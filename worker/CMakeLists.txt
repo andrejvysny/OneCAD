@@ -149,6 +149,8 @@ add_library(worker_core STATIC
     #     (spec §6) ---
     src/ops/ComponentGenerators.cpp
     src/ops/FastenerTables.cpp
+    # --- COMPONENT-LIBRARY WP-F2: ISO 15 bearing + NEMA stepper tables (spec §6.2) ---
+    src/ops/MachineElementTables.cpp
     # --- COMPONENT-LIBRARY P3 WP-3.1: mate re-seat candidate-transform math ---
     src/ops/ComponentMateSolver.cpp
     src/io/ExportStep.cpp

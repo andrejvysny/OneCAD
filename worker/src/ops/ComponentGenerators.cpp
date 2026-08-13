@@ -23,6 +23,7 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepLib.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -44,16 +45,24 @@
 
 #include "modeling/BooleanMode.h"
 #include "ops/FastenerTables.h"
+#include "ops/MachineElementTables.h"
 #include "ops/OpCommon.h"
 
 namespace onecad::ops {
 
 using nlohmann::json;
 namespace ft = onecad::ops::fasteners;
+namespace me = onecad::ops::machine_elements;
 
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+
+// The bearing code an instance that names none gets. Same rule as the op
+// layer's `M6` default for `thread`: an ABSENT param takes the family's
+// documented default (the seed package declares the identical one), while a
+// PRESENT but unknown one is refused. Never a substitution.
+constexpr const char* kDefaultBearingCode = "608";
 
 // One boolean, with the determinism/cancel arguments every generator uses
 // identically (single-threaded, no occtOptions, no cancel token — a generator
@@ -333,6 +342,27 @@ bool apply_thread_detail(const std::string& op_label, const TopoDS_Shape& blank,
     return false;
 }
 
+// A string param, or `fallback` when the caller sent none.
+std::string text_param(const GeneratorRequest& req, const std::string& key,
+                       const std::string& fallback) {
+    const auto it = req.text_params.find(key);
+    return it == req.text_params.end() ? fallback : it->second;
+}
+
+// `lookup`'s twin for the families keyed by something other than a thread
+// designation. `what` names the key in the error ("bearing code").
+template <typename Row>
+const Row* lookup_key(const std::map<std::string, Row>& table, const std::string& op_label,
+                      const std::string& what, const std::string& key, std::string& err) {
+    const auto it = table.find(key);
+    if (it == table.end()) {
+        err = op_label + ": unknown " + what + " '" + key +
+              "' — known values: " + me::known_keys(table);
+        return nullptr;
+    }
+    return &it->second;
+}
+
 // Looks `thread` up in `table`, failing loudly with the known sizes — never a
 // silent nearest-size substitution (spec §0 invariant 4).
 template <typename Row>
@@ -483,6 +513,161 @@ bool build_washer(const std::map<std::string, ft::WasherSize>& table, const Gene
     }
 }
 
+// Race radial wall and face relief, as fractions of the bearing's own
+// boundary dimensions. RENDERING choices, deliberately NOT table data: ISO 15
+// tabulates the boundary dimensions and nothing inside them, so a tabulated
+// "race width" would be an invented dimension (spec §6.2: "stepped-ring
+// geometry suffices").
+constexpr double kBearingRaceFraction = 0.25;    // of the radial wall (D − d)/2
+constexpr double kBearingReliefFraction = 0.15;  // of the width B
+
+// ISO 15 deep-groove ball bearing: ONE revolved solid, never a two-ring
+// assembly — a component resolves to exactly one solid (spec §9), and the
+// rings of a real bearing are connected only through its balls.
+//
+// The r–z cross-section is the boundary rectangle (bore → OD, 0 → width) with
+// a shallow annular relief cut into BOTH faces between the two races, so the
+// part reads as a bearing rather than a plain spacer while staying one
+// connected ring. Balls, cage, seals and chamfers are not modeled: none of
+// them changes where the bearing seats or what it clears, the same reasoning
+// `thread_detail: cosmetic` rests on.
+bool build_bearing(const GeneratorRequest& req, TopoDS_Shape& out, std::string& err) {
+    const std::string code = text_param(req, "code", kDefaultBearingCode);
+    const me::BearingSize* size =
+        lookup_key(me::iso15_table(), req.op_label, "bearing code", code, err);
+    if (size == nullptr) return false;
+    try {
+        const double ri = size->bore_diameter_mm / 2.0;
+        const double ro = size->outer_diameter_mm / 2.0;
+        const double w = size->width_mm;
+        const double t = (ro - ri) * kBearingRaceFraction;
+        const double g = w * kBearingReliefFraction;
+
+        // Closed r–z profile, walked once around: up the bore, across the
+        // lower relief, up the outside wall, back across the upper relief.
+        BRepBuilderAPI_MakePolygon poly;
+        poly.Add(gp_Pnt(ri, 0.0, 0.0));
+        poly.Add(gp_Pnt(ri + t, 0.0, 0.0));
+        poly.Add(gp_Pnt(ri + t, 0.0, g));
+        poly.Add(gp_Pnt(ro - t, 0.0, g));
+        poly.Add(gp_Pnt(ro - t, 0.0, 0.0));
+        poly.Add(gp_Pnt(ro, 0.0, 0.0));
+        poly.Add(gp_Pnt(ro, 0.0, w));
+        poly.Add(gp_Pnt(ro - t, 0.0, w));
+        poly.Add(gp_Pnt(ro - t, 0.0, w - g));
+        poly.Add(gp_Pnt(ri + t, 0.0, w - g));
+        poly.Add(gp_Pnt(ri + t, 0.0, w));
+        poly.Add(gp_Pnt(ri, 0.0, w));
+        poly.Close();
+        if (!poly.IsDone()) {
+            err = req.op_label + ": bearing " + code + " section profile failed";
+            return false;
+        }
+        BRepBuilderAPI_MakeFace face(poly.Wire());
+        if (!face.IsDone()) {
+            err = req.op_label + ": bearing " + code + " section face failed";
+            return false;
+        }
+        BRepPrimAPI_MakeRevol revol(face.Shape(), gp_Ax1(gp_Pnt(0.0, 0.0, 0.0),
+                                                        gp_Dir(0.0, 0.0, 1.0)),
+                                    2.0 * kPi, /*Copy=*/true);
+        if (!revol.IsDone() || revol.Shape().IsNull()) {
+            err = req.op_label + ": bearing " + code + " revolve failed";
+            return false;
+        }
+        out = revol.Shape();
+        return true;
+    } catch (const Standard_Failure& f) {
+        err = req.op_label + ": bearing " + code + " build raised: " +
+              (f.GetMessageString() ? f.GetMessageString() : "OCCT");
+        return false;
+    }
+}
+
+// NEMA stepper motor (frame `"17"` / `"23"`): body block + pilot boss + shaft,
+// fused, with the four mounting holes drilled blind into the faceplate.
+//
+// Body length is the free param (spec §6.2), and it is the ONLY free
+// dimension — everything else is fixed by the frame. A length the frame does
+// not admit is refused rather than clamped: a 5 mm-long NEMA 17 is not a
+// smaller motor, it is not a motor.
+//
+// DELIBERATE FIDELITY CUTS, stated rather than hidden: the body is a plain
+// square prism (a real one has chamfered corners and a stepped end-bell), the
+// shaft has no D-flat or keyway, and there are no wire leads or connector.
+// None of the three changes the footprint, the pilot fit, or the shaft
+// centre — the only things a mate resolves against.
+bool build_stepper_motor(const std::string& frame, const GeneratorRequest& req, TopoDS_Shape& out,
+                         std::string& err) {
+    const me::MotorSize* size =
+        lookup_key(me::nema_table(), req.op_label, "NEMA frame", frame, err);
+    if (size == nullptr) return false;
+    const std::string what = "NEMA " + frame;
+    const double body_length =
+        req.length_given ? req.length_mm : size->default_body_length_mm;
+    if (body_length < size->min_body_length_mm) {
+        err = req.op_label + ": " + what + " body length " + std::to_string(body_length) +
+              " mm is below the frame's minimum of " + std::to_string(size->min_body_length_mm) +
+              " mm";
+        return false;
+    }
+    try {
+        const double half = size->frame_square_mm / 2.0;
+        const TopoDS_Shape body =
+            BRepPrimAPI_MakeBox(gp_Pnt(-half, -half, 0.0), size->frame_square_mm,
+                                size->frame_square_mm, body_length)
+                .Shape();
+        const TopoDS_Shape pilot =
+            BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(0.0, 0.0, -size->pilot_height_mm), gp_Dir(0.0, 0.0, 1.0)),
+                size->pilot_diameter_mm / 2.0, size->pilot_height_mm)
+                .Shape();
+        const TopoDS_Shape shaft =
+            BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(0.0, 0.0, -size->shaft_length_mm), gp_Dir(0.0, 0.0, 1.0)),
+                size->shaft_diameter_mm / 2.0, size->shaft_length_mm)
+                .Shape();
+
+        // Pilot and shaft overlap (the shaft runs through the boss), so they
+        // are fused one at a time rather than offered as one compound tool.
+        TopoDS_Shape fused;
+        if (!generator_boolean(req.op_label + ": " + what + " pilot boss fuse", body, pilot,
+                               app::BooleanMode::Add, fused, err)) {
+            return false;
+        }
+        if (!generator_boolean(req.op_label + ": " + what + " shaft fuse", fused, shaft,
+                               app::BooleanMode::Add, fused, err)) {
+            return false;
+        }
+
+        // Four blind mounting holes on the square pattern, drilled from the
+        // faceplate into the body. One compound tool, one boolean — the same
+        // rule the simplified thread's rings follow. The cutters overshoot
+        // below z = 0 so the cut is never a coplanar-face boolean; nothing of
+        // the part lives out there (the pattern clears the pilot boss).
+        BRep_Builder cb;
+        TopoDS_Compound holes;
+        cb.MakeCompound(holes);
+        const double p = size->mounting_hole_pitch_mm / 2.0;
+        for (const double sx : {-1.0, 1.0}) {
+            for (const double sy : {-1.0, 1.0}) {
+                cb.Add(holes,
+                       BRepPrimAPI_MakeCylinder(
+                           gp_Ax2(gp_Pnt(sx * p, sy * p, -1.0), gp_Dir(0.0, 0.0, 1.0)),
+                           size->mounting_hole_diameter_mm / 2.0,
+                           size->mounting_hole_depth_mm + 1.0)
+                           .Shape());
+            }
+        }
+        return generator_boolean(req.op_label + ": " + what + " mounting holes", fused, holes,
+                                 app::BooleanMode::Cut, out, err);
+    } catch (const Standard_Failure& f) {
+        err = req.op_label + ": " + what + " build raised: " +
+              (f.GetMessageString() ? f.GetMessageString() : "OCCT");
+        return false;
+    }
+}
+
 }  // namespace
 
 bool parse_thread_detail(const std::string& s, ThreadDetail& out) {
@@ -502,7 +687,7 @@ bool parse_thread_detail(const std::string& s, ThreadDetail& out) {
 }
 
 std::string known_generator_ids() {
-    return "iso4014, iso4017, iso4032, iso4762, iso7089, iso7093, iso7380";
+    return "iso15, iso4014, iso4017, iso4032, iso4762, iso7089, iso7093, iso7380, nema17, nema23";
 }
 
 bool build_component(const std::string& generator_id, const GeneratorRequest& req,
@@ -518,6 +703,9 @@ bool build_component(const std::string& generator_id, const GeneratorRequest& re
     if (generator_id == "iso4032") return build_hex_nut(req, solid_out, err);
     if (generator_id == "iso7089") return build_washer(ft::iso7089_table(), req, solid_out, err);
     if (generator_id == "iso7093") return build_washer(ft::iso7093_table(), req, solid_out, err);
+    if (generator_id == "iso15") return build_bearing(req, solid_out, err);
+    if (generator_id == "nema17") return build_stepper_motor("17", req, solid_out, err);
+    if (generator_id == "nema23") return build_stepper_motor("23", req, solid_out, err);
     err = req.op_label + ": unknown source.generatorId '" + generator_id +
           "' — known generators: " + known_generator_ids();
     return false;

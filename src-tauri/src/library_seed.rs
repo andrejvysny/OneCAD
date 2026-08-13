@@ -31,7 +31,7 @@ use onecad_library::package::COMPONENT_MANIFEST_FILE;
 /// Bumped whenever the shipped set of packages changes (a new family, a
 /// corrected manifest). A root whose marker is missing or lower re-runs the
 /// seeding pass; one at this version is left alone.
-pub const SEED_VERSION: u32 = 1;
+pub const SEED_VERSION: u32 = 2;
 
 const SEED_MARKER_FILE: &str = ".seed-version";
 
@@ -67,6 +67,10 @@ pub const SEED_PACKAGES: &[SeedPackage] = &[
     seed!("onecad.std.iso4032"),
     seed!("onecad.std.iso7089"),
     seed!("onecad.std.iso7093"),
+    // WP-F2 (SEED_VERSION 2): the non-fastener families spec §6.2 asks for.
+    seed!("onecad.std.iso15"),
+    seed!("onecad.std.nema17"),
+    seed!("onecad.std.nema23"),
 ];
 
 /// What one seeding pass did. `installed` names packages written now;

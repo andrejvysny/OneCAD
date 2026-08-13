@@ -18,11 +18,19 @@
 //   * A screw's head occupies z ∈ [0, k] and its shank z ∈ [-length, 0], so
 //     dropping it on a hole rim drives the shank into the hole.
 //   * A nut/washer occupies z ∈ [0, thickness] — it sits ON the surface.
+//   * A bearing occupies z ∈ [0, width] — a ring sits ON the surface, same as
+//     a washer.
+//   * A motor's faceplate is the seating plane: the body occupies
+//     z ∈ [0, body length] (it sits ON the plate, like a nut) while the pilot
+//     boss and shaft run z < 0 (they drive INTO the plate's pilot hole, like
+//     a screw's shank).
 //
-// Dimensions come from `FastenerTables.h` and nothing here hardcodes one.
+// Dimensions come from `FastenerTables.h` / `MachineElementTables.h` and
+// nothing here hardcodes one.
 #ifndef ONECAD_OPS_COMPONENTGENERATORS_H
 #define ONECAD_OPS_COMPONENTGENERATORS_H
 
+#include <map>
 #include <string>
 
 #include <TopoDS_Shape.hxx>
@@ -40,12 +48,23 @@ bool parse_thread_detail(const std::string& s, ThreadDetail& out);
 
 /// One generator invocation. `length_mm` is the free `length` param and is
 /// ignored by families whose geometry has no length (nuts, washers) — a
-/// package for those simply never declares the param.
+/// package for those simply never declares the param. `length_given` says
+/// whether the caller actually SENT it, so a family whose own default is not
+/// the wire default (a motor's body length) can apply its own instead of
+/// silently inheriting a screw's 20 mm.
+///
+/// `text_params` carries every STRING param under `source.params` verbatim,
+/// including `thread` (which `thread` above is read out of, so the two can
+/// never disagree). Families not keyed by a thread designation — a bearing's
+/// `code` — read their own key from here, which is why adding one needs no
+/// change to the op layer.
 struct GeneratorRequest {
     std::string op_label;
     std::string thread;
     double length_mm;
+    bool length_given;
     ThreadDetail detail;
+    std::map<std::string, std::string> text_params;
 };
 
 /// Builds `generator_id`'s solid for `req`. Never throws: every failure —
@@ -54,7 +73,7 @@ struct GeneratorRequest {
 bool build_component(const std::string& generator_id, const GeneratorRequest& req,
                      TopoDS_Shape& solid_out, std::string& err);
 
-/// `"iso4014, iso4017, …"` — the registered ids, for the unknown-id message
+/// `"iso15, iso4014, …"` — the registered ids, for the unknown-id message
 /// and for tests that assert the seed catalog's shape.
 std::string known_generator_ids();
 

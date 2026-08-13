@@ -756,15 +756,19 @@ async fn every_seeded_component_places_through_the_real_worker() {
         }
     }
     assert!(
-        placements.len() >= 7,
-        "the seed catalog should carry every fastener family, got {placements:?}"
+        placements.len() >= 10,
+        "the seed catalog should carry every seeded family, got {placements:?}"
     );
 
     let wm = spawn_worker(bin).await;
     let mut rt = runtime_over(&wm);
     for (i, (component_id, generator_id, generator_version)) in placements.iter().enumerate() {
-        // M6 is in every seeded family's declared `thread` domain — the one
-        // size they all share, which is why it is the sweep's probe.
+        // M6 is in every seeded FASTENER family's declared `thread` domain —
+        // the one size they all share, which is why it is the sweep's probe.
+        // The non-fastener families (bearings, motors) are not keyed by a
+        // thread at all: they ignore it and build their own documented
+        // default, which is exactly what the library's preview lane (which
+        // sends no params whatsoever) relies on.
         let mut generator_params = std::collections::BTreeMap::new();
         generator_params.insert(
             "thread".to_string(),
@@ -989,7 +993,7 @@ async fn every_seeded_component_meshes_for_the_library_ui() {
         .flat_map(|(id, versions)| versions.keys().map(move |v| (id.clone(), v.clone())))
         .collect();
     assert!(
-        ids.len() >= 7,
+        ids.len() >= 10,
         "the seed catalog should be complete: {ids:?}"
     );
 

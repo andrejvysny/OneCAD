@@ -248,7 +248,9 @@ add_test(NAME component_blob_source COMMAND test_component_blob_source)
 #     catalog's dimension tables — one exact analytic volume per family (values
 #     hardcoded FROM THE SOURCE, never read back out of the table), the
 #     partial/full thread split, the loud unknown-generator and unknown-size
-#     refusals, and a builds-at-every-seeded-size sweep. In-process, real OCCT. ---
+#     refusals, and a builds-at-every-seeded-size sweep. In-process, real OCCT.
+#     COMPONENT-LIBRARY WP-F2 extends it with the ISO 15 bearing + NEMA stepper
+#     families (exact volume + bounding-box dimensions per family). ---
 add_executable(test_component_generators test_component_generators.cpp)
 target_link_libraries(test_component_generators PRIVATE worker_core)
 add_test(NAME component_generators COMMAND test_component_generators)

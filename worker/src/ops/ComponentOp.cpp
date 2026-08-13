@@ -4,7 +4,9 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <map>
 #include <optional>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -441,26 +443,37 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
         // Generator.params` reaches here verbatim. Defaults reproduce P0/P1's
         // old hardcoded M6×20 exactly; `thread_detail` defaults to `cosmetic` for
         // the same byte-identical reason (WP-2.5).
-        std::string thread = kDefaultThread;
+        //
+        // WP-F2: every STRING param is carried through verbatim rather than
+        // named one by one here, so a family keyed by something other than a
+        // thread (a bearing's `code`) needs no change to this layer.
+        // `thread`/`thread_detail` are read back OUT of that map, which is
+        // what keeps them from drifting from it.
+        std::map<std::string, std::string> text_params;
         double length_mm = kDefaultLengthMm;
-        std::string thread_detail_str = kDefaultThreadDetail;
+        bool length_given = false;
         if (source.contains("params") && source["params"].is_object()) {
             const json& gp = source["params"];
-            if (gp.contains("thread") && gp["thread"].is_string()) {
-                thread = gp["thread"].get<std::string>();
+            for (auto it = gp.begin(); it != gp.end(); ++it) {
+                if (it.value().is_string()) text_params[it.key()] = it.value().get<std::string>();
             }
             if (gp.contains("length")) {
                 const json& l = gp["length"];
                 if (l.is_number()) {
                     length_mm = l.get<double>();
+                    length_given = true;
                 } else if (l.is_object() && l.contains("value") && l["value"].is_number()) {
                     length_mm = l["value"].get<double>();
+                    length_given = true;
                 }
             }
-            if (gp.contains("thread_detail") && gp["thread_detail"].is_string()) {
-                thread_detail_str = gp["thread_detail"].get<std::string>();
-            }
         }
+        const auto text_or = [&text_params](const char* key, const char* fallback) {
+            const auto it = text_params.find(key);
+            return it == text_params.end() ? std::string(fallback) : it->second;
+        };
+        const std::string thread = text_or("thread", kDefaultThread);
+        const std::string thread_detail_str = text_or("thread_detail", kDefaultThreadDetail);
         if (!std::isfinite(length_mm) || length_mm <= 0.0) {
             return OpOutcome::fail("OP_FAILED",
                                    op_label + ": source.params.length must be finite and positive");
@@ -472,7 +485,8 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
                                                     "' — known values: cosmetic, simplified, modeled");
         }
 
-        const GeneratorRequest req{op_label, thread, length_mm, thread_detail};
+        const GeneratorRequest req{op_label,      thread,        length_mm,
+                                   length_given,  thread_detail, std::move(text_params)};
         if (!build_component(generator_id, req, solid, err)) {
             return OpOutcome::fail("OP_FAILED", err);
         }

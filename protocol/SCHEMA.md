@@ -1517,15 +1517,22 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   `UNSUPPORTED`.
   - `generator` — `{generatorId, generatorVersion, params}`. Table-driven per
     thread size as of WP-2.1 (spec §6), and DISPATCHED PER FAMILY on
-    `generatorId` as of WP-A1: `iso4014` · `iso4017` · `iso4032` · `iso4762` ·
-    `iso7089` · `iso7093` · `iso7380`. An unregistered `generatorId` fails
-    recoverably with `OP_FAILED`, naming the registered ids — it does **not**
-    fall back to any family (before WP-A1 every id built an ISO 4762 socket
-    cap, which is the silent substitution spec §0 invariant 4 forbids).
-    `params.thread` / `.length` / `.thread_detail` are the free params;
-    families with no external thread (nuts, washers) ignore `thread_detail`,
-    and families with no length (nuts, washers) ignore `length`. An unknown
-    `thread` for the addressed family fails loudly with the known sizes.
+    `generatorId` as of WP-A1, extended with the non-fastener families in
+    WP-F2: `iso15` · `iso4014` · `iso4017` · `iso4032` · `iso4762` ·
+    `iso7089` · `iso7093` · `iso7380` · `nema17` · `nema23`. An unregistered
+    `generatorId` fails recoverably with `OP_FAILED`, naming the registered
+    ids — it does **not** fall back to any family (before WP-A1 every id built
+    an ISO 4762 socket cap, which is the silent substitution spec §0
+    invariant 4 forbids). `params.thread` / `.length` / `.thread_detail` are
+    the fastener free params; families with no external thread (nuts, washers,
+    bearings, motors) ignore `thread_detail`, and families with no length
+    (nuts, washers, bearings) ignore `length`. A family keyed by something
+    other than a thread reads its OWN string param — `iso15` reads
+    `params.code` (the bearing code) — and every string under `params` reaches
+    the generator verbatim, so a new key is not a wire change. An unknown
+    `thread` / `code` for the addressed family fails loudly with the known
+    values; an ABSENT one takes the family's documented default (`M6`, `608`,
+    and the frame's own body length for a motor).
   - `embedded` / `document` — a BAKED solid, carried as a content-addressed
     blob in the placing document's own `imports/` section:
     `{sha256, codec, brepFormat}`, plus `documentSha256` (the frozen authoring
@@ -2880,6 +2887,25 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — §7.3 `PlaceComponent` / `DetachComponent`: three NEW
+  registered `source.generatorId`s** (Component Library WP-F2, spec §6.2,
+  single-repo, both tracks land together). **Purely ADDITIVE — no wire shape
+  changes**: no field is added, removed or retyped, `source.params` was
+  already an open map, every existing document lowers byte-identically, and no
+  fixture moves.
+  - Registered now: `iso15` (ISO 15 deep-groove ball bearing) · `nema17` /
+    `nema23` (NEMA stepper motors), alongside WP-A1's seven fastener ids. The
+    unregistered-id refusal is unchanged in kind; only the list it names grew.
+  - `iso15` is keyed by `params.code` (`"608"`), not `params.thread` — the
+    op layer now forwards EVERY string under `source.params` to the generator
+    verbatim instead of naming three keys, so a future family keyed by
+    something else needs no §7.3 change either. `params.length` gains an
+    "absent vs. present" distinction so a motor can default to its own frame's
+    body length rather than a screw's 20 mm; a length below the frame's
+    minimum is refused, never clamped.
+  - Seeded packages `onecad.std.iso15` / `.nema17` / `.nema23` ship with them
+    (`SEED_VERSION` 2).
 
 - **2026-08-13 — §7.3 `PlaceComponent` / `DetachComponent` `source.generatorId`
   is now DISPATCHED, and two stale §7.3 paragraphs corrected** (Component

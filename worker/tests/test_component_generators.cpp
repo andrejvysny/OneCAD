@@ -1,12 +1,14 @@
-// test_component_generators.cpp — Component Library WP-A1: the per-family
-// generator dispatch (`ComponentGenerators.h`) and the seed catalog's
-// dimension tables (`FastenerTables.h`), in-process via
-// `ops::execute_place_component` (real OCCT). No framework: exit code ==
-// failure count. Mirrors `test_component_ops.cpp`'s shape.
+// test_component_generators.cpp — Component Library WP-A1 + WP-F2: the
+// per-family generator dispatch (`ComponentGenerators.h`) and the seed
+// catalog's dimension tables (`FastenerTables.h`,
+// `MachineElementTables.h`), in-process via `ops::execute_place_component`
+// (real OCCT). No framework: exit code == failure count. Mirrors
+// `test_component_ops.cpp`'s shape.
 //
 // EVERY expected dimension below is hardcoded FROM THE SOURCE (the BOLTS
-// column or the ISO table), never read back out of `FastenerTables.h` — a test
-// that asks the table what the table says proves nothing. This is spec §6.5's
+// column, the ISO table, the NEMA frame), never read back out of the table
+// headers — a test that asks the table what the table says proves nothing.
+// This is spec §6.5's
 // "spot-check harness asserting key dimensions per size against a reference
 // source", and it is why a typo in a row fails here rather than shipping.
 #include <cmath>
@@ -53,6 +55,29 @@ double dome_volume(double a, double k) {
 
 double cyl_volume(double d, double h) { return kPi * (d / 2.0) * (d / 2.0) * h; }
 
+/// Volume of the stepped bearing ring: the full boundary annulus minus the
+/// two face reliefs. The 0.25 / 0.15 fractions are the generator's declared
+/// RENDERING constants, re-typed here (not read from it) so this stays an
+/// independent derivation; the boundary dimensions come from the ISO 15
+/// series, like every other expectation in this file.
+double bearing_volume(double bore, double od, double width) {
+    const double ri = bore / 2.0;
+    const double ro = od / 2.0;
+    const double t = (ro - ri) * 0.25;
+    const double g = width * 0.15;
+    return kPi * (ro * ro - ri * ri) * width -
+           2.0 * kPi * ((ro - t) * (ro - t) - (ri + t) * (ri + t)) * g;
+}
+
+/// Volume of the stepper motor: body block + pilot boss + the shaft's run
+/// BEYOND the boss (the rest of it is inside the boss already) − four blind
+/// mounting holes.
+double motor_volume(double frame, double body_length, double pilot_d, double pilot_h,
+                    double shaft_d, double shaft_l, double hole_d, double hole_depth) {
+    return frame * frame * body_length + cyl_volume(pilot_d, pilot_h) +
+           cyl_volume(shaft_d, shaft_l - pilot_h) - 4.0 * cyl_volume(hole_d, hole_depth);
+}
+
 struct Ctx {
     std::vector<std::pair<std::string, json>> sketches;
     std::string last_sketch;
@@ -62,19 +87,26 @@ struct Ctx {
     }
 };
 
-json sized_source(const std::string& generator_id, const std::string& thread, double length_mm,
-                  const std::string& detail = "") {
-    json params = {{"thread", thread}, {"length", length_mm}};
-    if (!detail.empty()) params["thread_detail"] = detail;
+json param_source(const std::string& generator_id, const json& params) {
     return json{{"kind", "generator"},
                 {"generatorId", generator_id},
                 {"generatorVersion", 1},
                 {"params", params}};
 }
 
+json sized_source(const std::string& generator_id, const std::string& thread, double length_mm,
+                  const std::string& detail = "") {
+    json params = {{"thread", thread}, {"length", length_mm}};
+    if (!detail.empty()) params["thread_detail"] = detail;
+    return param_source(generator_id, params);
+}
+
 /// Runs one PlaceComponent at the origin and returns its outcome; `volume_out`
-/// is the published body's volume when it published one.
-ops::OpOutcome place(const std::string& op_id, const json& source, double& volume_out) {
+/// is the published body's volume when it published one, and `metrics_out`
+/// (optional) its full metrics — the bounding box is how a face RADIUS gets
+/// pinned, which volume alone cannot do.
+ops::OpOutcome place(const std::string& op_id, const json& source, double& volume_out,
+                     onecad::session::ShapeMetrics* metrics_out = nullptr) {
     BodyStore bodies;
     onecad::elementmap::ElementMapPartition part;
     json op = {{"opType", "PlaceComponent"},
@@ -90,6 +122,9 @@ ops::OpOutcome place(const std::string& op_id, const json& source, double& volum
     ops::OpOutcome oc = ops::execute_place_component(ctx, op, op_id);
     const onecad::session::BodyRecord* rec = bodies.get("body_" + op_id);
     volume_out = (rec != nullptr) ? onecad::session::shape_volume(rec->geom) : 0.0;
+    if (metrics_out != nullptr && rec != nullptr) {
+        *metrics_out = onecad::session::compute_shape_metrics(rec->geom);
+    }
     return oc;
 }
 
@@ -169,6 +204,128 @@ void test_iso7089_m10_bore_is_the_corrected_value() {
     place("g7089m10", sized_source("iso7089", "M10", 20.0), v);
     check_near(v, cyl_volume(20.0, 2.0) - cyl_volume(10.5, 2.0), 0.2,
                "iso7089 M10: bore is 10.5 (ISO 7089 / DIN 125 A), not BOLTS' 10.0");
+}
+
+// ── ISO 15 deep-groove bearing 608: the boundary dimensions 8 × 22 × 7 are
+// pinned twice over — the bounding box fixes the OD face radius at 11.0 and
+// the width at 7.0, and the volume fixes the bore, which no bbox can see. ───
+void test_iso15_608_exact_dimensions_and_volume() {
+    double v = 0.0;
+    onecad::session::ShapeMetrics m;
+    const ops::OpOutcome oc = place("g15a", param_source("iso15", {{"code", "608"}}), v, &m);
+    check(oc.status == ops::OpOutcome::Status::Ok, "iso15 608: Ok");
+    check_near(m.bbox_max[0], 11.0, 1e-4, "iso15 608: OD face radius is 11.0 (D = 22)");
+    check_near(m.bbox_min[0], -11.0, 1e-4, "iso15 608: OD face radius is 11.0 the other way");
+    check_near(m.bbox_min[2], 0.0, 1e-4, "iso15 608: seats at z = 0");
+    check_near(m.bbox_max[2], 7.0, 1e-4, "iso15 608: width is 7.0 (B)");
+    check_near(v, bearing_volume(8.0, 22.0, 7.0), 0.5, "iso15 608: stepped-ring volume");
+}
+
+// ── 6802 is the thin-section extreme of the seeded series (15 × 24 × 5): a
+// 4.5 mm radial wall, where a race/relief fraction that overshot would fold
+// the profile on itself. ───────────────────────────────────────────────────
+void test_iso15_6802_thin_section_exact_volume() {
+    double v = 0.0;
+    onecad::session::ShapeMetrics m;
+    const ops::OpOutcome oc = place("g15b", param_source("iso15", {{"code", "6802"}}), v, &m);
+    check(oc.status == ops::OpOutcome::Status::Ok, "iso15 6802: Ok");
+    check_near(m.bbox_max[0], 12.0, 1e-4, "iso15 6802: OD face radius is 12.0 (D = 24)");
+    check_near(m.bbox_max[2], 5.0, 1e-4, "iso15 6802: width is 5.0 (B)");
+    check_near(v, bearing_volume(15.0, 24.0, 5.0), 0.5, "iso15 6802: stepped-ring volume");
+}
+
+// ── An instance that names no code takes the family's DOCUMENTED default
+// (608, the same one the seed package declares) — the library's own preview
+// lane sends no params at all. An absent param defaulting is not the
+// substitution invariant 4 forbids; an unknown one being swapped would be. ──
+void test_iso15_defaults_to_608_when_no_code_is_sent() {
+    double defaulted = 0.0, explicit_608 = 0.0;
+    check(place("g15d", param_source("iso15", json::object()), defaulted).status ==
+              ops::OpOutcome::Status::Ok,
+          "iso15 with no params: Ok");
+    place("g15e", param_source("iso15", {{"code", "608"}}), explicit_608);
+    check_near(defaulted, explicit_608, 1e-9, "iso15 default code is 608");
+}
+
+// ── A bearing code the seeded series does not carry is refused with the
+// codes that exist — 6203 is a real bearing, which is exactly why guessing
+// the nearest seeded one (6202, 5 mm smaller in OD) would be a silent wrong
+// part. ────────────────────────────────────────────────────────────────────
+void test_unknown_bearing_code_fails_loud() {
+    double v = 0.0;
+    const ops::OpOutcome oc = place("g15bad", param_source("iso15", {{"code", "6203"}}), v);
+    check(oc.status == ops::OpOutcome::Status::Failed, "iso15 6203: Failed");
+    check(oc.error_code == "OP_FAILED", "iso15 6203: OP_FAILED");
+    check(oc.error_message.find("6203") != std::string::npos,
+          "iso15 6203: names the requested code");
+    check(oc.error_message.find("6202") != std::string::npos,
+          "iso15 6203: lists the known codes");
+}
+
+// ── Every seeded bearing code builds a publishable solid. ───────────────────
+void test_every_bearing_code_builds() {
+    int n = 0;
+    for (const char* code : {"625", "608", "6000", "6001", "6200", "6201", "6202", "6802"}) {
+        double v = 0.0;
+        const ops::OpOutcome oc =
+            place("g15all" + std::to_string(n++), param_source("iso15", {{"code", code}}), v);
+        check(oc.status == ops::OpOutcome::Status::Ok, std::string("iso15 ") + code + ": builds");
+        check(v > 0.0, std::string("iso15 ") + code + ": positive volume");
+    }
+}
+
+// ── NEMA 17 at a 40 mm body: 42.3 mm frame, Ø22 × 2 pilot boss, Ø5 × 24
+// shaft, four Ø3 blind holes 4.5 deep on the 31 mm square. The bbox pins the
+// frame size and the shaft's reach through the faceplate (z < 0). ──────────
+void test_nema17_exact_dimensions_and_volume() {
+    double v = 0.0;
+    onecad::session::ShapeMetrics m;
+    const ops::OpOutcome oc =
+        place("gn17", param_source("nema17", {{"length", 40.0}}), v, &m);
+    check(oc.status == ops::OpOutcome::Status::Ok, "nema17 L40: Ok");
+    check_near(m.bbox_max[0], 42.3 / 2.0, 1e-4, "nema17: frame is 42.3 mm square");
+    check_near(m.bbox_min[1], -42.3 / 2.0, 1e-4, "nema17: frame is 42.3 mm square in Y too");
+    check_near(m.bbox_min[2], -24.0, 1e-4, "nema17: shaft reaches 24 mm past the faceplate");
+    check_near(m.bbox_max[2], 40.0, 1e-4, "nema17: the body IS the free length");
+    check_near(v, motor_volume(42.3, 40.0, 22.0, 2.0, 5.0, 24.0, 3.0, 4.5), 0.5,
+               "nema17 L40: block + boss + shaft − 4 mounting holes");
+}
+
+// ── NEMA 23 at a 50 mm body: 56.4 mm frame, Ø38.1 × 1.6 pilot, Ø6.35 × 21
+// shaft, four Ø5.1 CLEARANCE holes 6.0 deep on the 47.14 mm square. ────────
+void test_nema23_exact_dimensions_and_volume() {
+    double v = 0.0;
+    onecad::session::ShapeMetrics m;
+    const ops::OpOutcome oc =
+        place("gn23", param_source("nema23", {{"length", 50.0}}), v, &m);
+    check(oc.status == ops::OpOutcome::Status::Ok, "nema23 L50: Ok");
+    check_near(m.bbox_max[0], 56.4 / 2.0, 1e-4, "nema23: frame is 56.4 mm square");
+    check_near(m.bbox_min[2], -21.0, 1e-4, "nema23: shaft reaches 21 mm past the faceplate");
+    check_near(m.bbox_max[2], 50.0, 1e-4, "nema23: the body IS the free length");
+    check_near(v, motor_volume(56.4, 50.0, 38.1, 1.6, 6.35, 21.0, 5.1, 6.0), 0.5,
+               "nema23 L50: block + boss + shaft − 4 mounting holes");
+}
+
+// ── A motor that names no length takes the FRAME's default (40 mm), not the
+// screw-shaped 20 mm the op layer defaults `length` to — the seed package
+// declares the same 40, so the two cannot drift. ───────────────────────────
+void test_nema_default_body_length_is_the_frames_own() {
+    double defaulted = 0.0, explicit_40 = 0.0;
+    check(place("gn17d", param_source("nema17", json::object()), defaulted).status ==
+              ops::OpOutcome::Status::Ok,
+          "nema17 with no params: Ok");
+    place("gn17e", param_source("nema17", {{"length", 40.0}}), explicit_40);
+    check_near(defaulted, explicit_40, 1e-9, "nema17 default body length is 40 mm");
+}
+
+// ── A body length below the frame's minimum is refused, never clamped: a
+// 10 mm NEMA 17 is not a smaller motor, it is not a motor. ─────────────────
+void test_nema_body_length_below_the_minimum_fails_loud() {
+    double v = 0.0;
+    const ops::OpOutcome oc = place("gn17bad", param_source("nema17", {{"length", 10.0}}), v);
+    check(oc.status == ops::OpOutcome::Status::Failed, "nema17 L10: Failed");
+    check(oc.error_message.find("minimum") != std::string::npos,
+          "nema17 L10: says it is below the minimum");
 }
 
 // ── An unknown generatorId fails LOUD and names the registered ids. Before
@@ -262,8 +419,8 @@ void test_thread_detail_extremes_for_the_new_families() {
 // quotes it — a new family that forgets to register would leave this stale. ──
 void test_known_generator_ids_covers_the_seed_catalog() {
     const std::string ids = ops::known_generator_ids();
-    for (const char* id : {"iso4014", "iso4017", "iso4032", "iso4762", "iso7089", "iso7093",
-                           "iso7380"}) {
+    for (const char* id : {"iso15", "iso4014", "iso4017", "iso4032", "iso4762", "iso7089",
+                           "iso7093", "iso7380", "nema17", "nema23"}) {
         check(ids.find(id) != std::string::npos,
               std::string("known_generator_ids lists ") + id);
     }
@@ -284,6 +441,15 @@ int main() {
     test_unknown_thread_in_a_new_family_fails_loud();
     test_every_seeded_size_builds();
     test_thread_detail_extremes_for_the_new_families();
+    test_iso15_608_exact_dimensions_and_volume();
+    test_iso15_6802_thin_section_exact_volume();
+    test_iso15_defaults_to_608_when_no_code_is_sent();
+    test_unknown_bearing_code_fails_loud();
+    test_every_bearing_code_builds();
+    test_nema17_exact_dimensions_and_volume();
+    test_nema23_exact_dimensions_and_volume();
+    test_nema_default_body_length_is_the_frames_own();
+    test_nema_body_length_below_the_minimum_fails_loud();
     test_known_generator_ids_covers_the_seed_catalog();
     if (g_failures == 0) std::fprintf(stderr, "test_component_generators: all checks passed\n");
     return g_failures;
