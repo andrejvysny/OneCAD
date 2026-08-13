@@ -7,13 +7,22 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ComponentParametersSection, formatDesignation } from "./ComponentParametersSection";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
-import type { LibraryComponent } from "@/ipc/types";
+import { viewportStore } from "@/stores/viewportStore";
+import type { ComponentUpgrade, LibraryComponent, ReplaceComponentReport } from "@/ipc/types";
 
 const getOperationParams = vi.fn();
 const listLibraryComponents = vi.fn<() => Promise<LibraryComponent[]>>();
 const setComponentParams = vi.fn(() => Promise.resolve());
+const componentUpgradeAvailable = vi.fn<() => Promise<ComponentUpgrade | null>>();
+const replaceComponent = vi.fn<() => Promise<ReplaceComponentReport>>();
 vi.mock("@/ipc/client", () => ({
-  createClient: () => ({ getOperationParams, listLibraryComponents, setComponentParams }),
+  createClient: () => ({
+    getOperationParams,
+    listLibraryComponents,
+    setComponentParams,
+    componentUpgradeAvailable,
+    replaceComponent,
+  }),
 }));
 
 const SHCS: LibraryComponent = {
@@ -59,12 +68,16 @@ function selectPlaceComponentFeature(overrideParams: Record<string, unknown> = {
     params: overrideParams,
   });
   listLibraryComponents.mockResolvedValue([SHCS]);
+  componentUpgradeAvailable.mockResolvedValue(null);
+  replaceComponent.mockResolvedValue({});
 }
 
 beforeEach(() => {
   getOperationParams.mockReset();
   listLibraryComponents.mockReset();
   setComponentParams.mockClear();
+  componentUpgradeAvailable.mockReset();
+  replaceComponent.mockReset();
   documentStore.setState({ features: [] });
   selectionStore.setState({ selected: [], hover: null });
 });
@@ -134,5 +147,69 @@ describe("ComponentParametersSection", () => {
 
     await new Promise((r) => setTimeout(r, 0));
     expect(setComponentParams).not.toHaveBeenCalled();
+  });
+});
+
+// ── WP-B4: opt-in upgrade + replace-in-place ────────────────────────────────
+
+const BUTTON_HEAD: LibraryComponent = {
+  ...SHCS,
+  id: "onecad.std.iso7380",
+  name: "Button Head Screw",
+};
+
+describe("upgrade and replace", () => {
+  it("offers an upgrade only when one is reported, and never applies it on its own", async () => {
+    selectPlaceComponentFeature();
+    render(<ComponentParametersSection />);
+    await screen.findByText("Component Parameters");
+    // No offer ⇒ no row at all, and nothing was swapped just by rendering.
+    expect(screen.queryByTestId("component-upgrade")).toBeNull();
+    expect(replaceComponent).not.toHaveBeenCalled();
+  });
+
+  it("upgrades to the reported version only when the user asks", async () => {
+    selectPlaceComponentFeature();
+    componentUpgradeAvailable.mockResolvedValue({
+      componentId: SHCS.id,
+      currentVersion: "1.0.0",
+      latestVersion: "1.1.0",
+      latestRevision: `sha256:${"b".repeat(64)}`,
+    });
+    render(<ComponentParametersSection />);
+
+    const apply = await screen.findByTestId("component-upgrade-apply");
+    expect(replaceComponent).not.toHaveBeenCalled();
+    fireEvent.click(apply);
+
+    await waitFor(() => expect(replaceComponent).toHaveBeenCalledTimes(1));
+    // Same id, newer version — an upgrade is a replace onto oneself.
+    expect(replaceComponent).toHaveBeenCalledWith("comp1", SHCS.id, "1.1.0");
+  });
+
+  it("replaces with the picked component and reports a dropped mate", async () => {
+    selectPlaceComponentFeature();
+    listLibraryComponents.mockResolvedValue([SHCS, BUTTON_HEAD]);
+    replaceComponent.mockResolvedValue({ droppedMateAttachment: "shank_axis" });
+    render(<ComponentParametersSection />);
+
+    const pick = await screen.findByTestId("component-replace-pick");
+    fireEvent.change(pick, { target: { value: `${BUTTON_HEAD.id}@${BUTTON_HEAD.version}` } });
+    fireEvent.click(screen.getByTestId("component-replace-apply"));
+
+    await waitFor(() => expect(replaceComponent).toHaveBeenCalledTimes(1));
+    expect(replaceComponent).toHaveBeenCalledWith("comp1", BUTTON_HEAD.id, BUTTON_HEAD.version);
+    // The dropped mate is SAID, not swallowed: the part quietly stopping
+    // following its target is exactly the failure this reports.
+    await waitFor(() =>
+      expect(viewportStore.getState().statusHint?.message ?? "").toContain("shank_axis"),
+    );
+  });
+
+  it("offers no replace target when the library holds only this component", async () => {
+    selectPlaceComponentFeature();
+    render(<ComponentParametersSection />);
+    await screen.findByText("Component Parameters");
+    expect(screen.queryByTestId("component-replace-pick")).toBeNull();
   });
 });

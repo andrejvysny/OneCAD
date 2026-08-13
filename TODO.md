@@ -1,5 +1,49 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-B4 (2026-08-13) — GATE PASSED
+
+`ReplaceComponent` + opt-in version upgrade (spec §3.3) — the last named P3
+operation. The Rust half landed with WP-A3's commit; this closes the UI.
+
+**In place, at the same `RecordId`.** SCHEMA §7.3 already fixed the design:
+this is not a wire op but an `UpdateOperationParams` on the existing
+`PlaceComponent` record, so identity, timeline position, every downstream
+reference and the minted `body_<opId>` all survive. Deleting and re-adding
+would break all four.
+
+**A mate rides across by ATTACHMENT NAME, or not at all.** A recorded mate
+names an attachment on the OLD component; the new one is a different package
+with its own table. Same name ⇒ the mate is carried unchanged (target, kind and
+flip are all still valid, and regen re-seats it). No such name ⇒ the mate is
+dropped, the instance keeps its frozen placement, and the report NAMES what was
+lost. Binding to the new component's first attachment instead would be the
+mis-bind spec §0 invariant 4 forbids; dropping it silently would leave the user
+to discover later that their part stopped following its target.
+
+**The upgrade offer is a REPORT.** `component_upgrade_available` looks only,
+and the inspector renders a row the user has to click. Nothing upgrades itself
+— a document opening differently because a shared library moved underneath it
+is the Toolbox failure this whole design exists to avoid. Pinned by a test that
+renders the section with an offer present and asserts `replaceComponent` was
+NOT called.
+
+**`LibraryIndex::latest` orders versions numerically** rather than by the
+`BTreeMap`'s lexicographic key order, which had `1.9.0` sorting after `1.10.0`
+— the first bump past 9 would have offered a DOWNGRADE as an upgrade.
+`newer_than` is strict, so an instance recorded at a version newer than
+anything indexed (a partially-synced library root) is offered nothing.
+
+**Inspector**: the section no longer returns null when a component declares no
+free params — a `document`-source component has none by construction, and
+replace/upgrade are exactly what its instances need.
+
+GATE: vitest **248 files / 4191** (up from 248/4187; 4 new upgrade/replace
+tests, and the existing configurator tests gained the two new client methods) ·
+`bunx tsc --noEmit` clean · Rust side already green in WP-A3's gate
+(`replace_swaps_identity_at_the_same_record`,
+`replace_carries_a_mate_by_attachment_name_and_reports_a_dropped_one`,
+`upgrade_is_offered_only_when_a_strictly_newer_version_is_indexed`).
+
 ## COMPONENT-LIBRARY WP-B2 (2026-08-13) — GATE PASSED
 
 "Save as Component" (spec §7) — a body at head becomes a reusable

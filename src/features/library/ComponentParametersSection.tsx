@@ -19,11 +19,17 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { SectionLabel } from "@/ui/SectionLabel";
+import { Button } from "@/ui/Button";
 import { useDocumentStore } from "@/stores/documentStore";
 import { useSelectionStore, primarySelection } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
-import type { ComponentParamValue, ComponentParameterSpec, LibraryComponent } from "@/ipc/types";
+import type {
+  ComponentParamValue,
+  ComponentParameterSpec,
+  ComponentUpgrade,
+  LibraryComponent,
+} from "@/ipc/types";
 
 /** Sticky error hint — mirrors `featureValueEdit.ts::errorHint`. */
 function errorHint(text: string): void {
@@ -58,6 +64,11 @@ function currentValue(
   return spec.value;
 }
 
+/** `"<id>@<version>"` — the catalog key the replace picker selects by. */
+function componentKey(id: string, version: string): string {
+  return `${id}@${version}`;
+}
+
 interface LoadedRecord {
   componentId: string;
   componentVersion: string;
@@ -73,7 +84,10 @@ export function ComponentParametersSection() {
 
   const [record, setRecord] = useState<LoadedRecord | null>(null);
   const [component, setComponent] = useState<LibraryComponent | null>(null);
+  const [catalog, setCatalog] = useState<LibraryComponent[]>([]);
+  const [upgrade, setUpgrade] = useState<ComponentUpgrade | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  const [replaceTo, setReplaceTo] = useState<string>("");
 
   const load = useCallback(
     async (alive: () => boolean = () => true) => {
@@ -90,17 +104,24 @@ export function ComponentParametersSection() {
             : {};
         if (!componentId || !componentVersion) return;
         const list = await client.listLibraryComponents();
+        // Read-only, and deliberately never acted on automatically: a document
+        // must not open differently because a shared library moved underneath
+        // it (spec §0 invariant 4 — the Toolbox failure mode).
+        const offered = await client.componentUpgradeAvailable(featureId);
         if (!alive()) return;
         const match =
           list.find((c) => c.id === componentId && c.version === componentVersion) ?? null;
         setRecord({ componentId, componentVersion, params: stored });
         setComponent(match);
+        setCatalog(list);
+        setUpgrade(offered);
       } catch {
         // A record `getOperationParams` cannot serve (stale/legacy) simply has
         // nothing to configure here — the section renders absent, not an error.
         if (!alive()) return;
         setRecord(null);
         setComponent(null);
+        setUpgrade(null);
       }
     },
     [featureId, isPlaceComponent],
@@ -118,8 +139,10 @@ export function ComponentParametersSection() {
 
   if (!isPlaceComponent || !record || !component) return null;
 
+  // NOT gated on free params any more (WP-B4): a `document`-source component
+  // has none by construction, and replace/upgrade are exactly what its
+  // instances need.
   const freeParams = Object.entries(component.parameters).filter(([, s]) => s.role === "free");
-  if (freeParams.length === 0) return null;
 
   const values: Record<string, ComponentParamValue> = {};
   for (const [key, spec] of freeParams) {
@@ -140,6 +163,36 @@ export function ComponentParametersSection() {
       setPending(null);
     }
   };
+
+  /**
+   * Swaps this instance to `id@version` IN PLACE (spec §3.3). A recorded mate
+   * that the new component cannot carry is DROPPED and named in the hint —
+   * the backend never re-binds it to a different attachment, and a silent drop
+   * would leave the user to discover later that their part stopped following
+   * its target.
+   */
+  const replaceWith = async (id: string, version: string, what: string) => {
+    setPending(what);
+    try {
+      const report = await createClient().replaceComponent(featureId as string, id, version);
+      viewportStore
+        .getState()
+        .setStatusHint(
+          report.droppedMateAttachment
+            ? `Replaced — the “${report.droppedMateAttachment}” mate was dropped (the new component has no such attachment).`
+            : "Component replaced",
+        );
+      await load();
+    } catch (e) {
+      errorHint(`Replace failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const alternatives = catalog.filter(
+    (c) => componentKey(c.id, c.version) !== componentKey(record.componentId, record.componentVersion),
+  );
 
   return (
     <>
@@ -197,6 +250,60 @@ export function ComponentParametersSection() {
           </div>
         );
       })}
+
+      {upgrade && (
+        <div
+          data-testid="component-upgrade"
+          className="mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5"
+        >
+          <span className="flex-1 truncate text-[12.5px] text-ink-2">
+            Version {upgrade.latestVersion} available
+          </span>
+          <Button
+            variant="secondary"
+            data-testid="component-upgrade-apply"
+            disabled={pending !== null}
+            onClick={() =>
+              void replaceWith(upgrade.componentId, upgrade.latestVersion, "upgrade")
+            }
+          >
+            Upgrade
+          </Button>
+        </div>
+      )}
+
+      {alternatives.length > 0 && (
+        <div className="mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5">
+          <select
+            aria-label="Replace with"
+            data-testid="component-replace-pick"
+            className="min-w-0 flex-1 rounded-sm border border-line bg-surface px-1 text-[12px] text-ink-2 outline-none"
+            value={replaceTo}
+            disabled={pending !== null}
+            onChange={(e) => setReplaceTo(e.target.value)}
+          >
+            <option value="">Replace with…</option>
+            {alternatives.map((c) => (
+              <option key={componentKey(c.id, c.version)} value={componentKey(c.id, c.version)}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <Button
+            variant="secondary"
+            data-testid="component-replace-apply"
+            disabled={pending !== null || replaceTo === ""}
+            onClick={() => {
+              const picked = alternatives.find(
+                (c) => componentKey(c.id, c.version) === replaceTo,
+              );
+              if (picked) void replaceWith(picked.id, picked.version, "replace");
+            }}
+          >
+            Replace
+          </Button>
+        </div>
+      )}
     </>
   );
 }
