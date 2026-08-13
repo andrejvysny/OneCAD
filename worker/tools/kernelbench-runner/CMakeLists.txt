@@ -31,3 +31,7 @@ add_test(NAME kernelbench_audit COMMAND test_kernelbench_audit)
 add_executable(test_kernelbench_case_v2 case_v2_fixtures.cpp)
 target_link_libraries(test_kernelbench_case_v2 PRIVATE benchmark_core)
 add_test(NAME kernelbench_case_v2 COMMAND test_kernelbench_case_v2)
+
+add_executable(test_kernelbench_metamorph metamorph_fixtures.cpp)
+target_link_libraries(test_kernelbench_metamorph PRIVATE benchmark_core)
+add_test(NAME kernelbench_metamorph COMMAND test_kernelbench_metamorph)

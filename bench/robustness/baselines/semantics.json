@@ -39,39 +39,39 @@
   },
   "fillet/matrix:m1": {
     "schemaVersion": 1,
-    "records": 264,
+    "records": 336,
     "gatingFailures": 0,
     "counts": {
       "backend": {
-        "onecad": 132,
-        "raw-occt": 132
+        "onecad": 168,
+        "raw-occt": 168
       },
       "domain": {
         "exploratory": 12,
-        "supported": 252
+        "supported": 324
       },
       "failureClass": {
         "kernelRejected": 6,
-        "none": 258
+        "none": 330
       },
       "generator": {
-        "fillet-matrix": 264
+        "fillet-matrix": 336
       },
       "verdict": {
         "characterization": 6,
-        "pass": 258
+        "pass": 330
       }
     },
     "differential": {
-      "same-status": 264
+      "same-status": 336
     },
     "replay": {
-      "stable": 264,
+      "stable": 336,
       "unstable": 0
     },
     "metamorph": {
       "failed": 0,
-      "passed": 216
+      "passed": 288
     },
     "criticalTransitions": []
   }

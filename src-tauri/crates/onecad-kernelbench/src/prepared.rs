@@ -28,6 +28,10 @@ pub struct PreparedCase {
     /// reports `notRun` for metamorphic equivalence — it has no cross-variant
     /// context — so this is read on the supervisor side.
     pub point_tolerance: f64,
+    /// The largest radius the operation requests. The `parameterEpsilon` variant
+    /// nudges exactly this value, so the expected geometric response is bounded
+    /// by it — see `campaign::Relation::Continuity`.
+    pub max_radius: f64,
     /// The canonical case document, exactly as it goes on the wire.
     pub json: Value,
     /// Executable metamorphs for this case (empty for v1 cases).
@@ -52,6 +56,7 @@ impl Case {
                 })
                 .and_then(|validator| validator.point_tolerance)
                 .unwrap_or(DEFAULT_POINT_TOLERANCE),
+            max_radius: self.operation.radius,
             json: serde_json::to_value(self).unwrap_or(Value::Null),
             metamorphs: Vec::new(),
         }
@@ -80,6 +85,7 @@ impl CaseV2 {
                 })
                 .and_then(|validator| validator.point_tolerance)
                 .unwrap_or(DEFAULT_POINT_TOLERANCE),
+            max_radius: self.operation.definition.radius_law.max_radius(),
             json: serde_json::to_value(self).unwrap_or(Value::Null),
             metamorphs: self.metamorphs.clone(),
         }

@@ -1,8 +1,37 @@
 # Live Implementation Delta
 
+Reviewed: 2026-08-13  
+Implementation state: uncommitted worktree after `c7df7c8`  
+OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
+
+## Since the 2026-08-11 review
+
+- **P3 is complete** (`f36c960`): 35 machine-readable contract rows over 16
+  operations (`docs/qa/modeling-operation-contracts.json`), Transform through
+  the Tier A validator, ImportStep policy row, UI mode disposition recorded,
+  and `scripts/verify-modeling-contracts.mjs` enforcing all of it.
+- **P4 is complete** (`f36c960`, `f1415e8`): Boolean Intersect vertical across
+  C++/Rust/frontend/Playwright, Mirror and Linear/Circular Pattern Playwright
+  flows, critical mode closure tests, and a real-worker corpus executor with
+  zero unclassified corpus files.
+- **Phase 5 WP5.1 landed** (`b7b47e2`): mirror, far-origin translation,
+  edge-order permutation and contour seed execute in the runner.
+- **Phase 5 WP5.1 residual (M3.5) closed, uncommitted** (2026-08-13):
+  `uniformScale` and `parameterEpsilon` are back in `fillet/matrix:m1` behind a
+  per-variant RELATION (equivalence / similarity / continuity) rather than a
+  single equality gate; m1 is 336 records with `gatingFailures: 0`. It found and
+  fixed a real defect — the semantic validators measured the blend against the
+  case's declared radius rather than the radius the operation ran with. Detail in
+  `TODO.md` § M3.5 and `CURRENT_STATE.md`.
+- **Still owed from P2:** the manual Tauri smoke. Unchanged.
+- **Next in roadmap order:** Phase 5 WP5.2, the M4 recipe-agnostic validators.
+
+The sections below are the 2026-08-11 review, kept for its evidence trail.
+
+---
+
 Reviewed: 2026-08-11  
 Implementation state: current uncommitted worktree after `055d31f7d8edcb106a881590b9b2c5a9d1e37982` (`055d31f`)
-OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
 
 ## Status language
 

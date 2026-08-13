@@ -12,9 +12,14 @@ struct ValidationSummary {
   bool publication_valid = false;
 };
 
+/// `effective_radius` is the radius the operation actually ran with, which is
+/// NOT the case's declared radius for the `scaled` and `parameterEpsilon`
+/// metamorphs (see `Execution.cpp`). Validating a blend against the declared
+/// value there measures the wrong shape and reports a false red.
 ValidationSummary validate_output(const Request &request,
                                   const GeneratedGeometry &geometry,
                                   const AdapterResult &adapter,
-                                  const nlohmann::json &audit);
+                                  const nlohmann::json &audit,
+                                  double effective_radius);
 
 } // namespace onecad::benchmark

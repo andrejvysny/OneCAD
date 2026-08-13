@@ -387,6 +387,19 @@ fn metamorphs(domain: ExpectedDomain) -> Vec<MetamorphV2> {
         },
         MetamorphV2::EdgeOrderPermutation { order: vec![0] },
         MetamorphV2::ContourSeed { anchor_index: 0 },
+        // Not an isometry: the worker scales the geometry AND the requested
+        // radius, so the result is expected to differ by a similarity, which is
+        // what `campaign::Relation::Similarity` compares it against.
+        MetamorphV2::UniformScale {
+            factor: 2.0,
+            center: RotationCenterV2::InputCentroid,
+        },
+        // Nor is this one — it changes the operation. It gates continuity of the
+        // response, not equivalence (`campaign::Relation::Continuity`).
+        MetamorphV2::ParameterEpsilon {
+            parameter: crate::case_v2::EpsilonParameter::OperationRadius,
+            relative_delta: 1e-3,
+        },
     ]
 }
 
@@ -512,11 +525,11 @@ mod tests {
         let cases = m1();
         // 3 prismatic pairs x (5 supported + 2 exploratory) + 3 cone cases.
         assert_eq!(base_cases().len(), 24);
-        // Supported cases carry six metamorphic variants each (translation,
-        // far-origin translation, rotation, mirror, edge-order permutation,
-        // contour seed). Uniform scale and parameter epsilon are supported by
-        // the schema but not yet included in this preset.
-        assert_eq!(cases.len(), 24 + 6 * 18);
+        // Supported cases carry eight metamorphic variants each: six rigid
+        // (translation, far-origin translation, rotation, mirror, edge-order
+        // permutation, contour seed), one similarity (uniform scale) and one
+        // continuity probe (parameter epsilon).
+        assert_eq!(cases.len(), 24 + 8 * 18);
         let mut ids: Vec<_> = base_cases().into_iter().map(|case| case.case_id).collect();
         ids.sort();
         ids.dedup();

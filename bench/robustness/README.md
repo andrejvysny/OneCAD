@@ -50,6 +50,27 @@ variant's within the case's declared `pointTolerance`. Absence of evidence on
 both sides (e.g. an expected-limit case refusing identically under every
 variant) reports `notRun`, not a fabricated pass.
 
+### Not every variant preserves the shape
+
+Three relations exist, chosen by the variant's name; nothing records the choice
+because it is a pure function of that name.
+
+| relation | variants | mass properties | shape samples |
+|---|---|---|---|
+| equivalence | `translated`, `farOriginTranslated`, `rotated`, `mirrored`, `edgeOrderPermutation`, `contourSeed` | equal | equal within `pointTolerance` |
+| similarity | `scaled` | `k³·V`, `k²·A` | equal after inverse scaling |
+| continuity | `parameterEpsilon` | response bounded by `0.5·\|δ\|` and signed against the nudge | within `8·radius·\|δ\|` |
+
+`scaled` and `parameterEpsilon` change the radius the operation runs with, so
+they are NOT isometries: demanding equal volume there would gate on arithmetic
+the variant was designed to change. Compensating is not a relaxation — a kernel
+that scaled the solid but left the blend at the original radius fails
+similarity, and a discontinuous response to `±ε` fails continuity. Coefficients
+come from measurement over `fillet/matrix:m1`, both backends: worst similarity
+residual `5.6e-12`, worst continuity response `0.037` (volume) / `0.080` (area)
+per unit `δ`, worst sample displacement `3.58·radius·δ` (at the sharpest, 30°,
+dihedral — the tangency lines move by about `radius·δ/tan(θ/2)`).
+
 ## Verdict and exit policy
 
 Supported cases gate semantic success, deterministic replay, deep audit, and

@@ -201,10 +201,10 @@ struct Evidence {
   double after = 0.0;
 };
 
-Evidence gather(const Request &request, const GeneratedGeometry &geometry,
-                const AdapterResult &adapter) {
-  return {cylinder_evidence(adapter.output, request.benchmark_case.radius),
-          tangency_evidence(adapter.output, request.benchmark_case.radius),
+Evidence gather(const GeneratedGeometry &geometry, const AdapterResult &adapter,
+                double effective_radius) {
+  return {cylinder_evidence(adapter.output, effective_radius),
+          tangency_evidence(adapter.output, effective_radius),
           remote_supports(geometry, adapter.output), volume(geometry.shape),
           volume(adapter.output)};
 }
@@ -214,9 +214,9 @@ double tolerance_limit(const json &spec, double scale) {
          spec.value("relative", 0.0) * std::abs(scale);
 }
 
-json constant_radius(const json &spec, const Request &request,
-                     const AdapterResult &adapter) {
-  const double limit = std::max(1.0e-9, request.benchmark_case.radius * 1.0e-9);
+json constant_radius(const json &spec, const AdapterResult &adapter,
+                     double effective_radius) {
+  const double limit = std::max(1.0e-9, effective_radius * 1.0e-9);
   const bool pass = adapter.contour_count > 0 &&
                     adapter.assigned_radius_count == adapter.contour_count &&
                     adapter.assigned_radius_max_error <= limit;
@@ -228,10 +228,10 @@ json constant_radius(const json &spec, const Request &request,
 }
 
 json threshold_validator(const std::string &kind, const json &spec,
-                         const Request &request, const AdapterResult &adapter,
-                         const Evidence &evidence) {
+                         const AdapterResult &adapter,
+                         const Evidence &evidence, double effective_radius) {
   double measured = adapter.assigned_radius_max_error;
-  double scale = request.benchmark_case.radius;
+  double scale = effective_radius;
   std::string measured_name = "maximumAssignedRadiusError";
   if (kind == "tangencyTolerance") {
     measured = evidence.tangency.maximum_error;
@@ -253,13 +253,14 @@ json threshold_validator(const std::string &kind, const json &spec,
 
 json simple_validator(const std::string &kind, const json &spec,
                       const Request &request, const AdapterResult &adapter,
-                      const Evidence &evidence, const json &audit) {
+                      const Evidence &evidence, const json &audit,
+                      double effective_radius) {
   const bool required = spec.value("required", false);
   if (kind == "generatedBlendFace")
     return validator(kind, required, adapter.generated_face_count > 0 ? "pass" : "fail",
                      json::array({metric("generatedFaceCount", adapter.generated_face_count)}));
   if (kind == "cylindricalRadius") {
-    const double limit = std::max(1.0e-8, request.benchmark_case.radius * 1.0e-8);
+    const double limit = std::max(1.0e-8, effective_radius * 1.0e-8);
     return validator(kind, required,
                      evidence.radius.cylinders > 0 &&
                              evidence.radius.maximum_error <= limit ? "pass" : "fail",
@@ -288,17 +289,18 @@ json simple_validator(const std::string &kind, const json &spec,
 
 json validate_one(const json &spec, const Request &request,
                   const AdapterResult &adapter, const Evidence &evidence,
-                  const json &audit) {
+                  const json &audit, double effective_radius) {
   const std::string kind = spec.value("type", "unknown");
   const bool required = spec.value("required", false);
   if (!adapter.success)
     return validator(kind, required, "notRun");
   if (kind == "constantRadius")
-    return constant_radius(spec, request, adapter);
+    return constant_radius(spec, adapter, effective_radius);
   if (kind == "radiusTolerance" || kind == "tangencyTolerance" ||
       kind == "materialTolerance")
-    return threshold_validator(kind, spec, request, adapter, evidence);
-  return simple_validator(kind, spec, request, adapter, evidence, audit);
+    return threshold_validator(kind, spec, adapter, evidence, effective_radius);
+  return simple_validator(kind, spec, request, adapter, evidence, audit,
+                          effective_radius);
 }
 
 bool required_passes(const json &validators) {
@@ -314,12 +316,14 @@ bool required_passes(const json &validators) {
 ValidationSummary validate_output(const Request &request,
                                   const GeneratedGeometry &geometry,
                                   const AdapterResult &adapter,
-                                  const json &audit) {
+                                  const json &audit, double effective_radius) {
   ValidationSummary summary;
   summary.results = json::array();
-  const Evidence evidence = adapter.success ? gather(request, geometry, adapter) : Evidence{};
+  const Evidence evidence =
+      adapter.success ? gather(geometry, adapter, effective_radius) : Evidence{};
   for (const json &spec : request.benchmark_case.validators)
-    summary.results.push_back(validate_one(spec, request, adapter, evidence, audit));
+    summary.results.push_back(
+        validate_one(spec, request, adapter, evidence, audit, effective_radius));
   summary.required_pass = required_passes(summary.results);
   summary.publication_valid = adapter.success &&
                               audit_passes(request.benchmark_case, audit);

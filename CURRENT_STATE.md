@@ -1,3 +1,38 @@
+## KERNELBENCH M3.5 — NON-ISOMETRIC METAMORPH POLICY (2026-08-13) — GATE PASSED, UNCOMMITTED
+
+Roadmap Phase 5 WP5.1 residual, closed. The metamorph comparison now carries a
+RELATION per variant instead of demanding equality from all of them: rigid
+variants keep equivalence, `scaled` is compared as a SIMILARITY (`k³·V`, `k²·A`),
+and `parameterEpsilon` is compared for CONTINUITY (bounded, correctly signed
+response; shape tolerance widened to `8·radius·|δ|`). The relation is a pure
+function of the variant name, so the frozen result-v1 `metamorphEvidence` block
+is untouched. Every coefficient is measured over m1 rather than guessed — the
+numbers and their margins are in TODO.md § M3.5.
+
+The two re-enabled variants immediately found a real defect: `validate_output`
+measured the blend against the case's DECLARED radius while `Execution.cpp`
+filleted with the scaled/nudged EFFECTIVE one, so `cylindricalRadius` and
+`g1BoundaryTangency` reported a false red on correct results. The effective
+radius is now threaded through; red-first proof is the new ctest
+`kernelbench_metamorph` (`worker/tools/kernelbench-runner/metamorph_fixtures.cpp`),
+verified to fail against the old call site and pass against the new one.
+
+- **Changed:** `worker/src/benchmark/{Execution.cpp,SemanticValidation.cpp,SemanticValidation.h}` ·
+  `worker/tools/kernelbench-runner/{CMakeLists.txt,metamorph_fixtures.cpp}` (new) ·
+  `src-tauri/crates/onecad-kernelbench/src/{campaign.rs,prepared.rs,suite_v2.rs}` ·
+  `bench/robustness/{README.md,baselines/digests.json,baselines/semantics.json}`.
+- **Gates:** ctest **115/115** · `cargo fmt --all --check` · workspace `clippy -D warnings` ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0** · kernelbench lib **61** ·
+  T0 **136/136** unchanged and `compare` OK · m1 **336 records**, 330 pass + 6 characterization,
+  metamorph 288/0, replay 336 stable, `gatingFailures: 0`, p50 11.8 ms / p95 68.9 ms.
+- **Baselines:** m1 digests + semantics re-recorded (`darwin-arm64`, 336 rows). Every m1
+  `inputDigest` moved because `input_digest` hashes the canonical case document, which now
+  declares eight metamorphs instead of six. T0 rows are byte-identical.
+- **Not implicated:** no frontend file changed, so vitest and Playwright were not re-run.
+- **Still open:** `m1` has `darwin-arm64` rows only — record `linux-x64` on the self-hosted
+  host (Phase 5 WP5.6). Next in roadmap order is Phase 5 WP5.2, the M4 recipe-agnostic
+  validators.
+
 ## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-12)
 
 Reviewed current uncommitted worktree, OCCT 8.0.1 fingerprint
