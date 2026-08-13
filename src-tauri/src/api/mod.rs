@@ -2619,6 +2619,19 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
             // own commit precisely (never mistaking sibling republishes for success).
             failed_steps: report.failed_steps.clone(),
             affected_bodies: report.affected_bodies.clone(),
+            // Distinct, in first-seen order: several refs on one record can each
+            // need repair, but the awaiter asks a yes/no question about its op.
+            repair_steps: if report.published() {
+                let mut seen = std::collections::BTreeSet::new();
+                report
+                    .needs_repair
+                    .iter()
+                    .filter(|item| seen.insert(item.op_id.clone()))
+                    .map(|item| item.op_id.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            },
         },
     );
     if report.published() {

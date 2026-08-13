@@ -35,6 +35,7 @@ import type {
   PromotePick,
   RecentProject,
   RecoveryInfo,
+  RegenTerminal,
   SaveOutcome,
   ResolveCandidate,
   ResolveRefRequest,
@@ -218,6 +219,21 @@ const needsRepairListeners = new Set<(e: NeedsRepairEvent) => void>();
 /** Test seam: push a `needs-repair` event through the mock (drives the banner). */
 export function emitMockNeedsRepair(event: NeedsRepairEvent): void {
   for (const cb of [...needsRepairListeners]) cb(event);
+}
+
+/**
+ * Forced regen terminal for every subsequent mock apply, with the message a real
+ * failure would carry. The mock has no regen, so it can never PRODUCE a
+ * `needsRepair`/`failed`/`timeout` outcome on its own — but every consumer family
+ * has to be provable against all five terminals, and the mock lane is where that
+ * table-driven test runs. `null` restores the natural `published`/`noop`.
+ */
+let mockForcedTerminal: { terminal: RegenTerminal; errorMessage?: string } | null = null;
+
+export function setMockRegenTerminal(
+  forced: { terminal: RegenTerminal; errorMessage?: string } | null,
+): void {
+  mockForcedTerminal = forced;
 }
 
 // ── Mock document model: synthetic bodies + feature timeline + undo/redo ───────
@@ -603,11 +619,15 @@ function insertAtMockCursor(featureId: string): void {
 
 /** Stamp the timeline cursor onto a result (H7b: the cursor rides the edit result). */
 function withCursor(res: ApplyOperationResult): ApplyOperationResult {
+  const forced = mockForcedTerminal;
   return {
     ...res,
     appliedOps: mockAppliedOps,
     totalOps: mockFeatures.length,
-    terminal: res.terminal ?? "published",
+    terminal: forced?.terminal ?? res.terminal ?? "published",
+    // A forced non-published terminal carries its reason exactly as the real
+    // client would; `published`/`noop`/`needsRepair` carry none.
+    errorMessage: forced?.errorMessage ?? res.errorMessage,
   };
 }
 

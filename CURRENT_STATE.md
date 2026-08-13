@@ -1,4 +1,26 @@
-## KERNELBENCH M4 — RECIPE-AGNOSTIC VALIDATORS (2026-08-13) — GATE PASSED, UNCOMMITTED
+## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13) — GATE PASSED, UNCOMMITTED
+
+WP0.3 finished. It was recorded complete but only the transport half had landed:
+`needsRepair` was declared and never produced, no shared helper existed, and every
+consumer still inferred success from body counts — a live R-04 defect, not missing
+evidence.
+
+`regen-finished` gained `repairSteps` so a commit can tell "my op could not resolve
+its refs" from "my op published"; it rides that payload because the sibling
+`needs-repair` event is emitted after it. `src/ipc/regenOutcome.ts` is now the one
+place a result becomes a verdict, and a NeedsRepair record is never rolled back —
+rolling back the record repair operates on would delete what the user is fixing.
+
+- **Changed:** `src-tauri/src/{dto.rs,api/mod.rs}` · `src/ipc/{types.ts,tauriClient.ts,mockClient.ts}` ·
+  `src/ipc/regenOutcome.ts` (new) + its test · `src/tools/modelTools/ModelToolController.ts` ·
+  `src/features/inspector/historyActions.ts` · two new terminal-table tests.
+- **Gates:** tsc clean · vitest **247 files / 4161 tests** (from 244/4124) · build clean ·
+  fmt · clippy · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**.
+- **Both new tables proved non-vacuous by mutation** — reverting `commitPattern` to the
+  old check reproduces R-04: a `needsRepair` result printed the success hint.
+- **Next:** A2, pin the Draft refusals and run the mandated circular-profile red probe.
+
+## KERNELBENCH M4 — RECIPE-AGNOSTIC VALIDATORS (2026-08-13) — COMMITTED `8bd0fdb`
 
 Roadmap Phase 5 WP5.2. `supportTangency`, `crossSectionProfile`, `manifold`,
 `noSelfIntersection`, `microTopology` and `toleranceGrowth` are implemented and

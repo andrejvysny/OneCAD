@@ -748,6 +748,16 @@ export interface RegenFinished {
    */
   failedSteps?: Array<{ recordId: string; message: string; diagnostics?: OperationDiagnostic[] }>;
   /**
+   * Record ids this published regen left in `NeedsRepair`. Same per-record shape
+   * as `failedSteps`, and present for the same reason — the sibling `needs-repair`
+   * event carries the same facts but is emitted AFTER this one, so an awaiter that
+   * settles here would always miss it. NeedsRepair is document state, never a
+   * failure: this exists so a commit stops reporting itself as published, not so
+   * it can be raised into an error. Present only when non-empty; the mock lane
+   * omits it unless a scenario asks for it.
+   */
+  repairSteps?: string[];
+  /**
    * Per record-id, the body ids that op created (incl. split children) or modified
    * in THIS published regen. Lets a correlated commit scope its result bodies to
    * ONLY its own op's bodies (MODEL-HARDEN); absent ⇒ fall back to the full

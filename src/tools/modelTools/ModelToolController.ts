@@ -46,6 +46,7 @@ import { getDatumVisuals } from "@/modules/modeling/datumViewport";
 import { bareBodyId, buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
 import { mintUuid } from "@/ipc/sketchWireMap";
 import { promoteOne } from "@/ipc/promote";
+import { classifyRegen, failureReason, keepsRecord } from "@/ipc/regenOutcome";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { setSketchVisible } from "@/features/tree/treeActions";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
@@ -4826,11 +4827,13 @@ export class ModelToolController {
     // The result message is captured, not published, until the tool has been reset —
     // see `resetToSelect` for why publishing first would lose it.
     let failure: string | null = null;
+    let repaired = false;
     try {
       const res = await this.client.applyOperation(op);
-      if (res.errorMessage) {
-        failure = res.errorMessage;
-      } else {
+      const outcome = classifyRegen(res);
+      failure = failureReason(outcome);
+      repaired = outcome.kind === "needsRepair";
+      if (outcome.kind === "published") {
         this.applyResult(res);
         // Select the generated children (contract: successSelection "newBodies"),
         // not the source — a non-fused pattern/mirror leaves the source body
@@ -4841,6 +4844,11 @@ export class ModelToolController {
           .filter((id) => id !== bodyId);
         const toSelect = created.length > 0 ? created : [bodyId];
         selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
+      } else if (outcome.kind === "noop" || repaired) {
+        // Nothing published, nothing wrong. Apply whatever the result carries and
+        // select nothing — moving the selection onto a body this op did not
+        // produce is exactly the mis-report WP0.3 forbids.
+        this.applyResult(res);
       }
     } catch (e) {
       failure = errMessage(e);
@@ -4853,6 +4861,12 @@ export class ModelToolController {
     this.patternFuseResult = false;
     if (failure !== null) {
       this.resetToSelect(`Pattern failed: ${failure}`, { severity: "error", sticky: true });
+    } else if (repaired) {
+      // A repair prompt, not a failure and not a success: the record stands and
+      // the repair panel is what acts on it next.
+      // `info`, not `error`: the status system has exactly two severities and
+      // NeedsRepair is not a failure. Sticky, because it is an ask.
+      this.resetToSelect("Pattern needs repair", { severity: "info", sticky: true });
     } else {
       this.resetToSelect(doneHint);
     }
@@ -6939,10 +6953,11 @@ export class ModelToolController {
       try {
         const res = await this.client.applyOperation(fallback);
         if (gen !== this.commitGen) return { kind: "superseded" };
-        if (res.errorMessage || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+        const outcome = classifyRegen(res);
+        if (!keepsRecord(outcome)) {
           await this.rollbackFailedCommit();
           if (gen !== this.commitGen) return { kind: "superseded" };
-          return { kind: "failed", reason: res.errorMessage ?? "no body changed" };
+          return { kind: "failed", reason: failureReason(outcome) ?? "no body changed" };
         }
         return { kind: "ok", res };
       } catch (e) {
@@ -6985,14 +7000,16 @@ export class ModelToolController {
     }
     this.releaseCommittedSession(es);
     if (gen !== this.commitGen) return { kind: "superseded" };
-    if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+    const outcome = classifyRegen(res);
+    if (!keepsRecord(outcome)) {
       // The command applied but its regen failed — pop the errored record so a
       // retried ✓ replaces it instead of stacking a duplicate (extrude's rule).
+      // A NeedsRepair record is deliberately NOT rolled back: repair acts on it.
       await this.rollbackFailedCommit();
       if (gen !== this.commitGen) return { kind: "superseded" };
-      return { kind: "failed", reason: res?.errorMessage ?? "no body changed" };
+      return { kind: "failed", reason: failureReason(outcome) ?? "no body changed" };
     }
-    return { kind: "ok", res };
+    return { kind: "ok", res: res as ApplyOperationResult };
   }
 
   /** Drop a consumed/released lane session + its candidate meshes (no endPreview). */
@@ -7451,15 +7468,16 @@ export class ModelToolController {
       return;
     }
     if (gen !== this.commitGen) return;
-    if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+    const outcome = classifyRegen(res);
+    if (!keepsRecord(outcome)) {
       // Applied but the regen failed: pop the errored record so a retried Apply
       // cannot stack a duplicate (the same defect class extrude's rollback closes).
       await this.rollbackFailedCommit();
       if (gen !== this.commitGen) return;
-      this.onBooleanCommitFailed(res?.errorMessage, gen);
+      this.onBooleanCommitFailed(failureReason(outcome) ?? undefined, gen);
       return;
     }
-    this.applyResult(res);
+    this.applyResult(res as ApplyOperationResult);
     for (const es of this.previewSessions) this.removeExactPreviewMeshes(es);
     this.previewSessions = [];
     this.previewOwner = null;

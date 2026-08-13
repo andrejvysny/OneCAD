@@ -1,5 +1,21 @@
 # OneCAD-Tauri Migration TODO
 
+## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13, plan `now-lets-plan-next-sunny-lighthouse.md`) — GATE PASSED
+
+Roadmap WP0.3, finished. It was recorded complete at `MODEL-CORRECTNESS-P0` but only the transport half had landed: `RegenTerminal` declared `needsRepair` and **neither client ever assigned it**, no shared consumer helper existed, `.terminal` was read nowhere outside its own test, and every consumer family still inferred success from body counts — the inference the spec explicitly forbids. That was the fix for risk **R-04** (severity 5, score 80), so it was a live defect, not missing evidence.
+
+- [x] **`needsRepair` is now produced.** `regen-finished` gained `repairSteps` (record ids a published regen left in NeedsRepair), populated in `emit_regen_events` from the same `report.needs_repair` the sibling `needs-repair` event uses. It rides THIS payload because `needs-repair` is emitted AFTER `regen-finished`, so an awaiter settling there would always miss it. `tauriClient`'s recordId awaiter settles `needsRepair` when its own record appears.
+- [x] **`src/ipc/regenOutcome.ts`** — one `classifyRegen()` consumed by every family, plus `keepsRecord()` and `failureReason()`. A resolved `errorMessage` is failure whatever the terminal claims (checked first). A result with no `terminal` falls back to the historical body-count inference verbatim, so legacy fixtures are unchanged.
+- [x] **Two outcomes body counting got backwards are now right**: an empty *published* result and a *delete-only* result are no longer failures-with-rollback, and `needsRepair` is no longer a success.
+- [x] **Consumers migrated**: `commitPattern`, the exact-preview fallback commit, the shell/edge commit tail and the boolean commit in `ModelToolController`; `suppressFeature`/`rollToIndex`/`deleteFeature`/`rebindCandidate` in `historyActions.ts` — the last four hydrated and announced success while catching only a rejected promise, so a resolved `errorMessage` printed "Feature deleted".
+- [x] **A NeedsRepair record is never rolled back.** `keepsRecord()` covers published/noop/needsRepair; rollback stays for failed/timeout only. Rolling back the record repair operates on would delete the thing the user is about to fix.
+- [x] **The table-driven test the spec asks for**, in two files over one shared table so the families cannot drift: `src/features/inspector/regenTerminals.test.ts` (3 families × 6 rows) and `src/tools/modelTools/ModelToolController.terminals.test.ts`. Asserts no success hint on error, one sticky diagnostic, no duplicate record on retry, authored values recoverable, and selection never moved onto a body that failed to publish.
+- [x] **Both tables proved non-vacuous by mutation.** Bypassing the classifier in `historyActions.settle` reds 9 rows; reverting `commitPattern` to the `errorMessage`-only check reds 4 and reproduces R-04 verbatim — `needsRepair` and a message-less `failed` both printed the success hint "Linear pattern ×7".
+
+Gates: `bunx tsc --noEmit` clean; `bun run test` **247 files / 4161 tests** (244/4124 → +3 files, +37 tests); `bun run build` clean; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**. Worker and ctest untouched by this wave.
+
+- [ ] Next per the plan: A2 (pin the Draft refusals — no test pins any of the three, and the mandated circular-profile red probe was never run).
+
 ## MODELING UX HARDENING — WP0 through WP6 (2026-08-12/13, plan `plans/modeling-ux-wp0.md` + `act-as-senior-software-linked-graham.md`) — FE GATE PASSED, ALL 19 DEFECTS CLOSED
 
 WP0 (red evidence, no production changes): frozen `src/test/contracts/modelingInteractionContract.ts` + 11 new red tests, one per confirmed defect (D7,D8,D9,D10,D11,D12,D13,D14,D17,D19 — 17 test cases). WP1+WP2 (2026-08-12) closed D9/D1/D2/D6(partial)/D13/D17; a follow-up pass (2026-08-13) closed the remaining D7/D8/D10/D11/D12/D14/D19. D6's structural refactor (`ToolChipState` discriminated union) remains the sole deliberate non-goal — no red test forces it, pure internal type-safety, its own dedicated pass.
