@@ -85,6 +85,7 @@ function install(radius: number): Harness {
     setOrbitSuppressed: vi.fn(),
     probePick: vi.fn(() => ({
       bodyId: "body_1",
+      kind: "face",
       elementId: "el_1",
       topoKey: "f:1",
       worldPos: { x: 0, y: 0, z: 0 },
@@ -151,6 +152,32 @@ describe("placementController auto-size", () => {
     expect(harness.placeComponent).toHaveBeenCalledTimes(1);
     // Argument 5 is the free-param map; the ghost above chose the same one.
     expect(harness.placeComponent.mock.calls[0][4]).toMatchObject({ thread: "M6" });
+  });
+
+  it("records the snapped mate on commit (WP-H2, spec §5.4 step 5)", async () => {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS);
+    armPlacement(componentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+    // Flip once so the recorded mate carries the gesture's real flip state.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    window.dispatchEvent(new PointerEvent("pointerdown", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    expect(harness.placeComponent).toHaveBeenCalledTimes(1);
+    // Argument 6 is the recorded snap — identity evidence, kind, and flip.
+    expect(harness.placeComponent.mock.calls[0][5]).toEqual({
+      selfAttachment: "shank_axis",
+      targetBodyId: "body_1",
+      targetTopoKey: "f:1",
+      targetElementId: "el_1",
+      targetKind: "face",
+      kind: "concentric",
+      flipped: true,
+      anchorWorldPoint: [0, 0, 0],
+    });
   });
 
   it("leaves the size alone when no declared size fits the hole", async () => {

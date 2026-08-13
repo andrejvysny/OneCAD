@@ -233,8 +233,12 @@ const geometryQueryService: GeometryQueryService = {
  * `manifest.ts::CommandApiService`).
  */
 const commandApiService: CommandApiService = {
-  placeComponent: (componentId, componentVersion, translate, rotate) =>
-    createClient().placeComponent(componentId, componentVersion, translate, rotate),
+  // Forward EVERY argument. This seam once dropped `params` (WP-A3 auto-size):
+  // the ghost previewed the sized screw through `source.params` while the
+  // commit placed the generator default — exactly the preview/commit divergence
+  // the tauriClient comment warns about.
+  placeComponent: (componentId, componentVersion, translate, rotate, params, mate) =>
+    createClient().placeComponent(componentId, componentVersion, translate, rotate, params, mate),
   detachComponent: (recordId) => createClient().detachComponent(recordId),
   beginPreview: (draft) => createClient().beginPreview(draft),
   updatePreview: (sessionId, params, epoch) => createClient().updatePreview(sessionId, params, epoch),

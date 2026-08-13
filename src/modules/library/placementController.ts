@@ -33,9 +33,14 @@
  *     step 1's "ghost follows the cursor" is honored from the FIRST valid
  *     hover, not from arm-time. Free-space placement (step 6, the Move-tool
  *     fallback) is not wired; there is no Move-tool integration point yet.
- *   - No `mate` is RECORDED by this gesture: the solved transform is frozen
- *     into `placement`. Regen-time re-seating of a mate that IS recorded ships
- *     (WP-3.1, worker-side); authoring one from here is still open.
+ *
+ * MATE AUTHORING (WP-H2, spec §5.4 step 5): a snapped commit records the
+ * attachment pair — the matched attachment key, the target pick's identity
+ * evidence (bodyId + topoKey + elementId when the pick carried one), the snap
+ * kind, and the flip state. The backend promotes the topoKey to a Rust-minted
+ * ElementId at the head and authors `PlaceComponentParams.mate`, which is what
+ * regen's re-seat lane (WP-3.1) resolves. Fails closed: an unpromotable target
+ * refuses the placement rather than silently degrading to free-space.
  */
 import { useSyncExternalStore } from "react";
 import { getViewportEngine } from "@/viewport/engineBridge";
@@ -85,6 +90,8 @@ interface LastMatch {
   attachmentKey: string;
   frame: NonNullable<import("@/ipc/types").ClassifyResult["frame"]>;
   pickWorldPos: [number, number, number];
+  /** The hovered pick's identity evidence — becomes the committed mate's target. */
+  target: { bodyId: string; topoKey: string; elementId?: string; kind: "face" | "edge" };
 }
 
 let armedComponent: LibraryComponent | null = null;
@@ -370,7 +377,13 @@ function onPointerMove(e: PointerEvent): void {
           ? lastMatch.attachmentKey
           : candidates[0];
       const pickWorldPos: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
-      lastMatch = { snapKind, attachmentKey, frame: classify.frame, pickWorldPos };
+      lastMatch = {
+        snapKind,
+        attachmentKey,
+        frame: classify.frame,
+        pickWorldPos,
+        target: { bodyId: hit.bodyId, topoKey: hit.topoKey, elementId: hit.elementId, kind: hit.kind },
+      };
       // Auto-size BEFORE the candidate push, so the very first ghost frame for
       // this hover already shows the size the commit will place.
       if (applyAutoSize(component, classify.frame)) {
@@ -389,16 +402,40 @@ function onPointerDown(e: PointerEvent): void {
   if (!armedComponent) return;
   e.preventDefault();
   e.stopPropagation();
-  if (!lastCandidate || !armedComponent) return;
+  if (!lastCandidate || !armedComponent || !lastMatch) return;
   const component = armedComponent;
   const candidate = lastCandidate;
-  void services?.commandApi.placeComponent(
-    component.id,
-    component.version,
-    candidate.translate,
-    candidate.rotate,
-    Object.keys(gestureParams).length > 0 ? { ...gestureParams } : undefined,
-  );
+  // The recorded snap (WP-H2): what makes the placement re-seat on regen when
+  // the target moves, and surface NeedsRepair when it vanishes (spec §5.5).
+  const mate: import("@/ipc/types").PlaceComponentMate = {
+    selfAttachment: lastMatch.attachmentKey,
+    targetBodyId: lastMatch.target.bodyId,
+    targetTopoKey: lastMatch.target.topoKey,
+    targetElementId: lastMatch.target.elementId,
+    targetKind: lastMatch.target.kind,
+    kind: lastMatch.snapKind,
+    flipped,
+    anchorWorldPoint: lastMatch.pickWorldPos,
+  };
+  void services?.commandApi
+    .placeComponent(
+      component.id,
+      component.version,
+      candidate.translate,
+      candidate.rotate,
+      Object.keys(gestureParams).length > 0 ? { ...gestureParams } : undefined,
+      mate,
+    )
+    .catch((e: unknown) => {
+      // Fail closed, visibly: the backend refuses a mate it cannot promote
+      // (stale pick) instead of authoring a silently-unmated record.
+      viewportStore
+        .getState()
+        .setStatusHint(
+          `Place failed: ${e instanceof Error ? e.message : String(e)}`,
+          { severity: "error", sticky: true },
+        );
+    });
   cancelPlacement();
 }
 

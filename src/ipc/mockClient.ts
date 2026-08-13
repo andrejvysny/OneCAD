@@ -43,6 +43,7 @@ import type {
   PromotePick,
   RecentProject,
   RecoveryInfo,
+  PlaceComponentMate,
   RegenTerminal,
   ReindexReport,
   SaveOutcome,
@@ -1410,6 +1411,19 @@ let mockAuthored: LibraryComponent[] = [];
 let mockTemplates: ProjectTemplate[] = [];
 
 /**
+ * The fixture or a session-authored component matching `id@version`, else
+ * `null`. Authored components place with the fixture's geometry (nothing is
+ * baked on this lane) but keep their own identity + attachments, which is
+ * what the author→place e2e needs to exist at all.
+ */
+function mockComponentByIdentity(id: string, version: string): LibraryComponent | null {
+  if (id === MOCK_LIBRARY_FIXTURE.id && version === MOCK_LIBRARY_FIXTURE.version) {
+    return MOCK_LIBRARY_FIXTURE;
+  }
+  return mockAuthored.find((c) => c.id === id && c.version === version) ?? null;
+}
+
+/**
  * Rejects any key that is not `role = "free"` on `component` — the mock's
  * mirror of the backend's own signature check (`library.rs::check_free_params`).
  * `what` names the caller so the two commands' messages stay distinguishable.
@@ -1444,6 +1458,7 @@ function commitPlaceComponent(
   translate: [number, number, number],
   rotate: TransformRotationParams | undefined,
   overrides: Record<string, ComponentParamValue> | undefined,
+  mate?: PlaceComponentMate,
 ): ApplyOperationResult {
   const seq = nextComponentSeq++;
   const bodyId = nextBodyId();
@@ -1481,6 +1496,10 @@ function commitPlaceComponent(
       translate,
       rotate: rot,
     },
+    // The gesture's recorded snap (WP-H2). The mock has no ladder, so this is
+    // stored verbatim: tests assert the commit CARRIED it, the worker-backed
+    // lane (component_ops.rs) is where it actually re-seats.
+    ...(mate ? { mate } : {}),
   });
   insertAtMockCursor(featureId);
   mockRevision += 1;
@@ -2472,22 +2491,22 @@ export const mockClient: CadClient = {
     componentVersion: string,
   ): Promise<PlaceComponentSource> {
     await wait(MESH_LATENCY_MS);
-    if (
-      componentId !== MOCK_LIBRARY_FIXTURE.id ||
-      componentVersion !== MOCK_LIBRARY_FIXTURE.version
-    ) {
+    const component = mockComponentByIdentity(componentId, componentVersion);
+    if (!component) {
       throw new Error(
-        `resolveComponentSource: unknown component ${componentId}@${componentVersion} — the mock lane only knows the ?mocklibrary=1 fixture`,
+        `resolveComponentSource: unknown component ${componentId}@${componentVersion} — the mock lane knows the ?mocklibrary=1 fixture and this session's authored components`,
       );
     }
     // The fixture is a `generator` component, so there is nothing to stage —
     // which is the honest mock answer, not a shortcut: staging is a real
     // document-carrier + worker-workspace write that has no meaning in a lane
-    // with neither. A blob-backed fixture would have to fake both.
+    // with neither. An AUTHORED mock component has no baked blob either
+    // (`saveAsComponent` bakes nothing here), so it resolves as the fixture's
+    // generator — same reuse `placeComponent` documents.
     return {
       kind: "generator",
-      generatorId: MOCK_LIBRARY_FIXTURE.generatorId ?? MOCK_LIBRARY_FIXTURE.id,
-      generatorVersion: MOCK_LIBRARY_FIXTURE.generatorVersion ?? 1,
+      generatorId: component.generatorId ?? MOCK_LIBRARY_FIXTURE.generatorId ?? MOCK_LIBRARY_FIXTURE.id,
+      generatorVersion: component.generatorVersion ?? MOCK_LIBRARY_FIXTURE.generatorVersion ?? 1,
     };
   },
 
@@ -2497,17 +2516,19 @@ export const mockClient: CadClient = {
     translate: [number, number, number],
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
+    mate?: PlaceComponentMate,
   ): Promise<void> {
-    if (componentId !== MOCK_LIBRARY_FIXTURE.id || componentVersion !== MOCK_LIBRARY_FIXTURE.version) {
+    const component = mockComponentByIdentity(componentId, componentVersion);
+    if (!component) {
       throw new Error(
-        `placeComponent: unknown component ${componentId}@${componentVersion} — the mock lane only knows the ?mocklibrary=1 fixture`,
+        `placeComponent: unknown component ${componentId}@${componentVersion} — the mock lane knows the ?mocklibrary=1 fixture and this session's authored components`,
       );
     }
     documentStore.getState().regenStarted();
     try {
       await wait();
-      assertFreeParams(MOCK_LIBRARY_FIXTURE, params);
-      const res = commitPlaceComponent(MOCK_LIBRARY_FIXTURE, translate, rotate, params);
+      assertFreeParams(component, params);
+      const res = commitPlaceComponent(component, translate, rotate, params, mate);
       emitMockDocumentChanged({
         revision: res.revision,
         changedBodies: res.changedBodies,

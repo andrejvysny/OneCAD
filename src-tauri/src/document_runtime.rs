@@ -3367,6 +3367,14 @@ impl DocumentRuntime {
     /// The code mirrors the worker's own refusal (`REF_UNRESOLVED`, SCHEMA §7.5) so
     /// the two halves of the gate report the same thing; both surface to the
     /// frontend as `ApiError::OpFailed`.
+    /// The id of the last PUBLISHED snapshot, or `None` before the first
+    /// publish. A promotion made server-side on the caller's behalf (the
+    /// library's mate authoring, WP-H2) addresses this head — it has no older
+    /// pick snapshot to be stale against.
+    pub fn head_snapshot_id(&self) -> Option<SnapshotId> {
+        self.latest_snapshot.as_ref().map(|s| s.id)
+    }
+
     fn gate_stale_pick(&self, snapshot: SnapshotId) -> Result<(), EngineError> {
         let Some(head) = &self.latest_snapshot else {
             return Ok(());

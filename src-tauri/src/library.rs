@@ -33,13 +33,15 @@ use std::str::FromStr;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use onecad_core::document::record::{
-    ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
+    ComponentMate, ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
     ImportSourceCodec, KnownOperation, Operation, OperationRecord, PlaceComponentParams,
     TransformRotation,
 };
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{CommandOutcome, EditCommand};
-use onecad_core::ids::RecordId;
+use onecad_core::ids::{BodyId, ElementId, RecordId, TopoKey};
+use onecad_core::math::Vec3;
 
 use onecad_library::index::LibraryIndex;
 use onecad_library::package::{self, ComponentPackage, ParameterRole, COMPONENT_MANIFEST_FILE};
@@ -47,8 +49,8 @@ use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
 use onecad_library::Library;
 
 use crate::dto::{
-    ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, ProjectTemplateDto,
-    ReindexReportDto, ReplaceComponentReportDto,
+    ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, PlaceComponentMateInput,
+    ProjectTemplateDto, ReindexReportDto, ReplaceComponentReportDto,
 };
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -197,6 +199,118 @@ pub async fn reindex_library(app: AppHandle) -> Result<ReindexReportDto, ApiErro
 /// authoring a NEW placement against one; placing against a component that
 /// no longer matches its recorded identity is a caller bug, not a document
 /// state to preserve.
+/// Builds the recorded [`ComponentMate`] from the gesture's raw pick evidence
+/// plus the promoted (or pick-carried) element id. Pure — promotion happens at
+/// the call site, under the runtime lock.
+fn component_mate_from_input(
+    input: &PlaceComponentMateInput,
+    body: BodyId,
+    element: ElementId,
+) -> ComponentMate {
+    ComponentMate {
+        self_attachment: input.self_attachment.clone(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element,
+                kind: if input.target_kind == "edge" {
+                    ElementKind::Edge
+                } else {
+                    ElementKind::Face
+                },
+                extra: Default::default(),
+            }),
+            // No `intent`: the descriptor is worker-owned evidence; the ladder
+            // re-derives it (same reasoning as `add_sketch_on_face`).
+            intent: None,
+            anchor: Some(AnchorIntent {
+                world_point: Vec3::new_unchecked(
+                    input.anchor_world_point[0],
+                    input.anchor_world_point[1],
+                    input.anchor_world_point[2],
+                ),
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        },
+        kind: input.kind,
+        flipped: input.flipped,
+        extra: Default::default(),
+    }
+}
+
+/// Resolves the gesture's mate evidence to a full [`ComponentMate`], promoting
+/// the pick's `TopoKey` to a Rust-minted `ElementId` at the CURRENT head when
+/// the pick carried none (§0 invariant 8 — the frontend never fabricates
+/// identity). FAILS CLOSED: a mate that cannot be promoted refuses the whole
+/// placement rather than silently degrading to a free-space record — the
+/// user saw a snap, so a commit that forgot it would lose re-seating without
+/// a trace (the same class of silent degradation spec §4 forbids).
+async fn resolve_mate_input(
+    state: &State<'_, AppState>,
+    input: &PlaceComponentMateInput,
+) -> Result<ComponentMate, ApiError> {
+    if input.self_attachment.trim().is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "placeComponent: mate.selfAttachment must not be empty".into(),
+        ));
+    }
+    let body = crate::worker::wire::parse_body_id(&input.target_body_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("placeComponent: mate.targetBodyId: {e}")))?;
+    if let Some(id) = input.target_element_id.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(component_mate_from_input(input, body, ElementId::new(id)));
+    }
+    let anchor = AnchorIntent {
+        world_point: Vec3::new_unchecked(
+            input.anchor_world_point[0],
+            input.anchor_world_point[1],
+            input.anchor_world_point[2],
+        ),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("placeComponent".into()))?;
+    let Some(head) = rt.head_snapshot_id() else {
+        return Err(ApiError::InvalidCommand(
+            "placeComponent: cannot record a mate before the first publish — re-pick".into(),
+        ));
+    };
+    let promoted = rt
+        .promote_selection(
+            head,
+            body,
+            vec![(TopoKey::new(&input.target_topo_key), Some(anchor))],
+        )
+        .await
+        .map_err(|e| {
+            ApiError::InvalidCommand(format!(
+                "placeComponent: mate target could not be promoted ({e}) — re-pick"
+            ))
+        })?;
+    let Some(first) = promoted.first() else {
+        return Err(ApiError::InvalidCommand(format!(
+            "placeComponent: mate target `{}` on body {} did not resolve at the head — re-pick",
+            input.target_topo_key, input.target_body_id
+        )));
+    };
+    Ok(component_mate_from_input(
+        input,
+        body,
+        ElementId::new(&first.element_id),
+    ))
+}
+
+// One arg per spec §3.1 field the gesture carries — grouping them into an ad-hoc
+// struct would just rename the problem (same precedent as `regen/executor.rs`).
+#[allow(clippy::too_many_arguments)]
 async fn place_component_at(
     root: &Path,
     state: &State<'_, AppState>,
@@ -205,7 +319,14 @@ async fn place_component_at(
     translate: [f64; 3],
     rotate: Option<TransformRotation>,
     free_params: BTreeMap<String, ComponentParamValue>,
+    mate: Option<PlaceComponentMateInput>,
 ) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
+    // Promote FIRST (its own short lock): identity must exist before the record
+    // that names it is authored; `stage_blob_and_apply` re-locks below.
+    let mate = match &mate {
+        Some(input) => Some(resolve_mate_input(state, input).await?),
+        None => None,
+    };
     let library = open_at(root)?;
     let (_version, entry) = library
         .get(&component_id, Some(&component_version))
@@ -237,7 +358,7 @@ async fn place_component_at(
         component_revision: revision,
         params: free_params,
         source,
-        mate: None,
+        mate,
         placement: FrozenPlacement {
             translate: [
                 Scalar::new(translate[0]),
@@ -437,6 +558,7 @@ async fn stage_blob_and_apply(
 /// Absent ⇒ the generator's declared defaults, byte-identical to every prior
 /// caller.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn place_component(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -445,6 +567,7 @@ pub async fn place_component(
     translate: [f64; 3],
     rotate: Option<TransformRotation>,
     params: Option<BTreeMap<String, ComponentParamValue>>,
+    mate: Option<PlaceComponentMateInput>,
 ) -> Result<DocumentProjection, ApiError> {
     let root = library_root(&app)
         .ok_or_else(|| ApiError::Internal("placeComponent: no app data dir".into()))?;
@@ -456,6 +579,7 @@ pub async fn place_component(
         translate,
         rotate,
         params.unwrap_or_default(),
+        mate,
     )
     .await?;
     finish(&app, &state, &outcome, &projection);
@@ -1582,6 +1706,7 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             [1.0, 2.0, 3.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place_component_at");
@@ -1606,6 +1731,118 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
         let rt_guard = guard.runtime.lock().await;
         let rt = rt_guard.as_ref().unwrap();
         assert_eq!(rt.head_body_ids().len(), 0, "no regen ran, so no body yet");
+    }
+
+    /// WP-H2: a mate whose pick already carries a Rust-minted `ElementId`
+    /// needs no promotion — the record must land with the full `ComponentMate`
+    /// exactly as the gesture described it. (The promotion branch needs a real
+    /// worker and is exercised by `component_ops.rs`.)
+    #[tokio::test]
+    async fn place_with_an_element_id_mate_records_the_full_mate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let body_uuid = uuid::Uuid::from_u128(0xb0d1);
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            Some(PlaceComponentMateInput {
+                self_attachment: "shank_axis".to_string(),
+                target_body_id: format!("body_{body_uuid}"),
+                target_topo_key: "f:7".to_string(),
+                target_element_id: Some("el_0000000000000f7a".to_string()),
+                target_kind: "face".to_string(),
+                kind: onecad_core::document::record::MateKind::Concentric,
+                flipped: true,
+                anchor_world_point: [1.0, 2.0, 3.0],
+            }),
+        )
+        .await
+        .expect("place with mate");
+        let record_id = projection.features[0].id.clone();
+
+        let guard = app.state::<AppState>();
+        let rt_guard = guard.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        let params = rt
+            .operation_params(RecordId(uuid::Uuid::parse_str(&record_id).unwrap()))
+            .expect("record params");
+        let mate = &params["mate"];
+        assert_eq!(mate["selfAttachment"], "shank_axis");
+        assert_eq!(mate["kind"], "concentric");
+        assert_eq!(mate["flipped"], true);
+        assert_eq!(
+            mate["target"]["primary"]["elementId"],
+            "el_0000000000000f7a"
+        );
+        assert_eq!(
+            mate["target"]["anchor"]["worldPoint"],
+            serde_json::json!([1.0, 2.0, 3.0])
+        );
+    }
+
+    /// WP-H2 fail-closed: a mate that needs promotion (no `ElementId` on the
+    /// pick) before the first publish must refuse the WHOLE placement — never
+    /// author a silently-unmated record.
+    #[tokio::test]
+    async fn place_with_an_unpromotable_mate_refuses_the_placement() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let err = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            Some(PlaceComponentMateInput {
+                self_attachment: "shank_axis".to_string(),
+                target_body_id: format!("body_{}", uuid::Uuid::from_u128(0xb0d2)),
+                target_topo_key: "f:7".to_string(),
+                target_element_id: None,
+                target_kind: "face".to_string(),
+                kind: onecad_core::document::record::MateKind::Concentric,
+                flipped: false,
+                anchor_world_point: [0.0, 0.0, 0.0],
+            }),
+        )
+        .await
+        .expect_err("no head snapshot ⇒ the mate cannot promote ⇒ refuse");
+        assert!(
+            err.to_string().contains("re-pick"),
+            "actionable refusal, got: {err}"
+        );
+
+        let guard = app.state::<AppState>();
+        let rt_guard = guard.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        assert!(
+            rt.projection().features.is_empty(),
+            "fail closed: nothing was authored"
+        );
     }
 
     /// WP-A3: the placement gesture sends free params of its own (auto-size on
@@ -1641,9 +1878,9 @@ generator_version = 1
     }
 
     /// Places `component_id`, then hand-authors a mate onto the resulting
-    /// record — `place_component_at` never authors one (the interactive
-    /// gesture freezes its transform into `placement` instead), so a mate has
-    /// to be written directly to exercise the carry rules.
+    /// record. (`place_component_at` CAN author one since WP-H2, but its input
+    /// shape wants pick evidence; writing the `ComponentMate` directly keeps
+    /// these carry-rule tests independent of the promotion path.)
     async fn place_then_mate(
         root: &Path,
         state: &State<'_, AppState>,
@@ -1658,6 +1895,7 @@ generator_version = 1
             [0.0, 0.0, 0.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place");
@@ -1718,6 +1956,7 @@ generator_version = 1
             [1.0, 2.0, 3.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place");
@@ -1892,6 +2131,7 @@ generator_version = 1
             [0.0, 0.0, 0.0],
             None,
             free,
+            None,
         )
         .await
         .expect("place_component_at with a free param");
@@ -1944,6 +2184,7 @@ generator_version = 1
             [0.0, 0.0, 0.0],
             None,
             free,
+            None,
         )
         .await
         .expect_err("a table-role key is not settable at placement either");
@@ -1973,6 +2214,7 @@ generator_version = 1
             [0.0, 0.0, 0.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place_component_at");
@@ -2036,6 +2278,7 @@ generator_version = 1
             [0.0, 0.0, 0.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place_component_at");
@@ -2122,6 +2365,7 @@ geometry_format = 4
             [0.0, 0.0, 0.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place a document-source component");
@@ -2259,6 +2503,7 @@ geometry_format = 4
             [0.0, 0.0, 0.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect_err("a package with no bake cannot be placed");
@@ -2293,6 +2538,7 @@ geometry_format = 4
             [0.0, 0.0, 0.0],
             None,
             Default::default(),
+            None,
         )
         .await
         .expect("place");

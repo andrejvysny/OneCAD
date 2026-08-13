@@ -322,6 +322,36 @@ pub struct RecentProjectDto {
     pub thumbnail: Option<String>,
 }
 
+/// The placement gesture's recorded snap, as the frontend sends it with a
+/// `placeComponent` commit (spec §5.4 step 5, WP-H2; `types.ts`
+/// `PlaceComponentMate`). Raw pick EVIDENCE, not a finished `ComponentMate`:
+/// the backend promotes `target_topo_key` to a Rust-minted `ElementId` at the
+/// head snapshot when the pick carried none, then builds the full
+/// `ElementRef` — the frontend never fabricates identity (§0 invariant 8).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceComponentMateInput {
+    /// Key into the component's `[attachments]` table (the Tab-cycled match).
+    pub self_attachment: String,
+    pub target_body_id: String,
+    /// Snapshot-scoped pick evidence, promoted server-side when
+    /// `target_element_id` is absent.
+    pub target_topo_key: String,
+    /// Rust-minted id when the pick already carried one.
+    #[serde(default)]
+    pub target_element_id: Option<String>,
+    /// `"face"` | `"edge"` — the pick's element kind.
+    pub target_kind: String,
+    /// Snap classification (`concentric` | `coincident` |
+    /// `concentricAndCoincident`) — serde shape of `MateKind`.
+    pub kind: onecad_core::document::record::MateKind,
+    #[serde(default)]
+    pub flipped: bool,
+    /// Anchor evidence for the ladder: the pick's world position (a point ON
+    /// the target element).
+    pub anchor_world_point: [f64; 3],
+}
+
 /// One library component entry for the (future) library panel (Component
 /// Library WP-1.3; `types.ts` `LibraryComponent`) — the `onecad-library`
 /// crate's `IndexEntry` plus the identity fields the index keys on but

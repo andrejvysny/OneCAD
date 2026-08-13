@@ -14,6 +14,7 @@ import type {
   PreviewDraft,
   PreviewParams,
   PreviewResult,
+  PlaceComponentMate,
   PreviewSession,
   TransformRotationParams,
   Unsubscribe,
@@ -69,6 +70,7 @@ export interface CommandApiService {
     translate: [number, number, number],
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
+    mate?: PlaceComponentMate,
   ): Promise<void>;
   /** `CadClient.detachComponent` — spec §3.4 `DetachComponent`. */
   detachComponent(recordId: string): Promise<void>;

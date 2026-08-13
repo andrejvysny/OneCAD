@@ -16,6 +16,7 @@ import type {
   ComponentParamValue,
   ComponentUpgrade,
   NewComponentSpec,
+  PlaceComponentMate,
   ProjectTemplate,
   ReplaceComponentReport,
   DocumentChange,
@@ -452,6 +453,7 @@ export interface CadClient {
     translate: [number, number, number],
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
+    mate?: PlaceComponentMate,
   ): Promise<void>;
 
   /**

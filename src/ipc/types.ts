@@ -622,6 +622,28 @@ export interface ComponentParameterSpec {
  */
 export type ComponentParamValue = number | string | boolean;
 
+/**
+ * The placement gesture's recorded snap, sent with a `placeComponent` commit
+ * (spec §5.4 step 5; mirrors Rust `PlaceComponentMateInput`). Raw pick
+ * EVIDENCE: the backend promotes `targetTopoKey` to a Rust-minted `ElementId`
+ * at the head when `targetElementId` is absent — the frontend never
+ * fabricates identity. A mate that cannot be promoted refuses the whole
+ * placement (fail closed), never a silent free-space record.
+ */
+export interface PlaceComponentMate {
+  /** Key into the component's `[attachments]` table (the Tab-cycled match). */
+  selfAttachment: string;
+  targetBodyId: string;
+  targetTopoKey: string;
+  targetElementId?: string;
+  targetKind: "face" | "edge";
+  /** Snap classification — matches `placementSolver.ts` `MateSnapKind`. */
+  kind: "concentric" | "coincident" | "concentricAndCoincident";
+  flipped: boolean;
+  /** The pick's world position — anchor evidence for the resolution ladder. */
+  anchorWorldPoint: [number, number, number];
+}
+
 /** A `reindexLibrary()` outcome (mirrors Rust `ReindexReportDto`). */
 export interface ReindexReport {
   total: number;
