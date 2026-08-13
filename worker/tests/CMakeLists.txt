@@ -230,6 +230,14 @@ add_executable(test_component_mate_reseat test_component_mate_reseat.cpp)
 target_link_libraries(test_component_mate_reseat PRIVATE worker_core)
 add_test(NAME component_mate_reseat COMMAND test_component_mate_reseat)
 
+# --- COMPONENT-LIBRARY WP-3.2: the `embedded` / `document` blob source kinds and
+#     the `ExportGeometry` verb that bakes them — export a published body, place
+#     the bytes back, and pin every refusal (2 solids, wrong/absent format pin,
+#     unmaterialized blob, unknown codec/kind). In-process, real OCCT. ---
+add_executable(test_component_blob_source test_component_blob_source.cpp)
+target_link_libraries(test_component_blob_source PRIVATE worker_core)
+add_test(NAME component_blob_source COMMAND test_component_blob_source)
+
 # --- VF-M7: an ElementMap entry minted on body A must never bind a face of body B.
 #     Hole + Shell against two DIFFERENT bodies, asserted by exact analytic volume
 #     (silent wrong drill / wrong seat / wrong shell wall). In-process, real OCCT. ---

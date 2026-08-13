@@ -54,6 +54,7 @@ import type {
   DragSolveResult,
   ElementInfo,
   LibraryComponent,
+  PlaceComponentSource,
   MassProperties,
   ModuleState,
   EnterSketchTarget,
@@ -174,6 +175,7 @@ const CMD = {
   classifyElement: "classify_element",
   listLibraryComponents: "list_library_components",
   reindexLibrary: "reindex_library",
+  resolveComponentSource: "resolve_component_source",
   placeComponent: "place_component",
   setComponentParams: "set_component_params",
   detachComponent: "detach_component",
@@ -1581,6 +1583,16 @@ export function createTauriClient(): CadClient {
     return call<ReindexReport>(CMD.reindexLibrary, {});
   }
 
+  async function resolveComponentSource(
+    componentId: string,
+    componentVersion: string,
+  ): Promise<PlaceComponentSource> {
+    return call<PlaceComponentSource>(CMD.resolveComponentSource, {
+      componentId,
+      componentVersion,
+    });
+  }
+
   async function placeComponent(
     componentId: string,
     componentVersion: string,
@@ -1867,6 +1879,7 @@ export function createTauriClient(): CadClient {
     classifyElement,
     listLibraryComponents,
     reindexLibrary,
+    resolveComponentSource,
     placeComponent,
     setComponentParams,
     detachComponent,

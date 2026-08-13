@@ -513,6 +513,49 @@ impl WorkerManager {
         }
     }
 
+    /// `ExportGeometry` verb passthrough (SCHEMA §7.8) — bakes live bodies into a
+    /// §7.3 replay codec at `path`. `codec` is `"brep"` or `"xbf"`.
+    ///
+    /// Unlike the user-facing exports this one is an INTERNAL lane: its output is
+    /// read straight back as a content-addressed blob (a Component Library
+    /// `embedded` / `document` source, spec §2.1), never handed to the user as a
+    /// file.
+    ///
+    /// # Errors
+    /// [`EngineError`] on a disconnected worker or a worker-side failure (an
+    /// unknown codec, a missing body, a non-solid body).
+    pub async fn export_geometry(
+        &self,
+        path: &str,
+        bodies: &[BodyId],
+        codec: &str,
+    ) -> Result<crate::worker::BakedGeometry, EngineError> {
+        let client = self.client_or_err()?;
+        let args = wire::export_geometry_args(path, bodies, codec);
+        let resp = client
+            .request("ExportGeometry", args)
+            .await
+            .map_err(protocol_err)?;
+        let result = ok_result(resp)?;
+        Ok(crate::worker::BakedGeometry {
+            codec: result
+                .get("codec")
+                .and_then(Value::as_str)
+                .unwrap_or(codec)
+                .to_string(),
+            format: u32::try_from(result.get("format").and_then(Value::as_u64).unwrap_or(0))
+                .unwrap_or(0),
+            solid_count: usize::try_from(
+                result
+                    .get("solidCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0),
+            bytes_written: result.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+        })
+    }
+
     /// `ExportStep` verb passthrough (SCHEMA §7.8) — surfaced here so an app
     /// command can drive STEP export later. Returns bytes written.
     ///

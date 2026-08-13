@@ -549,3 +549,178 @@ async fn place_component_with_an_unresolvable_mate_still_publishes_at_its_frozen
 
     wm.shutdown().await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-3.2 — the blob-backed source kinds, end to end against the real worker
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bakes a live body into the §7.3 replay form (SCHEMA §7.8 `ExportGeometry`)
+/// and returns `(bytes, sha256, format)` — the shape a component package's
+/// geometry pointer records, and the shape `stage_component_blob` wants.
+async fn bake_body(wm: &WorkerManager, body: BodyId) -> (Vec<u8>, String, u32) {
+    let dir = std::env::temp_dir().join(format!("onecad-bake-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("bake dir");
+    let path = dir.join("component.brep");
+    let baked = onecad_lib::worker::manager::WorkerManager::export_geometry(
+        wm,
+        &path.to_string_lossy(),
+        &[body],
+        "brep",
+    )
+    .await
+    .expect("ExportGeometry");
+    assert_eq!(baked.codec, "brep");
+    assert_eq!(baked.solid_count, 1, "a component is exactly one solid");
+    let bytes = std::fs::read(&path).expect("read baked bytes");
+    assert_eq!(bytes.len() as u64, baked.bytes_written);
+    let sha = onecad_lib::imports::sha256_hex(&bytes);
+    let _ = std::fs::remove_dir_all(&dir);
+    (bytes, sha, baked.format)
+}
+
+fn document_component_record(
+    rec: u128,
+    document_sha256: String,
+    sha256: String,
+    brep_format: u32,
+) -> OperationRecord {
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.bracket".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: format!("sha256:{}", "0".repeat(64)),
+        params: std::collections::BTreeMap::new(),
+        source: ComponentSourceRef::Document {
+            document_sha256,
+            sha256,
+            codec: onecad_core::document::record::ImportSourceCodec::Brep,
+            brep_format: Some(brep_format),
+            params: std::collections::BTreeMap::new(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Place Component", op)
+}
+
+/// **The spec §12 claim, automated.** A user-authored (`document`-source)
+/// component places as its baked solid, and that solid survives save → reopen
+/// on a FRESH worker with NO library anywhere — because the bytes were copied
+/// into the document itself at place time, refcounted at save, materialized at
+/// open, and read back by the worker through the wire-injected path.
+///
+/// Every link in that chain is load-bearing and silent when broken: miss the
+/// save-time refcount and the blob is dropped; miss the open-time
+/// materialization and the wire lowers an empty path. Both fail HERE, and
+/// nowhere else in the suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_baked_component_survives_save_and_reopen_with_no_library() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+
+    // 1. Model something real, and bake it — the same lane "Save as Component"
+    //    will use. The generator screw is the convenient source solid: its
+    //    volume is an exact analytic oracle both tracks already pin.
+    let wm1 = spawn_worker(bin.clone()).await;
+    let mut authoring = runtime_over(&wm1);
+    add_op(&mut authoring, place_component_record(0xd1));
+    let report = regen_all(&mut authoring).await;
+    let source_body = published(&report, "authoring").bodies[0].body;
+    let baked_volume = exact_volume(&wm1, source_body).await;
+    let (bytes, sha, format) = bake_body(&wm1, source_body).await;
+
+    // 2. Place it into a DIFFERENT document as a `document`-source component,
+    //    staging the bytes exactly as `library.rs::place_component_at` does.
+    let mut rt = runtime_over(&wm1);
+    rt.stage_component_blob(
+        &sha,
+        onecad_core::document::record::ImportSourceCodec::Brep,
+        &bytes,
+    )
+    .expect("stage the baked solid");
+    add_op(
+        &mut rt,
+        document_component_record(0xd2, "a".repeat(64), sha.clone(), format),
+    );
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "place baked component");
+    assert_eq!(snap.bodies.len(), 1, "a baked component mints one body");
+    let vol = exact_volume(&wm1, snap.bodies[0].body).await;
+    assert!(
+        (vol - baked_volume).abs() < 1e-6,
+        "the placed solid IS the baked solid: got {vol}, want {baked_volume}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("baked.onecad");
+    rt.save(&path, save_meta()).expect("save");
+    wm1.shutdown().await;
+
+    // 3. Reopen on a fresh worker. There is no library root in this test at
+    //    all, and the authoring runtime is gone — the ONLY thing carrying the
+    //    geometry is the saved container.
+    let wm2 = spawn_worker(bin).await;
+    let mut rt2 = open_over(&wm2, &path);
+    assert!(
+        rt2.import_blob_shas().contains(&sha),
+        "the baked solid came back out of the container (the save-time refcount kept it)"
+    );
+    let report2 = regen_all(&mut rt2).await;
+    let snap2 = published(&report2, "reopen baked component");
+    assert_eq!(
+        snap2.bodies.len(),
+        1,
+        "reopen still publishes the component"
+    );
+    let vol2 = exact_volume(&wm2, snap2.bodies[0].body).await;
+    assert!(
+        (vol2 - baked_volume).abs() < 1e-6,
+        "reopened volume {vol2} != baked {baked_volume}"
+    );
+
+    wm2.shutdown().await;
+}
+
+/// A component whose blob is NOT in the document fails that ONE step, loudly,
+/// and leaves the rest of the document alone — the `io::imports` blast-radius
+/// rule. The dangerous alternative is publishing something else instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_component_with_no_cached_geometry_fails_only_its_own_step() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // A healthy generator component FIRST, so there is something to lose.
+    add_op(&mut rt, place_component_record(0xd3));
+    add_op(
+        &mut rt,
+        document_component_record(0xd4, "a".repeat(64), "b".repeat(64), 4),
+    );
+    let report = regen_all(&mut rt).await;
+
+    // The plan early-stops AT the broken step and publishes everything before
+    // it (`StoppedReason` on the snapshot), so the healthy component is still
+    // there and the failure is recorded rather than swallowed.
+    let snap = published(&report, "blob-less component");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the healthy component still published; only the blob-less one failed"
+    );
+    assert_ne!(
+        snap.stopped_reason,
+        onecad_core::regen::StoppedReason::Completed,
+        "the missing-geometry step must be reported, not silently skipped"
+    );
+
+    wm.shutdown().await;
+}

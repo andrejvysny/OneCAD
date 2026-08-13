@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use onecad_core::ids::BodyId;
 use onecad_core::regen::EngineError;
 
-use crate::worker::{PendingBackend, WorkerManager};
+use crate::worker::{BakedGeometry, PendingBackend, WorkerManager};
 
 /// Exports bodies to a mesh/BREP file on disk. `path` is the target file, `bodies`
 /// the body ids to write. Object-safe so the app can store it as a trait object.
@@ -53,6 +53,23 @@ pub trait GeometryExporter: Send + Sync {
     /// [`EngineError`] on a disconnected worker or a worker-side export failure.
     async fn export_obj(&self, path: &str, bodies: &[BodyId], lod: &str)
         -> Result<(), EngineError>;
+
+    /// Bakes `bodies` into a §7.3 REPLAY codec (`"brep"` / `"xbf"`) at `path`
+    /// (SCHEMA §7.8 `ExportGeometry`), reporting the codec + format version the
+    /// worker actually wrote.
+    ///
+    /// Not a user-facing export: this is the lane a Component Library `embedded` /
+    /// `document` source is baked through (spec §2.1), whose output is read back
+    /// as a content-addressed blob rather than handed to the user.
+    ///
+    /// # Errors
+    /// [`EngineError`] on a disconnected worker or a worker-side failure.
+    async fn export_geometry(
+        &self,
+        path: &str,
+        bodies: &[BodyId],
+        codec: &str,
+    ) -> Result<BakedGeometry, EngineError>;
 }
 
 #[async_trait]
@@ -93,6 +110,15 @@ impl GeometryExporter for WorkerManager {
             .await
             .map(|_bytes_written| ())
     }
+
+    async fn export_geometry(
+        &self,
+        path: &str,
+        bodies: &[BodyId],
+        codec: &str,
+    ) -> Result<BakedGeometry, EngineError> {
+        WorkerManager::export_geometry(self, path, bodies, codec).await
+    }
 }
 
 #[async_trait]
@@ -123,6 +149,15 @@ impl GeometryExporter for PendingBackend {
         _lod: &str,
     ) -> Result<(), EngineError> {
         Err(not_ready("OBJ"))
+    }
+
+    async fn export_geometry(
+        &self,
+        _path: &str,
+        _bodies: &[BodyId],
+        _codec: &str,
+    ) -> Result<BakedGeometry, EngineError> {
+        Err(not_ready("component geometry"))
     }
 }
 

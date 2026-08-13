@@ -148,6 +148,10 @@ add_library(worker_core STATIC
     # --- COMPONENT-LIBRARY P3 WP-3.1: mate re-seat candidate-transform math ---
     src/ops/ComponentMateSolver.cpp
     src/io/ExportStep.cpp
+    # --- COMPONENT-LIBRARY WP-3.2: body → §7.3 replay-codec bytes (`ExportGeometry`,
+    #     SCHEMA §7.8) — what an `embedded` / `document` component source is baked
+    #     from. ---
+    src/io/ExportGeometry.cpp
     src/io/MeshExport.cpp
     src/io/Checkpoint.cpp
     # --- STEP-IMPORT WP-A W0: pure STEP read core + OCCT global-state guards. ---

@@ -170,8 +170,9 @@ pub fn parse_import_blob_path(path: &str) -> Option<(String, ImportSourceCodec)>
 /// Every import-blob digest **pinned by a live timeline record**.
 ///
 /// Refcounting is keyed to the record list, not to the carrier: a blob is written
-/// iff some record in `document.timeline.records()` is an `ImportStep` naming it.
-/// Three consequences, all intentional:
+/// iff some record in `document.timeline.records()` names it — an `ImportStep`
+/// source, or (WP-3.2) a `PlaceComponent`/`DetachComponent` whose component source
+/// is one of the blob-backed kinds. Three consequences, all intentional:
 ///
 /// * **Orphans are dropped at save.** Re-importing over an existing feature (or
 ///   undoing an import and saving) leaves a blob nothing references; carrying it
@@ -196,6 +197,24 @@ pub fn referenced_import_shas(document: &Document) -> BTreeSet<String> {
                 shas.extend(p.provenance_sha256.clone());
                 shas
             }
+            // A placed `embedded`/`document` component's baked solid lives in the
+            // SAME section and must be pinned by the SAME rule — miss this and the
+            // blob is dropped at the first save, so the document reopens with a
+            // component whose geometry no longer exists. That is precisely the
+            // failure spec §4's "geometry is always cached locally" forbids.
+            Operation::Known(KnownOperation::PlaceComponent(p)) => p
+                .source
+                .blob_ref()
+                .map(|b| vec![b.sha256.to_string()])
+                .unwrap_or_default(),
+            // Detach keeps the geometry and drops only the library identity
+            // (spec §3.4) — the blob it replays from is unchanged, so the pin is
+            // too.
+            Operation::Known(KnownOperation::DetachComponent(p)) => p
+                .source
+                .blob_ref()
+                .map(|b| vec![b.sha256.to_string()])
+                .unwrap_or_default(),
             _ => Vec::new(),
         })
         .collect()
@@ -347,6 +366,86 @@ mod tests {
         let refs = referenced_import_shas(&d);
         assert!(refs.contains(&a));
         assert!(refs.contains(&b), "a suppressed record still pins its blob");
+    }
+
+    /// WP-3.2's load-bearing pin: a placed `embedded`/`document` component's
+    /// baked solid lives in this same section, and if the refcount does not see
+    /// it the blob is dropped at the FIRST save — so the document reopens with a
+    /// component whose geometry no longer exists anywhere. That is the exact
+    /// failure spec §4's "geometry is always cached locally" forbids, and it
+    /// would surface as data loss a week later, not as a test failure.
+    #[test]
+    fn referenced_shas_include_placed_and_detached_component_blobs() {
+        use crate::document::record::{
+            ComponentSourceRef, DetachComponentParams, FrozenPlacement, PlaceComponentParams,
+        };
+
+        let placed = sha_of(b"baked bracket");
+        let detached = sha_of(b"baked bearing");
+        let generator = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+            component_id: "acme.screw".into(),
+            component_version: "1.0.0".into(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: Default::default(),
+            source: ComponentSourceRef::Generator {
+                generator_id: "iso4762".into(),
+                generator_version: 1,
+                params: Default::default(),
+                extra: Default::default(),
+            },
+            mate: None,
+            placement: FrozenPlacement {
+                translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        }));
+        let place = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: Default::default(),
+            source: ComponentSourceRef::Document {
+                document_sha256: sha_of(b"authoring document"),
+                sha256: placed.clone(),
+                codec: ImportSourceCodec::Xbf,
+                brep_format: Some(12),
+                params: Default::default(),
+                extra: Default::default(),
+            },
+            mate: None,
+            placement: FrozenPlacement {
+                translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        }));
+        let detach = Operation::Known(KnownOperation::DetachComponent(DetachComponentParams {
+            source: ComponentSourceRef::Embedded {
+                sha256: detached.clone(),
+                codec: ImportSourceCodec::Brep,
+                brep_format: Some(4),
+                extra: Default::default(),
+            },
+            placement: FrozenPlacement {
+                translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        }));
+
+        let d = doc_with_imports(&[
+            (0x1, generator, false),
+            (0x2, place, false),
+            (0x3, detach, false),
+        ]);
+        let refs = referenced_import_shas(&d);
+        assert!(refs.contains(&placed), "a placed component pins its blob");
+        assert!(
+            refs.contains(&detached),
+            "detaching keeps the geometry, so it keeps the pin"
+        );
+        assert_eq!(refs.len(), 2, "a generator component pins nothing");
     }
 
     #[test]

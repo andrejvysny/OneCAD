@@ -39,7 +39,13 @@ import type { PickHit } from "@/viewport/engine/Picker";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { viewportStore } from "@/stores/viewportStore";
-import type { LibraryComponent, PreviewResult, PreviewSession } from "@/ipc/types";
+import { createClient } from "@/ipc/client";
+import type {
+  LibraryComponent,
+  PlaceComponentSource,
+  PreviewResult,
+  PreviewSession,
+} from "@/ipc/types";
 import type { CommandApiService, GeometryQueryService } from "@/modules/modeling/manifest";
 import {
   attachmentAccepts,
@@ -76,6 +82,8 @@ interface LastMatch {
 }
 
 let armedComponent: LibraryComponent | null = null;
+/** The armed component's resolved geometry source (WP-3.2) — see `armPlacement`. */
+let armedSource: PlaceComponentSource | null = null;
 let flipped = false;
 let previewSession: PreviewSession | null = null;
 let previewBodyIds: string[] = [];
@@ -131,18 +139,43 @@ export function armPlacement(component: LibraryComponent): void {
   window.addEventListener("keydown", onKeyDown, true);
   unsubscribePreviewResult = services.commandApi.onPreviewResult(onPreviewResult);
 
-  void services.commandApi
-    .beginPreview({
-      opType: "PlaceComponent",
-      params: placementDraftParams(component, [0, 0, 0], identityRotate()),
+  // Resolve the component's geometry source BEFORE the first preview (WP-3.2).
+  // For a blob-backed component this is also what materializes its baked bytes
+  // for the worker, so the ghost cannot lower an empty path; for a generator it
+  // is a cheap lookup. Called on `createClient()` rather than through
+  // `services` on purpose: resolving a LIBRARY identity is the library's own
+  // surface (the same call shape `LibraryPanel` uses for list/reindex), while
+  // everything that touches the kernel below still routes through modeling's
+  // published services per ADR-0002.
+  void createClient()
+    .resolveComponentSource(component.id, component.version)
+    .then((source) => {
+      if (armedComponent !== component) return; // cancelled mid-flight
+      armedSource = source;
+      return services?.commandApi
+        .beginPreview({
+          opType: "PlaceComponent",
+          params: placementDraftParams(component, source, [0, 0, 0], identityRotate()),
+        })
+        .then((session) => {
+          // Armed state may have been cancelled while the round trip was in flight.
+          if (armedComponent !== component) {
+            void services?.commandApi.endPreview(session.sessionId, false);
+            return;
+          }
+          previewSession = session;
+        });
     })
-    .then((session) => {
-      // Armed state may have been cancelled while the round trip was in flight.
-      if (armedComponent !== component) {
-        void services?.commandApi.endPreview(session.sessionId, false);
-        return;
-      }
-      previewSession = session;
+    .catch((e: unknown) => {
+      if (armedComponent !== component) return;
+      // No usable geometry ⇒ no ghost, and no silent half-armed state that
+      // would commit a placement the preview never showed.
+      cancelPlacement();
+      viewportStore
+        .getState()
+        .setStatusHint(
+          `Cannot place ${component.name}: ${e instanceof Error ? e.message : String(e)}`,
+        );
     });
 
   viewportStore
@@ -174,6 +207,7 @@ export function cancelPlacement(): void {
   if (armedComponent) viewportStore.getState().setStatusHint(null);
 
   armedComponent = null;
+  armedSource = null;
   lastMatch = null;
   lastCandidate = null;
   publishArmed();
@@ -185,6 +219,7 @@ function identityRotate(): { center: [number, number, number]; axis: [number, nu
 
 function placementDraftParams(
   component: LibraryComponent,
+  source: PlaceComponentSource,
   translate: [number, number, number],
   rotate: { center: [number, number, number]; axis: [number, number, number]; angleDeg: number },
 ): Record<string, unknown> {
@@ -192,8 +227,10 @@ function placementDraftParams(
     componentId: component.id,
     componentVersion: component.version,
     componentRevision: component.revision,
-    generatorId: component.generatorId ?? component.id,
-    generatorVersion: component.generatorVersion ?? 1,
+    // The backend's own resolution, verbatim — see `armPlacement`. This used to
+    // be a locally-assembled generator source, which previewed the generator
+    // stub's screw for ANY component whose real source was a blob.
+    source,
     translate,
     rotate,
   };
@@ -207,11 +244,11 @@ function matchingAttachments(component: LibraryComponent, snapKind: MateSnapKind
 }
 
 function pushCandidate(translate: [number, number, number], rotate: CandidatePlacement["rotate"]): void {
-  if (!armedComponent || !previewSession || !services) return;
+  if (!armedComponent || !previewSession || !services || !armedSource) return;
   epoch += 1;
   services.commandApi.updatePreview(
     previewSession.sessionId,
-    placementDraftParams(armedComponent, translate, rotate),
+    placementDraftParams(armedComponent, armedSource, translate, rotate),
     epoch,
   );
 }

@@ -2014,10 +2014,14 @@ pub enum ComponentParamValue {
 
 /// Where a placed component's geometry comes from (spec §3.1 `source`).
 ///
-/// WP-1.2: **`Generator` and `Embedded`**. `Document` (a frozen `.onecad`
-/// replay) lands in P3. Reduced scope, not a different shape — the wire tag
-/// matches the spec's `[source] kind` field exactly, so widening this enum
-/// later is additive.
+/// All three spec §2.1 kinds, as of WP-3.2. `Embedded` and `Document` both
+/// resolve to **the same thing at regen time** — a baked solid, content
+/// addressed, cached in this document's own
+/// [`imports`](crate::io::imports) section — and differ only in what the
+/// record remembers about where that solid came from. That is deliberate: a
+/// document must render with the library folder deleted (spec §4/§12), so
+/// nothing on the regen path may depend on re-deriving geometry from a
+/// package.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ComponentSourceRef {
@@ -2046,9 +2050,106 @@ pub enum ComponentSourceRef {
     Embedded {
         sha256: String,
         codec: ImportSourceCodec,
+        /// The binary format version `sha256`'s bytes were written in, for the
+        /// CONVERTED codecs (`brep` / `xbf`) — the same pin
+        /// [`ImportStepParams::brep_format`] carries, validated by the worker
+        /// against the version it writes today. `None` for `step`, which is a
+        /// text format with no such pin.
+        ///
+        /// `#[serde(default)]`: records authored before WP-3.2 carry no
+        /// `embedded` source at all (the kind never reached the worker), so this
+        /// is additive with nothing to migrate.
+        #[serde(
+            rename = "brepFormat",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        brep_format: Option<u32>,
         #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
         extra: Extra,
     },
+    /// A user-authored component: a frozen `.onecad` document in the package
+    /// (spec §2.1 `[source] kind = "document"`), placed as the **baked solid**
+    /// that document produces.
+    ///
+    /// `document_sha256` is identity/provenance — the frozen document the
+    /// package carried at place time. It is deliberately NOT what regen reads:
+    /// replaying a nested document would need a second worker session (the
+    /// worker is one-session-per-process) and the library folder to still
+    /// exist, and both of those are exactly what spec §4's "geometry is always
+    /// cached locally" rules out. Regen reads `sha256` — the baked blob in this
+    /// document's own `imports/` section — and nothing else.
+    ///
+    /// It is recorded because it is the key a future re-bake needs: re-resolving
+    /// free-parameter overrides against the authoring document (spec §3.1's
+    /// "replays the document with overrides") requires knowing WHICH document
+    /// the baked bytes came from. Until that lands, `params` on a `Document`
+    /// source is refused at the authoring entry point rather than silently
+    /// ignored.
+    Document {
+        /// sha256 of the package's frozen `source.onecad` at place time.
+        #[serde(rename = "documentSha256")]
+        document_sha256: String,
+        /// The baked geometry blob, in this document's `imports/` section.
+        sha256: String,
+        codec: ImportSourceCodec,
+        /// Format pin for `sha256`'s bytes — see [`Self::Embedded::brep_format`].
+        #[serde(
+            rename = "brepFormat",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        brep_format: Option<u32>,
+        /// Free-parameter overrides recorded for this instance. Empty in this
+        /// build (a re-bake lane is required to honor them, see above).
+        #[serde(default)]
+        params: BTreeMap<String, ComponentParamValue>,
+        #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+        extra: Extra,
+    },
+}
+
+/// The baked-blob pointer an `embedded` / `document` component source carries:
+/// everything the regen path needs, with the provenance differences stripped.
+///
+/// Exists so the two blob-backed kinds are handled ONCE — wire lowering and the
+/// save-time blob refcount both walk this, not a per-variant match, which is what
+/// keeps a future fourth kind from silently missing one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComponentBlobRef<'a> {
+    /// The blob's content address, keying this document's `imports/` section.
+    pub sha256: &'a str,
+    /// The byte form those bytes are in.
+    pub codec: ImportSourceCodec,
+    /// Binary format pin for the converted codecs.
+    pub brep_format: Option<u32>,
+}
+
+impl ComponentSourceRef {
+    /// The baked blob this source resolves through, or `None` for a `generator`
+    /// source (which re-runs from params and depends on no bytes at all).
+    #[must_use]
+    pub fn blob_ref(&self) -> Option<ComponentBlobRef<'_>> {
+        match self {
+            ComponentSourceRef::Generator { .. } => None,
+            ComponentSourceRef::Embedded {
+                sha256,
+                codec,
+                brep_format,
+                ..
+            }
+            | ComponentSourceRef::Document {
+                sha256,
+                codec,
+                brep_format,
+                ..
+            } => Some(ComponentBlobRef {
+                sha256,
+                codec: *codec,
+                brep_format: *brep_format,
+            }),
+        }
+    }
 }
 
 /// The snap classification a placement mate resolved to (spec §5.3).
@@ -2206,15 +2307,47 @@ impl PlaceComponentParams {
 /// [`DetachComponentParams`] — both carry the same [`ComponentSourceRef`]
 /// shape. `op_name` names the caller in the error message.
 fn validate_component_source(source: &ComponentSourceRef, op_name: &str) -> Result<(), String> {
-    match source {
-        ComponentSourceRef::Generator { generator_id, .. } if generator_id.trim().is_empty() => {
+    if let ComponentSourceRef::Generator { generator_id, .. } = source {
+        return if generator_id.trim().is_empty() {
             Err(format!("{op_name} source.generatorId must not be empty"))
+        } else {
+            Ok(())
+        };
+    }
+    if let ComponentSourceRef::Document {
+        document_sha256, ..
+    } = source
+    {
+        if !is_sha256_hex(document_sha256) {
+            return Err(format!(
+                "{op_name} source.documentSha256 `{document_sha256}` is not a 64-character \
+                 lowercase-hex sha256"
+            ));
         }
-        ComponentSourceRef::Generator { .. } => Ok(()),
-        ComponentSourceRef::Embedded { sha256, .. } if !is_sha256_hex(sha256) => Err(format!(
-            "{op_name} source.sha256 `{sha256}` is not a 64-character lowercase-hex sha256"
-        )),
-        ComponentSourceRef::Embedded { .. } => Ok(()),
+    }
+    // Both blob-backed kinds share the pointer rules: the blob names a document
+    // `imports/` entry, and a CONVERTED codec must pin the binary format version
+    // its bytes were written in (the worker refuses a record pinned to a version
+    // it does not write — see SCHEMA §7.3 `ImportStep.brepFormat`). A `step`
+    // source is text and carries no such pin.
+    let Some(blob) = source.blob_ref() else {
+        return Ok(());
+    };
+    if !is_sha256_hex(blob.sha256) {
+        return Err(format!(
+            "{op_name} source.sha256 `{}` is not a 64-character lowercase-hex sha256",
+            blob.sha256
+        ));
+    }
+    match blob.codec {
+        ImportSourceCodec::Step => Ok(()),
+        ImportSourceCodec::Brep | ImportSourceCodec::Xbf if blob.brep_format.is_none() => {
+            Err(format!(
+                "{op_name} source.brepFormat is required for sourceCodec `{}`",
+                blob.codec.extension()
+            ))
+        }
+        ImportSourceCodec::Brep | ImportSourceCodec::Xbf => Ok(()),
     }
 }
 
@@ -3462,6 +3595,122 @@ mod tests {
         assert_eq!(source["generatorVersion"], serde_json::json!(1));
         assert!(source.get("generator_id").is_none());
         assert!(source.get("generator_version").is_none());
+    }
+
+    /// Same camelCase trap as the generator arm above, for the WP-3.2 kinds —
+    /// and the `document` variant has TWO digests, so a rename slip there would
+    /// silently swap provenance for geometry.
+    #[test]
+    fn document_component_source_fields_are_camel_case() {
+        let mut params = place_component_params();
+        params.source = ComponentSourceRef::Document {
+            document_sha256: "a".repeat(64),
+            sha256: "b".repeat(64),
+            codec: ImportSourceCodec::Xbf,
+            brep_format: Some(12),
+            params: BTreeMap::new(),
+            extra: Extra::new(),
+        };
+        let json = serde_json::to_value(KnownOperation::PlaceComponent(params)).unwrap();
+        let source = &json["params"]["source"];
+        assert_eq!(source["kind"], serde_json::json!("document"));
+        assert_eq!(source["documentSha256"], serde_json::json!("a".repeat(64)));
+        assert_eq!(source["sha256"], serde_json::json!("b".repeat(64)));
+        assert_eq!(source["codec"], serde_json::json!("xbf"));
+        assert_eq!(source["brepFormat"], serde_json::json!(12));
+        assert!(source.get("document_sha256").is_none());
+        assert!(source.get("brep_format").is_none());
+    }
+
+    /// A CONVERTED codec (`brep`/`xbf`) must pin the binary format version its
+    /// bytes were written in, exactly as `ImportStep` does — without it the
+    /// worker cannot tell "written by this build" from "written by a build whose
+    /// format it cannot read", and a misparse would be silent.
+    #[test]
+    fn a_blob_component_source_requires_a_format_pin_for_converted_codecs() {
+        let mut params = place_component_params();
+        params.source = ComponentSourceRef::Embedded {
+            sha256: "b".repeat(64),
+            codec: ImportSourceCodec::Brep,
+            brep_format: None,
+            extra: Extra::new(),
+        };
+        let err = params.validate().unwrap_err();
+        assert!(err.contains("brepFormat"), "{err}");
+
+        // …and a `step` payload (spec §2.1 allows a plain STEP in an `embedded`
+        // package) has no such pin to require.
+        let mut step = place_component_params();
+        step.source = ComponentSourceRef::Embedded {
+            sha256: "b".repeat(64),
+            codec: ImportSourceCodec::Step,
+            brep_format: None,
+            extra: Extra::new(),
+        };
+        assert!(step.validate().is_ok());
+    }
+
+    #[test]
+    fn a_blob_component_source_rejects_a_malformed_digest() {
+        let mut geometry = place_component_params();
+        geometry.source = ComponentSourceRef::Embedded {
+            sha256: "not-a-digest".to_string(),
+            codec: ImportSourceCodec::Step,
+            brep_format: None,
+            extra: Extra::new(),
+        };
+        assert!(geometry.validate().unwrap_err().contains("sha256"));
+
+        let mut provenance = place_component_params();
+        provenance.source = ComponentSourceRef::Document {
+            document_sha256: "nope".to_string(),
+            sha256: "b".repeat(64),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            params: BTreeMap::new(),
+            extra: Extra::new(),
+        };
+        assert!(provenance
+            .validate()
+            .unwrap_err()
+            .contains("documentSha256"));
+    }
+
+    /// The one accessor wire lowering and the save-time blob refcount both walk —
+    /// a fourth source kind that forgets it would silently lose its blob.
+    #[test]
+    fn blob_ref_covers_exactly_the_blob_backed_kinds() {
+        assert!(ComponentSourceRef::Generator {
+            generator_id: "iso4762".to_string(),
+            generator_version: 1,
+            params: BTreeMap::new(),
+            extra: Extra::new(),
+        }
+        .blob_ref()
+        .is_none());
+
+        let embedded = ComponentSourceRef::Embedded {
+            sha256: "b".repeat(64),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            extra: Extra::new(),
+        };
+        let blob = embedded.blob_ref().expect("embedded carries a blob");
+        assert_eq!(blob.sha256, "b".repeat(64));
+        assert_eq!(blob.codec, ImportSourceCodec::Brep);
+        assert_eq!(blob.brep_format, Some(4));
+
+        let document = ComponentSourceRef::Document {
+            document_sha256: "a".repeat(64),
+            sha256: "c".repeat(64),
+            codec: ImportSourceCodec::Xbf,
+            brep_format: Some(12),
+            params: BTreeMap::new(),
+            extra: Extra::new(),
+        };
+        // The GEOMETRY digest, never the provenance one — swapping them would
+        // pin the wrong blob at save and materialize the wrong path at regen.
+        assert_eq!(document.blob_ref().unwrap().sha256, "c".repeat(64));
     }
 
     /// `inputs[]` = the mate target ONLY when a mate is present (spec §3.1); a

@@ -22,6 +22,7 @@
 #include <Standard_Version.hxx>
 
 #include "io/Checkpoint.h"
+#include "io/ExportGeometry.h"
 #include "io/ExportStep.h"
 #include "io/InspectStep.h"
 #include "io/MeshExport.h"
@@ -333,6 +334,15 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "ExportStep",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::io::handle_export_step(session, r);
+        });
+    // --- Component Library WP-3.2: geometry export in the §7.3 REPLAY codecs
+    //     (SCHEMA §7.8). The inverse of InspectStep's conversion lane — this one
+    //     bakes a body already in the session, which is what an `embedded` /
+    //     `document` component source is made of. ---
+    dispatcher.register_verb(
+        "ExportGeometry",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::io::handle_export_geometry(session, r);
         });
     // --- STEP-IMPORT WP-A W1: read-only STEP probe + brep conversion lane
     //     (SCHEMA §7.8). No session argument by design: no head, no scratch, no

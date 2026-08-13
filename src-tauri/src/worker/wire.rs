@@ -384,23 +384,66 @@ fn lift_profile_to_params(params: &mut Value) {
 /// named, per-record failure — exactly the blast radius `io::imports` designs for.
 /// Refusing to lower (or panicking) would take down the whole plan, i.e. every
 /// unrelated feature in the document, over one un-materialized blob.
+/// (WP-3.2) The same treatment reaches a placed component whose source is one of
+/// the blob-backed kinds (`embedded` / `document`): the record carries the content
+/// address, the worker needs the bytes, and the path is injected at
+/// `params.source.path` — nested, because that is where the rest of the source
+/// pointer already lives. `generator` sources are untouched: they carry no blob.
 fn inject_import_path(operation: &Operation, params: &mut Value) {
-    let Operation::Known(KnownOperation::ImportStep(p)) = operation else {
+    match operation {
+        Operation::Known(KnownOperation::ImportStep(p)) => {
+            let Some(map) = params.as_object_mut() else {
+                return;
+            };
+            let path = crate::imports::resolve_blob_path(&p.source_sha256);
+            if path.is_empty() {
+                tracing::warn!(
+                    sha = %p.source_sha256,
+                    source = %p.source_name,
+                    "importStep: no materialized blob for this source — lowering an empty path \
+                     (the worker will fail THIS step with OP_FAILED, not the plan)"
+                );
+            }
+            map.insert("path".into(), Value::String(path));
+        }
+        Operation::Known(KnownOperation::PlaceComponent(p)) => {
+            inject_component_source_path(&p.source, params, "placeComponent");
+        }
+        Operation::Known(KnownOperation::DetachComponent(p)) => {
+            inject_component_source_path(&p.source, params, "detachComponent");
+        }
+        _ => {}
+    }
+}
+
+/// Injects `params.source.path` for a blob-backed component source. Same three
+/// rules as the `ImportStep` lane: wire-only, never hashed, and an unmaterialized
+/// blob lowers an EMPTY path so exactly that one step fails.
+fn inject_component_source_path(
+    source: &onecad_core::document::record::ComponentSourceRef,
+    params: &mut Value,
+    op_label: &str,
+) {
+    let Some(blob) = source.blob_ref() else {
+        return; // generator source — no bytes to point at
+    };
+    let Some(source_map) = params
+        .as_object_mut()
+        .and_then(|m| m.get_mut("source"))
+        .and_then(Value::as_object_mut)
+    else {
         return;
     };
-    let Some(map) = params.as_object_mut() else {
-        return;
-    };
-    let path = crate::imports::resolve_blob_path(&p.source_sha256);
+    let path = crate::imports::resolve_blob_path(blob.sha256);
     if path.is_empty() {
         tracing::warn!(
-            sha = %p.source_sha256,
-            source = %p.source_name,
-            "importStep: no materialized blob for this source — lowering an empty path \
-             (the worker will fail THIS step with OP_FAILED, not the plan)"
+            sha = %blob.sha256,
+            op = op_label,
+            "component source: no materialized blob — lowering an empty path (the worker will \
+             fail THIS step with OP_FAILED, not the plan)"
         );
     }
-    map.insert("path".into(), Value::String(path));
+    source_map.insert("path".into(), Value::String(path));
 }
 
 /// Rewrites every body-bearing field of `value` — a key exactly `"bodyId"` or ending
@@ -1361,6 +1404,20 @@ pub fn export_obj_args(path: &str, bodies: &[BodyId], lod: &str) -> Value {
         "path": path,
         "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
         "lod": lod,
+    })
+}
+
+/// `ExportGeometry.args` (SCHEMA §7.8): `{path, bodyIds, codec}`.
+///
+/// `codec` is one of the §7.3 REPLAY codecs (`"brep"` / `"xbf"`) — this verb bakes
+/// a live body into the same byte form `ImportStep` reads back, which is what a
+/// Component Library `embedded` / `document` source is made of (spec §2.1).
+#[must_use]
+pub fn export_geometry_args(path: &str, bodies: &[BodyId], codec: &str) -> Value {
+    json!({
+        "path": path,
+        "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
+        "codec": codec,
     })
 }
 
@@ -6574,5 +6631,108 @@ mod prepare_offset_face_tests {
         let dto = parse_prepare_offset_face(&r).expect("accepted");
         assert_eq!(dto.current_dims.radius, None);
         assert_eq!(dto.current_dims.thickness, None);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Component-source blob path injection (Component Library WP-3.2)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod component_blob_path_tests {
+    use super::*;
+    use onecad_core::document::record::{
+        ComponentSourceRef, DetachComponentParams, FrozenPlacement, ImportSourceCodec,
+        PlaceComponentParams,
+    };
+    use onecad_core::document::variables::Scalar;
+    use onecad_core::ids::DocumentId;
+
+    fn placement() -> FrozenPlacement {
+        FrozenPlacement {
+            translate: [Scalar::new(1.0), Scalar::new(2.0), Scalar::new(3.0)],
+            rotate: Default::default(),
+        }
+    }
+
+    fn embedded(sha: &str) -> ComponentSourceRef {
+        ComponentSourceRef::Embedded {
+            sha256: sha.to_string(),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            extra: Default::default(),
+        }
+    }
+
+    fn place(source: ComponentSourceRef) -> Operation {
+        Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+            component_id: "acme.bracket".into(),
+            component_version: "1.0.0".into(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: Default::default(),
+            source,
+            mate: None,
+            placement: placement(),
+            extra: Default::default(),
+        }))
+    }
+
+    /// The bytes reach the worker as a FILE, exactly like `ImportStep`'s: the
+    /// record carries only the content address, and Rust injects the path it
+    /// materialized the blob to.
+    #[test]
+    fn a_materialized_component_blob_lowers_its_path_under_source() {
+        let bytes = b"pretend brep bytes";
+        let sha = crate::imports::sha256_hex(bytes);
+        let mut ws = crate::imports::ImportWorkspace::new(DocumentId(Uuid::from_u128(0xB10B)));
+        let written = ws
+            .materialize(&sha, ImportSourceCodec::Brep, bytes)
+            .expect("materialize");
+
+        let op = place(embedded(&sha));
+        let wire = preview_wire_op(&op, "op_1");
+        assert_eq!(
+            wire["params"]["source"]["path"],
+            json!(written.to_string_lossy())
+        );
+        // …and the record's own fields are untouched: the path is wire-only, so
+        // it must never displace the content address the planner hashes.
+        assert_eq!(wire["params"]["source"]["sha256"], json!(sha));
+        assert_eq!(wire["params"]["source"]["brepFormat"], json!(4));
+
+        // The SAME rule for a detached component: it keeps replaying the blob.
+        let detach = Operation::Known(KnownOperation::DetachComponent(DetachComponentParams {
+            source: embedded(&sha),
+            placement: placement(),
+            extra: Default::default(),
+        }));
+        assert_eq!(
+            preview_wire_op(&detach, "op_2")["params"]["source"]["path"],
+            json!(written.to_string_lossy())
+        );
+    }
+
+    /// An unmaterialized blob lowers an EMPTY path on purpose — the worker fails
+    /// THAT step with a named `OP_FAILED` while every other feature in the
+    /// document still regenerates (the `io::imports` blast-radius rule).
+    #[test]
+    fn an_unmaterialized_component_blob_lowers_an_empty_path() {
+        let wire = preview_wire_op(&place(embedded(&"e".repeat(64))), "op_3");
+        assert_eq!(wire["params"]["source"]["path"], json!(""));
+    }
+
+    /// A generator source depends on no bytes, so nothing is injected — a `path`
+    /// key there would be meaningless noise the worker would have to ignore.
+    #[test]
+    fn a_generator_source_gets_no_path() {
+        let wire = preview_wire_op(
+            &place(ComponentSourceRef::Generator {
+                generator_id: "iso4762".into(),
+                generator_version: 1,
+                params: Default::default(),
+                extra: Default::default(),
+            }),
+            "op_4",
+        );
+        assert!(wire["params"]["source"].get("path").is_none());
     }
 }

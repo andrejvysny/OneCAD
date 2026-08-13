@@ -1284,10 +1284,36 @@ export interface PlaceComponentParams {
   componentId: string;
   componentVersion: string;
   componentRevision: string;
-  generatorId: string;
-  generatorVersion: number;
+  /**
+   * Where the ghost's geometry comes from — the SAME discriminant the committed
+   * record carries (spec §2.1). Before WP-3.2 the preview hardcoded a generator
+   * source, which meant arming a non-generator component previewed a
+   * DIFFERENT body than committing it would produce (the generator stub's
+   * ISO 4762 screw). A preview that can disagree with its own commit is worse
+   * than no preview.
+   */
+  source: PlaceComponentSource;
   translate: [number, number, number];
   rotate: TransformRotationParams;
+}
+
+/** Ghost-preview geometry source, mirroring Rust `ComponentSourceRef`. */
+export type PlaceComponentSource =
+  | { kind: "generator"; generatorId: string; generatorVersion: number }
+  | ({ kind: "embedded" } & ComponentGeometry)
+  | ({ kind: "document"; documentSha256: string } & ComponentGeometry);
+
+/**
+ * The staged geometry pointer `stageComponentGeometry` returns (Rust
+ * `ComponentGeometryDto`): a blob-backed component's baked solid, already cached
+ * in the open document and materialized for the worker.
+ */
+export interface ComponentGeometry {
+  sha256: string;
+  /** `step` | `brep` | `xbf`. */
+  codec: string;
+  /** Binary format pin; absent for `step`. */
+  brepFormat?: number;
 }
 
 /**

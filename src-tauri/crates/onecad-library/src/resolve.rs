@@ -19,16 +19,55 @@ pub struct ResolveRequest<'a> {
     pub component_revision: &'a str,
 }
 
-/// The worker-consumable geometry source a resolution produced. P0/WP-1.1
-/// scope: `Generator` only (mirrors `onecad-core`'s `ComponentSourceRef`
-/// reduction — `Embedded`/`Document` land WP-1.2/P3).
-#[derive(Debug, Clone, PartialEq)]
+/// The worker-consumable geometry source a resolution produced — all three spec
+/// §2.1 kinds as of WP-3.2.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedSource {
     Generator {
         generator_id: String,
         generator_version: u32,
     },
+    /// A static payload from the blob store.
+    Embedded { blob: ResolvedBlob },
+    /// A user-authored component: the baked solid, plus the digest of the frozen
+    /// authoring document it was baked from (recorded as provenance and as the
+    /// key a future re-bake would need — see [`SourceSpec::Document`]).
+    Document {
+        document_sha256: String,
+        blob: ResolvedBlob,
+    },
 }
+
+/// Bytes from the library blob store plus everything needed to read them back:
+/// the content address (which becomes the placing document's own `imports/` key),
+/// the byte form, and the binary format pin.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedBlob {
+    /// Bare 64-hex digest — the same value the placing document will key its
+    /// copy of these bytes by.
+    pub sha256: String,
+    /// `step` | `brep` | `xbf`.
+    pub codec: String,
+    /// Binary format version; `None` only for `step`.
+    pub format: Option<u32>,
+    /// The verified bytes (the store re-hashes on every read).
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for ResolvedBlob {
+    /// Hand-written so a resolution failure log never dumps megabytes of BRep.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedBlob")
+            .field("sha256", &self.sha256)
+            .field("codec", &self.codec)
+            .field("format", &self.format)
+            .field("bytes", &format_args!("<{} bytes>", self.bytes.len()))
+            .finish()
+    }
+}
+
+/// The codecs a component blob may be in — the §7.3 replay codecs, verbatim.
+const KNOWN_CODECS: [&str; 3] = ["step", "brep", "xbf"];
 
 /// Resolves a recorded component identity against the library ON DISK.
 ///
@@ -68,15 +107,95 @@ pub fn resolve(
             generator_id: generator,
             generator_version,
         }),
-        SourceSpec::Embedded { .. } => Err(LibraryError::MalformedPackage {
-            path: manifest_path,
-            message: "embedded source resolution lands in WP-1.2".into(),
+        SourceSpec::Embedded {
+            blob,
+            codec,
+            format,
+        } => Ok(ResolvedSource::Embedded {
+            blob: read_blob(
+                library_root,
+                &manifest_path,
+                "source.blob",
+                &blob,
+                &codec,
+                format,
+            )?,
         }),
-        SourceSpec::Document { .. } => Err(LibraryError::MalformedPackage {
-            path: manifest_path,
-            message: "document source resolution lands in P3".into(),
-        }),
+        SourceSpec::Document {
+            file,
+            geometry,
+            geometry_codec,
+            geometry_format,
+        } => {
+            // The frozen document is hashed, not read: a placement resolves to the
+            // BAKED solid (see `SourceSpec::Document`). Reading it here proves the
+            // package still carries the document its geometry claims to come from,
+            // which is the whole value of recording the digest.
+            let document_path = library_root.join(&entry.path).join(&file);
+            let document_bytes =
+                std::fs::read(&document_path).map_err(|e| LibraryError::MalformedPackage {
+                    path: manifest_path.clone(),
+                    message: format!(
+                        "source.file `{file}` is not readable at {}: {e}",
+                        document_path.display()
+                    ),
+                })?;
+            Ok(ResolvedSource::Document {
+                document_sha256: crate::blob::sha256_hex(&document_bytes),
+                blob: read_blob(
+                    library_root,
+                    &manifest_path,
+                    "source.geometry",
+                    &geometry,
+                    &geometry_codec,
+                    geometry_format,
+                )?,
+            })
+        }
     }
+}
+
+/// Reads and validates one blob-store pointer from a manifest.
+///
+/// Every failure names the manifest and the field, because these are all AUTHORING
+/// mistakes in someone's package — an unknown codec, a missing format pin, a blob
+/// that was never written. A `document` package whose bake is absent lands here
+/// too: refused loudly, never quietly replayed from `source.onecad` (which would
+/// need a second worker session and the library folder present at every regen —
+/// exactly what spec §4 rules out).
+fn read_blob(
+    library_root: &Path,
+    manifest_path: &Path,
+    field: &str,
+    key: &str,
+    codec: &str,
+    format: Option<u32>,
+) -> LibraryResult<ResolvedBlob> {
+    let malformed = |message: String| LibraryError::MalformedPackage {
+        path: manifest_path.to_path_buf(),
+        message,
+    };
+    if !KNOWN_CODECS.contains(&codec) {
+        return Err(malformed(format!(
+            "{field} codec `{codec}` is unknown (known: {})",
+            KNOWN_CODECS.join(", ")
+        )));
+    }
+    if codec != "step" && format.is_none() {
+        return Err(malformed(format!(
+            "{field} codec `{codec}` requires a binary format version"
+        )));
+    }
+    // Spec §2.1 writes the pointer as `"sha256:<hex>"`; the blob store keys on the
+    // bare digest. Accept both spellings rather than making an author guess.
+    let sha256 = key.strip_prefix("sha256:").unwrap_or(key).to_string();
+    let bytes = crate::blob::BlobStore::new(library_root).get(&sha256)?;
+    Ok(ResolvedBlob {
+        sha256,
+        codec: codec.to_string(),
+        format,
+        bytes,
+    })
 }
 
 #[cfg(test)]

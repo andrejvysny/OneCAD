@@ -1,3 +1,122 @@
+# Handoff — Component Library (P3 WP-3.2, blob-backed component geometry)
+
+Session 15 · 2026-08-13
+
+> Continues Session 14 directly. WP-3.1 is COMMITTED (`81f535a`); this
+> session's WP-3.2 delta is uncommitted on top (29 modified files + 3 new).
+
+## Goal
+
+P3's `document` source kind (spec §10's next bullet) — which scoping turned
+into "both blob-backed source kinds", for a reason worth carrying.
+
+## Original plan
+
+`~/.claude/plans/atomic-leaping-dove.md` — five phases (A: the ExportGeometry
+verb · B: core record + wire · C: library + app crate · D: worker blob arm ·
+E: frontend arm/preview lane) plus the gate. Landed as planned; the only
+deviation is that Phase A's verb had to flatten solid-LIKE bodies rather than
+demand a bare solid (see below).
+
+## Done and why
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY P3 WP-3.2 (gate entry). What a
+future reader most needs:
+
+- **The WP is bigger than the spec bullet because `embedded` had never
+  shipped either.** `resolve.rs` returned `MalformedPackage "lands in WP-1.2"`
+  and `ComponentOp.cpp` refused every kind but `generator` — despite spec §10
+  claiming `embedded` as P1 scope. Consequence, flagged since session 7 and
+  true until now: **spec §12's differentiator (reopen with the library folder
+  deleted and still see the part) had no automated proof for anything but a
+  generator**, which re-runs from params and never needed cached geometry at
+  all. Both kinds reduce to the same mechanism, so they landed on one lane and
+  that claim is now a real-worker test
+  (`a_baked_component_survives_save_and_reopen_with_no_library`).
+- **The architecture fork, and the two facts that settled it** (presented to
+  the user before any code): a `document` package carries `source.onecad` PLUS
+  a baked geometry blob, and placement copies the blob — nothing ever replays
+  a frozen document. The spec-literal alternative (replay at place time) dies
+  on two things checked in the code, not assumed: the worker is **one session
+  per process** (`Session.h:3`; `WorkerManager` owns a single child), so a
+  nested replay needs a SECOND worker process; and spec §4 requires the
+  geometry to be in the document anyway. `documentSha256` IS recorded and
+  currently unread — deliberately: it is the key a future re-bake lane (param
+  overrides on a user-authored part) needs. Don't delete it as dead weight.
+- **Nothing here is a new mechanism.** A component's cached solid is an import
+  source in every respect that matters, so it rides `io::imports` verbatim
+  (section, workspace materialization, sha→path registry, wire-only non-hashed
+  path injection, the same worker readers and the same `brepFormat` pin
+  refusal). The one genuinely new thing is `ExportGeometry` (§7.8) — nothing in
+  the protocol could get geometry OUT of a session as bytes; `GetBodies` (§7.6)
+  is specified but has never been implemented, and its bulk-stream shape is
+  heavier than the temp-path hop every other §7.8 export already does.
+- **`referenced_import_shas` is the silent one.** Miss the
+  `PlaceComponent`/`DetachComponent` arms and the baked blob is dropped at the
+  FIRST save — the document reopens with a component whose geometry no longer
+  exists anywhere. It has its own test for exactly that reason.
+- **Two defects found by RUNNING it** (both invisible to the worker-only ctest,
+  which never bakes a body a real op published): `ExportGeometry` first
+  demanded a bare `TopAbs_SOLID` and refused the first real body it saw — a
+  published body is solid-LIKE (`single_solid_policy` admits a compound
+  wrapper, and a fused feature routinely produces one); and `xbf` face colors
+  are indexed by the BODY's face map, so they can only be carried when the body
+  flattens to exactly one solid (dropped, never misapplied, otherwise).
+- **A frontend defect this WP had to fix to be reachable at all**:
+  `placementDraftParams` + `placeComponentParams` hardcoded a generator source,
+  so arming ANY non-generator component previewed the generator stub's M6 screw
+  and committed something else. New `resolveComponentSource` command resolves
+  the real source and stages its bytes at ARM time (the ghost lowers `source`
+  through the same wire path a commit does, so the blob must be materialized
+  before the first preview).
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Worker rebuilt this session — the staged sidecar has `ExportGeometry` +
+   `read_source_blob`. Rebuild if stale.
+3. Next task: P3 has three bullets left — **"Save as Component"** (the natural
+   next one: its bake engine is this WP's `ExportGeometry` + the
+   `stage_component_blob` discipline, and its output format is the
+   `document` package this WP defined), **"Save as Template" + start-screen
+   row**, and **`ReplaceComponent` + opt-in version upgrade** (independent of
+   both).
+4. Full gate, every suite RUN and green this session (none inferred):
+   ```bash
+   ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+   ctest --test-dir worker/build --output-on-failure   # 118/118
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 \
+     cargo test --workspace --no-fail-fast   # 100% green
+   bunx tsc --noEmit && bun run test         # 245 files / 4162
+   bunx playwright test                       # 404/404 (21.5 min)
+   grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'   # hex gate: empty
+   ```
+
+## Open questions
+
+- The package-format extension (`[source]` gains `codec`/`format`; `document`
+  gains a `geometry` pointer) is a documented deviation from spec §2.1's
+  comment lines, which name only `blob`/`file`. Proceeding was necessary — a
+  reader cannot know the byte form or the version pin otherwise — but a spec
+  edit should ratify it.
+- A `document` package with no baked geometry is refused. Once a registry (P4)
+  can serve foreign packages, that refusal becomes a real limitation and the
+  deferred nested-replay lane is what answers it.
+- Carried forward: Q4 (starter-template content) becomes live the moment "Save
+  as Template" starts.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY P3 WP-3.2 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 15)
+- Plan → `~/.claude/plans/atomic-leaping-dove.md`
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md` §2.1/§4/§9/§12
+- Wire → `protocol/SCHEMA.md` §7.3 (`PlaceComponent.source`), §7.8
+  (`ExportGeometry`), §14 (2026-08-13 entry)
+
+---
+
 # Handoff — Component Library (P3 WP-3.1, persistent mate re-seating)
 
 Session 14 · 2026-08-13

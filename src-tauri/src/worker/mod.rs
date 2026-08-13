@@ -434,6 +434,27 @@ pub struct StepInspection {
     pub geometry_bytes: Option<Vec<u8>>,
 }
 
+/// One `ExportGeometry` result (SCHEMA §7.8) — a live body baked into one of the
+/// §7.3 replay codecs.
+///
+/// The worker reports `codec`/`format` back rather than letting the caller assume
+/// them: whatever a record pins as `sourceCodec`/`brepFormat` must be the version
+/// the worker ACTUALLY wrote, the same discipline [`StepInspection`] follows for
+/// the STEP conversion lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BakedGeometry {
+    /// The byte form written (`"brep"` / `"xbf"`) — the value to author into
+    /// `ImportStepParams::source_codec` or a component source's `codec`.
+    pub codec: String,
+    /// The binary format version of those bytes (the value to pin as
+    /// `brepFormat`).
+    pub format: u32,
+    /// How many solids were written, in the requested body order.
+    pub solid_count: usize,
+    /// Size of the file the worker wrote.
+    pub bytes_written: u64,
+}
+
 /// Probes a STEP file without touching any session state (SCHEMA §7.8
 /// `InspectStep`).
 ///

@@ -913,3 +913,69 @@ describe("localSolver mock-lane local synthesis table", () => {
     expect(seen[0].mesh).toBeUndefined();
   });
 });
+
+// ── PlaceComponent's source (Component Library WP-3.2) ───────────────────────
+
+describe("PlaceComponent ghost carries the backend's resolved source", () => {
+  function placeSession(source: unknown): PreviewSessionState {
+    return session({
+      opType: "PlaceComponent",
+      latestParams: {
+        componentId: "acme.bracket",
+        componentVersion: "1.0.0",
+        componentRevision: `sha256:${"0".repeat(64)}`,
+        source,
+        translate: [1, 2, 3],
+      } as unknown as PreviewParams,
+    });
+  }
+
+  it("passes a blob-backed source through verbatim", () => {
+    // The ghost previews the SAME source the commit records. Before WP-3.2 this
+    // builder synthesized a generator source, so a document-source component
+    // previewed the generator stub's screw and committed something else.
+    const op = OP_BUILDERS.PlaceComponent!(
+      placeSession({
+        kind: "document",
+        documentSha256: "a".repeat(64),
+        sha256: "b".repeat(64),
+        codec: "xbf",
+        brepFormat: 12,
+      }),
+    );
+    expect(op).toMatchObject({
+      opType: "PlaceComponent",
+      params: {
+        source: {
+          kind: "document",
+          documentSha256: "a".repeat(64),
+          sha256: "b".repeat(64),
+          codec: "xbf",
+          brepFormat: 12,
+        },
+      },
+    });
+  });
+
+  it("throws on an under-specified source instead of defaulting one", () => {
+    // A missing pointer must fail at the arm, where the component is named —
+    // never silently preview (and then commit) a different body.
+    expect(() => OP_BUILDERS.PlaceComponent!(placeSession({ kind: "embedded", codec: "brep" }))).toThrow(
+      /sha256/,
+    );
+    expect(() =>
+      OP_BUILDERS.PlaceComponent!(placeSession({ kind: "document", sha256: "b".repeat(64), codec: "brep" })),
+    ).toThrow(/documentSha256/);
+    expect(() => OP_BUILDERS.PlaceComponent!(placeSession({ kind: "registry" }))).toThrow(/unknown/);
+    expect(() => OP_BUILDERS.PlaceComponent!(placeSession(undefined))).toThrow(/source/);
+  });
+
+  it("still accepts a generator source", () => {
+    const op = OP_BUILDERS.PlaceComponent!(
+      placeSession({ kind: "generator", generatorId: "iso4762", generatorVersion: 1 }),
+    );
+    expect(op.params).toMatchObject({
+      source: { kind: "generator", generatorId: "iso4762", generatorVersion: 1 },
+    });
+  });
+});

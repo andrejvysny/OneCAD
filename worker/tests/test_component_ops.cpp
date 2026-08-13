@@ -231,25 +231,42 @@ void test_place_component_non_positive_length_fails_loud() {
           "placeComponent: length=0 -> OP_FAILED");
 }
 
-// ── An unsupported source kind refuses loudly (P0/WP-0.2: generator only). ────────
-void test_place_component_embedded_source_unsupported() {
+// ── An UNKNOWN source kind refuses loudly; a known-but-unmaterialized blob
+//    refuses for its own, different reason (WP-3.2 made `embedded`/`document`
+//    real, so the old "embedded is UNSUPPORTED" expectation was retired here
+//    rather than left asserting a shipped behavior backwards). ───────────────────
+void test_place_component_unknown_source_kind_unsupported() {
     BodyStore bodies;
     onecad::elementmap::ElementMapPartition part;
     json op = {{"opType", "PlaceComponent"}, {"opId", "opc3"},
                {"params", {{"componentId", "onecad.std.iso4762"},
                            {"componentVersion", "1.0.0"},
                            {"componentRevision", "sha256:" + std::string(64, '0')},
-                           {"source", {{"kind", "embedded"}, {"sha256", std::string(64, 'a')}}},
+                           {"source", {{"kind", "registry"}, {"sha256", std::string(64, 'a')}}},
                            {"placement", identity_placement()}}}};
     Ctx c;
     ops::OpContext ctx = c.make(bodies, part);
     ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opc3");
-    // A recognized-but-not-yet-wired PARAMETER VALUE is a recoverable
+    // A recognized-but-unknown PARAMETER VALUE is a recoverable
     // `Status::Failed` with code UNSUPPORTED — distinct from `Status::Unsupported`,
     // which PlanExecutor reserves for an entirely unrecognized opType.
     check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "UNSUPPORTED",
-          "placeComponent: embedded source is UNSUPPORTED in this build");
+          "placeComponent: an unknown source kind is UNSUPPORTED");
     check(bodies.get("body_opc3") == nullptr, "placeComponent: no body published on refusal");
+
+    // An `embedded` source whose blob Rust could not materialize lowers an EMPTY
+    // path; that fails THIS step (OP_FAILED), never publishes, and never claims
+    // the kind itself is unsupported. Full blob coverage:
+    // test_component_blob_source.cpp.
+    json blobless = op;
+    blobless["opId"] = "opc3b";
+    blobless["params"]["source"] = {{"kind", "embedded"}, {"sha256", std::string(64, 'a')},
+                                    {"codec", "brep"}, {"brepFormat", 4}, {"path", ""}};
+    ops::OpContext ctx2 = c.make(bodies, part);
+    ops::OpOutcome blob_oc = ops::execute_place_component(ctx2, blobless, "opc3b");
+    check(blob_oc.status == ops::OpOutcome::Status::Failed && blob_oc.error_code == "OP_FAILED",
+          "placeComponent: an unmaterialized blob fails its own step");
+    check(bodies.get("body_opc3b") == nullptr, "placeComponent: no body published on a missing blob");
 }
 
 // ── An empty generatorId fails loudly, recoverably. ────────────────────────────────
@@ -557,18 +574,18 @@ void test_detach_component_placement_transform_preserves_volume() {
     }
 }
 
-// ── DetachComponent refuses an unsupported source exactly like PlaceComponent. ────
-void test_detach_component_embedded_source_unsupported() {
+// ── DetachComponent refuses an unknown source exactly like PlaceComponent. ───────
+void test_detach_component_unknown_source_kind_unsupported() {
     BodyStore bodies;
     onecad::elementmap::ElementMapPartition part;
     json op = {{"opType", "DetachComponent"}, {"opId", "opd3"},
-               {"params", {{"source", {{"kind", "embedded"}, {"sha256", std::string(64, 'a')}}},
+               {"params", {{"source", {{"kind", "registry"}, {"sha256", std::string(64, 'a')}}},
                            {"placement", identity_placement()}}}};
     Ctx c;
     ops::OpContext ctx = c.make(bodies, part);
     ops::OpOutcome oc = ops::execute_detach_component(ctx, op, "opd3");
     check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "UNSUPPORTED",
-          "detachComponent: embedded source is UNSUPPORTED in this build");
+          "detachComponent: an unknown source kind is UNSUPPORTED");
     check(bodies.get("body_opd3") == nullptr, "detachComponent: no body published on refusal");
 }
 
@@ -582,7 +599,7 @@ int main() {
     test_place_component_m12_exact_volume();
     test_place_component_unknown_thread_fails_loud();
     test_place_component_non_positive_length_fails_loud();
-    test_place_component_embedded_source_unsupported();
+    test_place_component_unknown_source_kind_unsupported();
     test_place_component_empty_generator_id_fails_loud();
     test_place_component_thread_detail_cosmetic_matches_default();
     test_place_component_thread_detail_simplified_removes_material();
@@ -595,7 +612,7 @@ int main() {
     test_place_component_thread_detail_modeled_m12_long_shank();
     test_detach_component_exact_volume_matches_place_component();
     test_detach_component_placement_transform_preserves_volume();
-    test_detach_component_embedded_source_unsupported();
+    test_detach_component_unknown_source_kind_unsupported();
     if (g_failures == 0) std::fprintf(stderr, "component_ops: OK\n");
     return g_failures;
 }

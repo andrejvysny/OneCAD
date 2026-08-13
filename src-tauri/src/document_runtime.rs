@@ -50,8 +50,8 @@ use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementEntry;
 use onecad_core::document::modules::{ModuleId, ModuleState};
 use onecad_core::document::record::{
-    ExtrudeMode, KnownOperation, Operation, OperationRecord, PlaneKind, SketchOpParams,
-    SketchPlaneRef,
+    ExtrudeMode, ImportSourceCodec, KnownOperation, Operation, OperationRecord, PlaneKind,
+    SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery};
 use onecad_core::document::repair::RepairItem;
@@ -2231,6 +2231,63 @@ impl DocumentRuntime {
             "importProject: imported"
         );
         Ok(combined)
+    }
+
+    /// Stages one Component Library geometry blob (spec §2.1 `embedded` /
+    /// `document` source) into this document's carrier + worker workspace.
+    ///
+    /// The SAME section, cap, and materialization path a STEP import uses — a
+    /// baked component solid is an import source in every respect that matters:
+    /// irreplaceable input for exactly one record, unreconstructable by regen,
+    /// and needed as a FILE by the worker. Reusing the section is also what makes
+    /// [`referenced_import_shas`](onecad_core::io::imports::referenced_import_shas)
+    /// pin it at save.
+    ///
+    /// Idempotent: staging bytes already carried re-materializes the path (cheap,
+    /// and correct after a workspace sweep) and leaves the carrier alone.
+    ///
+    /// Must be called BEFORE the record that names the blob is authored — and
+    /// before the placement PREVIEW, which lowers the same source through the
+    /// same wire path.
+    ///
+    /// # Errors
+    /// [`ApiError::Io`] when the bytes are over the cap or the workspace write
+    /// fails; [`ApiError::InvalidCommand`] when the bytes do not hash to
+    /// `sha256` (a mis-keyed blob must never enter the carrier — the section is
+    /// content-addressed and every later read re-verifies it).
+    pub fn stage_component_blob(
+        &mut self,
+        sha256: &str,
+        codec: ImportSourceCodec,
+        bytes: &[u8],
+    ) -> Result<(), ApiError> {
+        if bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
+            return Err(ApiError::Io(format!(
+                "component geometry blob {sha256} is {} bytes, over the \
+                 {MAX_IMPORT_BLOB_BYTES}-byte limit",
+                bytes.len()
+            )));
+        }
+        let actual = crate::imports::sha256_hex(bytes);
+        if actual != sha256 {
+            return Err(ApiError::InvalidCommand(format!(
+                "component geometry blob is keyed {sha256} but its bytes hash to {actual}"
+            )));
+        }
+        self.import_workspace
+            .materialize(sha256, codec, bytes)
+            .map_err(|e| {
+                ApiError::Io(format!(
+                    "cannot stage component geometry {sha256} for the geometry worker: {e}"
+                ))
+            })?;
+        self.imports
+            .entry(sha256.to_string())
+            .or_insert_with(|| ImportBlob {
+                codec,
+                bytes: Arc::new(bytes.to_vec()),
+            });
+        Ok(())
     }
 
     /// The import blobs currently carried (a save writes the referenced subset).

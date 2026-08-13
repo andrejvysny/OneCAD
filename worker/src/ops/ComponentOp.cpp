@@ -3,11 +3,13 @@
 
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <BRep_Builder.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -42,6 +44,9 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "io/BrepCodec.h"
+#include "io/StepRead.h"
+#include "io/XcafCodec.h"
 #include "kernel/validation/ShapeAudit.h"
 #include "modeling/BooleanMode.h"
 #include "ops/ComponentMateSolver.h"
@@ -636,15 +641,107 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
     return MateReseat{*candidate, candidate_trsf};
 }
 
+// Reads the baked solid behind an `embedded` / `document` source (spec §2.1,
+// WP-3.2) out of the wire-only `source.path` Rust materialized for it.
+//
+// The bytes are one of the §7.3 REPLAY codecs and are read with the SAME readers
+// `ImportStep` uses — a component's cached geometry is an import source in every
+// respect that matters, so it must not grow a second, subtly different reader.
+// Three rules are carried over deliberately:
+//   * a CONVERTED codec must pin the binary format version it was written in,
+//     and a pin this worker does not write fails loudly rather than being
+//     misparsed (`ImportOp.cpp`'s `check_format`);
+//   * an absent path is `OP_FAILED` for THIS step only (Rust lowers an empty
+//     path when a blob is not materialized — one broken component must never
+//     take down the plan);
+//   * `step` is accepted because spec §2.1 allows a plain STEP payload in an
+//     `embedded` package, and refusing it would make the spec's own example
+//     unplaceable.
+//
+// EXACTLY ONE SOLID (spec §9 `single_solid_policy`): a component resolves to one
+// solid in v1, and a multi-solid blob is an authoring mistake that must be named,
+// not silently reduced to its first solid.
+//
+// Returns `nullopt` on success (`solid_out` filled), else the failing outcome.
+std::optional<OpOutcome> read_source_blob(const json& source, const std::string& op_label,
+                                          const onecad::CancelToken* cancel,
+                                          TopoDS_Shape& solid_out) {
+    const std::string codec = read_str(source, "codec", "step");
+    const std::string path = read_str(source, "path");
+    if (path.empty()) {
+        return OpOutcome::fail("OP_FAILED",
+                               op_label + ": no materialized geometry for source blob '" +
+                                   read_str(source, "sha256") + "'");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        return OpOutcome::fail("OP_FAILED", op_label + ": source geometry path is not a readable "
+                                                       "file (" +
+                                                path + ")");
+    }
+
+    const auto check_format = [&](int expected) -> std::string {
+        if (!source.contains("brepFormat") || !source["brepFormat"].is_number_integer()) {
+            return op_label + ": source codec '" + codec + "' requires an integer brepFormat";
+        }
+        const int got = source["brepFormat"].get<int>();
+        if (got != expected) {
+            return op_label + ": source brepFormat " + std::to_string(got) +
+                   " is not the version this worker writes (" + std::to_string(expected) + ")";
+        }
+        return {};
+    };
+
+    std::vector<TopoDS_Shape> solids;
+    if (codec == "brep") {
+        const std::string bad = check_format(io::kBrepFormatVersion);
+        if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
+        const io::BrepReadResult read = io::read_brep_solids(path);
+        if (!read.ok()) return OpOutcome::fail("OP_FAILED", op_label + ": " + read.error);
+        solids = read.solids;
+    } else if (codec == io::kXcafCodecName) {
+        const std::string bad = check_format(io::kXcafFormatVersion);
+        if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
+        const io::XcafReadResult read = io::read_xcaf_solids(path);
+        if (!read.ok()) return OpOutcome::fail("OP_FAILED", op_label + ": " + read.error);
+        solids = read.solids;
+    } else if (codec == "step") {
+        const io::StepReadResult read = io::read_step(path, io::StepReadPolicy{}, cancel);
+        if (read.cancelled) return OpOutcome::cancelled();
+        if (!read.ok()) {
+            return OpOutcome::fail("OP_FAILED",
+                                   op_label + ": " + (read.error ? *read.error : "STEP read failed"));
+        }
+        solids = read.solids;
+    } else {
+        return OpOutcome::fail("OP_FAILED", op_label + ": unknown source codec '" + codec +
+                                                "' (known: step, brep, " + io::kXcafCodecName + ")");
+    }
+
+    if (solids.size() != 1) {
+        return OpOutcome::fail("OP_FAILED",
+                               op_label + ": a component must resolve to exactly one solid (spec "
+                                          "§9); this source carries " +
+                                   std::to_string(solids.size()));
+    }
+    if (solids[0].IsNull()) {
+        return OpOutcome::fail("OP_FAILED", op_label + ": source geometry is a null shape");
+    }
+    solid_out = solids[0];
+    return std::nullopt;
+}
+
 // Shared pipeline behind BOTH `PlaceComponent` and `DetachComponent`
 // (identical geometry construction — the two differ only in what the
 // RECORD's params carry: PlaceComponent keeps a library identity + optional
 // mate, DetachComponent carries neither, per spec §3.4's "no component_*
 // fields remain"). `op_label` names the caller in error messages.
 //
-// `source.kind` MUST be `"generator"` (P0/WP-1.1 scope; `embedded` reaches
-// the worker once WP-1.3 wires the wire-only blob-path injection, `document`
-// in P3). The generator is TABLE-DRIVEN as of WP-2.1 (`iso4762Table()`) —
+// `source.kind` is `"generator"`, `"embedded"`, or `"document"` (spec §2.1).
+// The two blob-backed kinds share ONE arm (`read_source_blob`): they differ
+// only in what the RECORD remembers about the solid's provenance, never in how
+// the solid is produced — a baked solid read back from this document's own
+// cached bytes. The generator is TABLE-DRIVEN as of WP-2.1 (`iso4762Table()`) —
 // every `generatorId` still builds an ISO 4762 SHCS (a distinct per-family
 // generator dispatch is future scope once a second family is seeded), sized
 // by `source.params.thread`/`.length` (defaulted for byte-identical P0/P1
@@ -656,56 +753,67 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     }
     const json& source = params["source"];
     const std::string kind = read_str(source, "kind");
-    if (kind != "generator") {
+    if (kind != "generator" && kind != "embedded" && kind != "document") {
         return OpOutcome::fail("UNSUPPORTED",
                                op_label + ": source.kind '" + kind +
-                                   "' not yet supported (this build implements 'generator' only)");
+                                   "' is unknown (known: generator, embedded, document)");
     }
-    const std::string generator_id = read_str(source, "generatorId");
-    if (generator_id.empty()) {
-        return OpOutcome::fail("OP_FAILED", op_label + " source.generatorId must not be empty");
-    }
-
-    if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
-
-    // Free params live under `source.params` — the wire lowering has no
-    // PlaceComponent special-case beyond `inputs[]`, so `ComponentSourceRef::
-    // Generator.params` reaches here verbatim. Defaults reproduce P0/P1's
-    // old hardcoded M6×20 exactly; `thread_detail` defaults to `cosmetic` for
-    // the same byte-identical reason (WP-2.5).
-    std::string thread = kDefaultThread;
-    double length_mm = kDefaultLengthMm;
-    std::string thread_detail_str = kDefaultThreadDetail;
-    if (source.contains("params") && source["params"].is_object()) {
-        const json& gp = source["params"];
-        if (gp.contains("thread") && gp["thread"].is_string()) {
-            thread = gp["thread"].get<std::string>();
-        }
-        if (gp.contains("length")) {
-            const json& l = gp["length"];
-            if (l.is_number()) {
-                length_mm = l.get<double>();
-            } else if (l.is_object() && l.contains("value") && l["value"].is_number()) {
-                length_mm = l["value"].get<double>();
-            }
-        }
-        if (gp.contains("thread_detail") && gp["thread_detail"].is_string()) {
-            thread_detail_str = gp["thread_detail"].get<std::string>();
-        }
-    }
-    if (!std::isfinite(length_mm) || length_mm <= 0.0) {
-        return OpOutcome::fail("OP_FAILED", op_label + ": source.params.length must be finite and positive");
-    }
-    ThreadDetail thread_detail;
-    if (!parse_thread_detail(thread_detail_str, thread_detail)) {
-        return OpOutcome::fail("OP_FAILED", op_label + ": unknown thread_detail '" + thread_detail_str +
-                                                 "' — known values: cosmetic, simplified, modeled");
-    }
-
     TopoDS_Shape solid;
     std::string err;
-    if (!build_shcs(op_label, thread, length_mm, thread_detail, solid, err)) {
-        return OpOutcome::fail("OP_FAILED", err);
+
+    if (kind != "generator") {
+        if (std::optional<OpOutcome> failure =
+                read_source_blob(source, op_label, ctx.cancel, solid)) {
+            return *failure;
+        }
+        if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+    } else {
+        const std::string generator_id = read_str(source, "generatorId");
+        if (generator_id.empty()) {
+            return OpOutcome::fail("OP_FAILED", op_label + " source.generatorId must not be empty");
+        }
+
+        if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+
+        // Free params live under `source.params` — the wire lowering has no
+        // PlaceComponent special-case beyond `inputs[]`, so `ComponentSourceRef::
+        // Generator.params` reaches here verbatim. Defaults reproduce P0/P1's
+        // old hardcoded M6×20 exactly; `thread_detail` defaults to `cosmetic` for
+        // the same byte-identical reason (WP-2.5).
+        std::string thread = kDefaultThread;
+        double length_mm = kDefaultLengthMm;
+        std::string thread_detail_str = kDefaultThreadDetail;
+        if (source.contains("params") && source["params"].is_object()) {
+            const json& gp = source["params"];
+            if (gp.contains("thread") && gp["thread"].is_string()) {
+                thread = gp["thread"].get<std::string>();
+            }
+            if (gp.contains("length")) {
+                const json& l = gp["length"];
+                if (l.is_number()) {
+                    length_mm = l.get<double>();
+                } else if (l.is_object() && l.contains("value") && l["value"].is_number()) {
+                    length_mm = l["value"].get<double>();
+                }
+            }
+            if (gp.contains("thread_detail") && gp["thread_detail"].is_string()) {
+                thread_detail_str = gp["thread_detail"].get<std::string>();
+            }
+        }
+        if (!std::isfinite(length_mm) || length_mm <= 0.0) {
+            return OpOutcome::fail("OP_FAILED",
+                                   op_label + ": source.params.length must be finite and positive");
+        }
+        ThreadDetail thread_detail;
+        if (!parse_thread_detail(thread_detail_str, thread_detail)) {
+            return OpOutcome::fail("OP_FAILED", op_label + ": unknown thread_detail '" +
+                                                    thread_detail_str +
+                                                    "' — known values: cosmetic, simplified, modeled");
+        }
+
+        if (!build_shcs(op_label, thread, length_mm, thread_detail, solid, err)) {
+            return OpOutcome::fail("OP_FAILED", err);
+        }
     }
 
     gp_Trsf trsf;

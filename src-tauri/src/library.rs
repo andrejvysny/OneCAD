@@ -34,7 +34,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use onecad_core::document::record::{
     ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
-    KnownOperation, Operation, OperationRecord, PlaceComponentParams, TransformRotation,
+    ImportSourceCodec, KnownOperation, Operation, OperationRecord, PlaceComponentParams,
+    TransformRotation,
 };
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{CommandOutcome, EditCommand};
@@ -42,7 +43,7 @@ use onecad_core::ids::RecordId;
 
 use onecad_library::index::LibraryIndex;
 use onecad_library::package::{self, ComponentPackage, ParameterRole, COMPONENT_MANIFEST_FILE};
-use onecad_library::resolve::{ResolveRequest, ResolvedSource};
+use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
 use onecad_library::Library;
 
 use crate::dto::{DocumentProjection, LibraryComponentDto, ReindexReportDto};
@@ -138,16 +139,15 @@ pub async fn reindex_library(app: AppHandle) -> Result<ReindexReportDto, ApiErro
 /// Resolves + builds the `PlaceComponent` op and applies it (spec §3.1).
 /// WP-1.5 scope: `translate` + `rotate` — the snap solver's computed
 /// candidate transform, sent already-resolved by the frontend
-/// (`placementSolver.ts`). No `mate` yet: the worker's `ComponentOp`
-/// resolver does not consume `mate` on regen (it only reads
-/// `placement.{translate,rotate}`), so recording one now would assert a
-/// persistence the document cannot honor — spec §5.5's re-seat-on-regen
-/// ladder lands in P3 (`ComponentMate`'s own doc comment already flags
-/// this). A `generator`-source component places directly; an `embedded`
-/// source's document-side blob copy-in (spec §4 "geometry is always cached
-/// locally") is NOT yet wired — the worker itself only implements
-/// `generator` as of WP-1.2, so an embedded placement would refuse at the
-/// worker anyway; this does not special-case it further.
+/// (`placementSolver.ts`). No `mate` is authored HERE (the interactive
+/// gesture records one through the preview lane); regen-time re-seating of a
+/// recorded mate landed in WP-3.1.
+///
+/// All three source kinds place (WP-3.2). A `generator` component carries only
+/// its identity; an `embedded` / `document` component's baked solid is COPIED
+/// INTO this document's own `imports/` section before the record is authored —
+/// spec §4's "geometry is always cached locally", which is what lets the
+/// document reopen with the library folder deleted.
 ///
 /// Revision verification happens inside `Library::resolve_source`: a
 /// mismatch is a typed [`onecad_library::LibraryError::RevisionMismatch`],
@@ -179,17 +179,7 @@ async fn place_component_at(
         component_version: &component_version,
         component_revision: &revision,
     })?;
-    let source = match resolved {
-        ResolvedSource::Generator {
-            generator_id,
-            generator_version,
-        } => ComponentSourceRef::Generator {
-            generator_id,
-            generator_version,
-            params: Default::default(),
-            extra: Default::default(),
-        },
-    };
+    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
 
     let params = PlaceComponentParams {
         component_id,
@@ -211,14 +201,119 @@ async fn place_component_at(
     let op = Operation::Known(KnownOperation::PlaceComponent(params));
     let record = OperationRecord::new(RecordId::new(), 0, "Place Component", op);
 
-    apply_and_project(
+    stage_blob_and_apply(
         state,
+        blob,
         EditCommand::AddOperation {
             record,
             at_cursor: true,
         },
     )
     .await
+}
+
+/// A component's baked geometry, resolved out of the library and ready to be
+/// staged into the placing document (WP-3.2).
+struct StagedBlob {
+    sha256: String,
+    codec: ImportSourceCodec,
+    format: Option<u32>,
+    bytes: Vec<u8>,
+}
+
+/// Translates a library resolution into the record's `source` plus, for the two
+/// blob-backed kinds, the bytes the placing document must cache.
+///
+/// This is the type-family bridge this module exists for: `onecad-library` owns
+/// the package format, `onecad-core` owns the wire/record form, and neither
+/// depends on the other.
+fn component_source_from_resolved(
+    resolved: ResolvedSource,
+    component_id: &str,
+) -> Result<(ComponentSourceRef, Option<StagedBlob>), ApiError> {
+    match resolved {
+        ResolvedSource::Generator {
+            generator_id,
+            generator_version,
+        } => Ok((
+            ComponentSourceRef::Generator {
+                generator_id,
+                generator_version,
+                params: Default::default(),
+                extra: Default::default(),
+            },
+            None,
+        )),
+        ResolvedSource::Embedded { blob } => {
+            let staged = staged_blob(blob, component_id)?;
+            Ok((
+                ComponentSourceRef::Embedded {
+                    sha256: staged.sha256.clone(),
+                    codec: staged.codec,
+                    brep_format: staged.format,
+                    extra: Default::default(),
+                },
+                Some(staged),
+            ))
+        }
+        ResolvedSource::Document {
+            document_sha256,
+            blob,
+        } => {
+            let staged = staged_blob(blob, component_id)?;
+            Ok((
+                ComponentSourceRef::Document {
+                    document_sha256,
+                    sha256: staged.sha256.clone(),
+                    codec: staged.codec,
+                    brep_format: staged.format,
+                    // Overrides need a re-bake lane (see `set_component_params_at`'s
+                    // Document arm); recording any here would be inert data.
+                    params: Default::default(),
+                    extra: Default::default(),
+                },
+                Some(staged),
+            ))
+        }
+    }
+}
+
+fn staged_blob(blob: ResolvedBlob, component_id: &str) -> Result<StagedBlob, ApiError> {
+    let codec = ImportSourceCodec::from_extension(&blob.codec).ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "placeComponent: {component_id} declares an unknown geometry codec `{}`",
+            blob.codec
+        ))
+    })?;
+    Ok(StagedBlob {
+        sha256: blob.sha256,
+        codec,
+        format: blob.format,
+        bytes: blob.bytes,
+    })
+}
+
+/// Stages a component's geometry blob into the open document and applies `command`
+/// under the SAME runtime lock.
+///
+/// One lock, in this order, on purpose: the blob must be in the carrier and
+/// materialized for the worker BEFORE any regen can see the record that names it
+/// (the `add_import_record` discipline). Splitting the two would leave a window
+/// where an autosave writes a record whose blob is not yet staged.
+async fn stage_blob_and_apply(
+    state: &State<'_, AppState>,
+    blob: Option<StagedBlob>,
+    command: EditCommand,
+) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("library".into()))?;
+    if let Some(b) = blob {
+        rt.stage_component_blob(&b.sha256, b.codec, &b.bytes)?;
+    }
+    let outcome = rt.apply(command)?;
+    Ok((outcome, rt.projection()))
 }
 
 #[tauri::command]
@@ -243,6 +338,69 @@ pub async fn place_component(
     .await?;
     finish(&app, &state, &outcome, &projection);
     Ok(projection)
+}
+
+/// Resolves a component's `source` for a GHOST PREVIEW, staging its baked
+/// geometry into the open document on the way (WP-3.2). Authors nothing.
+///
+/// The placement ghost previews through `beginPreview` with a candidate
+/// `PlaceComponent` op, and that op lowers its `source` through the SAME wire
+/// path a committed record does. Two consequences the frontend cannot handle on
+/// its own, which is why this command exists:
+///
+/// * a blob-backed component's bytes must be materialized for the worker at ARM
+///   time, not at commit — otherwise the first preview lowers an empty path;
+/// * the preview must carry the REAL source. Before this, the preview lane
+///   hardcoded a generator source, so arming a non-generator component previewed
+///   the generator stub's screw and committed something else entirely.
+///
+/// Returned verbatim to the caller as the draft `source`, so the preview and the
+/// commit cannot diverge. A `generator` component stages nothing (it re-runs from
+/// params and depends on no bytes); the call is still made, uniformly, so the
+/// frontend has exactly one code path.
+///
+/// Idempotent — safe to call again for an already-armed component.
+async fn resolve_component_source_at(
+    root: &Path,
+    state: &State<'_, AppState>,
+    component_id: String,
+    component_version: String,
+) -> Result<ComponentSourceRef, ApiError> {
+    let library = open_at(root)?;
+    let (_version, entry) = library
+        .get(&component_id, Some(&component_version))
+        .ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "resolveComponentSource: unknown component {component_id}@{component_version}"
+            ))
+        })?;
+    let revision = entry.revision.clone();
+    let resolved = library.resolve_source(&ResolveRequest {
+        component_id: &component_id,
+        component_version: &component_version,
+        component_revision: &revision,
+    })?;
+    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    if let Some(blob) = blob {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("resolveComponentSource".into()))?;
+        rt.stage_component_blob(&blob.sha256, blob.codec, &blob.bytes)?;
+    }
+    Ok(source)
+}
+
+#[tauri::command]
+pub async fn resolve_component_source(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    component_id: String,
+    component_version: String,
+) -> Result<ComponentSourceRef, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("resolveComponentSource: no app data dir".into()))?;
+    resolve_component_source_at(&root, &state, component_id, component_version).await
 }
 
 /// Loads a package's full `component.toml` (parameters included) by identity
@@ -352,6 +510,20 @@ async fn set_component_params_at(
         ComponentSourceRef::Embedded { .. } => {
             return Err(ApiError::InvalidCommand(
                 "setComponentParams: an embedded-source placement has no free parameters".into(),
+            ))
+        }
+        // A `document` component's geometry is a solid BAKED from its authoring
+        // document (WP-3.2). Honoring an override means replaying that document
+        // with new variable values and re-baking — a lane this build does not
+        // have. Refusing is the honest answer: merging the value into the record
+        // would show a new designation over unchanged geometry, which is the
+        // silent-substitution failure spec §0 invariant #4 exists to prevent.
+        ComponentSourceRef::Document { .. } => {
+            return Err(ApiError::InvalidCommand(
+                "setComponentParams: a document-source placement carries baked geometry; \
+                 editing its parameters needs a re-bake of the authoring document, which this \
+                 build does not implement"
+                    .into(),
             ))
         }
     };
@@ -764,5 +936,248 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             matches!(err, ApiError::InvalidCommand(ref m) if m.contains("unknown parameter")),
             "got {err:?}"
         );
+    }
+
+    /// Writes a `document`-kind package (spec §2.1 + WP-3.2's geometry
+    /// pointer): a frozen authoring document in the package directory, and the
+    /// solid baked from it in the library's shared blob store.
+    fn write_document_package(root: &Path, id: &str, geometry: &[u8]) -> String {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("source.onecad"), b"frozen authoring document").unwrap();
+        let sha = onecad_library::blob::BlobStore::new(root)
+            .put(geometry)
+            .expect("blob put");
+        let toml = format!(
+            r#"
+[identity]
+id = "{id}"
+version = "1.0.0"
+revision = "sha256:{zeros}"
+
+[metadata]
+name = "Bracket"
+
+[source]
+kind = "document"
+file = "source.onecad"
+geometry = "sha256:{sha}"
+geometry_codec = "brep"
+geometry_format = 4
+"#,
+            zeros = "0".repeat(64)
+        );
+        std::fs::write(dir.join("component.toml"), toml).unwrap();
+        sha
+    }
+
+    /// A `document` component places as its BAKED solid, and the bytes land in
+    /// the placing document's own carrier — the spec §4 promise that a document
+    /// renders with the library folder gone. The record keeps the authoring
+    /// document's digest as provenance, and the two digests must not be swapped
+    /// (one is what regen reads, the other is only evidence).
+    #[tokio::test]
+    async fn a_document_component_places_its_baked_solid_and_caches_the_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let geometry = b"pretend baked brep bytes".to_vec();
+        let geometry_sha = write_document_package(dir.path(), "acme.bracket", &geometry);
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.bracket".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+        )
+        .await
+        .expect("place a document-source component");
+        assert_eq!(projection.features[0].op_type, "PlaceComponent");
+
+        let guard = app.state::<AppState>();
+        let rt_guard = guard.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        assert_eq!(
+            rt.import_blob_shas(),
+            vec![geometry_sha.clone()],
+            "the baked solid is cached in the placing document, not just referenced in the library"
+        );
+
+        let record = RecordId::from_str(&projection.features[0].id).unwrap();
+        let raw = rt.operation_params(record).unwrap();
+        let params: PlaceComponentParams = serde_json::from_value(raw).unwrap();
+        match params.source {
+            ComponentSourceRef::Document {
+                document_sha256,
+                sha256,
+                codec,
+                brep_format,
+                ..
+            } => {
+                assert_eq!(sha256, geometry_sha, "regen reads the GEOMETRY digest");
+                assert_eq!(
+                    document_sha256,
+                    crate::imports::sha256_hex(b"frozen authoring document"),
+                    "provenance is the frozen authoring document's own digest"
+                );
+                assert_eq!(codec, ImportSourceCodec::Brep);
+                assert_eq!(brep_format, Some(4));
+            }
+            other => panic!("expected a Document source, got {other:?}"),
+        }
+    }
+
+    /// Arming a placement resolves the same source the commit will, and stages
+    /// the same bytes — the ghost cannot preview geometry the commit would not
+    /// produce (the defect this command exists to close).
+    #[tokio::test]
+    async fn resolving_a_source_for_the_ghost_stages_the_same_bytes_a_commit_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let geometry = b"pretend baked brep bytes".to_vec();
+        let geometry_sha = write_document_package(dir.path(), "acme.bracket", &geometry);
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let source = resolve_component_source_at(
+            dir.path(),
+            &state,
+            "acme.bracket".to_string(),
+            "1.0.0".to_string(),
+        )
+        .await
+        .expect("resolve for the ghost");
+        assert_eq!(
+            source.blob_ref().map(|b| b.sha256.to_string()),
+            Some(geometry_sha.clone())
+        );
+
+        // Idempotent: arming twice must not double-stage or fail.
+        resolve_component_source_at(
+            dir.path(),
+            &state,
+            "acme.bracket".to_string(),
+            "1.0.0".to_string(),
+        )
+        .await
+        .expect("re-arm");
+
+        let guard = app.state::<AppState>();
+        let rt_guard = guard.runtime.lock().await;
+        assert_eq!(
+            rt_guard.as_ref().unwrap().import_blob_shas(),
+            vec![geometry_sha]
+        );
+    }
+
+    /// A `document` package whose bake is missing is refused, loudly, naming the
+    /// package. It is NOT replayed from `source.onecad` behind the user's back:
+    /// that needs a second worker session and the library present at every
+    /// regen, which is exactly what spec §4 rules out.
+    #[tokio::test]
+    async fn a_document_package_with_no_baked_geometry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("acme.bracket");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("source.onecad"), b"frozen authoring document").unwrap();
+        std::fs::write(
+            pkg.join("component.toml"),
+            format!(
+                r#"
+[identity]
+id = "acme.bracket"
+version = "1.0.0"
+revision = "sha256:{zeros}"
+
+[metadata]
+name = "Bracket"
+
+[source]
+kind = "document"
+file = "source.onecad"
+geometry = "sha256:{missing}"
+geometry_codec = "brep"
+geometry_format = 4
+"#,
+                zeros = "0".repeat(64),
+                missing = "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let err = place_component_at(
+            dir.path(),
+            &state,
+            "acme.bracket".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+        )
+        .await
+        .expect_err("a package with no bake cannot be placed");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("a".repeat(64).as_str()),
+            "names the missing blob: {msg}"
+        );
+    }
+
+    /// Editing a baked component's parameters needs a re-bake lane this build
+    /// does not have. Refusing says so; merging the value would show a new
+    /// designation over unchanged geometry.
+    #[tokio::test]
+    async fn setting_params_on_a_document_component_is_refused_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package(dir.path(), "acme.bracket", b"pretend baked brep bytes");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.bracket".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+        )
+        .await
+        .expect("place");
+        let record_id = projection.features[0].id.clone();
+
+        // The package declares no parameters at all, so this is refused at the
+        // signature check first; declare one to reach the source arm.
+        let mut params = BTreeMap::new();
+        params.insert("length".to_string(), ComponentParamValue::Number(30.0));
+        let err = set_component_params_at(dir.path(), &state, record_id, params)
+            .await
+            .expect_err("a baked component has no editable parameters in this build");
+        assert!(matches!(err, ApiError::InvalidCommand(_)), "got {err:?}");
     }
 }

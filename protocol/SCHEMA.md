@@ -1491,14 +1491,23 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   placed component is a first-class instance, never a copied-in body (spec
   §3). A component resolves to exactly ONE solid in v1 (spec §9,
   `single_solid_policy`).
-- `source.kind` ∈ `generator` | `embedded` | `document`. **This build
-  implements `generator` only** — `embedded`/`document` refuse recoverably
-  with `UNSUPPORTED` (worker-side; the Rust type already carries all three as
-  of WP-1.2, `embedded` reaching the worker once WP-1.3 wires the wire-only
-  blob-path injection ImportStep's `inject_import_path` already establishes
-  the pattern for). The generator itself is **hardcoded** in this build —
-  every `generatorId` builds a fixed ISO 4762 M6×20 SHCS solid; table-driven
-  per-generator dispatch is P2 (spec §6).
+- `source.kind` ∈ `generator` | `embedded` | `document` — **all three
+  implemented** (WP-3.2). An unknown kind refuses recoverably with
+  `UNSUPPORTED`.
+  - `generator` — `{generatorId, generatorVersion, params}`. Table-driven per
+    thread size as of WP-2.1 (spec §6).
+  - `embedded` / `document` — a BAKED solid, carried as a content-addressed
+    blob in the placing document's own `imports/` section:
+    `{sha256, codec, brepFormat}`, plus `documentSha256` (the frozen authoring
+    document, provenance only) on `document`. The bytes reach the worker as a
+    **wire-only, NON-hashed `source.path`** Rust injects from its materialized
+    blob — the same mechanism, and the same "an unmaterialized blob lowers an
+    EMPTY path so only THAT step fails" rule, as `ImportStep` (§7.3). `codec` /
+    `brepFormat` carry the identical meaning and the identical
+    version-pin refusal.
+  - The two blob kinds are read by the SAME reader and differ only in the
+    record's provenance fields; both must resolve to **exactly one solid**
+    (spec §9), and a blob carrying more is refused rather than reduced.
 - `mate` is optional; absent ⇒ dropped in free space, positioned by
   `placement` alone. When present, `target` is a full semantic ref so the
   resolution ladder can re-resolve it after upstream edits — this is what
@@ -2450,6 +2459,44 @@ delete its bodies on the next regen; see the changelog.)
 - The probe honors cancel; a malformed file is an `OP_FAILED`-class error
   response (recoverable), never `PROTOCOL_ERROR`.
 
+#### ExportGeometry
+
+Bakes live bodies into one of the **§7.3 replay codecs** — the byte forms
+`ImportStep.sourceCodec` reads back — at a Rust-provided temp path.
+
+```json
+// req.args
+{ "path": "/tmp/onecad/bake_ef56.brep", "bodyIds": ["body_3"], "codec": "brep" }
+// result
+{ "written": true, "bytes": 91234, "codec": "brep", "format": 4, "solidCount": 1 }
+```
+
+- The inverse of `InspectStep`'s conversion lane: that one converts a FOREIGN
+  STEP file into the replay form, this one converts geometry ALREADY IN THE
+  SESSION. It exists because a Component Library `embedded` / `document` source
+  (spec §2.1) is a baked solid cached in the placing document, and "Save as
+  Component" has to produce that solid from what the user modelled.
+- `codec` ∈ `"brep"` | `"xbf"`, **required — there is no default**: the caller
+  pins the value it will record as `sourceCodec`, so the worker must never
+  silently pick a different byte form than the record claims. `xbf` additionally
+  carries per-face colors (`brep` does not — the same asymmetry that moved the
+  STEP conversion lane to `xbf`, see 2026-08-02 below).
+- `format` echoes the binary format version actually written (BinTools `4` /
+  OCAF `12`), so a record's `brepFormat` pin is never hardcoded Rust-side.
+- A published body is SOLID-LIKE, not necessarily a bare `TopAbs_SOLID`
+  (`single_solid_policy` admits a compound wrapper), so each body is flattened
+  to the solids it contains and `solidCount` reports the total written. A body
+  containing NO solid is a recoverable `OP_FAILED` naming the body — both replay
+  readers reject a non-solid, and refusing here reports it where it can still be
+  acted on rather than at the far end of a save/reopen.
+- `xbf` carries face colors only for a body that flattens to exactly one solid
+  (what a component is, spec §9). A multi-solid body's colors are indexed by the
+  body's own face map and would need a `ModifiedShape` remap to re-index per
+  solid; they are dropped rather than misapplied.
+- `bodyIds` is **required and non-empty** (unlike `ExportStep`'s "all" default) —
+  a bake is always about a chosen body, and "everything in the session" is never
+  a meaningful component.
+
 #### ExportStep
 
 ```json
@@ -2787,6 +2834,27 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-13 — §7.8 NEW verb `ExportGeometry`; §7.3 `PlaceComponent` /
+  `DetachComponent` source kinds `embedded` + `document` IMPLEMENTED**
+  (Component Library WP-3.2, spec §2.1/§4/§9, single-repo, both tracks land
+  together). Additive on both counts — no existing document changes shape, and
+  a `generator` source lowers byte-identically to before.
+  - `ExportGeometry` is the missing inverse of `InspectStep`'s conversion lane:
+    it bakes a body ALREADY IN THE SESSION into a §7.3 replay codec at a
+    Rust-provided temp path. `GetBodies` (§7.6) is specified for BREP-out but
+    has never been implemented, and its bulk-stream shape is heavier than the
+    file hop every other §7.8 export already does; a component bake is a
+    once-per-authoring operation, not a streaming one. The response echoes
+    `codec`/`format` so a record's `brepFormat` pin is the version the worker
+    actually wrote, never a Rust-side constant.
+  - `embedded`/`document` were declared in this section from WP-0.2 but refused
+    at the worker. They now resolve through the same readers `ImportStep` uses,
+    from a wire-only `source.path`. The alternative — resolving a `document`
+    component by REPLAYING its frozen `.onecad` at regen — was rejected: the
+    worker is one-session-per-process, so a nested replay needs a second worker
+    process AND the library folder still present at every regen, and spec §4
+    requires a placed component to render with the library deleted. Baking at
+    authoring keeps the geometry in the document, where the invariant needs it.
 - **2026-08-13 — §7.2 ADDITIVE `planStep.matePlacement`; §7.3 `PlaceComponent`
   CORRECTIVE `inputs[]` — `mate.target` REMOVED** (Component Library P3
   WP-3.1, spec §5.5, single-repo, both tracks land together). The prior

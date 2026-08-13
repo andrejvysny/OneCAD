@@ -49,19 +49,67 @@ fn default_unit() -> String {
 }
 
 /// `[source]` — exactly one of `embedded` | `generator` | `document` (spec §2.1).
+///
+/// **WP-3.2 widened the two blob-backed kinds.** Spec §2.1's comment lines name
+/// only `blob` / `file`, which is not enough to READ the bytes back: the worker's
+/// replay readers need to know which byte form they are (`step` text vs. BinTools
+/// `brep` vs. BinXCAF `xbf`) and, for the two binary forms, the format version
+/// they were written in — a record pinned to a version the worker does not write
+/// must fail loudly rather than be silently misparsed (SCHEMA §7.3
+/// `ImportStep.brepFormat`). So both kinds carry `codec` + `format`, and
+/// `document` additionally carries the baked-geometry pointer.
+///
+/// A `document` package's geometry is **baked at authoring**, not replayed at
+/// placement: replaying a nested document needs a second worker session (the
+/// worker is one-session-per-process) and the library folder to still exist,
+/// and spec §4 requires a placed component to render with the library deleted.
+/// A `document` package with no baked geometry is refused, loudly, by
+/// [`resolve`](crate::resolve::resolve) — never silently replayed, never
+/// substituted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum SourceSpec {
     Embedded {
+        /// Blob-store key. Accepts a bare 64-hex digest or spec §2.1's
+        /// `"sha256:<hex>"` spelling.
         blob: String,
+        /// Byte form of `blob` (`step` | `brep` | `xbf`). Defaults to `step`,
+        /// matching spec §2.1's "a STEP/BREP payload" wording where a plain
+        /// STEP file is the unadorned case.
+        #[serde(default = "default_blob_codec")]
+        codec: String,
+        /// Binary format version — REQUIRED for `brep` / `xbf`, meaningless for
+        /// `step`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<u32>,
     },
     Generator {
         generator: String,
         generator_version: u32,
     },
     Document {
+        /// The frozen `.onecad` inside the package directory — identity,
+        /// provenance, and the input a future re-bake (parameter overrides)
+        /// would replay. Never read on the placement path.
         file: String,
+        /// Blob-store key of the solid baked from `file` at authoring time.
+        /// This is what a placement actually resolves to.
+        geometry: String,
+        #[serde(default = "default_document_geometry_codec")]
+        geometry_codec: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geometry_format: Option<u32>,
     },
+}
+
+fn default_blob_codec() -> String {
+    "step".to_string()
+}
+
+fn default_document_geometry_codec() -> String {
+    // A bake comes out of the worker's own ExportGeometry lane, whose
+    // attribute-preserving form is xbf (SCHEMA §7.8).
+    "xbf".to_string()
 }
 
 /// A `[parameters].<key>` entry. Fields are role-dependent (spec §2.1); kept as

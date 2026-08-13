@@ -40,6 +40,7 @@ import type {
   OffsetFaceParams,
   OperationOp,
   PlaceComponentParams,
+  PlaceComponentSource,
   RevolveParams,
   Rgba,
   SemanticRef,
@@ -249,7 +250,8 @@ interface WirePlaceComponentParams {
   componentVersion: string;
   componentRevision: string;
   params: Record<string, never>;
-  source: { kind: "generator"; generatorId: string; generatorVersion: number };
+  /** Mirrors Rust `ComponentSourceRef` (SCHEMA §7.3), all three spec §2.1 kinds. */
+  source: PlaceComponentSource;
   placement: { translate: [WireScalar, WireScalar, WireScalar]; rotate: { center: WireVec3; axis: WireVec3; angleDeg: WireScalar } };
 }
 
@@ -655,11 +657,10 @@ function placeComponentParams(p: PlaceComponentParams): WirePlaceComponentParams
     componentVersion: p.componentVersion,
     componentRevision: p.componentRevision,
     params: {},
-    source: {
-      kind: "generator",
-      generatorId: p.generatorId,
-      generatorVersion: p.generatorVersion,
-    },
+    // Carried through, never rebuilt: the source was resolved by the backend
+    // (`resolveComponentSource`) and any local reconstruction here could
+    // disagree with what a commit resolves (WP-3.2).
+    source: p.source,
     placement: {
       translate: [scalar(p.translate[0]), scalar(p.translate[1]), scalar(p.translate[2])],
       rotate: {

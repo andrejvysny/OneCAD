@@ -1,5 +1,99 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY P3 WP-3.2 (2026-08-13) — GATE PASSED
+
+Blob-backed component geometry: the `embedded` **and** `document` source kinds
+(spec §2.1), plus the `ExportGeometry` verb that bakes what they carry.
+
+**What the scoping pass found, and why this WP is bigger than "add the document
+kind":** `ComponentSourceRef` had no `Document` variant at all, and `embedded`
+had never shipped either — `resolve.rs` returned `MalformedPackage "lands in
+WP-1.2"` and `ComponentOp.cpp` refused every kind but `generator`, despite spec
+§10's P1 line ("`embedded` source kind only"). So the spec §12 differentiator —
+"reopen with the library folder deleted and still see the part" — had **no
+automated proof for anything but a generator**, which re-runs from params and
+never needed cached geometry. Both kinds reduce to one mechanism (a baked solid,
+content-addressed, cached in the user's own document), so they landed together on
+one lane.
+
+**The architecture fork, decided with the user before implementation:** a
+`document` package carries `source.onecad` (identity/provenance/future re-edit)
+**plus a baked geometry blob**; placement copies the blob and nothing ever
+replays a frozen document. The spec-literal alternative (replay `source.onecad`
+at place time) was rejected on two hard facts checked in the code, not assumed:
+the worker is **one session per process** (`Session.h:3`, `WorkerManager` owns
+one child), so a nested replay needs a SECOND worker process; and spec §4
+requires a placed component to render with the library deleted, so the geometry
+has to live in the document regardless. Baking at authoring puts it there once.
+The record shape leaves room for a re-bake lane (`documentSha256` is recorded and
+currently unread — deliberately, it is the key that lane needs).
+
+**Reused, not rebuilt** — a component's cached solid is an import source in every
+respect that matters, so it rides `io::imports` verbatim: same content-addressed
+section, same `ImportWorkspace` materialization + process-global sha→path
+registry, same wire-only non-hashed path injection, same worker-side
+`read_brep_solids`/`read_xcaf_solids`/`read_step` readers and the same
+`brepFormat` version-pin refusal.
+
+**Worker:** new `io/ExportGeometry.{h,cpp}` (§7.8) — the inverse of
+`InspectStep`'s conversion lane, baking a body already in the session into a
+replay codec at a Rust temp path, echoing `codec`/`format` so no pin is
+hardcoded Rust-side. `ComponentOp.cpp::read_source_blob` is the shared arm for
+both blob kinds (they differ only in the record's provenance fields), enforcing
+**exactly one solid** (spec §9) and falling through to the existing
+placement + WP-3.1 mate-reseat tail, so a baked component gets persistent mates
+for free.
+
+**Two things found by running it, not by inspection:**
+1. `ExportGeometry`'s first cut required a bare `TopAbs_SOLID` and refused the
+   very first real body it was pointed at. A published body is **solid-LIKE**
+   (`single_solid_policy` admits a compound wrapper, and a fused feature
+   routinely produces one) — it now flattens to the contained solids and refuses
+   only a body with none. Caught by the real-worker integration test; the
+   worker-only ctest would not have, because it never bakes a body a real op
+   published.
+2. `xbf` face colors are indexed by the BODY's face map, which only coincides
+   with the solid's when the body flattens to one. Multi-solid bodies drop
+   colors rather than misapply them (the `ModifiedShape` remap
+   `ImportOp::scale_solids` does would be needed to do it properly).
+
+**Rust:** `ComponentSourceRef::Document` + `Embedded.brep_format`, with a shared
+`blob_ref()` accessor so the two places that must never miss a kind (wire
+lowering, save-time refcount) walk ONE thing. `referenced_import_shas` gained
+`PlaceComponent`/`DetachComponent` arms — **load-bearing**: without it the baked
+blob is dropped at the first save and the document reopens with a component whose
+geometry no longer exists. `DocumentRuntime::stage_component_blob` mirrors
+`add_import_record`'s "stage before authoring" discipline (and re-verifies the
+digest, so a mis-keyed blob never enters the carrier). `library.rs` resolves all
+three kinds, stages under the SAME lock as the edit, and refuses a `document`
+package with no bake — loudly, naming it — rather than silently replaying it.
+`set_component_params` on a baked source is refused with the reason.
+
+**Package format (documented deviation from spec §2.1's comment lines):** both
+blob kinds gained `codec` + `format` (a reader cannot know the byte form or the
+version pin otherwise), and `document` gained the `geometry` pointer. Spec §2.1
+names only `blob` / `file`.
+
+**Frontend — a real defect, fixed:** `placementDraftParams` +
+`placeComponentParams` hardcoded a generator source, so arming ANY non-generator
+component previewed the generator stub's M6 screw and committed something else.
+New `resolveComponentSource` command (library-owned, like list/reindex) resolves
+the real source AND stages its bytes at ARM time — the ghost previews through the
+same wire path a commit takes, so it must be materialized before the first
+preview, not at commit.
+
+GATE: worker ctest **118/118** (117 baseline + `component_blob_source`: export→
+place round trip on both codecs, 2-solid refusal, wrong/absent format pin,
+unmaterialized blob, unknown codec/kind; two WP-0.2 ctests updated from
+"embedded is UNSUPPORTED" to the shipped behavior) · `cargo fmt`/`clippy -D
+warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **100% green**
+(new: `a_baked_component_survives_save_and_reopen_with_no_library` — the spec §12
+claim, automated for the first time; blob-less component fails only its own step;
+`referenced_import_shas` pinning; `blob_ref` coverage; validator + camelCase
+pins; wire `source.path` injection incl. the empty-path rule; four `library.rs`
+command tests) · `bunx tsc --noEmit` clean · vitest **245 files / 4162** ·
+Playwright **404/404**.
+
 ## COMPONENT-LIBRARY P3 WP-3.1 (2026-08-13) — GATE PASSED
 
 Persistent mate re-seating on regen (spec §5.5) — P3's first WP, chosen

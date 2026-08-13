@@ -21,6 +21,7 @@ import type {
   DocumentSnapshot,
   ElementInfo,
   LibraryComponent,
+  PlaceComponentSource,
   MassProperties,
   EnterSketchTarget,
   FeatureDependencies,
@@ -2398,6 +2399,30 @@ export const mockClient: CadClient = {
     return mockLibraryEnabled()
       ? { total: 1, indexed: 1, skipped: [] }
       : { total: 0, indexed: 0, skipped: [] };
+  },
+
+  async resolveComponentSource(
+    componentId: string,
+    componentVersion: string,
+  ): Promise<PlaceComponentSource> {
+    await wait(MESH_LATENCY_MS);
+    if (
+      componentId !== MOCK_LIBRARY_FIXTURE.id ||
+      componentVersion !== MOCK_LIBRARY_FIXTURE.version
+    ) {
+      throw new Error(
+        `resolveComponentSource: unknown component ${componentId}@${componentVersion} — the mock lane only knows the ?mocklibrary=1 fixture`,
+      );
+    }
+    // The fixture is a `generator` component, so there is nothing to stage —
+    // which is the honest mock answer, not a shortcut: staging is a real
+    // document-carrier + worker-workspace write that has no meaning in a lane
+    // with neither. A blob-backed fixture would have to fake both.
+    return {
+      kind: "generator",
+      generatorId: MOCK_LIBRARY_FIXTURE.generatorId ?? MOCK_LIBRARY_FIXTURE.id,
+      generatorVersion: MOCK_LIBRARY_FIXTURE.generatorVersion ?? 1,
+    };
   },
 
   async placeComponent(

@@ -390,6 +390,7 @@ pub fn run() {
             api::classify_element,
             library::list_library_components,
             library::reindex_library,
+            library::resolve_component_source,
             library::place_component,
             library::set_component_params,
             library::detach_component,

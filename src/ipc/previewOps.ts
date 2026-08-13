@@ -53,6 +53,7 @@ import type {
   OperationOp,
   OpType,
   PlaceComponentParams,
+  PlaceComponentSource,
   PreviewParams,
   RevolveParams,
   SemanticRef,
@@ -531,9 +532,12 @@ function booleanOp(s: PreviewSessionState): OperationOp {
  * Mirrors the candidate transform `placementController.ts` computes
  * (`placementSolver.ts`) — NOT a commit-site builder (there is no commit
  * call-site for this op-type; see {@link OperationOp}'s `PlaceComponent` doc).
- * `generatorId`/`generatorVersion` are required non-empty because the worker's
- * `ComponentOp` resolver requires them present, even though v1's generator
- * stub ignores their value.
+ *
+ * `source` is the backend's own resolution (`CadClient.resolveComponentSource`),
+ * carried through verbatim. WP-3.2 replaced a hardcoded generator source here:
+ * a blob-backed component previewed as the generator stub's screw and committed
+ * something else, and a ghost that disagrees with its own commit is worse than
+ * no ghost.
  */
 function placeComponentOp(s: PreviewSessionState): OperationOp {
   const componentId = nonEmptyString(s.latestParams.componentId);
@@ -542,12 +546,7 @@ function placeComponentOp(s: PreviewSessionState): OperationOp {
   if (!componentVersion) throw new Error("PlaceComponent requires componentVersion");
   const componentRevision = nonEmptyString(s.latestParams.componentRevision);
   if (!componentRevision) throw new Error("PlaceComponent requires componentRevision");
-  const generatorId = nonEmptyString(s.latestParams.generatorId);
-  if (!generatorId) throw new Error("PlaceComponent requires generatorId");
-  const generatorVersion = Number(s.latestParams.generatorVersion);
-  if (!Number.isFinite(generatorVersion)) {
-    throw new Error("PlaceComponent generatorVersion must be finite");
-  }
+  const source = placeComponentSource(s.latestParams.source);
   const translate = s.latestParams.translate;
   if (
     !Array.isArray(translate) ||
@@ -566,12 +565,51 @@ function placeComponentOp(s: PreviewSessionState): OperationOp {
     componentId,
     componentVersion,
     componentRevision,
-    generatorId,
-    generatorVersion,
+    source,
     translate: translate as [number, number, number],
     rotate,
   };
   return { opType: "PlaceComponent", opId: s.opId, params };
+}
+
+/**
+ * Validates the draft's `source` without reinterpreting it: every field the
+ * worker reads must be present and of the right shape, but nothing is defaulted
+ * or substituted — an under-specified source must fail at the arm, where the
+ * component is named, rather than silently previewing something else.
+ */
+function placeComponentSource(raw: unknown): PlaceComponentSource {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("PlaceComponent requires a source");
+  }
+  const s = raw as Record<string, unknown>;
+  const kind = nonEmptyString(s.kind);
+  if (kind === "generator") {
+    const generatorId = nonEmptyString(s.generatorId);
+    if (!generatorId) throw new Error("PlaceComponent generator source requires generatorId");
+    const generatorVersion = Number(s.generatorVersion);
+    if (!Number.isFinite(generatorVersion)) {
+      throw new Error("PlaceComponent generatorVersion must be finite");
+    }
+    return { kind: "generator", generatorId, generatorVersion };
+  }
+  if (kind === "embedded" || kind === "document") {
+    const sha256 = nonEmptyString(s.sha256);
+    if (!sha256) throw new Error(`PlaceComponent ${kind} source requires sha256`);
+    const codec = nonEmptyString(s.codec);
+    if (!codec) throw new Error(`PlaceComponent ${kind} source requires codec`);
+    const brepFormat = s.brepFormat === undefined ? undefined : Number(s.brepFormat);
+    if (brepFormat !== undefined && !Number.isFinite(brepFormat)) {
+      throw new Error("PlaceComponent brepFormat must be finite");
+    }
+    if (kind === "embedded") return { kind, sha256, codec, brepFormat };
+    const documentSha256 = nonEmptyString(s.documentSha256);
+    if (!documentSha256) {
+      throw new Error("PlaceComponent document source requires documentSha256");
+    }
+    return { kind, documentSha256, sha256, codec, brepFormat };
+  }
+  throw new Error(`PlaceComponent source.kind ${String(s.kind)} is unknown`);
 }
 
 /**

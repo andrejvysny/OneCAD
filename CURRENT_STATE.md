@@ -1,3 +1,50 @@
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 15, P3 WP-3.2)
+
+Last verified 2026-08-13 12:15. Branch `OneCAD-Component-Library`, **dirty** —
+the whole WP is uncommitted on top of WP-3.1 (`81f535a`). 29 modified files +
+3 new (`worker/src/io/ExportGeometry.{h,cpp}`,
+`worker/tests/test_component_blob_source.cpp`). This session:
+the `embedded` + `document` component source kinds (spec §2.1) on one shared
+blob lane, plus the `ExportGeometry` verb that bakes what they carry.
+
+Scoping found `embedded` had never shipped either (resolve + worker both refused
+it despite spec §10's P1 line), so the spec §12 differentiator — reopen with the
+library deleted and still see the part — had no automated proof for anything but
+a generator. Both kinds land together, and that claim is now a real-worker test.
+
+Decided before implementing: a `document` package carries `source.onecad` PLUS a
+baked geometry blob; placement copies the blob and nothing replays a frozen
+document. Replay would need a SECOND worker process (one session per process)
+and the library present at every regen — which spec §4 rules out anyway.
+
+Worker: `io/ExportGeometry.{h,cpp}` (§7.8, the inverse of InspectStep's
+conversion lane) + `ComponentOp.cpp::read_source_blob`, one arm shared by both
+blob kinds, exactly-one-solid enforced, falling through to WP-3.1's mate reseat.
+
+Rust: `ComponentSourceRef::Document` + `Embedded.brep_format` behind a shared
+`blob_ref()`; `referenced_import_shas` now pins component blobs (without it the
+blob is dropped at the first save); `DocumentRuntime::stage_component_blob`;
+`library.rs` resolves + stages all three kinds under the edit's own lock.
+
+Frontend: `resolveComponentSource` (new command) resolves the REAL source and
+stages its bytes at arm time — the ghost lane previously hardcoded a generator
+source, so a blob-backed component previewed the M6 screw and committed
+something else.
+
+Two defects found by running it: `ExportGeometry` first required a bare
+`TopAbs_SOLID` and refused the first real body (published bodies are solid-LIKE
+— a compound wrapper is legal), and `xbf` face colors can only be carried for a
+body that flattens to one solid.
+
+Gate (all four suites RUN this session, none inferred): worker ctest 118/118 ·
+fmt/clippy clean · `cargo test --workspace` 100% green · tsc clean · vitest 245
+files / 4162 · Playwright 404/404 (21.5 min) · hex gate empty.
+
+Blockers: none. One flake seen and dismissed: `ModelToolController.wave2.test.ts`
+> "editExtrudeFeature while already armed…" failed once in a full-suite run and
+passed 18/18 in isolation — its own comment already documents that flake, and it
+was green in the final full run.
+
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 14, P3 WP-3.1)
 
 Branch `OneCAD-Component-Library` (worktree), on top of the WP-2.6 commit

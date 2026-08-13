@@ -30,6 +30,7 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  PlaceComponentSource,
   ReindexReport,
   PreviewDraft,
   PreviewParams,
@@ -401,6 +402,26 @@ export interface CadClient {
 
   /** Rebuilds the library index from packages on disk (spec §4 `reindex`). */
   reindexLibrary(): Promise<ReindexReport>;
+
+  /**
+   * Resolves a component's geometry `source` for the placement GHOST, staging
+   * its baked bytes into the open document on the way (Component Library
+   * WP-3.2). Authors nothing.
+   *
+   * Call this when ARMING a placement, and put the result in the draft params:
+   * the ghost previews through a candidate `PlaceComponent` op that lowers its
+   * `source` exactly as a committed record does, so a blob-backed component
+   * (`embedded` / `document`) needs its bytes materialized for the worker
+   * BEFORE the first preview, and the preview must carry the real source rather
+   * than a hardcoded generator one.
+   *
+   * Idempotent. A `generator` component stages nothing but still answers, so
+   * there is exactly one arming path.
+   */
+  resolveComponentSource(
+    componentId: string,
+    componentVersion: string,
+  ): Promise<PlaceComponentSource>;
 
   /**
    * Instantiates a library component as a placed instance (spec §3.1
