@@ -1,6 +1,27 @@
 # Current State
 
-Last verified: 2026-08-13 — modeling-correctness hardening worktree, no commit
+Last verified: 2026-08-13 23:10 — ladder run, tranche committed, MC-R7 closed on both browser lanes
+
+- **Branch:** `master`, 2 commits ahead of `origin/master` (`cf6273d` code +
+  `dc4bd5e` docs), **dirty** (the MC-R7 fix + these doc updates). Nothing pushed.
+- **MC-R7 CLOSED.** Commit `c7df7c8` removed the click-away commit on purpose (D2)
+  and the frozen contract pins `clickAwayPolicy: "cancel"`; the e2e spec and the
+  arm hint text were never updated, so both were asserting/promising a gesture that
+  no longer exists. `e2e/extrude-commit-gesture.spec.ts` now asserts click-away does
+  NOT commit and leaves the tool armed;
+  `src/tools/modelTools/ModelToolController.ts` `armHintFor` no longer promises it.
+- **Browser lanes, retries 0, measured 2026-08-13:** chromium **200/200** (rerun),
+  webkit **200/200**. The first chromium run of the pair was 199/1 on
+  `e2e/boolean-preview.spec.ts:356` (Intersect chip): `previewOwner` never became
+  `"boolean"` inside the 20 s lane poll, so the boolean lane never opened. That spec
+  is 9/9 in isolation with `--repeat-each=3` and 200/200 on the immediate full rerun,
+  and the signature matches the boolean-preview projection-push race already bisected
+  to before the Platform refactor. Recorded as **MC-R8**, unclassified
+  nondeterminism — do not add a retry to hide it.
+- **Use `E2E_PORT`** for any lane run: a concurrent session in
+  `OneCAD-Component-Library` holds 4177, and a stray node process was found holding
+  4187. The runs above used 4191 / 4193.
+- **Blockers:** none.
 
 - **Baseline:** `master` at `9933689`, one commit ahead of `origin/master`; no commit/push/pull
   authorized. All status below distinguishes implementation from gates.
@@ -18,15 +39,16 @@ Last verified: 2026-08-13 — modeling-correctness hardening worktree, no commit
   `npx tsc --noEmit` 0 · `bun run build` clean · Vitest **250 files / 4182 tests** ·
   coverage + contract verifiers pass, negative controls **15/15** · hex gate empty ·
   kernelbench T0 both backends **136/136**, 0 regressions, semantics baseline unmoved ·
-  Playwright retries 0 **chromium 199/1**, **webkit 199/1**.
+  Playwright retries 0 **chromium 199/1**, **webkit 199/1** — both single failures were MC-R7,
+  now fixed and re-measured at **chromium 200/200 · webkit 200/200** (see the top block).
 - **Three defects the ladder caught (fixed this session):** the worker stub emitted an `autoBind`
   ResolveRefs resolution with no `bodyId`, which SCHEMA §7.5 allows only on a non-promotable
   missing-body `needsRepair`; `topology_rebind` fed a real V3 region id into a version-less
   profile and the worker correctly refused it; `src-tauri/src/tauri_e2e.rs` had never been
   compiled and did not (E0597 in `composition_status`).
-- **Known pre-existing failure (predates this work, reproduced at `9933689`):** e2e click-away
-  extrude commit, both browsers, deterministic. Residual MC-R7. The browser gate is 199/200 per
-  lane — do not read it as green.
+- **Former pre-existing failure, now CLOSED:** e2e click-away extrude commit, both browsers,
+  deterministic, reproduced at `9933689`. Residual MC-R7 — it was stale evidence, not a product
+  defect; the spec and the arm hint were fixed and both lanes now run 200/200.
 - **Open:** P2 measured ceilings/performance; P3 full semantic/overhead closure and Pattern budget;
   real-Tauri/WDIO composition run (compiles, never executed); Chamfer and Boolean campaign breadth;
   kernelbench m1; Linux/macOS/Windows aggregate release enforcement and 20-run stability sample.

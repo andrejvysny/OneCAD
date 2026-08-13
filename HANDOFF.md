@@ -1,12 +1,158 @@
 # Handoff — Finishing the modeling-correctness roadmap
 
-Session 5 · 2026-08-13
+Session 7 · 2026-08-13
 
-> **THREE THREADS IN THIS FILE.** Session 5 (this one, immediately below) is the
-> live one: completing `OneCAD-modeling-correctness-roadmap/`. Session 4 and
-> Session 3 follow, unchanged, as history for the Platform refactor and the
-> Advanced-Fillet program. Read Session 5 to pick up; the others only if you touch
+> **FIVE THREADS IN THIS FILE.** Session 6 is immediately below — it ran the
+> mandated gate ladder over Session 5's uncommitted work and committed it — and
+> Session 7 (the live one) sits inside it, at § "Session 7 — the two lanes": it ran
+> both full browser lanes, closed MC-R7 and opened MC-R8. Read those two first.
+> Session 5 follows with the roadmap plan and its decisions — read it
+> next, it still governs what "done" means. Sessions 4 and 3 are history for the
+> Platform refactor and the Advanced-Fillet program; read them only if you touch
 > those areas.
+
+## Session 6 — ran the ladder, committed the tranche
+
+### What this session was
+
+A Codex run (`019ffbc3-dde5-7aa1-b19f-02b6ce8987de`) implemented Session 5's
+completion plan, then died on usage limits **mid `cargo test --workspace`** with
+102 dirty paths and nothing committed. This session analyzed that rollout, ran the
+full gate ladder, fixed what it turned red, and committed.
+
+Scope was set with the user up front: **stabilize + verify only** (no new plan
+features), **commit at a green gate** (no push).
+
+### Landed (two commits on `master`, unpushed)
+
+- `cf6273d feat(modeling): harden plan-stream, worker lockstep, identity V3, publication evidence`
+- `dc4bd5e docs: reconcile state, TODO, roadmap delta, risk register, residual register`
+
+The code is deliberately ONE commit: the Rust/C++/protocol changes are mutually
+dependent and a finer split would have put non-building intermediates on master.
+That reasoning is in the commit body.
+
+### Gate ladder — measured, not claimed (2026-08-13, local mac, unsandboxed)
+
+| Gate | Result |
+| --- | --- |
+| worker Release build + restaged sidecar/manifest, `ctest` | 119/119 |
+| `cargo fmt --all --check`, `clippy --workspace --all-targets -D warnings` | clean |
+| `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` | **767/767 over 60 targets** |
+| corpus | 9 of 9 executed, zero skips |
+| `cargo check --features tauri-e2e` | clean (first compile that code ever got) |
+| `npx tsc --noEmit` · `bun run build` · `bun run test` | 0 · clean · 250 files / 4182 tests |
+| coverage + contract verifiers, negative controls, hex gate | pass · 15/15 · empty |
+| kernelbench `fillet/foundation:t0` both backends + `semantic-compare` | 136/136, 0 regressions, baseline unmoved |
+| Playwright retries 0 | chromium 199 passed / 1 failed · webkit 199 passed / 1 failed |
+
+### Three defects the ladder caught (fixed, in `cf6273d`)
+
+1. **Worker stub violated SCHEMA §7.5.** It emitted an `autoBind` ResolveRefs
+   resolution with no `bodyId`. Omitting `bodyId` is legal only on a
+   non-promotable missing-body `needsRepair` with no candidates — which is exactly
+   what the real worker returns for a bodyless ref (`ElementIdentity.cpp`
+   `missing_body_resolution`). The stub now mirrors that branch; `solver_stub` pins
+   both branches instead of the one contract-violating shape.
+2. **`topology_rebind` fed a real V3 region id into a version-less profile.** The
+   worker correctly refused (`regionId 'r_…' matched no selectable region`). Same
+   fixture class Codex was mid-fixing when it died; now carries
+   `region_identity_version: (!region.is_empty()).then_some(3)`, matching
+   `revolve_ops` / `m2_gate` / `wire_contract` / `step_import_gate`.
+3. **`src-tauri/src/tauri_e2e.rs` had never been compiled and did not** — E0597
+   borrow error in `composition_status`. Codex's sandbox could not download the
+   WDIO crates, so the whole `tauri-e2e` feature was unverified source.
+
+### The one browser failure, and what it actually was
+
+`e2e/extrude-commit-gesture.spec.ts:135` "click-away commits" failed
+deterministically (3/3) on **both** browsers — and identically on a clean worktree
+at baseline `9933689`, so it predates the modeling work. Root cause found by
+reading history, not by guessing:
+
+**commit `c7df7c8` — "D2: click-away commit removed entirely (spec choice)"**. The
+frozen contract `src/test/contracts/modelingInteractionContract.ts` pins
+`clickAwayPolicy: "cancel"` for every tool, and
+`ModelToolController.commit.test.ts` has a vitest test asserting click-away must
+NOT commit. `c7df7c8` shipped on vitest/tsc/build gates without the e2e lane, so
+two stale artifacts survived it: this e2e spec, and the arm hint text still
+promising "click away to confirm".
+
+So this is **not** a product bug — production is right, the spec and the hint were
+lying. Enter and the chip ✓ remain the only commit gestures.
+
+### MC-R7 — closed (see the Session 7 block below)
+
+Two files, both the MC-R7 correction:
+
+- `e2e/extrude-commit-gesture.spec.ts` — the test now asserts click-away does NOT
+  commit and leaves the tool armed, matching the frozen contract.
+- `src/tools/modelTools/ModelToolController.ts` — `armHintFor` no longer promises
+  "click away to confirm" / "click away to revolve".
+
+Verified: that spec file on chromium **5/5**, `npx tsc --noEmit` 0, `bun run test`
+**4182/4182**, then both full lanes with retries 0 — **webkit 200/200**,
+**chromium 200/200**.
+
+## Session 7 — the two lanes, and the one thing they turned up
+
+Session 7 · 2026-08-13
+
+The lanes ran on `E2E_PORT=4191` and `4193`. Check the port before quoting any lane
+result: 4177 is held by the concurrent `OneCAD-Component-Library` session, and 4187
+turned out to be held by a stray node process. A collision surfaces as
+`ERR_CONNECTION_REFUSED`, which reads exactly like a product failure.
+
+`e2e/extrude-commit-gesture.spec.ts` passes on both lanes, so **MC-R7 is closed as
+stale evidence, not a product defect** — the spec and the arm hint were wrong, the
+production behavior was right all along.
+
+### MC-R8 — new, recorded, deliberately not fixed
+
+The FIRST chromium run came back 199/1, on `e2e/boolean-preview.spec.ts:356`
+(Intersect chip). The 20 s poll on `previewOwner === "boolean"` timed out at `null`,
+so the boolean lane never opened. That spec is **9/9 in isolation** with
+`--repeat-each=3`, and the immediate full rerun was **200/200**. The signature
+matches the boolean-preview projection-push race already bisected to before the
+Platform refactor: the region click lands ahead of the sketch-visibility commit's
+projection push.
+
+So the browser gate is green **as measured** but not yet **reproducibly** green.
+The one move that must not happen here is adding a Playwright retry — a retry is
+what let the auto-fit regression look green once already (Session 3, M0.4).
+
+### How to resume
+
+1. **Nothing is committed.** The MC-R7 fix (two files) plus the doc updates
+   (`CURRENT_STATE.md`, `TODO.md`, `HANDOFF.md`,
+   `docs/qa/modeling-residuals-v1.json`) are all in the working tree. Suggested
+   subject: `fix(e2e): the click-away spec asserted a gesture D2 removed`. No push
+   was requested; `master` is 2 commits ahead of `origin/master` already.
+2. Then either root-cause MC-R8, or move on to the still-unrun gates below — MC-R8
+   blocks a "reproducibly green" claim, not the work.
+
+### Still unrun on any machine (unchanged from Session 5, do not claim these)
+
+Real-Tauri WDIO composition (compiles now, never executed), kernelbench m1,
+Linux/Windows release matrix, 20-run stability sample, P2 measured
+ceilings/performance, P3 semantic + overhead closure and Pattern budget, Chamfer
+and Boolean campaign breadth.
+
+### Environment notes worth carrying
+
+- `ONECAD_OCCT_ROOT=/Users/andrejvysny/.onecad-occt/8.0.1` (read from
+  `worker/build/CMakeCache.txt`).
+- `scripts/build-worker.sh` regenerates BOTH the staged sidecar and
+  `src-tauri/binaries/onecad-worker-manifest.json`. Skipping the restage makes
+  manager tests fail on a hash mismatch that looks like a real defect.
+- Kernelbench needs absolute paths: a relative `--out-dir` resolves against the
+  process cwd and silently writes outside the repo.
+
+---
+
+## Session 5 — the roadmap plan (still governs "done")
+
+Session 5 · 2026-08-13
 
 ## Goal
 

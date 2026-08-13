@@ -1787,9 +1787,12 @@ export class ModelToolController {
         this.extrude.booleanAuto && hasMaterial(this.extrude.sides)
           ? " · one way adds material, the other cuts"
           : "";
-      return `${head}${rule} · Enter, ✓, or click away to confirm`;
+      // No "click away" here: D2 removed the click-away commit entirely and the
+      // frozen interaction contract pins `clickAwayPolicy: "cancel"`. A hint that
+      // still promised it was telling the user about a gesture that does nothing.
+      return `${head}${rule} · Enter or ✓ to confirm`;
     }
-    return "Drag to set angle · Enter, ✓, or click away to revolve";
+    return "Drag to set angle · Enter or ✓ to revolve";
   }
 
   /** A body pick during targetPick (extrude): probe → adopt as the boolean target. */

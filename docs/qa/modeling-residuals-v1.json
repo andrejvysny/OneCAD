@@ -54,13 +54,23 @@
     },
     {
       "id": "MC-R7",
-      "category": "browser-lane-defect",
-      "impact": "Click-away no longer commits an armed extrude in the mock browser lane; the tool stays armed and mints no body.",
-      "affectedVersions": "predates the modeling-correctness work; reproduced on clean baseline 9933689",
-      "reproduction": "bunx playwright test --project=chromium e2e/extrude-commit-gesture.spec.ts -g 'click-away' (fails 3/3 with --repeat-each=3; same on webkit)",
+      "category": "stale-evidence",
+      "impact": "CLOSED 2026-08-13. Never a product defect: commit c7df7c8 removed the click-away commit deliberately (D2) and the frozen interaction contract pins clickAwayPolicy 'cancel', but the e2e spec and the extrude/revolve arm hint text kept asserting and promising the removed gesture, because c7df7c8 shipped on the vitest/tsc/build gates without the browser lane. The spec now asserts click-away does NOT commit and leaves the tool armed; the hint reads 'Enter or the check to confirm'. Verified in the full lanes: chromium 200/200, webkit 200/200, retries 0.",
+      "affectedVersions": "predated the modeling-correctness work; reproduced on clean baseline 9933689",
+      "reproduction": "Historical: bunx playwright test --project=chromium e2e/extrude-commit-gesture.spec.ts -g 'click-away' failed 3/3 with --repeat-each=3, same on webkit. Now passes on both lanes.",
       "owner": "extrude commit gesture",
       "mustNotWorsenTest": "e2e/extrude-commit-gesture.spec.ts",
-      "reopeningTrigger": "Any additional browser-lane failure, or this one being papered over instead of fixed."
+      "reopeningTrigger": "A gate-shipping change that skips the browser lane again, or any spec re-asserting a gesture the frozen interaction contract does not carry."
+    },
+    {
+      "id": "MC-R8",
+      "category": "browser-lane-nondeterminism",
+      "impact": "The Intersect boolean commit spec fails intermittently in a FULL chromium suite run only: previewOwner never becomes 'boolean' within the 20 s lane poll, so the boolean lane never opens and the Intersect chip is never reachable. Observed once in two consecutive full runs (199/200, then 200/200), 9/9 green in isolation with --repeat-each=3. Same signature class as the historical boolean-preview race already bisected to before the Platform refactor: the region click lands before the sketch-visibility commit's projection push. Unclassified nondeterminism keeps the browser gate from being callable as reproducibly green.",
+      "affectedVersions": "e2e mock lane, both browsers historically; chromium as observed 2026-08-13",
+      "reproduction": "E2E_PORT=<free> bunx playwright test --project=chromium (full suite, retries 0); the isolated spec does not reproduce it.",
+      "owner": "boolean preview lane",
+      "mustNotWorsenTest": "e2e/boolean-preview.spec.ts",
+      "reopeningTrigger": "Any second occurrence, or a retry being added to hide it instead of root-causing the projection-push race."
     },
     {
       "id": "MC-R6",

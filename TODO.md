@@ -54,12 +54,36 @@ Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one c
         (`regionId … matched no selectable region`) — fixture now carries version 3, matching the
         `revolve_ops`/`m2_gate`/`wire_contract`/`step_import_gate` pattern; and `tauri_e2e.rs`
         did not compile.
-- [ ] **Pre-existing browser defect, NOT from this work**: `e2e/extrude-commit-gesture.spec.ts:135`
+- [x] **MC-R7 correction — DONE, both lanes measured.** Root cause is
+      NOT a product bug: commit `c7df7c8` removed the click-away commit deliberately
+      ("D2: click-away commit removed entirely (spec choice)"), the frozen contract
+      `src/test/contracts/modelingInteractionContract.ts` pins
+      `clickAwayPolicy: "cancel"`, and `ModelToolController.commit.test.ts` already
+      asserts it must not commit. `c7df7c8` shipped without the e2e lane, so the spec
+      and the arm hint text kept promising the removed gesture. Both are now fixed in
+      the working tree (spec asserts no-commit + still-armed; hint reads
+      "Enter or ✓ to confirm"). Verified: that spec chromium 5/5, tsc 0,
+      Vitest 4182/4182, then BOTH full lanes with `E2E_PORT` and retries 0 —
+      **webkit 200/200**, **chromium 200/200** on the rerun. MC-R7 is closed in
+      `docs/qa/modeling-residuals-v1.json` as stale evidence rather than a product
+      defect.
+- [ ] **MC-R8 — the boolean-preview lane is nondeterministic in a full chromium run.**
+      The first of the two chromium runs above was 199/1 on
+      `e2e/boolean-preview.spec.ts:356` (Intersect chip): the 20 s poll on
+      `previewOwner === "boolean"` timed out at `null`, so the boolean lane never
+      opened. It is 9/9 in isolation (`--repeat-each=3`) and 200/200 on the immediate
+      full rerun, and the signature matches the projection-push race already bisected
+      to before the Platform refactor. NOT fixed, NOT retried away — recorded so the
+      browser gate is not claimed as reproducibly green. Root-cause the race between
+      the region click and the sketch-visibility commit's projection push.
+- [x] ~~**Pre-existing browser defect**~~ — superseded by the MC-R7 entry above; kept for the
+      measurement that found it: `e2e/extrude-commit-gesture.spec.ts:135`
       "clicking empty canvas away from the handle commits (click-away)" fails deterministically
       (3/3 with `--repeat-each=3`) on BOTH chromium and webkit — and fails identically on a clean
       worktree at baseline `9933689`, so it predates the modeling-correctness work. The click leaves
-      the tool `armed` and mints no body. Tracked as MC-R7. Browser gate is therefore 199/200 per
-      lane, NOT green; do not claim a zero-failure browser lane.
+      the tool `armed` and mints no body. Tracked as MC-R7, now closed: the spec was wrong, not the
+      product. Both lanes re-measured at 200/200 — but see MC-R8 above before calling the browser
+      gate reproducibly green.
 - [ ] Still unrun on any machine: real-Tauri WDIO composition, kernelbench m1 campaign,
       Linux/Windows release matrix, 20-run stability sample.
 
