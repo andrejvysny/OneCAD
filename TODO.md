@@ -26,6 +26,41 @@ unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
 
 Detail per completed wave is recorded below, newest first.
 
+## RENDER MODULE — STUB REGISTRATION + DESIGN DOCS (2026-08-13) — DOCS ONLY, NO GATE
+
+Not part of Track A/roadmap — a separate, product-requested design pass for a
+future Render workspace (Fusion 360 Render parity, materials on OpenPBR). Docs
++ an inert module scaffold only; no functional capability.
+
+- [x] **`onecad.render` module scaffolded and registered**, reaches `"ready"`
+      with zero contributions (`src/modules/render/manifest.ts`, `ids.ts`,
+      `module.ts`, `register.test.ts`; wired in `src/app/bootstrap.ts`).
+- [x] **ADR-0014** (`docs/adr/0014-render-module-openpbr.md`) records: Render is
+      its own module (not folded into Modeling); its future UI targets the
+      *existing* `onecad.shell` `Visualization` workspace placeholder rather
+      than a new workspace id (product confirmed the placeholder already means
+      "Render", just labeled differently); OpenPBR is the material schema
+      baseline.
+- [x] **`docs/RENDER_MODULE.md`** drafts the OpenPBR-to-schema mapping, a
+      document-state shape, and a phased roadmap — all explicitly marked
+      draft/unimplemented. Render backend (real-time preview vs. offline
+      path-traced vs. other) is explicitly left open, not decided.
+- [ ] Everything past registration — material schema, assignment UI, workspace
+      migration, render backend — unstarted by design; this wave is scaffolding
+      for a later implementer, not a first slice of the feature.
+
+**Changed:** `src/modules/render/manifest.ts`, `ids.ts`, `module.ts`,
+`register.test.ts`; `src/app/bootstrap.ts`; `docs/adr/0014-render-module-openpbr.md`;
+`docs/adr/README.md`; `docs/RENDER_MODULE.md`; `TODO.md`.
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run test` — new
+`src/modules/render/register.test.ts` passes, `src/platform/architecture.test.ts`
+and `src/platform/registry.test.ts` unaffected (no forbidden import, no
+namespace/duplicate-id regression). No Rust/C++ touched — ctest/cargo/Playwright
+out of scope, not run.
+
+**Next:** none scheduled — parked until product prioritizes Render.
+
 ## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
 
 One gate, three items, and **two of them turned out not to be evidence debt at all**: the mandated
