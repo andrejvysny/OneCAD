@@ -71,6 +71,40 @@ residual `5.6e-12`, worst continuity response `0.037` (volume) / `0.080` (area)
 per unit `δ`, worst sample displacement `3.58·radius·δ` (at the sharpest, 30°,
 dihedral — the tangency lines move by about `radius·δ/tan(θ/2)`).
 
+## Recipe-agnostic validators
+
+`cylindricalRadius` and `g1BoundaryTangency` find the blend by SURFACE TYPE —
+"the cylinder in the output is the fillet" — which is only true when both
+supports are planes. `m1` therefore emits them on all-planar pairs only, and two
+generic validators carry the curved pairs:
+
+- **`supportTangency`** samples every boundary the blend shares with the selected
+  edge's OWN supports and measures the angle between the two outward normals. The
+  blend and the supports both come from the fillet builder's history
+  (`Generated` / `Modified`), never from surface type, so a cylindrical or
+  conical support is not a special case. The end caps a blend also meets — at a
+  right angle, by design — are excluded because they are not supports.
+- **`crossSectionProfile`** samples the blend's interior and compares `1/|k|` for
+  the larger principal curvature against the requested radius. A constant-radius
+  blend is a canal surface whose circular sections are lines of curvature, so
+  that reciprocal IS the section radius on plane, cylinder and cone alike.
+
+Both report `notApplicable` when the blend yields no evidence, which fails a
+required check: silence must never read as a pass. Their allowances have a
+conditioning term proportional to the sampled coordinate magnitude, because
+double precision is relative and `farOriginTranslation` deliberately rebuilds the
+model 1.7e6 mm out — measured there, the boundary angle degrades from 3e-15 to
+7.5e-9 rad and the section error from 6e-16 to 2.7e-9 mm. Without that term the
+probe would report arithmetic as a defect. Worst measured/allowed ratio over m1,
+both backends: 0.090 (tangency) and 0.084 (section).
+
+`manifold`, `noSelfIntersection`, `microTopology` and `toleranceGrowth` itemize
+what `deepAudit` gates as a single bit, so a red campaign names its cause.
+`toleranceGrowth` reports the input and output tolerance maxima and their ratio
+always, and gates on the `limits.quality` ceilings the case declares — a case
+that declares none gets `notApplicable`, because what counts as acceptable growth
+is a property of the case, not of the validator.
+
 ## Verdict and exit policy
 
 Supported cases gate semantic success, deterministic replay, deep audit, and

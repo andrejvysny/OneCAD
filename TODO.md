@@ -766,6 +766,22 @@ Gates: `ctest` **115/115** (114 → 115); `cargo fmt --all --check`; `cargo clip
 
 - [ ] `m1` still has `darwin-arm64` rows only; record `linux-x64` when the suite next runs on the self-hosted host (roadmap Phase 5 WP5.6).
 
+### M4 — recipe-agnostic validators (2026-08-13) — DONE, GATE PASSED
+
+Roadmap Phase 5 WP5.2. All six land and are REQUIRED on every m1 case, curved pairs included.
+
+- [x] **The blend is taken from the builder's history, not guessed from surface type.** `AdapterResult` gained `blend_faces` (`Generated`) and `support_faces` (`Modified` of the selected edge's own supports) — both backends fill them from the same `BRepFilletAPI_MakeFillet` history. This is the fix for the assumption `cylindricalRadius` encodes: "the cylinder in the output is the fillet" is false the moment a SUPPORT is a cylinder.
+- [x] **`supportTangency`** — angle between the blend's and the support's outward normals, sampled along every shared boundary. The blend's boundary with the END CAPS is excluded: it is a right angle by design, and including it failed every non-cone case at exactly π/2 during bring-up.
+- [x] **`crossSectionProfile`** — `1/|k|` for the larger principal curvature versus the requested radius. A constant-radius blend is a canal surface whose circular sections are lines of curvature, so this is exact on plane, cylinder and cone alike. Measured worst deviation over the whole matrix: **2.7e-14 mm**.
+- [x] **`manifold`, `noSelfIntersection`, `microTopology`, `toleranceGrowth`** — the itemized halves of `deepAudit`, so a red campaign names its cause. `toleranceGrowth` always reports input/output tolerance maxima and their ratio, and gates on the ceilings the CASE declares; declaring none yields `notApplicable`, which fails a required check. m1 now declares 1e-6 vertex/edge/face (ten times the 1e-7 measured) and zero micro-edges/slivers.
+- [x] `notApplicable` fails a required check, as the spec demands — that is precisely what these six returned before they were implemented, and what the new ctest `kernelbench_validators` reproduces against the old dispatch (`plane-plane: supportTangency = notApplicable`).
+- [x] **Tolerances carry a conditioning term.** `farOriginTranslation` rebuilds the model 1.7e6 mm out, where double precision costs six orders of magnitude: the boundary angle goes 3.3e-15 → **7.5e-9 rad** and the section error 6.1e-16 → **2.7e-9 mm**. The allowance is `feature scale + coordinateMagnitude·1e-14` (divided by the radius for the angle, since an angle error is a position error over the feature size). Worst measured/allowed over m1, both backends: **0.090** tangency, **0.084** section — an 11× margin that still fails a real defect by orders of magnitude.
+- [x] `cylindricalRadius` / `g1BoundaryTangency` stay exactly where their assumptions hold (all-planar pairs) and are untouched in frozen v1.
+
+Gates: `ctest` **116/116** (115 → 116); `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**; T0 both backends **136/136** with digests AND semantics byte-unchanged; m1 **336 records**, 330 pass + 6 characterization, metamorph 288/0, replay 336 stable, `gatingFailures: 0`. m1 digests re-recorded (the case documents gained six validators and the quality ceilings); m1 semantics unchanged, so no verdict moved. No frontend file changed.
+
+- [ ] Next in Phase 5: WP5.3, the Boolean foundation campaign (`boolean/foundation:t0`).
+
 ### Then — see HANDOFF.md for the resume recipe
 
 ### Then — see HANDOFF.md for the resume recipe

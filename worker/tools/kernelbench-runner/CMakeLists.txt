@@ -9,6 +9,7 @@ add_library(benchmark_core STATIC
     ../../src/benchmark/Artifacts.cpp
     ../../src/benchmark/Execution.cpp
     ../../src/benchmark/SemanticValidation.cpp
+    ../../src/benchmark/BlendEvidence.cpp
 )
 target_include_directories(benchmark_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(benchmark_core PUBLIC worker_core)
@@ -35,3 +36,7 @@ add_test(NAME kernelbench_case_v2 COMMAND test_kernelbench_case_v2)
 add_executable(test_kernelbench_metamorph metamorph_fixtures.cpp)
 target_link_libraries(test_kernelbench_metamorph PRIVATE benchmark_core)
 add_test(NAME kernelbench_metamorph COMMAND test_kernelbench_metamorph)
+
+add_executable(test_kernelbench_validators validator_fixtures.cpp)
+target_link_libraries(test_kernelbench_validators PRIVATE benchmark_core)
+add_test(NAME kernelbench_validators COMMAND test_kernelbench_validators)

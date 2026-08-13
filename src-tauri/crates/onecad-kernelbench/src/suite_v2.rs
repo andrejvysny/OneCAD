@@ -316,6 +316,18 @@ fn validators(pair: Pair, domain: ExpectedDomain, radius: f64) -> Vec<ValidatorV
         simple(ValidatorTypeV2::GeneratedBlendFace),
         simple(ValidatorTypeV2::MaterialChange),
         simple(ValidatorTypeV2::DeepAudit),
+        // The recipe-agnostic pair, required on EVERY pair including the curved
+        // ones. They read the builder's own generated and modified faces, so a
+        // cylindrical or conical support is not a special case for them the way
+        // it is for `cylindricalRadius` / `g1BoundaryTangency` below.
+        simple(ValidatorTypeV2::SupportTangency),
+        simple(ValidatorTypeV2::CrossSectionProfile),
+        // The itemized halves of `deepAudit`: a named cause beats one aggregate
+        // bit when a campaign goes red.
+        simple(ValidatorTypeV2::Manifold),
+        simple(ValidatorTypeV2::NoSelfIntersection),
+        simple(ValidatorTypeV2::MicroTopology),
+        simple(ValidatorTypeV2::ToleranceGrowth),
     ];
     result[2].direction = Some(MaterialDirection::Decrease);
     result.push(ValidatorV2 {
@@ -496,12 +508,16 @@ fn default_limits() -> Limits {
             stderr_bytes: 1_048_576,
             artifact_bytes: 67_108_864,
         },
+        // Ceilings a case must declare for `toleranceGrowth` to gate rather than
+        // report `notApplicable`. 1e-6 is ten times the 1e-7 maximum measured
+        // across the matrix on both backends — a real ceiling with real margin,
+        // not a number chosen to be unreachable.
         quality: QualityLimits {
-            max_vertex_tolerance: None,
-            max_edge_tolerance: None,
-            max_face_tolerance: None,
-            max_micro_edges: None,
-            max_sliver_faces: None,
+            max_vertex_tolerance: Some(1e-6),
+            max_edge_tolerance: Some(1e-6),
+            max_face_tolerance: Some(1e-6),
+            max_micro_edges: Some(0),
+            max_sliver_faces: Some(0),
         },
     }
 }

@@ -23,8 +23,14 @@ OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
   fixed a real defect — the semantic validators measured the blend against the
   case's declared radius rather than the radius the operation ran with. Detail in
   `TODO.md` § M3.5 and `CURRENT_STATE.md`.
+- **Phase 5 WP5.2 (M4) done, uncommitted** (2026-08-13): `supportTangency`,
+  `crossSectionProfile`, `manifold`, `noSelfIntersection`, `microTopology` and
+  `toleranceGrowth` implemented and required on every m1 case including the
+  curved pairs. The blend now comes from the fillet builder's history rather than
+  from surface type, which is what makes a curved support stop being a special
+  case. Detail in `TODO.md` § M4.
 - **Still owed from P2:** the manual Tauri smoke. Unchanged.
-- **Next in roadmap order:** Phase 5 WP5.2, the M4 recipe-agnostic validators.
+- **Next in roadmap order:** Phase 5 WP5.3, the Boolean foundation campaign.
 
 The sections below are the 2026-08-11 review, kept for its evidence trail.
 

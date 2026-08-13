@@ -1,4 +1,37 @@
-## KERNELBENCH M3.5 — NON-ISOMETRIC METAMORPH POLICY (2026-08-13) — GATE PASSED, UNCOMMITTED
+## KERNELBENCH M4 — RECIPE-AGNOSTIC VALIDATORS (2026-08-13) — GATE PASSED, UNCOMMITTED
+
+Roadmap Phase 5 WP5.2. `supportTangency`, `crossSectionProfile`, `manifold`,
+`noSelfIntersection`, `microTopology` and `toleranceGrowth` are implemented and
+REQUIRED on every m1 case, curved support pairs included. They previously
+returned `notApplicable`, which a required check must fail.
+
+The enabling change is that the blend is now taken from the fillet builder's own
+history — `AdapterResult.blend_faces` (`Generated`) and `.support_faces`
+(`Modified` of the selected edge's supports) — instead of being recognised by
+surface type. "The cylinder in the output is the fillet" is false the moment a
+SUPPORT is a cylinder, which is the assumption that keeps `cylindricalRadius` and
+`g1BoundaryTangency` confined to all-planar pairs.
+
+`crossSectionProfile` compares `1/|k|` for the larger principal curvature against
+the requested radius, exact on plane, cylinder and cone because a constant-radius
+blend is a canal surface whose circular sections are lines of curvature — worst
+deviation across the matrix 2.7e-14 mm. Allowances carry a conditioning term
+proportional to coordinate magnitude, because `farOriginTranslation` rebuilds the
+model 1.7e6 mm out where double precision costs six orders of magnitude; without
+it the probe reads arithmetic as a defect.
+
+- **Changed:** `worker/src/benchmark/{BlendEvidence.h,BlendEvidence.cpp}` (new) ·
+  `worker/src/benchmark/{Types.h,FilletRun.cpp,SemanticValidation.cpp,SemanticValidation.h,Execution.cpp}` ·
+  `worker/tools/kernelbench-runner/{CMakeLists.txt,validator_fixtures.cpp}` (new) ·
+  `src-tauri/crates/onecad-kernelbench/src/suite_v2.rs` ·
+  `bench/robustness/{README.md,baselines/digests.json}`.
+- **Gates:** ctest **116/116** · fmt · clippy · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0** ·
+  T0 **136/136** with digests AND semantics byte-unchanged · m1 **336 records**, 330 pass + 6
+  characterization, metamorph 288/0, `gatingFailures: 0`. m1 digests re-recorded (case documents
+  gained the six validators and the quality ceilings); m1 semantics unchanged, so no verdict moved.
+- **Next:** Phase 5 WP5.3, the Boolean foundation campaign.
+
+## KERNELBENCH M3.5 — NON-ISOMETRIC METAMORPH POLICY (2026-08-13) — COMMITTED `1d0fbb7`
 
 Roadmap Phase 5 WP5.1 residual, closed. The metamorph comparison now carries a
 RELATION per variant instead of demanding equality from all of them: rigid

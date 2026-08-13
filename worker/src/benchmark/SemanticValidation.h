@@ -20,6 +20,7 @@ ValidationSummary validate_output(const Request &request,
                                   const GeneratedGeometry &geometry,
                                   const AdapterResult &adapter,
                                   const nlohmann::json &audit,
+                                  const nlohmann::json &input_audit,
                                   double effective_radius);
 
 } // namespace onecad::benchmark
