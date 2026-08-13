@@ -3,8 +3,10 @@ import type { ClassifyFrame, ClassifyResult } from "@/ipc/types";
 import {
   attachmentAccepts,
   classifySnapKind,
+  nearestSmallerThread,
   rotationFromLocalZTo,
   solveCandidatePlacement,
+  threadNominalDiameterMm,
 } from "./placementSolver";
 
 function rotateZ(axis: [number, number, number], angleDeg: number): [number, number, number] {
@@ -141,5 +143,55 @@ describe("solveCandidatePlacement", () => {
   it("throws for coincident with no normal (a malformed frame)", () => {
     const frame: ClassifyFrame = { origin: [0, 0, 0], normal: null, axis: null, radius: null };
     expect(() => solveCandidatePlacement("coincident", frame, [0, 0, 0], false)).toThrow();
+  });
+});
+
+// ── auto-size (spec §5.3's hole row, §5.4 step 3; WP-A3) ────────────────────
+
+describe("threadNominalDiameterMm", () => {
+  it("reads the nominal diameter out of a metric designation", () => {
+    expect(threadNominalDiameterMm("M6")).toBe(6);
+    expect(threadNominalDiameterMm("M2.5")).toBe(2.5);
+    expect(threadNominalDiameterMm(" M12 ")).toBe(12);
+  });
+
+  it("returns null for anything that is not an M<number> designation", () => {
+    // An inch series or a free-text size opts OUT of auto-sizing rather than
+    // being guessed at — a wrong guess here places the wrong hardware.
+    expect(threadNominalDiameterMm("1/4-20")).toBeNull();
+    expect(threadNominalDiameterMm("608")).toBeNull();
+    expect(threadNominalDiameterMm("M")).toBeNull();
+    expect(threadNominalDiameterMm("")).toBeNull();
+  });
+});
+
+describe("nearestSmallerThread", () => {
+  const DOMAIN = ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12"];
+
+  it("picks the largest size that still fits the hole", () => {
+    // An M6 clearance hole (6.6) takes an M6, never the M8 that cannot pass.
+    expect(nearestSmallerThread(6.6, DOMAIN)).toBe("M6");
+    // An M8 clearance hole (9.0) takes an M8.
+    expect(nearestSmallerThread(9.0, DOMAIN)).toBe("M8");
+    // Exactly nominal still fits (a press fit is the user's business).
+    expect(nearestSmallerThread(6.0, DOMAIN)).toBe("M6");
+    // Just under nominal drops a size rather than forcing it.
+    expect(nearestSmallerThread(5.99, DOMAIN)).toBe("M5");
+  });
+
+  it("is not fooled by domain ordering", () => {
+    expect(nearestSmallerThread(6.6, ["M12", "M3", "M8", "M6"])).toBe("M6");
+  });
+
+  it("returns null when nothing fits, rather than substituting the smallest", () => {
+    // The founding invariant in miniature: a 1 mm hole gets no fastener, not
+    // the nearest one that would silently be wrong.
+    expect(nearestSmallerThread(1.0, DOMAIN)).toBeNull();
+  });
+
+  it("returns null for a domain with no metric designations, and for junk input", () => {
+    expect(nearestSmallerThread(10, ["608", "6001"])).toBeNull();
+    expect(nearestSmallerThread(0, DOMAIN)).toBeNull();
+    expect(nearestSmallerThread(Number.NaN, DOMAIN)).toBeNull();
   });
 });

@@ -21,17 +21,21 @@
  * `ViewportRoot.tsx` — the shell still does not know this module exists.
  * `engine.setOrbitSuppressed(true)` is the belt to that suspenders.
  *
+ * AUTO-SIZE (spec §5.3's hole row, §5.4 step 3, WP-A3): hovering a cylinder or
+ * a circular edge measures the hole and picks the largest declared size that
+ * still fits, feeding it to the ghost AND the commit through the same
+ * `source.params`. Nothing is substituted when nothing fits — the armed size
+ * simply stands, the same refusal the generator applies to an unknown size.
+ *
  * SCOPE CUT vs the full spec, recorded here (also in TODO.md's gate entry):
  *   - No free-space follow. The ghost appears only once hovering a target
  *     whose classification matches one of the component's attachments — spec
  *     step 1's "ghost follows the cursor" is honored from the FIRST valid
  *     hover, not from arm-time. Free-space placement (step 6, the Move-tool
  *     fallback) is not wired; there is no Move-tool integration point yet.
- *   - No auto-size (spec step 3): P1's one seeded generator has no size
- *     table to pick a nearest-smaller size FROM (P2 scope, spec §6).
- *   - No `mate` persistence (spec §5.5): the worker's `ComponentOp` resolver
- *     does not consume `mate` on regen yet — see `CadClient.placeComponent`'s
- *     doc comment. The computed transform is written into `placement` only.
+ *   - No `mate` is RECORDED by this gesture: the solved transform is frozen
+ *     into `placement`. Regen-time re-seating of a mate that IS recorded ships
+ *     (WP-3.1, worker-side); authoring one from here is still open.
  */
 import { useSyncExternalStore } from "react";
 import { getViewportEngine } from "@/viewport/engineBridge";
@@ -41,6 +45,7 @@ import { buildBodyObjects, remove as removeMesh, swap as swapMesh } from "@/view
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
 import type {
+  ComponentParamValue,
   LibraryComponent,
   PlaceComponentSource,
   PreviewResult,
@@ -50,6 +55,7 @@ import type { CommandApiService, GeometryQueryService } from "@/modules/modeling
 import {
   attachmentAccepts,
   classifySnapKind,
+  nearestSmallerThread,
   solveCandidatePlacement,
   type CandidatePlacement,
   type MateSnapKind,
@@ -92,6 +98,12 @@ let epoch = 0;
 let hoverSeq = 0;
 let lastMatch: LastMatch | null = null;
 let lastCandidate: CandidatePlacement | null = null;
+/**
+ * Free-param overrides the gesture itself chose — auto-size only, today. Sent
+ * with BOTH the ghost (`source.params`) and the commit, so the two can never
+ * describe different hardware.
+ */
+let gestureParams: Record<string, ComponentParamValue> = {};
 
 export function isPlacementArmed(): boolean {
   return armedComponent !== null;
@@ -130,6 +142,7 @@ export function armPlacement(component: LibraryComponent): void {
   flipped = false;
   lastMatch = null;
   lastCandidate = null;
+  gestureParams = {};
   epoch = 0;
   publishArmed();
 
@@ -210,6 +223,7 @@ export function cancelPlacement(): void {
   armedSource = null;
   lastMatch = null;
   lastCandidate = null;
+  gestureParams = {};
   publishArmed();
 }
 
@@ -229,11 +243,56 @@ function placementDraftParams(
     componentRevision: component.revision,
     // The backend's own resolution, verbatim — see `armPlacement`. This used to
     // be a locally-assembled generator source, which previewed the generator
-    // stub's screw for ANY component whose real source was a blob.
-    source,
+    // stub's screw for ANY component whose real source was a blob. The
+    // gesture's own free params ride INSIDE it, because `source.params` is
+    // what the worker's table lookup reads.
+    source: withGestureParams(source),
     translate,
     rotate,
   };
+}
+
+/**
+ * `source` with the gesture's chosen free params folded in. Only a generator
+ * source takes them: a blob-backed component's geometry was baked at authoring
+ * time and has no parameters to re-derive from (the backend refuses the same
+ * combination, loudly, rather than recording an inert override).
+ */
+function withGestureParams(source: PlaceComponentSource): PlaceComponentSource {
+  if (source.kind !== "generator" || Object.keys(gestureParams).length === 0) return source;
+  return { ...source, params: { ...gestureParams } };
+}
+
+/**
+ * The free-param key this component sizes by, or `null` when it declares no
+ * `thread` domain to choose from — a component with a free-text size, or none
+ * at all, simply never auto-sizes.
+ */
+function sizeDomain(component: LibraryComponent): readonly string[] | null {
+  const spec = component.parameters?.thread;
+  if (!spec || spec.role !== "free") return null;
+  const domain = spec.domain?.filter((v): v is string => typeof v === "string") ?? [];
+  return domain.length > 0 ? domain : null;
+}
+
+/**
+ * Auto-size (spec §5.3's hole row, §5.4 step 3): a cylinder or circular-edge
+ * frame carries the hole's radius, so the largest size that still fits is
+ * decidable right here. Returns whether the chosen size CHANGED, so the caller
+ * only re-hints when there is something new to say.
+ *
+ * Nothing fitting is not an error and not a substitution: the armed size
+ * stands and the user still places a screw, it just is not the one the hole
+ * wanted. Deciding otherwise would be the Toolbox failure mode in miniature.
+ */
+function applyAutoSize(component: LibraryComponent, frame: LastMatch["frame"]): boolean {
+  if (frame.radius === null || frame.radius === undefined) return false;
+  const domain = sizeDomain(component);
+  if (!domain) return false;
+  const picked = nearestSmallerThread(frame.radius * 2, domain);
+  if (!picked || gestureParams.thread === picked) return false;
+  gestureParams = { ...gestureParams, thread: picked };
+  return true;
 }
 
 /** The component's attachments whose `accepts` admits `snapKind`, in table order. */
@@ -312,6 +371,16 @@ function onPointerMove(e: PointerEvent): void {
           : candidates[0];
       const pickWorldPos: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
       lastMatch = { snapKind, attachmentKey, frame: classify.frame, pickWorldPos };
+      // Auto-size BEFORE the candidate push, so the very first ghost frame for
+      // this hover already shows the size the commit will place.
+      if (applyAutoSize(component, classify.frame)) {
+        viewportStore
+          .getState()
+          .setStatusHint(
+            `Place ${component.name} ${String(gestureParams.thread)} — A flips, Esc cancels`,
+            { sticky: true },
+          );
+      }
       recomputeFromLastMatch();
     });
 }
@@ -328,6 +397,7 @@ function onPointerDown(e: PointerEvent): void {
     component.version,
     candidate.translate,
     candidate.rotate,
+    Object.keys(gestureParams).length > 0 ? { ...gestureParams } : undefined,
   );
   cancelPlacement();
 }

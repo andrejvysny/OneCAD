@@ -10,6 +10,7 @@ import { moduleId, contributionId, type ModuleId, type ServiceId } from "@/platf
 import type {
   ApplyOperationResult,
   ClassifyResult,
+  ComponentParamValue,
   PreviewDraft,
   PreviewParams,
   PreviewResult,
@@ -57,12 +58,17 @@ export interface GeometryQueryService {
  * component operations arrive (`setComponentParams`/`replaceComponent`).
  */
 export interface CommandApiService {
-  /** `CadClient.placeComponent` — spec §3.1 `PlaceComponent`. */
+  /**
+   * `CadClient.placeComponent` — spec §3.1 `PlaceComponent`. `params` carries
+   * the gesture's own free-parameter overrides (auto-size on a hole rim,
+   * WP-A3); the backend validates them against the component's signature.
+   */
   placeComponent(
     componentId: string,
     componentVersion: string,
     translate: [number, number, number],
     rotate?: TransformRotationParams,
+    params?: Record<string, ComponentParamValue>,
   ): Promise<void>;
   /** `CadClient.detachComponent` — spec §3.4 `DetachComponent`. */
   detachComponent(recordId: string): Promise<void>;

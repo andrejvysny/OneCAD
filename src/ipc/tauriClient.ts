@@ -1598,11 +1598,15 @@ export function createTauriClient(): CadClient {
     componentVersion: string,
     translate: [number, number, number],
     rotate?: TransformRotationParams,
+    params?: Record<string, ComponentParamValue>,
   ): Promise<void> {
     // `rotate` used to be dropped here — the real backend placed every
     // component unrotated regardless of the flip gesture (`A` key), only
     // masked because the mock lane's `commitPlaceComponent` DOES honor it.
-    await call(CMD.placeComponent, { componentId, componentVersion, translate, rotate });
+    // `params` (WP-A3) is the same class of bug waiting to happen: the ghost
+    // previews the auto-sized screw through `source.params`, so a commit that
+    // dropped it would place a different size than the user saw.
+    await call(CMD.placeComponent, { componentId, componentVersion, translate, rotate, params });
   }
 
   async function setComponentParams(

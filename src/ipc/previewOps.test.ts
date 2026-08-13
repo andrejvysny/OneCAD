@@ -977,5 +977,33 @@ describe("PlaceComponent ghost carries the backend's resolved source", () => {
     expect(op.params).toMatchObject({
       source: { kind: "generator", generatorId: "iso4762", generatorVersion: 1 },
     });
+    // No params ⇒ the key is absent, not an empty object: the generator's own
+    // defaults must stay byte-identical for every caller that never auto-sizes.
+    expect((op.params as { source: Record<string, unknown> }).source.params).toBeUndefined();
+  });
+
+  // WP-A3: the auto-sized thread rides in `source.params`, which is what the
+  // worker's table lookup reads. A ghost that dropped it would preview the
+  // generator's DEFAULT size and commit the chosen one.
+  it("carries a generator source's free params through", () => {
+    const op = OP_BUILDERS.PlaceComponent!(
+      placeSession({
+        kind: "generator",
+        generatorId: "iso4762",
+        generatorVersion: 1,
+        params: { thread: "M8", length: 20, thread_detail: "cosmetic" },
+      }),
+    );
+    expect(op.params).toMatchObject({
+      source: { params: { thread: "M8", length: 20, thread_detail: "cosmetic" } },
+    });
+  });
+
+  it("refuses a malformed params map rather than dropping it", () => {
+    const bad = (params: unknown) =>
+      placeSession({ kind: "generator", generatorId: "iso4762", generatorVersion: 1, params });
+    expect(() => OP_BUILDERS.PlaceComponent!(bad([1, 2]))).toThrow(/params/);
+    expect(() => OP_BUILDERS.PlaceComponent!(bad({ thread: { nested: true } }))).toThrow(/thread/);
+    expect(() => OP_BUILDERS.PlaceComponent!(bad({ length: Number.NaN }))).toThrow(/finite/);
   });
 });

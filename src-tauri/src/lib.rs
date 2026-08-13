@@ -407,6 +407,8 @@ pub fn run() {
             library::resolve_component_source,
             library::place_component,
             library::set_component_params,
+            library::replace_component,
+            library::component_upgrade_available,
             library::detach_component,
             api::prepare_offset_face,
             api::prepare_edge_op,

@@ -1369,6 +1369,25 @@ function mockLibraryEnabled(): boolean {
 
 let nextComponentSeq = 1;
 
+/**
+ * Rejects any key that is not `role = "free"` on `component` — the mock's
+ * mirror of the backend's own signature check (`library.rs::check_free_params`).
+ * `what` names the caller so the two commands' messages stay distinguishable.
+ */
+function assertFreeParams(
+  component: LibraryComponent,
+  params: Record<string, ComponentParamValue> | undefined,
+  what = "placeComponent",
+): void {
+  for (const key of Object.keys(params ?? {})) {
+    const spec = component.parameters[key];
+    if (!spec) throw new Error(`${what}: unknown parameter \`${key}\` on ${component.id}`);
+    if (spec.role !== "free") {
+      throw new Error(`${what}: \`${key}\` is not a free parameter on ${component.id}`);
+    }
+  }
+}
+
 /** Every `role: "free"` key's default value — `key` (string domain) or `value` (numeric). */
 function defaultFreeParams(component: LibraryComponent): Record<string, ComponentParamValue> {
   const out: Record<string, ComponentParamValue> = {};
@@ -1384,6 +1403,7 @@ function commitPlaceComponent(
   component: LibraryComponent,
   translate: [number, number, number],
   rotate: TransformRotationParams | undefined,
+  overrides: Record<string, ComponentParamValue> | undefined,
 ): ApplyOperationResult {
   const seq = nextComponentSeq++;
   const bodyId = nextBodyId();
@@ -1402,7 +1422,10 @@ function commitPlaceComponent(
   // `commitOp`'s generic `wireParamsOf` (PlaceComponent throws there — it
   // never reaches the generic op-preview lane), so this is the one place
   // that stores it for the library op.
-  const resolvedParams = defaultFreeParams(component);
+  // The gesture's own free params (auto-size, WP-A3) layered over the
+  // component's declared defaults — the same merge the real backend performs,
+  // so the stored record and the configurator agree on which size was placed.
+  const resolvedParams = { ...defaultFreeParams(component), ...(overrides ?? {}) };
   featureParams.set(featureId, {
     componentId: component.id,
     componentVersion: component.version,
@@ -2430,6 +2453,7 @@ export const mockClient: CadClient = {
     componentVersion: string,
     translate: [number, number, number],
     rotate?: TransformRotationParams,
+    params?: Record<string, ComponentParamValue>,
   ): Promise<void> {
     if (componentId !== MOCK_LIBRARY_FIXTURE.id || componentVersion !== MOCK_LIBRARY_FIXTURE.version) {
       throw new Error(
@@ -2439,7 +2463,8 @@ export const mockClient: CadClient = {
     documentStore.getState().regenStarted();
     try {
       await wait();
-      const res = commitPlaceComponent(MOCK_LIBRARY_FIXTURE, translate, rotate);
+      assertFreeParams(MOCK_LIBRARY_FIXTURE, params);
+      const res = commitPlaceComponent(MOCK_LIBRARY_FIXTURE, translate, rotate, params);
       emitMockDocumentChanged({
         revision: res.revision,
         changedBodies: res.changedBodies,

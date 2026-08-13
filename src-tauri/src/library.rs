@@ -46,7 +46,10 @@ use onecad_library::package::{self, ComponentPackage, ParameterRole, COMPONENT_M
 use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
 use onecad_library::Library;
 
-use crate::dto::{DocumentProjection, LibraryComponentDto, ReindexReportDto};
+use crate::dto::{
+    ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, ReindexReportDto,
+    ReplaceComponentReportDto,
+};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -201,6 +204,7 @@ async fn place_component_at(
     component_version: String,
     translate: [f64; 3],
     rotate: Option<TransformRotation>,
+    free_params: BTreeMap<String, ComponentParamValue>,
 ) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
     let library = open_at(root)?;
     let (_version, entry) = library
@@ -216,13 +220,22 @@ async fn place_component_at(
         component_version: &component_version,
         component_revision: &revision,
     })?;
+    // Role enforcement at the PLACE site, not just the edit site (WP-A3): the
+    // interactive gesture now sends free params of its own (auto-size on a hole
+    // rim), and a placement that writes a non-free key would author a record
+    // `set_component_params` would then refuse to touch.
+    if !free_params.is_empty() {
+        let package = component_package_at(root, &component_id, &component_version)?;
+        check_free_params("placeComponent", &package, &component_id, &free_params)?;
+    }
     let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    let source = source_with_free_params(source, &free_params, &component_id)?;
 
     let params = PlaceComponentParams {
         component_id,
         component_version,
         component_revision: revision,
-        params: Default::default(),
+        params: free_params,
         source,
         mate: None,
         placement: FrozenPlacement {
@@ -247,6 +260,72 @@ async fn place_component_at(
         },
     )
     .await
+}
+
+/// Rejects any key that is not `role = "free"` in the component's own
+/// signature (spec §3.1/§3.2). `onecad-core` cannot depend on the crate that
+/// resolves a signature, so this is the only place the check can live; both
+/// the place site and the edit site call it, and `what` names the caller in
+/// the message.
+fn check_free_params(
+    what: &str,
+    package: &ComponentPackage,
+    component_id: &str,
+    params: &BTreeMap<String, ComponentParamValue>,
+) -> Result<(), ApiError> {
+    for key in params.keys() {
+        match package.parameters.get(key) {
+            Some(spec) if spec.role == ParameterRole::Free => {}
+            Some(_) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "{what}: `{key}` is not a free parameter on {component_id}"
+                )))
+            }
+            None => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "{what}: unknown parameter `{key}` on {component_id}"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Carries the caller's free params into the resolved source.
+///
+/// ONLY a `generator` source consumes them — it re-derives geometry from
+/// params on every regen, which is exactly what makes a size editable. A
+/// blob-backed source carries geometry BAKED at authoring time, so recording
+/// params against it would show one designation over unrelated geometry: the
+/// silent substitution spec §0 invariant 4 forbids. Refused loudly instead,
+/// the same answer `set_component_params_at` gives for the same reason.
+fn source_with_free_params(
+    source: ComponentSourceRef,
+    free_params: &BTreeMap<String, ComponentParamValue>,
+    component_id: &str,
+) -> Result<ComponentSourceRef, ApiError> {
+    if free_params.is_empty() {
+        return Ok(source);
+    }
+    match source {
+        ComponentSourceRef::Generator {
+            generator_id,
+            generator_version,
+            extra,
+            ..
+        } => Ok(ComponentSourceRef::Generator {
+            generator_id,
+            generator_version,
+            params: free_params.clone(),
+            extra,
+        }),
+        ComponentSourceRef::Embedded { .. } | ComponentSourceRef::Document { .. } => {
+            Err(ApiError::InvalidCommand(format!(
+                "placeComponent: {component_id} carries baked geometry, which has no free \
+                 parameters to set"
+            )))
+        }
+    }
 }
 
 /// A component's baked geometry, resolved out of the library and ready to be
@@ -353,6 +432,10 @@ async fn stage_blob_and_apply(
     Ok((outcome, rt.projection()))
 }
 
+/// `params` carries the free-parameter overrides chosen during the gesture —
+/// auto-size on a hole rim today (WP-A3), the configurator's own values later.
+/// Absent ⇒ the generator's declared defaults, byte-identical to every prior
+/// caller.
 #[tauri::command]
 pub async fn place_component(
     app: AppHandle,
@@ -361,6 +444,7 @@ pub async fn place_component(
     component_version: String,
     translate: [f64; 3],
     rotate: Option<TransformRotation>,
+    params: Option<BTreeMap<String, ComponentParamValue>>,
 ) -> Result<DocumentProjection, ApiError> {
     let root = library_root(&app)
         .ok_or_else(|| ApiError::Internal("placeComponent: no app data dir".into()))?;
@@ -371,6 +455,7 @@ pub async fn place_component(
         component_version,
         translate,
         rotate,
+        params.unwrap_or_default(),
     )
     .await?;
     finish(&app, &state, &outcome, &projection);
@@ -511,23 +596,12 @@ async fn set_component_params_at(
     };
 
     let package = component_package_at(root, &current.component_id, &current.component_version)?;
-    for key in params.keys() {
-        match package.parameters.get(key) {
-            Some(spec) if spec.role == ParameterRole::Free => {}
-            Some(_) => {
-                return Err(ApiError::InvalidCommand(format!(
-                    "setComponentParams: `{key}` is not a free parameter on {}",
-                    current.component_id
-                )))
-            }
-            None => {
-                return Err(ApiError::InvalidCommand(format!(
-                    "setComponentParams: unknown parameter `{key}` on {}",
-                    current.component_id
-                )))
-            }
-        }
-    }
+    check_free_params(
+        "setComponentParams",
+        &package,
+        &current.component_id,
+        &params,
+    )?;
 
     let mut merged = current.params.clone();
     merged.extend(params);
@@ -587,6 +661,193 @@ pub async fn set_component_params(
     let (outcome, projection) = set_component_params_at(&root, &state, record_id, params).await?;
     finish(&app, &state, &outcome, &projection);
     Ok(projection)
+}
+
+/// Swaps a placed instance to a DIFFERENT component (spec §3.3
+/// `ReplaceComponent`) — all M6 socket caps to flanged button heads, or one
+/// instance to a newer version of the same package.
+///
+/// **In-place at the SAME `RecordId`**, via `UpdateOperationParams`, exactly
+/// like `setComponentParams`: the record keeps its identity, its position in
+/// the timeline, and every downstream reference to the body it mints (which is
+/// `body_<opId>` — derived from the record, so it survives too). Deleting and
+/// re-adding would break all three, which is why spec §3.3 calls this an
+/// in-place edit and SCHEMA §7.3 gives it no `opType` of its own.
+///
+/// **The mate is carried by ATTACHMENT NAME, or not at all.** A recorded mate
+/// names an attachment on the OLD component (`shank_axis`); the new component
+/// is a different package with its own `[attachments]` table. If it declares
+/// the same name the mate rides across unchanged — the target ElementRef, the
+/// kind and the flip are all still valid, and regen re-seats it (WP-3.1). If it
+/// does NOT, the mate is dropped and the instance keeps its frozen
+/// `placement`: the component stays exactly where it is, and nothing re-seats
+/// it against geometry it was never mated to. Silently binding the new
+/// component's first attachment instead would be the mis-bind spec §0
+/// invariant 4 exists to forbid. The report says which name was lost so the UI
+/// can tell the user rather than leaving them to notice.
+async fn replace_component_at(
+    root: &Path,
+    state: &State<'_, AppState>,
+    record_id: String,
+    component_id: String,
+    component_version: String,
+    free_params: BTreeMap<String, ComponentParamValue>,
+) -> Result<(CommandOutcome, DocumentProjection, Option<String>), ApiError> {
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+
+    let current = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("replaceComponent".into()))?;
+        let raw = rt.operation_params(record).ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "replaceComponent: no params for record {record_id}"
+            ))
+        })?;
+        serde_json::from_value::<PlaceComponentParams>(raw).map_err(|e| {
+            ApiError::InvalidCommand(format!(
+                "replaceComponent: record {record_id} is not a placed component: {e}"
+            ))
+        })?
+    };
+
+    let library = open_at(root)?;
+    let (_version, entry) = library
+        .get(&component_id, Some(&component_version))
+        .ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "replaceComponent: unknown component {component_id}@{component_version}"
+            ))
+        })?;
+    let revision = entry.revision.clone();
+    let resolved = library.resolve_source(&ResolveRequest {
+        component_id: &component_id,
+        component_version: &component_version,
+        component_revision: &revision,
+    })?;
+
+    let package = component_package_at(root, &component_id, &component_version)?;
+    // Params are checked against the NEW signature, not the old one: a key the
+    // old component called free may not exist here at all.
+    check_free_params("replaceComponent", &package, &component_id, &free_params)?;
+
+    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    let source = source_with_free_params(source, &free_params, &component_id)?;
+
+    let (mate, dropped_attachment) = match current.mate {
+        Some(mate) if package.attachments.contains_key(&mate.self_attachment) => (Some(mate), None),
+        Some(mate) => {
+            let lost = mate.self_attachment.clone();
+            (None, Some(lost))
+        }
+        None => (None, None),
+    };
+
+    let updated = PlaceComponentParams {
+        component_id,
+        component_version,
+        component_revision: revision,
+        params: free_params,
+        source,
+        mate,
+        placement: current.placement,
+        extra: current.extra,
+    };
+    let op = Operation::Known(KnownOperation::PlaceComponent(updated));
+
+    let (outcome, projection) = stage_blob_and_apply(
+        state,
+        blob,
+        EditCommand::UpdateOperationParams { record, op },
+    )
+    .await?;
+    Ok((outcome, projection, dropped_attachment))
+}
+
+/// Whether a NEWER version of this instance's component is indexed (spec §3.3's
+/// "opt-in version upgrade").
+///
+/// Read-only and opt-in BY CONSTRUCTION: it reports, it never swaps. Automatic
+/// upgrading is precisely the SolidWorks Toolbox failure spec §0 invariant 4
+/// names — a document that opens differently because a shared library moved
+/// underneath it. Acting on this answer is a separate, explicit
+/// `replaceComponent` call the user makes.
+fn component_upgrade_available_at(
+    root: &Path,
+    component_id: &str,
+    component_version: &str,
+) -> Result<Option<ComponentUpgradeDto>, ApiError> {
+    let library = open_at(root)?;
+    let Some((latest_version, entry)) = library.index().newer_than(component_id, component_version)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ComponentUpgradeDto {
+        component_id: component_id.to_string(),
+        current_version: component_version.to_string(),
+        latest_version: latest_version.to_string(),
+        latest_revision: entry.revision.clone(),
+    }))
+}
+
+#[tauri::command]
+pub async fn replace_component(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    record_id: String,
+    component_id: String,
+    component_version: String,
+    params: Option<BTreeMap<String, ComponentParamValue>>,
+) -> Result<ReplaceComponentReportDto, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("replaceComponent: no app data dir".into()))?;
+    let (outcome, projection, dropped_mate_attachment) = replace_component_at(
+        &root,
+        &state,
+        record_id,
+        component_id,
+        component_version,
+        params.unwrap_or_default(),
+    )
+    .await?;
+    finish(&app, &state, &outcome, &projection);
+    Ok(ReplaceComponentReportDto {
+        dropped_mate_attachment,
+    })
+}
+
+/// Reports whether a newer version of the component behind `record_id` is
+/// indexed. Read-only; see [`component_upgrade_available_at`].
+#[tauri::command]
+pub async fn component_upgrade_available(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    record_id: String,
+) -> Result<Option<ComponentUpgradeDto>, ApiError> {
+    let Some(root) = library_root(&app) else {
+        return Ok(None);
+    };
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+    let placed = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("componentUpgradeAvailable".into()))?;
+        let Some(raw) = rt.operation_params(record) else {
+            return Ok(None);
+        };
+        // A record that is not a placed component simply has no upgrade — this
+        // is a read the inspector fires for whatever is selected, so a
+        // non-component selection must answer "none", never error.
+        match serde_json::from_value::<PlaceComponentParams>(raw) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        }
+    };
+    component_upgrade_available_at(&root, &placed.component_id, &placed.component_version)
 }
 
 /// Drops a placed component's library identity, keeping its cached geometry
@@ -840,6 +1101,7 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             "1.0.0".to_string(),
             [1.0, 2.0, 3.0],
             None,
+            Default::default(),
         )
         .await
         .expect("place_component_at");
@@ -866,6 +1128,349 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
         assert_eq!(rt.head_body_ids().len(), 0, "no regen ran, so no body yet");
     }
 
+    /// WP-A3: the placement gesture sends free params of its own (auto-size on
+    /// a hole rim), so they must land on BOTH the record and the generator
+    /// source at PLACE time — not only through a follow-up edit. A commit that
+    /// dropped them would place a differently-sized screw than the ghost showed.
+    /// A generator package that declares ONE attachment, so the
+    /// carry-the-mate-by-name path has something to match (or not) against.
+    fn write_generator_package_with_attachment(root: &Path, id: &str, attachment: &str) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = format!(
+            r#"
+[identity]
+id = "{id}"
+version = "1.0.0"
+revision = "sha256:{zeros}"
+
+[metadata]
+name = "{id}"
+
+[source]
+kind = "generator"
+generator = "iso4762"
+generator_version = 1
+
+[attachments]
+{attachment} = {{ on = "cylinder:shank", accepts = ["cylinder", "hole"] }}
+"#,
+            zeros = "0".repeat(64)
+        );
+        std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), toml).unwrap();
+    }
+
+    /// Places `component_id`, then hand-authors a mate onto the resulting
+    /// record — `place_component_at` never authors one (the interactive
+    /// gesture freezes its transform into `placement` instead), so a mate has
+    /// to be written directly to exercise the carry rules.
+    async fn place_then_mate(
+        root: &Path,
+        state: &State<'_, AppState>,
+        component_id: &str,
+        attachment: &str,
+    ) -> String {
+        let (_outcome, projection) = place_component_at(
+            root,
+            state,
+            component_id.to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+        )
+        .await
+        .expect("place");
+        let record_id = projection.features[0].id.clone();
+        let record = RecordId::from_str(&record_id).unwrap();
+
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let mut current: PlaceComponentParams =
+            serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+        current.mate = Some(onecad_core::document::record::ComponentMate {
+            self_attachment: attachment.to_string(),
+            target: onecad_core::document::refs::ElementRef {
+                primary: Some(onecad_core::document::refs::PrimaryRef {
+                    body: onecad_core::ids::BodyId::new(),
+                    element: onecad_core::ids::ElementId::new("el_target"),
+                    kind: onecad_core::document::refs::ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Default::default(),
+            },
+            kind: onecad_core::document::record::MateKind::Concentric,
+            flipped: false,
+            extra: Default::default(),
+        });
+        rt.apply(EditCommand::UpdateOperationParams {
+            record,
+            op: Operation::Known(KnownOperation::PlaceComponent(current)),
+        })
+        .expect("author the mate");
+        record_id
+    }
+
+    /// Spec §3.3: the swap happens IN PLACE. A new record would break the
+    /// timeline position, every downstream ref, and the `body_<opId>` the
+    /// instance mints — which is exactly why this is not a wire op.
+    #[tokio::test]
+    async fn replace_swaps_identity_at_the_same_record() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package(dir.path(), "onecad.std.iso4762", "SHCS");
+        write_generator_package(dir.path(), "onecad.std.iso7380", "Button head");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [1.0, 2.0, 3.0],
+            None,
+            Default::default(),
+        )
+        .await
+        .expect("place");
+        let record_id = projection.features[0].id.clone();
+
+        let (_outcome, projection, dropped) = replace_component_at(
+            dir.path(),
+            &state,
+            record_id.clone(),
+            "onecad.std.iso7380".to_string(),
+            "1.0.0".to_string(),
+            Default::default(),
+        )
+        .await
+        .expect("replace");
+
+        assert_eq!(projection.features.len(), 1, "no second record was added");
+        assert_eq!(projection.features[0].id, record_id, "same RecordId");
+        assert_eq!(projection.features[0].op_type, "PlaceComponent");
+        assert!(dropped.is_none(), "no mate to lose");
+
+        let raw = {
+            let guard = state.runtime.lock().await;
+            let rt = guard.as_ref().unwrap();
+            rt.operation_params(RecordId::from_str(&record_id).unwrap())
+                .unwrap()
+        };
+        let after: PlaceComponentParams = serde_json::from_value(raw).unwrap();
+        assert_eq!(after.component_id, "onecad.std.iso7380");
+        match after.source {
+            ComponentSourceRef::Generator { generator_id, .. } => {
+                assert_eq!(
+                    generator_id, "iso4762",
+                    "the NEW package's declared generator"
+                );
+            }
+            other => panic!("expected a generator source, got {other:?}"),
+        }
+        // The frozen placement is the instance's position; a replace is not a move.
+        assert_eq!(after.placement.translate[0], Scalar::new(1.0));
+    }
+
+    /// A mate survives a replace ONLY when the new component declares the same
+    /// attachment name. Both halves are pinned: silently re-binding to some
+    /// other attachment is the mis-bind spec §0 invariant 4 forbids, and
+    /// silently dropping it without saying so leaves the user to discover that
+    /// their screw stopped following the plate.
+    #[tokio::test]
+    async fn replace_carries_a_mate_by_attachment_name_and_reports_a_dropped_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package_with_attachment(dir.path(), "acme.with.shank", "shank_axis");
+        write_generator_package_with_attachment(dir.path(), "acme.also.shank", "shank_axis");
+        write_generator_package_with_attachment(dir.path(), "acme.other.seat", "seat");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        // Carried: the new package declares `shank_axis` too.
+        let record_id = place_then_mate(dir.path(), &state, "acme.with.shank", "shank_axis").await;
+        let (_o, _p, dropped) = replace_component_at(
+            dir.path(),
+            &state,
+            record_id.clone(),
+            "acme.also.shank".to_string(),
+            "1.0.0".to_string(),
+            Default::default(),
+        )
+        .await
+        .expect("replace onto a package with the same attachment");
+        assert!(dropped.is_none(), "the mate rode across");
+        let carried: PlaceComponentParams = {
+            let guard = state.runtime.lock().await;
+            let rt = guard.as_ref().unwrap();
+            serde_json::from_value(
+                rt.operation_params(RecordId::from_str(&record_id).unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            carried.mate.as_ref().map(|m| m.self_attachment.as_str()),
+            Some("shank_axis")
+        );
+
+        // Dropped: the next package declares `seat` only.
+        let (_o, _p, dropped) = replace_component_at(
+            dir.path(),
+            &state,
+            record_id.clone(),
+            "acme.other.seat".to_string(),
+            "1.0.0".to_string(),
+            Default::default(),
+        )
+        .await
+        .expect("replace onto a package without the attachment");
+        assert_eq!(
+            dropped.as_deref(),
+            Some("shank_axis"),
+            "names what was lost"
+        );
+        let after: PlaceComponentParams = {
+            let guard = state.runtime.lock().await;
+            let rt = guard.as_ref().unwrap();
+            serde_json::from_value(
+                rt.operation_params(RecordId::from_str(&record_id).unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(
+            after.mate.is_none(),
+            "dropped, never re-bound to the new component's own attachment"
+        );
+    }
+
+    /// The upgrade offer is a REPORT. It never swaps anything, and it never
+    /// points backwards.
+    #[test]
+    fn upgrade_is_offered_only_when_a_strictly_newer_version_is_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package(dir.path(), "acme.part", "Part");
+        reindex_library_at(dir.path()).unwrap();
+
+        // Only 1.0.0 exists.
+        assert!(
+            component_upgrade_available_at(dir.path(), "acme.part", "1.0.0")
+                .unwrap()
+                .is_none()
+        );
+        // An instance recorded at a version NEWER than anything indexed is not
+        // offered a downgrade.
+        assert!(
+            component_upgrade_available_at(dir.path(), "acme.part", "2.0.0")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            component_upgrade_available_at(dir.path(), "acme.missing", "1.0.0")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn place_with_a_free_param_records_it_on_the_record_and_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package_with_params(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let mut free = BTreeMap::new();
+        free.insert(
+            "thread".to_string(),
+            ComponentParamValue::Text("M8".to_string()),
+        );
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            free,
+        )
+        .await
+        .expect("place_component_at with a free param");
+
+        let record_id = projection.features[0].id.clone();
+        let raw = {
+            let guard = state.runtime.lock().await;
+            let rt = guard.as_ref().unwrap();
+            rt.operation_params(onecad_core::ids::RecordId::from_str(&record_id).unwrap())
+                .unwrap()
+        };
+        let placed: PlaceComponentParams = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            placed.params.get("thread"),
+            Some(&ComponentParamValue::Text("M8".to_string()))
+        );
+        match placed.source {
+            ComponentSourceRef::Generator { params, .. } => assert_eq!(
+                params.get("thread"),
+                Some(&ComponentParamValue::Text("M8".to_string())),
+                "source.params is what the worker's table lookup reads"
+            ),
+            other => panic!("expected a Generator source, got {other:?}"),
+        }
+    }
+
+    /// The role check runs at the place site too — otherwise a gesture could
+    /// author a record whose own edit command would then refuse to touch it.
+    #[tokio::test]
+    async fn place_with_a_non_free_param_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package_with_params(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let mut free = BTreeMap::new();
+        // `head_d` is `role = "table"` in the fixture — derived, never set.
+        free.insert("head_d".to_string(), ComponentParamValue::Number(9.0));
+        let err = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            free,
+        )
+        .await
+        .expect_err("a table-role key is not settable at placement either");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("head_d"), "names the offending key: {msg}");
+    }
+
     #[tokio::test]
     async fn set_component_params_merges_a_free_override_and_reaches_source_params() {
         let dir = tempfile::tempdir().unwrap();
@@ -887,6 +1492,7 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             "1.0.0".to_string(),
             [0.0, 0.0, 0.0],
             None,
+            Default::default(),
         )
         .await
         .expect("place_component_at");
@@ -949,6 +1555,7 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             "1.0.0".to_string(),
             [0.0, 0.0, 0.0],
             None,
+            Default::default(),
         )
         .await
         .expect("place_component_at");
@@ -1034,6 +1641,7 @@ geometry_format = 4
             "1.0.0".to_string(),
             [0.0, 0.0, 0.0],
             None,
+            Default::default(),
         )
         .await
         .expect("place a document-source component");
@@ -1170,6 +1778,7 @@ geometry_format = 4
             "1.0.0".to_string(),
             [0.0, 0.0, 0.0],
             None,
+            Default::default(),
         )
         .await
         .expect_err("a package with no bake cannot be placed");
@@ -1203,6 +1812,7 @@ geometry_format = 4
             "1.0.0".to_string(),
             [0.0, 0.0, 0.0],
             None,
+            Default::default(),
         )
         .await
         .expect("place");

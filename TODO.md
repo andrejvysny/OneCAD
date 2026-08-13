@@ -1,5 +1,64 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-A3 (2026-08-13) — GATE PASSED, PHASE A CLOSED
+
+Auto-size on hole rims (spec §5.3's hole row, §5.4 step 3) — the last named
+content gap, and the step that makes spec §12's flagship sentence true end to
+end: drag a screw onto a hole and it arrives at the hole's size.
+
+**No wire change was needed, which was worth checking before designing one:**
+`ClassifyElement` already returns `frame.radius` for cylinder and circle frames
+(SCHEMA §7.5) and it already reaches the frontend as `ClassifyResult.frame
+.radius`. The measurement was there; nothing consumed it.
+
+**The picker is pure and refuses rather than substitutes.**
+`nearestSmallerThread(holeDiameter, domain)` takes the largest declared size
+whose NOMINAL diameter still fits — an M6 clearance hole (6.6) takes an M6, not
+the M8 that cannot pass. Nothing fitting returns `null` and the armed size
+stands: a 1 mm hole gets no auto-size rather than the smallest thread in the
+domain, which would be the Toolbox failure mode in miniature. A non-metric
+designation (an inch series, a bearing code) opts out instead of being guessed
+at.
+
+**The real work was making the ghost and the commit agree.** They run through
+two different call paths — `updatePreview`'s `source.params` and
+`placeComponent`'s own `params` — and the free params reached NEITHER before
+this WP: `CadClient.placeComponent` had no params argument at all, and the
+preview's generator source carried no `params` key, so every ghost previewed
+the generator's DEFAULT size. This module has already shipped that exact class
+of bug twice (a dropped `rotate`, then a hardcoded `source`), so the pairing
+now has its own test that watches both calls from ONE gesture.
+
+**Threaded through, end to end**: `source.params` on the preview op (validated,
+never coerced — a malformed map throws rather than being dropped),
+`placeComponent(…, params)` on `CadClient` / `CommandApiService` / the tauri
+client / the mock, and `place_component(…, params)` in Rust, which validates
+them against the component's own signature. That validation moved into a shared
+`check_free_params` so the place site and the edit site cannot drift; the place
+site needs it because a gesture that authored a non-free key would produce a
+record the edit command then refuses to touch. A blob-backed source with params
+is refused with a reason — baked geometry has nothing to re-derive.
+
+**Coverage, and one honest gap.** Unit tests for the picker (including the
+nothing-fits and non-metric cases), `previewOps` tests for the `source.params`
+passthrough and its refusals, Rust tests for place-with-a-free-param and the
+non-free refusal, and a new `placementController.test.ts` driving a real
+pointermove→pointerdown gesture over stub services to pin ghost/commit
+agreement. **The Playwright mock lane cannot cover auto-size**:
+`mockClient.classifyElement` derives its answer from mesh metrics and only ever
+reports `plane` or `other` — it has no cylinder/circle case and therefore no
+radius. Recorded here rather than papered over with a fabricated mock frame;
+teaching the mock to classify a cylinder is its own piece of work.
+
+Also removed: `placementController`'s scope-cut comment block, which still
+claimed "no auto-size" and "no mate persistence" — the second had been false
+since WP-3.1.
+
+GATE: vitest **246 files / 4172** (up from 245/4162) · `bunx tsc --noEmit`
+clean · `cargo test --workspace` green (2 new `library.rs` tests) · `cargo
+fmt`/`clippy -D warnings` clean · worker ctest **119/119** unchanged (no C++
+touched) · hex gate empty · Playwright full sweep run at the phase boundary.
+
 ## COMPONENT-LIBRARY WP-A2 (2026-08-13) — GATE PASSED
 
 First-run seeding of the built-in catalog — the other half of "the library is

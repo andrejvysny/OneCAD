@@ -368,6 +368,39 @@ pub struct ReindexReportDto {
     pub skipped: Vec<String>,
 }
 
+/// An opt-in upgrade offer for one placed instance (`component_upgrade_available`;
+/// `types.ts` `ComponentUpgrade`) — spec §3.3's "existing instances keep their
+/// recorded revision and offer opt-in upgrade".
+///
+/// Reporting only. Applying it is a separate, explicit `replace_component`
+/// call: a document must never open differently because a shared library moved
+/// underneath it (spec §0 invariant 4 — the Toolbox failure mode).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentUpgradeDto {
+    pub component_id: String,
+    pub current_version: String,
+    pub latest_version: String,
+    /// The newer package's content hash — what a `replace_component` to it
+    /// would record, surfaced so the UI can show the identity actually being
+    /// adopted rather than just a version string.
+    pub latest_revision: String,
+}
+
+/// The outcome of a `replace_component` (`types.ts` `ReplaceComponentReport`).
+///
+/// `dropped_mate_attachment` names the attachment the OLD instance was mated
+/// through when the NEW component does not declare it: the mate is dropped and
+/// the instance holds its frozen placement rather than being re-bound to some
+/// other attachment. Naming it is the difference between an honest report and
+/// a component that quietly stops following its target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceComponentReportDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_mate_attachment: Option<String>,
+}
+
 /// A crash-recovery offer surfaced at startup (`check_recovery`; `types.ts`
 /// `RecoveryInfo`). A previous session left an autosave whose owning process is
 /// gone — the start screen offers to Restore or Discard it.

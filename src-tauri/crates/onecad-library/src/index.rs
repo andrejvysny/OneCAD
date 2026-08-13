@@ -149,16 +149,68 @@ impl LibraryIndex {
     }
 
     /// The entry for `id`, at `version` when given, else the newest version
-    /// (lexicographic on the version string — a real semver-aware ordering is
-    /// P2 tables work, not this WP's scope).
+    /// by semver order (see [`Self::latest`]).
     #[must_use]
     pub fn get(&self, id: &str, version: Option<&str>) -> Option<(&str, &IndexEntry)> {
         let versions = self.components.get(id)?;
         match version {
             Some(v) => versions.get_key_value(v).map(|(k, e)| (k.as_str(), e)),
-            None => versions.iter().next_back().map(|(v, e)| (v.as_str(), e)),
+            None => self.latest(id),
         }
     }
+
+    /// The newest indexed version of `id`, by SEMVER order.
+    ///
+    /// Not by the `BTreeMap`'s own key order, which is lexicographic and gets
+    /// `1.10.0` vs `1.9.0` exactly backwards — the first version bump past 9
+    /// would otherwise offer a DOWNGRADE as an upgrade (WP-B4).
+    #[must_use]
+    pub fn latest(&self, id: &str) -> Option<(&str, &IndexEntry)> {
+        let versions = self.components.get(id)?;
+        versions
+            .iter()
+            .max_by(|(a, _), (b, _)| compare_versions(a, b))
+            .map(|(v, e)| (v.as_str(), e))
+    }
+
+    /// The newest indexed version of `id` that is STRICTLY newer than
+    /// `version` — the opt-in upgrade offer (spec §3.3), or `None` when the
+    /// instance is already on the newest.
+    ///
+    /// Strictly newer matters in both directions: an instance placed from a
+    /// package the library no longer has the newest copy of (a downgraded or
+    /// partially-synced library root) must not be offered an "upgrade" that
+    /// would move it BACKWARDS.
+    #[must_use]
+    pub fn newer_than(&self, id: &str, version: &str) -> Option<(&str, &IndexEntry)> {
+        let (latest, entry) = self.latest(id)?;
+        (compare_versions(latest, version) == std::cmp::Ordering::Greater)
+            .then_some((latest, entry))
+    }
+}
+
+/// Orders two `major.minor.patch` strings numerically, component by component.
+///
+/// Deliberately narrow: no pre-release or build metadata ordering (`1.0.0-rc1`
+/// sorts as `1.0.0` followed by a string tiebreak). The package format calls
+/// `version` semver and every shipped package is a plain triple; a full semver
+/// implementation can replace this the day a pre-release actually ships, and
+/// the tests below say what today's rule is rather than implying more.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .take(3)
+            .collect()
+    };
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..3 {
+        let ord = pa.get(i).unwrap_or(&0).cmp(pb.get(i).unwrap_or(&0));
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a.cmp(b)
 }
 
 #[derive(Debug, Default)]
@@ -334,5 +386,62 @@ generator_version = 1
         let (index, report) = LibraryIndex::reindex(&missing).unwrap();
         assert!(index.components.is_empty());
         assert_eq!(report.total, 0);
+    }
+
+    #[test]
+    fn latest_orders_versions_numerically_not_lexicographically() {
+        // The bug this exists to prevent: "1.10.0" < "1.9.0" as strings, so a
+        // lexicographic "newest" would offer 1.9.0 as an upgrade FROM 1.10.0.
+        let entry = |version: &str| IndexEntry {
+            path: "acme.part".to_string(),
+            name: "Part".to_string(),
+            category: Vec::new(),
+            tags: Vec::new(),
+            source_kind: "generator".to_string(),
+            parameter_keys: Vec::new(),
+            revision: format!("sha256:{}", "0".repeat(64)),
+            generator_id: Some("iso4762".to_string()),
+            generator_version: Some(1),
+            attachments: BTreeMap::new(),
+            parameters: BTreeMap::new(),
+            designation: Some(version.to_string()),
+        };
+        let mut index = LibraryIndex::default();
+        let mut versions = BTreeMap::new();
+        for v in ["1.9.0", "1.10.0", "1.2.0"] {
+            versions.insert(v.to_string(), entry(v));
+        }
+        index.components.insert("acme.part".to_string(), versions);
+
+        assert_eq!(index.latest("acme.part").map(|(v, _)| v), Some("1.10.0"));
+        assert_eq!(index.get("acme.part", None).map(|(v, _)| v), Some("1.10.0"));
+        assert_eq!(
+            index.get("acme.part", Some("1.2.0")).map(|(v, _)| v),
+            Some("1.2.0"),
+            "an explicit version is still exact"
+        );
+        assert!(index.latest("acme.missing").is_none());
+    }
+
+    #[test]
+    fn version_compare_handles_majors_and_equal_triples() {
+        assert_eq!(
+            compare_versions("2.0.0", "1.99.99"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("1.0.1", "1.0.0"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+        // Unparsable components read as 0 and fall back to a string tiebreak
+        // rather than panicking on a package a future build wrote.
+        assert_eq!(
+            compare_versions("1.0.0", "1.0"),
+            std::cmp::Ordering::Greater
+        );
     }
 }

@@ -43,6 +43,7 @@ import type {
   AxisRef,
   BooleanOperation,
   BooleanParams,
+  ComponentParamValue,
   ExtrudeParams,
   FeatureBooleanMode,
   FilletParams,
@@ -573,6 +574,31 @@ function placeComponentOp(s: PreviewSessionState): OperationOp {
 }
 
 /**
+ * A generator source's free-parameter overrides (WP-A3), or `undefined` when
+ * the draft carries none. Values are the wire's own scalar union
+ * (`ComponentParamValue`); anything else is a caller bug and throws rather
+ * than being dropped, because a silently-dropped size override previews one
+ * screw and commits another.
+ */
+function componentParams(raw: unknown): Record<string, ComponentParamValue> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("PlaceComponent source.params must be an object");
+  }
+  const out: Record<string, ComponentParamValue> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
+      throw new Error(`PlaceComponent source.params.${key} must be a number, string or boolean`);
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error(`PlaceComponent source.params.${key} must be finite`);
+    }
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * Validates the draft's `source` without reinterpreting it: every field the
  * worker reads must be present and of the right shape, but nothing is defaulted
  * or substituted — an under-specified source must fail at the arm, where the
@@ -591,7 +617,10 @@ function placeComponentSource(raw: unknown): PlaceComponentSource {
     if (!Number.isFinite(generatorVersion)) {
       throw new Error("PlaceComponent generatorVersion must be finite");
     }
-    return { kind: "generator", generatorId, generatorVersion };
+    const params = componentParams(s.params);
+    return params
+      ? { kind: "generator", generatorId, generatorVersion, params }
+      : { kind: "generator", generatorId, generatorVersion };
   }
   if (kind === "embedded" || kind === "document") {
     const sha256 = nonEmptyString(s.sha256);

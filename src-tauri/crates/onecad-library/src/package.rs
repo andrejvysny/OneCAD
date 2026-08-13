@@ -174,6 +174,46 @@ pub fn parse(toml_str: &str, path: &Path) -> LibraryResult<ComponentPackage> {
     })
 }
 
+/// Serializes a package back to `component.toml` text (spec §2.1).
+///
+/// The inverse of [`parse`], and the authoring half of the format: "Save as
+/// Component" (WP-B2) writes packages, it does not only read them. Round-trip
+/// fidelity is pinned by test — a field this cannot write is a field an
+/// authored package silently loses.
+///
+/// # Errors
+/// A package whose `[parameters]` carry values TOML cannot represent.
+pub fn to_toml(pkg: &ComponentPackage) -> LibraryResult<String> {
+    toml::to_string_pretty(pkg).map_err(|e| LibraryError::Io(format!("serialize package: {e}")))
+}
+
+/// Writes `component.toml` into `package_dir`, then recomputes and rewrites
+/// `identity.revision` so the manifest describes what is ACTUALLY on disk.
+///
+/// Two passes, deliberately: the revision hashes every file in the directory
+/// EXCEPT the manifest, so every other file must already be written when it is
+/// computed — and the computed value then has to land in the manifest itself.
+/// Writing the manifest once with a guessed revision is how a package ends up
+/// claiming a hash it does not have, which makes every placement of it resolve
+/// `NeedsRepair` (spec §4).
+///
+/// Returns the recorded revision.
+///
+/// # Errors
+/// I/O failure, or a package that fails [`validate_identity`].
+pub fn write_package(package_dir: &Path, pkg: &ComponentPackage) -> LibraryResult<String> {
+    validate_identity(pkg)?;
+    std::fs::create_dir_all(package_dir)?;
+    let manifest_path = package_dir.join(COMPONENT_MANIFEST_FILE);
+    std::fs::write(&manifest_path, to_toml(pkg)?)?;
+
+    let revision = compute_revision(package_dir)?;
+    let mut stamped = pkg.clone();
+    stamped.identity.revision = revision.clone();
+    std::fs::write(&manifest_path, to_toml(&stamped)?)?;
+    Ok(revision)
+}
+
 /// Validates the package's identity invariants (spec §2.1): namespaced id,
 /// non-empty version, well-formed `sha256:` revision.
 pub fn validate_identity(pkg: &ComponentPackage) -> LibraryResult<()> {
@@ -348,5 +388,48 @@ shank_axis = { on = "cylinder:shank", accepts = ["cylinder", "hole", "circularEd
             rev1, rev4,
             "component.toml's own bytes are excluded from its hash"
         );
+    }
+
+    #[test]
+    fn a_package_round_trips_through_to_toml() {
+        // What this pins: an authored package that loses a field on write is a
+        // package that silently changes meaning the next time it is read.
+        let pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        let text = to_toml(&pkg).unwrap();
+        let again = parse(&text, Path::new("component.toml")).unwrap();
+        assert_eq!(pkg, again);
+    }
+
+    #[test]
+    fn write_package_stamps_the_revision_of_what_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("acme.bracket");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        // A sibling file is what the revision actually hashes.
+        std::fs::write(pkg_dir.join("source.onecad"), b"frozen document bytes").unwrap();
+
+        let mut pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        pkg.identity.id = "acme.bracket".to_string();
+        pkg.identity.revision = format!("sha256:{}", "f".repeat(64)); // deliberately wrong
+
+        let recorded = write_package(&pkg_dir, &pkg).unwrap();
+        let on_disk = parse(
+            &std::fs::read_to_string(pkg_dir.join(COMPONENT_MANIFEST_FILE)).unwrap(),
+            Path::new("component.toml"),
+        )
+        .unwrap();
+        assert_eq!(on_disk.identity.revision, recorded);
+        assert_eq!(recorded, compute_revision(&pkg_dir).unwrap());
+        assert_ne!(recorded, format!("sha256:{}", "f".repeat(64)));
+    }
+
+    #[test]
+    fn write_package_refuses_an_invalid_identity_before_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("nope");
+        let mut pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        pkg.identity.id = "unnamespaced".to_string();
+        assert!(write_package(&pkg_dir, &pkg).is_err());
+        assert!(!pkg_dir.join(COMPONENT_MANIFEST_FILE).exists());
     }
 }

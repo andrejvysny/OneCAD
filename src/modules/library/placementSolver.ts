@@ -116,6 +116,44 @@ export function attachmentAccepts(accepts: readonly string[], snapKind: MateSnap
 }
 
 /**
+ * The nominal diameter a metric thread designation names, in mm — `"M6"` → 6,
+ * `"M2.5"` → 2.5. `null` for anything that is not an `M<number>` designation
+ * (an inch series, a free-text key), which simply opts that entry out of
+ * auto-sizing rather than guessing at it.
+ */
+export function threadNominalDiameterMm(designation: string): number | null {
+  const m = /^M(\d+(?:\.\d+)?)$/.exec(designation.trim());
+  if (!m) return null;
+  const d = Number(m[1]);
+  return Number.isFinite(d) && d > 0 ? d : null;
+}
+
+/**
+ * Auto-size (spec §5.3's hole row, §5.4 step 3): the largest declared size
+ * whose NOMINAL diameter still fits `holeDiameterMm` — "nearest smaller
+ * standard size", the rule a fastener actually has to obey (an M8 screw does
+ * not go through a 6.6 mm clearance hole).
+ *
+ * `null` when nothing fits (a hole smaller than the smallest declared size) or
+ * when no entry is a metric designation — the caller then leaves the size
+ * alone rather than substituting one, which is the same refusal discipline the
+ * generator applies to an unknown size.
+ */
+export function nearestSmallerThread(
+  holeDiameterMm: number,
+  domain: readonly string[],
+): string | null {
+  if (!Number.isFinite(holeDiameterMm) || holeDiameterMm <= 0) return null;
+  let best: { designation: string; diameter: number } | null = null;
+  for (const designation of domain) {
+    const diameter = threadNominalDiameterMm(designation);
+    if (diameter === null || diameter > holeDiameterMm) continue;
+    if (!best || diameter > best.diameter) best = { designation, diameter };
+  }
+  return best?.designation ?? null;
+}
+
+/**
  * The candidate placement for one already-matched (attachment, classify)
  * pair — spec §5.3's transform rules. `pickWorldPos` is the raw hover hit
  * point (used to pick a seat point along an infinite axis / a point on an

@@ -425,13 +425,19 @@ export interface CadClient {
 
   /**
    * Instantiates a library component as a placed instance (spec §3.1
-   * `PlaceComponent`). WP-1.5 scope: `translate` + `rotate` — the placement
-   * solver's (`placementSolver.ts`) computed candidate transform, already
-   * resolved client-side from a classify+attachment match. No `mate` yet:
-   * the worker's `ComponentOp` resolver does not consume `mate` on regen
-   * (reads `placement.{translate,rotate}` only), so recording one now would
-   * assert a persistence the document cannot honor — spec §5.5's
-   * re-seat-on-regen ladder is P3. Geometry arrives via the usual
+   * `PlaceComponent`). `translate` + `rotate` are the placement solver's
+   * (`placementSolver.ts`) computed candidate transform, already resolved
+   * client-side from a classify+attachment match.
+   *
+   * `params` carries the free-parameter overrides the gesture chose — today
+   * auto-size on a hole rim (WP-A3), which must reach the COMMIT and not only
+   * the ghost. Keys are validated against the component's own signature
+   * backend-side (`role = "free"` only); a non-free key is refused, never
+   * silently dropped.
+   *
+   * No `mate` is sent from here: the gesture's own transform is frozen into
+   * `placement`, and regen-time re-seating of a recorded mate is the worker's
+   * job (WP-3.1). Geometry arrives via the usual
    * `onProjectionUpdated`/`onDocumentChanged` event stream, same as every
    * other mutating command — this resolves once the edit is APPLIED, not
    * once it has regenerated.
@@ -441,6 +447,7 @@ export interface CadClient {
     componentVersion: string,
     translate: [number, number, number],
     rotate?: TransformRotationParams,
+    params?: Record<string, ComponentParamValue>,
   ): Promise<void>;
 
   /**

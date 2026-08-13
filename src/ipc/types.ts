@@ -1272,13 +1272,11 @@ export interface TransformBodyParams {
 
 /**
  * `PlaceComponent` GHOST-preview params (Rust `PlaceComponentParams` — spec
- * §3.1; Component Library WP-1.5). Narrower than the Rust struct: no `params`
- * free-overrides (P1 has no size table to override against, spec §6 is P2)
- * and no `mate` (the worker's `ComponentOp` resolver does not consume `mate`
- * on regen yet — spec §5.5's re-seat ladder is P3). `generatorId`/
- * `generatorVersion` come straight off the `LibraryComponent` the panel is
- * dragging; the worker's v1 generator stub ignores their VALUE (every id
- * builds the same hardcoded M6 SHCS solid) but still requires them non-empty.
+ * §3.1; Component Library WP-1.5). Narrower than the Rust struct: no `mate`
+ * (the gesture records its own on commit; regen-time re-seating is the
+ * worker's job since WP-3.1). Free-parameter overrides ride inside
+ * `source.params` — where the worker reads them — rather than as a second
+ * top-level copy the ghost would have to keep in sync.
  */
 export interface PlaceComponentParams {
   componentId: string;
@@ -1297,9 +1295,22 @@ export interface PlaceComponentParams {
   rotate: TransformRotationParams;
 }
 
-/** Ghost-preview geometry source, mirroring Rust `ComponentSourceRef`. */
+/**
+ * Ghost-preview geometry source, mirroring Rust `ComponentSourceRef`.
+ *
+ * `params` on the generator variant carries the free-parameter overrides the
+ * gesture chose (auto-size on a hole rim, WP-A3). It is what the worker's own
+ * table lookup reads, so a ghost that omits it previews the generator's
+ * DEFAULT size while the commit places the chosen one — the preview/commit
+ * disagreement WP-3.2 already had to fix once for `source` itself.
+ */
 export type PlaceComponentSource =
-  | { kind: "generator"; generatorId: string; generatorVersion: number }
+  | {
+      kind: "generator";
+      generatorId: string;
+      generatorVersion: number;
+      params?: Record<string, ComponentParamValue>;
+    }
   | ({ kind: "embedded" } & ComponentGeometry)
   | ({ kind: "document"; documentSha256: string } & ComponentGeometry);
 
