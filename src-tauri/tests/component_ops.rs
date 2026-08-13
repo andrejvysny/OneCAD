@@ -823,3 +823,141 @@ async fn every_seeded_component_places_through_the_real_worker() {
 
     wm.shutdown().await;
 }
+
+/// "Save as Component" end to end against the real worker (WP-B2, spec §7):
+/// author a body as a `document` package, then PLACE that package back into a
+/// fresh document and land the same solid.
+///
+/// This is the whole authoring claim in one test. The bake
+/// (`ExportGeometry`), the content-addressed blob, the manifest + revision, the
+/// index, and the placement path that reads all of it are separately tested;
+/// what only this can show is that they compose — an authored component is a
+/// placeable component, with the geometry the author actually saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin).await;
+
+    // Something to author FROM: a generator component's own solid is a real
+    // published body, which is all "Save as Component" needs.
+    let runtime = tokio::sync::Mutex::new(Some(runtime_over(&wm)));
+    let (body, authored_volume) = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(rt, place_component_record(0xa1));
+        let report = regen_all(rt).await;
+        let snap = published(&report, "author source");
+        (snap.bodies[0].body, ())
+    };
+    let authored_volume = {
+        let _ = authored_volume;
+        exact_volume(&wm, body).await
+    };
+
+    let exporter: Arc<dyn onecad_lib::export::GeometryExporter> = Arc::new(wm.clone());
+    let saved = onecad_lib::library::save_as_component_at(
+        library_dir.path(),
+        &runtime,
+        exporter,
+        body.to_string(),
+        onecad_lib::library::NewComponentSpec {
+            id: "acme.bracket".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Bracket".to_string(),
+            category: vec!["mine".to_string()],
+            tags: vec!["authored".to_string()],
+            designation: None,
+            attachments: [(
+                "seat".to_string(),
+                onecad_lib::library::AttachmentSpecInput {
+                    on: "face:seat".to_string(),
+                    accepts: vec!["plane".to_string()],
+                },
+            )]
+            .into_iter()
+            .collect(),
+        },
+        None,
+    )
+    .await
+    .expect("save as component");
+    assert_eq!(saved.source_kind, "document");
+    assert_eq!(saved.attachments.len(), 1);
+
+    // The library on disk now carries a package whose geometry is a blob, not a
+    // recipe — the authoring document is gone from the picture entirely.
+    let library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let (_v, entry) = library.get("acme.bracket", None).expect("indexed");
+    assert_eq!(entry.revision, saved.revision);
+
+    // Place it into a FRESH document. Resolution goes through the same lane a
+    // real placement uses, blob and all.
+    let resolved = library
+        .resolve_source(&onecad_library::resolve::ResolveRequest {
+            component_id: "acme.bracket",
+            component_version: "1.0.0",
+            component_revision: &saved.revision,
+        })
+        .expect("resolve the authored package");
+    let (sha256, bytes, codec, format) = match resolved {
+        onecad_library::resolve::ResolvedSource::Document { blob, .. } => {
+            (blob.sha256, blob.bytes, blob.codec, blob.format)
+        }
+        other => panic!("expected a document source, got {other:?}"),
+    };
+
+    let mut fresh = runtime_over(&wm);
+    fresh
+        .stage_component_blob(
+            &sha256,
+            onecad_core::document::record::ImportSourceCodec::from_extension(&codec).unwrap(),
+            &bytes,
+        )
+        .expect("stage the authored blob");
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.bracket".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: saved.revision.clone(),
+        params: Default::default(),
+        source: ComponentSourceRef::Document {
+            // The record's provenance pointer is the frozen document's own
+            // digest; this test does not read it back, so any well-formed
+            // digest stands in (`validate` requires bare 64-hex).
+            document_sha256: "0".repeat(64),
+            sha256,
+            codec: onecad_core::document::record::ImportSourceCodec::from_extension(&codec)
+                .unwrap(),
+            brep_format: format,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    add_op(
+        &mut fresh,
+        OperationRecord::new(RecordId(Uuid::from_u128(0xa2)), 0, "Place Component", op),
+    );
+    let report = regen_all(&mut fresh).await;
+    let snap = published(&report, "place the authored component");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the authored package publishes one body"
+    );
+    let replaced_volume = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        (replaced_volume - authored_volume).abs() < 1e-6,
+        "authored {authored_volume} vs placed {replaced_volume} — the bake must be the same solid"
+    );
+
+    wm.shutdown().await;
+}

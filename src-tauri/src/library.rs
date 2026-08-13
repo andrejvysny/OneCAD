@@ -663,6 +663,221 @@ pub async fn set_component_params(
     Ok(projection)
 }
 
+/// The identity + metadata half of "Save as Component" (spec §7), as the
+/// authoring UI supplies it. Everything about GEOMETRY is decided by the
+/// backend: which body was baked, in which codec, and where the blob landed.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewComponentSpec {
+    /// Namespaced, e.g. `"acme.bracket"`. Validated by the library crate.
+    pub id: String,
+    pub version: String,
+    pub name: String,
+    #[serde(default)]
+    pub category: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designation: Option<String>,
+    /// Named mate points the author placed (spec §2.1's `[attachments]`) —
+    /// `{ on, accepts }` per key. A component with none can never snap, so the
+    /// UI is expected to require at least one; this layer does not, because a
+    /// non-snapping component is still a legitimate thing to save.
+    #[serde(default)]
+    pub attachments: BTreeMap<String, AttachmentSpecInput>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentSpecInput {
+    pub on: String,
+    pub accepts: Vec<String>,
+}
+
+/// "Save as Component" (spec §7) — captures one body at head as a reusable
+/// `document`-kind package.
+///
+/// **The bake is the whole design.** The package stores the frozen authoring
+/// document AND a solid baked out of the live session (`ExportGeometry`, SCHEMA
+/// §7.8); a placement copies the baked solid into the placing document. Nothing
+/// ever replays a frozen document — spec §4 requires a placed component to
+/// render with the library deleted, and the worker is one session per process,
+/// so a nested replay would need a second worker. The frozen document is
+/// provenance and the input a future re-bake lane would replay (WP-3.2).
+///
+/// **Spec §9's single-solid rule is enforced HERE, at save time**, where the
+/// author can still do something about it — not at placement, where they would
+/// discover it as a failure on someone else's machine. `ExportGeometry` reports
+/// the solid count it actually wrote.
+///
+/// The document is frozen WITHOUT adopting a path or clearing the dirty flag:
+/// `build_save_payload` + `write_payload` are used directly rather than
+/// `DocumentRuntime::save`, which would tell the open document it had been
+/// saved to a temp file inside the library.
+#[tauri::command]
+pub async fn save_as_component(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    body_id: String,
+    spec: NewComponentSpec,
+    preview_png: Option<String>,
+) -> Result<LibraryComponentDto, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("saveAsComponent: no app data dir".into()))?;
+    save_as_component_at(
+        &root,
+        &state.runtime,
+        state.exporter(),
+        body_id,
+        spec,
+        preview_png,
+    )
+    .await
+}
+
+/// The testable core of [`save_as_component`].
+///
+/// Takes the runtime and the exporter EXPLICITLY rather than an `AppState`, so
+/// an integration test can drive it over a real worker (`AppState`'s own
+/// accessors are behind a `tauri::State`, and the `#[tauri::command]` wrapper
+/// is pinned to the `Wry` runtime — the same constraint the `*_at` split in
+/// this module already exists for).
+pub async fn save_as_component_at(
+    root: &Path,
+    runtime: &tokio::sync::Mutex<Option<crate::document_runtime::DocumentRuntime>>,
+    exporter: std::sync::Arc<dyn crate::export::GeometryExporter>,
+    body_id: String,
+    spec: NewComponentSpec,
+    preview_png: Option<String>,
+) -> Result<LibraryComponentDto, ApiError> {
+    let body = onecad_core::ids::BodyId::from_str(&body_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId {body_id:?}: {e}")))?;
+
+    // A scratch directory per save, alongside the import workspaces (same
+    // process-scoped temp root, same "this is worker hand-off material, not
+    // user data" status).
+    let scratch = std::env::temp_dir().join(format!(
+        "onecad-authoring-{}-{}",
+        std::process::id(),
+        body_id.replace(['/', '\\'], "_")
+    ));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| ApiError::Internal(format!("saveAsComponent: scratch dir: {e}")))?;
+    let document_path = scratch.join("source.onecad");
+    let geometry_path = scratch.join("geometry.xbf");
+
+    // Freeze the document under the runtime lock, write it outside — the same
+    // split `save_document` uses, for the same reason (serialization must not
+    // block an edit).
+    let payload = {
+        let mut guard = runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("saveAsComponent".into()))?;
+        if !rt.head_body_ids().contains(&body) {
+            return Err(ApiError::InvalidCommand(format!(
+                "saveAsComponent: {body_id} is not a body at head"
+            )));
+        }
+        rt.build_save_payload(
+            crate::api::save_meta(),
+            crate::document_runtime::SaveCaches::none(),
+        )
+    };
+    crate::document_runtime::DocumentRuntime::write_payload(&document_path, &payload)
+        .map_err(|e| ApiError::Internal(format!("saveAsComponent: freeze document: {e}")))?;
+
+    // Bake the solid out of the LIVE session. `xbf` is the attribute-preserving
+    // form (face colors survive), and the worker echoes back the codec/format
+    // it actually wrote rather than this layer pinning a version.
+    let baked = exporter
+        .export_geometry(&geometry_path.to_string_lossy(), &[body], "xbf")
+        .await?;
+    if baked.solid_count != 1 {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(ApiError::InvalidCommand(format!(
+            "saveAsComponent: a component must resolve to exactly one solid (spec §9); \
+             {body_id} baked {} — union the bodies, pick one, or split them into separate \
+             components",
+            baked.solid_count
+        )));
+    }
+
+    let document = std::fs::read(&document_path)
+        .map_err(|e| ApiError::Internal(format!("saveAsComponent: read frozen document: {e}")))?;
+    let geometry = std::fs::read(&geometry_path)
+        .map_err(|e| ApiError::Internal(format!("saveAsComponent: read baked geometry: {e}")))?;
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    let package = ComponentPackage {
+        identity: package::Identity {
+            id: spec.id.clone(),
+            version: spec.version.clone(),
+            // Recomputed by `save_component` over what actually lands on disk.
+            revision: format!("sha256:{}", "0".repeat(64)),
+        },
+        metadata: package::Metadata {
+            name: spec.name,
+            standard: None,
+            designation: spec.designation,
+            category: spec.category,
+            tags: spec.tags,
+            unit: "mm".to_string(),
+        },
+        // Overwritten by `save_component` with the document source it produces.
+        source: package::SourceSpec::Generator {
+            generator: String::new(),
+            generator_version: 0,
+        },
+        // An authored component declares no parameters in this build: a
+        // `document` source has baked geometry, and `set_component_params`
+        // already refuses to edit one (there is no re-bake lane). Declaring
+        // free params here would offer an edit that cannot be honored.
+        parameters: BTreeMap::new(),
+        attachments: spec
+            .attachments
+            .into_iter()
+            .map(|(key, a)| {
+                (
+                    key,
+                    package::AttachmentSpec {
+                        on: a.on,
+                        accepts: a.accepts,
+                    },
+                )
+            })
+            .collect(),
+    };
+
+    let mut library = open_at(root)?;
+    library.save_component(onecad_library::NewComponent {
+        package,
+        document,
+        geometry,
+        geometry_codec: baked.codec,
+        geometry_format: Some(baked.format),
+        preview_png: crate::api::decode_preview_png(preview_png),
+    })?;
+
+    let (version, entry) = library
+        .get(&spec.id, Some(&spec.version))
+        .ok_or_else(|| ApiError::Internal("saveAsComponent: saved but not indexed".into()))?;
+    Ok(LibraryComponentDto {
+        id: spec.id.clone(),
+        version: version.to_string(),
+        name: entry.name.clone(),
+        category: entry.category.clone(),
+        tags: entry.tags.clone(),
+        source_kind: entry.source_kind.clone(),
+        revision: entry.revision.clone(),
+        generator_id: entry.generator_id.clone(),
+        generator_version: entry.generator_version,
+        attachments: entry.attachments.clone(),
+        parameters: entry.parameters.clone(),
+        designation: entry.designation.clone(),
+    })
+}
+
 /// Swaps a placed instance to a DIFFERENT component (spec §3.3
 /// `ReplaceComponent`) — all M6 socket caps to flanged button heads, or one
 /// instance to a newer version of the same package.

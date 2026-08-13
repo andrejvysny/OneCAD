@@ -46,6 +46,9 @@ import type {
   BeginGestureResult,
   ClassifyResult,
   ComponentParamValue,
+  ComponentUpgrade,
+  NewComponentSpec,
+  ReplaceComponentReport,
   CurveParams,
   DocumentChange,
   DocumentModule,
@@ -177,6 +180,9 @@ const CMD = {
   reindexLibrary: "reindex_library",
   resolveComponentSource: "resolve_component_source",
   placeComponent: "place_component",
+  saveAsComponent: "save_as_component",
+  replaceComponent: "replace_component",
+  componentUpgradeAvailable: "component_upgrade_available",
   setComponentParams: "set_component_params",
   detachComponent: "detach_component",
   prepareOffsetFace: "prepare_offset_face",
@@ -1609,6 +1615,32 @@ export function createTauriClient(): CadClient {
     await call(CMD.placeComponent, { componentId, componentVersion, translate, rotate, params });
   }
 
+  async function saveAsComponent(
+    bodyId: string,
+    spec: NewComponentSpec,
+    previewPng?: string | null,
+  ): Promise<LibraryComponent> {
+    return call<LibraryComponent>(CMD.saveAsComponent, { bodyId, spec, previewPng });
+  }
+
+  async function replaceComponent(
+    recordId: string,
+    componentId: string,
+    componentVersion: string,
+    params?: Record<string, ComponentParamValue>,
+  ): Promise<ReplaceComponentReport> {
+    return call<ReplaceComponentReport>(CMD.replaceComponent, {
+      recordId,
+      componentId,
+      componentVersion,
+      params,
+    });
+  }
+
+  async function componentUpgradeAvailable(recordId: string): Promise<ComponentUpgrade | null> {
+    return call<ComponentUpgrade | null>(CMD.componentUpgradeAvailable, { recordId });
+  }
+
   async function setComponentParams(
     recordId: string,
     params: Record<string, ComponentParamValue>,
@@ -1885,6 +1917,9 @@ export function createTauriClient(): CadClient {
     reindexLibrary,
     resolveComponentSource,
     placeComponent,
+    saveAsComponent,
+    replaceComponent,
+    componentUpgradeAvailable,
     setComponentParams,
     detachComponent,
     prepareOffsetFace,

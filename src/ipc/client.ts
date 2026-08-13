@@ -14,6 +14,9 @@ import type {
   BeginGestureResult,
   ClassifyResult,
   ComponentParamValue,
+  ComponentUpgrade,
+  NewComponentSpec,
+  ReplaceComponentReport,
   DocumentChange,
   DocumentModule,
   DocumentProjectionWire,
@@ -449,6 +452,57 @@ export interface CadClient {
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
   ): Promise<void>;
+
+  /**
+   * Captures one body at head as a reusable `document`-kind component (spec §7
+   * "Save as Component").
+   *
+   * The backend freezes the document, bakes the body's solid through the
+   * worker, stores it content-addressed, writes the package and re-indexes.
+   * Refused when the body bakes to anything other than exactly one solid (spec
+   * §9) — checked at SAVE time, where the author can still fix it, rather than
+   * at placement on someone else's machine.
+   *
+   * **The component seats at its MODEL ORIGIN, +Z up.** The placement solver
+   * aligns a component's local origin/+Z to the target, and an authored body's
+   * origin is wherever it was modelled — so "put the origin on the face that
+   * seats" is the authoring rule, the same convention every built-in generator
+   * follows. Per-attachment frames (which would lift that restriction) are not
+   * in this build.
+   *
+   * `previewPng` is an optional viewport capture (data URL or bare base64),
+   * stored as the package thumbnail; a malformed one is dropped, never fatal.
+   */
+  saveAsComponent(
+    bodyId: string,
+    spec: NewComponentSpec,
+    previewPng?: string | null,
+  ): Promise<LibraryComponent>;
+
+  /**
+   * Swaps a placed instance to a different component, IN PLACE at the same
+   * record (spec §3.3 `ReplaceComponent`) — identity, timeline position and
+   * every downstream reference survive.
+   *
+   * A recorded mate rides across only when the new component declares an
+   * attachment of the same name; otherwise it is dropped, reported in the
+   * returned {@link ReplaceComponentReport}, and the instance holds its frozen
+   * placement. Never silently re-bound to a different attachment.
+   */
+  replaceComponent(
+    recordId: string,
+    componentId: string,
+    componentVersion: string,
+    params?: Record<string, ComponentParamValue>,
+  ): Promise<ReplaceComponentReport>;
+
+  /**
+   * Whether a newer version of the component behind `recordId` is indexed
+   * (spec §3.3's opt-in upgrade). Read-only: a document must never open
+   * differently because a shared library moved underneath it. `null` when the
+   * record is not a placed component, or is already on the newest version.
+   */
+  componentUpgradeAvailable(recordId: string): Promise<ComponentUpgrade | null>;
 
   /**
    * Drops a placed component's library identity, keeping its cached

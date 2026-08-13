@@ -1,5 +1,63 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-B2 (2026-08-13) — GATE PASSED
+
+"Save as Component" (spec §7) — a body at head becomes a reusable
+`document`-kind package, and places back as the same solid.
+
+**The bake is the design.** The package stores the frozen authoring document
+AND a solid exported out of the live session (`ExportGeometry`, §7.8), and a
+placement copies the baked solid. Nothing ever replays a frozen document (spec
+§4 wants the geometry in the placing document anyway, and the worker is one
+session per process). The frozen document is provenance plus the input a future
+re-bake lane would replay.
+
+**Spec §9's single-solid rule is enforced at SAVE time**, where the author can
+still union/split, rather than at placement on someone else's machine.
+`ExportGeometry` reports the count it actually wrote.
+
+**Two honest limits, stated in the dialog rather than faked:**
+- **No face-clicking to place attachments.** The solver seats a component by its
+  local origin and +Z, and nothing on the wire carries a per-attachment frame —
+  an attachment placed on an arbitrary face could not be honoured at placement.
+  So the authoring rule is the one every built-in generator already follows:
+  **the component seats at its model origin**. The dialog says so. Per-attachment
+  frames (`mate.selfFrame` + a canonicalizing bake) are the follow-up.
+- **No parameter roles.** A baked source has no re-bake lane, and
+  `set_component_params` already refuses to edit one; declaring free params here
+  would offer an edit that cannot be honoured.
+
+**Storage** (landed with WP-A3's commit, exercised here): `package::to_toml` +
+`write_package` (write → recompute the revision over what is on disk → rewrite),
+content-addressed blob put, and **version-qualified package directories** — the
+last found by a test, because a bare `<id>` directory made a 1.1.0 save
+overwrite 1.0.0's manifest and leave every instance recording 1.0.0 resolving
+`NeedsRepair` with no file left to explain why. Re-saving the same id@version is
+refused: that is a semver bump, not an overwrite.
+
+**The test that proves the whole claim**:
+`a_body_saved_as_a_component_places_back_as_the_same_solid` authors a published
+body against the REAL worker, then resolves the package out of the library and
+places it into a FRESH document, asserting the exact kernel volume matches.
+Everything else (bake, blob, manifest, index, placement) is tested separately;
+only this shows they compose.
+
+**Frontend**: the menu item is a `Slots.TreeContext` contribution (WP-B1) gated
+on `kind === "body"`, so the library reaches a row modeling provides without
+either module importing the other. The dialog is a `Slots.ShellOverlay`
+occupant; it stays OPEN on a backend refusal, because every way this can fail is
+something the author fixes in place, and closing would discard their typing.
+
+**`shellContract.ts` amended** (a user-visible change, per that file's own
+rule): `SaveAsComponentHost` joins `Slots.ShellOverlay` at the end, after the
+four shell modals. It renders `null` until a body is being authored, so nothing
+moved and nothing new is visible until the user asks for it.
+
+GATE: vitest **248 files / 4187** (up from 247/4178) · `bunx tsc --noEmit` clean
+· `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1163 passed / 0 failed** ·
+`cargo fmt`/`clippy -D warnings` clean · worker ctest 119/119 unchanged (no C++
+touched) · hex gate empty.
+
 ## COMPONENT-LIBRARY WP-B1 (2026-08-13) — GATE PASSED
 
 Cross-module context-menu contributions — the platform seam "Save as

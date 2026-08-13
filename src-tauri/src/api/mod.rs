@@ -532,7 +532,7 @@ const MAX_PREVIEW_PNG_BYTES: usize = 512 * 1024;
 /// **Every failure is `None` with a warning, never an error.** A save carries the
 /// user's work; a thumbnail is decoration. Refusing to persist a document because
 /// its screenshot was malformed would be an absurd trade.
-fn decode_preview_png(encoded: Option<String>) -> Option<Vec<u8>> {
+pub(crate) fn decode_preview_png(encoded: Option<String>) -> Option<Vec<u8>> {
     use base64::Engine as _;
 
     let raw = encoded?;
@@ -2693,7 +2693,7 @@ fn snapshot_of(rt: &DocumentRuntime) -> DocumentSnapshotDto {
 
 /// Provenance metadata for a save. The pure core never reads the wall clock, so
 /// the app supplies the timestamps here.
-fn save_meta() -> SaveMeta {
+pub(crate) fn save_meta() -> SaveMeta {
     let now = now_rfc3339();
     SaveMeta {
         app_version: env!("CARGO_PKG_VERSION").to_string(),

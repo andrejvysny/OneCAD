@@ -17,12 +17,14 @@
 import type { InspectorContext, ModuleScope, Platform } from "@/platform";
 import { Slots } from "@/platform";
 import { LIBRARY_MODULE_ID } from "./manifest";
-import { LibraryPanels } from "./panelIds";
+import { LibraryMenuItems, LibraryPanels } from "./panelIds";
 import { LibraryInspectorPriorities, LibraryInspectorSections } from "./inspectorSectionIds";
 import { LibraryPanel } from "@/features/library/LibraryPanel";
 import { LibraryStatusSection } from "@/features/library/LibraryStatusSection";
 import { ComponentParametersSection } from "@/features/library/ComponentParametersSection";
 import { configurePlacementController } from "./placementController";
+import { openSaveAsComponent } from "./authoringController";
+import { SaveAsComponentHost } from "@/features/library/SaveAsComponentHost";
 import {
   ModelingScopes,
   ModelingServices,
@@ -77,6 +79,29 @@ export function contributeLibraryUi(scope: ModuleScope): void {
     canRender: (ctx: InspectorContext) =>
       ctx.scopes.includes(ModelingScopes.Model) && ctx.selection[0]?.typeId === "feature",
     component: ComponentParametersSection,
+  });
+
+  // WP-B2: "Save as Component" — a menu contribution on a BODY row plus the
+  // overlay that owns its dialog. The row belongs to modeling's tree provider
+  // and the item belongs here; `platform.menus` (WP-B1) is what lets those be
+  // two different modules without either importing the other (ADR-0002).
+  scope.registerMenuItem({
+    id: LibraryMenuItems.SaveAsComponent,
+    slot: Slots.TreeContext,
+    title: "Save as Component…",
+    appliesTo: (target) => target.kind === "body",
+    run: (target) => openSaveAsComponent({ bodyId: target.id, bodyName: target.label }),
+  });
+
+  scope.registerPanel({
+    id: LibraryPanels.SaveAsComponentHost,
+    slot: Slots.ShellOverlay,
+    title: "Save as component",
+    // AFTER the four shell modals (100-130), which is what `shellContract.ts`
+    // freezes. Overlay order is stacking order, and a dialog opened from a
+    // context menu is the most recent thing the user asked for.
+    priority: 140,
+    component: SaveAsComponentHost,
   });
 
   // The placement gesture (WP-1.5) needs modeling's published services

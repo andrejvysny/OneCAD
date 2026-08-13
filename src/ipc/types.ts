@@ -498,6 +498,49 @@ export interface ClassifyFrame {
 }
 
 /**
+ * "Save as Component" input (spec §7; Rust `NewComponentSpec`) — identity and
+ * metadata only.
+ *
+ * Everything about GEOMETRY is the backend's: which body is baked, in which
+ * codec, and where the blob lands. The frontend names the component; it never
+ * describes how the solid is stored.
+ */
+export interface NewComponentSpec {
+  /** Namespaced (`<ns>.<name>`), validated backend-side. */
+  id: string;
+  version: string;
+  name: string;
+  category: string[];
+  tags: string[];
+  designation?: string;
+  /** `[attachments]` — named mate points, `{ on, accepts }` per key. */
+  attachments: Record<string, LibraryAttachment>;
+}
+
+/**
+ * An opt-in upgrade offer for one placed instance (Rust `ComponentUpgradeDto`;
+ * spec §3.3). Reporting only — applying it is an explicit `replaceComponent`.
+ */
+export interface ComponentUpgrade {
+  componentId: string;
+  currentVersion: string;
+  latestVersion: string;
+  latestRevision: string;
+}
+
+/**
+ * The outcome of a `replaceComponent` (Rust `ReplaceComponentReportDto`).
+ *
+ * `droppedMateAttachment` names the attachment the old instance was mated
+ * through when the new component does not declare it: the mate is dropped and
+ * the instance holds its frozen placement rather than being re-bound to a
+ * different attachment.
+ */
+export interface ReplaceComponentReport {
+  droppedMateAttachment?: string;
+}
+
+/**
  * One indexed library component (Component Library WP-1.3; mirrors Rust
  * `LibraryComponentDto` — `onecad-library`'s `IndexEntry` plus the identity
  * fields the index keys on).

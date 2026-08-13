@@ -408,6 +408,7 @@ pub fn run() {
             library::place_component,
             library::set_component_params,
             library::replace_component,
+            library::save_as_component,
             library::component_upgrade_available,
             library::detach_component,
             api::prepare_offset_face,

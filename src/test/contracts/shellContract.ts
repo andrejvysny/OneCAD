@@ -30,6 +30,13 @@
  * comment. `LibraryPanel` is still a real, separately-registered
  * contribution (its OWN entry in the registry, its OWN mount-order slot), so
  * it belongs in this contract like any other panel.
+ *
+ * AMENDED 2026-08-13 (Component Library WP-B2) — recorded in TODO.md.
+ * `SaveAsComponentHost` joined `Slots.ShellOverlay` at the END, after the four
+ * shell modals. It is the "Save as Component" dialog's mount point and renders
+ * `null` whenever no body is being authored, so nothing above it moved and
+ * nothing new is visible until the user opens it. Overlay LAST is the same
+ * rule the region itself follows: a modal has to cover every region above it.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",
@@ -58,4 +65,5 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "ExtensionsManager",
   "CustomizeWorkspaceSheet",
   "MissingExtensionDialog",
+  "SaveAsComponentHost",
 ];

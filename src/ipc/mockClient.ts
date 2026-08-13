@@ -16,6 +16,9 @@ import type {
   BodyMeshRef,
   ClassifyResult,
   ComponentParamValue,
+  ComponentUpgrade,
+  NewComponentSpec,
+  ReplaceComponentReport,
   DocumentChange,
   DocumentProjectionWire,
   DocumentSnapshot,
@@ -1370,6 +1373,14 @@ function mockLibraryEnabled(): boolean {
 let nextComponentSeq = 1;
 
 /**
+ * Components authored through `saveAsComponent` this session (WP-B2). Kept
+ * in memory only — the mock lane has no library root to write to, and this
+ * exists so the authoring FLOW (menu → dialog → the panel listing the result)
+ * is exercisable without a backend.
+ */
+let mockAuthored: LibraryComponent[] = [];
+
+/**
  * Rejects any key that is not `role = "free"` on `component` — the mock's
  * mirror of the backend's own signature check (`library.rs::check_free_params`).
  * `what` names the caller so the two commands' messages stay distinguishable.
@@ -1979,6 +1990,7 @@ export function resetMockDocument(): void {
   undoStack.length = 0;
   redoStack.length = 0;
   mockRecovery = null;
+  mockAuthored = [];
   mockSketchDatum.clear();
   documentStore.getState().applyChange({ datums: {} });
   // Re-adopt the (already reset) projection store as the mock's metadata authority.
@@ -2414,7 +2426,8 @@ export const mockClient: CadClient = {
 
   async listLibraryComponents(): Promise<LibraryComponent[]> {
     await wait(MESH_LATENCY_MS);
-    return mockLibraryEnabled() ? [MOCK_LIBRARY_FIXTURE] : [];
+    const seeded = mockLibraryEnabled() ? [MOCK_LIBRARY_FIXTURE] : [];
+    return [...seeded, ...mockAuthored];
   },
 
   async reindexLibrary(): Promise<ReindexReport> {
@@ -2485,6 +2498,64 @@ export const mockClient: CadClient = {
    * designation but not the rendered geometry — the real worker-backed lane
    * (`component_ops.rs`) is where a size change actually resizes the body.
    */
+  /**
+   * MOCK-LANE HONESTY: the package is recorded in the in-memory catalog so the
+   * authoring FLOW is exercisable (the dialog, the menu item, the panel picking
+   * it up afterwards), but nothing is baked and nothing is written — there is
+   * no worker on this lane to export a solid from, and no library root to write
+   * to. A placement of a mock-authored component therefore reuses the fixture
+   * geometry, exactly like every other mock placement.
+   */
+  async saveAsComponent(
+    bodyId: string,
+    spec: NewComponentSpec,
+    _previewPng?: string | null,
+  ): Promise<LibraryComponent> {
+    await wait();
+    if (!documentStore.getState().bodies[bodyId]) {
+      throw new Error(`saveAsComponent: ${bodyId} is not a body in this document`);
+    }
+    if (!spec.id.includes(".")) {
+      throw new Error(`saveAsComponent: id \`${spec.id}\` must be namespaced (<ns>.<name>)`);
+    }
+    if (mockAuthored.some((c) => c.id === spec.id && c.version === spec.version)) {
+      throw new Error(`saveAsComponent: ${spec.id}@${spec.version} already exists`);
+    }
+    const authored: LibraryComponent = {
+      id: spec.id,
+      version: spec.version,
+      name: spec.name,
+      category: spec.category,
+      tags: spec.tags,
+      sourceKind: "document",
+      revision: `sha256:${"a".repeat(64)}`,
+      attachments: spec.attachments,
+      parameters: {},
+      designation: spec.designation,
+    };
+    mockAuthored.push(authored);
+    return authored;
+  },
+
+  /** The mock lane has one fixture component and nothing to replace it with. */
+  async replaceComponent(
+    recordId: string,
+    componentId: string,
+    _componentVersion: string,
+    _params?: Record<string, ComponentParamValue>,
+  ): Promise<ReplaceComponentReport> {
+    await wait();
+    throw new Error(
+      `replaceComponent: not available on the mock lane (record ${recordId} → ${componentId})`,
+    );
+  },
+
+  /** No versioned catalog on the mock lane, so nothing is ever newer. */
+  async componentUpgradeAvailable(_recordId: string): Promise<ComponentUpgrade | null> {
+    await wait();
+    return null;
+  },
+
   async setComponentParams(
     recordId: string,
     params: Record<string, ComponentParamValue>,
