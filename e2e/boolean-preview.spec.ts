@@ -188,6 +188,22 @@ async function setupTwoBodies(page: Page): Promise<[string, string]> {
  *  engine's OWN `probePick` (exposed at `window.__vpEngine` under `?vpdebug`),
  *  mirroring `helpers.ts findExtrudeHandle`'s scanning approach. */
 async function findBodyScreenPoint(page: Page, bodyId: string): Promise<{ x: number; y: number }> {
+  // MC-R8. The camera MUST be settled before the scan, for the same reason
+  // `helpers.ts findFaceOnBody` and this file's own `extrudeRegionAt` wait: a probe
+  // returns a point valid for the camera it was taken with, and the click that
+  // follows raycasts against whatever camera is live a moment later.
+  //
+  // MEASURED (instrumented full chromium lane, all three tests, every run):
+  // `autoFitPending: true` both at entry and immediately after the scan, with the
+  // scanned point still hitting. The two extrudes in `twoBodies` each commit a body,
+  // and a new body schedules the DEBOUNCED auto-fit — so the fit is reliably
+  // scheduled-but-not-started right here, and whether its 250 ms timer fires before
+  // or after the click is pure timing. When it fires first the tween moves the
+  // camera, the click's ray misses the body, `ViewportRoot.runPick` gets no ref
+  // (a genuine miss, NOT the `"unsettled"` sketch-reload case that defers), the
+  // selection is cleared, and the boolean lane never opens — the spec then times out
+  // on `previewOwner === "boolean"`, which reads exactly like a product defect.
+  await waitForCameraSettled(page);
   let found: { x: number; y: number } | null = null;
   await expect(async () => {
     found = await page.evaluate((id) => {
