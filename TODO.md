@@ -1,5 +1,117 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-F2 (part 1: bearings + steppers) — GATE PASSED
+
+Spec §6.2's two non-fastener families. The starter-template half of WP-F2 is
+NOT in this pass and stays queued.
+
+- [x] **`iso15` — ISO 15 deep-groove ball bearing**, keyed by BEARING CODE
+  (`625 608 6000 6001 6200 6201 6202 6802`). ONE revolved solid, not two
+  rings: a component resolves to exactly one solid (spec §9) and a real
+  bearing's rings are connected only through its balls, so the r–z section is
+  the boundary rectangle with a shallow annular relief in both faces — reads
+  as a bearing, stays one connected ring ("stepped-ring geometry suffices").
+  Race wall / relief depth are RENDERING fractions, deliberately not table
+  data: ISO 15 tabulates the boundary dimensions and nothing inside them, so a
+  tabulated race width would be an invented dimension.
+- [x] **`nema17` / `nema23` — NEMA stepper motors**, one generator per frame
+  (the house style is one id per family). Body block + pilot boss + shaft
+  fused, four blind mounting holes cut in one boolean. Body length is the only
+  free dimension; below the frame's minimum it is REFUSED, never clamped.
+- [x] **Tables self-authored** (`ops/MachineElementTables.h/.cpp`, new file —
+  neither family is a fastener, neither is keyed by a thread, neither comes
+  from BOLTS). Spec §6.3 asks for exactly this; **no `THIRD_PARTY_NOTICES`
+  entry is owed** because nothing was copied.
+- [x] **Op layer stopped naming string params one by one.** `source.params`
+  now forwards EVERY string to the generator verbatim (`thread` is read back
+  out of that map, so the two cannot drift), which is what lets `iso15` be
+  keyed by `code` with no wire change. `length` gained an absent-vs-present
+  flag so a motor defaults to its own frame's body length instead of
+  inheriting a screw's 20 mm.
+- [x] **Seeds** `onecad.std.iso15` / `.nema17` / `.nema23` (`SEED_VERSION`
+  1 → 2, which is what restores them into an already-seeded library root).
+- [x] **SCHEMA §7.3 registered-id list + §14 entry.** Additive only: no field
+  added/removed/retyped, `source.params` was already an open map, no fixture
+  moves.
+- [x] Gate, all RUN: ctest **124/124** · `cargo fmt --check` clean · `cargo
+  clippy --workspace --all-targets -D warnings` clean · `ONECAD_REQUIRE_WORKER=1
+  cargo test --workspace --no-fail-fast` **1183 passed / 0 failed** (79
+  suites), incl. `every_seeded_component_places_through_the_real_worker` and
+  `every_seeded_component_meshes_for_the_library_ui` over all **10** seeded
+  packages.
+- **FLAGGED SEAM (frontend, deliberately untouched here):** the mock lane's
+  own catalog in `src/ipc/mockClient.ts` still lists the seven fastener
+  packages only, so the mock/Playwright UI shows no bearing or motor until it
+  is extended. The real (tauri) lane reads the seeded library and needs
+  nothing. Also unshipped: `ComponentParametersSection`'s free-param control
+  is fine for `code` (a domain dropdown) but nothing resolves a `role="table"`
+  `from = "iso15.bore"` yet — those rows are declarative, as they were for
+  every prior package.
+
+## COMPONENT-LIBRARY HARDENING WP-H0…H4 (2026-08-13) — GATE PASSED
+
+Full-branch review (3 investigators + 3 reviewers over the ~22.8k-line diff)
+then hardening. Plan: `~/.claude/plans/iterative-splashing-raven.md`.
+
+### WP-H0 — master merged, resolution audited, full gate re-run
+- [x] `master` (39f5839) merged as `f242712`. The PRIOR in-tree resolution had
+  dropped ALL FOUR master-side SCHEMA hunks (ResolveRefs snapshot echo, draft +
+  boolean diagnostic codes, pattern-lineage fixture entry) — re-merged keeping
+  both sides; tracker docs stack both session threads; `mockClient` keeps
+  `RegenTerminal` + `ReindexReport`.
+- [x] Post-merge gate, all RUN: ctest **124/124** · `cargo fmt/clippy` clean ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **0 failed** · `tsc` clean ·
+  vitest **260 files / 4261** · Playwright **410/410** (23.4m, retries 0) ·
+  hex gate empty. Branch verified NOT breaking master.
+
+### WP-H1 — component id/version path safety (security)
+- [x] `validate_identity` (onecad-library) + `PlaceComponentParams::validate`
+  (onecad-core) now reject path-escaping ids/versions (`/`, `\`, `..`,
+  charset-pinned) — both values name the package directory
+  (`<root>/<id>@<version>`), so `onecad.std/../evil` could previously escape
+  the library root. Tests at both entry points.
+
+### WP-H2 — mate authoring from the placement gesture (spec §5.4 step 5)
+- [x] The gesture commit now RECORDS its snap: `placementController` sends
+  `PlaceComponentMate` (attachment key, target bodyId+topoKey+elementId,
+  snap kind, flip, anchor world point) through
+  `CommandApiService.placeComponent` → new `place_component` `mate` arg →
+  `resolve_mate_input` promotes the topoKey to a Rust-minted ElementId at the
+  head (fail CLOSED — an unpromotable mate refuses the whole placement) →
+  `PlaceComponentParams.mate`. WP-3.1's regen re-seat lane finally has a UI
+  producer; spec §12's "move the plate, screws re-seat" is now reachable.
+- [x] EN ROUTE BUG (register.ts): the `CommandApiService.placeComponent`
+  forwarding DROPPED `params` — auto-size ghosts previewed the sized screw,
+  commits placed the default. Fixed; every arg forwards.
+- [x] Tests: vitest pins gesture→mate arg (incl. flip); Rust pins
+  record-carries-mate + fail-closed refusal; existing worker reseat ctests
+  unchanged. e2e mate assertion deferred (no client seam from Playwright to
+  read record params; chain is pinned unit+integration instead).
+
+### WP-H3 — frontend robustness
+- [x] `componentPreviewScene`: `webglcontextlost` now resets the shared
+  offscreen renderer to "not tried yet" instead of latching the null terminal
+  state (context loss used to kill every future thumbnail for the session).
+- [x] `mockClient`: `resolveComponentSource`/`placeComponent` now accept this
+  session's AUTHORED components (fixture-geometry reuse, own identity) —
+  unblocks author→place on the mock lane.
+- [x] Reviewer claims verified NO-CHANGE: ComponentPreview3D lifecycle (the
+  `disposed` flag already guards every async path), placementController
+  listener teardown (cancelPlacement runs in every failure branch),
+  localSolver rotate fallback (controller always sends rotate).
+
+### WP-H4 — spec ratification (docs only)
+- [x] Spec gains §13 ratifying the four deviations: in-place
+  `SetComponentParams`/`ReplaceComponent`, mate NOT in wire `inputs[]`,
+  `[source]` codec/format + `document.geometry`, model-origin seating.
+
+Remaining (approved scope, next): WP-F1 authoring completion (param-role UI +
+attachment placement + single-solid choice), WP-F2 bearings/NEMA tables
+(LANDED — see the WP-F2 section at the top) + starter templates (still
+queued), WP-F3 gesture polish (free-space follow, auto-size e2e via
+mock cylinder classify; Tab-cycle turned out ALREADY SHIPPED —
+`placementController.ts:420`).
+
 ## COMPONENT-LIBRARY WP-B5 + WP-B6 (2026-08-13) — GATE PASSED, PHASE B CLOSED
 
 Two things at once: P3's remaining e2e coverage (WP-B5), and — at the user's

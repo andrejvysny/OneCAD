@@ -1,4 +1,17 @@
-## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 16, Phase A + P3 CLOSED)
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 17, HARDENING WP-H0…H4)
+
+Session 17 (this one): full-branch review + hardening. `master` (39f5839)
+merged as `f242712` — the earlier in-tree resolution had dropped all four
+master-side SCHEMA hunks; re-merged keeping both sides. Then: WP-H1 (path-safe
+component ids), WP-H2 (the gesture now RECORDS its mate — spec §12's
+re-seat flow reachable from the UI; also fixed `register.ts` dropping `params`
+so auto-size commits matched their ghost), WP-H3 (WebGL context-loss recovery;
+mock lane resolves authored components), WP-H4 (spec §13 ratifies the four
+deviations). Full gate green at each step — see TODO.md WP-H entry.
+Next (approved): WP-F1 authoring completion, WP-F2 bearings/NEMA + starter
+templates, WP-F3 gesture polish.
+
+## COMPONENT LIBRARY — session 16 (Phase A + P3 CLOSED)
 
 Last verified 2026-08-13. Branch `OneCAD-Component-Library`, clean at
 `0166ac4`. Seven commits this session, each its own gate:
