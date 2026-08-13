@@ -1,5 +1,104 @@
 # OneCAD-Tauri Migration TODO
 
+## WP-VE.1 (2026-08-13) — GATE PASSED
+
+**Variables actually drive geometry** (core lane). A `Scalar`'s `expr` was
+stored and never read anywhere: `regen/**` had zero references to the variable
+table, the worker's `read_scalar` takes `value` only, and a probe (extrude with
+an expr-bound distance, `SetVariable 10 → 20`, regen `Published`) produced
+bit-identical volumes. That is fixed. No worker/C++ change, no frontend change
+(VE.2), no SCHEMA change.
+
+- [x] **The substitution pass** — `onecad-core/src/regen/variables.rs` (new):
+  `substitute_variables` (in place over a caller-owned record slice),
+  `substituted_timeline` (the `Timeline`-level wrapper), `resolve_expr`,
+  `write_back_resolved_values`. V1 semantics per `document/variables.rs`:
+  `expr` is a **bare variable name**; a trimmed non-identifier (arithmetic,
+  `w * 2`) fails as an UNSUPPORTED EXPRESSION rather than being looked up as a
+  literal name and reported missing. A variable whose own value is
+  expression-driven is refused too (chained expressions are not V1).
+- [x] **Substitution site: the regen mirror**
+  (`document_runtime::sync_regen_timeline` + `from_document`). The mirror
+  timeline now holds the EFFECTIVE records; `session` keeps the stored ones
+  verbatim, and `build_save_payload` writes the stored ones, so nothing on disk
+  moves until the write-back below. Placing it there rather than inside
+  `begin_regen` is load-bearing: ONE substituted record set feeds the planner
+  hash, the checkpoint-staleness guard (`history_prefix_hash` over the same
+  effective records ⇒ a variable edit correctly invalidates checkpoints), the
+  wire lowering (`wire::wire_op` serializes `PlannedOp.operation`), AND the
+  executor's replay-from-0 fallback (`RegenPlanner::without_checkpoint` re-plans
+  off the scratch timeline). Hash and geometry cannot disagree.
+- [x] **Per-step failure channel** — an unresolvable binding is stamped
+  `StepState::Error { reason }` on the mirror by `substituted_timeline` (the
+  state is a pure function of records × variables, so it needs no worker
+  round-trip), and `begin_regen` folds the lowest broken step into the SAME
+  execution ceiling the SCHEMA §7.3 seeded-repair gate uses — the plan stops
+  strictly below it, publish ≤ m−1, downstream steps stay Dirty. It reaches the
+  UI through `feature_dto`/`failed_steps_of` unchanged. **Never** a fallback to
+  the stale cached `value`; a WARN rides the regen lane.
+- [x] **Derived write-back** — `sync_variable_values`
+  (`document_runtime` → `DocumentSession::sync_variable_values` →
+  `Timeline::sync_resolved_scalar_values`), called from `finish_regen`'s
+  published branch right beside `sync_record_outputs`/`sync_mate_placements` and
+  scoped to `executed`. No undo entry, no revision bump: `Scalar.value` under an
+  `expr` IS documented as the last evaluated value. `expr` is never rewritten,
+  and the number written is the one the plan was hashed with, so re-substituting
+  it is a no-op — no hash moves, no checkpoint dies from the write-back.
+- [x] **Scalar inventory** — `KnownOperation::scalars_mut()`
+  (`document/record.rs`), mirroring the `element_refs_mut` hand-table
+  discipline: Extrude `distance`/`draftAngleDeg`/`distance2`, Revolve
+  `angleDeg`, Fillet `radius`, Chamfer `radius`/`distance2?`, Shell `thickness`,
+  LinearPattern `spacing`, CircularPattern `angleDeg`, ImportStep `unitScale`,
+  TransformBody `translate[0..3]`/`rotate.angleDeg`, Hole
+  `diameter`/`depth?`/`cb*`/`cs*`, OffsetFace `distance`, PlaceComponent
+  `placement.translate[0..3]`/`placement.rotate.angleDeg`. Field ORDER is
+  normative (the write-back position-zips two records' lists).
+- [x] **SCHEMA: no wire change, verified.** `Scalar` already serializes as
+  `{value, expr?}` and §7.3 (amended 2026-07-16) already requires both readers
+  to accept the object form; `worker/src/ops/OpCommon.cpp::read_scalar` takes
+  `value` and ignores everything else, so `expr` rides the wire inert exactly as
+  before. No fixture bump, no §14 entry.
+- [x] Gate, all RUN: `ctest --test-dir worker/build` **124/124** ·
+  `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets
+  -D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+  --no-fail-fast` **exit 0**, every target green including the golden
+  hash-pin/corpus targets (`regen_planner` 13, `corpus_executor`,
+  `wire_contract`, `m2_gate`). New: 10 core unit tests in `regen/variables.rs`,
+  1 planner golden (`a_document_without_expressions_plans_identically_with_a_
+  populated_variable_table` — a populated variable table cannot move a single
+  plan hash on a doc that binds nothing), 3 worker-backed tests in
+  `src-tauri/tests/variable_driven_ops.rs` (exact `QueryMassProperties`:
+  4000 → 8000 on `SetVariable 10 → 20`; a missing variable errors THAT step with
+  a message naming `Extrude.distance` + `height` while the sketch step stays
+  fine and no body is built off the stale value; stored record keeps
+  `expr` + stale `value` pre-regen, resolved value written back post-regen, both
+  round-tripped through a real container save/reopen).
+
+### WP-VE.3 — sketch dimensional constraints (DEFERRED, not in VE.1)
+
+The 6 `Scalar`-typed constraint values in `sketch/constraint.rs`
+(`Distance`/`HorizontalDistance`/`VerticalDistance`/`Angle`/`Radius`/`Diameter`)
+CANNOT ride the op-param pass, because the sketch lane is structurally
+different, not merely another field list:
+
+* `SketchOpParams.entities`/`constraints` are **opaque `serde_json::Value`** —
+  an already-lowered, already-SOLVED wire snapshot, minted by
+  `document_runtime::sketch_record_op` → `wire::sketch_wire` at finish/backfill
+  time. The typed `Constraint` with its `Scalar` never reaches the timeline
+  record, so substituting record params would rewrite solved coordinates, not a
+  driving dimension.
+* The authoritative typed sketch lives in `Document.sketches` and is solved on
+  the SCHEMA §7.4 solver lane (`enter_sketch` → `wire::sketch_upsert_args`),
+  which regen never re-runs.
+
+**Where the hook goes:** resolve the constraint `Scalar`s (same
+`regen::variables::resolve_expr`) when building the solver payload in
+`wire::sketch_upsert_args`/`sketch_wire`, AND add a variable→sketch invalidation
+that re-solves the affected sketches and refreshes their `Sketch` records via
+`sketch_record_op` before the plan compiles — otherwise a variable edit would
+change the solve but not the record the worker replays. That re-solve pass is
+the actual work; the substitution itself is two lines.
+
 ## COMPONENT-LIBRARY WP-F3 (2026-08-13) — GATE PASSED
 
 Placement-gesture polish + mock-lane parity (spec §5.4). Frontend only — no

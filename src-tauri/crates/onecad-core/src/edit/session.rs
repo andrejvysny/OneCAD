@@ -420,6 +420,42 @@ impl DocumentSession {
         changed
     }
 
+    /// Syncs the RESOLVED value of every expression-driven [`Scalar`] from the
+    /// regen mirror's effective records onto the document's authoritative ones
+    /// (WP-VE.1) — a DERIVED, no-undo writeback, right beside
+    /// [`sync_mate_placements`](Self::sync_mate_placements) and matched by
+    /// `RecordId` for the same reason.
+    ///
+    /// A `Scalar`'s `value` under an `expr` is documented as the last EVALUATED
+    /// value, so a regen that just evaluated it is the moment to store it: a
+    /// document saved afterwards carries current numbers instead of whatever the
+    /// record was last hand-edited with. `expr` itself is never touched, so the
+    /// binding survives, and the number written is exactly the one the plan was
+    /// hashed and built with — re-substituting it is a no-op, so no hash moves
+    /// and no checkpoint is invalidated by the writeback itself.
+    ///
+    /// [`Scalar`]: crate::document::variables::Scalar
+    pub fn sync_variable_values(
+        &mut self,
+        regen_timeline: &Timeline,
+        executed: &BTreeSet<RecordId>,
+    ) -> bool {
+        let mut changed = false;
+        for &id in executed {
+            let Some(regen_rec) = regen_timeline.record_by_id(id) else {
+                continue;
+            };
+            let Some(index) = self.document.timeline.index_of(id) else {
+                continue;
+            };
+            changed |= self
+                .document
+                .timeline
+                .sync_resolved_scalar_values(index, &regen_rec.op);
+        }
+        changed
+    }
+
     /// Registers a document metadata row for every body in `regen` the document does
     /// not know yet (the regen row copied verbatim). Returns whether anything was
     /// adopted.

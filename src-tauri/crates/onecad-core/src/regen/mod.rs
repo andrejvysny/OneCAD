@@ -25,6 +25,9 @@
 //! * [`checkpoint`] — the [`CheckpointStore`] + versioned envelope validation.
 //! * [`scheduler`] — the single-in-flight, latest-wins debounce/coalesce/cancel
 //!   funnel (R-WP8); engine-agnostic, driving an app-supplied [`RegenDriver`].
+//! * [`variables`] — the document-variable substitution pass that turns a
+//!   `Scalar`'s `expr` into the number the planner hashes and the worker builds
+//!   (WP-VE.1), on effective copies of the records.
 //!
 //! ## Test double
 //!
@@ -41,6 +44,7 @@ pub mod executor;
 pub mod planner;
 pub mod scheduler;
 pub mod snapshot;
+pub mod variables;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointArtifacts, CheckpointEnvelope, CheckpointId, CheckpointMeta,
@@ -65,3 +69,7 @@ pub use scheduler::{
     SchedulerStatus, CANCEL_GRACE_SECS, PREVIEW_DEBOUNCE_MS,
 };
 pub use snapshot::{BodySnapshot, Lod, MeshKey, ModelSnapshot, RepairSummary, SnapshotPublisher};
+pub use variables::{
+    resolve_expr, substitute_variables, substituted_timeline, write_back_resolved_values,
+    UnresolvedVariable,
+};

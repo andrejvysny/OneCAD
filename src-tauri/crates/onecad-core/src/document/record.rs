@@ -400,6 +400,99 @@ impl KnownOperation {
             _ => Vec::new(),
         }
     }
+
+    /// Mutable access to every dimensional [`Scalar`] this op carries as a
+    /// **parameter**, paired with its `opType.field` label for diagnostics.
+    ///
+    /// The variable-substitution pass
+    /// ([`crate::regen::variables`]) walks exactly this set to replace an
+    /// expr-bound scalar's cached `value` with the document variable's current
+    /// one, on an effective COPY of the record. Field order is fixed and
+    /// deterministic — the derived write-back zips two records' lists by
+    /// position, so an arm must never reorder its fields.
+    ///
+    /// **Adding a `Scalar` param means adding it here.** A field left out is
+    /// silently un-drivable by a variable (it would keep its stale cached value
+    /// forever), which is the exact defect this pass exists to remove. The same
+    /// hand-maintained-table discipline (and hazard) as
+    /// [`element_refs_mut`](Self::element_refs_mut).
+    ///
+    /// Ops with no dimensional parameter at all — `Sketch` (its entities and
+    /// constraints are an opaque, already-solved wire snapshot; see
+    /// `crate::sketch::constraint` and WP-VE.3), `Boolean`, `Loft`, `Sweep`,
+    /// `MirrorBody`, `DetachComponent` — contribute nothing.
+    #[must_use]
+    pub fn scalars_mut(&mut self) -> Vec<(&'static str, &mut Scalar)> {
+        match self {
+            KnownOperation::Extrude(p) => vec![
+                ("Extrude.distance", &mut p.distance),
+                ("Extrude.draftAngleDeg", &mut p.draft_angle_deg),
+                ("Extrude.distance2", &mut p.distance2),
+            ],
+            KnownOperation::Revolve(p) => vec![("Revolve.angleDeg", &mut p.angle_deg)],
+            KnownOperation::Fillet(p) => vec![("Fillet.radius", &mut p.radius)],
+            KnownOperation::Chamfer(p) => {
+                let mut out = vec![("Chamfer.radius", &mut p.radius)];
+                if let Some(d2) = p.distance2.as_mut() {
+                    out.push(("Chamfer.distance2", d2));
+                }
+                out
+            }
+            KnownOperation::Shell(p) => vec![("Shell.thickness", &mut p.thickness)],
+            KnownOperation::LinearPattern(p) => vec![("LinearPattern.spacing", &mut p.spacing)],
+            KnownOperation::CircularPattern(p) => {
+                vec![("CircularPattern.angleDeg", &mut p.angle_deg)]
+            }
+            KnownOperation::ImportStep(p) => vec![("ImportStep.unitScale", &mut p.unit_scale)],
+            KnownOperation::TransformBody(p) => {
+                let [tx, ty, tz] = &mut p.translate;
+                vec![
+                    ("TransformBody.translate[0]", tx),
+                    ("TransformBody.translate[1]", ty),
+                    ("TransformBody.translate[2]", tz),
+                    ("TransformBody.rotate.angleDeg", &mut p.rotate.angle_deg),
+                ]
+            }
+            KnownOperation::Hole(p) => {
+                let mut out = vec![("Hole.diameter", &mut p.diameter)];
+                if let Some(s) = p.depth.as_mut() {
+                    out.push(("Hole.depth", s));
+                }
+                if let Some(s) = p.cb_diameter.as_mut() {
+                    out.push(("Hole.cbDiameter", s));
+                }
+                if let Some(s) = p.cb_depth.as_mut() {
+                    out.push(("Hole.cbDepth", s));
+                }
+                if let Some(s) = p.cs_diameter.as_mut() {
+                    out.push(("Hole.csDiameter", s));
+                }
+                if let Some(s) = p.cs_angle_deg.as_mut() {
+                    out.push(("Hole.csAngleDeg", s));
+                }
+                out
+            }
+            KnownOperation::OffsetFace(p) => vec![("OffsetFace.distance", &mut p.distance)],
+            KnownOperation::PlaceComponent(p) => {
+                let [tx, ty, tz] = &mut p.placement.translate;
+                vec![
+                    ("PlaceComponent.placement.translate[0]", tx),
+                    ("PlaceComponent.placement.translate[1]", ty),
+                    ("PlaceComponent.placement.translate[2]", tz),
+                    (
+                        "PlaceComponent.placement.rotate.angleDeg",
+                        &mut p.placement.rotate.angle_deg,
+                    ),
+                ]
+            }
+            KnownOperation::Sketch(_)
+            | KnownOperation::Boolean(_)
+            | KnownOperation::Loft(_)
+            | KnownOperation::Sweep(_)
+            | KnownOperation::MirrorBody(_)
+            | KnownOperation::DetachComponent(_) => Vec::new(),
+        }
+    }
 }
 
 /// Unknown-`opType` payload, captured as a raw map (frozen node).

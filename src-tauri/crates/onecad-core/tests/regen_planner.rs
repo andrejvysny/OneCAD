@@ -98,6 +98,50 @@ fn planner_is_deterministic() {
     assert_ne!(history_prefix_hash(&r[0..2]), history_prefix_hash(&r[0..3]));
 }
 
+/// WP-VE.1 golden-pin guard: the variable-substitution pass is the IDENTITY on a
+/// document that binds no expression, so a populated variable table cannot move
+/// a single plan hash. Without this the pass would be free to churn every
+/// existing document's `expectedBaseHash` (and invalidate every checkpoint) the
+/// day someone adds a variable they never referenced.
+#[test]
+fn a_document_without_expressions_plans_identically_with_a_populated_variable_table() {
+    use onecad_core::document::variables::{Unit, Variable, VariableTable};
+    use onecad_core::ids::VariableId;
+    use onecad_core::regen::substituted_timeline;
+
+    let tl = timeline_of(4);
+    let mut vars = VariableTable::new();
+    for (name, value) in [("width", 12.5), ("depth", 40.0)] {
+        vars.upsert(Variable {
+            id: VariableId::new(),
+            name: name.to_string(),
+            value: Scalar::new(value),
+            unit: Unit::Mm,
+        });
+    }
+
+    let (empty, none_unresolved) = substituted_timeline(&tl, &VariableTable::new());
+    let (populated, unresolved) = substituted_timeline(&tl, &vars);
+    assert!(none_unresolved.is_empty() && unresolved.is_empty());
+    assert_eq!(
+        empty.records(),
+        populated.records(),
+        "no expression ⇒ substitution is the identity on the records"
+    );
+
+    let g = DependencyGraph::new();
+    let plan_of = |t: &Timeline| {
+        RegenPlanner::plan(t, &g, &[], RegenRequest::ToEnd { from: 0 }, &default_ctx())
+    };
+    let baseline = plan_of(&tl);
+    assert_eq!(plan_of(&empty), baseline);
+    assert_eq!(plan_of(&populated), baseline);
+    assert_eq!(
+        history_prefix_hash(populated.records()),
+        history_prefix_hash(tl.records()),
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // (g) checkpoint restore path
 // ─────────────────────────────────────────────────────────────────────────────

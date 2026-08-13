@@ -272,6 +272,21 @@ impl Timeline {
         true
     }
 
+    /// Copies the RESOLVED value of every expression-driven `Scalar` from
+    /// `source` (a regen-mirror record's effective op) onto the record at
+    /// `index` (WP-VE.1). Regen provenance sync, not an edit — same shape as
+    /// [`set_place_component_placement`](Self::set_place_component_placement):
+    /// step states and the cursor are deliberately untouched, and `expr` itself
+    /// is preserved. Returns whether anything changed; see
+    /// [`crate::regen::variables::write_back_resolved_values`] for the refusal
+    /// rules.
+    pub fn sync_resolved_scalar_values(&mut self, index: usize, source: &Operation) -> bool {
+        let Some(rec) = self.records.get_mut(index) else {
+            return false;
+        };
+        crate::regen::variables::write_back_resolved_values(&mut rec.op, source)
+    }
+
     /// Removes the record with the given id, keeping the cursor consistent
     /// (OneCAD-CPP `Document::removeOperation`, `Document.cpp:966-990`: decrement
     /// the applied cursor iff the removed index is inside the applied prefix,

@@ -76,7 +76,7 @@ use onecad_core::regen::{
     CheckpointStore, ElementBinding, EngineError, GeometryEngine, InMemoryCheckpointStore, Lod,
     MeshKey, MeshSink, ModelSnapshot, Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest,
     PolicyVersions, RefResolution, RegenExecutor, RegenPlan, RegenPlanner, RegenRequest,
-    RegenSession, ResolveRequest, SnapshotPublisher, TessellateSpec,
+    RegenSession, ResolveRequest, SnapshotPublisher, TessellateSpec, UnresolvedVariable,
 };
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
@@ -432,7 +432,20 @@ struct PromotionEntry {
 /// The per-document runtime (V1 single writer).
 pub struct DocumentRuntime {
     session: DocumentSession,
+    /// The regen mirror. Its timeline holds the **EFFECTIVE** records — every
+    /// expression-driven `Scalar` already resolved against the document's
+    /// variable table (WP-VE.1, `onecad_core::regen::variables`) — while
+    /// [`session`](Self::session) keeps the stored ones verbatim. The mirror is
+    /// what `begin_regen` plans (and hashes) from, what the executor's
+    /// replay-from-0 fallback re-plans from, and what the wire lowering
+    /// serializes; it is never saved.
     regen: RegenSession,
+    /// Steps whose `Scalar` expression could not be resolved, lowest first
+    /// (`onecad_core::regen::variables`). Recomputed on every mirror rebuild, so
+    /// it is a pure function of (records, variables). The lowest entry is a hard
+    /// execution ceiling for [`begin_regen`](Self::begin_regen): nothing at or
+    /// after a broken binding may run on a stale cached value.
+    unresolved_variables: BTreeMap<usize, UnresolvedVariable>,
     /// The lock-free fencing tokens (revision + worker epoch). See [`FencingCell`].
     fencing: Arc<FencingCell>,
     /// Identity of THIS runtime object, minted per construction and never reused.
@@ -616,9 +629,15 @@ impl DocumentRuntime {
         backfill_missing_sketch_records(&mut doc);
         // Seed the regen mirror from the (possibly persisted) geometry outputs so
         // the tree renders saved bodies immediately, before the first regen.
+        // WP-VE.1: the mirror carries EFFECTIVE records — a loaded document's
+        // expr-bound scalars are resolved here, so the very first regen already
+        // builds the variable table's current numbers.
+        let (effective_timeline, unresolved_variables) =
+            onecad_core::regen::substituted_timeline(&doc.timeline, &doc.variables);
+        log_unresolved_variables(&unresolved_variables, "open");
         let regen = RegenSession {
             bodies: seed_regen_bodies(&doc),
-            timeline: doc.timeline.clone(),
+            timeline: effective_timeline,
             repair: doc.repair.clone(),
             elements: doc.elements.clone(),
         };
@@ -633,6 +652,7 @@ impl DocumentRuntime {
         Self {
             session: DocumentSession::new(doc),
             regen,
+            unresolved_variables,
             instance: Uuid::new_v4(),
             fencing: Arc::new(FencingCell::new(engine.current_epoch().0)),
             title,
@@ -1083,11 +1103,22 @@ impl DocumentRuntime {
     /// Rebuilds the regen mirror timeline from the authoritative session timeline
     /// (records + cursor). `from_records` marks every step Dirty; the next regen
     /// recomputes states.
+    ///
+    /// WP-VE.1: the mirror is the document's **effective** form — every
+    /// expression-driven `Scalar` resolved against the current variable table on
+    /// this copy, never on the stored records. Rebuilding it here (rather than
+    /// inside `begin_regen`) is what keeps ONE substituted record set behind the
+    /// planner hash, the wire lowering, and the executor's replay-from-0
+    /// re-plan. A step whose expression cannot resolve is stamped
+    /// `StepState::Error` immediately — the state is a pure function of
+    /// (records, variables), so it needs no worker round-trip to be true.
     fn sync_regen_timeline(&mut self) {
-        let src = &self.session.document().timeline;
-        let mut mirror = Timeline::from_records(src.records().to_vec());
-        mirror.set_cursor(src.cursor());
+        let doc = self.session.document();
+        let (mirror, unresolved) =
+            onecad_core::regen::substituted_timeline(&doc.timeline, &doc.variables);
+        log_unresolved_variables(&unresolved, "edit");
         self.regen.timeline = mirror;
+        self.unresolved_variables = unresolved;
     }
 
     // ── Regen (the driver body) ──────────────────────────────────────────────
@@ -1148,11 +1179,27 @@ impl DocumentRuntime {
         // SCHEMA §7.3 `TransformBody` edit-safety gate: a seeded NeedsRepair step's
         // refs may only re-resolve through the repair flow, so the plan stops
         // strictly BELOW the lowest seeded step (publish ≤ m−1, Invariant 6).
-        let ceiling = match self.regen.repair.first_seeded_step() {
+        //
+        // WP-VE.1 shares that ceiling: a step whose `Scalar` expression names a
+        // missing variable MUST NOT execute on its stale cached value, so the plan
+        // stops strictly below the lowest broken binding too. Whichever gate is
+        // lower wins; the step itself already carries `StepState::Error` from
+        // `sync_regen_timeline`, and everything after it stays Dirty — the same
+        // shape as any other failed step.
+        let gate = match (
+            self.regen.repair.first_seeded_step(),
+            self.unresolved_variables.keys().next().copied(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let ceiling = match gate {
             None => None,
             // A gate on step 0 leaves nothing legal to execute at all.
             Some(0) => {
-                tracing::info!("begin_regen: repair gate at step 0 → nothing may execute (noop)");
+                tracing::info!(
+                    "begin_regen: repair/variable gate at step 0 → nothing may execute (noop)"
+                );
                 return None;
             }
             Some(s) => Some(s - 1),
@@ -1401,6 +1448,10 @@ impl DocumentRuntime {
                 // is derived data the same way `outputs` is — write it back
                 // onto the document's own record right beside it.
                 self.sync_mate_placements(&executed);
+                // WP-VE.1: likewise for an expression-driven `Scalar` — its
+                // `value` IS the last evaluated number, and this regen just
+                // evaluated it.
+                self.sync_variable_values(&executed);
                 // Label freshly-imported bodies from their STEP product names BEFORE
                 // the rows are adopted — `adopt_regen_bodies` is insert-only, so this
                 // is the one moment the name can reach `document.bodies`.
@@ -1728,6 +1779,16 @@ impl DocumentRuntime {
     fn sync_mate_placements(&mut self, executed: &BTreeSet<RecordId>) {
         self.session
             .sync_mate_placements(&self.regen.timeline, executed);
+    }
+
+    /// WP-VE.1: writes each executed record's RESOLVED expression-driven scalar
+    /// values from the regen mirror onto the document's own record — the same
+    /// derived, no-undo writeback as [`sync_mate_placements`](Self::sync_mate_placements),
+    /// so a document saved after a regen carries the variable table's current
+    /// numbers rather than whatever the record was last hand-edited with.
+    fn sync_variable_values(&mut self, executed: &BTreeSet<RecordId>) {
+        self.session
+            .sync_variable_values(&self.regen.timeline, executed);
     }
 
     fn inherit_v2_pattern_child_display_metadata(&mut self, existing: &HashSet<BodyId>) {
@@ -3833,6 +3894,23 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
                 "persisted split_of must re-derive the stored BodyId (deterministic)"
             );
         }
+    }
+}
+
+/// WP-VE.1: reports every step whose `Scalar` expression failed to resolve. A
+/// broken variable binding silently reverting to a stale number is exactly the
+/// failure mode this pass removes, so it is a WARN on the regen lane, not a
+/// debug line.
+fn log_unresolved_variables(unresolved: &BTreeMap<usize, UnresolvedVariable>, lane: &str) {
+    for item in unresolved.values() {
+        tracing::warn!(
+            lane,
+            step = item.step_index,
+            record = %item.record_id,
+            expr = %item.expr,
+            "regen: variable binding UNRESOLVED — {} (the step will not execute)",
+            item.message
+        );
     }
 }
 
