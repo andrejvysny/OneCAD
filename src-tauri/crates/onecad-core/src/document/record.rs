@@ -2164,6 +2164,28 @@ pub enum MateKind {
     ConcentricAndCoincident,
 }
 
+/// The component-local basis a mate seats FROM, FROZEN into the record at
+/// authoring out of the package's `[attachments].<key>.frame` (spec §2.1;
+/// Component Library WP-F1.1).
+///
+/// Frozen, not looked up on regen, for the same reason `source` is: a
+/// placement must re-seat identically with the library folder deleted (spec
+/// §4). A later package revision that moves its attachment does NOT silently
+/// move already-placed instances — that is an explicit `replaceComponent`.
+///
+/// Right-handed and orthonormal by construction: `y` is derived (`z × x`) and
+/// never stored, and `onecad-library`'s manifest parse normalizes both axes
+/// before this is minted. `origin` is the component-local point that lands on
+/// the target's seat point; `z` is the direction aligned to the target
+/// axis/normal; `x` fixes only the roll about `z`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MateFrame {
+    pub origin: Vec3,
+    pub z: Vec3,
+    pub x: Vec3,
+}
+
 /// A placed component's recorded attachment to the document (spec §3.1
 /// `mate`). Absent on the owning [`PlaceComponentParams`] ⇒ dropped in free
 /// space, positioned by `placement` alone.
@@ -2182,6 +2204,12 @@ pub struct ComponentMate {
     /// the solved frame.
     #[serde(default)]
     pub flipped: bool,
+    /// The component-local frame [`self_attachment`](Self::self_attachment)
+    /// declared, frozen at authoring (WP-F1.1). ABSENT ⇒ the identity frame,
+    /// i.e. the component seats at its own model origin — every document
+    /// written before WP-F1.1 loads and re-seats byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_frame: Option<MateFrame>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -2301,6 +2329,15 @@ impl PlaceComponentParams {
         if let Some(mate) = &self.mate {
             if mate.self_attachment.trim().is_empty() {
                 return Err("PlaceComponent mate.selfAttachment must not be empty".into());
+            }
+            if let Some(frame) = &mate.self_frame {
+                for (field, v) in [("origin", frame.origin), ("z", frame.z), ("x", frame.x)] {
+                    if !v.is_finite() {
+                        return Err(format!(
+                            "PlaceComponent mate.selfFrame.{field} must be finite"
+                        ));
+                    }
+                }
             }
         }
         for (axis, s) in ["x", "y", "z"].iter().zip(self.placement.translate.iter()) {
@@ -3761,6 +3798,7 @@ mod tests {
             },
             kind: MateKind::Concentric,
             flipped: false,
+            self_frame: None,
             extra: Extra::new(),
         });
         let op = Operation::Known(KnownOperation::PlaceComponent(mated));
@@ -3826,8 +3864,90 @@ mod tests {
             },
             kind: MateKind::Coincident,
             flipped: false,
+            self_frame: None,
             extra: Extra::new(),
         });
         assert!(bad_mate.validate().is_err());
+    }
+
+    /// WP-F1.1: `mate.selfFrame` is additive and OPTIONAL. What this pins is
+    /// the compatibility half — a mate with no frame must serialize with NO
+    /// `selfFrame` key at all, so every document written before WP-F1.1 stays
+    /// byte-identical on rewrite and no reader has to special-case a null.
+    #[test]
+    fn mate_self_frame_round_trips_and_is_absent_when_unset() {
+        let mate = |self_frame| ComponentMate {
+            self_attachment: "shank_axis".to_string(),
+            target: ElementRef {
+                primary: Some(crate::document::refs::PrimaryRef {
+                    body: body(1),
+                    element: ElementId::new("el_1"),
+                    kind: ElementKind::Face,
+                    extra: Extra::new(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Extra::new(),
+            },
+            kind: MateKind::Concentric,
+            flipped: false,
+            self_frame,
+            extra: Extra::new(),
+        };
+
+        let bare = serde_json::to_value(mate(None)).unwrap();
+        assert!(
+            bare.get("selfFrame").is_none(),
+            "an unset frame must not even emit the key: {bare}"
+        );
+        assert_eq!(
+            serde_json::from_value::<ComponentMate>(bare).unwrap(),
+            mate(None)
+        );
+
+        let framed = mate(Some(MateFrame {
+            origin: Vec3::new_unchecked(0.0, 0.0, 10.0),
+            z: Vec3::new_unchecked(0.0, 0.0, 1.0),
+            x: Vec3::new_unchecked(1.0, 0.0, 0.0),
+        }));
+        let json = serde_json::to_value(framed.clone()).unwrap();
+        // Vec3's wire form is a bare `[x,y,z]` array (SCHEMA §4) — the same
+        // spelling every other coordinate on this op uses.
+        assert_eq!(
+            json["selfFrame"]["origin"],
+            serde_json::json!([0.0, 0.0, 10.0])
+        );
+        assert_eq!(json["selfFrame"]["z"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(json["selfFrame"]["x"], serde_json::json!([1.0, 0.0, 0.0]));
+        assert_eq!(
+            serde_json::from_value::<ComponentMate>(json).unwrap(),
+            framed
+        );
+    }
+
+    /// A non-finite frame component is refused at authoring, the same way
+    /// every other coordinate on this op is (`Vec3`'s own deserialize already
+    /// blocks the wire path; this covers the programmatic one).
+    #[test]
+    fn place_component_refuses_a_non_finite_self_frame() {
+        let mut params = place_component_params();
+        params.mate = Some(ComponentMate {
+            self_attachment: "shank_axis".to_string(),
+            target: ElementRef {
+                primary: None,
+                intent: None,
+                anchor: None,
+                extra: Extra::new(),
+            },
+            kind: MateKind::Concentric,
+            flipped: false,
+            self_frame: Some(MateFrame {
+                origin: Vec3::new_unchecked(0.0, 0.0, f64::NAN),
+                z: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                x: Vec3::new_unchecked(1.0, 0.0, 0.0),
+            }),
+            extra: Extra::new(),
+        });
+        assert!(params.validate().is_err());
     }
 }

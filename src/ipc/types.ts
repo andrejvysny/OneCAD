@@ -591,6 +591,25 @@ export interface LibraryAttachment {
   on: string;
   /** Geometry kinds this attachment mates with (`"plane"`/`"cylinder"`/`"hole"`/`"circularEdge"`). */
   accepts: string[];
+  /**
+   * The component-local basis this attachment seats FROM (WP-F1.1; mirrors
+   * Rust `AttachmentFrame`). ABSENT ⇒ the identity frame, i.e. the component
+   * seats at its own model origin.
+   *
+   * Already orthonormal and right-handed (`y = z × x`, derived): the backend
+   * normalizes every frame at manifest parse, so the solver may assume it.
+   */
+  frame?: LibraryAttachmentFrame;
+}
+
+/** A `[attachments].<key>.frame` (mirrors Rust `AttachmentFrame`, spec §2.1). */
+export interface LibraryAttachmentFrame {
+  /** Component-local point that lands on the target's seat point. */
+  origin: [number, number, number];
+  /** Direction aligned to the target's axis / outward normal. */
+  z: [number, number, number];
+  /** Roll reference about `z`. */
+  x: [number, number, number];
 }
 
 /** `component.toml` `[parameters].<key>`'s role (spec §2.1). */

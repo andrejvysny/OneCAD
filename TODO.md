@@ -1,5 +1,24 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-F1.1 (2026-08-13) — GATE PASSED
+
+Attachment local frames travel end-to-end: optional
+`[attachments].<key>.frame = { origin, z, x }` in `component.toml`
+(normalized at parse; left-handed bases unrepresentable — y is derived),
+frozen into `ComponentMate.self_frame` at placement by the package lookup,
+carried as optional `mate.selfFrame` on the wire (SCHEMA §7.3 + §14 additive
+entry), honored by BOTH solvers via `S ∘ F⁻¹` (rotation `R_s·R_fᵀ`,
+translation `T_s − R·origin_f`) — worker `ComponentMateSolver.cpp` and FE
+`placementSolver.ts` in verbatim parity with matching numeric test cases.
+Absent frame ⇒ identity ⇒ byte-identical pre-F1.1 behavior (existing reseat
+ctests unchanged). Components no longer have to seat at their model origin —
+the enabler for authored attachment placement (F1.2).
+
+- [x] Gate (run on the combined F1.1+F2b tree): worker rebuilt, ctest full
+  pass · `cargo fmt/clippy` clean · `ONECAD_REQUIRE_WORKER=1 cargo test
+  --workspace` 0 failed (component_ops 12/12) · `tsc` clean · vitest
+  library+ipc 639/639.
+
 ## COMPONENT-LIBRARY WP-F2b (part 2: starter templates) — GATE PASSED
 
 Spec §8's "ship 3–5 honest starters" — the half WP-F2 left queued. Three seed

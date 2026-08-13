@@ -244,6 +244,73 @@ void test_cross_body_target_never_substituted() {
     }
 }
 
+// ── WP-F1.1 (spec §2.1/§5): a mate carrying a non-identity `selfFrame` seats
+// the component by its ATTACHMENT point, not by its model origin. Same target
+// and same frozen placement as `test_reseat_on_target_move` — only the frame
+// differs, so the 10mm delta in the answer is attributable to it alone. ─────────
+void test_reseat_honors_a_non_identity_self_frame() {
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    const TopoDS_Shape cyl = cylinder_at(gp_Pnt(0.0, 0.0, 0.0));
+    bodies.create("plate", "op_plate", cyl);
+    const TopoDS_Shape face = lateral_face_of(cyl);
+    part.mint("plate", "el_hole", km::ElementKind::Face, face, cyl, json::object());
+
+    // The attachment sits at component-local (0,4,10) — deliberately OFF every
+    // axis so the framed answer cannot be confused with the un-framed one.
+    // Frozen at (0,5,5) with no rotation, so the attachment currently sits at
+    // world (0,9,15); `concentric` projects THAT onto the target axis, giving
+    // a seat of (0,0,15), and the body therefore lands at (0,0,15)-(0,4,10) =
+    // (0,-4,5). The un-framed case (`test_reseat_on_target_move`, same target
+    // and same frozen placement) lands at (0,0,5) instead — the body itself on
+    // the axis. That difference IS the feature.
+    json mate = component_mate("plate", "el_hole", "face", "concentric");
+    mate["selfFrame"] = json{{"origin", {0.0, 4.0, 10.0}},
+                             {"z", {0.0, 0.0, 1.0}},
+                             {"x", {1.0, 0.0, 0.0}}};
+    const json op = place_component_op("opm5", frozen_placement(0.0, 5.0, 5.0), mate);
+
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opm5");
+
+    check(oc.status == ops::OpOutcome::Status::Ok, "self-frame reseat: Ok");
+    check(oc.needs_repair.empty(), "self-frame reseat: AutoBind, no NeedsRepair");
+    check(oc.mate_placement.has_value(), "self-frame reseat: matePlacement echoed");
+    if (oc.mate_placement) {
+        const json& t = (*oc.mate_placement)["translate"];
+        check_near(t[0].get<double>(), 0.0, 1e-6, "self-frame reseat: translate.x");
+        check_near(t[1].get<double>(), -4.0, 1e-6,
+                   "self-frame reseat: the BODY sits off the axis — it is the ATTACHMENT point "
+                   "that lands on it, not the model origin");
+        check_near(t[2].get<double>(), 5.0, 1e-6,
+                   "self-frame reseat: the seat's depth along the axis is preserved from where "
+                   "the ATTACHMENT was, not from where the body origin was");
+    }
+    check(bodies.get("body_opm5") != nullptr, "self-frame reseat: body published");
+
+    // FIXED POINT. Feeding the reseated placement back in must produce NO
+    // further move: the seat anchor is the ATTACHMENT point's world position,
+    // not the body origin's, so the frame offset is not re-subtracted. Anchor
+    // this on the body origin instead and the component walks 10mm down the
+    // axis on every single regen — silent, unbounded drift.
+    if (oc.mate_placement) {
+        BodyStore again_bodies;
+        em::ElementMapPartition again_part;
+        const TopoDS_Shape again_cyl = cylinder_at(gp_Pnt(0.0, 0.0, 0.0));
+        again_bodies.create("plate", "op_plate", again_cyl);
+        again_part.mint("plate", "el_hole", km::ElementKind::Face, lateral_face_of(again_cyl),
+                        again_cyl, json::object());
+        const json again_op = place_component_op("opm6", *oc.mate_placement, mate);
+        Ctx c2;
+        ops::OpContext ctx2 = c2.make(again_bodies, again_part);
+        const ops::OpOutcome again = ops::execute_place_component(ctx2, again_op, "opm6");
+        check(again.status == ops::OpOutcome::Status::Ok, "self-frame reseat (2nd pass): Ok");
+        check(!again.mate_placement.has_value(),
+              "self-frame reseat is a FIXED POINT — a second regen must not move it again");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -252,6 +319,7 @@ int main() {
     test_no_reseat_within_epsilon();
     test_needs_repair_on_vanished_target_body();
     test_cross_body_target_never_substituted();
+    test_reseat_honors_a_non_identity_self_frame();
     if (g_failures == 0) std::fprintf(stderr, "component_mate_reseat: OK\n");
     return g_failures;
 }

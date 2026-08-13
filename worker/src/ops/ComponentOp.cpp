@@ -266,7 +266,38 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
         }
     }
 
-    const std::optional<json> candidate = onecad::ops::solve_mate_placement(snap_kind, frame, seat_anchor, flipped);
+    // `mate.selfFrame` (WP-F1.1, SCHEMA §7.3): the component-local basis the
+    // attachment seats from, frozen into the record at authoring. Absent on
+    // every pre-WP-F1.1 record ⇒ the identity frame ⇒ the seat solve is
+    // arithmetically untouched.
+    const json self_frame = mate.contains("selfFrame") ? mate["selfFrame"] : json();
+
+    gp_Trsf frozen_trsf, candidate_trsf;
+    std::string terr;
+    const bool frozen_ok = read_placement(json{{"placement", frozen}}, "mate", frozen_trsf, terr);
+
+    // WP-F1.1 anchor correction, and it is LOAD-BEARING: `solve_mate_placement`
+    // anchors on the world SEAT point, which with an attachment frame is where
+    // the ATTACHMENT sits — not where the body origin sits. Feeding it the raw
+    // frozen translate would re-subtract the frame offset on every regen and
+    // walk the component down the axis a frame-length per tick. Transforming
+    // the frame's local origin by the frozen placement recovers the seat, and
+    // makes a re-seat that changed nothing an exact fixed point.
+    if (frozen_ok && self_frame.is_object()) {
+        std::array<double, 3> local{0.0, 0.0, 0.0};
+        if (self_frame.contains("origin") && self_frame["origin"].is_array() &&
+            self_frame["origin"].size() == 3) {
+            for (std::size_t i = 0; i < 3; ++i) {
+                const json& v = self_frame["origin"][i];
+                if (v.is_number()) local[i] = v.get<double>();
+            }
+        }
+        const gp_Pnt seat_point = gp_Pnt(local[0], local[1], local[2]).Transformed(frozen_trsf);
+        seat_anchor = {seat_point.X(), seat_point.Y(), seat_point.Z()};
+    }
+
+    const std::optional<json> candidate =
+        onecad::ops::solve_mate_placement(snap_kind, frame, seat_anchor, flipped, self_frame);
     if (!candidate) {
         needs_repair_out.push_back(mate_unresolved_repair(
             ref_id, ref.element_id,
@@ -274,10 +305,7 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
         return std::nullopt;
     }
 
-    gp_Trsf frozen_trsf, candidate_trsf;
-    std::string terr;
-    if (!read_placement(json{{"placement", frozen}}, "mate", frozen_trsf, terr) ||
-        !read_placement(json{{"placement", *candidate}}, "mate", candidate_trsf, terr)) {
+    if (!frozen_ok || !read_placement(json{{"placement", *candidate}}, "mate", candidate_trsf, terr)) {
         // Both placements are worker-authored (frozen was validated at
         // authoring; candidate was just built by `solve_mate_placement`) —
         // a parse failure here is an internal defect, not a repair signal.

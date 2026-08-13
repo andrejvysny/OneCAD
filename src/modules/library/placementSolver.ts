@@ -84,6 +84,156 @@ function projectPointOntoLine(point: Vec3, origin: Vec3, direction: Vec3): Vec3 
   return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
 }
 
+// ── attachment frames (spec §2.1 `[attachments].<key>.frame`; WP-F1.1) ───────
+//
+// A component seats from a NAMED LOCAL BASIS, not from its model origin. The
+// frame is authored in `component.toml`, frozen into the record's
+// `mate.selfFrame` at placement, and honored identically here and in the
+// worker's `ComponentMateSolver.cpp` (that file is a 1:1 port of this one —
+// keep both sides' math and both sides' tests in lockstep).
+
+/**
+ * A component-local seating basis: `origin` is the point that lands on the
+ * target's seat point, `z` the direction aligned to the target axis/normal,
+ * `x` the roll reference about `z`. Right-handed (`y = z × x`, derived).
+ * Assumed already orthonormal — Rust's manifest parse normalizes it.
+ */
+export interface MateSelfFrame {
+  origin: Vec3;
+  z: Vec3;
+  x: Vec3;
+}
+
+/** Row-major 3×3, `m[row][col]`. */
+type Mat3 = readonly [Vec3, Vec3, Vec3];
+
+/** Rodrigues: the rotation matrix for (`axis`, `angleDeg`). */
+function matFromAxisAngle(axis: Vec3, angleDeg: number): Mat3 {
+  const [x, y, z] = normalize(axis);
+  const rad = (angleDeg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const t = 1 - c;
+  return [
+    [t * x * x + c, t * x * y - s * z, t * x * z + s * y],
+    [t * x * y + s * z, t * y * y + c, t * y * z - s * x],
+    [t * x * z - s * y, t * y * z + s * x, t * z * z + c],
+  ];
+}
+
+function matMultiply(a: Mat3, b: Mat3): Mat3 {
+  const row = (r: number): Vec3 => [
+    a[r][0] * b[0][0] + a[r][1] * b[1][0] + a[r][2] * b[2][0],
+    a[r][0] * b[0][1] + a[r][1] * b[1][1] + a[r][2] * b[2][1],
+    a[r][0] * b[0][2] + a[r][1] * b[1][2] + a[r][2] * b[2][2],
+  ];
+  return [row(0), row(1), row(2)];
+}
+
+function matTranspose(m: Mat3): Mat3 {
+  return [
+    [m[0][0], m[1][0], m[2][0]],
+    [m[0][1], m[1][1], m[2][1]],
+    [m[0][2], m[1][2], m[2][2]],
+  ];
+}
+
+function matApply(m: Mat3, v: Vec3): Vec3 {
+  return [
+    m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+    m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+    m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+  ];
+}
+
+/**
+ * The inverse of `matFromAxisAngle` — the composed rotation has to be
+ * re-expressed as axis-angle because `FrozenPlacement.rotate` is axis-angle
+ * and the wire reads nothing else.
+ */
+function axisAngleFromMat(m: Mat3): AxisAngle {
+  const trace = m[0][0] + m[1][1] + m[2][2];
+  const c = Math.max(-1, Math.min(1, (trace - 1) / 2));
+  if (c > 1 - EPS) return { axis: [0, 0, 1], angleDeg: 0 };
+  if (c < -1 + EPS) {
+    // θ = π: the skew part vanishes, so recover the axis from `R + I`, whose
+    // columns are all 2·u·uᵢ — take the longest to stay conditioned.
+    let best: Vec3 = [0, 0, 1];
+    let bestLen = 0;
+    for (let col = 0; col < 3; col++) {
+      const v: Vec3 = [
+        m[0][col] + (col === 0 ? 1 : 0),
+        m[1][col] + (col === 1 ? 1 : 0),
+        m[2][col] + (col === 2 ? 1 : 0),
+      ];
+      const len = length(v);
+      if (len > bestLen) {
+        bestLen = len;
+        best = v;
+      }
+    }
+    const axis = bestLen < EPS ? ([0, 0, 1] as Vec3) : normalize(best);
+    return { axis: [axis[0], axis[1], axis[2]], angleDeg: 180 };
+  }
+  const s = Math.sqrt(1 - c * c);
+  const raw: Vec3 = [
+    (m[2][1] - m[1][2]) / (2 * s),
+    (m[0][2] - m[2][0]) / (2 * s),
+    (m[1][0] - m[0][1]) / (2 * s),
+  ];
+  const axis = normalize(raw);
+  return { axis: [axis[0], axis[1], axis[2]], angleDeg: (Math.acos(c) * 180) / Math.PI };
+}
+
+/**
+ * `M = S ∘ F⁻¹` expressed back as a `CandidatePlacement`: rotation
+ * `R_s · R_fᵀ`, translation `T_s − (R_s · R_fᵀ) · origin_f`.
+ *
+ * `S` is the seat transform (`seat`, `seatRot`) the snap solved; `F` maps
+ * component-local identity onto the attachment frame (rotation columns
+ * `[x, z×x, z]`, translation `origin`). Composing the inverse is what makes
+ * the ATTACHMENT POINT, rather than the model origin, land on the seat.
+ */
+function composeWithSelfFrame(seat: Vec3, seatRot: AxisAngle, f: MateSelfFrame): CandidatePlacement {
+  const z = normalize(f.z);
+  const d = dot(z, f.x);
+  const xRel: Vec3 = [f.x[0] - z[0] * d, f.x[1] - z[1] * d, f.x[2] - z[2] * d];
+  // Rust normalizes before freezing; this only guards a hand-written record.
+  const x = length(xRel) < EPS ? arbitraryPerpendicular(z) : normalize(xRel);
+  const y = cross(z, x);
+  const rF: Mat3 = [
+    [x[0], y[0], z[0]],
+    [x[1], y[1], z[1]],
+    [x[2], y[2], z[2]],
+  ];
+  const rM = matMultiply(matFromAxisAngle(seatRot.axis, seatRot.angleDeg), matTranspose(rF));
+  const shifted = matApply(rM, f.origin);
+  const { axis, angleDeg } = axisAngleFromMat(rM);
+  return {
+    translate: [seat[0] - shifted[0], seat[1] - shifted[1], seat[2] - shifted[2]],
+    rotate: { center: [0, 0, 0], axis, angleDeg },
+  };
+}
+
+/**
+ * The seat placement, composed with `selfFrame` when one is present. Absent
+ * returns the un-composed placement VERBATIM — not a multiply-by-identity —
+ * so a component with no authored frame keeps its exact pre-WP-F1.1 numbers.
+ */
+function seated(
+  seat: Vec3,
+  seatRot: AxisAngle,
+  selfFrame: MateSelfFrame | null | undefined,
+): CandidatePlacement {
+  if (!selfFrame) {
+    return {
+      translate: [seat[0], seat[1], seat[2]],
+      rotate: { center: [0, 0, 0], axis: seatRot.axis, angleDeg: seatRot.angleDeg },
+    };
+  }
+  return composeWithSelfFrame(seat, seatRot, selfFrame);
+}
+
 /**
  * The snap kind an attachment/classify pairing resolves to (spec §5.3's
  * table), or `null` when the hovered target does not satisfy any accepted
@@ -161,28 +311,31 @@ export function nearestSmallerThread(
  * near end" is approximated as "seated under the cursor" rather than a true
  * nearest-endpoint solve — an honest simplification, not a claim of exact
  * end-detection).
+ *
+ * `selfFrame` is the matched attachment's own local basis (WP-F1.1). Omit it
+ * (or pass `null`) for a component that declares none — that is the identity
+ * frame, i.e. the component seats at its model origin, which is exactly the
+ * pre-WP-F1.1 behavior and takes the pre-WP-F1.1 arithmetic.
  */
 export function solveCandidatePlacement(
   snapKind: MateSnapKind,
   frame: ClassifyFrame,
   pickWorldPos: Vec3,
   flipped: boolean,
+  selfFrame?: MateSelfFrame | null,
 ): CandidatePlacement {
-  const center: [number, number, number] = [0, 0, 0];
   if (snapKind === "coincident") {
     if (!frame.normal) throw new Error("placementSolver: coincident snap requires a plane normal");
     const normal = normalize(frame.normal);
     const direction: Vec3 = flipped ? [-normal[0], -normal[1], -normal[2]] : normal;
-    const { axis, angleDeg } = rotationFromLocalZTo(direction);
-    return { translate: [...pickWorldPos], rotate: { center, axis, angleDeg } };
+    return seated(pickWorldPos, rotationFromLocalZTo(direction), selfFrame);
   }
   if (!frame.axis) throw new Error(`placementSolver: ${snapKind} snap requires an axis`);
   const axisDir = normalize(frame.axis);
   const direction: Vec3 = flipped ? [-axisDir[0], -axisDir[1], -axisDir[2]] : axisDir;
-  const { axis, angleDeg } = rotationFromLocalZTo(direction);
   const seat =
     snapKind === "concentricAndCoincident"
       ? frame.origin
       : projectPointOntoLine(pickWorldPos, frame.origin, axisDir);
-  return { translate: [...seat], rotate: { center, axis, angleDeg } };
+  return seated(seat, rotationFromLocalZTo(direction), selfFrame);
 }

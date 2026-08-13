@@ -1503,7 +1503,8 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   "mate": { "selfAttachment": "shank_axis",
             "target": { "primary": {"bodyId":"body_1","elementId":"el_…","kind":"face"},
                         "anchor": {"worldPoint":[10,5,0]} },
-            "kind": "concentric", "flipped": false },
+            "kind": "concentric", "flipped": false,
+            "selfFrame": { "origin":[0,0,10], "z":[0,0,1], "x":[1,0,0] } },   // optional
   "placement": { "translate": [10.0, 5.0, 0.0],
                  "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0.0 } } }
 ```
@@ -1558,6 +1559,33 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   the generic `resolve_input_refs` pre-flight treats an unresolved input as
   blocking, which would publish ZERO bodies for a component whose target was
   deleted — the opposite of the rule above.
+- `mate.selfFrame` is **optional** (Component Library WP-F1.1, spec §2.1/§5) —
+  the component-LOCAL basis `selfAttachment` seats from, frozen into the record
+  at authoring out of the package's `[attachments].<key>.frame`. Three plain
+  Vec3s: `origin` is the local point that lands on the target's seat point, `z`
+  the local direction aligned to the target axis / outward normal, `x` the roll
+  reference about `z`. Right-handed — `y` is DERIVED (`z × x`) and never sent,
+  so a left-handed basis cannot be expressed. Both axes are already orthonormal
+  when they reach the worker (Rust normalizes and re-orthogonalizes at manifest
+  parse); a record carrying otherwise is re-orthogonalized rather than trusted.
+  - The seat solve composes it as **`M = S ∘ F⁻¹`**: `S` is the seat transform
+    from (`kind`, resolved frame, `flipped`), `F` maps component-local identity
+    onto the attachment frame. So the ATTACHMENT POINT lands on the target,
+    not the component's model origin.
+  - The regen re-seat's stand-in for the cursor becomes **the attachment
+    point's current world position** (`placement` applied to `selfFrame.origin`)
+    rather than the raw `placement.translate`. Anchoring on the body origin
+    would re-subtract the frame offset on every regen and walk the component
+    along the axis a frame-length per tick; anchoring on the attachment makes
+    an unchanged re-seat an exact fixed point. Identical for an absent frame,
+    where the two are the same point.
+  - **ABSENT ⇒ the identity frame**, and the worker takes an early return
+    through the pre-WP-F1.1 arithmetic — every document written before this
+    lands re-seats byte-identically. It is frozen, never re-read from the
+    library on regen, for the same reason `source` is: spec §4 requires a
+    placement to re-seat with the library deleted, and a package revision that
+    moves its attachment must not silently move already-placed instances (that
+    is an explicit `replaceComponent`, which re-freezes).
 - `placement` — SAME normative order as TransformBody: `X' = T ∘ R(center,
   axis, angleDeg) · X`. `rotate` defaults to the identity rotation when
   absent.
@@ -2887,6 +2915,27 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — §7.3 `PlaceComponent`: new OPTIONAL `mate.selfFrame`**
+  (Component Library WP-F1.1, spec §2.1/§5, single-repo, both tracks land
+  together). Closes spec §11's open item 4 ("components seat at their model
+  origin"): an attachment's local basis now travels end-to-end — authored in
+  `component.toml [attachments].<key>.frame`, frozen into the record at
+  placement, and honored by BOTH placement solvers (the FE ghost in
+  `placementSolver.ts` and the worker's regen re-seat in
+  `ComponentMateSolver.cpp`, which stay a 1:1 port of each other and share
+  their numeric test cases).
+  - **Purely ADDITIVE.** One new optional field on an existing optional
+    object; nothing is removed or retyped. Absent ⇒ the identity frame, and
+    the worker short-circuits to the pre-WP-F1.1 code path rather than
+    multiplying by identity, so every existing document lowers AND re-seats
+    byte-identically (pinned by the unchanged `test_component_mate_reseat`
+    cases plus an explicit byte-identity check in `test_component_mate_solver`).
+  - **No fixture bump**: `protocol/fixtures/` carries no component-op NDJSON at
+    all, so there is no recorded frame to move. When one is added it should
+    cover both the framed and unframed mate.
+  - Composition is `M = S ∘ F⁻¹` (seat transform ∘ inverse attachment frame) —
+    see the `mate.selfFrame` bullet in §7.3 for the full definition.
 
 - **2026-08-13 — §7.3 `PlaceComponent` / `DetachComponent`: three NEW
   registered `source.generatorId`s** (Component Library WP-F2, spec §6.2,

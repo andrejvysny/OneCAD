@@ -34,7 +34,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use onecad_core::document::record::{
     ComponentMate, ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
-    ImportSourceCodec, KnownOperation, Operation, OperationRecord, PlaceComponentParams,
+    ImportSourceCodec, KnownOperation, MateFrame, Operation, OperationRecord, PlaceComponentParams,
     TransformRotation,
 };
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
@@ -139,6 +139,8 @@ pub(crate) fn seed_and_reindex_at(root: &Path) {
     tracing::info!(
         installed = outcome.installed.len(),
         kept = outcome.kept.len(),
+        templates_installed = outcome.templates_installed.len(),
+        templates_kept = outcome.templates_kept.len(),
         "library seed pass"
     );
     match reindex_library_at(root) {
@@ -206,9 +208,11 @@ fn component_mate_from_input(
     input: &PlaceComponentMateInput,
     body: BodyId,
     element: ElementId,
+    self_frame: Option<MateFrame>,
 ) -> ComponentMate {
     ComponentMate {
         self_attachment: input.self_attachment.clone(),
+        self_frame,
         target: ElementRef {
             primary: Some(PrimaryRef {
                 body,
@@ -252,6 +256,7 @@ fn component_mate_from_input(
 async fn resolve_mate_input(
     state: &State<'_, AppState>,
     input: &PlaceComponentMateInput,
+    self_frame: Option<MateFrame>,
 ) -> Result<ComponentMate, ApiError> {
     if input.self_attachment.trim().is_empty() {
         return Err(ApiError::InvalidCommand(
@@ -261,7 +266,12 @@ async fn resolve_mate_input(
     let body = crate::worker::wire::parse_body_id(&input.target_body_id)
         .map_err(|e| ApiError::InvalidCommand(format!("placeComponent: mate.targetBodyId: {e}")))?;
     if let Some(id) = input.target_element_id.as_deref().filter(|s| !s.is_empty()) {
-        return Ok(component_mate_from_input(input, body, ElementId::new(id)));
+        return Ok(component_mate_from_input(
+            input,
+            body,
+            ElementId::new(id),
+            self_frame,
+        ));
     }
     let anchor = AnchorIntent {
         world_point: Vec3::new_unchecked(
@@ -305,7 +315,28 @@ async fn resolve_mate_input(
         input,
         body,
         ElementId::new(&first.element_id),
+        self_frame,
     ))
+}
+
+/// The component-local frame `attachment` declares, converted to the record's
+/// own type (spec §2.1 → §3.1; WP-F1.1). `None` when the package declares no
+/// frame for it — including when it declares no such attachment at all.
+///
+/// Deliberately NOT a refusal for an unknown key: WP-H2 authors mates without
+/// validating `selfAttachment` against the package, and turning that into a
+/// hard error here would change an unrelated contract. An unknown key simply
+/// seats at the model origin, exactly as it did before this landed.
+///
+/// The axes are already orthonormal — `package::parse` normalizes every frame
+/// it reads, so nothing downstream re-derives a basis.
+fn attachment_frame(package: &ComponentPackage, attachment: &str) -> Option<MateFrame> {
+    let frame = package.attachments.get(attachment)?.frame?;
+    Some(MateFrame {
+        origin: Vec3::new_unchecked(frame.origin[0], frame.origin[1], frame.origin[2]),
+        z: Vec3::new_unchecked(frame.z[0], frame.z[1], frame.z[2]),
+        x: Vec3::new_unchecked(frame.x[0], frame.x[1], frame.x[2]),
+    })
 }
 
 // One arg per spec §3.1 field the gesture carries — grouping them into an ad-hoc
@@ -323,8 +354,18 @@ async fn place_component_at(
 ) -> Result<(CommandOutcome, DocumentProjection), ApiError> {
     // Promote FIRST (its own short lock): identity must exist before the record
     // that names it is authored; `stage_blob_and_apply` re-locks below.
+    //
+    // The attachment's own local frame is FROZEN into the mate here (WP-F1.1),
+    // read from the package the placement is authored against — so the record
+    // re-seats identically later even with the library deleted, and a package
+    // revision that moves its attachment never silently moves this instance.
     let mate = match &mate {
-        Some(input) => Some(resolve_mate_input(state, input).await?),
+        Some(input) => {
+            let package =
+                component_package_at("placeComponent", root, &component_id, &component_version)?;
+            let self_frame = attachment_frame(&package, &input.self_attachment);
+            Some(resolve_mate_input(state, input, self_frame).await?)
+        }
         None => None,
     };
     let library = open_at(root)?;
@@ -346,7 +387,8 @@ async fn place_component_at(
     // rim), and a placement that writes a non-free key would author a record
     // `set_component_params` would then refuse to touch.
     if !free_params.is_empty() {
-        let package = component_package_at(root, &component_id, &component_version)?;
+        let package =
+            component_package_at("placeComponent", root, &component_id, &component_version)?;
         check_free_params("placeComponent", &package, &component_id, &free_params)?;
     }
     let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
@@ -654,6 +696,7 @@ pub async fn resolve_component_source(
 /// `role`/`domain` shape `set_component_params_at` needs to enforce spec
 /// §3.2's role=free rule.
 fn component_package_at(
+    what: &str,
     root: &Path,
     component_id: &str,
     component_version: &str,
@@ -663,7 +706,7 @@ fn component_package_at(
         .get(component_id, Some(component_version))
         .ok_or_else(|| {
             ApiError::InvalidCommand(format!(
-                "setComponentParams: unknown component {component_id}@{component_version}"
+                "{what}: unknown component {component_id}@{component_version}"
             ))
         })?;
     let manifest_path = root.join(&entry.path).join(COMPONENT_MANIFEST_FILE);
@@ -719,7 +762,12 @@ async fn set_component_params_at(
         })?
     };
 
-    let package = component_package_at(root, &current.component_id, &current.component_version)?;
+    let package = component_package_at(
+        "setComponentParams",
+        root,
+        &current.component_id,
+        &current.component_version,
+    )?;
     check_free_params(
         "setComponentParams",
         &package,
@@ -1081,6 +1129,11 @@ pub struct NewComponentSpec {
 pub struct AttachmentSpecInput {
     pub on: String,
     pub accepts: Vec<String>,
+    /// The attachment's component-local seating frame (WP-F1.1). Optional —
+    /// absent means the component seats at its own model origin, which is what
+    /// the authoring UI produces until it grows a frame picker.
+    #[serde(default)]
+    pub frame: Option<package::AttachmentFrame>,
 }
 
 /// "Save as Component" (spec §7) — captures one body at head as a reusable
@@ -1198,6 +1251,30 @@ pub async fn save_as_component_at(
         .map_err(|e| ApiError::Internal(format!("saveAsComponent: read baked geometry: {e}")))?;
     let _ = std::fs::remove_dir_all(&scratch);
 
+    // Frames are orthonormalized (and a degenerate one refused) HERE, at the
+    // authoring door, so the manifest that lands on disk is already in the
+    // form `package::parse` guarantees every reader.
+    let mut attachments = BTreeMap::new();
+    for (key, a) in spec.attachments {
+        let frame = match a.frame {
+            Some(f) => Some(f.orthonormalized().ok_or_else(|| {
+                ApiError::InvalidCommand(format!(
+                    "saveAsComponent: attachment `{key}` has a degenerate frame — `z` and `x` \
+                     must be non-zero, finite, and not parallel"
+                ))
+            })?),
+            None => None,
+        };
+        attachments.insert(
+            key,
+            package::AttachmentSpec {
+                on: a.on,
+                accepts: a.accepts,
+                frame,
+            },
+        );
+    }
+
     let package = ComponentPackage {
         identity: package::Identity {
             id: spec.id.clone(),
@@ -1223,19 +1300,7 @@ pub async fn save_as_component_at(
         // already refuses to edit one (there is no re-bake lane). Declaring
         // free params here would offer an edit that cannot be honored.
         parameters: BTreeMap::new(),
-        attachments: spec
-            .attachments
-            .into_iter()
-            .map(|(key, a)| {
-                (
-                    key,
-                    package::AttachmentSpec {
-                        on: a.on,
-                        accepts: a.accepts,
-                    },
-                )
-            })
-            .collect(),
+        attachments,
     };
 
     let mut library = open_at(root)?;
@@ -1332,7 +1397,8 @@ async fn replace_component_at(
         component_revision: &revision,
     })?;
 
-    let package = component_package_at(root, &component_id, &component_version)?;
+    let package =
+        component_package_at("replaceComponent", root, &component_id, &component_version)?;
     // Params are checked against the NEW signature, not the old one: a key the
     // old component called free may not exist here at all.
     check_free_params("replaceComponent", &package, &component_id, &free_params)?;
@@ -1341,7 +1407,14 @@ async fn replace_component_at(
     let source = source_with_free_params(source, &free_params, &component_id)?;
 
     let (mate, dropped_attachment) = match current.mate {
-        Some(mate) if package.attachments.contains_key(&mate.self_attachment) => (Some(mate), None),
+        // A replace IS an authoring event, so the kept mate re-freezes the NEW
+        // package's frame for that attachment (WP-F1.1). Carrying the old
+        // component's frozen frame onto different geometry would seat the new
+        // part by the old one's dimensions — a silent mis-seat.
+        Some(mut mate) if package.attachments.contains_key(&mate.self_attachment) => {
+            mate.self_frame = attachment_frame(&package, &mate.self_attachment);
+            (Some(mate), None)
+        }
         Some(mate) => {
             let lost = mate.self_attachment.clone();
             (None, Some(lost))
@@ -1602,6 +1675,37 @@ generator_version = 1
         std::fs::write(dir.join("component.toml"), toml).unwrap();
     }
 
+    /// Same as `write_generator_package`, plus an `[attachments]` table where
+    /// ONE attachment declares a `frame` and the other does not — the shape
+    /// WP-F1.1's freeze needs to exercise both arms. `z` is deliberately
+    /// un-normalized so the test can also see that the parse normalized it.
+    fn write_generator_package_with_attachment_frame(root: &Path, id: &str, name: &str) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = format!(
+            r#"
+[identity]
+id = "{id}"
+version = "1.0.0"
+revision = "sha256:{}"
+
+[metadata]
+name = "{name}"
+
+[source]
+kind = "generator"
+generator = "iso4762"
+generator_version = 1
+
+[attachments]
+head_seat = {{ on = "face:head_underside", accepts = ["plane"], frame = {{ origin = [0.0, 0.0, 10.0], z = [0.0, 0.0, 4.0], x = [1.0, 0.0, 0.0] }} }}
+shank_axis = {{ on = "cylinder:shank", accepts = ["cylinder", "hole"] }}
+"#,
+            "0".repeat(64)
+        );
+        std::fs::write(dir.join("component.toml"), toml).unwrap();
+    }
+
     /// Same as `write_generator_package`, plus a `[parameters]` table with
     /// two `role: free` keys (`thread`, `thread_detail`) and one
     /// `role: table` key (`head_d`) — the minimum shape
@@ -1792,6 +1896,82 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
             mate["target"]["anchor"]["worldPoint"],
             serde_json::json!([1.0, 2.0, 3.0])
         );
+        // The package declares no `[attachments]` frame, so none is frozen —
+        // the pre-WP-F1.1 shape, unchanged.
+        assert!(mate.get("selfFrame").is_none(), "unframed mate: {mate}");
+    }
+
+    /// WP-F1.1: the matched attachment's own local frame is FROZEN into the
+    /// authored mate. That is what lets the placement re-seat by its
+    /// attachment point on every later regen — including with the library
+    /// folder deleted, which is exactly why it is frozen and not looked up.
+    #[tokio::test]
+    async fn place_with_a_mate_freezes_the_packages_attachment_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package_with_attachment_frame(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let body_uuid = uuid::Uuid::from_u128(0xb0d2);
+        let mate_input = |attachment: &str| PlaceComponentMateInput {
+            self_attachment: attachment.to_string(),
+            target_body_id: format!("body_{body_uuid}"),
+            target_topo_key: "f:7".to_string(),
+            target_element_id: Some("el_0000000000000f7a".to_string()),
+            target_kind: "face".to_string(),
+            kind: onecad_core::document::record::MateKind::Concentric,
+            flipped: false,
+            anchor_world_point: [1.0, 2.0, 3.0],
+        };
+
+        // Both placements FIRST — `place_component_at` takes the runtime lock
+        // itself, so nothing may hold it across these calls.
+        let mut record_ids = Vec::new();
+        for attachment in ["head_seat", "shank_axis"] {
+            let (_outcome, projection) = place_component_at(
+                dir.path(),
+                &state,
+                "onecad.std.iso4762".to_string(),
+                "1.0.0".to_string(),
+                [0.0, 0.0, 0.0],
+                None,
+                Default::default(),
+                Some(mate_input(attachment)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("place with a `{attachment}` mate: {e:?}"));
+            record_ids.push(projection.features.last().unwrap().id.clone());
+        }
+
+        let guard = app.state::<AppState>();
+        let rt_guard = guard.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        let params_of = |id: &String| {
+            rt.operation_params(RecordId(uuid::Uuid::parse_str(id).unwrap()))
+                .expect("record params")
+        };
+
+        let framed = params_of(&record_ids[0]);
+        let frame = &framed["mate"]["selfFrame"];
+        assert_eq!(frame["origin"], serde_json::json!([0.0, 0.0, 10.0]));
+        // Normalized on the way in — the manifest wrote `z = [0, 0, 4]`.
+        assert_eq!(frame["z"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(frame["x"], serde_json::json!([1.0, 0.0, 0.0]));
+
+        // An attachment that declares NO frame in the same package freezes
+        // none — the lookup is per-attachment, not per-package.
+        let unframed = params_of(&record_ids[1]);
+        assert!(
+            unframed["mate"].get("selfFrame").is_none(),
+            "unframed attachment: {}",
+            unframed["mate"]
+        );
     }
 
     /// WP-H2 fail-closed: a mate that needs promotion (no `ElementId` on the
@@ -1921,6 +2101,7 @@ generator_version = 1
             },
             kind: onecad_core::document::record::MateKind::Concentric,
             flipped: false,
+            self_frame: None,
             extra: Default::default(),
         });
         rt.apply(EditCommand::UpdateOperationParams {

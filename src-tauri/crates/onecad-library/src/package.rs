@@ -144,13 +144,101 @@ pub enum ParameterRole {
 }
 
 /// A `[attachments].<key>` entry — a named mate point (spec §2.1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttachmentSpec {
     /// Local geometry the attachment names (`"face:head_underside"`,
     /// `"cylinder:shank"`).
     pub on: String,
     /// Geometry kinds this attachment mates with.
     pub accepts: Vec<String>,
+    /// Component-local seating frame (WP-F1.1). Absent ⇒ the identity frame,
+    /// i.e. the component seats at its own model origin — which is exactly
+    /// how every pre-WP-F1.1 package behaves, so existing manifests stay
+    /// byte-valid and place identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<AttachmentFrame>,
+}
+
+/// The local basis an attachment seats FROM (spec §2.1 `[attachments].<key>
+/// .frame`; WP-F1.1). Component-local, right-handed — `y` is derived (`z × x`)
+/// rather than authored, so a left-handed basis cannot be written down at all.
+///
+/// `z` is the seating direction (the axis a `concentric` mate aligns to the
+/// target axis, or a `coincident` mate to the target normal); `x` fixes only
+/// the roll about it; `origin` is the point on the component that lands on the
+/// target's seat point.
+///
+/// [`parse`] normalizes every frame it reads, so downstream code (the record
+/// freeze, the index, both solvers) only ever sees an orthonormal basis.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentFrame {
+    #[serde(default)]
+    pub origin: [f64; 3],
+    #[serde(default = "unit_z")]
+    pub z: [f64; 3],
+    #[serde(default = "unit_x")]
+    pub x: [f64; 3],
+}
+
+fn unit_z() -> [f64; 3] {
+    [0.0, 0.0, 1.0]
+}
+
+fn unit_x() -> [f64; 3] {
+    [1.0, 0.0, 0.0]
+}
+
+impl Default for AttachmentFrame {
+    fn default() -> Self {
+        Self {
+            origin: [0.0; 3],
+            z: unit_z(),
+            x: unit_x(),
+        }
+    }
+}
+
+/// Below this an axis is treated as having no direction at all.
+const AXIS_EPS: f64 = 1e-9;
+
+impl AttachmentFrame {
+    /// The orthonormalized form: `z` normalized, `x` re-orthogonalized against
+    /// `z` (Gram-Schmidt) and normalized. `None` when either axis is
+    /// degenerate — a zero-length axis, or an `x` parallel to `z` — neither of
+    /// which names a basis at all, so both are refused rather than guessed at.
+    ///
+    /// Re-orthogonalizing instead of refusing a non-perpendicular `x` is
+    /// deliberate: `z` is the seating direction and is authoritative, `x` only
+    /// fixes the roll about it. A hand-typed `x` a fraction of a degree off is
+    /// a rounding artifact, not a different intent — and projecting it still
+    /// yields the roll the author asked for, while refusing would reject
+    /// perfectly meaningful manifests over float noise.
+    #[must_use]
+    pub fn orthonormalized(&self) -> Option<Self> {
+        let z = normalize(self.z)?;
+        let dot = z[0] * self.x[0] + z[1] * self.x[1] + z[2] * self.x[2];
+        let x = normalize([
+            self.x[0] - z[0] * dot,
+            self.x[1] - z[1] * dot,
+            self.x[2] - z[2] * dot,
+        ])?;
+        if !self.origin.iter().all(|c| c.is_finite()) {
+            return None;
+        }
+        Some(Self {
+            origin: self.origin,
+            z,
+            x,
+        })
+    }
+}
+
+fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if !len.is_finite() || len < AXIS_EPS {
+        return None;
+    }
+    Some([v[0] / len, v[1] / len, v[2] / len])
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,11 +255,35 @@ pub struct ComponentPackage {
 
 /// Parses `component.toml` bytes into a [`ComponentPackage`]. `path` is used
 /// only for the error message.
+///
+/// Attachment frames are normalized HERE, at the one door every reader comes
+/// through (the index, the placement freeze, the configurator), so no
+/// downstream consumer has to re-check handedness or unit length — and a
+/// degenerate frame is refused as a malformed package instead of reaching a
+/// solver as a divide-by-zero.
 pub fn parse(toml_str: &str, path: &Path) -> LibraryResult<ComponentPackage> {
-    toml::from_str(toml_str).map_err(|e| LibraryError::MalformedPackage {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })
+    let mut pkg: ComponentPackage =
+        toml::from_str(toml_str).map_err(|e| LibraryError::MalformedPackage {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    for (key, spec) in &mut pkg.attachments {
+        let Some(frame) = spec.frame else { continue };
+        spec.frame =
+            Some(
+                frame
+                    .orthonormalized()
+                    .ok_or_else(|| LibraryError::MalformedPackage {
+                        path: path.to_path_buf(),
+                        message: format!(
+                            "attachments.{key}.frame is degenerate: `z` and `x` must be non-zero, \
+                     finite, and not parallel (got z = {:?}, x = {:?})",
+                            frame.z, frame.x
+                        ),
+                    })?,
+            );
+    }
+    Ok(pkg)
 }
 
 /// Serializes a package back to `component.toml` text (spec §2.1).
@@ -364,6 +476,75 @@ shank_axis = { on = "cylinder:shank", accepts = ["cylinder", "hole", "circularEd
         assert_eq!(pkg.parameters.len(), 3);
         assert_eq!(pkg.attachments.len(), 2);
         assert!(validate_identity(&pkg).is_ok());
+    }
+
+    /// WP-F1.1: an attachment with no `frame` reads as `None`, which is what
+    /// keeps every already-authored package (the seeded catalog included)
+    /// byte-valid and placing exactly as before.
+    #[test]
+    fn an_attachment_with_no_frame_stays_absent() {
+        let pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        assert!(pkg.attachments["head_seat"].frame.is_none());
+        assert!(pkg.attachments["shank_axis"].frame.is_none());
+    }
+
+    #[test]
+    fn an_attachment_frame_parses_and_is_orthonormalized() {
+        let toml = valid_toml().replace(
+            r#"accepts = ["plane"] }"#,
+            r#"accepts = ["plane"], frame = { origin = [0.0, 0.0, 10.0], z = [0.0, 0.0, 2.0], x = [3.0, 0.0, 0.5] } }"#,
+        );
+        let pkg = parse(&toml, Path::new("component.toml")).unwrap();
+        let frame = pkg.attachments["head_seat"].frame.unwrap();
+        assert_eq!(frame.origin, [0.0, 0.0, 10.0]);
+        // `z` normalized, and `x` re-orthogonalized against it (its 0.5 of z
+        // is projected out) then normalized — the solvers may assume both.
+        assert_eq!(frame.z, [0.0, 0.0, 1.0]);
+        assert!((frame.x[0] - 1.0).abs() < 1e-12, "x = {:?}", frame.x);
+        assert!(frame.x[1].abs() < 1e-12 && frame.x[2].abs() < 1e-12);
+
+        // A frame an authoring pass writes back must survive the round trip —
+        // a lost frame is a component that silently reverts to origin-seating.
+        let again = parse(&to_toml(&pkg).unwrap(), Path::new("component.toml")).unwrap();
+        assert_eq!(pkg, again);
+    }
+
+    /// Partial frames are legal: an attachment that only moves the seat point
+    /// takes the identity axes, which is the common authoring case.
+    #[test]
+    fn an_origin_only_frame_takes_the_identity_axes() {
+        let toml = valid_toml().replace(
+            r#"accepts = ["plane"] }"#,
+            r#"accepts = ["plane"], frame = { origin = [1.0, 2.0, 3.0] } }"#,
+        );
+        let pkg = parse(&toml, Path::new("component.toml")).unwrap();
+        let frame = pkg.attachments["head_seat"].frame.unwrap();
+        assert_eq!(frame.origin, [1.0, 2.0, 3.0]);
+        assert_eq!(frame.z, [0.0, 0.0, 1.0]);
+        assert_eq!(frame.x, [1.0, 0.0, 0.0]);
+    }
+
+    /// A degenerate axis is refused at the door, never normalized into a
+    /// divide-by-zero inside a solver.
+    #[test]
+    fn a_degenerate_attachment_frame_is_refused() {
+        for bad in [
+            r#"frame = { z = [0.0, 0.0, 0.0] }"#,
+            r#"frame = { x = [0.0, 0.0, 0.0] }"#,
+            // `x` parallel to `z` names no roll at all — Gram-Schmidt leaves
+            // nothing behind, so there is no basis to recover.
+            r#"frame = { z = [0.0, 0.0, 1.0], x = [0.0, 0.0, 4.0] }"#,
+        ] {
+            let toml = valid_toml().replace(
+                r#"accepts = ["plane"] }"#,
+                &format!(r#"accepts = ["plane"], {bad} }}"#),
+            );
+            let err = parse(&toml, Path::new("component.toml")).unwrap_err();
+            assert!(
+                matches!(err, LibraryError::MalformedPackage { .. }),
+                "`{bad}` must be refused as malformed"
+            );
+        }
     }
 
     #[test]

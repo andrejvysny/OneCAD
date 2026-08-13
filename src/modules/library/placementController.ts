@@ -63,6 +63,7 @@ import {
   nearestSmallerThread,
   solveCandidatePlacement,
   type CandidatePlacement,
+  type MateSelfFrame,
   type MateSnapKind,
 } from "./placementSolver";
 
@@ -327,6 +328,19 @@ function clearGhostOnly(): void {
   previewBodyIds = [];
 }
 
+/**
+ * The matched attachment's own local seating frame (WP-F1.1), or `null` when
+ * it declares none — then the component seats at its model origin, exactly as
+ * before. The backend freezes the SAME frame into the committed
+ * `mate.selfFrame`, so the ghost and the record cannot describe different
+ * seats.
+ */
+function matchedSelfFrame(): MateSelfFrame | null {
+  if (!armedComponent || !lastMatch) return null;
+  const frame = armedComponent.attachments[lastMatch.attachmentKey]?.frame;
+  return frame ? { origin: frame.origin, z: frame.z, x: frame.x } : null;
+}
+
 function recomputeFromLastMatch(): void {
   if (!lastMatch) return;
   const candidate = solveCandidatePlacement(
@@ -334,6 +348,7 @@ function recomputeFromLastMatch(): void {
     lastMatch.frame,
     lastMatch.pickWorldPos,
     flipped,
+    matchedSelfFrame(),
   );
   lastCandidate = candidate;
   pushCandidate(candidate.translate, candidate.rotate);

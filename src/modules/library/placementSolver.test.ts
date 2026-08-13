@@ -146,6 +146,107 @@ describe("solveCandidatePlacement", () => {
   });
 });
 
+// ── attachment frames (spec §2.1/§5; WP-F1.1) ────────────────────────────────
+//
+// PARITY DISCIPLINE: these exact cases are mirrored 1:1 in
+// `worker/tests/test_component_mate_solver.cpp` — `ComponentMateSolver.cpp` is
+// a verbatim port of this file, and the FE ghost and the worker's regen
+// re-seat MUST agree or a component jumps the moment it is committed.
+
+/** `p` applied to a component-LOCAL point: `R(axis, angleDeg)·p + translate`. */
+function applyPlacement(
+  p: ReturnType<typeof solveCandidatePlacement>,
+  local: [number, number, number],
+): [number, number, number] {
+  const d = applyRotation(p, local);
+  return [d[0] + p.translate[0], d[1] + p.translate[1], d[2] + p.translate[2]];
+}
+
+/** `p`'s rotation applied to a component-local DIRECTION (translation ignored). */
+function applyRotation(
+  p: ReturnType<typeof solveCandidatePlacement>,
+  local: [number, number, number],
+): [number, number, number] {
+  // Rodrigues again — an independent oracle, never the solver's own matrices.
+  const rad = (p.rotate.angleDeg * Math.PI) / 180;
+  const [ax, ay, az] = p.rotate.axis;
+  const len = Math.hypot(ax, ay, az) || 1;
+  const u: [number, number, number] = [ax / len, ay / len, az / len];
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const dotUV = u[0] * local[0] + u[1] * local[1] + u[2] * local[2];
+  const crossUV: [number, number, number] = [
+    u[1] * local[2] - u[2] * local[1],
+    u[2] * local[0] - u[0] * local[2],
+    u[0] * local[1] - u[1] * local[0],
+  ];
+  return [
+    local[0] * c + crossUV[0] * s + u[0] * dotUV * (1 - c),
+    local[1] * c + crossUV[1] * s + u[1] * dotUV * (1 - c),
+    local[2] * c + crossUV[2] * s + u[2] * dotUV * (1 - c),
+  ];
+}
+
+describe("solveCandidatePlacement with an attachment frame", () => {
+  it("is byte-identical to the un-composed solve when no frame is declared", () => {
+    // The compatibility guarantee: a component with no `[attachments].frame`
+    // (every seeded package today) keeps its exact former numbers — the
+    // absent case does not route through the matrix path at all.
+    const frame: ClassifyFrame = { origin: [0, 0, 0], normal: null, axis: [0, 0, 1], radius: 3 };
+    const bare = solveCandidatePlacement("concentric", frame, [3, 4, 7], false);
+    expect(solveCandidatePlacement("concentric", frame, [3, 4, 7], false, null)).toEqual(bare);
+    expect(solveCandidatePlacement("concentric", frame, [3, 4, 7], false, undefined)).toEqual(bare);
+  });
+
+  it("offset origin: the ATTACHMENT point lands on the seat, not the model origin", () => {
+    // A component whose mate point sits 10mm up its own local +Z, seated on a
+    // +Z plane at (1,2,3): the body must sit 10mm BELOW the pick, at (1,2,-7).
+    // Before WP-F1.1 it seated at (1,2,3) — the whole defect this closes.
+    const frame: ClassifyFrame = { origin: [5, 5, 5], normal: [0, 0, 1], axis: null, radius: null };
+    const selfFrame = { origin: [0, 0, 10] as const, z: [0, 0, 1] as const, x: [1, 0, 0] as const };
+    const p = solveCandidatePlacement("coincident", frame, [1, 2, 3], false, selfFrame);
+    expect(approxEqual(p.translate, [1, 2, -7])).toBe(true);
+    expect(p.rotate.angleDeg).toBe(0);
+    expect(approxEqual(applyPlacement(p, [0, 0, 10]), [1, 2, 3])).toBe(true);
+  });
+
+  it("rotated frame z: the attachment axis aligns to the target axis", () => {
+    // The attachment's local +X (its `z`) is the seating axis. Target axis is
+    // world +Z through the origin, pick projects to (0,0,4); the attachment
+    // origin is 2mm out along local +X, so the body lands at (0,0,2).
+    const frame: ClassifyFrame = { origin: [0, 0, 0], normal: null, axis: [0, 0, 1], radius: 3 };
+    const selfFrame = { origin: [2, 0, 0] as const, z: [1, 0, 0] as const, x: [0, 0, 1] as const };
+    const p = solveCandidatePlacement("concentric", frame, [0, 0, 4], false, selfFrame);
+    expect(approxEqual(p.translate, [0, 0, 2])).toBe(true);
+    expect(approxEqual(applyPlacement(p, [2, 0, 0]), [0, 0, 4])).toBe(true);
+    expect(approxEqual(applyRotation(p, [1, 0, 0]), [0, 0, 1])).toBe(true);
+  });
+
+  it("composes a non-degenerate rotation (target normal off every axis)", () => {
+    // Neither the seat rotation nor the frame rotation is the identity or a
+    // 180° flip here — this is the general arm of `axisAngleFromMat`.
+    const frame: ClassifyFrame = { origin: [0, 0, 0], normal: [0, 1, 0], axis: null, radius: null };
+    const selfFrame = { origin: [1, 2, 3] as const, z: [0, 0, 1] as const, x: [0, 1, 0] as const };
+    const p = solveCandidatePlacement("coincident", frame, [4, 5, 6], false, selfFrame);
+    // The two invariants that define the mate: the attachment point is ON the
+    // seat, and the attachment's own +Z is ALONG the target normal.
+    expect(approxEqual(applyPlacement(p, [1, 2, 3]), [4, 5, 6])).toBe(true);
+    expect(approxEqual(applyRotation(p, [0, 0, 1]), [0, 1, 0])).toBe(true);
+    // …and the roll is the one the frame asked for, not an arbitrary one.
+    expect(approxEqual(applyRotation(p, [0, 1, 0]), [1, 0, 0])).toBe(true);
+  });
+
+  it("flip inverts the seating direction with a frame just as it does without one", () => {
+    const frame: ClassifyFrame = { origin: [0, 0, 0], normal: [0, 0, 1], axis: null, radius: null };
+    const selfFrame = { origin: [0, 0, 10] as const, z: [0, 0, 1] as const, x: [1, 0, 0] as const };
+    const p = solveCandidatePlacement("coincident", frame, [0, 0, 0], true, selfFrame);
+    expect(approxEqual(applyRotation(p, [0, 0, 1]), [0, 0, -1])).toBe(true);
+    // Flipped, the 10mm offset points the other way: the body sits ABOVE.
+    expect(approxEqual(p.translate, [0, 0, 10])).toBe(true);
+    expect(approxEqual(applyPlacement(p, [0, 0, 10]), [0, 0, 0])).toBe(true);
+  });
+});
+
 // ── auto-size (spec §5.3's hole row, §5.4 step 3; WP-A3) ────────────────────
 
 describe("threadNominalDiameterMm", () => {
