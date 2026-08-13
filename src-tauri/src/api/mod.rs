@@ -170,7 +170,7 @@ fn spawn_gated_regen<C, Fut>(
 /// bounding how long a genuinely stuck cold start can silently withhold the
 /// document's first regen. The document uuid captured here is the staleness probe:
 /// the gate fires only while the SAME document is still the open one.
-async fn schedule_initial_regen(state: &AppState) {
+pub(crate) async fn schedule_initial_regen(state: &AppState) {
     let expected = match state.runtime.lock().await.as_ref() {
         Some(rt) => rt.document_uuid(),
         None => return, // no document — nothing to rebuild
@@ -520,7 +520,7 @@ pub async fn save_document(
 /// write a `preview.png` that our own reader would refuse.
 ///
 /// [`MAX_PREVIEW_BYTES`]: onecad_core::io::container::MAX_PREVIEW_BYTES
-const MAX_PREVIEW_PNG_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_PREVIEW_PNG_BYTES: usize = 512 * 1024;
 
 /// Decodes the frontend's base64 viewport capture for
 /// [`save_document`](crate::api::save_document).
@@ -2684,7 +2684,7 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
     }
 }
 
-fn snapshot_of(rt: &DocumentRuntime) -> DocumentSnapshotDto {
+pub(crate) fn snapshot_of(rt: &DocumentRuntime) -> DocumentSnapshotDto {
     DocumentSnapshotDto {
         document_id: rt.document_id(),
         title: rt.title().to_string(),

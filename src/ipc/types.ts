@@ -498,6 +498,18 @@ export interface ClassifyFrame {
 }
 
 /**
+ * One project template (spec §8; Rust `ProjectTemplateDto`). `previewDataUrl`
+ * is inlined because the webview has no filesystem capability — a path would
+ * be unreadable to it.
+ */
+export interface ProjectTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  previewDataUrl?: string;
+}
+
+/**
  * "Save as Component" input (spec §7; Rust `NewComponentSpec`) — identity and
  * metadata only.
  *

@@ -2089,6 +2089,20 @@ impl DocumentRuntime {
         self.dirty = true;
     }
 
+    /// Detaches this runtime from the file it was loaded from: no path, no
+    /// borrowed title, dirty.
+    ///
+    /// "New from template" (Component Library WP-B3) loads a template container
+    /// and then calls this, so the first Save prompts for a location instead of
+    /// writing back over the template. A template is immutable BY BEING NOT
+    /// TARGETED, not by a filesystem permission — the copy is the user's
+    /// document and the template stays exactly as shipped.
+    pub fn detach_from_file(&mut self, title: &str) {
+        self.path = None;
+        self.title = title.to_string();
+        self.dirty = true;
+    }
+
     // ── STEP import (SCHEMA §7.3 `ImportStep`) ───────────────────────────────
 
     /// Authors one `ImportStep` record from a [`PreparedImport`] the caller built

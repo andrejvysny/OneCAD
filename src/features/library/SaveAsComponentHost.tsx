@@ -7,18 +7,25 @@
  * and the dialog's props.
  */
 import { SaveAsComponentDialog } from "./SaveAsComponentDialog";
+import { SaveAsTemplateDialog } from "./SaveAsTemplateDialog";
 import {
   closeSaveAsComponent,
+  closeSaveAsTemplate,
   useSaveAsComponentTarget,
+  useSaveAsTemplateOpen,
 } from "@/modules/library/authoringController";
 
 export function SaveAsComponentHost() {
   const target = useSaveAsComponentTarget();
+  const templateOpen = useSaveAsTemplateOpen();
   return (
-    <SaveAsComponentDialog
-      bodyId={target?.bodyId ?? null}
-      bodyName={target?.bodyName}
-      onClose={closeSaveAsComponent}
-    />
+    <>
+      <SaveAsComponentDialog
+        bodyId={target?.bodyId ?? null}
+        bodyName={target?.bodyName}
+        onClose={closeSaveAsComponent}
+      />
+      <SaveAsTemplateDialog open={templateOpen} onClose={closeSaveAsTemplate} />
+    </>
   );
 }

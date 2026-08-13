@@ -17,13 +17,13 @@
 import type { InspectorContext, ModuleScope, Platform } from "@/platform";
 import { Slots } from "@/platform";
 import { LIBRARY_MODULE_ID } from "./manifest";
-import { LibraryMenuItems, LibraryPanels } from "./panelIds";
+import { LibraryCommands, LibraryMenuItems, LibraryPanels } from "./panelIds";
 import { LibraryInspectorPriorities, LibraryInspectorSections } from "./inspectorSectionIds";
 import { LibraryPanel } from "@/features/library/LibraryPanel";
 import { LibraryStatusSection } from "@/features/library/LibraryStatusSection";
 import { ComponentParametersSection } from "@/features/library/ComponentParametersSection";
 import { configurePlacementController } from "./placementController";
-import { openSaveAsComponent } from "./authoringController";
+import { openSaveAsComponent, openSaveAsTemplate } from "./authoringController";
 import { SaveAsComponentHost } from "@/features/library/SaveAsComponentHost";
 import {
   ModelingScopes,
@@ -91,6 +91,20 @@ export function contributeLibraryUi(scope: ModuleScope): void {
     title: "Save as Component…",
     appliesTo: (target) => target.kind === "body",
     run: (target) => openSaveAsComponent({ bodyId: target.id, bodyName: target.label }),
+  });
+
+  // WP-B3: "Save as Template…" is a COMMAND, not a File-menu item — the File
+  // menu lives in `features/shell`, and the shell must not import the library
+  // to offer a library action. The palette lists every registered command, so
+  // a command is the module-owned way in.
+  scope.registerCommand({
+    id: LibraryCommands.SaveAsTemplate,
+    title: "Save as Template…",
+    keywords: ["template", "starter", "new project"],
+    execute: () => {
+      openSaveAsTemplate();
+      return { status: "done" };
+    },
   });
 
   scope.registerPanel({

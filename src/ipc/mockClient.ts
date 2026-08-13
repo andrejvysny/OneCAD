@@ -18,6 +18,7 @@ import type {
   ComponentParamValue,
   ComponentUpgrade,
   NewComponentSpec,
+  ProjectTemplate,
   ReplaceComponentReport,
   DocumentChange,
   DocumentProjectionWire,
@@ -1381,6 +1382,14 @@ let nextComponentSeq = 1;
 let mockAuthored: LibraryComponent[] = [];
 
 /**
+ * Templates saved through `saveAsTemplate` this session (WP-B3). In memory
+ * only, for the same reason `mockAuthored` is: there is no library root on this
+ * lane. `newFromTemplate` therefore hands back the same synthetic document
+ * `newDocument()` does — the FLOW is real, the starting geometry is not.
+ */
+let mockTemplates: ProjectTemplate[] = [];
+
+/**
  * Rejects any key that is not `role = "free"` on `component` — the mock's
  * mirror of the backend's own signature check (`library.rs::check_free_params`).
  * `what` names the caller so the two commands' messages stay distinguishable.
@@ -1991,6 +2000,7 @@ export function resetMockDocument(): void {
   redoStack.length = 0;
   mockRecovery = null;
   mockAuthored = [];
+  mockTemplates = [];
   mockSketchDatum.clear();
   documentStore.getState().applyChange({ datums: {} });
   // Re-adopt the (already reset) projection store as the mock's metadata authority.
@@ -2498,6 +2508,40 @@ export const mockClient: CadClient = {
    * designation but not the rendered geometry — the real worker-backed lane
    * (`component_ops.rs`) is where a size change actually resizes the body.
    */
+  async listTemplates(): Promise<ProjectTemplate[]> {
+    await wait();
+    return [...mockTemplates];
+  },
+
+  async saveAsTemplate(
+    id: string,
+    name: string,
+    description?: string,
+    _previewPng?: string | null,
+  ): Promise<ProjectTemplate> {
+    await wait();
+    if (!id.trim()) throw new Error("saveAsTemplate: a template needs an id");
+    if (mockTemplates.some((t) => t.id === id)) {
+      throw new Error(`saveAsTemplate: template \`${id}\` already exists`);
+    }
+    const template: ProjectTemplate = { id, name, description };
+    mockTemplates.push(template);
+    return template;
+  },
+
+  /**
+   * The FLOW is real (a new untitled document replaces the current one); the
+   * starting geometry is not, because the mock lane has no frozen container to
+   * instantiate. Same honesty rule `saveAsComponent` follows below.
+   */
+  async newFromTemplate(id: string): Promise<DocumentSnapshot> {
+    await wait();
+    if (!mockTemplates.some((t) => t.id === id)) {
+      throw new Error(`newFromTemplate: unknown template ${id}`);
+    }
+    return mockClient.newDocument();
+  },
+
   /**
    * MOCK-LANE HONESTY: the package is recorded in the in-memory catalog so the
    * authoring FLOW is exercisable (the dialog, the menu item, the panel picking

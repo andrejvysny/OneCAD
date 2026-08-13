@@ -12,6 +12,7 @@ pub mod package;
 pub mod registry;
 pub mod resolve;
 pub mod tables;
+pub mod template;
 
 use std::path::{Path, PathBuf};
 
@@ -164,14 +165,29 @@ impl Library {
         Ok(revision)
     }
 
-    /// "Save as Template" (spec §8). Same P3 deferral as [`Self::save_component`].
+    /// "Save as Template" (spec §8) — writes a frozen document under
+    /// `templates/`. See [`template`] for why templates are listed by reading
+    /// the directory rather than through `library.json`.
     ///
     /// # Errors
-    /// Always — this is a stub.
-    pub fn save_template(&mut self, _new: NewTemplate) -> LibraryResult<String> {
-        Err(LibraryError::Io(
-            "Library::save_template is not implemented (P3 — Component Library authoring)".into(),
-        ))
+    /// A malformed id/name, a taken id, or a filesystem failure.
+    pub fn save_template(
+        &mut self,
+        new: template::NewTemplate,
+    ) -> LibraryResult<template::TemplateEntry> {
+        template::save(&self.root, new)
+    }
+
+    /// Every template under this root, sorted by name.
+    #[must_use]
+    pub fn templates(&self) -> Vec<template::TemplateEntry> {
+        template::list(&self.root)
+    }
+
+    /// One template by id, or `None`.
+    #[must_use]
+    pub fn template(&self, id: &str) -> Option<template::TemplateEntry> {
+        template::get(&self.root, id)
     }
 }
 
@@ -198,13 +214,6 @@ pub struct NewComponent {
     pub geometry_format: Option<u32>,
     /// Optional thumbnail (PNG bytes from the viewport snapshot).
     pub preview_png: Option<Vec<u8>>,
-}
-
-/// Input to [`Library::save_template`] (P3 scope).
-#[derive(Debug, Clone)]
-pub struct NewTemplate {
-    pub name: String,
-    pub document_bytes: Vec<u8>,
 }
 
 #[cfg(test)]

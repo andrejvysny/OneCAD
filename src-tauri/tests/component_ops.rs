@@ -845,18 +845,14 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
     // Something to author FROM: a generator component's own solid is a real
     // published body, which is all "Save as Component" needs.
     let runtime = tokio::sync::Mutex::new(Some(runtime_over(&wm)));
-    let (body, authored_volume) = {
+    let body = {
         let mut guard = runtime.lock().await;
         let rt = guard.as_mut().unwrap();
         add_op(rt, place_component_record(0xa1));
         let report = regen_all(rt).await;
-        let snap = published(&report, "author source");
-        (snap.bodies[0].body, ())
+        published(&report, "author source").bodies[0].body
     };
-    let authored_volume = {
-        let _ = authored_volume;
-        exact_volume(&wm, body).await
-    };
+    let authored_volume = exact_volume(&wm, body).await;
 
     let exporter: Arc<dyn onecad_lib::export::GeometryExporter> = Arc::new(wm.clone());
     let saved = onecad_lib::library::save_as_component_at(

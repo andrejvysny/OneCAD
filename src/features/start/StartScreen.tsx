@@ -3,13 +3,15 @@ import { Button } from "@/ui/Button";
 import { TextInput } from "@/ui/TextInput";
 import { Icon } from "@/icons/Icon";
 import { useAppStore } from "@/stores/appStore";
-import type { RecentProject } from "@/ipc/types";
+import type { ProjectTemplate, RecentProject } from "@/ipc/types";
 import { RecentGrid } from "./RecentGrid";
 import { RecentGridSkeleton } from "./RecentGridSkeleton";
 import { RecoveryCard } from "./RecoveryCard";
 import { SortMenu, type SortKey } from "./SortMenu";
 import { StartSidebar } from "./StartSidebar";
 import { StartLibraryPanel } from "./StartLibraryPanel";
+import { TemplateGrid } from "./TemplateGrid";
+import { createClient } from "@/ipc/client";
 import { SettingsModal } from "@/features/settings/SettingsModal";
 import { ExtensionsManager } from "@/features/extensions/ExtensionsManager";
 import { extensionsStore } from "@/stores/extensionsStore";
@@ -32,7 +34,7 @@ const NAV_TITLE: Record<StartNavKey, string> = {
 
 const NAV_EMPTY_HINT: Record<"starred" | "templates", string> = {
   starred: "No starred projects yet.",
-  templates: "No templates yet.",
+  templates: "No templates yet. Open a project and run “Save as Template…” from the command palette.",
 };
 
 /** Filter (case-insensitive substring on name) + sort — mirrors prototype 1a. */
@@ -63,6 +65,7 @@ export function StartScreen() {
   const deleteRecent = useAppStore((s) => s.deleteRecent);
   const revealRecent = useAppStore((s) => s.revealRecent);
   const newProject = useAppStore((s) => s.newProject);
+  const newFromTemplate = useAppStore((s) => s.newFromTemplate);
   const openProject = useAppStore((s) => s.openProject);
   const importFromDialog = useAppStore((s) => s.importFromDialog);
   const importError = useAppStore((s) => s.importError);
@@ -75,11 +78,30 @@ export function StartScreen() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("date");
   const [nav, setNav] = useState<StartNavKey>("recent");
+  // Templates load on first visit to their row rather than at mount: the
+  // recents grid is what the screen opens on, and a template read touches the
+  // library root (WP-B3).
+  const [templates, setTemplates] = useState<ProjectTemplate[] | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (recentsStatus === "idle") void loadRecents();
   }, [recentsStatus, loadRecents]);
+
+  useEffect(() => {
+    if (nav !== "templates" || templates !== null) return;
+    let alive = true;
+    // An unreadable library reads as "no templates", never as an error banner:
+    // the start screen's job is to let the user get INTO a project, and a
+    // template row that cannot load must not stand in the way of that.
+    void createClient()
+      .listTemplates()
+      .then((list) => alive && setTemplates(list))
+      .catch(() => alive && setTemplates([]));
+    return () => {
+      alive = false;
+    };
+  }, [nav, templates]);
 
   useEffect(() => {
     if (recoveryStatus === "idle") void checkRecovery();
@@ -198,6 +220,8 @@ export function StartScreen() {
 
           {nav === "library" ? (
             <StartLibraryPanel />
+          ) : nav === "templates" && templates !== null && templates.length > 0 ? (
+            <TemplateGrid templates={templates} onUse={(id) => void newFromTemplate(id)} />
           ) : nav !== "recent" ? (
             <div className="pb-5 pt-9 text-center text-[12.5px] text-ink-6">
               {NAV_EMPTY_HINT[nav]}

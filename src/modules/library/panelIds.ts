@@ -5,7 +5,7 @@
  * definition, a test) must import from HERE and not drag the editor chunk
  * into the startup bundle.
  */
-import { contributionId, type MenuContributionId, type PanelId } from "@/platform";
+import { contributionId, type CommandId, type MenuContributionId, type PanelId } from "@/platform";
 import { LIBRARY_MODULE_ID } from "./manifest";
 
 const panelId = (name: string) =>
@@ -20,6 +20,14 @@ export const LibraryPanels = {
 
 const menuItemId = (name: string) =>
   contributionId<MenuContributionId>(LIBRARY_MODULE_ID, `onecad.library.menu.${name}`);
+
+const commandId = (name: string) =>
+  contributionId<CommandId>(LIBRARY_MODULE_ID, `onecad.library.command.${name}`);
+
+export const LibraryCommands = {
+  /** "Save as Template…" — palette-reachable (spec §8, WP-B3). */
+  SaveAsTemplate: commandId("saveAsTemplate"),
+} as const;
 
 export const LibraryMenuItems = {
   /** "Save as Component…" on a body row (`Slots.TreeContext`, WP-B1/B2). */

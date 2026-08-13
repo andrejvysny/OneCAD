@@ -401,6 +401,20 @@ pub struct ReplaceComponentReportDto {
     pub dropped_mate_attachment: Option<String>,
 }
 
+/// One project template (`list_templates`; `types.ts` `ProjectTemplate`) —
+/// spec §8. `previewDataUrl` is inlined rather than a path because the webview
+/// has no filesystem capability at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTemplateDto {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_data_url: Option<String>,
+}
+
 /// A crash-recovery offer surfaced at startup (`check_recovery`; `types.ts`
 /// `RecoveryInfo`). A previous session left an autosave whose owning process is
 /// gone — the start screen offers to Restore or Discard it.

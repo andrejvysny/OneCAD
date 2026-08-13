@@ -48,6 +48,7 @@ import type {
   ComponentParamValue,
   ComponentUpgrade,
   NewComponentSpec,
+  ProjectTemplate,
   ReplaceComponentReport,
   CurveParams,
   DocumentChange,
@@ -181,6 +182,9 @@ const CMD = {
   resolveComponentSource: "resolve_component_source",
   placeComponent: "place_component",
   saveAsComponent: "save_as_component",
+  listTemplates: "list_templates",
+  saveAsTemplate: "save_as_template",
+  newFromTemplate: "new_from_template",
   replaceComponent: "replace_component",
   componentUpgradeAvailable: "component_upgrade_available",
   setComponentParams: "set_component_params",
@@ -1615,6 +1619,23 @@ export function createTauriClient(): CadClient {
     await call(CMD.placeComponent, { componentId, componentVersion, translate, rotate, params });
   }
 
+  async function listTemplates(): Promise<ProjectTemplate[]> {
+    return call<ProjectTemplate[]>(CMD.listTemplates, {});
+  }
+
+  async function saveAsTemplate(
+    id: string,
+    name: string,
+    description?: string,
+    previewPng?: string | null,
+  ): Promise<ProjectTemplate> {
+    return call<ProjectTemplate>(CMD.saveAsTemplate, { id, name, description, previewPng });
+  }
+
+  async function newFromTemplate(id: string): Promise<DocumentSnapshot> {
+    return call<DocumentSnapshot>(CMD.newFromTemplate, { id });
+  }
+
   async function saveAsComponent(
     bodyId: string,
     spec: NewComponentSpec,
@@ -1918,6 +1939,9 @@ export function createTauriClient(): CadClient {
     resolveComponentSource,
     placeComponent,
     saveAsComponent,
+    listTemplates,
+    saveAsTemplate,
+    newFromTemplate,
     replaceComponent,
     componentUpgradeAvailable,
     setComponentParams,

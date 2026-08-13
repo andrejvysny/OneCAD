@@ -1,5 +1,50 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-B3 (2026-08-13) — GATE PASSED
+
+Project templates (spec §8) — the start screen's `templates` nav key has been
+a stub since the start screen shipped; it is now real in both directions.
+
+**Same storage discipline as a component, deliberately a DIFFERENT index.**
+`templates/<id>/` holds `template.toml` + `template.onecad` (+ optional
+preview), written with the same one-directory-per-entry, refuse-don't-overwrite
+rules. What they do NOT get is an entry in `library.json`: a template is not
+placeable, has no parameters, attachments or source kind, and giving it an
+`IndexEntry` would force every consumer of the component index to learn to skip
+a kind it can never use. Templates are listed by reading the directory — there
+are a handful, and the read happens on the start screen, not in a regen loop.
+
+**A template is immutable by never being the save target.** `new_from_template`
+opens its container like any other document and then calls the new
+`DocumentRuntime::detach_from_file`, so the copy is untitled and dirty and the
+first Save prompts for a location. Nothing marks the file read-only, and
+nothing should — a user editing their own template file is not doing something
+wrong. It is also deliberately NOT recorded in recents: nothing has been saved,
+and an entry pointing into the library would reopen the template itself.
+
+**"Save as Template…" is a COMMAND, not a File-menu item.** The File menu lives
+in `features/shell`, and the shell must not import the library to offer a
+library action (the same wall WP-B1 exists to respect). A registered command is
+the module-owned way in, and the palette already lists every one.
+
+**Content scope, as decided with the user**: the MECHANISM ships; the
+opinionated starters (3D-print part, NEMA mount plate, enclosure base) do not.
+Authoring those means committing to datum placement and NEMA footprint accuracy
+that should be reviewed, not guessed — carried Q4 stays open. The empty state
+says how to make one rather than pretending the row is broken.
+
+**Skipped-not-fatal, everywhere it matters**: a template directory whose
+manifest is unparsable, or which has no document to instantiate, is skipped and
+the rest still list. An unreadable library root reads as "no templates" on the
+start screen rather than an error banner — the screen's job is to get the user
+into a project.
+
+GATE: vitest **249 files / 4195** (up from 248/4191) · `bunx tsc --noEmit`
+clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1168 passed / 0
+failed** (5 new `template.rs` tests, including the path-traversal refusal —
+an id IS a directory name) · `cargo fmt`/`clippy -D warnings` clean · worker
+ctest 119/119 unchanged (no C++ touched).
+
 ## COMPONENT-LIBRARY WP-B4 (2026-08-13) — GATE PASSED
 
 `ReplaceComponent` + opt-in version upgrade (spec §3.3) — the last named P3

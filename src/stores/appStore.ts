@@ -72,6 +72,8 @@ export interface AppState {
    *  effort — a failure is logged, not surfaced (nothing to revert in the UI). */
   revealRecent(path: string): Promise<void>;
   newProject(): Promise<void>;
+  /** Starts a new untitled document from a template (spec §8). */
+  newFromTemplate(id: string): Promise<void>;
   openProject(path: string): Promise<void>;
   openDialogAndOpen(): Promise<void>;
   importStep(): Promise<void>;
@@ -197,6 +199,17 @@ export const appStore = createStore<AppState>()((set, get) => {
       await get().requestReplacement(async () => {
         resetIfReplacing();
         const document = await client.newDocument();
+        enter(document);
+      });
+    },
+
+    async newFromTemplate(id) {
+      await get().requestReplacement(async () => {
+        resetIfReplacing();
+        // Deliberately NOT recorded in recents: nothing has been saved yet, and
+        // an entry pointing into the library would reopen the template itself
+        // rather than the user's copy.
+        const document = await client.newFromTemplate(id);
         enter(document);
       });
     },

@@ -42,6 +42,35 @@ export function saveAsComponentTarget(): AuthoringTarget | null {
   return target;
 }
 
+/** Whether the "Save as Template" dialog is open (spec §8; WP-B3). */
+let templateOpen = false;
+
+export function openSaveAsTemplate(): void {
+  templateOpen = true;
+  publish();
+}
+
+export function closeSaveAsTemplate(): void {
+  if (!templateOpen) return;
+  templateOpen = false;
+  publish();
+}
+
+export function isSaveAsTemplateOpen(): boolean {
+  return templateOpen;
+}
+
+export function useSaveAsTemplateOpen(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    isSaveAsTemplateOpen,
+    () => false,
+  );
+}
+
 export function useSaveAsComponentTarget(): AuthoringTarget | null {
   return useSyncExternalStore(
     (cb) => {

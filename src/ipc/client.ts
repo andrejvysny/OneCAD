@@ -16,6 +16,7 @@ import type {
   ComponentParamValue,
   ComponentUpgrade,
   NewComponentSpec,
+  ProjectTemplate,
   ReplaceComponentReport,
   DocumentChange,
   DocumentModule,
@@ -452,6 +453,32 @@ export interface CadClient {
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
   ): Promise<void>;
+
+  /**
+   * Every project template in the library (spec §8). An unreadable library is
+   * an empty list, never an error — the start screen still has to render.
+   */
+  listTemplates(): Promise<ProjectTemplate[]>;
+
+  /**
+   * Freezes the OPEN document as a starter template (spec §8). Nothing about
+   * the open document changes — it keeps its path, title and dirty flag,
+   * because saving a template is not saving your work.
+   */
+  saveAsTemplate(
+    id: string,
+    name: string,
+    description?: string,
+    previewPng?: string | null,
+  ): Promise<ProjectTemplate>;
+
+  /**
+   * Starts a NEW untitled document from a template (spec §8). The copy is
+   * detached from the template file, so the first Save prompts for a location
+   * and the template itself is never the save target — that detach IS its
+   * immutability.
+   */
+  newFromTemplate(id: string): Promise<DocumentSnapshot>;
 
   /**
    * Captures one body at head as a reusable `document`-kind component (spec §7

@@ -47,8 +47,8 @@ use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
 use onecad_library::Library;
 
 use crate::dto::{
-    ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, ReindexReportDto,
-    ReplaceComponentReportDto,
+    ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, ProjectTemplateDto,
+    ReindexReportDto, ReplaceComponentReportDto,
 };
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -661,6 +661,144 @@ pub async fn set_component_params(
     let (outcome, projection) = set_component_params_at(&root, &state, record_id, params).await?;
     finish(&app, &state, &outcome, &projection);
     Ok(projection)
+}
+
+// ── Templates (spec §8) ─────────────────────────────────────────────────────
+
+/// A template's PNG thumbnail as a data URL, or `None`.
+///
+/// Inlined rather than handed over as a path: the webview has zero filesystem
+/// capability by design, so a path would be unreadable to it. Bounded by the
+/// same cap the document preview uses — a template with an absurd thumbnail
+/// still lists, just without one.
+fn template_preview_data_url(path: Option<&Path>) -> Option<String> {
+    use base64::Engine as _;
+    let bytes = std::fs::read(path?).ok()?;
+    if bytes.len() > crate::api::MAX_PREVIEW_PNG_BYTES {
+        return None;
+    }
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn template_dto(entry: &onecad_library::template::TemplateEntry) -> ProjectTemplateDto {
+    ProjectTemplateDto {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        description: entry.description.clone(),
+        preview_data_url: template_preview_data_url(entry.preview_path.as_deref()),
+    }
+}
+
+fn list_templates_at(root: &Path) -> Vec<ProjectTemplateDto> {
+    onecad_library::template::list(root)
+        .iter()
+        .map(template_dto)
+        .collect()
+}
+
+/// Every project template in the library (spec §8). An unreadable library root
+/// is an empty list, not an error — the start screen must still render.
+#[tauri::command]
+pub async fn list_templates(app: AppHandle) -> Result<Vec<ProjectTemplateDto>, ApiError> {
+    let Some(root) = library_root(&app) else {
+        return Ok(Vec::new());
+    };
+    Ok(list_templates_at(&root))
+}
+
+/// "Save as Template" (spec §8) — freezes the OPEN document as a starter.
+///
+/// The document is frozen with the same lock discipline `save_as_component`
+/// uses, and for the same reason. Nothing about the open document changes: it
+/// keeps its path, its title and its dirty flag, because saving a template is
+/// not saving your work.
+#[tauri::command]
+pub async fn save_as_template(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    description: Option<String>,
+    preview_png: Option<String>,
+) -> Result<ProjectTemplateDto, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("saveAsTemplate: no app data dir".into()))?;
+    let scratch = std::env::temp_dir().join(format!("onecad-template-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| ApiError::Internal(format!("saveAsTemplate: scratch dir: {e}")))?;
+    let frozen = scratch.join("template.onecad");
+
+    let payload = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("saveAsTemplate".into()))?;
+        rt.build_save_payload(
+            crate::api::save_meta(),
+            // Meshes ON: a template is opened cold and its bodies should paint
+            // before the from-0 regen finishes, exactly like any other document.
+            crate::document_runtime::SaveCaches::explicit(),
+        )
+    };
+    crate::document_runtime::DocumentRuntime::write_payload(&frozen, &payload)
+        .map_err(|e| ApiError::Internal(format!("saveAsTemplate: freeze document: {e}")))?;
+    let document = std::fs::read(&frozen)
+        .map_err(|e| ApiError::Internal(format!("saveAsTemplate: read frozen document: {e}")))?;
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    let entry = onecad_library::template::save(
+        &root,
+        onecad_library::template::NewTemplate {
+            id,
+            name,
+            description,
+            document,
+            preview_png: crate::api::decode_preview_png(preview_png),
+        },
+    )?;
+    Ok(template_dto(&entry))
+}
+
+/// Starts a NEW untitled document from a template (spec §8).
+///
+/// The template's container is opened like any other document and then
+/// DETACHED from its file, so the copy is untitled and dirty and the first Save
+/// prompts for a location. That detach is the whole of the template's
+/// immutability: nothing marks the file read-only, it simply is never the save
+/// target.
+#[tauri::command]
+pub async fn new_from_template(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::dto::DocumentSnapshotDto, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("newFromTemplate: no app data dir".into()))?;
+    let entry = onecad_library::template::get(&root, &id).ok_or_else(|| {
+        ApiError::InvalidCommand(format!("newFromTemplate: unknown template {id}"))
+    })?;
+
+    let mut rt =
+        crate::api::open_runtime_over_new_backend_blocking(&state, entry.document_path.clone())
+            .await?;
+    rt.detach_from_file(&entry.name);
+
+    let (snapshot, projection) = {
+        let mut guard = state.runtime.lock().await;
+        *guard = Some(rt);
+        let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch();
+        (crate::api::snapshot_of(rt), rt.projection())
+    };
+    state.commit_backend();
+    let _ = app.emit(crate::events::PROJECTION_UPDATED, &projection);
+    // NOT recorded in recents: the user has not saved anything yet, and a
+    // recents entry pointing INTO the library would reopen the template itself.
+    crate::api::schedule_initial_regen(&state).await;
+    Ok(snapshot)
 }
 
 /// The identity + metadata half of "Save as Component" (spec §7), as the
