@@ -11,6 +11,7 @@
 #include <BRepGProp.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -406,6 +407,111 @@ void test_revolve_typed_edge_axis_wins() {
     check(bodies.contains("body_typed_axis"), "revolve typed axis: typed edge won over legacy ordinal");
 }
 
+// The four-line rectangle profile every revolve case below revolves; kept out of
+// the individual tests so a case reads as "which AXIS did I hand it".
+json revolve_profile_sketch() {
+    json sk;
+    sk["sketchId"] = "sk1";
+    sk["plane"] = json{{"kind", "XY"}};
+    sk["entities"] = json::array({
+        json{{"id", "r1"}, {"type", "Line"}, {"p0", {10, 0}}, {"p1", {20, 0}}},
+        json{{"id", "r2"}, {"type", "Line"}, {"p0", {20, 0}}, {"p1", {20, 10}}},
+        json{{"id", "r3"}, {"type", "Line"}, {"p0", {20, 10}}, {"p1", {10, 10}}},
+        json{{"id", "r4"}, {"type", "Line"}, {"p0", {10, 10}}, {"p1", {10, 0}}},
+    });
+    sk["constraints"] = json::array();
+    return sk;
+}
+
+// WP1.5 test 2 — a CURVED axis edge is refused, never silently straightened into
+// the line through its endpoints. The refusal is `OP_FAILED` and NOT NeedsRepair:
+// the edge resolved perfectly well, it is simply not a valid axis, so there is
+// nothing for a repair dialog to rebind (`RevolveOp.cpp:121-124`).
+void test_revolve_typed_axis_curved_edge_refuses() {
+    const TopoDS_Shape cyl = BRepPrimAPI_MakeCylinder(5.0, 10.0).Shape();
+    const TopoDS_Shape circle = edge_by_center(cyl, 0, 0, 0);  // the base circle
+    BodyStore bodies;
+    bodies.create("body_axis", "axis_source", cyl);
+    em::ElementMapPartition part;
+    part.mint("body_axis", "el_axis", km::ElementKind::Edge, circle, cyl,
+              json{{"worldPoint", {0.0, 0.0, 0.0}}});
+
+    Ctx c;
+    c.sketches.push_back({"sk1", revolve_profile_sketch()});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    const json typed = edge_input("body_axis", "el_axis", circle, 0, 0, 0);
+    json op = {{"opType", "Revolve"}, {"opId", "curved_axis"}, {"inputs", json::array({typed})},
+               {"params", {{"sketchId", "sk1"}, {"angleDeg", 360.0}, {"booleanMode", "NewBody"},
+                           {"axis", {{"kind", "edge"}, {"bodyId", "body_axis"},
+                                     {"edgeId", "e:1"}, {"edgeRef", typed}}}}}};
+    const ops::OpOutcome out = ops::execute_revolve(ctx, op, "curved_axis");
+    check(out.status == ops::OpOutcome::Status::Failed && out.error_code == "OP_FAILED",
+          "revolve curved axis: OP_FAILED");
+    check(out.error_message == "Revolve: axis edge must be a straight line",
+          "revolve curved axis: names the reason (got '" + out.error_message + "')");
+    check(out.needs_repair.empty(),
+          "revolve curved axis: a resolvable-but-invalid edge is NOT NeedsRepair");
+    check(!bodies.contains("body_curved_axis"), "revolve curved axis: no body published");
+}
+
+// WP1.5 test 4 — two bodies, and the typed axis must stay on the one it NAMES.
+// Both ownership gates are exercised: a ref whose `primary.bodyId` disagrees with
+// the axis `bodyId` (`RevolveOp.cpp:147`), and an elementId that agrees on paper
+// but is bound to the OTHER body in the partition (`:167`). Either one binding the
+// second body's edge would be a silent cross-body axis swap.
+void test_revolve_typed_axis_two_body_ambiguity() {
+    // Two parallel straight edges, one per body — geometrically interchangeable,
+    // so only the identity gates can tell them apart.
+    const TopoDS_Shape shape_a =
+        BRepBuilderAPI_MakeEdge(gp_Pnt(-20, 0, 0), gp_Pnt(20, 0, 0)).Shape();
+    const TopoDS_Shape shape_b =
+        BRepBuilderAPI_MakeEdge(gp_Pnt(-20, 0, 5), gp_Pnt(20, 0, 5)).Shape();
+    const TopoDS_Shape edge_a = edge_by_center(shape_a, 0, 0, 0);
+    const TopoDS_Shape edge_b = edge_by_center(shape_b, 0, 0, 5);
+
+    BodyStore bodies;
+    bodies.create("body_a", "op_a", shape_a);
+    bodies.create("body_b", "op_b", shape_b);
+    em::ElementMapPartition part;
+    part.mint("body_a", "el_a", km::ElementKind::Edge, edge_a, shape_a,
+              json{{"worldPoint", {0.0, 0.0, 0.0}}});
+    part.mint("body_b", "el_b", km::ElementKind::Edge, edge_b, shape_b,
+              json{{"worldPoint", {0.0, 0.0, 5.0}}});
+
+    Ctx c;
+    c.sketches.push_back({"sk1", revolve_profile_sketch()});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+
+    // (a) the ref names body_b while the axis names body_a.
+    const json ref_b = edge_input("body_b", "el_b", edge_b, 0, 0, 5);
+    json op_cross = {{"opType", "Revolve"}, {"opId", "cross_body"}, {"inputs", json::array({ref_b})},
+                     {"params", {{"sketchId", "sk1"}, {"angleDeg", 360.0}, {"booleanMode", "NewBody"},
+                                 {"axis", {{"kind", "edge"}, {"bodyId", "body_a"},
+                                           {"edgeId", "e:1"}, {"edgeRef", ref_b}}}}}};
+    const ops::OpOutcome cross = ops::execute_revolve(ctx, op_cross, "cross_body");
+    check(cross.status == ops::OpOutcome::Status::Failed && cross.error_code == "OP_FAILED",
+          "revolve two-body: mismatched ref body → OP_FAILED");
+    check(cross.error_message == "Revolve: typed axis edge belongs to a different body",
+          "revolve two-body: names the ownership refusal (got '" + cross.error_message + "')");
+    check(!bodies.contains("body_cross_body"), "revolve two-body: nothing published on refusal");
+
+    // (b) the ref agrees with the axis on `bodyId`, but its elementId is bound to
+    // body_b in the partition — the paper trail is consistent, the binding is not.
+    json ref_forged = edge_input("body_a", "el_b", edge_b, 0, 0, 5);
+    json op_forged = {{"opType", "Revolve"}, {"opId", "forged"}, {"inputs", json::array({ref_forged})},
+                      {"params", {{"sketchId", "sk1"}, {"angleDeg", 360.0}, {"booleanMode", "NewBody"},
+                                  {"axis", {{"kind", "edge"}, {"bodyId", "body_a"},
+                                            {"edgeId", "e:1"}, {"edgeRef", ref_forged}}}}}};
+    const ops::OpOutcome forged = ops::execute_revolve(ctx, op_forged, "forged");
+    check(forged.status == ops::OpOutcome::Status::Failed && forged.error_code == "OP_FAILED",
+          "revolve two-body: foreign partition binding → OP_FAILED");
+    check(forged.error_message == "Revolve: typed axis edge binding is foreign or not an edge",
+          "revolve two-body: names the foreign binding (got '" + forged.error_message + "')");
+    check(!bodies.contains("body_forged"), "revolve two-body: nothing published on foreign binding");
+}
+
 // --- Revolve angle too small → OP_FAILED. ---
 void test_revolve_angle_too_small() {
     json sk;
@@ -445,6 +551,8 @@ int main() {
     test_fillet_ambiguous_edge_needs_repair();
     test_revolve_pappus();
     test_revolve_typed_edge_axis_wins();
+    test_revolve_typed_axis_curved_edge_refuses();
+    test_revolve_typed_axis_two_body_ambiguity();
     test_revolve_angle_too_small();
     if (g_failures == 0) std::fprintf(stderr, "wp6_ops: OK\n");
     return g_failures;

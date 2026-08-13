@@ -2882,6 +2882,53 @@ pub fn parse_resolve_refs(result: &Value) -> Vec<RefResolution> {
         .unwrap_or_default()
 }
 
+/// Validates the SCHEMA §7.5 echo before a resolution may be trusted (the
+/// `BindElementIds` discipline, applied to the dry-run lane).
+///
+/// The load-bearing check is `snapshotId`: a client caches a candidate set by
+/// `{revision, snapshotId, refId}` and promotes its TopoKeys ONLY against that
+/// snapshot. Accepting a resolution computed on some OTHER snapshot and filing it
+/// under the requested one is exactly the stale-candidate mis-bind the §7.5 rule
+/// exists to prevent, so a mismatch is a protocol error, not a warning.
+///
+/// `refId` is checked in ORDER: the response preserves request order, and a
+/// re-ordered response would silently attach one ref's evidence to another's dialog.
+pub fn validate_resolve_refs_result(req: &ResolveRequest, result: &Value) -> Result<(), String> {
+    let resolutions = result
+        .get("resolutions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ResolveRefs: missing resolutions array".to_string())?;
+    if resolutions.len() != req.refs.len() {
+        return Err(format!(
+            "ResolveRefs: expected {} resolutions, got {}",
+            req.refs.len(),
+            resolutions.len()
+        ));
+    }
+    for (index, (actual, expected)) in resolutions.iter().zip(&req.refs).enumerate() {
+        if actual.get("refId").and_then(Value::as_str) != Some(expected.ref_id.as_str()) {
+            return Err(format!(
+                "ResolveRefs: mismatched refId at resolutions[{index}]"
+            ));
+        }
+        match actual.get("snapshotId").and_then(Value::as_u64) {
+            Some(echoed) if echoed == req.snapshot_id.0 => {}
+            Some(echoed) => {
+                return Err(format!(
+                    "ResolveRefs: resolutions[{index}] echoed snapshot {echoed}, requested {}",
+                    req.snapshot_id.0
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "ResolveRefs: resolutions[{index}] carries no snapshotId echo"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reads a non-empty string field as an [`ElementId`] (empty/absent ⇒ `None`).
 fn opt_element_id(r: &Value, key: &str) -> Option<ElementId> {
     r.get(key)
@@ -2892,6 +2939,15 @@ fn opt_element_id(r: &Value, key: &str) -> Option<ElementId> {
 
 fn parse_one_resolution(r: &Value) -> Option<RefResolution> {
     let ref_id = r.get("refId").and_then(Value::as_str)?.to_string();
+    // SCHEMA §7.5 echo. Validated in `validate_resolve_refs_result` before any of
+    // this is trusted; parsed here so the caller never has to re-derive it.
+    let snapshot_id = SnapshotId(r.get("snapshotId").and_then(Value::as_u64).unwrap_or(0));
+    let revision = r.get("revision").and_then(Value::as_u64).unwrap_or(0);
+    let body_id = r
+        .get("bodyId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| parse_body_id(s).ok());
     let outcome = match r.get("outcome").and_then(Value::as_str)? {
         "autoBind" => {
             // SCHEMA §7.5 strict slot: `elementId` is the bound Rust-minted id (empty
@@ -2922,7 +2978,13 @@ fn parse_one_resolution(r: &Value) -> Option<RefResolution> {
         }
         _ => return None,
     };
-    Some(RefResolution { ref_id, outcome })
+    Some(RefResolution {
+        ref_id,
+        outcome,
+        snapshot_id,
+        revision,
+        body_id,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3617,6 +3679,99 @@ mod tests {
         let a = JobId(Uuid::from_u128(u128::from(u64::MAX - 1)));
         let b = JobId(Uuid::from_u128(u128::from(u64::MAX)));
         assert_ne!(job_id_wire(a), job_id_wire(b));
+    }
+
+    // ── SCHEMA §7.5 ResolveRefs echo ─────────────────────────────────────────
+
+    fn resolve_req(snapshot: u64, ref_ids: &[&str]) -> ResolveRequest {
+        use onecad_core::regen::ResolveRef;
+
+        ResolveRequest {
+            snapshot_id: SnapshotId(snapshot),
+            refs: ref_ids
+                .iter()
+                .map(|id| ResolveRef {
+                    ref_id: (*id).to_string(),
+                    element: ElementRef {
+                        primary: None,
+                        intent: None,
+                        anchor: None,
+                        extra: Default::default(),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_refs_echo_validates_snapshot_ref_id_and_arity() {
+        let req = resolve_req(5012, &["op_5.input0", "op_5.input1"]);
+        let good = json!({"resolutions": [
+            {"refId": "op_5.input0", "snapshotId": 5012, "revision": 44,
+             "bodyId": "body_3", "outcome": "unchanged", "elementId": "el_a"},
+            {"refId": "op_5.input1", "snapshotId": 5012, "revision": 44,
+             "outcome": "needsRepair", "needsRepair": {"refId": "op_5.input1"}},
+        ]});
+        assert!(validate_resolve_refs_result(&req, &good).is_ok());
+
+        // The load-bearing one: a resolution computed against ANOTHER snapshot must
+        // not be filed under the requested one — that is the stale-candidate bind.
+        let wrong_snapshot = json!({"resolutions": [
+            {"refId": "op_5.input0", "snapshotId": 4999, "revision": 44, "outcome": "unchanged"},
+            {"refId": "op_5.input1", "snapshotId": 5012, "revision": 44, "outcome": "unchanged"},
+        ]});
+        let err = validate_resolve_refs_result(&req, &wrong_snapshot).unwrap_err();
+        assert!(err.contains("echoed snapshot 4999"), "{err}");
+
+        // A worker that echoes nothing is refused too: silence is exactly the state
+        // this echo exists to eliminate, so it cannot be the tolerated case.
+        let no_echo = json!({"resolutions": [
+            {"refId": "op_5.input0", "outcome": "unchanged"},
+            {"refId": "op_5.input1", "outcome": "unchanged"},
+        ]});
+        assert!(validate_resolve_refs_result(&req, &no_echo)
+            .unwrap_err()
+            .contains("no snapshotId echo"));
+
+        // Order is identity here: swapped resolutions would attach one ref's
+        // evidence to the other's repair dialog.
+        let swapped = json!({"resolutions": [
+            {"refId": "op_5.input1", "snapshotId": 5012, "outcome": "unchanged"},
+            {"refId": "op_5.input0", "snapshotId": 5012, "outcome": "unchanged"},
+        ]});
+        assert!(validate_resolve_refs_result(&req, &swapped)
+            .unwrap_err()
+            .contains("mismatched refId"));
+
+        let short = json!({"resolutions": [
+            {"refId": "op_5.input0", "snapshotId": 5012, "outcome": "unchanged"},
+        ]});
+        assert!(validate_resolve_refs_result(&req, &short)
+            .unwrap_err()
+            .contains("expected 2 resolutions"));
+
+        assert!(validate_resolve_refs_result(&req, &json!({}))
+            .unwrap_err()
+            .contains("missing resolutions array"));
+    }
+
+    #[test]
+    fn parse_resolve_refs_carries_the_echo_onto_every_resolution() {
+        let result = json!({"resolutions": [
+            {"refId": "op_5.input0", "snapshotId": 5012, "revision": 44,
+             "bodyId": "body_00000000-0000-0000-0000-000000000003",
+             "outcome": "autoBind", "elementId": "el_a", "score": 0.94, "margin": 0.31,
+             "topoKey": "f:1"},
+        ]});
+        let parsed = parse_resolve_refs(&result);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].snapshot_id, SnapshotId(5012));
+        assert_eq!(parsed[0].revision, 44);
+        assert_eq!(
+            parsed[0].body_id,
+            Some(BodyId(Uuid::from_u128(3))),
+            "the echoed body is parsed back out of its wire form"
+        );
     }
 
     #[test]

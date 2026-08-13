@@ -125,6 +125,16 @@ terminal frame is left for the following `expect`. Use for `ExecutePlan`, whose
 | [`hello.ndjson`](./hello.ndjson) | handshake happy path: unsolicited `hello` with all version fields, then `OpenSession` |
 | [`echo_error.ndjson`](./echo_error.ndjson) | unknown verb → `PROTOCOL_ERROR` terminal `resp` shape |
 | [`boolean_empty_refusal.ndjson`](./boolean_empty_refusal.ndjson) | zero-solid standalone Boolean refuses without lifecycle events |
+| [`resolve_refs_snapshot_echo.ndjson`](./resolve_refs_snapshot_echo.ndjson) | §7.5 — every resolution echoes `{snapshotId, revision, refId, bodyId}`, on the `needsRepair` branch too; a stale snapshot is refused outright |
+| [`circular_pattern_lineage.ndjson`](./circular_pattern_lineage.ndjson) | §7.3 Pattern V2 — `count-1` children `body_<opId>:<k>`, source preserved with no lifecycle event |
+
+Every `*.ndjson` here is executed by BOTH lanes automatically — the C++ side globs
+this directory (`worker/tests/interop/check_interop.sh`) and the Rust parse lane
+enumerates it (`onecad-protocol` `ndjson_fixtures_parse_into_message_types`). Adding
+a file is therefore enough to put it under test; only the per-fixture `ctest` entry
+in `worker/tests/CMakeLists.txt` is still written by hand, so a fixture gets its own
+named test. (Both lanes used to carry hardcoded lists, which is how
+`boolean_empty_refusal.ndjson` ran in exactly one of them for a whole wave.)
 
 Planned (per plan M0/M1 co-sign gate): `capabilities`, `cancellation`,
 `malformed_frame`, `chunked_mesh`, `crash_restart`, `execute_plan_prefix_atomic`,

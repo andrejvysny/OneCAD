@@ -210,7 +210,7 @@
       "supportStatus": "supported",
       "inputTopLevelShapes": "closed sketch profile region + target body edge",
       "requiresExactlyOneSolid": true,
-      "emptyResultSemantics": "refuse if axis edge missing or curved",
+      "emptyResultSemantics": "refuse if the axis edge is curved or foreign to the named body",
       "multiSolidResultSemantics": "follows base Revolve mode",
       "bodyLifecycle": "follows base Revolve mode",
       "bodyIdPolicy": "follows base Revolve mode",
@@ -222,8 +222,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "additive typed axis ref persists; legacy edgeId preserved for replay",
       "userRecoveryBehavior": "missing/deleted edge produces NeedsRepair, not OP_FAILED",
-      "uiExposure": "exposed",
-      "notes": "P1B added additive typed Revolve body-edge axis companion ref."
+      "uiExposure": "hidden",
+      "notes": "P1B added the additive typed body-edge axis companion ref. It exists in core/worker but the UI authors only the sketchLine variant (src/ipc/types.ts AxisRef); exposing it is a UI decision. WP1.5 conditions exposure on the persistence/reopen/upstream-edit evidence, which now exists: worker/tests/test_wp6_ops.cpp (curved-edge and cross-body refusals) and src-tauri/tests/revolve_ops.rs (reopen + upstream edit, and consumed edge => NeedsRepair)."
     },
     {
       "operation": "Fillet",

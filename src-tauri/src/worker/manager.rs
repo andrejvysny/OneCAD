@@ -1233,7 +1233,12 @@ impl GeometryEngine for WorkerManager {
             .request("ResolveRefs", wire::resolve_refs_args(&req))
             .await
             .map_err(protocol_err)?;
-        ok_result(resp).map(|r| wire::parse_resolve_refs(&r))
+        let result = ok_result(resp)?;
+        // Fail closed on the §7.5 echo before a single resolution reaches a repair
+        // dialog — the same discipline `BindElementIds` already applies.
+        wire::validate_resolve_refs_result(&req, &result)
+            .map_err(|message| EngineError::Protocol { message })?;
+        Ok(wire::parse_resolve_refs(&result))
     }
 
     async fn cancel(&self, job_id: JobId) -> Result<(), EngineError> {

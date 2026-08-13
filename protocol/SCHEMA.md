@@ -1909,6 +1909,18 @@ the `bodyId` used to enumerate candidates when one exists. A client MUST cache a
 candidate set by `{revision, snapshotId, refId}` and MUST promote its TopoKeys only
 against that echoed snapshot; a mismatch requires a fresh resolve, never ordinal reuse.
 
+The echo is per-RESOLUTION and mandatory on every branch, `needsRepair` included — a
+failed resolution still has to say which head it failed against. `snapshotId` is the
+snapshot the ladder actually ran on (the request's when it names one, else the head)
+and `revision` is the document revision that head last accepted; `bodyId` is present
+only when a body was there to enumerate. **Rust MUST validate the echo before a
+resolution is used**: request order preserved, one resolution per requested ref, and
+`snapshotId` equal to the requested snapshot — a resolution computed against another
+snapshot, filed under the requested one, is precisely the stale-candidate mis-bind
+this rule exists to prevent. `documentRevision` remains a Rust-owned advisory stamp
+(D4), so the echoed `revision` is evidence about the engine's head, not a value the
+client keys its own candidate cache by.
+
 ### 7.6 Geometry
 
 #### PreviewOp
@@ -2669,6 +2681,32 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — §7.3 Pattern V2 lineage gains a cross-track fixture** (roadmap A6).
+  No contract change: `circular_pattern_lineage.ndjson` pins the already-normative V2
+  rules on the wire — `count-1` children named `body_<opId>:<k>`, the source preserved
+  as instance zero with no lifecycle event of its own, and the `perStepResults`
+  body-id set. The per-instance step angle (`angleDeg / count`) is geometry and is
+  NOT asserted here; it stays pinned in `test_m6a_ops.cpp` and the frontend
+  `patternPreview` unit test, because an NDJSON exchange carries nothing to measure
+  it with. **No wire change; fixture ADDITION only.**
+
+- **2026-08-13 — §7.5 `ResolveRefs` resolutions carry the snapshot echo they always
+  specified** (roadmap A6, Rust + worker sign-off). The §7.5 text has required
+  `{snapshotId, revision, refId, bodyId}` on every resolution since it was written,
+  and neither the C++ worker nor the Rust stub emitted any of the three: Rust
+  manufactured all of them app-side from its own state and validated nothing, so a
+  resolution computed on an older snapshot was cached under a freshly minted key —
+  the silent wrong bind the rule forbids. The worker now echoes them on every branch
+  (`unchanged`, `autoBind`, `needsRepair`; `bodyId` only when a body was enumerated),
+  the stub matches, and `wire::validate_resolve_refs_result` refuses a mismatched
+  snapshot, a re-ordered `refId`, a wrong arity, or a missing echo. *Reason:* the
+  contract was normative and unenforced; the fields are additive, so the frame shape
+  and every existing top-level code are unchanged. **Fixture bump — 2 files:**
+  `resolve_refs_snapshot_echo.ndjson` (new — both branches plus a stale-snapshot
+  refusal) and `bind_element_ids.ndjson` (its `ResolveRefs` expectation now asserts
+  the echo). Verified non-vacuous: dropping the `revision` echo in the worker reds
+  `canonical_resolve_refs_snapshot_echo`.
 
 - **2026-08-13 — §7.3 stable diagnostic codes for the Draft and zero-solid Boolean
   refusals.** Both previously returned a bare `OP_FAILED` with the reason only in

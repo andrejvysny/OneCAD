@@ -234,6 +234,8 @@ json query_by_topokey(const PublishedStateSnapshot& state, const json& args) {
 
 json missing_body_resolution(const json& ref, const std::string& ref_id,
                              const std::string& element_id, const std::string& body_id) {
+    // No `bodyId` echo here: SCHEMA §7.5 echoes the body candidates were enumerated
+    // FROM, and this branch exists precisely because there was none.
     return json{{"refId", ref_id},
                 {"outcome", "needsRepair"},
                 {"needsRepair",
@@ -264,6 +266,7 @@ json ladder_resolution(const PublishedStateSnapshot& state, const json& ref,
         result ? result->margin : 0.0, result ? result->bound_topo_key.c_str() : "");
     if (results.empty() || results[0].outcome != em::LadderOutcome::AutoBind) {
         return json{{"refId", ref_id},
+                    {"bodyId", body_id},
                     {"outcome", "needsRepair"},
                     {"needsRepair", results.empty() ? json::object()
                                                      : results[0].to_needs_repair_json()}};
@@ -271,6 +274,7 @@ json ladder_resolution(const PublishedStateSnapshot& state, const json& ref,
     const em::PartitionEntry* held =
         entry_by_topokey(state.partition, body_id, results[0].bound_topo_key);
     return json{{"refId", ref_id},
+                {"bodyId", body_id},
                 {"outcome", "autoBind"},
                 {"elementId", held ? held->element_id : ""},
                 {"topoKey", results[0].bound_topo_key},
@@ -291,6 +295,7 @@ json resolve_one(const PublishedStateSnapshot& state, const json& ref) {
                 "outcome=unchanged topoKey=%s",
                 ref_id.c_str(), element_id.c_str(), entry->topo_key.c_str());
             return json{{"refId", ref_id},
+                        {"bodyId", entry->body_id},
                         {"outcome", "unchanged"},
                         {"elementId", element_id},
                         {"topoKey", entry->topo_key}};
@@ -381,8 +386,20 @@ Envelope handle_resolve_refs(Session& session, const Envelope& req) {
     if (published.error) return std::move(*published.error);
     json resolutions = json::array();
     const json refs = req.args.value("refs", json::array());
+    // SCHEMA §7.5: every resolution carries the exact snapshot it was computed
+    // against and the document revision of that head. The client caches candidates
+    // by {revision, snapshotId, refId} and may promote TopoKeys ONLY against the
+    // echoed snapshot — so the echo has to come from the state the ladder actually
+    // ran on, never from what the CALLER believed the head was.
+    const std::uint64_t snapshot_id = published.state->snapshot_id;
+    const std::uint64_t revision = session.head_stamp().document_revision;
     if (refs.is_array()) {
-        for (const json& ref : refs) resolutions.push_back(resolve_one(*published.state, ref));
+        for (const json& ref : refs) {
+            json resolution = resolve_one(*published.state, ref);
+            resolution["snapshotId"] = snapshot_id;
+            resolution["revision"] = revision;
+            resolutions.push_back(std::move(resolution));
+        }
     }
     return Envelope::ok_response(req.id, json{{"resolutions", std::move(resolutions)}});
 }

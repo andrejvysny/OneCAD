@@ -641,16 +641,24 @@ mod tests {
     #[test]
     fn ndjson_fixtures_parse_into_message_types() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../protocol/fixtures");
-        for name in [
-            "hello.ndjson",
-            "echo_error.ndjson",
-            // SCHEMA §7.2 `checkpointFallbackReplay` (VF-M5). The pair differs by
-            // that field alone and expects the same result, so parsing both here
-            // is what makes "Rust reads what the worker executes" checkable.
-            "execute_plan_ordinary.ndjson",
-            "execute_plan_checkpoint_fallback.ndjson",
-            "bind_element_ids.ndjson",
-        ] {
+        // ENUMERATED, not listed. A hardcoded list is how a fixture escapes this
+        // lane unnoticed — `boolean_empty_refusal.ndjson` shipped and was parsed by
+        // nothing on the Rust side for a whole wave. Every canonical fixture is the
+        // executable form of SCHEMA.md, so every canonical fixture parses here.
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read dir {dir}: {e}"))
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                name.ends_with(".ndjson").then_some(name)
+            })
+            .collect();
+        names.sort();
+        assert!(
+            names.len() >= 6,
+            "expected the canonical fixture set, found {names:?} — a scan that finds \
+             nothing would make every assertion below vacuously true"
+        );
+        for name in &names {
             let path = format!("{dir}/{name}");
             let text =
                 std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

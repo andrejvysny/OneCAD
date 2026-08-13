@@ -1,4 +1,73 @@
-## ROADMAP A3 — STABLE DIAGNOSTIC CODES FOR THE P0 REFUSALS (2026-08-13) — GATE PASSED, UNCOMMITTED
+# Current State
+
+Last verified: 2026-08-13 14:25
+
+- **Branch:** `master`, **11 commits ahead of `origin/master` — nothing pushed.**
+- **This session's commits:** `772b3d2` (A1) · `6b08e27` (A2) · `4b62965` (A3) · Track A remainder
+  (A4/A5/A6) — see below.
+- **Build/test, all run at the A4/A5/A6 gate:** `ctest --test-dir worker/build` → **119/119** ·
+  `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` → clean ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → **1082 / 0** ·
+  `bunx tsc --noEmit` → clean · `bun run test` → **249 files / 4173 tests** ·
+  `bun run build` → clean · both modeling verifiers → pass · hex gate → 0 ·
+  targeted Playwright (preview lanes, both browsers, retries 0) → **20/20**.
+  Full Playwright suite still not re-run (plan item C6); kernelbench not implicated.
+- **Key decisions:** the Revolve body-edge axis stays **UI-hidden** (kernel/core keep it, the
+  contract row says so, and tests pin both that the UI never authors it and that a record holding
+  one survives a re-edit) · the SCHEMA §7.5 `ResolveRefs` snapshot echo was **implemented** rather
+  than written around, with Rust validating it fail-closed · `documentRevision` stays Rust-owned in
+  the repair DTO (D4), so only the SNAPSHOT is the engine's echo.
+- **Two live defects fixed by the mandated tests** (not evidence debt): preview failure was tracked
+  globally, so a recovered secondary region still blocked every commit; and `ResolveRefs` results
+  were cached under a key Rust minted itself.
+- **Blockers / open:**
+  - Full Playwright suite still not green-verified since the P4 landings (plan item C6).
+  - A second session, `onecad-library-content-impl`, shares this working tree.
+
+The per-gate detail for every wave, newest first, follows.
+
+## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
+
+Track A is complete. Full per-item detail is in `TODO.md` § ROADMAP A4 · A5 · A6; the parts worth
+carrying:
+
+**A4 — the Revolve body-edge axis is recorded as UI-hidden, and now provable.** The contract row
+said `uiExposure:"exposed"` while no code path could author one. The product call is HIDDEN: kernel
+and core keep the capability, the UI keeps authoring only `sketchLine`. All four WP1.5 tests landed
+— curved-edge and cross-body refusals in `test_wp6_ops.cpp`, promote→revolve→upstream-edit→reopen
+and a fillet-CONSUMED axis edge ⇒ NeedsRepair in `revolve_ops.rs`. Removing the partition-ownership
+gate makes the revolve silently swap to the other body's edge; that is what the test now catches.
+Measured aside: a +20% upstream growth of the axis edge rebinds, +100% is NeedsRepair, and a FILLET
+ref answers identically — the shared ladder's descriptor-magnitude policy, not an axis quirk.
+
+**A5 — WP0.7 was a live defect, not missing evidence.** Candidate ownership was per-session but
+`previewFailure` was one field: a secondary region's refusal outlived its own recovery and blocked
+every commit behind a stale error hint. Failure now lives on `ToolPreviewSession`; the lane's
+failure is the union. The mandated test (both delivery orders, secondary fail-and-RECOVER) was red
+before the fix. WP0.8 gained its two untested re-arm paths (rejected commit, resolved regen failure)
+and the "permits a successful second Apply" clause, committing the re-armed session rather than the
+consumed one.
+
+**A6 — one fixture needed the contract to become true first.** SCHEMA §7.5 has always required every
+`ResolveRefs` resolution to echo `{snapshotId, revision, refId, bodyId}`; neither worker emitted any
+of it, Rust manufactured all three app-side and validated nothing, so a resolution computed on an
+older snapshot was cached under a freshly minted key — the silent wrong bind the rule exists to
+prevent. Worker + stub now echo it, `wire::validate_resolve_refs_result` fails closed, and the DTO
+keeps Rust's own `revision` by decision D4 (the repair store keys on it) while taking the SNAPSHOT
+from the echo. Two new canonical fixtures, and fixture discovery is now enumerated in both lanes —
+the hardcoded lists were why `boolean_empty_refusal.ndjson` ran in only one of them.
+
+- **Changed:** `worker/src/session/ElementIdentity.cpp` · `worker/tests/{test_wp6_ops.cpp,CMakeLists.txt,interop/check_interop.sh}` ·
+  `protocol/{SCHEMA.md,fixtures/README.md,fixtures/bind_element_ids.ndjson}` + two new fixtures ·
+  `src-tauri/crates/onecad-core/src/regen/engine.rs` · `src-tauri/crates/onecad-protocol/src/messages.rs` ·
+  `src-tauri/crates/onecad-worker-stub/src/main.rs` · `src-tauri/src/{api/mod.rs,dto.rs,worker/wire.rs,worker/manager.rs}` ·
+  `src-tauri/tests/revolve_ops.rs` · `src/tools/modelTools/ModelToolController.ts` + three test files ·
+  `docs/qa/modeling-operation-contracts.json`.
+- **Gates:** ctest **119/119** · fmt · clippy · real-worker workspace **1082 / 0** · tsc · build ·
+  vitest **249 files / 4173 tests** · both verifiers · hex 0 · targeted Playwright 20/20.
+- **Next:** C1 — make the coverage manifest true, then give `verify-modeling-coverage.mjs` teeth.
+
+## ROADMAP A3 — STABLE DIAGNOSTIC CODES FOR THE P0 REFUSALS (2026-08-13) — COMMITTED `4b62965`
 
 Phase 0 shipped two new refusals — zero-solid Boolean and Draft — that returned a
 bare `OP_FAILED` with the reason only in the message, forcing message-text routing

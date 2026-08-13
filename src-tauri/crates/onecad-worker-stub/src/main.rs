@@ -968,20 +968,45 @@ fn handle_resolve_refs<W: Write>(
     req: &ReqFrame,
 ) -> Result<(), ProtocolError> {
     let mut resolutions = Vec::new();
+    // SCHEMA §7.5 echo: the snapshot the resolution was computed against (the request's
+    // when it names one, else the head) and the revision of that head. Rust validates
+    // this echo fail-closed, so the stub has to speak it too or the whole stub lane
+    // would fail for a reason that has nothing to do with what a test is asserting.
+    let echoed_snapshot = req
+        .args
+        .get("snapshotId")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| state.stamp().snapshot_id);
+    let echoed_revision = state.stamp().document_revision;
     if let Some(refs) = req.args.get("refs").and_then(Value::as_array) {
         for r in refs {
             let ref_id = r.get("refId").and_then(Value::as_str).unwrap_or("");
+            let body_id = r
+                .get("primary")
+                .and_then(|p| p.get("bodyId"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let existing = r
                 .get("primary")
                 .and_then(|p| p.get("elementId"))
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            resolutions.push(match existing {
-                Some(eid) => json!({ "refId": ref_id, "outcome": "unchanged", "elementId": eid, "topoKey": "f:0" }),
+            let mut resolution = match existing {
+                Some(eid) => {
+                    json!({ "refId": ref_id, "outcome": "unchanged", "elementId": eid, "topoKey": "f:0" })
+                }
                 // SCHEMA §7.5: `elementId` slot (empty — the stub holds no partition,
                 // so an autoBind resolves an unminted element); `topoKey` = evidence.
-                None => json!({ "refId": ref_id, "outcome": "autoBind", "elementId": "", "topoKey": "f:0", "score": 0.95, "margin": 0.5 }),
-            });
+                None => {
+                    json!({ "refId": ref_id, "outcome": "autoBind", "elementId": "", "topoKey": "f:0", "score": 0.95, "margin": 0.5 })
+                }
+            };
+            resolution["snapshotId"] = json!(echoed_snapshot);
+            resolution["revision"] = json!(echoed_revision);
+            if !body_id.is_empty() {
+                resolution["bodyId"] = json!(body_id);
+            }
+            resolutions.push(resolution);
         }
     }
     let stamp = state.stamp();

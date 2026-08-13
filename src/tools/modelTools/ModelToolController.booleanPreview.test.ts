@@ -82,6 +82,11 @@ function makeClientMock(capturePreview?: (cb: (result: PreviewResult) => void) =
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
+/** Drive the boolean op segment through the chip handler the controller registered. */
+function controllerBooleanOp(op: "Union" | "Cut" | "Intersect"): void {
+  toolChipStore.getState().onOp?.(op);
+}
+
 const TWO_BODIES = {
   body1: { id: "body1", name: "Body 1", visible: true },
   body2: { id: "body2", name: "Body 2", visible: true },
@@ -267,6 +272,97 @@ describe("ModelToolController boolean kernel preview", () => {
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
     expect(hint?.message).toContain("self-intersecting geometry");
+  });
+
+  // ── WP0.8: the other two re-arm paths, and the second Apply ────────────────
+  //
+  // `commitBoolean` can fail three ways: the exact-preview BARRIER refuses (pinned
+  // above), `endPreview(true)` REJECTS, or it RESOLVES with a regen that failed.
+  // All three must return actionable controls — the chip is cleared before the
+  // commit, so a re-arm that does not rebuild it leaves the user with a body pair
+  // selected, no Apply, and no Cancel. Only the first path had a test.
+
+  /** Apply, then let the exact-preview barrier lapse so the commit reaches endPreview. */
+  async function applyAndSettle(): Promise<void> {
+    toolChipStore.getState().onApply?.();
+    for (let i = 0; i < 6; i++) await flush();
+  }
+
+  it("a REJECTED commit re-arms with the controls and values intact", async () => {
+    build();
+    await armBoolean();
+    controllerBooleanOp("Cut");
+    // Only the commit's endPreview(true) rejects; the teardown/re-arm calls that
+    // follow must still resolve, or the re-arm would fail for the wrong reason.
+    clientMock.endPreview.mockRejectedValueOnce(new Error("worker gone"));
+
+    await applyAndSettle();
+
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(toolStore.getState().modelTool).toBe("boolean");
+    expect(toolChipStore.getState().kind).toBe("booleanOp");
+    expect(toolChipStore.getState().op).toBe("Cut"); // the authored value survived
+    expect(toolChipStore.getState().onApply).toBeTypeOf("function");
+    expect(toolChipStore.getState().onCancel).toBeTypeOf("function");
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.severity).toBe("error");
+    expect(hint?.message).toContain("worker gone");
+    // A rejected commit never applied anything, so there is nothing to roll back.
+    expect(clientMock.undo).not.toHaveBeenCalled();
+  });
+
+  it("a RESOLVED regen failure rolls the record back exactly once and re-arms", async () => {
+    build();
+    await armBoolean();
+    // Applied, then the regen failed: the record exists and must be popped, or a
+    // retried Apply stacks a duplicate (the defect extrude's rollback closes).
+    clientMock.endPreview.mockResolvedValueOnce({
+      ...okResult(),
+      errorMessage: "regen failed after apply",
+    });
+
+    await applyAndSettle();
+
+    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(toolChipStore.getState().kind).toBe("booleanOp");
+    expect(viewportStore.getState().statusHint?.message).toContain("regen failed after apply");
+  });
+
+  it("a terminal-only failure (no errorMessage) is a failure too", async () => {
+    build();
+    await armBoolean();
+    // `classifyRegen` reads the terminal when no message is present — a result with
+    // bodies but `terminal:"failed"` used to be counted as success by body count.
+    clientMock.endPreview.mockResolvedValueOnce({ ...okResult(), terminal: "failed" });
+
+    await applyAndSettle();
+
+    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(toolChipStore.getState().kind).toBe("booleanOp");
+  });
+
+  it("permits a successful SECOND Apply on the freshly re-armed session", async () => {
+    build();
+    await armBoolean();
+    clientMock.endPreview.mockRejectedValueOnce(new Error("worker gone"));
+    await applyAndSettle();
+
+    // The re-arm opened pv-2; the retry must commit THAT session, not the consumed
+    // one, and must not stack a second record.
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    await applyAndSettle();
+
+    // Two commit attempts, each against its OWN session: the rejected one consumed
+    // pv-1, the retry commits the session the re-arm opened. Retrying pv-1 would be
+    // committing a lane the worker already tore down.
+    const committed = (clientMock.endPreview.mock.calls as unknown[][])
+      .filter((c) => c[1] === true)
+      .map((c) => c[0]);
+    expect(committed).toEqual(["pv-1", "pv-2"]);
+    expect(toolStore.getState().modelTool).toBe("select"); // committed, tool released
+    expect(toolChipStore.getState().kind).not.toBe("booleanOp"); // one chip, then gone
   });
 
   it("Esc/tool switch tears the open session down with endPreview(false) and restores hidden bodies", async () => {

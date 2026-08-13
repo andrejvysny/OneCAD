@@ -817,6 +817,22 @@ pub enum ResolveOutcome {
 pub struct RefResolution {
     pub ref_id: String,
     pub outcome: ResolveOutcome,
+    /// SCHEMA §7.5 echo — the snapshot the ladder ACTUALLY ran against. A client
+    /// caches a candidate set by `{revision, snapshotId, refId}` and may promote its
+    /// TopoKeys only against this snapshot, so it has to come from the resolving side
+    /// rather than from what the caller believed the head was: a resolution computed
+    /// on an older snapshot, cached under a freshly minted key, is a silent wrong
+    /// bind waiting to happen. Validated against the request before it gets here.
+    pub snapshot_id: SnapshotId,
+    /// The document revision of the resolving head as the engine echoed it (evidence).
+    /// `documentRevision` is a Rust-owned advisory stamp (decision D4), so this is
+    /// **not** the value a repair candidate is keyed by — it records what the engine
+    /// last accepted, which is how a lagging engine becomes visible at all.
+    pub revision: u64,
+    /// The body whose candidates the ladder enumerated, when one existed. Absent when
+    /// the referenced body is gone — the branch that exists precisely because there
+    /// was nothing to enumerate.
+    pub body_id: Option<BodyId>,
 }
 
 /// `RestoreCheckpoint` request (SCHEMA §7.7).

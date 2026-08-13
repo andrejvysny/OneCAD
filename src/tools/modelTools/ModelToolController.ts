@@ -502,6 +502,13 @@ interface ToolPreviewSession {
   previewBodyIds: string[];
   /** Committed bodies hidden by this session's exact candidate. */
   replacedBodyIds: string[];
+  /**
+   * This session's newest kernel refusal, cleared the moment it answers with a
+   * candidate again (WP0.7: failure is tracked per session/epoch, never globally).
+   * A shared field made one region's refusal outlive its own recovery and wedge the
+   * commit for every other region.
+   */
+  failure: PreviewFailure | null;
 }
 
 /** Which tool owns the currently open preview sessions (drives hints + params). */
@@ -1350,6 +1357,7 @@ export class ModelToolController {
         lastAppliedEpoch: 0,
         previewBodyIds: [],
         replacedBodyIds: [],
+        failure: null,
       });
     }
     this.previewSessions = sessions;
@@ -2493,6 +2501,7 @@ export class ModelToolController {
         lastAppliedEpoch: 0,
         previewBodyIds: [],
         replacedBodyIds: [],
+        failure: null,
       });
     }
     this.previewSessions = sessions;
@@ -2800,7 +2809,8 @@ export class ModelToolController {
     const failed = this.previewSessions[k];
     const remaining = this.previewSessions.slice(k + 1);
     if (!failed) {
-      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 }));
+      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null }));
+      this.recomputePreviewFailure();
       this.throttle.reset();
       this.sendPreview();
       return;
@@ -2812,7 +2822,7 @@ export class ModelToolController {
     } catch {
       // The lane could not be re-opened: the L1 lathe + the armed FSM still carry the
       // user's parameters, and a re-confirm falls back to `applyOperation`.
-      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 }));
+      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null }));
       this.previewOwner = this.previewSessions.length > 0 ? this.previewOwner : null;
       this.previewParamsFn = this.previewSessions.length > 0 ? this.previewParamsFn : null;
       return;
@@ -2825,9 +2835,10 @@ export class ModelToolController {
     // epochs from a lower value, and a survivor holding a LARGE epoch would stale-drop
     // every new result and freeze its preview (extrude finding 9).
     this.previewSessions = [
-      { ...failed, session: freshSession, lastAppliedEpoch: 0 },
-      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
+      { ...failed, session: freshSession, lastAppliedEpoch: 0, failure: null },
+      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null })),
     ];
+    this.recomputePreviewFailure();
     this.throttle.reset();
     this.throttle.setTrailingMs(REVOLVE_PREVIEW_TRAILING_MS);
     this.sendPreview();
@@ -3228,7 +3239,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "edgeOp";
     this.previewParamsFn = () => this.edgeOpPreviewParams();
     this.previewPending = false;
@@ -3391,7 +3402,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "shell";
     this.previewParamsFn = () => this.shellPreviewParams();
     this.previewPending = false;
@@ -3927,7 +3938,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "offsetFace";
     this.previewParamsFn = () => this.offsetFacePreviewParams();
     this.previewPending = false;
@@ -4400,7 +4411,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "hole";
     this.previewParamsFn = () => this.holePreviewParams();
     this.previewPending = false;
@@ -6406,21 +6417,13 @@ export class ModelToolController {
       es.lastAppliedEpoch = r.epoch;
       if (r.error) {
         this.clearPreviewCandidate(es);
-        this.onPreviewFailure(r.error);
+        this.onPreviewFailure(es, r.error);
       } else if (r.bodies || r.mesh) {
-        this.previewFailure = null;
+        this.clearSessionFailure(es);
         this.stalePreviewRetryAttempted = false;
         this.applyPreviewBodies(es, r);
         this.lastL2Epoch = r.epoch;
-        // Restore the OWNER's arm hint (a session exists ⇒ the owner is set). A
-        // recovered candidate MUST take the line back: otherwise the previous
-        // "… preview failed" stays on screen contradicting a preview that now
-        // works, and the user has no signal that ✓ is unblocked again.
-        if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
-          viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
-        } else if (this.previewArmHint) {
-          viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
-        }
+        this.restoreArmHint();
       }
       const send = this.throttle.tick(now);
       if (send) {
@@ -6434,9 +6437,15 @@ export class ModelToolController {
       // is the only staleness guard (they follow the primary's epochs).
       if (r.error) {
         this.clearPreviewCandidate(es);
-        this.onPreviewFailure(r.error);
+        this.onPreviewFailure(es, r.error);
+      } else if (r.bodies || r.mesh) {
+        // A recovered SECONDARY must drop its own failure exactly like the primary
+        // does. It used not to, so one region's transient refusal outlived itself
+        // and blocked every commit for the rest of the gesture (WP0.7).
+        this.clearSessionFailure(es);
+        this.applyPreviewBodies(es, r);
+        this.restoreArmHint();
       }
-      else if (r.bodies || r.mesh) this.applyPreviewBodies(es, r);
       es.lastAppliedEpoch = r.epoch;
     }
   }
@@ -6514,8 +6523,41 @@ export class ModelToolController {
     return this.previewOwner ?? "extrude";
   }
 
-  private onPreviewFailure(error: PreviewFailure): void {
+  /**
+   * Restore the OWNER's arm hint (a session exists ⇒ the owner is set). A recovered
+   * candidate MUST take the line back: otherwise the previous "… preview failed"
+   * stays on screen contradicting a preview that now works, and the user has no
+   * signal that ✓ is unblocked again. Called from BOTH result branches — a
+   * secondary's recovery is just as visible to the user as the primary's.
+   */
+  private restoreArmHint(): void {
+    if (this.previewFailure) return; // another session is still failing — its hint stands
+    if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
+      viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
+    } else if (this.previewArmHint) {
+      viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
+    }
+  }
+
+  /**
+   * `previewFailure` is the LANE's failure: the newest refusal among the sessions
+   * that still have one. Every commit gate reads it, so it must go quiet as soon as
+   * the last failing session recovers, and stay set while any other still refuses.
+   */
+  private recomputePreviewFailure(): void {
+    this.previewFailure = this.previewSessions.find((s) => s.failure)?.failure ?? null;
+  }
+
+  /** Drop `es`'s refusal after it answered with a candidate again. */
+  private clearSessionFailure(es: ToolPreviewSession): void {
+    if (!es.failure) return;
+    es.failure = null;
+    this.recomputePreviewFailure();
+  }
+
+  private onPreviewFailure(es: ToolPreviewSession, error: PreviewFailure): void {
     traceWarn(this.previewOwnerTag(), `preview failure (kind=${error.kind}): ${error.message}`);
+    es.failure = error;
     this.previewFailure = error;
     this.clearPreviewPending();
     // The exact candidate is gone; bring the L1 ghost back so the user is not left
@@ -6818,9 +6860,10 @@ export class ModelToolController {
     // epochs from a lower value; a surviving session that kept a LARGE lastAppliedEpoch
     // would stale-drop every new (lower) L2 epoch, freezing its preview. Zero them all.
     this.previewSessions = [
-      { ...failed, session: freshSession, lastAppliedEpoch: 0 },
-      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
+      { ...failed, session: freshSession, lastAppliedEpoch: 0, failure: null },
+      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null })),
     ];
+    this.recomputePreviewFailure();
 
     // Every session on this path is an Extrude arm, so each carries its profile;
     // the filter is the type-level restatement of that, not a new tolerance.
@@ -7368,7 +7411,7 @@ export class ModelToolController {
   /** Wire a freshly opened Boolean session into the shared preview lane and send
    *  the first exact request. Shared by the initial arm and a post-failure re-arm. */
   private openBooleanPreviewSession(session: PreviewSession, draft: PreviewDraft): void {
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "boolean";
     this.previewParamsFn = () => this.booleanPreviewParams();
     this.previewFailure = null;

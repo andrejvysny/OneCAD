@@ -1,0 +1,35 @@
+# CANONICAL §7.3 fixture — CircularPattern V2 body LINEAGE.
+#
+# `resultPolicyVersion: 2` is normative for Pattern: the SOURCE is instance zero and
+# emits NO lifecycle event, and a non-fused pattern creates exactly `count-1`
+# children named `body_<opId>:<k>`, where child k is transformed instance k+1. That
+# naming is identity — a repair, a re-edit or a count reduction addresses children by
+# it — so it belongs in the cross-track contract, not only in a C++ unit test.
+#
+# 20x20 rect extruded 25 (body_op1), then patterned 180 degrees in 3 instances about
+# a Z-axis 100mm away, so the copies are far apart and no boolean can be implied.
+#
+# What this fixture deliberately does NOT pin: the per-instance step angle. The
+# `angleDeg / count` rule (SCHEMA 7.3 — divides by count, NOT count-1) is a
+# GEOMETRIC fact, and an NDJSON exchange carries no geometry to measure it with.
+# It stays pinned where it is measurable: worker/tests/test_m6a_ops.cpp
+# (test_circular_pattern_partial_sweep, successive polar deltas of exactly 60 deg)
+# and src/tools/preview/patternPreview.test.ts on the frontend side. Asserting it
+# here by proxy would be a test that cannot fail.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_circular_lineage","documentRevision":0,"workerEpoch":1,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":11,"documentRevision":1,"workerEpoch":1,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222","3333333333333333333333333333333333333333333333333333333333333333"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"e2","type":"Line","p0":[20,0],"p1":[20,20]},{"id":"e3","type":"Line","p0":[20,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":25.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"CircularPattern","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"body_op1","kind":"body"}}],"params":{"sourceBodyId":"body_op1","axisOrigin":[-100,0,0],"axisDirection":[0,0,1],"angleDeg":180.0,"count":3,"fuseResult":false,"resultPolicyVersion":2}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":11,"payload":{"stepIndex":0,"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":11,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}],"signatures":{"geometry":"$hex64"}}}}
+# count-1 children, ordinal-named, and NO event for the untouched source.
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":11,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op2:0"},{"kind":"created","bodyId":"body_op2:1"}],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":11,"result":{"planPrepared":true,"preparedSnapshotId":1,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]},{"stepIndex":2,"status":"ok","bodyIds":["body_op2:0","body_op2:1"]}],"historyPrefixHash":"3333333333333333333333333333333333333333333333333333333333333333"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":11,"documentRevision":1,"workerEpoch":1}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":11,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# The source survives the pattern untouched — it is instance zero, not an input the
+# op consumed. A published head that lost it would be a silent data loss.
+{"send":{"v":1,"t":"req","id":4,"verb":"QueryElement","args":{"snapshotId":1,"bodyId":"body_op1","topoKey":"f:1"}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"present":true,"bodyId":"body_op1","topoKey":"f:1","kind":"face"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"goodbye":true}}}

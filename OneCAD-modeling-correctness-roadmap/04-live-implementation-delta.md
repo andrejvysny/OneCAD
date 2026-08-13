@@ -29,8 +29,21 @@ OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
   curved pairs. The blend now comes from the fillet builder's history rather than
   from surface type, which is what makes a curved support stop being a special
   case. Detail in `TODO.md` § M4.
-- **Still owed from P2:** the manual Tauri smoke. Unchanged.
-- **Next in roadmap order:** Phase 5 WP5.3, the Boolean foundation campaign.
+- **TRACK A of the completion plan is complete** (2026-08-13, `772b3d2` · `6b08e27` · `4b62965`
+  plus the A4/A5/A6 gate). Track A is the unbilled remainder of Phases 0–4: the shared
+  operation-result classifier (WP0.3, risk R-04), the Draft applied-or-refused evidence and its
+  mandated red probe (WP0.6, R-10 closed as not-present), stable diagnostic codes for the two new P0
+  refusals, the Revolve body-edge-axis contract (WP1.5 — recorded UI-HIDDEN with all four tests),
+  the WP0.7/WP0.8 tests, and the two missing cross-track fixtures.
+- **Three of those items were live defects rather than missing evidence**, which is the point of
+  running the mandated tests: `needsRepair` was declared and never produced; exact-preview failure
+  was tracked globally, so a recovered secondary region still blocked every commit; and the SCHEMA
+  §7.5 `ResolveRefs` snapshot echo was normative but implemented by neither worker, with Rust
+  manufacturing the values it then cached candidates under.
+- **Still owed from P2:** the manual Tauri smoke. Unchanged (plan Track D replaces it with an
+  automated Tauri lane).
+- **Next in roadmap order:** plan item C1 — make the P4 coverage manifest true and give
+  `verify-modeling-coverage.mjs` teeth — then C2, before Phase 5 WP5.3's Boolean campaign.
 
 The sections below are the 2026-08-11 review, kept for its evidence trail.
 

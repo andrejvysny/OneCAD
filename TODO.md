@@ -1,5 +1,128 @@
 # OneCAD-Tauri Migration TODO
 
+## NOW — roadmap completion program (plan `~/.claude/plans/now-lets-plan-next-sunny-lighthouse.md`)
+
+Approved 2026-08-13. Seven tracks A–G; **TRACK A IS COMPLETE — A1–A6 done and committed**.
+Sequence and full rationale live in the plan file; the short version is below. Track A was the
+unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
+
+- [x] **A4 — Revolve body-edge axis. PRODUCT CALL TAKEN: the variant stays UI-HIDDEN.** Kernel and
+      core implement it; the UI authors only `sketchLine`, and that is now what the contract row
+      says (`uiExposure: "hidden"`, was a false `"exposed"`). This is also what WP1.5 asked for —
+      "do not expose it until persistence, reopen and upstream-edit tests pass". All four required
+      tests landed; detail in § ROADMAP A4 below.
+- [x] A5 — the WP0.7 / WP0.8 tests. WP0.7 was **not** tests-only: preview failure was tracked
+      GLOBALLY, so a secondary region's refusal outlived its own recovery and wedged every commit.
+      Fixed per-session, red-first. Detail in § ROADMAP A5.
+- [x] A6 — the two missing cross-track fixtures. The `ResolveRefs` one could not be written
+      honestly: SCHEMA §7.5's snapshot echo was normative and implemented by NEITHER worker, with
+      Rust manufacturing the values and validating nothing. Implemented and validated fail-closed.
+      Detail in § ROADMAP A6.
+- [ ] C1 — make the coverage manifest true (16 dead paths, a `ciJob` that does not exist, five
+      unsafe overclaims), then give `verify-modeling-coverage.mjs` teeth: stat every path, resolve
+      `ciJob`, and add WP4.5's five registry cross-checks.
+- [ ] C2 — make the corpus executable (1 of 9 runs today; the interpreter knows only Sketch + Extrude).
+- [ ] B1–B5, C3–C6, D, E (Phase 5 remainder), F (Phase 6), G (write the accepted residuals down).
+
+Detail per completed wave is recorded below, newest first.
+
+## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
+
+One gate, three items, and **two of them turned out not to be evidence debt at all**: the mandated
+tests found live defects in shipped code, which is the whole reason the roadmap asks for them.
+
+### A4 — Revolve body-edge axis: hidden, and now provable either way
+
+The typed `AxisRef::Element` variant is complete in the worker (`RevolveOp.cpp:129-201`) and core,
+and the UI authors only `sketchLine`. The contract row claimed `uiExposure:"exposed"` — false for a
+whole phase, because no code path could produce one. **Product call: it stays hidden**, following
+the `MirrorBody / fuse` precedent (`supported` + `hidden`) and WP1.5's own instruction not to expose
+it before the persistence/reopen/upstream-edit evidence exists.
+
+- [x] **The four WP1.5 tests.** Two are worker-level refusals (`worker/tests/test_wp6_ops.cpp`): a
+      CURVED axis edge is `OP_FAILED` "axis edge must be a straight line" and explicitly NOT
+      NeedsRepair (the edge resolved fine, it is simply not an axis), and a TWO-BODY fixture proves
+      both ownership gates — a ref naming another body, and an elementId that agrees on paper but is
+      bound to the other body in the partition. Two need a real document
+      (`src-tauri/tests/revolve_ops.rs`): promote → revolve → **upstream edit** → **save/reopen**,
+      and an axis edge CONSUMED by an upstream fillet ⇒ `NeedsRepair`, no body published.
+- [x] **Non-vacuity, measured.** Removing the partition-ownership gate makes the revolve SUCCEED on
+      the other body's edge — a silent cross-body axis swap; removing the curved-edge guard silently
+      straightens a circle. The consumed-edge test carries an in-test NEGATIVE CONTROL (the same
+      document without the fillet publishes cleanly), because the mutation that would prove it lives
+      in `resolve_input_refs`, which returns no candidates on that path.
+- [x] **A measured finding worth keeping.** An upstream edit that grows the axis edge +20% rebinds;
+      +100% is `NeedsRepair` (ambiguous). A FILLET ref on the same edge answers identically at both
+      sizes — checked, not assumed — so this is the shared ladder's descriptor-magnitude policy
+      (auto-bind needs score ≥0.85 AND margin ≥0.10), not something about axes. The test pins both
+      directions, so a future policy change has to be deliberate.
+- [x] **The row now reads `hidden`**, and `ModelToolController.revolveAxisExposure.test.ts` binds the
+      claim to the code from both sides: no lane authors an `edge` axis, and a record that ALREADY
+      holds one survives a re-edit (hidden must not mean destroyed — the angle-only deep merge sends
+      no `axis`; adding one reds the test). The frozen interaction contract was NOT edited: its
+      revolve row already says `requiredSelections: "sketch region + axis line"`.
+
+### A5 — WP0.7 preview ownership (a real defect) and WP0.8 Boolean re-arm
+
+- [x] **WP0.7 was half-landed, and the missing half was the failure state.** Ownership of candidate
+      bodies and visibility claims was per-session; `previewFailure` was ONE field. A secondary
+      session's refusal set it, and only the PRIMARY branch ever cleared it — so a region that failed
+      and then recovered left every commit blocked behind a stale error hint contradicting a preview
+      that visibly worked again. `ToolPreviewSession.failure` is now per session, the lane's failure
+      is the union, and a recovered secondary takes the status line back exactly like the primary.
+- [x] **`ModelToolController.previewOwnership.test.ts`** delivers two region responses in BOTH
+      orders (both candidates survive, replaced-body claims union), fails one secondary (only its own
+      candidate and claim drop), then RECOVERS it and requires the commit to go through — red before
+      the fix. A still-failing session keeping the commit blocked is the negative control. No existing
+      harness could express this: the multi-region specs stub `onPreviewResult` away and one of them
+      hands every `beginPreview` the same constant sessionId.
+- [x] **WP0.8's two untested paths + the second Apply.** `booleanPreview.test.ts` covered the
+      exact-preview barrier only. Added: a REJECTED `endPreview`, a RESOLVED regen failure (one
+      `undo` per applied-but-failed attempt), a terminal-only failure with no `errorMessage`, and a
+      successful SECOND Apply that commits the session the re-arm opened (`pv-2`), not the consumed
+      one. Reverting `commitBoolean` to the old `errorMessage`-only check reds the terminal-only case.
+
+### A6 — the two cross-track fixtures, one of which needed the contract to become true first
+
+- [x] **SCHEMA §7.5's snapshot echo was normative and implemented nowhere.** Every resolution is
+      required to carry `{snapshotId, revision, refId, bodyId}`, and a client must cache candidates
+      by `{revision, snapshotId, refId}`. Neither the C++ worker nor the Rust stub emitted any of the
+      three; `api/mod.rs` manufactured all of them from Rust's own state and `manager.rs` validated
+      nothing — so a resolution computed on an older snapshot was cached under a freshly minted key.
+      The worker now echoes them on every branch (`bodyId` only when a body was enumerated), the stub
+      matches, and `wire::validate_resolve_refs_result` fails closed on a mismatched snapshot, a
+      re-ordered `refId`, a wrong arity or a missing echo.
+- [x] **`revision` stays Rust-owned in the DTO, deliberately** (decision D4): the repair store keys
+      candidates on the same `(revision, snapshotId)` the `needs-repair` events carry, and the
+      engine's own stamp legitimately lags an un-regenerated edit. The SNAPSHOT is the engine's echo.
+      Recorded in SCHEMA §7.5 so the next reader does not have to re-derive it.
+- [x] **`protocol/fixtures/resolve_refs_snapshot_echo.ndjson`** (new) covers the direct-hit and
+      missing-body branches plus a stale-snapshot refusal; `bind_element_ids.ndjson` now asserts the
+      echo on its own ResolveRefs step. Dropping the `revision` echo in the worker reds
+      `canonical_resolve_refs_snapshot_echo`.
+- [x] **`protocol/fixtures/circular_pattern_lineage.ndjson`** (new) pins Pattern V2 lineage on the
+      wire: `count−1` children `body_<opId>:<k>`, the source preserved as instance zero with no
+      lifecycle event, and the `perStepResults` body-id set. It deliberately does NOT pin the
+      `angleDeg / count` step angle — NDJSON carries no geometry to measure it with, so that stays in
+      `test_m6a_ops.cpp` and `patternPreview.test.ts`. Said so in the fixture header rather than
+      asserting it by proxy.
+- [x] **Fixture discovery is now ENUMERATED in both lanes**, which was the actual root cause of A6's
+      gap: `boolean_empty_refusal.ndjson` (added last commit) ran in the ctest lane and in neither
+      hardcoded list. `check_interop.sh` globs `protocol/fixtures/*.ndjson` (and fails on an empty
+      glob) and the Rust parse test reads the directory with a ≥6 floor.
+
+Gates: `ctest` **119/119** (117 → 119); `cargo fmt --all --check`; `clippy --workspace --all-targets
+-D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1082 / 0** (1078 → 1082);
+`bunx tsc --noEmit`; `bun run build`; `bun run test` **249 files / 4173 tests** (247/4161 → 249/4173);
+both `verify-modeling-*` verifiers; hex gate 0; targeted Playwright on the touched preview lanes
+(`multiregion`, `boolean-preview`, `extrude-commit-gesture`, `extrude-multiselect`) **20/20** across
+Chromium + WebKit at `retries: 0`. Kernelbench was NOT re-run: no benchmark, fillet or kernel-geometry
+source changed (the worker delta is `ElementIdentity.cpp` plus test registration).
+
+**Next:** C1 — make the coverage manifest true, then give `verify-modeling-coverage.mjs` teeth. Two
+inputs for it are already on the table: it has no `body-edge axis` row at all, and its single Revolve
+row cites `src/tools/modelTools/revolve.test.ts`, which does not exist.
+
 ## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13, plan `now-lets-plan-next-sunny-lighthouse.md`) — GATE PASSED
 
 Roadmap WP0.3, finished. It was recorded complete at `MODEL-CORRECTNESS-P0` but only the transport half had landed: `RegenTerminal` declared `needsRepair` and **neither client ever assigned it**, no shared consumer helper existed, `.terminal` was read nowhere outside its own test, and every consumer family still inferred success from body counts — the inference the spec explicitly forbids. That was the fix for risk **R-04** (severity 5, score 80), so it was a live defect, not missing evidence.
