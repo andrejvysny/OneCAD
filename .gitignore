@@ -33,6 +33,7 @@ test-results/
 playwright-report/
 blob-report/
 .playwright/
+e2e-tauri/results/
 
 # Editor directories and files
 .vscode/*

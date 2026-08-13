@@ -16,6 +16,11 @@ enum class CurveFragmentKind {
     Ellipse,
 };
 
+enum class CurveRefinementPolicy {
+    V2ParameterProximity,
+    V3PhysicalProximity,
+};
+
 struct CurveFragment {
     sk::EntityID baseEntityId;
     CurveFragmentKind kind = CurveFragmentKind::Line;

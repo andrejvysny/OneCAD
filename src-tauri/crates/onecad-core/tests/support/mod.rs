@@ -203,6 +203,8 @@ struct FakeState {
     restore: RestoreConfig,
     /// Count of `restore_checkpoint` calls (for retry assertions).
     restore_calls: usize,
+    /// Test-only corruption applied after the normal event stream is built.
+    event_mutation: Option<fn(&mut Vec<PlanEvent>)>,
 }
 
 /// A scripted, OCCT-free [`GeometryEngine`].
@@ -227,6 +229,7 @@ impl FakeEngine {
                 reject_accept: None,
                 restore: RestoreConfig::default(),
                 restore_calls: 0,
+                event_mutation: None,
             })),
         }
     }
@@ -256,6 +259,13 @@ impl FakeEngine {
     #[must_use]
     pub fn with_restore(self, config: RestoreConfig) -> Self {
         self.inner.lock().unwrap().restore = config;
+        self
+    }
+
+    /// Corrupts the normally valid stream to exercise executor protocol guards.
+    #[must_use]
+    pub fn with_event_mutation(self, mutation: fn(&mut Vec<PlanEvent>)) -> Self {
+        self.inner.lock().unwrap().event_mutation = Some(mutation);
         self
     }
 
@@ -412,6 +422,9 @@ impl GeometryEngine for FakeEngine {
                         // The scripted engine inlines no geometry — the pull path.
                         artifact_meshes: Vec::new(),
                     }));
+                    if let Some(mutation) = st.event_mutation {
+                        mutation(&mut events);
+                    }
                 }
                 None
             };

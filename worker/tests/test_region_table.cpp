@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numbers>
 #include <string>
 #include <unordered_map>
@@ -80,7 +81,9 @@ loop::RegionTable table_from(const loop::LoopDetectionResult& result) {
         sk::constants::COINCIDENCE_TOLERANCE);
 }
 
-loop::RegionTable table_from(const json& sketch) {
+loop::RegionTable table_from(
+    const json& sketch,
+    loop::RegionIdentityVersion identity_version = loop::RegionIdentityVersion::V2) {
     onecad::wire::TranslateResult translated = onecad::wire::translate(sketch);
     check(translated.ok, "wire sketch translates");
     if (!translated.ok) {
@@ -92,14 +95,24 @@ loop::RegionTable table_from(const json& sketch) {
         return {};
     }
     loop::LoopDetector detector;
-    detector.setConfig(loop::makeRegionDetectionConfig());
+    loop::LoopDetectorConfig config = loop::makeRegionDetectionConfig();
+    if (identity_version == loop::RegionIdentityVersion::V3) {
+        config.curveRefinementPolicy = loop::CurveRefinementPolicy::V3PhysicalProximity;
+    }
+    detector.setConfig(config);
     const loop::LoopDetectionResult detected = detector.detect(*translated.sketch);
     const auto map_edge = [&](const sk::EntityID& internal) {
         const auto it = translated.index.internal_edge_to_wire.find(internal);
         return it == translated.index.internal_edge_to_wire.end() ? internal : it->second;
     };
     return loop::buildRegionTable(
-        detected, map_edge, sk::constants::COINCIDENCE_TOLERANCE);
+        detected, map_edge, sk::constants::COINCIDENCE_TOLERANCE, identity_version);
+}
+
+std::unordered_set<std::string> region_ids(const loop::RegionTable& table) {
+    std::unordered_set<std::string> ids;
+    for (const loop::RegionDefinition& region : table.regions) ids.insert(region.id);
+    return ids;
 }
 
 const loop::RegionDefinition* region_with_outer(
@@ -281,6 +294,72 @@ void test_nested_cells_and_profile_lookup() {
           "stale-id error lists canonical available ids");
 }
 
+void test_v2_bytes_are_frozen_and_v3_is_separate() {
+    const json sketch = nested_sketch();
+    const loop::RegionTable v2 = table_from(sketch);
+    const loop::RegionTable v3 = table_from(sketch, loop::RegionIdentityVersion::V3);
+    check(v2.success && v3.success && v2.regions.size() == 2 && v3.regions.size() == 2,
+          "V2 and V3 nested-cell tables build separately");
+    if (!v2.success || !v3.success || v2.regions.size() != 2 || v3.regions.size() != 2) return;
+
+    const loop::RegionDefinition* v2_outer = region_with_outer(v2, uuid(101));
+    const loop::RegionDefinition* v3_outer = region_with_outer(v3, uuid(101));
+    check(v2_outer != nullptr,
+          "V2 nested-cell identity remains available beside locked V2 fixtures");
+    check(v2_outer && v3_outer && v2_outer->id != v3_outer->id,
+          "explicit V3 selects a distinct cell identity domain");
+    check(v3_outer && v3_outer->id == "r_d6120ff647c05f88",
+          "V3 cell byte stream is fixture-locked");
+
+    if (v3_outer) {
+        std::string error;
+        const auto face = onecad::ops::build_profile_face(sketch, v3_outer->id, 3, error);
+        check(face.has_value(), "V3 canonical region id resolves: " + error);
+        if (face) {
+            const CurveCensus census = curve_census(*face);
+            check(census.lines == 4 && census.circles == 1 && census.other == 0,
+                  "V3 profile remains entirely analytic, never polygonized");
+        }
+    }
+}
+
+void test_v3_provenance_validation() {
+    const loop::Loop legacy_only = make_loop(
+        {uuid(111), uuid(112), uuid(113), uuid(114)},
+        {{0, 0}, {1, 0}, {1, 1}, {0, 1}});
+    const auto build_v3 = [](const loop::Loop& value) {
+        return loop::buildRegionTable(
+            detection(value), [](const sk::EntityID& id) { return id; },
+            sk::constants::COINCIDENCE_TOLERANCE, loop::RegionIdentityVersion::V3);
+    };
+    check(!build_v3(legacy_only).success,
+          "V3 fails closed when exact analytic provenance is absent");
+    loop::Loop analytic = legacy_only;
+    analytic.fragments.reserve(analytic.wire.edges.size());
+    for (std::size_t i = 0; i < analytic.wire.edges.size(); ++i) {
+        loop::CurveFragment fragment;
+        fragment.baseEntityId = analytic.wire.edges[i];
+        fragment.firstParameter = 0.0;
+        fragment.lastParameter = 1.0;
+        fragment.sourceFirstParameter = 0.0;
+        fragment.sourceLastParameter = 1.0;
+        analytic.fragments.push_back(fragment);
+    }
+    check(build_v3(analytic).success, "V3 accepts complete finite analytic provenance");
+
+    analytic.fragments[0].baseEntityId.clear();
+    check(!build_v3(analytic).success, "V3 refuses an empty analytic base entity id");
+    analytic.fragments[0].baseEntityId = uuid(999);
+    check(!build_v3(analytic).success, "V3 refuses mismatched analytic provenance");
+    analytic.fragments[0].baseEntityId = analytic.wire.edges[0];
+    analytic.fragments[0].sourceLastParameter = 0.0;
+    check(!build_v3(analytic).success,
+          "V3 refuses a non-positive analytic source interval");
+    analytic.fragments[0].sourceLastParameter = std::numeric_limits<double>::infinity();
+    check(!build_v3(analytic).success,
+          "V3 refuses a non-finite analytic source interval");
+}
+
 json overlapping_circles() {
     return {
         {"sketchId", "overlap"},
@@ -292,6 +371,89 @@ json overlapping_circles() {
          })},
         {"constraints", json::array()},
     };
+}
+
+json scaled_overlapping_circles(double scale) {
+    json sketch = overlapping_circles();
+    for (json& entity : sketch["entities"]) {
+        entity["center"][0] = entity["center"][0].get<double>() * scale;
+        entity["center"][1] = entity["center"][1].get<double>() * scale;
+        entity["radius"] = entity["radius"].get<double>() * scale;
+    }
+    return sketch;
+}
+
+json near_tangent_large_circles() {
+    constexpr double radius = 1'000'000.0;
+    constexpr double penetration = 0.0001;
+    return {
+        {"sketchId", "near-tangent-large"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(211)}, {"type", "Circle"},
+              {"center", {-radius + penetration * 0.5, 0}}, {"radius", radius}},
+             {{"id", uuid(212)}, {"type", "Circle"},
+              {"center", {radius - penetration * 0.5, 0}}, {"radius", radius}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+json seam_near_tangent_circles() {
+    constexpr double radius = 1'000.0;
+    constexpr double penetration = 2e-13;
+    return {
+        {"sketchId", "seam-near-tangent"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(221)}, {"type", "Circle"}, {"center", {0, 0}},
+              {"radius", radius}},
+             {{"id", uuid(222)}, {"type", "Circle"},
+              {"center", {2.0 * radius - penetration, 0}}, {"radius", radius}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+void test_v3_identity_is_scale_and_entity_order_invariant() {
+    const loop::RegionTable base =
+        table_from(scaled_overlapping_circles(1.0), loop::RegionIdentityVersion::V3);
+    const loop::RegionTable scaled =
+        table_from(scaled_overlapping_circles(10'000.0), loop::RegionIdentityVersion::V3);
+    json permuted_sketch = scaled_overlapping_circles(1.0);
+    std::reverse(permuted_sketch["entities"].begin(), permuted_sketch["entities"].end());
+    const loop::RegionTable permuted =
+        table_from(permuted_sketch, loop::RegionIdentityVersion::V3);
+
+    check(base.success && scaled.success && permuted.success,
+          "V3 overlap tables build across scale and entity order");
+    check(base.regions.size() == 3 && scaled.regions.size() == 3 &&
+              permuted.regions.size() == 3,
+          "V3 scale and permutation keep all three cells");
+    check(region_ids(base) == region_ids(scaled),
+          "V3 normalized analytic intervals are scale invariant");
+    check(region_ids(base) == region_ids(permuted),
+          "V3 analytic identity is entity-order invariant");
+}
+
+void test_v3_near_tangent_uses_physical_split_distance() {
+    const json sketch = near_tangent_large_circles();
+    const loop::RegionTable v2 = table_from(sketch);
+    const loop::RegionTable v3 = table_from(sketch, loop::RegionIdentityVersion::V3);
+    check(v2.success && v2.regions.size() != v3.regions.size(),
+          "V2 and V3 retain separate near-tangent split policies (V2=" +
+              std::to_string(v2.regions.size()) + ", V3=" +
+              std::to_string(v3.regions.size()) + ")");
+    check(v3.success && v3.regions.size() == 3,
+          "V3 keeps physically separated intersections on large-radius curves");
+
+    const loop::RegionTable seam =
+        table_from(seam_near_tangent_circles(), loop::RegionIdentityVersion::V3);
+    check(seam.success && seam.regions.size() == 2,
+          "V3 collapses physically coincident splits across a closed-curve seam (regions=" +
+              std::to_string(seam.regions.size()) + ")");
 }
 
 void test_overlapping_cells_are_unique_and_bounded() {
@@ -600,6 +762,10 @@ int main() {
     test_identity_determinism();
     test_simple_legacy_and_holes();
     test_nested_cells_and_profile_lookup();
+    test_v2_bytes_are_frozen_and_v3_is_separate();
+    test_v3_provenance_validation();
+    test_v3_identity_is_scale_and_entity_order_invariant();
+    test_v3_near_tangent_uses_physical_split_distance();
     test_overlapping_cells_are_unique_and_bounded();
     test_line_circle_planarization_keeps_exact_edges();
     test_crossing_arcs_publish_three_exact_cells();

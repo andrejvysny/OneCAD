@@ -21,12 +21,11 @@ import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { ChipOverflow } from "@/features/toolbar/ChipOverflow";
 import type { BooleanMode, ExtrudeEndCondition } from "@/tools/modelTools/modelToolMachine";
 
-/** The armed-cluster boolean segments: New Body / Add / Cut / Intersect. */
+/** Intersect stays hidden until its full real-worker/browser evidence gate passes. */
 const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
   { mode: "NewBody", label: "New Body", testid: "chip-bool-newbody" },
   { mode: "Add", label: "Add", testid: "chip-bool-add" },
   { mode: "Cut", label: "Cut", testid: "chip-bool-cut" },
-  { mode: "Intersect", label: "Intersect", testid: "chip-bool-intersect" },
 ];
 
 
@@ -157,7 +156,7 @@ export function SymmetricToggle({ pressed, onToggle }: { pressed: boolean; onTog
 }
 
 /**
- * The New Body / Add / Cut / Intersect segment group on the armed extrude/revolve cluster
+ * The New Body / Add / Cut segment group on the armed extrude/revolve cluster
  * (Wave 2). Disabled (all three) when no existing body can be a boolean target;
  * the disabled group carries the "Needs an existing body" title.
  */

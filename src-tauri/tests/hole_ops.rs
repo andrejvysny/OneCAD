@@ -540,7 +540,12 @@ async fn through_all_drills_the_full_thickness_of_each_host() {
     );
     let rep = regen_all(&mut rt).await;
     let snap = published(&rep, "two holes");
-    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    let repair_items = rt.repair_items();
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "two-host hole repair evidence: {:?}",
+        repair_items
+    );
 
     for (body, thickness, base) in [(body_a, 25.0, 10000.0), (body_b, 40.0, 16000.0)] {
         let want = base - removed_volume(6.0, thickness, None, None);

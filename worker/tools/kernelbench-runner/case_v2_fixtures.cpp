@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "benchmark/CaseParser.h"
+#include "benchmark/Execution.h"
 #include "benchmark/Geometry.h"
 
 namespace {
@@ -258,6 +259,73 @@ void a_variable_radius_law_is_refused_until_it_can_be_proven() {
           "a linear radius law must not execute as if it were constant");
 }
 
+json boolean_case(const std::string &mode) {
+  json value = json::parse(kTemplate);
+  value["caseId"] = "fixture.boolean-" + mode;
+  value["generator"] = {{"family", "boolean"},
+                        {"name", "boolean-foundation"},
+                        {"version", 1},
+                        {"seed", "0123456789abcdef"}};
+  value["geometry"] = {
+      {"recipe", "twoBoxes"},
+      {"parameters", {{"targetDimensions", {10.0, 10.0, 10.0}},
+                      {"toolDimensions", {10.0, 10.0, 10.0}},
+                      {"toolOffset", {5.0, 0.0, 0.0}}}},
+      {"tags", {"boolean", "overlap"}}};
+  value["operation"] = {{"type", "boolean"},
+                        {"definition", {{"mode", mode}}}};
+  value["selector"] = {{"mode", "bodyRoles"},
+                       {"target", "target"},
+                       {"tools", {"tool"}}};
+  value["validators"] = json::array(
+      {{{"type", "deepAudit"}, {"required", true}},
+       {{"type", "materialChange"}, {"required", true},
+        {"direction", mode == "fuse" ? "increase" : "decrease"}},
+       {{"type", "history"}, {"required", true}}});
+  return value;
+}
+
+void boolean_foundation_runs_both_backends() {
+  for (const std::string mode : {"fuse", "cut", "common"}) {
+    const CaseSpec spec = parse(boolean_case(mode));
+    GeneratedGeometry geometry;
+    VariantSpec variant;
+    variant.name = "base";
+    std::string generation_error;
+    require(onecad::benchmark::generate_geometry(spec, variant, geometry,
+                                                 generation_error),
+            "Boolean geometry must generate: " + generation_error);
+    require(!geometry.tool_shape.IsNull(), "twoBoxes generates a tool body");
+    require(geometry.selection_evidence.size() == 2,
+            "body-role selector resolves target and tool");
+    for (const std::string backend : {"raw-occt", "onecad"}) {
+      onecad::benchmark::Request request;
+      request.canonical = {{"variant", {{"name", "base"}}}};
+      request.benchmark_case = spec;
+      request.backend = backend;
+      request.variant.name = "base";
+      const json result = onecad::benchmark::execute_request(request);
+      require(result["verdict"] == "pass",
+              mode + "/" + backend + " verdict: " + result.dump());
+      require(result["operationState"] == "success",
+              mode + "/" + backend + " operation succeeds");
+    }
+  }
+
+  json mismatched = boolean_case("fuse");
+  mismatched["operation"]["definition"] = {
+      {"radiusLaw", {{"mode", "constant"}, {"radius", 1.0}}},
+      {"continuity", "g1"}};
+  CaseSpec rejected;
+  std::string error;
+  require(!onecad::benchmark::parse_case_v2(mismatched, rejected, error),
+          "Boolean type rejects a Fillet definition");
+  json extra = boolean_case("fuse");
+  extra["geometry"]["parameters"]["dimensions"] = {1.0, 1.0, 1.0};
+  require(!onecad::benchmark::parse_case_v2(extra, rejected, error),
+          "twoBoxes rejects another recipe's parameters");
+}
+
 } // namespace
 
 int main() {
@@ -266,5 +334,6 @@ int main() {
   run_fixture("unimplemented-supports", unimplemented_supports_are_refused_by_name);
   run_fixture("version-disjoint", the_two_case_versions_stay_disjoint);
   run_fixture("variable-radius", a_variable_radius_law_is_refused_until_it_can_be_proven);
+  run_fixture("boolean-foundation", boolean_foundation_runs_both_backends);
   return 0;
 }

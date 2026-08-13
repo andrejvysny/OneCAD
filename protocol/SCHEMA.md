@@ -723,6 +723,16 @@ Terminal resp — `PlanPrepared`:
 // bin: [ { "name": "mesh:body_3", "off": 0, "len": 4096 } ]
 ```
 
+All terminal fields above are mandatory and strictly typed. `perStepResults` is
+the unique, ordered prefix of the requested `ops[].stepIndex` sequence; indices
+may not be missing, duplicated, reordered, or invented. `completed` reaches the
+last requested step and contains only `ok` rows. `opFailed`/`needsRepair` ends in
+exactly one matching terminal row, and `lastValidStep` names the immediately
+preceding `ok` row (or is `null`). Rust MUST discard scratch and return
+`PROTOCOL_ERROR` before `AcceptPrepared` when any stream/terminal consistency
+rule fails. Unknown status or stopped-reason values are never compatibility
+defaults.
+
 The prepared snapshot is held in scratch, NOT published. `preparedSnapshotId`
 becomes live only after `AcceptPrepared`.
 
@@ -746,13 +756,10 @@ becomes live only after `AcceptPrepared`.
   Rust does exactly this (`worker::wire::parse_plan_artifact_meshes`): a malformed
   handle is warned and skipped individually; an invalid section table drops the
   whole artifact set; both leave the plan a normal success.
-- **§5.2 tension (current behavior, documented not blessed).** §5.2 says a payload
-  larger than the negotiated `chunkSize` (default 1 MiB) MUST be chunked. The
-  worker inlines these artifact blobs **regardless of size**, so a dense body can
-  produce a terminal `resp` well past `chunkSize`. That is the shipped behavior and
-  is what this section describes; chunking the artifact lane (or capping which
-  bodies are inlined) is the forward direction, and a reader's ingest cap is the
-  interim guard. The `Tessellate` verb itself is unaffected — it still streams.
+- **Transport limit.** A prepared mesh is inlined only when that blob fits the
+  advertised `chunkSize` and the response aggregate fits `initialBulkCredit`.
+  Bodies that do not fit are omitted from this cache; Rust uses the existing
+  chunked `Tessellate` pull.
 
 #### AcceptPrepared
 Publishes the prepared scratch snapshot into the active session atomically. The
@@ -1013,7 +1020,7 @@ OneCAD-CPP `ExtrudeParams`.
 {
   "sketchId": "sk_1",             // profile sketch (see "Profile binding")
   "regionId": "r_ac127d8846949…",
-  "regionIdentityVersion": 2,    // required for newly authored profiles
+  "regionIdentityVersion": 3,    // new authoring; persisted V1/V2 remain frozen
   "distance": 25.0,
   "draftAngleDeg": 0.0,
   "extrudeMode": "Blind",         // Blind | ThroughAll | Symmetric | ToNext | ToFace
@@ -1085,7 +1092,7 @@ produced or consumed.
 {
   "sketchId": "sk_1",
   "regionId": "r_ac127d8846949…",
-  "regionIdentityVersion": 2,
+  "regionIdentityVersion": 3,
   "angleDeg": 360.0,
   "axis": { "kind": "sketchLine", "sketchId": "sk_1", "lineId": "e1" },
               // axis.kind ∈ "sketchLine" {sketchId,lineId} | "edge" {bodyId,edgeId,edgeRef?} | "none"
@@ -1677,7 +1684,7 @@ preview fill).
 { "sketchId": "sk_1" }
 // result
 {
-  "sketchId": "sk_1", "sketchRevision": 5, "regionIdentityVersion": 2,
+  "sketchId": "sk_1", "sketchRevision": 5, "regionIdentityVersion": 3,
   "regions": [
     {
       "regionId": "r0",
@@ -1702,7 +1709,7 @@ preview fill).
   outer-loop entity UUID as its 16 raw bytes in ascending order, then winding
   byte `0`, rendered `"r_%016x"`.
 
-  A cell with holes or an intersected source entity hashes one canonical UTF-8
+  Version 2 (frozen) hashes a cell with holes or an intersected source entity as one canonical UTF-8
   member string, then winding byte `0`, through the same FNV/rendering rule. The
   string is `cell-v2|outer{L}|holes{H...}`:
 
@@ -1713,6 +1720,13 @@ preview fill).
     then `:f` or `:r` for traversal. Tessellation indices are never identity.
   - Each hole loop is canonicalized independently; the resulting hole strings
     are sorted and length-prefixed before concatenation.
+
+  Version 3 hashes `cell-v3` from every ordered fragment's analytic provenance
+  and curve-domain-normalized source interval. Split proximity is measured as
+  physical curve distance, including shortest distance across a periodic seam;
+  raw curve parameters are not compared to a model-length tolerance. Supported
+  Line/Circle/Arc/Ellipse fragments remain analytic. Missing, mismatched,
+  non-finite, non-positive, or discontinuous provenance refuses the profile.
 
   The worker MUST reject duplicate canonical ids instead of publishing ambiguous
   regions or duplicate binary section names. An older outer-only id may resolve
@@ -1759,12 +1773,13 @@ preview fill).
   partial triangle list — a partial fill reads as a wrong boundary to the
   ring-recovery consumers above.
 
-- **Region identity version.** `SketchRegions` always emits
-  `regionIdentityVersion: 2`. New `SketchRegionRef`s persist that version and
-  version-2 profile lookup requires one exact canonical id; an empty/stale id
-  refuses. An absent persisted version is V1: it replays the legacy detector and
-  may use its first-region fallback. A legacy outer id aliases only when unique;
-  an exact-v2 ambiguity refuses and lists v2 candidates.
+- **Region identity version.** `SketchRegions` emits
+  `regionIdentityVersion: 3` for new authoring. A persisted V1 or V2 record keeps
+  that version through load/save/re-edit/undo/reopen; neither bytes nor lookup
+  behavior migrate implicitly. V2 keeps its frozen raw-parameter behavior. V3
+  requires one exact `cell-v3` id and fails closed. An absent persisted version
+  is V1 and keeps its legacy first-region fallback. A future explicit migration
+  may proceed only when every old region maps uniquely; ambiguity aborts it.
 
 - **Exact fragment BReps.** Supported Line/Circle/Arc/Ellipse fragments are
   intersected with `Geom2dAPI_InterCurveCurve`, then built as trimmed analytic
@@ -1923,7 +1938,9 @@ without binding anything.
 
 `outcome` ∈ `autoBind` | `needsRepair` | `unchanged`.
 Every resolution carries the exact `snapshotId`, document `revision`, `refId`, and
-the `bodyId` used to enumerate candidates when one exists. A client MUST cache a
+the `bodyId` used to enumerate candidates when one exists. An echoed `bodyId` MUST
+equal that ref's primary body. Body omission is allowed only for a non-promotable
+`needsRepair` missing-body result with no candidates. A client MUST cache a
 candidate set by `{revision, snapshotId, refId}` and MUST promote its TopoKeys only
 against that echoed snapshot; a mismatch requires a fresh resolve, never ordinal reuse.
 
@@ -1933,7 +1950,8 @@ snapshot the ladder actually ran on (the request's when it names one, else the h
 and `revision` is the document revision that head last accepted; `bodyId` is present
 only when a body was there to enumerate. **Rust MUST validate the echo before a
 resolution is used**: request order preserved, one resolution per requested ref, and
-`snapshotId` equal to the requested snapshot — a resolution computed against another
+`snapshotId` equal to the requested snapshot, valid revision evidence, and actual
+worker provenance preserved — a resolution computed against another
 snapshot, filed under the requested one, is precisely the stale-candidate mis-bind
 this rule exists to prevent. `documentRevision` remains a Rust-owned advisory stamp
 (D4), so the echoed `revision` is evidence about the engine's head, not a value the
@@ -2461,7 +2479,7 @@ STATE (see [§8](#8-error-taxonomy)).
   "ladderFailed": "descriptor",          // "history" | "descriptor"
   "reason": "ambiguous",                 // "ambiguous" | "no-candidates" | "low-confidence"
                                          //   | "ordinal-permutation" (Rust-seeded only)
-  "scoringVersion": 2,                   // = resolverVersion the scores were computed under
+  "scoringVersion": 3,                   // = resolverVersion the scores were computed under
   "candidates": [
     {
       "topoKey": "f:31",
@@ -2517,7 +2535,10 @@ evidence so the policy can later move to Rust.
 
 1. **OCCT history** — consult the modified/generated maps of **all** ops in the
    step's builders (not just booleans); builder objects are kept alive for the
-   step. A unique history image auto-binds.
+   step. Images are deduplicated by TopoDS identity. A unique image auto-binds;
+   multiple images pass the same confidence/margin gate. `Modified()` contributes
+   `0.09` provenance confidence, deliberately below the `0.10` margin: it cannot
+   resolve an otherwise tied Modified/Generated pair by itself.
 2. **Descriptor matching with anchor narrowing** — for unresolved refs, match the
    frozen `intent.descriptor` against candidate elements; narrow ambiguity using
    the `anchor` (world point, surface UV, local frame, adjacency hint).
@@ -2537,9 +2558,10 @@ count (edges). This is `quantizationVersion = 1` / `descriptorVersion = 1`.
 
 **Scoring (REDESIGNED — normalized).** OneCAD-CPP's `score()` is an unbounded,
 scale-dependent cost that cannot express the locked policy; this protocol replaces
-it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 2`;
-version 1 was the same scheme without the edit-scoped veto and with a fixed
-`1.0 mm` anchor-scale floor). Higher = better match. Policy:
+it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 3`;
+version 2 added the edit-scoped veto and proportional anchor scale; version 1 had
+neither). Version 3 adds Modified-channel provenance only at the history rung.
+Higher = better match. Policy:
 
 - **Auto-bind iff** `score1 ≥ 0.85` **AND** `(score1 − score2) ≥ 0.10`
   (score1/score2 = best/second-best candidate) **AND the edit-scoped
@@ -2630,6 +2652,13 @@ The worker returns, per ref: candidates, `featureContributions`, `score`,
 `margin`, and the ladder level reached — full evidence for repair UI and for
 moving policy to Rust later.
 
+**History-channel provenance (`resolverVersion = 3`).** Generated images are kept
+in the candidate union because some builders expose the only successor there, but
+generated side topology must not erase stronger direct lineage. A Modified image
+therefore adds `0.09` to its normalized history score (clamped to `1.0`). The value
+is strictly below the locked `0.10` margin, so a descriptor/anchor tie still emits
+NeedsRepair; the underlying geometry evidence must supply the remaining separation.
+
 ---
 
 ## 11. Invariants
@@ -2689,6 +2718,10 @@ and back Invariant 5 and checkpoint drift detection.
   (`ONECAD_WORKER_PATH` is a development and test seam only). A field whose absence
   silently degrades CORRECTNESS rather than performance — such as
   [`checkpointFallbackReplay`](#72-regen) — relies on this property.
+  Every release embeds a generated manifest containing the bundled binary SHA-256,
+  protocol/worker/quantization/solver axes, and OCCT version/fingerprint. The app
+  verifies the digest before spawn and every hello axis before the session becomes
+  ready. Release resolution accepts only the executable-adjacent bundled sidecar.
 
 ---
 
@@ -2699,6 +2732,21 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — atomic publication and identity V3 hardening.** Plan streams are
+  now strict ordered prefixes and malformed terminals are discarded before
+  publication. Release builds verify a generated worker manifest and accept only
+  the bundled sidecar. New sketches author `regionIdentityVersion:3`/`cell-v3`;
+  V1/V2 remain frozen. `ResolveRefs` validates revision/body provenance. STEP
+  conversion refuses exact canonical-order ties with `AMBIGUOUS_IMPORT_ORDER`.
+  Prepared meshes obey advertised per-blob and aggregate limits.
+
+- **2026-08-13 — resolver scoring version 3 history provenance.** History now
+  unions and deduplicates `Modified()` + `Generated()` images. Multiple images
+  remain confidence-gated; direct Modified lineage contributes `0.09`, below the
+  locked `0.10` margin, so it cannot settle an otherwise tied pair. This prevents
+  generated side topology from masking a descriptor-separated Modified successor.
+  `scoringVersion` fixtures move 2 → 3; protocol and checkpoint policy axes do not.
 
 - **2026-08-13 — §7.3 Pattern V2 lineage gains a cross-track fixture** (roadmap A6).
   No contract change: `circular_pattern_lineage.ndjson` pins the already-normative V2

@@ -288,6 +288,38 @@ AnchorEvidence anchor_of(const nlohmann::json& anchor) {
     return a;
 }
 
+struct HistorySuccessor {
+    TopoDS_Shape shape;
+    bool modified = false;
+};
+
+// Modified is direct successor evidence; Generated may also be the only lineage
+// available. Keep both and deduplicate by TopoDS identity.
+std::vector<HistorySuccessor> history_successors(BRepBuilderAPI_MakeShape& hist,
+                                                 const TopoDS_Shape& old) {
+    std::vector<HistorySuccessor> successors;
+    const auto append_unique = [&](const TopTools_ListOfShape& images, bool modified) {
+        for (TopTools_ListIteratorOfListOfShape it(images); it.More(); it.Next()) {
+            auto duplicate = std::find_if(successors.begin(), successors.end(), [&](auto& seen) {
+                return seen.shape.IsSame(it.Value());
+            });
+            if (duplicate != successors.end()) {
+                duplicate->modified = duplicate->modified || modified;
+            } else {
+                successors.push_back(HistorySuccessor{it.Value(), modified});
+            }
+        }
+    };
+    append_unique(hist.Modified(old), true);
+    append_unique(hist.Generated(old), false);
+    return successors;
+}
+
+// Direct Modified lineage supplies part of the locked 0.10 margin. The value is
+// deliberately below the margin by itself: an otherwise tied Modified/Generated
+// pair still refuses, while descriptor separation must supply the remainder.
+constexpr double kModifiedHistoryConfidence = 0.09;
+
 }  // namespace
 
 void ElementMapPartition::apply_history(const std::string& body_id,
@@ -327,17 +359,18 @@ void ElementMapPartition::apply_history(const std::string& body_id,
             continue;
         }
 
-        // Ladder level 1 (SCHEMA §10): consult OCCT Modified().
-        TopTools_ListOfShape modified;
-        if (!old.IsNull()) modified = hist.Modified(old);
+        // Ladder level 1 (SCHEMA §10): consult the union of both OCCT history
+        // channels. Some builders expose same-kind successors only as Generated().
+        std::vector<HistorySuccessor> successors;
+        if (!old.IsNull()) successors = history_successors(hist, old);
 
         TopoDS_Shape image;
-        if (modified.IsEmpty()) {
+        if (successors.empty()) {
             // Not deleted, not modified: does the old shape survive verbatim?
             image = old;
-        } else if (modified.Extent() == 1) {
+        } else if (successors.size() == 1) {
             // UNIQUE image → auto-bind (the fillet-survives-edit path).
-            image = modified.First();
+            image = successors.front().shape;
         } else {
             // SPLIT: >1 images. EXPLICIT LINEAGE — score every image candidate
             // against the entry's frozen descriptor + anchor and gate on confidence
@@ -346,13 +379,15 @@ void ElementMapPartition::apply_history(const std::string& body_id,
             std::vector<TopoDS_Shape> imgs;
             std::vector<double> scores;
             std::vector<km::ElementDescriptor> descs;
-            for (TopTools_ListIteratorOfListOfShape it(modified); it.More(); it.Next()) {
-                const km::ElementDescriptor cd = describe(it.Value());
-                imgs.push_back(it.Value());
+            for (const HistorySuccessor& successor : successors) {
+                const km::ElementDescriptor cd = describe(successor.shape);
+                imgs.push_back(successor.shape);
                 descs.push_back(cd);
-                scores.push_back(
-                    score_candidate(e.descriptor, /*has_intent_descriptor=*/true, anchor, cd, body_diag)
-                        .score);
+                double score = score_candidate(e.descriptor, /*has_intent_descriptor=*/true,
+                                               anchor, cd, body_diag)
+                                   .score;
+                if (successor.modified) score += kModifiedHistoryConfidence;
+                scores.push_back(std::min(score, 1.0));
             }
             // best / runner-up (deterministic tie-break by list order).
             int best = 0;

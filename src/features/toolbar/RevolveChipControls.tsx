@@ -1,6 +1,6 @@
 /*
  * RevolveChipControls — the armed-revolve cluster's `⋯` overflow, holding the
- * New Body / Add / Cut / Intersect segments (UNIFY-UX Phase 2). Mirrors ExtrudeChipControls'
+ * New Body / Add / Cut segments (UNIFY-UX Phase 2). Mirrors ExtrudeChipControls'
  * `ExtrudeOverflow` / EdgeOpChipControls' `EdgeOpOverflow`: the collapsed chip
  * carries the angle and the Axis reset (both primary — Axis stays inline, only
  * the boolean mode collapses), everything else behind the button.

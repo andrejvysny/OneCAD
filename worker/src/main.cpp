@@ -27,6 +27,7 @@
 #include "io/MeshExport.h"
 #include "protocol/Dispatcher.h"
 #include "protocol/Envelope.h"
+#include "protocol/Limits.h"
 #include "protocol/SolverLane.h"
 #include "session/ElementIdentity.h"
 #include "session/FaceProjection.h"
@@ -56,9 +57,6 @@ constexpr int kProtocolVersion = 1;
 constexpr const char* kWorkerVersion = "0.1.0";
 constexpr int kQuantizationVersion = 1;
 constexpr int kSolverPolicyVersion = 1;
-// SCHEMA §6 handshake transport limits (defaults).
-constexpr std::uint64_t kChunkSize = 1048576;          // 1 MiB
-constexpr std::uint64_t kInitialBulkCredit = 8388608;  // 8 MiB
 
 // Redirect OCCT's default messenger from std::cout to std::cerr. The default
 // printer writes to std::cout, which would corrupt our stdout frame stream, so
@@ -104,7 +102,9 @@ nlohmann::json make_hello_result() {
                                                 "op.chamfer", "op.boolean", "op.importStep",
                                                 "solver.planegcs", "tessellate.mesh1", "io.step",
                                                 "io.step.import"})},
-        {"limits", {{"chunkSize", kChunkSize}, {"initialBulkCredit", kInitialBulkCredit}}},
+        {"limits",
+         {{"chunkSize", onecad::protocol::kChunkSize},
+          {"initialBulkCredit", onecad::protocol::kInitialBulkCredit}}},
     };
 }
 

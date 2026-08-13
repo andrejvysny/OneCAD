@@ -640,6 +640,7 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
                                "OffsetFace target body not found: " + target_id);
     }
     const TopoDS_Shape target_shape = target_rec->geom;
+    if (auto invalid = validate_modeling_input(target_shape, "OffsetFace", "target")) return *invalid;
     if (target_shape.IsNull()) {
         return OpOutcome::fail("REF_UNRESOLVED", "OffsetFace target body has no geometry");
     }

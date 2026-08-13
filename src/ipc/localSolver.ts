@@ -593,12 +593,12 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         const { detectRegions } = await import("./mockRegions");
         const regions = detectRegions(session.entities);
         finishedRegions.set(sketchId, regions); // cache for extrude synthesis
-        return { regionIdentityVersion: 2, regions };
+        return { regionIdentityVersion: 3, regions };
       }
       // Sessionless finish (the model-mode record guarantee): answer from the
       // cache instead of clobbering it with [] — the armed preview lane still
       // resolves its profile from finishedRegions on a re-arm.
-      return { regionIdentityVersion: 2, regions: finishedRegions.get(sketchId) ?? [] };
+      return { regionIdentityVersion: 3, regions: finishedRegions.get(sketchId) ?? [] };
     },
 
     async cancelSketch(_sketchId: string): Promise<void> {

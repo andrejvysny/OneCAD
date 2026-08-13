@@ -1024,13 +1024,28 @@ fn handle_resolve_refs<W: Write>(
                 .and_then(|p| p.get("elementId"))
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            let mut resolution = match existing {
-                Some(eid) => {
+            let mut resolution = match (existing, body_id.is_empty()) {
+                // SCHEMA §7.5: no body to enumerate candidates from. The real worker
+                // takes its missing-body branch here, and that non-promotable
+                // no-candidates shape is the ONLY resolution allowed to omit `bodyId`.
+                (_, true) => json!({
+                    "refId": ref_id,
+                    "outcome": "needsRepair",
+                    "needsRepair": {
+                        "refId": ref_id,
+                        "elementId": existing.unwrap_or(""),
+                        "ladderFailed": "descriptor",
+                        "reason": "no-candidates",
+                        "candidates": [],
+                        "uiLabel": "referenced body not found",
+                    },
+                }),
+                (Some(eid), false) => {
                     json!({ "refId": ref_id, "outcome": "unchanged", "elementId": eid, "topoKey": "f:0" })
                 }
                 // SCHEMA §7.5: `elementId` slot (empty — the stub holds no partition,
                 // so an autoBind resolves an unminted element); `topoKey` = evidence.
-                None => {
+                (None, false) => {
                     json!({ "refId": ref_id, "outcome": "autoBind", "elementId": "", "topoKey": "f:0", "score": 0.95, "margin": 0.5 })
                 }
             };

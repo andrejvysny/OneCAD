@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "caseId": "boolean.foundation.overlap-fuse",
+  "generator": {
+    "family": "boolean",
+    "name": "boolean-foundation",
+    "version": 1,
+    "seed": "0123456789abcdef"
+  },
+  "geometry": {
+    "recipe": "twoBoxes",
+    "parameters": {
+      "targetDimensions": [10, 10, 10],
+      "toolDimensions": [10, 10, 10],
+      "toolOffset": [5, 0, 0]
+    },
+    "tags": ["boolean", "overlap"]
+  },
+  "operation": {
+    "type": "boolean",
+    "definition": { "mode": "fuse" }
+  },
+  "selector": {
+    "mode": "bodyRoles",
+    "target": "target",
+    "tools": ["tool"]
+  },
+  "expectedDomain": "supported",
+  "validators": [
+    { "type": "deepAudit", "required": true },
+    { "type": "materialChange", "required": true, "direction": "increase" },
+    { "type": "manifold", "required": true },
+    { "type": "noSelfIntersection", "required": true },
+    { "type": "history", "required": true }
+  ],
+  "metamorphs": [],
+  "limits": {
+    "resources": {
+      "wallTimeMs": 10000,
+      "addressSpaceBytes": 2147483648,
+      "stdoutBytes": 1048576,
+      "stderrBytes": 1048576,
+      "artifactBytes": 67108864
+    },
+    "quality": {}
+  }
+}

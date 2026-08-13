@@ -50,6 +50,12 @@ bool read_bool_strict(const nlohmann::json& params, const char* key, bool dflt,
 kernel::validation::PublicationDecision publication_decision(
     const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy);
 
+// Mutating operations must refuse an invalid modeling input before invoking OCCT.
+// Import remains separate because its advisory/healing policy is versioned.
+std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
+                                                 const std::string& operation,
+                                                 const std::string& role);
+
 // Operation-local semantic-ref ownership preflight. The generic ladder deliberately
 // accepts refs against their own named bodies; these operations instead require
 // their typed sub-element refs to belong to one operated body. Returns §9-shaped

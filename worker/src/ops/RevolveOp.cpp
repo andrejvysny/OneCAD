@@ -322,6 +322,7 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     if (target_id.empty()) return OpOutcome::fail("OP_FAILED", "Revolve boolean requires a target body");
     const session::BodyRecord* target_rec = ctx.bodies.get(target_id);
     if (!target_rec) return OpOutcome::fail("REF_UNRESOLVED", "Revolve target body not found: " + target_id);
+    if (auto invalid = validate_modeling_input(target_rec->geom, "Revolve", "target")) return *invalid;
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
     std::shared_ptr<BRepBuilderAPI_MakeShape> builder;

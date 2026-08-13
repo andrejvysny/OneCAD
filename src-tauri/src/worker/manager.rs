@@ -65,6 +65,9 @@ use crate::dto::{BeginGestureDto, DragSolveDto, FinishSketchDto, SketchUpsertDto
 
 use super::{wire, MeshProvider, SolverEngine};
 
+#[path = "manifest.rs"]
+mod bundled_manifest;
+
 /// Lifecycle state surfaced to the app (drives the worker-status banner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {
@@ -872,6 +875,11 @@ fn fire_restart_hook(shared: &Shared, epoch: WorkerEpoch) {
 async fn spawn_and_connect(
     shared: &Shared,
 ) -> Result<(tokio::process::Child, Arc<ProtocolClient>), String> {
+    let expected = bundled_manifest::embedded_release_manifest()?;
+    if let Some(expected) = &expected {
+        bundled_manifest::verify_binary(&shared.config.binary, expected)?;
+    }
+
     let mut cmd = tokio::process::Command::new(&shared.config.binary);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -907,6 +915,9 @@ async fn spawn_and_connect(
             connected.map_err(|e| format!("handshake: {e}"))?
         }
     };
+    if let Some(expected) = &expected {
+        bundled_manifest::verify_hello(expected, client.hello())?;
+    }
     Ok((child, Arc::new(client)))
 }
 

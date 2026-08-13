@@ -7,6 +7,12 @@ import { installLogForwarder } from "./debug/logSink";
 import { startThemeController } from "./theme/themeController";
 import "./styles/globals.css";
 
+// The WDIO bridge is bundled only into the feature-built Tauri E2E artifact.
+// Ordinary dev/release builds replace this condition with false and drop it.
+if (import.meta.env.VITE_TAURI_E2E === "1") {
+  await import("@wdio/tauri-plugin");
+}
+
 // Before the first render: reconcile the attribute index.html guessed with the
 // hydrated preference, and start following the OS. Idempotent.
 startThemeController();

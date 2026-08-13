@@ -28,6 +28,13 @@ Envelope fail(std::uint64_t id, const std::string& message) {
                                     protocol::ErrorInfo{"OP_FAILED", message, /*retriable=*/false});
 }
 
+Envelope fail_read(std::uint64_t id, const std::string& message) {
+    const char* code = message.find(kAmbiguousImportOrder) != std::string::npos
+                           ? kAmbiguousImportOrder
+                           : "OP_FAILED";
+    return Envelope::error_response(id, protocol::ErrorInfo{code, message, false});
+}
+
 // Axis-aligned bounds over every solid. An empty read yields an all-zero box
 // rather than an absent field, so the result shape does not depend on the file.
 json bbox_json(const std::vector<TopoDS_Shape>& solids) {
@@ -88,7 +95,7 @@ Envelope handle_inspect_step(const Envelope& req, const onecad::CancelToken& can
         return Envelope::error_response(
             req.id, protocol::ErrorInfo{"CANCELLED", "InspectStep cancelled", /*retriable=*/false});
     }
-    if (!read.ok()) return fail(req.id, "InspectStep: " + *read.error);
+    if (!read.ok()) return fail_read(req.id, "InspectStep: " + *read.error);
 
     // The XCAF attribute pass. ADVISORY: it runs unconditionally (so `productNames`
     // does not depend on whether the caller also asked for the bytes) and a failure

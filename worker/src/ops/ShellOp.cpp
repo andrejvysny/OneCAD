@@ -66,6 +66,7 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
         return OpOutcome::fail("REF_UNRESOLVED", "Shell target body not found: " + target_id);
     }
     const TopoDS_Shape target_shape = target_rec->geom;
+    if (auto invalid = validate_modeling_input(target_shape, "Shell", "target")) return *invalid;
 
     // --- thickness guard (signed '<' per RegenerationEngine.cpp:1455) ---
     double thickness = 0.0;

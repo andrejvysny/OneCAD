@@ -212,6 +212,11 @@ struct LoopDetectorConfig {
     /// is proven equivalent to the established tessellated detector.
     bool exactAnalyticFragments = false;
 
+    /// V2 compares split parameters directly. V3 compares points in sketch
+    /// units so curve parameterization and model scale cannot merge splits.
+    CurveRefinementPolicy curveRefinementPolicy =
+        CurveRefinementPolicy::V2ParameterProximity;
+
     /// Tessellation tolerance for arcs/circles (mm)
     double tessellationTolerance = 0.05;
 

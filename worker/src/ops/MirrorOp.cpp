@@ -47,6 +47,7 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
         return OpOutcome::fail("REF_UNRESOLVED", "MirrorBody source body not found: " + source_id);
     }
     const TopoDS_Shape source = source_rec->geom;
+    if (auto invalid = validate_modeling_input(source, "MirrorBody", "source")) return *invalid;
 
     double px = 0.0, py = 0.0, pz = 0.0;
     double nx = 0.0, ny = 0.0, nz = 1.0;

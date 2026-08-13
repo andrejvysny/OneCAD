@@ -335,6 +335,12 @@ json simple_validator(const std::string &kind, const json &spec,
   if (kind == "remoteSupportsUnchanged")
     return validator(kind, required,
                      evidence.remote.first == evidence.remote.second ? "pass" : "fail");
+  if (kind == "history") {
+    const int count = adapter.history_modified_count + adapter.history_generated_count;
+    return validator(kind, required, count > 0 ? "pass" : "fail",
+                     json::array({metric("modifiedCount", adapter.history_modified_count),
+                                  metric("generatedCount", adapter.history_generated_count)}));
+  }
   if (kind == "deepAudit")
     return validator(kind, required,
                      audit_passes(request.benchmark_case, audit) ? "pass" : "fail");

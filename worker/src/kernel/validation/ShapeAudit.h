@@ -36,7 +36,17 @@ struct ShapeEvidence {
   double volume = 0.0;
   int self_interference_count = 0;
   bool self_interference_checked = false;
+  int open_edge_count = 0;
+  int non_manifold_edge_count = 0;
+  bool manifold_checked = false;
+  int micro_edge_count = 0;
+  int sliver_face_count = 0;
+  double minimum_edge_ratio = 0.0;
+  double minimum_face_ratio = 0.0;
+  double scale_diagonal = 0.0;
+  bool micro_topology_checked = false;
   ShapeTolerances tolerances;
+  double validator_duration_ms = 0.0;
   std::string error;
 
   bool publishable() const;
@@ -60,6 +70,14 @@ struct PublicationDecision {
   PublicationDisposition disposition = PublicationDisposition::Refused;
   std::string code;
   std::string message;
+  ShapeEvidence evidence;
+
+  struct Timings {
+    double build_ms = 0.0;
+    double validator_ms = 0.0;
+
+    nlohmann::json to_json() const;
+  } timings;
 
   bool publishable() const {
     return disposition == PublicationDisposition::Publishable;
@@ -67,6 +85,7 @@ struct PublicationDecision {
   bool lifecycle_only() const {
     return disposition == PublicationDisposition::LifecycleOnly;
   }
+  nlohmann::json to_json() const;
 };
 
 PublicationPolicy single_solid_policy(std::string name, PublicationTier tier);

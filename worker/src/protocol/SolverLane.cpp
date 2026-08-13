@@ -789,15 +789,19 @@ Envelope SolverLane::on_regions(const Envelope& req) {
         return err(req, "OP_FAILED", "SketchRegions: solve failed: " + detail);
     }
 
+    loop::LoopDetectorConfig detection_config = loop::makeRegionDetectionConfig();
+    detection_config.curveRefinementPolicy =
+        loop::CurveRefinementPolicy::V3PhysicalProximity;
     loop::LoopDetector detector;
-    detector.setConfig(loop::makeRegionDetectionConfig());
+    detector.setConfig(detection_config);
     const loop::LoopDetectionResult det = detector.detect(*tr.sketch);
     const auto map_edge = [&](const sk::EntityID& internalId) {
         const auto it = tr.index.internal_edge_to_wire.find(internalId);
         return it != tr.index.internal_edge_to_wire.end() ? it->second : internalId;
     };
     const loop::RegionTable table = loop::buildRegionTable(
-        det, map_edge, sk::constants::COINCIDENCE_TOLERANCE);
+        det, map_edge, sk::constants::COINCIDENCE_TOLERANCE,
+        loop::RegionIdentityVersion::V3);
     if (!table.success) {
         return err(req, "OP_FAILED", "SketchRegions: " + table.errorMessage);
     }
@@ -868,7 +872,7 @@ Envelope SolverLane::on_regions(const Envelope& req) {
     json result = {
         {"sketchId", sketch_id},
         {"sketchRevision", stored->revision},
-        {"regionIdentityVersion", 2},
+        {"regionIdentityVersion", 3},
         {"regions", std::move(regions)},
     };
     Envelope resp = Envelope::ok_response(req.id, std::move(result));

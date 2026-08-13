@@ -1,0 +1,19 @@
+{
+  "build": {
+    "beforeBuildCommand": "VITE_TAURI_E2E=1 bun run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        "default",
+        {
+          "identifier": "tauri-e2e",
+          "description": "WebdriverIO bridge for the tauri-e2e artifact only",
+          "windows": ["main"],
+          "permissions": ["wdio:default", "wdio-webdriver:default"]
+        }
+      ]
+    }
+  }
+}

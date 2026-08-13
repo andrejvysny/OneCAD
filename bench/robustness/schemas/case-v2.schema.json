@@ -81,12 +81,12 @@
       "required": ["family", "name", "version", "seed"],
       "properties": {
         "family": {
-          "description": "The operation family this case exercises. Only fillet exists today; the field is what lets chamfer/shell/boolean matrices share this schema instead of forking it.",
-          "enum": ["fillet"]
+          "description": "The operation family this case exercises.",
+          "enum": ["fillet", "boolean"]
         },
         "name": {
           "description": "The concrete generator. `fillet-foundation` reproduces the v1 recipe set; `fillet-matrix` is the expanded support-surface / topology / conditioning matrix.",
-          "enum": ["fillet-foundation", "fillet-matrix"]
+          "enum": ["fillet-foundation", "fillet-matrix", "boolean-foundation"]
         },
         "version": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "seed": {
@@ -146,6 +146,14 @@
         {
           "if": { "properties": { "recipe": { "const": "valenceCorner" } } },
           "then": { "properties": { "parameters": { "required": ["valence"] } } }
+        },
+        {
+          "if": { "properties": { "recipe": { "const": "twoBoxes" } } },
+          "then": {
+            "properties": {
+              "parameters": { "$ref": "#/$defs/twoBoxesParameters" }
+            }
+          }
         }
       ]
     },
@@ -167,7 +175,8 @@
         "nearSeamEdge",
         "faceNearlyConsumed",
         "faceFullyConsumed",
-        "blendCollision"
+        "blendCollision",
+        "twoBoxes"
       ]
     },
 
@@ -215,7 +224,41 @@
         "separation": {
           "description": "Distance between two blends that are meant to collide (or not).",
           "$ref": "#/$defs/nonNegativeNumber"
-        }
+        },
+        "targetDimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/positiveNumber" }
+        },
+        "toolDimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/positiveNumber" }
+        },
+        "toolOffset": { "$ref": "#/$defs/vector3" }
+      }
+    },
+
+    "twoBoxesParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetDimensions", "toolDimensions", "toolOffset"],
+      "properties": {
+        "targetDimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/positiveNumber" }
+        },
+        "toolDimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/positiveNumber" }
+        },
+        "toolOffset": { "$ref": "#/$defs/vector3" }
       }
     },
 
@@ -265,12 +308,34 @@
     "convexity": { "enum": ["convex", "concave", "mixed"] },
 
     "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "definition"],
+          "properties": {
+            "type": { "const": "fillet" },
+            "definition": { "$ref": "#/$defs/filletDefinition" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "definition"],
+          "properties": {
+            "type": { "const": "boolean" },
+            "definition": { "$ref": "#/$defs/booleanDefinition" }
+          }
+        }
+      ]
+    },
+
+    "booleanDefinition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "definition"],
+      "required": ["mode"],
       "properties": {
-        "type": { "const": "fillet" },
-        "definition": { "$ref": "#/$defs/filletDefinition" }
+        "mode": { "enum": ["fuse", "cut", "common"] }
       }
     },
 
@@ -342,6 +407,30 @@
     },
 
     "selector": {
+      "oneOf": [
+        { "$ref": "#/$defs/edgeSelector" },
+        { "$ref": "#/$defs/bodyRoleSelector" }
+      ]
+    },
+
+    "bodyRoleSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "target", "tools"],
+      "properties": {
+        "mode": { "const": "bodyRoles" },
+        "target": { "const": "target" },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [{ "const": "tool" }],
+          "items": false
+        }
+      }
+    },
+
+    "edgeSelector": {
       "type": "object",
       "additionalProperties": false,
       "required": ["mode", "topologyRole", "provenance", "anchors", "surfaceDescriptors", "adjacency"],
@@ -536,7 +625,8 @@
             "noSelfIntersection",
             "manifold",
             "toleranceGrowth",
-            "microTopology"
+            "microTopology",
+            "history"
           ]
         },
         "required": { "type": "boolean" },

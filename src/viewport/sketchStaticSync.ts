@@ -223,7 +223,7 @@ export class SketchStaticSync {
     try {
       finish = await client.getSketchRegions(id);
     } catch {
-      finish = { regionIdentityVersion: 2, regions: [] };
+      finish = { regionIdentityVersion: 3, regions: [] };
       regionsAreAuthoritative = false;
       if (this.fetchSeq.get(id) === token) {
         this.regionRetry.add(id);
