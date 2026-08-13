@@ -22,6 +22,7 @@ import { configureAuthoringController } from "@/modules/library/authoringControl
 import { cancelAttachmentPick } from "@/modules/library/attachmentPicker";
 
 const saveAsComponent = vi.fn();
+const listVariables = vi.fn();
 const classifyElement = vi.fn();
 const engine = vi.hoisted(() => ({
   probePick: vi.fn(),
@@ -29,7 +30,10 @@ const engine = vi.hoisted(() => ({
 }));
 
 vi.mock("@/ipc/client", () => ({
-  createClient: () => ({ saveAsComponent: (...args: unknown[]) => saveAsComponent(...args) }),
+  createClient: () => ({
+    saveAsComponent: (...args: unknown[]) => saveAsComponent(...args),
+    listVariables: () => listVariables(),
+  }),
 }));
 vi.mock("@/viewport/engineBridge", () => ({
   getViewportEngine: () => ({
@@ -123,6 +127,8 @@ describe("SaveAsComponentDialog", () => {
     saveAsComponent.mockImplementation((_body: string, spec: NewComponentSpec) =>
       Promise.resolve(saved(spec)),
     );
+    listVariables.mockReset();
+    listVariables.mockResolvedValue([]);
     classifyElement.mockReset();
     engine.probePick.mockReset();
     engine.setOrbitSuppressed.mockReset();
@@ -203,6 +209,77 @@ describe("SaveAsComponentDialog", () => {
 });
 
 /*
+ * Free parameters (WP-F1.3). The whole point is the BINDING: a checked row must
+ * travel as `{ key: <variable name>, value: <current> }`, because the re-bake
+ * lane sets a variable by name — a parameter that named nothing would be an
+ * edit `setComponentParams` could never honour.
+ */
+describe("SaveAsComponentDialog parameters", () => {
+  beforeEach(() => {
+    saveAsComponent.mockReset();
+    saveAsComponent.mockImplementation((_body: string, spec: NewComponentSpec) =>
+      Promise.resolve(saved(spec)),
+    );
+    listVariables.mockReset();
+    listVariables.mockResolvedValue([
+      { id: "var_1", name: "depth", value: 10 },
+      { id: "var_2", name: "width", value: 20 },
+    ]);
+    classifyElement.mockReset();
+    configureAuthoringController({ geometryQuery: { classifyElement } });
+  });
+
+  afterEach(() => {
+    cancelAttachmentPick();
+    configureAuthoringController(null);
+  });
+
+  it("lists the document's variables, one row each", async () => {
+    render(<SaveAsComponentDialog bodyId="body_1" bodyName="Plate" onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("save-as-component-parameter-row")).toHaveLength(2),
+    );
+    expect(screen.getByLabelText("Expose depth")).not.toBeChecked();
+    expect(screen.queryByTestId("save-as-component-no-variables")).toBeNull();
+  });
+
+  it("sends only the checked variables, bound by name to their current value", async () => {
+    render(<SaveAsComponentDialog bodyId="body_1" bodyName="Plate" onClose={() => {}} />);
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(screen.getByLabelText("Expose depth")).toBeInTheDocument());
+    await user.click(screen.getByLabelText("Expose depth"));
+    await user.click(screen.getByTestId("save-as-component-commit"));
+
+    await waitFor(() => expect(saveAsComponent).toHaveBeenCalledTimes(1));
+    expect(saveAsComponent.mock.calls[0][1].parameters).toEqual({
+      depth: { key: "depth", value: 10 },
+    });
+  });
+
+  it("declares nothing when the author checks nothing — the pre-WP-F1.3 package", async () => {
+    render(<SaveAsComponentDialog bodyId="body_1" bodyName="Plate" onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Expose depth")).toBeInTheDocument());
+    await userEvent.setup().click(screen.getByTestId("save-as-component-commit"));
+
+    await waitFor(() => expect(saveAsComponent).toHaveBeenCalledTimes(1));
+    expect(saveAsComponent.mock.calls[0][1].parameters).toEqual({});
+  });
+
+  it("says so, rather than showing an empty table, when the document has no variables", async () => {
+    listVariables.mockResolvedValue([]);
+    render(<SaveAsComponentDialog bodyId="body_1" bodyName="Plate" onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("save-as-component-no-variables")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("save-as-component-parameters")).toBeNull();
+  });
+});
+
+/*
  * Attachment picking (WP-F1.2). The interesting property is that a pick becomes
  * a FRAME, not just a label: the placement solver seats a component by its
  * attachment frame, so a row without one would place at the model origin no
@@ -214,6 +291,8 @@ describe("SaveAsComponentDialog attachment picking", () => {
     saveAsComponent.mockImplementation((_body: string, spec: NewComponentSpec) =>
       Promise.resolve(saved(spec)),
     );
+    listVariables.mockReset();
+    listVariables.mockResolvedValue([]);
     classifyElement.mockReset();
     engine.probePick.mockReset();
     engine.setOrbitSuppressed.mockReset();

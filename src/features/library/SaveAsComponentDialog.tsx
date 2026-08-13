@@ -21,12 +21,19 @@
  * components — need a solid-picking UI that does not exist yet, and the offer
  * says so rather than pretending they are unavailable for a deeper reason.
  *
+ * PARAMETERS ARE THE DOCUMENT'S VARIABLES (WP-F1.3). Each checked variable
+ * becomes a `role: "free"` parameter bound to that variable by name; editing it
+ * on a placed instance replays this document with the new value and re-bakes.
+ * Only variables can be offered: a re-bake sets variables, so a parameter with
+ * nothing to set would be an edit that cannot be honoured. A document with no
+ * variables therefore offers nothing, and a component with nothing checked
+ * behaves exactly as every pre-WP-F1.3 authored package.
+ *
  * WHAT THIS DIALOG STILL DELIBERATELY DOES NOT DO:
  *
- * - **No parameter roles.** A `document`-kind package has geometry baked at
- *   authoring time, and `setComponentParams` already refuses to edit one (there
- *   is no re-bake lane). Declaring free params here would offer an edit that
- *   cannot be honoured.
+ * - **No `role: "table"`/`"computed"` parameters, no domains, no min/snap.**
+ *   Those describe a catalog part driven by a dimension table, which authoring
+ *   from a document does not produce.
  *
  * Recorded in TODO.md as the follow-up, not hidden here.
  */
@@ -35,7 +42,13 @@ import { createPortal } from "react-dom";
 import { Button } from "@/ui/Button";
 import { TextInput } from "@/ui/TextInput";
 import { createClient } from "@/ipc/client";
-import type { LibraryAttachment, LibraryAttachmentFrame, NewComponentSpec } from "@/ipc/types";
+import type {
+  DocumentVariable,
+  LibraryAttachment,
+  LibraryAttachmentFrame,
+  NewComponentParameter,
+  NewComponentSpec,
+} from "@/ipc/types";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { viewportStore } from "@/stores/viewportStore";
 import {
@@ -124,6 +137,8 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<AttachmentRow[]>([]);
+  const [variables, setVariables] = useState<DocumentVariable[]>([]);
+  const [exposed, setExposed] = useState<ReadonlySet<string>>(new Set());
   const [picking, setPicking] = useState(false);
   const [pickHint, setPickHint] = useState<string | null>(null);
   // The multi-solid refusal is the ONE backend failure with a repair the dialog
@@ -143,11 +158,32 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
     setTags("");
     setError(null);
     setRows([]);
+    setExposed(new Set());
     setOfferUnion(false);
     idTouched.current = false;
     nameInput.current?.focus();
     nameInput.current?.select();
   }, [bodyId, bodyName]);
+
+  // The document's variables are the ONLY things a saved component can expose
+  // as free parameters (a re-bake sets variables). Read once per open; a
+  // failure leaves the list empty, which degrades to the pre-WP-F1.3 dialog
+  // rather than blocking the save.
+  useEffect(() => {
+    if (!bodyId) return;
+    let alive = true;
+    void createClient()
+      .listVariables()
+      .then((vars) => {
+        if (alive) setVariables(vars);
+      })
+      .catch(() => {
+        if (alive) setVariables([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [bodyId]);
 
   // Pick mode must not outlive the dialog — an armed picker with nowhere to
   // deliver would keep swallowing viewport clicks.
@@ -222,6 +258,30 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
     return table;
   };
 
+  /**
+   * The `[parameters]` table this save writes: one `role: "free"` entry per
+   * checked variable, keyed BY THE VARIABLE NAME so a designation template
+   * (`"{depth} deep"`) and the binding read the same word. `value` freezes the
+   * variable's current number as the package default — which is what the frozen
+   * document itself builds, so an instance that overrides nothing resolves to
+   * exactly the baked solid.
+   */
+  const parameterTable = (): Record<string, NewComponentParameter> => {
+    const table: Record<string, NewComponentParameter> = {};
+    for (const v of variables) {
+      if (exposed.has(v.name)) table[v.name] = { key: v.name, value: v.value };
+    }
+    return table;
+  };
+
+  const toggleExposed = (name: string) =>
+    setExposed((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
   const commit = async (unionSolids: boolean) => {
     if (!canCommit) return;
     stopPicking();
@@ -238,6 +298,7 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
         .map((t) => t.trim())
         .filter(Boolean),
       attachments: attachmentTable(),
+      parameters: parameterTable(),
     };
     try {
       const saved = await createClient().saveAsComponent(
@@ -430,6 +491,39 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
               ? "Attachment names must be unique — a mate is recorded by name."
               : "An attachment name uses lowercase letters, digits, - and _."}
           </div>
+        )}
+
+        <div className="mt-4 text-[11.5px] text-ink-5">Parameters</div>
+        {variables.length === 0 ? (
+          <div className="mt-1 text-[11.5px] text-ink-5" data-testid="save-as-component-no-variables">
+            This document has no variables — nothing to expose. Add one in the Variables section to
+            make a size editable on placed copies.
+          </div>
+        ) : (
+          <ul className="mt-1 flex flex-col gap-1" data-testid="save-as-component-parameters">
+            {variables.map((v) => (
+              <li
+                key={v.name}
+                className="flex items-center gap-2 rounded border border-border-subtle bg-well px-2 py-1"
+                data-testid="save-as-component-parameter-row"
+              >
+                <input
+                  type="checkbox"
+                  id={`sac-param-${v.name}`}
+                  aria-label={`Expose ${v.name}`}
+                  checked={exposed.has(v.name)}
+                  onChange={() => toggleExposed(v.name)}
+                />
+                <label
+                  htmlFor={`sac-param-${v.name}`}
+                  className="min-w-0 flex-1 truncate text-[11.5px] text-ink-2"
+                >
+                  {v.name}
+                </label>
+                <span className="text-[11px] text-ink-5">{v.value}</span>
+              </li>
+            ))}
+          </ul>
         )}
 
         {error && (

@@ -885,6 +885,7 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
             )]
             .into_iter()
             .collect(),
+            parameters: Default::default(),
         },
         None,
         false,
@@ -1033,6 +1034,7 @@ async fn a_multi_solid_body_is_refused_and_the_union_opt_in_saves_it() {
         tags: vec![],
         designation: None,
         attachments: Default::default(),
+        parameters: Default::default(),
     };
 
     let refused = onecad_lib::library::save_as_component_at(

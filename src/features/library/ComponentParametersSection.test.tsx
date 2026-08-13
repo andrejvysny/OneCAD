@@ -213,3 +213,76 @@ describe("upgrade and replace", () => {
     expect(screen.queryByTestId("component-replace-pick")).toBeNull();
   });
 });
+
+/*
+ * A `document`-source component (WP-F1.3). Its free params are indistinguishable
+ * from a generator's HERE — the section keys on `role`, never on `sourceKind` —
+ * and that is the property under test: the re-bake happens behind
+ * `setComponentParams`, so the configurator needs no source-kind branch at all.
+ *
+ * The one thing that IS different is where the default lives: a document param
+ * spells the SOURCE VARIABLE NAME in `key` and the number in `value`, so a
+ * `key`-first read would show the field as the literal word "depth".
+ */
+describe("ComponentParametersSection over a document-source component", () => {
+  const BRACKET: LibraryComponent = {
+    id: "mine.bracket",
+    version: "1.0.0",
+    name: "Bracket",
+    category: ["mine"],
+    tags: [],
+    sourceKind: "document",
+    revision: `sha256:${"c".repeat(64)}`,
+    attachments: {},
+    parameters: {
+      depth: { role: "free", key: "depth", value: 10 },
+    },
+    designation: "Bracket {depth} deep",
+  };
+
+  function selectBracket(overrideParams: Record<string, unknown> = {}) {
+    documentStore.setState({
+      features: [
+        {
+          id: "comp1",
+          kind: "boolean",
+          opType: "PlaceComponent",
+          label: "Place Component",
+          valueText: "",
+          status: "ok",
+        },
+      ],
+    });
+    selectionStore.getState().set([{ kind: "feature", id: "comp1" }]);
+    getOperationParams.mockResolvedValue({
+      componentId: BRACKET.id,
+      componentVersion: BRACKET.version,
+      params: overrideParams,
+    });
+    listLibraryComponents.mockResolvedValue([BRACKET]);
+    componentUpgradeAvailable.mockResolvedValue(null);
+  }
+
+  it("edits a variable-bound free param exactly like a generator's", async () => {
+    selectBracket();
+    render(<ComponentParametersSection />);
+
+    // The NUMBER, not the variable name the binding spells in `key`.
+    await waitFor(() => expect(screen.getByLabelText("depth value")).toHaveValue(10));
+    expect(screen.getByText("Bracket 10 deep")).toBeInTheDocument();
+
+    const field = screen.getByLabelText("depth value");
+    fireEvent.change(field, { target: { value: "25" } });
+    fireEvent.blur(field);
+
+    await waitFor(() => expect(setComponentParams).toHaveBeenCalledTimes(1));
+    expect(setComponentParams).toHaveBeenCalledWith("comp1", { depth: 25 });
+  });
+
+  it("seeds from the instance's stored override, not the package default", async () => {
+    selectBracket({ depth: 25 });
+    render(<ComponentParametersSection />);
+    await waitFor(() => expect(screen.getByLabelText("depth value")).toHaveValue(25));
+    expect(screen.getByText("Bracket 25 deep")).toBeInTheDocument();
+  });
+});

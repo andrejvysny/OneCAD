@@ -2915,7 +2915,16 @@ export const mockClient: CadClient = {
       sourceKind: "document",
       revision: `sha256:${"a".repeat(64)}`,
       attachments: spec.attachments,
-      parameters: {},
+      // Declared free params ride through so the configurator is exercisable on
+      // this lane too (WP-F1.3). Editing one still changes no geometry here —
+      // there is no worker to re-bake with — which is the same honesty the bake
+      // itself keeps above.
+      parameters: Object.fromEntries(
+        Object.entries(spec.parameters ?? {}).map(([name, p]) => [
+          name,
+          { role: "free" as const, key: p.key, value: p.value },
+        ]),
+      ),
       designation: spec.designation,
     };
     mockAuthored.push(authored);

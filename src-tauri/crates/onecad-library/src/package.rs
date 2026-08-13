@@ -135,6 +135,42 @@ pub struct ParameterSpec {
     pub from: Option<String>,
 }
 
+impl ParameterSpec {
+    /// A `role = "free"` parameter of a `document` package, bound to a NAMED
+    /// VARIABLE of that package's frozen source document (WP-F1.3).
+    ///
+    /// `key` carries the variable name and `value` the variable's value at
+    /// authoring time — the package's declared default, and the number the
+    /// frozen document already builds, so an instance that overrides nothing
+    /// resolves to exactly the baked solid.
+    ///
+    /// Constructed here rather than in the app crate so `toml::Value` stays an
+    /// implementation detail of the package format (the app crate does not
+    /// depend on `toml`).
+    #[must_use]
+    pub fn free_variable(variable: &str, value: f64) -> Self {
+        Self {
+            role: ParameterRole::Free,
+            key: Some(variable.to_string()),
+            value: Some(toml::Value::Float(value)),
+            domain: None,
+            snap: None,
+            min: None,
+            from: None,
+        }
+    }
+
+    /// This spec's declared default as a number, when it has one.
+    #[must_use]
+    pub fn number(&self) -> Option<f64> {
+        match self.value.as_ref()? {
+            toml::Value::Float(f) => Some(*f),
+            toml::Value::Integer(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ParameterRole {

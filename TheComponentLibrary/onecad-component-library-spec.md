@@ -374,8 +374,17 @@ this section ratifies them so the spec and the code agree.
    from their baked blob at regen (never a nested document replay — the
    worker is one-session-per-process, and §4 requires rendering with the
    library deleted). Consequence: a `document` package with no baked
-   geometry is refused, and `document`-source params are not editable until
-   a re-bake lane exists.
+   geometry is refused.
+
+   **Amended by WP-F1.3 (2026-08-13):** `document`-source params ARE now
+   editable. `setComponentParams` replays the frozen source on its OWN
+   ephemeral worker (a second process, so the open document's session is
+   untouched), re-bakes, and swaps the instance's blob — the regen path is
+   unchanged and still reads only the cached solid. The authoring dialog
+   declares free params from the document's VARIABLES. Two limits stand: the
+   source document must build exactly one body (a re-bake never fuses — see
+   §9), and a package baked with `unionSolids` cannot be re-baked, because
+   nothing records that choice.
 
 4. **§2.1 `[attachments]` frames — components seat at their model origin.**
    Nothing on the wire carries an attachment's local frame yet; the

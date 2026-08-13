@@ -54,15 +54,25 @@ export function formatDesignation(
   );
 }
 
-/** The current value for a `role: "free"` param: an override, else the package's own default. */
+/**
+ * The current value for a `role: "free"` param: an override, else the package's
+ * own default.
+ *
+ * `value` wins over `key` because the two mean different things in the two
+ * package kinds a free param can come from: a generator's string-domain param
+ * spells its default in `key` (`thread = { key = "M6" }`, spec §2.1) while a
+ * `document` package's param puts the SOURCE VARIABLE NAME there and the number
+ * in `value` (WP-F1.3). Reading `key` first would show a document param's
+ * default as the literal variable name. No package declares both.
+ */
 function currentValue(
   spec: ComponentParameterSpec,
   stored: Record<string, ComponentParamValue>,
   key: string,
 ): ComponentParamValue | undefined {
   if (key in stored) return stored[key];
-  if (spec.key !== undefined) return spec.key;
-  return spec.value;
+  if (spec.value !== undefined) return spec.value;
+  return spec.key;
 }
 
 /** `"<id>@<version>"` — the catalog key the replace picker selects by. */

@@ -1,4 +1,38 @@
-## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 17, HARDENING WP-H0…H4)
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 17, PROGRAM COMPLETE)
+
+Session 17 closed the Component Library program (spec §12) end-to-end. After
+the hardening below, the finishing waves landed, each gate-green:
+
+- **WP-F2a/b** — ISO 15 bearings + NEMA 17/23 generators (self-authored
+  tables, 10 seeded packages) and 3 seeded starter templates (Blank,
+  3D-Printed Part with a real Build-plate datum, NEMA 17 Mount with a real
+  PlaceComponent record).
+- **WP-F1.1** — attachment local frames end-to-end (`[attachments].frame` →
+  frozen `mate.selfFrame` → `S ∘ F⁻¹` in both solvers, verbatim parity).
+- **WP-F1.2** — authoring UI: viewport attachment picking (frame origin =
+  clicked point) + union-at-bake on the MULTI_SOLID_BODY refusal.
+- **WP-F3** — free-space ghost follow/drop; mock lane measures real cylinder
+  classification (auto-size finally e2e-covered); mock catalog/template
+  parity.
+- **WP-VE.1** — variables actually drive geometry: `Scalar.expr` substituted
+  on the regen mirror before the planner hash; loud per-step failure on a
+  missing/unsupported binding; no-expr documents hash byte-identically.
+  (Found blocked-honest by the F1.3 agent: expr was storage-only in every
+  layer; proven with kernel volumes before building.)
+- **WP-VE.2** — variables surface: list/upsert/remove commands, Variables
+  inspector section (hosted in the empty state), `=name` binding in
+  Scalar-backed fields rendering only backend-recorded `primaryExpr`.
+- **WP-F1.3** — the re-bake lane: document-source components declare free
+  params mapped to source variables; `setComponentParams` replays the frozen
+  source on an EPHEMERAL worker (Drop-guarded, never touches the open
+  session), requires exactly one solid, re-bakes the blob, updates the same
+  RecordId. Proven: depth 10→20 moves the placed body 4000→8000 mm³ and
+  survives reopen with the library deleted.
+
+Known deferrals (recorded in TODO.md): WP-VE.2b (Hole binding), WP-VE.3
+(sketch-dim variables), re-bake one-body/union limits, P4 registry.
+
+## COMPONENT LIBRARY — session 17 hardening (WP-H0…H4)
 
 Session 17 (this one): full-branch review + hardening. `master` (39f5839)
 merged as `f242712` — the earlier in-tree resolution had dropped all four

@@ -1,5 +1,126 @@
 # OneCAD-Tauri Migration TODO
 
+## WP-F1.3 (2026-08-13) — GATE PASSED · **Component Library program COMPLETE**
+
+**A component authored from a document is PARAMETRIC.** Its free parameters are
+the source document's VARIABLES, and `setComponentParams` on a placed instance
+replays the frozen source with the new values, re-bakes, and swaps the
+instance's solid. This was the last hole in spec §12's definition of done and
+the last ratified deviation (§13.3 #3, now amended in the spec): before this a
+`document`-source placement carried baked geometry with nothing editable.
+
+The two blockers are gone — WP-VE.1 made `Scalar.expr` drive regen, WP-VE.2
+exposed the variable table — so this WP is the join.
+
+- [x] **Authoring declares free params** (`SaveAsComponentDialog` "Parameters"
+  section + `NewComponentSpec.parameters`). `listVariables()` rows with
+  checkboxes; a checked variable becomes `[parameters].<name> = { role = "free",
+  key = "<variable>", value = <current> }`. Only VARIABLES are offered, because a
+  re-bake sets variables — anything else would be an edit that cannot be
+  honoured. `save_as_component_at` REFUSES a parameter naming a variable the
+  document does not declare, at authoring time where the author can fix it (the
+  same discipline as the single-solid rule). No variables / nothing checked ⇒ an
+  empty table and byte-identical behaviour to every pre-WP-F1.3 package.
+- [x] **`ParameterSpec::free_variable` lives in `onecad-library`**, not the app
+  crate, so `toml::Value` stays an implementation detail of the package format
+  (the app crate has no `toml` dependency and does not gain one).
+- [x] **The re-bake lane** (`library.rs`, replacing the Document refusal arm).
+  In order: `check_free_params` (role=free, existing) → `variable_overrides`
+  (each param's `key` IS the variable name; a free param with NO `key` is refused
+  BY NAME — guessing "the same-named variable" is the mis-bind spec §0 invariant
+  4 forbids) → `frozen_source_document` (revision-verified through
+  `resolve_source`, PLUS a direct check that the package's `source.onecad` still
+  hashes to what the instance recorded) → replay → export → stage.
+- [x] **The ephemeral worker is the design.** The worker is one session per
+  process, so replaying a second document needs a second process; running it on
+  the open document's worker would trample the session the user is editing. So:
+  `WorkerManager::spawn(SupervisorConfig::production(resolve_worker_path()))`,
+  wrapped in an `EphemeralWorker(WorkerManager)` guard whose `Drop` calls
+  `retire()` — the reason it is a guard and not a call at the end of the happy
+  path is that EVERY `?` in between must also tear it down. It is never installed
+  in `AppState`'s `live`/`warm` slots, gets no restart hook and no status
+  forwarder, and never bumps the open document's epoch: the open session, its
+  fencing tokens and its epoch never see it. The scratch `DocumentRuntime` opens
+  the frozen bytes from a per-call temp dir (swept on every path, error included),
+  applies one `EditCommand::SetVariable` per override, regens `ToEnd { from: 0 }`,
+  and is dropped with the worker. **No lock is held across any of it** — the
+  runtime lock is taken only to read the record before, and to stage+apply after.
+- [x] **Exactly one solid, never a silent fuse.** The replay must yield exactly
+  one body AND `ExportGeometry` exactly one solid; more is a loud refusal naming
+  the count. The author already answered the multi-solid question at save time
+  (`unionSolids`); re-deciding it here would change what the component IS behind
+  their back.
+- [x] **One undoable edit at the SAME `RecordId`.** `stage_blob_and_apply` puts
+  the re-baked blob in the carrier and applies `UpdateOperationParams` under ONE
+  runtime lock (the `add_import_record` discipline: no regen may see a record
+  naming a blob that is not yet staged). The instance keeps its recorded
+  component revision — the package did not change. `source.sha256` moves, which
+  is what makes the step dirty and the geometry actually rebuild.
+- [x] **A missing/changed package refuses the EDIT, never the document.** The
+  typed `LibraryError` (`NotFound` / `RevisionMismatch`) travels out unchanged;
+  the instance's cached blob is authoritative, so it keeps rendering exactly what
+  it had. Proven by test, including the volume after the refusal.
+- [x] **Configurator needed no source-kind branch** — it already keys on
+  `role === "free"` (WP-B4). One real bug fixed: `currentValue` read `spec.key`
+  before `spec.value`, which is right for a generator (`thread = { key = "M6" }`)
+  and WRONG for a document param, whose `key` is the variable NAME — the field
+  would have shown the literal word `depth`. `value` now wins; no package
+  declares both.
+- [x] **Catalog preview stopped refusing.** `component_preview_mesh_at` dropped
+  free params for a blob-backed source into `source_with_free_params`, which
+  refuses them — fine while a `document` package declared none, an error on a
+  thumbnail now that it can. Params are applied only for a `generator` (the only
+  kind whose geometry they select); a blob-backed component previews the solid
+  its package carries.
+- [x] **`place_component_at` / `set_component_params_at` / `reindex_library_at` /
+  `list_library_components_at` are now `pub`** — the `save_as_component_at`
+  precedent, so the worker-backed test drives the REAL command cores through
+  `tauri::test::mock_app` instead of re-deriving them.
+- [x] **SCHEMA: no wire change, verified.** `ExportGeometry` (§7.8),
+  `PlaceComponent.source` (§7.3) and the blob-staging path all pre-exist;
+  `SetVariable` is an `EditCommand`, not a wire op. `source.params` on a
+  `document` kind was already an optional field the worker ignores — it is now
+  non-empty. §7.3 gains one CLARIFYING sentence saying so (documentation of
+  existing behaviour, no shape change ⇒ no fixture bump, no §14 entry).
+  `record.rs`'s "empty in this build" doc comments were stale and are corrected.
+
+**Gate:** ctest 124/124 green · `cargo fmt --check` clean · `cargo clippy
+--workspace --all-targets -D warnings` clean · `cargo test --workspace
+--no-fail-fast` 81 targets green (`ONECAD_REQUIRE_WORKER=1`), incl. the new
+`tests/component_rebake.rs` 3/3 · `tsc --noEmit` clean · vitest 264 files / 4348
+tests green (+6) · hex gate empty.
+
+**New worker-backed proof** (`src-tauri/tests/component_rebake.rs`): author
+`depth = 10` driving a 20×20 extrude (4000 mm³) → save as a component with
+`depth` free → place → `setComponentParams depth = 20` → the PLACED body is
+8000 mm³ by `QueryMassProperties` → save, **delete the library**, reopen on a
+FRESH worker → still 8000. Plus: a deleted package refuses the edit and leaves
+4000 mm³ standing; a two-body source document refuses the re-bake.
+
+### The Component Library program (spec §12) is COMPLETE
+
+Everything in the definition of done ships: browse/search, drag-snap onto a hole
+with auto-size, one undoable node, in-place parameter edit (now for authored
+components too), save/close/reopen with the library deleted and geometry intact,
+mate re-seating, authoring one's own snapping component, and project templates.
+
+**Known deferrals — none of them block the definition of done:**
+- **A re-bakeable source document must build exactly ONE body**, and a package
+  baked with `unionSolids` cannot be re-baked at all (nothing records that
+  choice). Both are loud refusals at the first edit, never a wrong solid. Fixing
+  either means recording the baked body / the fuse choice in `component.toml`,
+  i.e. a package-format change.
+- **WP-VE.2b** — bindings through the model TOOLS (Hole first): its re-edit
+  rebuilds every `HoleParams` scalar from the FSM, so binding one field today
+  would silently discard a binding on another.
+- **WP-VE.3** — sketch dimensions cannot be variable-bound: they are solver
+  values, not `Scalar`s, and need a document-variable → constraint-value lane.
+- **P4 registry** — the shared/remote component registry (spec §11) is not built;
+  the library is a local folder.
+- A `document` component's CATALOG preview shows the package as authored, not a
+  placed instance's re-baked geometry (a preview re-bake would pay a worker per
+  thumbnail). The viewport shows the instance, which is where it matters.
+
 ## WP-VE.2 (2026-08-13) — GATE PASSED
 
 **Users can author variables and bind op params to them.** WP-VE.1 made

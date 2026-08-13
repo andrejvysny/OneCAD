@@ -527,6 +527,25 @@ export interface NewComponentSpec {
   designation?: string;
   /** `[attachments]` — named mate points, `{ on, accepts }` per key. */
   attachments: Record<string, LibraryAttachment>;
+  /**
+   * `[parameters]` — the `role: "free"` parameters this component exposes,
+   * each bound to a document VARIABLE (WP-F1.3). Editing one on a placed
+   * instance re-bakes the frozen source document with the new value. Absent or
+   * empty ⇒ a component with no editable size.
+   */
+  parameters?: Record<string, NewComponentParameter>;
+}
+
+/**
+ * One declared free parameter of an authored component (Rust
+ * `FreeParameterInput`). Numeric only — a document variable is a number, so
+ * there is nothing else a re-bake could set.
+ */
+export interface NewComponentParameter {
+  /** The source document's variable name this parameter drives. */
+  key: string;
+  /** The variable's value at authoring time — the package's declared default. */
+  value: number;
 }
 
 /**

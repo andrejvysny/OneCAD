@@ -1543,6 +1543,11 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
     EMPTY path so only THAT step fails" rule, as `ImportStep` (§7.3). `codec` /
     `brepFormat` carry the identical meaning and the identical
     version-pin refusal.
+    A `document` source may also carry `params` — the free-parameter values its
+    blob was RE-BAKED at (WP-F1.3, spec §3.2). They are provenance and UI state,
+    never a regen input: the geometry they produced is already in `sha256`, the
+    re-bake happens Rust-side on its own worker, and this worker ignores them
+    exactly as it always has.
   - The two blob kinds are read by the SAME reader and differ only in the
     record's provenance fields; both must resolve to **exactly one solid**
     (spec §9), and a blob carrying more is refused rather than reduced.

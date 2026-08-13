@@ -29,6 +29,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -42,18 +44,23 @@ use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{CommandOutcome, EditCommand};
 use onecad_core::ids::{BodyId, ElementId, RecordId, TopoKey};
 use onecad_core::math::Vec3;
+use onecad_core::regen::{CancelToken, GeometryEngine, Outcome, RegenRequest};
 
 use onecad_library::index::LibraryIndex;
 use onecad_library::package::{self, ComponentPackage, ParameterRole, COMPONENT_MANIFEST_FILE};
 use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
 use onecad_library::Library;
 
+use crate::document_runtime::DocumentRuntime;
 use crate::dto::{
     ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, PlaceComponentMateInput,
     ProjectTemplateDto, ReindexReportDto, ReplaceComponentReportDto,
 };
 use crate::error::ApiError;
+use crate::export::GeometryExporter;
 use crate::state::AppState;
+use crate::worker::manager::SupervisorConfig;
+use crate::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
 /// `ONECAD_LIBRARY_ROOT`, else `<app_data_dir>/library`; `None` only when
 /// neither resolves (a headless/permission-denied environment — mirrors
@@ -102,7 +109,7 @@ fn index_entries_at(index: &LibraryIndex) -> Vec<LibraryComponentDto> {
 /// producer). A library that has never been indexed reads as empty, not an
 /// error (`Library::open` on a not-yet-existing root already degrades this
 /// way).
-fn list_library_components_at(root: &Path) -> Result<Vec<LibraryComponentDto>, ApiError> {
+pub fn list_library_components_at(root: &Path) -> Result<Vec<LibraryComponentDto>, ApiError> {
     Ok(index_entries_at(open_at(root)?.index()))
 }
 
@@ -154,7 +161,7 @@ pub(crate) fn seed_and_reindex_at(root: &Path) {
 }
 
 /// Rebuilds the library index from packages on disk (spec §4 `reindex`).
-fn reindex_library_at(root: &Path) -> Result<ReindexReportDto, ApiError> {
+pub fn reindex_library_at(root: &Path) -> Result<ReindexReportDto, ApiError> {
     let mut library = open_at(root)?;
     let report = library.reindex()?;
     Ok(ReindexReportDto {
@@ -339,10 +346,14 @@ fn attachment_frame(package: &ComponentPackage, attachment: &str) -> Option<Mate
     })
 }
 
+/// The testable core of [`place_component`] — `pub` for the same reason
+/// [`save_as_component_at`] is: a worker-backed integration test drives the real
+/// command logic rather than re-deriving it (`tauri::test::mock_app` supplies
+/// the `State`, which the `#[tauri::command]` wrapper's `AppHandle` cannot be).
 // One arg per spec §3.1 field the gesture carries — grouping them into an ad-hoc
 // struct would just rename the problem (same precedent as `regen/executor.rs`).
 #[allow(clippy::too_many_arguments)]
-async fn place_component_at(
+pub async fn place_component_at(
     root: &Path,
     state: &State<'_, AppState>,
     component_id: String,
@@ -460,8 +471,12 @@ fn check_free_params(
 /// params on every regen, which is exactly what makes a size editable. A
 /// blob-backed source carries geometry BAKED at authoring time, so recording
 /// params against it would show one designation over unrelated geometry: the
-/// silent substitution spec §0 invariant 4 forbids. Refused loudly instead,
-/// the same answer `set_component_params_at` gives for the same reason.
+/// silent substitution spec §0 invariant 4 forbids. Refused loudly instead.
+///
+/// A `document` component's params ARE editable — but only through
+/// `set_component_params_at`, which re-bakes (WP-F1.3). The PLACEMENT gesture
+/// deliberately has no such lane: it would pay a second worker and a full
+/// replay for a drag, and the configurator is one click away afterwards.
 fn source_with_free_params(
     source: ComponentSourceRef,
     free_params: &BTreeMap<String, ComponentParamValue>,
@@ -546,8 +561,10 @@ fn component_source_from_resolved(
                     sha256: staged.sha256.clone(),
                     codec: staged.codec,
                     brep_format: staged.format,
-                    // Overrides need a re-bake lane (see `set_component_params_at`'s
-                    // Document arm); recording any here would be inert data.
+                    // A placement records the package's own defaults, i.e. the
+                    // values its frozen document already builds — so an empty
+                    // map IS the configuration. `set_component_params_at` fills
+                    // this in when the first override re-bakes (WP-F1.3).
                     params: Default::default(),
                     extra: Default::default(),
                 },
@@ -715,6 +732,292 @@ fn component_package_at(
     package::parse(&raw, &manifest_path).map_err(ApiError::from)
 }
 
+// ── The re-bake lane (WP-F1.3, spec §3.2 + §13.3 deviation 3) ───────────────
+
+/// How long a re-bake waits for its own worker to finish the OCW1 handshake.
+/// Generous: this is a cold process start plus OCCT's own init, on a machine
+/// already running the document's worker.
+const REBAKE_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Owns the re-bake's OWN worker process and retires it on **every** exit path
+/// — the `?` early returns included, which is the whole reason it is a guard
+/// rather than a call at the end of the happy path. A leaked sidecar would
+/// outlive the edit and hold an OCCT process for the rest of the session.
+///
+/// This manager is never installed into [`AppState`]'s `live`/`warm` slots, gets
+/// no restart hook and no status forwarder: it is not the document's worker, and
+/// the open document's session, fencing tokens and epoch never see it.
+struct EphemeralWorker(WorkerManager);
+
+impl Drop for EphemeralWorker {
+    fn drop(&mut self) {
+        self.0.retire();
+    }
+}
+
+/// The frozen `source.onecad` bytes a re-bake replays, **revision-verified**.
+///
+/// A package that changed underneath this instance is refused with the same
+/// typed [`onecad_library::LibraryError`] resolution already produces (absent /
+/// `RevisionMismatch`). The refusal is the honest answer and costs nothing: the
+/// instance's baked geometry is cached in the document's own `imports/` section,
+/// so the document still renders exactly as before — only the EDIT fails.
+fn frozen_source_document(
+    root: &Path,
+    package: &ComponentPackage,
+    current: &PlaceComponentParams,
+    recorded_document_sha256: &str,
+) -> Result<Vec<u8>, ApiError> {
+    let library = open_at(root)?;
+    let (_version, entry) = library
+        .get(&current.component_id, Some(&current.component_version))
+        .ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "setComponentParams: unknown component {}@{}",
+                current.component_id, current.component_version
+            ))
+        })?;
+    let package_dir = root.join(&entry.path);
+    library.resolve_source(&ResolveRequest {
+        component_id: &current.component_id,
+        component_version: &current.component_version,
+        component_revision: &current.component_revision,
+    })?;
+
+    let package::SourceSpec::Document { file, .. } = &package.source else {
+        return Err(ApiError::InvalidCommand(format!(
+            "setComponentParams: {} is not a document-source component",
+            current.component_id
+        )));
+    };
+    let path = package_dir.join(file);
+    let bytes = std::fs::read(&path).map_err(|e| {
+        ApiError::Io(format!(
+            "setComponentParams: read frozen source {}: {e}",
+            path.display()
+        ))
+    })?;
+    let actual = onecad_library::blob::sha256_hex(&bytes);
+    if actual != recorded_document_sha256 {
+        return Err(ApiError::InvalidCommand(format!(
+            "setComponentParams: {} carries a frozen document hashing to {actual}, but this \
+             instance was placed against {recorded_document_sha256} — re-baking it would build \
+             different geometry under the same identity",
+            current.component_id
+        )));
+    }
+    Ok(bytes)
+}
+
+/// `(variable name, value)` for every override, resolved through each
+/// parameter's own [`package::ParameterSpec::key`].
+///
+/// A free parameter with no `key` is a package the re-bake cannot honor: nothing
+/// says WHICH variable it drives. Refused loudly, naming the parameter — guessing
+/// (first variable, same-name variable) is exactly the silent mis-bind spec §0
+/// invariant 4 forbids.
+fn variable_overrides(
+    package: &ComponentPackage,
+    component_id: &str,
+    params: &BTreeMap<String, ComponentParamValue>,
+) -> Result<Vec<(String, f64)>, ApiError> {
+    let mut out = Vec::with_capacity(params.len());
+    for (name, value) in params {
+        // `check_free_params` already proved the key exists and is `role = free`.
+        let spec = package.parameters.get(name).ok_or_else(|| {
+            ApiError::Internal(format!(
+                "setComponentParams: parameter `{name}` vanished from {component_id}"
+            ))
+        })?;
+        let variable = spec.key.as_ref().ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "setComponentParams: free parameter `{name}` on {component_id} names no source \
+                 variable (`key`), so a re-bake cannot know what to set"
+            ))
+        })?;
+        let ComponentParamValue::Number(n) = value else {
+            return Err(ApiError::InvalidCommand(format!(
+                "setComponentParams: parameter `{name}` on {component_id} drives variable \
+                 `{variable}`, which is a number — got {value:?}"
+            )));
+        };
+        out.push((variable.clone(), *n));
+    }
+    Ok(out)
+}
+
+/// Replays a `document` component's frozen source with `merged`'s variable
+/// overrides and re-bakes its solid (spec §3.1's "replays the document with
+/// overrides"; WP-F1.3). Returns the new blob, ready to stage into the OPEN
+/// document.
+///
+/// **On its own worker, over its own scratch [`DocumentRuntime`].** The worker
+/// is one session per process, so replaying a second document needs a second
+/// process; running it on the open document's worker would trample the session
+/// the user is editing. The scratch runtime is never published, never locked
+/// into [`AppState`], and is dropped with the worker.
+async fn rebake_document_component(
+    root: &Path,
+    package: &ComponentPackage,
+    current: &PlaceComponentParams,
+    recorded_document_sha256: &str,
+    merged: &BTreeMap<String, ComponentParamValue>,
+) -> Result<StagedBlob, ApiError> {
+    let overrides = variable_overrides(package, &current.component_id, merged)?;
+    let frozen = frozen_source_document(root, package, current, recorded_document_sha256)?;
+
+    // Scratch alongside the authoring bake's (same process-scoped temp root, same
+    // "worker hand-off material, not user data" status). Swept on every path.
+    let scratch = std::env::temp_dir().join(format!(
+        "onecad-rebake-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| ApiError::Internal(format!("setComponentParams: scratch dir: {e}")))?;
+    let document_path = scratch.join("source.onecad");
+    let geometry_path = scratch.join("geometry.xbf");
+    let staged = match std::fs::write(&document_path, &frozen) {
+        Ok(()) => {
+            replay_and_bake(
+                &document_path,
+                &geometry_path,
+                &overrides,
+                &current.component_id,
+            )
+            .await
+        }
+        Err(e) => Err(ApiError::Io(format!(
+            "setComponentParams: write frozen source to scratch: {e}"
+        ))),
+    };
+    let _ = std::fs::remove_dir_all(&scratch);
+    staged
+}
+
+/// The worker-facing half of [`rebake_document_component`], split out so the
+/// scratch directory is swept whatever this returns.
+async fn replay_and_bake(
+    document_path: &Path,
+    geometry_path: &Path,
+    overrides: &[(String, f64)],
+    component_id: &str,
+) -> Result<StagedBlob, ApiError> {
+    let bin = resolve_worker_path().ok_or_else(|| {
+        ApiError::Internal(
+            "setComponentParams: no geometry worker binary resolved — a re-bake needs one".into(),
+        )
+    })?;
+    let worker = EphemeralWorker(WorkerManager::spawn(SupervisorConfig::production(bin)));
+    if !worker.0.wait_ready(REBAKE_WORKER_READY_TIMEOUT).await {
+        return Err(ApiError::Worker(format!(
+            "setComponentParams: the re-bake worker for {component_id} never became ready"
+        )));
+    }
+
+    let engine: Arc<dyn GeometryEngine> = Arc::new(worker.0.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(worker.0.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(worker.0.clone());
+    let mut rt = DocumentRuntime::open(document_path, engine, meshes, solver).map_err(|e| {
+        ApiError::Io(format!(
+            "setComponentParams: reopen {component_id}'s frozen source document: {e}"
+        ))
+    })?;
+
+    for (variable, value) in overrides {
+        let id = rt
+            .variables()
+            .iter()
+            .find(|v| &v.name == variable)
+            .map(|v| v.id)
+            .ok_or_else(|| {
+                ApiError::InvalidCommand(format!(
+                    "setComponentParams: {component_id} binds a parameter to variable \
+                     `{variable}`, which its source document does not declare"
+                ))
+            })?;
+        let value = Scalar::try_new(*value).ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "setComponentParams: variable `{variable}` must be finite"
+            ))
+        })?;
+        rt.apply(EditCommand::SetVariable {
+            variable: id,
+            value,
+        })?;
+    }
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    match &report.outcome {
+        Outcome::Published(_) => {}
+        other => {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "setComponentParams: re-baking {component_id} did not publish ({other:?})"
+                ),
+                diagnostics: Vec::new(),
+            })
+        }
+    }
+    if let Some(failed) = report.failed_steps.first() {
+        return Err(ApiError::OpFailed {
+            message: format!(
+                "setComponentParams: re-baking {component_id} failed at step {}: {}",
+                failed.record_id, failed.message
+            ),
+            diagnostics: failed.diagnostics.clone(),
+        });
+    }
+
+    // EXACTLY one solid, and never a silent fuse: the author already answered
+    // the multi-solid question at save time (`unionSolids`), and re-deciding it
+    // here would change what the component IS behind their back. A document
+    // whose new parameter value splits the body is a refusal, not a repair.
+    let bodies = rt.head_body_ids();
+    let [body] = bodies.as_slice() else {
+        return Err(ApiError::InvalidCommand(format!(
+            "setComponentParams: re-baking {component_id} produced {} bodies; a component is \
+             exactly one solid (spec §9) — the value cannot be applied",
+            bodies.len()
+        )));
+    };
+    let baked = GeometryExporter::export_geometry(
+        &worker.0,
+        &geometry_path.to_string_lossy(),
+        &[*body],
+        "xbf",
+        false,
+    )
+    .await?;
+    if baked.solid_count != 1 {
+        return Err(ApiError::InvalidCommand(format!(
+            "setComponentParams: re-baking {component_id} produced {} solids; a component is \
+             exactly one solid (spec §9) — the value cannot be applied",
+            baked.solid_count
+        )));
+    }
+
+    let bytes = std::fs::read(geometry_path).map_err(|e| {
+        ApiError::Io(format!(
+            "setComponentParams: read re-baked geometry for {component_id}: {e}"
+        ))
+    })?;
+    let codec = ImportSourceCodec::from_extension(&baked.codec).ok_or_else(|| {
+        ApiError::Internal(format!(
+            "setComponentParams: the worker baked {component_id} in unknown codec `{}`",
+            baked.codec
+        ))
+    })?;
+    Ok(StagedBlob {
+        sha256: crate::imports::sha256_hex(&bytes),
+        codec,
+        format: Some(baked.format),
+        bytes,
+    })
+}
+
 /// Applies free-parameter overrides to an already-placed component instance
 /// (spec §3.1 `params`; WP-2.3 — the app-crate half of the role=free
 /// enforcement `validate_place_component`'s doc comment flags as
@@ -736,7 +1039,7 @@ fn component_package_at(
 /// here would duplicate data the worker never reads and the wire format
 /// doesn't need; `component.toml`'s `[parameters]` table stays the single
 /// source of truth for that resolution, on the authoring side only.
-async fn set_component_params_at(
+pub async fn set_component_params_at(
     root: &Path,
     state: &State<'_, AppState>,
     record_id: String,
@@ -778,47 +1081,77 @@ async fn set_component_params_at(
     let mut merged = current.params.clone();
     merged.extend(params);
 
-    let source = match current.source {
+    let (source, blob) = match &current.source {
         ComponentSourceRef::Generator {
             generator_id,
             generator_version,
             extra,
             ..
-        } => ComponentSourceRef::Generator {
-            generator_id,
-            generator_version,
-            params: merged.clone(),
-            extra,
-        },
+        } => (
+            ComponentSourceRef::Generator {
+                generator_id: generator_id.clone(),
+                generator_version: *generator_version,
+                params: merged.clone(),
+                extra: extra.clone(),
+            },
+            None,
+        ),
         ComponentSourceRef::Embedded { .. } => {
             return Err(ApiError::InvalidCommand(
                 "setComponentParams: an embedded-source placement has no free parameters".into(),
             ))
         }
         // A `document` component's geometry is a solid BAKED from its authoring
-        // document (WP-3.2). Honoring an override means replaying that document
-        // with new variable values and re-baking — a lane this build does not
-        // have. Refusing is the honest answer: merging the value into the record
-        // would show a new designation over unchanged geometry, which is the
-        // silent-substitution failure spec §0 invariant #4 exists to prevent.
-        ComponentSourceRef::Document { .. } => {
-            return Err(ApiError::InvalidCommand(
-                "setComponentParams: a document-source placement carries baked geometry; \
-                 editing its parameters needs a re-bake of the authoring document, which this \
-                 build does not implement"
-                    .into(),
-            ))
+        // document (WP-3.2), so an override is honored by RE-BAKING: replay the
+        // frozen source with the new variable values and swap in the solid it
+        // produces (WP-F1.3). Merging the value into the record without that
+        // would show a new designation over unchanged geometry — the silent
+        // substitution spec §0 invariant #4 exists to prevent.
+        ComponentSourceRef::Document {
+            document_sha256,
+            extra,
+            ..
+        } => {
+            let staged = rebake_document_component(
+                root,
+                &package,
+                &current,
+                document_sha256.as_str(),
+                &merged,
+            )
+            .await?;
+            (
+                ComponentSourceRef::Document {
+                    document_sha256: document_sha256.clone(),
+                    sha256: staged.sha256.clone(),
+                    codec: staged.codec,
+                    brep_format: staged.format,
+                    params: merged.clone(),
+                    extra: extra.clone(),
+                },
+                Some(staged),
+            )
         }
     };
 
     let updated = PlaceComponentParams {
         params: merged,
         source,
+        // The package did not change, so neither does the recorded revision: this
+        // instance is still an instance of exactly the component it was placed as.
         ..current
     };
     let op = Operation::Known(KnownOperation::PlaceComponent(updated));
 
-    apply_and_project(state, EditCommand::UpdateOperationParams { record, op }).await
+    // ONE undoable edit at the SAME `RecordId`, with the re-baked blob staged
+    // under the same runtime lock — the `add_import_record` discipline: no regen
+    // may see a record naming a blob that is not yet in the carrier.
+    stage_blob_and_apply(
+        state,
+        blob,
+        EditCommand::UpdateOperationParams { record, op },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -897,7 +1230,19 @@ pub async fn component_preview_mesh_at(
         component_revision: &revision,
     })?;
     let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
-    let source = source_with_free_params(source, &params.unwrap_or_default(), &component_id)?;
+    // Free params select geometry only for a GENERATOR. A blob-backed component
+    // previews the solid its package carries, so its params are dropped here
+    // rather than refused: since WP-F1.3 a `document` package legitimately
+    // declares free params, and the configurator asks for a picture of the
+    // component with them — erroring on a thumbnail would be the wrong answer to
+    // the right question. This is a catalog preview of the PACKAGE; a placed
+    // instance's re-baked geometry lives in the document, not here.
+    let source = match source {
+        ComponentSourceRef::Generator { .. } => {
+            source_with_free_params(source, &params.unwrap_or_default(), &component_id)?
+        }
+        baked => baked,
+    };
 
     // A blob-backed component's bytes must be readable by the worker before the
     // op is lowered (the wire injects `source.path` from the process-global
@@ -1122,6 +1467,28 @@ pub struct NewComponentSpec {
     /// non-snapping component is still a legitimate thing to save.
     #[serde(default)]
     pub attachments: BTreeMap<String, AttachmentSpecInput>,
+    /// `role = "free"` parameters the author declared (spec §2.1's
+    /// `[parameters]`; WP-F1.3) — each one bound to a VARIABLE of the document
+    /// being frozen. A placed instance edits these through
+    /// `setComponentParams`, which re-bakes the frozen document with the new
+    /// values. Empty ⇒ a component with no editable size, exactly as every
+    /// pre-WP-F1.3 authored package.
+    #[serde(default)]
+    pub parameters: BTreeMap<String, FreeParameterInput>,
+}
+
+/// One declared free parameter (spec §2.1 `[parameters].<key>`, `role = "free"`).
+///
+/// Numeric only, because a document variable IS a number
+/// ([`onecad_core::document::variables::Variable`]) — there is nothing else a
+/// re-bake could set.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeParameterInput {
+    /// The source document's variable name this parameter drives.
+    pub key: String,
+    /// The variable's value at authoring time — the package's declared default.
+    pub value: f64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1225,7 +1592,7 @@ pub async fn save_as_component_at(
     // Freeze the document under the runtime lock, write it outside — the same
     // split `save_document` uses, for the same reason (serialization must not
     // block an edit).
-    let payload = {
+    let (payload, variable_names) = {
         let mut guard = runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -1235,11 +1602,39 @@ pub async fn save_as_component_at(
                 "saveAsComponent: {body_id} is not a body at head"
             )));
         }
-        rt.build_save_payload(
-            crate::api::save_meta(),
-            crate::document_runtime::SaveCaches::none(),
+        let variable_names: Vec<String> = rt.variables().iter().map(|v| v.name.clone()).collect();
+        (
+            rt.build_save_payload(
+                crate::api::save_meta(),
+                crate::document_runtime::SaveCaches::none(),
+            ),
+            variable_names,
         )
     };
+
+    // A declared parameter that names no variable of the document being frozen
+    // could never be honored by the re-bake — refused HERE, where the author can
+    // still fix it, rather than at the first instance edit on someone else's
+    // machine (the same discipline as the single-solid rule below).
+    let mut parameters = BTreeMap::new();
+    for (name, p) in &spec.parameters {
+        if !variable_names.iter().any(|v| v == &p.key) {
+            return Err(ApiError::InvalidCommand(format!(
+                "saveAsComponent: parameter `{name}` binds to variable `{}`, which this document \
+                 does not declare",
+                p.key
+            )));
+        }
+        if !p.value.is_finite() {
+            return Err(ApiError::InvalidCommand(format!(
+                "saveAsComponent: parameter `{name}` has a non-finite value"
+            )));
+        }
+        parameters.insert(
+            name.clone(),
+            package::ParameterSpec::free_variable(&p.key, p.value),
+        );
+    }
     crate::document_runtime::DocumentRuntime::write_payload(&document_path, &payload)
         .map_err(|e| ApiError::Internal(format!("saveAsComponent: freeze document: {e}")))?;
 
@@ -1314,11 +1709,12 @@ pub async fn save_as_component_at(
             generator: String::new(),
             generator_version: 0,
         },
-        // An authored component declares no parameters in this build: a
-        // `document` source has baked geometry, and `set_component_params`
-        // already refuses to edit one (there is no re-bake lane). Declaring
-        // free params here would offer an edit that cannot be honored.
-        parameters: BTreeMap::new(),
+        // Each declared parameter binds to a VARIABLE of the document being
+        // frozen above (WP-F1.3); `set_component_params` replays that document
+        // with the overridden values and re-bakes. The `value` recorded here is
+        // the variable's authoring-time number, so an instance that overrides
+        // nothing resolves to exactly the solid baked below.
+        parameters,
         attachments,
     };
 
@@ -2509,6 +2905,17 @@ generator_version = 1
     /// pointer): a frozen authoring document in the package directory, and the
     /// solid baked from it in the library's shared blob store.
     fn write_document_package(root: &Path, id: &str, geometry: &[u8]) -> String {
+        write_document_package_with_free_param(root, id, geometry, "")
+    }
+
+    /// [`write_document_package`] plus a verbatim `[parameters]` row, so a test
+    /// can author the exact shape the re-bake lane's refusals key on.
+    fn write_document_package_with_free_param(
+        root: &Path,
+        id: &str,
+        geometry: &[u8],
+        parameters: &str,
+    ) -> String {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("source.onecad"), b"frozen authoring document").unwrap();
@@ -2531,6 +2938,9 @@ file = "source.onecad"
 geometry = "sha256:{sha}"
 geometry_codec = "brep"
 geometry_format = 4
+
+[parameters]
+{parameters}
 "#,
             zeros = "0".repeat(64)
         );
@@ -2714,11 +3124,12 @@ geometry_format = 4
         );
     }
 
-    /// Editing a baked component's parameters needs a re-bake lane this build
-    /// does not have. Refusing says so; merging the value would show a new
-    /// designation over unchanged geometry.
+    /// A key the package does not declare is refused at the SIGNATURE check,
+    /// before the re-bake lane spends a worker on it — a `document` component
+    /// that declares no parameters has nothing editable, exactly like a
+    /// generator that declares none.
     #[tokio::test]
-    async fn setting_params_on_a_document_component_is_refused_with_a_reason() {
+    async fn setting_an_undeclared_param_on_a_document_component_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         write_document_package(dir.path(), "acme.bracket", b"pretend baked brep bytes");
         reindex_library_at(dir.path()).unwrap();
@@ -2750,7 +3161,56 @@ geometry_format = 4
         params.insert("length".to_string(), ComponentParamValue::Number(30.0));
         let err = set_component_params_at(dir.path(), &state, record_id, params)
             .await
-            .expect_err("a baked component has no editable parameters in this build");
+            .expect_err("a key the package never declared is not editable");
         assert!(matches!(err, ApiError::InvalidCommand(_)), "got {err:?}");
+    }
+
+    /// A `role = "free"` parameter with no `key` names no source variable, so
+    /// the re-bake has nothing to set. Refused BY NAME and before any worker is
+    /// spawned — guessing a variable (the first one, the same-named one) is the
+    /// silent mis-bind spec §0 invariant 4 forbids.
+    #[tokio::test]
+    async fn a_free_param_naming_no_source_variable_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_document_package_with_free_param(
+            dir.path(),
+            "acme.bracket",
+            b"pretend baked brep bytes",
+            // `role = "free"` and nothing else: no `key`, so nothing to set.
+            r#"depth = { role = "free", value = 10.0 }"#,
+        );
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.bracket".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("place");
+        let record_id = projection.features[0].id.clone();
+
+        let mut params = BTreeMap::new();
+        params.insert("depth".to_string(), ComponentParamValue::Number(30.0));
+        let err = set_component_params_at(dir.path(), &state, record_id, params)
+            .await
+            .expect_err("a free param that names no variable cannot be re-baked");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("depth") && msg.contains("key"),
+            "the refusal must name the parameter and what it is missing: {msg}"
+        );
     }
 }

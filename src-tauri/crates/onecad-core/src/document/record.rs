@@ -2173,12 +2173,13 @@ pub enum ComponentSourceRef {
     /// cached locally" rules out. Regen reads `sha256` — the baked blob in this
     /// document's own `imports/` section — and nothing else.
     ///
-    /// It is recorded because it is the key a future re-bake needs: re-resolving
+    /// It is recorded because it is the key the RE-BAKE needs: re-resolving
     /// free-parameter overrides against the authoring document (spec §3.1's
     /// "replays the document with overrides") requires knowing WHICH document
-    /// the baked bytes came from. Until that lands, `params` on a `Document`
-    /// source is refused at the authoring entry point rather than silently
-    /// ignored.
+    /// the baked bytes came from. `setComponentParams` (WP-F1.3) replays that
+    /// document on its own ephemeral worker, bakes the solid the new values
+    /// produce, and swaps `sha256` for it — so an override always moves
+    /// geometry, never just a designation string.
     Document {
         /// sha256 of the package's frozen `source.onecad` at place time.
         #[serde(rename = "documentSha256")]
@@ -2193,8 +2194,10 @@ pub enum ComponentSourceRef {
             skip_serializing_if = "Option::is_none"
         )]
         brep_format: Option<u32>,
-        /// Free-parameter overrides recorded for this instance. Empty in this
-        /// build (a re-bake lane is required to honor them, see above).
+        /// Free-parameter overrides recorded for this instance — the variable
+        /// values `sha256`'s bytes were re-baked at (WP-F1.3). Provenance and
+        /// UI state, not a regen input: the geometry they produced is already
+        /// in `sha256`, so the worker never reads them.
         #[serde(default)]
         params: BTreeMap<String, ComponentParamValue>,
         #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
