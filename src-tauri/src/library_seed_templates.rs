@@ -12,7 +12,7 @@
 //! change either compiles or does not, and the seeded starter is by
 //! construction whatever this build can open.
 //!
-//! **What the three starters actually contain** — this list is the honest
+//! **What the two starters actually contain** — this list is the honest
 //! inventory, not a wish:
 //!
 //! * `blank` — an empty document in millimetres. Nothing else; that IS the
@@ -23,11 +23,13 @@
 //!   thing here: there is no print-settings machinery in the document model to
 //!   encode a nozzle, a layer height or a bed size, and inventing an
 //!   unreferenced variable table would be decoration, not a starter.
-//! * `nema17-mount` — an empty document plus one `PlaceComponent` record for
-//!   the seeded `onecad.std.nema17` package at the origin, no mate. The motor
-//!   arrives when the document is opened and regenerated, exactly like any
-//!   other placed instance; nothing here needs a worker, because a record is
-//!   authored, not executed.
+//!
+//! A third starter, `nema17-mount`, opened with a `PlaceComponent` record for
+//! the seeded NEMA 17 package. It went when that package did (SEED_VERSION 4
+//! cut the catalog to the socket cap screw): a starter that places a component
+//! the library does not ship opens straight into `NeedsRepair`, which is the
+//! precise failure this project exists to avoid. Spec §8 asks for "3–5 honest
+//! starters" and two honest ones beat three with a broken reference.
 //!
 //! **The seeding rule is the component rule, verbatim: the user's copy always
 //! wins.** A template directory that already exists is left untouched, and
@@ -39,28 +41,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use onecad_core::document::datum::DatumPlane;
-use onecad_core::document::record::{
-    ComponentSourceRef, FrozenPlacement, KnownOperation, Operation, OperationRecord,
-    PlaceComponentParams,
-};
-use onecad_core::document::variables::Scalar;
 use onecad_core::document::Document;
 use onecad_core::edit::{DocumentSession, EditCommand};
-use onecad_core::ids::{DatumPlaneId, DocumentId, RecordId};
+use onecad_core::ids::{DatumPlaneId, DocumentId};
 use onecad_core::io::container::{ContainerCaches, ContainerWriter};
 
 use onecad_library::template::{self, NewTemplate, TEMPLATES_DIR};
-
-/// The component whose instance the motor-mount starter opens with. Its
-/// version and package revision are read from the seed manifest rather than
-/// spelled here, so the starter can never claim a revision the shipped package
-/// does not have.
-const MOUNT_COMPONENT_ID: &str = "onecad.std.nema17";
-/// The worker generator `MOUNT_COMPONENT_ID`'s package resolves to (its
-/// `[source]` block). Kept in lockstep with that manifest by
-/// `nema17_template_matches_the_shipped_package`.
-const MOUNT_GENERATOR_ID: &str = "nema17";
-const MOUNT_GENERATOR_VERSION: u32 = 1;
 
 /// One shipped starter: the manifest metadata plus the builder for its frozen
 /// document.
@@ -86,12 +72,6 @@ pub const SEED_TEMPLATES: &[SeedTemplate] = &[
         name: "3D-Printed Part",
         description: "Millimetres, with a Build plate datum on XY to sketch the footprint on.",
         build: printed_part_document,
-    },
-    SeedTemplate {
-        id: "onecad.std.template.nema17-mount",
-        name: "NEMA 17 Motor Mount",
-        description: "A NEMA 17 stepper placed at the origin — model the mounting plate around it.",
-        build: nema17_mount_document,
     },
 ];
 
@@ -188,62 +168,6 @@ fn printed_part_document() -> Result<Document, String> {
     Ok(session.into_document())
 }
 
-fn nema17_mount_document() -> Result<Document, String> {
-    let (version, revision) = mount_component_identity()?;
-    let params = PlaceComponentParams {
-        component_id: MOUNT_COMPONENT_ID.to_string(),
-        component_version: version,
-        component_revision: revision,
-        // No overrides: the generator's own default body length is the honest
-        // starting point, and the user edits it on the instance.
-        params: Default::default(),
-        source: ComponentSourceRef::Generator {
-            generator_id: MOUNT_GENERATOR_ID.to_string(),
-            generator_version: MOUNT_GENERATOR_VERSION,
-            params: Default::default(),
-            extra: Default::default(),
-        },
-        // No mate: there is nothing in a starter to mate TO, and a recorded
-        // mate that cannot resolve is exactly the NeedsRepair this project
-        // exists to avoid.
-        mate: None,
-        placement: FrozenPlacement {
-            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
-            rotate: Default::default(),
-        },
-        extra: Default::default(),
-    };
-    let record = OperationRecord::new(
-        RecordId::new(),
-        0,
-        "NEMA 17 Stepper Motor",
-        Operation::Known(KnownOperation::PlaceComponent(params)),
-    );
-    let mut session = DocumentSession::new(Document::new(DocumentId::new()));
-    session
-        .apply(EditCommand::AddOperation {
-            record,
-            at_cursor: false,
-        })
-        .map_err(|e| format!("{e:?}"))?;
-    Ok(session.into_document())
-}
-
-/// The shipped NEMA 17 package's `(version, revision)`, read out of the seed
-/// manifest that will be installed alongside this template.
-fn mount_component_identity() -> Result<(String, String), String> {
-    let pkg = crate::library_seed::SEED_PACKAGES
-        .iter()
-        .find(|p| p.id == MOUNT_COMPONENT_ID)
-        .ok_or_else(|| format!("{MOUNT_COMPONENT_ID} is not a seeded package"))?;
-    let parsed = onecad_library::package::parse(
-        pkg.manifest,
-        &std::path::PathBuf::from(pkg.id).join(onecad_library::package::COMPONENT_MANIFEST_FILE),
-    )
-    .map_err(|e| format!("parse {}: {e:?}", pkg.id))?;
-    Ok((parsed.identity.version, parsed.identity.revision))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,36 +239,25 @@ mod tests {
         );
     }
 
-    /// The starter's recorded identity must be the package that seeds beside
-    /// it: a stale version or revision is the silent-substitution failure
-    /// spec §0 invariant 4 forbids.
+    /// No starter references a library component any more (the `nema17-mount`
+    /// one went with the NEMA 17 package at SEED_VERSION 4). A starter that
+    /// did would need its recorded version/revision pinned against the shipped
+    /// manifest — a stale one is the silent-substitution failure spec §0
+    /// invariant 4 forbids — so this asserts the property that replaces it:
+    /// every starter opens with a timeline that depends on nothing outside the
+    /// document.
     #[test]
-    fn nema17_template_matches_the_shipped_package() {
+    fn no_starter_depends_on_a_library_component() {
         let dir = tempfile::tempdir().unwrap();
         install(dir.path());
-        let entry = template::get(dir.path(), "onecad.std.template.nema17-mount").unwrap();
-        let loaded = ContainerReader::open(&entry.document_path).unwrap();
-        let records = loaded.document().timeline.records();
-        assert_eq!(records.len(), 1);
-        let Operation::Known(KnownOperation::PlaceComponent(p)) = &records[0].op else {
-            panic!("expected a PlaceComponent record, got {:?}", records[0].op);
-        };
-        p.validate().expect("the seeded record must be valid");
-        let (version, revision) = mount_component_identity().unwrap();
-        assert_eq!(p.component_id, MOUNT_COMPONENT_ID);
-        assert_eq!(p.component_version, version);
-        assert_eq!(p.component_revision, revision);
-        assert!(p.mate.is_none());
-        match &p.source {
-            ComponentSourceRef::Generator {
-                generator_id,
-                generator_version,
-                ..
-            } => {
-                assert_eq!(generator_id, MOUNT_GENERATOR_ID);
-                assert_eq!(*generator_version, MOUNT_GENERATOR_VERSION);
-            }
-            other => panic!("a seeded starter must depend on no blob, got {other:?}"),
+        for entry in template::list(dir.path()) {
+            let loaded = ContainerReader::open(&entry.document_path).unwrap();
+            assert!(
+                loaded.document().timeline.records().is_empty(),
+                "{}: a starter with a PlaceComponent record must pin its \
+                 component's version/revision against the shipped manifest",
+                entry.id
+            );
         }
     }
 

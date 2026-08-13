@@ -36,7 +36,15 @@ use onecad_library::package::COMPONENT_MANIFEST_FILE;
 /// Bumped whenever the shipped set of packages changes (a new family, a
 /// corrected manifest). A root whose marker is missing or lower re-runs the
 /// seeding pass; one at this version is left alone.
-pub const SEED_VERSION: u32 = 3;
+///
+/// **A bump adds, it never removes.** Seeding only ever creates a package
+/// directory that is missing, so a root seeded at an EARLIER version keeps
+/// every package that version shipped — including families since dropped from
+/// [`SEED_PACKAGES`]. That is the "user's copy always wins" rule doing exactly
+/// what it says: this pass cannot tell a stale built-in from a package the user
+/// authored under the same id, and guessing wrong deletes their work. Clearing
+/// a dropped family from an existing root is a manual `rm` of its directory.
+pub const SEED_VERSION: u32 = 4;
 
 const SEED_MARKER_FILE: &str = ".seed-version";
 
@@ -60,23 +68,21 @@ macro_rules! seed {
     };
 }
 
-/// The built-in catalog (spec §6.2). Every entry is a `generator` package —
-/// one per registered worker generator id, which is the pairing
-/// `seed_ids_match_the_worker_generators` in the worker's own test suite and
-/// `every_seed_package_parses_and_validates` here keep honest.
-pub const SEED_PACKAGES: &[SeedPackage] = &[
-    seed!("onecad.std.iso4762"),
-    seed!("onecad.std.iso7380"),
-    seed!("onecad.std.iso4014"),
-    seed!("onecad.std.iso4017"),
-    seed!("onecad.std.iso4032"),
-    seed!("onecad.std.iso7089"),
-    seed!("onecad.std.iso7093"),
-    // WP-F2 (SEED_VERSION 2): the non-fastener families spec §6.2 asks for.
-    seed!("onecad.std.iso15"),
-    seed!("onecad.std.nema17"),
-    seed!("onecad.std.nema23"),
-];
+/// The built-in catalog. Every entry is a `generator` package, and its id must
+/// be one the worker's `build_component` dispatch actually registers —
+/// `known_generator_ids_covers_the_seed_catalog` (ctest) is the pairing from
+/// the worker's side, `every_seed_package_parses_and_validates` the one from
+/// here.
+///
+/// **The catalog is deliberately ONE family.** SEED_VERSION 4 dropped the six
+/// other fastener families and the three machine elements (bearing, two NEMA
+/// frames) that spec §6.2 sketched, along with their worker generators and
+/// dimension tables. The socket cap screw is the flagship §12 flow ("search M8
+/// socket head, drag it onto a hole") and the only family with pinned
+/// exact-volume ctests; the rest were breadth without a consumer. Re-adding one
+/// means a manifest here, a generator + table in the worker, and a
+/// `SEED_VERSION` bump — not a revert.
+pub const SEED_PACKAGES: &[SeedPackage] = &[seed!("onecad.std.iso4762")];
 
 /// What one seeding pass did. `installed` names packages written now;
 /// `kept` names shipped packages already present on disk and therefore left
@@ -280,7 +286,9 @@ mod tests {
             std::fs::read_to_string(pkg_dir.join(COMPONENT_MANIFEST_FILE)).unwrap(),
             "# mine\n"
         );
-        // …and the rest still arrived.
+        // …and every OTHER shipped package still arrived (none, while the
+        // catalog is one family — the assertion is written against the list so
+        // it keeps meaning if a family is ever re-added).
         assert_eq!(outcome.installed.len(), SEED_PACKAGES.len() - 1);
     }
 

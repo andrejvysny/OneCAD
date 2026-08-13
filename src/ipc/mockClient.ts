@@ -1460,98 +1460,16 @@ const MOCK_LIBRARY_FIXTURE: LibraryComponent = {
 };
 
 /**
- * The rest of the SHIPPED seed catalog (WP-F2), mirrored from the real
- * manifests in `src-tauri/resources/library-seed/<id>/component.toml` —
- * identity, metadata, the parameter table's roles/domains and the attachment
- * signature, field for field.
+ * The whole opt-in catalog. ONE entry, because the shipped seed catalog is one
+ * package (`src-tauri/src/library_seed.rs::SEED_PACKAGES`) — the nine other
+ * families this list used to mirror went with their worker generators.
  *
- * MIRRORED, not invented: a mock catalog that carried a different parameter
- * shape than the packages the app actually ships would make the configurator
- * and the placement gesture provable only against fiction. Any drift here is a
- * lie about what the tauri lane will hand back, so these entries move when
- * those manifests do.
- *
- * What is NOT mirrored is geometry — the mock has no kernel, so every one of
- * these places as the same synthetic solid the SHCS does (see
- * `resolveComponentSource`'s note).
+ * MIRRORED, not invented: a mock catalog carrying a parameter shape the app
+ * does not ship would make the configurator and the placement gesture provable
+ * only against fiction. What is NOT mirrored is geometry — the mock has no
+ * kernel (see `resolveComponentSource`'s note).
  */
-const MOCK_SEED_FIXTURES: LibraryComponent[] = [
-  {
-    id: "onecad.std.iso15",
-    version: "1.0.0",
-    name: "Deep Groove Ball Bearing",
-    category: ["bearings"],
-    tags: ["bearing", "deep-groove", "ball", "metric", "608", "625"],
-    sourceKind: "generator",
-    revision: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    generatorId: "iso15",
-    generatorVersion: 1,
-    attachments: {
-      seat: { on: "face:side", accepts: ["plane"] },
-      bore_axis: { on: "cylinder:bore", accepts: ["cylinder", "hole", "circularEdge"] },
-    },
-    parameters: {
-      code: {
-        role: "free",
-        key: "608",
-        domain: ["625", "608", "6000", "6001", "6200", "6201", "6202", "6802"],
-      },
-      bore: { role: "table", from: "iso15.bore" },
-      od: { role: "table", from: "iso15.od" },
-      width: { role: "table", from: "iso15.width" },
-    },
-    designation: "Bearing {code}",
-  },
-  {
-    id: "onecad.std.nema17",
-    version: "1.0.0",
-    name: "NEMA 17 Stepper Motor",
-    category: ["motors", "steppers"],
-    tags: ["nema17", "stepper", "motor", "42mm", "3d-printer"],
-    sourceKind: "generator",
-    revision: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    generatorId: "nema17",
-    generatorVersion: 1,
-    attachments: {
-      faceplate: { on: "face:faceplate", accepts: ["plane"] },
-      pilot_axis: { on: "cylinder:pilot", accepts: ["cylinder", "hole", "circularEdge"] },
-    },
-    parameters: {
-      length: { role: "free", value: 40, min: 20 },
-      frame_square: { role: "table", from: "nema17.frame_square" },
-      hole_pattern: { role: "table", from: "nema17.mounting_hole_pitch" },
-      pilot_diameter: { role: "table", from: "nema17.pilot_diameter" },
-      shaft_diameter: { role: "table", from: "nema17.shaft_diameter" },
-    },
-    designation: "NEMA 17 {length}mm",
-  },
-  {
-    id: "onecad.std.nema23",
-    version: "1.0.0",
-    name: "NEMA 23 Stepper Motor",
-    category: ["motors", "steppers"],
-    tags: ["nema23", "stepper", "motor", "57mm", "cnc"],
-    sourceKind: "generator",
-    revision: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    generatorId: "nema23",
-    generatorVersion: 1,
-    attachments: {
-      faceplate: { on: "face:faceplate", accepts: ["plane"] },
-      pilot_axis: { on: "cylinder:pilot", accepts: ["cylinder", "hole", "circularEdge"] },
-    },
-    parameters: {
-      length: { role: "free", value: 40, min: 20 },
-      frame_square: { role: "table", from: "nema23.frame_square" },
-      hole_pattern: { role: "table", from: "nema23.mounting_hole_pitch" },
-      pilot_diameter: { role: "table", from: "nema23.pilot_diameter" },
-      shaft_diameter: { role: "table", from: "nema23.shaft_diameter" },
-    },
-    designation: "NEMA 23 {length}mm",
-  },
-];
-
-/** The whole opt-in catalog, SHCS first (the panel renders in this order). */
-const MOCK_LIBRARY_FIXTURES: LibraryComponent[] = [MOCK_LIBRARY_FIXTURE, ...MOCK_SEED_FIXTURES];
+const MOCK_LIBRARY_FIXTURES: LibraryComponent[] = [MOCK_LIBRARY_FIXTURE];
 
 /**
  * The built-in starter templates, mirroring `src-tauri/src/
@@ -1573,11 +1491,6 @@ const MOCK_SEED_TEMPLATES: ProjectTemplate[] = [
     id: "onecad.std.template.printed-part",
     name: "3D-Printed Part",
     description: "Millimetres, with a Build plate datum on XY to sketch the footprint on.",
-  },
-  {
-    id: "onecad.std.template.nema17-mount",
-    name: "NEMA 17 Motor Mount",
-    description: "A NEMA 17 stepper placed at the origin — model the mounting plate around it.",
   },
 ];
 

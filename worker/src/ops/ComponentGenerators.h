@@ -5,10 +5,11 @@
 // `PlaceComponent`/`DetachComponent` record carries in `source.generatorId`.
 // Before WP-A1 there was no dispatch at all: EVERY generatorId built an ISO
 // 4762 socket cap screw, which is exactly the silent-substitution failure
-// spec §0 invariant 4 exists to prevent once a second family is seeded. An
-// unknown id now fails loudly, naming the ids that do exist.
+// spec §0 invariant 4 exists to prevent. The catalog is back to that one
+// family, but the DISPATCH stays — an unknown id fails loudly, naming the ids
+// that do exist, instead of quietly handing back a screw.
 //
-// Geometry conventions shared by every family — these ARE the mate contract,
+// Geometry conventions every family must follow — these ARE the mate contract,
 // because the placement solver seats a component by its local origin and
 // local +Z (see `ComponentMateSolver.h`; `mate.selfAttachment` is not yet read
 // worker-side):
@@ -17,16 +18,10 @@
 //     surface the part seats against.
 //   * A screw's head occupies z ∈ [0, k] and its shank z ∈ [-length, 0], so
 //     dropping it on a hole rim drives the shank into the hole.
-//   * A nut/washer occupies z ∈ [0, thickness] — it sits ON the surface.
-//   * A bearing occupies z ∈ [0, width] — a ring sits ON the surface, same as
-//     a washer.
-//   * A motor's faceplate is the seating plane: the body occupies
-//     z ∈ [0, body length] (it sits ON the plate, like a nut) while the pilot
-//     boss and shaft run z < 0 (they drive INTO the plate's pilot hole, like
-//     a screw's shank).
+//   * A part that sits ON a surface rather than through it (a nut, a washer)
+//     occupies z ∈ [0, thickness].
 //
-// Dimensions come from `FastenerTables.h` / `MachineElementTables.h` and
-// nothing here hardcodes one.
+// Dimensions come from `FastenerTables.h` and nothing here hardcodes one.
 #ifndef ONECAD_OPS_COMPONENTGENERATORS_H
 #define ONECAD_OPS_COMPONENTGENERATORS_H
 
@@ -55,9 +50,9 @@ bool parse_thread_detail(const std::string& s, ThreadDetail& out);
 ///
 /// `text_params` carries every STRING param under `source.params` verbatim,
 /// including `thread` (which `thread` above is read out of, so the two can
-/// never disagree). Families not keyed by a thread designation — a bearing's
-/// `code` — read their own key from here, which is why adding one needs no
-/// change to the op layer.
+/// never disagree). No current generator reads anything else out of it, and it
+/// is kept populated on purpose: a family not keyed by a thread designation
+/// reads its own key from here, so adding one needs no change to the op layer.
 struct GeneratorRequest {
     std::string op_label;
     std::string thread;
@@ -73,8 +68,8 @@ struct GeneratorRequest {
 bool build_component(const std::string& generator_id, const GeneratorRequest& req,
                      TopoDS_Shape& solid_out, std::string& err);
 
-/// `"iso15, iso4014, …"` — the registered ids, for the unknown-id message
-/// and for tests that assert the seed catalog's shape.
+/// `"iso4762"` — the registered ids, comma-separated, for the unknown-id
+/// message and for tests that assert the seed catalog's shape.
 std::string known_generator_ids();
 
 }  // namespace onecad::ops

@@ -1,5 +1,72 @@
 # OneCAD-Tauri Migration TODO
 
+## CL-TRIM (2026-08-13) — GATE PASSED · **seed catalog cut to one family**
+
+Scope reduction, requested: the shipped component catalog is now the ISO 4762
+socket head cap screw and nothing else. The nine other families — ISO 7380,
+4014, 4017, 4032, 7089, 7093 and the three machine elements (ISO 15 bearing,
+NEMA 17/23 steppers) — are gone from the seed catalog **and** from the code
+that generated them. This is a delete, not a feature flag: re-adding a family
+means a manifest, a worker generator and a dimension table, not a revert.
+
+Why the screw: it is spec §12's flagship flow ("search M8 socket head, drag it
+onto a hole") and the only family carrying pinned exact-volume ctests. The rest
+was breadth with no consumer.
+
+- [x] **Seed catalog** — nine `component.toml` directories deleted;
+  `SEED_PACKAGES` is one entry; `SEED_VERSION` 3 → 4.
+  **Known limit, documented at the constant:** a bump ADDS, it never removes.
+  A library root seeded at version ≤3 keeps the nine packages on disk, because
+  seeding cannot tell a stale built-in from a package the user authored under
+  the same id — "the user's copy always wins" is the rule, and guessing wrong
+  deletes their work. Clearing a dropped family from an existing root is a
+  manual `rm` of its directory.
+- [x] **Worker** — `ComponentGenerators.cpp` keeps `build_socket_cap` and the
+  three thread-detail cutters; `build_button_head` / `hex_screw` / `hex_nut` /
+  `washer` / `bearing` / `stepper_motor` and their helpers (`build_hex_prism`,
+  `build_dome_head`, `lookup_key`, `text_param`) are gone. `known_generator_ids`
+  is `"iso4762"`. `MachineElementTables.{h,cpp}` deleted; `FastenerTables` is
+  one struct and one table. **The DISPATCH stays** — an unknown id still fails
+  loudly naming what exists, which is the whole point of WP-A1 and is not the
+  same thing as having only one family.
+- [x] **Rust mirror tables** — `onecad-library/src/tables/fasteners.rs` deleted
+  (it had no consumer outside its own tests once the generators went);
+  `iso4762.rs` and its worker cross-pinning stay.
+- [x] **Template** — `onecad.std.template.nema17-mount` removed with its NEMA 17
+  package. A starter that places a component the library does not ship opens
+  straight into `NeedsRepair`. Two honest starters (`blank`, `printed-part`)
+  beat three with a broken reference; spec §8's "3–5 starters" is now under-met
+  and recorded as such rather than faked.
+- [x] **Mock lane** — `MOCK_SEED_FIXTURES` gone, catalog is the one SHCS
+  fixture, template mirror is two.
+- [x] **Provenance** — `THIRD_PARTY_NOTICES` drops the four BOLTS classes whose
+  data no longer ships (hex.blt ×2, nut.blt, washer.blt) and the two
+  hand-transcribed non-BOLTS standards; the ISO 4762 / hex_socket.blt entry and
+  the ISO 261 pitch note stay.
+
+**Gate:** vitest 4347/4347 · ctest 124/124 · `cargo test --workspace` 80 targets,
+0 failures (worker-backed, `ONECAD_REQUIRE_WORKER=1`) · clippy `-D warnings`
+clean · `cargo fmt --check` clean · Playwright **422/426**, every library spec
+green (`library-browse-place-snap`, `library-preview`, `library-place-freespace`,
+`library-author-component`, `library-template`).
+
+The four e2e failures are NOT this work, and that was checked rather than
+assumed: `filletChamfer:181` and `sketch-multi-object:44` pass in isolation
+(the documented full-suite load-flake class); `extrude-commit-gesture:135`
+fails DETERMINISTICALLY on both browsers in a clean worktree at HEAD `2b9b04b`,
+i.e. before any of this. It expects 2 body options and gets 1 — pre-existing,
+unrelated to the catalog, and left for whoever owns that lane.
+
+**Seams flagged:**
+- `GeneratorRequest::text_params` is populated but no generator reads anything
+  but `thread` out of it now. Kept on purpose — it is the seam a non-thread-keyed
+  family needs, and dropping it would have to be undone to add one back.
+- The thread cutters keep `thread_length_mm` for the same reason, though the
+  sole caller passes the full shank length.
+- No seeded starter carries a `PlaceComponent` record any more, so nothing
+  proves an authored record meets the generator it names at open time. Noted in
+  `component_ops.rs` where that test used to live.
+
 ## WP-F1.3 (2026-08-13) — GATE PASSED · **Component Library program COMPLETE**
 
 **A component authored from a document is PARAMETRIC.** Its free parameters are

@@ -2534,7 +2534,11 @@ generator_version = 1
     async fn replace_swaps_identity_at_the_same_record() {
         let dir = tempfile::tempdir().unwrap();
         write_generator_package(dir.path(), "onecad.std.iso4762", "SHCS");
-        write_generator_package(dir.path(), "onecad.std.iso7380", "Button head");
+        // The SECOND package is under an authored (`me.`) id on purpose: the
+        // shipped catalog is one package, and a synthetic fixture wearing an
+        // `onecad.std.*` id the app does not ship reads as a claim about the
+        // seed catalog rather than what it is — some other component to swap to.
+        write_generator_package(dir.path(), "me.custom.button-head", "Button head");
         reindex_library_at(dir.path()).unwrap();
 
         let app_state = pending_app_state();
@@ -2562,7 +2566,7 @@ generator_version = 1
             dir.path(),
             &state,
             record_id.clone(),
-            "onecad.std.iso7380".to_string(),
+            "me.custom.button-head".to_string(),
             "1.0.0".to_string(),
             Default::default(),
         )
@@ -2581,7 +2585,7 @@ generator_version = 1
                 .unwrap()
         };
         let after: PlaceComponentParams = serde_json::from_value(raw).unwrap();
-        assert_eq!(after.component_id, "onecad.std.iso7380");
+        assert_eq!(after.component_id, "me.custom.button-head");
         match after.source {
             ComponentSourceRef::Generator { generator_id, .. } => {
                 assert_eq!(

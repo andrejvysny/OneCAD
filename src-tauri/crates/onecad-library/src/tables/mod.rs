@@ -12,14 +12,13 @@
 //! two different M6 screws.
 //!
 //! Provenance is recorded per family, at the family. BOLTS-sourced tables are
-//! credited in the repo-root `THIRD_PARTY_NOTICES`; ISO 7380-1 and ISO 7093-1
-//! are NOT in that dataset and say so where they are defined.
+//! credited in the repo-root `THIRD_PARTY_NOTICES`; a family that dataset does
+//! not carry says so where it is defined.
+//!
+//! ONE family, because the seed catalog is one family. The six other fastener
+//! tables that lived here went with their worker generators — a mirror of a
+//! table nothing generates from pins nothing.
 
-mod fasteners;
 mod iso4762;
 
-pub use fasteners::{
-    HexScrewRow, Iso4014Table, Iso4017Table, Iso4032Table, Iso7089Table, Iso7093Table,
-    Iso7380Table, NutRow, ScrewRow, WasherRow,
-};
 pub use iso4762::{Iso4762Row, Iso4762Table};

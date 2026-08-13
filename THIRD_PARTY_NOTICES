@@ -15,25 +15,11 @@ Components: ISO 4762 / DIN 912 socket-head cap screw dimensions
             data/hex_socket.blt, class "hexsocketheadcap"
             Retrieved 2026-08-12
 
-            ISO 4014 hexagon head bolt (partially threaded) dimensions
-            (tables/fasteners.rs, FastenerTables.cpp::iso4014_table())
-            data/hex.blt, class "hexbolt2"
-            Retrieved 2026-08-13
-
-            ISO 4017 hexagon head screw (fully threaded) dimensions
-            (tables/fasteners.rs, FastenerTables.cpp::iso4017_table())
-            data/hex.blt, class "hexscrew2"
-            Retrieved 2026-08-13
-
-            ISO 4032 hexagon nut dimensions
-            (tables/fasteners.rs, FastenerTables.cpp::iso4032_table())
-            data/nut.blt, class "hexagonnut1"
-            Retrieved 2026-08-13
-
-            ISO 7089 plain washer (normal series) dimensions
-            (tables/fasteners.rs, FastenerTables.cpp::iso7089_table())
-            data/washer.blt, class "plainwasher1"
-            Retrieved 2026-08-13
+            (ISO 4014, ISO 4017, ISO 4032 and ISO 7089 tables were also
+            transcribed from BOLTS and have since been REMOVED along with
+            their generators. No BOLTS-derived data from those classes
+            remains in the tree; the entries are dropped here rather than
+            kept as a claim about data that is not shipped.)
 
 Source:     BOLTS — Open Library of Technical Specifications
             https://github.com/boltsparts/BOLTS_archive
@@ -57,12 +43,10 @@ Notes:      Dimension values (M2–M12 where the standard defines them)
             carry their own LGPL 2.1+ headers, which is the license that
             applies to this data.
 
-            ONE CORRECTION was made to the BOLTS values: ISO 7089's M10
-            inner diameter is listed there as 10.0 mm. ISO 7089 and DIN
-            125 A (which that BOLTS table is anchored to) both publish
-            10.5 mm, and a 10.0 mm bore would not pass an M10 bolt. Both
-            copies use 10.5 and pin it with a test. Every other value is
-            verbatim from the source.
+            The shipped ISO 4762 values are verbatim from the source. (A
+            correction was carried against BOLTS' ISO 7089 M10 inner
+            diameter — 10.0 mm there, 10.5 mm in ISO 7089 and DIN 125 A —
+            for as long as that table shipped; it no longer does.)
 
 -------------------------------------------------------------------------
 Not third-party — hand-transcribed public standards
@@ -73,9 +57,8 @@ dataset, and is listed here only so its provenance is not mistaken for the
 above. It was hand-transcribed from the published dimension tables of the
 named standards, which are numeric facts rather than a licensed work:
 
-  * ISO 7380-1 button head socket screw (dk, k) — not present in BOLTS
-    (data/hex_socket.blt carries no button-head class).
-  * ISO 7093-1 plain washer, large series (d1, d2, s) — not present in
-    BOLTS (data/washer.blt carries 7089/7090/7091/7092 only).
   * ISO 261 coarse thread pitch series (pitch_mm), used by every threaded
     family.
+
+(ISO 7380-1 and ISO 7093-1 were hand-transcribed here too, and were removed
+along with their generators. Neither was BOLTS data to begin with.)

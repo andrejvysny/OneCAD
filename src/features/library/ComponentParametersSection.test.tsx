@@ -152,9 +152,14 @@ describe("ComponentParametersSection", () => {
 
 // ── WP-B4: opt-in upgrade + replace-in-place ────────────────────────────────
 
-const BUTTON_HEAD: LibraryComponent = {
+// A SECOND component to replace the placed one with. Deliberately under an
+// authored (`me.`) id rather than `onecad.std.*`: the shipped catalog is one
+// package, and a fixture wearing a std id the app does not ship reads as a
+// claim about the seed catalog instead of what it is — an arbitrary other
+// component the picker can offer.
+const OTHER_SCREW: LibraryComponent = {
   ...SHCS,
-  id: "onecad.std.iso7380",
+  id: "me.custom.button-head",
   name: "Button Head Screw",
 };
 
@@ -189,16 +194,16 @@ describe("upgrade and replace", () => {
 
   it("replaces with the picked component and reports a dropped mate", async () => {
     selectPlaceComponentFeature();
-    listLibraryComponents.mockResolvedValue([SHCS, BUTTON_HEAD]);
+    listLibraryComponents.mockResolvedValue([SHCS, OTHER_SCREW]);
     replaceComponent.mockResolvedValue({ droppedMateAttachment: "shank_axis" });
     render(<ComponentParametersSection />);
 
     const pick = await screen.findByTestId("component-replace-pick");
-    fireEvent.change(pick, { target: { value: `${BUTTON_HEAD.id}@${BUTTON_HEAD.version}` } });
+    fireEvent.change(pick, { target: { value: `${OTHER_SCREW.id}@${OTHER_SCREW.version}` } });
     fireEvent.click(screen.getByTestId("component-replace-apply"));
 
     await waitFor(() => expect(replaceComponent).toHaveBeenCalledTimes(1));
-    expect(replaceComponent).toHaveBeenCalledWith("comp1", BUTTON_HEAD.id, BUTTON_HEAD.version);
+    expect(replaceComponent).toHaveBeenCalledWith("comp1", OTHER_SCREW.id, OTHER_SCREW.version);
     // The dropped mate is SAID, not swallowed: the part quietly stopping
     // following its target is exactly the failure this reports.
     await waitFor(() =>

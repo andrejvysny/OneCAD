@@ -1,3 +1,18 @@
+## COMPONENT LIBRARY — CATALOG TRIMMED TO ONE FAMILY (2026-08-13, CL-TRIM)
+
+**Read this before anything below that counts packages.** The shipped catalog
+is now ONE component: `onecad.std.iso4762`, the socket head cap screw. The nine
+other seeded families are deleted — manifests, worker generators, dimension
+tables, mirror tables and tests — as is the `nema17-mount` starter that placed
+one of them. `SEED_VERSION` is 4; there are 2 starters, not 3. Everything below
+describing "10 seeded packages" or "3 starters" is history, accurate at the time
+it was written.
+
+The dispatch, the tables' generic shape and `GeneratorRequest::text_params`
+survive on purpose: they are what a re-added family needs on day one. Full
+rationale, the seeding limitation on already-seeded roots, and the flagged seams
+are in TODO.md § CL-TRIM.
+
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 17, PROGRAM COMPLETE)
 
 Session 17 closed the Component Library program (spec §12) end-to-end. After

@@ -82,50 +82,30 @@ describe("mockClient library catalog — mirrors the shipped seed packages", () 
     expect(await mockClient.reindexLibrary()).toEqual({ total: 0, indexed: 0, skipped: [] });
   });
 
-  it("lists the four seeded packages with the flag on, SHCS first", async () => {
+  it("lists the one seeded package with the flag on", async () => {
     setLibraryFlag(true);
     const list = await mockClient.listLibraryComponents();
-    expect(list.map((c) => c.id)).toEqual([
-      "onecad.std.iso4762",
-      "onecad.std.iso15",
-      "onecad.std.nema17",
-      "onecad.std.nema23",
-    ]);
-    expect(await mockClient.reindexLibrary()).toEqual({ total: 4, indexed: 4, skipped: [] });
+    expect(list.map((c) => c.id)).toEqual(["onecad.std.iso4762"]);
+    expect(await mockClient.reindexLibrary()).toEqual({ total: 1, indexed: 1, skipped: [] });
   });
 
-  it("the bearing is keyed by its CODE domain, with locked boundary dimensions", async () => {
+  it("the screw is keyed by its THREAD domain, and seats on the head or the shank", async () => {
     setLibraryFlag(true);
     const list = await mockClient.listLibraryComponents();
-    const bearing = list.find((c) => c.id === "onecad.std.iso15")!;
-    expect(bearing.parameters.code).toMatchObject({ role: "free", key: "608" });
-    expect(bearing.parameters.code.domain).toContain("6202");
-    // d/D/B are read off the table, never chosen per instance.
-    for (const key of ["bore", "od", "width"]) {
-      expect(bearing.parameters[key].role).toBe("table");
-    }
-    expect(bearing.designation).toBe("Bearing {code}");
-    expect(bearing.attachments.bore_axis.accepts).toContain("hole");
-  });
-
-  it("the steppers offer body length only, and seat on the faceplate or the pilot", async () => {
-    setLibraryFlag(true);
-    const list = await mockClient.listLibraryComponents();
-    for (const id of ["onecad.std.nema17", "onecad.std.nema23"]) {
-      const motor = list.find((c) => c.id === id)!;
-      const free = Object.entries(motor.parameters).filter(([, s]) => s.role === "free");
-      expect(free.map(([k]) => k)).toEqual(["length"]);
-      expect(motor.parameters.length).toMatchObject({ value: 40, min: 20 });
-      expect(motor.attachments.faceplate.accepts).toEqual(["plane"]);
-      expect(motor.attachments.pilot_axis.accepts).toContain("cylinder");
-      expect(motor.generatorId).toBe(id.split(".").pop());
-    }
+    const screw = list.find((c) => c.id === "onecad.std.iso4762")!;
+    expect(screw.parameters.thread).toMatchObject({ role: "free", key: "M6" });
+    expect(screw.parameters.thread.domain).toContain("M8");
+    // dk is read off the table, never chosen per instance.
+    expect(screw.parameters.head_d.role).toBe("table");
+    expect(screw.designation).toBe("ISO 4762 {thread}x{length}");
+    expect(screw.attachments.headSeat.accepts).toEqual(["plane"]);
+    expect(screw.attachments.shankAxis.accepts).toContain("hole");
   });
 
   it("resolves a seeded component's source for placement", async () => {
     setLibraryFlag(true);
-    const source = await mockClient.resolveComponentSource("onecad.std.nema17", "1.0.0");
-    expect(source).toMatchObject({ kind: "generator", generatorId: "nema17" });
+    const source = await mockClient.resolveComponentSource("onecad.std.iso4762", "1.0.0");
+    expect(source).toMatchObject({ kind: "generator", generatorId: "iso4762" });
   });
 });
 
@@ -135,22 +115,21 @@ describe("mockClient project templates — the built-in starters", () => {
     expect(await mockClient.listTemplates()).toEqual([]);
   });
 
-  it("lists the three starters with the flag on", async () => {
+  it("lists the two starters with the flag on", async () => {
     setLibraryFlag(true);
     const templates = await mockClient.listTemplates();
     expect(templates.map((t) => t.id)).toEqual([
       "onecad.std.template.blank",
       "onecad.std.template.printed-part",
-      "onecad.std.template.nema17-mount",
     ]);
-    expect(templates.map((t) => t.name)).toEqual(["Blank", "3D-Printed Part", "NEMA 17 Motor Mount"]);
+    expect(templates.map((t) => t.name)).toEqual(["Blank", "3D-Printed Part"]);
     // Every starter says what it actually contains — the card renders it.
     expect(templates.every((t) => (t.description ?? "").length > 0)).toBe(true);
   });
 
   it("starts a new document from a starter, and refuses an id nothing carries", async () => {
     setLibraryFlag(true);
-    const doc = await mockClient.newFromTemplate("onecad.std.template.nema17-mount");
+    const doc = await mockClient.newFromTemplate("onecad.std.template.printed-part");
     expect(doc.documentId).toBeTruthy();
     await expect(mockClient.newFromTemplate("onecad.std.template.nope")).rejects.toThrow(
       /unknown template/,
@@ -167,7 +146,6 @@ describe("mockClient project templates — the built-in starters", () => {
     expect((await mockClient.listTemplates()).map((t) => t.id)).toEqual([
       "onecad.std.template.blank",
       "onecad.std.template.printed-part",
-      "onecad.std.template.nema17-mount",
       "me.mine",
     ]);
   });

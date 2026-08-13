@@ -267,6 +267,8 @@ Proven pattern (BOLTS, FreeCAD): **separate dimension data (tables) from geometr
 
 ### 6.2 Seed catalog
 
+> **AS SHIPPED (CL-TRIM, 2026-08-13): one family — ISO 4762, M2–M12.** The rest of this section is the designed catalog, kept because it is the spec for what a family must carry. All ten families were built and then cut back to the flagship one; the generator dispatch, the table shape and the parameter roles below are unchanged and are what a re-added family plugs into. See `TODO.md` § CL-TRIM.
+
 - **Fasteners** (table-driven, BOLTS-seeded): ISO 4762/DIN 912 socket cap, ISO 7380 button head, ISO 4014/4017 hex bolts, ISO 4032 nuts, ISO 7089/7093 washers — M2–M12.
 - **Bearings** (pure lookup, ISO 15): only bore/OD/width matter for placement; fully determined by bearing code (608 = 8×22×7). Stepped-ring geometry suffices.
 - **Motors** (NEMA 17/23): faceplate square, hole pattern, pilot Ø/height, shaft Ø/length fixed; body length is a free per-instance value.

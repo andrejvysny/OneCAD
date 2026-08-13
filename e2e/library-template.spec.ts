@@ -83,14 +83,13 @@ test("the built-in starters show on the Templates row, and one starts a project"
   await expect(page.getByRole("button", { name: "New project" })).toBeVisible();
 
   await page.getByRole("button", { name: "Templates" }).click();
-  await expect(page.getByTestId("template-card")).toHaveCount(3);
+  await expect(page.getByTestId("template-card")).toHaveCount(2);
   // Mirrors `src-tauri/src/library_seed_templates.rs::SEED_TEMPLATES` — the
-  // three the app actually ships, by name and by what they say they contain.
-  const motorMount = page.getByTestId("template-card").filter({ hasText: "NEMA 17 Motor Mount" });
+  // two the app actually ships, by name and by what they say they contain.
+  const printedPart = page.getByTestId("template-card").filter({ hasText: "3D-Printed Part" });
   await expect(page.getByTestId("template-card").filter({ hasText: "Blank" })).toBeVisible();
-  await expect(page.getByTestId("template-card").filter({ hasText: "3D-Printed Part" })).toBeVisible();
-  await expect(motorMount).toContainText("NEMA 17 stepper placed at the origin");
+  await expect(printedPart).toContainText("Build plate datum");
 
-  await motorMount.click();
+  await printedPart.click();
   await expect(page.locator('[data-testid="viewport-canvas"] canvas')).toBeVisible();
 });
