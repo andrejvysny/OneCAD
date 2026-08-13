@@ -65,13 +65,18 @@ use tokio::sync::{watch, Mutex};
 
 use onecad_core::document::body::split_child_uuid;
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord, PlaneKind,
-    RevolveParams, SketchOpParams, SketchPlaneRef,
+    BooleanMode, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation, Operation,
+    OperationRecord, PlaneKind, RevolveParams, SketchOpParams, SketchPlaneRef,
 };
-use onecad_core::document::refs::{AxisRef, SketchRegionRef};
+use onecad_core::document::refs::{
+    AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
+};
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{EditCommand, SketchEditOp};
-use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::ids::{
+    BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, SnapshotId, TopoKey,
+};
+use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, RegenScheduler,
@@ -1391,4 +1396,569 @@ async fn revolve_reedit_binds_the_stored_region_not_the_first() {
          UpdateOperationParams ({vol:.3} → {vol2:.3})",
         bound.region_id
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP1.5 — the TYPED BODY-EDGE AXIS, the half of `AxisRef` the UI does not author.
+//
+// The variant is implemented end to end (worker `RevolveOp.cpp:129-201`, core
+// `AxisRef::Element`, wire `wire_op_inputs`) and its contract row is recorded
+// `uiExposure:"hidden"`: exposing it is a UI decision, but the PERSISTENCE and
+// IDENTITY behaviour must be proven either way — WP1.5 conditions any future
+// exposure on exactly these tests.
+//
+// The two refusal cases (curved axis edge, foreign/cross-body binding) are
+// worker-level and live in `worker/tests/test_wp6_ops.cpp`; the two that need a
+// real document — save/reopen + upstream edit, and a CONSUMED edge — are here.
+//
+// Geometry, once, for both tests:
+//   * axis body — an XZ sketch `toWorld(u,v)=(0,u,v)` rect u∈[0,10] v∈[0,10]
+//     extruded 20 along its normal ⇒ a box with ONE edge lying on the world
+//     X-axis (y=0, z=0). That edge is the revolution axis.
+//   * profile — the Pappus rect of test 1: XY `toWorld(u,v)=(-v,u,0)`,
+//     u∈[10,20] v∈[0,10] ⇒ world x∈[-10,0], y∈[10,20], radius 15 from the
+//     X-axis, area 100 ⇒ 360° sweeps V = 2π·15·100 = 9424.78.
+// Revolving about a BODY EDGE therefore lands on the same number the sketch-line
+// axis produces — which is the point: the axis SOURCE must not change the result.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SKETCH_AXIS: u128 = 0xC00; // the sketch whose extrude owns the axis edge
+const EXTRUDE_AXIS: u128 = 0xC01; // the axis body producer
+const FILLET_AXIS: u128 = 0xC02; // consumes the axis edge (NeedsRepair test)
+const SKETCH_PROFILE: u128 = 0xC03; // the revolved profile
+const REVOLVE_TYPED: u128 = 0xC04; // the revolve driven by the body-edge axis
+
+const SEC_EDGE_RANGES: u32 = 7;
+const SEC_EDGE_POSITIONS: u32 = 8;
+const SEC_EDGE_ID_OFFS: u32 = 9;
+const SEC_EDGE_ID_CHARS: u32 = 10;
+
+/// MESH1 string table (`id-offs` + `id-chars`) — verbatim from `topology_rebind.rs`.
+fn id_table(
+    view: &MeshHeaderView,
+    blob: &[u8],
+    offs_ty: u32,
+    chars_ty: u32,
+    count: usize,
+) -> Vec<String> {
+    let offs = view.section(offs_ty).expect("id-offs");
+    let chars = view.section(chars_ty).expect("id-chars");
+    let (obase, cbase) = (offs.offset as usize, chars.offset as usize);
+    (0..count)
+        .map(|i| {
+            let lo = u32_le(blob, obase + i * 4) as usize;
+            let hi = u32_le(blob, obase + (i + 1) * 4) as usize;
+            String::from_utf8_lossy(&blob[cbase + lo..cbase + hi]).into_owned()
+        })
+        .collect()
+}
+
+/// The edge that LIES ON the world X-axis (every sampled point has |y|,|z| ≤ 1e-3)
+/// ⇒ `(topoKey, centroid anchor)`. Picked by geometry rather than by ordinal so the
+/// test does not depend on which direction the extrude ran, nor on OCCT's edge
+/// ordering — either would make a green run accidental.
+fn x_axis_edge_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
+    assert!(
+        view.has_edges(),
+        "MESH1 must carry edges to pick an axis edge"
+    );
+    let er = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let ep = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let keys = id_table(
+        view,
+        blob,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let (erbase, epbase) = (er.offset as usize, ep.offset as usize);
+    for (i, key) in keys.iter().enumerate().take(view.edge_count as usize) {
+        let first = u32_le(blob, erbase + i * 8) as usize;
+        let count = u32_le(blob, erbase + i * 8 + 4) as usize;
+        if count < 2 {
+            continue;
+        }
+        let (mut on_axis, mut sx) = (true, 0.0f64);
+        for p in 0..count {
+            let o = epbase + (first + p) * 12;
+            let (x, y, z) = (
+                f32_le(blob, o) as f64,
+                f32_le(blob, o + 4) as f64,
+                f32_le(blob, o + 8) as f64,
+            );
+            on_axis &= y.abs() <= 1e-3 && z.abs() <= 1e-3;
+            sx += x;
+        }
+        if on_axis {
+            return (
+                key.clone(),
+                Vec3::new_unchecked(sx / count as f64, 0.0, 0.0),
+            );
+        }
+    }
+    panic!("the axis body has no edge on the world X-axis — the fixture geometry moved");
+}
+
+/// Promote the world-X-axis edge of `body` at `snap_id` to a stable [`ElementId`].
+async fn promote_x_axis_edge(
+    rt: &mut DocumentRuntime,
+    body: BodyId,
+    snap_id: SnapshotId,
+) -> (ElementId, Vec3) {
+    let mesh = body_mesh(rt, body, Lod::Coarse).await;
+    let view = validate_mesh_blob(&mesh).expect("MESH1 validates");
+    let (key, anchor) = x_axis_edge_pick(&view, &mesh);
+    let promoted = rt
+        .promote_selection(
+            snap_id,
+            body,
+            vec![(
+                TopoKey::new(&key),
+                Some(AnchorIntent {
+                    world_point: anchor,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .expect("promote the axis edge");
+    (ElementId::new(promoted[0].element_id.clone()), anchor)
+}
+
+fn edge_ref_of(body: BodyId, edge_el: &ElementId, anchor: Vec3) -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: edge_el.clone(),
+            kind: ElementKind::Edge,
+            extra: Default::default(),
+        }),
+        // Left absent deliberately: the single writer stamps `intent.descriptor`
+        // on the way out, exactly as it does for a Fillet edge ref.
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: anchor,
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }
+}
+
+/// A Revolve whose axis is `AxisRef::Element` — the typed companion plus the
+/// legacy `edgeId` mirror the additive contract requires.
+fn revolve_typed_axis_record(
+    rec: u128,
+    sketch: SketchId,
+    angle_deg: f64,
+    body: BodyId,
+    edge_el: ElementId,
+    anchor: Vec3,
+) -> OperationRecord {
+    let params = RevolveParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""),
+            region_identity_version: None,
+            extra: Default::default(),
+        }),
+        angle_deg: Scalar::new(angle_deg),
+        axis: Some(AxisRef::Element {
+            body,
+            edge: edge_el.clone(),
+            edge_ref: Some(edge_ref_of(body, &edge_el, anchor)),
+            extra: Default::default(),
+        }),
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Revolve",
+        Operation::Known(KnownOperation::Revolve(params)),
+    )
+}
+
+fn fillet_record(rec: u128, body: BodyId, edge_el: ElementId, anchor: Vec3) -> OperationRecord {
+    let edge_ref = edge_ref_of(body, &edge_el, anchor);
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Fillet",
+        Operation::Known(KnownOperation::Fillet(FilletParams {
+            radius: Scalar::new(2.0),
+            edge_ids: vec![edge_el],
+            edges: vec![edge_ref],
+            chain_tangent_edges: false,
+            tangent_closure_version: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+/// A closed, fully-constrained (dof-0) polygon through `pts` (CCW) — the marshaller
+/// shape `rect_sketch` uses, generalized. Verbatim from `topology_rebind::add_poly`.
+fn add_poly(sk: &mut Sketch, base: u128, pts: &[(f64, f64)]) {
+    let n = pts.len() as u128;
+    let e = |k: u128| EntityId(Uuid::from_u128(base + k));
+    let c = |k: u128| ConstraintId(Uuid::from_u128(base + 0x400 + k));
+    for i in 0..n {
+        let (x0, y0) = pts[i as usize];
+        let (x1, y1) = pts[((i + 1) % n) as usize];
+        sk.add_entity(SketchEntity::point(
+            e(2 * i),
+            Vec2::new_unchecked(x0, y0),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::point(
+            e(2 * i + 1),
+            Vec2::new_unchecked(x1, y1),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::line(
+            e(0x100 + i),
+            e(2 * i),
+            e(2 * i + 1),
+            false,
+        ))
+        .unwrap();
+    }
+    for i in 0..n {
+        sk.add_constraint(Constraint::Coincident {
+            id: c(i),
+            point1: e(2 * i + 1),
+            point2: e(2 * ((i + 1) % n)),
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        })
+        .unwrap();
+        sk.add_constraint(Constraint::Fixed {
+            id: c(0x100 + i),
+            point: e(2 * i),
+            at: Vec2::new_unchecked(pts[i as usize].0, pts[i as usize].1),
+        })
+        .unwrap();
+    }
+}
+
+/// The axis body's sketch + extrude, appended to `rt`. Returns its `BodyId`.
+///
+/// The profile is an **L**, not a rectangle, and that is load-bearing: the axis edge
+/// is the L's REFLEX corner (270° of material), the only edge of the prism with that
+/// descriptor. A box would give four congruent parallel edges, and after an upstream
+/// edit the ladder would correctly refuse to pick among them on anchor evidence alone
+/// — a genuine `NeedsRepair`, but of the ambiguity class, which would prove nothing
+/// about whether the typed axis ref SURVIVES an edit.
+///
+/// XZ `toWorld(u,v) = (0,u,v)`, so the reflex corner at sketch (0,0) puts that edge
+/// exactly on the world X-axis; extruding along the plane normal runs it down +X.
+fn add_axis_body(rt: &mut DocumentRuntime, depth: f64) -> BodyId {
+    let sid = SketchId(Uuid::from_u128(SKETCH_AXIS));
+    let mut sk = Sketch::on_world_plane(sid, "AxisL", WorldPlane::XY);
+    add_poly(
+        &mut sk,
+        0x3000,
+        &[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (-10.0, 10.0),
+            (-10.0, -10.0),
+            (0.0, -10.0),
+        ],
+    );
+    add_op(rt, sketch_record(SKETCH_AXIS, &sk, xz_plane_ref()));
+    add_op(rt, extrude_record(EXTRUDE_AXIS, sid, depth));
+    body_of(EXTRUDE_AXIS)
+}
+
+/// The Pappus profile sketch, appended to `rt`. Returns its `SketchId`.
+fn add_profile_sketch(rt: &mut DocumentRuntime) -> SketchId {
+    let sid = SketchId(Uuid::from_u128(SKETCH_PROFILE));
+    let sk = rect_sketch(sid, 0x4000, 10.0, 0.0, 10.0, 10.0);
+    add_op(rt, sketch_record(SKETCH_PROFILE, &sk, xy_plane_ref()));
+    sid
+}
+
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
+        .await
+}
+
+fn open_over(wm: &WorkerManager, path: &std::path::Path) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::open(path, engine, meshes, solver).expect("reopen saved container")
+}
+
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "revolve-typed-axis".into(),
+        occt_fingerprint: None,
+        created: "2026-08-13T00:00:00Z".into(),
+        modified: "2026-08-13T00:00:00Z".into(),
+    }
+}
+
+const PAPPUS_360: f64 = 9424.778; // 2π·15·100
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP1.5 test 1 — promote a straight body edge, revolve about it, SAVE/REOPEN,
+// then edit the op UPSTREAM of the axis. The typed ref must survive all three:
+// a reopen replays it from `document.json`, and an upstream edit re-runs the
+// producing extrude, so the axis edge is a *different* OCCT edge afterwards and
+// only the semantic ref can still name it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_typed_body_edge_axis_survives_reopen_and_upstream_edit() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("typed_axis.onecad");
+    let mut rt = runtime_over(&wm);
+
+    // (0) the axis body, and the promotion that turns its X-axis edge into identity.
+    let axis_body = add_axis_body(&mut rt, 20.0);
+    let base = regen_all(&mut rt).await;
+    let base_snap = published(&base, "axis body");
+    let (edge_el, anchor) = promote_x_axis_edge(&mut rt, axis_body, base_snap.id).await;
+
+    // (1) revolve the Pappus profile about that edge.
+    let profile = add_profile_sketch(&mut rt);
+    add_op(
+        &mut rt,
+        revolve_typed_axis_record(
+            REVOLVE_TYPED,
+            profile,
+            360.0,
+            axis_body,
+            edge_el.clone(),
+            anchor,
+        ),
+    );
+    let first = regen_all(&mut rt).await;
+    let snap = published(&first, "typed-axis revolve");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "a freshly promoted axis edge resolves directly — no repair"
+    );
+    assert!(
+        snap.bodies.iter().any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "the typed body-edge axis published a revolved body"
+    );
+    let vol = mesh_vol(&mut rt, body_of(REVOLVE_TYPED), Lod::Fine).await;
+    assert!(
+        (vol - PAPPUS_360).abs() < 40.0,
+        "revolving about the BODY EDGE lands on the same Pappus solid as the \
+         sketch-line axis ({PAPPUS_360}), got {vol}"
+    );
+
+    // Save the CLEAN pre-edit document — the reopen leg below replays exactly this.
+    rt.save(&path, save_meta())
+        .expect("save the typed-axis doc");
+
+    // (2) UPSTREAM EDIT on the LIVE session — deepen the extrude that owns the axis
+    //     edge, through the edit lane (`from = 1`, which is what stamps SCHEMA §7.2
+    //     `editedFrom`). The edge is rebuilt as a different OCCT edge, longer than
+    //     before; only the semantic ref can still name it. The axis LINE it defines
+    //     is unchanged, so the revolved volume must not move.
+    //
+    //     This runs on `rt`, not on the reopened runtime, for the same reason
+    //     `topology_rebind::h6a_flagship_edit_lane_…` does: an edit replayed from
+    //     zero has no migrated partition, so the anchor-exact carve-out is
+    //     deliberately disabled there (VF-M5) and the correct answer is NeedsRepair.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_AXIS)),
+        op: extrude_record(EXTRUDE_AXIS, SketchId(Uuid::from_u128(SKETCH_AXIS)), 24.0).op,
+    })
+    .expect("edit the axis body's extrude depth");
+    let edited = regen_from(&mut rt, 1).await;
+    let edited_snap = published(&edited, "post-upstream-edit revolve");
+    assert_eq!(
+        edited_snap.repair_summary.needs_repair_count, 0,
+        "an upstream edit that only LENGTHENS the axis edge rebinds it on the live \
+         edit lane, it does not ask for repair"
+    );
+    let edited_vol = mesh_vol(&mut rt, body_of(REVOLVE_TYPED), Lod::Fine).await;
+    assert!(
+        (edited_vol - vol).abs() < 1.0,
+        "the same axis line ⇒ the same revolved volume ({vol}) after the upstream edit, \
+         got {edited_vol}"
+    );
+
+    // (3) A LARGER upstream edit — the axis edge grows +100% — is deterministically
+    //     `NeedsRepair`, not a silent bind onto one of its congruent twins. Measured,
+    //     not assumed: a FILLET ref on this exact edge answers identically at both
+    //     sizes, so this is the shared ladder's descriptor-magnitude policy (auto-bind
+    //     needs score ≥0.85 AND margin ≥0.10) and not something specific to the axis.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_AXIS)),
+        op: extrude_record(EXTRUDE_AXIS, SketchId(Uuid::from_u128(SKETCH_AXIS)), 48.0).op,
+    })
+    .expect("edit the axis body's extrude depth again");
+    let stretched = regen_from(&mut rt, 1).await;
+    let stretched_snap = published(&stretched, "oversized upstream edit");
+    assert!(
+        stretched_snap.repair_summary.needs_repair_count > 0,
+        "an edit that doubles the axis edge is refused, not guessed"
+    );
+    assert!(
+        !stretched_snap
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "a refused axis publishes NO revolved body"
+    );
+
+    // (4) REOPEN the saved pre-edit container and replay it from zero: the typed
+    //     axis is persisted state, not session state.
+    let mut reopened = open_over(&wm, &path);
+    let replay = regen_from(&mut reopened, 0).await;
+    let replay_snap = published(&replay, "reopened typed-axis revolve");
+    assert_eq!(
+        replay_snap.repair_summary.needs_repair_count, 0,
+        "the typed axis ref replays clean after a reopen"
+    );
+    let replay_vol = mesh_vol(&mut reopened, body_of(REVOLVE_TYPED), Lod::Fine).await;
+    assert!(
+        (replay_vol - vol).abs() < 1.0,
+        "the reopened document revolves about the same axis ({vol}), got {replay_vol}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE TYPED-AXIS PASS: {vol:.3} → upstream edit {edited_vol:.3} → reopen {replay_vol:.3}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP1.5 test 3 — the axis edge is CONSUMED (a fillet upstream rolls it away).
+// The contract row's `userRecoveryBehavior` is "missing/deleted edge produces
+// NeedsRepair, not OP_FAILED": the user is offered a re-pick, the timeline is not
+// broken, and — the part that matters — no OTHER edge is silently substituted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_typed_axis_consumed_edge_is_needs_repair_not_failure() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let axis_body = add_axis_body(&mut rt, 20.0);
+    let base = regen_all(&mut rt).await;
+    let base_snap = published(&base, "axis body");
+    let (edge_el, anchor) = promote_x_axis_edge(&mut rt, axis_body, base_snap.id).await;
+
+    // The fillet is inserted BEFORE the revolve, so by the time the revolve runs
+    // its axis edge no longer exists in the head.
+    add_op(
+        &mut rt,
+        fillet_record(FILLET_AXIS, axis_body, edge_el.clone(), anchor),
+    );
+    let profile = add_profile_sketch(&mut rt);
+    add_op(
+        &mut rt,
+        revolve_typed_axis_record(
+            REVOLVE_TYPED,
+            profile,
+            360.0,
+            axis_body,
+            edge_el.clone(),
+            anchor,
+        ),
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "revolve over a consumed axis edge");
+    assert!(
+        snap.repair_summary.needs_repair_count > 0,
+        "a consumed axis edge is NeedsRepair STATE — auto-binding a different edge \
+         here would silently revolve about the wrong axis"
+    );
+    assert!(
+        !rep.needs_repair.is_empty(),
+        "the report carries the repair item (non-vacuity: an empty list would satisfy \
+         nothing above)"
+    );
+    let refs: Vec<(String, String)> = rep
+        .needs_repair
+        .iter()
+        .map(|item| (item.op_id.clone(), item.ref_id.clone()))
+        .collect();
+    // The item must be the REVOLVE's, named by op id — the fillet in this same
+    // timeline also owns an `…​.input0` ref, so matching the slot alone would let
+    // the fillet's own repair item satisfy a revolve assertion.
+    let revolve_id = Uuid::from_u128(REVOLVE_TYPED).to_string();
+    assert!(
+        refs.iter()
+            .any(|(op, r)| *op == revolve_id && r == &format!("{revolve_id}.input0")),
+        "the REVOLVE's axis (input slot 0) is what needs repair, got {refs:?}"
+    );
+    assert!(
+        !snap.bodies.iter().any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "NeedsRepair publishes NO revolved body — a wrong-axis solid is worse than none"
+    );
+    // The axis body itself survived: this is a repairable REFERENCE, not a broken doc.
+    assert!(
+        snap.bodies.iter().any(|b| b.body == axis_body),
+        "the filleted axis body is still published"
+    );
+
+    // NEGATIVE CONTROL, in the same process: the IDENTICAL document minus the
+    // fillet publishes cleanly. Without this the assertions above would also be
+    // satisfied by a fixture that simply cannot revolve — the fillet has to be
+    // what makes the difference, and this is the only way to show it.
+    let mut control = runtime_over(&wm);
+    let control_body = add_axis_body(&mut control, 20.0);
+    let control_base = regen_all(&mut control).await;
+    let control_snap = published(&control_base, "control axis body");
+    let (control_el, control_anchor) =
+        promote_x_axis_edge(&mut control, control_body, control_snap.id).await;
+    let control_profile = add_profile_sketch(&mut control);
+    add_op(
+        &mut control,
+        revolve_typed_axis_record(
+            REVOLVE_TYPED,
+            control_profile,
+            360.0,
+            control_body,
+            control_el,
+            control_anchor,
+        ),
+    );
+    let control_rep = regen_all(&mut control).await;
+    let control_out = published(&control_rep, "control revolve");
+    assert_eq!(
+        control_out.repair_summary.needs_repair_count, 0,
+        "the same document WITHOUT the fillet resolves its axis — the consumed edge          is what produced the repair above"
+    );
+    assert!(
+        control_out
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "the control document publishes the revolved body"
+    );
+
+    wm.shutdown().await;
+    eprintln!("REVOLVE TYPED-AXIS CONSUMED PASS: NeedsRepair {refs:?}, no revolved body");
 }

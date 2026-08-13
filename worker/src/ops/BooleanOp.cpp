@@ -69,7 +69,24 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     // deterministic children `body_<opId>:<k>` (SCHEMA §2, D1).
     if (publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out) ==
         BooleanPublishResult::Empty) {
-        return OpOutcome::fail("OP_FAILED", "Boolean produced no solids");
+        // A recoverable refusal (SCHEMA §7.3): target and tool stay intact and no
+        // lifecycle event is emitted. It carries its own diagnostic code because
+        // the §8 top-level code is the generic `OP_FAILED` shared with every other
+        // Boolean failure, and "your Cut consumed the target completely" is the one
+        // the user can actually act on.
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", "Boolean produced no solids");
+        failure.diagnostics.push_back(
+            {{"severity", "error"},
+             {"code", "BOOLEAN_EMPTY_RESULT"},
+             {"message", "Boolean produced no solids"},
+             {"stage", "publish"},
+             {"evidence",
+              {{"boolean",
+                {{"operation", read_str(params, "operation", "Union")},
+                 {"targetBodyId", target_id},
+                 {"toolBodyId", tool_id},
+                 {"solidCount", 0}}}}}});
+        return failure;
     }
 
     // The tool is consumed by the operation: drop its body + partition entries.

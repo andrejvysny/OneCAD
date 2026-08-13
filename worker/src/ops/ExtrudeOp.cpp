@@ -243,6 +243,18 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
     return out;
 }
 
+// Why a draft refusal carries its own code and evidence: the top-level failure is
+// the §8 `OP_FAILED` taxonomy value for every one of these, so a caller that needs
+// to tell "this profile has no planar wall to draft" from "OCCT rejected the faces
+// I offered" would otherwise have to match on message TEXT — the routing the
+// diagnostics contract forbids. Codes follow the `EDGE_OP_*` precedent: stable
+// per-defect string, `stage`, and bounded evidence naming the parameters involved.
+struct DraftFailure {
+    std::string code;
+    std::string message;
+    nlohmann::json evidence;
+};
+
 // Apply draft to side faces. A requested draft must succeed; silently returning
 // an undrafted solid would make preview/commit claim parameters were honored.
 std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
@@ -250,7 +262,7 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
                                         const gp_Pln& plane,
                                         const gp_Dir& direction,
                                         double distance,
-                                        std::string& error) {
+                                        DraftFailure& failure) {
     if (std::abs(draft_angle_deg) <= kDraftAngleEpsilon) return shape;
     try {
         const double angle_rad = draft_angle_deg * M_PI / 180.0;
@@ -276,12 +288,28 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
                 ++added_faces;
             }
         }
+        // Every refusal below reports the same three facts, because they are what
+        // separates the cases: the angle asked for, how many side faces were
+        // eligible, and how many the builder accepted.
+        const auto counts = [&](double angle) {
+            return nlohmann::json{{"draft",
+                                   {{"angleDeg", angle},
+                                    {"eligibleFaces", eligible_faces},
+                                    {"addedFaces", added_faces}}}};
+        };
         if (eligible_faces == 0) {
-            error = "Extrude draft refused: no eligible planar side faces";
+            // No planar wall exists at all — a circular profile, for instance.
+            failure = {"EXTRUDE_DRAFT_NO_PLANAR_FACE",
+                       "Extrude draft refused: no eligible planar side faces",
+                       counts(draft_angle_deg)};
             return std::nullopt;
         }
         if (added_faces == 0) {
-            error = "Extrude draft refused: no eligible side faces accepted";
+            // Walls existed; OCCT rejected every one of them. A different defect
+            // from the above, and the user's next move differs too.
+            failure = {"EXTRUDE_DRAFT_NO_FACE_ACCEPTED",
+                       "Extrude draft refused: no eligible side faces accepted",
+                       counts(draft_angle_deg)};
             return std::nullopt;
         }
         draft.Build();
@@ -290,17 +318,38 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
             const double after = solid_volume(draft.Shape());
             const double tolerance = std::max(1e-9, std::abs(before) * 1e-10);
             if (std::abs(after - before) > tolerance) return draft.Shape();
-            error = "Extrude draft refused: draft left shape unchanged";
+            // The builder completed and changed nothing: the semantic check that
+            // stops a claimed angle from being silently dropped.
+            nlohmann::json evidence = counts(draft_angle_deg);
+            evidence["draft"]["volumeBefore"] = before;
+            evidence["draft"]["volumeAfter"] = after;
+            failure = {"EXTRUDE_DRAFT_NO_CHANGE",
+                       "Extrude draft refused: draft left shape unchanged", evidence};
             return std::nullopt;
         }
-        error = "Extrude draft failed";
-    } catch (const Standard_Failure& failure) {
-        error = std::string("Extrude draft failed: ") +
-                (failure.GetMessageString() ? failure.GetMessageString() : "OCCT");
+        failure = {"EXTRUDE_DRAFT_BUILD_FAILED", "Extrude draft failed",
+                   counts(draft_angle_deg)};
+    } catch (const Standard_Failure& error) {
+        failure = {"EXTRUDE_DRAFT_BUILD_FAILED",
+                   std::string("Extrude draft failed: ") +
+                       (error.GetMessageString() ? error.GetMessageString() : "OCCT"),
+                   nlohmann::json{{"draft", {{"angleDeg", draft_angle_deg}}}}};
     } catch (...) {
-        error = "Extrude draft failed";
+        failure = {"EXTRUDE_DRAFT_BUILD_FAILED", "Extrude draft failed",
+                   nlohmann::json{{"draft", {{"angleDeg", draft_angle_deg}}}}};
     }
     return std::nullopt;
+}
+
+/// Wraps a draft refusal in the `OP_FAILED` outcome plus its stable diagnostic.
+OpOutcome draft_refusal(const DraftFailure& failure) {
+    OpOutcome out = OpOutcome::fail("OP_FAILED", failure.message);
+    out.diagnostics.push_back({{"severity", "error"},
+                               {"code", failure.code},
+                               {"message", failure.message},
+                               {"stage", "build"},
+                               {"evidence", failure.evidence}});
+    return out;
 }
 
 }  // namespace
@@ -469,9 +518,10 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         }
 
         // Draft (side faces only) — applied to the prism before the boolean.
+        DraftFailure draft_failure;
         std::optional<TopoDS_Shape> drafted =
-            apply_draft(tool_shape, draft_angle, plane, direction, distance, err);
-        if (!drafted) return OpOutcome::fail("OP_FAILED", err);
+            apply_draft(tool_shape, draft_angle, plane, direction, distance, draft_failure);
+        if (!drafted) return draft_refusal(draft_failure);
         tool_shape = std::move(*drafted);
         const std::string drafted_error =
             invalid_shape_reason(tool_shape, "Extrude draft");

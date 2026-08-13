@@ -18,6 +18,7 @@ import {
   rollbackToCursorCommand,
   suppressOperationCommand,
 } from "@/ipc/tauriCommandMap";
+import { classifyRegen, failureReason, keepsRecord } from "@/ipc/regenOutcome";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import type { ApplyOperationResult, NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
 import { parseRefId } from "@/ipc/tauriCommandMap";
@@ -58,6 +59,28 @@ function hint(text: string): void {
   viewportStore.getState().setStatusHint(text);
 }
 
+/**
+ * Hydrate, then report what the backend ACTUALLY did (WP0.3).
+ *
+ * Every history affordance used to hydrate and then announce success, catching
+ * only a rejected promise — so a resolved `errorMessage` produced a success hint
+ * on a document the regen had refused to change. The result is classified once,
+ * here, and the hint follows the verdict.
+ */
+function settle(res: ApplyOperationResult, success: string, failurePrefix: string): void {
+  const outcome = classifyRegen(res);
+  if (keepsRecord(outcome)) applyEditResult(res);
+  const reason = failureReason(outcome);
+  if (reason !== null) {
+    errorHint(`${failurePrefix}: ${reason}`);
+  } else if (outcome.kind === "needsRepair") {
+    // Not a failure: the record stands and the repair panel acts on it next.
+    viewportStore.getState().setStatusHint(`${success} — needs repair`, { sticky: true });
+  } else {
+    hint(success);
+  }
+}
+
 /** Sticky error hint — stays until the next status change so it stays readable. */
 function errorHint(text: string): void {
   viewportStore.getState().setStatusHint(text, { severity: "error", sticky: true });
@@ -84,8 +107,7 @@ export async function suppressFeature(opId: string, suppressed: boolean): Promis
     // downstream that depends on it, but UN-suppressing must not cascade — that
     // would resurrect dependents the user deliberately suppressed on their own.
     const res = await createClient().applyEditCommand(suppressOperationCommand(opId, suppressed, suppressed));
-    applyEditResult(res);
-    hint(suppressed ? "Feature suppressed" : "Feature unsuppressed");
+    settle(res, suppressed ? "Feature suppressed" : "Feature unsuppressed", "Suppress failed");
   } catch (e) {
     errorHint(`Suppress failed: ${errMessage(e)}`);
   }
@@ -99,8 +121,7 @@ export async function suppressFeature(opId: string, suppressed: boolean): Promis
 export async function rollToIndex(index: number): Promise<void> {
   try {
     const res = await createClient().applyEditCommand(rollbackToCursorCommand(index + 1));
-    applyEditResult(res);
-    hint("Rolled timeline");
+    settle(res, "Rolled timeline", "Rollback failed");
   } catch (e) {
     errorHint(`Rollback failed: ${errMessage(e)}`);
   }
@@ -110,8 +131,7 @@ export async function rollToIndex(index: number): Promise<void> {
 export async function deleteFeature(opId: string): Promise<void> {
   try {
     const res = await createClient().applyEditCommand(removeOperationCommand(opId));
-    applyEditResult(res);
-    hint("Feature deleted");
+    settle(res, "Feature deleted", "Delete failed");
   } catch (e) {
     errorHint(`Delete failed: ${errMessage(e)}`);
   }
@@ -187,7 +207,11 @@ export async function rebindCandidate(
     errorHint(REPAIR_NOT_REBINDABLE);
     return false;
   }
-  const bodyId = deriveOperatedBody(item);
+  // The candidate's own authoritative body (denormalized from `ResolveRefResult.
+  // bodyId` — see `ResolveCandidate.bodyId`) always wins over the item's stored
+  // `bodyId`, which names the body a feature HISTORICALLY operated on and can be
+  // stale by the time a candidate is resolved and picked.
+  const bodyId = candidate.bodyId ?? deriveOperatedBody(item);
   if (!bodyId) {
     const bodyCount = Object.keys(documentStore.getState().bodies).length;
     errorHint(
@@ -215,8 +239,17 @@ export async function rebindCandidate(
       candidate.worldPos,
     );
     const res = await client.applyEditCommand(rebindInputCommand(item.opId, path, ref));
-    applyEditResult(res);
-    hint("Reference repaired");
+    // A rebind that resolved to a failure must not report the reference repaired,
+    // and must return false so the panel keeps the row.
+    const outcome = classifyRegen(res);
+    if (keepsRecord(outcome)) applyEditResult(res);
+    const reason = failureReason(outcome);
+    if (reason !== null) {
+      errorHint(`Repair failed: ${reason}`);
+      return false;
+    }
+    // Still NeedsRepair after a rebind means this slot took, another did not.
+    hint(outcome.kind === "needsRepair" ? "Reference repaired — more remain" : "Reference repaired");
     return true;
   } catch (e) {
     errorHint(`Repair failed: ${errMessage(e)}`);

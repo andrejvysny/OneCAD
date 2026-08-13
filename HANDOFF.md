@@ -1159,6 +1159,155 @@ Session 4 · 2026-08-08
 > down, unchanged) is the Advanced-Fillet roadmap and is still the live handoff
 > for that program — its § "VF-M5 gate regression" is the diagnosis behind P1
 > here. Read whichever thread you are picking up; read both before pushing.
+# Handoff — Finishing the modeling-correctness roadmap
+
+Session 5 · 2026-08-13
+
+> **THREE THREADS IN THIS FILE.** Session 5 (this one, immediately below) is the
+> live one: completing `OneCAD-modeling-correctness-roadmap/`. Session 4 and
+> Session 3 follow, unchanged, as history for the Platform refactor and the
+> Advanced-Fillet program. Read Session 5 to pick up; the others only if you touch
+> those areas.
+
+## Goal
+
+Finish the seven-phase program in `OneCAD-modeling-correctness-roadmap/` — every
+supported modeling operation with an explicit publication contract, proportionate
+validation, fail-closed identity, preview that matches commit, evidence at kernel /
+real-worker / user-flow layers, and CI that blocks rather than informs.
+
+## Original plan
+
+`~/.claude/plans/now-lets-plan-next-sunny-lighthouse.md` — approved 2026-08-13.
+Seven tracks A–G. **Read it before doing anything**; it carries the per-item
+evidence (file:line) that this summary compresses away.
+
+Three decisions were taken with the user while planning, and they shape everything
+downstream:
+
+1. **Finish Phase 5, then Phase 6 as a separate second tranche** (the master
+   roadmap's own recommendation for one founder).
+2. **Replace the owed manual Tauri smoke with a real automated Tauri lane** — it
+   closes risk R-20 permanently instead of discharging a manual gate once.
+3. **Generalize kernelbench's case-v2 additively** rather than cutting a v3. Every
+   m1 `inputDigest` will move again and must be re-recorded with a written
+   explanation, exactly as in `1d0fbb7`.
+
+### What the planning phase found, and why it reordered the work
+
+Three exploration agents verified every phase exit gate against the live tree. The
+finding that set the plan's shape: **"recorded complete" and "gate satisfied" have
+come apart in all five finished phases, and the pattern is consistent — the
+implementations landed, the evidence did not.** Repeatedly a work package's code is
+correct and complete while the tests the spec mandates do not exist, and in a few
+places an artifact asserts something the code does not do. Hence Track A (the
+unbilled remainder of Phases 0–4) comes before any new Phase 5 breadth.
+
+## Done so far (and why)
+
+Five waves committed this session, all on `master`, **none pushed** (10 commits
+ahead of `origin/master`).
+
+- **`1d0fbb7` — M3.5, non-isometric metamorph policy** (Phase 5 WP5.1 residual).
+  The metamorph comparison now carries a RELATION per variant instead of demanding
+  equality from all of them: rigid → equivalence, `scaled` → similarity (`k³·V`,
+  `k²·A`), `parameterEpsilon` → continuity. The relation is a pure function of the
+  variant name, so the frozen result-v1 block is untouched. Coefficients measured,
+  not guessed. **It found a real defect**: `validate_output` measured the blend
+  against the case's DECLARED radius while `Execution.cpp` filleted with the
+  scaled/nudged EFFECTIVE one.
+- **`8bd0fdb` — M4 recipe-agnostic validators** (Phase 5 WP5.2). The enabling move
+  was taking the blend from the fillet builder's own history (`Generated` /
+  `Modified`) instead of recognising it by surface type — "the cylinder in the
+  output is the fillet" is false the moment a *support* is a cylinder.
+  `crossSectionProfile` uses `1/|k|` of the larger principal curvature, exact on
+  plane/cylinder/cone because a constant-radius blend is a canal surface.
+- **`772b3d2` — A1, the shared operation-result classifier** (WP0.3). The one item
+  in Track A that was a live correctness defect (R-04) rather than missing evidence:
+  `needsRepair` was declared and never produced, no shared helper existed, and every
+  consumer inferred success from body counts.
+- **`6b08e27` — A2, draft applied-or-refused** (WP0.6). **The mandated
+  circular-profile red probe finally ran; the answer is REFUSAL**, so R-10 is closed
+  as not-present with evidence rather than by inspection.
+- **`4b62965` — A3, stable diagnostic codes** for the Draft and empty-Boolean
+  refusals, both of which returned a bare `OP_FAILED` with the reason only in the
+  message.
+
+### Decisions and dead-ends worth not rediscovering
+
+- **`repairSteps` rides `regen-finished`, not the `needs-repair` event.** The
+  sibling event carries the same facts but is emitted AFTER `regen-finished`
+  (`api/mod.rs` `emit_regen_events`), so an awaiter settling there would always miss
+  it. This was the whole reason `needsRepair` had never been produced.
+- **A NeedsRepair record is never rolled back.** `keepsRecord()` covers
+  published/noop/needsRepair. Rolling back the record repair operates on would
+  delete the thing the user is about to fix.
+- **`classifyRegen` falls back to the old body-count inference when `terminal` is
+  absent**, deliberately, so legacy fixtures behave exactly as before.
+- **Blend/support faces must come from builder history.** Sampling the blend's
+  boundary with the END CAPS fails every non-cone case at exactly π/2 — that
+  boundary is a right angle by design, not a defect.
+- **Tolerances need a conditioning term.** `farOriginTranslation` rebuilds 1.7e6 mm
+  out where double precision costs six orders of magnitude; without the term the
+  probe reads arithmetic as a defect.
+- **Two findings recorded, not fixed** (both outside their item's scope): `Arc`
+  entities still reach the BRep as polylines while `Circle` stays analytic — the
+  slot probe measures 28 faces and a 24-gon cap, direct evidence for the Phase 2
+  residual the plan tracks as B3. And the draft refusal already carried a structured
+  `Diagnostic{stage:"build"}`, which narrowed A3 to the code rather than the
+  envelope.
+- **Every new test table was proved non-vacuous by mutation**, and this is the house
+  style now: bypassing the classifier reds 9 rows; reverting `commitPattern` reds 4
+  and reproduces R-04 verbatim; a wrong code in `boolean_empty_refusal.ndjson` reds
+  the fixture. Do the same for anything new.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Read `~/.claude/plans/now-lets-plan-next-sunny-lighthouse.md` — the plan is the
+   authority, this file is the summary.
+3. **Answer the open question below**, because A4 cannot start without it.
+4. Environment (nothing here is optional — `bundle.externalBin` makes any cargo
+   command that compiles the app crate require the staged sidecar):
+   ```bash
+   ONECAD_OCCT_ROOT=$HOME/.onecad-occt/8.0.1 scripts/build-worker.sh Release
+   ctest --test-dir worker/build --output-on-failure          # expect 117/117
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+   ```
+5. A second interactive session (`onecad-library-content-impl`) shares this working
+   tree. Coordinate before touching Rust or worker sources; **never branch or stash
+   here** — a stash once swept a concurrent session's work.
+
+## Open questions
+
+- **A4 needs a product call, and it blocks the next item.** The Revolve body-edge
+  axis is implemented and deliberately unexposed (`ModelToolController.ts:8302`),
+  its four required tests are missing, and the P3 contract row asserts
+  `uiExposure:"exposed"` while `src/ipc/types.ts:843` says the tool only authors the
+  `sketchLine` variant. **Either expose it in the UI, or mark the row
+  deferred/hidden with a contract test.** The four tests get written either way; only
+  the contract row and the UI differ.
+- **Nothing is pushed** (10 commits). No push was requested; say so before doing it.
+- **Phase 6 needs Proxmox host access** (F4/F5) that refused connections last time,
+  and **no Windows machine is identified anywhere** for F6.
+
+## Pointers
+
+- Plan → `~/.claude/plans/now-lets-plan-next-sunny-lighthouse.md`
+- Tasks → `TODO.md` § NOW · Snapshot → `CURRENT_STATE.md`
+- Roadmap bundle → `OneCAD-modeling-correctness-roadmap/` (read
+  `04-live-implementation-delta.md` first; it supersedes the baseline files)
+
+---
+
+# Handoff — Platform refactor (Milestones 1 + 2), and what comes next
+
+Session 4 · 2026-08-08
+
+> Session 4 is the Platform/module refactor, COMMITTED as `4145f3f`. Session 3
+> (further down, unchanged) is the Advanced-Fillet roadmap — its § "VF-M5 gate
+> regression" is the diagnosis behind P1 here.
 
 ## Goal
 

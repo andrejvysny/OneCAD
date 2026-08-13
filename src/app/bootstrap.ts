@@ -13,6 +13,7 @@
 import { createPlatform, type Platform } from "@/platform";
 import { registerShellModule } from "@/modules/shell/module";
 import { registerModelingModule } from "@/modules/modeling/register";
+import { registerRenderModule } from "@/modules/render/module";
 
 export function bootstrapOneCAD(): Platform {
   const platform = createPlatform();
@@ -21,6 +22,8 @@ export function bootstrapOneCAD(): Platform {
   // dependencies, and placement comes from each contribution's own priority.
   registerShellModule(platform);
   registerModelingModule(platform);
+  // Stub — registers with zero contributions. See src/modules/render/module.ts.
+  registerRenderModule(platform);
 
   platform.initializeSync();
   return platform;

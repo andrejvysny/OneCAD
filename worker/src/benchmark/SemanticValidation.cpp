@@ -1,5 +1,7 @@
 #include "benchmark/SemanticValidation.h"
 
+#include "benchmark/BlendEvidence.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -20,6 +22,37 @@ namespace {
 using EdgeFaces = NCollection_IndexedDataMap<
     TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>;
 using json = nlohmann::json;
+
+/// Defaults for the two recipe-agnostic blend validators, which carry no
+/// per-case bounds of their own — a case that needs its own numbers declares
+/// `tangencyTolerance` / `crossSectionTolerance` instead. Both are measured, not
+/// assumed: over `fillet/matrix:m1`, both backends, the worst boundary angle is
+/// 1.4e-14 rad and the worst section-radius deviation is 2.7e-14 mm (8e-15
+/// relative). See `bench/robustness/README.md`.
+constexpr double kTangencyRadians = 1.0e-9;
+constexpr double kSectionRelative = 1.0e-9;
+
+/// Conditioning term, in multiples of the coordinate magnitude. Double precision
+/// is relative, so rebuilding the same model a million millimetres from the
+/// origin costs about six orders of magnitude of absolute accuracy — and the
+/// `farOriginTranslation` metamorph exists to provoke exactly that. Measured at
+/// 1.7e6 mm: 2.7e-9 mm of section error and 7.5e-9 rad of boundary angle, both
+/// several times inside this allowance. Without the term the probe would read
+/// arithmetic as a defect.
+constexpr double kConditioning = 1.0e-14;
+
+/// Section-radius allowance: the feature's own scale, floored, plus whatever the
+/// model's distance from the origin costs.
+double section_limit(double radius, double magnitude) {
+  return std::max(1.0e-9, radius * kSectionRelative) + magnitude * kConditioning;
+}
+
+/// An angle error is a position error over the feature size, so the same
+/// conditioning term divides by the radius here.
+double tangency_limit(double radius, double magnitude) {
+  return kTangencyRadians +
+         magnitude * kConditioning / std::max(radius, 1.0e-9);
+}
 
 double volume(const TopoDS_Shape &shape) {
   if (shape.IsNull())
@@ -196,17 +229,31 @@ bool audit_passes(const CaseSpec &benchmark_case, const json &audit) {
 struct Evidence {
   RadiusEvidence radius;
   TangencyEvidence tangency;
+  BlendEvidence blend;
   std::pair<int, int> remote;
   double before = 0.0;
   double after = 0.0;
 };
 
-Evidence gather(const Request &request, const GeneratedGeometry &geometry,
-                const AdapterResult &adapter) {
-  return {cylinder_evidence(adapter.output, request.benchmark_case.radius),
-          tangency_evidence(adapter.output, request.benchmark_case.radius),
+Evidence gather(const GeneratedGeometry &geometry, const AdapterResult &adapter,
+                double effective_radius) {
+  return {cylinder_evidence(adapter.output, effective_radius),
+          tangency_evidence(adapter.output, effective_radius),
+          blend_evidence(adapter.output, adapter.blend_faces, adapter.support_faces,
+                         effective_radius),
           remote_supports(geometry, adapter.output), volume(geometry.shape),
           volume(adapter.output)};
+}
+
+/// Largest tolerance carried by any vertex, edge or face in an audit.
+double maximum_tolerance(const json &audit) {
+  double out = 0.0;
+  const json &tolerances = audit.value("tolerances", json::object());
+  for (const char *topology : {"vertex", "edge", "face"}) {
+    if (tolerances.contains(topology))
+      out = std::max(out, tolerances[topology].value("maximum", 0.0));
+  }
+  return out;
 }
 
 double tolerance_limit(const json &spec, double scale) {
@@ -214,9 +261,9 @@ double tolerance_limit(const json &spec, double scale) {
          spec.value("relative", 0.0) * std::abs(scale);
 }
 
-json constant_radius(const json &spec, const Request &request,
-                     const AdapterResult &adapter) {
-  const double limit = std::max(1.0e-9, request.benchmark_case.radius * 1.0e-9);
+json constant_radius(const json &spec, const AdapterResult &adapter,
+                     double effective_radius) {
+  const double limit = std::max(1.0e-9, effective_radius * 1.0e-9);
   const bool pass = adapter.contour_count > 0 &&
                     adapter.assigned_radius_count == adapter.contour_count &&
                     adapter.assigned_radius_max_error <= limit;
@@ -228,14 +275,19 @@ json constant_radius(const json &spec, const Request &request,
 }
 
 json threshold_validator(const std::string &kind, const json &spec,
-                         const Request &request, const AdapterResult &adapter,
-                         const Evidence &evidence) {
+                         const AdapterResult &adapter,
+                         const Evidence &evidence, double effective_radius) {
   double measured = adapter.assigned_radius_max_error;
-  double scale = request.benchmark_case.radius;
+  double scale = effective_radius;
   std::string measured_name = "maximumAssignedRadiusError";
   if (kind == "tangencyTolerance") {
-    measured = evidence.tangency.maximum_error;
-    measured_name = "maximumTangencyError";
+    // The generic boundary measurement, not the plane/cylinder-only one: a
+    // tolerance the case declares must mean the same thing on every support.
+    measured = evidence.blend.maximum_tangency_radians;
+    measured_name = "maximumTangencyRadians";
+  } else if (kind == "crossSectionTolerance") {
+    measured = evidence.blend.maximum_profile_error;
+    measured_name = "maximumSectionRadiusError";
   } else if (kind == "materialTolerance") {
     measured = std::abs(evidence.after - evidence.before);
     scale = evidence.before;
@@ -243,8 +295,11 @@ json threshold_validator(const std::string &kind, const json &spec,
   }
   const double limit = tolerance_limit(spec, scale);
   const bool minimum = kind == "materialTolerance";
-  const bool evidence_exists = minimum || adapter.assigned_radius_count > 0 ||
-                               evidence.tangency.pairs > 0;
+  bool evidence_exists = minimum || adapter.assigned_radius_count > 0;
+  if (kind == "tangencyTolerance")
+    evidence_exists = evidence.blend.boundaries > 0;
+  else if (kind == "crossSectionTolerance")
+    evidence_exists = evidence.blend.samples > 0;
   const bool pass = evidence_exists && (minimum ? measured > limit : measured <= limit);
   return validator(kind, spec.value("required", false), pass ? "pass" : "fail",
                    json::array({metric(measured_name, measured),
@@ -253,13 +308,14 @@ json threshold_validator(const std::string &kind, const json &spec,
 
 json simple_validator(const std::string &kind, const json &spec,
                       const Request &request, const AdapterResult &adapter,
-                      const Evidence &evidence, const json &audit) {
+                      const Evidence &evidence, const json &audit,
+                      double effective_radius) {
   const bool required = spec.value("required", false);
   if (kind == "generatedBlendFace")
     return validator(kind, required, adapter.generated_face_count > 0 ? "pass" : "fail",
                      json::array({metric("generatedFaceCount", adapter.generated_face_count)}));
   if (kind == "cylindricalRadius") {
-    const double limit = std::max(1.0e-8, request.benchmark_case.radius * 1.0e-8);
+    const double limit = std::max(1.0e-8, effective_radius * 1.0e-8);
     return validator(kind, required,
                      evidence.radius.cylinders > 0 &&
                              evidence.radius.maximum_error <= limit ? "pass" : "fail",
@@ -286,19 +342,124 @@ json simple_validator(const std::string &kind, const json &spec,
                                                                   "notApplicable");
 }
 
+/// `supportTangency` and `crossSectionProfile` are the recipe-agnostic pair.
+/// They read the builder's OWN generated faces rather than picking the blend out
+/// of the output by surface type, so a cylindrical or conical support is not a
+/// special case. Absent evidence reports `notApplicable`, which fails a required
+/// check — silence must never read as a pass.
+json blend_validator(const std::string &kind, const json &spec,
+                     const Evidence &evidence, double effective_radius) {
+  const bool required = spec.value("required", false);
+  if (kind == "supportTangency") {
+    if (evidence.blend.boundaries < 2)
+      return validator(kind, required, "notApplicable",
+                       json::array({metric("boundaryCount", evidence.blend.boundaries)}));
+    const double allowed = tangency_limit(effective_radius,
+                                          evidence.blend.coordinate_magnitude);
+    const bool pass = evidence.blend.maximum_tangency_radians <= allowed;
+    return validator(kind, required, pass ? "pass" : "fail",
+                     json::array({metric("boundaryCount", evidence.blend.boundaries),
+                                  metric("maximumTangencyRadians",
+                                         evidence.blend.maximum_tangency_radians, "rad"),
+                                  metric("allowedTangencyRadians", allowed, "rad"),
+                                  metric("coordinateMagnitude",
+                                         evidence.blend.coordinate_magnitude, "mm")}));
+  }
+  if (evidence.blend.samples == 0)
+    return validator(kind, required, "notApplicable",
+                     json::array({metric("sampleCount", 0)}));
+  const double limit =
+      section_limit(effective_radius, evidence.blend.coordinate_magnitude);
+  const bool pass = evidence.blend.maximum_profile_error <= limit;
+  return validator(kind, required, pass ? "pass" : "fail",
+                   json::array({metric("sampleCount", evidence.blend.samples),
+                                metric("maximumSectionRadiusError",
+                                       evidence.blend.maximum_profile_error, "mm"),
+                                metric("minimumSectionRadius",
+                                       evidence.blend.minimum_section_radius, "mm"),
+                                metric("maximumSectionRadius",
+                                       evidence.blend.maximum_section_radius, "mm"),
+                                metric("allowedError", limit, "mm")}));
+}
+
+/// The itemized halves of `deepAudit`. Keeping them separate is what lets a case
+/// require manifoldness without also requiring the whole production audit, and
+/// what gives a failing campaign a named cause instead of one aggregate bit.
+json audit_validator(const std::string &kind, const json &spec,
+                     const CaseSpec &benchmark_case, const json &audit,
+                     const json &input_audit) {
+  const bool required = spec.value("required", false);
+  if (kind == "manifold")
+    return validator(kind, required, audit.value("closedManifold", false) ? "pass" : "fail",
+                     json::array({metric("faceCount", audit["counts"].value("faces", 0))}));
+  if (kind == "noSelfIntersection")
+    return validator(kind, required,
+                     audit.value("selfInterferenceFree", false) ? "pass" : "fail");
+  if (kind == "microTopology") {
+    const json &micro = audit.value("microTopology", json::object());
+    const json &quality = benchmark_case.limits.value("quality", json::object());
+    const int micro_edges = micro.value("microEdgeCount", 0);
+    const int slivers = micro.value("sliverFaceCount", 0);
+    const bool pass = micro_edges <= quality.value("maxMicroEdges", 0) &&
+                      slivers <= quality.value("maxSliverFaces", 0);
+    return validator(kind, required, pass ? "pass" : "fail",
+                     json::array({metric("microEdgeCount", micro_edges),
+                                  metric("sliverFaceCount", slivers),
+                                  metric("minimumEdgeRatio",
+                                         micro.value("minimumEdgeRatio", 0.0)),
+                                  metric("minimumFaceRatio",
+                                         micro.value("minimumFaceRatio", 0.0))}));
+  }
+  // toleranceGrowth. Evidence first: input/output maxima and their ratio are
+  // always reported. Gating uses the ceilings the CASE declares — what counts as
+  // acceptable is a property of the case, not of the validator — so a case that
+  // declares none reports `notApplicable`, which fails when it marked this
+  // required. `deepAudit` gates the same ceilings as one aggregate bit; this
+  // names which topology grew and by how much.
+  const double before = maximum_tolerance(input_audit);
+  const double after = maximum_tolerance(audit);
+  const json &quality = benchmark_case.limits.value("quality", json::object());
+  json metrics = json::array({metric("inputMaximumTolerance", before, "mm"),
+                              metric("outputMaximumTolerance", after, "mm"),
+                              metric("growthRatio", before > 0.0 ? after / before : 0.0)});
+  const std::vector<std::pair<const char *, const char *>> ceilings = {
+      {"maxVertexTolerance", "vertex"}, {"maxEdgeTolerance", "edge"},
+      {"maxFaceTolerance", "face"}};
+  bool declared = false;
+  bool pass = true;
+  for (const auto &[limit_key, topology] : ceilings) {
+    if (!quality.contains(limit_key))
+      continue;
+    declared = true;
+    const double limit = quality.value(limit_key, 0.0);
+    const double measured = audit["tolerances"][topology].value("maximum", 0.0);
+    metrics.push_back(metric(std::string(topology) + "Maximum", measured, "mm"));
+    pass = pass && measured <= limit;
+  }
+  return validator(kind, required,
+                   !declared ? "notApplicable" : (pass ? "pass" : "fail"), metrics);
+}
+
 json validate_one(const json &spec, const Request &request,
                   const AdapterResult &adapter, const Evidence &evidence,
-                  const json &audit) {
+                  const json &audit, const json &input_audit,
+                  double effective_radius) {
   const std::string kind = spec.value("type", "unknown");
   const bool required = spec.value("required", false);
   if (!adapter.success)
     return validator(kind, required, "notRun");
   if (kind == "constantRadius")
-    return constant_radius(spec, request, adapter);
+    return constant_radius(spec, adapter, effective_radius);
   if (kind == "radiusTolerance" || kind == "tangencyTolerance" ||
-      kind == "materialTolerance")
-    return threshold_validator(kind, spec, request, adapter, evidence);
-  return simple_validator(kind, spec, request, adapter, evidence, audit);
+      kind == "materialTolerance" || kind == "crossSectionTolerance")
+    return threshold_validator(kind, spec, adapter, evidence, effective_radius);
+  if (kind == "supportTangency" || kind == "crossSectionProfile")
+    return blend_validator(kind, spec, evidence, effective_radius);
+  if (kind == "manifold" || kind == "noSelfIntersection" ||
+      kind == "microTopology" || kind == "toleranceGrowth")
+    return audit_validator(kind, spec, request.benchmark_case, audit, input_audit);
+  return simple_validator(kind, spec, request, adapter, evidence, audit,
+                          effective_radius);
 }
 
 bool required_passes(const json &validators) {
@@ -314,12 +475,15 @@ bool required_passes(const json &validators) {
 ValidationSummary validate_output(const Request &request,
                                   const GeneratedGeometry &geometry,
                                   const AdapterResult &adapter,
-                                  const json &audit) {
+                                  const json &audit, const json &input_audit,
+                                  double effective_radius) {
   ValidationSummary summary;
   summary.results = json::array();
-  const Evidence evidence = adapter.success ? gather(request, geometry, adapter) : Evidence{};
+  const Evidence evidence =
+      adapter.success ? gather(geometry, adapter, effective_radius) : Evidence{};
   for (const json &spec : request.benchmark_case.validators)
-    summary.results.push_back(validate_one(spec, request, adapter, evidence, audit));
+    summary.results.push_back(validate_one(spec, request, adapter, evidence, audit,
+                                           input_audit, effective_radius));
   summary.required_pass = required_passes(summary.results);
   summary.publication_valid = adapter.success &&
                               audit_passes(request.benchmark_case, audit);

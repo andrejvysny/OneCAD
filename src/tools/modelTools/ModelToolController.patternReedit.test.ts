@@ -18,6 +18,7 @@ import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type { ApplyOperationResult } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -375,5 +376,98 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     expect(toolStore.getState().modelTool).toBe("select");
     expect(viewportStore.getState().statusHint?.message).toBe("Linear pattern ×7");
+  });
+
+  // ── WP0 red tests — stored field preservation + result selection ────────────
+
+  it("re-edited CircularPattern preserves stored axisOrigin on commit", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      axisOrigin: [10, 20, 30],
+      axisDirection: [0, 0, 1],
+      angleDeg: { value: 180 },
+      count: 5,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-cp", kind: "boolean", opType: "CircularPattern", label: "Circular Pattern", valueText: "×5", status: "ok" }],
+    });
+
+    await controller.editCircularPatternFeature("feat-cp");
+    await flush();
+    toolChipStore.getState().onApply?.();
+    await flush();
+
+    expect(clientMock.applyOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        opType: "CircularPattern",
+        params: expect.objectContaining({
+          axisOrigin: [10, 20, 30],
+        }),
+      }),
+    );
+  });
+
+  it("re-edited Mirror preserves stored planePoint and fuseWithOriginal on commit", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      planePoint: [5, 10, 0],
+      planeNormal: [1, 0, 0],
+      fuseWithOriginal: true,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-mi", kind: "boolean", opType: "MirrorBody", label: "Mirror", valueText: "YZ", status: "ok" }],
+    });
+
+    await controller.editMirrorFeature("feat-mi");
+    await flush();
+    toolChipStore.getState().onApply?.();
+    await flush();
+
+    expect(clientMock.applyOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        opType: "MirrorBody",
+        params: expect.objectContaining({
+          planePoint: [5, 10, 0],
+          fuseWithOriginal: true,
+        }),
+      }),
+    );
+  });
+
+  it("non-fused LinearPattern selects generated children, not the source body", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      direction: [1, 0, 0],
+      spacing: { value: 20 },
+      count: 3,
+      fuseResult: false,
+      resultPolicyVersion: 2,
+    });
+    clientMock.applyOperation.mockResolvedValue({
+      revision: 2,
+      features: [],
+      changedBodies: [
+        { bodyId: "body1", meshKey: "body1#0" },
+        { bodyId: "body_feat-lp:1", meshKey: "body_feat-lp:1#0" },
+        { bodyId: "body_feat-lp:2", meshKey: "body_feat-lp:2#0" },
+      ],
+      removedBodies: [],
+    });
+    documentStore.setState({
+      features: [{ id: "feat-lp", kind: "boolean", opType: "LinearPattern", label: "Linear Pattern", valueText: "×3", status: "ok" }],
+    });
+
+    await controller.editLinearPatternFeature("feat-lp");
+    await flush();
+    toolChipStore.getState().onApply?.();
+    await flush();
+
+    const selectedIds = selectionStore.getState().selected.map((r) => r.id);
+    expect(selectedIds).not.toContain("body1");
+    expect(selectedIds).toContain("body_feat-lp:1");
+    expect(selectedIds).toContain("body_feat-lp:2");
   });
 });

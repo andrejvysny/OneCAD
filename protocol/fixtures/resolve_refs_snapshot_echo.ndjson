@@ -1,0 +1,38 @@
+# CANONICAL §7.5 fixture — the ResolveRefs SNAPSHOT ECHO.
+#
+# "Every resolution carries the exact snapshotId, document revision, refId, and the
+# bodyId used to enumerate candidates when one exists. A client MUST cache a
+# candidate set by {revision, snapshotId, refId} and MUST promote its TopoKeys only
+# against that echoed snapshot" (SCHEMA §7.5).
+#
+# The echo is what makes that rule checkable: without it the caller can only file a
+# resolution under the snapshot it ASKED about, so a resolution computed elsewhere
+# is indistinguishable from one computed here — the stale-candidate mis-bind the
+# rule exists to prevent. Rust validates the echo fail-closed
+# (`wire::validate_resolve_refs_result`), and this fixture is the worker-side half.
+#
+# Both branches are covered: a direct partition hit (`unchanged`) and a reference to
+# a body that is not in the snapshot (`needsRepair`). The second carries the echo
+# too — a failed resolution still has to say which head it failed against.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_resolve_echo","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":92,"documentRevision":7,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[60,0]},{"id":"e2","type":"Line","p0":[60,0],"p1":[60,40]},{"id":"e3","type":"Line","p0":[60,40],"p1":[0,40]},{"id":"e4","type":"Line","p0":[0,40],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":20.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":92,"result":{"planPrepared":true,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":92,"documentRevision":7,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":92,"result":{"accepted":true,"snapshotId":1,"documentRevision":7}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"AcquireElementIds","args":{"snapshotId":1,"bodyId":"body_op1","picks":[{"topoKey":"f:1"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"ids":[{"topoKey":"f:1","kind":"face","bodyId":"body_op1","descriptor":"$any"}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_echo_face","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_echo_face","kind":"face"}]}}}
+# The document revision the ECHO must carry is the one this session accepted (7),
+# not the 0 the session opened with — a lagging engine has to be visible.
+{"send":{"v":1,"t":"req","id":6,"verb":"ResolveRefs","args":{"snapshotId":1,"refs":[{"refId":"op_5.input0","primary":{"bodyId":"body_op1","elementId":"el_echo_face","kind":"face"}},{"refId":"op_5.input1","primary":{"bodyId":"body_ghost","elementId":"el_echo_missing","kind":"face"}}]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"resolutions":[{"refId":"op_5.input0","snapshotId":1,"revision":7,"bodyId":"body_op1","outcome":"unchanged","elementId":"el_echo_face","topoKey":"f:1"},{"refId":"op_5.input1","snapshotId":1,"revision":7,"outcome":"needsRepair","needsRepair":{"refId":"op_5.input1","elementId":"el_echo_missing","reason":"no-candidates"}}]}}}
+# A stale snapshot is refused outright — there is no resolution to echo at all.
+{"send":{"v":1,"t":"req","id":7,"verb":"ResolveRefs","args":{"snapshotId":99,"refs":[{"refId":"op_5.input0","primary":{"bodyId":"body_op1","elementId":"el_echo_face","kind":"face"}}]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":false,"error":{"code":"REF_UNRESOLVED","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"goodbye":true}}}

@@ -2454,6 +2454,1081 @@ The cross-language half: the worker can now execute a `schemaVersion: 2` case, a
 ### M3.5 — non-isometric metamorph policy (OPEN)
 - [ ] Decide how `uniformScale` and `parameterEpsilon` should gate. Options: scale the compared mass properties by `factor³`/`factor²` in the campaign; relax the metamorphic-equivalence tolerance for epsilon; or treat them as separate robustness probes with their own validator instead of `metamorphicEquivalence`.
 - [ ] Once the policy is decided, add `uniformScale` and `parameterEpsilon` back to the `m1` preset and record updated baselines.
+## NOW — roadmap completion program (plan `~/.claude/plans/now-lets-plan-next-sunny-lighthouse.md`)
+
+Approved 2026-08-13. Seven tracks A–G; **TRACK A IS COMPLETE — A1–A6 done and committed**.
+Sequence and full rationale live in the plan file; the short version is below. Track A was the
+unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
+
+- [x] **A4 — Revolve body-edge axis. PRODUCT CALL TAKEN: the variant stays UI-HIDDEN.** Kernel and
+      core implement it; the UI authors only `sketchLine`, and that is now what the contract row
+      says (`uiExposure: "hidden"`, was a false `"exposed"`). This is also what WP1.5 asked for —
+      "do not expose it until persistence, reopen and upstream-edit tests pass". All four required
+      tests landed; detail in § ROADMAP A4 below.
+- [x] A5 — the WP0.7 / WP0.8 tests. WP0.7 was **not** tests-only: preview failure was tracked
+      GLOBALLY, so a secondary region's refusal outlived its own recovery and wedged every commit.
+      Fixed per-session, red-first. Detail in § ROADMAP A5.
+- [x] A6 — the two missing cross-track fixtures. The `ResolveRefs` one could not be written
+      honestly: SCHEMA §7.5's snapshot echo was normative and implemented by NEITHER worker, with
+      Rust manufacturing the values and validating nothing. Implemented and validated fail-closed.
+      Detail in § ROADMAP A6.
+- [x] C1 — the coverage manifest is true and its verifier has teeth (16 dead paths, a `ciJob` that
+      exists in no workflow, four measured overclaims and one UNDER-claim, all corrected; the
+      verifier now stats paths, resolves jobs and runs WP4.5's five registry cross-checks).
+      Detail in § ROADMAP C1.
+- [x] C2 — the corpus runs 3 of 9 (was 1), the classification is manifest-driven, and the
+      structure/provenance of all nine is checked on every machine. The blocker was NOT a thin
+      interpreter: only case `a` carried complete geometry. Detail in § ROADMAP C2.
+- [ ] B1–B5, C3–C6, D, E (Phase 5 remainder), F (Phase 6), G (write the accepted residuals down).
+
+Detail per completed wave is recorded below, newest first.
+
+## RENDER MODULE — STUB REGISTRATION + DESIGN DOCS (2026-08-13) — DOCS ONLY, NO GATE
+
+Not part of Track A/roadmap — a separate, product-requested design pass for a
+future Render workspace (Fusion 360 Render parity, materials on OpenPBR). Docs
++ an inert module scaffold only; no functional capability.
+
+- [x] **`onecad.render` module scaffolded and registered**, reaches `"ready"`
+      with zero contributions (`src/modules/render/manifest.ts`, `ids.ts`,
+      `module.ts`, `register.test.ts`; wired in `src/app/bootstrap.ts`).
+- [x] **ADR-0014** (`docs/adr/0014-render-module-openpbr.md`) records: Render is
+      its own module (not folded into Modeling); its future UI targets the
+      *existing* `onecad.shell` `Visualization` workspace placeholder rather
+      than a new workspace id (product confirmed the placeholder already means
+      "Render", just labeled differently); OpenPBR is the material schema
+      baseline.
+- [x] **`docs/RENDER_MODULE.md`** drafts the OpenPBR-to-schema mapping, a
+      document-state shape, and a phased roadmap — all explicitly marked
+      draft/unimplemented. Render backend (real-time preview vs. offline
+      path-traced vs. other) is explicitly left open, not decided.
+- [ ] Everything past registration — material schema, assignment UI, workspace
+      migration, render backend — unstarted by design; this wave is scaffolding
+      for a later implementer, not a first slice of the feature.
+
+**Changed:** `src/modules/render/manifest.ts`, `ids.ts`, `module.ts`,
+`register.test.ts`; `src/app/bootstrap.ts`; `docs/adr/0014-render-module-openpbr.md`;
+`docs/adr/README.md`; `docs/RENDER_MODULE.md`; `TODO.md`.
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run test` — new
+`src/modules/render/register.test.ts` passes, `src/platform/architecture.test.ts`
+and `src/platform/registry.test.ts` unaffected (no forbidden import, no
+namespace/duplicate-id regression). No Rust/C++ touched — ctest/cargo/Playwright
+out of scope, not run.
+
+**Next:** none scheduled — parked until product prioritizes Render.
+
+## ROADMAP C1 — A MANIFEST THAT CAN BE FALSIFIED (2026-08-13) — GATE PASSED
+
+`docs/qa/modeling-operation-coverage.json` is the machine-readable claim about where each
+supported operation is proven, and nothing checked the claims. Sixteen cited paths did not exist —
+nine `src/tools/modelTools/*` unit tests that were never written under those names, three e2e
+specs, an `import_step.rs` that is really `step_import.rs` — and eleven rows named a CI job
+`macos-full` that is in no workflow. All of it green.
+
+- [x] **Every row cites a file that exists**, found by asking what actually covers each lane rather
+      than by deleting the claim: Fillet/Chamfer/Shell are `ModelToolController.edgeShellPreview`,
+      Boolean is `booleanPreview`, the sketch drag is `selectDrag.reconcile`, Shell's browser flow
+      is `shell-preview.spec.ts`, ImportStep is `step_import.rs` + `step_import_gate.rs`. Two lanes
+      have NO honest citation (an FE unit test for Boolean Intersect, one for XCAF) and are left
+      EMPTY — an empty field says "unproven", a dead path says "proven" and is not.
+- [x] **`ciJob` became a per-lane list**, because one job can never gate a row whose evidence spans
+      C++, Rust, vitest and Playwright. The verifier resolves every id against
+      `.github/workflows/*.yml` and requires each non-empty lane to name the job that runs it.
+- [x] **Four overclaims now state their measured limit** (each verified against the test code, not
+      assumed): Shell runs a SINGLE open face in every lane; the OffsetFace Rust lane executes
+      `Radius` only and covers `Total` through the prepare handshake, with `Diameter` C++-only; the
+      Hole browser flow configures countersink and never commits it; CircularPattern's partial
+      sweep is C++ and FE-unit only.
+- [x] **One "overclaim" was not one.** MirrorBody no-fuse IS covered — `ordinal_tripwire.rs` authors
+      it and the C++ lane runs both `fuseWithOriginal` values — so the row says so instead of
+      inheriting a review's guess. And Boolean Intersect was UNDER-claimed as
+      deferred-with-no-evidence though its P4 vertical landed.
+- [x] **Five WP4.5 cross-checks**: `KnownOperation`, worker dispatch, the SCHEMA §7.3 op catalogue,
+      the frontend tool registrations, and the kernelbench families. Each scan asserts it found
+      something first, so a moved source cannot turn a check vacuously green; rows that are
+      deliberately not `KnownOperation`s declare themselves in the manifest's `nonOperationRows`.
+- [x] **Twelve negative controls, up from one**, across both verifiers — including the acceptance
+      test the plan names: renaming a cited spec reds the check, proven both through a mutated temp
+      manifest and by renaming `e2e/hole.spec.ts` on disk.
+
+Gates: both verifiers; `scripts/tests/verify-modeling-coverage.test.sh` 12/12. Committed `1c76c41`.
+
+## ROADMAP C2 — THE CORPUS EXECUTES (2026-08-13) — GATE PASSED
+
+**The finding that shaped the work: the corpus ran 1 of 9 because only case `a` carried complete
+geometry, not because the interpreter was thin.** Case `b` extrudes `sk_base.region.r0`,
+`sk_cut.region.r0`, `sk_2` and `sk_3` — four sketches its `opScript` never authors. Case `c`
+references `sk_base` and mixes three independent C++ documents in one script. Case `i`'s entities
+were prose: `"4 lines: (0,0)(10,0)(10,5)(0,5)"`. The numbers and citations were all there; the
+runnable geometry was not.
+
+Decision taken with the user: **enrich the cases** (rather than hiding the geometry in Rust or
+recording the mismatch and moving on), because every footprint is READ BACK OUT of a frozen
+assertion — `afterCut 3750 = 4000 − 5·5·10` fixes the base box at 20×20×10 and the cut at 5×5
+through-all — so nothing is invented, and each addition carries its own `entitiesProvenance`.
+
+- [x] **Case `i` is executable**: the four loop-detector scenarios carry SCHEMA §7.4 entities, with
+      the original prose kept as `sketch.description`. Rectangle, square-with-hole, arc+chord and
+      ellipse run through `SketchUpsert` → `SketchRegions`, the same lane a profile pick uses.
+- [x] **Case `b` is executable**: its four sketches are authored, every op declares the `scenario`
+      it belongs to (the C++ oracles are SEPARATE documents — running them in one timeline would
+      boolean unrelated bodies together), and `bodyLabels` says which op mints each referenced
+      label. ThroughAll cut → 3750, two-direction → 800, symmetric → 800 (derived-not-asserted,
+      still labelled so).
+- [x] **A DELIBERATE divergence, recorded rather than papered over.** The square-with-hole scenario
+      detects TWO regions on the new stack (annulus + inner square) where the C++ LoopDetector
+      reported one face with an inner loop. That is the planar-cell model `wire_contract.rs`
+      already pins (`nested_inner_disk_parity_and_reopen_stability`), so the case now carries a
+      `newStack` block citing it and the runner asserts the current contract while the frozen
+      number stays visible.
+- [x] **Case `a` asserts its whole expected block**, not just the last volume: the sketch step's
+      region count, the extrude's body-lifecycle events, the solid count, the volume, AND the
+      `faceCount` the case records as derived-not-asserted — which is the assertion that catches a
+      prism built from the wrong profile at the right volume.
+- [x] **Classification is manifest-driven.** The executor READS `corpusCases` from the coverage
+      manifest, so the two artifacts cannot disagree; a case the manifest does not classify, and a
+      manifest entry with no corpus file, are both errors.
+- [x] **Structure + provenance are checked for all nine on every machine** (the worker-free half):
+      `source[]` non-empty and naming a file, an `opScript`, `bodyLabels` pointing at real ops, and
+      every scalar measurement carrying a citation — or an explicit `confidence`, which is how the
+      corpus says "derived, not captured".
+- [x] **A stale unsupported reason is now an error.** Six cases still carry one, each naming the
+      machinery it needs (face-hosted sketches for `c`, MESH1 edge picking for `d`/`e`, a
+      descriptor-tie fixture for `f`, the gesture lane for `g`, a rollback-cursor harness for `h`).
+      A reason kept for a case that has become executable fails the test.
+- [x] **Non-vacuity proved by mutation**: 2000→2500, 3750→3700 and regions 1→3 each red the run
+      with the right message; the corpus was restored byte-identical afterwards.
+
+Gates: `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1082 / 0** · fmt · clippy `-D warnings` ·
+both modeling verifiers · negative controls 12/12 · every corpus file still parses.
+
+**Next:** C3 (WP4.6 has zero tests — nothing asserts a structured diagnostic reaches the inspector)
+and C4 (deepen the thin verticals, which is where the four measured limits above are closed).
+
+## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
+
+One gate, three items, and **two of them turned out not to be evidence debt at all**: the mandated
+tests found live defects in shipped code, which is the whole reason the roadmap asks for them.
+
+### A4 — Revolve body-edge axis: hidden, and now provable either way
+
+The typed `AxisRef::Element` variant is complete in the worker (`RevolveOp.cpp:129-201`) and core,
+and the UI authors only `sketchLine`. The contract row claimed `uiExposure:"exposed"` — false for a
+whole phase, because no code path could produce one. **Product call: it stays hidden**, following
+the `MirrorBody / fuse` precedent (`supported` + `hidden`) and WP1.5's own instruction not to expose
+it before the persistence/reopen/upstream-edit evidence exists.
+
+- [x] **The four WP1.5 tests.** Two are worker-level refusals (`worker/tests/test_wp6_ops.cpp`): a
+      CURVED axis edge is `OP_FAILED` "axis edge must be a straight line" and explicitly NOT
+      NeedsRepair (the edge resolved fine, it is simply not an axis), and a TWO-BODY fixture proves
+      both ownership gates — a ref naming another body, and an elementId that agrees on paper but is
+      bound to the other body in the partition. Two need a real document
+      (`src-tauri/tests/revolve_ops.rs`): promote → revolve → **upstream edit** → **save/reopen**,
+      and an axis edge CONSUMED by an upstream fillet ⇒ `NeedsRepair`, no body published.
+- [x] **Non-vacuity, measured.** Removing the partition-ownership gate makes the revolve SUCCEED on
+      the other body's edge — a silent cross-body axis swap; removing the curved-edge guard silently
+      straightens a circle. The consumed-edge test carries an in-test NEGATIVE CONTROL (the same
+      document without the fillet publishes cleanly), because the mutation that would prove it lives
+      in `resolve_input_refs`, which returns no candidates on that path.
+- [x] **A measured finding worth keeping.** An upstream edit that grows the axis edge +20% rebinds;
+      +100% is `NeedsRepair` (ambiguous). A FILLET ref on the same edge answers identically at both
+      sizes — checked, not assumed — so this is the shared ladder's descriptor-magnitude policy
+      (auto-bind needs score ≥0.85 AND margin ≥0.10), not something about axes. The test pins both
+      directions, so a future policy change has to be deliberate.
+- [x] **The row now reads `hidden`**, and `ModelToolController.revolveAxisExposure.test.ts` binds the
+      claim to the code from both sides: no lane authors an `edge` axis, and a record that ALREADY
+      holds one survives a re-edit (hidden must not mean destroyed — the angle-only deep merge sends
+      no `axis`; adding one reds the test). The frozen interaction contract was NOT edited: its
+      revolve row already says `requiredSelections: "sketch region + axis line"`.
+
+### A5 — WP0.7 preview ownership (a real defect) and WP0.8 Boolean re-arm
+
+- [x] **WP0.7 was half-landed, and the missing half was the failure state.** Ownership of candidate
+      bodies and visibility claims was per-session; `previewFailure` was ONE field. A secondary
+      session's refusal set it, and only the PRIMARY branch ever cleared it — so a region that failed
+      and then recovered left every commit blocked behind a stale error hint contradicting a preview
+      that visibly worked again. `ToolPreviewSession.failure` is now per session, the lane's failure
+      is the union, and a recovered secondary takes the status line back exactly like the primary.
+- [x] **`ModelToolController.previewOwnership.test.ts`** delivers two region responses in BOTH
+      orders (both candidates survive, replaced-body claims union), fails one secondary (only its own
+      candidate and claim drop), then RECOVERS it and requires the commit to go through — red before
+      the fix. A still-failing session keeping the commit blocked is the negative control. No existing
+      harness could express this: the multi-region specs stub `onPreviewResult` away and one of them
+      hands every `beginPreview` the same constant sessionId.
+- [x] **WP0.8's two untested paths + the second Apply.** `booleanPreview.test.ts` covered the
+      exact-preview barrier only. Added: a REJECTED `endPreview`, a RESOLVED regen failure (one
+      `undo` per applied-but-failed attempt), a terminal-only failure with no `errorMessage`, and a
+      successful SECOND Apply that commits the session the re-arm opened (`pv-2`), not the consumed
+      one. Reverting `commitBoolean` to the old `errorMessage`-only check reds the terminal-only case.
+
+### A6 — the two cross-track fixtures, one of which needed the contract to become true first
+
+- [x] **SCHEMA §7.5's snapshot echo was normative and implemented nowhere.** Every resolution is
+      required to carry `{snapshotId, revision, refId, bodyId}`, and a client must cache candidates
+      by `{revision, snapshotId, refId}`. Neither the C++ worker nor the Rust stub emitted any of the
+      three; `api/mod.rs` manufactured all of them from Rust's own state and `manager.rs` validated
+      nothing — so a resolution computed on an older snapshot was cached under a freshly minted key.
+      The worker now echoes them on every branch (`bodyId` only when a body was enumerated), the stub
+      matches, and `wire::validate_resolve_refs_result` fails closed on a mismatched snapshot, a
+      re-ordered `refId`, a wrong arity or a missing echo.
+- [x] **`revision` stays Rust-owned in the DTO, deliberately** (decision D4): the repair store keys
+      candidates on the same `(revision, snapshotId)` the `needs-repair` events carry, and the
+      engine's own stamp legitimately lags an un-regenerated edit. The SNAPSHOT is the engine's echo.
+      Recorded in SCHEMA §7.5 so the next reader does not have to re-derive it.
+- [x] **`protocol/fixtures/resolve_refs_snapshot_echo.ndjson`** (new) covers the direct-hit and
+      missing-body branches plus a stale-snapshot refusal; `bind_element_ids.ndjson` now asserts the
+      echo on its own ResolveRefs step. Dropping the `revision` echo in the worker reds
+      `canonical_resolve_refs_snapshot_echo`.
+- [x] **`protocol/fixtures/circular_pattern_lineage.ndjson`** (new) pins Pattern V2 lineage on the
+      wire: `count−1` children `body_<opId>:<k>`, the source preserved as instance zero with no
+      lifecycle event, and the `perStepResults` body-id set. It deliberately does NOT pin the
+      `angleDeg / count` step angle — NDJSON carries no geometry to measure it with, so that stays in
+      `test_m6a_ops.cpp` and `patternPreview.test.ts`. Said so in the fixture header rather than
+      asserting it by proxy.
+- [x] **Fixture discovery is now ENUMERATED in both lanes**, which was the actual root cause of A6's
+      gap: `boolean_empty_refusal.ndjson` (added last commit) ran in the ctest lane and in neither
+      hardcoded list. `check_interop.sh` globs `protocol/fixtures/*.ndjson` (and fails on an empty
+      glob) and the Rust parse test reads the directory with a ≥6 floor.
+
+Gates: `ctest` **119/119** (117 → 119); `cargo fmt --all --check`; `clippy --workspace --all-targets
+-D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1082 / 0** (1078 → 1082);
+`bunx tsc --noEmit`; `bun run build`; `bun run test` **249 files / 4173 tests** (247/4161 → 249/4173);
+both `verify-modeling-*` verifiers; hex gate 0; targeted Playwright on the touched preview lanes
+(`multiregion`, `boolean-preview`, `extrude-commit-gesture`, `extrude-multiselect`) **20/20** across
+Chromium + WebKit at `retries: 0`. Kernelbench was NOT re-run: no benchmark, fillet or kernel-geometry
+source changed (the worker delta is `ElementIdentity.cpp` plus test registration).
+
+**Next:** C1 — make the coverage manifest true, then give `verify-modeling-coverage.mjs` teeth. Two
+inputs for it are already on the table: it has no `body-edge axis` row at all, and its single Revolve
+row cites `src/tools/modelTools/revolve.test.ts`, which does not exist.
+
+## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13, plan `now-lets-plan-next-sunny-lighthouse.md`) — GATE PASSED
+
+Roadmap WP0.3, finished. It was recorded complete at `MODEL-CORRECTNESS-P0` but only the transport half had landed: `RegenTerminal` declared `needsRepair` and **neither client ever assigned it**, no shared consumer helper existed, `.terminal` was read nowhere outside its own test, and every consumer family still inferred success from body counts — the inference the spec explicitly forbids. That was the fix for risk **R-04** (severity 5, score 80), so it was a live defect, not missing evidence.
+
+- [x] **`needsRepair` is now produced.** `regen-finished` gained `repairSteps` (record ids a published regen left in NeedsRepair), populated in `emit_regen_events` from the same `report.needs_repair` the sibling `needs-repair` event uses. It rides THIS payload because `needs-repair` is emitted AFTER `regen-finished`, so an awaiter settling there would always miss it. `tauriClient`'s recordId awaiter settles `needsRepair` when its own record appears.
+- [x] **`src/ipc/regenOutcome.ts`** — one `classifyRegen()` consumed by every family, plus `keepsRecord()` and `failureReason()`. A resolved `errorMessage` is failure whatever the terminal claims (checked first). A result with no `terminal` falls back to the historical body-count inference verbatim, so legacy fixtures are unchanged.
+- [x] **Two outcomes body counting got backwards are now right**: an empty *published* result and a *delete-only* result are no longer failures-with-rollback, and `needsRepair` is no longer a success.
+- [x] **Consumers migrated**: `commitPattern`, the exact-preview fallback commit, the shell/edge commit tail and the boolean commit in `ModelToolController`; `suppressFeature`/`rollToIndex`/`deleteFeature`/`rebindCandidate` in `historyActions.ts` — the last four hydrated and announced success while catching only a rejected promise, so a resolved `errorMessage` printed "Feature deleted".
+- [x] **A NeedsRepair record is never rolled back.** `keepsRecord()` covers published/noop/needsRepair; rollback stays for failed/timeout only. Rolling back the record repair operates on would delete the thing the user is about to fix.
+- [x] **The table-driven test the spec asks for**, in two files over one shared table so the families cannot drift: `src/features/inspector/regenTerminals.test.ts` (3 families × 6 rows) and `src/tools/modelTools/ModelToolController.terminals.test.ts`. Asserts no success hint on error, one sticky diagnostic, no duplicate record on retry, authored values recoverable, and selection never moved onto a body that failed to publish.
+- [x] **Both tables proved non-vacuous by mutation.** Bypassing the classifier in `historyActions.settle` reds 9 rows; reverting `commitPattern` to the `errorMessage`-only check reds 4 and reproduces R-04 verbatim — `needsRepair` and a message-less `failed` both printed the success hint "Linear pattern ×7".
+
+Gates: `bunx tsc --noEmit` clean; `bun run test` **247 files / 4161 tests** (244/4124 → +3 files, +37 tests); `bun run build` clean; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**. Worker and ctest untouched by this wave.
+
+## ROADMAP A2 — DRAFT APPLIED-OR-REFUSED (2026-08-13) — GATE PASSED
+
+Roadmap WP0.6. The implementation was already correct — three named refusals plus a semantic volume-delta check (`ExtrudeOp.cpp:248-302`) — but **no test pinned any of the three strings**, and the work package's FIRST mandated task, the circular-profile red probe, had never been run. The only draft coverage was one square prism asserting `500 < v < 990`, which no refusal path and no wrong angle could fail.
+
+- [x] **The mandated red probe ran, and the answer is REFUSAL.** A circular profile extrudes to a cylinder whose only side face is curved, so `apply_draft` finds zero eligible faces and returns `Extrude draft refused: no eligible planar side faces`. The spec's escalation condition — "if OCCT returns success with unchanged geometry, promote to a confirmed P0 defect" — **does not fire**. Risk **R-10** is closed as not-present, with evidence rather than by inspection. The probe asserts both branches, so it still catches a silent no-op if the behaviour ever changes.
+- [x] **`worker/tests/test_extrude_draft.cpp`** (new ctest `extrude_draft`, 117/117): closed-form frustum volume for ±10° (`V = h/3·(A₁+A₂+√(A₁A₂))`, matched to 0.5 mm³ — a wrong angle, a wrong neutral plane or a one-sided taper all fail it), the sign genuinely reversing the taper, the neutral plane keeping the base footprint, ±89° near-limit safe-refusal, a sub-epsilon angle staying a clean straight prism, and determinism across two runs.
+- [x] **`src-tauri/tests/preview_extrude_draft.rs`** (real worker, +2): the drag shows the drafted frustum (preview **688.801** vs closed form **688.801**), the preview leaves the head byte-identical, the commit lands on the previewed volume, and a refused draft **refuses in the preview lane too** rather than showing the straight cylinder the commit would never publish.
+
+**TWO FINDINGS, recorded not fixed** (both outside A2's scope):
+- **`Arc` entities still reach the BRep as polylines while `Circle` stays analytic.** The slot probe reports 28 faces (2 flanks + **24** cap segments + top + bottom) and a volume 0.19% under analytic `(400+25π)·10` — exactly a 24-gon inscribed in the caps. So the "mixed planar/curved" case is not yet mixed at the BRep level, and this is direct evidence for the Phase 2 residual the plan tracks as B3 ("no polygon-fallback warning for supported analytic entities" is asserted by nothing).
+- **The refusal already carries structured evidence.** The preview lane returned `Diagnostic { code: "OP_FAILED", stage: "build", … }`, so A3's remaining work on draft is the stable per-defect CODE, not the diagnostic envelope.
+
+Gates: `ctest` **117/117** (116 → 117); `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1078 / 0** (1076 → 1078). No frontend file changed.
+
+## ROADMAP A3 — STABLE DIAGNOSTIC CODES FOR THE P0 REFUSALS (2026-08-13) — GATE PASSED
+
+Roadmap WP0.6 "Diagnostics". Phase 0 shipped two new refusals — zero-solid Boolean and Draft — and both returned a bare `OP_FAILED` with the reason only in the message. A caller wanting to tell "no planar wall to draft" from "the kernel rejected the walls I offered", or "your Cut consumed the target completely" from any other Boolean failure, had to match on message TEXT. That is exactly the message-text routing the diagnostics contract forbids.
+
+Follows the established `EDGE_OP_TANGENT_CLOSURE_CHANGED` precedent: the §8 top-level code stays `OP_FAILED`, and the DIAGNOSTIC carries the stable per-defect code, `stage`, and bounded evidence.
+
+- [x] **Draft vocabulary** (`stage:"build"`, evidence `{draft:{angleDeg,eligibleFaces,addedFaces}}`): `EXTRUDE_DRAFT_NO_PLANAR_FACE`, `EXTRUDE_DRAFT_NO_FACE_ACCEPTED`, `EXTRUDE_DRAFT_NO_CHANGE` (adds `volumeBefore`/`volumeAfter`), `EXTRUDE_DRAFT_BUILD_FAILED`. `apply_draft` now returns a `DraftFailure{code,message,evidence}` instead of a bare string.
+- [x] **`BOOLEAN_EMPTY_RESULT`** (`stage:"publish"`, evidence `{boolean:{operation,targetBodyId,toolBodyId,solidCount:0}}`).
+- [x] **The codes DISCRIMINATE, and that is asserted** — a vocabulary whose members never differ would be `OP_FAILED` spelled longer. `distinct_defects_get_distinct_codes` runs a no-planar-wall profile and a self-intersecting 89° taper and requires different codes: measured `EXTRUDE_DRAFT_NO_PLANAR_FACE` vs `EXTRUDE_DRAFT_BUILD_FAILED`.
+- [x] **Both lanes agree.** `preview_extrude_draft.rs` pins that the PREVIEW refusal carries the same `EXTRUDE_DRAFT_NO_PLANAR_FACE` the commit does (SCHEMA §7.6 requires byte-equivalent diagnostics for the same candidate).
+- [x] **Cross-track fixture extended** — `protocol/fixtures/boolean_empty_refusal.ndjson` now asserts the diagnostic on its refused step. This is one of the fixtures the Phase 3 review flagged as never extended. **Verified non-vacuous**: substituting a wrong code reds `canonical_boolean_empty_refusal`.
+- [x] **SCHEMA §7.3 + §14 changelog** record both vocabularies as diagnostic-code-only additions; the top-level code is unchanged, so every existing fixture stays byte-valid.
+
+Gates: `ctest` **117/117**; `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1078 / 0**. No frontend file changed.
+
+- [ ] Next per the plan: A4 (Revolve body-edge axis — the four required tests, then reconcile the contract row that claims `uiExposure:"exposed"` against `src/ipc/types.ts:843`).
+
+## MODELING UX HARDENING — WP0 through WP6 (2026-08-12/13, plan `plans/modeling-ux-wp0.md` + `act-as-senior-software-linked-graham.md`) — FE GATE PASSED, ALL 19 DEFECTS CLOSED
+
+WP0 (red evidence, no production changes): frozen `src/test/contracts/modelingInteractionContract.ts` + 11 new red tests, one per confirmed defect (D7,D8,D9,D10,D11,D12,D13,D14,D17,D19 — 17 test cases). WP1+WP2 (2026-08-12) closed D9/D1/D2/D6(partial)/D13/D17; a follow-up pass (2026-08-13) closed the remaining D7/D8/D10/D11/D12/D14/D19. D6's structural refactor (`ToolChipState` discriminated union) remains the sole deliberate non-goal — no red test forces it, pure internal type-safety, its own dedicated pass.
+
+- [x] **D9** — `commitPattern` and `commitPreviewedOp`'s fallback branch check `res.errorMessage` before treating a resolved result as success.
+- [x] **D17 + D1** — boolean/linearPattern/circularPattern/mirror chips gained a visible ✕ (`CancelButton`), wired through `toolChipStore`'s `onCancel`.
+- [x] **D2** — click-away commit removed entirely (all tools).
+- [x] **D13** — shell re-edit chip no longer auto-commits on value change; `onConfirm` is the sole commit trigger.
+- [x] **D14** — `sketchStatusText`/`sketchStatusSentence` treat DOF 0 as fully constrained regardless of a lagging solver status label.
+- [x] **D11** — `repairStore.applyEvent` orders lexicographically on `(revision, snapshotId)`, not `revision` alone.
+- [x] **D12** — `rebindCandidate` prefers `candidate.bodyId` (denormalized by `RepairPanel` from `ResolveRefResult.bodyId`, new field on the FE-only `ResolveCandidate` type — NOT a wire/dto.rs change) over the possibly-stale `deriveOperatedBody(item)`. Test fixture had two latent gaps fixed alongside: no seeded `features` entry for opId `"op1"` (path resolution returned null, so `promoteOne` was never reached — 0 calls, not a bodyId mismatch) and no `bodyId` on the candidate literal.
+- [x] **D7** — `CircularPatternFsm` gained an `origin: [number,number,number]` field, threaded through `armCircular`'s new `seedOrigin` param and `editCircularPatternFeature` (`storedVec3(stored?.axisOrigin)`); `commitCircular` sends `this.circular.origin` instead of a hardcoded `[0,0,0]`.
+- [x] **D8** — `MirrorFsm` gained `planePoint`; `armMirror` gained `seedPlanePoint`/`fuseWithOriginal` params (the latter reuses the existing shared `this.patternFuseResult` field, same as linear/circular); `editMirrorFeature` seeds both from stored params; `commitMirror` sends real values instead of hardcoded `[0,0,0]`/`false`.
+- [x] **D10 + D19** — `commitPattern` and `commitTransform` now select `res.changedBodies` minus the original source/target ids (the newly created children/copies), falling back to the sources when nothing new was created (a fused-in-place result) — same policy in both, mirroring `finishExtrude`/`finishRevolve`'s changedBodies-derived selection.
+
+Regressions caught and fixed during the WP1+WP2 pass (pre-existing tests that encoded now-removed behavior, not covered by the WP0 red set): `ModelToolController.regionPick.test.ts` "(a2) revolve two regions..." asserted a click-away commit — swapped for an explicit Enter. `ModelToolController.edgeShellPreview.test.ts` "shell re-edit's result hint SURVIVES..." called `onValue` alone expecting a commit — added the `onConfirm` call a real Enter also fires.
+
+Gates: `bun run test` 244/244 files, 4124/4124 tests green; `bunx tsc --noEmit` clean; `bun run build` clean.
+
+## MODELING CORRECTNESS P3 — PUBLICATION POLICY (2026-08-12) — COMPLETE
+
+- [x] Machine-readable per-operation contract rows: `docs/qa/modeling-operation-contracts.json` (35 rows / 16 operations) covering support status, validation tier, body lifecycle, empty/multi-solid semantics, and `uiExposure`.
+- [x] Transform policy row; wired `TransformBody` through the common `publication_decision` Tier A validator (`worker/src/ops/TransformOp.cpp`).
+- [x] ImportStep policy row and explicit invalid-solid warning exception documented in contracts.
+- [x] UI mode disposition recorded: Revolve Intersect, Mirror fuse, Extrude Intersect hidden; Pattern fuse hidden; Transform move/copy exposed; OffsetFace Total/Diameter deferred.
+- [x] `scripts/verify-modeling-contracts.mjs` validates schema, required fields, uniqueness, and coverage-manifest cross-reference.
+
+Gates: worker Release build; CTest 113/113 passed; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` passed; contract/coverage verifiers passed.
+
+## MODELING CORRECTNESS P4 — BOOLEAN INTERSECT VERTICAL (2026-08-12) — COMPLETE
+
+- [x] C++ standalone fixtures: overlap, containment, identity, face/edge/vertex touching refusal (`worker/tests/test_boolean_intersect.cpp`). CTest 114/114.
+- [x] Rust real-worker tests: preview/commit parity, disjoint refusal, save/reopen, undo restoration (`src-tauri/tests/preview_boolean.rs`).
+- [x] Frontend + Playwright: Intersect tool selection, target/tool pick, Apply, single body row; added `data-testid` to boolean op chip buttons.
+
+## MODELING CORRECTNESS P4 — REMAINING COVERAGE (2026-08-12) — COMPLETE
+
+- [x] MirrorBody Playwright flow (`e2e/mirror-body.spec.ts`).
+- [x] Linear/Circular Pattern Playwright flows (`e2e/linear-pattern.spec.ts`, `e2e/circular-pattern.spec.ts`).
+- [x] Critical mode closure tests: Extrude/Revolve overflow hide Intersect; Mirror/Pattern chips have no fuse/union toggle (`src/features/toolbar/ModelToolChips.test.tsx`).
+- [x] Real-worker corpus executor (`src-tauri/tests/corpus_executor.rs`): enumerates all `corpus/cases/*.json`, executes `a_sketch_extrude_blind` end-to-end (volume within tolerance), and records explicit unsupported reasons for the rest. Zero unclassified files.
+
+Gates: worker Release build; CTest 114/114; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` passed; TypeScript / Vitest passed; contract/coverage verifiers passed; targeted Playwright boolean/pattern/mirror specs 12/12 (Chromium + WebKit, retries 0). Full Playwright suite not re-run yet; prior unrelated `unsaved-guard` / `view-ux` flakes remain the only known blockers.
+
+## MODELING CORRECTNESS P2 GATE (2026-08-12) — AUTOMATED LANES PASSED; MANUAL TAURI SMOKE OPEN
+
+- [x] Build worker Release against pinned OCCT 8.0.1 fingerprint `0a6a1dce34181289`.
+- [x] CTest 113/113 passed.
+- [x] Cargo fmt/clippy/workspace tests with `ONECAD_REQUIRE_WORKER=1` all passed.
+- [x] Kernelbench T0 both backends: 136 records, 0 gating failures, replay 136 stable, metamorph 48 passed, differential same-status 136. Summary matches baseline except timing.
+- [x] TypeScript check, production build, Vitest 241 files / 4116 tests passed.
+- [x] Playwright zero retries: Chromium 196/196 passed, WebKit 196/196 passed.
+- [ ] Manual Tauri smoke (open project → extrude → fillet → undo → save → reopen) still owed; no automated equivalent exists.
+
+Fixed P2 region-identity regression found by real-worker gate:
+- `src-tauri/tests/sketch_on_face.rs`: `region_extrude_record` now authors `region_identity_version: 2` so fragmented projected regions resolve under the V2 exact-profile detector.
+- `src-tauri/tests/wire_contract.rs`: `nested_inner_disk_parity_and_reopen_stability` now sets `region_identity_version: 2` when binding the exact disk/annulus region ids.
+
+## MODEL-CORRECTNESS-P0 + REF-OWNERSHIP-AND-SNAPSHOT P1 (2026-08-11) — COMPLETE
+
+- [x] P0 — deferred replacement guard; authoritative `SaveOutcome`; classified terminals; zero-solid Boolean refusal; circular `angle / count`; semantic Draft refusal; per-session preview ownership; Boolean re-arm.
+- [x] P1A — typed-ref local ownership before ladder scoring; stale ToFace/Hole promotion and OffsetFace adoption fences.
+- [x] P1B — provenance-versioned repair candidates; additive typed Revolve body-edge axis with no ordinal fallback.
+  - [x] `ResolveRefs` echoes `{revision, snapshotId, refId, bodyId}`; candidate loads key on that tuple, old events/loads/clicks cannot promote stale ordinals. Focused FE 32/32; Rust lib 256/256.
+- [~] Gates — worker Release + CTest 112/112; Cargo fmt/clippy/workspace worker tests; `npx tsc --noEmit`; Bun build; Vitest 241 files / 4115 tests all pass. Full Playwright retries 0: Chromium 196/196, WebKit 196/196 after `commitExtrudeAtHandle` releases a failed retry pointerdown. Manual Tauri smoke and T0 digest/semantic campaign remain open.
+
+Gate evidence: baseline `1c11d49`; `scripts/build-worker.sh Release`; `ctest --test-dir worker/build --output-on-failure`; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace`; `npx tsc --noEmit`; `bun run build`; `bun run test`; `bunx playwright test e2e/repair-rebind-multibody.spec.ts e2e/sketch-multi-object.spec.ts --project=chromium --project=webkit --retries=0`. Untracked roadmap bundle intentionally untouched.
+
+## TRACK A — a CI that means something (2026-08-10)
+
+Goal: before any R1 work, make "green" a fact CI enforces rather than a claim verified by hand. Four work packages, all landed.
+
+### A1 — the inline-edit test was a REAL race, not a slow deadline
+- [x] **My first diagnosis was wrong and the second attempt found the mechanism.** I read `InspectorPanel.test.tsx`'s failure as an arbitrary wall-clock deadline and widened it; it went red again in CI **with a 4 s budget**, on an assertion whose work is pure microtasks — which a timeout cannot explain.
+- [x] Actual cause: `DimensionInput.commit()` reads the `text` STATE and calls `onCommit` only when the formatted new value differs from the current one. Firing `change` and `keyDown` inside ONE `act` nests their flushes into the outer scope, so the `keyDown` handler can still close over the pre-change text — `formatValue(n) === formatValue(value)` holds, the commit is CORRECTLY skipped, and `applyEditCommand` never fires. Split into two `act` scopes so Enter runs against a component that has re-rendered.
+
+### A2 — the 12 red e2e specs were THREE unrelated causes, not one
+The plan (and `TODO.md`) attributed all 12 to the live-dim tree. Wrong on 10 of them.
+- [x] **Toolbar flyout families (8 of 12).** `d81f758` made the toolbar one slot per family, so Center rectangle (behind Rectangle) and Ellipse (behind Circle) have no button until picked from a flyout. `selectSketchTool` now tries the direct button, then DISCOVERS the owning flyout by opening each chevron rather than hardcoding a family table. Menu rows concatenate title+shortcut with no separator (`"EllipseO"`), so the title span is matched exactly. Note for future helpers: **`count()` does not auto-wait** and must never be the first thing asked of a mounting toolbar.
+- [x] **Extrude gesture + a wrong precondition (2).** Confirming from the armed state leaves depth at zero and nothing commits (UNIFY-UX), so a real handle grab is required — restored as a shared `dragExtrudeDepth`, filling an orphaned docstring that had lost its function. The body-COUNT precondition was wrong in EITHER drag direction: the rectangle overlaps the seeded body, so auto Add/Cut resolves to `Cut` and the extrude modifies `body1`. Correct behaviour, irrelevant to reattach — the precondition now asserts a moved revision.
+- [x] **The angle change (2), and production is right.** The chip is withheld on a first segment because `angleLadder` authors nothing without a `prev`, so a drivable-looking chip would be a lie. The spec now types on a chained second leg. Two things the rewrite had to learn from the code: the field types the **visual corner angle**, not the raw turn (`cornerAngleOf = 180 - |turn|`, so a typed 30 is a 30° corner and a 150° turn), and geometry cannot be asserted with absolute headings — the plane's +U runs opposite to screen +x and leg 2 is stored end-first — so it measures the undirected corner at the shared vertex.
+- [x] **Full Playwright suite 392/392** locally, both browsers, run alone.
+
+### A3 — `worker-7.9.3` deleted
+- [x] It never compiled (four benchmark sites call `failure.what()`, absent from 7.9.3's `Standard_Failure`) and `continue-on-error` masked that on EVERY run including green ones. The two persistence jobs stay: different question, and they build only `test_occt_persistence`, which never touches the benchmark sources.
+
+### A4 — `ci.yml` split into two lanes, self-hosted + macOS shipping gate
+- [x] **Self-hosted (Linux):** `linux-worker` (hygiene, build, selftest+fingerprint, ctest 110/110, edge-op determinism) and `linux-kernelbench` (`-p onecad-kernelbench`, T0 both backends, linux-x64 digest gate, cross-host semantics gate). Uses the PERSISTENT OCCT prefix, so the 40-90 min kernel build is paid once.
+- [x] **macOS shipping gate:** packaging linkage smoke (no Linux equivalent), `cargo test --workspace`, both e2e projects, persistence pair.
+- [x] **SECURITY:** every self-hosted job is gated to trusted code — a push to this repo, or a PR whose head branch lives here. Fork PRs get the full GitHub-hosted lane. User has since set fork-PR approval in Settings → Actions as the backstop.
+- [x] **e2e is now gated in CI** — chromium and webkit, 392 executions.
+
+### The finding that changed a design decision: digests are SAME-MACHINE
+- [x] The macOS digest gate failed comparing **darwin-arm64 against a darwin-arm64 baseline**: same pinned OCCT source, same build id, same architecture, but GitHub's `macos-14` AppleClang is not the laptop's — and the trig-heavy `valence4-*` family moved. So platform-keying (yesterday's conclusion) is still too coarse.
+- [x] The digest gate therefore runs **only on the self-hosted runner**, the one persistent machine. Both lanes gate the portable thing: **semantics**. `bench/robustness/baselines/README.md` records the measurement.
+
+### Two CI-only flakes, both "a local-machine number standing in for a condition"
+- [x] `ModelToolController.wave2` asserted straight after `flush()` — a single `setTimeout(0)`, ONE macrotask tick — while `editExtrudeFeature` awaits `endPreview` then `beginPreview`. Passed 18/18 in isolation, red in CI. Now waits for the condition.
+- [x] `boolean-preview`'s lane polls carried 5 s; the lane opens behind a body pick, a Combine arm and a preview round-trip. It passed on both browsers in one CI run and failed on both in the next — a deadline flake. Raised to 20 s behind a named constant, assertions unchanged.
+
+### Still open
+- [ ] **Runner root installs** (Proxmox SSH was refusing connections, so these could not be done): `unzip` (blocks `setup-bun`, which is why `frontend` is GitHub-hosted) and Playwright's chromium libraries. The exact one-liner is in `ci.yml` above `e2e-chromium`. Both jobs move to the runner once they land.
+- [ ] **`boolean-preview` on ubuntu chromium** fails a body pick that succeeds on macOS chromium — a plausible SwiftShader/GL difference and a real finding. Chromium runs on macOS meanwhile; investigating this is what would let the whole e2e lane move to the runner.
+- [ ] **OPEN DECISION — `retries` in CI.** With e2e gated, the suite runs ~99.5% clean: 195/196 per job, with a DIFFERENT spec failing each run (`boolean-preview`, `tree-visibility`, live-dim…). Every one so far has been a local-machine deadline standing in for a condition, and each is individually fixable — but it is a long tail. `playwright.config.ts` sets `retries: 0` deliberately, with the rationale that retries once hid flakes that were invisible in CI and hard-red locally (`TODO.md` OPEN DECISION, and the config's own comment). That rationale predates e2e being a gate at all. Choose: keep 0 and grind the tail down, or `retries: 1` on CI only and keep grinding without a red gate.
+- [ ] Nothing is a REQUIRED check yet — worth turning on once the retries decision lands, so the gate actually blocks.
+
+## SELF-HOSTED RUNNER — Linux benchmark host, S1-S4 ladder (2026-08-10) — GATE PASSED
+
+`.github/workflows/self-hosted.yml`, `workflow_dispatch` ONLY. Runner `prx-lxc` = Proxmox LXC 107 "GithubRunner", Debian 13 trixie, unprivileged, **4 cores / 8 GB / 70 GB**. Purpose: long campaigns move off the Mac (wall-clock is free there); the Mac keeps the fast iteration lane.
+
+- [x] **SECURITY — the repo is PUBLIC and the runner is on the home LAN.** Self-hosted jobs are in their own workflow because `ci.yml` triggers on unfiltered `pull_request:`; a fork PR reaching a self-hosted job executes the fork's code on that hardware. Every job additionally re-checks `github.repository` + `github.event_name`. Never add `pull_request`/`pull_request_target` there. 0 forks today.
+- [x] **S1 environment report.** Container shipped with only curl/tar/python3/perl and **no sudo**. One-time root install via `pct exec 107`: `git ca-certificates build-essential cmake ninja-build pkg-config libboost-dev libeigen3-dev nlohmann-json3-dev`, then `libx11-dev libxext-dev libxmu-dev libxi-dev libgl-dev libglu1-mesa-dev`. gcc 14.2.0 · cmake 3.31.6 · ninja 1.12.1. (`git`'s absence is not cosmetic: `actions/checkout` silently falls back to the REST tarball, leaving no `.git`.)
+- [x] **S2 pinned OCCT 8.0.1 from source.** Artifact provenance byte-identical to macOS (same `sourceCommit`, `buildId`, normalized option list). 120 MB prefix / 49 `libTK*.so`. Persistent prefix outside the workspace + an assert that a second invocation prints "Reusing pinned OCCT", so the 40-90 min build is paid once.
+  - OCCT's `TKService` compiles against Xlib on Linux where macOS uses Cocoa. Installing X11 headers is the correct fix, NOT `USE_XLIB=OFF`: `HAVE_XLIB` is auto-detected and absent from the pinned option policy, so headers cannot move the fingerprint, whereas suppressing the module either edits the policy or lets two materially different builds share one fingerprint.
+- [x] **S3 worker + ctest.** **`ctest` 110/110** and **`fingerprint 0a6a1dce34181289` identical to macOS** — the seed is `occtVersion|sourceCommit|buildOptions|buildId|kernelPolicyVersion`, all platform-independent, and that design now has evidence. Edge-op determinism `cmp` byte-identical.
+- [x] **S4 kernelbench T0, both backends.** 136 records · `gatingFailures` 0 · replay 136 stable / 0 unstable · metamorph 48 passed / 0 failed · differential 136 same-status — semantically identical to the macOS baseline. Timing **p50 29.7 ms / p95 993 ms** vs macOS 10.3 / 62.3 (4 shared LXC cores); M5 sizing must use these, not the Mac numbers.
+
+### Three repo defects the port surfaced (all fixed)
+- [x] **`json_fwd.hpp` was never vendored** next to `json.hpp`, and nothing declares it — there is no `find_package(nlohmann_json)` in the build. Six benchmark headers resolved it from the system. macOS was green only because Homebrew also ships 3.12.0; Debian's 3.11.3 puts a second inline ABI namespace into `nlohmann` and every `json_pointer` reference goes ambiguous. **This was a live latent failure on the shipping platform** — any Homebrew bump past 3.12.0 breaks macOS identically. `VENDOR.txt` already stated the invariant this restores.
+- [x] **`DT_RUNPATH` is not transitive.** GNU ld defaults to `--enable-new-dtags`, so the OCCT path resolved only the worker's own `DT_NEEDED` entries; all 26 OCCT-internal edges (`libTKOffset -> libTKG2d`) fell through to the system path and the worker died at startup. OCCT's libraries carry no RPATH of their own. `-Wl,--disable-new-dtags` under `if(NOT APPLE)` restores transitive `DT_RPATH`; the macOS link line is unchanged.
+- [x] **`std::reverse` without `<algorithm>`** in `test_polygon_fill.cpp` — libc++ transitive, libstdc++ not. FLAGGED: 34 more files use `std::u?int*_t` without `<cstdint>` and currently compile only by transitive luck; a separate hygiene sweep, not landed here.
+
+### Digests are platform-dependent; semantics are not
+- [x] Same pinned OCCT 8.0.1, identical build id AND identical 16-hex fingerprint, yet **182 of 272 digest values differ**: `translated` inputDigest **0/32** (translation is exact in FP) · `rotated` **32/32** (trig) · `base` **20/72** — precisely the trig-built shapes (all 8 `valence4`, `overflow-02/-03`); every box and `valence3` is bit-identical · `normalizedDigest` **130/136**.
+- [x] The 1e-9 quantization CANNOT fix this: rounding to a grid narrows but never closes boundary straddles, and with thousands of quantized values per record a straddle is near-certain. A digest is a **same-host** regression tripwire only.
+- [x] `digests.json` keyed `suite|case|backend|variant|platform` (256 macOS rows migrated to `darwin-arm64`, 136 `linux-x64` rows recorded). `record` only replaces the current platform's rows; `compare` on an unrecorded platform exits 3.
+- [x] **`semantics.json` is new and NOT platform-keyed** — the portability claim. Verified by running T0 on macOS against the baseline recorded on Linux: both hosts satisfy the same row. Timing and tolerance distributions excluded (host properties, not kernel behaviour).
+- [x] Consequence for M5: "byte-identical `results.jsonl` across `--jobs`/`--shard`/`--resume`" stays valid (same host, same binary). Any CROSS-host claim must be semantic.
+
+### Full verification sweep at `cb88ba9` (2026-08-10)
+All four suites run on macOS with the three worker fixes in place, plus the manifest tool exercised against both suites and both platforms.
+
+- [x] **ctest 110/110** · `cargo fmt --all --check` · `clippy --workspace --all-targets -D warnings` · `cargo test --workspace` with `ONECAD_REQUIRE_WORKER=1` — all green, so the vendored `json_fwd.hpp` and the `NOT APPLE` link-option guard leave macOS untouched.
+- [x] **vitest 241 files / 4102 tests, all pass** · `bun run build` green.
+- [x] **Manifest tool, tested rather than assumed.** `fillet/matrix:m1` 120 rows unchanged (the migration path I had NOT previously exercised) · `t0` 136 rows unchanged · macOS satisfies the Linux-recorded semantics row · guards: unrecorded platform → 3, bad mode → 2, missing semantics suite → 3 · **negative controls**: a tampered digest and a tampered `gatingFailures` both correctly report a mismatch · census 392 rows (`darwin-arm64` 256, `linux-x64` 136), every key 5 fields.
+- [x] **DT_RPATH verified at the ELF level on Linux**, not inferred from a green build: tag `0x0f RPATH` (not `0x1d RUNPATH`) and **0 unresolved libraries, down from 26**.
+- [x] Runner after the full ladder: 4.8 GB used of 69 GB. Persistent state ~1 GB (OCCT prefix 120 MB, worker build 142 MB, cargo 97 MB, workspace 638 MB).
+
+### Two stale claims corrected by that sweep
+- **`InspectorPanel.test.tsx:341` is CI-FLAKY, not broken.** `ci.yml` went red at `cb88ba9` on `expected "applyEditCommand" to be called at least once`; the preceding commit `b344ab6` was green with byte-identical frontend code (the only delta was `TODO.md`), the file passes 5/5 locally in isolation and 4102/4102 in the full suite, and a rerun of the SAME sha went green. It is a `vi.waitFor` timing out under CI load (that run spent 102 s in environment setup alone). **A flaky test inside a gate is a WP0.2 blocker** — wiring Playwright/vitest as required checks makes this fail the branch at random.
+- **`HANDOFF.md:126`'s "4 fail (theme.spec, pre-existing)" is stale.** `theme.spec.ts` passes clean. A full-suite run under CPU contention reported 19 failures; re-running the 7 non-sketch ones in isolation (`offset-face`, `theme` ×2, `transform-body`, `history-inline-dimension`, `multiregion`, `point`) gave **38/38 pass**. They were contention artifacts of running vitest and Playwright concurrently — `workers: 1` + `retries: 0` makes this suite timing-sensitive, so e2e must be run alone.
+
+### Playwright: 380/392, and the 12 are exactly WP0.1's scope
+Re-run in isolation, deterministic and symmetric (6 chromium + 6 webkit), all four spec files from the landed sketch-angle work: `center-rect` ×1, `ellipse` ×3, `live-dim-line` ×1, `sketch-reattach` ×1, per browser. This confirms the plan's WP0.1 estimate exactly — the specs encode the OLD absolute-heading semantics and must be reconciled against the signed-turn chip before Playwright can be a CI gate.
+
+### Still open
+- [ ] **USER:** Settings → Actions → General → "Fork pull request workflows from outside collaborators" must require approval. Not readable via REST for a public repo. Consider making the repo private.
+- [ ] De-flake `InspectorPanel.test.tsx:341` before vitest/Playwright become required checks (WP0.2).
+- [ ] `m1` has `darwin-arm64` rows only; record `linux-x64` when the suite next runs there.
+- [ ] `CLAUDE.md` still tells contributors to `brew install nlohmann-json`; that package is now inert (no `find_package`). Fold into the doc pass.
+- [ ] The 34 `<cstdint>` transitive-include cases above.
+
+## REF-H0 — Fresh Subelement Identity Contract (2026-08-09) — COMPLETE
+
+Goal: a face, edge, or vertex promoted from the current published snapshot resolves
+directly and uniquely on that unchanged worker head. Shell, OffsetFace, Hole, and
+Fillet must consume the same trusted identity path; ambiguity thresholds and
+operation-specific ordinal fallbacks remain unchanged.
+
+### Investigation
+- [x] Reproduce root cause from live code/history: `AcquireElementIds` returns worker
+  evidence, Rust mints and caches the `ElementId`, but the authoritative worker-head
+  `ElementMapPartition` never receives that binding. `PrepareOffsetFace` then treats
+  the fresh id as authoritative and refuses its inevitable partition miss.
+- [x] Confirm Shell's separate persistence gap: legacy `ShellParams.openFaces`
+  stores bare ids, so Rust discards the frontend's typed face evidence before
+  `PreviewOp` and full replay. The contract now adds typed `ShellParams.faces` in
+  strict lockstep while preserving absent/empty legacy compatibility.
+- [x] Audit `body_<uuid>` normalization: frontend/Rust/worker conversions are
+  consistent in the clean-box path; not the root cause.
+- [x] Audit mesh face/edge ordinals: tessellation and resolver use the same
+  `TopExp::MapShapes` domains; not the root cause.
+- [x] Find secondary MESH1 defect: partially persistent id tables mix `el_*` and
+  TopoKeys, while the picker treats every label as persistent when the body-global
+  flag is set.
+
+### Red-first contracts
+- [x] Box face/edge/vertex `AcquireElementIds` round trip: same head resolves
+  `unchanged`, same id and TopoKey; `QueryElement(elementId)` reports present.
+- [x] `AcquireElementIds` then `PrepareOffsetFace` with the returned id succeeds.
+- [x] Fresh promoted top-face Shell `PreviewOp` returns no `NeedsRepair`, without a
+  prior operation pre-seeding the partition.
+- [x] MESH1 mixed-id pick classifies `el_*` as persistent and `f:N`/`e:N` as
+  snapshot-scoped evidence.
+
+### Implementation
+- [x] Implement internal `BindElementIds`: validate exact/idempotent evidence and
+  atomically install the full Rust-minted batch into the snapshot-fenced worker
+  head; promotion returns and caches only after bind succeeds.
+- [x] Make identity reads use one atomic published-state snapshot.
+- [x] Implement `ShellParams.faces` in strict order/id lockstep with `openFaces` so
+  preview, full replay, save/reopen, and fresh-worker replay retain typed evidence;
+  accept absent/empty `faces` only for legacy bare-id behavior.
+- [x] Fix shared preview diagnostics to report actual tool/op, never `extrude` for
+  Shell/OffsetFace/Hole.
+- [x] Keep safe refusal: no threshold relaxation, first-candidate fallback, or
+  operation-specific identity path.
+
+### Verification
+- [x] Run focused worker ctests and real-worker Rust identity/OffsetFace/Shell tests.
+- [x] Re-run Fillet fresh selection lifecycle without manual repair.
+- [x] Run worker build + ctest, Cargo fmt/clippy/workspace tests, focused frontend
+  tests, TypeScript, and production build.
+- [x] Review final diff; preserve unrelated sketch/live-dimension worktree changes.
+
+Gate: worker CTest 110/110; real-worker Rust workspace green; fmt + clippy
+`-D warnings` green; focused frontend 127/127; full Vitest 240 files / 4051 tests;
+`npx tsc --noEmit` + production build green. Fresh Shell cold reopen publishes
+`needsRepair=0` at volume 2224; fresh promoted Fillet commit publishes
+`needsRepair=0`. Final Shell body/load hardening: onecad-core 259 unit + 176
+integration tests green; persisted foreign-body typed refs fail closed.
+
+### Unresolved questions
+- None.
+
+## EXTRUDE DIRECT MANIPULATION — moving two-way arrow + dimension-only chip (2026-08-09, plan `simplify-this-chip-in-optimized-unicorn.md`) — FE GATE PASSED
+
+Applying an extrude was a form, not a gesture: a twelve-control chip demanded every
+decision before the user saw a result, while the arrow sat frozen at the profile
+centroid and the chip sat on top of the prism. The arrow is now the operation — it
+travels with the depth, points where material is going, reads two-way until the
+first grab, and turns destructive on a Cut; the chip carries a dimension, a `⋯` and
+✓/✕, and rides beside the arrowhead. **Extrude only** by decision; revolve, fillet,
+hole, offset-face and transform keep today's clusters, and the new seams
+(`DragHandle.setAxis`, overlay `axisFrom`, `ChipPlacement`) are built to generalize.
+
+**TWO LATENT DEFECTS FOUND WHILE VALIDATING THE DESIGN, FIXED FIRST.**
+- *The grab was a ratchet waiting for a moving arrow.* The drag reported the
+  ABSOLUTE axis projection (`axisDepthFromRay`), which only ever worked because the
+  arrow never moved. Anchored at `centroid + normal·depth`, every re-grab would add
+  an arrow-length to the depth — and `commitExtrudeAtHandle` re-grabs on each
+  `toPass` retry, so it would have drifted in the gate lane immediately. Now
+  grab-relative, exactly like the offset-face arrow. `forceExtrudeGrab` zeroes the
+  grab basis, which collapses to the old absolute mapping and keeps the depth-exact
+  unit tests meaningful.
+- *A press on the chip already started a depth drag.* The chip layer is a sibling of
+  the canvas overlay inside the container the controller listens on, and the extrude
+  branch — unlike fillet/shell/offset — never excluded chip targets. Parking the chip
+  at the arrowhead would have made ✓ and the value field eat the grab.
+
+DECISIONS WORTH CARRYING:
+- **Two-way means UNDECIDED, not symmetric.** One glyph, one meaning: the second head
+  retires at the first grab, and a symmetric extrude keeps a single head at the
+  `+|depth|` face. The pick envelope tracks the drawn heads — a permanently symmetric
+  envelope would reach backwards through the prism and the body (`depthTest:false`,
+  no occlusion test in `raycast`) and swallow selection clicks.
+- **`inside`, not `gap ≈ 0`, decides "into material".** A sketch coplanar with a body
+  face reads gap ≈ 0 on BOTH sides; only the side whose ray exits through a BACK face
+  actually starts in the solid. This is what lets the rule generalize past
+  `hostFace` — a sketch on a datum plane through a block now cuts — without turning
+  every coplanar second extrude into a wrong silent Cut.
+- **The chip's live position never goes through the store.** `worldPos` is the mount
+  effect's key, so a per-frame write would unmount the chip: focus lost and
+  `commitOnBlur` firing on half-typed text. The controller calls `engine.moveChip`.
+- **`offsetPx` is clearance to the chip's near EDGE.** The driver adds half the
+  element's own size as a CSS percentage, so no layout read per frame. A centre-based
+  offset was tried first and the chip still covered the arrow — which the e2e lane
+  caught as an unclickable handle, because the chip-exclusion guard was already in.
+- **The `⋯` button is a READOUT.** It shows the resolved boolean mode and raises a dot
+  for any other non-default, because a mode the drag changes on its own must never
+  change out of sight. `e2e/sketch-on-face.spec.ts` asserts that readout rather than
+  the segments: a dismiss-on-outside-press popover cannot stay open across a drag.
+- **Esc still cancels the TOOL, not the popover.** The controller owns Escape from a
+  window listener registered in capture at construction, so nothing mounted later can
+  preempt it; racing listener order to fake "first Esc closes" would be worse than Esc
+  meaning one thing everywhere. Dismissal is an outside press or a second `⋯` click.
+- `maybeNegativeDragHint` RETIRED — the arrow's colour, the prism tint and the `⋯`
+  readout say it, and with the auto lane generalized its precondition rarely held.
+
+BUG THE E2E LANE CAUGHT (and no unit test could): `LineSegments2` **extends Mesh**, so
+the probe's `isMesh` filter admitted the fat edge lines, whose `raycast` reads
+`raycaster.params.Line2` and throws on a plain raycaster — every extrude arm died in
+the browser while jsdom stayed green. The probe now takes `userData.kind === "face"`.
+
+GATE: `bunx tsc --noEmit` clean · `bun run build` green · vitest **240 files / 4040
+tests** (from 236/3986) · hex gate 0 · Playwright chromium: the 25-spec
+extrude/boolean/tree/revolve set **25/25**, with `revolve-commit` green UNMODIFIED
+(proof the shared `BooleanModeSegments` was not collapsed out from under it).
+NOT RUN: Rust, ctest, webkit — untouched by this wave.
+STILL OWED: the manual `tauri dev` smoke, which is the only thing that can prove the
+UX itself (arrow follows, chip never covers the prism, push-in cuts / pull-out joins).
+
+FLAGGED: in the mock e2e lane the material probe finds committed face meshes, but the
+generalized rule's coverage lives in `materialProbe.test.ts` +
+`ModelToolController.extrudeGesture.test.ts`; the datum-plane-through-a-body case has
+no e2e of its own yet. NEXT: generalize the moving arrow to revolve/offset-face, and
+decide whether `tree-visibility.spec.ts` should hide its seed body.
+
+## UNIFY-UX — Fillet/Revolve/Extrude chip parity (2026-08-09, plan `act-as-senior-ui-ux-tranquil-sparrow.md`) — FE GATE PASSED
+
+Goal, from a user UI/UX review against Shapr3D/Fusion 360: unify the three tools'
+armed-chip UX. Extrude already had a moving two-way arrow + leader-lined chip (see
+above); Fillet/Chamfer had NO 3D handle at all (a whole-viewport screen-space claim)
+and its chip sat centered directly ON the picked edge; Revolve showed nothing in the
+viewport until both a face AND an axis were picked, guided only by a StatusBar string.
+Landed in 4 phases, reusing the shared chip/store/overlay infra the extrude wave built
+to generalize rather than growing three divergent implementations.
+
+DECISIONS WORTH CARRYING:
+- **Phase 0 (shared infra).** `ChipAnchorOpts` (`anchorAxisFrom`/`anchorOffsetPx`)
+  promoted from `ExtrudeChipOpts`-only onto `EdgeOpChipOpts`/`RevolveChipOpts` too, with
+  a shared `DEFAULT_CHIP_OFFSET_PX` (`toolChipStore.ts`) applied whenever an axis is
+  given but no explicit offset — default-ON, not a per-call-site magic number.
+  `HtmlOverlayDriver` now draws an actual DASHED LEADER LINE from the raw anchor to the
+  offset chip position (previously the offset only repositioned the chip; no line
+  existed) — a plain absolutely-positioned bordered `<div>`, rotated/scaled per frame,
+  matching the driver's existing zero-React-render discipline. It piggybacks on
+  whatever already mutates `worldPos`/`axisFrom` each frame (`setWorldPos`/
+  `setAxisFrom`, called by `moveChip`) — no second write path, so extrude's
+  continuously-moving arrow never desyncs from its line (regression-pinned:
+  `HtmlOverlayDriver.test.ts` "tracks a LIVE move"). `ChipOverflow` extracted from
+  `ExtrudeChipControls`'s `ExtrudeOverflow` as the shared `⋯`-button-plus-popover shell;
+  extrude's own `chip-mode-readout` testid preserved via an override prop so the
+  existing e2e/vitest contract didn't need touching.
+- **Phase 1 (Fillet/Chamfer).** Reused `showValueHandle`/`hideValueHandle` (the same
+  shared `DragHandle` instance extrude/offset-face already use) whenever
+  `filletAxisSource !== "screen"` (a resolvable bisector/bbox direction); the degraded
+  ("screen") tier keeps the old whole-viewport claim unchanged. Per explicit user
+  decision, grabbing the handle is now REQUIRED in the non-degraded case — mirrors
+  offset-face's `offsetDegraded` press-gating exactly, narrows "claims every press" to
+  "claims presses on the handle," and click-away stays excluded for the degraded tier
+  only, unchanged. Chip anchor moved from the raw picked-edge point to the handle's own
+  base/tip pair, so it's leader-lined off the arrow instead of sitting on the edge.
+  [Fillet|Chamfer] + the chamfer second leg moved behind a new `EdgeOpOverflow` (own
+  file `EdgeOpChipControls.tsx`) — per user decision, NOT left inline, even though it's
+  flipped more often than extrude's collapsed settings.
+- **Phase 2 (Revolve).** New `revolveAxisPick` chip kind — text + ✕ only, anchored at
+  the profile centroid — fills the axisPick phase's total silence (previously: zero
+  chip, faint unlabeled candidate lines, a StatusBar string). A NEW screen-fixed,
+  `pointer-events-none` top-anchored banner (`ViewportRoot.tsx`, `revolve-empty-hint`)
+  covers the truly-nothing-selected state — the ONLY existing precedent for a
+  viewport-space (not StatusBar, not world-anchored) hint in this codebase is the
+  `chip==="cached"` pill, reused rather than inventing new visual language. Derived
+  from existing reactive state only (`toolStore.modelTool==="revolve" &&
+  toolChipStore.kind==="none"`) — no new controller-to-store plumbing needed, since
+  BOTH new/existing revolve phases now publish a chip kind, leaving `"none"` true only
+  during the genuine gap. Armed chip leader-lined off one axis-line endpoint
+  (`revolveChipAxisFrom`). Boolean segments moved behind a new `RevolveOverflow`
+  (`RevolveChipControls.tsx`); the Axis-reset button stays inline (primary action, per
+  plan). Per explicit user decision: NO rotate-handle gizmo this wave — angle doesn't
+  map cleanly onto `DragHandle`'s linear forward/twoWay model; the leader-lined chip +
+  already-existing live lathe preview covers the gap for v1.
+- **Phase 3 (Extrude).** Pure dedupe/regression pass: local `CHIP_AXIS_OFFSET_PX`
+  removed in favor of the Phase-0 shared constant directly; the new leader-line code
+  path verified against the ONE thing that could desync it (extrude's per-frame
+  `moveChip`-driven arrow) via a dedicated `HtmlOverlayDriver` test rather than
+  eyeballing it — see above.
+
+WEBKIT-ONLY E2E FLAKE, FOUND AND FIXED WHILE VALIDATING FILLET'S NEW HANDLE: the FIRST
+drag right after arming (no prior chip interaction to let a natural render happen) could
+land a `mouse.down()` on a handle a JS-side hit-test had JUST confirmed hot, and
+silently do nothing — reproduced directly: `hitExtrudeHandle` at the identical point
+flips true→false→true across consecutive calls in WebKit headless specifically
+(Chromium never showed it). A 300ms settle wait in the new `dragEdgeOpHandle` e2e helper
+(`modelToolHelpers.ts`) fixes it — every OTHER handle-drag call site in this codebase
+already has a prior interaction that incidentally buys the same margin, which is why
+this never surfaced before. Verified with 20/20 repeat-each runs across both browsers
+post-fix (0/10–9/10 failing before it, depending on the mitigation attempt).
+
+GATE: `bunx tsc --noEmit` clean · `bun run build` green · hex-gate 0 on touched files ·
+vitest **240 files / 4060 tests** (from 240/4051 pre-wave — +9: 4 leader-line + 1
+live-move regression in `HtmlOverlayDriver.test.ts`, 4 in `ModelToolChips.test.tsx` for
+the two new overflows/axisPick chip) · Playwright chromium+webkit, FULL suite (69 spec
+files): **380/392 passed**. The 12 failures (`center-rect`, `ellipse` ×3,
+`live-dim-line`, `sketch-reattach` — ×2 browsers) are ALL in sketch-drawing /
+live-dimension specs, whose source (`LiveDimChips.tsx`, `liveDimStore.ts`,
+`SketchController.ts`, `liveDimFrames.ts`, `liveDimension.ts`, `liveToolMachines.ts`,
+`CornerCluster.tsx`) was mid-edit in this same working tree from a CONCURRENT session
+before and during this wave (uncommitted, not touched by this diff) — same pattern the
+EXTRUDE DIRECT MANIPULATION gate above flagged and preserved. Zero overlap with any
+file this wave touched; every spec that exercises a file this wave DID touch
+(`filletChamfer.spec.ts` 26/26, `revolve-{commit,preview,region}.spec.ts` 8/8 incl. 2
+new guidance-banner cases, `extrude-{commit-gesture,boolean,draft,end-conditions,
+multiselect}.spec.ts`, `offset-face.spec.ts`, `shell-preview.spec.ts`,
+`boolean-preview.spec.ts`, `sketch-{on-face,fillet,hole-extrude,offset}.spec.ts`,
+`history-inline-dimension.spec.ts`, `tree-visibility.spec.ts`) is green.
+NOT RUN from here: Rust, ctest (untouched by this wave — no worker/backend changes).
+NOT INVESTIGATED further: the 12 pre-existing sketch/live-dim failures above — outside
+this wave's scope and file set, belongs to the concurrent session's own gate.
+
+### Unresolved questions
+- Dashed leader-line visual spec (color/dash pattern/min-max length) has no design
+  token yet — engineering default used (`--color-border-strong`, 1px dashed, hidden
+  under 4px), needs a design pass.
+- Revolve's pre-axisPick copy ("Pick an axis line", "Select a sketch region to
+  revolve") is a placeholder pending copy review.
+- Whether `hitExtrudeHandle`/`showValueHandle`/etc. get renamed now that fillet is a
+  third caller (e.g. `hitValueHandle`) — naming-only, not blocking.
+- Revolve rotate-handle gizmo and Fillet's whole-viewport-vs-handle-required tradeoff
+  were explicit user calls for v1; both are flagged in the plan as revisitable.
+
+
+## PLATFORM REFACTOR — Milestones 1 + 2 (2026-08-08, plan `velvety-leaping-adleman.md`) — IN FLIGHT
+
+Architecture-only refactor: modeling stops being synonymous with OneCAD and becomes the first built-in module on a Platform, and `.onecad` gains namespaced module state that survives a round trip without its owner installed. **No user-visible change, no modeling behavior change.** Out of scope: SDK package, test addon, addon manifest/loader/host, GitHub install, resource-store generalization, dynamic Tauri router, crate extraction, any file moves.
+
+Laws: `docs/ARCHITECTURE.md` (normative) + `docs/adr/0001`–`0008` + the new CLAUDE.md § Architecture laws.
+
+### Recorded baseline (W0, measured — not inherited from a doc)
+- `bunx tsc --noEmit` was **RED** on `src/ipc/mockClient.import.test.ts:106` (`'snap' is possibly 'null'`, from concurrent commit `685efc2`). Fixed by narrowing, no cast. Now green.
+- `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` against the **staged** sidecar (`worker/build/onecad-worker`, built 19:37, pre-VF-M5-gate): **1033 passed / 0 failed**. The VF-M5 red recorded in this file does NOT reproduce on that binary — consistent with the note that it needs a worker built from HEAD.
+- Worker could NOT be rebuilt here: `scripts/build-worker.sh` aborts with "OCCT artifact metadata is absent" for `/opt/homebrew/opt/occt-8.0.1` (no `occt-build.json`; that prefix is not a `build-pinned-occt.sh` product). **Unrelated to this refactor — flagged, not worked around.** The VF-M5 FOLLOW-UP gate below therefore stays open and unverified from here.
+- Frontend baseline at W0 close: vitest **213 files / 3720 tests** green; `cargo fmt --all --check` + workspace `clippy -D warnings` clean; `cargo test -p onecad-core --lib` 242/0.
+
+### W0 — invariants captured ✅
+- [x] Frozen behavior contracts in `src/test/contracts/` (+ a README stating they may not be edited to make a refactor pass): toolbar arrangement, the three keymap tables + cross-mode opt-out, editor mount order, inspector section order per state.
+- [x] Four golden probes: `toolbarConfig.golden.test.ts`, `keymap.golden.test.ts` (full (key, shift, mode) resolution matrix against an independently-written oracle, not a call into the code under test), `editorMountOrder.golden.test.ts` (JSX scan; becomes a registry scan at W3 against the SAME contract), `InspectorPanel.golden.test.tsx`.
+- [x] CORRECTED ASSUMPTION while writing them: the inspector's Constraints section is UNCONDITIONAL in sketch mode (label + "No constraints yet.") — the contract records shipped behavior, not the guess.
+- [x] Rust `unknown_document_state_survives_open_modify_save` in `io/container.rs` — the W5 guarantee rehearsed on today's `Document.extra` lane: open → real modeling edit → save → reopen, foreign key byte-equal.
+- [x] `docs/ARCHITECTURE.md`, `docs/adr/README.md` + ADR-0001…0008, CLAUDE.md § Architecture laws.
+
+### W1 — platform core ✅ (pure addition, nothing wired)
+- [x] `src/platform/ids.ts` — branded ids + reverse-DNS owner validation + namespace enforcement (an addon cannot construct an `onecad.*` contribution id).
+- [x] `src/platform/registry.ts` — owner-scoped generic registry. Duplicate id ⇒ throw naming the holder; foreign namespace ⇒ throw; order is `(priority, insertion index)` with `group` as consumer metadata, NOT a sort key (group names sort alphabetically, which is never the intended visual order); snapshot reference is cached because `useSyncExternalStore` loops on a fresh array per call.
+- [x] `src/platform/contributions.ts` — Command / Tool / Panel / Inspector / Viewport / Workspace contracts, domain-neutral (scopes are opaque strings so the platform never learns "model"/"sketch"). `ViewportContext.invalidate()` is the on-demand-render seam.
+- [x] `src/platform/{slots,events,services,platform}.ts` — closed slot list, owned event subscriptions, service registry with a naming `require()`, module lifecycle with dependency topo-sort, cycle + missing-dependency rejection, and a failed activation that leaves nothing registered.
+- [x] `src/platform/react/` — `PlatformProvider` (context, never a global singleton), `SlotHost` (renders no wrapper DOM — these are absolutely-positioned overlays and a wrapper would change stacking), `ContributionBoundary` (per-contribution isolation; the app-level boundary's full-screen fallback is the wrong shape for a 260px panel).
+- [x] Tests 46/46: ownership, stale-handle safety, duplicate + namespace rejection, order independent of registration order, tie-break, notification, dependency order, cycle, failed-activation cleanup, scope teardown completeness, slot render order, error isolation.
+
+### W2 — modeling owns its tools, commands and bindings ✅
+- [x] `src/modules/modeling/tools.ts` + `bindings.ts` are now the SINGLE source of truth for the palette and the three key tables. `features/toolbar/toolbarConfig.ts` and `shortcuts/keymap.ts` DERIVE from them and keep their exported shapes, so every call site and test is untouched. Resolution rules (mode precedence, exact chord, cross-mode fallback + opt-out) stay in `keymap.ts` — the module owns WHICH keys exist, the shortcut layer owns HOW one resolves.
+- [x] Descriptors are discriminated on `scope`, so a sketch-only tool placed in the model table is a compile error, and consumers narrow without a cast.
+- [x] Separators are DERIVED from group boundaries rather than authored — `group` is consumer metadata, `priority` is the sort key.
+- [x] Ids are SCOPE-QUALIFIED (`…tool.model.mirror` vs `…tool.sketch.mirror`): `select` and `mirror` exist in both unions and mean different things, so a flat map would have let one shadow the other.
+- [x] `registryToolbar.ts` rebuilds the arrangement FROM the registry — the golden assertion runs against that, not against the table the registry was built from, or it would only prove the table equals itself.
+- [x] Tool activation and command execution DELEGATE to the existing `activateTool` / `runAction`, so a registry-driven invocation and a toolbar click cannot diverge.
+- [x] `ToolDefinition.shortcutLabel` added: Measure binds ⇧/ but is written "?", so glyph and chord are not derivable from each other.
+
+### W3 — EditorShell + slot hosting ✅
+- [x] `src/app/shell/EditorShell.tsx` renders permanent structure + one `SlotHost` per region; the 19 concrete imports are gone. `EditorScreen.tsx` is now a one-line bridge so `App.tsx`'s code-split specifier and `StartScreen`'s idle prefetch keep working.
+- [x] Contributions register on EDITOR MOUNT, not at bootstrap: the editor tree is a deliberate code-split chunk, and hoisting those imports into the startup bundle to satisfy an architectural preference would make the start screen pay for the editor. That needed `platform.createScope(owner)` (independent child scope) and a fix to scope teardown — `dispose()` no longer sweeps the whole owner, which would have let the editor's scope tear down the module's bootstrap registrations.
+- [x] Panel ids live in `panelIds.ts`, split from the files that import components, so a workspace definition can name a panel without dragging the editor chunk in.
+- [x] TWO NEW SLOTS, deliberately: `viewport.chrome` (controls anchored to the viewport frame — nav pill, corner cluster; they sit above the docked panels, unlike scene-tracking overlays) and `shell.notification` (banners). Without them the frozen mount order could not be reproduced with contiguous slot regions.
+- [x] The mount-order probe was REPLACED (JSX scan → registry scan) against the SAME frozen contract, plus two new checks: every registered panel lands in a region the shell actually renders, and re-registration after teardown is collision-free (StrictMode double-invokes).
+
+### W4 — default workspace + composition root ✅
+- [x] `src/app/bootstrap.ts` — `bootstrapOneCAD()` creates the Platform, registers `onecad.shell` + `onecad.modeling`, initializes in dependency order. It lives in `app/` and NOT in `platform/`: the composition root is the only place allowed to know both sides.
+- [x] `App.tsx` builds it in a state initializer and wraps the tree in `PlatformProvider` — no global singleton, and every existing test that renders `<App/>` keeps working with no setup.
+- [x] `platform.initializeSync()` added because the React root must have a Platform on its FIRST render; it throws if a module's `activate` is async, so the restriction is visible at startup rather than as a half-built registry.
+- [x] `onecad.shell.workspace.design` reproduces the current layout declaratively. NAMING DEVIATION recorded: the spec sketches `onecad.workspace.design`, but a contribution id must sit under its owner's namespace, and this workspace is owned by `onecad.shell` because it composes several modules. No workspace switcher in the UI.
+
+### W5 — Rust module-owned document state ✅
+- [x] `onecad_core::document::modules` — `ModuleId` (reverse-DNS, validated on AUTHORING only), `ModuleState { schemaVersion, payload }`, `ModuleStateTable`. Deserialization is deliberately permissive: refusing an id a stricter build dislikes would destroy exactly the data preservation exists to protect.
+- [x] `Document.modules` + the `DocumentData` mirror, `skip_serializing_if` empty — pinned by test that a document without module state writes NO `"modules"` key, in the document and in the manifest. No container-version bump, no user-document migration.
+- [x] `Manifest.modules` descriptor table, DERIVED from the document at save so the two can never disagree — this is what makes "this project uses an addon you do not have" answerable without decoding a payload.
+- [x] `EditCommand::SetModuleState` + `Inverse::RestoreModuleState`, dirty floor `None` (no timeline step can consume state the platform cannot interpret). Programmatic writes therefore use the SAME transaction path as user edits.
+- [x] Proofs: unknown-module state byte-equal across open → real modeling edit → save → reopen; a module id this build would refuse still round-trips; undo restores the PRIOR slice rather than merely deleting the new one; clear-then-undo restores.
+
+### W6 — wire + missing-module reporting ✅
+- [x] `ModuleStateDto` / `DocumentModuleDto`; three typed Tauri commands (`get_module_state`, `set_module_state`, `list_document_modules`). NO dynamic router — spec §97's `platform_invoke` is deferred to the addon-host effort, where it will have a consumer.
+- [x] `CadClient` gains three append-only methods; `tauriClient` and `mockClient` both implement them, so the whole persistence lane is exercisable with no backend. `set_module_state` refuses a `schemaVersion` without a payload rather than silently treating it as a clear.
+- [x] `src/platform/documentState.ts` — the service binds the module id at construction, so a module cannot address another module's slice by accident. `missingModules()` reports, never blocks.
+
+### W7 — enforcement + gate ✅
+- [x] `src/platform/architecture.test.ts` scans the real import graph: Platform must not import `@/features`, `@/tools`, `@/modules`, `@/stores`, `@/viewport`, `@/app`; modules must not import the shell or deep-path into the platform. Carries a POSITIVE CONTROL (an edge that really exists) because every other assertion expects an empty list — which is also what a broken scanner returns.
+
+### Flagged seams (carried forward, not fixed here)
+- `zoomFit` / `home` are registered as MODELING commands because that is where their bindings live today; they are really view-navigation and belong to the platform once a selection/viewport service exists. — **P2 W11.**
+- ~~The toolbar component still renders from the derived `MODEL_TOOLS`/`SKETCH_TOOLS` arrays~~ — **CLOSED by P2 W8.**
+- Inspector sections, tree nodes and viewport layers are NOT yet contributions — `InspectorContribution` / `ViewportContribution` / `TreeProvider` exist as contracts with no producers. — **P2 W9/W10/W12.**
+- **DECISION OWED before P3 — is the toolbar extensible?** W8 made it read the registry live, but it stays a MODELING PROJECTION: `registryToolbar.ts:52` skips any tool id absent from modeling's reverse map, and `FloatingToolbar` activates through `activateTool` (the store `Tool` union) rather than `ToolDefinition.activate`. So an addon could register a valid tool and be silently absent from the toolbar. Opening it needs applicability to become a contribution concern (`toolApplicability.ts` is typed on the modeling `Tool` union) and `ToolEntry` to give way to `ToolDefinition` — which changes the currency the frozen toolbar contract is written in. P3 freezes the SDK surface over whichever answer we pick, so pick it first.
+- Module state is stored in `document.json` (ADR-0004); moving to `modules/<id>/state.json` later is a container-format change.
+- **CORRECTED (was mis-reported as a blocker):** `scripts/build-worker.sh` failed with "OCCT artifact metadata is absent" only because it was pointed at `/opt/homebrew/opt/occt-8.0.1`, a plain Homebrew install. The PINNED prefix `~/.onecad-occt/8.0.1` carries `share/onecad/occt-build.json` and configures fine. Nothing is blocked. CONSEQUENCE: this session's worker-backed 1045/0 ran against `worker/build/onecad-worker` (19:37), which HANDOFF.md § VF-M5 identifies as a **stale pre-gate build** — so it did not exercise `069bb48`'s worker changes. Re-run against a HEAD build before trusting that number for the worker lane (see NEXT SESSION P1).
+
+## P2.5 — GENERIC EXTENSION SEMANTICS BEFORE THE SDK (2026-08-09, plan `act-as-senior-software-encapsulated-balloon.md`) — IN FLIGHT
+
+P3 does not start over a surface where three registries are generic at the contract and modeling-specific at the runtime: an addon tool is silently dropped by the toolbar, `defaultShortcut` never reaches the keyboard, and `TreeNode.id` collides across providers. Sequence: WP0 baseline → WP1 tool runtime → WP2 shortcuts → WP3 tree + settings → WP4 module lifecycle → WP5 `@onecad/sdk` → WP6 reference addon → WP7 enforcement. Workspace runtime is deliberately DEFERRED past the reference addon (it is not in the SDK's tool/tree/shortcut currency).
+
+### WP0 — green baseline ✅ (2026-08-09)
+- [x] VF-M5 flagship regression closed — see § VF-M5 FOLLOW-UP below. **A RESIDUAL remains open** (§ VF-M5 RESIDUAL): the gate is off, and the F12 fallback lane it should protect is real. Re-arming it is a protocol change.
+- [x] The four Playwright failures were stale specs, not an open UX question. Both removals were already decided AND pinned elsewhere (`TitleBar.test.tsx:67-69` asserts the Appearance toggle is absent; the unified start-screen `Import…` is recorded in § Wave 4), so the specs moved to the shipped entry points rather than the UI moving back.
+      - `theme.spec` — the two title-bar-toggle tests became a Settings-modal pair: the modal drives the theme AND the engine (the half CSS cannot fake), and modal ↔ popover stay in step. Same intent, the control that exists.
+      - `project-import` / `step-import` — one `Import…` button now routes on extension, so a `.onecad` pick is an OPEN (asserted through `appStore`, since the mock's `openDocument` pushes no projection) and the append lane stays covered by the in-editor File ▸ Import Project… test. `mockClient.importFileDialog()` gained `?mockimport=step` (same dev-only URL-flag pattern as `?vpdemo`) so the router's STEP half is still reachable from a browser lane.
+- [x] Gate: `bunx tsc --noEmit` clean · vitest **224 files / 3837** · worker ctest **107/107** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1045 passed / 0 failed** across 72 targets (worker built from HEAD against `~/.onecad-occt/8.0.1`, staged) · `cargo fmt --all --check` · workspace clippy `-D warnings` · full Playwright **387 passed / 3 failed**.
+- [x] **The 3 remaining Playwright failures are PRE-EXISTING and are not this work.** All three are `boolean-preview.spec.ts` (chromium :276, webkit :227 + :276). Verified by bisect in a throwaway worktree: the same test fails on `4145f3f` (before P2) and on `cf75bda` (before the Platform refactor entirely). Symptom, from the failing run's `fe-logs`: after the sketch is re-shown between the two extrudes, the click on the circle region does not select it — Extrude then arms in multi-select ("Select regions to extrude") instead of the depth drag. `sketchHitTestReady` already passed, so the sketch WAS hit-testable; the suspect is the click racing the visibility commit's projection push. Machine-dependent: the 2026-08-08 full run had it green.
+- [ ] **Manual `tauri dev` smoke still owed** (open project → extrude → fillet → undo → save → reopen). Unchanged from P0 below: the one Definition-of-Done item with no evidence.
+
+### WP1 — generic tool runtime ✅ (`4b8ec0d`, ADR-0010)
+- [x] `ToolHost` on the platform owns the active id + the activate/deactivate handshake; `FloatingToolbar` renders `ToolDefinition`s directly (title/icon/shortcutLabel, `group` boundary ⇒ separator, `priority` ⇒ order) and activates through the host. `toolFromId` no longer stands between a registration and the screen.
+- [x] Modeling stays authoritative and REPORTS: `toolStore` changes are mirrored into the host, so AUTO-MODE, the Esc ladder and self-arming controllers cannot leave the highlight disagreeing with the store. `deactivate()` runs only on a CROSS-owner swap.
+- [x] `canActivate` returns `ToolAvailability` (the toolbar has always explained WHY a tool is grayed) and gained `subscribe(onChange)` — the same staleness rule W14 gave `TreeProvider`. Modeling backs every tool with ONE shared emitter over two stores.
+- [x] A tool with NO scopes now appears everywhere (`CommandDefinition.scopes`'s documented "empty ⇒ always"); the old projection dropped that case, which made a zero-knowledge contribution impossible. Icons resolve defensively — `def.icon` is an open string and the old cast crashed inside `Icon`.
+- [x] **Real regression caught by e2e**: `mirror` is in BOTH tool unions, so routing every tool through the model applicability matrix disabled the SKETCH Mirror tool with nothing selected. Applicability is model-scope only, with a vitest case pinning it.
+- [x] `toolbarFromRegistry` demoted to the golden probe's projection (the contract is written in `ToolEntry` and may not be edited); new case pins that a FOREIGN registration leaves modeling's arrangement byte-identical.
+
+### WP2 — registered shortcuts reach the keyboard ✅ (`eb59b6d`, ADR-0011)
+- [x] `defaultShortcut` was write-only — three producers, no reader. `platform.shortcuts` resolves chords over both registries; `useShortcuts` asks modifier chords → `resolveBinding` → the registry, in that order, so a contribution CANNOT shadow a built-in and the golden keymap oracle stays byte-identical.
+- [x] Conflicts never resolve by load order: scope-specific → explicit priority → built-in over addon → otherwise the chord fires NOTHING and is reported. A keystroke does not bypass `canExecute`. The ⌘-chords stay hardcoded and are explicitly not addon-reachable in v1.
+
+### WP3 — tree public surface + settings ✅ (`7dee177`, ADR-0012)
+- [x] Rows are addressed by `(providerId, nodeId)`. Ids stay provider-local: demanding globally unique ids pushes a naming burden onto every contributor to fix a host bug.
+- [x] Modeling's provider implements `subscribe`; the host dropped its five modeling store subscriptions and now watches only providers.
+- [x] `TreeNodeAction` is command-backed with a declarative `confirm`, so a row action is reachable from a palette rather than living inside one popover. Delete-datum/delete-sketch became modeling commands; the panel lost its `kind` branches for them. **Reattach stays the one flagged modeling-specific branch** — it needs a fact the node does not carry AND a second anchored popover.
+- [x] Settings moved from `ModelTreePanel` to the shell's `StatusBar`. `settingsStore` ownership is untouched and out of scope.
+
+### WP4 — module lifecycle ✅ (`bbe1ceb`)
+- [x] `ModuleDefinition.deactivate` was declared and called from NOWHERE. It now runs on `disposeOwner` and `platform.dispose()`, before the registrations go, in reverse initialization order. Not for a failed activation, not for a short-lived child scope, and a throw does not abort disposal. New `deactivating` state; `platform.dispose()` also sweeps the registries per owner (it only walked tracked scopes).
+
+### WP5/WP6/WP7 — SDK boundary + reference addon + enforcement (ADR-0013)
+- [x] `@onecad/sdk` → `src/sdk/` (tsconfig + vite alias; not published — a real package buys nothing until something outside this repo builds against it). Re-exports ids + checked constructors, `Disposable`, the contribution contracts, `Slots`, `SelectionRef`, document-state types and `ExtensionContext`.
+- [x] `ExtensionContext` replaces `ModuleScope` for addons: same registrations, no `platform`, no `createScope`, and `document.state` pre-bound to the addon's namespace. Narrowed BY CONSTRUCTION, not by cast — a cast leaves `platform` present at runtime. `createExtensionContext`/`registerExtension` are host-side and absent from the SDK.
+- [x] `src/addons/reference/` contributes command + tool + panel + inspector section + tree section with a command-backed action + viewport layer + workspace + its own document namespace, over its OWN domain type (`com.onecadtest.reference.item`), importing `@onecad/sdk` and `react` only. Tests drive the REAL toolbar, tree, shortcut lane and viewport host.
+- [x] **Deliberately NOT registered in `bootstrap.ts`** — shipping a fake "Widgets" panel into the product UI to prove an architectural point is a worse trade than proving it in tests. It becomes the addon loader's first package when the loader lands.
+- [x] `architecture.test.ts` enforces both directions (addon ⇏ application, SDK ⇏ application implementation), plus a runtime-surface snapshot of the SDK barrel and an explicit "the SDK does not export the host" check. Both new rules carry the positive-control pattern.
+
+## MODULAR-PLATFORM UI (2026-08-09) — design turn 2 implemented, FE gate PASSED
+
+Source: `claude.ai/design/p/f68f85fa` → `OneCAD UI Explorations.dc.html`, turn 2
+("Modular platform — workspaces, extensions, palette, missing add-ons"), options
+2a–2d. Read via the `claude_design` MCP; nothing from the design project is
+vendored into the repo.
+
+**This is the first DELIBERATE user-visible change since the platform refactor.**
+`src/test/contracts/shellContract.ts` was amended for it (six new shell
+contributions, nothing existing moved) — recorded here because the contracts
+README requires an explicit decision, never a refactor-driven edit.
+
+### What is REAL (bound to something that exists)
+- [x] **Workspace selector** in the title bar, projected off `platform.workspaces`. Four shell workspaces registered (Design + Simulation/Drawing/Visualization); an add-on's workspace lands in its own ADD-ONS group automatically, and an empty group renders nothing.
+- [x] **Workspace panel filtering**: `SlotHost` takes a `filter` predicate; `modules/shell/workspaceLayout.ts` resolves it. Rule is CONSERVATIVE — a panel is hidden only on an explicit `visible:false` placement or a user override. "Unlisted ⇒ hidden" would silently swallow every tool overlay.
+- [x] **⌘K command palette**, projected off `commands` + `tools` + `workspaces` registries. No palette registry: anything registered is findable, nothing opts in. Disabled entries stay visible with their owner's `reason`.
+- [x] **Missing-extension banner + details dialog + "Unavailable data" explorer section**, all from the REAL `listDocumentModules()` ⋂ `platform.moduleIds()` diff. This is ADR-0005 made visible.
+- [x] **Extensions manager** — Installed tab lists real modules with their lifecycle state and a count of what each contributed.
+- [x] **Viewport layers menu** on the NavPill's previously-dead "View presets" button. New `ViewportEngine.setLayerVisible()` toggles `bodiesRoot`/`sketchRoot`/`contributionsRoot`; grid reuses the existing `viewportStore` flag (one piece of state, two entry points).
+- [x] **Collapsible explorer sections** + `TreeNode.meta` / `TreeNode.problem` / `TreeSection.defaultCollapsed` / `TreeSection.emptyNote` (additive platform contract).
+- [x] **Customize workspace sheet** — panels/tool groups/layers all DERIVED from the registries, never enumerated. Tool-group hiding filters `FloatingToolbar` only; the tool stays registered and reachable by shortcut and palette.
+- [x] **Start-screen Extensions entry** (2d), with Settings below the rule — configuration, not project content.
+- [x] **Title-bar buttons unified** behind one `TitleBarButton` (28px · 6px radius · ghost). Home/File/workspace/⌘K were three different hand-rolled geometries in a row.
+- [x] **File ▸ Rename…** (moved out of the title bar at user request — a title inside the drag region is a rename you trigger by accident).
+
+### What is UI-ONLY, and why (no backend exists)
+- **Extensions Browse / Updates** render an explicit "no registry configured" empty state. Deliberately NOT a mock catalog: dead Install buttons teach users the feature is broken, and fake listings outlive the mock. There is no addon loader (`platform/extension.ts` closing note).
+- **Enable/disable + uninstall** are absent rather than inert — a half-unloaded built-in module is not a state the app is designed to run in.
+- **Background-tasks chip** (`tasksStore`, status bar) has a real `begin/setProgress/end` API and renders an INDETERMINATE bar when `progress` is undefined. Nothing calls it yet: regen is request/response over OCW1 with no progress frames. **FLAGGED** — first producer should be regen once the protocol can report progress.
+- **Simulation / Drawing / Visualization** are real registered arrangements with no module behind them: each switches modeling's tool surfaces OFF and shows a `WorkspacePlaceholder` naming what is missing. Leaving Extrude on screen under "Drawing" would have been worse.
+- **Rename is display-only** (`DocumentState.displayTitle`). There is no `RenameDocument` in the protocol — the Rust runtime derives the title from the file it loaded, and `renameRecentProject` needs a path the editor does not hold. The dialog SAYS the file is untouched. **FLAGGED — next backend tranche.**
+
+### Flagged seams
+- `CommandPalette` imports `useModelingToolContext` from `@/modules/modeling`. Shell UI reaching a specific module: the palette needs a real selection context to evaluate `canExecute`, and no neutral selection SERVICE exists yet. Precedent: `ViewportRoot` → `datumViewport`. Fix is a module-published context service, not a cast.
+- `paletteStore`/`workspaceStore`/`layersStore` overrides are session-only — nothing persists yet.
+- `Popover` gained `top-start`, which measures the panel after mount (one frame at the seeded position, same as every other placement).
+
+### Gate (2026-08-09)
+- `bunx tsc --noEmit` clean · `bun run build` green · vitest **236 files / 3986 tests** green (was 227/3919; +9 files) · hex-token grep empty · Playwright **387 passed / 3 failed**.
+- The 3 e2e failures are pre-existing, verified not assumed: `sketch-reattach` (chromium) passes 3/3 isolated (load flake); both webkit `boolean-preview` failures reproduce in a clean worktree at HEAD `352ddd1` — the same failure already bisected to before the Platform refactor.
+- Rust/ctest untouched by this wave.
+- REMAINING: manual Mac smoke (`bun run tauri dev`) — the workspace filter and the new `shell.overlay` region are layout changes no jsdom test can prove.
+
+## NEXT SESSION — three work packages (2026-08-08, handoff)
+
+Read `HANDOFF.md` § Session 4 first. P1 is another program's open gate; P2 finishes what the platform refactor left half-done; P3 is the next real tranche. **Do P2 before P3** — an SDK frozen over a half-converted surface freezes the wrong shape.
+
+### P0 — verify before touching anything (30 min)
+- [ ] Manual smoke, the only Definition-of-Done item with no evidence: `bun run tauri dev` → open an existing project, extrude, fillet, undo, save, reopen. Chrome and layout must look identical to before `4145f3f`. Any visual difference is a slot-order or z-index regression — `src/test/contracts/shellContract.ts` is the contract it violated.
+- [ ] Rebuild the sidecar against the PINNED prefix and re-run the worker lane, so the numbers describe HEAD:
+      ```bash
+      ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" \
+      ONECAD_WORKER_BUILD_DIR="$PWD/worker/build-pinned" scripts/build-worker.sh Release
+      ctest --test-dir worker/build-pinned --output-on-failure          # expect 107/107
+      cd src-tauri && ONECAD_WORKER_PATH=$PWD/../worker/build-pinned/onecad-worker \
+        ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+      ```
+      EXPECTED: `topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean` FAILS. That is P1, not a platform-refactor regression — it is the VF-M5 gate that `069bb48` opened.
+
+### P1 — close the VF-M5 gate regression — CLOSED (2026-08-09, resolution (a))
+Full diagnosis already existed in `HANDOFF.md` § "VF-M5 gate regression" and § VF-M5 FOLLOW-UP above.
+- [x] The discriminator was wrong. Worker `PlanExecutor` used `job.partition.size() == 0` to mean "from-zero replay", but the RegenPlanner emits full-replay-from-0 plans for EVERY regen and `Session::fence_and_clone` clones an empty base for those (D5), so it is ALWAYS true — the gate degenerated to `edited_from.is_some()` and the flagship edit lane (`ToEnd { from: 1 }`) was falsely treated as a replay, disabling the anchor-exact carve-out and flagging `NeedsRepair`.
+- [x] **Resolution (a) taken.** `job.from_zero_replay = false` in `PlanExecutor.cpp`, with the derivation and the re-enable condition (a genuine restored-basis signal, never partition emptiness) recorded at the assignment. The field is re-documented in `ScratchJob.h` and `Ladder.h` as "replay onto a RESTORED basis", which is what it always meant; V1 has no restore (SaveCheckpoint/RestoreCheckpoint UNSUPPORTED, `baseCheckpoint` never read), so the hazard cannot occur. The ladder behaviour stays wired and stays covered by `worker/tests/test_wp6_ladder.cpp`, which builds `LadderEditContext` directly.
+- [x] Red-first, verified on a worker built from HEAD against the pinned prefix: `topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean` reproduced RED (`needsRepair` 1, expected 0) BEFORE the change and passes after. The gate was not weakened.
+- [x] The 4 Playwright failures were STALE SPECS, not the platform refactor and not an open UX question — both removals are already pinned elsewhere: `TitleBar.test.tsx:67-69` asserts the Appearance toggle is absent (it lives in `DisplayModePopover` + `SettingsModal`), and `TODO.md` § Wave 4 records the unified start-screen `Import…` button with the sidebar duplicates removed. Specs rewritten to the shipped entry points; `mockClient.importFileDialog()` gained `?mockimport=step` so the extension router's STEP half stays reachable from the browser lane.
+
+### P2 — finish Milestone 1 (plan `~/.claude/plans/resume-parallel-muffin.md`, Codex-reviewed terra/high → revise, 3 blockers + 4 high all folded)
+- [x] **W8 — toolbar reads the registry live.** `FloatingToolbar` now takes `usePlatform()` + `useRegistryEntries(platform.tools)` and memoizes `toolbarFromRegistry` off that snapshot — the projection allocates a fresh array per call and would loop `useSyncExternalStore` as the snapshot itself. `toolbarConfig.ts` was NOT deleted as first planned: `src/test/contracts/toolbarContract.ts:6` imports `ToolEntry` from it, and rewriting that import edits a frozen contract file. It shrank to the entry shape (`ToolItem`/`ToolSeparator`/`ToolEntry`/`isSeparator`) and is now the contract's type anchor; the runtime derivation (`MODEL_TOOLS`/`SKETCH_TOOLS`/`toolsForMode`/`toolEntriesFor`) is gone. Golden probe moved to `modules/modeling/registryToolbar.golden.test.ts` (probe follows the mechanism; contract does not move) and gained a live-registry case: disposing modeling's scope empties the toolbar. New `src/test/renderWithPlatform.tsx` boots a REAL platform (not a stub registry, which would let a registration bug pass) for `FloatingToolbar.test.tsx` + `SketchEntry.test.tsx`, which rendered bare.
+- [x] **W9 — inspector sections become contributions.** The eight labelled sections (Appearance body/face, Dimensions, History selection/feature, Constraints hint/list, Depends on) moved out of `InspectorPanel.tsx` into `src/features/inspector/sections.tsx` and register through `src/modules/modeling/inspectorSections.ts`. The panel keeps the frame, the branch tree, headings, the DOF card and the trailing hints; EMPTY and REPAIR host no sections at all, which is why the contract is untouched by leaving them chrome. **ONE platform change:** `InspectorContext` gained `scopes: readonly string[]` — opaque tokens, the same currency as `ToolDefinition.scopes` — because three sections gate on mode and an `InspectorContext.mode` would teach the platform a modeling concept. `SlotHost` could not be reused (it is bound to `platform.panels`), so `InspectorSectionHost` is modeling-owned and subscribes to `selectionStore` + `toolStore` as well as the registry: `canRender` is a plain predicate and a registry-only host would keep rendering the last selection's sections. Sections render their OWN `SectionLabel` — the label is what the order contract counts, so a section with nothing to show must render nothing at all. `subElement` carries the ElementId only, never the topoKey, or an unpromoted face would look promoted to every `canRender`. **Probe change, contract untouched:** `InspectorPanel.golden.test.tsx`, `InspectorPanel.test.tsx` and `RepairPanel.test.tsx` gained a `renderWithPlatform` harness (the panel needs a Platform now); every assertion, `sectionsOf` and the `tracking-[0.07em]` marker are byte-identical, and `git diff --exit-code src/test/contracts/` is clean. New `InspectorSectionHost.test.tsx` (7) covers the staleness cases a registry-only host would pass: selection change, mode change, register-after-mount, dispose, priority-over-registration order, throwing-section isolation, and the EntityRef→SelectionRef mapping including the topoKey guard.
+- [x] **W10 — TreeProvider beneath the existing rendering.** `TreeProvider` did not exist anywhere (not in `contributions.ts`, not in the ADRs — only the two unused `Slots.Tree*` constants), so the shape was designed here: `TreeNode { id, label, icon, kind, selected, dimmed?, visible?, select(), activate?, toggleVisible?, rename? }` + `TreeSection` + `TreeProvider.sections()`, with a `platform.tree` registry mirroring `platform.inspector`. **`select()` is separate from `activate()`** because click and double-click mean different things on every shipped row (a sketch selects on click, re-opens on double-click); collapsing them would either change behavior or push modeling's selection semantics back into the generic panel. **An ABSENT capability is how a row says it lacks one** — a datum supplies no `toggleVisible` and no `rename`, so the eye and the Rename item disappear on their own; the menu now branches on the node's capabilities rather than on `menu.kind`. `sections()` READS the stores (`getState()`) and the panel keeps the subscriptions purely to re-render — that is what lets the contract stay a plain function instead of a hook, and it is commented as load-bearing in both files. The visible tree is unchanged. **Flagged seam:** the context menu still lives in the panel and its datum/sketch branches still switch on `node.kind`; Reattach needs its own anchored popover and two-click delete is panel state, so a provider-supplied `TreeNodeAction[]` is the next step. P3's addon therefore gets rows but not menu items.
+- [x] **W13 — ADR-0007 corrected.** It documented iteration order as `(group, priority, insertion index)`; the runtime sorts `(priority, insertion)` (`registry.ts:73-78`) and `group` is consumer metadata. Sorting by group first would order the UI by how a group is SPELLED. Text fixed and pinned by a new `registry.test.ts` case whose groups are spelled so that alphabetical order is the reverse of the intended one.
+- [x] **W11 — view navigation off modeling.** `zoomFit`/`home` are `onecad.shell.command.*` now, with the two chords in a new `modules/shell/bindings.ts` (`keymap.ts` concatenates modeling's global table then the shell's, which reproduces the frozen `GLOBAL_KEYS` order exactly). `Escape`/`Enter` stay modeling — global in reach, modeling in meaning — and `isolate` stays modeling because it masks BODIES. **The trap this wave was really about:** implementing the service over `engineBridge.fitView()` — the obvious reading of "zoom to fit" — silently turns ⇧F from *frame the selection* into *frame everything*, and neither the type system nor the keymap contract notices. `modules/shell/viewportNavigation.ts` therefore delegates to `viewportStore.zoomFit/homeView`, where the selected-body semantics live, and `runAction` calls THAT object rather than the store, so the command and the keystroke are one call. Registered in `shell/module.ts` (bootstrap), NOT `register.ts` — that file imports the chrome components and would drag them into the startup bundle. New `viewportNavigation.test.ts` (8) pins the selection matrix through both entry points, the service lookup, the no-op-before-engine case, and the chords.
+- [ ] **Deferred, flagged:** a registry-driven keymap. `useShortcuts` installs a window keydown handler outside React, so routing resolution through the command registry is its own change; `keymap.ts` does a static two-owner merge for now.
+- [x] **W12 — ViewportContribution + the full DatumLayer port.** `ViewportContext` carried only `invalidate()`, which was enough to declare the contract and nothing else; the first real producer showed what a layer actually needs. It now also carries `root`, `createLabel`, `onFrame`, `onThemeChange`, `raycastFromClient` and `registerSecondaryHover`, with type-only `three` imports recorded in **ADR-0009** (the forbidden edge is `@/viewport`, not the rendering library, and `slots.ts` already called in-scene contributions Three.js objects). `createLabel` is a façade rather than the `HtmlOverlayDriver` itself — handing out the driver would put a renderer internal in the public surface and let a contribution move labels it does not own.
+  - **Six methods deleted from `ViewportEngine`** (`syncDatums`, `datumHitTest`, `setDatumHover`, `setDatumSelected`, `setDatumGhost`, `isDatumGhostVisible`) plus the layer field. A datum is a MODELING record; a viewport that knows what one is cannot host a module that has none. Five caller sites rerouted through `modules/modeling/datumViewport` (`datumSync`, `SketchController` ×3, `ModelToolController` ×3, `ViewportRoot`), and `Picker`'s hardcoded datum branch became `registerSecondaryHover`.
+  - **The host is `ContributionHost.ts`, and reconciles — it does not attach once.** Contributions register on editor mount while `engine.init()` is still awaiting the renderer, so a one-shot attach drops whichever side loses that race; `ViewportRoot` hands the engine the REGISTRY and it stays subscribed. Teardown is reverse-order. Failure policy is explicit: a throwing `attach` is rolled back (labels included) and skipped, a throwing frame/theme/hover callback detaches that contribution — one bad layer may not kill a frame.
+  - **Ordering is pinned by test**, not by luck: frame callbacks run at the ladder position the datum layer used to occupy, and secondary hover keeps built-ins first, then contributions in registry order, first non-null wins.
+  - **`themeRefresh.test.ts` gained its first DatumLayer case, negative-checked** (neuter `refreshColors` ⇒ red, restore ⇒ green). It never had one, and the silent-failure invariant is now *harder* to satisfy for a contribution: it is not in `applyTheme()`'s list at all, so a forgotten `onThemeChange` is invisible to the engine. `viewport/engine/README.md` § Theming says so.
+  - Probes followed the mechanism: the e2e datum surface moved from `window.__vpEngine.datumHitTest`/`.isDatumGhostVisible` to `window.__datumVisuals` (DEV-only), published by the contribution.
+- [x] **W14 — hardening pass** (Codex implementation review, `gpt-5.6-sol`/high over the committed W8–W12 range; 1 high + 5 medium + 1 low, all verified in source and all fixed, each with a negative-checked regression test).
+  - **HIGH — the late-attach hole.** `DatumSync.attach()` pushed the projection ONCE. The layer is a contribution now, so it attaches on the viewport host's schedule: whenever it landed second, that sweep went into a `null` and the datums stayed invisible until an unrelated store change re-pushed them. `datumViewport` gained `onDatumVisualsChanged` (fires immediately with the current value), and `DatumSync` replays the full sweep + selection through it.
+  - **Removal did not schedule a frame.** `reconcile()` only invalidated on ADD, so a disposed contribution's objects left the scene graph while the on-demand renderer drew nothing — the last framebuffer kept showing them. Now any change invalidates, including `setRegistry(null)` and a guard-triggered detach.
+  - **The label cleanup skipped every second label.** Each `dispose()` splices itself out of the array the host was iterating. Snapshot + `finally`, so a contribution's own throwing disposer can no longer strand host-owned overlay items either. The first version of this test did NOT catch it (the fake tidied up after itself) — rewritten so the host's loop is what runs.
+  - **A crashed contribution came straight back.** `guard()` detached it but its registration remained, so the next unrelated register/dispose re-attached it and it threw again. Failed ids are held back until their registration goes away — a re-register is still a genuine second chance, pinned by test.
+  - **`canRender` ran outside its own `ContributionBoundary`** (admission is decided before there are children), so a throwing predicate escaped the section and would have taken the whole inspector down. Guarded; a predicate that cannot decide does not admit.
+  - **`TreeProvider` gained optional `subscribe`.** A provider backed by data the panel does not watch — i.e. any non-modeling one — could never update its rows after mount. Optional only because modeling's is backed by stores the host already watches for its own reasons; the contract says so.
+  - `docs/DEBUGGING.md:243` still told developers to call the deleted `__vpEngine.datumHitTest`; now documents `window.__datumVisuals`.
+  - Gate: tsc clean · vitest **224 files / 3837** · contracts byte-identical · hex gate empty · Playwright chromium datum/sketch-on-face/acceptance **14/14**.
+
+### P3 — Milestone 3: SDK boundary + bundled test addon (the next real tranche)
+Validates the boundary on OneCAD's own code before any third party sees it (spec §197).
+- [ ] `@onecad/sdk` — a package that re-exports ONLY the public surface: ids, contribution contracts, `ModuleScope`, the document-state service, selection/event types. It must NOT re-export `createPlatform`, the registries' internals, or anything from `@/features`/`@/tools`.
+- [ ] A bundled test addon (an architectural fixture, NOT a product feature) that registers a command, a panel, an inspector section, a viewport contribution and its own document namespace — importing `@onecad/sdk` and nothing else.
+- [ ] Extend `src/platform/architecture.test.ts`: the addon's imports must resolve only to the SDK. That test already carries a positive control; keep that pattern.
+- [ ] Prerequisite from P2: the addon cannot contribute an inspector section until inspector sections have a host.
+
+## VF-M5+VF-M6 DEFECT FIXES + IMPORT PROJECT (2026-08-08) — GATE PASSED
+
+Defect fixes from the review round (worker ladder + import blob lifecycle), then the "Import Project" feature: append another `.onecad` document's timeline to the open document. Assembly/joints explicitly out of scope; static import now, live/XREF later.
+
+### VF-M5 — from-0 replay rebases onto stale WORLD anchors
+- [x] Root cause: on a from-0 replay an inherited edit ("ALL" buckets, whose refs were animated to the source model) resolves WORLD anchors through the post-edit scene; the replayed model telerecorders scored anchor-exact, which vetoed their legit `NeedsRepair` — replay silently misassigned. The far-edge blend captured it and anchor-rebased nothing.
+- [x] Fix (attempt, RE-OPENED — see VF-M5 FOLLOW-UP below): from-0 replay now runs with edit-context `from_zero_replay`, which disables the anchor-exact carve-out during that loop. The checkpoint path (from-zero carrying the user's original edit) still binds AutoBind; the from-ZERO (checkpoint-recreated) replay surfaces the same case as `NeedsRepair` + "ambiguous" so a follow-up repair/step runs as authored. **The gate as built regresses the flagship real-worker edit lane and must be reworked — V1 has no checkpoint restore, so the carve-out should stay ON until a genuine restore basis is plumbed.**
+- [x] Plumbed `from_zero_replay` through `LadderEditContext` → `ScratchJob` → `PlanExecutor` → into the four edit ops (`Shell/Hole/Fillet-Chamfer/Extrude`); `job.partition.size()==0` is the from-zero gate — **WRONG as a discriminator, see FOLLOW-UP**
+- [x] Docs: gap-closed note in `protocol/IRR/SCHEMA.md` + `docs/qa/…` (records the accepted residual + the gap this runs through).
+
+### VF-M6 — import-blob lifecycle (3 defects)
+- [x] `materialize()`: now checks the staged path is actually a FILE (a collided digest that resolved to a directory would previously arm the job against a wall, then corrupt the model). Sweeper now also kills stale per-workspace... clean.
+- [x] `sweep_stale_workspaces()`: sweeping is now PID-aware — a workspace survives while its importing process is alive (unix: `libc::kill(pid, 0)`; non-unix lanes disable sweeping rather than guess). Parse + sweep covered by unit tests.
+- [x] `prepare_import()`: converted-geometry byte cap enforced (defense in depth; `add_import_record` already caps raw blob bytes).
+- [x] Tests: `imports.rs` unit tests for the materialize/parent-dir/absolute path, the PID-aware sweep, and the over-cap reject. Full ctest + cargo green.
+
+### Wave 3 — Import Project (backend)
+- [x] `onecad_core::io::project_import` — `read_project_for_import` (open container → records + sketches + import blobs), `find_import_collisions` (refuses a source `RecordId` or `SketchId` that already exists in the target), `ProjectImportError` taxonomy.
+- [x] `DocumentRuntime::import_project(path)` — collision-refuse → stage every blob into the import workspace/carrier → one transaction appending each record (`AddOperation` at cursor) + each sketch, merging all outcomes. Refused imports leave the target untouched.
+- [x] `api::import_project` — Rust-owned `.onecad` picker; with an open runtime it appends, with none it seeds a blank document (`make_backend` + `new_blank` + adopt), then `PROJECTION_UPDATED` + snapshot + scheduler. No runtime → `NoDocument` error surfaced to the UI hint.
+- [x] Wire: `client.ts` interface, `tauriClient` mapping, `commandMap`.
+- [x] Tests: `document_runtime/tests.rs` import-append / collision-refuse / blank-runtime import; `imports.rs` lifecycle tests; full cargo workspace green.
+
+### Wave 4 — import through the UI (mock + e2e)
+- [x] `mockClient.importProject()` — merges the STEP-import fabrication (one body + `Import` row) so the whole frontend lane is mockable. Mock-unit test covers the appended snapshot.
+- [x] `FileMenu` "Import Project…" (Open/Save group, above the Export hairline) → `fileActions.importProject` (dialog-backed, cancel = no-op) — shines one hint "Project imported".
+- [x] `StartScreen` — sidebar "Import Project…" below Import STEP→; both entry points pinned by `e2e/project-import.spec.ts` (in-editor + start-screen lanes).
+- [x] Unified start-screen import — the header button now says `Import…`, and the start screen routes `.onecad` vs STEP/STP by extension through one dialog. Sidebar duplicate removed. Gate: focused vitest on `StartScreen`, `tauriClient`, and `mockClient.import` green; `cd src-tauri && ONECAD_REQUIRE_WORKER=1 cargo test --workspace --lib` green.
+
+### Gate
+- [x] `bun run build` (tsc+vite) green · vitest **209 files / 3697 tests** · Playwright `project-import`/`step-import` spec **12/12** · full Playwright **386/390** (4 pre-existing `theme.spec` failures root-caused to the WORK `TitleBar` changes, not this package) · worker ctest **106/106** · `cargo fmt --all --check` · workspace clippy `-D warnings` · `cargo test -p onecad --lib` **253 passed / 0 failed**. Full `cargo test --workspace` (real-worker lane) and kernelbench left for the follow-up gate below.
+
+### GH-0 — GATE PASSED 2026-08-09 (WP0.0 → WP0.3)
+- [x] **`boolean-preview.spec.ts` is GREEN** — 16/16 across chromium + webkit at `--repeat-each=4`. Closed by three fixes, and the root cause was NOT what the plan assumed (see WP0.2 below for the full correction).
+- [x] **Kernelbench baseline is now a RETAINED MANIFEST, not a summary.** `bench/robustness/baselines/digests.json` freezes 256 rows of `(suite, caseId, backend, variant) → {inputDigest, normalizedDigest}` for `fillet/foundation:t0` (136) and `fillet/matrix:m1` (120), with `scripts/kernelbench-manifest.mjs record|compare`. The aggregate the gate used to quote cannot answer "did this change move a digest?" — a case can change shape and still pass — and replay only compares two runs of the SAME build. Comparator proven by mutating one saved digest and watching `compare` exit 1.
+- [x] Suites re-measured against the HEAD-built pinned worker: T0 **136 records, 136 pass, 0 fail, gatingFailures 0**; m1 **120 records, 114 pass + 6 characterization, gatingFailures 0** — both identical to the previously recorded numbers.
+- [x] Gate: ctest **109/109** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1048 / 0** across 73 targets · `cargo fmt --all --check` + workspace `clippy -D warnings` clean · `bunx tsc --noEmit` clean · vitest **240 files / 4043 tests** (from 236/3986) · hex gate 0 · Playwright **380 passed / 10 failed**.
+- [x] **The 10 Playwright failures are NOT this work, and that was verified rather than assumed.** All 10 are 5 specs × 2 browsers (`ellipse` ×3, `center-rect`, `sketch-reattach`) and ALL of them reproduce at `d81f758` in a throwaway worktree — i.e. before any commit of this tranche. They are the concurrent session's `feat(toolbar): tool flyout families` commit: `Ellipse` / `Center rectangle` moved behind a flyout and those specs still query them as top-level buttons (`getByRole("button", {name: "Ellipse"})` ⇒ element not found). `boolean-preview` PASSES at `d81f758` in that same worktree and passes here, so this tranche took the suite from 3 boolean-preview failures to 0 and introduced none. **Owner: the toolbar session** — the specs need to open the flyout, or the flyout needs to keep the family's active tool queryable by name.
+
+### GH-0 WP0.2 — boolean-preview: THREE DEFECTS, root cause NOT what the plan predicted (2026-08-09)
+- [x] **Defect 1 — a REJECTED region fetch wiped live selection.** `sketchStaticSync.loadSketch` fell through its `catch` into `reconcileRegionRefs(id, ∅)`, so a transient `getSketchRegions` failure dropped every `sketchRegion` ref for that sketch. An empty set from a FAILED fetch is not evidence a region disappeared; a DELETED sketch still reconciles (that set is authoritative).
+- [x] **Defect 2 — a pick landing during a refill read as "empty space".** A token-driven reload calls `removeSketch` and only restores the fills two awaited round trips later; in that window `sketchStaticHitTest` returns null and `ViewportRoot` called `sel.clear()`. Now `ViewportEngine.sketchStaticPickState` returns an ATOMIC `hit | miss | unsettled` and an unsettled pick DEFERS (one bounded retry, cancelled by the next pick, released on detach) instead of clearing. Polling a readiness flag cannot fix this — the window can open between the poll and the click, which is why the old `sketchHitTestReady` passed immediately before the failure.
+- [x] Both proven red-first: reverting either fix turns the three new `sketchStaticSync.test.ts` cases red (verified by actually reverting them, not by inspection).
+- [x] **Defect 3, and the ACTUAL root cause — a stale click coordinate, not a race in the pick lane.** Instrumenting the pick with both hits on a failing webkit run showed `state:"miss"` with **no body hit AND no sketch hit**: the ray lands on empty space. `extrudeRegionAt` projected the sketch-plane point to client coordinates without waiting for the camera; re-showing a sketch schedules the DEBOUNCED auto-fit, which then moves the camera and invalidates the coordinate. `waitForCameraSettled` already existed for precisely this and its own comment describes the failure ("a fit can be scheduled-but-not-started … invalidating any client coordinate the caller computed from a probe") — `extrudeRegionAt` simply never called it.
+- [x] **Two hypotheses were wrong and are recorded so they are not re-tried.** (a) The plan's assumption that the refill teardown window was the cause: `sketchHitTestReady` polls the tri-state and reports `hit` immediately before the click, and the deferral only engages on `unsettled`. (b) The follow-up hypothesis that HIT PRECEDENCE was returning the body ref for a point over the region: refuted by the probe — there was no body hit at all. Fixes 1 and 2 are still correct defects on their own merits; neither was this one.
+- [x] **Defect 4 — `clickApplyButton` could silently not click.** Its `toPass` retry only asserted that a rect EXISTED, so a click that missed (the chip is overlay-positioned and can move between measuring and clicking) still returned successfully and left the caller to time out on a lane that was never applied. It now retries on the OUTCOME (lane closed), re-checking first so a successful apply is never clicked twice.
+- [x] An earlier attempt to make the spec wait for the region to appear in `selectionStore` before clicking Extrude was REVERTED: it made things worse (4 failures) because it asserts a precondition the product does not guarantee at that point.
+- [x] Result: **16/16** on `--repeat-each=4` across both browsers.
+
+### VF-M5 RESIDUAL — CLOSED 2026-08-09 by `checkpointFallbackReplay` (GH-0 WP0.0+WP0.1)
+- [x] **RED FIRST, and the entrance criterion was real.** `topology_rebind::vfm5_lane_d_checkpoint_fallback_replay_must_not_bind_the_decoy`: checkpoint selected → worker killed → restore reports `restored:false` → F12 replay → the fillet **silently consumed a congruent decoy parked on the stale anchor** (`needsRepair=0`, `removed=10.3009` = the analytic wedge, `centroidY=69.00107` matching the decoy prediction exactly against the authored rib's `68.99535`). Green after the field lands.
+- [x] **Three constraints found by measurement, all of which had made the earlier fixtures vacuous.** (a) A sketch at step 0 can only regen with `ToEnd { from: 0 }`, which claims no `editedFrom` — so `post_upstream_edit` is false and the veto never arms. That is why every H5 test uses `regen_all` and why NONE of them reach this carve-out; the fixture puts the comb sketch at step 2 behind a throwaway body. (b) Editing a `TransformBody` **seeds** NeedsRepair downstream (`transform_body.rs:906`), so it never reaches the ladder and cannot be the driver. (c) At 20 mm of rib separation the ordinary auto-bind margin gate refuses first (measured margin 0.0745 < 0.10) and the carve-out never decides — the scene needs 48 mm.
+- [x] Independently confirmed the veto is reachable end to end by forcing `from_zero_replay = true` and running the suite: the ONLY test that flips is `h6a` (the false-positive direction), and neither H5 decoy test changes.
+- [x] **The fix is the protocol change this entry demanded.** SCHEMA §7.2 `checkpointFallbackReplay` (OPTIONAL, omitted when false), set by exactly one place — `regen/executor.rs`'s F12 branch — and consumed by `PlanExecutor.cpp` as the sole source of `job.from_zero_replay`. §14 entry + §13 lockstep note (the worker is a bundled `externalBin` sidecar, so no capability negotiation is needed — but that property is now written down as load-bearing). Two canonical fixtures added, `protocol/fixtures/execute_plan_{ordinary,checkpoint_fallback}.ndjson`, run by BOTH tracks (`messages.rs` list, `worker/tests/CMakeLists.txt`, `check_interop.sh`).
+- [x] **The ordinary edit lane is deliberately UNCHANGED** and now pinned by its own characterization test (`vfm5_teleport_on_the_ordinary_edit_lane_is_the_accepted_residual`): the teleport still binds the decoy there. That is the documented H6a residual, not a bug this tranche fixes — a change to it must be a decision, not a side effect.
+- [x] Accepted trade: a legitimate anchor-exact rebind occurring inside an F12 fallback now returns `NeedsRepair` (a conservative false positive on a rare lane). Deterministic `NeedsRepair` beats a silent wrong bind.
+- [x] Gate: ctest **109/109** (107 → 109, the two new canonical fixtures) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1048 / 0** across 73 targets (from 1045/0 across 72) · `cargo fmt --all --check` + workspace `clippy -D warnings` clean · worker built from HEAD against `~/.onecad-occt/8.0.1`.
+- [x] Stale "V1 has no restore / checkpoints UNSUPPORTED" prose corrected everywhere it was asserted: `worker/src/session/Session.cpp`, `ScratchJob.h`, `Ladder.h`, `CURRENT_STATE.md` (both sites), `HANDOFF.md`.
+
+### VF-M5 FOLLOW-UP — real-worker lane RED (the flagship regression) — CLOSED 2026-08-09
+- [x] `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` against a worker built from HEAD **FAILED** `topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean` (`needsRepair` expected 0, got 1). Reproduced here on a fresh `worker/build-pinned` build before changing anything.
+- [x] Root cause confirmed by reading, not inferred: `Session::fence_and_clone` clones an EMPTY base for any plan whose expectedBaseHash is the empty anchor (D5, `Session.cpp:153-175`), which is every ordinary regen — so `job.partition.size() == 0` in `PlanExecutor` is always true and `from_zero_replay` degenerated to `edited_from.is_some()`.
+- [x] Fix: resolution (a). `job.from_zero_replay = false`, restoring the shipped edit lane. **The SECOND half of that entry — "the hazard cannot occur in V1" — was wrong and is corrected in § VF-M5 RESIDUAL above.** Ladder behaviour untouched and still covered by `worker/tests/test_wp6_ladder.cpp`.
+- [x] Re-verified on the real-worker lane: `topology_rebind` 13/13, `cargo test --workspace` **1045 passed / 0 failed** across 72 targets, ctest **107/107**.
+
+## ADVANCED-FILLET ROADMAP — M0 REPRODUCIBLE-GREEN + M1 QA-AUTOMATION (2026-08-08) — GATE PASSED
+
+First two milestones of the Advanced-Fillet program (kernel robustness 70% / direct modeling 20% / UI 10%; KPI = raw-OCCT rescue rate, with `raw PASS → OneCAD FAIL` treated as a serious regression and invalid geometry always worse than a safe refusal). No production fillet algorithm was touched — by design, the benchmark discovers the problem before the kernel guesses at a solution.
+
+### M0.1 — OCCT build fingerprint: effective configuration, not literal presence
+- [x] Root-caused against the pinned source AND a real configure, not assumed. OCCT's `OCCT_CHECK_AND_UNSET` does `unset(VAR CACHE)`, and `OCCT_IS_PRODUCT_REQUIRED` derives each `CAN_USE_*` by scanning `BUILD_TOOLKITS`. With `BUILD_MODULE_Draw=OFF` nothing requires `CSF_TclTkLibs`, so `CAN_USE_TK` is OFF and CMakeLists (8.0.1 L558-565; 7.9.3 byte-identical over every `USE_*`/`CAN_USE_*`/`OCCT_CHECK_AND_UNSET` line) DELETES our `-DUSE_TK=OFF` from the cache. The old literal-presence loop then aborted a configuration that was exactly what we asked for. Nine further keys can vanish the same way: `BUILD_USE_PCH USE_DRACO USE_FFMPEG USE_FREEIMAGE USE_FREETYPE USE_OPENGL USE_RAPIDJSON USE_TBB USE_VTK`.
+- [x] New `scripts/occt-fingerprint.sh` — sourceable, side-effect-free, bash 3.2 compatible. Keys are classified REQUIRED vs DEPENDENT. An absent DEPENDENT key normalizes to `OFF` **only when the policy requested OFF** (OCCT deleted it precisely because the feature is not in the build); requested-ON-but-dropped is fatal, a missing REQUIRED key is fatal, a present key that disagrees with policy is fatal, and a value outside CMake's documented truth constants is fatal rather than guessed. Normalization, not relaxation.
+- [x] New `scripts/tests/occt-fingerprint.test.sh` — 14/14, no network, no OCCT build. The 8.0.1 fixture is a verbatim capture of the fingerprinted lines from a real `CMakeCache.txt` (including the `:UNINITIALIZED` types a bare `-D` produces); every absence carries its CMakeLists citation. Covers both versions producing byte-identical fingerprints, alternate boolean spellings, duplicate cache lines, and all four failure modes.
+- [x] `build-pinned-occt.sh` sources the library and restates the policy string, so an edit (or a pre-set env override, the seam the test uses) on either side cannot silently change what a real build is fingerprinted against.
+- [x] CI: new fast `occt-fingerprint` job gates the hour-long OCCT jobs; both cache keys now hash `occt-fingerprint.sh` as well.
+- [x] VERIFIED END TO END: pinned OCCT 8.0.1 built from scratch into a clean prefix and installed, `occt-build.json` carrying the correct `normalizedBuildOptions`; the reuse path then short-circuits. `USE_TK` is genuinely absent from the produced cache — the old script would have hard-failed here.
+
+### M0.2 — frontend clean build
+- [x] `bun run build` was red while `bun run test` was green, because vitest does not typecheck. Two `tsc` errors in `faceColors.test.ts`: a hand-written structural mock of the 24-field `BodyMeshView` (missing 8 fields) and readonly `FaceColor` assigned into a mutable tuple.
+- [x] Fixed at the type level, no casts: `Rgba` is now `readonly [number, number, number, number]` (a color is a value, never mutated), and the ~20 duplicated raw `[number, number, number, number]` literals across `documentStore` / `mockClient` / `tauriCommandMap` / `meshSync` collapse onto it. Read-only consumers (`faceColors.ts`, `meshRegistry.ts`) take `ReadonlyMap<string, Rgba>`.
+- [x] New `src/test/fixtures/bodyMeshView.ts` → `makeBodyMeshViewFixture({faces, idsHaveElementIds, …})`, deriving `faceRanges`/`faceIdOffsets`/`faceIdChars`/counts/flags/bbox so a fixture cannot disagree with itself. Prefer `parseMeshPayload(makeBoxMesh(...))` when MESH1 framing matters; the builder exists for shapes MESH1 fixtures cannot produce (ElementId-bearing face ids).
+- [x] Hex gate regression found and fixed while gating: `InspectorPanel.rgbaToHex` returned the literal `#a9aeb6` — which IS `--color-body-fill`. Now resolved through `palette.bodyNeutral()`, so the no-color swatch follows the theme instead of freezing at the light value. `grep -rn '#[0-9a-fA-F]\{6\}' src` is back to zero.
+
+### M1 — manual-QA debt triaged
+- [x] All ~112 boxes of the historical `docs/MANUAL_GATES_RUN.md` classified into K (CTest/Kernelbench) · H (Rust real-worker) · F (Vitest/Playwright) · M (manual). Result: **78 already asserted by an existing automated test and retired** (each cited by `path:line`), **22 named gaps** that belong in an automated lane but have no test yet, **12 genuinely manual** checks.
+- [x] `docs/qa/MANUAL_RELEASE_GATES.md` — the 12 survivors only, grouped by WHY a machine cannot judge them: visual (4), native (4), hardware (4). Carries an explicit "do not grow this file" rule — a new manual permutation means a missing automated lane, which is exactly the pressure advanced fillet would otherwise apply.
+- [x] `docs/qa/MANUAL_GATES_TRIAGE.md` — the item-by-item classification plus the GAP-K/H/F backlog. Nothing was deleted: every check is cited as covered, listed as a gap with its target lane, or moved into the release checklist.
+- [x] Historical checklist archived verbatim at `docs/qa/archive/MANUAL_GATES_RUN-2026-08-04.md`; stale pointers in `README.md` and TODO :155 updated.
+
+### M0.4 — viewport auto-fit regression, found by the gate
+- [x] The gate's e2e run failed in a large cluster (`constraint-apply`, `live-dim-line`, `marquee`, `measure`, `navigation`). BISECTED, not assumed: `measure.spec.ts` is 5/5 at `d1c5339`, **1/5 at `1fe0cef`**, and 5/5 at `1fe0cef` with only the auto-fit debounce reverted.
+- [x] Cause: `1fe0cef` replaced "auto-fit once on the first body" with a 250 ms debounced re-fit (right intent — a multi-body assembly must not be framed on whichever body streamed in first), but the timer lived in the React bridge. A `fitView()` tween could therefore START after everything else already believed the camera had settled, invalidating any client coordinate computed from a probe. User-visible too: a queued fit can snap the camera mid-interaction, and one landing during sketch entry is saved as the restore pose.
+- [x] Fix keeps the intent and makes the scheduled state real: the debounce moved onto `ViewportEngine` as `requestAutoFit()` / `autoFitPending` / `cancelAutoFit()`, cancelled by explicit `fitView`, `fitToBodies`, `enterSketch`, and `dispose`. `ViewportRoot` just calls `engine.requestAutoFit()`; `waitForCameraSettled` now requires no tween AND no pending auto-fit. Full suite 12+ failures → **7**.
+
+### Gate
+`bun install --frozen-lockfile` · `bun run build` (tsc+vite) · vitest **208 files / 3687 tests** · `scripts/build-pinned-occt.sh` 8.0.1 clean build + reuse path · `scripts/build-worker.sh Release` against the PINNED prefix · ctest **106/106** on the pinned worker · `cargo fmt --all --check` · `clippy --workspace --all-targets -D warnings` · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1000 passed / 0 failed** against the pinned worker · kernelbench T0 both-backend **136/136 pass, 0 rescued, 0 regressions, 0 replay-unstable** · fingerprint normalizer **14/14** · hex gate 0 hits · Playwright **183/190**.
+
+### M0.5/M0.6 — the remaining 7 e2e failures, root-caused not retried
+All seven reproduced on a pristine `1fe0cef` checkout; none was caused by this work package. Each is now fixed at its cause:
+- [x] `transform-body ×4`: the spec's `bodyBounds` folded the fat-line EDGE layer into the bbox. `Line2` reports `isMesh === true`, and its `position` attribute is the instanced unit-quad TEMPLATE `(-1,-1,0)…(1,2,0)` — the real endpoints live in `instanceStart`/`instanceEnd`. Every body's min was therefore clamped to ≤ -1 while `max` stayed correct, which is exactly the observed `[-37, -1, -15]` (only the component inside that box was wrong). Traversal now takes `userData.kind === "face"` only.
+- [x] `history-inline-dimension:213`: `toolApplicability.ts` is NEW in `1fe0cef` — the toolbar is selection-gated now, and committing an extrude hides its sketch, so none of sketch/region/sole-visible-sketch held and Extrude sat `aria-disabled` while the click burned the 45 s timeout. Also `getByLabel("Dimension value")` matched both the row editor and the tool chip. Re-show the sketch (eye toggle, NOT a selection change — the row selection has to survive) and scope the locator to the row.
+- [x] `hole:226`: `findFaceOnBody` probed pixels before the camera settled, so the returned point sat on a face about to move ("no second pixel far enough on the same face"). Helper settles first.
+- [x] `sketch-degenerate:35` + `live-dim-mouse-rounding:62`: `enterSketch` aims along the plane normal at `controls.getDistance()`, so the sketch view INHERITS the model camera distance — which sets `planePixelWorld`, hence the draw tools' screen-constant reject radius (`minSize = 4 × planePixelWorld`) AND the zoom-adaptive dimension quantum. Entering mid-fit made both non-deterministic run to run; every caller settled AFTER entering, too late. `enterSketchViaPlanePicker` settles first.
+- [x] Verified 52/52 across `transform-body`, `history-inline-dimension`, `hole`, `sketch-degenerate`, `live-dim-mouse-rounding`, `measure`, `constraint-apply`, `marquee`, `navigation`.
+- [ ] OPEN DECISION: `playwright.config.ts` uses `retries: 1` in CI, `0` locally. Every flake above was invisible in CI and hard-red locally. Now that they are root-caused rather than retried away, dropping the CI retry is the honest setting — a retry is what let the auto-fit regression look green.
+
+### Concurrent-session caveat
+A second session was editing this tree throughout (`TitleBar.tsx`, `ViewCube.tsx`, `CadOrbitControls.ts`, `Picker.ts` — `hasHitAt` removed — `ModelToolController.ts`, `navigation.spec.ts`, `document_runtime/tests.rs`) and added a **webkit** Playwright project (suite 190 → 386). A full-suite number is not attributable while that is in flight: one run hit a live `[vite] Transform failed` from a mid-edit save, and `theme.spec:121,145` fails on `getByRole('button', {name: /^Appearance:/})` — element not found — from the `TitleBar.tsx` change. Not from this work package.
+
+### M2 part 1 — kernelbench case-v2 — DONE
+- [x] `bench/robustness/schemas/case-v2.schema.json` (strict throughout) + `src-tauri/crates/onecad-kernelbench/src/case_v2.rs` (a SEPARATE type set, not an extension) + `bench/robustness/examples/fillet-matrix-plane-cylinder-v2.json` (ajv-validated; deliberately NOT in `regressions/`, which is contractual).
+- [x] `selector` moved to top level — the same geometry+selection is reused across radius laws and later across operations, so a resolving selector is a PRECONDITION for the operation, not part of its definition.
+- [x] `operation.definition` mirrors the kernel-level `FilletDefinition` (radius law + continuity), so `constant`/`linear`/`controlPoints` are all expressible and adding one later is additive on both sides.
+- [x] `geometry.parameters` is a typed per-recipe union rather than the free-form object the plan sketched: a free-form bag lets a typo silently generate different geometry, which is the one failure mode a fuzzing corpus cannot survive.
+- [x] `continuity` admits only `g1`, `sizeType` only `radius` (agent rules 11/15 — an option is not a capability; G2 and chord width become expressible only once a validator can prove the result).
+- [x] Recipes expressible: the v1 four, plus `supportPair`, `valenceCorner`, `shortEdge`, `microEdge`, `sliverNeighborFace`, `tinyNeighborFace`, `periodicSeam`, `nearSeamEdge`, `faceNearlyConsumed`, `faceFullyConsumed`, `blendCollision`. Supports span plane/cylinder/cone/sphere/torus/bspline; `scaleBand` covers 1e-3 … 1e6.
+- [x] Metamorphs expressible: translation, farOriginTranslation, rotation, mirror, uniformScale, parameterEpsilon, edgeOrderPermutation, contourSeed (M3's set, schema side).
+- [x] Guards: v1/v2 provably disjoint (both directions, in Rust AND ajv) · v1 regressions still validate under `Case` · round-trip reproduces the committed file, which already caught three missing `#[serde(rename)]`. Cross-field rules that JSON Schema cannot express live in Rust and are authoritative because Rust is what executes: mode ⇒ (anchor count, adjacency relation) as ONE table; control-point parameters strictly increasing; torus `minorRadius < radius`; `edgeOrderPermutation` a real permutation; zero epsilon rejected.
+- [x] Gate: kernelbench 50 lib + 5 integration green · `cargo fmt --all --check` · workspace `clippy -D warnings`.
+
+### M2 part 2 — geometry generators + the v2 execution lane — DONE
+
+The cross-language half: the worker can now execute a `schemaVersion: 2` case, and the supervisor can drive one end to end.
+
+- [x] **C++ `CaseSpec` is normalized, not forked.** `Types.h` carries the v2 shape (`schema_version`, `generator.family`, `recipe` + typed `RecipeParameters`, `RadiusLaw`, `scale_band`, selector `convexity`/`vertexValence`) and the v1 parse fills the subset, so ONE execution path serves both formats. Duplicating the executor per version is where a v2-only bug would hide. `parse_case` dispatches on `schemaVersion`; v1 acceptance is unchanged.
+- [x] `CaseParserV2.cpp` (new) mirrors `case_v2.rs::validate` field for field — the Rust side is authoritative for what a case may CONTAIN, the C++ side for what the runner will EXECUTE, and a disagreement would make a valid case fail as an invalid request. Shared primitives moved to `CaseParserShared.h` rather than being copied. A non-constant radius law is REFUSED at parse (`invalidRequest`), not silently flattened to its peak — variable radius is M12, with a validator that can prove the law.
+- [x] `SelectorParser` gains the v2 selector: top-level, wider surface/curve vocabulary, `chain`/`closedContour` modes, `supportPairEdge`/`seamEdge`/`shortEdge` roles, and the mode ⇒ (anchor count, adjacency relation) table as ONE table. `parse_case_v2` re-checks `schemaVersion == 2` itself, so the entry point cannot be called directly on a v1 document — a gap the new fixture caught.
+- [x] **`supportPair` generators** (`GeometrySupportPair.cpp`, new). Two constructions: the PRISM family (plane|cylinder × plane|cylinder) is one 2D profile extruded along Z, giving a straight shared edge through the origin and a FREE dihedral over `(0,180)`; the CONE family (plane × cone) is a frustum's base circle, where the dihedral is `90 - halfAngle` by construction — so the declared angle is rebuilt from the half angle and a disagreement is refused rather than silently generating different geometry than the file describes. Unimplemented kinds (sphere/torus/bspline) and concave supports refuse BY NAME.
+- [x] Why the prism family and not the committed example's base-circle form: the example locked plane↔cylinder to a 90° dihedral, and the dihedral is the main conditioning axis for fillet failure. The prism form also keeps the blend a CYLINDER, which is what lets `constantRadius`/`cylindricalRadius` gate it. `examples/fillet-matrix-plane-cylinder-v2.json` updated to match (anchor, `curveKind`, `edgeLength`) — examples are explicitly not contractual; `regressions/` untouched.
+- [x] **Rust `PreparedCase`** (`prepared.rs`, new) is the version-agnostic view the supervisor executes: identity, resource ceilings, metamorph tolerance, and the canonical document. `campaign`/`runner`/`child`/`result`/`result_validation` route through it, so none of them grew a `match` on the schema version. A v2 case reports the v1 `{name, version, seed}` generator shape because the RESULT schema is frozen at v1 — `Execution.cpp` now BUILDS that block instead of echoing the case's, which is what made the first v2 run fail 60/60 on strict result validation.
+- [x] **`suite_v2.rs` — `fillet/matrix` preset `m1`**: 24 cases (3 prismatic pairs × 5 dihedrals supported + 2 near-tangent exploratory, plus 3 cone half-angles), 60 records with metamorphic variants. `cli` gained the suite and a version-dispatched `run-case`.
+- [x] **Sizing is measured, not assumed.** A blend needs room; for a prismatic pair the throat is `R·(1 - cos θ)`. Swept against OCCT 8.0.1: every pair blends at 0.20 of the throat, the cylinder↔cylinder lens refuses at 0.40. Supported cases sit at 0.04–0.16, so a red there is a kernel regression and not a greedy case. Near-tangent dihedrals (170°, 178°) are `exploratory`, NOT `expectedLimit` — an expectedLimit case needs a radius the kernel is KNOWN to refuse, and guessing one produces a case that passes whatever happens.
+- [x] **Validator finding: `cylindricalRadius` and `g1BoundaryTangency` are box-shaped.** The first counts EVERY cylindrical face in the output against the requested radius, so a cylindrical SUPPORT reads as a blend of the wrong radius (measured 17.0 error on a 20 mm support); the second only recognises plane↔cylinder tangency pairs and cannot see a blend meeting a curved support. Both are emitted only for all-planar pairs, pinned by test. Their general replacements (`supportTangency`, `crossSectionProfile`) are expressible in case-v2 but unimplemented — and an unimplemented validator reports `notApplicable`, which FAILS a required check rather than passing it, so emitting them now would red the whole suite. They land with M4.
+- [x] `kernelbench_case_v2` ctest fixture asserts GEOMETRY, not the parser echoing itself: the built dihedral is measured from the two adjacent face normals at the selected edge's own midpoint and compared to the declared angle to 1e-6, across 3 pairs × 3 angles, plus the cone-mismatch refusal, unimplemented-kind refusal, version disjointness, and the variable-law refusal.
+
+### Gate — M2 part 2
+`ctest` **107/107** on the pinned OCCT 8.0.1 worker (106 → 107, the new `kernelbench_case_v2`) · `cargo fmt --all --check` · workspace `clippy -D warnings` clean · kernelbench **56 lib + 5 integration** (50 → 56) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1032 passed / 0 failed** across 73 targets against the pinned worker (1000 → 1032) · **T0 both-backend UNCHANGED: 136/136 pass, replay 136 stable, metamorph 48 pass / 0 fail / 16 notRun, differential 136 same-status, `gatingFailures: 0`** · **M1 both-backend: 120 records, 114 pass + 6 characterization (the near-tangent exploratory refusals), replay 120 stable, metamorph 72 pass / 0 fail, differential 120 same-status, `gatingFailures: 0`, p50 10.3 ms / p95 62.3 ms** · the committed v2 example executes through `run-case` on both backends, pass + replay-stable · ajv-valid under Draft 2020-12.
+
+### M3 — metamorph execution (DONE)
+
+- [x] `VariantSpec` (`worker/src/benchmark/Types.h`) and `suite::Variant` widened to the full v2 metamorph set: `translation`, `rotation`, `mirror`, `scale`, `parameterEpsilon`, `edgeOrderPermutation`, `contourSeed`, plus `farOriginTranslation`. All fields serialize/deserialize on both sides with strict unknown-field rejection.
+- [x] `apply_variant` (`Geometry.cpp`) implements mirror (about volume center or explicit center), uniform scale (about volume center or explicit center), and keeps the existing translation/rotation. `edgeOrderPermutation` and `contourSeed` reorder `selected_edges`, exercising selector order-independence.
+- [x] `metamorph.rs` inverse-transforms mirror, scale, far-origin translation, rotation, and translation; identity no-ops for parameterEpsilon/edgeOrderPermutation/contourSeed. Shape-signature comparison is genuine, not fabricated.
+- [x] `parameterEpsilon` is handled on the request side: `Execution.cpp` multiplies the effective fillet radius by `(1 + relativeDelta)` when the variant requests it.
+- [x] `fillet/matrix:m1` preset includes the rigid/isometric metamorphs (translation, far-origin translation, rotation, mirror, edge-order permutation, contour seed). `uniformScale` and `parameterEpsilon` were held out here because they intentionally change mass properties and so failed the equality-only gate; M3.5 below replaced that gate with a per-variant relation and put both back in the preset.
+- [x] Gate passed: T0 **136/136** pass, replay stable, metamorph 48 pass / 0 fail / 16 notRun, differential same-status, `gatingFailures: 0`. `fillet/matrix:m1` **264 records** (24 base cases + 18 supported × 6 variants), **258 pass + 6 characterization**, replay stable 264, metamorph 216 pass / 0 fail, differential same-status, `gatingFailures: 0`. p50 **10.9 ms** / p95 **69.3 ms** (macOS AppleClang, Release worker, debug supervisor).
+- [x] Manifest baselines updated: `bench/robustness/baselines/digests.json` now records 136 T0 rows + 264 m1 rows for `darwin-arm64`; `semantics.json` records both suites.
+
+### M3.5 — non-isometric metamorph policy (2026-08-13) — DONE, GATE PASSED
+
+Roadmap Phase 5 WP5.1 residual. Policy: the comparison carries a RELATION, chosen by the variant name, so nothing new is recorded in the frozen result-v1 `metamorphEvidence` block (`additionalProperties:false`, and the relation is a pure function of a field already there).
+
+- [x] `campaign::Relation` — `Equivalence` (the six rigid variants, unchanged), `Similarity{factor}` (`scaled`: `k³·V`, `k²·A`, points already inverse-scaled by `metamorph.rs`), `Continuity{delta}` (`parameterEpsilon`: bounded signed response, shape tolerance widened to `8·radius·|δ|`).
+- [x] Not a relaxation, and that is asserted: a kernel that scales the solid but leaves the blend at the original radius fails similarity (`a_similarity_that_skips_the_blend_fails`); a volume that GROWS as the radius grows fails continuity, as does a jump far larger than the nudge.
+- [x] Coefficients are measured, not guessed. Over m1, both backends: worst similarity residual **5.6e-12** (allowance 1e-9), worst continuity response **0.037** volume / **0.080** area per unit δ (allowance 0.5), worst sample displacement **3.58·r·δ** (allowance 8). The last one is geometric, not noise — tangency lines move by ≈`r·δ/tan(θ/2)`, so the 30° pair dominates and the allowance covers down to ~14°.
+- [x] `uniformScale` (factor 2.0) and `parameterEpsilon` (δ 1e-3) are back in the `m1` preset: **336 records** (24 base + 18 supported × 8 variants), 330 pass + 6 characterization, metamorph 288 pass / 0 fail, replay 336 stable, differential 336 same-status, `gatingFailures: 0`.
+
+**A REAL DEFECT, found by the two new variants and fixed here.** `cylindricalRadius` and `g1BoundaryTangency` failed on every plane-plane case under both. Cause: `Execution.cpp` fillets with an `effective_radius` (scaled / nudged) but `validate_output` measured the blend against `benchmark_case.radius`, the DECLARED one — so the validators were checking the wrong shape and reporting a false red on a correct result. `effective_radius` is now threaded into `validate_output` and reaches `cylinder_evidence`, `tangency_evidence`, `constantRadius`, `cylindricalRadius` and the `radiusTolerance` scale. Red-first proven: `worker/tools/kernelbench-runner/metamorph_fixtures.cpp` (new ctest `kernelbench_metamorph`) fails with `cylindricalRadius=fail g1BoundaryTangency=fail` against the old call and passes against the new one.
+
+Baselines: m1 digests + semantics re-recorded for `darwin-arm64` (336 rows). **Every m1 `inputDigest` moved, and that is expected** — `input_digest` hashes the canonical case document, which now declares eight metamorphs instead of six; `normalizedDigest` follows because it hashes a result containing `inputDigest`. T0 is byte-unchanged: 136 rows, `compare` OK.
+
+Gates: `ctest` **115/115** (114 → 115); `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 passed / 0 failed**; kernelbench lib **61** (56 → 61); T0 both backends **136/136**, metamorph 48 pass, replay stable, `gatingFailures: 0`; m1 as above. p50 **11.8 ms** / p95 **68.9 ms**. No frontend file changed, so vitest/Playwright are not implicated.
+
+- [ ] `m1` still has `darwin-arm64` rows only; record `linux-x64` when the suite next runs on the self-hosted host (roadmap Phase 5 WP5.6).
+
+### M4 — recipe-agnostic validators (2026-08-13) — DONE, GATE PASSED
+
+Roadmap Phase 5 WP5.2. All six land and are REQUIRED on every m1 case, curved pairs included.
+
+- [x] **The blend is taken from the builder's history, not guessed from surface type.** `AdapterResult` gained `blend_faces` (`Generated`) and `support_faces` (`Modified` of the selected edge's own supports) — both backends fill them from the same `BRepFilletAPI_MakeFillet` history. This is the fix for the assumption `cylindricalRadius` encodes: "the cylinder in the output is the fillet" is false the moment a SUPPORT is a cylinder.
+- [x] **`supportTangency`** — angle between the blend's and the support's outward normals, sampled along every shared boundary. The blend's boundary with the END CAPS is excluded: it is a right angle by design, and including it failed every non-cone case at exactly π/2 during bring-up.
+- [x] **`crossSectionProfile`** — `1/|k|` for the larger principal curvature versus the requested radius. A constant-radius blend is a canal surface whose circular sections are lines of curvature, so this is exact on plane, cylinder and cone alike. Measured worst deviation over the whole matrix: **2.7e-14 mm**.
+- [x] **`manifold`, `noSelfIntersection`, `microTopology`, `toleranceGrowth`** — the itemized halves of `deepAudit`, so a red campaign names its cause. `toleranceGrowth` always reports input/output tolerance maxima and their ratio, and gates on the ceilings the CASE declares; declaring none yields `notApplicable`, which fails a required check. m1 now declares 1e-6 vertex/edge/face (ten times the 1e-7 measured) and zero micro-edges/slivers.
+- [x] `notApplicable` fails a required check, as the spec demands — that is precisely what these six returned before they were implemented, and what the new ctest `kernelbench_validators` reproduces against the old dispatch (`plane-plane: supportTangency = notApplicable`).
+- [x] **Tolerances carry a conditioning term.** `farOriginTranslation` rebuilds the model 1.7e6 mm out, where double precision costs six orders of magnitude: the boundary angle goes 3.3e-15 → **7.5e-9 rad** and the section error 6.1e-16 → **2.7e-9 mm**. The allowance is `feature scale + coordinateMagnitude·1e-14` (divided by the radius for the angle, since an angle error is a position error over the feature size). Worst measured/allowed over m1, both backends: **0.090** tangency, **0.084** section — an 11× margin that still fails a real defect by orders of magnitude.
+- [x] `cylindricalRadius` / `g1BoundaryTangency` stay exactly where their assumptions hold (all-planar pairs) and are untouched in frozen v1.
+
+Gates: `ctest` **116/116** (115 → 116); `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**; T0 both backends **136/136** with digests AND semantics byte-unchanged; m1 **336 records**, 330 pass + 6 characterization, metamorph 288/0, replay 336 stable, `gatingFailures: 0`. m1 digests re-recorded (the case documents gained six validators and the quality ceilings); m1 semantics unchanged, so no verdict moved. No frontend file changed.
+
+- [ ] Next in Phase 5: WP5.3, the Boolean foundation campaign (`boolean/foundation:t0`).
 
 ### Then — see HANDOFF.md for the resume recipe
 

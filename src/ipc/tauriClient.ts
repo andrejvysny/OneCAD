@@ -544,11 +544,19 @@ export function createTauriClient(): CadClient {
           });
         } else {
           // Success — scope to this op's own bodies (incl. split children).
+          // A record left in NeedsRepair published no geometry of its own, but it
+          // did not fail either: it settles as `needsRepair` so the consumer shows
+          // the repair affordance instead of a success hint. Never an error.
           const change = a.pendingChange ?? lastPublishedChange;
+          const needsRepair = rf.repairSteps?.includes(a.recordId) ?? false;
           settle(a, {
             change: scopeChange(change, rf.affectedBodies?.[a.recordId], rf.revision),
             revision: rf.revision,
-            terminal: rf.outcome === "noop" ? "noop" : "published",
+            terminal: needsRepair
+              ? "needsRepair"
+              : rf.outcome === "noop"
+                ? "noop"
+                : "published",
           });
         }
       } else if (rf.outcome !== "published") {

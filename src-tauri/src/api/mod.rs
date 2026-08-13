@@ -2294,12 +2294,24 @@ pub async fn resolve_refs(
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("resolveRefs".into()))?;
         let resolutions = rt.resolve_refs(req).await?;
+        // `revision` stays RUST-OWNED (decision D4): the repair store keys candidates
+        // on `(revision, snapshotId)` from the same projection the `needs-repair`
+        // events carry, and the engine's own `documentRevision` is an advisory stamp
+        // that legitimately lags an un-regenerated edit. The SNAPSHOT, by contrast, is
+        // now the engine's echo — validated equal to the request in
+        // `wire::validate_resolve_refs_result`, so it is provenance rather than a
+        // value this layer re-asserts on the engine's behalf.
         let revision = rt.projection().revision;
         resolutions
             .into_iter()
             .map(|resolution| {
+                // The body a rebind promotes against comes from the RECORD's own
+                // inputs, which is what the frontend will bind through; the engine's
+                // echoed `body_id` is the pool it enumerated candidates from. They
+                // agree in practice, and the record is authoritative for the promote.
                 let body_id = rt.repair_candidate_body(&resolution.ref_id);
-                ResolveRefDto::from_resolution(resolution, snapshot_id, revision, body_id)
+                let echoed_snapshot = resolution.snapshot_id.0;
+                ResolveRefDto::from_resolution(resolution, echoed_snapshot, revision, body_id)
             })
             .collect()
     };
@@ -2670,6 +2682,19 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
             // own commit precisely (never mistaking sibling republishes for success).
             failed_steps: report.failed_steps.clone(),
             affected_bodies: report.affected_bodies.clone(),
+            // Distinct, in first-seen order: several refs on one record can each
+            // need repair, but the awaiter asks a yes/no question about its op.
+            repair_steps: if report.published() {
+                let mut seen = std::collections::BTreeSet::new();
+                report
+                    .needs_repair
+                    .iter()
+                    .filter(|item| seen.insert(item.op_id.clone()))
+                    .map(|item| item.op_id.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            },
         },
     );
     if report.published() {

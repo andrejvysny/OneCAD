@@ -1058,6 +1058,22 @@ OneCAD-CPP `ExtrudeParams`.
   **un-repairable** across parametric edits, violating Invariants 2/3; the typed
   ref lets the resolution ladder rebind it. Absent for non-`ToFace` extrudes.
 
+- **Draft is applied or refused, never silently dropped.** A non-zero
+  `draftAngleDeg` must add at least one eligible side face, the builder must
+  complete, and the result must differ from the undrafted prism; otherwise the step
+  is a recoverable `OP_FAILED` carrying one of the draft diagnostic codes
+  (`stage:"build"`, evidence `{draft:{angleDeg,eligibleFaces,addedFaces}}`):
+
+  | code | meaning |
+  |---|---|
+  | `EXTRUDE_DRAFT_NO_PLANAR_FACE` | the profile has no planar side face to draft (e.g. a circular profile) |
+  | `EXTRUDE_DRAFT_NO_FACE_ACCEPTED` | eligible walls existed; the kernel rejected every one |
+  | `EXTRUDE_DRAFT_NO_CHANGE` | the builder completed and changed nothing (adds `volumeBefore`/`volumeAfter`) |
+  | `EXTRUDE_DRAFT_BUILD_FAILED` | the draft build itself failed or threw |
+
+  These are diagnostic codes only; the §8 top-level code stays `OP_FAILED`. The
+  preview lane reports the same code as the commit for the same candidate.
+
 **Profile binding (NORMATIVE, Extrude / Revolve / Sweep).** The sketch profile is
 carried as **flat `params.sketchId` + `params.regionId`**, NOT as a semantic ref
 in `inputs[]`. A region is identified by the derived `regionId` (§7.4), which is
@@ -1212,7 +1228,12 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
 - A zero-solid `Cut` or `Intersect` is a recoverable `OP_FAILED`: the target and
   tool remain intact, no body lifecycle event or mesh is emitted, and the caller
   may revise the operation. Complete-consumption deletion is not implicit in this
-  standalone operation.
+  standalone operation. It carries diagnostic `BOOLEAN_EMPTY_RESULT`
+  (`stage:"publish"`) with evidence
+  `{boolean:{operation,targetBodyId,toolBodyId,solidCount:0}}`, so a caller routes
+  on the CODE rather than on message text — the §8 top-level value is the generic
+  `OP_FAILED` every Boolean failure shares. Cross-track fixture:
+  `protocol/fixtures/boolean_empty_refusal.ndjson`.
 
 **Shell** (`op.shell`) — hollow a body, removing (opening) selected faces. Field
 names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelog)).
@@ -2005,6 +2026,18 @@ Every resolution carries the exact `snapshotId`, document `revision`, `refId`, a
 the `bodyId` used to enumerate candidates when one exists. A client MUST cache a
 candidate set by `{revision, snapshotId, refId}` and MUST promote its TopoKeys only
 against that echoed snapshot; a mismatch requires a fresh resolve, never ordinal reuse.
+
+The echo is per-RESOLUTION and mandatory on every branch, `needsRepair` included — a
+failed resolution still has to say which head it failed against. `snapshotId` is the
+snapshot the ladder actually ran on (the request's when it names one, else the head)
+and `revision` is the document revision that head last accepted; `bodyId` is present
+only when a body was there to enumerate. **Rust MUST validate the echo before a
+resolution is used**: request order preserved, one resolution per requested ref, and
+`snapshotId` equal to the requested snapshot — a resolution computed against another
+snapshot, filed under the requested one, is precisely the stale-candidate mis-bind
+this rule exists to prevent. `documentRevision` remains a Rust-owned advisory stamp
+(D4), so the echoed `revision` is evidence about the engine's head, not a value the
+client keys its own candidate cache by.
 
 #### ClassifyElement
 
@@ -2924,6 +2957,47 @@ sign-off) once fixtures exist.
   through `CandidateResult`/`emit_plan_step` in
   `worker/src/session/PlanExecutor.{h,cpp}`. Purely additive; no existing
   wire form changes.
+- **2026-08-13 — §7.3 Pattern V2 lineage gains a cross-track fixture** (roadmap A6).
+  No contract change: `circular_pattern_lineage.ndjson` pins the already-normative V2
+  rules on the wire — `count-1` children named `body_<opId>:<k>`, the source preserved
+  as instance zero with no lifecycle event of its own, and the `perStepResults`
+  body-id set. The per-instance step angle (`angleDeg / count`) is geometry and is
+  NOT asserted here; it stays pinned in `test_m6a_ops.cpp` and the frontend
+  `patternPreview` unit test, because an NDJSON exchange carries nothing to measure
+  it with. **No wire change; fixture ADDITION only.**
+
+- **2026-08-13 — §7.5 `ResolveRefs` resolutions carry the snapshot echo they always
+  specified** (roadmap A6, Rust + worker sign-off). The §7.5 text has required
+  `{snapshotId, revision, refId, bodyId}` on every resolution since it was written,
+  and neither the C++ worker nor the Rust stub emitted any of the three: Rust
+  manufactured all of them app-side from its own state and validated nothing, so a
+  resolution computed on an older snapshot was cached under a freshly minted key —
+  the silent wrong bind the rule forbids. The worker now echoes them on every branch
+  (`unchanged`, `autoBind`, `needsRepair`; `bodyId` only when a body was enumerated),
+  the stub matches, and `wire::validate_resolve_refs_result` refuses a mismatched
+  snapshot, a re-ordered `refId`, a wrong arity, or a missing echo. *Reason:* the
+  contract was normative and unenforced; the fields are additive, so the frame shape
+  and every existing top-level code are unchanged. **Fixture bump — 2 files:**
+  `resolve_refs_snapshot_echo.ndjson` (new — both branches plus a stale-snapshot
+  refusal) and `bind_element_ids.ndjson` (its `ResolveRefs` expectation now asserts
+  the echo). Verified non-vacuous: dropping the `revision` echo in the worker reds
+  `canonical_resolve_refs_snapshot_echo`.
+
+- **2026-08-13 — §7.3 stable diagnostic codes for the Draft and zero-solid Boolean
+  refusals.** Both previously returned a bare `OP_FAILED` with the reason only in
+  the message, so a caller wanting to tell "no planar wall to draft" from "the
+  kernel rejected the walls I offered" — or "your Cut consumed the target
+  completely" from any other Boolean failure — had to match on message TEXT, which
+  the diagnostics contract forbids. Adds `EXTRUDE_DRAFT_NO_PLANAR_FACE`,
+  `EXTRUDE_DRAFT_NO_FACE_ACCEPTED`, `EXTRUDE_DRAFT_NO_CHANGE`,
+  `EXTRUDE_DRAFT_BUILD_FAILED` (`stage:"build"`, evidence
+  `{draft:{angleDeg,eligibleFaces,addedFaces}}`) and `BOOLEAN_EMPTY_RESULT`
+  (`stage:"publish"`, evidence
+  `{boolean:{operation,targetBodyId,toolBodyId,solidCount}}`). Diagnostic codes
+  only — the §8 top-level code is unchanged, so this is additive on the wire and
+  every existing fixture stays byte-valid. `boolean_empty_refusal.ndjson` is
+  extended to assert the new diagnostic (verified to fail on a wrong code).
+
 - **2026-08-12 — §7.3 NEW ops `PlaceComponent`/`DetachComponent`** (Component
   Library WP-0.2/WP-1.2, single-repo, both tracks land together). Instantiate
   a library component as a first-class placed instance, and drop a placed

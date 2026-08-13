@@ -450,6 +450,7 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     onOp: (op: BooleanOperation) => void,
     onApply: () => void,
+    onCancel?: () => void,
   ): void;
   /** Show the armed hole cluster at the picked point (WP-C T3). */
   showHole(
@@ -481,6 +482,7 @@ export interface ToolChipState {
       onCount: (count: number) => void;
       onSpacing: (spacing: number) => void;
       onApply: () => void;
+      onCancel?: () => void;
     },
   ): void;
   showCircularPattern(
@@ -493,12 +495,13 @@ export interface ToolChipState {
       onCount: (count: number) => void;
       onAngle: (angle: number) => void;
       onApply: () => void;
+      onCancel?: () => void;
     },
   ): void;
   showMirror(
     plane: MirrorPlane,
     worldPos: [number, number, number],
-    handlers: { onPlane: (plane: MirrorPlane) => void; onApply: () => void },
+    handlers: { onPlane: (plane: MirrorPlane) => void; onApply: () => void; onCancel?: () => void },
   ): void;
   /** Show the armed placement cluster `[Move|Rotate][X|Y|Z][value ▸][Copy][✓][✕]`. */
   showTransform(
@@ -738,8 +741,8 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onCancel: handlers.onCancel,
     });
   },
-  showBoolean(op, worldPos, onOp, onApply) {
-    set({ ...CLEARED, kind: "booleanOp", op, worldPos, onOp, onApply });
+  showBoolean(op, worldPos, onOp, onApply, onCancel) {
+    set({ ...CLEARED, kind: "booleanOp", op, worldPos, onOp, onApply, onCancel: onCancel ?? null });
   },
   showHole(diameter, worldPos, handlers, opts) {
     set({
@@ -807,6 +810,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onCount: handlers.onCount,
       onValue: handlers.onSpacing,
       onApply: handlers.onApply,
+      onCancel: handlers.onCancel ?? null,
     });
   },
   showCircularPattern(axis, count, angle, worldPos, handlers) {
@@ -821,10 +825,19 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onCount: handlers.onCount,
       onValue: handlers.onAngle,
       onApply: handlers.onApply,
+      onCancel: handlers.onCancel ?? null,
     });
   },
   showMirror(plane, worldPos, handlers) {
-    set({ ...CLEARED, kind: "mirror", plane, worldPos, onPlane: handlers.onPlane, onApply: handlers.onApply });
+    set({
+      ...CLEARED,
+      kind: "mirror",
+      plane,
+      worldPos,
+      onPlane: handlers.onPlane,
+      onApply: handlers.onApply,
+      onCancel: handlers.onCancel ?? null,
+    });
   },
   showTransform(mode, axis, value, worldPos, handlers, opts) {
     set({

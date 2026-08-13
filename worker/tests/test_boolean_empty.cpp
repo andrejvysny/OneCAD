@@ -61,6 +61,27 @@ void check_refusal(const char* name, const TopoDS_Shape& target, const TopoDS_Sh
     check(outcome.status == ops::OpOutcome::Status::Failed,
           std::string(name) + ": empty boolean is recoverably refused");
     check(outcome.error_code == "OP_FAILED", std::string(name) + ": refusal is OP_FAILED");
+    // Routable by CODE, not by message text: the §8 top-level value is the generic
+    // one every Boolean failure shares, so the complete-consumption case — the one
+    // a user can act on — carries its own diagnostic and names the operands.
+    check(outcome.diagnostics.size() == 1, std::string(name) + ": carries one diagnostic");
+    if (!outcome.diagnostics.empty()) {
+        const nlohmann::json& diagnostic = outcome.diagnostics.front();
+        check(diagnostic.value("code", "") == "BOOLEAN_EMPTY_RESULT",
+              std::string(name) + ": stable code BOOLEAN_EMPTY_RESULT, got '" +
+                  diagnostic.value("code", "") + "'");
+        check(diagnostic.value("severity", "") == "error", std::string(name) + ": severity error");
+        check(diagnostic.value("stage", "") == "publish", std::string(name) + ": stage publish");
+        const nlohmann::json evidence =
+            diagnostic.value("evidence", nlohmann::json::object()).value("boolean", nlohmann::json::object());
+        check(evidence.value("operation", "") == operation,
+              std::string(name) + ": evidence names the operation");
+        check(evidence.value("targetBodyId", "") == "body_target" &&
+                  evidence.value("toolBodyId", "") == "body_tool",
+              std::string(name) + ": evidence names both operands");
+        check(evidence.value("solidCount", -1) == 0,
+              std::string(name) + ": evidence reports the zero solid count");
+    }
     check(outcome.body_events.empty() && outcome.body_ids.empty() && outcome.delta.empty(),
           std::string(name) + ": refusal emits no lifecycle or element-map delta");
     check(fixture.bodies.contains("body_target") && fixture.bodies.contains("body_tool"),

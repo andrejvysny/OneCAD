@@ -272,9 +272,10 @@ describe("ModelToolController region pick", () => {
     expect(draft.opType).toBe("Revolve");
     expect(draft.regionId).toBe("r1"); // the TOGGLED region, not the first
 
-    // A plain click away commits the default 360° — through the lane session, so the
-    // previewed candidate IS what materializes (never a second ad-hoc op).
-    click(200, 200);
+    // Enter confirms the default 360° — through the lane session, so the previewed
+    // candidate IS what materializes (never a second ad-hoc op). Click-away no longer
+    // commits (WP0 spec choice — see modelingInteractionContract.ts).
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
     await flush();
     await flush();

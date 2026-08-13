@@ -36,10 +36,64 @@ pub fn run_cases(
     Ok(if records.iter().any(is_red) { 1 } else { 0 })
 }
 
+/// The relation a metamorphic variant is expected to preserve.
+///
+/// Only the rigid variants preserve the shape outright. A uniform scale is a
+/// SIMILARITY — the worker scales the geometry and the requested radius by the
+/// same factor (`worker/src/benchmark/Execution.cpp` and `Geometry.cpp`), so
+/// mass properties are expected to move by `k³`/`k²`, not to stay equal. A
+/// parameter epsilon changes the operation itself, so nothing is preserved
+/// except CONTINUITY of the response: same classification, and a shape that
+/// moves proportionally to the nudge instead of jumping.
+///
+/// The relation is a pure function of the variant name, which is why it needs
+/// no room in the frozen result-v1 `metamorphEvidence` block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Relation {
+    Equivalence,
+    Similarity { factor: f64 },
+    Continuity { relative_delta: f64 },
+}
+
+/// Similarity-compensated properties are recomputed through a power of the
+/// factor, so they cannot carry the near-exact agreement the rigid variants do.
+/// Measured worst residual over `fillet/matrix:m1`, both backends: 5.6e-12.
+const SIMILARITY_RELATIVE_TOLERANCE: f64 = 1e-9;
+
+/// Ceiling on the relative volume and area response to a relative radius nudge.
+/// A blend's contribution grows as r², so the response is a small multiple of
+/// `|δ|`; measured worst over m1 is 0.037 (volume) and 0.080 (area), while a
+/// topological jump is orders of magnitude above it.
+const CONTINUITY_VOLUME_COEFFICIENT: f64 = 0.5;
+
+/// Ceiling on how far a surface sample may move under the nudge, in multiples
+/// of `radius · |δ|`. The blend's tangency lines move by roughly
+/// `radius · δ / tan(θ/2)` on a θ dihedral, so the sharpest pair in the matrix
+/// (30°) dominates: measured worst is 3.58, and this covers down to ~14°.
+const CONTINUITY_DISPLACEMENT_COEFFICIENT: f64 = 8.0;
+
+/// Below this fraction of the base volume a signed response is numerical noise,
+/// so the direction check abstains rather than gating on a rounding error.
+const CONTINUITY_DIRECTION_NOISE: f64 = 1e-12;
+
+#[derive(Clone, Copy)]
+struct CaseContext {
+    point_tolerance: f64,
+    max_radius: f64,
+}
+
 fn apply_metamorph(records: &mut [Value], generated: &[GeneratedCase]) {
-    let tolerances: BTreeMap<&str, f64> = generated
+    let contexts: BTreeMap<&str, CaseContext> = generated
         .iter()
-        .map(|item| (item.case.case_id.as_str(), item.case.point_tolerance))
+        .map(|item| {
+            (
+                item.case.case_id.as_str(),
+                CaseContext {
+                    point_tolerance: item.case.point_tolerance,
+                    max_radius: item.case.max_radius,
+                },
+            )
+        })
         .collect();
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, record) in records.iter().enumerate() {
@@ -56,29 +110,27 @@ fn apply_metamorph(records: &mut [Value], generated: &[GeneratedCase]) {
         else {
             continue;
         };
-        let tolerance = tolerances
+        let context = contexts
             .get(text(&records[base], "caseId").as_str())
             .copied()
-            .unwrap_or(1e-6);
+            .unwrap_or(CaseContext {
+                point_tolerance: 1e-6,
+                max_radius: 0.0,
+            });
         for index in indices.iter().copied().filter(|index| *index != base) {
-            attach_metamorph(records, base, index, tolerance);
+            attach_metamorph(records, base, index, context);
         }
     }
 }
 
-fn attach_metamorph(records: &mut [Value], base: usize, variant: usize, tolerance: f64) {
+fn attach_metamorph(records: &mut [Value], base: usize, variant: usize, context: CaseContext) {
+    let relation = relation_of(&records[variant]);
     let status_match =
         text(&records[base], "operationState") == text(&records[variant], "operationState");
-    let properties_match = invariant_number_match(
-        &records[base],
-        &records[variant],
-        &[
-            "/outputAudit/massProperties/volume",
-            "/outputAudit/massProperties/area",
-        ],
-    );
+    let properties_match = properties_match(&records[base], &records[variant], relation);
     let semantic_match =
         validator_signature(&records[base]) == validator_signature(&records[variant]);
+    let tolerance = shape_tolerance(relation, context);
     let evidence = metamorph::compare(&records[base], &records[variant], tolerance);
     let (surface_samples_match, point_classification_match) = evidence
         .as_ref()
@@ -122,16 +174,117 @@ fn attach_metamorph(records: &mut [Value], base: usize, variant: usize, toleranc
     }
 }
 
-fn invariant_number_match(left: &Value, right: &Value, pointers: &[&str]) -> bool {
-    pointers.iter().all(|pointer| {
-        let a = left.pointer(pointer).and_then(Value::as_f64);
-        let b = right.pointer(pointer).and_then(Value::as_f64);
-        match (a, b) {
-            (Some(a), Some(b)) => (a - b).abs() <= 1e-7_f64.max(a.abs() * 1e-9),
-            (None, None) => true,
-            _ => false,
+fn relation_of(record: &Value) -> Relation {
+    let variant = record.get("campaignVariant");
+    match variant_name(record).as_str() {
+        "scaled" => variant
+            .and_then(|value| value.pointer("/scale/factor"))
+            .and_then(Value::as_f64)
+            .filter(|factor| factor.is_finite() && *factor > 0.0)
+            .map_or(Relation::Equivalence, |factor| Relation::Similarity {
+                factor,
+            }),
+        "parameterEpsilon" => variant
+            .and_then(|value| value.pointer("/parameterEpsilon/relativeDelta"))
+            .and_then(Value::as_f64)
+            .filter(|delta| delta.is_finite() && *delta != 0.0)
+            .map_or(Relation::Equivalence, |relative_delta| {
+                Relation::Continuity { relative_delta }
+            }),
+        _ => Relation::Equivalence,
+    }
+}
+
+fn shape_tolerance(relation: Relation, context: CaseContext) -> f64 {
+    match relation {
+        Relation::Equivalence | Relation::Similarity { .. } => context.point_tolerance,
+        // The blend surface genuinely moves by about `radius · delta`; a shape
+        // that stays inside that band responded continuously, one that jumps
+        // does not.
+        Relation::Continuity { relative_delta } => context
+            .point_tolerance
+            .max(CONTINUITY_DISPLACEMENT_COEFFICIENT * context.max_radius * relative_delta.abs()),
+    }
+}
+
+const VOLUME_POINTER: &str = "/outputAudit/massProperties/volume";
+const AREA_POINTER: &str = "/outputAudit/massProperties/area";
+
+fn properties_match(base: &Value, variant: &Value, relation: Relation) -> bool {
+    match relation {
+        Relation::Equivalence => invariant_number_match(base, variant, 1.0, 1.0),
+        Relation::Similarity { factor } => {
+            invariant_number_match(base, variant, factor.powi(3), factor.powi(2))
         }
-    })
+        Relation::Continuity { relative_delta } => continuity_match(base, variant, relative_delta),
+    }
+}
+
+/// Compares mass properties after mapping the base values through the relation's
+/// expected exponent. `1.0`/`1.0` is plain equality, which is what every rigid
+/// variant asks for.
+fn invariant_number_match(
+    base: &Value,
+    variant: &Value,
+    volume_ratio: f64,
+    area_ratio: f64,
+) -> bool {
+    let similarity = volume_ratio != 1.0 || area_ratio != 1.0;
+    [(VOLUME_POINTER, volume_ratio), (AREA_POINTER, area_ratio)]
+        .iter()
+        .all(|(pointer, ratio)| {
+            let a = base.pointer(pointer).and_then(Value::as_f64);
+            let b = variant.pointer(pointer).and_then(Value::as_f64);
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let expected = a * ratio;
+                    let allowance = if similarity {
+                        (expected.abs() * SIMILARITY_RELATIVE_TOLERANCE).max(1e-7)
+                    } else {
+                        1e-7_f64.max(expected.abs() * 1e-9)
+                    };
+                    (expected - b).abs() <= allowance
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        })
+}
+
+/// A parameter nudge is expected to move the result, so this gates the RESPONSE
+/// rather than equality: the volume must move by no more than the nudge's own
+/// order, and — on the convex edges this matrix builds — a larger blend must
+/// remove material, never add it.
+fn continuity_match(base: &Value, variant: &Value, relative_delta: f64) -> bool {
+    let base_volume = base.pointer(VOLUME_POINTER).and_then(Value::as_f64);
+    let variant_volume = variant.pointer(VOLUME_POINTER).and_then(Value::as_f64);
+    let base_area = base.pointer(AREA_POINTER).and_then(Value::as_f64);
+    let variant_area = variant.pointer(AREA_POINTER).and_then(Value::as_f64);
+    let (Some(base_volume), Some(variant_volume)) = (base_volume, variant_volume) else {
+        // Absent on both sides is the same "nothing to compare" case the rigid
+        // relations treat as no evidence of a mismatch.
+        return base_volume.is_none()
+            && variant_volume.is_none()
+            && base_area.is_none()
+            && variant_area.is_none();
+    };
+    let (Some(base_area), Some(variant_area)) = (base_area, variant_area) else {
+        return false;
+    };
+    if base_volume.abs() <= f64::EPSILON {
+        return false;
+    }
+    let allowance = CONTINUITY_VOLUME_COEFFICIENT * relative_delta.abs();
+    let volume_response = (variant_volume - base_volume) / base_volume;
+    let area_response = if base_area.abs() > f64::EPSILON {
+        (variant_area - base_area) / base_area
+    } else {
+        return false;
+    };
+    let bounded = volume_response.abs() <= allowance && area_response.abs() <= allowance;
+    let directed = volume_response.abs() <= CONTINUITY_DIRECTION_NOISE
+        || volume_response.signum() != relative_delta.signum();
+    bounded && directed
 }
 
 fn validator_signature(value: &Value) -> Vec<(String, String)> {
@@ -374,6 +527,101 @@ mod tests {
         assert_eq!(
             records[1].pointer("/differential/classification"),
             Some(&json!("status-difference"))
+        );
+    }
+
+    fn mass(volume: f64, area: f64) -> Value {
+        json!({"outputAudit":{"massProperties":{"volume":volume,"area":area}}})
+    }
+
+    fn scaled(volume: f64, area: f64, factor: f64) -> Value {
+        let mut value = mass(volume, area);
+        value["campaignVariant"] = json!({"name":"scaled","scale":{"factor":factor}});
+        value
+    }
+
+    fn epsilon(volume: f64, area: f64, relative_delta: f64) -> Value {
+        let mut value = mass(volume, area);
+        value["campaignVariant"] = json!({
+            "name":"parameterEpsilon",
+            "parameterEpsilon":{"parameter":"operation.radius","relativeDelta":relative_delta}
+        });
+        value
+    }
+
+    #[test]
+    fn a_rigid_variant_still_demands_equal_properties() {
+        let base = mass(1000.0, 600.0);
+        let mut variant = mass(1000.0, 600.0);
+        variant["campaignVariant"] = json!({"name":"rotated"});
+        assert_eq!(relation_of(&variant), Relation::Equivalence);
+        assert!(properties_match(&base, &variant, Relation::Equivalence));
+        let moved = mass(1000.001, 600.0);
+        assert!(!properties_match(&base, &moved, Relation::Equivalence));
+    }
+
+    #[test]
+    fn a_uniform_scale_is_compared_through_its_own_exponents() {
+        let base = mass(1000.0, 600.0);
+        let variant = scaled(8000.0, 2400.0, 2.0);
+        assert_eq!(relation_of(&variant), Relation::Similarity { factor: 2.0 });
+        assert!(properties_match(&base, &variant, relation_of(&variant)));
+        // Equality — what the old gate demanded — is now the failing answer.
+        let unscaled = scaled(1000.0, 600.0, 2.0);
+        assert!(!properties_match(&base, &unscaled, relation_of(&unscaled)));
+    }
+
+    /// The gate this replaces would have passed a kernel that scaled the solid
+    /// but left the blend at the original radius, since it only ever compared
+    /// the variant with itself. This one does not.
+    #[test]
+    fn a_similarity_that_skips_the_blend_fails() {
+        let base = mass(1000.0, 600.0);
+        let variant = scaled(8000.0 * 1.0001, 2400.0, 2.0);
+        assert!(!properties_match(&base, &variant, relation_of(&variant)));
+    }
+
+    #[test]
+    fn a_parameter_nudge_gates_a_bounded_signed_response() {
+        let base = mass(1000.0, 600.0);
+        let delta = 1e-3;
+        assert_eq!(
+            relation_of(&epsilon(0.0, 0.0, delta)),
+            Relation::Continuity {
+                relative_delta: delta
+            }
+        );
+        // A larger blend on a convex edge removes material: small, negative.
+        let responded = epsilon(999.8, 599.9, delta);
+        assert!(properties_match(&base, &responded, relation_of(&responded)));
+        // Gaining volume as the radius grows is not a continuous response.
+        let inverted = epsilon(1000.2, 600.1, delta);
+        assert!(!properties_match(&base, &inverted, relation_of(&inverted)));
+        // Neither is a jump far larger than the nudge.
+        let jumped = epsilon(950.0, 590.0, delta);
+        assert!(!properties_match(&base, &jumped, relation_of(&jumped)));
+    }
+
+    #[test]
+    fn only_the_continuity_relation_widens_the_shape_tolerance() {
+        let context = CaseContext {
+            point_tolerance: 1e-6,
+            max_radius: 4.0,
+        };
+        assert_eq!(shape_tolerance(Relation::Equivalence, context), 1e-6);
+        assert_eq!(
+            shape_tolerance(Relation::Similarity { factor: 2.0 }, context),
+            1e-6
+        );
+        assert_eq!(
+            shape_tolerance(
+                Relation::Continuity {
+                    relative_delta: 1e-3
+                },
+                context
+            ),
+            // 8 x radius x delta, the blend's own displacement scale.
+            8.0 * 4.0 * 1e-3
         );
     }
 

@@ -316,6 +316,18 @@ fn validators(pair: Pair, domain: ExpectedDomain, radius: f64) -> Vec<ValidatorV
         simple(ValidatorTypeV2::GeneratedBlendFace),
         simple(ValidatorTypeV2::MaterialChange),
         simple(ValidatorTypeV2::DeepAudit),
+        // The recipe-agnostic pair, required on EVERY pair including the curved
+        // ones. They read the builder's own generated and modified faces, so a
+        // cylindrical or conical support is not a special case for them the way
+        // it is for `cylindricalRadius` / `g1BoundaryTangency` below.
+        simple(ValidatorTypeV2::SupportTangency),
+        simple(ValidatorTypeV2::CrossSectionProfile),
+        // The itemized halves of `deepAudit`: a named cause beats one aggregate
+        // bit when a campaign goes red.
+        simple(ValidatorTypeV2::Manifold),
+        simple(ValidatorTypeV2::NoSelfIntersection),
+        simple(ValidatorTypeV2::MicroTopology),
+        simple(ValidatorTypeV2::ToleranceGrowth),
     ];
     result[2].direction = Some(MaterialDirection::Decrease);
     result.push(ValidatorV2 {
@@ -387,6 +399,19 @@ fn metamorphs(domain: ExpectedDomain) -> Vec<MetamorphV2> {
         },
         MetamorphV2::EdgeOrderPermutation { order: vec![0] },
         MetamorphV2::ContourSeed { anchor_index: 0 },
+        // Not an isometry: the worker scales the geometry AND the requested
+        // radius, so the result is expected to differ by a similarity, which is
+        // what `campaign::Relation::Similarity` compares it against.
+        MetamorphV2::UniformScale {
+            factor: 2.0,
+            center: RotationCenterV2::InputCentroid,
+        },
+        // Nor is this one — it changes the operation. It gates continuity of the
+        // response, not equivalence (`campaign::Relation::Continuity`).
+        MetamorphV2::ParameterEpsilon {
+            parameter: crate::case_v2::EpsilonParameter::OperationRadius,
+            relative_delta: 1e-3,
+        },
     ]
 }
 
@@ -483,12 +508,16 @@ fn default_limits() -> Limits {
             stderr_bytes: 1_048_576,
             artifact_bytes: 67_108_864,
         },
+        // Ceilings a case must declare for `toleranceGrowth` to gate rather than
+        // report `notApplicable`. 1e-6 is ten times the 1e-7 maximum measured
+        // across the matrix on both backends — a real ceiling with real margin,
+        // not a number chosen to be unreachable.
         quality: QualityLimits {
-            max_vertex_tolerance: None,
-            max_edge_tolerance: None,
-            max_face_tolerance: None,
-            max_micro_edges: None,
-            max_sliver_faces: None,
+            max_vertex_tolerance: Some(1e-6),
+            max_edge_tolerance: Some(1e-6),
+            max_face_tolerance: Some(1e-6),
+            max_micro_edges: Some(0),
+            max_sliver_faces: Some(0),
         },
     }
 }
@@ -512,11 +541,11 @@ mod tests {
         let cases = m1();
         // 3 prismatic pairs x (5 supported + 2 exploratory) + 3 cone cases.
         assert_eq!(base_cases().len(), 24);
-        // Supported cases carry six metamorphic variants each (translation,
-        // far-origin translation, rotation, mirror, edge-order permutation,
-        // contour seed). Uniform scale and parameter epsilon are supported by
-        // the schema but not yet included in this preset.
-        assert_eq!(cases.len(), 24 + 6 * 18);
+        // Supported cases carry eight metamorphic variants each: six rigid
+        // (translation, far-origin translation, rotation, mirror, edge-order
+        // permutation, contour seed), one similarity (uniform scale) and one
+        // continuity probe (parameter epsilon).
+        assert_eq!(cases.len(), 24 + 8 * 18);
         let mut ids: Vec<_> = base_cases().into_iter().map(|case| case.case_id).collect();
         ids.sort();
         ids.dedup();

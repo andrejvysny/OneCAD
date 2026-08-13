@@ -11,16 +11,184 @@
     "expected-values/proto_loop_detector.txt — 'Loop detector prototype: OK', exit 0."
   ],
   "opScript": [
-    { "opType": "SketchRegions", "opId": "regions_rect",       "sketch": { "entities": ["4 lines: (0,0)(10,0)(10,5)(0,5)"] } },
-    { "opType": "SketchRegions", "opId": "regions_square_hole", "sketch": { "entities": ["outer 10x10 square", "inner 4x4 square (3,3)-(7,7)"] } },
-    { "opType": "SketchRegions", "opId": "regions_arc_chord",   "sketch": { "entities": ["arc center(0,0) r5 sweep 0..pi", "line (5,0)->(-5,0)"] } },
-    { "opType": "SketchRegions", "opId": "regions_ellipse",     "sketch": { "entities": ["ellipse center(0,0) rx6 ry3 rot0.25"] }, "config": { "planarizeIntersections": true } }
+    {
+      "opType": "SketchRegions",
+      "opId": "regions_rect",
+      "sketch": {
+        "description": [
+          "4 lines: (0,0)(10,0)(10,5)(0,5)"
+        ],
+        "entitiesProvenance": "proto_loop_detector.cpp:11-30 — the 10x5 rectangle, four lines, in sketch (u,v).",
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Line",
+            "p0": [0,0],
+            "p1": [10,0]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [10,0],
+            "p1": [10,5]
+          },
+          {
+            "id": "e3",
+            "type": "Line",
+            "p0": [10,5],
+            "p1": [0,5]
+          },
+          {
+            "id": "e4",
+            "type": "Line",
+            "p0": [0,5],
+            "p1": [0,0]
+          }
+        ]
+      }
+    },
+    {
+      "opType": "SketchRegions",
+      "opId": "regions_square_hole",
+      "sketch": {
+        "description": [
+          "outer 10x10 square",
+          "inner 4x4 square (3,3)-(7,7)"
+        ],
+        "entitiesProvenance": "proto_loop_detector.cpp:32-61 — outer 10x10 square, inner 4x4 square at (3,3)-(7,7).",
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Line",
+            "p0": [0,0],
+            "p1": [10,0]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [10,0],
+            "p1": [10,10]
+          },
+          {
+            "id": "e3",
+            "type": "Line",
+            "p0": [10,10],
+            "p1": [0,10]
+          },
+          {
+            "id": "e4",
+            "type": "Line",
+            "p0": [0,10],
+            "p1": [0,0]
+          },
+          {
+            "id": "e5",
+            "type": "Line",
+            "p0": [3,3],
+            "p1": [7,3]
+          },
+          {
+            "id": "e6",
+            "type": "Line",
+            "p0": [7,3],
+            "p1": [7,7]
+          },
+          {
+            "id": "e7",
+            "type": "Line",
+            "p0": [7,7],
+            "p1": [3,7]
+          },
+          {
+            "id": "e8",
+            "type": "Line",
+            "p0": [3,7],
+            "p1": [3,3]
+          }
+        ]
+      }
+    },
+    {
+      "opType": "SketchRegions",
+      "opId": "regions_arc_chord",
+      "sketch": {
+        "description": [
+          "arc center(0,0) r5 sweep 0..pi",
+          "line (5,0)->(-5,0)"
+        ],
+        "entitiesProvenance": "proto_loop_detector.cpp:63-78 — semicircle arc center(0,0) r5 sweeping 0..pi, closed by the diameter chord (5,0)->(-5,0).",
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Arc",
+            "center": [0,0],
+            "radius": 5.0,
+            "start": [5,0],
+            "end": [-5,0]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [-5,0],
+            "p1": [5,0]
+          }
+        ]
+      }
+    },
+    {
+      "opType": "SketchRegions",
+      "opId": "regions_ellipse",
+      "sketch": {
+        "description": [
+          "ellipse center(0,0) rx6 ry3 rot0.25"
+        ],
+        "entitiesProvenance": "proto_loop_detector.cpp:80-94 — single ellipse center(0,0) rx6 ry3 rotation 0.25 rad.",
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Ellipse",
+            "center": [0,0],
+            "majorR": 6.0,
+            "minorR": 3.0,
+            "rotation": 0.25
+          }
+        ]
+      },
+      "config": {
+        "planarizeIntersections": true
+      }
+    }
   ],
   "expected": {
-    "rectangle":   { "regions": 1, "holes": 0, "provenance": "proto_loop_detector.cpp:28-29" },
-    "squareWithHole": { "regions": 1, "holes": 1, "wiresInFace": 2, "provenance": "proto_loop_detector.cpp:59-60; proto_face_builder.cpp:89 (countWires==2)" },
-    "arcAndChord": { "regions": ">=1", "note": "faces not empty; exact count not asserted", "provenance": "proto_loop_detector.cpp:76-77" },
-    "ellipse":     { "regions": 1, "holes": 0, "outerLoopArea_gt": 50.0, "areaApprox": 56.5, "provenance": "proto_loop_detector.cpp:92-93 (area()>50.0; pi*6*3~=56.5, only '>50' asserted)" }
+    "rectangle": {
+      "regions": 1,
+      "holes": 0,
+      "provenance": "proto_loop_detector.cpp:28-29"
+    },
+    "squareWithHole": {
+      "regions": 1,
+      "holes": 1,
+      "wiresInFace": 2,
+      "provenance": "proto_loop_detector.cpp:59-60; proto_face_builder.cpp:89 (countWires==2)",
+      "newStack": {
+        "regions": 2,
+        "holes": 1,
+        "reason": "DELIBERATE DIVERGENCE, not a regression. The C++ LoopDetector reported ONE face carrying an inner loop; the new stack's planar-cell detector reports both CELLS — the annulus (which owns the hole) and the inner square — because each is independently extrudable and a profile pick must be able to name either. Recorded here so the case keeps the old oracle visible instead of being quietly rewritten to the new answer.",
+        "provenance": "src-tauri/tests/wire_contract.rs nested_inner_disk_parity_and_reopen_stability — 'annulus + inner disk' asserts regions.len()==2 with exactly one hole-bearing cell; protocol/SCHEMA.md §7.4 SketchRegions."
+      }
+    },
+    "arcAndChord": {
+      "regions": ">=1",
+      "note": "faces not empty; exact count not asserted",
+      "provenance": "proto_loop_detector.cpp:76-77"
+    },
+    "ellipse": {
+      "regions": 1,
+      "holes": 0,
+      "outerLoopArea_gt": 50.0,
+      "areaApprox": 56.5,
+      "provenance": "proto_loop_detector.cpp:92-93 (area()>50.0; pi*6*3~=56.5, only '>50' asserted)"
+    }
   },
-  "notes": "Region/hole counts feed extrude/revolve profile selection and preview fill (SCHEMA §7.4 SketchRegions -> regions[] with outerLoop + holes[]). The square-with-hole case is the key multi-loop fixture: ONE region, ONE hole => an extrude of it produces a body with a through/blind pocket. The ellipse area is asserted only as '>50' (not an exact value) — recorded as such (approx 56.5 shown for orientation, not as an oracle). Loop detection uses makeRegionDetectionConfig() in the regen path (proto_regeneration Test 1)."
+  "notes": "Region/hole counts feed extrude/revolve profile selection and preview fill (SCHEMA §7.4 SketchRegions -> regions[] with outerLoop + holes[]). The square-with-hole case is the key multi-loop fixture: ONE region, ONE hole => an extrude of it produces a body with a through/blind pocket. The ellipse area is asserted only as '>50' (not an exact value) — recorded as such (approx 56.5 shown for orientation, not as an oracle). Loop detection uses makeRegionDetectionConfig() in the regen path (proto_regeneration Test 1). EXECUTABLE (roadmap C2): each scenario's `sketch.entities` is now the SCHEMA §7.4 entity form of the prose it shipped with, so the corpus runner can drive SketchRegions directly; `sketch.description` keeps the original wording and `sketch.entitiesProvenance` cites the C++ lines the geometry is read from. No expected value moved. The squareWithHole scenario carries a `newStack` block: the region MODEL changed (planar cells, both extrudable) while the hole count did not, and the corpus records both answers rather than replacing the frozen one."
 }

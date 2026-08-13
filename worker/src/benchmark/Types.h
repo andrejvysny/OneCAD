@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
 #include <nlohmann/json.hpp>
@@ -162,6 +163,15 @@ struct AdapterResult {
   TopoDS_Shape partial_shape;
   int contour_count = 0;
   int generated_face_count = 0;
+  // The faces the fillet builder GENERATED, taken from its own history rather
+  // than inferred from surface type. A recipe-agnostic validator cannot ask
+  // "which face is the cylinder?" — on a cylindrical support the answer is
+  // wrong, and that assumption is what `cylindricalRadius` is retired for.
+  std::vector<TopoDS_Face> blend_faces;
+  // The output faces the two supports of each selected edge became. Tangency is
+  // owed on the blend's boundary with THESE and nowhere else — a blend also
+  // meets the end caps, at a right angle, by design.
+  std::vector<TopoDS_Face> support_faces;
   int assigned_radius_count = 0;
   double assigned_radius_max_error = 0.0;
   nlohmann::json diagnostics = nlohmann::json::array();

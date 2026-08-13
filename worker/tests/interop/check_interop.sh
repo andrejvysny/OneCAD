@@ -22,11 +22,18 @@ HARNESS="${1:?harness binary path required}"
 WORKER="${2:?worker binary path required}"
 FIXDIR="${3:?protocol/fixtures dir required}"
 
+# ENUMERATED, never listed: a hardcoded set is how a canonical fixture escapes
+# this lane (boolean_empty_refusal.ndjson did exactly that). Every *.ndjson in
+# protocol/fixtures/ is part of the contract, so every one of them is replayed.
 rc=0
-for fx in hello.ndjson echo_error.ndjson \
-          execute_plan_ordinary.ndjson execute_plan_checkpoint_fallback.ndjson \
-          bind_element_ids.ndjson; do
-    path="${FIXDIR}/${fx}"
+shopt -s nullglob
+fixtures=("${FIXDIR}"/*.ndjson)
+if [ "${#fixtures[@]}" -eq 0 ]; then
+    echo "interop: NO fixtures found in ${FIXDIR} — refusing to pass vacuously"
+    exit 1
+fi
+for path in "${fixtures[@]}"; do
+    fx="$(basename "${path}")"
     echo "interop: replaying Rust-authored ${path} against ${WORKER}"
     if "${HARNESS}" --worker "${WORKER}" --fixture "${path}"; then
         echo "interop: ${fx} OK"

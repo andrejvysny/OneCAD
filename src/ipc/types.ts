@@ -696,6 +696,15 @@ export interface ResolveCandidate {
   summary: string;
   /** Per-feature score contributions (opaque; SCHEMA §9). */
   featureContributions?: unknown;
+  /**
+   * The authoritative body this candidate belongs to. NOT a wire field on
+   * `ResolveCandidateDto` — the backend only carries it once, on the parent
+   * `ResolveRefResult.bodyId` (SCHEMA §9), so the FE denormalizes it onto each
+   * candidate when building this list (`RepairPanel`), letting `rebindCandidate`
+   * promote against the body the resolve ladder actually enumerated instead of
+   * guessing from the (possibly stale) repair item.
+   */
+  bodyId?: string;
 }
 
 /**
@@ -906,6 +915,16 @@ export interface RegenFinished {
    * Present only when non-empty; the mock lane omits it.
    */
   failedSteps?: Array<{ recordId: string; message: string; diagnostics?: OperationDiagnostic[] }>;
+  /**
+   * Record ids this published regen left in `NeedsRepair`. Same per-record shape
+   * as `failedSteps`, and present for the same reason — the sibling `needs-repair`
+   * event carries the same facts but is emitted AFTER this one, so an awaiter that
+   * settles here would always miss it. NeedsRepair is document state, never a
+   * failure: this exists so a commit stops reporting itself as published, not so
+   * it can be raised into an error. Present only when non-empty; the mock lane
+   * omits it unless a scenario asks for it.
+   */
+  repairSteps?: string[];
   /**
    * Per record-id, the body ids that op created (incl. split children) or modified
    * in THIS published regen. Lets a correlated commit scope its result bodies to

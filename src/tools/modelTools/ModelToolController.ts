@@ -46,6 +46,7 @@ import { getDatumVisuals } from "@/modules/modeling/datumViewport";
 import { bareBodyId, buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
 import { mintUuid } from "@/ipc/sketchWireMap";
 import { promoteOne } from "@/ipc/promote";
+import { classifyRegen, failureReason, keepsRecord } from "@/ipc/regenOutcome";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { setSketchVisible } from "@/features/tree/treeActions";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
@@ -501,6 +502,13 @@ interface ToolPreviewSession {
   previewBodyIds: string[];
   /** Committed bodies hidden by this session's exact candidate. */
   replacedBodyIds: string[];
+  /**
+   * This session's newest kernel refusal, cleared the moment it answers with a
+   * candidate again (WP0.7: failure is tracked per session/epoch, never globally).
+   * A shared field made one region's refusal outlive its own recovery and wedge the
+   * commit for every other region.
+   */
+  failure: PreviewFailure | null;
 }
 
 /** Which tool owns the currently open preview sessions (drives hints + params). */
@@ -606,13 +614,6 @@ export class ModelToolController {
   // or re-arm a preview) after the tool moved on. Extends the armGen discipline
   // into commit time.
   private commitGen = 0;
-
-  // Click-away commit (MODEL-HARDEN Wave 1). A window-level capture pointerdown/up
-  // pair confirms an armed extrude/revolve on a true click outside the chip /
-  // toolbar / inputs and off the depth/angle handle (an orbit drag never commits).
-  private clickAwayArmed = false;
-  private clickAwayDownX = 0;
-  private clickAwayDownY = 0;
 
   // Edge-op (fillet / chamfer) context.
   private filletEdges: EntityRef[] = [];
@@ -821,10 +822,6 @@ export class ModelToolController {
     c.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
-    // Click-away commit — window capture so a click on ANY chrome (or empty space)
-    // outside the container is seen; the handlers gate on the armed phase + target.
-    window.addEventListener("pointerdown", this.onWindowPointerDown, true);
-    window.addEventListener("pointerup", this.onWindowPointerUp, true);
 
     this.unsubs.push(deps.client.onPreviewResult((r) => this.onPreviewResult(r)));
 
@@ -1360,6 +1357,7 @@ export class ModelToolController {
         lastAppliedEpoch: 0,
         previewBodyIds: [],
         replacedBodyIds: [],
+        failure: null,
       });
     }
     this.previewSessions = sessions;
@@ -2503,6 +2501,7 @@ export class ModelToolController {
         lastAppliedEpoch: 0,
         previewBodyIds: [],
         replacedBodyIds: [],
+        failure: null,
       });
     }
     this.previewSessions = sessions;
@@ -2810,7 +2809,8 @@ export class ModelToolController {
     const failed = this.previewSessions[k];
     const remaining = this.previewSessions.slice(k + 1);
     if (!failed) {
-      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 }));
+      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null }));
+      this.recomputePreviewFailure();
       this.throttle.reset();
       this.sendPreview();
       return;
@@ -2822,7 +2822,7 @@ export class ModelToolController {
     } catch {
       // The lane could not be re-opened: the L1 lathe + the armed FSM still carry the
       // user's parameters, and a re-confirm falls back to `applyOperation`.
-      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 }));
+      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null }));
       this.previewOwner = this.previewSessions.length > 0 ? this.previewOwner : null;
       this.previewParamsFn = this.previewSessions.length > 0 ? this.previewParamsFn : null;
       return;
@@ -2835,9 +2835,10 @@ export class ModelToolController {
     // epochs from a lower value, and a survivor holding a LARGE epoch would stale-drop
     // every new result and freeze its preview (extrude finding 9).
     this.previewSessions = [
-      { ...failed, session: freshSession, lastAppliedEpoch: 0 },
-      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
+      { ...failed, session: freshSession, lastAppliedEpoch: 0, failure: null },
+      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null })),
     ];
+    this.recomputePreviewFailure();
     this.throttle.reset();
     this.throttle.setTrailingMs(REVOLVE_PREVIEW_TRAILING_MS);
     this.sendPreview();
@@ -3238,7 +3239,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "edgeOp";
     this.previewParamsFn = () => this.edgeOpPreviewParams();
     this.previewPending = false;
@@ -3366,17 +3367,10 @@ export class ModelToolController {
     this.previewArmHint = editFeatureId ? null : hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     const anchor = faces[0]?.anchor?.worldPoint ?? [0, 0, 0];
-    if (editFeatureId) {
-      toolChipStore.getState().showShell(startThickness, anchor, (v) => {
-        this.onShellChip(v);
-        void this.commitShell(); // chip Enter/blur commits the thickness-only re-edit
-      });
-    } else {
-      toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
-        onConfirm: () => void this.commitShell(),
-        onCancel: () => toolStore.getState().setTool("select"),
-      });
-    }
+    toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
+      onConfirm: () => void this.commitShell(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     this.updateDebug();
     // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so
     // previewing an existing feature would double-apply it (the extrude re-edit
@@ -3408,7 +3402,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "shell";
     this.previewParamsFn = () => this.shellPreviewParams();
     this.previewPending = false;
@@ -3944,7 +3938,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "offsetFace";
     this.previewParamsFn = () => this.offsetFacePreviewParams();
     this.previewPending = false;
@@ -4417,7 +4411,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "hole";
     this.previewParamsFn = () => this.holePreviewParams();
     this.previewPending = false;
@@ -4614,6 +4608,7 @@ export class ModelToolController {
       onCount: (n) => this.onLinearCount(n),
       onSpacing: (v) => this.onLinearSpacing(v),
       onApply: () => void this.commitLinear(),
+      onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
   }
@@ -4687,6 +4682,7 @@ export class ModelToolController {
     seedAngle?: number,
     resultPolicyVersion?: 2,
     fuseResult?: boolean,
+    seedOrigin?: [number, number, number],
   ): void {
     this.patternEditFeatureId = editFeatureId;
     this.patternResultPolicyVersion = editFeatureId ? resultPolicyVersion : 2;
@@ -4696,6 +4692,7 @@ export class ModelToolController {
       bodyId,
       count: seedCount,
       axis: seedAxis,
+      origin: seedOrigin,
       angle: seedAngle,
     }).state;
     toolStore.setState({ phase: "armed" });
@@ -4706,6 +4703,7 @@ export class ModelToolController {
       onCount: (n) => this.onCircularCount(n),
       onAngle: (v) => this.onCircularAngle(v),
       onApply: () => void this.commitCircular(),
+      onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
   }
@@ -4732,13 +4730,13 @@ export class ModelToolController {
     if (!entry) return;
     this.deps.engine.showGhostPreview(
       entry,
-      circularGhostTransforms([0, 0, 0], WORLD_AXIS[this.circular.axis], this.circular.angle, this.circular.count),
+      circularGhostTransforms(this.circular.origin, WORLD_AXIS[this.circular.axis], this.circular.angle, this.circular.count),
     );
   }
 
   private async commitCircular(): Promise<void> {
     if (this.circular.phase !== "armed" || !this.circular.bodyId) return;
-    const { bodyId, axis, angle, count } = this.circular;
+    const { bodyId, axis, angle, count, origin } = this.circular;
     const editFeatureId = this.patternEditFeatureId;
     this.circular = circularPatternStep(this.circular, { kind: "apply" }).state;
     const op: OperationOp = {
@@ -4747,7 +4745,7 @@ export class ModelToolController {
       inputs: [{ primary: { bodyId, kind: "body" } }],
       params: {
         sourceBodyId: bodyId,
-        axisOrigin: [0, 0, 0],
+        axisOrigin: origin,
         axisDirection: WORLD_AXIS[axis],
         angleDeg: angle,
         count,
@@ -4772,15 +4770,28 @@ export class ModelToolController {
     this.armMirror(bodyId);
   }
 
-  private armMirror(bodyId: string, editFeatureId?: string, seedPlane?: MirrorPlane): void {
+  private armMirror(
+    bodyId: string,
+    editFeatureId?: string,
+    seedPlane?: MirrorPlane,
+    seedPlanePoint?: [number, number, number],
+    fuseWithOriginal?: boolean,
+  ): void {
     this.patternEditFeatureId = editFeatureId;
-    this.mirror = mirrorStep(mirrorInit(), { kind: "arm", bodyId, plane: seedPlane }).state;
+    this.patternFuseResult = editFeatureId ? fuseWithOriginal ?? true : false;
+    this.mirror = mirrorStep(mirrorInit(), {
+      kind: "arm",
+      bodyId,
+      plane: seedPlane,
+      planePoint: seedPlanePoint,
+    }).state;
     toolStore.setState({ phase: "armed" });
     viewportStore.getState().setStatusHint("Pick a mirror plane, then Apply", { sticky: true });
     this.rebuildMirrorGhost();
     toolChipStore.getState().showMirror(this.mirror.plane, this.bodyCenter(bodyId), {
       onPlane: (p) => this.onMirrorPlane(p),
       onApply: () => void this.commitMirror(),
+      onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
   }
@@ -4795,12 +4806,15 @@ export class ModelToolController {
     if (!this.mirror.bodyId) return;
     const entry = getEntry(this.mirror.bodyId);
     if (!entry) return;
-    this.deps.engine.showGhostPreview(entry, mirrorGhostTransforms([0, 0, 0], WORLD_PLANE_NORMAL[this.mirror.plane]));
+    this.deps.engine.showGhostPreview(
+      entry,
+      mirrorGhostTransforms(this.mirror.planePoint, WORLD_PLANE_NORMAL[this.mirror.plane]),
+    );
   }
 
   private async commitMirror(): Promise<void> {
     if (this.mirror.phase !== "armed" || !this.mirror.bodyId) return;
-    const { bodyId, plane } = this.mirror;
+    const { bodyId, plane, planePoint } = this.mirror;
     const editFeatureId = this.patternEditFeatureId;
     this.mirror = mirrorStep(this.mirror, { kind: "apply" }).state;
     const op: OperationOp = {
@@ -4809,9 +4823,9 @@ export class ModelToolController {
       inputs: [{ primary: { bodyId, kind: "body" } }],
       params: {
         sourceBodyId: bodyId,
-        planePoint: [0, 0, 0],
+        planePoint,
         planeNormal: WORLD_PLANE_NORMAL[plane],
-        fuseWithOriginal: false,
+        fuseWithOriginal: this.patternFuseResult,
       },
     };
     await this.commitPattern(op, bodyId, "Mirrored");
@@ -4824,10 +4838,29 @@ export class ModelToolController {
     // The result message is captured, not published, until the tool has been reset —
     // see `resetToSelect` for why publishing first would lose it.
     let failure: string | null = null;
+    let repaired = false;
     try {
       const res = await this.client.applyOperation(op);
-      this.applyResult(res);
-      selectionStore.getState().set([{ kind: "body", id: bodyId }]);
+      const outcome = classifyRegen(res);
+      failure = failureReason(outcome);
+      repaired = outcome.kind === "needsRepair";
+      if (outcome.kind === "published") {
+        this.applyResult(res);
+        // Select the generated children (contract: successSelection "newBodies"),
+        // not the source — a non-fused pattern/mirror leaves the source body
+        // untouched alongside its new copies. A fused result folds everything
+        // back into the source, so there ARE no "new" ids: fall back to it.
+        const created = (res.changedBodies ?? [])
+          .map((r) => r.bodyId)
+          .filter((id) => id !== bodyId);
+        const toSelect = created.length > 0 ? created : [bodyId];
+        selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
+      } else if (outcome.kind === "noop" || repaired) {
+        // Nothing published, nothing wrong. Apply whatever the result carries and
+        // select nothing — moving the selection onto a body this op did not
+        // produce is exactly the mis-report WP0.3 forbids.
+        this.applyResult(res);
+      }
     } catch (e) {
       failure = errMessage(e);
     }
@@ -4839,6 +4872,12 @@ export class ModelToolController {
     this.patternFuseResult = false;
     if (failure !== null) {
       this.resetToSelect(`Pattern failed: ${failure}`, { severity: "error", sticky: true });
+    } else if (repaired) {
+      // A repair prompt, not a failure and not a success: the record stands and
+      // the repair panel is what acts on it next.
+      // `info`, not `error`: the status system has exactly two severities and
+      // NeedsRepair is not a failure. Sticky, because it is an ask.
+      this.resetToSelect("Pattern needs repair", { severity: "info", sticky: true });
     } else {
       this.resetToSelect(doneHint);
     }
@@ -4904,10 +4943,11 @@ export class ModelToolController {
     }
     const angle = scalarNumber(stored?.angleDeg);
     const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
+    const origin = storedVec3(stored?.axisOrigin) ?? undefined;
     toolStore.getState().setTool("circularPattern");
     const resultPolicyVersion = stored?.resultPolicyVersion === 2 ? 2 : undefined;
     const fuseResult = typeof stored?.fuseResult === "boolean" ? stored.fuseResult : true;
-    this.armCircular(bodyId, featureId, count, axis, angle, resultPolicyVersion, fuseResult);
+    this.armCircular(bodyId, featureId, count, axis, angle, resultPolicyVersion, fuseResult, origin);
   }
 
   /** Mirror counterpart of `editLinearPatternFeature` — seeds the mirror plane from
@@ -4930,8 +4970,10 @@ export class ModelToolController {
         });
       return;
     }
+    const planePoint = storedVec3(stored?.planePoint) ?? undefined;
+    const fuseWithOriginal = typeof stored?.fuseWithOriginal === "boolean" ? stored.fuseWithOriginal : true;
     toolStore.getState().setTool("mirror");
-    this.armMirror(bodyId, featureId, plane);
+    this.armMirror(bodyId, featureId, plane, planePoint, fuseWithOriginal);
   }
 
   /**
@@ -5564,7 +5606,15 @@ export class ModelToolController {
       const res = await this.client.applyOperation(op);
       this.applyResult(res);
       this.endAlign();
-      selectionStore.getState().set(params.targets.map((id) => ({ kind: "body" as const, id })));
+      // A copy leaves the sources untouched and produces NEW body ids in
+      // `changedBodies` (`body_<opId>:<k>`, see the comment above) — select
+      // those, not the sources. A non-copy move keeps the same id, so the
+      // targets ARE the changed bodies and this falls back to them unchanged.
+      const created = (res.changedBodies ?? [])
+        .map((r) => r.bodyId)
+        .filter((id) => !params.targets.includes(id));
+      const toSelect = created.length > 0 ? created : params.targets;
+      selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
       this.transform = transformInit();
       this.transformEditFeatureId = undefined;
       this.transformArmedInverse = null;
@@ -5664,10 +5714,9 @@ export class ModelToolController {
   //
   //   base pick — the PlanePicker gizmo is reused VERBATIM (its orbit gate,
   //               hover chip and geometric labelling all come along for free);
-  //   offset    — a live ghost quad + the datum chip. ✓ or Enter commits; there
-  //               is deliberately NO click-away commit (`isArmedForClickAway`
-  //               ignores the datum), because the offset phase has no drag
-  //               gesture and a stray canvas click would silently author a datum.
+  //   offset    — a live ghost quad + the datum chip. ✓ or Enter commits; a
+  //               stray canvas click never authors a datum (no click-away commit
+  //               exists anywhere in this controller — see the WP0 spec choice).
   //
   // V1 authors OffsetFromPlane off a WORLD plane only. The backend also accepts
   // another datum's id as the base (chained offsets) — that is a later wave, and
@@ -6179,63 +6228,7 @@ export class ModelToolController {
     }
   };
 
-  // ── click-away commit (window capture — MODEL-HARDEN Wave 1) ─────────────────
-  //
-  // The controller's own pointer listeners are container-local, so a click OUTSIDE
-  // the container (or on empty 3D space) can't reach them. A window-capture pair
-  // confirms an armed extrude/revolve on a TRUE click (within DRAG_PX of the press,
-  // so an orbit drag never commits) that lands off the chip / toolbar / inputs and
-  // does not grab the depth/angle handle. Disabled during axis / target / region
-  // pick (those phases are not `armed`).
-
-  private onWindowPointerDown = (e: PointerEvent): void => {
-    this.clickAwayArmed = false;
-    if (e.button !== 0 || !this.isArmedForClickAway()) return;
-    if (this.isExcludedClickAwayTarget(e.target)) return;
-    if (this.pressGrabsHandle(e.clientX, e.clientY)) return; // a re-drag, not a click-away
-    this.clickAwayArmed = true;
-    this.clickAwayDownX = e.clientX;
-    this.clickAwayDownY = e.clientY;
-  };
-
-  private onWindowPointerUp = (e: PointerEvent): void => {
-    if (!this.clickAwayArmed) return;
-    this.clickAwayArmed = false;
-    if (e.button !== 0) return;
-    const moved =
-      Math.abs(e.clientX - this.clickAwayDownX) > DRAG_PX ||
-      Math.abs(e.clientY - this.clickAwayDownY) > DRAG_PX;
-    if (moved) return; // an orbit / angle drag — never commits
-    if (this.isExcludedClickAwayTarget(e.target)) return;
-    if (this.extrude.phase === "armed") void this.confirmExtrude();
-    else if (this.revolve.phase === "armed") void this.confirmRevolve();
-    else if (this.offsetFace.phase === "armed") void this.commitOffsetFace();
-  };
-
-  /** True while an extrude/revolve/offset is armed and no modal pick owns the pointer. */
-  private isArmedForClickAway(): boolean {
-    if (this.regionPick) return false;
-    // OffsetFace joins ONLY in its handle gesture. The DEGRADED variant claims
-    // every viewport press as a value drag (there is no arrow to miss), and a tool
-    // that owns the press cannot also treat it as a click-away — the same reason
-    // the edge ops and shell are absent from this list entirely.
-    if (this.offsetFace.phase === "armed" && !this.offsetDegraded) return true;
-    return this.extrude.phase === "armed" || this.revolve.phase === "armed";
-  }
-
-  /** A press that grabs the depth handle is a re-drag, not a click-away (extrude). */
-  private pressGrabsHandle(x: number, y: number): boolean {
-    if (this.extrude.phase === "armed") return this.engine.hitExtrudeHandle(x, y);
-    // Same shared handle, same rule: a press ON the offset arrow starts a drag.
-    if (this.offsetFace.phase === "armed" && !this.offsetDegraded) {
-      return this.engine.hitExtrudeHandle(x, y);
-    }
-    // Revolve: any press is a potential angle drag — the moved-check decides commit
-    // vs drag on release, so never suppress the click-away arm here.
-    return false;
-  }
-
-  /** Chip / toolbar / input / overlay targets never trigger a click-away commit.
+  /** Chip / toolbar / input / overlay targets never drive an in-canvas gesture.
    *  Accepts any Element incl. SVGElement (a toolbar icon click lands on an <svg>/
    *  <path>, which is NOT an HTMLElement) — walk up via `.closest()` so an icon-inside-
    *  button still resolves to its excluded ancestor (finding 5). */
@@ -6424,21 +6417,13 @@ export class ModelToolController {
       es.lastAppliedEpoch = r.epoch;
       if (r.error) {
         this.clearPreviewCandidate(es);
-        this.onPreviewFailure(r.error);
+        this.onPreviewFailure(es, r.error);
       } else if (r.bodies || r.mesh) {
-        this.previewFailure = null;
+        this.clearSessionFailure(es);
         this.stalePreviewRetryAttempted = false;
         this.applyPreviewBodies(es, r);
         this.lastL2Epoch = r.epoch;
-        // Restore the OWNER's arm hint (a session exists ⇒ the owner is set). A
-        // recovered candidate MUST take the line back: otherwise the previous
-        // "… preview failed" stays on screen contradicting a preview that now
-        // works, and the user has no signal that ✓ is unblocked again.
-        if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
-          viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
-        } else if (this.previewArmHint) {
-          viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
-        }
+        this.restoreArmHint();
       }
       const send = this.throttle.tick(now);
       if (send) {
@@ -6452,9 +6437,15 @@ export class ModelToolController {
       // is the only staleness guard (they follow the primary's epochs).
       if (r.error) {
         this.clearPreviewCandidate(es);
-        this.onPreviewFailure(r.error);
+        this.onPreviewFailure(es, r.error);
+      } else if (r.bodies || r.mesh) {
+        // A recovered SECONDARY must drop its own failure exactly like the primary
+        // does. It used not to, so one region's transient refusal outlived itself
+        // and blocked every commit for the rest of the gesture (WP0.7).
+        this.clearSessionFailure(es);
+        this.applyPreviewBodies(es, r);
+        this.restoreArmHint();
       }
-      else if (r.bodies || r.mesh) this.applyPreviewBodies(es, r);
       es.lastAppliedEpoch = r.epoch;
     }
   }
@@ -6532,8 +6523,41 @@ export class ModelToolController {
     return this.previewOwner ?? "extrude";
   }
 
-  private onPreviewFailure(error: PreviewFailure): void {
+  /**
+   * Restore the OWNER's arm hint (a session exists ⇒ the owner is set). A recovered
+   * candidate MUST take the line back: otherwise the previous "… preview failed"
+   * stays on screen contradicting a preview that now works, and the user has no
+   * signal that ✓ is unblocked again. Called from BOTH result branches — a
+   * secondary's recovery is just as visible to the user as the primary's.
+   */
+  private restoreArmHint(): void {
+    if (this.previewFailure) return; // another session is still failing — its hint stands
+    if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
+      viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
+    } else if (this.previewArmHint) {
+      viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
+    }
+  }
+
+  /**
+   * `previewFailure` is the LANE's failure: the newest refusal among the sessions
+   * that still have one. Every commit gate reads it, so it must go quiet as soon as
+   * the last failing session recovers, and stay set while any other still refuses.
+   */
+  private recomputePreviewFailure(): void {
+    this.previewFailure = this.previewSessions.find((s) => s.failure)?.failure ?? null;
+  }
+
+  /** Drop `es`'s refusal after it answered with a candidate again. */
+  private clearSessionFailure(es: ToolPreviewSession): void {
+    if (!es.failure) return;
+    es.failure = null;
+    this.recomputePreviewFailure();
+  }
+
+  private onPreviewFailure(es: ToolPreviewSession, error: PreviewFailure): void {
     traceWarn(this.previewOwnerTag(), `preview failure (kind=${error.kind}): ${error.message}`);
+    es.failure = error;
     this.previewFailure = error;
     this.clearPreviewPending();
     // The exact candidate is gone; bring the L1 ghost back so the user is not left
@@ -6836,9 +6860,10 @@ export class ModelToolController {
     // epochs from a lower value; a surviving session that kept a LARGE lastAppliedEpoch
     // would stale-drop every new (lower) L2 epoch, freezing its preview. Zero them all.
     this.previewSessions = [
-      { ...failed, session: freshSession, lastAppliedEpoch: 0 },
-      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
+      { ...failed, session: freshSession, lastAppliedEpoch: 0, failure: null },
+      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0, failure: null })),
     ];
+    this.recomputePreviewFailure();
 
     // Every session on this path is an Extrude arm, so each carries its profile;
     // the filter is the type-level restatement of that, not a new tolerance.
@@ -6971,10 +6996,11 @@ export class ModelToolController {
       try {
         const res = await this.client.applyOperation(fallback);
         if (gen !== this.commitGen) return { kind: "superseded" };
-        if (res.changedBodies.length === 0 && res.removedBodies.length === 0) {
+        const outcome = classifyRegen(res);
+        if (!keepsRecord(outcome)) {
           await this.rollbackFailedCommit();
           if (gen !== this.commitGen) return { kind: "superseded" };
-          return { kind: "failed", reason: res.errorMessage ?? "no body changed" };
+          return { kind: "failed", reason: failureReason(outcome) ?? "no body changed" };
         }
         return { kind: "ok", res };
       } catch (e) {
@@ -7017,14 +7043,16 @@ export class ModelToolController {
     }
     this.releaseCommittedSession(es);
     if (gen !== this.commitGen) return { kind: "superseded" };
-    if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+    const outcome = classifyRegen(res);
+    if (!keepsRecord(outcome)) {
       // The command applied but its regen failed — pop the errored record so a
       // retried ✓ replaces it instead of stacking a duplicate (extrude's rule).
+      // A NeedsRepair record is deliberately NOT rolled back: repair acts on it.
       await this.rollbackFailedCommit();
       if (gen !== this.commitGen) return { kind: "superseded" };
-      return { kind: "failed", reason: res?.errorMessage ?? "no body changed" };
+      return { kind: "failed", reason: failureReason(outcome) ?? "no body changed" };
     }
-    return { kind: "ok", res };
+    return { kind: "ok", res: res as ApplyOperationResult };
   }
 
   /** Drop a consumed/released lane session + its candidate meshes (no endPreview). */
@@ -7319,6 +7347,7 @@ export class ModelToolController {
       this.bodyCenter(tool),
       (op) => this.setBooleanOp(op),
       () => void this.commitBoolean(),
+      () => toolStore.getState().setTool("select"),
     );
     this.previewArmHint = "Choose Union / Cut / Intersect, then Apply";
   }
@@ -7382,7 +7411,7 @@ export class ModelToolController {
   /** Wire a freshly opened Boolean session into the shared preview lane and send
    *  the first exact request. Shared by the initial arm and a post-failure re-arm. */
   private openBooleanPreviewSession(session: PreviewSession, draft: PreviewDraft): void {
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
     this.previewOwner = "boolean";
     this.previewParamsFn = () => this.booleanPreviewParams();
     this.previewFailure = null;
@@ -7482,15 +7511,16 @@ export class ModelToolController {
       return;
     }
     if (gen !== this.commitGen) return;
-    if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+    const outcome = classifyRegen(res);
+    if (!keepsRecord(outcome)) {
       // Applied but the regen failed: pop the errored record so a retried Apply
       // cannot stack a duplicate (the same defect class extrude's rollback closes).
       await this.rollbackFailedCommit();
       if (gen !== this.commitGen) return;
-      this.onBooleanCommitFailed(res?.errorMessage, gen);
+      this.onBooleanCommitFailed(failureReason(outcome) ?? undefined, gen);
       return;
     }
-    this.applyResult(res);
+    this.applyResult(res as ApplyOperationResult);
     for (const es of this.previewSessions) this.removeExactPreviewMeshes(es);
     this.previewSessions = [];
     this.previewOwner = null;
@@ -7608,6 +7638,7 @@ export class ModelToolController {
       this.bodyCenter(toolRetired ? targetBodyId : toolBodyId),
       (next) => this.setBooleanOp(next),
       () => void this.commitBoolean(),
+      () => toolStore.getState().setTool("select"),
     );
     viewportStore.getState().setStatusHint("Change the boolean operation · Apply", { sticky: true });
     this.updateDebug();
@@ -8257,8 +8288,6 @@ export class ModelToolController {
     c.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("keyup", this.onKeyUp, true);
-    window.removeEventListener("pointerdown", this.onWindowPointerDown, true);
-    window.removeEventListener("pointerup", this.onWindowPointerUp, true);
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
     if (this.commitBodyTimer) clearTimeout(this.commitBodyTimer);
     if (this.commitRevolveBodyTimer) clearTimeout(this.commitRevolveBodyTimer);

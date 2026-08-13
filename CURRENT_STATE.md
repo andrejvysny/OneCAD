@@ -442,6 +442,248 @@ Deviation from the plan, recorded: `SetComponentParams`/`ReplaceComponent` (WP-1
 Not started: WP-1.5 (snap solver + `PreviewOp` drag ghost — the largest remaining P1 WP, first one to touch the viewport engine), WP-1.6 (StatusSection/tasks-chip), WP-1.7 (e2e), all of P2/P3/P4. Plan's open questions Q1 (crate boundary) and Q6 (library-service-vs-CommandApi routing) resolved by implementation; Q2 (service-build scope) moot, done; Q3 (BOLTS ingestion ownership), Q4 (template content sourcing), Q5 (`document` source nested-replay) remain fully open — none block WP-1.5.
 
 Next action: WP-1.5. See `HANDOFF.md` new top entry for full resume detail.
+# Current State
+
+Last verified: 2026-08-13 15:05
+
+- **Branch:** `master`, **14 commits ahead of `origin/master` — nothing pushed.** One of
+  them (`15e798a`, a Render-module design stub) is the CONCURRENT session's, landed mid-gate.
+- **This session:** Track A complete (`772b3d2` A1 · `6b08e27` A2 · `4b62965` A3 · `5723ab3`
+  A4/A5/A6), then plan items **C1** (`1c76c41`) and **C2**.
+- **Build/test at the C2 gate:** `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → **1082 / 0** ·
+  `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` → clean ·
+  `ctest --test-dir worker/build` → **119/119** (unchanged by C1/C2, worker untouched) ·
+  `bun run test` → **249 files / 4173 tests** · `bunx tsc --noEmit` + `bun run build` → clean ·
+  both modeling verifiers → pass · verifier negative controls → **12/12** ·
+  targeted Playwright (preview lanes, both browsers, retries 0) → 20/20.
+  Full Playwright suite still not re-run (plan item C6); kernelbench not implicated.
+- **Key decisions:** the Revolve body-edge axis stays **UI-hidden** · the SCHEMA §7.5 `ResolveRefs`
+  snapshot echo was **implemented** rather than written around, and Rust validates it fail-closed ·
+  `documentRevision` stays Rust-owned in the repair DTO (D4) · corpus cases are **enriched with
+  executable geometry** read back out of their own frozen numbers, rather than moving the geometry
+  into Rust or leaving the corpus 1-of-9 live.
+- **Three live defects fixed by mandated tests this session** (none was evidence debt): preview
+  failure tracked globally blocked commits after a recovered secondary region; `ResolveRefs`
+  results were cached under a key Rust minted itself; and `needsRepair` was declared but never
+  produced (A1).
+- **Blockers / open:**
+  - Full Playwright suite still not green-verified since the P4 landings (plan item C6).
+  - Six corpus cases still carry an explicit unsupported reason (C2 § below names each).
+  - A second session, `onecad-library-content-impl`, shares this working tree.
+
+The per-gate detail for every wave, newest first, follows.
+
+## ROADMAP C1 + C2 — EVIDENCE THAT CAN FAIL (2026-08-13) — GATE PASSED
+
+Two plan items whose whole subject is whether a claim can be falsified. Full detail in `TODO.md`
+§ ROADMAP C1 and § ROADMAP C2.
+
+**C1 — the coverage manifest.** Sixteen cited test paths did not exist and eleven rows named a CI
+job (`macos-full`) that is in no workflow, all under a green verifier that never opened a file.
+Every row now cites something real; `ciJob` became a per-lane list resolved against the workflows;
+four rows state a measured limit instead of an overclaim (single-face Shell, `Radius`-only
+OffsetFace in Rust, an uncommitted countersink in the browser, C++-only partial sweep); one
+"overclaim" was disproved (MirrorBody no-fuse IS covered) and one under-claim corrected (Boolean
+Intersect). The verifier stats every path, resolves every job, runs WP4.5's five registry
+cross-checks with a found-something guard on each scan, and is backed by twelve negative controls
+— including the plan's acceptance test, renaming a cited spec.
+
+**C2 — the corpus.** It ran 1 of 9 not because the interpreter was thin but because only case `a`
+carried complete geometry: `b` referenced four sketches it never authored, `i`'s entities were
+prose. With the user's decision, the cases were ENRICHED — every footprint read back out of a
+frozen assertion (`3750 = 4000 − 5·5·10`), each with its own `entitiesProvenance` — and the
+executor now runs `a`, `b` and `i`. Case `a` asserts its whole expected block (regions, body
+events, solids, volume, faceCount) rather than one volume; classification comes from the coverage
+manifest so the two artifacts cannot drift; structure and provenance are checked for all nine on
+every machine; and a stale unsupported reason is an error.
+
+One divergence is recorded rather than smoothed over: the square-with-hole sketch detects TWO
+regions on the new stack (annulus + inner square) where the C++ LoopDetector reported one face with
+an inner loop. That is the planar-cell model `wire_contract.rs` already pins, so the case carries a
+`newStack` block citing it and keeps the frozen number visible.
+
+- **Changed:** `docs/qa/modeling-operation-coverage.json` · `scripts/verify-modeling-coverage.mjs` ·
+  `scripts/tests/verify-modeling-coverage.test.sh` · `src-tauri/tests/corpus_executor.rs` ·
+  `corpus/cases/{b_extrude_throughall_symmetric_twodir,i_multiregion_loop_detection}.json`.
+- **Gates:** real-worker workspace **1082 / 0** · fmt · clippy · both verifiers · controls 12/12 ·
+  every corpus file parses; case `a` byte-identical.
+- **Next:** C3 (WP4.6 has zero tests) and C4 (deepen the thin verticals — where C1's four measured
+  limits get closed).
+
+## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
+
+Track A is complete. Full per-item detail is in `TODO.md` § ROADMAP A4 · A5 · A6; the parts worth
+carrying:
+
+**A4 — the Revolve body-edge axis is recorded as UI-hidden, and now provable.** The contract row
+said `uiExposure:"exposed"` while no code path could author one. The product call is HIDDEN: kernel
+and core keep the capability, the UI keeps authoring only `sketchLine`. All four WP1.5 tests landed
+— curved-edge and cross-body refusals in `test_wp6_ops.cpp`, promote→revolve→upstream-edit→reopen
+and a fillet-CONSUMED axis edge ⇒ NeedsRepair in `revolve_ops.rs`. Removing the partition-ownership
+gate makes the revolve silently swap to the other body's edge; that is what the test now catches.
+Measured aside: a +20% upstream growth of the axis edge rebinds, +100% is NeedsRepair, and a FILLET
+ref answers identically — the shared ladder's descriptor-magnitude policy, not an axis quirk.
+
+**A5 — WP0.7 was a live defect, not missing evidence.** Candidate ownership was per-session but
+`previewFailure` was one field: a secondary region's refusal outlived its own recovery and blocked
+every commit behind a stale error hint. Failure now lives on `ToolPreviewSession`; the lane's
+failure is the union. The mandated test (both delivery orders, secondary fail-and-RECOVER) was red
+before the fix. WP0.8 gained its two untested re-arm paths (rejected commit, resolved regen failure)
+and the "permits a successful second Apply" clause, committing the re-armed session rather than the
+consumed one.
+
+**A6 — one fixture needed the contract to become true first.** SCHEMA §7.5 has always required every
+`ResolveRefs` resolution to echo `{snapshotId, revision, refId, bodyId}`; neither worker emitted any
+of it, Rust manufactured all three app-side and validated nothing, so a resolution computed on an
+older snapshot was cached under a freshly minted key — the silent wrong bind the rule exists to
+prevent. Worker + stub now echo it, `wire::validate_resolve_refs_result` fails closed, and the DTO
+keeps Rust's own `revision` by decision D4 (the repair store keys on it) while taking the SNAPSHOT
+from the echo. Two new canonical fixtures, and fixture discovery is now enumerated in both lanes —
+the hardcoded lists were why `boolean_empty_refusal.ndjson` ran in only one of them.
+
+- **Changed:** `worker/src/session/ElementIdentity.cpp` · `worker/tests/{test_wp6_ops.cpp,CMakeLists.txt,interop/check_interop.sh}` ·
+  `protocol/{SCHEMA.md,fixtures/README.md,fixtures/bind_element_ids.ndjson}` + two new fixtures ·
+  `src-tauri/crates/onecad-core/src/regen/engine.rs` · `src-tauri/crates/onecad-protocol/src/messages.rs` ·
+  `src-tauri/crates/onecad-worker-stub/src/main.rs` · `src-tauri/src/{api/mod.rs,dto.rs,worker/wire.rs,worker/manager.rs}` ·
+  `src-tauri/tests/revolve_ops.rs` · `src/tools/modelTools/ModelToolController.ts` + three test files ·
+  `docs/qa/modeling-operation-contracts.json`.
+- **Gates:** ctest **119/119** · fmt · clippy · real-worker workspace **1082 / 0** · tsc · build ·
+  vitest **249 files / 4173 tests** · both verifiers · hex 0 · targeted Playwright 20/20.
+- **Next:** C1 — make the coverage manifest true, then give `verify-modeling-coverage.mjs` teeth.
+
+## ROADMAP A3 — STABLE DIAGNOSTIC CODES FOR THE P0 REFUSALS (2026-08-13) — COMMITTED `4b62965`
+
+Phase 0 shipped two new refusals — zero-solid Boolean and Draft — that returned a
+bare `OP_FAILED` with the reason only in the message, forcing message-text routing
+the diagnostics contract forbids. Both now carry a stable per-defect diagnostic
+code, `stage`, and bounded evidence, following the
+`EDGE_OP_TANGENT_CLOSURE_CHANGED` precedent: the §8 top-level code is unchanged,
+so this is additive on the wire.
+
+Four `EXTRUDE_DRAFT_*` codes plus `BOOLEAN_EMPTY_RESULT`. The codes are asserted to
+DISCRIMINATE (no-planar-wall vs 89° self-intersecting taper produce different
+codes), both lanes are asserted to agree (the preview refusal carries the same code
+as the commit), and `boolean_empty_refusal.ndjson` — one of the fixtures the Phase 3
+review flagged as never extended — now asserts the diagnostic and was verified to
+fail on a wrong code.
+
+- **Changed:** `worker/src/ops/{ExtrudeOp,BooleanOp}.cpp` · `worker/tests/{test_extrude_draft,test_boolean_empty}.cpp` ·
+  `src-tauri/tests/preview_extrude_draft.rs` · `protocol/{SCHEMA.md,fixtures/boolean_empty_refusal.ndjson}`.
+- **Gates:** ctest **117/117** · fmt · clippy · real-worker workspace **1078 / 0**.
+- **Next:** A4 — the four required Revolve body-edge-axis tests, then reconcile the
+  contract row claiming `uiExposure:"exposed"` against `src/ipc/types.ts:843`.
+
+## ROADMAP A2 — DRAFT APPLIED-OR-REFUSED (2026-08-13) — COMMITTED `6b08e27`
+
+WP0.6. The implementation was already correct; the evidence was missing. No test
+pinned any of the three refusal strings, and the work package's first mandated
+task — the circular-profile red probe — had never been run.
+
+**The probe ran and the answer is refusal**, so risk R-10 is closed as not-present
+with evidence rather than by inspection: a circular profile refuses with
+`Extrude draft refused: no eligible planar side faces`, in the preview lane as
+well as on commit. New ctest `extrude_draft` pins the closed-form frustum for both
+signs, the near-limit refusal, the sub-epsilon no-op and determinism; new
+real-worker `preview_extrude_draft.rs` pins preview == closed form == commit
+(688.801) and a head left byte-identical.
+
+- **Findings recorded, not fixed:** `Arc` entities still reach the BRep as polylines
+  while `Circle` stays analytic — the slot probe measures 28 faces and a 24-gon cap,
+  direct evidence for the Phase 2 residual. And the draft refusal already carries a
+  structured `Diagnostic{stage:"build"}`, so A3's remaining work there is the stable
+  per-defect code, not the envelope.
+- **Gates:** ctest **117/117** · fmt · clippy · real-worker workspace **1078 / 0**.
+- **Next:** A3, stable diagnostic codes for the zero-solid Boolean and Draft refusals.
+
+## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13) — COMMITTED `772b3d2`
+
+WP0.3 finished. It was recorded complete but only the transport half had landed:
+`needsRepair` was declared and never produced, no shared helper existed, and every
+consumer still inferred success from body counts — a live R-04 defect, not missing
+evidence.
+
+`regen-finished` gained `repairSteps` so a commit can tell "my op could not resolve
+its refs" from "my op published"; it rides that payload because the sibling
+`needs-repair` event is emitted after it. `src/ipc/regenOutcome.ts` is now the one
+place a result becomes a verdict, and a NeedsRepair record is never rolled back —
+rolling back the record repair operates on would delete what the user is fixing.
+
+- **Changed:** `src-tauri/src/{dto.rs,api/mod.rs}` · `src/ipc/{types.ts,tauriClient.ts,mockClient.ts}` ·
+  `src/ipc/regenOutcome.ts` (new) + its test · `src/tools/modelTools/ModelToolController.ts` ·
+  `src/features/inspector/historyActions.ts` · two new terminal-table tests.
+- **Gates:** tsc clean · vitest **247 files / 4161 tests** (from 244/4124) · build clean ·
+  fmt · clippy · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**.
+- **Both new tables proved non-vacuous by mutation** — reverting `commitPattern` to the
+  old check reproduces R-04: a `needsRepair` result printed the success hint.
+- **Next:** A2, pin the Draft refusals and run the mandated circular-profile red probe.
+
+## KERNELBENCH M4 — RECIPE-AGNOSTIC VALIDATORS (2026-08-13) — COMMITTED `8bd0fdb`
+
+Roadmap Phase 5 WP5.2. `supportTangency`, `crossSectionProfile`, `manifold`,
+`noSelfIntersection`, `microTopology` and `toleranceGrowth` are implemented and
+REQUIRED on every m1 case, curved support pairs included. They previously
+returned `notApplicable`, which a required check must fail.
+
+The enabling change is that the blend is now taken from the fillet builder's own
+history — `AdapterResult.blend_faces` (`Generated`) and `.support_faces`
+(`Modified` of the selected edge's supports) — instead of being recognised by
+surface type. "The cylinder in the output is the fillet" is false the moment a
+SUPPORT is a cylinder, which is the assumption that keeps `cylindricalRadius` and
+`g1BoundaryTangency` confined to all-planar pairs.
+
+`crossSectionProfile` compares `1/|k|` for the larger principal curvature against
+the requested radius, exact on plane, cylinder and cone because a constant-radius
+blend is a canal surface whose circular sections are lines of curvature — worst
+deviation across the matrix 2.7e-14 mm. Allowances carry a conditioning term
+proportional to coordinate magnitude, because `farOriginTranslation` rebuilds the
+model 1.7e6 mm out where double precision costs six orders of magnitude; without
+it the probe reads arithmetic as a defect.
+
+- **Changed:** `worker/src/benchmark/{BlendEvidence.h,BlendEvidence.cpp}` (new) ·
+  `worker/src/benchmark/{Types.h,FilletRun.cpp,SemanticValidation.cpp,SemanticValidation.h,Execution.cpp}` ·
+  `worker/tools/kernelbench-runner/{CMakeLists.txt,validator_fixtures.cpp}` (new) ·
+  `src-tauri/crates/onecad-kernelbench/src/suite_v2.rs` ·
+  `bench/robustness/{README.md,baselines/digests.json}`.
+- **Gates:** ctest **116/116** · fmt · clippy · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0** ·
+  T0 **136/136** with digests AND semantics byte-unchanged · m1 **336 records**, 330 pass + 6
+  characterization, metamorph 288/0, `gatingFailures: 0`. m1 digests re-recorded (case documents
+  gained the six validators and the quality ceilings); m1 semantics unchanged, so no verdict moved.
+- **Next:** Phase 5 WP5.3, the Boolean foundation campaign.
+
+## KERNELBENCH M3.5 — NON-ISOMETRIC METAMORPH POLICY (2026-08-13) — COMMITTED `1d0fbb7`
+
+Roadmap Phase 5 WP5.1 residual, closed. The metamorph comparison now carries a
+RELATION per variant instead of demanding equality from all of them: rigid
+variants keep equivalence, `scaled` is compared as a SIMILARITY (`k³·V`, `k²·A`),
+and `parameterEpsilon` is compared for CONTINUITY (bounded, correctly signed
+response; shape tolerance widened to `8·radius·|δ|`). The relation is a pure
+function of the variant name, so the frozen result-v1 `metamorphEvidence` block
+is untouched. Every coefficient is measured over m1 rather than guessed — the
+numbers and their margins are in TODO.md § M3.5.
+
+The two re-enabled variants immediately found a real defect: `validate_output`
+measured the blend against the case's DECLARED radius while `Execution.cpp`
+filleted with the scaled/nudged EFFECTIVE one, so `cylindricalRadius` and
+`g1BoundaryTangency` reported a false red on correct results. The effective
+radius is now threaded through; red-first proof is the new ctest
+`kernelbench_metamorph` (`worker/tools/kernelbench-runner/metamorph_fixtures.cpp`),
+verified to fail against the old call site and pass against the new one.
+
+- **Changed:** `worker/src/benchmark/{Execution.cpp,SemanticValidation.cpp,SemanticValidation.h}` ·
+  `worker/tools/kernelbench-runner/{CMakeLists.txt,metamorph_fixtures.cpp}` (new) ·
+  `src-tauri/crates/onecad-kernelbench/src/{campaign.rs,prepared.rs,suite_v2.rs}` ·
+  `bench/robustness/{README.md,baselines/digests.json,baselines/semantics.json}`.
+- **Gates:** ctest **115/115** · `cargo fmt --all --check` · workspace `clippy -D warnings` ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0** · kernelbench lib **61** ·
+  T0 **136/136** unchanged and `compare` OK · m1 **336 records**, 330 pass + 6 characterization,
+  metamorph 288/0, replay 336 stable, `gatingFailures: 0`, p50 11.8 ms / p95 68.9 ms.
+- **Baselines:** m1 digests + semantics re-recorded (`darwin-arm64`, 336 rows). Every m1
+  `inputDigest` moved because `input_digest` hashes the canonical case document, which now
+  declares eight metamorphs instead of six. T0 rows are byte-identical.
+- **Not implicated:** no frontend file changed, so vitest and Playwright were not re-run.
+- **Still open:** `m1` has `darwin-arm64` rows only — record `linux-x64` on the self-hosted
+  host (Phase 5 WP5.6). Next in roadmap order is Phase 5 WP5.2, the M4 recipe-agnostic
+  validators.
 
 ## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-12)
 

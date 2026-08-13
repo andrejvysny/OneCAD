@@ -1175,6 +1175,16 @@ pub struct RegenFinished {
     /// than off the whole republished set. Empty (omitted) on failed/superseded/noop.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub affected_bodies: std::collections::BTreeMap<String, Vec<String>>,
+    /// Record ids a PUBLISHED regen left in `NeedsRepair` — the same per-record
+    /// shape as `failed_steps`, and for the same reason: a commit correlated to
+    /// this completion must be able to tell "my op could not resolve its refs"
+    /// from "my op published". The sibling `needs-repair` event carries the same
+    /// facts but is emitted AFTER this one, so an awaiter that settles here would
+    /// always miss it. NeedsRepair is document state, never a failure: the
+    /// terminal exists so the frontend stops reporting it as success, not so it
+    /// can be raised into an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_steps: Vec<String>,
 }
 
 /// One entry in the `needs-repair` event — a **lean** summary of a step left in
@@ -2025,11 +2035,13 @@ mod tests {
             diagnostics: Vec::new(),
             failed_steps: Vec::new(),
             affected_bodies: std::collections::BTreeMap::new(),
+            repair_steps: Vec::new(),
         };
         let v = serde_json::to_value(&clean).unwrap();
         assert_eq!(v["outcome"], "published");
         assert!(v.get("failedSteps").is_none(), "empty ⇒ omitted");
         assert!(v.get("affectedBodies").is_none(), "empty ⇒ omitted");
+        assert!(v.get("repairSteps").is_none(), "empty ⇒ omitted");
         assert!(v.get("message").is_none());
 
         // A published-with-failure carries both, camelCase, keyed by recordId.
@@ -2056,9 +2068,13 @@ mod tests {
                 }],
             }],
             affected_bodies: affected,
+            // NeedsRepair rides the same payload as the failure list and means a
+            // different thing: this record resolved no refs, but nothing errored.
+            repair_steps: vec!["rec-fillet".into()],
             ..clean
         };
         let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["repairSteps"], serde_json::json!(["rec-fillet"]));
         assert_eq!(v["failedSteps"][0]["recordId"], "rec-revolve");
         assert_eq!(v["failedSteps"][0]["message"], "axis not found");
         assert_eq!(v["failedSteps"][0]["diagnostics"][0]["code"], "AXIS_FAILED");
@@ -2085,6 +2101,9 @@ mod tests {
                     margin: 0.31,
                     topo_key: Some(TopoKey::new("f:1")),
                 },
+                snapshot_id: onecad_core::ids::SnapshotId(5012),
+                revision: 44,
+                body_id: None,
             },
             5012,
             44,
@@ -2111,6 +2130,9 @@ mod tests {
                     margin: 0.2,
                     topo_key: Some(TopoKey::new("f:3")),
                 },
+                snapshot_id: onecad_core::ids::SnapshotId(5012),
+                revision: 44,
+                body_id: None,
             },
             5012,
             44,
@@ -2169,6 +2191,9 @@ mod tests {
             RefResolution {
                 ref_id: "op_6.input0".into(),
                 outcome: ResolveOutcome::NeedsRepair(item),
+                snapshot_id: onecad_core::ids::SnapshotId(5012),
+                revision: 44,
+                body_id: None,
             },
             5012,
             44,

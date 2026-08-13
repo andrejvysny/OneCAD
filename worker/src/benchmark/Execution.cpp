@@ -239,7 +239,8 @@ json execute_request(const Request &request) {
   const json output_audit = adapter.success ? deep_audit(adapter.output) : json(nullptr);
   const auto audit_end = Clock::now();
   const ValidationSummary validation = validate_output(
-      request, geometry, adapter, output_audit.is_null() ? json::object() : output_audit);
+      request, geometry, adapter, output_audit.is_null() ? json::object() : output_audit,
+      input_audit, effective_radius);
   result.update({{"verdict", verdict(request.benchmark_case, adapter,
                                       validation.required_pass, validation.publication_valid)},
                  {"executionState", "completed"},

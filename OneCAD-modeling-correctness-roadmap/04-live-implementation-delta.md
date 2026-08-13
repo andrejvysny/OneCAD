@@ -1,8 +1,63 @@
 # Live Implementation Delta
 
+Reviewed: 2026-08-13  
+Implementation state: uncommitted worktree after `c7df7c8`  
+OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
+
+## Since the 2026-08-11 review
+
+- **P3 is complete** (`f36c960`): 35 machine-readable contract rows over 16
+  operations (`docs/qa/modeling-operation-contracts.json`), Transform through
+  the Tier A validator, ImportStep policy row, UI mode disposition recorded,
+  and `scripts/verify-modeling-contracts.mjs` enforcing all of it.
+- **P4 is complete** (`f36c960`, `f1415e8`): Boolean Intersect vertical across
+  C++/Rust/frontend/Playwright, Mirror and Linear/Circular Pattern Playwright
+  flows, critical mode closure tests, and a real-worker corpus executor with
+  zero unclassified corpus files.
+- **Phase 5 WP5.1 landed** (`b7b47e2`): mirror, far-origin translation,
+  edge-order permutation and contour seed execute in the runner.
+- **Phase 5 WP5.1 residual (M3.5) closed, uncommitted** (2026-08-13):
+  `uniformScale` and `parameterEpsilon` are back in `fillet/matrix:m1` behind a
+  per-variant RELATION (equivalence / similarity / continuity) rather than a
+  single equality gate; m1 is 336 records with `gatingFailures: 0`. It found and
+  fixed a real defect — the semantic validators measured the blend against the
+  case's declared radius rather than the radius the operation ran with. Detail in
+  `TODO.md` § M3.5 and `CURRENT_STATE.md`.
+- **Phase 5 WP5.2 (M4) done, uncommitted** (2026-08-13): `supportTangency`,
+  `crossSectionProfile`, `manifold`, `noSelfIntersection`, `microTopology` and
+  `toleranceGrowth` implemented and required on every m1 case including the
+  curved pairs. The blend now comes from the fillet builder's history rather than
+  from surface type, which is what makes a curved support stop being a special
+  case. Detail in `TODO.md` § M4.
+- **TRACK A of the completion plan is complete** (2026-08-13, `772b3d2` · `6b08e27` · `4b62965`
+  plus the A4/A5/A6 gate). Track A is the unbilled remainder of Phases 0–4: the shared
+  operation-result classifier (WP0.3, risk R-04), the Draft applied-or-refused evidence and its
+  mandated red probe (WP0.6, R-10 closed as not-present), stable diagnostic codes for the two new P0
+  refusals, the Revolve body-edge-axis contract (WP1.5 — recorded UI-HIDDEN with all four tests),
+  the WP0.7/WP0.8 tests, and the two missing cross-track fixtures.
+- **Three of those items were live defects rather than missing evidence**, which is the point of
+  running the mandated tests: `needsRepair` was declared and never produced; exact-preview failure
+  was tracked globally, so a recovered secondary region still blocked every commit; and the SCHEMA
+  §7.5 `ResolveRefs` snapshot echo was normative but implemented by neither worker, with Rust
+  manufacturing the values it then cached candidates under.
+- **Plan items C1 and C2 are complete** (2026-08-13). P4's coverage manifest was false in sixteen
+  places and named a CI job that exists in no workflow; it is now true, and its verifier stats every
+  cited path, resolves every job against the workflows, and runs WP4.5's five registry
+  cross-checks. WP4.4's corpus runs three cases instead of one — the blocker was that only case `a`
+  carried complete geometry, so `b` and `i` were enriched with executable entities derived from
+  their own frozen numbers — and classification now comes from the manifest, so the two artifacts
+  cannot disagree.
+- **Still owed from P2:** the manual Tauri smoke. Unchanged (plan Track D replaces it with an
+  automated Tauri lane).
+- **Next in roadmap order:** plan item C1 — make the P4 coverage manifest true and give
+  `verify-modeling-coverage.mjs` teeth — then C2, before Phase 5 WP5.3's Boolean campaign.
+
+The sections below are the 2026-08-11 review, kept for its evidence trail.
+
+---
+
 Reviewed: 2026-08-11  
 Implementation state: current uncommitted worktree after `055d31f7d8edcb106a881590b9b2c5a9d1e37982` (`055d31f`)
-OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
 
 ## Status language
 

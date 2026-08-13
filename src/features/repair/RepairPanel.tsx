@@ -126,7 +126,11 @@ export function RepairPanel() {
           ) {
             throw new Error("Repair candidates expired — reopen this reference");
           }
-          const candidates = [...(r?.candidates ?? [])].sort((a, b) => b.score - a.score);
+          // Denormalize the ref-level authoritative body onto each candidate — the
+          // wire only carries it once, on `r.bodyId` (see `ResolveCandidate.bodyId`).
+          const candidates = [...(r?.candidates ?? [])]
+            .map((c) => ({ ...c, bodyId: r.bodyId }))
+            .sort((a, b) => b.score - a.score);
           setLoads((s) => ({
             ...s,
             [key]: {

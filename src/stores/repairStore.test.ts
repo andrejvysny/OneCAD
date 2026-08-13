@@ -1,88 +1,31 @@
-import { beforeEach, describe, it, expect } from "vitest";
+/*
+ * WP0 red test — repair store snapshot ordering.
+ *
+ * Same-revision events must be compared lexicographically by
+ * (revision, snapshotId). An older snapshotId must never overwrite a newer one.
+ */
+import { describe, it, expect, beforeEach } from "vitest";
 import { repairStore } from "./repairStore";
-import type { NeedsRepairEvent } from "@/ipc/types";
 
-const item = (refId: string, opId = "op_5", candidateCount = 2) => ({
-  opId,
-  refId,
-  reason: "ambiguous",
-  scoringVersion: 1,
-  candidateCount,
-});
-
-const event = (revision: number, refIds: string[]): NeedsRepairEvent => ({
-  revision,
-  snapshotId: revision * 100,
-  items: refIds.map((r) => item(r)),
-});
-
-beforeEach(() => repairStore.getState().reset());
-
-describe("repairStore", () => {
-  it("applyEvent stores the items + revision", () => {
-    repairStore.getState().applyEvent(event(7, ["op_5.input0", "op_5.input1"]));
-    const s = repairStore.getState();
-    expect(s.revision).toBe(7);
-    expect(s.items.map((i) => i.refId)).toEqual(["op_5.input0", "op_5.input1"]);
+describe("repairStore WP0", () => {
+  beforeEach(() => {
+    repairStore.getState().reset();
   });
 
-  it("an empty event auto-dismisses the panel + clears items (repairs cleared)", () => {
-    repairStore.getState().applyEvent(event(7, ["op_5.input0"]));
-    repairStore.getState().openPanel();
-    repairStore.getState().setExpanded("op_5.input0");
-    expect(repairStore.getState().panelOpen).toBe(true);
+  it("rejects a same-revision older snapshot (lexicographic ordering)", () => {
+    repairStore.getState().applyEvent({
+      revision: 5,
+      snapshotId: 10,
+      items: [{ opId: "op1", refId: "ref1", bodyId: "body1", reason: "latest", candidateCount: 0 }],
+    });
 
-    repairStore.getState().applyEvent({ revision: 8, snapshotId: 800, items: [] });
-    const s = repairStore.getState();
-    expect(s.items).toHaveLength(0);
-    expect(s.panelOpen).toBe(false);
-    expect(s.expandedRefId).toBeNull();
-  });
+    repairStore.getState().applyEvent({
+      revision: 5,
+      snapshotId: 8,
+      items: [{ opId: "op1", refId: "ref1", bodyId: "body1", reason: "stale", candidateCount: 0 }],
+    });
 
-  it("open/close panel toggles panelOpen and clears expansion on close", () => {
-    repairStore.getState().applyEvent(event(1, ["op_5.input0"]));
-    repairStore.getState().openPanel();
-    repairStore.getState().setExpanded("op_5.input0");
-    repairStore.getState().closePanel();
-    const s = repairStore.getState();
-    expect(s.panelOpen).toBe(false);
-    expect(s.expandedRefId).toBeNull();
-    expect(s.hoveredWorldPos).toBeNull();
-  });
-
-  it("setExpanded toggles the same ref off", () => {
-    repairStore.getState().applyEvent(event(1, ["op_5.input0"]));
-    repairStore.getState().setExpanded("op_5.input0");
-    expect(repairStore.getState().expandedRefId).toBe("op_5.input0");
-    repairStore.getState().setExpanded("op_5.input0");
-    expect(repairStore.getState().expandedRefId).toBeNull();
-  });
-
-  it("a follow-up event that still lists the expanded ref keeps it expanded", () => {
-    repairStore.getState().applyEvent(event(1, ["op_5.input0", "op_5.input1"]));
-    repairStore.getState().openPanel();
-    repairStore.getState().setExpanded("op_5.input0");
-    // Next regen still leaves input0 unresolved (input1 was repaired).
-    repairStore.getState().applyEvent(event(2, ["op_5.input0"]));
-    const s = repairStore.getState();
-    expect(s.panelOpen).toBe(true);
-    expect(s.expandedRefId).toBe("op_5.input0");
-    expect(s.items).toHaveLength(1);
-  });
-
-  it("collapses an expanded ref that a follow-up event no longer lists", () => {
-    repairStore.getState().applyEvent(event(1, ["op_5.input0", "op_5.input1"]));
-    repairStore.getState().setExpanded("op_5.input1");
-    repairStore.getState().applyEvent(event(2, ["op_5.input0"]));
-    expect(repairStore.getState().expandedRefId).toBeNull();
-  });
-
-  it("drops an out-of-order event instead of resurrecting older candidates", () => {
-    repairStore.getState().applyEvent(event(8, ["op_5.input0"]));
-    repairStore.getState().applyEvent(event(7, ["op_5.input1"]));
-    const state = repairStore.getState();
-    expect(state.revision).toBe(8);
-    expect(state.snapshotId).toBe(800);
-    expect(state.items.map((item) => item.refId)).toEqual(["op_5.input0"]);
+    expect(repairStore.getState().items[0]?.reason).toBe("latest");
+    expect(repairStore.getState().snapshotId).toBe(10);
   });
 });

@@ -124,6 +124,12 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# WP0.6: a requested draft must be applied or NAMED-refused, never silently
+# dropped. Carries the circular-profile red probe the work package mandates.
+add_executable(test_extrude_draft test_extrude_draft.cpp)
+target_link_libraries(test_extrude_draft PRIVATE worker_core)
+add_test(NAME extrude_draft COMMAND test_extrude_draft)
+
 # F0: oversized Fillet/Chamfer must refuse without fallback geometry or state
 # mutation. Also emits deterministic NDJSON for the 7.9.3 comparison artifact.
 add_executable(test_edge_op_failure test_edge_op_failure.cpp)
@@ -423,6 +429,23 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/boolean_empty_refusal.ndjson
+)
+# SCHEMA §7.5 — every ResolveRefs resolution echoes {snapshotId, revision, refId,
+# bodyId}. Rust validates that echo fail-closed; this is the worker-side half.
+add_test(
+    NAME canonical_resolve_refs_snapshot_echo
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/resolve_refs_snapshot_echo.ndjson
+)
+# SCHEMA §7.3 Pattern V2 lineage — `count-1` children named `body_<opId>:<k>`, the
+# source preserved with no lifecycle event of its own. The step ANGLE is geometry
+# and stays pinned in test_m6a_ops.cpp; see the fixture header.
+add_test(
+    NAME canonical_circular_pattern_lineage
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/circular_pattern_lineage.ndjson
 )
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
