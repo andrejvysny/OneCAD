@@ -2261,8 +2261,32 @@ impl PlaceComponentParams {
                 self.component_id
             ));
         }
+        // The id/version pair is also a PATH component at the library layer
+        // (`<root>/<id>@<version>`) — keep this charset in lockstep with
+        // `onecad-library::package::validate_identity` (no shared dep by design).
+        if !self.component_id.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        }) || self.component_id.split('.').any(str::is_empty)
+        {
+            return Err(format!(
+                "PlaceComponent componentId `{}` may only contain [a-z0-9._-] with \
+                 non-empty dot segments (it names the package directory)",
+                self.component_id
+            ));
+        }
         if self.component_version.trim().is_empty() {
             return Err("PlaceComponent componentVersion must not be empty".into());
+        }
+        if !self
+            .component_version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+        {
+            return Err(format!(
+                "PlaceComponent componentVersion `{}` may only contain [0-9A-Za-z.+-] \
+                 (it names the package directory)",
+                self.component_version
+            ));
         }
         match self.component_revision.strip_prefix("sha256:") {
             Some(hex) if is_sha256_hex(hex) => {}
@@ -3761,6 +3785,26 @@ mod tests {
         let mut bad_revision = ok.clone();
         bad_revision.component_revision = "not-a-hash".to_string();
         assert!(bad_revision.validate().is_err());
+
+        // The id/version pair names the package directory — a path-escaping
+        // value must die at authoring, before any `Path::join` sees it.
+        for evil in [
+            "onecad.std/../evil",
+            "..",
+            "a..b",
+            r"onecad\evil.x",
+            "Onecad.Std.X",
+        ] {
+            let mut traversal_id = ok.clone();
+            traversal_id.component_id = evil.to_string();
+            assert!(
+                traversal_id.validate().is_err(),
+                "id `{evil}` must be refused"
+            );
+        }
+        let mut traversal_version = ok.clone();
+        traversal_version.component_version = "1.0.0/../..".to_string();
+        assert!(traversal_version.validate().is_err());
 
         let mut bad_generator = ok.clone();
         bad_generator.source = ComponentSourceRef::Generator {

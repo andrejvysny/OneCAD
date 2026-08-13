@@ -216,6 +216,13 @@ pub fn write_package(package_dir: &Path, pkg: &ComponentPackage) -> LibraryResul
 
 /// Validates the package's identity invariants (spec §2.1): namespaced id,
 /// non-empty version, well-formed `sha256:` revision.
+///
+/// The id and version are also PATH components (`<root>/<id>@<version>`,
+/// `Library::save_component`), so both are restricted to a path-safe charset —
+/// an id like `onecad.std/../evil` must never reach a `Path::join`. The op
+/// layer applies the same rule (`PlaceComponentParams::validate` in
+/// `onecad-core::document::record`; the crates deliberately share no dep, so
+/// the two checks are kept in lockstep by their tests).
 pub fn validate_identity(pkg: &ComponentPackage) -> LibraryResult<()> {
     if pkg.identity.id.trim().is_empty() {
         return Err(LibraryError::InvalidIdentity(
@@ -228,10 +235,24 @@ pub fn validate_identity(pkg: &ComponentPackage) -> LibraryResult<()> {
             pkg.identity.id
         )));
     }
+    if !is_path_safe_id(&pkg.identity.id) {
+        return Err(LibraryError::InvalidIdentity(format!(
+            "identity.id `{}` may only contain [a-z0-9._-] and no `..` segment \
+             (it names the package directory)",
+            pkg.identity.id
+        )));
+    }
     if pkg.identity.version.trim().is_empty() {
         return Err(LibraryError::InvalidIdentity(
             "identity.version must not be empty".into(),
         ));
+    }
+    if !is_path_safe_version(&pkg.identity.version) {
+        return Err(LibraryError::InvalidIdentity(format!(
+            "identity.version `{}` may only contain [0-9A-Za-z.+-] \
+             (it names the package directory)",
+            pkg.identity.version
+        )));
     }
     match pkg.identity.revision.strip_prefix("sha256:") {
         Some(hex) if is_sha256_hex(hex) => {}
@@ -243,6 +264,17 @@ pub fn validate_identity(pkg: &ComponentPackage) -> LibraryResult<()> {
         }
     }
     Ok(())
+}
+
+fn is_path_safe_id(id: &str) -> bool {
+    id.bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+        && id.split('.').all(|seg| !seg.is_empty())
+}
+
+fn is_path_safe_version(v: &str) -> bool {
+    v.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 
 fn is_sha256_hex(s: &str) -> bool {
@@ -344,6 +376,30 @@ shank_axis = { on = "cylinder:shank", accepts = ["cylinder", "hole", "circularEd
     fn unnamespaced_id_is_rejected() {
         let toml = valid_toml().replace(r#"id = "onecad.std.iso4762""#, r#"id = "unnamespaced""#);
         let pkg = parse(&toml, Path::new("component.toml")).unwrap();
+        assert!(validate_identity(&pkg).is_err());
+    }
+
+    #[test]
+    fn path_escaping_id_or_version_is_rejected() {
+        // id and version name the package directory (`<id>@<version>`) — a
+        // separator or dot-dot segment must never reach a `Path::join`.
+        for evil in [
+            "onecad.std/../evil",
+            "..",
+            "a..b",
+            r"onecad\evil.x",
+            "Onecad.Std.X",
+            "onecad.std.iso 4762",
+        ] {
+            let mut pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+            pkg.identity.id = evil.to_string();
+            assert!(
+                validate_identity(&pkg).is_err(),
+                "id `{evil}` must be refused"
+            );
+        }
+        let mut pkg = parse(valid_toml(), Path::new("component.toml")).unwrap();
+        pkg.identity.version = "1.0.0/../..".to_string();
         assert!(validate_identity(&pkg).is_err());
     }
 
