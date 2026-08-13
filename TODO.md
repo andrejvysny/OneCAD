@@ -1,5 +1,126 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-F3 (2026-08-13) — GATE PASSED
+
+Placement-gesture polish + mock-lane parity (spec §5.4). Frontend only — no
+Rust, no worker, no protocol change.
+
+- [x] **Free-space follow + drop (spec §5.4 steps 1/6)** — closes the WP-1.5
+  scope cut recorded in `placementController.ts`'s header (comment rewritten,
+  not left stale). With no valid snap target the ghost follows the camera ray ∩
+  world `z = 0` (`placementSolver.groundPlanePoint`, a new pure helper — the
+  existing solve math is untouched) at identity rotation, and a click commits
+  **with `mate: undefined`**. A ray that cannot reach the plane (parallel, or
+  pointing away) leaves the ghost where it was and the commit follows the
+  ghost — never a fabricated point. Snap behaviour is byte-identical: all three
+  "no target" branches route to the new lane, the matched branch is unchanged,
+  and the pre-existing auto-size/mate cases still pass verbatim.
+- [x] **Mock lane classifies cylinders, MEASURED** (`mockMeshMetrics.
+  cylinderMetricsFromMesh`): facet-normal covariance → least-significant
+  eigenvector as the axis, a Kåsa circle fit in the perpendicular plane, and
+  BOTH the perpendicularity and the fit residual checked before an answer is
+  returned. A box face / a flat cap / an annulus still answer `other` with
+  `frame: null`. The circle is FITTED rather than averaged because the seam
+  vertex is duplicated — a plain centroid sits off-axis and would fail its own
+  equidistance test.
+- [x] **`?vpdemo=cyl` publishes a bushing with a real Ø8.5 bore**
+  (`mockMeshes.makeBoredCylinderMesh`, `mockClient.seedMockDemoCylinder`) —
+  opt-in for the same reason `?mocklibrary=1` is: an always-on second body
+  changes every existing spec's body list and camera fit. Ø8.5 is the M8
+  clearance hole, so auto-size resolves to a size the armed default is not.
+- [x] **Mock catalog + templates mirror what the app ships**: `iso15` /
+  `nema17` / `nema23` mirrored field-for-field from
+  `src-tauri/resources/library-seed/*/component.toml` (identity, `code`/`length`
+  free params + domains, table-locked dimensions, attachment `accepts`), and the
+  three starters from `library_seed_templates.rs` — both behind `?mocklibrary=1`,
+  which is the mock's stand-in for a SEEDED LIBRARY ROOT. This clears WP-F2b's
+  flagged frontend seam ("`mockTemplates` starts EMPTY, so the mock lane shows
+  no starters"). `setComponentParams` now resolves the component by identity
+  instead of comparing against the one SHCS id (a motor's `length` edit failed
+  on this lane only). Geometry parity is still NOT claimed — every mock
+  placement is the same synthetic solid.
+- [x] Gate, all RUN: `bunx tsc --noEmit` clean for every file in this change
+  (the only errors in the tree are in `SaveAsComponentDialog.tsx`, another
+  agent's in-flight WP — untouched here) · `bun run test` **4302/4302 in 262
+  files** · `bunx vitest run src/modules/library src/ipc src/features/start`
+  694/694 · Playwright chromium, FULL suite: **210 passed, 1 failed** — the 2
+  new `library-place-freespace.spec.ts` cases and the new starter-grid case
+  pass, and `library-browse-place-snap` / `library-template` / `library-preview`
+  / `library-author-component` stay green (9/9). `retries: 0` throughout.
+- **PRE-EXISTING FAILURE, not from this WP** —
+  `extrude-commit-gesture.spec.ts` › "clicking empty canvas away from the handle
+  commits (click-away)": the click-away commits no body (Bodies stays at 1).
+  Reproduced DETERMINISTICALLY in a clean `git worktree` at HEAD (`3b43c21`)
+  with none of this change present, so it is a real product defect that landed
+  earlier, not a regression here and not a flake. Needs its own investigation.
+- **FLAGGED SEAM:** "a free-space commit records NO mate" has no UI surface to
+  read — nothing renders a placement's mate — so the e2e asserts the observable
+  consequence (the body lands on the ground point with identity rotation) and
+  the mate-absence itself is pinned in `placementController.test.ts`. Giving the
+  inspector a mate row would make it e2e-visible; not in this WP's scope.
+- **FLAGGED SEAM:** `library-browse-place-snap.spec.ts`'s card locators had to
+  be scoped by name — the opt-in catalog is four cards now, and an unscoped
+  `getByTestId("library-card")` is a strict-mode violation.
+
+## COMPONENT-LIBRARY WP-F1.2 (2026-08-13) — GATE PASSED
+
+"Save as Component" authoring completed (spec §7/§9): attachments are PICKED in
+the viewport, and a multi-solid body is offered a union instead of only a
+refusal. Closes the two "deliberately does not do" items the WP-B2 dialog
+carried (bar parameter roles, which stays out — a `document` package has baked
+geometry and no re-bake lane).
+
+- [x] **Attachment picking** (`src/modules/library/attachmentPicker.ts`, new).
+  Copies `placementController`'s gesture pattern rather than sharing it
+  (capture-phase `pointerdown`/`keydown` on `window` + `setOrbitSuppressed`);
+  `placementController.ts` untouched. A pick → `engine.probePick` →
+  `geometryQuery.classifyElement` → `deriveAttachment`: planar face ⇒
+  `accepts:["plane"]`, cylinder ⇒ `["cylinder","hole"]`, circular edge ⇒
+  `["cylinder","hole","circularEdge"]` — checked against `placementSolver`'s own
+  snap table in a test, so an authored attachment cannot fail to match the snap
+  kind its geometry produces. Anything else stays in pick mode with a hint. Esc
+  leaves PICK mode, not the dialog.
+  - **Frame origin is the CLICKED point** (projected onto the plane, or onto the
+    axis for a cylinder), not OCCT's surface origin — that one is a
+    parametrization artifact and would seat the component where the author never
+    pointed. A circular edge uses its own centre. `x` is world X projected ⊥ z,
+    falling back to world Y — stable, so re-picking a face re-authors the same
+    frame. Frames are WORLD coords, which is right because `ExportGeometry`
+    bakes session coordinates verbatim (world == component-local after the bake).
+  - Services reach the dialog through `configureAuthoringController` in
+    `register.ts`, the same soft-lookup `configurePlacementController` uses
+    (ADR-0002; a harness without modeling's bootstrap simply cannot arm).
+  - Dialog rows: editable name (validated `[a-z0-9_-]`, non-empty, unique —
+    a duplicate would silently drop an attachment from the manifest table),
+    `on`/`accepts` summary, frame badge, Remove. `on` follows the name
+    (`face:seat`), so the two cannot drift. No rows ⇒ the pre-F1.2 model-origin
+    seat, unchanged.
+  - While picking, the dialog's scrim goes `pointer-events-none` and stops being
+    a click-to-close target; events inside the dialog are let through untouched.
+- [x] **Union at bake** (SCHEMA §7.8 `union` + §14 additive entry). Worker fuses
+  (`BRepAlgoAPI_Fuse` chain) BEFORE writing, and checks the RESULT's solid
+  count, not just `IsDone()` — OCCT "fuses" disjoint solids into a compound of
+  both, and writing that would move the failure to whoever places the component.
+  Face colors are dropped for a fused result (the face set is rewritten).
+  Rust threads `union_solids` through `GeometryExporter`/`WorkerManager`/
+  `wire`/`save_as_component`; the multi-solid refusal now carries the marker
+  `library::MULTI_SOLID_REFUSAL` (`"MULTI_SOLID_BODY"`) because `ApiError` has
+  no code field and the dialog must not key its offer on prose. The offer is
+  honest on screen: pick-primary and split are NOT offered in v1.
+  `CadClient.saveAsComponent` gained an append-only `unionSolids?` (mock accepts
+  and ignores it — nothing is baked on that lane).
+- [x] Gate, all RUN: `scripts/build-worker.sh Release` + `ctest` **124/124** ·
+  `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D
+  warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+  --no-fail-fast` **0 failed** (78 suites; `component_ops` 13/13 incl. the new
+  multi-solid refusal + union opt-in against the real worker) · `tsc --noEmit`
+  clean · vitest **4302/4302** (262 files; +14 new: dialog picking/union, 4
+  `attachmentPicker` unit) · hex gate empty.
+- Seam flagged: the union offer re-submits the WHOLE save, so a backend that
+  fails after the bake (a taken id) is retried end to end. Harmless today
+  (the bake is the expensive part and it is a temp file), but a future
+  "bake once, retry the write" lane would want a prepared-bake handle.
+
 ## COMPONENT-LIBRARY WP-F1.1 (2026-08-13) — GATE PASSED
 
 Attachment local frames travel end-to-end: optional

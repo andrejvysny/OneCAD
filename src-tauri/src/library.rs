@@ -1136,6 +1136,15 @@ pub struct AttachmentSpecInput {
     pub frame: Option<package::AttachmentFrame>,
 }
 
+/// The MACHINE-READABLE marker in the multi-solid refusal's message (WP-F1.2).
+///
+/// `ApiError` carries a `kind` + a prose `message` and no error code, and the
+/// authoring dialog has to tell "your body is several solids" (offer the fuse)
+/// apart from every other `invalidCommand` (do not). Matching prose would break
+/// the moment the sentence is reworded, so the sentence carries a token instead.
+/// Frontend counterpart: `MULTI_SOLID_REFUSAL` in `SaveAsComponentDialog.tsx`.
+pub const MULTI_SOLID_REFUSAL: &str = "MULTI_SOLID_BODY";
+
 /// "Save as Component" (spec §7) — captures one body at head as a reusable
 /// `document`-kind package.
 ///
@@ -1150,7 +1159,9 @@ pub struct AttachmentSpecInput {
 /// **Spec §9's single-solid rule is enforced HERE, at save time**, where the
 /// author can still do something about it — not at placement, where they would
 /// discover it as a failure on someone else's machine. `ExportGeometry` reports
-/// the solid count it actually wrote.
+/// the solid count it actually wrote. `union_solids` is the author's opt-in
+/// answer to that refusal (WP-F1.2): the BAKE fuses, so the open document keeps
+/// its several bodies and only the component package holds the fused solid.
 ///
 /// The document is frozen WITHOUT adopting a path or clearing the dirty flag:
 /// `build_save_payload` + `write_payload` are used directly rather than
@@ -1163,6 +1174,7 @@ pub async fn save_as_component(
     body_id: String,
     spec: NewComponentSpec,
     preview_png: Option<String>,
+    union_solids: Option<bool>,
 ) -> Result<LibraryComponentDto, ApiError> {
     let root = library_root(&app)
         .ok_or_else(|| ApiError::Internal("saveAsComponent: no app data dir".into()))?;
@@ -1173,6 +1185,7 @@ pub async fn save_as_component(
         body_id,
         spec,
         preview_png,
+        union_solids.unwrap_or(false),
     )
     .await
 }
@@ -1191,6 +1204,7 @@ pub async fn save_as_component_at(
     body_id: String,
     spec: NewComponentSpec,
     preview_png: Option<String>,
+    union_solids: bool,
 ) -> Result<LibraryComponentDto, ApiError> {
     let body = onecad_core::ids::BodyId::from_str(&body_id)
         .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId {body_id:?}: {e}")))?;
@@ -1233,14 +1247,19 @@ pub async fn save_as_component_at(
     // form (face colors survive), and the worker echoes back the codec/format
     // it actually wrote rather than this layer pinning a version.
     let baked = exporter
-        .export_geometry(&geometry_path.to_string_lossy(), &[body], "xbf")
+        .export_geometry(
+            &geometry_path.to_string_lossy(),
+            &[body],
+            "xbf",
+            union_solids,
+        )
         .await?;
     if baked.solid_count != 1 {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(ApiError::InvalidCommand(format!(
-            "saveAsComponent: a component must resolve to exactly one solid (spec §9); \
-             {body_id} baked {} — union the bodies, pick one, or split them into separate \
-             components",
+            "saveAsComponent: {MULTI_SOLID_REFUSAL}: a component must resolve to exactly one \
+             solid (spec §9); {body_id} baked {} — union them at bake, or split them into \
+             separate components",
             baked.solid_count
         )));
     }

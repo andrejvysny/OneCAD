@@ -152,6 +152,11 @@ function hasFlag(name: string): boolean {
   return new URLSearchParams(window.location.search).has(name);
 }
 
+/** A flag's VALUE (`?vpdemo=cyl`), or `null` when absent/bare. */
+function flagValue(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
 export function ViewportRoot({ className }: { className?: string }) {
   // Optional, not required: `ViewportRoot` is rendered bare by its own unit test
   // and by dev harnesses. No platform ⇒ no contributed layers, which is the
@@ -480,6 +485,7 @@ export function ViewportRoot({ className }: { className?: string }) {
         // (`toPass`/`expect.poll`) rather than asserting immediately after
         // navigation, so that tick is invisible there.
         const vpdemo = hasFlag("vpdemo");
+        const vpdemoCylinder = flagValue("vpdemo") === "cyl";
         const sketchdemo = hasFlag("sketchdemo");
         const toolsdemo = hasFlag("toolsdemo");
         if (import.meta.env.DEV && (vpdemo || sketchdemo || toolsdemo)) {
@@ -487,7 +493,16 @@ export function ViewportRoot({ className }: { className?: string }) {
             // Re-checked AFTER the await: StrictMode double-mount may have
             // torn this effect down while the dynamic import was in flight.
             if (cancelled) return;
-            m.runDemoFlags({ engine, client, container, modelToolController, vpdemo, sketchdemo, toolsdemo });
+            m.runDemoFlags({
+              engine,
+              client,
+              container,
+              modelToolController,
+              vpdemo,
+              vpdemoCylinder,
+              sketchdemo,
+              toolsdemo,
+            });
           });
         }
 

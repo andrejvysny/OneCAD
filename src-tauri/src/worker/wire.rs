@@ -1407,17 +1407,28 @@ pub fn export_obj_args(path: &str, bodies: &[BodyId], lod: &str) -> Value {
     })
 }
 
-/// `ExportGeometry.args` (SCHEMA §7.8): `{path, bodyIds, codec}`.
+/// `ExportGeometry.args` (SCHEMA §7.8): `{path, bodyIds, codec, union}`.
 ///
 /// `codec` is one of the §7.3 REPLAY codecs (`"brep"` / `"xbf"`) — this verb bakes
 /// a live body into the same byte form `ImportStep` reads back, which is what a
 /// Component Library `embedded` / `document` source is made of (spec §2.1).
+///
+/// `union_solids` is the opt-in multi-solid fuse (WP-F1.2): the worker fuses a
+/// body that flattens to more than one solid BEFORE writing, and refuses when the
+/// fused result is still not one solid. Always sent explicitly so the wire never
+/// depends on the worker's default.
 #[must_use]
-pub fn export_geometry_args(path: &str, bodies: &[BodyId], codec: &str) -> Value {
+pub fn export_geometry_args(
+    path: &str,
+    bodies: &[BodyId],
+    codec: &str,
+    union_solids: bool,
+) -> Value {
     json!({
         "path": path,
         "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
         "codec": codec,
+        "union": union_solids,
     })
 }
 

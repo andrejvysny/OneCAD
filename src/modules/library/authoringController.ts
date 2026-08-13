@@ -13,10 +13,35 @@
  * half-typed values.
  */
 import { useSyncExternalStore } from "react";
+import type { GeometryQueryService } from "@/modules/modeling/manifest";
 
 export interface AuthoringTarget {
   bodyId: string;
   bodyName?: string;
+}
+
+/**
+ * Modeling's published services, injected at editor mount by
+ * `contributeLibraryUi` — the same `configure*` pattern `placementController`
+ * uses, and for the same reason (ADR-0002: a kernel touch from library code
+ * routes through modeling's services, never a direct `CadClient` call).
+ *
+ * The attachment picker needs `classifyElement` to turn a viewport pick into a
+ * seatable frame. `null` on unmount so a stale service cannot outlive the scope
+ * that resolved it; the picker then simply cannot arm.
+ */
+export interface AuthoringServices {
+  geometryQuery: GeometryQueryService;
+}
+
+let services: AuthoringServices | null = null;
+
+export function configureAuthoringController(next: AuthoringServices | null): void {
+  services = next;
+}
+
+export function authoringServices(): AuthoringServices | null {
+  return services;
 }
 
 let target: AuthoringTarget | null = null;

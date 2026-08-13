@@ -57,7 +57,7 @@ function previewBodyCount(page: Page): Promise<number> {
 }
 
 test.beforeEach(async ({ page }) => {
-  // `?mocklibrary=1` opts the one-fixture catalog in (WP-1.4/1.5's
+  // `?mocklibrary=1` opts the seed catalog in (WP-1.4/1.5's
   // honest-empty-by-default rule); `vpdemo` gives the mock BOX body real
   // geometry to hover — the SHCS fixture's `headSeat` attachment accepts
   // `["plane"]`, so any planar face on the box matches.
@@ -68,9 +68,10 @@ test.beforeEach(async ({ page }) => {
 test("browse, arm, hover-snap, commit — one new named body", async ({ page }) => {
   await page.getByTestId("sidebar-tab-library").click();
 
-  const card = page.getByTestId("library-card");
+  // Scoped by name: the opt-in catalog seeds the whole shipped set (WP-F3), so
+  // an unscoped `library-card` locator resolves four elements, not one.
+  const card = page.getByTestId("library-card").filter({ hasText: "Socket Head Cap Screw" });
   await expect(card).toBeVisible();
-  await expect(card).toContainText("Socket Head Cap Screw");
 
   const before = await bodyNames(page);
   expect(before).toHaveLength(1); // the vpdemo box, nothing placed yet
@@ -99,7 +100,7 @@ test("browse, arm, hover-snap, commit — one new named body", async ({ page }) 
 test("Escape cancels an armed-but-uncommitted placement cleanly", async ({ page }) => {
   await page.getByTestId("sidebar-tab-library").click();
 
-  const card = page.getByTestId("library-card");
+  const card = page.getByTestId("library-card").filter({ hasText: "Socket Head Cap Screw" });
   await expect(card).toBeVisible();
 
   const before = await bodyNames(page);

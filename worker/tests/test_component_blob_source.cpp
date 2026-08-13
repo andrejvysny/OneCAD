@@ -326,6 +326,137 @@ void test_export_refusals(Session& s) {
     check(!unknown_body.ok.value_or(false), "export: an unknown body is refused");
 }
 
+// ── Union-at-bake (WP-F1.2, spec §9) ─────────────────────────────────────────
+// A V1 LinearPattern with `fuseResult:false` gathers source + instances into ONE
+// compound body — the everyday way an author ends up with a body that is not one
+// solid, and exactly the case "Save as Component" now offers to fuse.
+
+// Publishes `body_op2`: two 10³ boxes `spacing` apart in X, as one compound body.
+void publish_two_solid_body(Session& s, double spacing) {
+    s.open("doc", 0, 3, "determinism");
+    json plan_ops = json::array(
+        {json{{"opType", "Sketch"},
+              {"opId", "op0"},
+              {"stepIndex", 0},
+              {"params",
+               {{"sketchId", "sk"},
+                {"plane", {{"kind", "XY"}}},
+                {"entities",
+                 json::array({line_ent("e1", 0, 0, 10, 0), line_ent("e2", 10, 0, 10, 10),
+                              line_ent("e3", 10, 10, 0, 10), line_ent("e4", 0, 10, 0, 0)})},
+                {"constraints", json::array()}}}},
+         json{{"opType", "Extrude"},
+              {"opId", "op1"},
+              {"stepIndex", 1},
+              {"params",
+               {{"sketchId", "sk"},
+                {"distance", 10.0},
+                {"extrudeMode", "Blind"},
+                {"booleanMode", "NewBody"}}}},
+         json{{"opType", "LinearPattern"},
+              {"opId", "op2"},
+              {"stepIndex", 2},
+              {"params",
+               {{"sourceBodyId", "body_op1"},
+                {"direction", {1.0, 0.0, 0.0}},
+                {"spacing", spacing},
+                {"count", 2},
+                {"fuseResult", false}}}}});
+
+    CancelToken tok;
+    HandlerContext ctx{tok, [](int) {}, [](Envelope&) {}};
+    json args = {{"jobId", 1},          {"documentRevision", 0},
+                 {"workerEpoch", 3},    {"expectedBaseHash", kEmpty},
+                 {"prefixHashes", json::array({"a", "b", "c"})},
+                 {"targetStep", 2},     {"ops", plan_ops}};
+    onecad::session::handle_execute_plan(s, Envelope::request(1, "ExecutePlan", args), ctx);
+    const Envelope acc = onecad::session::handle_accept_prepared(
+        s, Envelope::request(1, "AcceptPrepared",
+                             json{{"jobId", 1}, {"documentRevision", 0}, {"workerEpoch", 3}}));
+    check(acc.ok.value_or(false), "fixture: two-solid body published");
+}
+
+Envelope export_union(Session& s, const std::string& path, bool do_union) {
+    return io::handle_export_geometry(
+        s, Envelope::request(6, "ExportGeometry",
+                             json{{"path", path},
+                                  {"bodyIds", json::array({"body_op2"})},
+                                  {"codec", "brep"},
+                                  {"union", do_union}}));
+}
+
+// Overlapping instances fuse into one solid — the whole point of the offer.
+void test_union_bakes_one_solid() {
+    Session s;
+    publish_two_solid_body(s, 5.0);
+    const std::string path = temp_path("onecad_f12_union.brep");
+
+    const Envelope plain = export_union(s, path, false);
+    check(plain.ok.value_or(false) && plain.result.value("solidCount", 0) == 2,
+          "union off: the body still bakes as two solids (Rust refuses that)");
+
+    const Envelope fused = export_union(s, path, true);
+    check(fused.ok.value_or(false), "union on: ok");
+    check(fused.result.value("solidCount", 0) == 1, "union on: exactly one solid written");
+
+    // The bytes on disk are the fused solid, not the compound — read them back
+    // the way a placement does.
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_place_component(
+        ctx, place_op("opu1", blob_source("document", path, "brep", io::kBrepFormatVersion), 0.0,
+                      0.0, 0.0),
+        "opu1");
+    check(oc.status == ops::OpOutcome::Status::Ok, "union on: the fused blob places");
+    const onecad::session::BodyRecord* rec = bodies.get("body_opu1");
+    check(rec != nullptr, "union on: body published");
+    if (rec != nullptr) {
+        // 0..15 × 10 × 10 — the two boxes overlap over 5mm.
+        check_near(volume_of(rec->geom), 1500.0, 1e-6, "union on: volume is the fused pair");
+    }
+    std::error_code rm;
+    std::filesystem::remove(path, rm);
+}
+
+// Disjoint solids "fuse" in OCCT into a compound that still holds both. Writing
+// that would move the failure to whoever places the component, so it is refused
+// here, where the author can still split or move the bodies.
+void test_union_refuses_disjoint_solids() {
+    Session s;
+    publish_two_solid_body(s, 40.0);
+    const std::string path = temp_path("onecad_f12_union_disjoint.brep");
+    const Envelope resp = export_union(s, path, true);
+    check(!resp.ok.value_or(false), "union on disjoint solids: refused");
+    check(resp.error.has_value() && resp.error->message.find("union refused") != std::string::npos,
+          "union on disjoint solids: the message names the refusal");
+    std::error_code rm;
+    std::filesystem::remove(path, rm);
+}
+
+// The fuse helper itself, away from any session — both outcomes in one place.
+void test_fuse_helper() {
+    TopoDS_Shape out;
+    const std::vector<TopoDS_Shape> touching = {
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(5, 0, 0), 10, 10, 10).Shape(),
+    };
+    check(io::fuse_to_single_solid(touching, out).empty(), "fuse helper: touching pair fuses");
+    check_near(volume_of(out), 1500.0, 1e-6, "fuse helper: fused volume");
+
+    const std::vector<TopoDS_Shape> apart = {
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 10, 10).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(40, 0, 0), 10, 10, 10).Shape(),
+    };
+    TopoDS_Shape unused;
+    check(!io::fuse_to_single_solid(apart, unused).empty(),
+          "fuse helper: a disjoint pair is refused, not written as a compound");
+
+    const std::vector<TopoDS_Shape> one = {BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 2, 2, 2).Shape()};
+    check(io::fuse_to_single_solid(one, out).empty(), "fuse helper: a lone solid passes through");
+}
+
 }  // namespace
 
 int main() {
@@ -342,6 +473,9 @@ int main() {
     test_unknown_codec_is_refused();
     test_unknown_source_kind_is_refused();
     test_export_refusals(s);
+    test_fuse_helper();
+    test_union_bakes_one_solid();
+    test_union_refuses_disjoint_solids();
 
     if (g_failures == 0) std::fprintf(stderr, "component_blob_source: OK\n");
     return g_failures;

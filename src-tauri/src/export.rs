@@ -62,6 +62,8 @@ pub trait GeometryExporter: Send + Sync {
     /// `document` source is baked through (spec §2.1), whose output is read back
     /// as a content-addressed blob rather than handed to the user.
     ///
+    /// `union_solids` opts into the worker's multi-solid fuse (WP-F1.2, spec §9).
+    ///
     /// # Errors
     /// [`EngineError`] on a disconnected worker or a worker-side failure.
     async fn export_geometry(
@@ -69,6 +71,7 @@ pub trait GeometryExporter: Send + Sync {
         path: &str,
         bodies: &[BodyId],
         codec: &str,
+        union_solids: bool,
     ) -> Result<BakedGeometry, EngineError>;
 }
 
@@ -116,8 +119,9 @@ impl GeometryExporter for WorkerManager {
         path: &str,
         bodies: &[BodyId],
         codec: &str,
+        union_solids: bool,
     ) -> Result<BakedGeometry, EngineError> {
-        WorkerManager::export_geometry(self, path, bodies, codec).await
+        WorkerManager::export_geometry(self, path, bodies, codec, union_solids).await
     }
 }
 
@@ -156,6 +160,7 @@ impl GeometryExporter for PendingBackend {
         _path: &str,
         _bodies: &[BodyId],
         _codec: &str,
+        _union_solids: bool,
     ) -> Result<BakedGeometry, EngineError> {
         Err(not_ready("component geometry"))
     }

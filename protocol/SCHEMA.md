@@ -2548,7 +2548,8 @@ Bakes live bodies into one of the **§7.3 replay codecs** — the byte forms
 
 ```json
 // req.args
-{ "path": "/tmp/onecad/bake_ef56.brep", "bodyIds": ["body_3"], "codec": "brep" }
+{ "path": "/tmp/onecad/bake_ef56.brep", "bodyIds": ["body_3"], "codec": "brep",
+  "union": false }
 // result
 { "written": true, "bytes": 91234, "codec": "brep", "format": 4, "solidCount": 1 }
 ```
@@ -2578,6 +2579,18 @@ Bakes live bodies into one of the **§7.3 replay codecs** — the byte forms
 - `bodyIds` is **required and non-empty** (unlike `ExportStep`'s "all" default) —
   a bake is always about a chosen body, and "everything in the session" is never
   a meaningful component.
+- `union` (optional, default `false`): when the addressed bodies flatten to more
+  than one solid, fuse them (`BRepAlgoAPI_Fuse` chain) into ONE before writing.
+  Opt-in because spec §9's one-solid rule is enforced Rust-side at save time, and
+  the author is offered the fuse only after being told their body is not one
+  solid — a bake that fused silently would change what they modelled. A fuse of
+  DISJOINT solids "succeeds" in OCCT and returns a compound that still holds
+  both, so the RESULT's solid count is checked as well as `IsDone()`; anything
+  other than exactly one solid is a recoverable `OP_FAILED` (`"union refused —
+  …"`) and nothing is written. `union` never affects a body that already
+  flattens to one solid. Face colors are dropped for a fused result — a fuse
+  rewrites the face set, and the source body's face indices no longer address
+  anything (the same rule the multi-solid case above follows).
 
 #### ExportStep
 
@@ -2915,6 +2928,22 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — §7.8 `ExportGeometry`: new OPTIONAL `union` arg** (Component
+  Library WP-F1.2, spec §9, single-repo, both tracks land together). Purely
+  ADDITIVE: absent/`false` is the pre-WP-F1.2 behavior byte-for-byte, and no
+  existing caller changes. "Save as Component" refuses a body that bakes to more
+  than one solid; the author's only recourse was to leave the dialog and rebuild
+  the body. With `union` the dialog can offer the fuse in place, and it is the
+  BAKE that fuses — not the document — so the author's own model is untouched
+  and the fused solid exists only inside the component package.
+  - The fuse is checked by RESULT, not by `IsDone()`: OCCT happily "fuses"
+    disjoint solids into a compound of both, and writing that would move the
+    one-solid failure to whoever places the component. Refused at the bake.
+  - Pick-primary and split-into-several-components are NOT offered — each needs
+    a solid-picking UI the authoring dialog does not have, and guessing which
+    solid the author meant is exactly the substitution failure spec §0 forbids.
+  - No fixture bump: `protocol/fixtures/` carries no `ExportGeometry` NDJSON.
 
 - **2026-08-13 — §7.3 `PlaceComponent`: new OPTIONAL `mate.selfFrame`**
   (Component Library WP-F1.1, spec §2.1/§5, single-repo, both tracks land

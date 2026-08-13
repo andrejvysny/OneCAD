@@ -5,31 +5,47 @@
  * contribution, WP-B1), never from a modeling surface: the library owns this
  * flow and modeling does not know it exists.
  *
- * WHAT THIS DIALOG DELIBERATELY DOES NOT DO, and why it says so on screen:
+ * ATTACHMENTS ARE PICKED IN THE VIEWPORT (WP-F1.2). "Add attachment" arms
+ * `attachmentPicker`, and each click on a planar face, a cylindrical face or a
+ * circular edge authors a named attachment WITH ITS OWN LOCAL FRAME — the wire
+ * support for which landed as WP-F1.1, which is what made this honest to offer.
+ * Before that, an attachment on an arbitrary face could not have been honoured
+ * at placement time, so the dialog only offered the model-origin convention.
+ * That convention is still the fallback: a component saved with no picked
+ * attachment gets the same origin seat it always did.
  *
- * - **No face-clicking to place attachments.** The placement solver seats a
- *   component by its local origin and +Z (`placementSolver.ts`), and nothing
- *   on the wire carries a per-attachment frame — so an attachment placed on an
- *   arbitrary face could not actually be honoured at placement time. The
- *   authoring rule is therefore the same one every built-in generator follows:
- *   the component seats at its MODEL ORIGIN with +Z out of the seating plane.
- *   The dialog states that instead of offering a picker whose result would be
- *   quietly ignored.
+ * A BODY THAT BAKES TO SEVERAL SOLIDS gets an offer, not just a refusal: spec
+ * §9 requires one solid, and the dialog can re-submit the same save with
+ * `unionSolids`, which fuses inside the BAKE (the open document keeps its
+ * bodies). The other two answers — pick one solid, split into several
+ * components — need a solid-picking UI that does not exist yet, and the offer
+ * says so rather than pretending they are unavailable for a deeper reason.
+ *
+ * WHAT THIS DIALOG STILL DELIBERATELY DOES NOT DO:
+ *
  * - **No parameter roles.** A `document`-kind package has geometry baked at
  *   authoring time, and `setComponentParams` already refuses to edit one (there
  *   is no re-bake lane). Declaring free params here would offer an edit that
  *   cannot be honoured.
  *
- * Both are recorded in TODO.md as the follow-up, not hidden here.
+ * Recorded in TODO.md as the follow-up, not hidden here.
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/ui/Button";
 import { TextInput } from "@/ui/TextInput";
 import { createClient } from "@/ipc/client";
-import type { NewComponentSpec } from "@/ipc/types";
+import type { LibraryAttachment, LibraryAttachmentFrame, NewComponentSpec } from "@/ipc/types";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { viewportStore } from "@/stores/viewportStore";
+import {
+  beginAttachmentPick,
+  cancelAttachmentPick,
+  DEFAULT_NAME,
+  ON_PREFIX,
+  PICK_HINT,
+  type AttachmentKind,
+} from "@/modules/library/attachmentPicker";
 
 /** `"Bracket Plate"` → `"bracket-plate"`, for the id's trailing segment. */
 export function slugify(name: string): string {
@@ -60,6 +76,38 @@ export function isValidVersion(version: string): boolean {
   return /^\d+\.\d+\.\d+$/.test(version.trim());
 }
 
+/**
+ * An attachment name is a manifest TABLE KEY (`[attachments].<key>`) and a mate
+ * is recorded BY that name, so it stays to the character set every seeded
+ * package uses. Uniqueness is checked separately — a duplicate would silently
+ * overwrite the earlier row when the record is built.
+ */
+export function isValidAttachmentName(name: string): boolean {
+  return /^[a-z0-9_-]+$/.test(name);
+}
+
+/** The marker `library.rs` puts in the multi-solid refusal. Kept in sync there. */
+export const MULTI_SOLID_REFUSAL = "MULTI_SOLID_BODY";
+
+/** One authored attachment row. `id` is React identity only — never sent. */
+interface AttachmentRow {
+  id: number;
+  name: string;
+  kind: AttachmentKind;
+  accepts: string[];
+  frame: LibraryAttachmentFrame;
+}
+
+/** `"seat"`, then `"seat2"`, `"seat3"`… — the first name not already taken. */
+function uniqueName(rows: readonly AttachmentRow[], base: string): string {
+  const taken = new Set(rows.map((r) => r.name));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 export interface SaveAsComponentDialogProps {
   /** The body being authored, or `null` when the dialog is closed. */
   bodyId: string | null;
@@ -75,7 +123,14 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
   const [tags, setTags] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rows, setRows] = useState<AttachmentRow[]>([]);
+  const [picking, setPicking] = useState(false);
+  const [pickHint, setPickHint] = useState<string | null>(null);
+  // The multi-solid refusal is the ONE backend failure with a repair the dialog
+  // can offer; everything else is just reported.
+  const [offerUnion, setOfferUnion] = useState(false);
   const nameInput = useRef<HTMLInputElement>(null);
+  const nextRowId = useRef(1);
   // The id follows the name until the user edits it themselves — after that it
   // is theirs, and a later name change must not overwrite what they typed.
   const idTouched = useRef(false);
@@ -87,21 +142,92 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
     setVersion("1.0.0");
     setTags("");
     setError(null);
+    setRows([]);
+    setOfferUnion(false);
     idTouched.current = false;
     nameInput.current?.focus();
     nameInput.current?.select();
   }, [bodyId, bodyName]);
 
+  // Pick mode must not outlive the dialog — an armed picker with nowhere to
+  // deliver would keep swallowing viewport clicks.
+  useEffect(() => {
+    if (bodyId) return;
+    cancelAttachmentPick();
+    setPicking(false);
+    setPickHint(null);
+  }, [bodyId]);
+  useEffect(() => () => cancelAttachmentPick(), []);
+
   if (!bodyId) return null;
 
   const trimmedName = name.trim();
+  const duplicateNames = rows.some((r, i) => rows.findIndex((o) => o.name === r.name) !== i);
+  const attachmentsValid = rows.every((r) => isValidAttachmentName(r.name)) && !duplicateNames;
   const canCommit =
-    !saving && trimmedName.length > 0 && isValidComponentId(id) && isValidVersion(version);
+    !saving &&
+    trimmedName.length > 0 &&
+    isValidComponentId(id) &&
+    isValidVersion(version) &&
+    attachmentsValid;
 
-  const commit = async () => {
+  const stopPicking = () => {
+    cancelAttachmentPick();
+    setPicking(false);
+    setPickHint(null);
+  };
+
+  const startPicking = () => {
+    const armed = beginAttachmentPick({
+      onPick: (picked) => {
+        setRows((prev) => [
+          ...prev,
+          {
+            id: nextRowId.current++,
+            name: uniqueName(prev, DEFAULT_NAME[picked.kind]),
+            kind: picked.kind,
+            accepts: picked.accepts,
+            frame: picked.frame,
+          },
+        ]);
+        setPickHint(PICK_HINT);
+      },
+      onReject: (message) => setPickHint(message),
+      onExit: () => {
+        setPicking(false);
+        setPickHint(null);
+      },
+    });
+    if (!armed) {
+      setPickHint("No viewport to pick in — open the model first.");
+      return;
+    }
+    setPicking(true);
+    setPickHint(PICK_HINT);
+  };
+
+  /**
+   * The `[attachments]` table this save writes. A picked row's `on` follows its
+   * NAME so the two can never drift apart, and rides with the frame the pick
+   * captured. No rows ⇒ the pre-WP-F1.2 origin seat, which is still a real
+   * (frameless) attachment: the component then seats at its model origin, the
+   * convention every built-in generator follows.
+   */
+  const attachmentTable = (): Record<string, LibraryAttachment> => {
+    if (rows.length === 0) return { seat: { on: "face:origin", accepts: ["plane"] } };
+    const table: Record<string, LibraryAttachment> = {};
+    for (const r of rows) {
+      table[r.name] = { on: `${ON_PREFIX[r.kind]}:${r.name}`, accepts: r.accepts, frame: r.frame };
+    }
+    return table;
+  };
+
+  const commit = async (unionSolids: boolean) => {
     if (!canCommit) return;
+    stopPicking();
     setSaving(true);
     setError(null);
+    setOfferUnion(false);
     const spec: NewComponentSpec = {
       id: id.trim(),
       version: version.trim(),
@@ -111,16 +237,14 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean),
-      // One attachment, matching what the origin convention actually offers: a
-      // seating plane. `accepts: ["plane"]` is what the snap solver matches a
-      // hovered planar face against.
-      attachments: { seat: { on: "face:origin", accepts: ["plane"] } },
+      attachments: attachmentTable(),
     };
     try {
       const saved = await createClient().saveAsComponent(
         bodyId,
         spec,
         getViewportEngine()?.captureThumbnail(256) ?? null,
+        unionSolids,
       );
       onClose();
       viewportStore
@@ -130,7 +254,12 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
       // Stays OPEN on failure: the backend's refusals (a taken id@version, a
       // body that bakes to more than one solid) are all things the author fixes
       // right here, and closing would throw away everything they typed.
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      // Matched on the MARKER, never the sentence — the offer must not vanish
+      // because the backend reworded its refusal. A union that itself failed
+      // (disjoint bodies) reports plainly instead of offering the same thing twice.
+      setOfferUnion(!unionSolids && message.includes(MULTI_SOLID_REFUSAL));
     } finally {
       setSaving(false);
     }
@@ -138,21 +267,29 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[95] flex items-start justify-center bg-scrim pt-[110px]"
-      onClick={onClose}
+      // While picking, the scrim must let pointer events through to the canvas
+      // AND stop being a click-to-close target — the author is clicking the
+      // model on purpose, and every one of those clicks would otherwise close
+      // the dialog they are filling in.
+      className={`fixed inset-0 z-[95] flex items-start justify-center pt-[110px] ${
+        picking ? "pointer-events-none" : "bg-scrim"
+      }`}
+      onClick={picking ? undefined : onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Save as component"
         data-testid="save-as-component-dialog"
+        data-authoring-dialog=""
         onClick={(e) => e.stopPropagation()}
-        className="w-[420px] rounded-lg border border-border bg-surface p-[20px_22px] font-ui shadow-popover"
+        className="pointer-events-auto w-[420px] rounded-lg border border-border bg-surface p-[20px_22px] font-ui shadow-popover"
       >
         <div className="text-[14px] font-semibold text-ink">Save as component</div>
         <div className="mt-[3px] text-[12px] text-ink-5">
-          Captures this body as a reusable component. It seats at the body’s model origin with
-          +Z out of the seating plane — the same convention the built-in fasteners use.
+          Captures this body as a reusable component. With no attachment picked it seats at the
+          body’s model origin with +Z out of the seating plane — the same convention the built-in
+          fasteners use.
         </div>
 
         <label className="mt-4 block text-[11.5px] text-ink-5" htmlFor="sac-name">
@@ -225,6 +362,76 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
           </div>
         </div>
 
+        <div className="mt-4 flex items-center justify-between">
+          <div className="text-[11.5px] text-ink-5">Attachments</div>
+          <Button
+            variant="secondary"
+            data-testid="save-as-component-add-attachment"
+            onClick={picking ? stopPicking : startPicking}
+          >
+            {picking ? "Stop picking" : "Add attachment"}
+          </Button>
+        </div>
+
+        {pickHint && (
+          <div className="mt-1 text-[11.5px] text-ink-4" data-testid="save-as-component-pick-hint">
+            {pickHint}
+          </div>
+        )}
+
+        {rows.length === 0 ? (
+          <div className="mt-1 text-[11.5px] text-ink-5" data-testid="save-as-component-no-attachments">
+            None picked — the component will seat at its model origin.
+          </div>
+        ) : (
+          <ul className="mt-1 flex flex-col gap-1" data-testid="save-as-component-attachments">
+            {rows.map((row) => (
+              <li
+                key={row.id}
+                className="flex items-center gap-2 rounded border border-border-subtle bg-well px-2 py-1"
+                data-testid="save-as-component-attachment-row"
+              >
+                <TextInput
+                  value={row.name}
+                  onChange={(e) =>
+                    setRows((prev) =>
+                      prev.map((r) => (r.id === row.id ? { ...r, name: e.target.value } : r)),
+                    )
+                  }
+                  aria-label={`Attachment name for ${ON_PREFIX[row.kind]}`}
+                  data-testid="save-as-component-attachment-name"
+                  wrapperClassName="w-[110px]"
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
+                <span className="min-w-0 flex-1 truncate text-[11px] text-ink-5">
+                  on {ON_PREFIX[row.kind]} · accepts {row.accepts.join(", ")}
+                </span>
+                <span className="rounded bg-chip px-1 text-[10px] text-ink-4">frame</span>
+                <button
+                  type="button"
+                  aria-label={`Remove attachment ${row.name}`}
+                  data-testid="save-as-component-attachment-remove"
+                  className="text-[11px] text-ink-5 hover:text-ink"
+                  onClick={() => setRows((prev) => prev.filter((r) => r.id !== row.id))}
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {!attachmentsValid && (
+          <div
+            className="mt-1 text-[11.5px] text-traffic-close"
+            data-testid="save-as-component-attachment-error"
+          >
+            {duplicateNames
+              ? "Attachment names must be unique — a mate is recorded by name."
+              : "An attachment name uses lowercase letters, digits, - and _."}
+          </div>
+        )}
+
         {error && (
           <div
             role="alert"
@@ -235,6 +442,32 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
           </div>
         )}
 
+        {offerUnion && (
+          <div
+            className="mt-2 rounded border border-warn-border bg-warn-surface p-2 text-[11.5px] text-warn-strong"
+            data-testid="save-as-component-union-offer"
+          >
+            The bake can fuse those solids into one and save that. Only the component is fused —
+            this document keeps its bodies. Picking one solid, or splitting them into separate
+            components, is not offered in this version; disjoint bodies cannot be fused at all.
+            <div className="mt-2 flex gap-2">
+              <Button
+                data-testid="save-as-component-union-commit"
+                onClick={() => void commit(true)}
+              >
+                Union into one solid and save
+              </Button>
+              <Button
+                variant="secondary"
+                data-testid="save-as-component-union-cancel"
+                onClick={() => setOfferUnion(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="secondary" data-testid="save-as-component-cancel" onClick={onClose}>
             Cancel
@@ -242,7 +475,7 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
           <Button
             disabled={!canCommit}
             data-testid="save-as-component-commit"
-            onClick={() => void commit()}
+            onClick={() => void commit(false)}
           >
             {saving ? "Saving…" : "Save"}
           </Button>

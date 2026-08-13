@@ -508,20 +508,24 @@ export interface CadClient {
    * §9) — checked at SAVE time, where the author can still fix it, rather than
    * at placement on someone else's machine.
    *
-   * **The component seats at its MODEL ORIGIN, +Z up.** The placement solver
-   * aligns a component's local origin/+Z to the target, and an authored body's
-   * origin is wherever it was modelled — so "put the origin on the face that
-   * seats" is the authoring rule, the same convention every built-in generator
-   * follows. Per-attachment frames (which would lift that restriction) are not
-   * in this build.
+   * Each `spec.attachments` entry MAY carry a `frame` (WP-F1.1): the
+   * component-local basis that attachment seats from, in the authoring
+   * document's own coordinates. Without one the component seats at its model
+   * origin with +Z up, the convention the built-in generators follow.
    *
    * `previewPng` is an optional viewport capture (data URL or bare base64),
    * stored as the package thumbnail; a malformed one is dropped, never fatal.
+   *
+   * `unionSolids` (WP-F1.2) fuses a body that bakes to several solids into one
+   * BEFORE it is stored — the author's opt-in answer to the refusal above. Only
+   * the package is fused; the open document keeps its bodies. A fuse that
+   * cannot produce a single solid (disjoint bodies) is refused too.
    */
   saveAsComponent(
     bodyId: string,
     spec: NewComponentSpec,
     previewPng?: string | null,
+    unionSolids?: boolean,
   ): Promise<LibraryComponent>;
 
   /**

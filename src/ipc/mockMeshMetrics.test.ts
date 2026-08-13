@@ -13,10 +13,11 @@
  * cylinder it stands for.
  */
 import { describe, it, expect } from "vitest";
-import { BOX_SIZE, makeBoxMesh, makeCylinderMesh } from "./mockMeshes";
+import { BOX_SIZE, makeBoredCylinderMesh, makeBoxMesh, makeCylinderMesh } from "./mockMeshes";
 import { visualSegmentsForClosedCurve } from "@/tools/preview/visualTessellation";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import {
+  cylinderMetricsFromMesh,
   edgeMetricsFromMesh,
   faceMetricsFromMesh,
   massPropertiesFromMesh,
@@ -202,5 +203,55 @@ describe("edgeMetricsFromMesh", () => {
 
   it("returns null for an edge the mesh does not carry", () => {
     expect(edgeMetricsFromMesh(box, "e:999")).toBeNull();
+  });
+});
+
+/*
+ * cylinderMetricsFromMesh — the input a concentric snap and auto-size run on
+ * (WP-F3). Same discipline as the rest of this file: every expectation is the
+ * analytic answer for the mock's OWN prism, and the negative cases matter more
+ * than the positive ones — a fit that said "cylinder" about a box face would
+ * hand the placement gesture an axis that does not exist.
+ */
+describe("cylinderMetricsFromMesh", () => {
+  it("recovers a cylinder's axis, axis point and radius from the tessellation", () => {
+    const fit = cylinderMetricsFromMesh(makeCylinderMesh(25, 60), "f:0")!;
+    expect(fit).not.toBeNull();
+    // Sign-canonical, matching the worker's rule: +Z, not -Z.
+    expect(fit.axis[0]).toBeCloseTo(0, 6);
+    expect(fit.axis[1]).toBeCloseTo(0, 6);
+    expect(fit.axis[2]).toBeCloseTo(1, 6);
+    // The seed cylinder is centred at the origin and spans z ∈ [-30, 30].
+    expect(fit.origin[0]).toBeCloseTo(0, 4);
+    expect(fit.origin[1]).toBeCloseTo(0, 4);
+    expect(fit.radius).toBeCloseTo(25, 4);
+  });
+
+  it("reads a BORE — the radius the hole actually has, not the part's", () => {
+    // A bushing 80 mm off the origin: the fit must recover the axis LINE where
+    // it is, not assume the world origin (the seam vertex is duplicated, so a
+    // plain centroid would sit off-axis — hence the least-squares circle).
+    const bushing = makeBoredCylinderMesh(20, 4.25, 16, [80, 0, 0]);
+    const bore = cylinderMetricsFromMesh(bushing, "f:1")!;
+    expect(bore.radius).toBeCloseTo(4.25, 4);
+    expect(bore.origin[0]).toBeCloseTo(80, 4);
+    expect(bore.origin[1]).toBeCloseTo(0, 4);
+    expect(bore.axis[2]).toBeCloseTo(1, 6);
+
+    const outer = cylinderMetricsFromMesh(bushing, "f:0")!;
+    expect(outer.radius).toBeCloseTo(20, 4);
+  });
+
+  it("refuses every face that is NOT a cylinder", () => {
+    // A planar box face: its facet normals are all parallel, so nothing is
+    // perpendicular to all of them in the way a cylinder demands.
+    expect(cylinderMetricsFromMesh(makeBoxMesh(), "f:0")).toBeNull();
+    // The cylinder's own flat cap, and the bushing's annular one.
+    expect(cylinderMetricsFromMesh(makeCylinderMesh(), "f:1")).toBeNull();
+    expect(cylinderMetricsFromMesh(makeBoredCylinderMesh(), "f:2")).toBeNull();
+  });
+
+  it("returns null for a face the mesh does not carry", () => {
+    expect(cylinderMetricsFromMesh(makeCylinderMesh(), "f:999")).toBeNull();
   });
 });

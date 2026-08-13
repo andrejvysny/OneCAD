@@ -304,6 +304,25 @@ export function nearestSmallerThread(
 }
 
 /**
+ * Where a camera ray meets the world ground plane `z = 0` — the free-space
+ * drop point (spec §5.4 steps 1/6). `null` when the ray cannot reach that
+ * plane: parallel to it (`|dir.z|` vanishes) or pointing away from it, where
+ * the only honest answer is "no point", and the gesture keeps the ghost where
+ * it already was rather than teleporting it to a fabricated one.
+ *
+ * Z=0 rather than an arbitrary depth because world is Z-up here (viewport
+ * README's hard invariant): the ground plane IS the XY plane a part is
+ * modelled on, so a free-space drop lands where the grid is drawn.
+ */
+export function groundPlanePoint(origin: Vec3, direction: Vec3): [number, number, number] | null {
+  const dz = direction[2];
+  if (!Number.isFinite(dz) || Math.abs(dz) < EPS) return null;
+  const t = -origin[2] / dz;
+  if (!Number.isFinite(t) || t <= 0) return null;
+  return [origin[0] + direction[0] * t, origin[1] + direction[1] * t, origin[2] + direction[2] * t];
+}
+
+/**
  * The candidate placement for one already-matched (attachment, classify)
  * pair — spec §5.3's transform rules. `pickWorldPos` is the raw hover hit
  * point (used to pick a seat point along an infinite axis / a point on an

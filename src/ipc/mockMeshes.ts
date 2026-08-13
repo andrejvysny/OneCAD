@@ -436,6 +436,115 @@ export function makeCylinderMesh(
   return encodeMesh1({ positions, normals, faces, edges, lod });
 }
 
+// ── Bored cylinder (a bushing: outer wall + through bore + two annular caps) ──
+
+/**
+ * A cylinder with an axial through bore, centred on `origin` and running along
+ * world +Z: outer wall `f:0`, BORE wall `f:1`, top annulus `f:2`, bottom
+ * annulus `f:3`.
+ *
+ * Exists so the mock lane has a real HOLE to hover — the one input auto-size
+ * runs on (spec §5.3's hole row). Both walls are genuine faceted rings, so
+ * `mockMeshMetrics.cylinderMetricsFromMesh` recovers the axis and the radius by
+ * MEASURING them; nothing here is announced to the classifier out of band. The
+ * bore's facets are wound so their outward normal points INTO the axis, which
+ * is what a hole's wall actually does.
+ */
+export function makeBoredCylinderMesh(
+  outerRadius = 20,
+  boreRadius = 4.25,
+  height = 16,
+  origin: readonly [number, number, number] = [0, 0, 0],
+  segments = visualSegmentsForClosedCurve(outerRadius),
+  lod = 0,
+): ArrayBuffer {
+  const [ox, oy, oz] = origin;
+  const zTop = oz + height / 2;
+  const zBot = oz - height / 2;
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const faces: FaceSource[] = [];
+
+  const push = (x: number, y: number, z: number, nx: number, ny: number, nz: number): number => {
+    const idx = positions.length / 3;
+    positions.push(x, y, z);
+    normals.push(nx, ny, nz);
+    return idx;
+  };
+  const ang = (i: number) => (i / segments) * Math.PI * 2;
+
+  /** One cylindrical wall; `outward` false points the normals at the axis (a bore). */
+  const wall = (radius: number, outward: boolean, id: string): void => {
+    const bot: number[] = [];
+    const top: number[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const a = ang(i);
+      const cx = Math.cos(a);
+      const cy = Math.sin(a);
+      const s = outward ? 1 : -1;
+      bot.push(push(ox + radius * cx, oy + radius * cy, zBot, s * cx, s * cy, 0));
+      top.push(push(ox + radius * cx, oy + radius * cy, zTop, s * cx, s * cy, 0));
+    }
+    const tris: [number, number, number][] = [];
+    for (let i = 0; i < segments; i++) {
+      // The bore's triangles are the outward ones REVERSED, so their geometric
+      // normal points at the axis — what a hole's wall really does.
+      if (outward) {
+        tris.push([bot[i], bot[i + 1], top[i + 1]], [bot[i], top[i + 1], top[i]]);
+      } else {
+        tris.push([top[i + 1], bot[i + 1], bot[i]], [top[i], top[i + 1], bot[i]]);
+      }
+    }
+    faces.push({ triangles: tris, id });
+  };
+
+  /** One annular cap at `z`, normal ±Z. */
+  const cap = (z: number, up: boolean, id: string): void => {
+    const nz = up ? 1 : -1;
+    const outer: number[] = [];
+    const inner: number[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const a = ang(i);
+      const cx = Math.cos(a);
+      const cy = Math.sin(a);
+      outer.push(push(ox + outerRadius * cx, oy + outerRadius * cy, z, 0, 0, nz));
+      inner.push(push(ox + boreRadius * cx, oy + boreRadius * cy, z, 0, 0, nz));
+    }
+    const tris: [number, number, number][] = [];
+    for (let i = 0; i < segments; i++) {
+      if (up) {
+        tris.push([inner[i], outer[i], outer[i + 1]], [inner[i], outer[i + 1], inner[i + 1]]);
+      } else {
+        // The +Z pair, reversed.
+        tris.push([outer[i + 1], outer[i], inner[i]], [inner[i + 1], outer[i + 1], inner[i]]);
+      }
+    }
+    faces.push({ triangles: tris, id });
+  };
+
+  wall(outerRadius, true, "f:0");
+  wall(boreRadius, false, "f:1");
+  cap(zTop, true, "f:2");
+  cap(zBot, false, "f:3");
+
+  const circle = (radius: number, z: number): [number, number, number][] => {
+    const pts: [number, number, number][] = [];
+    for (let i = 0; i <= segments; i++) {
+      const a = ang(i);
+      pts.push([ox + radius * Math.cos(a), oy + radius * Math.sin(a), z]);
+    }
+    return pts;
+  };
+  const edges: EdgeSource[] = [
+    { points: circle(outerRadius, zTop), id: "e:0" },
+    { points: circle(outerRadius, zBot), id: "e:1" },
+    { points: circle(boreRadius, zTop), id: "e:2" },
+    { points: circle(boreRadius, zBot), id: "e:3" },
+  ];
+
+  return encodeMesh1({ positions, normals, faces, edges, lod });
+}
+
 // ── Extrude body (prism from a sketch region × depth) — the mock L2 body ──────
 
 /**

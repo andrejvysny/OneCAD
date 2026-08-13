@@ -18,12 +18,31 @@
 // them, so the `brepFormat` a record pins is always the version this worker
 // actually wrote (the same discipline `InspectStep` follows with
 // `geometryCodec`/`geometryFormat`).
+//
+// `union` (optional, default false) is the "Save as Component" escape hatch for
+// a body that flattens to more than one solid: spec §9 requires a component to
+// be exactly one, and fusing at BAKE time is the only place the author can be
+// offered that choice with the geometry still in front of them.
 #pragma once
+
+#include <string>
+#include <vector>
+
+#include <TopoDS_Shape.hxx>
 
 #include "protocol/Envelope.h"
 #include "session/Session.h"
 
 namespace onecad::io {
+
+/// Fuses `solids` into ONE solid via a `BRepAlgoAPI_Fuse` chain. Returns an
+/// empty string on success (`out` is the single fused solid), else the reason.
+///
+/// A fuse of DISJOINT solids "succeeds" in OCCT and hands back a compound that
+/// still holds both — so the result's solid count is checked, not just
+/// `IsDone()`. Refusing there is the point: a disconnected union is not one
+/// component, and writing it would push the failure to whoever places it.
+std::string fuse_to_single_solid(const std::vector<TopoDS_Shape>& solids, TopoDS_Shape& out);
 
 protocol::Envelope handle_export_geometry(session::Session& session, const protocol::Envelope& req);
 

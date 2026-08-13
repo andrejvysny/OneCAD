@@ -70,6 +70,7 @@ import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { TopoIndex } from "@/viewport/mesh/faceRangeIndex";
 import {
   concatMesh1,
+  makeBoredCylinderMesh,
   makeBoxMesh,
   makeCylinderMesh,
   makeExtrudeBodyMesh,
@@ -82,6 +83,7 @@ import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import { lookupMockFace, mockElementHash } from "./mockFaceGeometry";
 import {
+  cylinderMetricsFromMesh,
   edgeMetricsFromMesh,
   faceMetricsFromMesh,
   massPropertiesFromMesh,
@@ -306,6 +308,43 @@ const syntheticBodies = new Map<string, ArrayBuffer>();
  */
 function mockBodyMesh(bodyId: string): ArrayBuffer {
   return syntheticBodies.get(bodyId) ?? meshForBody(bodyId);
+}
+
+// ── `?vpdemo=cyl` demo body: a bushing with a real bore ─────────────────────
+//
+// The seed box has six planar faces and nothing else, so the mock lane could
+// only ever exercise the COINCIDENT half of the placement gesture; auto-size
+// (spec §5.3's hole row) runs on a hole's RADIUS and had no hole to read. This
+// body supplies one. It is opt-in for the same reason `?mocklibrary=1` is: an
+// always-on second body would change what every existing spec's body list and
+// camera fit see.
+//
+// The bore is Ø8.5 — the standard M8 clearance hole — so auto-size resolves to
+// a size the armed default (M6) is not, which is what makes the e2e assertion
+// mean something.
+
+/** The `?vpdemo=cyl` body id (not `body<N>`: it must not collide with `nextBodyId`). */
+export const MOCK_DEMO_BORE_BODY_ID = "body_demo_bore";
+const DEMO_BORE_ORIGIN: readonly [number, number, number] = [80, 0, 0];
+
+/**
+ * Publish the demo bushing into the mock document (bodies registry + synthetic
+ * mesh) and hand back its mesh ref. The caller fires the `document-changed`, so
+ * ingestion still goes through the one path the real worker uses.
+ */
+export function seedMockDemoCylinder(): BodyMeshRef {
+  const bodyId = MOCK_DEMO_BORE_BODY_ID;
+  syntheticBodies.set(bodyId, makeBoredCylinderMesh(20, 4.25, 16, DEMO_BORE_ORIGIN));
+  mockRevision += 1;
+  const doc = documentStore.getState();
+  doc.applyChange({
+    revision: mockRevision,
+    bodies: { ...doc.bodies, [bodyId]: { id: bodyId, name: "Bushing", visible: true } },
+  });
+  // The mock owns this body's metadata now, like any other body it minted —
+  // otherwise the next `reassertMockMetadata` has nothing to re-assert from.
+  writeMockMeta("body", bodyId, { name: "Bushing", visible: true });
+  return bodyRef(bodyId);
 }
 let mockFeatures: FeatureRecord[] = MOCK_BASE_FEATURES.map(cloneFeature);
 /**
@@ -1385,6 +1424,128 @@ const MOCK_LIBRARY_FIXTURE: LibraryComponent = {
   designation: "ISO 4762 {thread}x{length}",
 };
 
+/**
+ * The rest of the SHIPPED seed catalog (WP-F2), mirrored from the real
+ * manifests in `src-tauri/resources/library-seed/<id>/component.toml` —
+ * identity, metadata, the parameter table's roles/domains and the attachment
+ * signature, field for field.
+ *
+ * MIRRORED, not invented: a mock catalog that carried a different parameter
+ * shape than the packages the app actually ships would make the configurator
+ * and the placement gesture provable only against fiction. Any drift here is a
+ * lie about what the tauri lane will hand back, so these entries move when
+ * those manifests do.
+ *
+ * What is NOT mirrored is geometry — the mock has no kernel, so every one of
+ * these places as the same synthetic solid the SHCS does (see
+ * `resolveComponentSource`'s note).
+ */
+const MOCK_SEED_FIXTURES: LibraryComponent[] = [
+  {
+    id: "onecad.std.iso15",
+    version: "1.0.0",
+    name: "Deep Groove Ball Bearing",
+    category: ["bearings"],
+    tags: ["bearing", "deep-groove", "ball", "metric", "608", "625"],
+    sourceKind: "generator",
+    revision: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    generatorId: "iso15",
+    generatorVersion: 1,
+    attachments: {
+      seat: { on: "face:side", accepts: ["plane"] },
+      bore_axis: { on: "cylinder:bore", accepts: ["cylinder", "hole", "circularEdge"] },
+    },
+    parameters: {
+      code: {
+        role: "free",
+        key: "608",
+        domain: ["625", "608", "6000", "6001", "6200", "6201", "6202", "6802"],
+      },
+      bore: { role: "table", from: "iso15.bore" },
+      od: { role: "table", from: "iso15.od" },
+      width: { role: "table", from: "iso15.width" },
+    },
+    designation: "Bearing {code}",
+  },
+  {
+    id: "onecad.std.nema17",
+    version: "1.0.0",
+    name: "NEMA 17 Stepper Motor",
+    category: ["motors", "steppers"],
+    tags: ["nema17", "stepper", "motor", "42mm", "3d-printer"],
+    sourceKind: "generator",
+    revision: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    generatorId: "nema17",
+    generatorVersion: 1,
+    attachments: {
+      faceplate: { on: "face:faceplate", accepts: ["plane"] },
+      pilot_axis: { on: "cylinder:pilot", accepts: ["cylinder", "hole", "circularEdge"] },
+    },
+    parameters: {
+      length: { role: "free", value: 40, min: 20 },
+      frame_square: { role: "table", from: "nema17.frame_square" },
+      hole_pattern: { role: "table", from: "nema17.mounting_hole_pitch" },
+      pilot_diameter: { role: "table", from: "nema17.pilot_diameter" },
+      shaft_diameter: { role: "table", from: "nema17.shaft_diameter" },
+    },
+    designation: "NEMA 17 {length}mm",
+  },
+  {
+    id: "onecad.std.nema23",
+    version: "1.0.0",
+    name: "NEMA 23 Stepper Motor",
+    category: ["motors", "steppers"],
+    tags: ["nema23", "stepper", "motor", "57mm", "cnc"],
+    sourceKind: "generator",
+    revision: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    generatorId: "nema23",
+    generatorVersion: 1,
+    attachments: {
+      faceplate: { on: "face:faceplate", accepts: ["plane"] },
+      pilot_axis: { on: "cylinder:pilot", accepts: ["cylinder", "hole", "circularEdge"] },
+    },
+    parameters: {
+      length: { role: "free", value: 40, min: 20 },
+      frame_square: { role: "table", from: "nema23.frame_square" },
+      hole_pattern: { role: "table", from: "nema23.mounting_hole_pitch" },
+      pilot_diameter: { role: "table", from: "nema23.pilot_diameter" },
+      shaft_diameter: { role: "table", from: "nema23.shaft_diameter" },
+    },
+    designation: "NEMA 23 {length}mm",
+  },
+];
+
+/** The whole opt-in catalog, SHCS first (the panel renders in this order). */
+const MOCK_LIBRARY_FIXTURES: LibraryComponent[] = [MOCK_LIBRARY_FIXTURE, ...MOCK_SEED_FIXTURES];
+
+/**
+ * The built-in starter templates, mirroring `src-tauri/src/
+ * library_seed_templates.rs::SEED_TEMPLATES` (id / name / description).
+ *
+ * Gated behind the SAME `?mocklibrary=1` flag the component fixtures are,
+ * because they are the same fact: these exist only where a seeded library ROOT
+ * exists, and the mock lane has none. Without the flag `listTemplates` still
+ * answers with this session's saved templates alone — which is what keeps "the
+ * Templates row says how to make one when the library is empty" a real test.
+ *
+ * The DOCUMENTS are not mirrored (the mock has no frozen container to
+ * instantiate) — `newFromTemplate` hands back a synthetic document for a
+ * starter exactly as it does for a session-saved one.
+ */
+const MOCK_SEED_TEMPLATES: ProjectTemplate[] = [
+  { id: "onecad.std.template.blank", name: "Blank", description: "An empty document in millimetres." },
+  {
+    id: "onecad.std.template.printed-part",
+    name: "3D-Printed Part",
+    description: "Millimetres, with a Build plate datum on XY to sketch the footprint on.",
+  },
+  {
+    id: "onecad.std.template.nema17-mount",
+    name: "NEMA 17 Motor Mount",
+    description: "A NEMA 17 stepper placed at the origin — model the mounting plate around it.",
+  },
+];
+
 function mockLibraryEnabled(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -1410,17 +1571,27 @@ let mockAuthored: LibraryComponent[] = [];
  */
 let mockTemplates: ProjectTemplate[] = [];
 
+/** The built-in starters, when the flag says a seeded library root exists. */
+function seededTemplates(): ProjectTemplate[] {
+  return mockLibraryEnabled() ? MOCK_SEED_TEMPLATES.map((t) => ({ ...t })) : [];
+}
+
 /**
- * The fixture or a session-authored component matching `id@version`, else
+ * The seed catalog or a session-authored component matching `id@version`, else
  * `null`. Authored components place with the fixture's geometry (nothing is
  * baked on this lane) but keep their own identity + attachments, which is
  * what the author→place e2e needs to exist at all.
+ *
+ * Deliberately NOT gated on `?mocklibrary=1`: the flag governs what the
+ * catalog LISTS, and a placement already in flight must not stop resolving
+ * because of a URL.
  */
 function mockComponentByIdentity(id: string, version: string): LibraryComponent | null {
-  if (id === MOCK_LIBRARY_FIXTURE.id && version === MOCK_LIBRARY_FIXTURE.version) {
-    return MOCK_LIBRARY_FIXTURE;
-  }
-  return mockAuthored.find((c) => c.id === id && c.version === version) ?? null;
+  return (
+    [...MOCK_LIBRARY_FIXTURES, ...mockAuthored].find(
+      (c) => c.id === id && c.version === version,
+    ) ?? null
+  );
 }
 
 /**
@@ -2422,11 +2593,16 @@ export const mockClient: CadClient = {
    * Component Library WP-0.1 mock. Reuses `elementInfo`'s same key resolution
    * (topoKey first, then elementId) and mesh-derived planar/edge metrics.
    *
-   * MOCK-LANE HONESTY: only the PLANE case is a real frame — the mock mesh
-   * utils expose no cylinder axis or circle radius, so a non-planar face or a
-   * curved edge answers with its kind but `frame: null` rather than
-   * fabricating an axis. Real cylinder/circle frames are pinned against the
-   * OCCT worker in `src-tauri/tests/component_ops.rs`, not here.
+   * MOCK-LANE HONESTY: the plane AND cylinder cases are real frames, each
+   * MEASURED off the body's own MESH1 bytes — a planar face by its shared
+   * triangle normal, a cylindrical one by `cylinderMetricsFromMesh` (facet
+   * normals ⊥ a common axis + a least-squares circle fit, both checked). A
+   * face that is neither still answers with its kind and `frame: null` rather
+   * than fabricating an axis, and a curved EDGE still does too (the mock emits
+   * circles as polylines, which are indistinguishable from any other curve
+   * here). Real cylinder/circle frames are pinned against the OCCT worker in
+   * `src-tauri/tests/component_ops.rs`; what this lane owns is the UI chain
+   * that runs on one — hover → snap kind → auto-size → ghost → commit.
    */
   async classifyElement(
     bodyId: string,
@@ -2455,12 +2631,21 @@ export const mockClient: CadClient = {
     }
     const face = faceMetricsFromMesh(blob, key);
     if (!face) return null;
+    if (face.planar) {
+      return {
+        kind: "face",
+        surfaceType: "plane",
+        curveType: "",
+        frame: { origin: face.center, normal: face.normal, axis: null, radius: null },
+      };
+    }
+    const cylinder = cylinderMetricsFromMesh(blob, key);
     return {
       kind: "face",
-      surfaceType: face.planar ? "plane" : "other",
+      surfaceType: cylinder ? "cylinder" : "other",
       curveType: "",
-      frame: face.planar
-        ? { origin: face.center, normal: face.normal, axis: null, radius: null }
+      frame: cylinder
+        ? { origin: cylinder.origin, normal: null, axis: cylinder.axis, radius: cylinder.radius }
         : null,
     };
   },
@@ -2475,15 +2660,14 @@ export const mockClient: CadClient = {
 
   async listLibraryComponents(): Promise<LibraryComponent[]> {
     await wait(MESH_LATENCY_MS);
-    const seeded = mockLibraryEnabled() ? [MOCK_LIBRARY_FIXTURE] : [];
+    const seeded = mockLibraryEnabled() ? MOCK_LIBRARY_FIXTURES : [];
     return [...seeded, ...mockAuthored];
   },
 
   async reindexLibrary(): Promise<ReindexReport> {
     await wait(MESH_LATENCY_MS);
-    return mockLibraryEnabled()
-      ? { total: 1, indexed: 1, skipped: [] }
-      : { total: 0, indexed: 0, skipped: [] };
+    const total = mockLibraryEnabled() ? MOCK_LIBRARY_FIXTURES.length : 0;
+    return { total, indexed: total, skipped: [] };
   },
 
   async resolveComponentSource(
@@ -2576,7 +2760,7 @@ export const mockClient: CadClient = {
 
   async listTemplates(): Promise<ProjectTemplate[]> {
     await wait();
-    return [...mockTemplates];
+    return [...seededTemplates(), ...mockTemplates];
   },
 
   async saveAsTemplate(
@@ -2587,7 +2771,7 @@ export const mockClient: CadClient = {
   ): Promise<ProjectTemplate> {
     await wait();
     if (!id.trim()) throw new Error("saveAsTemplate: a template needs an id");
-    if (mockTemplates.some((t) => t.id === id)) {
+    if ([...seededTemplates(), ...mockTemplates].some((t) => t.id === id)) {
       throw new Error(`saveAsTemplate: template \`${id}\` already exists`);
     }
     const template: ProjectTemplate = { id, name, description };
@@ -2602,7 +2786,7 @@ export const mockClient: CadClient = {
    */
   async newFromTemplate(id: string): Promise<DocumentSnapshot> {
     await wait();
-    if (!mockTemplates.some((t) => t.id === id)) {
+    if (![...seededTemplates(), ...mockTemplates].some((t) => t.id === id)) {
       throw new Error(`newFromTemplate: unknown template ${id}`);
     }
     return mockClient.newDocument();
@@ -2620,6 +2804,10 @@ export const mockClient: CadClient = {
     bodyId: string,
     spec: NewComponentSpec,
     _previewPng?: string | null,
+    // Accepted and ignored: nothing is baked on this lane, so there are never
+    // several solids to fuse (WP-F1.2). Refusing it would make the mock reject
+    // a call the real backend accepts.
+    _unionSolids?: boolean,
   ): Promise<LibraryComponent> {
     await wait();
     if (!documentStore.getState().bodies[bodyId]) {
@@ -2676,11 +2864,18 @@ export const mockClient: CadClient = {
       throw new Error(`setComponentParams: no params for record ${recordId}`);
     }
     const componentId = stored.componentId;
-    if (componentId !== MOCK_LIBRARY_FIXTURE.id) {
+    // Resolved through the catalog, not compared against ONE id: every seeded
+    // component's instances are configurable, and pinning this to the SHCS made
+    // a bearing's or a motor's `length` edit fail on this lane only.
+    const component =
+      typeof componentId === "string" && typeof stored.componentVersion === "string"
+        ? mockComponentByIdentity(componentId, stored.componentVersion)
+        : null;
+    if (!component) {
       throw new Error(`setComponentParams: record ${recordId} is not a placed component`);
     }
     for (const key of Object.keys(params)) {
-      const spec = MOCK_LIBRARY_FIXTURE.parameters[key];
+      const spec = component.parameters[key];
       if (!spec) {
         throw new Error(`setComponentParams: unknown parameter \`${key}\` on ${componentId}`);
       }

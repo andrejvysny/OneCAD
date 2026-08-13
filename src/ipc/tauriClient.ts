@@ -1675,8 +1675,14 @@ export function createTauriClient(): CadClient {
     bodyId: string,
     spec: NewComponentSpec,
     previewPng?: string | null,
+    unionSolids?: boolean,
   ): Promise<LibraryComponent> {
-    return call<LibraryComponent>(CMD.saveAsComponent, { bodyId, spec, previewPng });
+    return call<LibraryComponent>(CMD.saveAsComponent, {
+      bodyId,
+      spec,
+      previewPng,
+      unionSolids,
+    });
   }
 
   async function replaceComponent(

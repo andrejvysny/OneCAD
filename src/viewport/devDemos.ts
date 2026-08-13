@@ -13,6 +13,7 @@ import {
   mockMeshKey,
   resetMockSketches,
   resetMockDocument,
+  seedMockDemoCylinder,
   setMockLatency,
 } from "@/ipc/mockClient";
 import type { CadClient } from "@/ipc/client";
@@ -29,6 +30,8 @@ export interface DemoFlagsDeps {
   container: HTMLElement;
   modelToolController: ModelToolController;
   vpdemo: boolean;
+  /** `?vpdemo=cyl` — publish the bored bushing beside the box (see below). */
+  vpdemoCylinder: boolean;
   sketchdemo: boolean;
   toolsdemo: boolean;
 }
@@ -40,15 +43,25 @@ export interface DemoFlagsDeps {
  * itself stays private to ViewportRoot).
  */
 export function runDemoFlags(deps: DemoFlagsDeps): void {
-  const { engine, client, container, modelToolController, vpdemo, sketchdemo, toolsdemo } = deps;
+  const {
+    engine,
+    client,
+    container,
+    modelToolController,
+    vpdemo,
+    vpdemoCylinder,
+    sketchdemo,
+    toolsdemo,
+  } = deps;
 
   // ?vpdemo — drive the mock box through the FULL onDocumentChanged path.
+  // `?vpdemo=cyl` adds a bushing with a real Ø8.5 bore beside it, so the mock
+  // lane has a CYLINDRICAL face to hover (the box has none) — the input the
+  // placement gesture's concentric snap and auto-size actually run on.
   if (vpdemo) {
-    emitMockDocumentChanged({
-      revision: 1,
-      changedBodies: [{ bodyId: "body1", meshKey: mockMeshKey("body1", "coarse") }],
-      removedBodies: [],
-    });
+    const changedBodies = [{ bodyId: "body1", meshKey: mockMeshKey("body1", "coarse") }];
+    if (vpdemoCylinder) changedBodies.push(seedMockDemoCylinder());
+    emitMockDocumentChanged({ revision: 1, changedBodies, removedBodies: [] });
   }
 
   // ?sketchdemo — enter sketch mode on the seeded XY sketch (no backend;

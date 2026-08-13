@@ -337,6 +337,161 @@ export function faceMetricsFromMesh(blob: ArrayBuffer, faceId: string): MockFace
   return { area, center, normal, planar, size };
 }
 
+/** One mesh face's CYLINDRICAL fit — the inputs a concentric snap needs. */
+export interface MockCylinderMetrics {
+  /** Unit axis direction, sign-canonical (the worker's `sign_canonical` rule). */
+  axis: Vec3;
+  /** A point ON the axis — the face's vertex centroid, exact for a full ring. */
+  origin: Vec3;
+  /** The common distance from the axis (mm). */
+  radius: number;
+}
+
+/**
+ * Fit a cylinder to the face carrying `faceId`, or `null` when it is not one.
+ *
+ * MEASURED, not asserted: the mock's "cylinder" is a faceted prism, and what
+ * makes it read as a cylinder is a property its triangles genuinely have —
+ * every facet normal is perpendicular to one common direction, and every
+ * vertex lies on one circle in the plane normal to it. So the axis is
+ * recovered as the eigenvector of the facet-normal covariance with the
+ * SMALLEST eigenvalue (a cylinder's normals span the plane ⊥ axis and put zero
+ * weight along it), a circle is LEAST-SQUARES fitted to the vertices projected
+ * into that plane, and both the perpendicularity and the fit residual are
+ * CHECKED before an answer is returned. A box face, a cone, a sphere fail one
+ * of them and get `null` — the same refusal discipline
+ * `faceMetricsFromMesh`'s `planar` flag applies.
+ *
+ * The circle is fitted rather than averaged because the vertex list is not
+ * symmetric: the seam vertex is duplicated and triangulation repeats corners,
+ * so a plain centroid sits slightly OFF the axis and would fail its own
+ * equidistance test. Tolerances are loose enough for float32 round-tripping
+ * through MESH1 and far too tight for a non-cylinder to slip through.
+ */
+export function cylinderMetricsFromMesh(
+  blob: ArrayBuffer,
+  faceId: string,
+): MockCylinderMetrics | null {
+  const view = parseMeshPayload(blob);
+  const index = faceIds(view).indexOf(faceId);
+  if (index < 0) return null;
+
+  const firstTri = view.faceRanges[2 * index];
+  const triCount = view.faceRanges[2 * index + 1];
+  if (triCount < 2) return null;
+
+  const normals: Vec3[] = [];
+  const points: Vec3[] = [];
+  for (let t = firstTri; t < firstTri + triCount; t++) {
+    const a = vertexAt(view.positions, view.indices[3 * t]);
+    const b = vertexAt(view.positions, view.indices[3 * t + 1]);
+    const c = vertexAt(view.positions, view.indices[3 * t + 2]);
+    points.push(a, b, c);
+    const n = normalize(cross(sub(b, a), sub(c, a)));
+    if (n) normals.push(n);
+  }
+  if (normals.length < 2 || points.length === 0) return null;
+
+  // Σ n·nᵀ over the facet normals; its least-significant eigenvector is the
+  // one direction no normal leans along — the axis, if there is one.
+  const covariance: Mat3 = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (const n of normals) {
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) covariance[i][j] += n[i] * n[j];
+  }
+  const { values, vectors } = jacobiEigen(covariance);
+  let least = 0;
+  for (let k = 1; k < 3; k++) if (values[k] < values[least]) least = k;
+  const axis = normalize(vectors[least]);
+  if (!axis) return null;
+
+  // Every facet normal must be perpendicular to it, or this is not a cylinder.
+  for (const n of normals) if (Math.abs(dot(n, axis)) > 1e-3) return null;
+
+  // Project into the plane ⊥ axis and fit a circle there.
+  const e1 = normalize(
+    Math.abs(axis[0]) < 0.9 ? cross(axis, [1, 0, 0]) : cross(axis, [0, 1, 0]),
+  );
+  if (!e1) return null;
+  const e2 = cross(axis, e1);
+  const uv: [number, number][] = [];
+  let alongSum = 0;
+  for (const p of points) {
+    uv.push([dot(p, e1), dot(p, e2)]);
+    alongSum += dot(p, axis);
+  }
+  const circle = fitCircle(uv);
+  if (!circle) return null;
+  const { u: cu, v: cv, radius } = circle;
+  for (const [u, v] of uv) {
+    if (Math.abs(Math.hypot(u - cu, v - cv) - radius) > 1e-3 * radius) return null;
+  }
+
+  const along = alongSum / points.length;
+  const origin: Vec3 = [
+    e1[0] * cu + e2[0] * cv + axis[0] * along,
+    e1[1] * cu + e2[1] * cv + axis[1] * along,
+    e1[2] * cu + e2[2] * cv + axis[2] * along,
+  ];
+  return { axis: signCanonical(axis), origin, radius };
+}
+
+/**
+ * Least-squares circle through 2D points (Kåsa): the residual
+ * `u² + v² − 2·a·u − 2·b·v − c` is LINEAR in `(a, b, c)`, so the fit is one
+ * 3×3 normal-equation solve rather than an iteration. `null` for a degenerate
+ * (collinear / coincident) set, where there is no circle to report.
+ */
+function fitCircle(
+  uv: ReadonlyArray<readonly [number, number]>,
+): { u: number; v: number; radius: number } | null {
+  if (uv.length < 3) return null;
+  // Centre the data first — a ring 80 mm off the origin otherwise loses digits
+  // in the u² terms before the solve ever runs.
+  let mu = 0;
+  let mv = 0;
+  for (const [u, v] of uv) {
+    mu += u / uv.length;
+    mv += v / uv.length;
+  }
+  const m: number[][] = [
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ];
+  for (const [rawU, rawV] of uv) {
+    const u = rawU - mu;
+    const v = rawV - mv;
+    const s = u * u + v * v;
+    const row = [2 * u, 2 * v, 1];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) m[i][j] += row[i] * row[j];
+      m[i][3] += row[i] * s;
+    }
+  }
+  // Gauss-Jordan with partial pivoting on the 3×4 augmented system.
+  for (let col = 0; col < 3; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < 3; r++) if (Math.abs(m[r][col]) > Math.abs(m[pivot][col])) pivot = r;
+    if (Math.abs(m[pivot][col]) < 1e-12) return null;
+    [m[col], m[pivot]] = [m[pivot], m[col]];
+    const d = m[col][col];
+    for (let j = col; j < 4; j++) m[col][j] /= d;
+    for (let r = 0; r < 3; r++) {
+      if (r === col) continue;
+      const f = m[r][col];
+      for (let j = col; j < 4; j++) m[r][j] -= f * m[col][j];
+    }
+  }
+  const [a, b, c] = [m[0][3], m[1][3], m[2][3]];
+  const rSquared = c + a * a + b * b;
+  if (!(rSquared > 0)) return null;
+  return { u: a + mu, v: b + mv, radius: Math.sqrt(rSquared) };
+}
+
 /** Metrics for the edge carrying `edgeId`, or null when the mesh has no such edge. */
 export function edgeMetricsFromMesh(blob: ArrayBuffer, edgeId: string): MockEdgeMetrics | null {
   const view = parseMeshPayload(blob);

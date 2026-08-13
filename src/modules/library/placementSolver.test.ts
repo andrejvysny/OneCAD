@@ -3,6 +3,7 @@ import type { ClassifyFrame, ClassifyResult } from "@/ipc/types";
 import {
   attachmentAccepts,
   classifySnapKind,
+  groundPlanePoint,
   nearestSmallerThread,
   rotationFromLocalZTo,
   solveCandidatePlacement,
@@ -294,5 +295,26 @@ describe("nearestSmallerThread", () => {
     expect(nearestSmallerThread(10, ["608", "6001"])).toBeNull();
     expect(nearestSmallerThread(0, DOMAIN)).toBeNull();
     expect(nearestSmallerThread(Number.NaN, DOMAIN)).toBeNull();
+  });
+});
+
+describe("groundPlanePoint — the free-space drop point (spec §5.4 steps 1/6)", () => {
+  it("meets z = 0 where the ray actually crosses it", () => {
+    // Straight down from 100 mm up, offset in x/y: the drop lands under the
+    // camera point, at z exactly 0.
+    expect(groundPlanePoint([12, -5, 100], [0, 0, -1])).toEqual([12, -5, 0]);
+    // A 45° ray from (0,0,10) travels 10 along +x before it lands.
+    const p = groundPlanePoint([0, 0, 10], [Math.SQRT1_2, 0, -Math.SQRT1_2]);
+    expect(p![0]).toBeCloseTo(10, 9);
+    expect(p![1]).toBeCloseTo(0, 9);
+    expect(p![2]).toBeCloseTo(0, 9);
+  });
+
+  it("is null when the ray cannot reach the plane", () => {
+    // Parallel to it — no intersection exists, and inventing one would teleport
+    // the ghost somewhere the user never pointed.
+    expect(groundPlanePoint([0, 0, 40], [1, 0, 0])).toBeNull();
+    // Pointing AWAY from it: the crossing is behind the camera, not in front.
+    expect(groundPlanePoint([0, 0, 40], [0, 0, 1])).toBeNull();
   });
 });

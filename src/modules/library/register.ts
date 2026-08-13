@@ -23,7 +23,11 @@ import { LibraryPanel } from "@/features/library/LibraryPanel";
 import { LibraryStatusSection } from "@/features/library/LibraryStatusSection";
 import { ComponentParametersSection } from "@/features/library/ComponentParametersSection";
 import { configurePlacementController } from "./placementController";
-import { openSaveAsComponent, openSaveAsTemplate } from "./authoringController";
+import {
+  configureAuthoringController,
+  openSaveAsComponent,
+  openSaveAsTemplate,
+} from "./authoringController";
 import { SaveAsComponentHost } from "@/features/library/SaveAsComponentHost";
 import {
   ModelingScopes,
@@ -132,6 +136,13 @@ export function contributeLibraryUi(scope: ModuleScope): void {
   const commandApi = scope.platform.services.get<CommandApiService>(ModelingServices.CommandApi);
   configurePlacementController(geometryQuery && commandApi ? { geometryQuery, commandApi } : null);
   scope.own({ dispose: () => configurePlacementController(null) });
+
+  // The attachment picker (WP-F1.2) needs the same classification service the
+  // placement gesture does — a pick has to become a seatable frame before it can
+  // be authored as an attachment. Injected on the same soft-lookup terms: a
+  // harness without modeling's bootstrap services simply cannot start a pick.
+  configureAuthoringController(geometryQuery ? { geometryQuery } : null);
+  scope.own({ dispose: () => configureAuthoringController(null) });
 }
 
 export function registerLibraryModule(platform: Platform): void {

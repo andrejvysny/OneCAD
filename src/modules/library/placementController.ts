@@ -27,12 +27,15 @@
  * `source.params`. Nothing is substituted when nothing fits — the armed size
  * simply stands, the same refusal the generator applies to an unknown size.
  *
- * SCOPE CUT vs the full spec, recorded here (also in TODO.md's gate entry):
- *   - No free-space follow. The ghost appears only once hovering a target
- *     whose classification matches one of the component's attachments — spec
- *     step 1's "ghost follows the cursor" is honored from the FIRST valid
- *     hover, not from arm-time. Free-space placement (step 6, the Move-tool
- *     fallback) is not wired; there is no Move-tool integration point yet.
+ * FREE SPACE (spec §5.4 steps 1/6; WP-F3 — this closes the WP-1.5 scope cut):
+ * with no valid snap target under the cursor the ghost still follows, seated
+ * at the camera ray ∩ world `z = 0` with identity rotation, and a click there
+ * commits WITHOUT a mate. That is the honest record for an unsnapped drop —
+ * there is nothing to re-seat against, so regen must not pretend otherwise.
+ * A ray that cannot reach the ground plane leaves the ghost where it was, and
+ * a commit then places what the ghost SHOWS, which is the only thing the user
+ * agreed to. Snap behaviour is untouched: the moment a target classifies and
+ * matches an attachment, the mate lane below takes over unchanged.
  *
  * MATE AUTHORING (WP-H2, spec §5.4 step 5): a snapped commit records the
  * attachment pair — the matched attachment key, the target pick's identity
@@ -60,6 +63,7 @@ import type { CommandApiService, GeometryQueryService } from "@/modules/modeling
 import {
   attachmentAccepts,
   classifySnapKind,
+  groundPlanePoint,
   nearestSmallerThread,
   solveCandidatePlacement,
   type CandidatePlacement,
@@ -201,9 +205,10 @@ export function armPlacement(component: LibraryComponent): void {
 
   viewportStore
     .getState()
-    .setStatusHint(`Place ${component.name} — hover a target, A flips, Esc cancels`, {
-      sticky: true,
-    });
+    .setStatusHint(
+      `Place ${component.name} — snap to a target or drop in free space, A flips, Esc cancels`,
+      { sticky: true },
+    );
 }
 
 /** Tears the gesture down: hides the ghost, cancels the preview session, restores input. */
@@ -341,6 +346,24 @@ function matchedSelfFrame(): MateSelfFrame | null {
   return frame ? { origin: frame.origin, z: frame.z, x: frame.x } : null;
 }
 
+/**
+ * Free-space follow (spec §5.4 step 1): drop `lastMatch` and seat the ghost on
+ * the ground plane under the cursor. The ghost is NOT cleared — a placement
+ * with nothing under it is still a placement, and hiding the ghost until a
+ * target appears is what the WP-1.5 scope cut did.
+ *
+ * A ray that never meets `z = 0` leaves `lastCandidate` alone, so the ghost
+ * holds its last position rather than jumping; the commit follows the ghost.
+ */
+function followFreeSpace(clientX: number, clientY: number): void {
+  lastMatch = null;
+  const ray = getViewportEngine()?.screenRay(clientX, clientY) ?? null;
+  const ground = ray ? groundPlanePoint(ray.origin, ray.dir) : null;
+  if (!ground) return;
+  lastCandidate = { translate: ground, rotate: identityRotate() };
+  pushCandidate(lastCandidate.translate, lastCandidate.rotate);
+}
+
 function recomputeFromLastMatch(): void {
   if (!lastMatch) return;
   const candidate = solveCandidatePlacement(
@@ -356,12 +379,14 @@ function recomputeFromLastMatch(): void {
 
 function onPointerMove(e: PointerEvent): void {
   if (!armedComponent || !services) return;
+  // Read once, here: the classify below resolves in a later task, and its
+  // free-space fallback must use the cursor THIS move reported rather than
+  // wherever the pointer has since travelled.
+  const { clientX, clientY } = e;
   const engine = getViewportEngine();
-  const hit: PickHit | null = engine?.probePick(e.clientX, e.clientY) ?? null;
+  const hit: PickHit | null = engine?.probePick(clientX, clientY) ?? null;
   if (!hit) {
-    lastMatch = null;
-    lastCandidate = null;
-    clearGhostOnly();
+    followFreeSpace(clientX, clientY);
     return;
   }
   const seq = ++hoverSeq;
@@ -372,16 +397,12 @@ function onPointerMove(e: PointerEvent): void {
       if (seq !== hoverSeq || armedComponent !== component) return; // stale or cancelled
       const snapKind = classify ? classifySnapKind(classify) : null;
       if (!snapKind || !classify?.frame) {
-        lastMatch = null;
-        lastCandidate = null;
-        clearGhostOnly();
+        followFreeSpace(clientX, clientY);
         return;
       }
       const candidates = matchingAttachments(component, snapKind);
       if (candidates.length === 0) {
-        lastMatch = null;
-        lastCandidate = null;
-        clearGhostOnly();
+        followFreeSpace(clientX, clientY);
         return;
       }
       // Preserve the user's Tab-chosen attachment across hovers when it is
@@ -417,21 +438,26 @@ function onPointerDown(e: PointerEvent): void {
   if (!armedComponent) return;
   e.preventDefault();
   e.stopPropagation();
-  if (!lastCandidate || !armedComponent || !lastMatch) return;
+  if (!lastCandidate || !armedComponent) return;
   const component = armedComponent;
   const candidate = lastCandidate;
+  const match = lastMatch;
   // The recorded snap (WP-H2): what makes the placement re-seat on regen when
   // the target moves, and surface NeedsRepair when it vanishes (spec §5.5).
-  const mate: import("@/ipc/types").PlaceComponentMate = {
-    selfAttachment: lastMatch.attachmentKey,
-    targetBodyId: lastMatch.target.bodyId,
-    targetTopoKey: lastMatch.target.topoKey,
-    targetElementId: lastMatch.target.elementId,
-    targetKind: lastMatch.target.kind,
-    kind: lastMatch.snapKind,
-    flipped,
-    anchorWorldPoint: lastMatch.pickWorldPos,
-  };
+  // ABSENT for a free-space drop — there is no target to re-seat against, and
+  // the backend already accepts a mate-less placement (spec §5.4 step 6).
+  const mate: import("@/ipc/types").PlaceComponentMate | undefined = match
+    ? {
+        selfAttachment: match.attachmentKey,
+        targetBodyId: match.target.bodyId,
+        targetTopoKey: match.target.topoKey,
+        targetElementId: match.target.elementId,
+        targetKind: match.target.kind,
+        kind: match.snapKind,
+        flipped,
+        anchorWorldPoint: match.pickWorldPos,
+      }
+    : undefined;
   void services?.commandApi
     .placeComponent(
       component.id,

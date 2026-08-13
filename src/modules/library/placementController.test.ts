@@ -11,10 +11,11 @@
  * bug has already shipped twice in this module (a dropped `rotate`, then a
  * hardcoded `source`), which is why it is pinned here.
  *
- * The Playwright mock lane cannot cover it: `mockClient.classifyElement`
- * derives its answer from mesh metrics and only ever reports `plane` or
- * `other` — it has no cylinder/circle case and therefore no radius, which is
- * the input auto-size runs on.
+ * The Playwright lane now reaches this too (WP-F3 gave `mockClient.
+ * classifyElement` a measured cylinder answer and `?vpdemo=cyl` a bore to
+ * hover) — but it can only watch the OUTCOME, a committed record carrying the
+ * auto-sized thread. Watching both CALLS of one gesture, and proving the ghost
+ * and the commit agree even when nothing fits, still only happens here.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import type { ClassifyResult, LibraryComponent, PreviewSession } from "@/ipc/types";
@@ -79,17 +80,27 @@ interface Harness {
   placeComponent: ReturnType<typeof vi.fn>;
 }
 
-/** Installs a stub engine + services whose hover always classifies a hole of `2 * radius`. */
-function install(radius: number): Harness {
+/**
+ * Installs a stub engine + services whose hover always classifies a hole of
+ * `2 * radius`. `hit: false` makes every probe MISS instead — the free-space
+ * lane — with a camera ray straight down from 100 mm above (0,0), so the
+ * ground-plane intersection is the origin and any drift is visible.
+ */
+function install(radius: number, opts?: { hit?: boolean }): Harness {
   const engine = {
     setOrbitSuppressed: vi.fn(),
-    probePick: vi.fn(() => ({
-      bodyId: "body_1",
-      kind: "face",
-      elementId: "el_1",
-      topoKey: "f:1",
-      worldPos: { x: 0, y: 0, z: 0 },
-    })),
+    probePick: vi.fn(() =>
+      opts?.hit === false
+        ? null
+        : {
+            bodyId: "body_1",
+            kind: "face",
+            elementId: "el_1",
+            topoKey: "f:1",
+            worldPos: { x: 0, y: 0, z: 0 },
+          },
+    ),
+    screenRay: vi.fn(() => ({ origin: [0, 0, 100], dir: [0, 0, -1] })),
     setPreviewBody: vi.fn(),
     clearPreviewBody: vi.fn(),
   } as unknown as ViewportEngine;
@@ -195,5 +206,72 @@ describe("placementController auto-size", () => {
       source: { params?: Record<string, unknown> };
     };
     expect(previewParams.source.params).toBeUndefined();
+  });
+});
+
+/*
+ * FREE SPACE (spec §5.4 steps 1/6; WP-F3). Two things have to hold together and
+ * neither is provable from the solver alone: the ghost must FOLLOW with nothing
+ * under the cursor (the WP-1.5 scope cut hid it instead), and the commit must
+ * carry NO mate — a free-space drop has no target, and recording one anyway is
+ * how a placement would come back `NeedsRepair` against something it never
+ * touched.
+ */
+describe("placementController free space", () => {
+  afterEach(() => {
+    cancelPlacement();
+    configurePlacementController(null);
+    setViewportEngine(null);
+  });
+
+  it("follows the cursor on the ground plane when nothing is hovered", async () => {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS, { hit: false });
+    armPlacement(componentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    expect(harness.updatePreview).toHaveBeenCalled();
+    const calls = harness.updatePreview.mock.calls;
+    const params = calls[calls.length - 1][1] as {
+      translate: [number, number, number];
+      rotate: { axis: [number, number, number]; angleDeg: number };
+      source: { params?: Record<string, unknown> };
+    };
+    // The stub ray drops from (0,0,100) straight down, so z = 0 is the origin.
+    expect(params.translate).toEqual([0, 0, 0]);
+    // Identity rotation: there is no target frame to orient against.
+    expect(params.rotate.angleDeg).toBe(0);
+    // …and no auto-size either — the input for it is a hole's radius.
+    expect(params.source.params).toBeUndefined();
+  });
+
+  it("commits at the ghost's transform with NO mate", async () => {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS, { hit: false });
+    armPlacement(componentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+    window.dispatchEvent(new PointerEvent("pointerdown", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    expect(harness.placeComponent).toHaveBeenCalledTimes(1);
+    const call = harness.placeComponent.mock.calls[0];
+    expect(call[2]).toEqual([0, 0, 0]); // translate — what the ghost showed
+    expect(call[3]).toMatchObject({ angleDeg: 0 });
+    expect(call[5]).toBeUndefined(); // the mate argument
+  });
+
+  it("does not commit before the first move (no ghost, nothing agreed to)", async () => {
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS, { hit: false });
+    armPlacement(componentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointerdown", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    expect(harness.placeComponent).not.toHaveBeenCalled();
   });
 });

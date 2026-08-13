@@ -71,3 +71,26 @@ test("the Templates row says how to make one when the library is empty", async (
   await expect(page.getByText(/No templates yet/)).toBeVisible();
   await expect(page.getByTestId("template-card")).toHaveCount(0);
 });
+
+test("the built-in starters show on the Templates row, and one starts a project", async ({
+  page,
+}) => {
+  // WP-F3: `?mocklibrary=1` is the mock lane's stand-in for a SEEDED library
+  // root — the same flag that opts the seed component catalog in, because it is
+  // the same fact. Without a root there are no starters, which is what the
+  // empty-state test above still proves.
+  await page.goto("/?mocklibrary=1");
+  await expect(page.getByRole("button", { name: "New project" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Templates" }).click();
+  await expect(page.getByTestId("template-card")).toHaveCount(3);
+  // Mirrors `src-tauri/src/library_seed_templates.rs::SEED_TEMPLATES` — the
+  // three the app actually ships, by name and by what they say they contain.
+  const motorMount = page.getByTestId("template-card").filter({ hasText: "NEMA 17 Motor Mount" });
+  await expect(page.getByTestId("template-card").filter({ hasText: "Blank" })).toBeVisible();
+  await expect(page.getByTestId("template-card").filter({ hasText: "3D-Printed Part" })).toBeVisible();
+  await expect(motorMount).toContainText("NEMA 17 stepper placed at the origin");
+
+  await motorMount.click();
+  await expect(page.locator('[data-testid="viewport-canvas"] canvas')).toBeVisible();
+});

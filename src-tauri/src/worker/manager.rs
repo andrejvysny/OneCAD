@@ -521,17 +521,21 @@ impl WorkerManager {
     /// `embedded` / `document` source, spec §2.1), never handed to the user as a
     /// file.
     ///
+    /// `union_solids` fuses a multi-solid body into one before writing (WP-F1.2) —
+    /// opt-in, and refused by the worker when the fuse cannot produce one solid.
+    ///
     /// # Errors
     /// [`EngineError`] on a disconnected worker or a worker-side failure (an
-    /// unknown codec, a missing body, a non-solid body).
+    /// unknown codec, a missing body, a non-solid body, a refused union).
     pub async fn export_geometry(
         &self,
         path: &str,
         bodies: &[BodyId],
         codec: &str,
+        union_solids: bool,
     ) -> Result<crate::worker::BakedGeometry, EngineError> {
         let client = self.client_or_err()?;
-        let args = wire::export_geometry_args(path, bodies, codec);
+        let args = wire::export_geometry_args(path, bodies, codec, union_solids);
         let resp = client
             .request("ExportGeometry", args)
             .await

@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use onecad_core::document::record::{
     ComponentMate, ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
-    KnownOperation, MateKind, Operation, OperationRecord, PlaceComponentParams,
+    KnownOperation, LinearPatternParams, MateKind, Operation, OperationRecord,
+    PlaceComponentParams,
 };
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::document::variables::Scalar;
@@ -568,6 +569,7 @@ async fn bake_body(wm: &WorkerManager, body: BodyId) -> (Vec<u8>, String, u32) {
         &path.to_string_lossy(),
         &[body],
         "brep",
+        false,
     )
     .await
     .expect("ExportGeometry");
@@ -885,6 +887,7 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
             .collect(),
         },
         None,
+        false,
     )
     .await
     .expect("save as component");
@@ -960,6 +963,165 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
     assert!(
         (replaced_volume - authored_volume).abs() < 1e-6,
         "authored {authored_volume} vs placed {replaced_volume} — the bake must be the same solid"
+    );
+
+    wm.shutdown().await;
+}
+
+/// Union-at-bake (WP-F1.2, spec §9): a body that flattens to SEVERAL solids is
+/// refused with the machine-readable marker the dialog keys its offer on, and
+/// the very same save succeeds once the author opts into the fuse.
+///
+/// Both halves matter. Without the marker the dialog would have to match prose
+/// to know whether to offer the fuse; without the refusal a multi-solid
+/// component would reach someone else's machine, which is the failure spec §9
+/// exists to prevent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_multi_solid_body_is_refused_and_the_union_opt_in_saves_it() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin).await;
+
+    // A V1 LinearPattern with `fuseResult:false` gathers source + instance into
+    // ONE compound body — the everyday way an author ends up holding something
+    // that is not one solid. Spacing 4mm keeps the two M6 screws OVERLAPPING
+    // (head radius 5), so the fuse can actually connect them.
+    let runtime = tokio::sync::Mutex::new(Some(runtime_over(&wm)));
+    let (pattern_body, source_volume) = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(rt, place_component_record(0xc1));
+        let report = regen_all(rt).await;
+        let source = published(&report, "pattern source").bodies[0].body;
+        add_op(
+            rt,
+            OperationRecord::new(
+                RecordId(Uuid::from_u128(0xc2)),
+                0,
+                "LinearPattern",
+                Operation::Known(KnownOperation::LinearPattern(LinearPatternParams {
+                    source_body: Some(source),
+                    direction: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                    spacing: Scalar::new(4.0),
+                    count: 2,
+                    fuse_result: false,
+                    result_policy_version: None,
+                    extra: Default::default(),
+                })),
+            ),
+        );
+        let report = regen_all(rt).await;
+        let snap = published(&report, "linear pattern");
+        let pattern = snap
+            .bodies
+            .iter()
+            .map(|b| b.body)
+            .find(|b| *b != source)
+            .expect("the pattern publishes its own body");
+        (pattern, exact_volume(&wm, source).await)
+    };
+
+    let exporter: Arc<dyn onecad_lib::export::GeometryExporter> = Arc::new(wm.clone());
+    let spec = || onecad_lib::library::NewComponentSpec {
+        id: "acme.pair".to_string(),
+        version: "1.0.0".to_string(),
+        name: "Pair".to_string(),
+        category: vec!["mine".to_string()],
+        tags: vec![],
+        designation: None,
+        attachments: Default::default(),
+    };
+
+    let refused = onecad_lib::library::save_as_component_at(
+        library_dir.path(),
+        &runtime,
+        exporter.clone(),
+        pattern_body.to_string(),
+        spec(),
+        None,
+        false,
+    )
+    .await
+    .expect_err("a two-solid body must not become a component");
+    let message = refused.to_string();
+    assert!(
+        message.contains(onecad_lib::library::MULTI_SOLID_REFUSAL),
+        "the refusal must carry the marker the dialog keys on, got {message:?}"
+    );
+
+    let saved = onecad_lib::library::save_as_component_at(
+        library_dir.path(),
+        &runtime,
+        exporter,
+        pattern_body.to_string(),
+        spec(),
+        None,
+        true,
+    )
+    .await
+    .expect("the union opt-in saves the same body");
+    assert_eq!(saved.source_kind, "document");
+
+    // The package holds the FUSED pair: more than one screw, less than two
+    // (they overlap). Placing it back proves the bytes are one real solid.
+    let library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let resolved = library
+        .resolve_source(&onecad_library::resolve::ResolveRequest {
+            component_id: "acme.pair",
+            component_version: "1.0.0",
+            component_revision: &saved.revision,
+        })
+        .expect("resolve the fused package");
+    let (sha256, bytes, codec, format) = match resolved {
+        onecad_library::resolve::ResolvedSource::Document { blob, .. } => {
+            (blob.sha256, blob.bytes, blob.codec, blob.format)
+        }
+        other => panic!("expected a document source, got {other:?}"),
+    };
+    let mut fresh = runtime_over(&wm);
+    fresh
+        .stage_component_blob(
+            &sha256,
+            onecad_core::document::record::ImportSourceCodec::from_extension(&codec).unwrap(),
+            &bytes,
+        )
+        .expect("stage the fused blob");
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.pair".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: saved.revision.clone(),
+        params: Default::default(),
+        source: ComponentSourceRef::Document {
+            document_sha256: "0".repeat(64),
+            sha256,
+            codec: onecad_core::document::record::ImportSourceCodec::from_extension(&codec)
+                .unwrap(),
+            brep_format: format,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    add_op(
+        &mut fresh,
+        OperationRecord::new(RecordId(Uuid::from_u128(0xc3)), 0, "Place Component", op),
+    );
+    let report = regen_all(&mut fresh).await;
+    let snap = published(&report, "place the fused component");
+    assert_eq!(snap.bodies.len(), 1, "the fused package publishes one body");
+    let placed = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        placed > source_volume && placed < 2.0 * source_volume,
+        "the fused pair ({placed}) must be more than one screw ({source_volume}) and less than \
+         two — the overlap is what makes it a single solid"
     );
 
     wm.shutdown().await;

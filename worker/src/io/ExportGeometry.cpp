@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Shape.hxx>
@@ -27,12 +29,56 @@ std::string get_str(const json& o, const char* key, const std::string& dflt = ""
     return dflt;
 }
 
+bool get_bool(const json& o, const char* key, bool dflt) {
+    if (o.is_object() && o.contains(key) && o[key].is_boolean()) return o[key].get<bool>();
+    return dflt;
+}
+
 Envelope fail(std::uint64_t id, const std::string& message) {
     return Envelope::error_response(id,
                                     protocol::ErrorInfo{"OP_FAILED", message, /*retriable=*/false});
 }
 
+std::size_t count_solids(const TopoDS_Shape& shape) {
+    std::size_t n = 0;
+    for (TopExp_Explorer e(shape, TopAbs_SOLID); e.More(); e.Next()) ++n;
+    return n;
+}
+
 }  // namespace
+
+std::string fuse_to_single_solid(const std::vector<TopoDS_Shape>& solids, TopoDS_Shape& out) {
+    if (solids.empty()) return "nothing to fuse";
+    if (solids.size() == 1) {
+        out = solids.front();
+        return {};
+    }
+    TopoDS_Shape acc = solids.front();
+    try {
+        for (std::size_t i = 1; i < solids.size(); ++i) {
+            BRepAlgoAPI_Fuse fuse(acc, solids[i]);
+            fuse.Build();
+            if (!fuse.IsDone() || fuse.Shape().IsNull()) {
+                return "fuse failed at solid " + std::to_string(i + 1) + " of " +
+                       std::to_string(solids.size());
+            }
+            acc = fuse.Shape();
+        }
+    } catch (const Standard_Failure& f) {
+        return std::string("fuse raised: ") +
+               (f.GetMessageString() != nullptr ? f.GetMessageString() : "OCCT");
+    } catch (...) {
+        return "fuse raised an unknown exception";
+    }
+    const std::size_t n = count_solids(acc);
+    if (n != 1) {
+        return "fused result carries " + std::to_string(n) +
+               " solids, not one — the bodies do not touch, so they cannot become one component";
+    }
+    TopExp_Explorer e(acc, TopAbs_SOLID);
+    out = e.Current();
+    return {};
+}
 
 Envelope handle_export_geometry(session::Session& session, const Envelope& req) {
     const json& args = req.args;
@@ -96,6 +142,23 @@ Envelope handle_export_geometry(session::Session& session, const Envelope& req) 
             if (one_solid) a.face_colors = rec->face_colors;
             attrs.push_back(std::move(a));
         }
+    }
+
+    // The multi-solid escape hatch (spec §9): fuse BEFORE writing, so the bytes
+    // on disk are already the one solid the manifest will claim. Opt-in — the
+    // author asked for it after being told the body is not one solid; a bake
+    // that silently fused would change what they modelled.
+    if (get_bool(args, "union", false) && solids.size() > 1) {
+        TopoDS_Shape fused;
+        const std::string err = fuse_to_single_solid(solids, fused);
+        if (!err.empty()) {
+            return fail(req.id, "ExportGeometry: union refused — " + err);
+        }
+        solids = {fused};
+        // Face colors are indexed by the SOURCE body's face map, and a fuse
+        // rewrites the face set entirely — the same reason a multi-solid body
+        // drops them above. Dropped, never remapped by guess.
+        attrs = {SolidAttributes{}};
     }
 
     std::vector<std::uint8_t> bytes;
