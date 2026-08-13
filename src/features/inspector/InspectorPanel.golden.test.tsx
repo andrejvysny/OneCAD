@@ -9,13 +9,14 @@
  * It asserts ORDER and PRESENCE only — the content of each section stays covered
  * by InspectorPanel.test.tsx.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "@testing-library/react";
 import { InspectorPanel } from "./InspectorPanel";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { resetStores } from "@/test/resetStores";
+import { setMockLatency } from "@/ipc/mockClient";
 import { renderWithPlatform } from "@/test/renderWithPlatform";
 import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import type { SketchSession } from "@/ipc/types";
@@ -27,7 +28,22 @@ import {
 /** `SectionLabel` renders a div carrying this tracking class — its only marker. */
 const SECTION_CLASS = "tracking-[0.07em]";
 
-function sectionsOf(container: HTMLElement): string[] {
+/**
+ * Reads the rendered section labels AFTER letting the async sections settle.
+ *
+ * The settle is load-bearing since WP-VE.2: `Variables` loads the document's
+ * variable table through the client and renders nothing until that promise
+ * resolves, so a synchronous read would report the pre-load section list and
+ * pass this probe against a panel the user never sees. The mock lane's simulated
+ * latency is zeroed for the suite (below) so one timer tick is enough.
+ *
+ * The CONTRACT itself is unchanged by any of this — only what this probe is
+ * entitled to call "the shipped order".
+ */
+async function sectionsOf(container: HTMLElement): Promise<string[]> {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
   return [...container.querySelectorAll("div")]
     .filter((el) => el.className.includes(SECTION_CLASS))
     .map((el) => el.textContent?.trim() ?? "");
@@ -45,47 +61,51 @@ function emptySession(): SketchSession {
 }
 
 describe("inspector section order", () => {
-  beforeEach(() => resetStores());
+  beforeEach(() => {
+    resetStores();
+    setMockLatency(0);
+  });
+  afterEach(() => setMockLatency(120));
 
-  it("EMPTY state renders no sections", () => {
+  it("EMPTY state renders no sections", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().clear());
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.empty]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.empty]);
   });
 
-  it("a body renders Appearance before History", () => {
+  it("a body renders Appearance before History", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.body]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.body]);
   });
 
-  it("a promoted face renders Appearance before History", () => {
+  it("a promoted face renders Appearance before History", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore.getState().set([
         { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0", elementId: "el_top" },
       ]),
     );
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.face]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.face]);
   });
 
-  it("an edge renders History only — Appearance is faces and bodies", () => {
+  it("an edge renders History only — Appearance is faces and bodies", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore
         .getState()
         .set([{ kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" }]),
     );
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.edge]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.edge]);
   });
 
-  it("a sketch renders History before Constraints", () => {
+  it("a sketch renders History before Constraints", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]));
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketch]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketch]);
   });
 
-  it("a sketch region renders the same sections as its owning sketch", () => {
+  it("a sketch region renders the same sections as its owning sketch", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore.getState().set([
@@ -97,10 +117,10 @@ describe("inspector section order", () => {
         },
       ]),
     );
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchRegion]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchRegion]);
   });
 
-  it("sketch mode renders Constraints whether or not the session has any", () => {
+  it("sketch mode renders Constraints whether or not the session has any", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
@@ -108,7 +128,7 @@ describe("inspector section order", () => {
     });
     // Unconditional: an empty sketch shows the label over "No constraints yet.",
     // so the panel does not reflow when the first constraint lands.
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchMode]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchMode]);
 
     act(() =>
       sketchStore.getState().setSession({
@@ -116,15 +136,15 @@ describe("inspector section order", () => {
         constraints: [{ id: "c1", type: "Horizontal", entities: ["l1"] }],
       }),
     );
-    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchMode]);
+    expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchMode]);
   });
 
-  it("a selected feature leads with History", () => {
+  it("a selected feature leads with History", async () => {
     const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "op1" }]));
     // Dependency sections are data-driven and arrive async, so only the frozen
     // prefix is asserted — what matters is that History stays first.
-    const sections = sectionsOf(container);
+    const sections = await sectionsOf(container);
     expect(sections.slice(0, INSPECTOR_FEATURE_PREFIX_CONTRACT.length)).toEqual([
       ...INSPECTOR_FEATURE_PREFIX_CONTRACT,
     ]);

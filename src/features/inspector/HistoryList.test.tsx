@@ -774,3 +774,81 @@ describe("HistoryList — the Reattach affordance (H9)", () => {
     );
   });
 });
+
+// ── WP-VE.2: a bound row reads as its binding ────────────────────────────────
+
+describe("HistoryList — variable bindings", () => {
+  const bound: FeatureMeta[] = [
+    {
+      id: "f2",
+      kind: "extrude",
+      opType: "Extrude",
+      label: "Extrude",
+      valueText: "25.0 mm",
+      primaryValue: 25,
+      primaryValueKind: "length",
+      primaryExpr: "height",
+      status: "ok",
+    },
+  ];
+
+  /*
+   * The number is DERIVED once a variable drives it, so showing it at rest would
+   * invite an edit the next regen overwrites. It moves to the tooltip instead —
+   * and `primaryExpr` is backend-minted, so this can never claim a binding the
+   * document does not hold.
+   */
+  it("shows =name in place of the resolved number, with the number in the tooltip", () => {
+    render(<HistoryList items={bound} />);
+    const chip = screen.getByTestId("history-value-f2");
+    expect(chip).toHaveTextContent("=height");
+    expect(chip).toHaveAttribute("title", "height = 25 mm");
+  });
+
+  it("an UNBOUND row keeps the plain number and the plain tooltip", () => {
+    render(
+      <HistoryList
+        items={items}
+        valueEdit={() => ({ editable: true, bindable: true, onCommit: vi.fn(), onCommitExpr: vi.fn() })}
+      />,
+    );
+    const chip = screen.getByTestId("history-value-f2");
+    expect(chip).toHaveTextContent("25 mm");
+    expect(chip).toHaveAttribute("title", "Edit value");
+  });
+
+  it("opens the editor seeded with the binding and commits a new one", async () => {
+    const onCommitExpr = vi.fn();
+    render(
+      <HistoryList
+        items={bound}
+        valueEdit={() => ({ editable: true, bindable: true, onCommit: vi.fn(), onCommitExpr })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("history-value-f2"));
+    const field = (await screen.findByLabelText("Dimension value")) as HTMLInputElement;
+    expect(field.value).toBe("=height");
+
+    fireEvent.change(field, { target: { value: "=width" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onCommitExpr).toHaveBeenCalledWith(bound[0], "width", 25);
+  });
+
+  /** `bindable: false` (a Hole) must not even offer the affordance. */
+  it("a non-bindable row's editor refuses =name outright", async () => {
+    const onCommit = vi.fn();
+    const onCommitExpr = vi.fn();
+    render(
+      <HistoryList
+        items={items}
+        valueEdit={() => ({ editable: true, bindable: false, onCommit, onCommitExpr })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("history-value-f2"));
+    const field = await screen.findByLabelText("Dimension value");
+    fireEvent.change(field, { target: { value: "=height" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onCommitExpr).not.toHaveBeenCalled();
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+});

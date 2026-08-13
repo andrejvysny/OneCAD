@@ -70,6 +70,6 @@ pub use scheduler::{
 };
 pub use snapshot::{BodySnapshot, Lod, MeshKey, ModelSnapshot, RepairSummary, SnapshotPublisher};
 pub use variables::{
-    resolve_expr, substitute_variables, substituted_timeline, write_back_resolved_values,
-    UnresolvedVariable,
+    is_bare_name, resolve_expr, substitute_variables, substituted_timeline,
+    write_back_resolved_values, UnresolvedVariable,
 };

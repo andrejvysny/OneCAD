@@ -82,11 +82,33 @@ function errorHint(text: string): void {
 }
 
 /**
+ * Whether a feature's primary dimension may be BOUND to a document variable
+ * (WP-VE.2), as opposed to merely edited as a number.
+ *
+ * Everything in {@link WIRE_FIELD} except `Hole`. A hole's own re-edit does NOT
+ * go through the merge-patch lane below: `ModelToolController.commitHole`
+ * rebuilds every `HoleParams` scalar from its FSM and wholesale-replaces the op,
+ * so re-editing a hole's DEPTH would silently discard a binding on its DIAMETER —
+ * a field the user never touched. Offering an affordance that an ordinary
+ * follow-up gesture throws away is worse than not offering it, so the hole row
+ * stays numbers-only until its tool carries bindings (WP-VE.2b).
+ */
+export function canBindFeatureValue(opType: string | undefined): boolean {
+  return featureValueField(opType) !== null && opType !== "Hole";
+}
+
+/**
  * Commit one new primary value for a past feature.
  *
  * `value` is the DOCUMENT domain (mm for a length/diameter, degrees for an angle) —
  * exactly what `FeatureMeta.primaryValue` carries and what `DimensionInput` emits,
  * so nothing on this path converts units.
+ *
+ * `expr` is the document VARIABLE that should drive the field from now on
+ * (WP-VE.2). `null`/omitted CLEARS any existing binding, which is what typing a
+ * plain number into a bound field means. When it is set, `value` is still sent —
+ * it is the `Scalar`'s cached last-evaluated number, and regen overwrites it with
+ * the resolved one.
  *
  * Resolves `true` when the edit landed. A failure surfaces through the status hint
  * and resolves `false`, leaving the row on its previous value.
@@ -95,10 +117,12 @@ export async function commitFeatureValue(
   featureId: string,
   opType: string,
   value: number,
+  expr?: string | null,
 ): Promise<boolean> {
   const field = featureValueField(opType);
   if (field === null) return false;
   if (!Number.isFinite(value)) return false;
+  if (expr != null && !canBindFeatureValue(opType)) return false;
   const client = createClient();
   try {
     // The stored params are what makes this a PATCH: `updateScalarParamsCommand`
@@ -109,7 +133,10 @@ export async function commitFeatureValue(
       // parameter's own type keeps this cast honest without widening that module's
       // public surface.
       updateScalarParamsCommand(featureId, opType as OpTypeParam, stored, {
-        [field]: { value },
+        // A fresh object EVERY time, never a spread of the stored scalar: the
+        // absence of `expr` is what clears a binding, so carrying the old one
+        // forward would make an unbind impossible.
+        [field]: expr != null ? { value, expr } : { value },
       }),
     );
     applyEditResult(res);

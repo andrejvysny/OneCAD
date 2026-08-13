@@ -22,6 +22,7 @@ import type {
   ReplaceComponentReport,
   DocumentChange,
   DocumentProjectionWire,
+  DocumentVariable,
   DocumentSnapshot,
   ElementInfo,
   LibraryComponent,
@@ -60,7 +61,7 @@ import type {
   Unsubscribe,
   WorkerStatus,
 } from "./types";
-import { IMPORT_STEP_OP_TYPE } from "./types";
+import { IMPORT_STEP_OP_TYPE, VARIABLE_NAME_RE } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
 import { holeValueText } from "@/tools/modelTools/holeMachine";
@@ -198,6 +199,40 @@ let mockRecovery: RecoveryInfo | null = null;
 
 /** In-memory module slices, keyed by module id (the mock's `document.modules`). */
 const mockModuleState = new Map<string, { schemaVersion: number; payload: unknown }>();
+
+/*
+ * WP-VE.2 — the mock's document variable table. ORDERED (declaration order is
+ * authoritative, mirroring Rust's `VariableTable`) rather than a Map keyed by
+ * name, so a re-value keeps its position exactly as the real backend does.
+ *
+ * The validation below MIRRORS `api::upsert_variable_command`, deliberately
+ * including the messages' shape: the mock lane is where the Variables section's
+ * error paths are proved, and a mock that accepted a name the backend refuses
+ * would make those tests vacuous.
+ */
+let mockVariables: DocumentVariable[] = [];
+let nextVariableSeq = 1;
+
+function mockUpsertVariable(name: string, value: number): DocumentVariable[] {
+  const trimmed = name.trim();
+  if (!VARIABLE_NAME_RE.test(trimmed)) {
+    throw new Error(
+      `invalid variable name "${trimmed}": a name must match [A-Za-z_][A-Za-z0-9_]*`,
+    );
+  }
+  if (!Number.isFinite(value)) throw new Error("variable value must be finite");
+  const existing = mockVariables.find((v) => v.name === trimmed);
+  if (existing) existing.value = value;
+  else mockVariables.push({ id: `var${nextVariableSeq++}`, name: trimmed, value });
+  return mockVariables.map((v) => ({ ...v }));
+}
+
+function mockRemoveVariable(name: string): DocumentVariable[] {
+  const at = mockVariables.findIndex((v) => v.name === name);
+  if (at < 0) throw new Error(`unknown variable "${name}"`);
+  mockVariables.splice(at, 1);
+  return mockVariables.map((v) => ({ ...v }));
+}
 
 /** Test seam: seed (or clear) the crash-recovery offer the start screen checks. */
 export function setMockRecovery(r: RecoveryInfo | null): void {
@@ -1736,6 +1771,15 @@ function scalarValue(v: unknown): number | undefined {
   return undefined;
 }
 
+/** The variable name a wire `Scalar` is bound to (WP-VE.2), or undefined. */
+function scalarExpr(v: unknown): string | undefined {
+  if (v && typeof v === "object" && "expr" in (v as Record<string, unknown>)) {
+    const e = (v as { expr: unknown }).expr;
+    if (typeof e === "string" && e !== "") return e;
+  }
+  return undefined;
+}
+
 /**
  * The history-row value text of an edge op — MIRRORS Rust `dto.rs
  * feature_value_text` (pinned there by
@@ -1764,23 +1808,37 @@ function featureValueForParams(
   opType: string | undefined,
   kind: FeatureRecord["kind"],
   params: Record<string, unknown>,
-): Partial<Pick<FeatureRecord, "valueText" | "primaryValue" | "primaryValueKind">> {
-  const none = { valueText: undefined, primaryValue: undefined, primaryValueKind: undefined };
+): Partial<
+  Pick<FeatureRecord, "valueText" | "primaryValue" | "primaryValueKind" | "primaryExpr">
+> {
+  const none = {
+    valueText: undefined,
+    primaryValue: undefined,
+    primaryValueKind: undefined,
+    primaryExpr: undefined,
+  };
+  /*
+   * `source` is the wire `Scalar` the number was read from, and taking it FIRST
+   * is deliberate: it makes it impossible to mint a row value without naming the
+   * scalar the binding must come from — the same "one match decides all three"
+   * discipline `dto.rs feature_value` keeps on the Rust side (WP-VE.2).
+   */
   const dimensioned = (
+    source: unknown,
     valueText: string,
     value: number,
     primaryValueKind: FeatureRecord["primaryValueKind"] = "length",
-  ) => ({ valueText, primaryValue: value, primaryValueKind });
+  ) => ({ valueText, primaryValue: value, primaryValueKind, primaryExpr: scalarExpr(source) });
   switch (opType ?? kind) {
     case "Extrude":
     case "extrude": {
       const d = scalarValue(params.distance);
-      return d === undefined ? none : dimensioned(`${Math.abs(d).toFixed(1)} mm`, Math.abs(d));
+      return d === undefined ? none : dimensioned(params.distance, `${Math.abs(d).toFixed(1)} mm`, Math.abs(d));
     }
     case "Revolve":
     case "revolve": {
       const a = scalarValue(params.angleDeg);
-      return a === undefined ? none : dimensioned(`${Math.round(Math.abs(a))}°`, a, "angle");
+      return a === undefined ? none : dimensioned(params.angleDeg, `${Math.round(Math.abs(a))}°`, a, "angle");
     }
     case "Fillet":
     case "Chamfer":
@@ -1789,16 +1847,16 @@ function featureValueForParams(
       // `distance2` is Chamfer-only and skip-none on both sides, so its mere
       // presence is what makes the row asymmetric. The inline editor still targets
       // d1 (`radius`) alone, exactly as `dto.rs` does.
-      return r === undefined ? none : dimensioned(edgeOpValueText(r, scalarValue(params.distance2)), r);
+      return r === undefined ? none : dimensioned(params.radius, edgeOpValueText(r, scalarValue(params.distance2)), r);
     }
     case "Shell":
     case "shell": {
       const t = scalarValue(params.thickness);
-      return t === undefined ? none : dimensioned(`${t.toFixed(1)} mm`, t);
+      return t === undefined ? none : dimensioned(params.thickness, `${t.toFixed(1)} mm`, t);
     }
     case "Hole": {
       const d = scalarValue(params.diameter);
-      return d === undefined ? none : dimensioned(holeValueText(d), d, "diameter");
+      return d === undefined ? none : dimensioned(params.diameter, holeValueText(d), d, "diameter");
     }
     case "OffsetFace": {
       const d = scalarValue(params.distance);
@@ -1811,7 +1869,7 @@ function featureValueForParams(
         d,
         t === "Total" || t === "Radius" || t === "Diameter" ? t : "Offset",
       );
-      return dimensioned(v.valueText, v.primaryValue, v.primaryValueKind);
+      return dimensioned(params.distance, v.valueText, v.primaryValue, v.primaryValueKind);
     }
     case "LinearPattern":
     case "CircularPattern":
@@ -1931,7 +1989,7 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
         // come straight back, and the mock would report an asymmetric chamfer the
         // backend no longer holds.
         featureParams.set(command.record, { ...params });
-        const { valueText, primaryValue, primaryValueKind } = featureValueForParams(
+        const { valueText, primaryValue, primaryValueKind, primaryExpr } = featureValueForParams(
           nextOpType,
           feat.kind,
           params,
@@ -1954,7 +2012,9 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
             f.id === command.record
               ? {
                   ...f,
-                  ...(valueText !== undefined ? { valueText, primaryValue, primaryValueKind } : {}),
+                  ...(valueText !== undefined
+                    ? { valueText, primaryValue, primaryValueKind, primaryExpr }
+                    : {}),
                   ...(label !== undefined ? { label } : {}),
                   ...(opType !== undefined ? { opType } : {}),
                 }
@@ -2212,6 +2272,8 @@ export function resetMockDocument(): void {
   mockAuthored = [];
   mockTemplates = [];
   mockSketchDatum.clear();
+  mockVariables = [];
+  nextVariableSeq = 1;
   documentStore.getState().applyChange({ datums: {} });
   // Re-adopt the (already reset) projection store as the mock's metadata authority.
   seedMockMetadata();
@@ -2291,6 +2353,31 @@ export const mockClient: CadClient = {
     return [...mockModuleState.entries()]
       .map(([moduleId, s]) => ({ moduleId, schemaVersion: s.schemaVersion }))
       .sort((a, b) => a.moduleId.localeCompare(b.moduleId));
+  },
+  // Document variables (WP-VE.2). A real in-memory table, not a stub: the whole
+  // section — CRUD, validation messages, and the `=name` binding a bound row
+  // renders — has to be exercisable with no backend.
+  async listVariables() {
+    await wait();
+    return mockVariables.map((v) => ({ ...v }));
+  },
+  async upsertVariable(name: string, value: number) {
+    await wait();
+    const table = mockUpsertVariable(name, value);
+    // A variable edit dirties the timeline in the real backend, so it emits the
+    // same document-changed the UI refreshes off. The mock has no regen, so no
+    // body moves — but the EVENT must fire, or a consumer that repaints on it
+    // would look correct here and stale in the app.
+    mockRevision += 1;
+    emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
+    return table;
+  },
+  async removeVariable(name: string) {
+    await wait();
+    const table = mockRemoveVariable(name);
+    mockRevision += 1;
+    emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
+    return table;
   },
   async closeDocument() {
     await wait();

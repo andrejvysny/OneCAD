@@ -54,6 +54,7 @@ import type {
   CurveParams,
   DocumentChange,
   DocumentModule,
+  DocumentVariable,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
@@ -144,6 +145,9 @@ const CMD = {
   getModuleState: "get_module_state",
   setModuleState: "set_module_state",
   listDocumentModules: "list_document_modules",
+  listVariables: "list_variables",
+  upsertVariable: "upsert_variable",
+  removeVariable: "remove_variable",
   closeDocument: "close_document",
   checkRecovery: "check_recovery",
   recoverDocument: "recover_document",
@@ -1843,6 +1847,20 @@ export function createTauriClient(): CadClient {
     },
     listDocumentModules(): Promise<DocumentModule[]> {
       return call<DocumentModule[]>(CMD.listDocumentModules);
+    },
+    // WP-VE.2. All three return the table AFTER the edit, so the section never
+    // has to guess at the result of its own write; the backend owns validation
+    // (name grammar, duplicates, unknown-remove) and the client adds none of its
+    // own — a second, drifting copy of the rule is how a UI starts accepting
+    // names the document refuses.
+    listVariables(): Promise<DocumentVariable[]> {
+      return call<DocumentVariable[]>(CMD.listVariables);
+    },
+    upsertVariable(name: string, value: number): Promise<DocumentVariable[]> {
+      return call<DocumentVariable[]>(CMD.upsertVariable, { name, value });
+    },
+    removeVariable(name: string): Promise<DocumentVariable[]> {
+      return call<DocumentVariable[]>(CMD.removeVariable, { name });
     },
     async closeDocument(): Promise<void> {
       await call<void>(CMD.closeDocument);

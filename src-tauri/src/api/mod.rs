@@ -33,13 +33,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use onecad_core::document::modules::{ModuleId, ModuleState};
 use onecad_core::document::record::Operation;
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
+use onecad_core::document::variables::{Scalar, Unit, Variable};
 use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{
-    BodyId, ConstraintId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey,
+    BodyId, ConstraintId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey, VariableId,
 };
 use onecad_core::io::container::SaveMeta;
 use onecad_core::io::recovery::{scan_stale_markers, RecoveryOffer};
-use onecad_core::regen::{RegenRequest, ResolveRef, ResolveRequest};
+use onecad_core::regen::{is_bare_name, RegenRequest, ResolveRef, ResolveRequest};
 
 use crate::autosave;
 use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
@@ -47,7 +48,7 @@ use crate::dto::{
     BeginGestureDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto,
     FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto, RecentProjectDto,
     RecoveryInfoDto, ResolveRefDto, SaveOutcomeDto, SketchOnFaceDto, SketchSessionDto,
-    SketchUpsertDto,
+    SketchUpsertDto, VariableDto,
 };
 use crate::error::ApiError;
 use crate::events;
@@ -968,6 +969,141 @@ pub async fn list_document_modules(
 
 fn parse_module_id(value: &str) -> Result<ModuleId, ApiError> {
     ModuleId::parse(value).map_err(|e| ApiError::InvalidCommand(e.to_string()))
+}
+
+// ── Document variables (WP-VE.2) ─────────────────────────────────────────────
+//
+// Authoring for the table WP-VE.1 made drive regen. Every mutation goes through
+// `rt.apply(EditCommand::…)`, so it is undoable and schedules the same regen any
+// other edit does — there is no separate programmatic write path
+// (docs/ARCHITECTURE.md §9).
+
+/// The [`EditCommand`] an `upsert_variable(name, value)` lowers to, given the
+/// document's current table. Split out from the command so the validation +
+/// add-vs-set decision is testable without a Tauri `State`.
+fn upsert_variable_command(
+    current: &[Variable],
+    name: &str,
+    value: f64,
+) -> Result<EditCommand, ApiError> {
+    let name = name.trim();
+    if !is_bare_name(name) {
+        return Err(ApiError::InvalidCommand(format!(
+            "invalid variable name {name:?}: a name must match [A-Za-z_][A-Za-z0-9_]*"
+        )));
+    }
+    let value = Scalar::try_new(value)
+        .ok_or_else(|| ApiError::InvalidCommand("variable value must be finite".into()))?;
+    Ok(match current.iter().find(|v| v.name == name) {
+        Some(v) => EditCommand::SetVariable {
+            variable: v.id,
+            value,
+        },
+        None => EditCommand::AddVariable {
+            variable: Variable {
+                id: VariableId::new(),
+                name: name.to_string(),
+                value,
+                unit: Unit::Mm,
+            },
+        },
+    })
+}
+
+/// The [`EditCommand`] a `remove_variable(name)` lowers to. Unknown ⇒ refused.
+fn remove_variable_command(current: &[Variable], name: &str) -> Result<EditCommand, ApiError> {
+    let target = current
+        .iter()
+        .find(|v| v.name == name)
+        .ok_or_else(|| ApiError::InvalidCommand(format!("unknown variable {name:?}")))?;
+    Ok(EditCommand::RemoveVariable {
+        variable: target.id,
+    })
+}
+
+/// The open document's variables, in declaration order (`CadClient.listVariables`).
+#[tauri::command]
+pub async fn list_variables(state: State<'_, AppState>) -> Result<Vec<VariableDto>, ApiError> {
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("list_variables".into()))?;
+    Ok(rt.variables().iter().map(VariableDto::from).collect())
+}
+
+/// Creates or re-values a variable by NAME (`CadClient.upsertVariable`).
+///
+/// Name-keyed rather than id-keyed because a name is what an `expr` binds to —
+/// the id never appears in a document expression, so making the frontend carry
+/// one would only give it a second way to be stale.
+///
+/// Refuses a name `regen::variables::resolve_expr` could never look up, so the
+/// app cannot mint a variable that no binding can ever name. Existing name ⇒
+/// `SetVariable` (the id and declaration position are preserved); new ⇒
+/// `AddVariable`. Comparison is CASE-SENSITIVE, matching `VariableTable::get`.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(name = %name), err(Display))]
+pub async fn upsert_variable(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    name: String,
+    value: f64,
+) -> Result<Vec<VariableDto>, ApiError> {
+    let (outcome, variables, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("upsert_variable".into()))?;
+        // Read + apply under ONE guard: deciding add-vs-set from a table read that
+        // a concurrent edit could invalidate is how a "set" turns into a duplicate.
+        let command = upsert_variable_command(&rt.variables(), &name, value)?;
+        let outcome = rt.apply(command)?;
+        (
+            outcome,
+            rt.variables().iter().map(VariableDto::from).collect(),
+            rt.projection(),
+        )
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(variables)
+}
+
+/// Removes a variable by name (`CadClient.removeVariable`).
+///
+/// An unknown name is REFUSED rather than treated as a no-op: the caller believes
+/// it deleted something, and a silent success would leave a variable on screen the
+/// user just asked to be rid of. Records still bound to it are not rewritten —
+/// they fail loudly at regen (`resolve_expr`), which is the WP-VE.1 contract.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(name = %name), err(Display))]
+pub async fn remove_variable(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    name: String,
+) -> Result<Vec<VariableDto>, ApiError> {
+    let (outcome, variables, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("remove_variable".into()))?;
+        let command = remove_variable_command(&rt.variables(), &name)?;
+        let outcome = rt.apply(command)?;
+        (
+            outcome,
+            rt.variables().iter().map(VariableDto::from).collect(),
+            rt.projection(),
+        )
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(variables)
 }
 
 /// Undoes the last committed edit (`CadClient.undo`).
@@ -3098,6 +3234,163 @@ mod tests {
             )
             .await;
             assert_eq!(result, Ok(false), "PendingBackend never becomes ready");
+        }
+    }
+
+    // ── Document variables (WP-VE.2) ─────────────────────────────────────────
+
+    mod variables {
+        use super::*;
+        use onecad_core::document::variables::{Unit, Variable};
+        use onecad_core::ids::VariableId;
+
+        fn var(name: &str, value: f64) -> Variable {
+            Variable {
+                id: VariableId::new(),
+                name: name.to_string(),
+                value: Scalar::new(value),
+                unit: Unit::Mm,
+            }
+        }
+
+        #[test]
+        fn upsert_refuses_a_name_no_expression_could_ever_name() {
+            // Exactly the set `regen::variables::resolve_expr` rejects — an empty
+            // name, a leading digit, punctuation, and an arithmetic expression
+            // masquerading as a name.
+            for bad in ["", "   ", "2wide", "my-var", "w * 2", "wídth", "a b"] {
+                let err = upsert_variable_command(&[], bad, 1.0)
+                    .expect_err(&format!("{bad:?} must be refused"));
+                assert!(
+                    matches!(err, ApiError::InvalidCommand(_)),
+                    "{bad:?} → {err:?}"
+                );
+            }
+            // …and the set it accepts.
+            for good in ["w", "_w", "width2", "WIDTH", " width "] {
+                assert!(
+                    upsert_variable_command(&[], good, 1.0).is_ok(),
+                    "{good:?} must be accepted"
+                );
+            }
+        }
+
+        #[test]
+        fn upsert_refuses_a_non_finite_value() {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(matches!(
+                    upsert_variable_command(&[], "w", bad),
+                    Err(ApiError::InvalidCommand(_))
+                ));
+            }
+        }
+
+        /// A DUPLICATE name is a re-value, not a second variable — and it must
+        /// keep the SAME id, or every `expr` already bound to it would still
+        /// resolve while the timeline's undo entry pointed at a dead one.
+        #[test]
+        fn upsert_of_an_existing_name_sets_rather_than_adds() {
+            let existing = var("width", 10.0);
+            let id = existing.id;
+            match upsert_variable_command(&[existing], "width", 25.0).unwrap() {
+                EditCommand::SetVariable { variable, value } => {
+                    assert_eq!(variable, id);
+                    assert_eq!(value, Scalar::new(25.0));
+                }
+                other => panic!("expected SetVariable, got {other:?}"),
+            }
+        }
+
+        /// Case-SENSITIVE, matching `VariableTable::get`: `Width` and `width` are
+        /// two variables, because that is what an `expr` lookup would see.
+        #[test]
+        fn upsert_name_match_is_case_sensitive() {
+            let existing = vec![var("width", 10.0)];
+            assert!(matches!(
+                upsert_variable_command(&existing, "Width", 3.0).unwrap(),
+                EditCommand::AddVariable { .. }
+            ));
+        }
+
+        #[test]
+        fn remove_refuses_an_unknown_name() {
+            let err = remove_variable_command(&[var("width", 1.0)], "height")
+                .expect_err("unknown name must be refused, never a silent no-op");
+            assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+        }
+
+        /// The whole point of routing through `rt.apply(EditCommand::…)`: a
+        /// variable edit is UNDOABLE like any other edit. There is no separate
+        /// programmatic write path (docs/ARCHITECTURE.md §9), so if this ever
+        /// regresses the user loses the ability to take a variable edit back.
+        #[test]
+        fn variable_edits_are_undoable_through_the_runtime() {
+            use crate::worker::PendingBackend;
+            use std::sync::Arc;
+
+            let backend = Arc::new(PendingBackend);
+            let mut rt = crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            );
+            let names = |rt: &crate::document_runtime::DocumentRuntime| {
+                rt.variables()
+                    .iter()
+                    .map(|v| (v.name.clone(), v.value.value))
+                    .collect::<Vec<_>>()
+            };
+            assert!(names(&rt).is_empty(), "a blank document has no variables");
+
+            rt.apply(upsert_variable_command(&rt.variables(), "width", 10.0).unwrap())
+                .unwrap();
+            rt.apply(upsert_variable_command(&rt.variables(), "height", 20.0).unwrap())
+                .unwrap();
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 10.0), ("height".into(), 20.0)]
+            );
+
+            // Re-value: same id, same declaration position.
+            let width_id = rt.variables()[0].id;
+            rt.apply(upsert_variable_command(&rt.variables(), "width", 25.0).unwrap())
+                .unwrap();
+            assert_eq!(rt.variables()[0].id, width_id, "a re-value keeps the id");
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 25.0), ("height".into(), 20.0)]
+            );
+
+            rt.apply(remove_variable_command(&rt.variables(), "height").unwrap())
+                .unwrap();
+            assert_eq!(names(&rt), vec![("width".into(), 25.0)]);
+
+            // …and every one of those four edits comes back, in order.
+            rt.undo();
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 25.0), ("height".into(), 20.0)]
+            );
+            rt.undo();
+            assert_eq!(
+                names(&rt),
+                vec![("width".into(), 10.0), ("height".into(), 20.0)]
+            );
+            rt.undo();
+            assert_eq!(names(&rt), vec![("width".into(), 10.0)]);
+            rt.undo();
+            assert!(names(&rt).is_empty(), "undo returns to the blank table");
+        }
+
+        #[test]
+        fn remove_targets_the_named_variable() {
+            let a = var("width", 1.0);
+            let b = var("height", 2.0);
+            let want = b.id;
+            match remove_variable_command(&[a, b], "height").unwrap() {
+                EditCommand::RemoveVariable { variable } => assert_eq!(variable, want),
+                other => panic!("expected RemoveVariable, got {other:?}"),
+            }
         }
     }
 }

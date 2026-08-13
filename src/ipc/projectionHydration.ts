@@ -40,6 +40,9 @@ export function toFeatureMeta(f: FeatureRecord): FeatureMeta {
     // without its kind would render a degree as a millimetre.
     primaryValue: f.primaryValue,
     primaryValueKind: f.primaryValueKind,
+    // The variable binding behind that number (WP-VE.2). Carried here and NOWHERE
+    // else: the row may only render `=name` from what the backend recorded.
+    primaryExpr: f.primaryExpr,
     status: f.status,
     // Carry the worker failure reason through to the store so the HistoryList row
     // tooltips it (MODEL-HARDEN W0.5). `undefined` for any non-error feature.

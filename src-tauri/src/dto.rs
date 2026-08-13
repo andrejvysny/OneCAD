@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use onecad_core::document::record::{KnownOperation, OffsetDistanceType, Operation};
+use onecad_core::document::variables::{Scalar, Variable};
 use onecad_core::history::StepState;
 
 /// Whether a document is open (`src/stores/documentStore.ts` `DocStatus`).
@@ -151,6 +152,15 @@ pub struct FeatureDto {
     /// `Ø` prefix a hole's row carries. Absent whenever `primary_value` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_value_kind: Option<String>,
+    /// The document VARIABLE driving [`FeatureDto::primary_value`], when the
+    /// stored `Scalar` carries an `expr` (WP-VE.2). Absent ⇒ the number is a
+    /// literal.
+    ///
+    /// This is the ONLY signal the history row is allowed to render `=name` from:
+    /// it is minted from the stored params in the same match as the value itself,
+    /// so a row can never claim a binding the document does not hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_expr: Option<String>,
     pub status: FeatureStatus,
     /// The worker failure reason for an errored step (`StepState::Error{reason}`),
     /// surfaced to the HistoryList row tooltip (Codex MAJOR-4). Absent for any
@@ -162,6 +172,34 @@ pub struct FeatureDto {
     /// [`StepState`]. Always serialized so the frontend can drop its optimistic
     /// suppression overlay and read the backend truth.
     pub suppressed: bool,
+}
+
+/// One document variable, as the Variables inspector section reads it (WP-VE.2).
+///
+/// `value` is the LAST EVALUATED number (`Scalar::value`), which for a plain
+/// user-authored variable is simply what they typed. `expr` is carried so the
+/// section can show that a variable is itself expression-driven — V1 refuses to
+/// resolve such a chain (`regen::variables::resolve_expr`), so a UI that hid it
+/// would leave the user staring at a broken binding with no cause on screen.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VariableDto {
+    pub id: String,
+    pub name: String,
+    pub value: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expr: Option<String>,
+}
+
+impl From<&Variable> for VariableDto {
+    fn from(v: &Variable) -> Self {
+        Self {
+            id: v.id.to_string(),
+            name: v.name.clone(),
+            value: v.value.value,
+            expr: v.value.expr.clone(),
+        }
+    }
 }
 
 /// One datum plane in the tree (`documentStore.ts` `DatumMeta`).
@@ -1356,6 +1394,9 @@ pub struct FeatureValue {
     pub primary: Option<f64>,
     /// `"length"` | `"angle"` | `"diameter"`; `Some` exactly when `primary` is.
     pub primary_kind: Option<&'static str>,
+    /// The variable name driving [`FeatureValue::primary`] (WP-VE.2), read from
+    /// the very [`Scalar`] the arm picked — see [`FeatureValue::bound`].
+    pub primary_expr: Option<String>,
 }
 
 impl FeatureValue {
@@ -1365,6 +1406,7 @@ impl FeatureValue {
             text: text.into(),
             primary: None,
             primary_kind: None,
+            primary_expr: None,
         }
     }
 
@@ -1374,7 +1416,16 @@ impl FeatureValue {
             text,
             primary: Some(primary),
             primary_kind: Some(kind),
+            primary_expr: None,
         }
+    }
+
+    /// Carries `scalar`'s binding onto the row. `scalar` MUST be the same
+    /// [`Scalar`] the preceding `dimensioned` took its number from — that is what
+    /// makes the displayed `=name` and the edited field the same field.
+    fn bound(mut self, scalar: &Scalar) -> Self {
+        self.primary_expr = scalar.expr.clone();
+        self
     }
 }
 
@@ -1404,17 +1455,20 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
             format!("{:.1} mm", p.distance.value.abs()),
             p.distance.value.abs(),
             "length",
-        ),
+        )
+        .bound(&p.distance),
         KnownOperation::Revolve(p) => FeatureValue::dimensioned(
             format!("{:.1}°", p.angle_deg.value),
             p.angle_deg.value,
             "angle",
-        ),
+        )
+        .bound(&p.angle_deg),
         KnownOperation::Fillet(p) => FeatureValue::dimensioned(
             format!("{:.1} mm", p.radius.value),
             p.radius.value,
             "length",
-        ),
+        )
+        .bound(&p.radius),
         // A two-distance chamfer (SCHEMA §7.3, 2026-08-03) reads as `d1×d2`: the
         // row must not claim to be an equal-leg chamfer of `radius` when the
         // second leg is what makes the feature what it is. Absent ⇒ the plain
@@ -1431,12 +1485,14 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
             },
             p.radius.value,
             "length",
-        ),
+        )
+        .bound(&p.radius),
         KnownOperation::Shell(p) => FeatureValue::dimensioned(
             format!("{:.1} mm", p.thickness.value),
             p.thickness.value,
             "length",
-        ),
+        )
+        .bound(&p.thickness),
         // A hole's one identifying number is its DRILL diameter — the counterbore
         // /countersink dimensions dress it but never change what fastener it takes.
         // Diameter-prefixed (`Ø`) rather than " mm"-suffixed so the row cannot be
@@ -1445,7 +1501,8 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
             format!("Ø{:.1}", p.diameter.value),
             p.diameter.value,
             "diameter",
-        ),
+        )
+        .bound(&p.diameter),
         // An offset's one identifying number is its `distance`, but WHAT that
         // number means is `distanceType`'s to say — so the row is prefixed the way
         // the user typed it (`Ø` / `R` for the absolute cylindrical forms, the Hole
@@ -1460,7 +1517,7 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
                     (format!("{d:.1} mm"), "length")
                 }
             };
-            FeatureValue::dimensioned(text, d, kind)
+            FeatureValue::dimensioned(text, d, kind).bound(&p.distance)
         }
         // The operation IS a boolean row's one editable parameter — without it a
         // re-edit op swap has no visible projection signal at all. NOT a number,
@@ -1585,6 +1642,53 @@ mod tests {
         }))
     }
 
+    /// WP-VE.2 honesty spine: the row's `=name` badge is minted from the SAME
+    /// `Scalar` its number is, so it can never claim a binding the document does
+    /// not hold — and a literal scalar carries no badge at all.
+    #[test]
+    fn feature_value_carries_the_binding_of_the_scalar_it_measured() {
+        assert_eq!(feature_value(&extrude(25.0)).primary_expr, None);
+
+        let mut bound = extrude(25.0);
+        if let Operation::Known(KnownOperation::Extrude(p)) = &mut bound {
+            p.distance = Scalar::with_expr(25.0, "height");
+            // A binding on a DIFFERENT scalar must not leak onto the primary.
+            p.draft_angle_deg = Scalar::with_expr(0.0, "draft");
+        }
+        let v = feature_value(&bound);
+        assert_eq!(v.primary, Some(25.0));
+        assert_eq!(v.primary_expr.as_deref(), Some("height"));
+    }
+
+    /// `primaryExpr` is OPTIONAL on the wire — every unbound feature (the
+    /// overwhelming majority) must serialize exactly as before.
+    #[test]
+    fn feature_dto_omits_primary_expr_when_unbound() {
+        let dto = FeatureDto {
+            id: "f1".into(),
+            kind: FeatureKind::Extrude,
+            op_type: "Extrude".into(),
+            label: "Extrude".into(),
+            value_text: "25.0 mm".into(),
+            primary_value: Some(25.0),
+            primary_value_kind: Some("length".into()),
+            primary_expr: None,
+            status: FeatureStatus::Ok,
+            status_message: None,
+            suppressed: false,
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert!(json.get("primaryExpr").is_none());
+        let bound = FeatureDto {
+            primary_expr: Some("height".into()),
+            ..dto
+        };
+        assert_eq!(
+            serde_json::to_value(&bound).unwrap()["primaryExpr"],
+            serde_json::json!("height")
+        );
+    }
+
     #[test]
     fn projection_serializes_camelcase_mirroring_the_store() {
         let mut bodies = std::collections::BTreeMap::new();
@@ -1628,6 +1732,7 @@ mod tests {
                 value_text: "25.0 mm".into(),
                 primary_value: Some(25.0),
                 primary_value_kind: Some("length".into()),
+                primary_expr: None,
                 status: FeatureStatus::Ok,
                 status_message: None,
                 suppressed: false,
@@ -1808,6 +1913,7 @@ mod tests {
             value_text: "Cut".into(),
             primary_value: None,
             primary_value_kind: None,
+            primary_expr: None,
             status: FeatureStatus::Ok,
             status_message: None,
             suppressed: false,
@@ -1819,6 +1925,7 @@ mod tests {
         let dimensioned = FeatureDto {
             primary_value: Some(6.0),
             primary_value_kind: Some("diameter".into()),
+            primary_expr: None,
             ..dimensionless
         };
         let v = serde_json::to_value(&dimensioned).unwrap();
@@ -1878,6 +1985,7 @@ mod tests {
             value_text: feature_value_text(&lp),
             primary_value: None,
             primary_value_kind: None,
+            primary_expr: None,
             status: FeatureStatus::Ok,
             status_message: None,
             suppressed: false,
@@ -2033,6 +2141,7 @@ mod tests {
             value_text: "25.0 mm".into(),
             primary_value: Some(25.0),
             primary_value_kind: Some("length".into()),
+            primary_expr: None,
             status: FeatureStatus::Ok,
             status_message: None,
             suppressed: false,

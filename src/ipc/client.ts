@@ -21,6 +21,7 @@ import type {
   ReplaceComponentReport,
   DocumentChange,
   DocumentModule,
+  DocumentVariable,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
@@ -117,6 +118,30 @@ export interface CadClient {
    * missing addon instead of silently ignoring its data.
    */
   listDocumentModules(): Promise<DocumentModule[]>;
+  /**
+   * The open document's variables, in declaration order (WP-VE.2).
+   *
+   * Not part of the projection: the timeline is what the projection is for, and
+   * a variable table changes far more rarely than it does. The Variables section
+   * re-lists on `document-changed`.
+   */
+  listVariables(): Promise<DocumentVariable[]>;
+  /**
+   * Create (new name) or re-value (existing name) a variable, returning the whole
+   * table afterwards. Undoable — it goes through the same transaction path a user
+   * edit does, and schedules the same regen.
+   *
+   * Keyed by NAME because a name is what an `expr` binds to. Rejects a name
+   * outside {@link VARIABLE_NAME_RE} — the app must not be able to mint a
+   * variable that no binding could ever name. Case-SENSITIVE.
+   */
+  upsertVariable(name: string, value: number): Promise<DocumentVariable[]>;
+  /**
+   * Delete a variable by name, returning the table afterwards. An unknown name is
+   * REJECTED, never a silent no-op. Records still bound to it are not rewritten:
+   * they fail loudly at regen, which is the WP-VE.1 contract.
+   */
+  removeVariable(name: string): Promise<DocumentVariable[]>;
   /**
    * Close the open document, dropping the runtime + caches and returning to the
    * start screen. The backend emits an empty projection so the editor clears.

@@ -119,6 +119,9 @@ export interface FeatureMeta {
   primaryValue?: number;
   /** Domain of {@link FeatureMeta.primaryValue}; absent whenever it is. */
   primaryValueKind?: FeaturePrimaryKind;
+  /** The document variable driving {@link FeatureMeta.primaryValue} (WP-VE.2).
+   *  BACKEND-AUTHORITATIVE — see `FeatureRecord.primaryExpr`. Absent ⇒ literal. */
+  primaryExpr?: string;
   status: FeatureStatus;
   /** Worker failure reason for an errored feature (`status === "error"`), shown as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */

@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { FeatureMeta } from "@/stores/documentStore";
-import { canEditFeatureValue, commitFeatureValue, featureValueField } from "./featureValueEdit";
+import {
+  canBindFeatureValue,
+  canEditFeatureValue,
+  commitFeatureValue,
+  featureValueField,
+} from "./featureValueEdit";
 import * as clientModule from "@/ipc/client";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -155,5 +160,97 @@ describe("commitFeatureValue", () => {
       severity: "error",
       sticky: true,
     });
+  });
+});
+
+// ── WP-VE.2: binding a dimension to a document variable ──────────────────────
+
+describe("canBindFeatureValue", () => {
+  it("offers binding on every inline-editable op EXCEPT Hole", () => {
+    for (const t of ["Extrude", "Revolve", "Fillet", "Chamfer", "Shell", "OffsetFace"]) {
+      expect(canBindFeatureValue(t)).toBe(true);
+    }
+  });
+
+  /*
+   * A hole's own re-edit does NOT use the merge-patch lane: `commitHole`
+   * rebuilds every `HoleParams` scalar from its FSM and wholesale-replaces the
+   * op, so editing a hole's DEPTH would silently drop a binding on its
+   * DIAMETER — a field the user never touched. Offering an affordance that an
+   * ordinary follow-up gesture throws away is worse than not offering it.
+   */
+  it("does NOT offer binding on Hole, whose tool re-edit would discard it", () => {
+    expect(featureValueField("Hole")).toBe("diameter");
+    expect(canBindFeatureValue("Hole")).toBe(false);
+  });
+
+  it("offers nothing for an op with no editable dimension", () => {
+    for (const t of ["Sketch", "Boolean", "TransformBody", undefined]) {
+      expect(canBindFeatureValue(t)).toBe(false);
+    }
+  });
+});
+
+describe("commitFeatureValue — variable binding (WP-VE.2)", () => {
+  const getOperationParams = vi.fn();
+  const applyEditCommand = vi.fn();
+  let spy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    getOperationParams.mockReset();
+    applyEditCommand.mockReset();
+    applyEditCommand.mockResolvedValue({
+      revision: 2,
+      changedBodies: [],
+      removedBodies: [],
+      features: [],
+    });
+    spy = vi
+      .spyOn(clientModule, "createClient")
+      .mockReturnValue({ getOperationParams, applyEditCommand } as unknown as clientModule.CadClient);
+  });
+  afterEach(() => spy.mockRestore());
+
+  /** The patched scalar carries BOTH: `expr` binds it, `value` is the cache. */
+  it("sends {value, expr} when binding, leaving sibling params untouched", async () => {
+    getOperationParams.mockResolvedValue({
+      distance: { value: 25 },
+      draftAngleDeg: { value: 0 },
+      profile: { sketchId: "s1", regionId: "r0" },
+    });
+
+    expect(await commitFeatureValue("f2", "Extrude", 25, "height")).toBe(true);
+    expect(applyEditCommand.mock.calls[0][0].op.params).toEqual({
+      distance: { value: 25, expr: "height" },
+      draftAngleDeg: { value: 0 },
+      profile: { sketchId: "s1", regionId: "r0" },
+    });
+  });
+
+  /** Unbinding is the ABSENCE of `expr` — the backend replaces the whole op. */
+  it("omits expr entirely when clearing a binding", async () => {
+    getOperationParams.mockResolvedValue({ distance: { value: 25, expr: "height" } });
+
+    expect(await commitFeatureValue("f2", "Extrude", 40, null)).toBe(true);
+    expect(applyEditCommand.mock.calls[0][0].op.params.distance).toEqual({ value: 40 });
+  });
+
+  /*
+   * The HONESTY GATE. A plain numeric edit must not silently carry a stale
+   * binding forward: it would leave the field showing `=height` while the number
+   * the user typed is what regen overwrites on the next pass.
+   */
+  it("a plain numeric edit over a bound field clears the binding", async () => {
+    getOperationParams.mockResolvedValue({ distance: { value: 25, expr: "height" } });
+
+    expect(await commitFeatureValue("f2", "Extrude", 40)).toBe(true);
+    expect(applyEditCommand.mock.calls[0][0].op.params.distance).toEqual({ value: 40 });
+  });
+
+  it("refuses to bind an op whose re-edit lane cannot keep the binding", async () => {
+    getOperationParams.mockResolvedValue({ diameter: { value: 6 } });
+
+    expect(await commitFeatureValue("f9", "Hole", 6, "boltD")).toBe(false);
+    expect(applyEditCommand).not.toHaveBeenCalled();
   });
 });

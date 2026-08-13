@@ -52,6 +52,16 @@ import type {
 /** A dimension value on the wire (Rust `Scalar {value, expr?}`). */
 interface WireScalar {
   value: number;
+  /**
+   * The document VARIABLE driving this dimension (WP-VE.2). V1 is a bare
+   * variable name — no arithmetic (`regen::variables::resolve_expr`).
+   *
+   * `scalar()` never mints one: authoring a brand-new op is a tool gesture over
+   * numbers. Only the re-edit patch lane ({@link updateScalarParamsCommand}'s
+   * callers) sets it, which is also why OMITTING it clears an existing binding —
+   * the backend replaces the whole op, so an absent `expr` means literal.
+   */
+  expr?: string;
 }
 
 interface WireExtrudeParams {

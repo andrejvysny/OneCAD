@@ -29,7 +29,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { HistoryList, type HistoryRowActions, type HistoryValueEdit } from "./HistoryList";
-import { canEditFeatureValue, commitFeatureValue } from "./featureValueEdit";
+import { canBindFeatureValue, canEditFeatureValue, commitFeatureValue } from "./featureValueEdit";
 import { ConstraintList, isDimensionalConstraint, visibleConstraints } from "./ConstraintList";
 import { suppressFeature, rollToIndex, deleteFeature } from "./historyActions";
 import { setBodyColor, setFaceColor } from "@/features/tree/treeActions";
@@ -158,8 +158,14 @@ function makeValueEdit(
 ): (item: FeatureMeta, index: number) => HistoryValueEdit {
   return (item, index) => ({
     editable: canEditFeatureValue(item, index, appliedOps, modelTool),
+    bindable: canBindFeatureValue(item.opType),
     onCommit: (it, value) => {
       void commitFeatureValue(it.id, it.opType ?? "", value);
+    },
+    // WP-VE.2 — `expr` null CLEARS the binding; a name sets it. Same one-scalar
+    // `UpdateOperationParams` patch either way.
+    onCommitExpr: (it, expr, value) => {
+      void commitFeatureValue(it.id, it.opType ?? "", value, expr);
     },
   });
 }

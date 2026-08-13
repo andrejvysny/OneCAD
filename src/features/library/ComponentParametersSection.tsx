@@ -227,7 +227,7 @@ export function ComponentParametersSection() {
             {spec.domain && spec.domain.length > 0 ? (
               <select
                 aria-label={`${key} value`}
-                className="rounded-sm border border-line bg-surface px-1 text-[12px] text-ink-2 outline-none"
+                className="rounded-sm border border-border bg-surface px-1 text-[12px] text-ink-2 outline-none"
                 value={String(value ?? "")}
                 disabled={disabled}
                 onChange={(e) => void commit(key, e.target.value)}
@@ -242,7 +242,7 @@ export function ComponentParametersSection() {
               <input
                 aria-label={`${key} value`}
                 type="number"
-                className="w-16 rounded-sm border border-line bg-surface px-1 text-right text-[12px] text-ink-2 outline-none"
+                className="w-16 rounded-sm border border-border bg-surface px-1 text-right text-[12px] text-ink-2 outline-none"
                 defaultValue={typeof value === "number" ? value : ""}
                 min={spec.min}
                 disabled={disabled}
@@ -290,7 +290,7 @@ export function ComponentParametersSection() {
           <select
             aria-label="Replace with"
             data-testid="component-replace-pick"
-            className="min-w-0 flex-1 rounded-sm border border-line bg-surface px-1 text-[12px] text-ink-2 outline-none"
+            className="min-w-0 flex-1 rounded-sm border border-border bg-surface px-1 text-[12px] text-ink-2 outline-none"
             value={replaceTo}
             disabled={pending !== null}
             onChange={(e) => setReplaceTo(e.target.value)}

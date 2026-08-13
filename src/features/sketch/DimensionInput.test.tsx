@@ -7,7 +7,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { settingsStore } from "@/stores/settingsStore";
 import { DEFAULT_LENGTH_UNIT, type LengthUnitId } from "@/units/lengthUnits";
-import { DimensionInput } from "./DimensionInput";
+import { DimensionInput, parseExprInput } from "./DimensionInput";
 
 function input() {
   return screen.getByLabelText("Dimension value") as HTMLInputElement;
@@ -241,5 +241,108 @@ describe("DimensionInput — display unit", () => {
     expect(input().value).toBe("0.0394");
     fireEvent.blur(input());
     expect(onCommit).not.toHaveBeenCalled();
+  });
+});
+
+// ── WP-VE.2: the OPT-IN variable-binding lane ────────────────────────────────
+
+describe("parseExprInput — the `=name` grammar", () => {
+  it("accepts a bare variable name, with or without surrounding space", () => {
+    expect(parseExprInput("=height")).toBe("height");
+    expect(parseExprInput("  = height ")).toBe("height");
+    expect(parseExprInput("=_w2")).toBe("_w2");
+  });
+
+  it("rejects anything V1 could not resolve", () => {
+    // No arithmetic (`regen::variables::resolve_expr` refuses it LOUDLY rather
+    // than looking up a variable literally named "w * 2"), no leading digit, no
+    // empty name — and plain numbers are simply not expressions.
+    for (const bad of ["=", "= ", "=2w", "=w * 2", "=a-b", "25", ""]) {
+      expect(parseExprInput(bad)).toBeNull();
+    }
+  });
+});
+
+describe("DimensionInput — variable binding (WP-VE.2)", () => {
+  it("without onCommitExpr, `=name` is unparseable text and commits nothing", () => {
+    const onCommit = vi.fn();
+    render(<DimensionInput value={25} suffix="mm" onCommit={onCommit} />);
+    typeAndEnter("=height");
+    // The sketch-badge case: those values have no `Scalar` behind them, so a
+    // binding would be a promise the backend has nowhere to keep.
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(input().value).toBe("25");
+  });
+
+  it("renders an existing binding as `=name` rather than its resolved number", () => {
+    render(
+      <DimensionInput value={25} suffix="mm" expr="height" onCommit={vi.fn()} onCommitExpr={vi.fn()} />,
+    );
+    expect(input().value).toBe("=height");
+  });
+
+  it("commits a typed `=name` through onCommitExpr, never onCommit", () => {
+    const onCommit = vi.fn();
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput value={25} suffix="mm" onCommit={onCommit} onCommitExpr={onCommitExpr} />,
+    );
+    typeAndEnter("=height");
+    // `value` rides along as the Scalar's cached number until regen resolves it.
+    expect(onCommitExpr).toHaveBeenCalledWith("height", 25);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("clears the binding when a plain number is typed over it", () => {
+    const onCommit = vi.fn();
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput
+        value={25}
+        suffix="mm"
+        expr="height"
+        onCommit={onCommit}
+        onCommitExpr={onCommitExpr}
+      />,
+    );
+    typeAndEnter("40");
+    expect(onCommitExpr).toHaveBeenCalledWith(null, 40);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  /** Unbinding IS the edit, even when the number itself does not move. */
+  it("clears the binding even when the typed number is unchanged", () => {
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput value={25} suffix="mm" expr="height" onCommit={vi.fn()} onCommitExpr={onCommitExpr} />,
+    );
+    typeAndEnter("25");
+    expect(onCommitExpr).toHaveBeenCalledWith(null, 25);
+  });
+
+  /*
+   * A malformed binding must NOT fall through to the numeric parse and quietly
+   * re-commit the old number: the user asked for a binding and would get one
+   * silently ignored.
+   */
+  it("flashes an error on a malformed binding instead of committing anything", () => {
+    const onCommit = vi.fn();
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput value={25} suffix="mm" onCommit={onCommit} onCommitExpr={onCommitExpr} />,
+    );
+    typeAndEnter("=w * 2");
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(onCommitExpr).not.toHaveBeenCalled();
+    expect(input()).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("re-typing the SAME binding is a no-op, not a redundant edit", () => {
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput value={25} suffix="mm" expr="height" onCommit={vi.fn()} onCommitExpr={onCommitExpr} />,
+    );
+    typeAndEnter("=height");
+    expect(onCommitExpr).not.toHaveBeenCalled();
   });
 });

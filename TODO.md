@@ -1,5 +1,108 @@
 # OneCAD-Tauri Migration TODO
 
+## WP-VE.2 (2026-08-13) — GATE PASSED
+
+**Users can author variables and bind op params to them.** WP-VE.1 made
+`Scalar.expr` drive regen but nothing exposed it: no command, no UI. Now there
+is a `Variables` inspector section and `=name` binding on a history row's value.
+No worker/C++ change, no SCHEMA change (verified below).
+
+- [x] **Three thin Tauri commands** (`api/mod.rs`) — `list_variables`,
+  `upsert_variable(name, value)`, `remove_variable(name)`, all delegating through
+  `rt.apply(EditCommand::{Add,Set,Remove}Variable)` so a variable edit is as
+  undoable as any other edit and schedules the same regen (ARCHITECTURE §9: no
+  second write path). Keyed by NAME, not id — a name is what an `expr` binds to,
+  so making the frontend carry an id would only give it a second way to be stale.
+  Name validation reuses `regen::variables::is_bare_name` (newly `pub`) rather
+  than a second copy of the grammar: the app must not be able to mint a variable
+  no binding could ever name. Existing name ⇒ `SetVariable` (id + declaration
+  position preserved); new ⇒ `AddVariable`; case-SENSITIVE, matching
+  `VariableTable::get`; unknown remove REFUSED, never a silent no-op. The
+  read+decide+apply happens under ONE runtime guard.
+- [x] **`primaryExpr` on the projection** (`dto.rs` `FeatureValue`/`FeatureDto` →
+  `documentStore.FeatureMeta`). Minted in the SAME `feature_value` match arm the
+  number is (`.bound(&p.distance)` etc., 7 arms), extending that function's
+  existing "one match decides both" rule to a third field. **This is the honesty
+  spine**: it is the only thing the row renders `=name` from, so the UI can never
+  display a binding the document does not hold.
+- [x] **Binding lane assessment → SHIPPED.** The inspector's op-param edit already
+  sends the SCHEMA §7.3 object form: `featureValueEdit.commitFeatureValue` builds
+  `{[field]: {value}}` and `updateScalarParamsCommand` shallow-merges it over the
+  stored params. Upgrading it to `{value, expr}` was a one-site change per layer
+  (`WireScalar` gains `expr?`; `commitFeatureValue` gains an `expr` param;
+  `sections.tsx makeValueEdit` passes `onCommitExpr`). Omitting `expr` CLEARS a
+  binding — the backend replaces the whole op — which is exactly what "typed a
+  plain number over a bound field" should mean, and what makes the clear path
+  free.
+- [x] **`DimensionInput` binding is OPT-IN** (`onCommitExpr` + `expr` props).
+  Most consumers of that chip are sketch constraint badges, whose values are
+  solver dimensions with no `Scalar` and nowhere to record an `expr`; accepting
+  `=name` there would promise something the backend cannot keep. Without the
+  prop, `=name` stays the unparseable text it has always been. A MALFORMED
+  binding (`=`, `=2w`, `=w * 2`) flashes the error rather than falling through to
+  the numeric parse and quietly re-committing the old number.
+- [x] **Hole is deliberately NOT bindable** (`canBindFeatureValue`). Its re-edit
+  does not use the merge-patch lane: `ModelToolController.commitHole` rebuilds
+  every `HoleParams` scalar from its FSM and wholesale-replaces the op, so
+  editing a hole's DEPTH would silently discard a binding on its DIAMETER — a
+  field the user never touched. An affordance an ordinary follow-up gesture
+  throws away is worse than none. **Follow-up: WP-VE.2b** — thread `expr` through
+  the Hole tool (and the other `ModelToolController` re-edit sites, which today
+  clear the binding on the one field they patch; that one is correct-by-intent,
+  Hole's blast radius is not).
+- [x] **Variables inspector section** — modeling module contribution, priority
+  500 (last, after Dependencies). Rows (name · numeric value · delete), a draft
+  row committing on Enter, inline validation, empty-state one-liner. The row's
+  number field is KEYED ON ITS VALUE: it is uncontrolled, so a new `defaultValue`
+  alone never reaches the DOM and the row would keep showing a stale number after
+  a re-value or an undo (caught by the e2e). An `expr`-driven variable renders
+  read-only — V1 refuses to resolve a chained expression, so a number field there
+  would invite an edit that does nothing. Re-lists on `document-changed`, which
+  is what makes it follow an UNDO rather than its own last write.
+- [x] **FROZEN CONTRACT AMENDED — explicit user-visible change**
+  (`src/test/contracts/inspectorContract.ts`, per `contracts/README.md`).
+  "Variables" is appended to every MODEL-mode state (`empty`, `body`, `face`,
+  `edge`, `sketch`, `sketchRegion`); `sketchMode` is unchanged. It is the first
+  DOCUMENT-LEVEL section, so it renders regardless of selection.
+  `InspectorPanel`'s EMPTY state now hosts sections too — it hosted none because
+  every section then was about the selection, and gating a document's own
+  parameters on picking some unrelated body would hide them exactly where a user
+  looks for them. The golden PROBE also changed (it now flushes the async section
+  before reading, and zeroes the mock lane's simulated latency): it was passing
+  only because `Variables` had not resolved yet, i.e. asserting against a panel
+  the user never sees. The contract values changed on purpose; the probe changed
+  because the mechanism gained an async section.
+- [x] **SCHEMA: no change, verified.** `Scalar` already serializes as
+  `{value, expr?}` and §7.3 (amended 2026-07-16) already requires both readers to
+  accept the object form — the only new wire content is an `expr` the core
+  already round-trips and the worker already ignores (`read_scalar`). No fixture
+  bump, no §14 entry. `primaryExpr` is a DTO/tauri-IPC field, not OCW1.
+- [x] **Mock lane parity** — a real in-memory `VariableTable` (ordered, so a
+  re-value keeps its position) with the same validation and the same
+  `document-changed` emit, plus `primaryExpr` mirrored in
+  `featureValueForParams` (whose `dimensioned` now takes the source scalar FIRST,
+  so a row value cannot be minted without naming the scalar its binding comes
+  from). Without that mirror the e2e binding spec would be vacuous.
+
+**Gate:** `cargo fmt --check` clean · `cargo clippy --workspace --all-targets -D
+warnings` clean · `cargo test --workspace` 79 targets green (`ONECAD_REQUIRE_WORKER=1`)
+· `tsc --noEmit` clean · vitest 264 files / 4342 tests green (+40) · playwright
+`e2e/variables.spec.ts` 4/4 (chromium + webkit) and the three neighbouring
+history specs re-run green · hex gate empty.
+
+**Seams flagged:**
+- **WP-VE.2b** — bindings through the model TOOLS, Hole first (above).
+- Sketch dimensions still cannot be bound: they are solver values, not `Scalar`s.
+  A binding there needs a document-variable → constraint-value lane that does not
+  exist yet.
+- The V1 grammar (`[A-Za-z_][A-Za-z0-9_]*`, no arithmetic) is now duplicated as
+  `VARIABLE_NAME_RE` in `src/ipc/types.ts` for the pre-flight check. It is pinned
+  on both sides by tests; a real expression engine must retire both together.
+- `HistoryList.test.tsx > clicking the value opens an editor and commits the
+  typed number` flaked ONCE under full-suite load (a 220ms `VALUE_EDIT_OPEN_MS`
+  timer) and passed on every re-run, including the full suite. PRE-EXISTING, not
+  introduced here.
+
 ## WP-VE.1 (2026-08-13) — GATE PASSED
 
 **Variables actually drive geometry** (core lane). A `Scalar`'s `expr` was

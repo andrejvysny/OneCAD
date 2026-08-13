@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { SketchConstraintType } from "@/ipc/types";
+import { VARIABLE_NAME_RE } from "@/ipc/types";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
   formatLength,
@@ -24,6 +25,22 @@ export interface DimensionInputProps {
   value: number;
   suffix?: string;
   onCommit(value: number): void;
+  /**
+   * OPT-IN variable binding (WP-VE.2). When provided, the field also accepts
+   * `=name` — the document variable that should drive this dimension — and
+   * commits through this callback instead of {@link DimensionInputProps.onCommit}.
+   * `null` means "the user typed a plain number over a binding": clear it.
+   *
+   * Opt-in rather than universal because MOST consumers of this chip are sketch
+   * constraint badges, whose values are solver dimensions with no `Scalar` and no
+   * `expr` behind them. Accepting `=name` there would show a binding the backend
+   * has nowhere to record. With this prop absent, `=name` is rejected exactly as
+   * any other unparseable text is.
+   */
+  onCommitExpr?(expr: string | null, value: number): void;
+  /** The binding this field currently holds (BACKEND-AUTHORITATIVE — the
+   *  projection's `primaryExpr`), rendered as `=name` while at rest. */
+  expr?: string;
   /**
    * Enter contract for the armed model-tool cluster (MODEL-HARDEN Wave 1): when
    * provided, a valid Enter applies the typed value (via `onCommit`) and THEN
@@ -62,10 +79,20 @@ function isValidForKind(kind: SketchConstraintType, n: number): boolean {
   }
 }
 
+/** `=name` (with optional surrounding space), or null. V1 grammar: a bare name. */
+export function parseExprInput(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("=")) return null;
+  const name = trimmed.slice(1).trim();
+  return VARIABLE_NAME_RE.test(name) ? name : null;
+}
+
 export function DimensionInput({
   value,
   suffix = "",
   onCommit,
+  onCommitExpr,
+  expr,
   onConfirm,
   commitOnBlur = true,
   onCancel,
@@ -107,7 +134,13 @@ export function DimensionInput({
    */
   const shownSuffix = !isAngle && isLengthSuffix(suffix) ? lengthSuffix(unit) : suffix;
 
-  const [text, setText] = useState(() => formatValue(value));
+  /*
+   * A BOUND field reads as its binding, not its number: the number is derived,
+   * and showing it would leave the user editing a value the variable overwrites
+   * on the next regen. The resolved number rides the title attribute + the
+   * suffix slot instead (see the read-only chip in `HistoryList`).
+   */
+  const [text, setText] = useState(() => (expr ? `=${expr}` : formatValue(value)));
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -119,9 +152,9 @@ export function DimensionInput({
    * untouched.
    */
   useEffect(() => {
-    setText(formatValue(value));
+    setText(expr ? `=${expr}` : formatValue(value));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, unit]);
+  }, [value, unit, expr]);
 
   useEffect(() => {
     if (autoFocus) {
@@ -149,6 +182,27 @@ export function DimensionInput({
    * user can correct the value in place.
    */
   const commit = (): boolean => {
+    /*
+     * WP-VE.2, checked BEFORE the numeric parse so `=height` can never fall
+     * through to it. Only reachable when the caller opted in; otherwise `=x`
+     * stays the unparseable text it has always been.
+     */
+    if (onCommitExpr) {
+      const bound = parseExprInput(text);
+      if (bound !== null) {
+        // `value` rides along as the Scalar's cached number — regen replaces it
+        // with the resolved one, and it keeps the row readable until then.
+        if (bound !== expr) onCommitExpr(bound, value);
+        else setText(`=${bound}`);
+        return true;
+      }
+      if (text.trim().startsWith("=")) {
+        // A malformed binding (`=`, `=2x`, `=w * 2`) must NOT silently commit the
+        // old number — the user asked for a binding and got nothing.
+        flashError();
+        return false;
+      }
+    }
     // ANGLE chips keep the plain float parse: the UI angle domain is degrees and
     // its deg↔rad marshalling lives in `@/ipc/angleUnits`, which this module must
     // not second-guess. Every other chip is a LENGTH, so it accepts a unit suffix
@@ -162,12 +216,18 @@ export function DimensionInput({
         return false;
       }
       // No kind ⇒ legacy finite-only behavior, unchanged (model-tool chips).
-      setText(formatValue(value));
+      setText(expr ? `=${expr}` : formatValue(value));
       return true;
     }
     if (kind && !isValidForKind(kind, n)) {
       flashError();
       return false;
+    }
+    // A plain number typed over a BOUND field clears the binding — even when the
+    // number is unchanged, because unbinding IS the edit the user made.
+    if (onCommitExpr && expr) {
+      onCommitExpr(null, n);
+      return true;
     }
     // Compare formatted strings, not raw floats: an untouched blur of a value
     // that displays truncated (e.g. 12.345 → "12.345" already exact, but a
@@ -193,9 +253,11 @@ export function DimensionInput({
            1 mm) and would scroll its leading digits out of sight — the field
            widens only when a unit that needs it is selected, leaving the mm
            default pixel-identical. */
-        className={`${isAngle || unit === "mm" ? "w-9" : "w-14"} bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
+        className={`${onCommitExpr ? "w-20" : isAngle || unit === "mm" ? "w-9" : "w-14"} bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
         value={text}
-        inputMode="decimal"
+        /* A bindable field takes `=name`, so it must not ask for a numeric
+           keypad — that would make the "=" unreachable on a touch keyboard. */
+        inputMode={onCommitExpr ? "text" : "decimal"}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -209,7 +271,7 @@ export function DimensionInput({
             if (onCancel) {
               onCancel();
             } else {
-              setText(formatValue(value));
+              setText(expr ? `=${expr}` : formatValue(value));
               ref.current?.blur();
             }
           }

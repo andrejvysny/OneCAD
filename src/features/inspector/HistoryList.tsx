@@ -71,6 +71,12 @@ export interface HistoryValueEdit {
   editable: boolean;
   /** Commit a new value in the DOCUMENT domain (mm / degrees). */
   onCommit(item: FeatureMeta, value: number): void;
+  /** Whether this op's dimension may be bound to a document variable (WP-VE.2 —
+   *  `featureValueEdit.canBindFeatureValue`). Omit ⇒ numbers only. */
+  bindable?: boolean;
+  /** Bind (`expr` = a variable name) or unbind (`null`) the dimension. Only ever
+   *  called when {@link HistoryValueEdit.bindable} is true. */
+  onCommitExpr?(item: FeatureMeta, expr: string | null, value: number): void;
 }
 
 /**
@@ -82,6 +88,11 @@ export interface HistoryValueEdit {
 function displayValue(item: FeatureMeta, unit: LengthUnitId): string {
   const v = item.primaryValue;
   if (v === undefined) return item.valueText;
+  // A BOUND dimension reads as its binding (WP-VE.2). `primaryExpr` is minted by
+  // the backend from the same `Scalar` the number came from, so this can never
+  // claim a binding the document does not hold. The resolved number moves to the
+  // row's tooltip (see `valueTitle`).
+  if (item.primaryExpr !== undefined) return `=${item.primaryExpr}`;
   switch (item.primaryValueKind) {
     case "angle":
       return `${formatUnitless(v)}°`;
@@ -105,6 +116,17 @@ function displayValue(item: FeatureMeta, unit: LengthUnitId): string {
  * platform double-click threshold, which is the shortest delay that is still safe.
  */
 const VALUE_EDIT_OPEN_MS = 220;
+
+/** The value chip's tooltip: a bound row shows what its binding resolves to. */
+function valueTitle(item: FeatureMeta, unit: LengthUnitId): string {
+  if (item.primaryExpr === undefined || item.primaryValue === undefined) return "Edit value";
+  const kind = item.primaryValueKind;
+  const n =
+    kind === "angle"
+      ? `${formatUnitless(item.primaryValue)}°`
+      : `${formatLength(item.primaryValue, unit)} ${lengthSuffix(unit)}`;
+  return `${item.primaryExpr} = ${n}`;
+}
 
 /** Per-row history affordances (M4b): suppress toggle · roll-to-here · delete. */
 export interface HistoryRowActions {
@@ -309,6 +331,18 @@ function FeatureRow({
                what makes it parse bare input in that unit). */
             suffix={item.primaryValueKind === "angle" ? "°" : MM_SUFFIX}
             autoFocus
+            /* WP-VE.2 — both halves are opt-in and move TOGETHER: the field only
+               renders `=name` for a row whose backend record carries one, and
+               only accepts `=name` for an op whose re-edit lane can keep it. */
+            expr={valueEdit?.bindable ? item.primaryExpr : undefined}
+            onCommitExpr={
+              valueEdit?.bindable && valueEdit.onCommitExpr
+                ? (expr, v) => {
+                    setEditingValue(false);
+                    valueEdit.onCommitExpr?.(item, expr, v);
+                  }
+                : undefined
+            }
             onCommit={(v) => {
               setEditingValue(false);
               valueEdit?.onCommit(item, v);
@@ -326,7 +360,7 @@ function FeatureRow({
           role="button"
           tabIndex={0}
           data-testid={`history-value-${item.id}`}
-          title="Edit value"
+          title={valueTitle(item, unit)}
           onClick={(e) => {
             // The SECOND click of a double-click cancels the pending open and lets
             // the row's re-edit win — see VALUE_EDIT_OPEN_MS.
@@ -356,6 +390,7 @@ function FeatureRow({
         displayValue(item, unit) && (
           <MonoValue
             data-testid={`history-value-${item.id}`}
+            title={item.primaryExpr === undefined ? undefined : valueTitle(item, unit)}
             className={cn("text-[11.5px]", selected ? "text-sel-text" : "text-ink-4")}
           >
             {displayValue(item, unit)}

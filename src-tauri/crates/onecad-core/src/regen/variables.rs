@@ -95,7 +95,12 @@ pub fn resolve_expr(expr: &str, vars: &VariableTable) -> Result<f64, String> {
 /// Deliberately stricter than "whatever [`VariableTable::get`] would match": an
 /// `expr` like `w * 2` must fail LOUDLY as an unsupported expression rather than
 /// look up a variable literally named `"w * 2"` and report it as missing.
-fn is_bare_name(s: &str) -> bool {
+///
+/// Public because the authoring boundary (WP-VE.2's `upsert_variable` command)
+/// must refuse exactly the names this resolver could never look up — a variable
+/// the user can create but no `expr` can ever name is a trap, not a feature.
+#[must_use]
+pub fn is_bare_name(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}

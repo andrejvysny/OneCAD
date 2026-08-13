@@ -1622,6 +1622,15 @@ export interface FeatureRecord {
   primaryValue?: number;
   /** Domain of {@link FeatureRecord.primaryValue}; absent whenever it is. */
   primaryValueKind?: FeaturePrimaryKind;
+  /**
+   * The document VARIABLE driving {@link FeatureRecord.primaryValue} (WP-VE.2),
+   * when the stored `Scalar` carries an `expr`. Absent ⇒ the number is a literal.
+   *
+   * BACKEND-AUTHORITATIVE and the only thing the row may render `=name` from —
+   * the backend mints it from the same `Scalar` the number came from, so the UI
+   * can never show a binding the document does not hold.
+   */
+  primaryExpr?: string;
   status: "ok" | "dirty" | "error" | "needsRepair";
   /** Worker failure reason for an errored step (`status === "error"`), surfaced as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
@@ -1776,3 +1785,23 @@ export interface DocumentModule {
   moduleId: string;
   schemaVersion: number;
 }
+
+/**
+ * One document variable (WP-VE.2 — the authoring surface over the table WP-VE.1
+ * made drive regen).
+ *
+ * `value` is the LAST EVALUATED number: for a plain variable that is simply what
+ * the user typed; for one that is itself `expr`-driven it is the cached result.
+ * V1 refuses to resolve a chained expression at regen, so `expr` is surfaced
+ * rather than hidden — a broken binding must be visible where it was authored.
+ */
+export interface DocumentVariable {
+  id: string;
+  name: string;
+  value: number;
+  /** Present only for a variable whose own value is expression-driven. */
+  expr?: string;
+}
+
+/** The V1 variable-name grammar, shared with `regen::variables::is_bare_name`. */
+export const VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

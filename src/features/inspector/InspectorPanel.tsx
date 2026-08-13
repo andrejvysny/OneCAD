@@ -27,8 +27,15 @@ import type { SketchStatus } from "@/stores/documentStore";
  * `@/modules/modeling/inspectorSections`), which is what lets a module other
  * than modeling put something here.
  *
- * EMPTY and REPAIR deliberately do NOT host sections: they replace the panel
- * body outright, and the frozen contract records no sections for either.
+ * REPAIR deliberately does NOT host sections: it replaces the panel body
+ * outright, and the frozen contract records none for it.
+ *
+ * EMPTY DOES host them, as of WP-VE.2. It used to be a bare "nothing selected"
+ * placard for the same reason REPAIR is — every section then was about the
+ * SELECTION, so with none there was nothing to show. A document-level section
+ * (Variables) breaks that assumption: gating it on a selection would hide the
+ * document's own parameters behind picking some unrelated body. The placard
+ * stays; sections render under it.
  */
 export function InspectorPanel() {
   const mode = useToolStore((s) => s.mode);
@@ -62,7 +69,10 @@ export function InspectorPanel() {
       ) : sel ? (
         <SelectionState sel={sel} bodies={bodies} sketches={sketches} />
       ) : (
-        <EmptyState />
+        <>
+          <EmptyState />
+          <InspectorSectionHost />
+        </>
       )}
     </div>
   );

@@ -55,6 +55,7 @@ use onecad_core::document::record::{
 };
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery};
 use onecad_core::document::repair::RepairItem;
+use onecad_core::document::variables::Variable;
 use onecad_core::document::Document;
 use onecad_core::edit::session::{empty_outcome, merge_outcome, DocumentSession};
 use onecad_core::edit::{CommandOutcome, EditCommand, SketchEditOp, UndoOutcome};
@@ -763,6 +764,16 @@ impl DocumentRuntime {
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// The document's variable table in declaration order (WP-VE.2).
+    ///
+    /// Reads the STORED table (`session`), not the substituted regen mirror: the
+    /// mirror holds effective records, never variables, and a variable's own
+    /// `value` is already the last evaluated number (`sync_variable_values`).
+    #[must_use]
+    pub fn variables(&self) -> Vec<Variable> {
+        self.session.document().variables.iter().cloned().collect()
     }
 
     /// One module's slice of the document, if it has any (ADR-0004).
@@ -2792,6 +2803,10 @@ impl DocumentRuntime {
             value_text: value.text,
             primary_value: value.primary,
             primary_value_kind: value.primary_kind.map(ToString::to_string),
+            // The variable binding, if any (WP-VE.2). Substitution rewrites a
+            // Scalar's cached `value` and never its `expr`, so this is the stored
+            // binding whichever record set this projection was built from.
+            primary_expr: value.primary_expr,
             status: feature_status(&state),
             // Surface a step's worker failure reason (`StepState::Error{reason}`) so
             // the HistoryList row can tint + tooltip it end-to-end (Codex MAJOR-4).
