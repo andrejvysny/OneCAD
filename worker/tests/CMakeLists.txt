@@ -124,6 +124,12 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# WP0.6: a requested draft must be applied or NAMED-refused, never silently
+# dropped. Carries the circular-profile red probe the work package mandates.
+add_executable(test_extrude_draft test_extrude_draft.cpp)
+target_link_libraries(test_extrude_draft PRIVATE worker_core)
+add_test(NAME extrude_draft COMMAND test_extrude_draft)
+
 # F0: oversized Fillet/Chamfer must refuse without fallback geometry or state
 # mutation. Also emits deterministic NDJSON for the 7.9.3 comparison artifact.
 add_executable(test_edge_op_failure test_edge_op_failure.cpp)

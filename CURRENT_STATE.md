@@ -1,4 +1,26 @@
-## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13) — GATE PASSED, UNCOMMITTED
+## ROADMAP A2 — DRAFT APPLIED-OR-REFUSED (2026-08-13) — GATE PASSED, UNCOMMITTED
+
+WP0.6. The implementation was already correct; the evidence was missing. No test
+pinned any of the three refusal strings, and the work package's first mandated
+task — the circular-profile red probe — had never been run.
+
+**The probe ran and the answer is refusal**, so risk R-10 is closed as not-present
+with evidence rather than by inspection: a circular profile refuses with
+`Extrude draft refused: no eligible planar side faces`, in the preview lane as
+well as on commit. New ctest `extrude_draft` pins the closed-form frustum for both
+signs, the near-limit refusal, the sub-epsilon no-op and determinism; new
+real-worker `preview_extrude_draft.rs` pins preview == closed form == commit
+(688.801) and a head left byte-identical.
+
+- **Findings recorded, not fixed:** `Arc` entities still reach the BRep as polylines
+  while `Circle` stays analytic — the slot probe measures 28 faces and a 24-gon cap,
+  direct evidence for the Phase 2 residual. And the draft refusal already carries a
+  structured `Diagnostic{stage:"build"}`, so A3's remaining work there is the stable
+  per-defect code, not the envelope.
+- **Gates:** ctest **117/117** · fmt · clippy · real-worker workspace **1078 / 0**.
+- **Next:** A3, stable diagnostic codes for the zero-solid Boolean and Draft refusals.
+
+## ROADMAP A1 — SHARED OPERATION-RESULT CLASSIFIER (2026-08-13) — COMMITTED `772b3d2`
 
 WP0.3 finished. It was recorded complete but only the transport half had landed:
 `needsRepair` was declared and never produced, no shared helper existed, and every

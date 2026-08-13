@@ -14,7 +14,21 @@ Roadmap WP0.3, finished. It was recorded complete at `MODEL-CORRECTNESS-P0` but 
 
 Gates: `bunx tsc --noEmit` clean; `bun run test` **247 files / 4161 tests** (244/4124 → +3 files, +37 tests); `bun run build` clean; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1076 / 0**. Worker and ctest untouched by this wave.
 
-- [ ] Next per the plan: A2 (pin the Draft refusals — no test pins any of the three, and the mandated circular-profile red probe was never run).
+## ROADMAP A2 — DRAFT APPLIED-OR-REFUSED (2026-08-13) — GATE PASSED
+
+Roadmap WP0.6. The implementation was already correct — three named refusals plus a semantic volume-delta check (`ExtrudeOp.cpp:248-302`) — but **no test pinned any of the three strings**, and the work package's FIRST mandated task, the circular-profile red probe, had never been run. The only draft coverage was one square prism asserting `500 < v < 990`, which no refusal path and no wrong angle could fail.
+
+- [x] **The mandated red probe ran, and the answer is REFUSAL.** A circular profile extrudes to a cylinder whose only side face is curved, so `apply_draft` finds zero eligible faces and returns `Extrude draft refused: no eligible planar side faces`. The spec's escalation condition — "if OCCT returns success with unchanged geometry, promote to a confirmed P0 defect" — **does not fire**. Risk **R-10** is closed as not-present, with evidence rather than by inspection. The probe asserts both branches, so it still catches a silent no-op if the behaviour ever changes.
+- [x] **`worker/tests/test_extrude_draft.cpp`** (new ctest `extrude_draft`, 117/117): closed-form frustum volume for ±10° (`V = h/3·(A₁+A₂+√(A₁A₂))`, matched to 0.5 mm³ — a wrong angle, a wrong neutral plane or a one-sided taper all fail it), the sign genuinely reversing the taper, the neutral plane keeping the base footprint, ±89° near-limit safe-refusal, a sub-epsilon angle staying a clean straight prism, and determinism across two runs.
+- [x] **`src-tauri/tests/preview_extrude_draft.rs`** (real worker, +2): the drag shows the drafted frustum (preview **688.801** vs closed form **688.801**), the preview leaves the head byte-identical, the commit lands on the previewed volume, and a refused draft **refuses in the preview lane too** rather than showing the straight cylinder the commit would never publish.
+
+**TWO FINDINGS, recorded not fixed** (both outside A2's scope):
+- **`Arc` entities still reach the BRep as polylines while `Circle` stays analytic.** The slot probe reports 28 faces (2 flanks + **24** cap segments + top + bottom) and a volume 0.19% under analytic `(400+25π)·10` — exactly a 24-gon inscribed in the caps. So the "mixed planar/curved" case is not yet mixed at the BRep level, and this is direct evidence for the Phase 2 residual the plan tracks as B3 ("no polygon-fallback warning for supported analytic entities" is asserted by nothing).
+- **The refusal already carries structured evidence.** The preview lane returned `Diagnostic { code: "OP_FAILED", stage: "build", … }`, so A3's remaining work on draft is the stable per-defect CODE, not the diagnostic envelope.
+
+Gates: `ctest` **117/117** (116 → 117); `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1078 / 0** (1076 → 1078). No frontend file changed.
+
+- [ ] Next per the plan: A3 (stable diagnostic codes for the zero-solid Boolean and Draft refusals).
 
 ## MODELING UX HARDENING — WP0 through WP6 (2026-08-12/13, plan `plans/modeling-ux-wp0.md` + `act-as-senior-software-linked-graham.md`) — FE GATE PASSED, ALL 19 DEFECTS CLOSED
 
