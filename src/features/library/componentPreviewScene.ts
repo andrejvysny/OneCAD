@@ -133,6 +133,16 @@ function offscreenRenderer(): Offscreen | null {
       preserveDrawingBuffer: true, // required: `toDataURL` reads the buffer back
     });
     renderer.setPixelRatio(1); // a thumbnail is rasterized at its own size
+    // A lost context must NOT latch the `null` terminal state: the browser
+    // reclaims offscreen contexts under GPU pressure, and every future
+    // thumbnail for the session would silently fail. Reset to `undefined`
+    // ("not tried yet") so the next rasterize builds a fresh context; the
+    // already-rasterized data URLs in the cache stay valid.
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      offscreen?.renderer.dispose();
+      offscreen = undefined;
+    });
     const scene = new THREE.Scene();
     addPreviewLights(scene);
     offscreen = { renderer, scene, camera: new THREE.PerspectiveCamera(35, 1, 0.1, 1000) };

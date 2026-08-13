@@ -343,3 +343,43 @@ Library root + `component.toml` + `library.json`; `embedded` source kind only; `
 ## 12. Definition of done
 
 A user can: open the library panel, search "M8 socket head," drag it onto a hole, have it snap concentric and auto-size to M8, commit it as one undoable history node, edit its length in place, save, close, reopen with the library folder deleted and still see the screw (flagged `NeedsRepair`, geometry intact), move the plate and watch the screw re-seat, author their own bracket as a snapping component, and start a new project from a template. All gates pass, all invariants hold, and the wire contract is documented and signed off.
+
+---
+
+## 13. Ratified implementation deviations (2026-08-13)
+
+The build deviated from the letter of this spec in four places. Each was a
+deliberate, documented decision (SCHEMA §14 carries the wire-side entries);
+this section ratifies them so the spec and the code agree.
+
+1. **§3.2/§3.3 — `SetComponentParams` and `ReplaceComponent` are NOT
+   `KnownOperation` variants.** Both are in-place edits of the existing
+   `PlaceComponent` record at the same `RecordId` (the `Fillet⇄Chamfer`
+   op-type-swap precedent, `edit::session::op_type_edit_allowed`). This
+   preserves downstream refs by construction — the property §3.3 asked the
+   variant to engineer — with two fewer wire ops. The §3 signatures remain
+   as the authoritative shape of the *data* each edit carries.
+
+2. **§3.5 — `mate.target` does NOT travel in wire `inputs[]`.** The worker's
+   generic `inputs[]` pre-flight treats any unresolved input as blocking,
+   which is wrong for a mate: an unresolvable target must still publish the
+   component at its frozen `placement` (§5.5 "never drop it, never silently
+   move it"). The mate rides in `params` only and is resolved in-process by
+   `ComponentOp::resolve_mate_reseat` (SCHEMA §14, 2026-08-13 corrective
+   entry).
+
+3. **§2.1 — `[source]` carries `codec`/`format`, and a `document` package
+   carries a `geometry` blob pointer.** A reader cannot know the byte form
+   or version pin of baked geometry otherwise. `document` components resolve
+   from their baked blob at regen (never a nested document replay — the
+   worker is one-session-per-process, and §4 requires rendering with the
+   library deleted). Consequence: a `document` package with no baked
+   geometry is refused, and `document`-source params are not editable until
+   a re-bake lane exists.
+
+4. **§2.1 `[attachments]` frames — components seat at their model origin.**
+   Nothing on the wire carries an attachment's local frame yet; the
+   attachment name + `accepts` drive matching and the solved snap transform
+   compensates. A component whose natural mate point is far from its origin
+   authors awkwardly until attachment frames land (open work, tracked with
+   authoring completion).
