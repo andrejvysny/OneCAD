@@ -724,3 +724,102 @@ async fn a_component_with_no_cached_geometry_fails_only_its_own_step() {
 
     wm.shutdown().await;
 }
+
+/// Every SEEDED package (WP-A2) actually places through the real worker.
+///
+/// This is the pairing nothing else can check: a manifest names a
+/// `source.generator`, the worker registers a set of generator ids, and the two
+/// live in different languages in different directories. Before WP-A1 a
+/// mismatch was invisible (every id built a socket cap screw); now it is an
+/// `OP_FAILED`, and this test is what turns that from a runtime surprise into a
+/// build-time one. It also proves the shipped `thread` domains are sizes the
+/// generators accept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_seeded_component_places_through_the_real_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    onecad_lib::library_seed::seed_library(dir.path()).expect("seed");
+    let mut library = onecad_library::Library::open(dir.path()).expect("open seeded library");
+    library.reindex().expect("reindex");
+
+    let mut placements: Vec<(String, String, u32)> = Vec::new();
+    for (id, versions) in &library.index().components {
+        for entry in versions.values() {
+            let generator = entry
+                .generator_id
+                .clone()
+                .unwrap_or_else(|| panic!("{id}: a seeded package must be a generator source"));
+            placements.push((id.clone(), generator, entry.generator_version.unwrap_or(1)));
+        }
+    }
+    assert!(
+        placements.len() >= 7,
+        "the seed catalog should carry every fastener family, got {placements:?}"
+    );
+
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    for (i, (component_id, generator_id, generator_version)) in placements.iter().enumerate() {
+        // M6 is in every seeded family's declared `thread` domain — the one
+        // size they all share, which is why it is the sweep's probe.
+        let mut generator_params = std::collections::BTreeMap::new();
+        generator_params.insert(
+            "thread".to_string(),
+            ComponentParamValue::Text("M6".to_string()),
+        );
+        let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+            component_id: component_id.clone(),
+            component_version: "1.0.0".to_string(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: generator_params.clone(),
+            source: ComponentSourceRef::Generator {
+                generator_id: generator_id.clone(),
+                generator_version: *generator_version,
+                params: generator_params,
+                extra: Default::default(),
+            },
+            mate: None,
+            // Spread them out so each is its own solid, never a coincident pile.
+            placement: FrozenPlacement {
+                translate: [
+                    Scalar::new(60.0 * i as f64),
+                    Scalar::new(0.0),
+                    Scalar::new(0.0),
+                ],
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        }));
+        add_op(
+            &mut rt,
+            OperationRecord::new(
+                RecordId(Uuid::from_u128(0xe0 + i as u128)),
+                0,
+                "Place Component",
+                op,
+            ),
+        );
+    }
+
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "seeded catalog");
+    assert_eq!(
+        snap.stopped_reason,
+        onecad_core::regen::StoppedReason::Completed,
+        "no seeded package may fail its step"
+    );
+    assert_eq!(
+        snap.bodies.len(),
+        placements.len(),
+        "every seeded component publishes exactly one body"
+    );
+    for body in &snap.bodies {
+        let vol = exact_volume(&wm, body.body).await;
+        assert!(vol > 0.0, "a seeded component published an empty solid");
+    }
+
+    wm.shutdown().await;
+}

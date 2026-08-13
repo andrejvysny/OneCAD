@@ -23,6 +23,7 @@ pub mod events;
 pub mod export;
 pub mod imports;
 pub mod library;
+pub mod library_seed;
 pub mod logging;
 pub mod mesh_cache;
 pub mod recents;
@@ -306,6 +307,19 @@ pub fn run() {
                 })
                 .await;
             });
+            // Install any missing built-in component package and re-index
+            // (Component Library WP-A2). Same off-the-critical-path treatment as
+            // the sweep above: it is a handful of small file writes, but the
+            // window must not wait on disk IO, and an unseedable library
+            // degrades to an empty panel rather than blocking startup.
+            if let Some(root) = library::library_root(app.handle()) {
+                tauri::async_runtime::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        library::seed_and_reindex_at(&root);
+                    })
+                    .await;
+                });
+            }
             // Spawn the single regen scheduler over the shared runtime + app handle.
             let state = app.state::<AppState>();
             // Publish the app handle so the backend factory's worker-status

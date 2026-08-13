@@ -1,0 +1,41 @@
+# Plain Washer — a built-in generator package (Component Library spec §2.1/§6.2).
+#
+# Normal series. Sized by the THREAD it serves, not by its own bore — an M6
+# washer has a 6.4 mm hole (spec §6.1).
+#
+# Geometry is produced by the worker's `iso7089` generator from its own dimension
+# table; this manifest declares identity, metadata and the parameter/attachment
+# signature only — never a dimension. A size outside `thread.domain` is refused
+# loudly by the generator, never substituted (spec §0 invariant 4).
+#
+# `revision` is the package content hash over every file EXCEPT this manifest
+# (spec §2.1). A generator package carries no other file, so the hash is the
+# SHA-256 of nothing — the same value for every seed package here, correct
+# rather than coincidental, and pinned by a test in `src-tauri/src/library.rs`.
+
+[identity]
+id = "onecad.std.iso7089"
+version = "1.0.0"
+revision = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[metadata]
+name = "Plain Washer"
+standard = "ISO 7089"
+designation = "ISO 7089 {thread}"
+category = ["fasteners", "washers"]
+tags = ["metric", "washer", "normal-series", "din125"]
+unit = "mm"
+
+[source]
+kind = "generator"
+generator = "iso7089"
+generator_version = 1
+
+[parameters]
+thread = { role = "free", key = "M6", domain = ["M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12"] }
+
+[attachments]
+# A nut/washer seats its bearing face at the local origin and occupies +Z, so
+# it sits ON the surface it is dropped onto.
+seat = { on = "face:bearing", accepts = ["plane"] }
+bore_axis = { on = "cylinder:bore", accepts = ["cylinder", "hole", "circularEdge"] }

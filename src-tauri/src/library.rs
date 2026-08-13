@@ -57,7 +57,7 @@ use crate::state::AppState;
 /// — a real dev/test seam, not test-only plumbing: it also lets a developer
 /// point the library panel at a scratch package tree without touching the
 /// real app-data directory.
-fn library_root(app: &AppHandle) -> Option<PathBuf> {
+pub(crate) fn library_root(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ONECAD_LIBRARY_ROOT") {
         return Some(PathBuf::from(p));
     }
@@ -107,6 +107,43 @@ pub async fn list_library_components(app: AppHandle) -> Result<Vec<LibraryCompon
         return Ok(Vec::new());
     };
     list_library_components_at(&root)
+}
+
+/// Installs any missing built-in package and re-indexes if the pass changed
+/// anything (WP-A2). Runs once at application start, off the window-creation
+/// critical path.
+///
+/// Re-indexing here is not optional: `list_library_components` reads the
+/// PERSISTED index and deliberately never rebuilds it, so a package that
+/// seeds but is not indexed is still an empty panel.
+///
+/// Best-effort — a library that cannot be seeded (read-only volume, denied
+/// permission) degrades to whatever is already there. It logs and never
+/// blocks startup.
+pub(crate) fn seed_and_reindex_at(root: &Path) {
+    let outcome = match crate::library_seed::seed_library(root) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::warn!("library seeding skipped ({e}); library stays as found");
+            return;
+        }
+    };
+    if !outcome.ran {
+        return;
+    }
+    tracing::info!(
+        installed = outcome.installed.len(),
+        kept = outcome.kept.len(),
+        "library seed pass"
+    );
+    match reindex_library_at(root) {
+        Ok(report) => tracing::info!(
+            indexed = report.indexed,
+            total = report.total,
+            "library reindexed after seeding"
+        ),
+        Err(e) => tracing::warn!("library reindex after seeding failed: {e}"),
+    }
 }
 
 /// Rebuilds the library index from packages on disk (spec §4 `reindex`).

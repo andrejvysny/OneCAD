@@ -1,5 +1,62 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-A2 (2026-08-13) — GATE PASSED
+
+First-run seeding of the built-in catalog — the other half of "the library is
+empty". WP-A1 gave the worker seven generators; nothing on disk pointed at
+them. The library root is `<app_data_dir>/library`, empty on a fresh install,
+so a real user opened the panel and saw nothing, and spec §12's flagship flow
+was unreachable in the shipped app regardless of what the kernel could build.
+
+**Seven `component.toml` packages** (`src-tauri/resources/library-seed/`), one
+per registered generator, declaring identity/metadata/`[parameters]`/
+`[attachments]` and never a dimension — the generator owns those. Each
+family's `thread` domain is its STANDARD's range, not a uniform M2–M12: ISO
+7380-1 and ISO 7093-1 start at M3, and the manifests say so rather than
+inventing rows. Nuts and washers declare neither `length` nor `thread_detail`,
+because they have neither.
+
+**Embedded, not bundled as resources** (`include_str!`): a generator package is
+one small text file, and embedding makes seeding behave identically in `tauri
+dev`, a packaged bundle, `cargo test`, and CI — none of which resolve a
+resource directory the same way. It also removes a packaging step that could
+silently ship an app with an empty library. `include_bytes!` extends this the
+day a package needs a `preview.webp`.
+
+**The rule the module exists to protect: the user's copy always wins.** Seeding
+only ever CREATES a package directory that does not exist — never overwrites,
+never merges, never deletes. A `.seed-version` marker records that the pass
+ran, so a deleted built-in stays deleted; bumping `SEED_VERSION` re-runs the
+pass and restores what is missing. Both halves have their own test.
+
+**Re-indexing after seeding is not optional** and is why the pass lives in
+`library.rs` rather than the pure module: `list_library_components` reads the
+PERSISTED index and deliberately never rebuilds it (WP-1.6's explicit-action
+rule), so a package that seeds without being indexed is still an empty panel.
+Runs at app setup on a blocking task, off the window-creation critical path,
+degrading to "library stays as found" on any I/O failure.
+
+**The test that could not exist before:**
+`every_seeded_component_places_through_the_real_worker` seeds a temp root,
+reindexes, and places EVERY indexed component through the real OCCT worker,
+asserting one publishable body each. Manifest `source.generator` ids and the
+worker's registered ids live in different languages in different directories;
+before WP-A1 a mismatch was invisible (every id built a socket cap screw), and
+now it is an `OP_FAILED` — this turns that into a test failure instead of a
+user-facing one. It also proves the shipped `thread` domains are sizes the
+generators accept.
+
+Also pinned: every seed manifest parses, validates its identity, names a
+non-empty component, declares at least one attachment (a component with none
+can never snap), and carries a `revision` equal to the recomputed content hash
+of a manifest-only package — so adding a preview file without updating the
+manifest fails here rather than making every placement resolve `NeedsRepair`.
+
+GATE: `cargo test --workspace --no-fail-fast` **1148 passed / 0 failed** (7 new
+`library_seed` unit tests + the real-worker catalog sweep) · `cargo fmt --all
+--check` + workspace `clippy -D warnings` clean · worker ctest unchanged at
+**119/119** (no C++ touched) · frontend untouched.
+
 ## COMPONENT-LIBRARY WP-A1 (2026-08-13) — GATE PASSED
 
 Per-family generator dispatch + six more ISO fastener families (spec §6.2's
