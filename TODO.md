@@ -1,5 +1,73 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-A1 (2026-08-13) — GATE PASSED
+
+Per-family generator dispatch + six more ISO fastener families (spec §6.2's
+seed catalog). First WP of the "content gaps" phase the session-16 plan opened
+after scoping found the shipped library is **empty**: no seeded packages exist
+anywhere in the repo, and the worker's generator lane had no dispatch at all.
+
+**The defect this closes, stated plainly:** `ComponentOp.cpp` read
+`source.generatorId`, checked only that it was non-empty, and then built an ISO
+4762 socket cap screw **for every value**. Harmless while exactly one family
+existed; the instant a second one is seeded it is the silent-substitution
+failure spec §0 invariant 4 exists to forbid — ask for a washer, get a screw.
+An unregistered id now fails `OP_FAILED` naming the registered ids.
+
+**Worker, restructured (a move, not a rewrite):** the ISO 4762 table, both
+thread cutters, and the SHCS builder moved out of `ComponentOp.cpp` into
+`ops/ComponentGenerators.{h,cpp}` (builders + registry) and
+`ops/FastenerTables.{h,cpp}` (data only, so a table edit can never change HOW a
+family is built). The only change to either cutter is a `thread_length_mm`
+argument — the threaded run measured from the tip — which fully-threaded
+families pass as the whole shank, reproducing the old behavior exactly. ISO
+4762's pinned exact-volume ctests are the proof the move changed nothing;
+they passed unmodified on the first build.
+
+**Six new families**, each with its own analytic exact-volume ctest:
+`iso7380` (button head, dome = sphere ∩ cylinder), `iso4014` / `iso4017` (hex
+prism head; the two standards share every geometric column and differ ONLY in
+the threaded run — 4014 threads `b` from the tip, 4017 threads all of it, and a
+test pins both halves of that), `iso4032` (hex nut, cosmetic bore),
+`iso7089` / `iso7093` (normal and large series washers).
+
+**Data provenance, per family, and one real correction.** ISO 4014/4017/4032/
+7089 come from BOLTS (`data/hex.blt` `hexbolt2`/`hexscrew2`, `data/nut.blt`
+`hexagonnut1`, `data/washer.blt` `plainwasher1`, fetched via `gh api`
+2026-08-13). **ISO 7380-1 and ISO 7093-1 are not in BOLTS at all** — checked,
+not assumed: `hex_socket.blt` has no button-head class and `washer.blt` carries
+7089/7090/7091/7092 only. Those two are hand-transcribed from the standards and
+say so at their definition, in both copies, and in `THIRD_PARTY_NOTICES`.
+**BOLTS lists ISO 7089 M10 with a 10.0 mm bore; ISO 7089 and DIN 125 A both
+publish 10.5, and a 10.0 bore will not pass an M10 bolt** — corrected on both
+sides and pinned by a test on each so a future re-import cannot silently undo
+it. Every other value is verbatim.
+
+**Rust mirror**: `tables.rs` became a module directory (`tables/iso4762.rs`
+verbatim + `tables/fasteners.rs`), keeping WP-2.2's discipline — an
+authoring/metadata copy that is never a geometry authority, with per-family
+spot-checks against the SOURCE values and a cross-pinning test against the
+worker's numbers, so drift in either copy fails loud.
+
+**Table-extremes robustness** follows WP-2.6's precedent rather than
+kernelbench (whose case-v2 schema is architecturally fillet-only, established
+there): every seeded size of every family builds at cosmetic detail (63 cases),
+plus smallest/mid/largest × 3 thread details for the three new threaded
+families (27 cases). All pass; no new kernel limit surfaced beyond the M2
+turn-density one WP-2.6 already characterized.
+
+**Protocol**: §7.3's `generator` bullet documents the dispatch and the loud
+refusal, with a §14 entry. Two STALE §7.3 paragraphs also corrected in the same
+entry — `inputs[]` has carried no mate ref since WP-3.1, and the "not yet
+re-seated by the worker" paragraph described a build that shipped two WPs ago.
+Documentation-only; found while writing the dispatch note.
+
+GATE: worker ctest **119/119** (118 baseline + new `component_generators`, 12
+cases / ~200 checks) · `cargo test -p onecad-library` **37/37** (up from 28) ·
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` 100% green ·
+`cargo fmt --all --check` + workspace `clippy -D warnings` clean · frontend
+untouched (no `src/`/`e2e/` file in this WP's diff).
+
 ## COMPONENT-LIBRARY P3 WP-3.2 (2026-08-13) — GATE PASSED
 
 Blob-backed component geometry: the `embedded` **and** `document` source kinds

@@ -1,14 +1,12 @@
-//! Parametric dimension tables (spec §6) — BOLTS-seeded ISO fastener tables,
-//! bearing/motor lookups, spot-check harness.
+//! ISO 4762 / DIN 912 socket-head cap screw dimensions (spec §6.2).
 //!
-//! `Iso4762Table` is P2's first real content (WP-2.2), a Rust-side mirror of
-//! the worker's own `ComponentOp.cpp::iso4762Table()` — deliberately a
-//! SEPARATE copy, not a shared source (spec §6: generators are built-in and
-//! versioned in the worker; this crate's tables serve authoring/metadata —
-//! `component.toml`'s `[parameters] role="table"` resolution and the
-//! designation-string template — never geometry generation). The spot-check
-//! test below pins both copies against the same source values, so a
-//! transcription error in EITHER one is caught.
+//! A Rust-side mirror of the worker's own `FastenerTables.cpp::iso4762_table()`
+//! — deliberately a SEPARATE copy, not a shared source (spec §6: generators are
+//! built-in and versioned in the worker; this crate's tables serve
+//! authoring/metadata — `component.toml`'s `[parameters] role="table"`
+//! resolution and the designation-string template — never geometry
+//! generation). The spot-check tests below pin both copies against the same
+//! source values, so a transcription error in EITHER one is caught.
 //!
 //! Source: BOLTS (`github.com/boltsparts/BOLTS_archive`,
 //! `data/hex_socket.blt`, class `hexsocketheadcap` = ISO 4762 / DIN 912),

@@ -145,6 +145,10 @@ add_library(worker_core STATIC
     # --- COMPONENT-LIBRARY WP-0.2: placed-component op family (`PlaceComponent`,
     #     SCHEMA §7.3) ---
     src/ops/ComponentOp.cpp
+    # --- COMPONENT-LIBRARY WP-A1: per-family generator dispatch + dimension tables
+    #     (spec §6) ---
+    src/ops/ComponentGenerators.cpp
+    src/ops/FastenerTables.cpp
     # --- COMPONENT-LIBRARY P3 WP-3.1: mate re-seat candidate-transform math ---
     src/ops/ComponentMateSolver.cpp
     src/io/ExportStep.cpp

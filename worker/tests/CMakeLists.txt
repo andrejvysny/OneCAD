@@ -238,6 +238,15 @@ add_executable(test_component_blob_source test_component_blob_source.cpp)
 target_link_libraries(test_component_blob_source PRIVATE worker_core)
 add_test(NAME component_blob_source COMMAND test_component_blob_source)
 
+# --- COMPONENT-LIBRARY WP-A1: the per-family generator dispatch and the seed
+#     catalog's dimension tables — one exact analytic volume per family (values
+#     hardcoded FROM THE SOURCE, never read back out of the table), the
+#     partial/full thread split, the loud unknown-generator and unknown-size
+#     refusals, and a builds-at-every-seeded-size sweep. In-process, real OCCT. ---
+add_executable(test_component_generators test_component_generators.cpp)
+target_link_libraries(test_component_generators PRIVATE worker_core)
+add_test(NAME component_generators COMMAND test_component_generators)
+
 # --- VF-M7: an ElementMap entry minted on body A must never bind a face of body B.
 #     Hole + Shell against two DIFFERENT bodies, asserted by exact analytic volume
 #     (silent wrong drill / wrong seat / wrong shell wall). In-process, real OCCT. ---

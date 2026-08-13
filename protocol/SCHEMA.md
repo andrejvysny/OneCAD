@@ -1471,8 +1471,8 @@ entity as a first-class placed instance (spec §3.1). New v2 op, no
 OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
 
 ```json
-// inputs: [ semanticRef(mate target) ]  — present ONLY when `mate` is set
-//          (absent `mate` ⇒ no inputs at all, dropped in free space)
+// inputs: []  — ALWAYS empty, even when `mate` is set (P3 WP-3.1; see the
+//          `mate` bullet below and the 2026-08-13 §14 entry for why)
 // params
 { "componentId": "onecad.std.iso4762",
   "componentVersion": "1.0.0",
@@ -1495,7 +1495,16 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   implemented** (WP-3.2). An unknown kind refuses recoverably with
   `UNSUPPORTED`.
   - `generator` — `{generatorId, generatorVersion, params}`. Table-driven per
-    thread size as of WP-2.1 (spec §6).
+    thread size as of WP-2.1 (spec §6), and DISPATCHED PER FAMILY on
+    `generatorId` as of WP-A1: `iso4014` · `iso4017` · `iso4032` · `iso4762` ·
+    `iso7089` · `iso7093` · `iso7380`. An unregistered `generatorId` fails
+    recoverably with `OP_FAILED`, naming the registered ids — it does **not**
+    fall back to any family (before WP-A1 every id built an ISO 4762 socket
+    cap, which is the silent substitution spec §0 invariant 4 forbids).
+    `params.thread` / `.length` / `.thread_detail` are the free params;
+    families with no external thread (nuts, washers) ignore `thread_detail`,
+    and families with no length (nuts, washers) ignore `length`. An unknown
+    `thread` for the addressed family fails loudly with the known sizes.
   - `embedded` / `document` — a BAKED solid, carried as a content-addressed
     blob in the placing document's own `imports/` section:
     `{sha256, codec, brepFormat}`, plus `documentSha256` (the frozen authoring
@@ -1511,11 +1520,16 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
 - `mate` is optional; absent ⇒ dropped in free space, positioned by
   `placement` alone. When present, `target` is a full semantic ref so the
   resolution ladder can re-resolve it after upstream edits — this is what
-  makes the mate PERSISTENT (spec §5.5). **Not yet re-seated by the worker**
-  in this build: `placement` is always the transform actually applied: the
-  frozen fallback the spec's `mate`-present case describes as "kept as the
-  fallback if the mate later fails to resolve" is, in this build, the ONLY
-  behavior — persistent re-seating on regen lands P3.
+  makes the mate PERSISTENT (spec §5.5). **Re-seated by the worker on every
+  regen since P3 WP-3.1**: the target is re-resolved mid-`ExecutePlan` (so it
+  sees same-tick geometry), the seat recomputed from the mate kind + resolved
+  frame + flip, and the new transform echoed back on `planStep.matePlacement`
+  (§7.2) for Rust to persist. Unresolvable ⇒ a `NeedsRepair` item and the
+  frozen `placement` stands — the component ALWAYS publishes, never drops,
+  never silently moves. `mate.target` deliberately does NOT ride in `inputs[]`:
+  the generic `resolve_input_refs` pre-flight treats an unresolved input as
+  blocking, which would publish ZERO bodies for a component whose target was
+  deleted — the opposite of the rule above.
 - `placement` — SAME normative order as TransformBody: `X' = T ∘ R(center,
   axis, angleDeg) · X`. `rotate` defaults to the identity rotation when
   absent.
@@ -2833,6 +2847,24 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — §7.3 `PlaceComponent` / `DetachComponent` `source.generatorId`
+  is now DISPATCHED, and two stale §7.3 paragraphs corrected** (Component
+  Library WP-A1, spec §6.2, single-repo, both tracks land together).
+  - **Behavior change, deliberate and loud:** an unregistered `generatorId`
+    now fails recoverably with `OP_FAILED` naming the registered ids. It used
+    to build an ISO 4762 socket cap screw for ANY id — harmless while one
+    family existed, a silent substitution (spec §0 invariant 4) the moment a
+    second one did. Registered: `iso4014` `iso4017` `iso4032` `iso4762`
+    `iso7089` `iso7093` `iso7380`. No document changes shape; no fixture
+    moves; `iso4762` output is byte-identical (pinned by its exact-volume
+    ctests, which is what made the extraction safe).
+  - **Corrections to text that had gone stale**, both from P3 WP-3.1 landing
+    without its §7.3 prose being updated (the §14 entry for that change was
+    written; these two lines were not): `inputs[]` is documented as ALWAYS
+    empty (it has carried no mate ref since WP-3.1), and the "not yet
+    re-seated by the worker" paragraph is replaced by what actually ships.
+    Documentation-only — no wire or code change in this entry.
 
 - **2026-08-13 — §7.8 NEW verb `ExportGeometry`; §7.3 `PlaceComponent` /
   `DetachComponent` source kinds `embedded` + `document` IMPLEMENTED**
