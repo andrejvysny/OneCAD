@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "reviewed": "2026-08-13",
+  "residuals": [
+    {
+      "id": "MC-R1",
+      "category": "profile-tolerance-performance",
+      "impact": "Dense or ill-conditioned sketches may exceed unmeasured latency targets.",
+      "affectedVersions": "regionIdentityVersion 3",
+      "reproduction": "Run dense near-tangent source/pair/fragment ceiling and cancellation sweeps.",
+      "owner": "P2 bounds and performance",
+      "mustNotWorsenTest": "worker/tests/test_region_table.cpp",
+      "reopeningTrigger": "P95 above 25 ms, refusal above 200 ms, or simple-sketch regression above 20%."
+    },
+    {
+      "id": "MC-R2",
+      "category": "publication-policy",
+      "impact": "Structured evidence exists, but Tier A/B overhead and all semantic checks lack full measured closure.",
+      "affectedVersions": "all non-import operations",
+      "reproduction": "Run operation matrix with validator controls and collect build/validator timings.",
+      "owner": "P3 publication policy",
+      "mustNotWorsenTest": "worker/tests/test_fillet_builder.cpp",
+      "reopeningTrigger": "Invalid output publishes or Tier A/B exceeds 5%/15% P95."
+    },
+    {
+      "id": "MC-R3",
+      "category": "corpus-evidence",
+      "impact": "The frozen corpus executes 9 of 9, but must remain free of silent skips and raw expectation semantics.",
+      "affectedVersions": "frozen corpus b4ddccc",
+      "reproduction": "Run corpus_cases_are_classified_executed_or_unsupported with ONECAD_REQUIRE_WORKER=1.",
+      "owner": "P4 corpus harness",
+      "mustNotWorsenTest": "src-tauri/tests/corpus_executor.rs",
+      "reopeningTrigger": "Any silent skip, lost provenance, untyped expectation, or executable count below 9."
+    },
+    {
+      "id": "MC-R4",
+      "category": "composition-gate",
+      "impact": "Mock browser tests do not prove the packaged Tauri and bundled worker composition.",
+      "affectedVersions": "desktop release",
+      "reproduction": "Relocate a release bundle, unset overrides, hide dev worker, run WDIO save/reopen flow.",
+      "owner": "P5 real Tauri lane",
+      "mustNotWorsenTest": "src-tauri/src/worker/mod.rs relocated resolver tests",
+      "reopeningTrigger": "Missing WDIO gate, wrong worker hash/fingerprint, or leaked app/worker process."
+    },
+    {
+      "id": "MC-R5",
+      "category": "platform-release",
+      "impact": "No current 20-run stability sample or mandatory Windows worker-backed release matrix.",
+      "affectedVersions": "tagged/package releases",
+      "reproduction": "Inspect aggregate checks for candidate SHA and run Linux/macOS/Windows release matrix.",
+      "owner": "P6 release enforcement",
+      "mustNotWorsenTest": ".github/workflows/ci.yml",
+      "reopeningTrigger": "Release from SHA without aggregate green evidence or any unclassified flake."
+    },
+    {
+      "id": "MC-R7",
+      "category": "browser-lane-defect",
+      "impact": "Click-away no longer commits an armed extrude in the mock browser lane; the tool stays armed and mints no body.",
+      "affectedVersions": "predates the modeling-correctness work; reproduced on clean baseline 9933689",
+      "reproduction": "bunx playwright test --project=chromium e2e/extrude-commit-gesture.spec.ts -g 'click-away' (fails 3/3 with --repeat-each=3; same on webkit)",
+      "owner": "extrude commit gesture",
+      "mustNotWorsenTest": "e2e/extrude-commit-gesture.spec.ts",
+      "reopeningTrigger": "Any additional browser-lane failure, or this one being papered over instead of fixed."
+    },
+    {
+      "id": "MC-R6",
+      "category": "process-risk",
+      "impact": "Direct pushes to master can bypass review and merge enforcement.",
+      "affectedVersions": "repository process",
+      "reproduction": "Inspect repository rules and release workflow provenance.",
+      "owner": "accepted user process decision",
+      "mustNotWorsenTest": "release gate must bind artifacts to one aggregate-green SHA",
+      "reopeningTrigger": "User requests protected merges or a release bypasses the SHA gate."
+    }
+  ]
+}

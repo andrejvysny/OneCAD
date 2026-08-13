@@ -1,32 +1,36 @@
 # Current State
 
-Last verified: 2026-08-13 — P4 follow-up commit pending
+Last verified: 2026-08-13 — modeling-correctness hardening worktree, no commit
 
-- **Branch:** `master`; follow-up changes recorded in this commit. Push status not verified.
-- **This session:** Track A, C1/C2, then P4 follow-up: Pattern compatibility,
-  P2 source bounding, C3 diagnostics, C4 Intersect authoring, and exact corpus topology.
-- **Build/test at follow-up gate:** `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → clean ·
-  `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` → clean ·
-  `ctest --test-dir worker/build` → **119/119** · `bun run test` → **250 files / 4182 tests** ·
-  `bun run build` → clean ·
-  both modeling verifiers → pass · verifier negative controls → **12/12** ·
-  targeted Playwright historical lanes → 20/20. Full C6 browser gate remains unverified:
-  sandbox blocks Chromium Mach-port registration; approved run started on persistent Vite but
-  executor detached after five passes. No full Chromium/WebKit claim. Kernelbench not implicated.
-- **Key decisions:** the Revolve body-edge axis stays **UI-hidden** · the SCHEMA §7.5 `ResolveRefs`
-  snapshot echo was **implemented** rather than written around, and Rust validates it fail-closed ·
-  `documentRevision` stays Rust-owned in the repair DTO (D4) · corpus cases are **enriched with
-  executable geometry** read back out of their own frozen numbers, rather than moving the geometry
-  into Rust or leaving the corpus 1-of-9 live.
-- **Three live defects fixed by mandated tests this session** (none was evidence debt): preview
-  failure tracked globally blocked commits after a recovered secondary region; `ResolveRefs`
-  results were cached under a key Rust minted itself; and `needsRepair` was declared but never
-  produced (A1).
-- **Blockers / open:**
-  - P4 partial: C3 local diagnostics and C4 Intersect landed, but C5/C6, V3 region identity,
-    typed corpus classification/expectations, and full zero-retry browser gate remain.
-  - Corpus: 3 executable; 6 explicitly unsupported. Never claim all corpus cases execute.
-  - Pattern compatibility passed; Phases 5/6 remain partial.
+- **Baseline:** `master` at `9933689`, one commit ahead of `origin/master`; no commit/push/pull
+  authorized. All status below distinguishes implementation from gates.
+- **Implemented now:** strict plan-stream validation before `AcceptPrepared`; release-only bundled
+  worker resolution plus embedded SHA/protocol/OCCT manifest verification; prepared meshes bounded
+  by advertised transport limits; strict ResolveRefs revision/body provenance; Modified+Generated
+  history union; import exact-tie refusal; Region Identity V3 new authoring with frozen V1/V2;
+  structured publication evidence/timings; Tier-A modeling-input preflight; explicit
+  `(operation,mode,supportStatus,uiExposure)` coverage checks; Extrude/Revolve Intersect hidden;
+  corpus 9/9; case-v2 Boolean foundation; feature-gated real-Tauri composition lane.
+- **Full gate ladder, run end to end 2026-08-13 (local mac, unsandboxed):** worker Release build +
+  restaged sidecar/manifest, `ctest` **119/119** · `cargo fmt`/`clippy -D warnings` clean ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **767/767 over 60 targets** ·
+  real-worker corpus **9 of 9, zero skips** · `cargo check --features tauri-e2e` clean ·
+  `npx tsc --noEmit` 0 · `bun run build` clean · Vitest **250 files / 4182 tests** ·
+  coverage + contract verifiers pass, negative controls **15/15** · hex gate empty ·
+  kernelbench T0 both backends **136/136**, 0 regressions, semantics baseline unmoved ·
+  Playwright retries 0 **chromium 199/1**, **webkit 199/1**.
+- **Three defects the ladder caught (fixed this session):** the worker stub emitted an `autoBind`
+  ResolveRefs resolution with no `bodyId`, which SCHEMA §7.5 allows only on a non-promotable
+  missing-body `needsRepair`; `topology_rebind` fed a real V3 region id into a version-less
+  profile and the worker correctly refused it; `src-tauri/src/tauri_e2e.rs` had never been
+  compiled and did not (E0597 in `composition_status`).
+- **Known pre-existing failure (predates this work, reproduced at `9933689`):** e2e click-away
+  extrude commit, both browsers, deterministic. Residual MC-R7. The browser gate is 199/200 per
+  lane — do not read it as green.
+- **Open:** P2 measured ceilings/performance; P3 full semantic/overhead closure and Pattern budget;
+  real-Tauri/WDIO composition run (compiles, never executed); Chamfer and Boolean campaign breadth;
+  kernelbench m1; Linux/macOS/Windows aggregate release enforcement and 20-run stability sample.
+  See `docs/qa/modeling-residuals-v1.json`.
 
 The per-gate detail for every wave, newest first, follows.
 

@@ -1,5 +1,70 @@
 # OneCAD-Tauri Migration TODO
 
+## NOW — modeling-correctness hardening completion (2026-08-13)
+
+Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one commit ahead of
+`origin/master`. No commit/push/pull authorized.
+
+- [x] P0 strict plan-stream state machine; malformed fixtures refuse before `AcceptPrepared`.
+      Wire 34/34, executor 18/18, onecad-core full clean; malformed order/dup/range/enums/terminal
+      controls assert zero accepts + discard.
+- [x] P0 release worker lockstep manifest/hash/fingerprint; prepared-mesh transport limits.
+      Real worker manifest hash/hello matched; manager 20/20, release check + Clippy clean. Inline
+      meshes share hello constants; oversized bodies use chunked Tessellate.
+- [x] P1 ResolveRefs provenance/history/import-order hardening. Wrong/missing body/revision evidence
+      refuses; Modified+Generated focused 2/2; exact STEP order ties refuse.
+- [ ] P2 V3 core/new authoring done: `cell-v3`, seam-safe physical distance, frozen V1/V2, exact
+      analytic fail-closed. Worker full 119/119 + tsc. Still open: separated public tolerance knobs,
+      production cancellation breadth, source/pair/fragment ceiling matrix, measured perf targets.
+- [ ] P3 structured `PublicationDecision` evidence/timings + Tier-A modeling-input preflight done.
+      Still open: all semantic evidence routing, measured Tier A/B overhead, Pattern fuse/topology budget.
+- [ ] P4 mode-aware coverage + corpus **9/9** done. Real-worker corpus: all frozen cases,
+      typed assertions, zero skips; verifier controls 15/15. Still open: full zero-retry browsers,
+      complete C4 mode matrix, Intersect promotion, real diagnostic browser vertical.
+- [ ] P5 real-Tauri lane implemented: feature-gated official WDIO plugins, relocated bundle,
+      lockstep worker hash/fingerprint, Extrude → Fillet → Undo → Save/reopen, retained logs and
+      cleanup. `cargo check --features tauri-e2e` now compiles (it never had: the first compile of
+      `tauri_e2e.rs` exposed an E0597 borrow error in `composition_status`, fixed). The lane itself
+      is still UNRUN — no relocated-bundle WDIO execution has happened on any machine.
+- [ ] P6 kernelbench Boolean foundation done additively: strict case-v2 two-body recipe/roles,
+      Fuse/Cut/Common, raw OCCT + OneCAD publication paths, stable replay/differential evidence.
+      Focused Rust 62+5 and kernelbench CTest 5/5 pass. Chamfer/campaign breadth, T0/m1 campaigns,
+      and cross-platform release enforcement remain open.
+- [x] Reconciled current state, live delta, risk register, packaging, protocol, contracts, coverage;
+      added versioned residual register. Manual triage remains historical evidence, not a completion claim.
+- [x] **Final gate ladder RUN end to end (2026-08-13, unsandboxed local mac)** — worker → Rust →
+      frontend → verifiers → benchmarks → browsers. Measured, not claimed:
+      - worker Release build + stage (sidecar **and** `onecad-worker-manifest.json` regenerated) ·
+        `ctest --test-dir worker/build` → **119/119**
+      - `cargo fmt --all --check` clean · `clippy --workspace --all-targets -D warnings` clean ·
+        `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` → **767/767 across 60
+        targets, 0 failed, 0 ignored** · corpus **9 executed / 9, zero skips** ·
+        `cargo check --features tauri-e2e` clean
+      - `npx tsc --noEmit` 0 · `bun run build` clean · `bun run test` → **250 files / 4182 tests** ·
+        coverage + contract verifiers pass · verifier negative controls **15/15** · hex gate empty
+      - kernelbench `fillet/foundation:t0` both backends → **136 records, 136 pass, 0 fail,
+        rescued=0 regressions=0 replay-unstable=0**; `semantic-compare` vs
+        `bench/robustness/baselines/semantics.json` → OK on darwin-arm64 (frozen T0 unmoved)
+      - Playwright retries 0: **chromium 199 passed / 1 failed**, **webkit 199 passed / 1 failed**
+      - Three real defects the ladder caught and this session fixed: the worker STUB emitted an
+        `autoBind` ResolveRefs resolution with no `bodyId` (SCHEMA §7.5 allows omission only on a
+        non-promotable missing-body `needsRepair`) — stub now mirrors the real worker's
+        missing-body branch and `solver_stub` pins both branches; `topology_rebind` extrudes fed a
+        real V3 region id into a version-less profile, which correctly refused
+        (`regionId … matched no selectable region`) — fixture now carries version 3, matching the
+        `revolve_ops`/`m2_gate`/`wire_contract`/`step_import_gate` pattern; and `tauri_e2e.rs`
+        did not compile.
+- [ ] **Pre-existing browser defect, NOT from this work**: `e2e/extrude-commit-gesture.spec.ts:135`
+      "clicking empty canvas away from the handle commits (click-away)" fails deterministically
+      (3/3 with `--repeat-each=3`) on BOTH chromium and webkit — and fails identically on a clean
+      worktree at baseline `9933689`, so it predates the modeling-correctness work. The click leaves
+      the tool `armed` and mints no body. Tracked as MC-R7. Browser gate is therefore 199/200 per
+      lane, NOT green; do not claim a zero-failure browser lane.
+- [ ] Still unrun on any machine: real-Tauri WDIO composition, kernelbench m1 campaign,
+      Linux/Windows release matrix, 20-run stability sample.
+
+Unresolved questions: none.
+
 ## NOW — roadmap completion program (plan `~/.claude/plans/now-lets-plan-next-sunny-lighthouse.md`)
 
 Approved 2026-08-13. Seven tracks A–G; **TRACK A IS COMPLETE — A1–A6 done and committed**.
@@ -22,20 +87,23 @@ unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
       exists in no workflow, four measured overclaims and one UNDER-claim, all corrected; the
       verifier now stats paths, resolves jobs and runs WP4.5's five registry cross-checks).
       Detail in § ROADMAP C1.
-- [x] C2 — the corpus runs 3 of 9 (was 1), the classification is manifest-driven, and the
-      structure/provenance of all nine is checked on every machine. The blocker was NOT a thin
-      interpreter: only case `a` carried complete geometry. Detail in § ROADMAP C2.
-- [ ] C5/C6, remaining P2 V3 migration, typed corpus classification/expectations, Phase 5/6. P4 partial until full zero-retry browser gate passes. C5 performance caps remain undocumented pending measured Tier A/B and cumulative Pattern cost.
+- [x] C2 + corpus completion — all 9 frozen cases execute against the real worker; classification
+      is manifest-driven, expectations typed, unsupported table removed, zero silent skips. Frozen
+      case JSON unchanged by the 9/9 completion. Detail in § ROADMAP C2 and top gate ledger.
+- [ ] C5/C6, remaining P2 V3 bounds/performance, Phase 5/6 breadth. P4 remains partial until full
+      zero-retry browser gate passes. C5 performance caps remain undocumented pending measured Tier
+      A/B and cumulative Pattern cost.
 
 - [x] C3 diagnostics: bounded worker diagnostic evidence reaches Inspector and Repair;
       successful retry clears stale evidence; edit/retry and rebind remain explicit actions.
-- [x] C4 local verticals: Extrude/Revolve expose Intersect with exact lowering;
-      OffsetFace Total/Diameter remains Prepare-gated and re-edit-safe. Contract promotion
-      waits for C++/real-worker/browser parity.
+- [x] C4 local lowering: Extrude/Revolve Intersect lowering exists, but both profile-operation
+      Intersect controls are now UI-hidden until C++/real-worker/browser promotion is atomic.
+      OffsetFace Total/Diameter remains Prepare-gated and re-edit-safe.
 - [x] Corpus topology: `QueryBodyTopology` supplies actual BRep solid/face counts;
       corpus assertions no longer infer faces from coarse MESH1.
 - [x] P2 bounded source collection: analytic profile refinement refuses above 256 sources
-      before pair collection. `regionIdentityVersion:3` remains unimplemented.
+      before pair collection. `regionIdentityVersion:3` is now implemented for new authoring; measured
+      pair/fragment/cancellation/performance closure remains open.
 - [ ] C6 browser gate: persistent Vite on `4178` served correctly, but sandboxed Chromium
       aborts at Mach-port rendezvous; elevated run began cleanly then executor detached after
       five passes, leaving no valid full-lane result. Rerun Chromium + WebKit once per lane,
