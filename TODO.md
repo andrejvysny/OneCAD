@@ -18,10 +18,13 @@ unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
       honestly: SCHEMA §7.5's snapshot echo was normative and implemented by NEITHER worker, with
       Rust manufacturing the values and validating nothing. Implemented and validated fail-closed.
       Detail in § ROADMAP A6.
-- [ ] C1 — make the coverage manifest true (16 dead paths, a `ciJob` that does not exist, five
-      unsafe overclaims), then give `verify-modeling-coverage.mjs` teeth: stat every path, resolve
-      `ciJob`, and add WP4.5's five registry cross-checks.
-- [ ] C2 — make the corpus executable (1 of 9 runs today; the interpreter knows only Sketch + Extrude).
+- [x] C1 — the coverage manifest is true and its verifier has teeth (16 dead paths, a `ciJob` that
+      exists in no workflow, four measured overclaims and one UNDER-claim, all corrected; the
+      verifier now stats paths, resolves jobs and runs WP4.5's five registry cross-checks).
+      Detail in § ROADMAP C1.
+- [x] C2 — the corpus runs 3 of 9 (was 1), the classification is manifest-driven, and the
+      structure/provenance of all nine is checked on every machine. The blocker was NOT a thin
+      interpreter: only case `a` carried complete geometry. Detail in § ROADMAP C2.
 - [ ] B1–B5, C3–C6, D, E (Phase 5 remainder), F (Phase 6), G (write the accepted residuals down).
 
 Detail per completed wave is recorded below, newest first.
@@ -60,6 +63,94 @@ namespace/duplicate-id regression). No Rust/C++ touched — ctest/cargo/Playwrig
 out of scope, not run.
 
 **Next:** none scheduled — parked until product prioritizes Render.
+
+## ROADMAP C1 — A MANIFEST THAT CAN BE FALSIFIED (2026-08-13) — GATE PASSED
+
+`docs/qa/modeling-operation-coverage.json` is the machine-readable claim about where each
+supported operation is proven, and nothing checked the claims. Sixteen cited paths did not exist —
+nine `src/tools/modelTools/*` unit tests that were never written under those names, three e2e
+specs, an `import_step.rs` that is really `step_import.rs` — and eleven rows named a CI job
+`macos-full` that is in no workflow. All of it green.
+
+- [x] **Every row cites a file that exists**, found by asking what actually covers each lane rather
+      than by deleting the claim: Fillet/Chamfer/Shell are `ModelToolController.edgeShellPreview`,
+      Boolean is `booleanPreview`, the sketch drag is `selectDrag.reconcile`, Shell's browser flow
+      is `shell-preview.spec.ts`, ImportStep is `step_import.rs` + `step_import_gate.rs`. Two lanes
+      have NO honest citation (an FE unit test for Boolean Intersect, one for XCAF) and are left
+      EMPTY — an empty field says "unproven", a dead path says "proven" and is not.
+- [x] **`ciJob` became a per-lane list**, because one job can never gate a row whose evidence spans
+      C++, Rust, vitest and Playwright. The verifier resolves every id against
+      `.github/workflows/*.yml` and requires each non-empty lane to name the job that runs it.
+- [x] **Four overclaims now state their measured limit** (each verified against the test code, not
+      assumed): Shell runs a SINGLE open face in every lane; the OffsetFace Rust lane executes
+      `Radius` only and covers `Total` through the prepare handshake, with `Diameter` C++-only; the
+      Hole browser flow configures countersink and never commits it; CircularPattern's partial
+      sweep is C++ and FE-unit only.
+- [x] **One "overclaim" was not one.** MirrorBody no-fuse IS covered — `ordinal_tripwire.rs` authors
+      it and the C++ lane runs both `fuseWithOriginal` values — so the row says so instead of
+      inheriting a review's guess. And Boolean Intersect was UNDER-claimed as
+      deferred-with-no-evidence though its P4 vertical landed.
+- [x] **Five WP4.5 cross-checks**: `KnownOperation`, worker dispatch, the SCHEMA §7.3 op catalogue,
+      the frontend tool registrations, and the kernelbench families. Each scan asserts it found
+      something first, so a moved source cannot turn a check vacuously green; rows that are
+      deliberately not `KnownOperation`s declare themselves in the manifest's `nonOperationRows`.
+- [x] **Twelve negative controls, up from one**, across both verifiers — including the acceptance
+      test the plan names: renaming a cited spec reds the check, proven both through a mutated temp
+      manifest and by renaming `e2e/hole.spec.ts` on disk.
+
+Gates: both verifiers; `scripts/tests/verify-modeling-coverage.test.sh` 12/12. Committed `1c76c41`.
+
+## ROADMAP C2 — THE CORPUS EXECUTES (2026-08-13) — GATE PASSED
+
+**The finding that shaped the work: the corpus ran 1 of 9 because only case `a` carried complete
+geometry, not because the interpreter was thin.** Case `b` extrudes `sk_base.region.r0`,
+`sk_cut.region.r0`, `sk_2` and `sk_3` — four sketches its `opScript` never authors. Case `c`
+references `sk_base` and mixes three independent C++ documents in one script. Case `i`'s entities
+were prose: `"4 lines: (0,0)(10,0)(10,5)(0,5)"`. The numbers and citations were all there; the
+runnable geometry was not.
+
+Decision taken with the user: **enrich the cases** (rather than hiding the geometry in Rust or
+recording the mismatch and moving on), because every footprint is READ BACK OUT of a frozen
+assertion — `afterCut 3750 = 4000 − 5·5·10` fixes the base box at 20×20×10 and the cut at 5×5
+through-all — so nothing is invented, and each addition carries its own `entitiesProvenance`.
+
+- [x] **Case `i` is executable**: the four loop-detector scenarios carry SCHEMA §7.4 entities, with
+      the original prose kept as `sketch.description`. Rectangle, square-with-hole, arc+chord and
+      ellipse run through `SketchUpsert` → `SketchRegions`, the same lane a profile pick uses.
+- [x] **Case `b` is executable**: its four sketches are authored, every op declares the `scenario`
+      it belongs to (the C++ oracles are SEPARATE documents — running them in one timeline would
+      boolean unrelated bodies together), and `bodyLabels` says which op mints each referenced
+      label. ThroughAll cut → 3750, two-direction → 800, symmetric → 800 (derived-not-asserted,
+      still labelled so).
+- [x] **A DELIBERATE divergence, recorded rather than papered over.** The square-with-hole scenario
+      detects TWO regions on the new stack (annulus + inner square) where the C++ LoopDetector
+      reported one face with an inner loop. That is the planar-cell model `wire_contract.rs`
+      already pins (`nested_inner_disk_parity_and_reopen_stability`), so the case now carries a
+      `newStack` block citing it and the runner asserts the current contract while the frozen
+      number stays visible.
+- [x] **Case `a` asserts its whole expected block**, not just the last volume: the sketch step's
+      region count, the extrude's body-lifecycle events, the solid count, the volume, AND the
+      `faceCount` the case records as derived-not-asserted — which is the assertion that catches a
+      prism built from the wrong profile at the right volume.
+- [x] **Classification is manifest-driven.** The executor READS `corpusCases` from the coverage
+      manifest, so the two artifacts cannot disagree; a case the manifest does not classify, and a
+      manifest entry with no corpus file, are both errors.
+- [x] **Structure + provenance are checked for all nine on every machine** (the worker-free half):
+      `source[]` non-empty and naming a file, an `opScript`, `bodyLabels` pointing at real ops, and
+      every scalar measurement carrying a citation — or an explicit `confidence`, which is how the
+      corpus says "derived, not captured".
+- [x] **A stale unsupported reason is now an error.** Six cases still carry one, each naming the
+      machinery it needs (face-hosted sketches for `c`, MESH1 edge picking for `d`/`e`, a
+      descriptor-tie fixture for `f`, the gesture lane for `g`, a rollback-cursor harness for `h`).
+      A reason kept for a case that has become executable fails the test.
+- [x] **Non-vacuity proved by mutation**: 2000→2500, 3750→3700 and regions 1→3 each red the run
+      with the right message; the corpus was restored byte-identical afterwards.
+
+Gates: `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1082 / 0** · fmt · clippy `-D warnings` ·
+both modeling verifiers · negative controls 12/12 · every corpus file still parses.
+
+**Next:** C3 (WP4.6 has zero tests — nothing asserts a structured diagnostic reaches the inspector)
+and C4 (deepen the thin verticals, which is where the four measured limits above are closed).
 
 ## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
 

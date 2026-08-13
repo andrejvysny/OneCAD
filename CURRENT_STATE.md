@@ -1,30 +1,70 @@
 # Current State
 
-Last verified: 2026-08-13 14:25
+Last verified: 2026-08-13 15:05
 
-- **Branch:** `master`, **11 commits ahead of `origin/master` — nothing pushed.**
-- **This session's commits:** `772b3d2` (A1) · `6b08e27` (A2) · `4b62965` (A3) · Track A remainder
-  (A4/A5/A6) — see below.
-- **Build/test, all run at the A4/A5/A6 gate:** `ctest --test-dir worker/build` → **119/119** ·
+- **Branch:** `master`, **14 commits ahead of `origin/master` — nothing pushed.** One of
+  them (`15e798a`, a Render-module design stub) is the CONCURRENT session's, landed mid-gate.
+- **This session:** Track A complete (`772b3d2` A1 · `6b08e27` A2 · `4b62965` A3 · `5723ab3`
+  A4/A5/A6), then plan items **C1** (`1c76c41`) and **C2**.
+- **Build/test at the C2 gate:** `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → **1082 / 0** ·
   `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` → clean ·
-  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → **1082 / 0** ·
-  `bunx tsc --noEmit` → clean · `bun run test` → **249 files / 4173 tests** ·
-  `bun run build` → clean · both modeling verifiers → pass · hex gate → 0 ·
-  targeted Playwright (preview lanes, both browsers, retries 0) → **20/20**.
+  `ctest --test-dir worker/build` → **119/119** (unchanged by C1/C2, worker untouched) ·
+  `bun run test` → **249 files / 4173 tests** · `bunx tsc --noEmit` + `bun run build` → clean ·
+  both modeling verifiers → pass · verifier negative controls → **12/12** ·
+  targeted Playwright (preview lanes, both browsers, retries 0) → 20/20.
   Full Playwright suite still not re-run (plan item C6); kernelbench not implicated.
-- **Key decisions:** the Revolve body-edge axis stays **UI-hidden** (kernel/core keep it, the
-  contract row says so, and tests pin both that the UI never authors it and that a record holding
-  one survives a re-edit) · the SCHEMA §7.5 `ResolveRefs` snapshot echo was **implemented** rather
-  than written around, with Rust validating it fail-closed · `documentRevision` stays Rust-owned in
-  the repair DTO (D4), so only the SNAPSHOT is the engine's echo.
-- **Two live defects fixed by the mandated tests** (not evidence debt): preview failure was tracked
-  globally, so a recovered secondary region still blocked every commit; and `ResolveRefs` results
-  were cached under a key Rust minted itself.
+- **Key decisions:** the Revolve body-edge axis stays **UI-hidden** · the SCHEMA §7.5 `ResolveRefs`
+  snapshot echo was **implemented** rather than written around, and Rust validates it fail-closed ·
+  `documentRevision` stays Rust-owned in the repair DTO (D4) · corpus cases are **enriched with
+  executable geometry** read back out of their own frozen numbers, rather than moving the geometry
+  into Rust or leaving the corpus 1-of-9 live.
+- **Three live defects fixed by mandated tests this session** (none was evidence debt): preview
+  failure tracked globally blocked commits after a recovered secondary region; `ResolveRefs`
+  results were cached under a key Rust minted itself; and `needsRepair` was declared but never
+  produced (A1).
 - **Blockers / open:**
   - Full Playwright suite still not green-verified since the P4 landings (plan item C6).
+  - Six corpus cases still carry an explicit unsupported reason (C2 § below names each).
   - A second session, `onecad-library-content-impl`, shares this working tree.
 
 The per-gate detail for every wave, newest first, follows.
+
+## ROADMAP C1 + C2 — EVIDENCE THAT CAN FAIL (2026-08-13) — GATE PASSED
+
+Two plan items whose whole subject is whether a claim can be falsified. Full detail in `TODO.md`
+§ ROADMAP C1 and § ROADMAP C2.
+
+**C1 — the coverage manifest.** Sixteen cited test paths did not exist and eleven rows named a CI
+job (`macos-full`) that is in no workflow, all under a green verifier that never opened a file.
+Every row now cites something real; `ciJob` became a per-lane list resolved against the workflows;
+four rows state a measured limit instead of an overclaim (single-face Shell, `Radius`-only
+OffsetFace in Rust, an uncommitted countersink in the browser, C++-only partial sweep); one
+"overclaim" was disproved (MirrorBody no-fuse IS covered) and one under-claim corrected (Boolean
+Intersect). The verifier stats every path, resolves every job, runs WP4.5's five registry
+cross-checks with a found-something guard on each scan, and is backed by twelve negative controls
+— including the plan's acceptance test, renaming a cited spec.
+
+**C2 — the corpus.** It ran 1 of 9 not because the interpreter was thin but because only case `a`
+carried complete geometry: `b` referenced four sketches it never authored, `i`'s entities were
+prose. With the user's decision, the cases were ENRICHED — every footprint read back out of a
+frozen assertion (`3750 = 4000 − 5·5·10`), each with its own `entitiesProvenance` — and the
+executor now runs `a`, `b` and `i`. Case `a` asserts its whole expected block (regions, body
+events, solids, volume, faceCount) rather than one volume; classification comes from the coverage
+manifest so the two artifacts cannot drift; structure and provenance are checked for all nine on
+every machine; and a stale unsupported reason is an error.
+
+One divergence is recorded rather than smoothed over: the square-with-hole sketch detects TWO
+regions on the new stack (annulus + inner square) where the C++ LoopDetector reported one face with
+an inner loop. That is the planar-cell model `wire_contract.rs` already pins, so the case carries a
+`newStack` block citing it and keeps the frozen number visible.
+
+- **Changed:** `docs/qa/modeling-operation-coverage.json` · `scripts/verify-modeling-coverage.mjs` ·
+  `scripts/tests/verify-modeling-coverage.test.sh` · `src-tauri/tests/corpus_executor.rs` ·
+  `corpus/cases/{b_extrude_throughall_symmetric_twodir,i_multiregion_loop_detection}.json`.
+- **Gates:** real-worker workspace **1082 / 0** · fmt · clippy · both verifiers · controls 12/12 ·
+  every corpus file parses; case `a` byte-identical.
+- **Next:** C3 (WP4.6 has zero tests) and C4 (deepen the thin verticals — where C1's four measured
+  limits get closed).
 
 ## ROADMAP A4 · A5 · A6 — THE REST OF TRACK A (2026-08-13) — GATE PASSED
 

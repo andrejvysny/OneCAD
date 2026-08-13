@@ -13,48 +13,322 @@
   ],
   "opScript": [
     {
-      "opType": "Extrude", "opId": "op_base_box",
-      "inputs": [ { "primary": { "kind": "face", "elementId": "sk_base.region.r0" } } ],
-      "params": { "distance": 10.0, "draftAngleDeg": 0.0, "extrudeMode": "Blind", "booleanMode": "NewBody", "targetBodyId": "", "twoDirections": false },
-      "sketch": { "footprint": "20x20 square on XY", "sketchId": "sk_base" }
+      "opType": "Sketch",
+      "opId": "op_sketch_base",
+      "inputs": [],
+      "params": {
+        "sketchId": "sk_base",
+        "plane": {
+          "kind": "XY",
+          "origin": [0,0,0],
+          "xAxis": [0,1,0],
+          "yAxis": [-1,0,0],
+          "normal": [0,0,1]
+        },
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Line",
+            "p0": [0,0],
+            "p1": [20,0]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [20,0],
+            "p1": [20,20]
+          },
+          {
+            "id": "e3",
+            "type": "Line",
+            "p0": [20,20],
+            "p1": [0,20]
+          },
+          {
+            "id": "e4",
+            "type": "Line",
+            "p0": [0,20],
+            "p1": [0,0]
+          }
+        ],
+        "constraints": []
+      },
+      "entitiesProvenance": "proto_regeneration.cpp:1489-1503 — base box is 20x20x10, vol 4000: the footprint is the 20x20 the volume divides out to.",
+      "scenario": "throughAllCut"
     },
     {
-      "opType": "Extrude", "opId": "op_throughall_cut",
-      "inputs": [ { "primary": { "kind": "face", "elementId": "sk_cut.region.r0" } } ],
-      "params": { "distance": 1.0, "draftAngleDeg": 0.0, "extrudeMode": "ThroughAll", "booleanMode": "Cut", "targetBodyId": "body_1", "twoDirections": false },
-      "sketch": { "footprint": "5x5 square on XY", "sketchId": "sk_cut" },
-      "note": "distance sign only selects the through-all direction; extent is the target bbox (see H4 'ThroughAll bbox extent', TODO.md:148)."
+      "opType": "Extrude",
+      "opId": "op_base_box",
+      "inputs": [
+        {
+          "primary": {
+            "kind": "face",
+            "elementId": "sk_base.region.r0"
+          }
+        }
+      ],
+      "params": {
+        "distance": 10.0,
+        "draftAngleDeg": 0.0,
+        "extrudeMode": "Blind",
+        "booleanMode": "NewBody",
+        "targetBodyId": "",
+        "twoDirections": false
+      },
+      "sketch": {
+        "footprint": "20x20 square on XY",
+        "sketchId": "sk_base"
+      },
+      "scenario": "throughAllCut"
     },
     {
-      "opType": "Extrude", "opId": "op_twodir",
-      "inputs": [ { "primary": { "kind": "face", "elementId": "sk_2.region.r0" } } ],
-      "params": { "distance": 5.0, "draftAngleDeg": 0.0, "extrudeMode": "Blind", "booleanMode": "NewBody", "twoDirections": true, "extrudeMode2": "Blind", "distance2": 3.0, "targetFaceId": "", "targetFaceId2": "" },
-      "sketch": { "footprint": "10x10 square on XY", "sketchId": "sk_2" },
-      "note": "Independent scenario (separate document in the C++ test); two directions sum to depth 8."
+      "opType": "Sketch",
+      "opId": "op_sketch_cut",
+      "inputs": [],
+      "params": {
+        "sketchId": "sk_cut",
+        "plane": {
+          "kind": "XY",
+          "origin": [0,0,0],
+          "xAxis": [0,1,0],
+          "yAxis": [-1,0,0],
+          "normal": [0,0,1]
+        },
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Line",
+            "p0": [7.5,7.5],
+            "p1": [12.5,7.5]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [12.5,7.5],
+            "p1": [12.5,12.5]
+          },
+          {
+            "id": "e3",
+            "type": "Line",
+            "p0": [12.5,12.5],
+            "p1": [7.5,12.5]
+          },
+          {
+            "id": "e4",
+            "type": "Line",
+            "p0": [7.5,12.5],
+            "p1": [7.5,7.5]
+          }
+        ],
+        "constraints": []
+      },
+      "entitiesProvenance": "proto_regeneration.cpp:1519-1520 — afterCut 3750 = 4000 - 5*5*10, so the cut column is 5x5 through the full 10 height; placed centred so it is fully interior (any fully-interior placement gives the same volume).",
+      "scenario": "throughAllCut"
     },
     {
-      "opType": "Extrude", "opId": "op_symmetric",
-      "inputs": [ { "primary": { "kind": "face", "elementId": "sk_3.region.r0" } } ],
-      "params": { "distance": 8.0, "draftAngleDeg": 0.0, "extrudeMode": "Symmetric", "booleanMode": "NewBody", "twoDirections": false },
-      "sketch": { "footprint": "10x10 square on XY", "sketchId": "sk_3" },
-      "note": "Symmetric = half-distance each side of the sketch plane (OperationRecord.h:86). See expected.symmetric for provenance caveat."
+      "opType": "Extrude",
+      "opId": "op_throughall_cut",
+      "inputs": [
+        {
+          "primary": {
+            "kind": "face",
+            "elementId": "sk_cut.region.r0"
+          }
+        }
+      ],
+      "params": {
+        "distance": 1.0,
+        "draftAngleDeg": 0.0,
+        "extrudeMode": "ThroughAll",
+        "booleanMode": "Cut",
+        "targetBodyId": "body_1",
+        "twoDirections": false
+      },
+      "sketch": {
+        "footprint": "5x5 square on XY",
+        "sketchId": "sk_cut"
+      },
+      "note": "distance sign only selects the through-all direction; extent is the target bbox (see H4 'ThroughAll bbox extent', TODO.md:148).",
+      "scenario": "throughAllCut"
+    },
+    {
+      "opType": "Sketch",
+      "opId": "op_sketch_twodir",
+      "inputs": [],
+      "params": {
+        "sketchId": "sk_2",
+        "plane": {
+          "kind": "XY",
+          "origin": [0,0,0],
+          "xAxis": [0,1,0],
+          "yAxis": [-1,0,0],
+          "normal": [0,0,1]
+        },
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Line",
+            "p0": [0,0],
+            "p1": [10,0]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [10,0],
+            "p1": [10,10]
+          },
+          {
+            "id": "e3",
+            "type": "Line",
+            "p0": [10,10],
+            "p1": [0,10]
+          },
+          {
+            "id": "e4",
+            "type": "Line",
+            "p0": [0,10],
+            "p1": [0,0]
+          }
+        ],
+        "constraints": []
+      },
+      "entitiesProvenance": "proto_regeneration.cpp:1462-1484 — two-direction volume 800 = 10*10*(5+3): the footprint is 10x10.",
+      "scenario": "twoDirection"
+    },
+    {
+      "opType": "Extrude",
+      "opId": "op_twodir",
+      "inputs": [
+        {
+          "primary": {
+            "kind": "face",
+            "elementId": "sk_2.region.r0"
+          }
+        }
+      ],
+      "params": {
+        "distance": 5.0,
+        "draftAngleDeg": 0.0,
+        "extrudeMode": "Blind",
+        "booleanMode": "NewBody",
+        "twoDirections": true,
+        "extrudeMode2": "Blind",
+        "distance2": 3.0,
+        "targetFaceId": "",
+        "targetFaceId2": ""
+      },
+      "sketch": {
+        "footprint": "10x10 square on XY",
+        "sketchId": "sk_2"
+      },
+      "note": "Independent scenario (separate document in the C++ test); two directions sum to depth 8.",
+      "scenario": "twoDirection"
+    },
+    {
+      "opType": "Sketch",
+      "opId": "op_sketch_symmetric",
+      "inputs": [],
+      "params": {
+        "sketchId": "sk_3",
+        "plane": {
+          "kind": "XY",
+          "origin": [0,0,0],
+          "xAxis": [0,1,0],
+          "yAxis": [-1,0,0],
+          "normal": [0,0,1]
+        },
+        "entities": [
+          {
+            "id": "e1",
+            "type": "Line",
+            "p0": [0,0],
+            "p1": [10,0]
+          },
+          {
+            "id": "e2",
+            "type": "Line",
+            "p0": [10,0],
+            "p1": [10,10]
+          },
+          {
+            "id": "e3",
+            "type": "Line",
+            "p0": [10,10],
+            "p1": [0,10]
+          },
+          {
+            "id": "e4",
+            "type": "Line",
+            "p0": [0,10],
+            "p1": [0,0]
+          }
+        ],
+        "constraints": []
+      },
+      "entitiesProvenance": "OperationRecord.h:86 + expected.symmetric — 10x10 footprint over a distance-8 Symmetric; the VOLUME here is derived-not-asserted and stays so.",
+      "scenario": "symmetric"
+    },
+    {
+      "opType": "Extrude",
+      "opId": "op_symmetric",
+      "inputs": [
+        {
+          "primary": {
+            "kind": "face",
+            "elementId": "sk_3.region.r0"
+          }
+        }
+      ],
+      "params": {
+        "distance": 8.0,
+        "draftAngleDeg": 0.0,
+        "extrudeMode": "Symmetric",
+        "booleanMode": "NewBody",
+        "twoDirections": false
+      },
+      "sketch": {
+        "footprint": "10x10 square on XY",
+        "sketchId": "sk_3"
+      },
+      "note": "Symmetric = half-distance each side of the sketch plane (OperationRecord.h:86). See expected.symmetric for provenance caveat.",
+      "scenario": "symmetric"
     }
   ],
   "expected": {
     "throughAllCut": {
-      "baseBox": { "volume_mm3": 4000.0, "tol": 1.0, "provenance": "proto_regeneration.cpp:1503" },
-      "afterCut": { "volume_mm3": 3750.0, "tol": 1.0, "provenance": "proto_regeneration.cpp:1519-1520 (4000 - 5*5*10)" },
-      "bodyEvents": [ { "kind": "modified", "bodyId": "body_1" } ],
+      "baseBox": {
+        "volume_mm3": 4000.0,
+        "tol": 1.0,
+        "provenance": "proto_regeneration.cpp:1503"
+      },
+      "afterCut": {
+        "volume_mm3": 3750.0,
+        "tol": 1.0,
+        "provenance": "proto_regeneration.cpp:1519-1520 (4000 - 5*5*10)"
+      },
+      "bodyEvents": [
+        {
+          "kind": "modified",
+          "bodyId": "body_1"
+        }
+      ],
       "targetBodyPreserved": true,
       "provenance_targetBody": "proto_regeneration.cpp:1515-1517 (cutParams.targetBodyId=baseBody; resultBodyIds=baseBody)"
     },
     "twoDirection": {
-      "volume_mm3": 800.0, "tol": 1.0,
+      "volume_mm3": 800.0,
+      "tol": 1.0,
       "provenance": "proto_regeneration.cpp:1483-1484 (10*10*(5+3))",
-      "bodyEvents": [ { "kind": "created", "bodyId": "body_2" } ]
+      "bodyEvents": [
+        {
+          "kind": "created",
+          "bodyId": "body_2"
+        }
+      ]
     },
     "toFace_sibling": {
-      "volume_mm3": 250.0, "tol": 1.0,
+      "volume_mm3": 250.0,
+      "tol": 1.0,
       "provenance": "proto_regeneration.cpp:1543-1557 (5x5 region to top face z=10)"
     },
     "toNext_rejection": {
@@ -63,9 +337,16 @@
       "newStackMapping": "worker returns terminal resp error.code OP_FAILED or UNSUPPORTED (recoverable, session intact) per SCHEMA §8; NOT NeedsRepair."
     },
     "symmetric": {
-      "volume_mm3": { "value": 800.0, "confidence": "derived-not-asserted" },
+      "volume_mm3": {
+        "value": 800.0,
+        "confidence": "derived-not-asserted"
+      },
       "note": "NO current OneCAD-CPP test asserts a Symmetric extrude volume. Value shown is the geometric derivation (10x10 x total 8) for a distance-8 Symmetric, NOT a captured assertion. Do not treat as an oracle number; capture from the new worker and, if desired, add a Symmetric golden. The Symmetric MODE and its 'half each side' semantics ARE established (OperationRecord.h:86)."
     }
   },
-  "notes": "Covers three distinct end conditions plus the ToNext rejection. Only ThroughAll (3750), two-direction (800) and ToFace (250) carry hard C++ numeric assertions. Symmetric is structurally specified but numerically un-asserted by the old stack — flagged so no invented number leaks into a golden."
+  "notes": "Covers three distinct end conditions plus the ToNext rejection. Only ThroughAll (3750), two-direction (800) and ToFace (250) carry hard C++ numeric assertions. Symmetric is structurally specified but numerically un-asserted by the old stack — flagged so no invented number leaks into a golden. EXECUTABLE (roadmap C2): the opScript now authors the sketches it always referenced (sk_base/sk_cut/sk_2/sk_3) — each footprint is read back out of a frozen volume assertion and carries its own `entitiesProvenance`, so no number was invented. Every op declares the `scenario` it belongs to, because the C++ tests are SEPARATE documents (through-all cut, two-direction, symmetric) and running them in one timeline would boolean unrelated bodies together. `bodyLabels` says which op mints each referenced body label. ToFace/ToNext remain expectations without ops: the first needs a promoted face ref, the second is a rejection the corpus records rather than scripts.",
+  "bodyLabels": {
+    "body_1": "op_base_box",
+    "body_2": "op_twodir"
+  }
 }

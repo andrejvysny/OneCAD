@@ -40,6 +40,13 @@ OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
   was tracked globally, so a recovered secondary region still blocked every commit; and the SCHEMA
   §7.5 `ResolveRefs` snapshot echo was normative but implemented by neither worker, with Rust
   manufacturing the values it then cached candidates under.
+- **Plan items C1 and C2 are complete** (2026-08-13). P4's coverage manifest was false in sixteen
+  places and named a CI job that exists in no workflow; it is now true, and its verifier stats every
+  cited path, resolves every job against the workflows, and runs WP4.5's five registry
+  cross-checks. WP4.4's corpus runs three cases instead of one — the blocker was that only case `a`
+  carried complete geometry, so `b` and `i` were enriched with executable entities derived from
+  their own frozen numbers — and classification now comes from the manifest, so the two artifacts
+  cannot disagree.
 - **Still owed from P2:** the manual Tauri smoke. Unchanged (plan Track D replaces it with an
   automated Tauri lane).
 - **Next in roadmap order:** plan item C1 — make the P4 coverage manifest true and give
