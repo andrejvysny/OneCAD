@@ -155,6 +155,12 @@ describe("module scope teardown", () => {
       id: contributionId(A, "onecad.a.layer"),
       attach: () => ({ dispose: () => {} }),
     });
+    scope.registerMenuItem({
+      id: contributionId(A, "onecad.a.menuitem"),
+      slot: Slots.TreeContext,
+      title: "Item",
+      run: () => {},
+    });
     scope.registerWorkspace({
       id: contributionId(A, "onecad.a.workspace"),
       title: "W",
@@ -186,6 +192,7 @@ describe("module scope teardown", () => {
     expect(platform.panels.size).toBe(0);
     expect(platform.inspector.size).toBe(0);
     expect(platform.viewport.size).toBe(0);
+    expect(platform.menus.size).toBe(0);
     expect(platform.workspaces.size).toBe(0);
     expect(platform.services.has(unsafeId<ServiceId>("onecad.a.service"))).toBe(false);
 

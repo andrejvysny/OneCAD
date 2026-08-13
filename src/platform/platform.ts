@@ -14,6 +14,7 @@
 import type {
   CommandDefinition,
   InspectorContribution,
+  MenuContribution,
   PanelContribution,
   ToolDefinition,
   ViewportContribution,
@@ -94,6 +95,7 @@ export interface ModuleScope {
   registerInspectorSection(entry: InspectorContribution): Disposable;
   registerViewportContribution(entry: ViewportContribution): Disposable;
   registerTreeProvider(entry: TreeProvider): Disposable;
+  registerMenuItem(entry: MenuContribution): Disposable;
   registerWorkspace(entry: WorkspaceDefinition): Disposable;
   registerService<T>(id: ServiceId, impl: T): Disposable;
   subscribe<T = unknown>(id: EventId, fn: (payload: T) => void): Disposable;
@@ -109,6 +111,8 @@ export interface Platform {
   readonly inspector: Registry<InspectorContribution>;
   readonly viewport: Registry<ViewportContribution>;
   readonly tree: Registry<TreeProvider>;
+  /** Contextual-menu items, cross-module (`Slots.TreeContext`/`ViewportContext`). */
+  readonly menus: Registry<MenuContribution>;
   readonly workspaces: Registry<WorkspaceDefinition>;
   readonly services: ServiceRegistry;
   readonly events: EventBus;
@@ -190,6 +194,7 @@ export function createPlatform(): Platform {
   const inspector = createRegistry<InspectorContribution>("inspector section");
   const viewport = createRegistry<ViewportContribution>("viewport contribution");
   const tree = createRegistry<TreeProvider>("tree provider");
+  const menus = createRegistry<MenuContribution>("menu item");
   const workspaces = createRegistry<WorkspaceDefinition>("workspace");
   const services = createServiceRegistry();
   const events = createEventBus();
@@ -209,6 +214,7 @@ export function createPlatform(): Platform {
     inspector.disposeOwner(owner);
     viewport.disposeOwner(owner);
     tree.disposeOwner(owner);
+    menus.disposeOwner(owner);
     workspaces.disposeOwner(owner);
     services.disposeOwner(owner);
     events.disposeOwner(owner);
@@ -256,6 +262,7 @@ export function createPlatform(): Platform {
     tools,
     panels,
     inspector,
+    menus,
     viewport,
     tree,
     workspaces,
@@ -362,6 +369,7 @@ export function createPlatform(): Platform {
         registerTool: (e) => track(tools.register(owner, e)),
         registerPanel: (e) => track(panels.register(owner, e)),
         registerInspectorSection: (e) => track(inspector.register(owner, e)),
+        registerMenuItem: (e) => track(menus.register(owner, e)),
         registerViewportContribution: (e) => track(viewport.register(owner, e)),
         registerTreeProvider: (e) => track(tree.register(owner, e)),
         registerWorkspace: (e) => track(workspaces.register(owner, e)),

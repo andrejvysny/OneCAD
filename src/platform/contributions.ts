@@ -28,6 +28,7 @@ import type {
   TypeId,
   ViewportContributionId,
   TreeProviderId,
+  MenuContributionId,
   WorkspaceId,
 } from "./ids";
 
@@ -183,6 +184,58 @@ export interface InspectorContribution extends Contribution {
   readonly title?: string;
   canRender(ctx: InspectorContext): boolean;
   readonly component: ContributionComponent;
+}
+
+// ── Contextual menus ─────────────────────────────────────────────────────────
+
+/**
+ * What a contextual menu was opened ON, described generically.
+ *
+ * The host knows a target has a `kind` and an `id`; it never learns what
+ * either MEANS. A tree row passes its `TreeNode.kind`/`id` straight through,
+ * so a contributor gates on the same vocabulary the provider already
+ * publishes — no second taxonomy, and no way for the shell to grow a
+ * per-feature branch (ADR-0003).
+ */
+export interface MenuTarget {
+  /** Owner-defined category — `TreeNode.kind` for a tree row. */
+  readonly kind: string;
+  readonly id: string;
+  /** The target's own label, for items that name what they act on. */
+  readonly label?: string;
+}
+
+/**
+ * One item a module contributes to a contextual surface (`Slots.TreeContext`,
+ * `Slots.ViewportContext`).
+ *
+ * This is the CROSS-MODULE half of a context menu. A provider's own rows carry
+ * `TreeNode.actions` — that is how the module that OWNS a row adds items to it.
+ * A menu contribution is how a DIFFERENT module adds one: the library's "Save
+ * as Component…" belongs on a body row that modeling provides, and neither
+ * module may reach into the other (ADR-0002). Without this the only way to add
+ * it would be another `node.kind` branch inside the shell, which is exactly the
+ * seam this closes.
+ *
+ * Ordering is `(priority, registration index)` like every other registry, and
+ * `group` draws a separator — never a sort key.
+ */
+export interface MenuContribution extends Contribution {
+  readonly id: MenuContributionId;
+  /** Which contextual surface this belongs to. */
+  readonly slot: SlotId;
+  readonly title: string;
+  /** Rendered as destructive. */
+  readonly danger?: boolean;
+  /** Present ⇒ the item first becomes this label, and only then runs. */
+  readonly confirm?: string;
+  /**
+   * Whether the item applies to `target`. Absent ⇒ always. A contribution that
+   * cannot answer for a target it does not understand must return `false`;
+   * throwing here would take the whole menu down with it.
+   */
+  appliesTo?(target: MenuTarget): boolean;
+  run(target: MenuTarget): void | Promise<void>;
 }
 
 // ── Model tree ───────────────────────────────────────────────────────────────

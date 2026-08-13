@@ -1,5 +1,40 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-B1 (2026-08-13) — GATE PASSED
+
+Cross-module context-menu contributions — the platform seam "Save as
+Component" needs, and the one W10 flagged when it shipped `TreeNodeAction`
+("P3's addon therefore gets rows but not menu items").
+
+**The gap, precisely.** A tree provider's own rows can already declare
+`node.actions`, so the module that OWNS a row can add items to it. Nothing let
+a DIFFERENT module do so — and "Save as Component…" belongs on a body row that
+`onecad.modeling` provides, while the item belongs to `onecad.library`. Neither
+module may import the other (ADR-0002), so without this the only route was
+another `node.kind` branch inside the shell, which is exactly what ADR-0003
+forbids.
+
+**`platform.menus`**, a registry like every other: `MenuContribution {id, slot,
+title, danger?, confirm?, appliesTo?, run}` addressed by `Slots.TreeContext` /
+`Slots.ViewportContext` (both were declared and had no consumer), ordered by
+`(priority, registration index)`, owner-namespaced ids, duplicate = hard
+failure, swept with its owner.
+
+**Ordering rule, frozen**: capability items (Rename, Hide/Show) → the row's own
+declared actions → contributed items, each block behind its own separator. A
+foreign module can append, never interleave or displace — the first thing a
+user notices otherwise is the item they aim for by muscle memory moving under
+their cursor. `src/test/contracts/treeMenuContract.ts` pins the per-kind label
+order and `ModelTreePanel.menu.test.tsx` probes it through a REAL registered
+provider plus a real contribution from a second module.
+
+A contribution whose `appliesTo` throws is treated as not applying: one bad
+predicate must not take the whole menu down with it. Pinned by test.
+
+GATE: vitest **247 files / 4178** (up from 246/4172; 6 new menu tests + the
+teardown sweep now asserts `platform.menus`) · `bunx tsc --noEmit` clean · no
+Rust/C++ touched.
+
 ## COMPONENT-LIBRARY WP-A3 (2026-08-13) — GATE PASSED, PHASE A CLOSED
 
 Auto-size on hole rims (spec §5.3's hole row, §5.4 step 3) — the last named
