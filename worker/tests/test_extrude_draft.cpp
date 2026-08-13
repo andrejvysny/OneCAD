@@ -173,6 +173,36 @@ Run extrude(const json& sketch, double distance, double draft_deg) {
     return run;
 }
 
+/// The diagnostic a refusal carries, or a null json when it carries none.
+json diagnostic_of(const Run& run) {
+    return run.outcome.diagnostics.empty() ? json() : run.outcome.diagnostics.front();
+}
+
+/// A refusal must be routable by CODE, never by message text (WP0.6 diagnostics).
+/// Asserts the code, the stage, and the three facts that separate the cases.
+void check_refusal(const Run& run, const std::string& code, const std::string& label) {
+    check(run.outcome.status == ops::OpOutcome::Status::Failed, label + ": refused");
+    check(!run.created, label + ": a refusal publishes no body");
+    check(run.outcome.error_code == "OP_FAILED",
+          label + ": top-level code stays the §8 taxonomy value, got '" +
+              run.outcome.error_code + "'");
+    const json diagnostic = diagnostic_of(run);
+    if (diagnostic.is_null()) {
+        check(false, label + ": refusal carries a diagnostic");
+        return;
+    }
+    check(diagnostic.value("code", "") == code,
+          label + ": stable diagnostic code '" + code + "', got '" +
+              diagnostic.value("code", "") + "'");
+    check(diagnostic.value("severity", "") == "error", label + ": severity is error");
+    check(diagnostic.value("stage", "") == "build", label + ": stage is build");
+    check(!diagnostic.value("message", "").empty(), label + ": carries a message");
+    const json draft = diagnostic.value("evidence", json::object()).value("draft", json::object());
+    check(draft.contains("angleDeg"), label + ": evidence names the requested angle");
+    check(draft.contains("eligibleFaces") && draft.contains("addedFaces"),
+          label + ": evidence names the eligible/accepted face counts");
+}
+
 // ── The mandated red probe ──────────────────────────────────────────────────
 
 /// A circular profile extrudes to a cylinder whose only side face is CURVED, so
@@ -188,11 +218,14 @@ void circular_profile_is_applied_or_refused() {
     const bool refused = drafted.outcome.status == ops::OpOutcome::Status::Failed;
     if (refused) {
         note("circular profile REFUSES: " + drafted.outcome.error_message);
-        check(!drafted.created, "circular probe: a refusal publishes no body");
-        check(drafted.outcome.error_code == "OP_FAILED",
-              "circular probe: refusal carries a stable code, got '" + drafted.outcome.error_code + "'");
         check(drafted.outcome.error_message == "Extrude draft refused: no eligible planar side faces",
               "circular probe: refusal is NAMED, got '" + drafted.outcome.error_message + "'");
+        check_refusal(drafted, "EXTRUDE_DRAFT_NO_PLANAR_FACE", "circular probe");
+        // The distinguishing fact, machine-readable: no wall was even a candidate.
+        const json draft =
+            diagnostic_of(drafted).value("evidence", json::object()).value("draft", json::object());
+        check(draft.value("eligibleFaces", -1) == 0,
+              "circular probe: evidence reports zero eligible faces");
         return;
     }
     // Not refused ⇒ the taper must be real. Silent success at the undrafted
@@ -290,6 +323,15 @@ void near_limit_angle_refuses_safely() {
         if (run.outcome.status == ops::OpOutcome::Status::Failed) {
             check(!run.created, label + ": a refusal publishes no body");
             check(!run.outcome.error_message.empty(), label + ": refusal carries a message");
+            const std::string code = diagnostic_of(run).value("code", "");
+            note(label + " refuses with code " + code);
+            // Whatever it is, it must be a KNOWN code — never the generic
+            // top-level one leaking into the diagnostic slot.
+            check(code == "EXTRUDE_DRAFT_NO_PLANAR_FACE" ||
+                      code == "EXTRUDE_DRAFT_NO_FACE_ACCEPTED" ||
+                      code == "EXTRUDE_DRAFT_NO_CHANGE" ||
+                      code == "EXTRUDE_DRAFT_BUILD_FAILED",
+                  label + ": diagnostic code is from the draft vocabulary, got '" + code + "'");
         } else {
             check(run.created, label + ": a non-refusal must publish a body");
             check(run.volume > 0.0, label + ": a published solid has positive volume");
@@ -319,8 +361,29 @@ void draft_is_deterministic() {
 
 }  // namespace
 
+/// The point of a per-defect code is that it DISCRIMINATES. A vocabulary whose
+/// members never differ between two genuinely different defects would be the
+/// generic `OP_FAILED` again, spelled longer.
+void distinct_defects_get_distinct_codes() {
+    const Run no_wall = extrude(circle_sketch("sk1", 5.0), 10.0, 10.0);
+    const Run steep = extrude(rect_sketch("sk1", 10, 10), 10.0, 89.0);
+    if (no_wall.outcome.status != ops::OpOutcome::Status::Failed ||
+        steep.outcome.status != ops::OpOutcome::Status::Failed) {
+        note("code-discrimination: one probe did not refuse; nothing to compare");
+        return;
+    }
+    const std::string a = diagnostic_of(no_wall).value("code", "");
+    const std::string b = diagnostic_of(steep).value("code", "");
+    note("code discrimination: no-wall='" + a + "' steep='" + b + "'");
+    check(!a.empty() && !b.empty(), "code discrimination: both refusals carry a code");
+    check(a != b,
+          "code discrimination: a profile with no planar wall and a self-intersecting "
+          "taper must not share one code (both '" + a + "')");
+}
+
 int main() {
     circular_profile_is_applied_or_refused();
+    distinct_defects_get_distinct_codes();
     square_prism_taper_matches_the_closed_form();
     mixed_planar_and_curved_profile_is_applied_or_refused();
     near_limit_angle_refuses_safely();

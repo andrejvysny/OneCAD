@@ -479,7 +479,18 @@ async fn a_refused_draft_previews_nothing() {
     // Either the request errors, or it resolves carrying no body. What it must
     // never do is hand back a straight cylinder.
     match preview {
-        Err(e) => eprintln!("refused draft preview errored as expected: {e:?}"),
+        Err(e) => {
+            eprintln!("refused draft preview errored as expected: {e:?}");
+            // SCHEMA §7.6: a failed preview carries the same bounded diagnostics as
+            // its candidate ExecutePlan step. Pinning the CODE here is what proves
+            // the two lanes agree on WHICH defect this is — routable without
+            // matching message text on either side.
+            let rendered = format!("{e:?}");
+            assert!(
+                rendered.contains("EXTRUDE_DRAFT_NO_PLANAR_FACE"),
+                "the preview refusal must carry the same stable code the commit does, got {rendered}"
+            );
+        }
         Ok(p) => {
             let volumes: Vec<f64> = p
                 .bodies

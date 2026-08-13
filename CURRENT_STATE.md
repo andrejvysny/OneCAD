@@ -1,4 +1,26 @@
-## ROADMAP A2 — DRAFT APPLIED-OR-REFUSED (2026-08-13) — GATE PASSED, UNCOMMITTED
+## ROADMAP A3 — STABLE DIAGNOSTIC CODES FOR THE P0 REFUSALS (2026-08-13) — GATE PASSED, UNCOMMITTED
+
+Phase 0 shipped two new refusals — zero-solid Boolean and Draft — that returned a
+bare `OP_FAILED` with the reason only in the message, forcing message-text routing
+the diagnostics contract forbids. Both now carry a stable per-defect diagnostic
+code, `stage`, and bounded evidence, following the
+`EDGE_OP_TANGENT_CLOSURE_CHANGED` precedent: the §8 top-level code is unchanged,
+so this is additive on the wire.
+
+Four `EXTRUDE_DRAFT_*` codes plus `BOOLEAN_EMPTY_RESULT`. The codes are asserted to
+DISCRIMINATE (no-planar-wall vs 89° self-intersecting taper produce different
+codes), both lanes are asserted to agree (the preview refusal carries the same code
+as the commit), and `boolean_empty_refusal.ndjson` — one of the fixtures the Phase 3
+review flagged as never extended — now asserts the diagnostic and was verified to
+fail on a wrong code.
+
+- **Changed:** `worker/src/ops/{ExtrudeOp,BooleanOp}.cpp` · `worker/tests/{test_extrude_draft,test_boolean_empty}.cpp` ·
+  `src-tauri/tests/preview_extrude_draft.rs` · `protocol/{SCHEMA.md,fixtures/boolean_empty_refusal.ndjson}`.
+- **Gates:** ctest **117/117** · fmt · clippy · real-worker workspace **1078 / 0**.
+- **Next:** A4 — the four required Revolve body-edge-axis tests, then reconcile the
+  contract row claiming `uiExposure:"exposed"` against `src/ipc/types.ts:843`.
+
+## ROADMAP A2 — DRAFT APPLIED-OR-REFUSED (2026-08-13) — COMMITTED `6b08e27`
 
 WP0.6. The implementation was already correct; the evidence was missing. No test
 pinned any of the three refusal strings, and the work package's first mandated

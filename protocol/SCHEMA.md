@@ -1039,6 +1039,22 @@ OneCAD-CPP `ExtrudeParams`.
   **un-repairable** across parametric edits, violating Invariants 2/3; the typed
   ref lets the resolution ladder rebind it. Absent for non-`ToFace` extrudes.
 
+- **Draft is applied or refused, never silently dropped.** A non-zero
+  `draftAngleDeg` must add at least one eligible side face, the builder must
+  complete, and the result must differ from the undrafted prism; otherwise the step
+  is a recoverable `OP_FAILED` carrying one of the draft diagnostic codes
+  (`stage:"build"`, evidence `{draft:{angleDeg,eligibleFaces,addedFaces}}`):
+
+  | code | meaning |
+  |---|---|
+  | `EXTRUDE_DRAFT_NO_PLANAR_FACE` | the profile has no planar side face to draft (e.g. a circular profile) |
+  | `EXTRUDE_DRAFT_NO_FACE_ACCEPTED` | eligible walls existed; the kernel rejected every one |
+  | `EXTRUDE_DRAFT_NO_CHANGE` | the builder completed and changed nothing (adds `volumeBefore`/`volumeAfter`) |
+  | `EXTRUDE_DRAFT_BUILD_FAILED` | the draft build itself failed or threw |
+
+  These are diagnostic codes only; the §8 top-level code stays `OP_FAILED`. The
+  preview lane reports the same code as the commit for the same candidate.
+
 **Profile binding (NORMATIVE, Extrude / Revolve / Sweep).** The sketch profile is
 carried as **flat `params.sketchId` + `params.regionId`**, NOT as a semantic ref
 in `inputs[]`. A region is identified by the derived `regionId` (§7.4), which is
@@ -1193,7 +1209,12 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
 - A zero-solid `Cut` or `Intersect` is a recoverable `OP_FAILED`: the target and
   tool remain intact, no body lifecycle event or mesh is emitted, and the caller
   may revise the operation. Complete-consumption deletion is not implicit in this
-  standalone operation.
+  standalone operation. It carries diagnostic `BOOLEAN_EMPTY_RESULT`
+  (`stage:"publish"`) with evidence
+  `{boolean:{operation,targetBodyId,toolBodyId,solidCount:0}}`, so a caller routes
+  on the CODE rather than on message text — the §8 top-level value is the generic
+  `OP_FAILED` every Boolean failure shares. Cross-track fixture:
+  `protocol/fixtures/boolean_empty_refusal.ndjson`.
 
 **Shell** (`op.shell`) — hollow a body, removing (opening) selected faces. Field
 names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelog)).
@@ -2648,6 +2669,21 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-13 — §7.3 stable diagnostic codes for the Draft and zero-solid Boolean
+  refusals.** Both previously returned a bare `OP_FAILED` with the reason only in
+  the message, so a caller wanting to tell "no planar wall to draft" from "the
+  kernel rejected the walls I offered" — or "your Cut consumed the target
+  completely" from any other Boolean failure — had to match on message TEXT, which
+  the diagnostics contract forbids. Adds `EXTRUDE_DRAFT_NO_PLANAR_FACE`,
+  `EXTRUDE_DRAFT_NO_FACE_ACCEPTED`, `EXTRUDE_DRAFT_NO_CHANGE`,
+  `EXTRUDE_DRAFT_BUILD_FAILED` (`stage:"build"`, evidence
+  `{draft:{angleDeg,eligibleFaces,addedFaces}}`) and `BOOLEAN_EMPTY_RESULT`
+  (`stage:"publish"`, evidence
+  `{boolean:{operation,targetBodyId,toolBodyId,solidCount}}`). Diagnostic codes
+  only — the §8 top-level code is unchanged, so this is additive on the wire and
+  every existing fixture stays byte-valid. `boolean_empty_refusal.ndjson` is
+  extended to assert the new diagnostic (verified to fail on a wrong code).
 
 - **2026-08-11 — §2, §7.2, §7.3 Pattern V2 publication/lineage policy.**
   `resultPolicyVersion` absent remains frozen V1; present values are literal `2`.

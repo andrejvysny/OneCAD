@@ -28,7 +28,22 @@ Roadmap WP0.6. The implementation was already correct — three named refusals p
 
 Gates: `ctest` **117/117** (116 → 117); `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1078 / 0** (1076 → 1078). No frontend file changed.
 
-- [ ] Next per the plan: A3 (stable diagnostic codes for the zero-solid Boolean and Draft refusals).
+## ROADMAP A3 — STABLE DIAGNOSTIC CODES FOR THE P0 REFUSALS (2026-08-13) — GATE PASSED
+
+Roadmap WP0.6 "Diagnostics". Phase 0 shipped two new refusals — zero-solid Boolean and Draft — and both returned a bare `OP_FAILED` with the reason only in the message. A caller wanting to tell "no planar wall to draft" from "the kernel rejected the walls I offered", or "your Cut consumed the target completely" from any other Boolean failure, had to match on message TEXT. That is exactly the message-text routing the diagnostics contract forbids.
+
+Follows the established `EDGE_OP_TANGENT_CLOSURE_CHANGED` precedent: the §8 top-level code stays `OP_FAILED`, and the DIAGNOSTIC carries the stable per-defect code, `stage`, and bounded evidence.
+
+- [x] **Draft vocabulary** (`stage:"build"`, evidence `{draft:{angleDeg,eligibleFaces,addedFaces}}`): `EXTRUDE_DRAFT_NO_PLANAR_FACE`, `EXTRUDE_DRAFT_NO_FACE_ACCEPTED`, `EXTRUDE_DRAFT_NO_CHANGE` (adds `volumeBefore`/`volumeAfter`), `EXTRUDE_DRAFT_BUILD_FAILED`. `apply_draft` now returns a `DraftFailure{code,message,evidence}` instead of a bare string.
+- [x] **`BOOLEAN_EMPTY_RESULT`** (`stage:"publish"`, evidence `{boolean:{operation,targetBodyId,toolBodyId,solidCount:0}}`).
+- [x] **The codes DISCRIMINATE, and that is asserted** — a vocabulary whose members never differ would be `OP_FAILED` spelled longer. `distinct_defects_get_distinct_codes` runs a no-planar-wall profile and a self-intersecting 89° taper and requires different codes: measured `EXTRUDE_DRAFT_NO_PLANAR_FACE` vs `EXTRUDE_DRAFT_BUILD_FAILED`.
+- [x] **Both lanes agree.** `preview_extrude_draft.rs` pins that the PREVIEW refusal carries the same `EXTRUDE_DRAFT_NO_PLANAR_FACE` the commit does (SCHEMA §7.6 requires byte-equivalent diagnostics for the same candidate).
+- [x] **Cross-track fixture extended** — `protocol/fixtures/boolean_empty_refusal.ndjson` now asserts the diagnostic on its refused step. This is one of the fixtures the Phase 3 review flagged as never extended. **Verified non-vacuous**: substituting a wrong code reds `canonical_boolean_empty_refusal`.
+- [x] **SCHEMA §7.3 + §14 changelog** record both vocabularies as diagnostic-code-only additions; the top-level code is unchanged, so every existing fixture stays byte-valid.
+
+Gates: `ctest` **117/117**; `cargo fmt --all --check`; `clippy --workspace --all-targets -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1078 / 0**. No frontend file changed.
+
+- [ ] Next per the plan: A4 (Revolve body-edge axis — the four required tests, then reconcile the contract row that claims `uiExposure:"exposed"` against `src/ipc/types.ts:843`).
 
 ## MODELING UX HARDENING — WP0 through WP6 (2026-08-12/13, plan `plans/modeling-ux-wp0.md` + `act-as-senior-software-linked-graham.md`) — FE GATE PASSED, ALL 19 DEFECTS CLOSED
 
