@@ -185,7 +185,14 @@ export interface TransformChipHandlers {
 }
 
 /** Extra armed-placement options (the W2 copy seed). */
-export interface TransformChipOpts {
+/**
+ * The placement chip was the ONE `*ChipOpts` that did not extend
+ * {@link ChipAnchorOpts} (U5), so `resolveChipAnchor` never ran for it and it
+ * anchored dead-centre on the pivot — across the axis stems, the handle
+ * intersections and the pivot itself. It now opts into the same leader-lined
+ * offset placement every other armed cluster uses.
+ */
+export interface TransformChipOpts extends ChipAnchorOpts {
   copy?: boolean;
 }
 
@@ -281,8 +288,43 @@ export type ChipKind =
    *  WP-C T2b): `[ <label> <value> mm ]`, open for as long as the tool is armed. */
   | "sketchValue";
 
+/**
+ * The chips whose editor has a PRIMARY numeric value — the one a typed character
+ * routes to (U3, contract column `primaryEntry`).
+ *
+ * Keyed on the chip rather than on the reducers because the chip IS the editor:
+ * a tool with no numeric field (boolean, mirror, the revolve axis pick, the
+ * multi-region select) has nothing for a digit to mean, and this set cannot drift
+ * from what is actually on screen the way a parallel FSM table would.
+ */
+export const PRIMARY_VALUE_CHIPS: ReadonlySet<ChipKind> = new Set<ChipKind>([
+  "extrudeDepth",
+  "revolveAngle",
+  "filletRadius",
+  "shellThickness",
+  "offsetFace",
+  "hole",
+  "linearPattern",
+  "circularPattern",
+  "transform",
+  "datumOffset",
+]);
+
 export interface ToolChipState {
   kind: ChipKind;
+  /**
+   * A type-to-enter arm (U3, contract column `primaryEntry`).
+   *
+   * The controller sets this when a printable character reaches the canvas while
+   * a tool with a primary numeric parameter is armed: `seed` is that character,
+   * which REPLACES the formatted value, and `token` remounts the field so it
+   * takes focus. Null while nothing has been typed.
+   *
+   * It is a store field rather than a direct DOM focus call because the chip is
+   * a React subtree the controller must not reach into — and because the remount
+   * key has to be a value the renderer can see.
+   */
+  primaryEntry: { seed: string; token: number } | null;
   /** Live dimensional value (depth / radius / thickness / spacing / angle). */
   value: number;
   /** Live instance count (linear / circular pattern chips). */
@@ -396,10 +438,21 @@ export interface ToolChipState {
   onEdgeOp: ((edgeOp: EdgeOpKind) => void) | null;
   /** Second chamfer distance typed / cleared (armed edge-op cluster). */
   onDistance2: ((distance2: number | null) => void) | null;
-  /** Apply pressed (boolean / pattern / mirror chip). */
-  onApply: (() => void) | null;
   /** Axis-reset pressed (revolve chip). */
   onResetAxis: (() => void) | null;
+  /** Swap the boolean operands (U6). */
+  onSwap: (() => void) | null;
+  /** Boolean operand display names, shown as role badges. */
+  targetName: string;
+  toolName: string;
+  /**
+   * What this operation will produce, stated BEFORE Apply (U4/D18) — e.g.
+   * "3 total · 2 new bodies · source retained".
+   *
+   * Body-lifecycle operations only. It doubles as the tool's `aria-live` status,
+   * so it is the one place a screen reader learns what is about to happen.
+   */
+  resultSummary: string;
   /** World-axis toggled (pattern chips). */
   onAxis: ((axis: PatternAxis) => void) | null;
   /** Mirror plane toggled (mirror chip). */
@@ -448,9 +501,16 @@ export interface ToolChipState {
   showBoolean(
     op: BooleanOperation,
     worldPos: [number, number, number],
-    onOp: (op: BooleanOperation) => void,
-    onApply: () => void,
-    onCancel?: () => void,
+    handlers: {
+      onOp: (op: BooleanOperation) => void;
+      onConfirm: () => void;
+      onCancel?: () => void;
+      /** Exchange target and tool (U6) — a Cut is not symmetric. */
+      onSwap?: () => void;
+      /** Display names for the two operands, shown as role badges. */
+      targetName?: string;
+      toolName?: string;
+    },
   ): void;
   /** Show the armed hole cluster at the picked point (WP-C T3). */
   showHole(
@@ -481,7 +541,7 @@ export interface ToolChipState {
       onAxis: (axis: PatternAxis) => void;
       onCount: (count: number) => void;
       onSpacing: (spacing: number) => void;
-      onApply: () => void;
+      onConfirm: () => void;
       onCancel?: () => void;
     },
   ): void;
@@ -494,14 +554,14 @@ export interface ToolChipState {
       onAxis: (axis: PatternAxis) => void;
       onCount: (count: number) => void;
       onAngle: (angle: number) => void;
-      onApply: () => void;
+      onConfirm: () => void;
       onCancel?: () => void;
     },
   ): void;
   showMirror(
     plane: MirrorPlane,
     worldPos: [number, number, number],
-    handlers: { onPlane: (plane: MirrorPlane) => void; onApply: () => void; onCancel?: () => void },
+    handlers: { onPlane: (plane: MirrorPlane) => void; onConfirm: () => void; onCancel?: () => void },
   ): void;
   /** Show the armed placement cluster `[Move|Rotate][X|Y|Z][value ▸][Copy][✓][✕]`. */
   showTransform(
@@ -564,6 +624,10 @@ export interface ToolChipState {
   setAlignPhase(alignPhase: AlignPhase | null): void;
   /** Update just the chamfer second leg (`null` = equal-leg). */
   setDistance2(distance2: number | null): void;
+  /** Route a typed character to the primary numeric field (see `primaryEntry`). */
+  beginPrimaryEntry(seed: string): void;
+  /** Restate what the armed operation will produce (see `resultSummary`). */
+  setResultSummary(summary: string): void;
   clear(): void;
 }
 
@@ -643,16 +707,20 @@ const CLEARED = {
   onSymmetric: null,
   onConfirm: null,
   onCancel: null,
+  onSwap: null,
+  targetName: "",
+  toolName: "",
+  resultSummary: "",
+  primaryEntry: null,
   onOp: null,
   onBooleanMode: null,
-  onApply: null,
   onResetAxis: null,
   onAxis: null,
   onPlane: null,
   onCount: null,
 };
 
-export const toolChipStore = createStore<ToolChipState>()((set) => ({
+export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
   ...CLEARED,
 
   showExtrude(value, worldPos, handlers, opts) {
@@ -741,8 +809,19 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onCancel: handlers.onCancel,
     });
   },
-  showBoolean(op, worldPos, onOp, onApply, onCancel) {
-    set({ ...CLEARED, kind: "booleanOp", op, worldPos, onOp, onApply, onCancel: onCancel ?? null });
+  showBoolean(op, worldPos, handlers) {
+    set({
+      ...CLEARED,
+      kind: "booleanOp",
+      op,
+      worldPos,
+      onOp: handlers.onOp,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel ?? null,
+      onSwap: handlers.onSwap ?? null,
+      targetName: handlers.targetName ?? "",
+      toolName: handlers.toolName ?? "",
+    });
   },
   showHole(diameter, worldPos, handlers, opts) {
     set({
@@ -809,7 +888,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onAxis: handlers.onAxis,
       onCount: handlers.onCount,
       onValue: handlers.onSpacing,
-      onApply: handlers.onApply,
+      onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel ?? null,
     });
   },
@@ -824,7 +903,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onAxis: handlers.onAxis,
       onCount: handlers.onCount,
       onValue: handlers.onAngle,
-      onApply: handlers.onApply,
+      onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel ?? null,
     });
   },
@@ -835,7 +914,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       plane,
       worldPos,
       onPlane: handlers.onPlane,
-      onApply: handlers.onApply,
+      onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel ?? null,
     });
   },
@@ -848,6 +927,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       value,
       worldPos,
       copy: opts?.copy ?? false,
+      ...resolveChipAnchor(opts),
       onTransformMode: handlers.onTransformMode,
       onAxis: handlers.onAxis,
       onValue: handlers.onValue,
@@ -910,6 +990,13 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setAlignPhase(alignPhase) {
     set({ alignPhase });
+  },
+  setResultSummary(resultSummary) {
+    set({ resultSummary });
+  },
+  beginPrimaryEntry(seed) {
+    const token = (get().primaryEntry?.token ?? 0) + 1;
+    set({ primaryEntry: { seed, token } });
   },
   clear() {
     set({ ...CLEARED });

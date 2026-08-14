@@ -143,7 +143,7 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
     // The consumed tool body is not in the document, so nothing is highlighted —
     // a body selection here would imply a re-pick that cannot exist.
     expect(selectionStore.getState().selected).toEqual([]);
-    expect(viewportStore.getState().statusHint?.message).toBe("Change the boolean operation · Apply");
+    expect(viewportStore.getState().statusHint?.message).toBe("Change the boolean operation · Enter or ✓ to confirm");
   });
 
   it("Apply sends UpdateOperationParams with the stored bodies VERBATIM and only `operation` swapped", async () => {
@@ -152,7 +152,7 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
     await controller.editBooleanFeature("feat-bool");
     await flush();
     toolChipStore.getState().onOp?.("Cut"); // chip segment: Union → Cut
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(clientMock.applyOperation).not.toHaveBeenCalled(); // never appends a 2nd boolean
@@ -174,7 +174,7 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
 
     await controller.editBooleanFeature("feat-bool");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(clientMock.applyEditCommand).toHaveBeenCalledWith(
@@ -279,7 +279,7 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
       params: { operation: "Union", targetBodyId: "body1", toolBodyId: "body3" },
     });
 
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
     await flush(); // exact-preview barrier (collapsed to one macrotask) + endPreview
 

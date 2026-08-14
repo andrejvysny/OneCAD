@@ -61,6 +61,17 @@ std::int64_t normalizedParameter(const CurveFragment& fragment, double parameter
         (parameter - fragment.sourceFirstParameter) / span * kIdentityScale));
 }
 
+bool validV3Fragment(const CurveFragment& fragment) {
+    const double sourceSpan =
+        fragment.sourceLastParameter - fragment.sourceFirstParameter;
+    return !fragment.baseEntityId.empty() && std::isfinite(sourceSpan) &&
+           sourceSpan > 0.0 && std::isfinite(fragment.firstParameter) &&
+           std::isfinite(fragment.lastParameter) &&
+           fragment.lastParameter > fragment.firstParameter &&
+           fragment.firstParameter >= fragment.sourceFirstParameter &&
+           fragment.lastParameter <= fragment.sourceLastParameter + sourceSpan;
+}
+
 void orientLoop(Loop& loop, bool ccw) {
     if (loop.polygon.size() < 3 || loop.isCCW() == ccw) {
         return;
@@ -98,15 +109,30 @@ void normalizeCycle(std::vector<std::string>& tokens) {
                 tokens.end());
 }
 
-std::vector<std::string> loopTokens(const Loop& loop, const WireEdgeMapper& mapper) {
+std::vector<std::string> loopTokens(const Loop& loop, const WireEdgeMapper& mapper,
+                                    RegionIdentityVersion identityVersion) {
     std::vector<std::string> result;
     result.reserve(loop.wire.edges.size());
+    if (identityVersion == RegionIdentityVersion::V3 &&
+        loop.fragments.size() != loop.wire.edges.size()) {
+        return {};
+    }
     for (std::size_t i = 0; i < loop.wire.edges.size(); ++i) {
         const sk::EntityID& edgeId = loop.wire.edges[i];
         const sk::EntityID base = baseEdgeId(edgeId);
         std::string token = mapper(base);
         if (token.empty()) return {};
-        if (i < loop.fragments.size() && isFragmented(loop.fragments[i])) {
+        if (identityVersion == RegionIdentityVersion::V3) {
+            const CurveFragment& fragment = loop.fragments[i];
+            if (!validV3Fragment(fragment) || fragment.baseEntityId != base) return {};
+            const std::string provenance = mapper(fragment.baseEntityId);
+            if (provenance.empty() || provenance != token) return {};
+            token = provenance;
+            token += ":";
+            token += fragmentKindToken(fragment.kind);
+            token += "@" + std::to_string(normalizedParameter(fragment, fragment.firstParameter));
+            token += "-" + std::to_string(normalizedParameter(fragment, fragment.lastParameter));
+        } else if (i < loop.fragments.size() && isFragmented(loop.fragments[i])) {
             const CurveFragment& fragment = loop.fragments[i];
             token += ":";
             token += fragmentKindToken(fragment.kind);
@@ -127,8 +153,9 @@ std::vector<std::string> loopTokens(const Loop& loop, const WireEdgeMapper& mapp
     return result;
 }
 
-std::string loopSignature(const Loop& loop, const WireEdgeMapper& mapper) {
-    const std::vector<std::string> tokens = loopTokens(loop, mapper);
+std::string loopSignature(const Loop& loop, const WireEdgeMapper& mapper,
+                          RegionIdentityVersion identityVersion) {
+    const std::vector<std::string> tokens = loopTokens(loop, mapper, identityVersion);
     std::string result;
     for (const std::string& token : tokens) {
         result += std::to_string(token.size()) + ":" + token + ";";
@@ -162,32 +189,37 @@ bool populateWireEdges(RegionDefinition& region, const WireEdgeMapper& mapper,
     return true;
 }
 
-std::string materialSignature(const RegionDefinition& region, const WireEdgeMapper& mapper) {
-    const std::string outer = loopSignature(region.outerLoop, mapper);
+std::string materialSignature(const RegionDefinition& region, const WireEdgeMapper& mapper,
+                              RegionIdentityVersion identityVersion) {
+    const std::string outer = loopSignature(region.outerLoop, mapper, identityVersion);
     if (outer.empty()) return {};
     std::vector<std::string> holes;
     holes.reserve(region.holes.size());
     for (const Loop& hole : region.holes) {
-        std::string signature = loopSignature(hole, mapper);
+        std::string signature = loopSignature(hole, mapper, identityVersion);
         if (signature.empty()) return {};
         holes.push_back(std::move(signature));
     }
     std::sort(holes.begin(), holes.end());
-    std::string result = "cell-v2|outer{" + outer + "}|holes{";
+    std::string result = identityVersion == RegionIdentityVersion::V3
+                             ? "cell-v3|outer{" + outer + "}|holes{"
+                             : "cell-v2|outer{" + outer + "}|holes{";
     for (const std::string& hole : holes) {
         result += std::to_string(hole.size()) + ":" + hole + ";";
     }
     return result + "}";
 }
 
-bool assignIdentity(RegionDefinition& region, const WireEdgeMapper& mapper, std::string& error) {
+bool assignIdentity(RegionDefinition& region, const WireEdgeMapper& mapper,
+                    RegionIdentityVersion identityVersion, std::string& error) {
     region.legacyId = onecad::region::derive_region_id(
         region.outerWireEdges, onecad::region::Winding::Ccw);
-    if (region.holes.empty() && !usesFragments(region.outerLoop)) {
+    if (identityVersion == RegionIdentityVersion::V2 &&
+        region.holes.empty() && !usesFragments(region.outerLoop)) {
         region.id = region.legacyId;
         return true;
     }
-    const std::string signature = materialSignature(region, mapper);
+    const std::string signature = materialSignature(region, mapper, identityVersion);
     if (signature.empty()) {
         error = "region material boundary has no canonical identity";
         return false;
@@ -207,7 +239,8 @@ RegionTable failed(std::string message) {
 
 RegionTable buildRegionTable(const LoopDetectionResult& result,
                              const WireEdgeMapper& mapBaseEdge,
-                             double tolerance) {
+                             double tolerance,
+                             RegionIdentityVersion identityVersion) {
     if (!result.success) {
         return failed(result.errorMessage.empty() ? "loop detection failed"
                                                    : result.errorMessage);
@@ -222,7 +255,7 @@ RegionTable buildRegionTable(const LoopDetectionResult& result,
         for (Loop& hole : region.holes) orientLoop(hole, false);
         std::string error;
         if (!populateWireEdges(region, mapBaseEdge, error) ||
-            !assignIdentity(region, mapBaseEdge, error)) {
+            !assignIdentity(region, mapBaseEdge, identityVersion, error)) {
             return failed(std::move(error));
         }
         if (!uniqueIds.insert(region.id).second) {

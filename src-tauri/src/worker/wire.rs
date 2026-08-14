@@ -698,11 +698,17 @@ fn element_ref_wire(r: &ElementRef) -> Value {
 /// # Errors
 /// A human reason on a malformed `bodyId` / `elementMapDelta` / `needsRepair`
 /// payload (surfaced by the caller as `PROTOCOL_ERROR`).
-pub fn parse_plan_step(payload: &Value, fallback_step: usize) -> Result<PlanStepEvent, String> {
+pub fn parse_plan_step(payload: &Value, envelope_step: usize) -> Result<PlanStepEvent, String> {
     let step_index = payload
         .get("stepIndex")
         .and_then(Value::as_u64)
-        .map_or(fallback_step, |s| s as usize);
+        .and_then(|s| usize::try_from(s).ok())
+        .ok_or("planStep missing or invalid stepIndex")?;
+    if step_index != envelope_step {
+        return Err(format!(
+            "planStep payload stepIndex {step_index} != envelope stepIndex {envelope_step}"
+        ));
+    }
     Ok(PlanStepEvent {
         step_index,
         body_events: parse_body_events(payload.get("bodyEvents"))?,
@@ -974,13 +980,24 @@ pub fn parse_plan_prepared_with_artifacts(
             .ok_or("PlanPrepared missing preparedSnapshotId")?,
     );
     let last_valid_step = match result.get("lastValidStep") {
-        Some(Value::Number(n)) => n.as_u64().map(|v| v as usize),
-        _ => None,
+        Some(Value::Null) => None,
+        Some(Value::Number(n)) => Some(
+            n.as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .ok_or("PlanPrepared invalid lastValidStep")?,
+        ),
+        Some(_) => return Err("PlanPrepared invalid lastValidStep".into()),
+        None => return Err("PlanPrepared missing lastValidStep".into()),
     };
-    let stopped_reason = match result.get("stoppedReason").and_then(Value::as_str) {
-        Some("opFailed") => StoppedReason::OpFailed,
-        Some("needsRepair") => StoppedReason::NeedsRepair,
-        _ => StoppedReason::Completed,
+    let stopped_reason = match result.get("stoppedReason") {
+        Some(Value::String(reason)) if reason == "completed" => StoppedReason::Completed,
+        Some(Value::String(reason)) if reason == "opFailed" => StoppedReason::OpFailed,
+        Some(Value::String(reason)) if reason == "needsRepair" => StoppedReason::NeedsRepair,
+        Some(Value::String(reason)) => {
+            return Err(format!("PlanPrepared unknown stoppedReason {reason:?}"));
+        }
+        Some(_) => return Err("PlanPrepared invalid stoppedReason".into()),
+        None => return Err("PlanPrepared missing stoppedReason".into()),
     };
     Ok(PlanPrepared {
         job_id: job,
@@ -1260,16 +1277,31 @@ pub(super) fn verify_mesh(
 }
 
 fn parse_per_step(v: Option<&Value>) -> Result<Vec<StepResult>, String> {
-    let arr = v.and_then(Value::as_array).cloned().unwrap_or_default();
+    let arr = v
+        .and_then(Value::as_array)
+        .ok_or("PlanPrepared missing or invalid perStepResults")?;
     arr.iter()
         .map(|r| {
+            let step_index = r
+                .get("stepIndex")
+                .and_then(Value::as_u64)
+                .and_then(|s| usize::try_from(s).ok())
+                .ok_or("PlanPrepared perStepResults missing or invalid stepIndex")?;
+            let status = match r.get("status") {
+                Some(Value::String(status)) if status == "ok" => StepStatus::Ok,
+                Some(Value::String(status)) if status == "needsRepair" => StepStatus::NeedsRepair,
+                Some(Value::String(status)) if status == "opFailed" => StepStatus::OpFailed,
+                Some(Value::String(status)) => {
+                    return Err(format!(
+                        "PlanPrepared perStepResults unknown status {status:?}"
+                    ));
+                }
+                Some(_) => return Err("PlanPrepared perStepResults invalid status".into()),
+                None => return Err("PlanPrepared perStepResults missing status".into()),
+            };
             Ok(StepResult {
-                step_index: r.get("stepIndex").and_then(Value::as_u64).unwrap_or(0) as usize,
-                status: match r.get("status").and_then(Value::as_str) {
-                    Some("needsRepair") => StepStatus::NeedsRepair,
-                    Some("opFailed") => StepStatus::OpFailed,
-                    _ => StepStatus::Ok,
-                },
+                step_index,
+                status,
                 body_ids: body_array(r.get("bodyIds"))?,
                 message: r
                     .get("message")
@@ -2026,9 +2058,9 @@ fn validate_sketch_region_header(expected_sketch_id: &str, result: &Value) -> Re
         .get("regionIdentityVersion")
         .and_then(Value::as_u64)
         .ok_or("SketchRegions: missing/invalid regionIdentityVersion")?;
-    if version != 2 {
+    if !matches!(version, 2 | 3) {
         return Err(format!(
-            "SketchRegions: unsupported regionIdentityVersion {version}; expected 2"
+            "SketchRegions: unsupported regionIdentityVersion {version}; expected 2 or 3"
         ));
     }
     Ok(version as u32)
@@ -2409,6 +2441,32 @@ pub fn parse_mass_properties(
         centroid: vec3(result.get("centroid"), "centroid")?,
         principal_moments: vec3(result.get("principalMoments"), "principalMoments")?,
         principal_axes,
+    })
+}
+
+/// `QueryBodyTopology` args (SCHEMA §7.5).
+#[must_use]
+pub fn query_body_topology_args(body: BodyId) -> Value {
+    json!({ "bodyId": body_id_wire(body) })
+}
+
+/// Parses exact BRep topology counts. No default is honest here: a malformed
+/// result must not masquerade as an empty body.
+pub fn parse_body_topology(
+    body_id: String,
+    result: &Value,
+) -> Result<crate::dto::BodyTopologyDto, String> {
+    let count = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("QueryBodyTopology: missing/invalid {key:?}"))
+    };
+    Ok(crate::dto::BodyTopologyDto {
+        body_id,
+        solid_count: count("solidCount")?,
+        face_count: count("faceCount")?,
     })
 }
 
@@ -3074,6 +3132,7 @@ pub fn validate_resolve_refs_result(req: &ResolveRequest, result: &Value) -> Res
             resolutions.len()
         ));
     }
+    let mut echoed_revision = None;
     for (index, (actual, expected)) in resolutions.iter().zip(&req.refs).enumerate() {
         if actual.get("refId").and_then(Value::as_str) != Some(expected.ref_id.as_str()) {
             return Err(format!(
@@ -3094,8 +3153,68 @@ pub fn validate_resolve_refs_result(req: &ResolveRequest, result: &Value) -> Res
                 ))
             }
         }
+        let revision = actual
+            .get("revision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("ResolveRefs: resolutions[{index}] carries no revision echo"))?;
+        if let Some(first) = echoed_revision {
+            if revision != first {
+                return Err(format!(
+                    "ResolveRefs: resolutions[{index}] revision {revision} != {first}"
+                ));
+            }
+        } else {
+            echoed_revision = Some(revision);
+        }
+        validate_resolution_body(index, expected, actual)?;
     }
     Ok(())
+}
+
+fn validate_resolution_body(
+    index: usize,
+    expected: &onecad_core::regen::ResolveRef,
+    actual: &Value,
+) -> Result<(), String> {
+    let outcome = actual
+        .get("outcome")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ResolveRefs: resolutions[{index}] missing outcome"))?;
+    if !matches!(outcome, "unchanged" | "autoBind" | "needsRepair") {
+        return Err(format!(
+            "ResolveRefs: resolutions[{index}] unknown outcome {outcome:?}"
+        ));
+    }
+    let echoed = actual.get("bodyId").and_then(Value::as_str);
+    if let Some(primary) = &expected.element.primary {
+        let wanted = body_id_wire(primary.body);
+        if let Some(body) = echoed {
+            if body != wanted {
+                return Err(format!(
+                    "ResolveRefs: resolutions[{index}] bodyId {body:?} != primary {wanted:?}"
+                ));
+            }
+        } else if !missing_body_refusal(actual, outcome) {
+            return Err(format!(
+                "ResolveRefs: resolutions[{index}] omitted bodyId outside missing-body refusal"
+            ));
+        }
+    } else if echoed.is_none() && !missing_body_refusal(actual, outcome) {
+        return Err(format!(
+            "ResolveRefs: resolutions[{index}] omitted bodyId outside missing-body refusal"
+        ));
+    }
+    Ok(())
+}
+
+fn missing_body_refusal(actual: &Value, outcome: &str) -> bool {
+    let repair = actual.get("needsRepair");
+    outcome == "needsRepair"
+        && repair.and_then(|r| r.get("reason")).and_then(Value::as_str) == Some("no-candidates")
+        && repair
+            .and_then(|r| r.get("candidates"))
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
 }
 
 /// Reads a non-empty string field as an [`ElementId`] (empty/absent ⇒ `None`).
@@ -3829,6 +3948,22 @@ mod tests {
     }
 
     #[test]
+    fn body_topology_requires_both_bounded_counts() {
+        let body = BodyId(Uuid::from_u128(7));
+        assert_eq!(query_body_topology_args(body)["bodyId"], body_id_wire(body));
+        let parsed =
+            parse_body_topology("body_7".into(), &json!({ "solidCount": 1, "faceCount": 6 }))
+                .expect("valid topology");
+        assert_eq!((parsed.solid_count, parsed.face_count), (1, 6));
+        assert!(parse_body_topology("body_7".into(), &json!({ "solidCount": 1 })).is_err());
+        assert!(parse_body_topology(
+            "body_7".into(),
+            &json!({ "solidCount": 1, "faceCount": u64::from(u32::MAX) + 1 }),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn body_id_round_trips_through_wire() {
         let b = BodyId(Uuid::from_u128(0x4a1));
         let wire = body_id_wire(b);
@@ -3879,7 +4014,8 @@ mod tests {
             {"refId": "op_5.input0", "snapshotId": 5012, "revision": 44,
              "bodyId": "body_3", "outcome": "unchanged", "elementId": "el_a"},
             {"refId": "op_5.input1", "snapshotId": 5012, "revision": 44,
-             "outcome": "needsRepair", "needsRepair": {"refId": "op_5.input1"}},
+             "outcome": "needsRepair", "needsRepair": {"refId": "op_5.input1",
+             "reason": "no-candidates", "candidates": []}},
         ]});
         assert!(validate_resolve_refs_result(&req, &good).is_ok());
 
@@ -3922,6 +4058,44 @@ mod tests {
         assert!(validate_resolve_refs_result(&req, &json!({}))
             .unwrap_err()
             .contains("missing resolutions array"));
+    }
+
+    #[test]
+    fn resolve_refs_rejects_wrong_or_unproven_body_provenance() {
+        use onecad_core::document::refs::{ElementKind, PrimaryRef};
+        let mut req = resolve_req(9, &["op.input0"]);
+        req.refs[0].element.primary = Some(PrimaryRef {
+            body: BodyId(Uuid::from_u128(3)),
+            element: ElementId::new("el_a"),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        });
+        let primary_body = body_id_wire(BodyId(Uuid::from_u128(3)));
+        let base = json!({"resolutions": [{
+            "refId": "op.input0", "snapshotId": 9, "revision": 4,
+            "bodyId": primary_body, "outcome": "unchanged", "elementId": "el_a"
+        }]});
+        assert!(validate_resolve_refs_result(&req, &base).is_ok());
+
+        let mut wrong = base.clone();
+        wrong["resolutions"][0]["bodyId"] = json!("body_4");
+        assert!(validate_resolve_refs_result(&req, &wrong)
+            .unwrap_err()
+            .contains("!= primary"));
+
+        let mut absent = base.clone();
+        absent["resolutions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("bodyId");
+        assert!(validate_resolve_refs_result(&req, &absent)
+            .unwrap_err()
+            .contains("omitted bodyId"));
+
+        absent["resolutions"][0]["outcome"] = json!("needsRepair");
+        absent["resolutions"][0]["needsRepair"] =
+            json!({"reason": "no-candidates", "candidates": []});
+        assert!(validate_resolve_refs_result(&req, &absent).is_ok());
     }
 
     #[test]
@@ -4075,7 +4249,7 @@ mod tests {
             "signatures": { "geometry": "aa", "bodyLifecycle": "bb", "referencedBinding": "cc" },
             "diagnostics": [ { "severity": "warning", "code": "X", "message": "m" } ]
         });
-        let step = parse_plan_step(&payload, 0).unwrap();
+        let step = parse_plan_step(&payload, 3).unwrap();
         assert_eq!(step.step_index, 3);
         assert!(
             matches!(step.body_events[0], BodyLifecycleEvent::Created { body } if body == BodyId(op))
@@ -4096,6 +4270,14 @@ mod tests {
     }
 
     #[test]
+    fn plan_step_requires_matching_integer_step_index() {
+        for payload in [json!({}), json!({"stepIndex": "3"})] {
+            assert!(parse_plan_step(&payload, 3).is_err());
+        }
+        assert!(parse_plan_step(&json!({"stepIndex": 3}), 2).is_err());
+    }
+
+    #[test]
     fn needs_repair_injects_step_index_and_keeps_scoring_version() {
         let payload = json!({
             "stepIndex": 5,
@@ -4104,7 +4286,7 @@ mod tests {
                 "scoringVersion": 1, "candidates": []
             } ]
         });
-        let step = parse_plan_step(&payload, 0).unwrap();
+        let step = parse_plan_step(&payload, 5).unwrap();
         assert_eq!(step.needs_repair.len(), 1);
         assert_eq!(step.needs_repair[0].step_index, 5);
         assert_eq!(step.needs_repair[0].scoring_version, Some(1));
@@ -4127,6 +4309,53 @@ mod tests {
         assert_eq!(p.stopped_reason, StoppedReason::Completed);
         assert_eq!(p.per_step[0].body_ids[0], BodyId(op));
         assert_eq!(p.history_prefix_hash.as_str(), "9c4d");
+    }
+
+    #[test]
+    fn plan_prepared_requires_known_typed_terminal_fields() {
+        let job = JobId(Uuid::from_u128(7));
+        let valid = json!({
+            "preparedSnapshotId": 1,
+            "lastValidStep": 0,
+            "stoppedReason": "completed",
+            "perStepResults": [{"stepIndex": 0, "status": "ok"}],
+            "historyPrefixHash": "hash"
+        });
+        let cases = [
+            ("stoppedReason", Value::Null),
+            ("stoppedReason", json!("unknown")),
+            ("lastValidStep", json!("0")),
+            ("perStepResults", Value::Null),
+        ];
+        for (field, replacement) in cases {
+            let mut malformed = valid.clone();
+            malformed[field] = replacement;
+            assert!(parse_plan_prepared(job, &malformed).is_err(), "{field}");
+        }
+        let mut missing = valid;
+        missing.as_object_mut().unwrap().remove("stoppedReason");
+        assert!(parse_plan_prepared(job, &missing).is_err());
+    }
+
+    #[test]
+    fn plan_prepared_requires_known_typed_per_step_fields() {
+        let job = JobId(Uuid::from_u128(7));
+        for row in [
+            json!({"status": "ok"}),
+            json!({"stepIndex": "0", "status": "ok"}),
+            json!({"stepIndex": 0}),
+            json!({"stepIndex": 0, "status": 7}),
+            json!({"stepIndex": 0, "status": "unknown"}),
+        ] {
+            let result = json!({
+                "preparedSnapshotId": 1,
+                "lastValidStep": 0,
+                "stoppedReason": "completed",
+                "perStepResults": [row],
+                "historyPrefixHash": "hash"
+            });
+            assert!(parse_plan_prepared(job, &result).is_err());
+        }
     }
 
     #[test]
@@ -4193,7 +4422,8 @@ mod tests {
         let job = JobId(Uuid::from_u128(1));
         let result = json!({
             "preparedSnapshotId": 1, "lastValidStep": null, "stoppedReason": "needsRepair",
-            "perStepResults": [], "historyPrefixHash": "e3b0"
+            "perStepResults": [{"stepIndex": 0, "status": "needsRepair"}],
+            "historyPrefixHash": "e3b0"
         });
         let p = parse_plan_prepared(job, &result).unwrap();
         assert_eq!(p.last_valid_step, None);
@@ -5130,6 +5360,11 @@ mod solver_wire_tests {
         let triangles = regions.regions[0].preview_triangles.as_ref().unwrap();
         assert_eq!(triangles.holes_subtracted, 1);
         assert_eq!(triangles.indices, vec![0, 1, 2]);
+
+        let mut v3_result = result;
+        v3_result["regionIdentityVersion"] = json!(3);
+        let v3 = parse_sketch_regions("sk_1", &v3_result, &sections, &tail).unwrap();
+        assert_eq!(v3.region_identity_version, 3);
     }
 
     #[test]

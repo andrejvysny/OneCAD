@@ -21,7 +21,7 @@ import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { ChipOverflow } from "@/features/toolbar/ChipOverflow";
 import type { BooleanMode, ExtrudeEndCondition } from "@/tools/modelTools/modelToolMachine";
 
-/** The armed-cluster boolean segments: New Body / Add / Cut (Wave 2). */
+/** Intersect stays hidden until its full real-worker/browser evidence gate passes. */
 const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
   { mode: "NewBody", label: "New Body", testid: "chip-bool-newbody" },
   { mode: "Add", label: "Add", testid: "chip-bool-add" },
@@ -203,6 +203,7 @@ const MODE_LABEL: Record<BooleanMode, string> = {
   NewBody: "New",
   Add: "Add",
   Cut: "Cut",
+  Intersect: "Intersect",
 };
 
 export interface ExtrudeOverflowProps {

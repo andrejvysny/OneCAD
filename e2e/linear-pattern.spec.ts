@@ -31,9 +31,11 @@ test("linear pattern: select body → P → Apply commits a Linear Pattern row",
   const chip = page.getByTestId("model-tool-chip");
   await expect(chip).toBeVisible();
   await expect(page.getByTestId("chip-pattern-axis-x")).toBeVisible();
-  await expect(page.getByTestId("pattern-count")).toHaveText(/^[0-9]+$/);
+  // U6: Total is an editable field now (typing reaches the worker maximum), so
+  // the count reads off `value` rather than text content.
+  await expect(page.getByTestId("pattern-count")).toHaveValue(/^[0-9]+$/);
 
-  await page.getByTestId("chip-apply").click();
+  await page.getByTestId("chip-confirm").click();
 
   await expect.poll(async () => await getFeatureLabels(page)).toContain("Linear Pattern");
   const after = await documentBodyIds(page);

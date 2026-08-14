@@ -520,6 +520,15 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
         }
     }
 
+    // Tier-A input preflight, the same one every other mutating op runs — and the
+    // one this op needs MOST: an `embedded`/`document` source is an untrusted BRep
+    // blob out of a package or a container, not something this worker built. The
+    // check sits BEFORE the transform so a null/degenerate shape is refused by
+    // name instead of surfacing as an OCCT exception from `BRepBuilderAPI_Transform`.
+    // A generator's own output goes through it too: cheap, and a generator whose
+    // table drifted is exactly as broken as a bad blob.
+    if (auto invalid = validate_modeling_input(solid, op_label, "source")) return *invalid;
+
     gp_Trsf trsf;
     if (!read_placement(params, op_label, trsf, err)) {
         return OpOutcome::fail("OP_FAILED", err);

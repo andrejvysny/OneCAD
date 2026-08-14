@@ -15,12 +15,13 @@
       "authoritativeHistory": "N/A",
       "historyAbsenceBehavior": "N/A",
       "validationTier": "solver consistency + region identity",
-      "toleranceEvidence": "gap repair magnitude recorded; max repairable gap is product policy (deferred: calibrated ceiling)",
+      "toleranceEvidence": "V3 physical-distance proximity and fail-closed discontinuities; separated/calibrated tolerance ceilings remain deferred",
       "cancellationPolicy": "pairwise intersection loop polls cancellation; over-ceiling sketches refuse with code",
-      "previewFidelity": "exact kernel regions; analytic curve fragments in V2",
-      "persistenceBehavior": "sketch entities and attachment round-trip byte-stable; region ids derive deterministically from geometry",
+      "previewFidelity": "exact kernel regions; V3 analytic fragments never polygonize",
+      "persistenceBehavior": "V1/V2 records round-trip byte-stable; new profiles persist regionIdentityVersion 3 and cell-v3 identity; no implicit migration",
       "userRecoveryBehavior": "over-constrained/drag errors are recoverable; the sketch session remains open",
-      "notes": "Exact fragmented BReps are P2 (regionIdentityVersion:2). Gap-repair ceiling deferred to Phase 2 tolerance policy."
+      "notes": "Region Identity V3 is new-authoring default. V1/V2 behavior and bytes stay frozen; explicit migration requires unique mapping.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -40,7 +41,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "profile ref and params round-trip; upstream sketch edits rebind by region id",
       "userRecoveryBehavior": "stale region id refuses cleanly; user can re-pick the profile",
-      "notes": "Covers Blind, ThroughAll, Symmetric, ToNext, ToFace, two-direction. ToFace/ToNext must prove the profile reaches the bounded face."
+      "notes": "Covers Blind, ThroughAll, Symmetric, ToNext, ToFace, two-direction. ToFace/ToNext must prove the profile reaches the bounded face.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -60,7 +62,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "targetBodyId and profile ref persist; upstream target edit rebinds target and profile",
       "userRecoveryBehavior": "empty/no-overlap result refuses with code; target remains untouched",
-      "notes": "Boolean-mode extrude uses the same publication policy as standalone Boolean Union."
+      "notes": "Boolean-mode extrude uses the same publication policy as standalone Boolean Union.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -80,7 +83,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "targetBodyId and profile ref persist; upstream target edit rebinds target and profile",
       "userRecoveryBehavior": "zero-solid result refuses; full-consumption deletion is a separate product decision",
-      "notes": "Phase 0 decided: zero-solid Cut is a recoverable refusal, not a deletion."
+      "notes": "Phase 0 decided: zero-solid Cut is a recoverable refusal, not a deletion.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -121,7 +125,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "draft angle persists; upstream edit may refuse if profile becomes unsupported",
       "userRecoveryBehavior": "unsupported profile (e.g. all curved walls) refuses with named code",
-      "notes": "Phase 0 requires applied-or-refused behavior for curved profiles."
+      "notes": "Phase 0 requires applied-or-refused behavior for curved profiles.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Revolve",
@@ -141,7 +146,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "profile ref, angle, and axis persist; upstream sketch edit rebinds",
       "userRecoveryBehavior": "stale axis/profile refuses cleanly",
-      "notes": "P3 added common shape publication audit."
+      "notes": "P3 added common shape publication audit.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Revolve",
@@ -161,7 +167,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "targetBodyId persists",
       "userRecoveryBehavior": "no overlap refuses with code",
-      "notes": ""
+      "notes": "",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Revolve",
@@ -181,7 +188,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "targetBodyId persists",
       "userRecoveryBehavior": "zero-solid result refuses",
-      "notes": ""
+      "notes": "",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Revolve",
@@ -243,7 +251,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "typed edge refs persist; upstream edit rebinds by identity/descriptor",
       "userRecoveryBehavior": "over-large radius and missing edges report structured diagnostics",
-      "notes": "P1A enforces co-body edge ownership before the ladder runs."
+      "notes": "P1A enforces co-body edge ownership before the ladder runs.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Chamfer",
@@ -263,7 +272,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "typed edge refs persist; equal-leg and two-distance modes round-trip",
       "userRecoveryBehavior": "short/curved edges and missing edges report diagnostics",
-      "notes": "P3 routes Chamfer through the same Tier B validator as Fillet."
+      "notes": "P3 routes Chamfer through the same Tier B validator as Fillet.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Shell",
@@ -283,7 +293,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "typed face refs persist alongside legacy bare ids; upstream edit rebinds",
       "userRecoveryBehavior": "cross-body selection refused before arming; invalid result refuses",
-      "notes": "Positive thickness only; multi-face and inward/outward policy deferred to P4."
+      "notes": "Positive thickness only; multi-face and inward/outward policy deferred to P4.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Boolean",
@@ -303,7 +314,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "target/tool BodyIds persist; upstream edits rebind by body id",
       "userRecoveryBehavior": "disjoint/touching cases handled per policy; split ranking is deterministic",
-      "notes": "Tool deletion happens only after successful result classification."
+      "notes": "Tool deletion happens only after successful result classification.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Boolean",
@@ -323,7 +335,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "target/tool BodyIds persist",
       "userRecoveryBehavior": "zero-solid result refuses with code; target and tool remain",
-      "notes": "Phase 0 decision: zero-solid Cut is a recoverable refusal."
+      "notes": "Phase 0 decision: zero-solid Cut is a recoverable refusal.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Boolean",
@@ -344,7 +357,7 @@
       "persistenceBehavior": "target/tool BodyIds persist",
       "userRecoveryBehavior": "disjoint result refuses with code",
       "uiExposure": "exposed",
-      "notes": "P4 standalone Intersect coverage landed: C++ fixtures (overlap/containment/identity/touching), Rust real-worker preview/commit/save-reopen/undo tests, and Playwright chip-to-feature-label flow." 
+      "notes": "P4 standalone Intersect coverage landed: C++ fixtures (overlap/containment/identity/touching), Rust real-worker preview/commit/save-reopen/undo tests, and Playwright chip-to-feature-label flow."
     },
     {
       "operation": "LinearPattern",
@@ -353,19 +366,20 @@
       "inputTopLevelShapes": "one source solid",
       "requiresExactlyOneSolid": true,
       "emptyResultSemantics": "refuse if count or spacing produces no instance",
-      "multiSolidResultSemantics": "legacy V1 publishes one source-inclusive result body under the source BodyId",
-      "bodyLifecycle": "source modified in place",
-      "bodyIdPolicy": "source BodyId preserved",
+      "multiSolidResultSemantics": "legacy compatibility aggregate/compound body body_<opId>; disconnected result allowed",
+      "bodyLifecycle": "source unchanged; aggregate created",
+      "bodyIdPolicy": "source preserved; aggregate body_<opId> created",
       "authoritativeHistory": "BRepAlgoAPI_Fuse / compound builder history",
       "historyAbsenceBehavior": "source body modified as a whole; no per-instance children",
-      "validationTier": "Tier A",
+      "validationTier": "legacy compatibility; no V2 connected-solid Tier B",
       "toleranceEvidence": "BRepCheck + volume recorded",
       "cancellationPolicy": "count and cumulative fuse ceiling; loop polls cancellation",
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "legacy records without resultPolicyVersion replay V1",
       "userRecoveryBehavior": "invalid spacing/count refuses with code",
       "resultPolicyVersion": "V1 (absent)",
-      "notes": "V1 retained for legacy replay."
+      "notes": "V1 retained for legacy replay.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "LinearPattern",
@@ -386,7 +400,8 @@
       "persistenceBehavior": "resultPolicyVersion:2 persists; count edits remove tail children only",
       "userRecoveryBehavior": "disconnected fuse refuses PATTERN_DISJOINT_RESULT",
       "resultPolicyVersion": "V2",
-      "notes": "P3 implemented V2 fused policy."
+      "notes": "P3 implemented V2 fused policy.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "LinearPattern",
@@ -407,7 +422,8 @@
       "persistenceBehavior": "resultPolicyVersion:2 persists; children stable across count edits and reopen",
       "userRecoveryBehavior": "count reduction removes tail children; suppression removes children only",
       "resultPolicyVersion": "V2",
-      "notes": "P3 V2 source-preserving lineage."
+      "notes": "P3 V2 source-preserving lineage.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "CircularPattern",
@@ -416,19 +432,20 @@
       "inputTopLevelShapes": "one source solid",
       "requiresExactlyOneSolid": true,
       "emptyResultSemantics": "refuse if angle/count produces no instance",
-      "multiSolidResultSemantics": "legacy V1 publishes one source-inclusive result body under the source BodyId",
-      "bodyLifecycle": "source modified in place",
-      "bodyIdPolicy": "source BodyId preserved",
+      "multiSolidResultSemantics": "legacy compatibility aggregate/compound body body_<opId>; disconnected result allowed",
+      "bodyLifecycle": "source unchanged; aggregate created",
+      "bodyIdPolicy": "source preserved; aggregate body_<opId> created",
       "authoritativeHistory": "BRepAlgoAPI_Fuse / compound builder history",
       "historyAbsenceBehavior": "source body modified as a whole; no per-instance children",
-      "validationTier": "Tier A",
+      "validationTier": "legacy compatibility; no V2 connected-solid Tier B",
       "toleranceEvidence": "BRepCheck + volume recorded",
       "cancellationPolicy": "count and cumulative fuse ceiling; loop polls cancellation",
       "previewFidelity": "exact kernel BRep; partial sweep uses angle/count (P0 parity)",
       "persistenceBehavior": "legacy records without resultPolicyVersion replay V1",
       "userRecoveryBehavior": "invalid angle/count refuses with code",
       "resultPolicyVersion": "V1 (absent)",
-      "notes": "V1 retained for legacy replay."
+      "notes": "V1 retained for legacy replay.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "CircularPattern",
@@ -449,7 +466,8 @@
       "persistenceBehavior": "resultPolicyVersion:2 persists",
       "userRecoveryBehavior": "disconnected fuse refuses PATTERN_DISJOINT_RESULT",
       "resultPolicyVersion": "V2",
-      "notes": "P3 implemented V2 fused policy."
+      "notes": "P3 implemented V2 fused policy.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "CircularPattern",
@@ -470,7 +488,8 @@
       "persistenceBehavior": "resultPolicyVersion:2 persists; children stable across count edits and reopen",
       "userRecoveryBehavior": "count reduction removes tail children; suppression removes children only",
       "resultPolicyVersion": "V2",
-      "notes": "P3 V2 source-preserving lineage."
+      "notes": "P3 V2 source-preserving lineage.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "MirrorBody",
@@ -596,7 +615,8 @@
       "persistenceBehavior": "typed host face and point persist; legacy bare id fallback",
       "userRecoveryBehavior": "cross-body host ref refused; stale promotion leaves pick mode",
       "resultPolicyVersion": "V1 legacy multi-solid residual accepted; new-record policy deferred",
-      "notes": "P1A enforces host face body equals target body. P3 leaves legacy one-body multi-solid residual versioned."
+      "notes": "P1A enforces host face body equals target body. P3 leaves legacy one-body multi-solid residual versioned.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "OffsetFace",
@@ -723,6 +743,48 @@
       "userRecoveryBehavior": "N/A",
       "uiExposure": "unsupported",
       "notes": "Typed but unsupported; out of roadmap scope."
+    },
+    {
+      "operation": "PlaceComponent",
+      "mode": "generator or blob source, optional mate",
+      "supportStatus": "supported",
+      "inputTopLevelShapes": "none for a generator source; one baked solid for an embedded/document blob source",
+      "requiresExactlyOneSolid": true,
+      "emptyResultSemantics": "refuse; a component that bakes to no solid is a broken package, not an empty placement",
+      "multiSolidResultSemantics": "refuse at the BAKE (ExportGeometry checks by RESULT, not IsDone) so a multi-solid component can never be placed",
+      "bodyLifecycle": "created",
+      "bodyIdPolicy": "worker-minted deterministic body_<opId>, adopted by Rust at AcceptPrepared like every other NewBody op (decision D1)",
+      "authoritativeHistory": "none — the placed solid is transformed, not built from a document input, so there is no upstream lineage to carry",
+      "historyAbsenceBehavior": "not applicable; the mate resolves against the TARGET body's ladder (resolve_mate_reseat), never against the placed body",
+      "validationTier": "Tier A",
+      "toleranceEvidence": "publication_decision + single_solid_policy on the baked shape; exact volumes pinned per seeded family in test_component_ops.cpp",
+      "cancellationPolicy": "single build + transform; no long-running loop to cancel",
+      "persistenceBehavior": "source ref, params, frozen placement and mate (incl. selfFrame) round-trip; a document/embedded source keeps its blob in the container",
+      "previewFidelity": "exact kernel BRep via PreviewOp; the FE ghost (placementSolver.ts) is a 1:1 port of ComponentMateSolver.cpp so preview and commit seat identically",
+      "userRecoveryBehavior": "a mate that cannot re-seat emits planStep.needsRepair[] and the body STILL publishes at its frozen placement — the repair is offered, the geometry is never lost (SCHEMA §7.2 mate carve-out)",
+      "notes": "Component Library WP-0.2 / spec §3.1. The only op that publishes an ok row carrying needsRepair[]; see the §7.2 carve-out. Re-baking a document source on a parameter change is setComponentParams (WP-F1.3), not a second PlaceComponent.",
+      "uiExposure": "exposed"
+    },
+    {
+      "operation": "DetachComponent",
+      "mode": "drop library identity, keep geometry",
+      "supportStatus": "supported",
+      "inputTopLevelShapes": "the placed component's own cached solid",
+      "requiresExactlyOneSolid": true,
+      "emptyResultSemantics": "not reachable; the record it replaces already published exactly one solid",
+      "multiSolidResultSemantics": "not reachable; same reason",
+      "bodyLifecycle": "preserved — the SAME body id and the same geometry survive the swap",
+      "bodyIdPolicy": "unchanged; the record loses its library identity, the body keeps its id",
+      "authoritativeHistory": "none; the shape is carried through untouched",
+      "historyAbsenceBehavior": "not applicable — nothing is rebuilt, so nothing needs re-binding",
+      "validationTier": "Tier A",
+      "toleranceEvidence": "volume equality across the swap pinned by detach_component_preserves_body_and_volume_across_the_swap",
+      "cancellationPolicy": "no kernel work beyond carrying the cached shape; nothing to cancel",
+      "persistenceBehavior": "the record persists without componentId/version/mate; the blob it no longer references is not re-emitted",
+      "previewFidelity": "no preview — it is a metadata swap, not a modeled edit",
+      "userRecoveryBehavior": "irreversible only through undo; there is no re-attach op, which is why it is undo-backed like every other transaction",
+      "notes": "Component Library WP-1.2 / spec §3.4. Backend + service seam complete and proven; NO UI entry point exists yet and the mock lane throws, so uiExposure is hidden — see the matching coverage row.",
+      "uiExposure": "hidden"
     }
   ]
 }

@@ -487,7 +487,7 @@ fn revolve_record(
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(region),
-            region_identity_version: None,
+            region_identity_version: (!region.is_empty()).then_some(3),
             extra: Default::default(),
         }),
         angle_deg: Scalar::new(angle_deg),

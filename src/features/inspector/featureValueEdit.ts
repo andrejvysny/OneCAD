@@ -14,6 +14,7 @@
  * makes a row show a number it cannot commit.
  */
 import { createClient } from "@/ipc/client";
+import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
 import { updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
 import type { FeatureMeta } from "@/stores/documentStore";
 import type { ModelTool } from "@/stores/toolStore";
@@ -139,12 +140,33 @@ export async function commitFeatureValue(
         [field]: expr != null ? { value, expr } : { value },
       }),
     );
-    applyEditResult(res);
-    if (res.errorMessage) {
-      errorHint(`Edit failed: ${res.errorMessage}`);
+    /*
+     * VERDICT FIRST, hydrate second — `errorMessage` alone is not the failure
+     * signal. A regen that publishes the rest of the timeline while THIS record
+     * fails comes back with `terminal: "failed"` + `failedSteps` naming it and no
+     * `errorMessage` at all (the U1 correlation in `tauriClient.applyOperation`),
+     * so the old check hydrated that and reported success — a `=name` binding
+     * that never took would have rendered as a bound row. Same shape as
+     * `treeActions.ts`, which closed this hole for the metadata lane.
+     *
+     * `needsRepair` and `noop` KEEP the record (`keepsRecord`), so they are
+     * successes here: the edit landed, and a downstream step needing repair is a
+     * separate condition the repair panel owns.
+     */
+    const outcome = classifyRegen(res);
+    const reason = failureReason(outcome);
+    if (reason !== null) {
+      // No hydrate on the failure path: the projection in the store still holds
+      // the value the backend actually kept, which is the pre-edit one.
+      errorHint(`Edit failed: ${reason}`);
       return false;
     }
-    viewportStore.getState().setStatusHint("Feature updated");
+    applyEditResult(res);
+    viewportStore
+      .getState()
+      .setStatusHint(
+        outcome.kind === "needsRepair" ? "Feature updated — downstream needs repair" : "Feature updated",
+      );
     return true;
   } catch (e) {
     errorHint(`Edit failed: ${e instanceof Error ? e.message : String(e)}`);

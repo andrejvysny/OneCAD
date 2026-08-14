@@ -54,8 +54,8 @@ export function clampDraftAngle(deg: number): number {
   return Math.max(-DRAFT_ANGLE_LIMIT_DEG, Math.min(DRAFT_ANGLE_LIMIT_DEG, deg));
 }
 
-/** Boolean fusion mode the extrude/revolve commit carries (Wave 2 UI). */
-export type BooleanMode = "NewBody" | "Add" | "Cut";
+/** Boolean fusion mode the extrude/revolve commit carries (SCHEMA §7.3). */
+export type BooleanMode = "NewBody" | "Add" | "Cut" | "Intersect";
 
 /**
  * The boolean default an arm is SEEDED with (SKETCH-ON-FACE HOST-BOOLEAN).
@@ -820,6 +820,10 @@ export type BooleanEvent =
   | { kind: "start"; targetBodyId: string }
   | { kind: "pickTool"; toolBodyId: string }
   | { kind: "setOp"; op: BooleanOperation }
+  // U2: `confirm` is the shared commit-event name across every model reducer.
+  // `apply` is the pre-U2 alias, kept accepted so a stale caller cannot silently
+  // become a no-op; both land on the same transition.
+  | { kind: "confirm" }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -846,6 +850,7 @@ export function booleanStep(s: BooleanFsm, e: BooleanEvent): BooleanStep {
     case "setOp":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, op: e.op }, effect: "none" };
+    case "confirm":
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
@@ -1167,6 +1172,10 @@ export type LinearPatternEvent =
   | { kind: "setAxis"; axis: PatternAxis }
   | { kind: "setCount"; count: number }
   | { kind: "setSpacing"; spacing: number }
+  // U2: `confirm` is the shared commit-event name across every model reducer.
+  // `apply` is the pre-U2 alias, kept accepted so a stale caller cannot silently
+  // become a no-op; both land on the same transition.
+  | { kind: "confirm" }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -1179,9 +1188,37 @@ export interface LinearPatternStep {
 export const DEFAULT_PATTERN_COUNT = 3;
 export const DEFAULT_LINEAR_SPACING = 20;
 
+/*
+ * ONE pattern-count range policy across TS / Rust / worker (U6).
+ *
+ * There used to be three silent ranges: the chip stepper clamped 2–12, the
+ * worker accepts 2–128 (`PatternOp.cpp kMaxPatternCount`), and nothing said so.
+ * A user who wanted 20 instances got 12 with no explanation.
+ *
+ * The approved policy keeps both:
+ *   - the STEPPER stays 2–12, so the common case stays one click per instance;
+ *   - TYPED entry reaches the worker maximum.
+ * Out-of-range typed input is REFUSED, never clamped — a clamp would desynchronize
+ * the committed count from the number the user approved in the preview.
+ */
+export const PATTERN_COUNT_MIN = 2;
+/** How far the +/− buttons go. Typing reaches {@link PATTERN_COUNT_MAX}. */
+export const PATTERN_STEPPER_MAX = 12;
+/** The normative authoring maximum — `PatternOp.cpp kMaxPatternCount`. */
+export const PATTERN_COUNT_MAX = 128;
+
+/** Seed values only: a stored count is already valid, so this is a guard against
+ *  a malformed record rather than an input policy. */
 function clampCount(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_PATTERN_COUNT;
-  return Math.max(2, Math.min(12, Math.round(n)));
+  return Math.max(PATTERN_COUNT_MIN, Math.min(PATTERN_COUNT_MAX, Math.round(n)));
+}
+
+/** An authored count, or `null` when it is out of range (refuse, never clamp). */
+export function acceptCount(n: number): number | null {
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  return rounded >= PATTERN_COUNT_MIN && rounded <= PATTERN_COUNT_MAX ? rounded : null;
 }
 
 export function linearPatternInit(): LinearPatternFsm {
@@ -1205,12 +1242,17 @@ export function linearPatternStep(s: LinearPatternFsm, e: LinearPatternEvent): L
     case "setAxis":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, axis: e.axis }, effect: "ghost" };
-    case "setCount":
+    case "setCount": {
       if (s.phase !== "armed") return { state: s, effect: "none" };
-      return { state: { ...s, count: clampCount(e.count) }, effect: "ghost" };
+      // Out of range ⇒ no state change and no preview, so the chip can say what
+      // the range is while the field keeps what the user typed.
+      const count = acceptCount(e.count);
+      return count === null ? { state: s, effect: "none" } : { state: { ...s, count }, effect: "ghost" };
+    }
     case "setSpacing":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, spacing: e.spacing }, effect: "ghost" };
+    case "confirm":
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
@@ -1250,6 +1292,10 @@ export type CircularPatternEvent =
   | { kind: "setAxis"; axis: PatternAxis }
   | { kind: "setCount"; count: number }
   | { kind: "setAngle"; angle: number }
+  // U2: `confirm` is the shared commit-event name across every model reducer.
+  // `apply` is the pre-U2 alias, kept accepted so a stale caller cannot silently
+  // become a no-op; both land on the same transition.
+  | { kind: "confirm" }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -1295,12 +1341,15 @@ export function circularPatternStep(s: CircularPatternFsm, e: CircularPatternEve
     case "setAxis":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, axis: e.axis }, effect: "ghost" };
-    case "setCount":
+    case "setCount": {
       if (s.phase !== "armed") return { state: s, effect: "none" };
-      return { state: { ...s, count: clampCount(e.count) }, effect: "ghost" };
+      const count = acceptCount(e.count);
+      return count === null ? { state: s, effect: "none" } : { state: { ...s, count }, effect: "ghost" };
+    }
     case "setAngle":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, angle: clampCircularAngle(e.angle) }, effect: "ghost" };
+    case "confirm":
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
@@ -1332,6 +1381,10 @@ export interface MirrorFsm {
 export type MirrorEvent =
   | { kind: "arm"; bodyId?: string; plane?: MirrorPlane; planePoint?: [number, number, number] }
   | { kind: "setPlane"; plane: MirrorPlane }
+  // U2: `confirm` is the shared commit-event name across every model reducer.
+  // `apply` is the pre-U2 alias, kept accepted so a stale caller cannot silently
+  // become a no-op; both land on the same transition.
+  | { kind: "confirm" }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -1361,6 +1414,7 @@ export function mirrorStep(s: MirrorFsm, e: MirrorEvent): MirrorStep {
     case "setPlane":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, plane: e.plane }, effect: "ghost" };
+    case "confirm":
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
@@ -1479,6 +1533,10 @@ export type TransformEvent =
   | { kind: "alignApply"; translate: Vec3; angleDeg: number; rotAxisVec: Vec3 }
   /** Esc during align: step BACK one pick, and off the flow from the first. */
   | { kind: "alignCancel" }
+  // U2: `confirm` is the shared commit-event name across every model reducer.
+  // `apply` is the pre-U2 alias, kept accepted so a stale caller cannot silently
+  // become a no-op; both land on the same transition.
+  | { kind: "confirm" }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -1668,6 +1726,7 @@ export function transformStep(s: TransformFsm, e: TransformEvent): TransformStep
         state: { ...s, alignPhase: s.alignPhase === "pickDest" ? "pickMoving" : null },
         effect: "ghost",
       };
+    case "confirm":
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };

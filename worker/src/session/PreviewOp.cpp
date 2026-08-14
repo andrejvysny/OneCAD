@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "protocol/Limits.h"
 #include "session/PlanExecutor.h"
 #include "session/ScratchJob.h"
 #include "tess/MeshHandle.h"
@@ -167,14 +168,50 @@ void classify_body_events(const std::vector<BodyEvent>& events,
     }
 }
 
+// Coarser tier, or empty when `lod` is already the coarsest (SCHEMA §7.6).
+std::string coarser_lod(const std::string& lod) {
+    if (lod == "fine") return "medium";
+    if (lod == "medium") return "coarse";
+    return {};
+}
+
 std::string append_mesh(const std::string& body_id, const BodyRecord& body,
                         const std::string& lod, std::uint64_t snapshot_id,
                         const elementmap::ElementMapPartition& partition,
                         Envelope& response, json& meshes) {
-    tess::BodyMesh mesh = tess::tessellate_body(
-        body.geom, body_id, lod, /*include_edges=*/true, &partition, &body.face_colors);
-    if (!mesh.ok || mesh.triangle_count == 0) {
-        return "PreviewOp: changed body produced no preview mesh: " + body_id;
+    /*
+     * SCHEMA §5.2/§6: a control response may not exceed the transport limits this
+     * worker ADVERTISES in its hello. `ExecutePlan`'s `attach_tessellate` has
+     * obeyed them since the publication-hardening pass; this lane inlined its blob
+     * with no ceiling at all, and it is the lane the component library drives
+     * (`library.rs` previews every catalog card at `Lod::Medium`, on generator
+     * output that can carry modeled helical threads — the densest solid here).
+     *
+     * DEGRADE rather than refuse. A preview is an illustration: a coarser tier is
+     * a perfectly good answer, while an error would blank a catalog card for a
+     * component that places fine. Only when even `coarse` cannot fit does this
+     * fail, and then it says which limit and by how much rather than emitting an
+     * over-budget frame the client is entitled to treat as a protocol violation.
+     */
+    std::string tier = lod;
+    tess::BodyMesh mesh;
+    for (;;) {
+        mesh = tess::tessellate_body(body.geom, body_id, tier, /*include_edges=*/true, &partition,
+                                     &body.face_colors);
+        if (!mesh.ok || mesh.triangle_count == 0) {
+            return "PreviewOp: changed body produced no preview mesh: " + body_id;
+        }
+        const std::uint64_t blob = mesh.blob.size();
+        const bool fits = blob <= protocol::kChunkSize &&
+                          response.out_bin.size() + blob <= protocol::kInitialBulkCredit;
+        if (fits) break;
+        const std::string next = coarser_lod(tier);
+        if (next.empty()) {
+            return "PreviewOp: preview mesh for " + body_id + " is " + std::to_string(blob) +
+                   " bytes at the coarsest LOD, over the advertised chunkSize " +
+                   std::to_string(protocol::kChunkSize) + " / remaining bulk credit";
+        }
+        tier = next;
     }
     const std::uint64_t offset = response.out_bin.size();
     response.out_bin.insert(response.out_bin.end(), mesh.blob.begin(),
@@ -182,8 +219,10 @@ std::string append_mesh(const std::string& body_id, const BodyRecord& body,
     const std::string section = "mesh:" + body_id;
     response.bin.push_back(
         protocol::BinSection{section, offset, mesh.blob.size()});
+    // `tier`, not `lod`: the handle must name the LOD the bytes were actually
+    // built at, or a degraded preview would claim a fidelity it does not have.
     meshes.push_back(tess::mesh_handle_json(
-        body_id, section, lod, mesh.blob.size(), mesh.triangle_count,
+        body_id, section, tier, mesh.blob.size(), mesh.triangle_count,
         hashing::sha256_hex(mesh.blob.data(), mesh.blob.size()), snapshot_id));
     return {};
 }

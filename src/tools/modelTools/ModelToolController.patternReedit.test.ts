@@ -307,7 +307,7 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     await controller.editLinearPatternFeature("feat-lp");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(clientMock.applyOperation).toHaveBeenCalledWith(
@@ -345,7 +345,7 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     await controller.editLinearPatternFeature("feat-lp");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(clientMock.applyOperation).toHaveBeenCalledWith(
@@ -371,7 +371,7 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     await controller.editLinearPatternFeature("feat-lp");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(toolStore.getState().modelTool).toBe("select");
@@ -395,7 +395,7 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     await controller.editCircularPatternFeature("feat-cp");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(clientMock.applyOperation).toHaveBeenCalledWith(
@@ -422,7 +422,7 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     await controller.editMirrorFeature("feat-mi");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(clientMock.applyOperation).toHaveBeenCalledWith(
@@ -462,7 +462,7 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
 
     await controller.editLinearPatternFeature("feat-lp");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     const selectedIds = selectionStore.getState().selected.map((r) => r.id);

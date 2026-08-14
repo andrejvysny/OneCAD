@@ -1,3 +1,28 @@
+## BRANCHES MERGED (2026-08-14) — one trunk again
+
+`OneCAD-Component-Library` and `master` have merged. Every section below belongs
+to one of the two programs that were running in parallel until now — the
+Component Library + document variables on one side, the modeling-UX unification
+U0–U7 + publication/identity-V3 hardening + the data-integrity audit on the
+other. Both are live; neither supersedes the other.
+
+Three things changed that a reader of the older sections would not expect:
+
+- **`PlaceComponent`, `SetComponentParams` and `DetachComponent` now return an
+  `ApplyOperationResult`**, not `void`. They go through `applyEdit` like every
+  other mutating command, so callers must read the terminal instead of treating a
+  resolved promise as success.
+- **A preview mesh degrades its LOD rather than exceeding the transport limits.**
+  `PreviewOp` was the last inline-mesh producer with no ceiling; a handle now
+  reports the tier the bytes were actually built at, which may be coarser than
+  the one requested.
+- **SCHEMA §7.2 carries an explicit mate carve-out.** A published `ok` step may
+  carry `planStep.needsRepair[]` when — and only when — the repair target is a
+  mate. This was always the behavior; only the prose was missing.
+
+Still exempt from the result-truth doctrine: `upsertVariable`, `removeVariable`,
+`replaceComponent`. See `TODO.md` § MERGE for why and the two ways out.
+
 ## COMPONENT LIBRARY — CATALOG TRIMMED TO ONE FAMILY (2026-08-13, CL-TRIM)
 
 **Read this before anything below that counts packages.** The shipped catalog
@@ -515,32 +540,135 @@ Not started: WP-1.5 (snap solver + `PreviewOp` drag ghost — the largest remain
 Next action: WP-1.5. See `HANDOFF.md` new top entry for full resume detail.
 # Current State
 
-Last verified: 2026-08-13 15:05
+Last verified: 2026-08-14 16:20 — UX tranche committed (`0e58185`); data-integrity audit run, five findings recorded, no fix landed
 
-- **Branch:** `master`, **14 commits ahead of `origin/master` — nothing pushed.** One of
-  them (`15e798a`, a Render-module design stub) is the CONCURRENT session's, landed mid-gate.
-- **This session:** Track A complete (`772b3d2` A1 · `6b08e27` A2 · `4b62965` A3 · `5723ab3`
-  A4/A5/A6), then plan items **C1** (`1c76c41`) and **C2**.
-- **Build/test at the C2 gate:** `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → **1082 / 0** ·
-  `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` → clean ·
-  `ctest --test-dir worker/build` → **119/119** (unchanged by C1/C2, worker untouched) ·
-  `bun run test` → **249 files / 4173 tests** · `bunx tsc --noEmit` + `bun run build` → clean ·
-  both modeling verifiers → pass · verifier negative controls → **12/12** ·
-  targeted Playwright (preview lanes, both browsers, retries 0) → 20/20.
-  Full Playwright suite still not re-run (plan item C6); kernelbench not implicated.
-- **Key decisions:** the Revolve body-edge axis stays **UI-hidden** · the SCHEMA §7.5 `ResolveRefs`
-  snapshot echo was **implemented** rather than written around, and Rust validates it fail-closed ·
-  `documentRevision` stays Rust-owned in the repair DTO (D4) · corpus cases are **enriched with
-  executable geometry** read back out of their own frozen numbers, rather than moving the geometry
-  into Rust or leaving the corpus 1-of-9 live.
-- **Three live defects fixed by mandated tests this session** (none was evidence debt): preview
-  failure tracked globally blocked commits after a recovered secondary region; `ResolveRefs`
-  results were cached under a key Rust minted itself; and `needsRepair` was declared but never
-  produced (A1).
-- **Blockers / open:**
-  - Full Playwright suite still not green-verified since the P4 landings (plan item C6).
-  - Six corpus cases still carry an explicit unsupported reason (C2 § below names each).
-  - A second session, `onecad-library-content-impl`, shares this working tree.
+## NOW — DATA-INTEGRITY AUDIT (session 9, uncommitted)
+
+- **Question:** can OneCAD lose or corrupt a user's document? Eight probes over the persistence
+  lane; full findings table in `TODO.md` § DATA-INTEGRITY AUDIT.
+- **Safe, with evidence:** crash recovery exists (30 s debounced autosave + pid marker + one
+  persistence lane) · the container write is atomic (temp → fsync → rename → parent fsync, with a
+  crash-simulation test) · the import-blob carrier is insert-only and the undo stack is memory-only,
+  so no unreplayable-record window · a save snapshots under the runtime lock · unknown module state
+  round-trips verbatim · every `EditCommand` has a real inverse.
+- **Five findings, none fixed:** DI-1 a recovered document is unprotected against the next crash
+  (recovery consumes the marker, and discovery is marker-keyed) · DI-2 `recover_document` never
+  ticks the autosave loop · DI-3 `promote_selection` / `prepare_edge_op` persist state with no tick
+  and no dirty flag, so close skips the prompt · DI-4 authored face colours reopen as data but stop
+  being paintable · DI-5 STEP export drops XCAF names/colours.
+- **Two probes committed as executable evidence:** `src-tauri/tests/face_color_reopen.rs` (real
+  worker, save → fresh worker → reopen; mutation-proved) and
+  `io::recovery::tests::an_autosave_whose_marker_was_consumed_is_not_offered`.
+- **Ledger corrections:** VF-M6 was fixed 2026-08-08 and never ticked; the W5 seam is latent, not
+  live; MC-R8 is closed (`19088d0`) and MC-R9 was missing from the residual register entirely. The
+  register now carries an explicit `status` field instead of closure buried in prose.
+- **Blockers:** none. Which findings get fixed is a product call, not a defect queue.
+
+## Previous — MODELING UX UNIFICATION (sessions 8–9)
+
+- **Branch:** `master`, **in sync with `origin/master` at `4ac8565`** (session 8's "2 ahead,
+  nothing pushed" is stale: `cf6273d`/`dc4bd5e` plus `9559b8f`, `19088d0`, `f9df6b7`, `4ac8565`
+  were all pushed by 2026-08-14 09:22, per `git reflog show origin/master`). Working tree
+  **dirty**: 43 modified files + 5 new test files + the untracked `UX/` source documents.
+  **+2513 / −385.** The U0–U7 program itself is still uncommitted.
+- **What landed:** all eight packages of the delta program in
+  `~/.claude/plans/bright-munching-oasis.md` — U0 (red evidence + two new frozen-contract
+  columns), U1 (result truth), U2 (one confirmation grammar), U3 (live numeric contract),
+  U4 (OperationHUD + result summaries), U5 (gizmo arcs + collision-safe HUD), U6 (tool entry,
+  roles, ranges, unique body labels), U7 (repair + sketch truth). Per-package detail, evidence
+  and every deliberate omission are recorded in `TODO.md` § MODELING UX UNIFICATION.
+- **Gates measured this session:**
+  - `bunx tsc --noEmit` clean · `bun run build` clean
+  - `bun run test` **255 files / 4250 tests, all green** (baseline was 250 / 4182)
+  - worker Release build + stage · `ctest --test-dir worker/build` **119/119**
+  - `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D warnings` clean
+  - `ONECAD_WORKER_PATH=… ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`
+    **810 passed / 0 failed over 69 targets**
+  - coverage + contract verifiers pass · hex gate empty
+  - Playwright, retries 0: **chromium 200/200 · webkit 200/200** at the U4, U6 and U7 gates
+- **U5's browser lanes: RUN AND GREEN (session 9, 2026-08-14).** `chromium 200/200` in 14.2 min
+  (`E2E_PORT=4191`) and `webkit 200/200` in 8.6 min (`E2E_PORT=4193`), retries 0, one lane at a
+  time. That was the program's last owed gate — U5 changed gizmo geometry, screen scale and chip
+  anchoring, and only the browser can check those. No failures, so no triage; MC-R8/MC-R9 did not
+  reappear.
+- **Blockers:** none. Every gate this program owes is now measured green.
+
+### Deliberate omissions (each with its reason recorded in TODO.md)
+
+- **D6's discriminated `ToolEditorDescriptor` union** — deferred a second time. No red test forces
+  it, it is pure internal type-safety, and the store gained four fields this session, so a union
+  rewrite would land on a moving target. The behavioural half of D6 shipped in U2/U3/U4.
+- **Shell's thickness drag handle** — a handle needs a direction and the shell arm has none
+  (`EntityRef.anchor` carries no normal). Guessing one is worse than omitting it. Needs a face
+  normal on the prepare response: a wire change with its own gate.
+- **U8 typed face/datum/axis references** — never in scope for this program; still queued.
+- **OffsetFace's shared publication gate has no end-to-end negative control** and none is claimed;
+  its own postconditions already cover every Tier A check but the audit-error path.
+
+### Residuals opened/carried
+
+- **MC-R8** — **CLOSED**, root-caused and fixed in `19088d0` (the debounced auto-fit moved the
+  camera under the boolean spec's unsettled screen-point probe; one `waitForCameraSettled` at the
+  top of `findBodyScreenPoint`). Not a projection-push race, which was the earlier guess.
+- **MC-R9** (NEW) — `e2e/revolve-commit.spec.ts:111` failed in ONE loaded full chromium run
+  (19 min vs the usual 14) and passes in isolation and on the clean re-run. Same signature class.
+- Manual Tauri smoke for this program has **not** been run.
+
+## Previous — modeling-correctness roadmap (session 7)
+
+Last verified: 2026-08-13 23:10 — ladder run, tranche committed, MC-R7 closed on both browser lanes
+
+- **Branch:** `master`, 2 commits ahead of `origin/master` (`cf6273d` code +
+  `dc4bd5e` docs), **dirty** (the MC-R7 fix + these doc updates). Nothing pushed.
+- **MC-R7 CLOSED.** Commit `c7df7c8` removed the click-away commit on purpose (D2)
+  and the frozen contract pins `clickAwayPolicy: "cancel"`; the e2e spec and the
+  arm hint text were never updated, so both were asserting/promising a gesture that
+  no longer exists. `e2e/extrude-commit-gesture.spec.ts` now asserts click-away does
+  NOT commit and leaves the tool armed;
+  `src/tools/modelTools/ModelToolController.ts` `armHintFor` no longer promises it.
+- **Browser lanes, retries 0, measured 2026-08-13:** chromium **200/200** (rerun),
+  webkit **200/200**. The first chromium run of the pair was 199/1 on
+  `e2e/boolean-preview.spec.ts:356` (Intersect chip): `previewOwner` never became
+  `"boolean"` inside the 20 s lane poll, so the boolean lane never opened. That spec
+  is 9/9 in isolation with `--repeat-each=3` and 200/200 on the immediate full rerun,
+  and the signature matches the boolean-preview projection-push race already bisected
+  to before the Platform refactor. Recorded as **MC-R8**, unclassified
+  nondeterminism — do not add a retry to hide it.
+- **Use `E2E_PORT`** for any lane run: a concurrent session in
+  `OneCAD-Component-Library` holds 4177, and a stray node process was found holding
+  4187. The runs above used 4191 / 4193.
+- **Blockers:** none.
+
+- **Baseline:** `master` at `9933689`, one commit ahead of `origin/master`; no commit/push/pull
+  authorized. All status below distinguishes implementation from gates.
+- **Implemented now:** strict plan-stream validation before `AcceptPrepared`; release-only bundled
+  worker resolution plus embedded SHA/protocol/OCCT manifest verification; prepared meshes bounded
+  by advertised transport limits; strict ResolveRefs revision/body provenance; Modified+Generated
+  history union; import exact-tie refusal; Region Identity V3 new authoring with frozen V1/V2;
+  structured publication evidence/timings; Tier-A modeling-input preflight; explicit
+  `(operation,mode,supportStatus,uiExposure)` coverage checks; Extrude/Revolve Intersect hidden;
+  corpus 9/9; case-v2 Boolean foundation; feature-gated real-Tauri composition lane.
+- **Full gate ladder, run end to end 2026-08-13 (local mac, unsandboxed):** worker Release build +
+  restaged sidecar/manifest, `ctest` **119/119** · `cargo fmt`/`clippy -D warnings` clean ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **767/767 over 60 targets** ·
+  real-worker corpus **9 of 9, zero skips** · `cargo check --features tauri-e2e` clean ·
+  `npx tsc --noEmit` 0 · `bun run build` clean · Vitest **250 files / 4182 tests** ·
+  coverage + contract verifiers pass, negative controls **15/15** · hex gate empty ·
+  kernelbench T0 both backends **136/136**, 0 regressions, semantics baseline unmoved ·
+  Playwright retries 0 **chromium 199/1**, **webkit 199/1** — both single failures were MC-R7,
+  now fixed and re-measured at **chromium 200/200 · webkit 200/200** (see the top block).
+- **Three defects the ladder caught (fixed this session):** the worker stub emitted an `autoBind`
+  ResolveRefs resolution with no `bodyId`, which SCHEMA §7.5 allows only on a non-promotable
+  missing-body `needsRepair`; `topology_rebind` fed a real V3 region id into a version-less
+  profile and the worker correctly refused it; `src-tauri/src/tauri_e2e.rs` had never been
+  compiled and did not (E0597 in `composition_status`).
+- **Former pre-existing failure, now CLOSED:** e2e click-away extrude commit, both browsers,
+  deterministic, reproduced at `9933689`. Residual MC-R7 — it was stale evidence, not a product
+  defect; the spec and the arm hint were fixed and both lanes now run 200/200.
+- **Open:** P2 measured ceilings/performance; P3 full semantic/overhead closure and Pattern budget;
+  real-Tauri/WDIO composition run (compiles, never executed); Chamfer and Boolean campaign breadth;
+  kernelbench m1; Linux/macOS/Windows aggregate release enforcement and 20-run stability sample.
+  See `docs/qa/modeling-residuals-v1.json`.
 
 The per-gate detail for every wave, newest first, follows.
 

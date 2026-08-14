@@ -1874,7 +1874,13 @@ export class SketchController {
     // Tool-authored constraints resolve their index refs against the id-assigned
     // entities and SUPPRESS the intra-batch half of the inference — see
     // `resolveToolConstraints` for why the draw path cannot afford a duplicate.
-    const inferred = inferConstraints(newEntities, session.entities, { nextConstraintId: nextId });
+    const inferred = inferConstraints(newEntities, session.entities, {
+      nextConstraintId: nextId,
+      // The origin is only anchorable when it was actually OFFERED as a snap —
+      // the same preference that puts it in the snap ladder. With point snapping
+      // off, a point at (0,0) is a coincidence, not an accepted relation.
+      originAccepted: settingsStore.getState().snapTo.sketchGuidePoints,
+    });
     const toolAuthored = resolveToolConstraints(specs, newEntities, inferred, nextId);
     if (!dims || Object.keys(dims.locks).length === 0) return { toolAuthored, dimAuthored: [] };
     const dimSpecs = dimConstraintSpecs(dims.toolId, dims.anchors, dims.locks, {

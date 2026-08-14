@@ -39,6 +39,22 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("83.3 mm")).toBeInTheDocument();
   });
 
+  /*
+   * U0 red evidence. D14 fixed `constraintStatus.ts` — the pure function guards
+   * `dof === 0` — but `InspectorPanel`'s SelectionState branch never consults it:
+   * it hardcodes `Under-constrained · DOF {dof}` with no status check and a
+   * `?? 0` default (InspectorPanel.tsx:119-123). So a fully-constrained sketch
+   * selected in the tree still renders the impossible string the audit caught,
+   * and an UNKNOWN sketch renders it too. RED until U7 unifies the authority.
+   */
+  it("never renders Under-constrained for a sketch the solver reports at DOF 0", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => documentStore.getState().setSketchSolve("sketch2", 0, "ok"));
+
+    expect(screen.queryByText(/Under-constrained/)).toBeNull();
+    expect(screen.getByText("Fully constrained · DOF 0")).toBeInTheDocument();
+  });
+
   it("shows body status + full history when a body is selected", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
@@ -98,6 +114,30 @@ describe("InspectorPanel", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().clear());
     expect(screen.getByText("Nothing selected")).toBeInTheDocument();
+  });
+
+  it("renders structured failure detail in the inspector and edits for retry", () => {
+    const editEdgeOpFeature = vi.fn(() => Promise.resolve());
+    setModelToolController({ editEdgeOpFeature } as unknown as ModelToolController);
+    try {
+      documentStore.setState({
+        features: [{
+          id: "f-failed", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm",
+          status: "error", statusMessage: "kernel refused",
+          diagnostics: [{ severity: "error", code: "FILLET_TOO_LARGE", stage: "build", message: "radius exceeds edge", evidence: { radius: 11 } }],
+        }],
+      });
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+      act(() => selectionStore.getState().set([{ kind: "feature", id: "f-failed" }]));
+
+      expect(screen.getByText("FILLET_TOO_LARGE")).toBeInTheDocument();
+      expect(screen.getByText("Stage: build")).toBeInTheDocument();
+      expect(screen.getByTestId("operation-diagnostic-evidence-0")).toHaveTextContent('"radius": 11');
+      fireEvent.click(screen.getByTestId("feature-edit-retry"));
+      expect(editEdgeOpFeature).toHaveBeenCalledWith("f-failed", "Fillet");
+    } finally {
+      setModelToolController(null);
+    }
   });
 
   it("shows the SKETCH state (DOF card + one row per live constraint) in sketch mode", () => {
@@ -325,6 +365,11 @@ describe("InspectorPanel", () => {
       features: documentStore.getState().features.map((f) =>
         f.id === "f-a" ? { ...f, valueText: "30.0 mm", primaryValue: 30 } : f,
       ) as never,
+      // `terminal` is the verdict `commitFeatureValue` reads (`types.ts`: no
+      // production result may omit it). This fixture changes no body, so the
+      // honest stamp is `noop` — without it the body-count fallback reads a
+      // successful value edit as a failure and the store is never hydrated.
+      terminal: "noop",
     });
     try {
       renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });

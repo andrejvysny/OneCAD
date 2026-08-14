@@ -19,16 +19,15 @@
  * same reason `PlanePicker` scales its quads. The three pick tiers occupy
  * disjoint RADIUS bands so they cannot be confused from a normal viewing angle:
  * arrow tips end at 67px, quads sit 16–31px out along their in-plane axes (≥16px
- * clear of any arrow's 6px pick cylinder), and the rings' 5px pick tube starts at
- * 77px.
+ * clear of any arrow's 6px pick cylinder), and the rotation arcs occupy a compact
+ * 64–76px band on the 45° bisector, where no arrow and no quad reaches.
  *
  * Arbitration between handles is plain NEAREST-HIT — the three.js house rule, and
  * the honest one for an overlay where nothing is depth-tested: whatever the ray
- * reaches first is what the user sees under the cursor. The one case that reads
- * as surprising is a ring viewed EDGE-ON, which collapses to a line sweeping
- * across the whole gizmo and will win over an arm it crosses. That is correct —
- * the ring genuinely is the thing under the pointer there — and it self-corrects
- * the moment the camera leaves the degenerate angle.
+ * reaches first is what the user sees under the cursor. The edge-on case that
+ * used to make this surprising is gone with the full rings (U5): a ±26° arc
+ * cannot collapse into a line that sweeps the whole widget, so there is no longer
+ * a handle that wins from across the gizmo.
  */
 import * as THREE from "three";
 import { palette } from "./palette";
@@ -57,9 +56,31 @@ const CONE_R_PX = 4.5;
 const ARM_HIT_R_PX = 6; // fat, invisible grab cylinder around each arrow
 const QUAD_NEAR_PX = 16; // inner corner of a plane quad, along both in-plane axes
 const QUAD_PX = 15;
-const RING_R_PX = 82;
-const RING_TUBE_PX = 1.3;
-const RING_HIT_TUBE_PX = 5;
+/*
+ * Rotation handles (U5). These used to be three FULL tori at r=82px, which is a
+ * 164px-wide circle per axis: they crossed each other, they crossed both the
+ * arrows and the pivot, and viewed edge-on a ring collapses to a line sweeping
+ * the whole widget and wins the nearest-hit over any arm it crosses.
+ *
+ * They are now compact double-headed ARCS. Three properties do the work:
+ *   - radius 70px sits just OUTSIDE the arrow tips (67px) and well outside the
+ *     plane quads (whose far corner is r≈44), so the three tiers stay in
+ *     disjoint bands and the pivot stays clear;
+ *   - each arc is centred on the +45° bisector of its own plane, which is where
+ *     no arrow lives (they are on the axes) and which faces the default camera;
+ *   - a ±26° sweep is short enough that no arc can degenerate into a line across
+ *     the widget, which is what removes the edge-on ambiguity entirely rather
+ *     than arbitrating it.
+ */
+const RING_R_PX = 70;
+const RING_SWEEP_RAD = (26 * Math.PI) / 180;
+const RING_TUBE_PX = 1.1;
+/** ≥8 CSS px of pick corridor (12px diameter), well clear of the 2.2px visual. */
+const RING_HIT_TUBE_PX = 6;
+/** The double-headed arrowheads that say "this drags around". */
+const RING_HEAD_PX = 6;
+const RING_HEAD_R_PX = 2.6;
+const ARC_SEGMENTS = 24;
 
 const ARM_OPACITY = 0.9;
 const QUAD_OPACITY = 0.4;
@@ -180,15 +201,59 @@ export class TransformGizmo {
     this.addPart("plane", axis, mat, [quad], hit, QUAD_OPACITY);
   }
 
+  /**
+   * The arc for `axis` spins ABOUT that axis, so it lives in the plane of the
+   * other two — centred on their negative bisector (see the RING_* constants).
+   *
+   * Classification stays `{kind:"ring", axis}`: the gesture and everything
+   * downstream of it are unchanged, only the geometry the user grabs is.
+   */
   private buildRing(axis: GizmoAxis): void {
     const mat = this.newMat(axis, RING_OPACITY);
-    // TorusGeometry lies in local XY with normal +Z — the ring's rotation axis.
-    const q = new THREE.Quaternion().setFromUnitVectors(AXIS_DIR.Z, AXIS_DIR[axis]);
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(RING_R_PX, RING_TUBE_PX, 6, 72), mat);
-    ring.quaternion.copy(q);
-    const hit = new THREE.Mesh(new THREE.TorusGeometry(RING_R_PX, RING_HIT_TUBE_PX, 4, 48), this.hitMat);
-    hit.quaternion.copy(q);
-    this.addPart("ring", axis, mat, [ring], hit, RING_OPACITY);
+    const [a, b] = AXES.filter((x) => x !== axis);
+    // Centre of the sweep: the +45° bisector of the two in-plane axes — the
+    // direction that holds no arrow (those are ON the axes) and no quad (that
+    // ends at r≈44 in this direction), and that faces the default camera.
+    const centreAngle = Math.PI * 0.25;
+    const pointAt = (t: number): THREE.Vector3 => {
+      const angle = centreAngle + t;
+      return new THREE.Vector3()
+        .addScaledVector(AXIS_DIR[a], Math.cos(angle) * RING_R_PX)
+        .addScaledVector(AXIS_DIR[b], Math.sin(angle) * RING_R_PX);
+    };
+    const path = new THREE.CatmullRomCurve3(
+      Array.from({ length: ARC_SEGMENTS + 1 }, (_, i) =>
+        pointAt(-RING_SWEEP_RAD + (2 * RING_SWEEP_RAD * i) / ARC_SEGMENTS),
+      ),
+    );
+    const arc = new THREE.Mesh(
+      new THREE.TubeGeometry(path, ARC_SEGMENTS, RING_TUBE_PX, 6, false),
+      mat,
+    );
+    // A head at each end: the handle drags BOTH ways, and a bare arc reads as
+    // decoration rather than something to grab.
+    const visuals: THREE.Mesh[] = [arc];
+    for (const end of [-1, 1] as const) {
+      const tip = pointAt(end * RING_SWEEP_RAD);
+      const inward = pointAt(end * (RING_SWEEP_RAD - 0.08));
+      const head = new THREE.Mesh(
+        new THREE.ConeGeometry(RING_HEAD_R_PX, RING_HEAD_PX, 10),
+        mat,
+      );
+      head.position.copy(tip);
+      head.quaternion.setFromUnitVectors(
+        AXIS_DIR.Y,
+        tip.clone().sub(inward).normalize(),
+      );
+      visuals.push(head);
+    }
+    // Separate, fatter pick corridor over the SAME curve — a trackpad user must
+    // not have to land on a 2px stroke.
+    const hit = new THREE.Mesh(
+      new THREE.TubeGeometry(path, ARC_SEGMENTS, RING_HIT_TUBE_PX, 6, false),
+      this.hitMat,
+    );
+    this.addPart("ring", axis, mat, visuals, hit, RING_OPACITY);
   }
 
   /** Move the gizmo to `origin`. Orientation is fixed to the WORLD axes. */
@@ -196,6 +261,11 @@ export class TransformGizmo {
     this.group.position.copy(origin);
     this.group.updateMatrixWorld(true);
     this.deps.invalidate();
+  }
+
+  /** Where the widget sits, for a depth-accurate screen scale. */
+  worldAnchor(): THREE.Vector3 {
+    return this.group.position.clone();
   }
 
   /** Constant screen size: `worldPerPx` world units per CSS pixel. */
@@ -249,6 +319,20 @@ export class TransformGizmo {
       p.mat.opacity = lit ? HOT_OPACITY : p.baseOpacity;
     }
     this.deps.invalidate();
+  }
+
+  /**
+   * The gizmo's extent in WORLD units, as a radius about its pivot (U5).
+   *
+   * The widget is authored in px units and uniformly scaled, so its reach is a
+   * single number: the farthest handle (an arrow tip at `ARM_PX + CONE_PX`, or a
+   * rotation arc plus its pick corridor) times the current scale. Chip placement
+   * turns that into a screen-space exclusion — see
+   * `ViewportEngine.getInteractionOverlayBounds`.
+   */
+  worldRadius(): number {
+    const reachPx = Math.max(ARM_PX + CONE_PX, RING_R_PX + RING_HIT_TUBE_PX + RING_HEAD_PX);
+    return reachPx * this.group.scale.x;
   }
 
   /** Nearest handle under `raycaster`, or null (arbitration — see the header). */

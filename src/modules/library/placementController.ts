@@ -52,6 +52,7 @@ import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
+import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
 import type {
   ComponentParamValue,
   LibraryComponent,
@@ -467,6 +468,17 @@ function onPointerDown(e: PointerEvent): void {
       Object.keys(gestureParams).length > 0 ? { ...gestureParams } : undefined,
       mate,
     )
+    .then((res) => {
+      // A RESOLVED promise is not a success. The command applies the edit and
+      // then regenerates, so a placement can land and its regen still fail —
+      // only the correlated terminal says which (U1 result truth).
+      const reason = failureReason(classifyRegen(res));
+      if (reason !== null) {
+        viewportStore
+          .getState()
+          .setStatusHint(`Place failed: ${reason}`, { severity: "error", sticky: true });
+      }
+    })
     .catch((e: unknown) => {
       // Fail closed, visibly: the backend refuses a mate it cannot promote
       // (stale pick) instead of authoring a silently-unmated record.

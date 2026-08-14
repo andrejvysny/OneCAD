@@ -261,6 +261,20 @@ bool selector_matches_case(const SelectorSpec &selector,
 
 bool parse_selector_v2(const json &value, SelectorSpec &out,
                        std::string &error) {
+  if (value.is_object() && value.value("mode", "") == "bodyRoles") {
+    const std::set<std::string> fields = {"mode", "target", "tools"};
+    if (!exact_fields(value, fields, error) || value["target"] != "target" ||
+        !value["tools"].is_array() || value["tools"].size() != 1 ||
+        value["tools"][0] != "tool") {
+      error = error.empty() ? "bodyRoles needs target and exactly one tool" : error;
+      return false;
+    }
+    out.body_roles = true;
+    out.mode = "bodyRoles";
+    out.target_role = "target";
+    out.tool_roles = {"tool"};
+    return true;
+  }
   const std::set<std::string> allowed = {
       "mode",       "topologyRole", "convexity",          "vertexValence",
       "provenance", "anchors",      "surfaceDescriptors", "adjacency"};
@@ -327,6 +341,8 @@ bool selector_matches_case_v2(const SelectorSpec &selector,
                               const std::string &recipe,
                               bool has_feature_index,
                               std::size_t feature_index, std::string &error) {
+  if (selector.body_roles)
+    return generator == "boolean-foundation" && recipe == "twoBoxes";
   if (selector.provenance_generator != generator ||
       selector.provenance_recipe_type != recipe) {
     error = "selector provenance does not match generator recipe";

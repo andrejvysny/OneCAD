@@ -634,7 +634,7 @@ async fn interactive_sketch_flow_mints_the_timeline_record_and_extrude_commits()
     let sid = SketchId(Uuid::from_u128(0xF00));
 
     // 1. Interactive create + draw + finish — the app path, NO manual sketch_record.
-    let (regions, finish_outcome) = {
+    let (regions, region_identity_version, finish_outcome) = {
         let mut guard = runtime.lock().await;
         let rt = guard.as_mut().expect("open");
         rt.apply(EditCommand::AddSketch {
@@ -666,6 +666,7 @@ async fn interactive_sketch_flow_mints_the_timeline_record_and_extrude_commits()
         );
         (
             dto.regions,
+            dto.region_identity_version,
             outcome.expect("first finish appends the record ⇒ Some(outcome)"),
         )
     };
@@ -682,7 +683,9 @@ async fn interactive_sketch_flow_mints_the_timeline_record_and_extrude_commits()
         let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op else {
             unreachable!();
         };
-        p.profile.as_mut().unwrap().region = RegionId::new(regions[0].region_id.clone());
+        let profile = p.profile.as_mut().unwrap();
+        profile.region = RegionId::new(regions[0].region_id.clone());
+        profile.region_identity_version = Some(region_identity_version);
         rt.apply(EditCommand::AddOperation {
             record,
             at_cursor: false,
@@ -802,13 +805,14 @@ async fn legacy_container_without_sketch_records_extrudes_after_open() {
     // 3. The frontend arm + commit shape: a PURE region read (no session), then
     //    an `at_cursor: false` AddOperation binding the EXACT region id. Before
     //    the backfill the regen step failed "profile sketch not found in plan".
-    let regions = rt
+    let prepared = rt
         .prepare_sketch_regions(sid)
         .expect("prepare regions")
         .drive()
         .await
-        .expect("regions")
-        .regions;
+        .expect("regions");
+    let region_identity_version = prepared.region_identity_version;
+    let regions = prepared.regions;
     assert!(!regions.is_empty(), "rect derives a region");
 
     let runtime: Runtime = Arc::new(Mutex::new(Some(rt)));
@@ -820,7 +824,9 @@ async fn legacy_container_without_sketch_records_extrudes_after_open() {
         let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op else {
             unreachable!();
         };
-        p.profile.as_mut().unwrap().region = RegionId::new(regions[0].region_id.clone());
+        let profile = p.profile.as_mut().unwrap();
+        profile.region = RegionId::new(regions[0].region_id.clone());
+        profile.region_identity_version = Some(region_identity_version);
         rt.apply(EditCommand::AddOperation {
             record,
             at_cursor: false, // the frontend commit shape

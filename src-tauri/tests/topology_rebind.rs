@@ -303,7 +303,9 @@ fn extrude_op(sketch: SketchId, region: &str, dist: f64) -> Operation {
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(region),
-            region_identity_version: None,
+            // A real id comes out of `finish_sketch`, which authors V3 now; an empty
+            // id keeps the version-less legacy first-region fallback.
+            region_identity_version: (!region.is_empty()).then_some(3),
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),

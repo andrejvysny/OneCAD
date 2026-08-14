@@ -1,5 +1,748 @@
 # OneCAD-Tauri Migration TODO
 
+## MERGE — `OneCAD-Component-Library` × `master` (2026-08-14) — GATE PASSED
+
+Two programs ran in parallel from merge-base `39f5839` (2026-08-13): master's
+modeling-UX unification U0–U7 plus the publication/identity-V3 hardening and the
+data-integrity audit (10 commits), and this branch's whole Component Library
+program plus document variables (28 commits). 159 vs 185 changed files, 27
+overlapping. Resolved INBOUND (`git merge master` on the branch) so the shared
+`master` worktree at `../OneCAD-Tauri` was never left broken; master lands by
+fast-forward.
+
+`git merge-tree` predicted the conflict set exactly: **8 files**, seven of them
+"both sides appended at the same anchor".
+
+- [x] **Trait/command unions** — `worker/mod.rs` (×2), `worker/manager.rs`,
+  `api/mod.rs`, `lib.rs`. Master's `query_body_topology` and the branch's
+  `classify_element`/`classify_element_by_topo_key` now sit side by side in
+  `ElementQuery`, in `PendingBackend` and in `WorkerManager`; `generate_handler!`
+  carries `api::query_body_topology`, `api::classify_element` and all 13
+  `library::*` commands. **Losing a trait method is a compile error; losing a
+  command is SILENT** — the frontend's `invoke` just 404s at runtime.
+- [x] **`protocol/SCHEMA.md` §14** — both sides prepended entries dated
+  2026-08-13; concatenated, master's block first.
+- [x] **`TODO.md` / `HANDOFF.md`** — both rewrote their heads wholesale. Rebuilt
+  as sibling threads over the shared tail: master's UX/data-integrity block, then
+  the Component Library block. `HANDOFF.md` also drops a pre-existing branch
+  artifact (a duplicated Platform-refactor H1 with no body) and adopts master's
+  `## Session 5` seam, so the file has ONE H1 per thread again.
+- [x] **`DimensionInput.tsx`** — the only real logic conflict. Master's live
+  numeric entry (`onPreview`/`initialText`, the strict `parse()`, the
+  seed/echo/unit guards) and the branch's `=name` binding (`onCommitExpr`/`expr`,
+  `parseExprInput`) are ORTHOGONAL — no caller passes both — so all four props
+  are unioned rather than chosen between. Three decisions worth naming:
+  a seed outranks a binding in the initial text (typing a digit IS the unbind
+  gesture); a binding change joins a unit switch as a re-label EXEMPT from the
+  echo guard (new `lastExpr` ref — without it the merge is only accidentally
+  correct); and a half-typed `=` never previews. `commit()` keeps the expr branch
+  FIRST and master's strict `parse()` second, so `"12abc"` still refuses.
+
+### What auto-merged and still broke
+
+- [x] `dto.rs` — the branch's `feature_dto_omits_primary_expr_when_unbound` built
+  a full `FeatureDto` literal predating master's `diagnostics` field (E0063). The
+  **only** hard compile error in the merge.
+- [x] Verified rather than trusted, because each fails SILENTLY:
+  `regionIdentityVersion: 3` survived in `localSolver.ts` and `mockClient.ts`
+  (master's V3 bump landed in a region the branch moved by +723 lines);
+  `projectionHydration.ts` carries BOTH `primaryExpr` and `diagnostics`;
+  `support/mod.rs` has master's `with_event_mutation` beside the branch's
+  `mate_placement`; all three new verbs are registered in `main.cpp` and all six
+  branch sources are in `worker/CMakeLists.txt`.
+
+### The QA evidence gate (what would actually have broken CI)
+
+Not a conflict — a cross-check. `verify-modeling-coverage.mjs` fails on any op a
+registry knows and the manifest does not, and THREE of its scanners see the new
+ops (`KnownOperation`, the `PlanExecutor.cpp` dispatch regex, the SCHEMA §7.3
+catalogue). The branch never touched `docs/qa/`.
+
+- [x] `PlaceComponent` — coverage + contracts rows, `uiExposure: "exposed"`,
+  citing `test_component_ops.cpp`, `component_ops.rs`,
+  `placementController.test.ts` and both library e2e specs.
+- [x] `DetachComponent` — rows with `uiExposure: **"hidden"**, and no browser
+  lane, because that is the truth: the backend and the `CadClient`/service seam
+  are complete and proven (`detach_component_preserves_body_and_volume_across_the_swap`),
+  but **nothing in the UI calls it** — no menu item, no command, and the mock lane
+  still throws. Claiming `exposed` would have forced a fabricated Playwright
+  citation. Ticking it later needs a UI entry point AND a spec, together.
+
+### Policy gaps closed in the same landing (approved scope)
+
+These are defects the merge EXPOSED — each is one program's invariant meeting the
+other program's code for the first time.
+
+- [x] **SCHEMA §7.2 mate carve-out.** Master wrote "a `completed` stream contains
+  only `ok` rows"; `PlaceComponent` has always published an `ok` row carrying
+  `planStep.needsRepair[]` when its mate could not re-seat. Both deliberate,
+  never reconciled. §7.2 now says a published step MAY carry `needsRepair[]`
+  **only** for a mate, never for a topological input it built from — because a
+  component's geometry does not depend on its mate, so failing the step would
+  destroy a valid body to report a placement problem. No code changed on either
+  track; Rust's `validate_prepared_stream` already accepted this shape.
+- [x] **`PreviewOp.cpp` obeyed no transport limit.** Master capped
+  `attach_tessellate` at `kChunkSize`/`kInitialBulkCredit` and wrote that promise
+  into §14 — but `PreviewOp` inlined its blob uncapped, and that is exactly the
+  lane the library preview drives (`library.rs`, `Lod::Medium`, over generator
+  output that can carry modeled helical threads). Now DEGRADES the LOD until the
+  mesh fits and reports the tier it actually used, failing by name only when even
+  `coarse` is over budget. Degrade, not refuse: a preview is an illustration, and
+  an error would blank a catalog card for a component that places fine.
+- [x] **`validate_modeling_input` on both component ops.** Master added the
+  Tier-A preflight to all ten other mutating ops; `PlaceComponent` — the one op
+  that consumes an *untrusted* BRep blob out of a package — had none.
+- [x] **Result truth for the component lanes.** `placeComponent`,
+  `setComponentParams` and `detachComponent` used a bare `call()`, so they never
+  learned their own regen terminal: a placement whose regen failed reported the
+  same silent success as one that seated. All three now go through `applyEdit`
+  and return `ApplyOperationResult`; `placementController` and
+  `ComponentParametersSection` read the verdict via `classifyRegen`.
+- [x] **`featureValueEdit.ts` reported false success.** It checked only
+  `errorMessage`, which master's U1 correlation made insufficient — a regen that
+  publishes while THIS record fails carries `terminal: "failed"` and no message,
+  so a `=name` binding that never took rendered as bound. Verdict first, hydrate
+  second, mirroring `treeActions.ts`.
+- [x] **Worker announcements.** `make_hello_result`'s `capabilities[]` had
+  drifted — six ops shipped unannounced — so it was completed rather than
+  extended by three and left half-true. `onecad-worker-stub` learned
+  `ClassifyElement` and `ExportGeometry` (the bake writes a real file and reports
+  its real byte count; a stub that faked `bytes` would make the verb untestable).
+
+### Open, deliberately not in this merge
+
+- [ ] **Result truth for `upsertVariable` / `removeVariable` / `replaceComponent`.**
+  The last three kernel-touching commands still exempt from the `regenOutcome`
+  doctrine. They differ from the component lanes in KIND, not degree: they return
+  `Vec<VariableDto>` / `ReplaceComponentReportDto` rather than a projection, and
+  fire their regen asynchronously through `sched.handle`, so there is no terminal
+  to correlate without a wire change. Two options, both needing their own gate:
+  (a) add `variables` to `DocumentProjection` and route them through `applyEdit`
+  like everything else — cleanest, but it moves a DTO the golden tests pin;
+  (b) return the terminal alongside the existing payload. Either way a product
+  call is owed first: a variable edit that SAVES while its downstream regen FAILS
+  has two truths, and the UI currently states only the first. Do not "fix" this by
+  throwing on a failed regen — the variable really was saved.
+
+### Gates
+
+- [x] `ctest` — **124/124**, worker rebuilt against the merged sources.
+- [x] `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings` — clean.
+- [x] Worker-backed `cargo test --workspace` — **1244 passed / 0 failed**, 82 binaries,
+  `ONECAD_REQUIRE_WORKER=1`.
+- [x] `bun run build` + `bun run test` — **4422 passed / 0 failed**, 269 files.
+- [x] `verify-modeling-coverage.mjs`, its negative-control selftest, and
+  `verify-modeling-contracts.mjs` — all three clean.
+- [x] Hex gate (`grep -rn '#[0-9a-fA-F]\{6\}' src`) — empty.
+- [x] `bun run e2e` (mock lane, **both** projects, `retries: 0`) — **426 passed /
+  0 failed**, 31.7 min, no failure artifacts written.
+- [ ] Real-Tauri WDIO composition and a manual Tauri smoke are unrun for this
+  merge, as they were for each side separately.
+
+Two test fixtures were updated, both for the same reason and neither to make a
+failure go away: `featureValueEdit.test.ts` and `InspectorPanel.test.tsx` mocked
+edit results with no `terminal`, which `types.ts` already declares no production
+result may omit. The verdict now reads that field, so a fixture without one
+described a result the backend cannot produce.
+
+## DATA-INTEGRITY AUDIT (2026-08-14) — INVESTIGATION ONLY, NO FIX LANDED
+
+Question asked: **can OneCAD lose or corrupt a user's document, and how?** Eight probes over the
+persistence lane. Two probes are committed as executable evidence; everything else is a read with
+`file:line`. **No fix is implemented — which of DI-1…DI-5 gets built, and in what order, is a
+product call.**
+
+### Why this ran at all — the ledger was wrong in BOTH directions
+
+The two entries this repo carried as open data-integrity defects turned out to be closed:
+
+- **VF-M6** (`imports.rs` blob lifecycle, 3 defects) was fixed 2026-08-08 and the box was never
+  ticked. Six days as a phantom open bug.
+- **The W5 promoted-id seam** is real as a mechanism but its consumer was deleted in `1fe0cef`;
+  it is latent, not user-reachable.
+
+Both are corrected in place. The rule this suggests: an open box that cites `file:line` must be
+re-verified against the live tree before it is believed — line numbers drift, and a fix landing in
+another package does not tick anyone else's box.
+
+### Verified SAFE (each with the evidence that would have caught the bug)
+
+- [x] **Crash recovery exists and is well built.** 30 s *debounced* autosave (not a fixed cadence),
+      pid-stamped session marker, and both writers serialized on one persistence lane with the
+      documented lock order runtime → release → lane (`src-tauri/src/autosave.rs:1-40,62,124`).
+      Zero autosave activity with no document open.
+- [x] **The container write is atomic.** Sibling temp → `fsync` → `rename` → parent-dir `fsync`
+      (`onecad-core/src/io/container.rs:37-44,383`), with a crash-between-temp-and-rename test at
+      `:1367` and a dedicated `save_to_temp_for_test` seam at `:339`. A crash or a full disk cannot
+      leave a short, valid-looking `.onecad`.
+- [x] **Import blob refcount vs undo is not a loss window.** A save drops blobs no live record
+      names, but the in-session carrier is INSERT-ONLY (`document_runtime.rs:2114,2184,2256` — no
+      remove/retain/clear anywhere) and the undo stack is memory-only (`edit/undo.rs:317`, nothing
+      in `container.rs` persists it). So the sequence that would strand a record — remove import →
+      save → undo → regen — still has the bytes. Suppressed and rolled-back records pin their blobs
+      deliberately (`io/imports.rs:179-183`).
+- [x] **A save cannot capture a half-committed regen.** `build_save_payload` runs under the runtime
+      lock; only the container write is off-lock, on a blocking thread, under the lane
+      (`autosave.rs:27-40`). Regen commits under the same lock in `finish_regen`.
+- [x] **Unknown module state round-trips verbatim** per ADR-0004, pinned by
+      `container.rs:1296 unknown_module_state_survives_open_modify_save` plus an odd-payload case
+      at `:1345`.
+- [x] **Every `EditCommand` has a real inverse.** The `Inverse` family covers records, cursor,
+      sketches, bodies, datums, variables, module state and repair, with `Composite` for
+      multi-subsystem commands (`edit/undo.rs:48-127`). The one `Inverse::Noop` producer is a
+      genuine no-op (`edit/session.rs:900` — rolling to the row the bar already sits on).
+
+### FINDINGS — recorded, not fixed
+
+- [ ] **DI-1 (HIGH) — a recovered document is unprotected against the NEXT crash.**
+      `api::recover_document` consumes the crash marker (`api/mod.rs:796`) while deliberately
+      keeping the autosave file, on the stated reasoning that "the autosave file itself is kept so a
+      re-crash before the next tick still recovers". That reasoning is false: discovery iterates
+      `*.session.json` MARKERS (`io/recovery.rs:140-181`), so a kept autosave with no marker is
+      unreachable. **Probe committed:**
+      `io::recovery::tests::an_autosave_whose_marker_was_consumed_is_not_offered`, with the
+      marker-present control right above it. Fix options differ in their stale-offer profile: keep
+      the marker until the next autosave supersedes it · write a fresh marker at recovery · scan
+      autosave files as a fallback. ~½ day including the lane test.
+- [ ] **DI-2 (MEDIUM-HIGH) — `recover_document` never ticks the autosave loop.** It sets
+      `dirty = true` (`document_runtime.rs:2073-2076`) but does not call `state.note_mutation()`,
+      and the autosave loop is driven ONLY by that tick — it never reads `is_dirty`
+      (`autosave.rs:255-282`). Protection is incidental, from the tick a *published* regen bumps
+      (`lib.rs:174-176`). If the recovery replay fails, no-ops or is cancelled, nothing is
+      autosaved — and by DI-1 there is no marker either. One line to fix; the value is in the test.
+- [ ] **DI-3 (MEDIUM) — two commands mutate persisted state with no tick and no dirty flag.**
+      `promote_selection` (`api/mod.rs:1378`) and `prepare_edge_op` (`api/mod.rs:2207`) both write
+      `regen.elements` (`document_runtime.rs:3260`), which `build_save_payload` persists as
+      `doc.elements` (`:1914`). Neither calls `note_mutation`, and Rust reports `dirty:false`, so
+      `appStore.requestClose` takes the clean fast path and closes without a prompt. The rows are
+      identity plumbing rather than user intent, which is why this is not HIGH — but "persisted by
+      save, invisible to both the autosave tick and the unsaved guard" is a state no other mutation
+      is in. Audit rows: all 55 Tauri commands were classified; these two plus DI-2 are the only
+      mutating rows without a tick, and no non-mutating row has a spurious one.
+- [ ] **DI-4 (MEDIUM) — an authored FACE COLOUR survives as data but stops being paintable after a
+      reopen.** `SetFaceColor` keys on the Rust-minted `ElementId`; the frontend paints it through
+      exactly two paths (`meshSync.resolveAuthoredFaceColors`) and both bottom out in the worker's
+      element-map partition, which is minted on demand and dies with the process. `BindElementIds`
+      has ONE production call site — inside `promote_selection` — and nothing re-binds a persisted
+      id at open. **Probe committed:** `src-tauri/tests/face_color_reopen.rs`, real worker, save →
+      fresh worker → reopen. Measured: the colour is still in the reopened projection under the same
+      id, the mesh id table carries TopoKeys (`idsHaveElementIds:false`) and `elementInfo` answers
+      `None`. In-session controls sit beside both measurements, and the assertion was
+      **mutation-proved** (inverting it reds the test). Same root as the W5 seam, so one fix —
+      re-binding persisted ElementIds at open — closes both.
+- [ ] **DI-5 (LOW-MEDIUM) — the STEP round-trip is lossy on the way out.** Import keeps XCAF names
+      and colours (BinXCAF replay, `SCHEMA.md:2373`), but export is a bare `STEPControl_Writer`
+      (`worker/src/io/ExportStep.cpp:12,52,59`) with no XCAF document, so names and colours are
+      dropped. A file that came in coloured leaves grey. Relevant to the machined-parts priority,
+      where the exported STEP is the deliverable.
+
+Gates for the audit itself (measured 2026-08-14): `cargo fmt --all --check` clean · `cargo clippy
+--workspace --all-targets -D warnings` clean · worker-backed
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1101 passed / 0 failed across 76
+result lines**, including the two new probes. (That count is not comparable to the 810/69 figure in
+the session-8 ledger — this run tallies every result line, doc-tests included. The number that
+matters is zero failures.) The `face_color_reopen` assertion was mutation-proved: inverting it reds
+the test, reverting it greens it again. No frontend or browser gate is owed — no `src/` file
+changed.
+
+## NOW — MODELING UX UNIFICATION, U0–U7 (2026-08-14, plan `~/.claude/plans/bright-munching-oasis.md`)
+
+Source: the two documents in `UX/` — the senior UX audit (2026-08-11) and the b022edf7-pinned
+hardening specification. **The spec is 21 commits stale**; HEAD is `4ac8565`. The plan is the
+re-verified DELTA, not the spec as written. Re-verification found three defects the spec and
+`TODO.md` both record as CLOSED that are only PARTLY closed, plus six that are in neither document.
+Full drift ledger + evidence in the plan file. Approved scope: U0–U7 (U8 typed references queued).
+
+### U5's browser lanes — RUN, both green (2026-08-14, session 9)
+
+- [x] **Both full lanes, retries 0, one at a time: `chromium 200/200` (14.2 min, `E2E_PORT=4191`)
+      and `webkit 200/200` (8.6 min, `E2E_PORT=4193`).** This is the gate U5 owed — it changed the
+      transform gizmo's geometry (82px tori → ±26° arcs), its screen scale and the placement chip's
+      anchor, and the browser is the only real check for all three. No failure in either lane, so
+      no triage was needed; neither MC-R8 nor MC-R9 reappeared. Ports were verified free before
+      each launch (a concurrent session has held 4177/4187 before, and a collision reads as
+      `ERR_CONNECTION_REFUSED`, i.e. exactly like a product failure).
+- [x] Gate commit of the U0–U7 tranche — authorized this session, **commit only, no push**.
+- [ ] Manual Tauri smoke (spec §14) has never been run for this program; needs the native stack.
+
+Carried forward, each with its reason in the package block below: D6's discriminated
+`ToolEditorDescriptor` union · Shell's thickness handle (needs a face normal on the prepare
+response) · U8 typed references · MC-R9 browser nondeterminism (MC-R8 is CLOSED — root-caused and
+fixed in `19088d0`).
+
+Approved product decisions, taken before U0:
+- the frozen interaction contract gains `primaryEntry` + `livePreviewOnEdit` columns (TIGHTENING —
+  more rows red, never edited afterwards to make an implementation pass);
+- pattern count keeps a 2–12 stepper with direct numeric entry up to the worker's 128;
+- ✓/✕ becomes the single confirm vocabulary for all twelve tools; `ApplyButton` goes away, and the
+  body-lifecycle meaning it carried moves into U4's result-summary slot.
+
+### U0 — red evidence + contract teeth (2026-08-14) — GATE PASSED
+
+Tests only; **no production file changed** other than the frozen contract's two new columns (the
+user-visible-change decision recorded above, per `src/test/contracts/README.md`). 32 new reds, each
+paired with a green control so no red can be blamed on its fixture.
+
+- [x] **Contract columns + self-check.** `modelingInteractionContract.ts` gains `primaryEntry`
+      (`typeToEnter|clickFirst|none`) and `livePreviewOnEdit`. `modelingInteraction.golden.test.tsx`
+      asserts every row declares Enter support and that both new columns track `primaryParameter`.
+- [x] **D1 is only half-closed — 4 reds.** `modelingInteraction.golden.test.tsx`: boolean,
+      linearPattern, circularPattern and mirror still publish `onApply` instead of the shared
+      `onConfirm`/`onCancel` pair. Extrude + fillet are the green controls.
+- [x] **The Enter column was never enforced — 4 reds.** New
+      `modelingInteraction.keyboard.probe.test.ts` arms each of those four through its re-edit entry
+      point and dispatches a real capture-phase Enter on `window`.
+      `ModelToolController.onKeyDown:8022-8064` routes Enter for the other tools only, so nothing
+      commits. Each has a control that fires the chip's own callback and reaches the client once.
+- [x] **D3 + D4 — 4 reds.** New `modelingInteraction.numeric.probe.test.ts`: typing while armed does
+      not reach the primary value (no router listens), and no keystroke rebuilds the ghost (blur/Enter
+      only). Controls assert the chip published the seeded value, so the arm itself is proven.
+- [x] **D9/WP1 is only partly adopted — 12 reds.** New
+      `ModelToolController.terminalFamilies.test.ts`: transform, boolean, shell, offsetFace, fillet and
+      hole re-edit each announce a RESOLVED `failed`+message and `needsRepair` as a NON-STICKY
+      success. Six `published` controls green. Root cause recorded for U1: `applyOperation` mints a
+      `recordId` only for `addOperation` (`tauriClient.ts:890`), so an `updateOperationParams` re-edit
+      has no per-record correlation and a published-overall regen whose failing step is this record
+      never settles as failed (`tauriClient.ts:505-547`).
+- [x] **Two more families, same defect — 2 reds.** `treeActions.test.ts` (`dispatch` catches a
+      REJECTION only) and `reattachActions.test.ts` (own `revision > before` heuristic).
+- [x] **Boolean success selection contradicts its own contract row — 2 reds.** New
+      `modelingInteraction.selection.probe.test.ts`: a split Cut selects the stored target instead of
+      the child outputs (`ModelToolController.ts:7454`, `:7536`), and does so even when the commit
+      FAILED. The contract row says `allChildOutputs`.
+- [x] **D14 is only half-closed — 1 red.** `InspectorPanel.tsx:119-123` hardcodes
+      `Under-constrained · DOF {dof}` with no status check and a `?? 0` default, so a
+      fully-constrained sketch still renders the impossible string. `constraintStatus.ts` was fixed;
+      this second authority was not. The existing `InspectorPanel.test.tsx` fixtures are DOF-3 only,
+      which is why it went unnoticed.
+- [x] **Candidate copy can contradict the candidate list — 1 red.** `RepairPanel.test.tsx`: the
+      header count comes from the `needs-repair` event, the rows from a separate `resolveRefs`
+      response, so "2 candidates" can sit directly above "No candidates to choose from" (audit
+      finding 06).
+- [x] **Body display labels are position-derived — 1 red (Rust).**
+      `onecad-core/src/document/body.rs::fresh_body_names_never_collide_with_a_live_body`. Measured:
+      delete `Body 1` of three, create one, get `["Body 2", "Body 3", "Body 3"]`. `default_name()` is
+      `format!("Body {}", self.bodies.len() + 1)` — a position, not an allocation.
+- [x] **The sketch origin is not a reference at all — 2 reds.** New
+      `src/tools/sketch/originSnap.probe.test.ts`: `computeSnap` has no origin tier (endpoint /
+      midpoint / center / quadrant / intersection / onCurve / grid / align / polar only) and
+      `inferConstraints` never anchors an endpoint on (0,0). So the audit's "rectangle on the origin
+      still reports DOF 2" is STRUCTURAL — D14 fixed only the label. `"Fixed"` already exists as a
+      constraint type, so the fix needs no protocol change. A third spec is the green control: an
+      oblique line away from the origin must still infer nothing.
+
+Gates (measured, 2026-08-14): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test`
+**255 files / 4231 tests — 32 failed, 4199 passed**, exactly the 32 intended reds and **zero
+pre-existing tests broken** (baseline was 250 files / 4182 tests, all passing; +5 files, +49 tests =
+32 reds + 17 green controls) · `cargo fmt --all --check` clean · `cargo clippy -p onecad-core
+--all-targets -D warnings` clean · `cargo test -p onecad-core --lib` **263 passed / 1 failed** (the
+intended red) · `verify-modeling-coverage.mjs` and `verify-modeling-contracts.mjs` pass · hex gate
+empty.
+
+NOT run at this gate, and not claimed: worker CTest, the worker-backed `cargo test --workspace`
+lane, and both Playwright lanes. U0 changed no production behaviour, so none of them can move; they
+are owed at the first package that does (U1).
+
+Deliberately NOT covered by U0's terminal matrix: `confirmExtrude` (`:6784`) and the two revolve
+paths (`:2639`, `:2724`), which use the legacy body-count inference rather than the classifier.
+Their fixtures need a profile/region arm that the six re-edit families do not; U1 must add them
+rather than treat the matrix as complete.
+
+### U1 — result truth, completed (2026-08-14) — GATE PASSED
+
+**Unresolved question 1 is ANSWERED: no wire change.** `updateOperationParams` already carries the
+target record id (`WireEditCommand.record`), and `failed_steps_of` keys on `rec.record_id` for ANY
+errored timeline record (`document_runtime.rs:3759`) with no add/update distinction. The re-edit
+correlation was available all along and simply unused. `tauriClient.applyOperation` and
+`applyEditCommand` now pass it, so a published-overall regen whose FAILING step is this record
+settles as `failed` for its own awaiter. `removeOperation`, `setOperationSuppression` and
+`setRollback` are deliberately NOT correlated — the first names a record that no longer exists, and
+the other two act on DOWNSTREAM steps, so scoping the change to the named record's own bodies would
+drop exactly the bodies that moved.
+
+- [x] **All 11 bypassing sites now classify.** `commitTransform`, boolean re-edit + fresh, hole/shell/
+      offsetFace/edge-op re-edit, `treeActions.dispatch`, `reattachSketch`, and both legacy
+      body-count sites (`confirmExtrude`, `confirmRevolve` × 2). One new shared
+      `settleScalarEdit()` covers the four `updateOperationParams` re-edits so they cannot drift.
+- [x] **`classifyRegen` gained an explicit `noTerminal` option**, and this was a REAL defect found by
+      the change: metadata-only commands (`RegenHint::None`) publish a projection, run no regen, and
+      return no terminal — so the body-count fallback called every eye-click and every rename a
+      FAILURE and reverted it. `treeActions` and `reattachSketch` pass `noTerminal: "published"`;
+      every other caller keeps the historical inference verbatim.
+- [x] **A `needsRepair` record is never rolled back and never reads as success**, now in extrude and
+      revolve too (both previously rolled it back because it changes no bodies). Each family reports
+      it as the ask it is: sticky, `info`, "… needs repair".
+- [x] **Boolean success selection is `allChildOutputs`** per its contract row — new
+      `booleanResultSelection()` selects everything the regen published for the record, falling back
+      to the target only when it published nothing. Both boolean paths select ONLY on `published`, so
+      a failed commit no longer moves the selection.
+- [x] **The terminal matrix is complete.** `ModelToolController.terminalFamilies.test.ts` now covers
+      extrude and revolve re-edit as well (the honest gap U0 recorded), 8 families × 3 terminals.
+      Their fixtures needed a sketch/region read and a delivered mesh ingest, which is why U0 left
+      them out. **Proved non-vacuous by mutation**: restoring `confirmExtrude`'s body-count check
+      reds `extrude re-edit · failed with a reason` while its `published` control stays green.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **255 files /
+4237 tests — 16 failed, 4221 passed**. The 16 are exactly U0's remaining reds (8 → U2, 4 → U3,
+4 → U7); U1's own 16 went green and **no pre-existing test regressed**.
+
+NOT run: worker CTest and the worker-backed `cargo test --workspace` (no Rust/C++ file changed) and
+both Playwright lanes — owed at the first package that changes rendered behaviour (U2).
+
+### U2 — one confirmation grammar (2026-08-14) — GATE PASSED
+
+- [x] **`onApply` is deleted.** Boolean, both patterns and mirror publish the same `onConfirm` /
+      `onCancel` pair as every other tool; `showBoolean` also stopped being the one `show*` that took
+      positional handlers. `ApplyButton` is gone — `ConfirmButtons` (✓/✕) is the single confirm
+      vocabulary for all twelve tools, per the approved decision.
+- [x] **One table-driven Enter router.** `armedConfirm()` replaces the hand-enumerated `if` chain
+      that simply omitted boolean/linear/circular/mirror. A table cannot silently omit a tool: a new
+      reducer without a row is visible. The frozen contract's `enterSupport` column is green for all
+      twelve rows for the first time.
+- [x] **No armed model tool renders without a cancel.** The fillet/shell bare-numeric fallback was
+      already unreachable (`armShell` and both `showFillet` sites all wire ✓/✕) and is deleted.
+- [x] **Reducer event names unified on `confirm`**, with `apply` kept as an accepted alias so a stale
+      caller cannot silently become a no-op. Refusal wording unified on "Cannot confirm invalid
+      preview: …" (it forked "confirm"/"apply" across six sites).
+- [x] **The sketch→Extrude handoff no longer throws the intent away.** Pressing `E` while sketching
+      used to finish the sketch and then `resetToSelect("Select one closed sketch region, then choose
+      Extrude")` — it armed and immediately reset to Select, which is the "arms then resets" defect
+      the spec names. It now keeps the tool and enters the region pick; with a SOLE extrudable region
+      `enterRegionPick` arms outright, so `E` in a one-region sketch lands straight on "Drag the arrow
+      to set depth". Caught by the browser lane, not by unit tests.
+
+**User-visible changes** (deliberate, recorded per `src/test/contracts/README.md`): the accent `Apply`
+button is replaced by ✓ everywhere; `E` from sketch mode arms Extrude directly on a single region.
+Two e2e specs encoded the old behaviour and were rewritten (`auto-mode`, `ellipse`) — the rewrite
+keeps the region-identity assertion so "armed directly" cannot hide a wrong-region bind. `chip-apply`
+is now `chip-confirm` in four specs.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **255 files / 4237 tests — 8 failed,
+4229 passed** (the 8 are U3's 4 and U7's 4; no pre-existing test regressed) · full Playwright lanes,
+retries 0: **chromium 200/200**, **webkit 200/200**. MC-R8's boolean-preview lane passed in this
+chromium run; that is one clean sample, NOT a root cause, so MC-R8 stays open.
+
+### U3 — live numeric contract (2026-08-14) — GATE PASSED
+
+Closes D3 (blur-gated values) and D4 (no type-to-enter), the two columns U0 added to the frozen
+contract.
+
+- [x] **`DimensionInput` gained `onPreview` + `initialText`.** `onPreview` fires on every PARSEABLE
+      change with the document-domain value; partial text emits nothing, stays editable and never
+      clamps. `initialText` is the type-to-enter seed — the character typed on the canvas REPLACES
+      the formatted value, and it previews too (it is a parseable change like any other).
+- [x] **One numeric field for every armed model chip.** `clusterInput` and `numericChip` both route
+      through a single `primaryField()`: live `onPreview`, `commitOnBlur={false}` (an armed model
+      tool commits on Enter or ✓ only — nothing is lost, the value already went out through the
+      preview), and the type-to-enter seed/focus.
+- [x] **The type-to-enter router is controller-owned**, not chip-owned — a chip growing its own
+      keyboard behaviour is the fragmentation this program removes. A printable `0-9 . -` on the
+      canvas calls `toolChipStore.beginPrimaryEntry(char)`, guarded on: nothing editable focused
+      (`isEditableTarget` — which is what the command palette and inspector editors are), no
+      modifier, and `PRIMARY_VALUE_CHIPS.has(kind)`. That set is keyed on the CHIP, not on the
+      reducers: the chip IS the editor, so it cannot drift from what is on screen the way a parallel
+      FSM table would, and boolean/mirror/axis-pick/region-select correctly have nothing a digit
+      could mean.
+- [x] **Two real defects the live path exposed, both fixed:**
+      - **the angle parse accepted trailing junk.** `Number.parseFloat("12abc")` is 12, so an angle
+        typo silently committed 12 — and under live preview it ALSO rewrote the field mid-keystroke.
+        Angles are now as strict as lengths: only a complete number parses.
+      - **our own preview echoed back and ate the keystroke.** Live preview means the edit returns
+        as a new `value` prop, and re-formatting on that echo rewrote the text under the cursor:
+        typing `25.` collapsed to `25` the instant the 25 previewed. The field now ignores the echo
+        of the value it last previewed. **The first version of that guard was too broad and the
+        browser lane caught it**: it also suppressed the re-label on a UNIT switch, so 50.8 mm no
+        longer re-read as 2 in (`e2e/units.spec.ts:155`). A unit change always re-displays; only a
+        value echo is suppressed.
+- [x] **The probe drives both halves of the real path.** `modelingInteraction.numeric.probe.test.tsx`
+      renders the chip AND the controller: the canvas keystroke goes to `window` (where the
+      controller listens), everything after it goes to the focused field (where a browser sends it).
+      Simulating the second character on `window` would be testing something no browser does. Four
+      specs per tool incl. a seeded-value control and a partial-text/no-clamp spec.
+
+**Deliberately NOT migrated:** `HoleChipCluster`'s two raw `<input>`s (hole depth, counterbore /
+countersink). They are SECONDARY parameters whose domain includes `null` ("Thru"), which is not a
+`DimensionInput` domain, and a second `aria-label="Dimension value"` would make the primary-value
+locator every spec uses ambiguous. The existing rationale in that file still holds; the "one numeric
+field" rule is about the PRIMARY value, which already routes through `DimensionInput`.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **255 files / 4239 tests — 4 failed,
+4235 passed**; the 4 are U7's, and **no pre-existing test regressed** · full Playwright lanes,
+retries 0: **chromium 200/200**, **webkit 200/200** (re-run clean after the units fix — the first
+run was 199/1 and is not claimed).
+
+### U7 — repair and sketch truth (2026-08-14) — GATE PASSED
+
+Taken before U4–U6 because it closed the last four U0 reds and the native toolchain was warm; the
+packages are independent, so the order costs nothing.
+
+- [x] **One constraint-status authority.** `InspectorPanel`'s SelectionState branch reads
+      `sketchStatusText` instead of hardcoding `Under-constrained · DOF {dof}`. This was the second,
+      silent authority D14 left behind — the pure function was fixed, this branch was not, so a
+      fully-constrained sketch selected in the TREE still rendered the impossible string.
+- [x] **Candidate copy cannot contradict the candidate list.** The count now comes from the same
+      `ResolveRefs` response that renders the rows; a collapsed row states the REASON only until
+      that response lands. The `needs-repair` event's `candidateCount` is a scoring hint, not a
+      promise that any of them is an eligible rebind target (audit finding 06).
+- [x] **The sketch origin is a real reference.** It is now a snap tier — ranked WITH quadrant:
+      below the three snaps that name a relationship to drawn geometry, above the two derived ones,
+      because ranking it top would steal a snap from a nearer endpoint and ranking it bottom would
+      lose it to any stray curve passing the origin. `autoConstrain` emits ONE `Fixed` per sketch for
+      a point accepted on it, which is what removes the two translation DOF every other dimension
+      leaves behind (the audit's 60×40 rectangle reading DOF 2). `Fixed` was already wired end to
+      end, so no protocol change. Skipped when the sketch is already anchored — existing geometry on
+      the origin, or REFERENCE-LOCKED geometry (a sketch on a model face is positioned by its host
+      and its projected boundary carries its own `Fixed` constraints; `sketchOnFace.test.ts` caught
+      that case).
+- [x] **`OffsetFaceOp` runs the shared publication gate.** It was the one mutating operation that
+      never did.
+
+**Honest limit on the OffsetFace change:** its own postconditions (null, `BRepCheck`, exactly one
+solid, positive volume above `kMinVolume`, self-interference, semantic delta) are equal or stricter
+than every Tier A check except the audit-error path, and no real offset input was found that
+produces a non-solid-like result — so **there is no end-to-end negative control, and none is
+claimed**. The change buys the structured `PublicationDecision` evidence the P3 contract rows promise
+for every other operation, and stops future drift. `ImportOp` remains uncovered by design (its
+advisory/healing policy is versioned separately).
+
+Gates: `bunx tsc --noEmit` clean · `bun run test` **255 files / 4240 tests, ALL GREEN — every U0 red
+is now closed** · worker Release build + `ctest --test-dir worker/build` **119/119** ·
+`cargo fmt --all --check` clean.
+
+### U6 — tool entry, roles, and result truth (2026-08-14) — GATE PASSED
+
+- [x] **Unique body display labels.** `default_name` scans for the lowest FREE `Body N` instead of
+      `bodies.len() + 1`, which was a position, not an allocation: deleting `Body 1` of three made the
+      next fresh body `Body 3` as well. Measured before the fix: `["Body 2", "Body 3", "Body 3"]`.
+      Deterministic, stable across save/reopen, and needs no counter to serialize.
+- [x] **One pattern-count range across TS/Rust/worker.** `PATTERN_COUNT_MIN/STEPPER_MAX/COUNT_MAX`
+      (2 / 12 / 128) replace the silent 2–12 clamp. The +/− buttons still step 2–12 — one click per
+      instance for the common case — while TYPING reaches the worker's `kMaxPatternCount`. Out of
+      range is REFUSED and marked, never clamped: a clamp would commit a count the user never saw
+      previewed.
+- [x] **`Total`, not "count".** The label states that the number includes the source — the two
+      readings differ by exactly the body the user is looking at.
+- [x] **Boolean states its roles.** Two preselected bodies now ARM outright with roles assigned in
+      selection order, instead of discarding half the selection and asking for a pick already made;
+      one body still enters `AwaitingSelection: Pick the tool body`. The chip names both operands and
+      offers **Swap** — a Cut is not symmetric, and before this "did I pick the right target?" could
+      only be answered by cancelling. Swap RE-OPENS the preview lane rather than re-sending params:
+      a session's operand refs are fixed at `beginPreview`.
+- [x] **Ghost fidelity is disclosed.** Pattern and Mirror arm hints read "… · placement preview,
+      validated on Apply · Enter or ✓ to confirm". They have no kernel candidate — the viewport shows
+      the source mesh transformed locally, which proves placement and nothing else — and a translucent
+      shape looks identical to an exact candidate.
+- [x] **Mirror's fuse default matched to the record.** Re-edit fell back to `true` where
+      `MirrorBodyParams.fuse_with_original` is `#[serde(default)] bool` — i.e. `false`. A legacy record
+      with no `fuseWithOriginal` loaded non-fused in Rust but would have re-edited as fused, and
+      committing that silently flips the result mode.
+
+**Dropped after checking the source, not implemented blind:** the plan listed "mirror gains the
+`resultPolicyVersion` symmetry the patterns have". `MirrorBodyParams` has no such field, so there is
+nothing to preserve — the asymmetry is correct, and adding one would be a record/wire change with its
+own gate. The pattern `fuseResult ?? true` fallback is likewise left alone: absent means V1 legacy
+aggregate semantics, which `TODO.md`'s Pattern compatibility baseline pins.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **255 files / 4244 tests, all green** ·
+`cargo clippy --workspace --all-targets -D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace --no-fail-fast` **810 passed / 0 failed across 69 targets** · worker `ctest` 119/119 ·
+full Playwright lanes, retries 0: **chromium 200/200**, **webkit 200/200**.
+
+**The origin anchor is a user-visible change and the browser lane priced it.** Geometry whose point
+lands on the origin now loses two translation DOF, so five specs that draw from screen centre (which
+IS the origin) reported new numbers: circle 3→1, arc 5→3, ellipse 5→3, and a solitary circle/ellipse
+is no longer "No constraints yet". All five were updated with the reason, not the number alone.
+Tightened while doing so: the anchor is gated on `InferOptions.originAccepted`, which the controller
+sets from the same point-snap preference that puts the origin in the snap ladder — so with point
+snapping OFF a coordinate that happens to be (0,0) is a coincidence, not an accepted relation, and
+"do not auto-fix geometry merely because it was drawn near the origin" holds.
+
+**New residual — MC-R9 (full-suite-only, observed once).**
+`e2e/revolve-commit.spec.ts:111` ("Revolve guidance …") failed in ONE full chromium run that took
+19 min instead of the usual 14 (the box was loaded), and passes in isolation and in the clean
+re-run. Superficially the same signature class as MC-R8, but **not the same root cause**: MC-R8 was
+the debounced auto-fit moving the camera under an unsettled probe (`19088d0`), and this spec already
+calls `waitForCameraSettled` at both of its probe sites (`:124`, `:130`). Recorded, not retried
+away: two clean full lanes are the claim, one loaded run is the caveat.
+
+### U4 — OperationHUD + result summaries (2026-08-14) — GATE PASSED
+
+- [x] **One HUD frame for every armed model tool.** `panel()` is now the shared OperationHUD: common
+      tone (the WARN border on `valueError`, previously hand-rolled in the offsetFace branch and
+      absent everywhere else), a common result-summary slot above the controls, and a common
+      `role="status" aria-live="polite"` region. The offsetFace branch's private copy of the frame is
+      deleted. A tool can no longer quietly acquire its own tone, its own validity treatment, or no
+      accessible status at all.
+- [x] **D18 — every body-lifecycle operation states its result BEFORE Apply.** The audit's complaint
+      was that the user cannot tell whether instances are linked, merged, copied or editable later
+      until after committing, and a count alone cannot say it: `3` is the same number whether the
+      source survives or is folded away. So the summary names the LIFECYCLE:
+      - `Linear pattern · 3 total · 2 new bodies · source retained` (V2 keeps the source as instance
+        zero, hence N−1 children), or `· fused into the source`;
+      - `Circular pattern · …` the same way;
+      - `Mirror · 1 new body · source retained`;
+      - `Cut · Body 1 survives · Body 2 is consumed` — a Boolean CONSUMES its tool body, the single
+        most surprising thing about the operation and the one the audit found unstated;
+      - `Move · 2 bodies in place` / `Copy · 2 bodies · sources retained`.
+      It is published from the same place that rebuilds each ghost, so it cannot drift from what the
+      viewport is showing.
+
+**`ToolChipState` remains a flat object — deliberately, and this is the second time it has been
+deferred.** The spec's D6 asks for a discriminated `ToolEditorDescriptor` union. No red test forces
+it; it is pure internal type-safety; and the store gained four fields in this program (`primaryEntry`,
+`onSwap`/`targetName`/`toolName`, `resultSummary`), so a union rewrite now would land on a moving
+target. The behavioural half of D6 — one confirm protocol, one numeric field, one HUD frame — is
+what U2/U3/U4 actually delivered, and that is what a user or a future tool can observe. The type
+refactor stays a separate pass with its own gate.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **255 files /
+4247 tests, all green** · coverage + contract verifiers pass · hex gate empty · full Playwright
+lanes, retries 0: **chromium 200/200**, **webkit 200/200**.
+
+### U5 — gizmo overlay + collision-safe HUD (2026-08-14) — GATE PASSED
+
+Closes D5, the audit's P0 #2. **No transform semantics changed** — world-axis-only, frozen pivot,
+fold, copy and align are untouched. This is grab geometry and placement.
+
+- [x] **Three full 82px tori → three compact double-headed ARCS.** `TubeGeometry` over a ±26° sweep
+      at r=70, centred on each plane's 45° bisector — where no arrow lives (they are on the axes) and
+      no quad reaches (its far corner is r≈44) — with a cone at each end so the handle reads as
+      grabbable rather than decorative. Classification stays `{kind:"ring", axis}`, so the gesture and
+      `e2e/modelToolHelpers.findGizmoHandle` are unchanged.
+- [x] **The pick corridor is now 6px (12px across) against a 2.2px stroke** — a trackpad user no
+      longer has to land on a hairline.
+- [x] **The rotation handles no longer overlap EACH OTHER.** Three full circles of one radius meet at
+      six points, two rings deep, exactly where the translation arrows live; which ring you got was a
+      coin flip. The arcs share no point and none sits on an axis, so the arrow underneath wins
+      cleanly — pinned by a new spec.
+- [x] **`ViewportEngine.getInteractionOverlayBounds("transformGizmo")`** — the projected screen box.
+      No such API existed (`projectPoint` returns one point; the bounds helpers are world-space
+      `Box3`s), which is why nothing could ask where the gizmo was on screen.
+- [x] **The chip sits clear of the widget.** `TransformChipOpts` was the one `*ChipOpts` that did not
+      extend `ChipAnchorOpts`, so `resolveChipAnchor` never ran for it and the chip anchored dead on
+      the pivot — across the stems, the handle intersections and the pivot itself. It now offsets
+      along the active axis by the gizmo's own projected reach plus the shared gap, so the two cannot
+      drift apart when the geometry changes.
+- [x] **One screen-scale implementation.** Both overlays were fed `planePixelWorld()`, which measures
+      at the ORBIT TARGET and ignores orthographic zoom — so a handle away from the pivot was sized
+      for the wrong depth and every ortho zoom level scaled it identically. They now use
+      `screenScale.worldPerPixel` at each overlay's OWN anchor, which is what every other
+      constant-size layer (OriginTriad, PlanePicker, contributions) already used.
+
+**The edge-on case is characterised, not claimed fixed.** Any overlay handle coplanar with the view
+direction can be crossed; that is inherent to an unprojected, non-depth-tested widget, and
+nearest-hit remains the honest rule. What changed is the SIZE of the region — a 52° arc in one
+quadrant instead of a full circle. The old characterisation spec is kept, with its reasoning updated.
+
+**Shell's thickness handle is NOT implemented, deliberately.** A drag handle needs a direction, and
+the shell arm has none: `EntityRef.anchor` carries `worldPoint`/`surfaceUv` and no normal, and
+nothing in the shell path probes one (fillet and offsetFace get theirs from their own prepare
+responses). The spec's own rule — "the handle must not imply a valid direction where the operation
+cannot define one" — makes guessing worse than omitting. It needs a face normal on the prepare
+response, which is a wire change with its own gate.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **255 files /
+4248 tests, all green** · full Playwright lanes at the gate, retries 0.
+
+Unresolved questions:
+1. ~~Wire-level record correlation for `updateOperationParams`~~ — answered in U1: not needed.
+2. Is U8 (typed face/datum/axis references) queued straight after U7, or behind other roadmap tracks?
+3. MC-R8 is still un-root-caused. U2 and U6 touch that lane; the browser gate is not claimable for
+   those two packages until it is.
+
+## NOW — modeling-correctness hardening completion (2026-08-13)
+
+Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one commit ahead of
+`origin/master`. No commit/push/pull authorized.
+
+- [x] P0 strict plan-stream state machine; malformed fixtures refuse before `AcceptPrepared`.
+      Wire 34/34, executor 18/18, onecad-core full clean; malformed order/dup/range/enums/terminal
+      controls assert zero accepts + discard.
+- [x] P0 release worker lockstep manifest/hash/fingerprint; prepared-mesh transport limits.
+      Real worker manifest hash/hello matched; manager 20/20, release check + Clippy clean. Inline
+      meshes share hello constants; oversized bodies use chunked Tessellate.
+- [x] P1 ResolveRefs provenance/history/import-order hardening. Wrong/missing body/revision evidence
+      refuses; Modified+Generated focused 2/2; exact STEP order ties refuse.
+- [ ] P2 V3 core/new authoring done: `cell-v3`, seam-safe physical distance, frozen V1/V2, exact
+      analytic fail-closed. Worker full 119/119 + tsc. Still open: separated public tolerance knobs,
+      production cancellation breadth, source/pair/fragment ceiling matrix, measured perf targets.
+- [ ] P3 structured `PublicationDecision` evidence/timings + Tier-A modeling-input preflight done.
+      Still open: all semantic evidence routing, measured Tier A/B overhead, Pattern fuse/topology budget.
+- [ ] P4 mode-aware coverage + corpus **9/9** done. Real-worker corpus: all frozen cases,
+      typed assertions, zero skips; verifier controls 15/15. Still open: full zero-retry browsers,
+      complete C4 mode matrix, Intersect promotion, real diagnostic browser vertical.
+- [ ] P5 real-Tauri lane implemented: feature-gated official WDIO plugins, relocated bundle,
+      lockstep worker hash/fingerprint, Extrude → Fillet → Undo → Save/reopen, retained logs and
+      cleanup. `cargo check --features tauri-e2e` now compiles (it never had: the first compile of
+      `tauri_e2e.rs` exposed an E0597 borrow error in `composition_status`, fixed). The lane itself
+      is still UNRUN — no relocated-bundle WDIO execution has happened on any machine.
+- [ ] P6 kernelbench Boolean foundation done additively: strict case-v2 two-body recipe/roles,
+      Fuse/Cut/Common, raw OCCT + OneCAD publication paths, stable replay/differential evidence.
+      Focused Rust 62+5 and kernelbench CTest 5/5 pass. Chamfer/campaign breadth, T0/m1 campaigns,
+      and cross-platform release enforcement remain open.
+- [x] Reconciled current state, live delta, risk register, packaging, protocol, contracts, coverage;
+      added versioned residual register. Manual triage remains historical evidence, not a completion claim.
+- [x] **Final gate ladder RUN end to end (2026-08-13, unsandboxed local mac)** — worker → Rust →
+      frontend → verifiers → benchmarks → browsers. Measured, not claimed:
+      - worker Release build + stage (sidecar **and** `onecad-worker-manifest.json` regenerated) ·
+        `ctest --test-dir worker/build` → **119/119**
+      - `cargo fmt --all --check` clean · `clippy --workspace --all-targets -D warnings` clean ·
+        `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` → **767/767 across 60
+        targets, 0 failed, 0 ignored** · corpus **9 executed / 9, zero skips** ·
+        `cargo check --features tauri-e2e` clean
+      - `npx tsc --noEmit` 0 · `bun run build` clean · `bun run test` → **250 files / 4182 tests** ·
+        coverage + contract verifiers pass · verifier negative controls **15/15** · hex gate empty
+      - kernelbench `fillet/foundation:t0` both backends → **136 records, 136 pass, 0 fail,
+        rescued=0 regressions=0 replay-unstable=0**; `semantic-compare` vs
+        `bench/robustness/baselines/semantics.json` → OK on darwin-arm64 (frozen T0 unmoved)
+      - Playwright retries 0: **chromium 199 passed / 1 failed**, **webkit 199 passed / 1 failed**
+      - Three real defects the ladder caught and this session fixed: the worker STUB emitted an
+        `autoBind` ResolveRefs resolution with no `bodyId` (SCHEMA §7.5 allows omission only on a
+        non-promotable missing-body `needsRepair`) — stub now mirrors the real worker's
+        missing-body branch and `solver_stub` pins both branches; `topology_rebind` extrudes fed a
+        real V3 region id into a version-less profile, which correctly refused
+        (`regionId … matched no selectable region`) — fixture now carries version 3, matching the
+        `revolve_ops`/`m2_gate`/`wire_contract`/`step_import_gate` pattern; and `tauri_e2e.rs`
+        did not compile.
+- [x] **MC-R7 correction — DONE, both lanes measured.** Root cause is
+      NOT a product bug: commit `c7df7c8` removed the click-away commit deliberately
+      ("D2: click-away commit removed entirely (spec choice)"), the frozen contract
+      `src/test/contracts/modelingInteractionContract.ts` pins
+      `clickAwayPolicy: "cancel"`, and `ModelToolController.commit.test.ts` already
+      asserts it must not commit. `c7df7c8` shipped without the e2e lane, so the spec
+      and the arm hint text kept promising the removed gesture. Both are now fixed in
+      the working tree (spec asserts no-commit + still-armed; hint reads
+      "Enter or ✓ to confirm"). Verified: that spec chromium 5/5, tsc 0,
+      Vitest 4182/4182, then BOTH full lanes with `E2E_PORT` and retries 0 —
+      **webkit 200/200**, **chromium 200/200** on the rerun. MC-R7 is closed in
+      `docs/qa/modeling-residuals-v1.json` as stale evidence rather than a product
+      defect.
+- [x] **MC-R8 — CLOSED with a root cause and a fix, commit `19088d0`.** The symptom was
+      `e2e/boolean-preview.spec.ts:356` (Intersect chip) timing out at `previewOwner === null`
+      in a FULL chromium run only, 9/9 green in isolation. The race is NOT the projection push
+      first guessed at: an instrumented full lane measured `autoFitPending: true` at probe entry
+      in all three tests, every run. Each extrude in `twoBodies` commits a body, a new body
+      schedules the DEBOUNCED auto-fit, and whether that 250 ms timer fires before or after the
+      probe's click is pure timing — when it fires first the tween moves the camera and the ray
+      misses the body, so `runPick` returns no ref (a genuine miss, not the deferred
+      `"unsettled"` case) and the selection clears. Fix is one `waitForCameraSettled` at the top
+      of the local `findBodyScreenPoint`, matching `helpers.ts findFaceOnBody`. No retry added.
+      Two latent same-pattern scanners were audited and deliberately left alone
+      (`modelToolHelpers.ts findFacePoint`, `hole.spec.ts farthestPixelOnFace`) — a timing edit
+      to a shared helper needs its own two-lane evidence.
+- [x] ~~**Pre-existing browser defect**~~ — superseded by the MC-R7 entry above; kept for the
+      measurement that found it: `e2e/extrude-commit-gesture.spec.ts:135`
+      "clicking empty canvas away from the handle commits (click-away)" fails deterministically
+      (3/3 with `--repeat-each=3`) on BOTH chromium and webkit — and fails identically on a clean
+      worktree at baseline `9933689`, so it predates the modeling-correctness work. The click leaves
+      the tool `armed` and mints no body. Tracked as MC-R7, now closed: the spec was wrong, not the
+      product. Both lanes re-measured at 200/200 — but see MC-R8 above before calling the browser
+      gate reproducibly green.
+- [ ] Still unrun on any machine: real-Tauri WDIO composition, kernelbench m1 campaign,
+      Linux/Windows release matrix, 20-run stability sample.
+
+Unresolved questions: none.
+
 ## CL-TRIM (2026-08-13) — GATE PASSED · **seed catalog cut to one family**
 
 Scope reduction, requested: the shipped component catalog is now the ISO 4762
@@ -3197,10 +3940,31 @@ unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
       exists in no workflow, four measured overclaims and one UNDER-claim, all corrected; the
       verifier now stats paths, resolves jobs and runs WP4.5's five registry cross-checks).
       Detail in § ROADMAP C1.
-- [x] C2 — the corpus runs 3 of 9 (was 1), the classification is manifest-driven, and the
-      structure/provenance of all nine is checked on every machine. The blocker was NOT a thin
-      interpreter: only case `a` carried complete geometry. Detail in § ROADMAP C2.
-- [ ] B1–B5, C3–C6, D, E (Phase 5 remainder), F (Phase 6), G (write the accepted residuals down).
+- [x] C2 + corpus completion — all 9 frozen cases execute against the real worker; classification
+      is manifest-driven, expectations typed, unsupported table removed, zero silent skips. Frozen
+      case JSON unchanged by the 9/9 completion. Detail in § ROADMAP C2 and top gate ledger.
+- [ ] C5/C6, remaining P2 V3 bounds/performance, Phase 5/6 breadth. P4 remains partial until full
+      zero-retry browser gate passes. C5 performance caps remain undocumented pending measured Tier
+      A/B and cumulative Pattern cost.
+
+- [x] C3 diagnostics: bounded worker diagnostic evidence reaches Inspector and Repair;
+      successful retry clears stale evidence; edit/retry and rebind remain explicit actions.
+- [x] C4 local lowering: Extrude/Revolve Intersect lowering exists, but both profile-operation
+      Intersect controls are now UI-hidden until C++/real-worker/browser promotion is atomic.
+      OffsetFace Total/Diameter remains Prepare-gated and re-edit-safe.
+- [x] Corpus topology: `QueryBodyTopology` supplies actual BRep solid/face counts;
+      corpus assertions no longer infer faces from coarse MESH1.
+- [x] P2 bounded source collection: analytic profile refinement refuses above 256 sources
+      before pair collection. `regionIdentityVersion:3` is now implemented for new authoring; measured
+      pair/fragment/cancellation/performance closure remains open.
+- [ ] C6 browser gate: persistent Vite on `4178` served correctly, but sandboxed Chromium
+      aborts at Mach-port rendezvous; elevated run began cleanly then executor detached after
+      five passes, leaving no valid full-lane result. Rerun Chromium + WebKit once per lane,
+      retries `0`, retaining artifacts.
+
+- [x] Pattern compatibility baseline: V1 aggregate replay stays source-preserving;
+      only V2 applies connected-single-solid validation. Future numeric policy versions
+      load/resave losslessly and worker execution refuses `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`.
 
 Detail per completed wave is recorded below, newest first.
 
@@ -4422,7 +5186,22 @@ User priorities: 3D-print + machined parts + daily driver; light multi-part (no 
   - [x] **W4.5 BACKEND GATE (2026-08-02, commit 7a39f47)**: XcafCodec canonical BinXCAF (storage v12 pinned; AddShape label-collapse guarded), XcafRead GEOMETRIC face binder (TShape identity impossible across readers; ambiguous keys dropped never guessed; solid-label color FILL — XCAF doesn't inherit downward, whole-part-blue was 0/6), ImportOp xbf codec + BodyRecord face_colors → Mesh1 FACE_COLORS (color-less bodies byte-identical, asserted). **THIRD stdout defect**: TDocStd_Application PRIVATE messenger → 58B ANSI on fd1 per bad .xbf — re-pointed, 0-byte pinned. Per-ordinal productNames (per-root named nothing on multi-solid). xbf byte-deterministic (content-addressing). ctest 84/84 · cargo 654/0 · colored-fixture match 10/10.
   - [x] **W4.5-FE GATE (2026-08-02, commit 885d92e)**: FACE_COLORS ingestion — de-index preserves triangle ordinals (Picker/Highlight/Ghost verified + real-raycast pin of three.js non-indexed faceIndex semantics); shadedVertex MaterialKind white-base; unset faces baked from body token + theme REBAKE in-place (negative-checked ×3); mock lane + e2e live-scene assertions. tsc 0 · FE 2223/162 · e2e step-import 4/4 · hex clean.
   - **WP-A COMPLETE 2026-08-02** (W6 probe-preflight-dialog + progress frames deferred by design). Real STEP import: Start Screen + File menu → XCAF names+colors → first-class downstream ops → process-death-stable identity.
-  - [ ] SEAM (W5 finding, pre-existing SKETCH-ON-FACE): promoted-but-unconsumed ElementId does not survive process death (`DocumentRuntime::promoted` in-memory; HostFace attachment is not an op input, so the partition never mints it) ⇒ after reopen, re-promoting a face pick yields a fresh id that will never equal the persisted `SketchDto.hostFace.elementId` — exactly the comparison face-sketch dblclick re-entry uses; same mismatch possible without reopen (promotion cache keyed (body, TopoKey), regen may renumber ordinals). Route to face-sketch re-entry owner.
+  - [x] SEAM (W5 finding, pre-existing SKETCH-ON-FACE) — **LATENT, not user-reachable.** Re-traced
+        2026-08-14. The identity half is REAL and unchanged: `DocumentRuntime::promoted` is in-memory
+        (`document_runtime.rs:503`), `host_face` is stripped from the wire before the worker sees it
+        (`worker/wire.rs:275`, pinned by `sketch_host_face_is_dropped_from_the_wire_params`), so the
+        partition can never echo an `existing` id and a post-reopen promotion mints a fresh UUID
+        (`regen/engine.rs:759`). What is GONE is the consumer: the dblclick re-entry that compared the
+        two was deleted in `1fe0cef` — double-click now selects the connected body
+        (`ViewportRoot.tsx:414-437`), and `e2e/sketch-on-face.spec.ts:378,392` pins that it must never
+        enter sketch mode. Surviving `hostFace` readers use presence or `bodyId` only
+        (`reattachActions.ts:46`, `ModelToolController.ts:1576`). The finding's second clause is stale
+        too: the promotion cache has been keyed `(SnapshotId, BodyId, TopoKey)` since VF-M4, with
+        descriptor-pinned cross-generation reuse, so an ordinal renumber yields a MISS, never a wrong
+        bind. **What would wake it:** any new consumer comparing a fresh promotion to a persisted
+        `hostFace.elementId`. The two doc comments that advertised that contract now say so
+        (`src-tauri/src/dto.rs`, `document_runtime.rs::sketch_host_face`). No reopen+re-entry test
+        exists in any suite — `sketch_on_face.rs:1597` reopens but never re-promotes.
 - [ ] **WP-B BODY-TRANSFORM** (in flight 2026-08-03):
   - [x] **W0 GATE (2026-08-03, commit 0dc8c91)**: core TransformBodyParams + `can_fold_transform` lineage query; **edit-safety gate REFINED from blanket-ban to edit-time seeding** — level-1 partition rebinds stay exact under rigid motion (new worker `apply_placement` moves stored anchors WITH the body, fixing the pre-existing stale-anchor latent in `apply_history`), so healthy transform-then-fillet resolves 0 needsRepair; params edit or suppress toggle on a TransformBody seeds NeedsRepair on downstream lineage refs (rides the command's undo entry, cleared by repair resolution). Worker TransformOp (normative T∘R, copy:false modify-in-place id-preserved, copy:true §2 N-body minting). Proofs: ctest 85/85 · cargo 680/0 vs real worker (transform_body 8/8: healthy flow clean, edit ⇒ seeded NeedsRepair never silent re-bind, undo exact hash, multi-target, T∘R order pin). NOTE: implementing agent died at spend limit AFTER completing code+tests; orchestrator verified all suites + safety pieces directly and committed.
   - [x] **W1 GATE (2026-08-03, commit a540e74)**: FSM full-vector state (chip value = view of addressed component — axis switch can't clobber siblings); fold = backend query AND stored-targets==selection (per-body query would widen single-body records); NO PreviewOp lane (rigid ghost kernel-exact, documented); mock transformMesh1 re-derives bbox/FACE_BBOXES from moved data (pinned numerically). FE 2299/166 · e2e 124/124.
@@ -4462,7 +5241,15 @@ NOT next: assemblies/mates, Loft/Sweep, drawings.
 - [x] VF-M3 (FIXED H4) `AcquireElementIds` stale-snapshot fallback promotes nearest-centroid with NO score/margin/NeedsRepair (`ElementIdentity.cpp:50-66`; `snapshotId` request field ignored) — a pick against an already-regenerated snapshot mints a persistent id for an arbitrary face. Fixed on BOTH halves: Rust `gate_stale_pick` + worker `REF_UNRESOLVED` on a non-head `snapshotId`, plus a proportional anchor-fallback veto (`1.0·descriptor.size + 1 mm`, NOT the 0.85 descriptor gate).
 - [x] VF-M4 (FIXED H4) promoted-ElementId cache (`document_runtime.rs:2024`) keyed (body, topoKey) never invalidated by regen — returns a WRONG id (not just missing) after ordinal renumber; blast radius: face-dblclick re-entry, sketch-on-face arming, selection stamps, worker double-mint (one face, two ids). Supersedes the TODO.md:20 process-death seam (in-session aliasing is the sharper half). Re-keyed `(SnapshotId,BodyId,TopoKey)→PromotionEntry`, 2-generation prune, descriptor-pinned cross-generation reuse.
 - [ ] VF-M5 from-0 replay ladder scores stale WORLD anchors (`Scoring.cpp:82-86`, localFrame migrated but unread) — congruent-decoy binds at the old anchor position after a translating edit (H5-B residual; incremental path immune, so behavior differs by checkpoint availability). Plus 1 mm anchor-scale floor makes sub-2 mm parts NeedsRepair-by-default.
-- [ ] VF-M6 imports: converted-blob size never checked pre-authoring (`imports.rs:288` caps source only) → over-cap conversion = permanently unsaveable document (save fails whole); 7-day workspace sweep ignores the pid it embeds (`imports.rs:216`) — second instance can delete a live instance's blobs; macOS $TMPDIR purge (~3 d) deletes materialized blobs and `materialize` (`imports.rs:183`) never re-creates (bookkeeping check, not `is_file`).
+- [x] VF-M6 imports — **ALL THREE FIXED 2026-08-08**, see § VF-M5+VF-M6 DEFECT FIXES. This box was
+      never ticked and read as an open data-integrity defect for six days; re-verified against the
+      live tree 2026-08-14. Converted-blob cap `src-tauri/src/imports.rs:369` (rejects before the
+      record is authored, so the "permanently unsaveable document" cannot be created); PID-aware
+      sweep `:266` via `is_process_alive` (`libc::kill(pid,0)`, and non-unix treats unknown pids as
+      ALIVE so it never guesses); `materialize` `:183` gates on `path.is_file()`, so a $TMPDIR purge
+      re-creates the blob instead of arming the job against a missing file. Original finding text:
+      converted-blob size never checked pre-authoring; 7-day sweep ignored the pid it embeds;
+      `materialize` did a bookkeeping check rather than `is_file`.
 - [ ] VF-M7 `HoleOp.cpp:106` (and `ShellOp.cpp:89`) apply a partition entry's topoKey ordinal to the TARGET body without checking `entry->body_id` — cross-body elementId binds the Nth face of the wrong map silently (`FaceProjection.cpp:96` does it right).
 - [x] VF-M8 (FIXED W4) undo of a multi-transform cascade suppression restores repair state in the wrong order (`undo.rs:174` .rev() vs `session.rs:803` outward wrap) — first gate's seeds survive undo, regen stays truncated until a bogus manual repair.
 - [ ] Minors (agent transcripts, fold into adjacent fixes): malformed-frame worker teardown deferred to ping (~10 s window); 1 GiB per-frame reserve on header trust; `existing` set always empty in AdoptingEngine (D1 uniqueness vs base inert); checkpointId minted differently Rust vs worker; ladder margin two conventions + Hungarian-assigned candidate absent from evidence; split/merged events bypass D1 validation (unreachable today); interner silent no-op on lock poison; Hole depth (0,1e-3) session-accepts/worker-rejects + no cbDepth<depth cross-check; settingsStore no quota guard.

@@ -22,7 +22,9 @@
 
 #include <Geom2dAPI_InterCurveCurve.hxx>
 #include <Geom2dAPI_ProjectPointOnCurve.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <Geom2d_Circle.hxx>
+#include <Geom2dAdaptor_Curve.hxx>
 #include <Geom2d_Ellipse.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
@@ -428,12 +430,74 @@ std::optional<AnalyticSource> makeAnalyticSource(const sk::SketchEntity& entity,
     return source;
 }
 
-void addCurveSplit(std::vector<CurveSplit>& splits, double parameter,
-                   const sk::Vec2d& point, double tolerance) {
+std::optional<double> physicalCurveIntervalLength(const AnalyticSource& source,
+                                                  double firstParameter,
+                                                  double lastParameter,
+                                                  double tolerance) {
+    try {
+        Geom2dAdaptor_Curve adaptor(source.basis);
+        const double distance = GCPnts_AbscissaPoint::Length(
+            adaptor, firstParameter, lastParameter, tolerance);
+        if (!std::isfinite(distance)) return std::nullopt;
+        return distance;
+    } catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<double> physicalCurveProximity(const AnalyticSource& source,
+                                             double firstParameter,
+                                             double lastParameter,
+                                             double tolerance) {
+    const double low = std::min(firstParameter, lastParameter);
+    const double high = std::max(firstParameter, lastParameter);
+    const std::optional<double> direct =
+        physicalCurveIntervalLength(source, low, high, tolerance);
+    if (!direct.has_value() || !source.closed) return direct;
+    const std::optional<double> before = physicalCurveIntervalLength(
+        source, source.fragment.sourceFirstParameter, low, tolerance);
+    const std::optional<double> after = physicalCurveIntervalLength(
+        source, high, source.fragment.sourceLastParameter, tolerance);
+    if (!before.has_value() || !after.has_value()) return std::nullopt;
+    return std::min(*direct, *before + *after);
+}
+
+bool addCurveSplit(std::vector<CurveSplit>& splits, const AnalyticSource& source,
+                   double parameter, const sk::Vec2d& point, double tolerance,
+                   CurveRefinementPolicy policy) {
     for (const CurveSplit& existing : splits) {
-        if (std::abs(existing.parameter - parameter) <= tolerance) return;
+        if (policy == CurveRefinementPolicy::V2ParameterProximity &&
+            std::abs(existing.parameter - parameter) <= tolerance) return true;
+        if (policy == CurveRefinementPolicy::V2ParameterProximity) continue;
+        const std::optional<double> distance = physicalCurveProximity(
+            source, existing.parameter, parameter, tolerance);
+        if (!distance.has_value()) return false;
+        const bool same = *distance <= tolerance;
+        if (same) return true;
     }
     splits.push_back({parameter, point});
+    return true;
+}
+
+bool exactFragmentIsContinuous(const AnalyticSource& source,
+                               const CurveSplit& start,
+                               const CurveSplit& end,
+                               double tolerance) {
+    try {
+        const gp_Pnt2d exactStart = source.basis->Value(start.parameter);
+        const gp_Pnt2d exactEnd = source.basis->Value(end.parameter);
+        const gp_Vec2d startTangent = source.basis->DN(start.parameter, 1);
+        const gp_Vec2d endTangent = source.basis->DN(end.parameter, 1);
+        const auto finiteTangent = [](const gp_Vec2d& tangent) {
+            return std::isfinite(tangent.X()) && std::isfinite(tangent.Y()) &&
+                   tangent.SquareMagnitude() > 0.0;
+        };
+        return exactStart.Distance(gp_Pnt2d(start.point.x, start.point.y)) <= tolerance &&
+               exactEnd.Distance(gp_Pnt2d(end.point.x, end.point.y)) <= tolerance &&
+               finiteTangent(startTangent) && finiteTangent(endTangent);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
 }
 
 std::optional<double> projectCurveParameter(const AnalyticSource& source,
@@ -1028,7 +1092,22 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             continue;
         }
         auto source = makeAnalyticSource(*entity, sketch);
-        if (!source.has_value()) continue;
+        if (!source.has_value()) {
+            const bool supported = entity->type() == sk::EntityType::Line ||
+                                   entity->type() == sk::EntityType::Arc ||
+                                   entity->type() == sk::EntityType::Circle ||
+                                   entity->type() == sk::EntityType::Ellipse;
+            if (supported &&
+                config_.curveRefinementPolicy == CurveRefinementPolicy::V3PhysicalProximity) {
+                graph->errorMessage = "profile refinement could not preserve analytic provenance";
+                return graph;
+            }
+            continue;
+        }
+        if (sources.size() >= config_.maxPlanarizedSources) {
+            graph->errorMessage = "profile refinement exceeds analytic-source limit";
+            return graph;
+        }
         sources.push_back(std::move(*source));
     }
 
@@ -1055,10 +1134,17 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
     std::vector<std::vector<CurveSplit>> splits(sources.size());
     for (std::size_t i = 0; i < sources.size(); ++i) {
         if (!sources[i].closed) {
-            addCurveSplit(splits[i], sources[i].fragment.firstParameter,
-                          sources[i].fragment.startPoint, tolerance);
-            addCurveSplit(splits[i], sources[i].fragment.lastParameter,
-                          sources[i].fragment.endPoint, tolerance);
+            if (!addCurveSplit(splits[i], sources[i],
+                               sources[i].fragment.firstParameter,
+                               sources[i].fragment.startPoint, tolerance,
+                               config_.curveRefinementPolicy) ||
+                !addCurveSplit(splits[i], sources[i],
+                               sources[i].fragment.lastParameter,
+                               sources[i].fragment.endPoint, tolerance,
+                               config_.curveRefinementPolicy)) {
+                graph->errorMessage = "profile refinement could not measure exact curve distance";
+                return graph;
+            }
         }
     }
 
@@ -1079,8 +1165,13 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                 return graph;
             }
             const sk::Vec2d shared{point.X(), point.Y()};
-            addCurveSplit(splits[first], *firstParameter, shared, tolerance);
-            addCurveSplit(splits[second], *secondParameter, shared, tolerance);
+            if (!addCurveSplit(splits[first], sources[first], *firstParameter, shared,
+                               tolerance, config_.curveRefinementPolicy) ||
+                !addCurveSplit(splits[second], sources[second], *secondParameter, shared,
+                               tolerance, config_.curveRefinementPolicy)) {
+                graph->errorMessage = "profile refinement could not measure exact curve distance";
+                return graph;
+            }
         }
         // OCCT reports a point tangency both as a point and a zero-length
         // segment on some curve pairs. The point is already split above; do
@@ -1106,8 +1197,13 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                 return graph;
             }
             const sk::Vec2d shared{point.X(), point.Y()};
-            addCurveSplit(splits[first], *firstParameter, shared, tolerance);
-            addCurveSplit(splits[second], *secondParameter, shared, tolerance);
+            if (!addCurveSplit(splits[first], sources[first], *firstParameter, shared,
+                               tolerance, config_.curveRefinementPolicy) ||
+                !addCurveSplit(splits[second], sources[second], *secondParameter, shared,
+                               tolerance, config_.curveRefinementPolicy)) {
+                graph->errorMessage = "profile refinement could not measure exact curve distance";
+                return graph;
+            }
         }
         } catch (const Standard_Failure&) {
             // OCCT rejects two adjacent trims of the same support with U1 == U2.
@@ -1130,8 +1226,14 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             return a.parameter < b.parameter;
         });
         sourceSplits.erase(std::unique(sourceSplits.begin(), sourceSplits.end(),
-            [tolerance](const CurveSplit& a, const CurveSplit& b) {
-                return std::abs(a.parameter - b.parameter) <= tolerance;
+            [tolerance, policy = config_.curveRefinementPolicy,
+             &source = sources[sourceIndex]](const CurveSplit& a, const CurveSplit& b) {
+                if (policy == CurveRefinementPolicy::V2ParameterProximity) {
+                    return std::abs(a.parameter - b.parameter) <= tolerance;
+                }
+                const std::optional<double> distance = physicalCurveProximity(
+                    source, a.parameter, b.parameter, tolerance);
+                return distance.has_value() && *distance <= tolerance;
             }), sourceSplits.end());
 
         if (sources[sourceIndex].closed && sourceSplits.size() < 2) {
@@ -1151,7 +1253,23 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             }
             const CurveSplit& start = emittedSplits[splitIndex];
             const CurveSplit& end = emittedSplits[splitIndex + 1];
-            if (end.parameter - start.parameter <= tolerance) continue;
+            if (config_.curveRefinementPolicy == CurveRefinementPolicy::V2ParameterProximity) {
+                if (end.parameter - start.parameter <= tolerance) continue;
+            } else {
+                const std::optional<double> distance = physicalCurveIntervalLength(
+                    sources[sourceIndex], start.parameter, end.parameter, tolerance);
+                if (!distance.has_value()) {
+                    graph->errorMessage =
+                        "profile refinement could not measure exact curve distance";
+                    return graph;
+                }
+                if (*distance <= tolerance) continue;
+            }
+            if (config_.curveRefinementPolicy == CurveRefinementPolicy::V3PhysicalProximity &&
+                !exactFragmentIsContinuous(sources[sourceIndex], start, end, tolerance)) {
+                graph->errorMessage = "profile refinement found an exact-curve discontinuity";
+                return graph;
+            }
             if (++fragmentCount > config_.maxPlanarizedFragments) {
                 graph->errorMessage = "profile refinement exceeds fragment limit";
                 return graph;

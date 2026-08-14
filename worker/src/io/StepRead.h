@@ -49,6 +49,8 @@ inline constexpr const char* kRootSkipped = "STEP_ROOT_SKIPPED";     // a root y
 inline constexpr const char* kInvalidShape = "STEP_INVALID_SHAPE";   // BRepCheck rejected a solid
 }  // namespace step_diag
 
+inline constexpr const char* kAmbiguousImportOrder = "AMBIGUOUS_IMPORT_ORDER";
+
 // v1 read policy — the FIXED knob set. The struct exists so a later work package
 // can vary one value at a call site without rewriting the pipeline; W0 uses the
 // defaults everywhere and nothing reads a knob it has not pinned here.

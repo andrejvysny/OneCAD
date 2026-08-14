@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "benchmark/Artifacts.h"
+#include "benchmark/BooleanRun.h"
 #include "benchmark/DeepAudit.h"
 #include "benchmark/FilletRun.h"
 #include "benchmark/Geometry.h"
@@ -44,10 +45,16 @@ std::string verdict(const CaseSpec &benchmark_case, const AdapterResult &adapter
 std::string input_digest(const Request &request,
                          const GeneratedGeometry &geometry) {
   std::vector<std::uint8_t> bytes;
-  const std::string error = onecad::io::write_brep_compound({geometry.shape}, bytes);
+  std::vector<TopoDS_Shape> inputs = {geometry.shape};
+  if (!geometry.tool_shape.IsNull())
+    inputs.push_back(geometry.tool_shape);
+  const std::string error = onecad::io::write_brep_compound(inputs, bytes);
   std::string payload = request.benchmark_case.canonical.dump();
   payload += request.canonical["variant"].dump();
-  if (error.empty())
+  // The two-shape compound writer allocates internal BRep labels per process;
+  // its bytes are not a cross-process identity. `twoBoxes` is fully explicit,
+  // so its canonical recipe + variant is the stable semantic input contract.
+  if (error.empty() && request.benchmark_case.operation_type != "boolean")
     payload.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
   return onecad::hashing::sha256_hex(payload);
 }
@@ -101,12 +108,16 @@ json generator_identity(const GeneratorSpec &generator) {
 }
 
 json base_result(const Request &request) {
+  const bool boolean = request.benchmark_case.operation_type == "boolean";
   return {{"schemaVersion", 1}, {"caseId", request.benchmark_case.case_id},
           {"generator", generator_identity(request.benchmark_case.generator)},
           {"backend", request.backend},
           {"kernel", identity("OCCT", ONECAD_OCCT_VERSION, ONECAD_OCCT_BUILD_ID)},
           {"modeler", identity(request.backend == "onecad" ? "OneCAD" : "raw-occt",
-                               request.backend == "onecad" ? "FilletBuilder-v1" : "direct-v1",
+                               boolean ? (request.backend == "onecad" ?
+                                              "BooleanPolicy-v1" : "direct-boolean-v1") :
+                                         (request.backend == "onecad" ?
+                                              "FilletBuilder-v1" : "direct-v1"),
                                ONECAD_OCCT_BUILD_ID)},
           {"expectedDomain", request.benchmark_case.expected_domain},
           {"metamorph", nullptr}, {"search", nullptr}, {"shapeSignature", nullptr},
@@ -234,7 +245,10 @@ json execute_request(const Request &request) {
   const auto audit_start = Clock::now();
   const json input_audit = deep_audit(geometry.shape);
   const auto operation_start = Clock::now();
-  const AdapterResult adapter = run_fillet(request.backend, geometry, effective_radius);
+  const AdapterResult adapter = request.benchmark_case.operation_type == "boolean"
+                                    ? run_boolean(request.backend, geometry,
+                                                  request.benchmark_case.boolean_mode)
+                                    : run_fillet(request.backend, geometry, effective_radius);
   const auto operation_end = Clock::now();
   const json output_audit = adapter.success ? deep_audit(adapter.output) : json(nullptr);
   const auto audit_end = Clock::now();

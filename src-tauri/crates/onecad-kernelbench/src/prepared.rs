@@ -85,7 +85,7 @@ impl CaseV2 {
                 })
                 .and_then(|validator| validator.point_tolerance)
                 .unwrap_or(DEFAULT_POINT_TOLERANCE),
-            max_radius: self.operation.definition.radius_law.max_radius(),
+            max_radius: self.operation.max_radius(),
             json: serde_json::to_value(self).unwrap_or(Value::Null),
             metamorphs: self.metamorphs.clone(),
         }

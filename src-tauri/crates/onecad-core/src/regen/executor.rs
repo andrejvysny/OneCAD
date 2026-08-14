@@ -482,7 +482,6 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         let job = request.job_id;
         let plan_rev = request.document_revision;
         let epoch = request.worker_epoch;
-        let target = request.target_step;
         let lod = request.artifacts.tessellate.map_or(Lod::Coarse, |t| t.lod);
         let expected_base_hash = request.expected_base_hash.clone();
         let prefix_hashes = request.prefix_hashes.clone();
@@ -532,6 +531,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         // Drive the stream, buffering each step. Biased on the stream so a
         // fully-buffered terminal is observed; a mid-await cancel wins.
         let mut saw_step = false;
+        let mut streamed_steps = Vec::new();
         let terminal = loop {
             let event = tokio::select! {
                 biased;
@@ -541,6 +541,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             match event {
                 Some(PlanEvent::Step(e)) => {
                     saw_step = true;
+                    streamed_steps.push(e.step_index);
                     let by = step_records
                         .get(&e.step_index)
                         .copied()
@@ -565,9 +566,9 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                         plan_rev,
                         epoch,
                         start,
-                        target,
                         lod,
                         planned_steps: &planned_steps,
+                        streamed_steps: &streamed_steps,
                         expected_base_hash: &expected_base_hash,
                         prefix_hashes: &prefix_hashes,
                     },
@@ -618,9 +619,9 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             plan_rev,
             epoch,
             start,
-            target,
             lod,
             planned_steps,
+            streamed_steps,
             expected_base_hash,
             prefix_hashes,
         } = ctx;
@@ -643,6 +644,11 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             });
         }
 
+        if let Err(message) = validate_prepared_stream(&prepared, planned_steps, streamed_steps) {
+            self.discard(job).await;
+            return Outcome::EngineFailed(EngineError::Protocol { message });
+        }
+
         // X-WP1 item 2 / review F9: verify the worker's OPAQUE history-prefix echo
         // equals the token Rust minted for the last executed op (or the base hash
         // for a base-only prepare). A mismatch ⇒ the worker executed a different
@@ -662,20 +668,6 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 ),
             });
         }
-
-        // F23: a Completed prepare must have executed every planned step. The yardstick
-        // is the LAST PLANNED step, not `target`: a suppressed op is absent from the
-        // plan, so when the target step itself is suppressed the last executed step is
-        // legitimately below it.
-        let last_planned = planned_steps.last().copied().unwrap_or(target);
-        let completed_reached_target = prepared.stopped_reason != StoppedReason::Completed
-            || prepared.last_valid_step == Some(last_planned);
-        debug_assert!(
-            completed_reached_target,
-            "stoppedReason=Completed but lastValidStep {:?} != last planned step {last_planned} \
-             (target {target})",
-            prepared.last_valid_step
-        );
 
         // Fencing: read the current (revision, epoch) AT accept time and compare
         // BOTH (review F1/F2). A mismatch ⇒ superseded / orphaned prepare.
@@ -779,31 +771,13 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         // Build + publish the immutable snapshot (shared id + generation).
         let last_valid = prepared.last_valid_step;
         let signatures = last_valid.and_then(|s| scratch.step_signatures.get(&s).cloned());
-        let mut diagnostics: Vec<Diagnostic> = scratch
+        let diagnostics: Vec<Diagnostic> = scratch
             .diagnostics_by_step
             .values()
             .flatten()
             .take(64)
             .cloned()
             .collect();
-        // F23: surface the Completed⇒target invariant as a diagnostic in release
-        // builds too (the debug_assert only fires in debug).
-        if !completed_reached_target {
-            if diagnostics.len() == 64 {
-                diagnostics.pop();
-            }
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                code: "PREPARE_INVARIANT".into(),
-                message: format!(
-                    "stoppedReason=Completed but lastValidStep {:?} != last planned step \
-                     {last_planned} (target {target})",
-                    prepared.last_valid_step
-                ),
-                stage: None,
-                evidence: None,
-            });
-        }
         // Report the planned steps' states PLUS every seeded-gate step: the gate
         // steps are excluded from the plan by construction, so without this the
         // snapshot would never carry the state that explains the truncation.
@@ -923,11 +897,79 @@ struct OnPrepared<'a> {
     plan_rev: DocumentRevision,
     epoch: WorkerEpoch,
     start: usize,
-    target: usize,
     lod: Lod,
     planned_steps: &'a [usize],
+    streamed_steps: &'a [usize],
     expected_base_hash: &'a HistoryPrefixHash,
     prefix_hashes: &'a [HistoryPrefixHash],
+}
+
+/// Validates the worker's streamed/terminal execution summary against the exact
+/// ordered op slice Rust requested. Any mismatch is a protocol error before accept.
+fn validate_prepared_stream(
+    prepared: &PlanPrepared,
+    planned: &[usize],
+    streamed: &[usize],
+) -> Result<(), String> {
+    if planned.is_empty() || planned.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(format!("ExecutePlan has invalid ordered steps {planned:?}"));
+    }
+    let rows = &prepared.per_step;
+    if rows.is_empty() || rows.len() > planned.len() {
+        return Err(format!(
+            "PlanPrepared perStepResults cardinality {} invalid for {} planned steps",
+            rows.len(),
+            planned.len()
+        ));
+    }
+    for (position, row) in rows.iter().enumerate() {
+        if row.step_index != planned[position] {
+            return Err(format!(
+                "PlanPrepared perStepResults[{position}].stepIndex {} != planned step {}",
+                row.step_index, planned[position]
+            ));
+        }
+    }
+    validate_terminal(prepared, planned)?;
+    let streamed_prefix_len = match prepared.stopped_reason {
+        StoppedReason::Completed | StoppedReason::NeedsRepair => rows.len(),
+        StoppedReason::OpFailed => rows.len() - 1,
+    };
+    if streamed != &planned[..streamed_prefix_len] {
+        return Err(format!(
+            "planStep sequence {streamed:?} != executed prefix {:?}",
+            &planned[..streamed_prefix_len]
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terminal(prepared: &PlanPrepared, planned: &[usize]) -> Result<(), String> {
+    let rows = &prepared.per_step;
+    let terminal_position = rows.len() - 1;
+    let expected_last_valid = terminal_position
+        .checked_sub(1)
+        .map(|position| planned[position]);
+    let (expected_terminal, expected_len, expected_last) = match prepared.stopped_reason {
+        StoppedReason::Completed => (StepStatus::Ok, planned.len(), planned.last().copied()),
+        StoppedReason::OpFailed => (StepStatus::OpFailed, rows.len(), expected_last_valid),
+        StoppedReason::NeedsRepair => (StepStatus::NeedsRepair, rows.len(), expected_last_valid),
+    };
+    if rows.len() != expected_len
+        || rows[..terminal_position]
+            .iter()
+            .any(|row| row.status != StepStatus::Ok)
+        || rows[terminal_position].status != expected_terminal
+        || prepared.last_valid_step != expected_last
+    {
+        return Err(format!(
+            "PlanPrepared terminal inconsistent: stoppedReason={:?}, lastValidStep={:?}, statuses={:?}",
+            prepared.stopped_reason,
+            prepared.last_valid_step,
+            rows.iter().map(|row| row.status).collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
 }
 
 /// The opaque history-prefix token the worker is expected to echo for a prepare

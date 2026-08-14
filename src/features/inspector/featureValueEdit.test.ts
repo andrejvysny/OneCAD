@@ -108,7 +108,13 @@ describe("commitFeatureValue", () => {
       targetBodyId: "body1",
       profile: { sketchId: "s1", regionId: "r0" },
     });
-    applyEditCommand.mockResolvedValue({ revision: 8, changedBodies: [], removedBodies: [], features: [] });
+    applyEditCommand.mockResolvedValue({
+      revision: 8,
+      changedBodies: [],
+      removedBodies: [],
+      features: [],
+      terminal: "noop",
+    });
 
     expect(await commitFeatureValue("f7", "Revolve", 45)).toBe(true);
     expect(getOperationParams).toHaveBeenCalledWith("f7");
@@ -199,11 +205,15 @@ describe("commitFeatureValue — variable binding (WP-VE.2)", () => {
   beforeEach(() => {
     getOperationParams.mockReset();
     applyEditCommand.mockReset();
+    // `terminal` is what the verdict reads (`types.ts`: no production result may
+    // omit it). A binding edit whose regen published no body is a `noop`, NOT a
+    // failure — without the stamp the body-count fallback would call it one.
     applyEditCommand.mockResolvedValue({
       revision: 2,
       changedBodies: [],
       removedBodies: [],
       features: [],
+      terminal: "noop",
     });
     spy = vi
       .spyOn(clientModule, "createClient")

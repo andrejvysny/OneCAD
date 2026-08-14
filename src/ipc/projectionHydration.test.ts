@@ -189,6 +189,23 @@ describe("applyProjectionToStore", () => {
     // A non-error feature carries no message.
     expect(feats[1].statusMessage).toBeUndefined();
   });
+
+  it("carries diagnostics into failure state and clears them on a successful retry", () => {
+    const failure = {
+      id: "f1",
+      kind: "fillet" as const,
+      label: "Fillet",
+      valueText: "2.0 mm",
+      status: "error" as const,
+      statusMessage: "kernel refused",
+      diagnostics: [{ severity: "error" as const, code: "FILLET_TOO_LARGE", message: "radius exceeds edge" }],
+    };
+    applyProjectionToStore(proj(10, { features: [failure] }));
+    expect(documentStore.getState().features[0].diagnostics?.[0]?.code).toBe("FILLET_TOO_LARGE");
+
+    applyProjectionToStore(proj(11, { features: [{ ...failure, status: "ok", statusMessage: undefined, diagnostics: undefined }] }));
+    expect(documentStore.getState().features[0].diagnostics).toBeUndefined();
+  });
 });
 
 // ── Datum planes (DATUM W1) ──────────────────────────────────────────────────

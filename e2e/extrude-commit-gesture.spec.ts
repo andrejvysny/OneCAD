@@ -132,7 +132,15 @@ test("visible ✕ after release cancels the tool and creates no body", async ({ 
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore); // no body
 });
 
-test("clicking empty canvas away from the handle commits (click-away)", async ({ page }) => {
+test("clicking empty canvas away from the handle does NOT commit (click-away)", async ({
+  page,
+}) => {
+  // D2 (commit c7df7c8) removed the click-away commit entirely, and the frozen
+  // contract in src/test/contracts/modelingInteractionContract.ts pins
+  // `clickAwayPolicy: "cancel"` for every tool. This spec asserted the OLD Wave-1
+  // behavior and had been red on both browsers ever since, because D2 shipped on
+  // vitest/tsc/build gates without the e2e lane. Enter and the chip ✓ remain the
+  // only commit gestures — both are covered by the tests above.
   await armExtrude(page);
   const bodiesBefore = await bodyOptions(page).count();
 
@@ -146,7 +154,13 @@ test("clicking empty canvas away from the handle commits (click-away)", async ({
   await page.mouse.down();
   await page.mouse.up();
 
-  await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
+  // No body, and the tool is still armed with its preview — the click was inert,
+  // it did not commit and did not tear the armed cluster down either.
+  await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
+  await expect(page.getByRole("button", { name: "Extrude", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 test("exact-preview failure keeps the last preview and blocks confirmation", async ({ page }) => {

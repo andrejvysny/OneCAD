@@ -29,14 +29,19 @@ bool parse_generator_v2(const json &value, GeneratorSpec &out,
   const std::set<std::string> fields = {"family", "name", "version", "seed"};
   if (!exact_fields(value, fields, fields, error))
     return false;
-  if (!value["family"].is_string() || value["family"] != "fillet" ||
+  if (!value["family"].is_string() ||
       !value["name"].is_string() || !value["version"].is_number_integer() ||
       value["version"].get<int>() < 1 || !value["seed"].is_string()) {
     error = "unsupported generator family, name, or version";
     return false;
   }
-  const std::set<std::string> names = {"fillet-foundation", "fillet-matrix"};
-  if (names.count(value["name"].get<std::string>()) == 0) {
+  const std::string family = value["family"];
+  const std::string name = value["name"];
+  const bool supported =
+      (family == "fillet" &&
+       (name == "fillet-foundation" || name == "fillet-matrix")) ||
+      (family == "boolean" && name == "boolean-foundation");
+  if (!supported) {
     error = "unsupported generator name";
     return false;
   }
@@ -132,7 +137,8 @@ bool parse_parameters(const json &value, const std::string &recipe,
   const std::set<std::string> allowed = {
       "dimensions",      "featureIndex", "supportA",     "supportB",
       "dihedralDegrees", "valence",      "convexity",    "edgeLength",
-      "neighborSize",    "seamOffset",   "consumptionRatio", "separation"};
+      "neighborSize",    "seamOffset",   "consumptionRatio", "separation",
+      "targetDimensions", "toolDimensions", "toolOffset"};
   if (!exact_fields(value, allowed, {}, error))
     return false;
   if (value.contains("dimensions") &&
@@ -154,6 +160,35 @@ bool parse_parameters(const json &value, const std::string &recipe,
     }
     out.feature_index = value["featureIndex"].get<std::size_t>();
     out.has_feature_index = true;
+  }
+  if (value.contains("targetDimensions") &&
+      !parser::parse_vector(value["targetDimensions"], 3, 3,
+                            out.target_dimensions)) {
+    error = "targetDimensions must be three finite numbers";
+    return false;
+  }
+  if (value.contains("toolDimensions") &&
+      !parser::parse_vector(value["toolDimensions"], 3, 3,
+                            out.tool_dimensions)) {
+    error = "toolDimensions must be three finite numbers";
+    return false;
+  }
+  if (value.contains("toolOffset") &&
+      !parser::parse_vector(value["toolOffset"], 3, 3, out.tool_offset)) {
+    error = "toolOffset must be three finite numbers";
+    return false;
+  }
+  for (double dimension : out.target_dimensions) {
+    if (dimension <= 0.0) {
+      error = "targetDimensions must be positive";
+      return false;
+    }
+  }
+  for (double dimension : out.tool_dimensions) {
+    if (dimension <= 0.0) {
+      error = "toolDimensions must be positive";
+      return false;
+    }
   }
   if (value.contains("supportA")) {
     SupportSpec support;
@@ -233,6 +268,17 @@ bool parse_parameters(const json &value, const std::string &recipe,
     error = "valenceCorner requires valence";
     return false;
   }
+  if (recipe == "twoBoxes") {
+    if (out.target_dimensions.size() != 3 || out.tool_dimensions.size() != 3 ||
+        out.tool_offset.size() != 3) {
+      error = "twoBoxes requires targetDimensions, toolDimensions, and toolOffset";
+      return false;
+    }
+    if (value.size() != 3) {
+      error = "twoBoxes accepts only targetDimensions, toolDimensions, and toolOffset";
+      return false;
+    }
+  }
   return true;
 }
 
@@ -247,7 +293,7 @@ bool parse_geometry(const json &value, CaseSpec &out, std::string &error) {
       "overflowWedge", "supportPair",        "valenceCorner",
       "shortEdge",     "microEdge",          "sliverNeighborFace",
       "tinyNeighborFace", "periodicSeam",    "nearSeamEdge",
-      "faceNearlyConsumed", "faceFullyConsumed", "blendCollision"};
+      "faceNearlyConsumed", "faceFullyConsumed", "blendCollision", "twoBoxes"};
   if (!value["recipe"].is_string() ||
       recipes.count(value["recipe"].get<std::string>()) == 0) {
     error = "unsupported geometry recipe";
@@ -333,12 +379,28 @@ bool parse_radius_law(const json &value, RadiusLaw &out, std::string &error) {
 
 bool parse_operation_v2(const json &value, CaseSpec &out, std::string &error) {
   const std::set<std::string> fields = {"type", "definition"};
-  if (!exact_fields(value, fields, fields, error) || !value["type"].is_string() ||
-      value["type"] != "fillet") {
-    error = error.empty() ? "operation type must be fillet" : error;
+  if (!exact_fields(value, fields, fields, error) || !value["type"].is_string()) {
+    error = error.empty() ? "operation needs a type" : error;
     return false;
   }
+  out.operation_type = value["type"];
   const json &definition = value["definition"];
+  if (out.operation_type == "boolean") {
+    const std::set<std::string> definition_fields = {"mode"};
+    const std::set<std::string> modes = {"fuse", "cut", "common"};
+    if (!exact_fields(definition, definition_fields, definition_fields, error) ||
+        !definition["mode"].is_string() ||
+        modes.count(definition["mode"].get<std::string>()) == 0) {
+      error = error.empty() ? "invalid Boolean definition" : error;
+      return false;
+    }
+    out.boolean_mode = definition["mode"];
+    return true;
+  }
+  if (out.operation_type != "fillet") {
+    error = "unsupported operation type";
+    return false;
+  }
   const std::set<std::string> allowed = {"radiusLaw", "continuity", "sizeType"};
   const std::set<std::string> required = {"radiusLaw", "continuity"};
   if (!exact_fields(definition, allowed, required, error) ||
@@ -379,7 +441,7 @@ bool validate_validator_v2(const json &value, std::string &error) {
       "g1BoundaryTangency", "materialChange",       "remoteSupportsUnchanged",
       "deepAudit",        "crossSectionProfile",    "supportTangency",
       "noSelfIntersection", "manifold",             "toleranceGrowth",
-      "microTopology"};
+      "microTopology",     "history"};
   if (simple.count(type) > 0) {
     if (!exact_fields(value, {"type", "required", "direction"},
                       {"type", "required"}, error))
@@ -549,6 +611,15 @@ bool parse_case_v2(const nlohmann::json &value, CaseSpec &out,
                                 out.parameters.has_feature_index,
                                 out.parameters.feature_index, error))
     return false;
+  const bool family_matches =
+      (out.generator.family == "fillet" && out.operation_type == "fillet" &&
+       !out.selector.body_roles) ||
+      (out.generator.family == "boolean" && out.operation_type == "boolean" &&
+       out.recipe == "twoBoxes" && out.selector.body_roles);
+  if (!family_matches) {
+    error = "generator, operation, geometry, and selector families disagree";
+    return false;
+  }
   const std::set<std::string> domains = {"supported", "expectedLimit",
                                           "exploratory", "outsideProductDomain"};
   if (!value["expectedDomain"].is_string() ||
@@ -564,6 +635,31 @@ bool parse_case_v2(const nlohmann::json &value, CaseSpec &out,
        !parser::validate_search(value["search"], error))) {
     error = error.empty() ? "invalid validators, metamorphs, or limits" : error;
     return false;
+  }
+  if (out.operation_type == "boolean") {
+    if (value.contains("search")) {
+      error = "operation.radius search does not apply to Boolean";
+      return false;
+    }
+    const std::set<std::string> fillet_validators = {
+        "constantRadius", "generatedBlendFace", "cylindricalRadius",
+        "g1BoundaryTangency", "remoteSupportsUnchanged",
+        "crossSectionProfile", "supportTangency", "radiusTolerance",
+        "tangencyTolerance", "crossSectionTolerance", "radiusLawFollowed"};
+    for (const json &validator : value["validators"]) {
+      if (fillet_validators.count(validator.value("type", "")) > 0) {
+        error = "Fillet validator does not apply to Boolean";
+        return false;
+      }
+    }
+    for (const json &metamorph : value["metamorphs"]) {
+      const std::string type = metamorph.value("type", "");
+      if (type == "parameterEpsilon" || type == "edgeOrderPermutation" ||
+          type == "contourSeed") {
+        error = "edge/radius metamorph does not apply to Boolean";
+        return false;
+      }
+    }
   }
   out.expected_domain = value["expectedDomain"];
   out.validators = value["validators"];

@@ -1,6 +1,20 @@
 # OneCAD Modeling Correctness Risk Register
 
-Baseline: `1c11d4958aeadea14dd8431ba78c41f14be12142`
+Baseline: `9933689` plus uncommitted 2026-08-13 hardening worktree
+
+## 2026-08-13 disposition update
+
+- **Closed in implementation + focused gates:** R-17 (`Modified()` + `Generated()` union,
+  deduplicated, deletion definitive); R-28 (exact canonical STEP-order ties refuse with
+  `AMBIGUOUS_IMPORT_ORDER`); malformed plan-stream acceptance (strict prefix/terminal validation,
+  discard before accept); external release-worker resolution (release accepts bundled sidecar only,
+  verifies SHA and hello manifest axes).
+- **Reduced, still open:** R-15/R-16 (structured publication evidence and input preflight landed;
+  full operation semantics/overhead evidence remains); R-20 (release resolver and WDIO lane are
+  implemented, but the feature build/runtime gate is unrun); R-21 (Boolean foundation landed,
+  Chamfer and campaign breadth remain); R-24/R-26 (release SHA enforcement and Windows worker
+  lane open).
+- **Closed in current harness:** R-23 (all 9 frozen cases execute with typed assertions, zero skips).
 
 Scales:
 

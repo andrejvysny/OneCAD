@@ -136,10 +136,28 @@ void test_shape_audit_policy() {
       validation::single_solid_policy("Tier A box", validation::PublicationTier::TierA);
   const validation::ShapeEvidence fast_box =
       validation::collect_shape_evidence(box, validation::PublicationTier::TierA);
-  check(validation::evaluate_publication_policy(fast_box, tier_a_policy).publishable(),
+  const validation::PublicationDecision fast_decision =
+      validation::evaluate_publication_policy(fast_box, tier_a_policy);
+  check(fast_decision.publishable(),
         "Tier A policy accepts fast valid-solid evidence");
+  const nlohmann::json decision_json = fast_decision.to_json();
+  check(decision_json["disposition"] == "publishable" &&
+            decision_json["evidence"]["topLevelShape"] == "solid" &&
+            decision_json["evidence"]["solidCount"] == 1 &&
+            decision_json["evidence"]["brepValid"] == true,
+        "publication decision serializes verdict and core evidence");
+  check(decision_json["evidence"]["microTopologyChecked"] == false,
+        "Tier A omits scale-normalized micro topology");
+  check(decision_json["timings"]["buildMs"] == 0.0 &&
+            decision_json["timings"]["validatorMs"].get<double>() >= 0.0,
+        "publication decision serializes build and validator timings");
   const validation::PublicationPolicy tier_b_policy =
       validation::single_solid_policy("Tier B box", validation::PublicationTier::TierB);
+  const validation::ShapeEvidence deep_box =
+      validation::collect_shape_evidence(box, validation::PublicationTier::TierB);
+  check(deep_box.micro_topology_checked && deep_box.micro_edge_count == 0 &&
+            deep_box.sliver_face_count == 0 && deep_box.scale_diagonal > 0.0,
+        "Tier B evidence includes scale-normalized micro topology");
   check(!validation::evaluate_publication_policy(fast_box, tier_b_policy).publishable(),
         "Tier B policy refuses missing self-interference evidence");
 
@@ -160,6 +178,9 @@ void test_shape_audit_policy() {
       validation::audit_shape(open_box_solid());
   check(!invalid_audit.brep_valid && !invalid_audit.publishable(),
         "invalid solid fails audit");
+  check(invalid_audit.manifold_checked && invalid_audit.open_edge_count > 0 &&
+            invalid_audit.non_manifold_edge_count == 0,
+        "open solid reports open edge-use evidence");
 
   TopoDS_Compound overlapping;
   builder.MakeCompound(overlapping);
@@ -174,6 +195,9 @@ void test_shape_audit_policy() {
   check(overlap_audit.self_interference_checked &&
             overlap_audit.self_interference_count > 0,
         "overlapping solids report self-interference");
+  check(overlap_audit.manifold_checked && overlap_audit.open_edge_count == 0 &&
+            overlap_audit.non_manifold_edge_count == 0,
+        "Tier B evidence reports closed-manifold edge use");
   check(!validation::evaluate_publication_policy(overlap_audit, tier_b_policy).publishable(),
         "Tier B policy refuses overlapping solids");
 

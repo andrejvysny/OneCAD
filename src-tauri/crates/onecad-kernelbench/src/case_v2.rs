@@ -77,6 +77,7 @@ pub struct GeneratorV2 {
 #[serde(rename_all = "camelCase")]
 pub enum OperationFamily {
     Fillet,
+    Boolean,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -86,6 +87,8 @@ pub enum GeneratorName {
     FilletFoundation,
     /// The expanded support-surface / topology / conditioning matrix.
     FilletMatrix,
+    /// Two-body Boolean foundation: explicit boxes and relative placement.
+    BooleanFoundation,
 }
 
 // ── Geometry ────────────────────────────────────────────────────────────────
@@ -147,6 +150,7 @@ pub enum RecipeName {
     FaceNearlyConsumed,
     FaceFullyConsumed,
     BlendCollision,
+    TwoBoxes,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -180,6 +184,12 @@ pub struct RecipeParameters {
     pub consumption_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub separation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_dimensions: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_dimensions: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_offset: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -226,13 +236,44 @@ pub enum Convexity {
 pub struct Operation {
     #[serde(rename = "type")]
     pub operation_type: OperationTypeV2,
-    pub definition: FilletDefinition,
+    pub definition: OperationDefinition,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OperationTypeV2 {
     Fillet,
+    Boolean,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum OperationDefinition {
+    Fillet(FilletDefinition),
+    Boolean(BooleanDefinition),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BooleanDefinition {
+    pub mode: BooleanModeV2,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BooleanModeV2 {
+    Fuse,
+    Cut,
+    Common,
+}
+
+impl Operation {
+    pub fn max_radius(&self) -> f64 {
+        match &self.definition {
+            OperationDefinition::Fillet(definition) => definition.radius_law.max_radius(),
+            OperationDefinition::Boolean(_) => 0.0,
+        }
+    }
 }
 
 /// Mirrors the kernel-level fillet definition, not the persisted history record.
@@ -307,7 +348,7 @@ impl RadiusLaw {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SelectorV2 {
+pub struct EdgeSelectorV2 {
     pub mode: SelectorModeV2,
     pub topology_role: TopologyRoleV2,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +362,34 @@ pub struct SelectorV2 {
     pub anchors: Vec<SelectorAnchorV2>,
     pub surface_descriptors: Vec<SurfaceDescriptorV2>,
     pub adjacency: SelectorAdjacencyV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SelectorV2 {
+    Edge(EdgeSelectorV2),
+    BodyRoles(BodyRoleSelectorV2),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BodyRoleSelectorV2 {
+    pub mode: BodySelectorModeV2,
+    pub target: BodyRoleV2,
+    pub tools: Vec<BodyRoleV2>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BodySelectorModeV2 {
+    BodyRoles,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BodyRoleV2 {
+    Target,
+    Tool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -452,6 +521,7 @@ pub enum ValidatorTypeV2 {
     Manifold,
     ToleranceGrowth,
     MicroTopology,
+    History,
     RadiusTolerance,
     TangencyTolerance,
     MaterialTolerance,
@@ -564,6 +634,39 @@ impl CaseV2 {
         if self.generator.version == 0 {
             return Err(AppError::cli("generator version must be >= 1"));
         }
+        let family_matches = matches!(
+            (
+                self.generator.family,
+                self.generator.name,
+                self.operation.operation_type
+            ),
+            (
+                OperationFamily::Fillet,
+                GeneratorName::FilletFoundation | GeneratorName::FilletMatrix,
+                OperationTypeV2::Fillet
+            ) | (
+                OperationFamily::Boolean,
+                GeneratorName::BooleanFoundation,
+                OperationTypeV2::Boolean
+            )
+        );
+        if !family_matches {
+            return Err(AppError::cli(
+                "generator family, name, and operation type disagree",
+            ));
+        }
+        if self.operation.operation_type == OperationTypeV2::Boolean
+            && self.geometry.recipe != RecipeName::TwoBoxes
+        {
+            return Err(AppError::cli(
+                "Boolean foundation requires twoBoxes geometry",
+            ));
+        }
+        if self.operation.operation_type == OperationTypeV2::Boolean && self.search.is_some() {
+            return Err(AppError::cli(
+                "operation.radius search applies only to fillet",
+            ));
+        }
         self.validate_geometry()?;
         self.validate_operation()?;
         self.validate_selector()?;
@@ -629,6 +732,45 @@ impl CaseV2 {
                     return Err(AppError::cli("valence must be in 3..=8"));
                 }
             }
+            RecipeName::TwoBoxes => {
+                for (name, dimensions) in [
+                    ("targetDimensions", p.target_dimensions),
+                    ("toolDimensions", p.tool_dimensions),
+                ] {
+                    let dimensions = dimensions
+                        .ok_or_else(|| AppError::cli(format!("twoBoxes requires {name}")))?;
+                    if dimensions
+                        .iter()
+                        .any(|value| !value.is_finite() || *value <= 0.0)
+                    {
+                        return Err(AppError::cli(format!(
+                            "{name} must contain finite positive values"
+                        )));
+                    }
+                }
+                finite_vector(
+                    &p.tool_offset
+                        .ok_or_else(|| AppError::cli("twoBoxes requires toolOffset"))?,
+                    "toolOffset",
+                )?;
+                if p.dimensions.is_some()
+                    || p.feature_index.is_some()
+                    || p.support_a.is_some()
+                    || p.support_b.is_some()
+                    || p.dihedral_degrees.is_some()
+                    || p.valence.is_some()
+                    || p.convexity.is_some()
+                    || p.edge_length.is_some()
+                    || p.neighbor_size.is_some()
+                    || p.seam_offset.is_some()
+                    || p.consumption_ratio.is_some()
+                    || p.separation.is_some()
+                {
+                    return Err(AppError::cli(
+                        "twoBoxes accepts only targetDimensions, toolDimensions, and toolOffset",
+                    ));
+                }
+            }
             _ => {}
         }
 
@@ -657,7 +799,12 @@ impl CaseV2 {
     }
 
     fn validate_operation(&self) -> AppResult<()> {
-        match &self.operation.definition.radius_law {
+        let definition = match (&self.operation.operation_type, &self.operation.definition) {
+            (OperationTypeV2::Fillet, OperationDefinition::Fillet(definition)) => definition,
+            (OperationTypeV2::Boolean, OperationDefinition::Boolean(_)) => return Ok(()),
+            _ => return Err(AppError::cli("operation type and definition disagree")),
+        };
+        match &definition.radius_law {
             RadiusLaw::Constant { radius } => positive(*radius, "radius")?,
             RadiusLaw::Linear {
                 start_radius,
@@ -692,7 +839,20 @@ impl CaseV2 {
     }
 
     fn validate_selector(&self) -> AppResult<()> {
-        let s = &self.selector;
+        let s = match (&self.operation.operation_type, &self.selector) {
+            (OperationTypeV2::Fillet, SelectorV2::Edge(selector)) => selector,
+            (OperationTypeV2::Boolean, SelectorV2::BodyRoles(selector)) => {
+                if selector.target != BodyRoleV2::Target
+                    || selector.tools.as_slice() != [BodyRoleV2::Tool]
+                {
+                    return Err(AppError::cli(
+                        "Boolean selector needs target and exactly one tool role",
+                    ));
+                }
+                return Ok(());
+            }
+            _ => return Err(AppError::cli("operation and selector families disagree")),
+        };
         if s.provenance.recipe != self.geometry.recipe {
             return Err(AppError::cli(
                 "selector provenance recipe must match geometry",
@@ -779,6 +939,24 @@ impl CaseV2 {
             return Err(AppError::cli("a case needs 1..=48 validators"));
         }
         for v in &self.validators {
+            if self.operation.operation_type == OperationTypeV2::Boolean
+                && matches!(
+                    v.validator_type,
+                    ValidatorTypeV2::ConstantRadius
+                        | ValidatorTypeV2::GeneratedBlendFace
+                        | ValidatorTypeV2::CylindricalRadius
+                        | ValidatorTypeV2::G1BoundaryTangency
+                        | ValidatorTypeV2::RemoteSupportsUnchanged
+                        | ValidatorTypeV2::CrossSectionProfile
+                        | ValidatorTypeV2::SupportTangency
+                        | ValidatorTypeV2::RadiusTolerance
+                        | ValidatorTypeV2::TangencyTolerance
+                        | ValidatorTypeV2::CrossSectionTolerance
+                        | ValidatorTypeV2::RadiusLawFollowed
+                )
+            {
+                return Err(AppError::cli("Fillet validator does not apply to Boolean"));
+            }
             match v.validator_type {
                 t if t.is_tolerance() => {
                     let absolute = v
@@ -830,7 +1008,10 @@ impl CaseV2 {
         if self.metamorphs.len() > 32 {
             return Err(AppError::cli("at most 32 metamorphs"));
         }
-        let anchors = self.selector.anchors.len();
+        let anchors = match &self.selector {
+            SelectorV2::Edge(selector) => selector.anchors.len(),
+            SelectorV2::BodyRoles(_) => 0,
+        };
         for m in &self.metamorphs {
             match m {
                 MetamorphV2::Translation { vector }
@@ -850,6 +1031,11 @@ impl CaseV2 {
                 MetamorphV2::Mirror { normal, .. } => non_zero_vector(normal, "mirror normal")?,
                 MetamorphV2::UniformScale { factor, .. } => positive(*factor, "scale factor")?,
                 MetamorphV2::ParameterEpsilon { relative_delta, .. } => {
+                    if self.operation.operation_type != OperationTypeV2::Fillet {
+                        return Err(AppError::cli(
+                            "operation.radius metamorph applies only to fillet",
+                        ));
+                    }
                     if !(relative_delta.is_finite()
                         && (-0.01..=0.01).contains(relative_delta)
                         && *relative_delta != 0.0)
@@ -1024,6 +1210,8 @@ mod tests {
         include_str!("../../../../bench/robustness/examples/fillet-matrix-plane-cylinder-v2.json");
     const V1_REGRESSION: &str =
         include_str!("../../../../bench/robustness/regressions/fillet-box-supported-single.json");
+    const BOOLEAN_EXAMPLE: &str =
+        include_str!("../../../../bench/robustness/examples/boolean-two-box-overlap-v2.json");
 
     fn example() -> serde_json::Value {
         serde_json::from_str(EXAMPLE).unwrap()
@@ -1036,13 +1224,55 @@ mod tests {
         Ok(case)
     }
 
+    fn boolean_case() -> serde_json::Value {
+        serde_json::from_str(BOOLEAN_EXAMPLE).unwrap()
+    }
+
     #[test]
     fn the_committed_example_parses_and_validates() {
         let case = parse(example()).unwrap();
         assert_eq!(case.schema_version, SCHEMA_VERSION_V2);
         assert_eq!(case.geometry.recipe, RecipeName::SupportPair);
         assert_eq!(case.generator.family, OperationFamily::Fillet);
-        assert_eq!(case.operation.definition.radius_law.max_radius(), 3.0);
+        assert_eq!(case.operation.max_radius(), 3.0);
+    }
+
+    #[test]
+    fn boolean_definition_and_body_roles_parse_strictly() {
+        let case = parse(boolean_case()).unwrap();
+        assert_eq!(case.generator.family, OperationFamily::Boolean);
+        assert_eq!(case.geometry.recipe, RecipeName::TwoBoxes);
+        assert_eq!(case.operation.max_radius(), 0.0);
+
+        let mut mismatched = boolean_case();
+        mismatched["operation"]["definition"] =
+            serde_json::json!({"radiusLaw":{"mode":"constant","radius":1},"continuity":"g1"});
+        assert!(parse(mismatched).is_err());
+
+        let mut extra_parameter = boolean_case();
+        extra_parameter["geometry"]["parameters"]["dimensions"] = serde_json::json!([1, 1, 1]);
+        assert!(parse(extra_parameter).is_err());
+
+        let mut wrong_roles = boolean_case();
+        wrong_roles["selector"]["tools"] = serde_json::json!(["target"]);
+        assert!(parse(wrong_roles).is_err());
+
+        let mut fillet_validator = boolean_case();
+        fillet_validator["validators"][0]["type"] = serde_json::json!("constantRadius");
+        assert!(parse(fillet_validator).is_err());
+
+        let mut radius_search = boolean_case();
+        radius_search["search"] = serde_json::json!({
+            "parameter": "operation.radius",
+            "knownSuccess": 1,
+            "upperBound": 2,
+            "growthFactor": 2,
+            "maxProbes": 8,
+            "relativePrecision": 0.001,
+            "absolutePrecision": 0.001,
+            "relativeOffsets": [0.01, 0.0001, 0.000001, 0.00000001]
+        });
+        assert!(parse(radius_search).is_err());
     }
 
     /// Serialization must reproduce the committed file EXACTLY (as a value, so key
@@ -1215,7 +1445,7 @@ mod tests {
             ]
         });
         let case = parse(v).unwrap();
-        assert_eq!(case.operation.definition.radius_law.max_radius(), 4.0);
+        assert_eq!(case.operation.max_radius(), 4.0);
     }
 
     #[test]
@@ -1223,15 +1453,7 @@ mod tests {
         let mut v = example();
         v["operation"]["definition"]["radiusLaw"] =
             serde_json::json!({ "mode": "linear", "startRadius": 2, "endRadius": 7 });
-        assert_eq!(
-            parse(v)
-                .unwrap()
-                .operation
-                .definition
-                .radius_law
-                .max_radius(),
-            7.0
-        );
+        assert_eq!(parse(v).unwrap().operation.max_radius(), 7.0);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Scoring.h — normalized [0,1] descriptor-match confidence (W-WP6, resolverVersion 2).
+// Scoring.h — normalized [0,1] descriptor-match confidence (W-WP6, resolverVersion 3).
 //
 // ── Why a new score (not the OneCAD-CPP one) ─────────────────────────────────
 // OneCAD-CPP `ElementMap::score()` (kernel/elementmap/ElementMap.h:639-672) is an
@@ -44,11 +44,14 @@ namespace km = onecad::kernel::elementmap;
 // resolverVersion (SCHEMA §10 / handshake §13). Bump on any scoring change; it is
 // stamped into every NeedsRepair evidence payload (`scoringVersion`).
 //
+// 3 — history candidates add explicit Modified-channel provenance confidence;
+// Generated-only successors remain eligible, while generated side topology no
+// longer makes a strong Modified successor spuriously ambiguous.
 // 2 (H6a) — two scoring-policy changes: the EDIT-SCOPED descriptor-tie veto
 // (`LadderEditContext`, gated on the plan's `editedFrom`) and the PROPORTIONAL
 // anchor floor (the fixed 1.0 mm scale floor became a 1e-7 divide-by-zero guard).
 // 1 (W-WP6) — the original normalized [0,1] confidence.
-inline constexpr int kResolverVersion = 2;
+inline constexpr int kResolverVersion = 3;
 
 // Locked confidence policy (SCHEMA §10). A false positive (silent wrong bind) is
 // strictly worse than a false negative (asking the user), so BOTH must hold.

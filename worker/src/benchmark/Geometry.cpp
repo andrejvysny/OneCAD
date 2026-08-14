@@ -380,6 +380,10 @@ void apply_variant(const VariantSpec &variant, GeneratedGeometry &geometry) {
   const gp_Trsf transform = variant_transform(variant, geometry.shape);
   BRepBuilderAPI_Transform builder(geometry.shape, transform, true);
   geometry.shape = builder.Shape();
+  if (!geometry.tool_shape.IsNull()) {
+    BRepBuilderAPI_Transform tool_builder(geometry.tool_shape, transform, true);
+    geometry.tool_shape = tool_builder.Shape();
+  }
   for (TopoDS_Edge &edge : geometry.selected_edges)
     edge = TopoDS::Edge(builder.ModifiedShape(edge));
   for (gp_Pnt &point : geometry.probe_points)
@@ -393,8 +397,16 @@ bool generate_geometry(const CaseSpec &benchmark_case,
                        std::string &error) {
   std::uint64_t seed = std::stoull(benchmark_case.generator.seed, nullptr, 16);
   (void)unit_double(seed);
-  if (!make_shape(benchmark_case, out.shape, error))
+  if (benchmark_case.recipe == "twoBoxes") {
+    const auto &target = benchmark_case.parameters.target_dimensions;
+    const auto &tool = benchmark_case.parameters.tool_dimensions;
+    const auto &offset = benchmark_case.parameters.tool_offset;
+    out.shape = BRepPrimAPI_MakeBox(target[0], target[1], target[2]).Shape();
+    out.tool_shape = BRepPrimAPI_MakeBox(
+        gp_Pnt(offset[0], offset[1], offset[2]), tool[0], tool[1], tool[2]).Shape();
+  } else if (!make_shape(benchmark_case, out.shape, error)) {
     return false;
+  }
   if (out.shape.IsNull()) {
     error = "generator produced a null shape";
     return false;
@@ -402,6 +414,19 @@ bool generate_geometry(const CaseSpec &benchmark_case,
   const gp_Pnt center = volume_center(out.shape);
   out.rotation_center = {center.X(), center.Y(), center.Z()};
   out.probe_points = make_probe_points(center, benchmark_case.radius);
+  if (benchmark_case.selector.body_roles) {
+    apply_variant(variant, out);
+    const gp_Pnt target_center = volume_center(out.shape);
+    const gp_Pnt tool_center = volume_center(out.tool_shape);
+    out.selection_evidence = nlohmann::json::array(
+        {{{"provenance", "generator:twoBoxes:target"}, {"topologyRole", "targetBody"},
+          {"anchor", {target_center.X(), target_center.Y(), target_center.Z()}},
+          {"surface", "solid"}, {"adjacency", nlohmann::json::array()}},
+         {{"provenance", "generator:twoBoxes:tool"}, {"topologyRole", "toolBody"},
+          {"anchor", {tool_center.X(), tool_center.Y(), tool_center.Z()}},
+          {"surface", "solid"}, {"adjacency", nlohmann::json::array()}}});
+    return true;
+  }
   std::vector<EdgeInfo> candidates = role_edges(benchmark_case, out.shape);
   out.selected_edges = select_by_selector(benchmark_case, out.shape, candidates, error);
   if (out.selected_edges.empty()) {

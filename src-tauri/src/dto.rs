@@ -57,15 +57,19 @@ pub enum SketchStatus {
 
 /// The model face a sketch is hosted on (`types.ts` `SketchHostFace`).
 ///
-/// Projected from [`SketchAttachment::HostFace`](onecad_core::sketch::SketchAttachment)
-/// so the frontend can answer "is there already a sketch on this face?" without a
-/// round-trip — the double-click-a-face re-entry (SKETCH-ON-FACE W3). Identity
-/// ONLY: the frozen basis, the anchor and the worker-owned `intent` descriptor are
-/// deliberately NOT projected (the sketch's own `plane` is the basis authority,
-/// and the descriptor is evidence the core never interprets).
+/// Projected from [`SketchAttachment::HostFace`](onecad_core::sketch::SketchAttachment).
+/// Identity ONLY: the frozen basis, the anchor and the worker-owned `intent`
+/// descriptor are deliberately NOT projected (the sketch's own `plane` is the basis
+/// authority, and the descriptor is evidence the core never interprets).
 ///
 /// `body_id`/`element_id` render exactly as [`BodyDto::id`] and a promoted
-/// `elementId` do, so a face pick's promoted id compares `==` against this.
+/// `elementId` do. **Nothing in the frontend compares them today**: the
+/// double-click-a-face re-entry this was built for (SKETCH-ON-FACE W3) was removed
+/// in `1fe0cef` — double-click now selects the connected body, pinned by
+/// `e2e/sketch-on-face.spec.ts`. Any future consumer that DOES compare a fresh
+/// promotion against a persisted `element_id` must first read the seam recorded in
+/// `TODO.md` (W5): promotion ids are minted in memory and never survive process
+/// death, so the comparison fails on the first reopen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SketchHostFaceDto {
@@ -167,6 +171,11 @@ pub struct FeatureDto {
     /// non-error status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
+    /// Bounded structured diagnostics for this step's latest terminal. These are
+    /// projection state, so the inspector can explain a stopped feature without
+    /// relying on a history-row tooltip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
     /// Whether the op is suppressed — an axis ORTHOGONAL to [`FeatureStatus`],
     /// sourced from the RECORD flag (`OperationRecord::suppressed`), never from a
     /// [`StepState`]. Always serialized so the frontend can drop its optimistic
@@ -799,6 +808,15 @@ pub struct MassPropertiesDto {
     pub principal_moments: [f64; 3],
     /// The principal frame: three unit, right-handed, sign-canonical rows.
     pub principal_axes: [[f64; 3]; 3],
+}
+
+/// One body's exact BRep topology counts from `QueryBodyTopology` (SCHEMA §7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyTopologyDto {
+    pub body_id: String,
+    pub solid_count: u32,
+    pub face_count: u32,
 }
 
 /// One face's snapshot-scoped EVIDENCE from `PrepareOffsetFace` (SCHEMA §7.6).
@@ -1676,6 +1694,7 @@ mod tests {
             status: FeatureStatus::Ok,
             status_message: None,
             suppressed: false,
+            diagnostics: Vec::new(),
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert!(json.get("primaryExpr").is_none());
@@ -1735,6 +1754,7 @@ mod tests {
                 primary_expr: None,
                 status: FeatureStatus::Ok,
                 status_message: None,
+                diagnostics: Vec::new(),
                 suppressed: false,
             }],
             applied_ops: 1,
@@ -1916,6 +1936,7 @@ mod tests {
             primary_expr: None,
             status: FeatureStatus::Ok,
             status_message: None,
+            diagnostics: Vec::new(),
             suppressed: false,
         };
         let v = serde_json::to_value(&dimensionless).unwrap();
@@ -1988,6 +2009,7 @@ mod tests {
             primary_expr: None,
             status: FeatureStatus::Ok,
             status_message: None,
+            diagnostics: Vec::new(),
             suppressed: false,
         };
         assert_eq!(dto.kind, FeatureKind::Boolean);
@@ -2144,6 +2166,7 @@ mod tests {
             primary_expr: None,
             status: FeatureStatus::Ok,
             status_message: None,
+            diagnostics: Vec::new(),
             suppressed: false,
         };
         let v = serde_json::to_value(&ok).unwrap();

@@ -20,10 +20,11 @@ JSON execution request from stdin and writes exactly one result JSON line to
 stdout. Diagnostic text belongs on stderr. The runner is not an OCW1 worker and
 does not share `onecad-worker`'s framed stdout contract.
 
-The `raw-occt` backend calls `BRepFilletAPI_MakeFillet` directly. It has no
-OneCAD healing, retry, radius clamp, or fallback. The `onecad` backend calls the
-production `FilletBuilder`; benchmark code does not copy production modeling
-logic. Both backends regenerate the same semantic input and report an
+For Fillet, `raw-occt` calls `BRepFilletAPI_MakeFillet` directly and `onecad`
+calls production `FilletBuilder`. For Boolean case-v2, `raw-occt` calls the
+deterministic non-destructive OCCT Boolean builder and `onecad` calls the shared
+production Boolean/publication policy. Benchmark code does not copy production
+modeling logic. Both backends regenerate the same semantic inputs and report an
 `inputDigest` so the supervisor can prove that fact.
 
 Production `audit_shape()` behavior remains unchanged. Benchmark-only deep
@@ -147,6 +148,12 @@ threshold.
 | --- | --- | --- | --- |
 | `fillet/foundation` | `t0` | v1 | Box / valence / overflow recipes; edges between two PLANES. |
 | `fillet/matrix` | `m1` | v2 | Support-surface pairs: plane↔plane, plane↔cylinder, cylinder↔cylinder, plane↔cone, swept over the dihedral angle. |
+
+Boolean case-v2 now has an additive foundation definition: `operation.type`
+selects the strict `booleanDefinition` (`fuse`, `cut`, or `common`), `twoBoxes`
+generates explicit target/tool bodies, and `bodyRoles` binds those bodies without
+OCCT traversal ordinals. The focused runner fixture executes overlap Fuse/Cut/Common
+through both raw OCCT and OneCAD publication paths. It is not yet a frozen T0 suite.
 
 `supportPair` geometry has two constructions. The prismatic pairs
 (plane|cylinder × plane|cylinder) are one 2D profile extruded along Z, so the

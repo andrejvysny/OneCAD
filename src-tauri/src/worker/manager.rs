@@ -65,6 +65,9 @@ use crate::dto::{BeginGestureDto, DragSolveDto, FinishSketchDto, SketchUpsertDto
 
 use super::{wire, MeshProvider, SolverEngine};
 
+#[path = "manifest.rs"]
+mod bundled_manifest;
+
 /// Lifecycle state surfaced to the app (drives the worker-status banner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {
@@ -919,6 +922,11 @@ fn fire_restart_hook(shared: &Shared, epoch: WorkerEpoch) {
 async fn spawn_and_connect(
     shared: &Shared,
 ) -> Result<(tokio::process::Child, Arc<ProtocolClient>), String> {
+    let expected = bundled_manifest::embedded_release_manifest()?;
+    if let Some(expected) = &expected {
+        bundled_manifest::verify_binary(&shared.config.binary, expected)?;
+    }
+
     let mut cmd = tokio::process::Command::new(&shared.config.binary);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -954,6 +962,9 @@ async fn spawn_and_connect(
             connected.map_err(|e| format!("handshake: {e}"))?
         }
     };
+    if let Some(expected) = &expected {
+        bundled_manifest::verify_hello(expected, client.hello())?;
+    }
     Ok((child, Arc::new(client)))
 }
 
@@ -1989,6 +2000,20 @@ impl crate::worker::ElementQuery for WorkerManager {
             .await
             .map_err(protocol_err)?;
         ok_result(resp).map(|r| wire::parse_classify_element(&r))
+    }
+
+    async fn query_body_topology(
+        &self,
+        body: BodyId,
+        body_id_label: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request("QueryBodyTopology", wire::query_body_topology_args(body))
+            .await
+            .map_err(protocol_err)?;
+        wire::parse_body_topology(body_id_label, &ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
     }
 }
 

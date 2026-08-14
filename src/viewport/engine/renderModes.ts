@@ -24,7 +24,7 @@
  * substituted PER BODY for geometry that carries baked MESH1 FACE_COLORS (see
  * {@link vertexColorKind}). No render mode names it directly.
  */
-export type MaterialKind = "standard" | "shadedVertex";
+export type MaterialKind = "standard" | "shadedVertex" | "assemblyColor";
 
 /**
  * Does a kind's face material read the geometry's per-vertex `color`? Such a
@@ -34,6 +34,7 @@ export type MaterialKind = "standard" | "shadedVertex";
 export const MATERIAL_KIND_VERTEX_COLORS: Record<MaterialKind, boolean> = {
   standard: false,
   shadedVertex: true,
+  assemblyColor: false,
 };
 
 /**
@@ -47,13 +48,14 @@ export const MATERIAL_KIND_VERTEX_COLORS: Record<MaterialKind, boolean> = {
 const VERTEX_COLOR_KIND: Record<MaterialKind, MaterialKind> = {
   standard: "shadedVertex",
   shadedVertex: "shadedVertex",
+  assemblyColor: "shadedVertex",
 };
 
 export function vertexColorKind(kind: MaterialKind): MaterialKind {
   return VERTEX_COLOR_KIND[kind];
 }
 
-export type RenderModeId = "shaded" | "shadedEdges" | "wireframe";
+export type RenderModeId = "shaded" | "shadedEdges" | "wireframe" | "assemblyColors";
 
 /**
  * Which of a material set's two edge materials a mode draws edges with.
@@ -102,10 +104,18 @@ export const RENDER_MODES: Record<RenderModeId, RenderModeDef> = {
     materialKind: "standard",
     edgeStyle: "standalone",
   },
+  assemblyColors: {
+    id: "assemblyColors",
+    label: "Assembly colors",
+    faceVisible: true,
+    edgeVisible: true,
+    materialKind: "assemblyColor",
+    edgeStyle: "onFaces",
+  },
 };
 
 /** Cycle order for the display-mode button (also the canonical id enumeration). */
-export const RENDER_MODE_ORDER: readonly RenderModeId[] = ["shaded", "shadedEdges", "wireframe"];
+export const RENDER_MODE_ORDER: readonly RenderModeId[] = ["shaded", "shadedEdges", "wireframe", "assemblyColors"];
 
 /**
  * `shadedEdges` is what the renderer has always actually drawn (a BodyObject

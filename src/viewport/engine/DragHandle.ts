@@ -98,6 +98,11 @@ export class DragHandle {
    * produces an arbitrary 180° flip rather than a NaN — silent, and camera-
    * dependent. The extrude arm reaches exactly that case at depth 0.
    */
+  /** Where the handle sits, for a depth-accurate screen scale (U5). */
+  worldAnchor(): THREE.Vector3 {
+    return this.group.position.clone();
+  }
+
   setAxis(origin: THREE.Vector3, dir: THREE.Vector3, mode: DragHandleMode = "forward"): void {
     this.group.position.copy(origin);
     this._dir.copy(dir);

@@ -24,6 +24,9 @@ struct GeneratorSpec {
 };
 
 struct SelectorSpec {
+  bool body_roles = false;
+  std::string target_role;
+  std::vector<std::string> tool_roles;
   std::string mode;
   std::string topology_role;
   std::string provenance_generator;
@@ -69,6 +72,9 @@ struct RecipeParameters {
   std::optional<double> seam_offset;
   std::optional<double> consumption_ratio;
   std::optional<double> separation;
+  std::vector<double> target_dimensions;
+  std::vector<double> tool_dimensions;
+  std::vector<double> tool_offset;
 };
 
 /// The requested radius law. Only `constant` is executable today — variable
@@ -109,6 +115,8 @@ struct CaseSpec {
   // The executable radius. Equal to the constant law's radius; a non-constant
   // law is refused at parse time, so consumers can read this unconditionally.
   double radius = 0.0;
+  std::string operation_type = "fillet";
+  std::string boolean_mode;
   SelectorSpec selector;
   std::string expected_domain;
   nlohmann::json validators;
@@ -142,6 +150,7 @@ struct Request {
 
 struct GeneratedGeometry {
   TopoDS_Shape shape;
+  TopoDS_Shape tool_shape;
   std::vector<TopoDS_Edge> selected_edges;
   nlohmann::json selection_evidence = nlohmann::json::object();
   // Deterministic metamorphic-equivalence probes: `probe_points` moves with
@@ -174,6 +183,8 @@ struct AdapterResult {
   std::vector<TopoDS_Face> support_faces;
   int assigned_radius_count = 0;
   double assigned_radius_max_error = 0.0;
+  int history_modified_count = 0;
+  int history_generated_count = 0;
   nlohmann::json diagnostics = nlohmann::json::array();
 };
 

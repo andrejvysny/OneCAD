@@ -16,7 +16,8 @@
       "corpusCase": "i_multiregion_loop_detection",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Exact fragmented BRep remains P2. The corpus executor additionally runs the frozen loop-detector oracle (case i: rectangle, square-with-hole, arc+chord, ellipse), including the recorded planar-cell divergence from the C++ stack."
+      "notes": "Exact fragmented BRep remains P2. The corpus executor additionally runs the frozen loop-detector oracle (case i: rectangle, square-with-hole, arc+chord, ellipse), including the recorded planar-cell divergence from the C++ stack.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Sketch",
@@ -29,7 +30,8 @@
       "corpusCase": "g_sketch_solver_drag_constraints",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Solver case."
+      "notes": "Solver case.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -42,7 +44,8 @@
       "corpusCase": "a_sketch_extrude_blind",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Corpus shape compiles only where explicit sketch geometry exists."
+      "notes": "Corpus shape compiles only where explicit sketch geometry exists.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -55,7 +58,8 @@
       "corpusCase": "b_extrude_throughall_symmetric_twodir",
       "kernelbenchSuite": "",
       "ciJob": "rust-8-0-1",
-      "notes": "ThroughAll and Symmetric now COMMIT against the real worker through the corpus executor (case b), which asserts the frozen C++ volumes 3750 and 800 and the body-lifecycle events. Still deferred because the mode closure the UI needs is unproven: no browser flow commits these end conditions, and ToFace/ToNext remain corpus expectations without ops. Plan item C4."
+      "notes": "ThroughAll and Symmetric now COMMIT against the real worker through the corpus executor (case b), which asserts the frozen C++ volumes 3750 and 800 and the body-lifecycle events. Still deferred because the mode closure the UI needs is unproven: no browser flow commits these end conditions, and ToFace/ToNext remain corpus expectations without ops. Plan item C4.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Extrude",
@@ -68,7 +72,22 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; e2e-chromium; e2e-webkit",
-      "notes": "Applied-or-refused (WP0.6): closed-form frustum volume, the three named refusals, and preview==commit. The circular-profile red probe REFUSES, so R-10 is closed as not-present."
+      "notes": "Applied-or-refused (WP0.6): closed-form frustum volume, the three named refusals, and preview==commit. The circular-profile red probe REFUSES, so R-10 is closed as not-present.",
+      "uiExposure": "exposed"
+    },
+    {
+      "operation": "Extrude",
+      "mode": "Intersect",
+      "supportStatus": "deferred",
+      "uiExposure": "hidden",
+      "cppTest": "",
+      "rustRealWorkerTest": "",
+      "frontendTest": "src/tools/modelTools/ModelToolController.hostBoolean.test.ts",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "frontend",
+      "notes": "Kernel lowering exists, but full C++/real-worker/browser proof is incomplete. Hidden from profile-operation chips until atomic promotion."
     },
     {
       "operation": "Revolve",
@@ -81,7 +100,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Intersect UI closure deferred (contract row: uiExposure hidden)."
+      "notes": "Intersect UI closure deferred (contract row: uiExposure hidden).",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Revolve",
@@ -94,7 +114,22 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend",
-      "notes": "WP1.5. Kernel/core implement the typed axis; the UI authors only sketchLine, so the contract row is uiExposure hidden and there is deliberately NO browser flow. Curved-edge and cross-body refusals are ctests; reopen, upstream edit and consumed-edge NeedsRepair are real-worker."
+      "notes": "WP1.5. Kernel/core implement the typed axis; the UI authors only sketchLine, so the contract row is uiExposure hidden and there is deliberately NO browser flow. Curved-edge and cross-body refusals are ctests; reopen, upstream edit and consumed-edge NeedsRepair are real-worker.",
+      "uiExposure": "hidden"
+    },
+    {
+      "operation": "Revolve",
+      "mode": "Intersect",
+      "supportStatus": "deferred",
+      "uiExposure": "hidden",
+      "cppTest": "worker/tests/test_revolve_boolean_modes.cpp",
+      "rustRealWorkerTest": "",
+      "frontendTest": "src/tools/modelTools/ModelToolController.revolvePreview.test.ts",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; frontend",
+      "notes": "C++ and frontend lowering exist, but real-worker/browser proof is incomplete. Hidden from profile-operation chips until atomic promotion."
     },
     {
       "operation": "Boolean",
@@ -105,9 +140,10 @@
       "frontendTest": "src/tools/modelTools/ModelToolController.booleanPreview.test.ts",
       "playwrightTest": "e2e/boolean-preview.spec.ts",
       "corpusCase": "c_boolean_cut_fuse_bodyid",
-      "kernelbenchSuite": "",
-      "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Zero-solid result refuses with BOOLEAN_EMPTY_RESULT (P0); the refusal is also pinned cross-track by protocol/fixtures/boolean_empty_refusal.ndjson."
+      "kernelbenchSuite": "boolean/foundation",
+      "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit; linux-kernelbench",
+      "notes": "Zero-solid result refuses with BOOLEAN_EMPTY_RESULT (P0); the refusal is also pinned cross-track by protocol/fixtures/boolean_empty_refusal.ndjson. Case-v2 Boolean foundation exercises Fuse/Cut through raw OCCT and OneCAD publication paths.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Boolean",
@@ -118,9 +154,10 @@
       "frontendTest": "",
       "playwrightTest": "e2e/boolean-preview.spec.ts",
       "corpusCase": "",
-      "kernelbenchSuite": "",
-      "ciJob": "worker-8-0-1; rust-8-0-1; e2e-chromium; e2e-webkit",
-      "notes": "P4 vertical landed: overlap/containment/identity plus face-, edge- and vertex-touching refusals in C++, preview/commit parity + disjoint refusal + save/reopen + undo in Rust, and the chip flow in Playwright. No FE unit test drives Intersect specifically — deliberately left empty rather than pointing at a test that only proves Intersect is ABSENT elsewhere."
+      "kernelbenchSuite": "boolean/foundation",
+      "ciJob": "worker-8-0-1; rust-8-0-1; e2e-chromium; e2e-webkit; linux-kernelbench",
+      "notes": "P4 vertical landed: overlap/containment/identity plus face-, edge- and vertex-touching refusals in C++, preview/commit parity + disjoint refusal + save/reopen + undo in Rust, and the chip flow in Playwright. Case-v2 Boolean foundation exercises Common through raw OCCT and OneCAD publication paths. No FE unit test drives Intersect specifically — deliberately left empty rather than pointing at a test that only proves Intersect is ABSENT elsewhere.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Fillet",
@@ -133,12 +170,13 @@
       "corpusCase": "d_fillet_selected_edge",
       "kernelbenchSuite": "fillet/foundation",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit; linux-kernelbench",
-      "notes": "Semantic-reference lane."
+      "notes": "Semantic-reference lane.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Fillet",
       "mode": "upstream edit",
-      "supportStatus": "supported",
+      "supportStatus": "deferred",
       "cppTest": "",
       "rustRealWorkerTest": "src-tauri/tests/topology_rebind.rs",
       "frontendTest": "",
@@ -146,7 +184,8 @@
       "corpusCase": "e_naming_break_fillet_upstream_edit",
       "kernelbenchSuite": "",
       "ciJob": "rust-8-0-1",
-      "notes": "Anti-goal identity case."
+      "notes": "Anti-goal identity case.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Chamfer",
@@ -159,7 +198,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Curved-edge and short-edge atomicity remain unproven (plan item C4)."
+      "notes": "Curved-edge and short-edge atomicity remain unproven (plan item C4).",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Shell",
@@ -172,7 +212,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: every lane shells exactly ONE open face (test_m6a_ops.cpp openFaces has a single entry, preview_edge_shell.rs passes one promoted ref, the spec picks one face). Multi-open-face and the cross-body refusal are unproven — plan item C4."
+      "notes": "MEASURED LIMIT: every lane shells exactly ONE open face (test_m6a_ops.cpp openFaces has a single entry, preview_edge_shell.rs passes one promoted ref, the spec picks one face). Multi-open-face and the cross-body refusal are unproven — plan item C4.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "OffsetFace",
@@ -185,7 +226,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: the C++ lane EXECUTES Radius and Diameter; the Rust lane executes Radius and covers Total only through PrepareOffsetFace (the opposite-face handshake), never as a committed offset. Diameter has no Rust or browser coverage. The contract rows for Total/Diameter are deferred accordingly."
+      "notes": "MEASURED LIMIT: the C++ lane EXECUTES Radius and Diameter; the Rust lane executes Radius and covers Total only through PrepareOffsetFace (the opposite-face handshake), never as a committed offset. Diameter has no Rust or browser coverage. The contract rows for Total/Diameter are deferred accordingly.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Hole",
@@ -198,7 +240,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: all three seat types remove their analytic volumes in C++ and Rust, but the browser flow CONFIGURES countersink and never commits it (e2e/hole.spec.ts selects the chip, then asserts only holeType). A committed countersink has no browser evidence — plan item C4."
+      "notes": "MEASURED LIMIT: all three seat types remove their analytic volumes in C++ and Rust, but the browser flow CONFIGURES countersink and never commits it (e2e/hole.spec.ts selects the chip, then asserts only holeType). A committed countersink has no browser evidence — plan item C4.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "LinearPattern",
@@ -211,7 +254,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "V2 non-fused preserves the source and mints instance-ordinal children."
+      "notes": "V2 non-fused preserves the source and mints instance-ordinal children.",
+      "uiExposure": "mixed"
     },
     {
       "operation": "CircularPattern",
@@ -224,7 +268,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: the PARTIAL sweep (angleDeg < 360, the angleDeg/count step rule) is proven only in C++ (test_circular_pattern_partial_sweep) and in the frontend patternPreview unit test; the Rust lane runs 360 degrees only. V2 lineage is additionally pinned cross-track by protocol/fixtures/circular_pattern_lineage.ndjson."
+      "notes": "MEASURED LIMIT: the PARTIAL sweep (angleDeg < 360, the angleDeg/count step rule) is proven only in C++ (test_circular_pattern_partial_sweep) and in the frontend patternPreview unit test; the Rust lane runs 360 degrees only. V2 lineage is additionally pinned cross-track by protocol/fixtures/circular_pattern_lineage.ndjson.",
+      "uiExposure": "mixed"
     },
     {
       "operation": "MirrorBody",
@@ -237,7 +282,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "BOTH modes are covered, contrary to an earlier review note: the C++ lane runs fuseWithOriginal true and false, breadth_ops.rs is the fused case and ordinal_tripwire.rs authors the non-fused one. The UI hard-codes false (contract row: uiExposure hidden for fuse)."
+      "notes": "BOTH modes are covered, contrary to an earlier review note: the C++ lane runs fuseWithOriginal true and false, breadth_ops.rs is the fused case and ordinal_tripwire.rs authors the non-fused one. The UI hard-codes false (contract row: uiExposure hidden for fuse).",
+      "uiExposure": "mixed"
     },
     {
       "operation": "TransformBody",
@@ -250,7 +296,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": ""
+      "notes": "",
+      "uiExposure": "exposed"
     },
     {
       "operation": "ImportStep",
@@ -263,7 +310,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; e2e-chromium; e2e-webkit",
-      "notes": "Explicit import exception for P3. The browser spec drives the MOCK lane only (no real XCAF in a webview), and there is no FE unit test for XCAF itself — left empty rather than cited falsely."
+      "notes": "Explicit import exception for P3. The browser spec drives the MOCK lane only (no real XCAF in a webview), and there is no FE unit test for XCAF itself — left empty rather than cited falsely.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "ResolveRefs",
@@ -276,7 +324,8 @@
       "corpusCase": "f_symmetric_ambiguity",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1",
-      "notes": "Must produce NeedsRepair. A protocol verb, not a KnownOperation — declared in nonOperationRows. The §7.5 snapshot echo is pinned by protocol/fixtures/resolve_refs_snapshot_echo.ndjson."
+      "notes": "Must produce NeedsRepair. A protocol verb, not a KnownOperation — declared in nonOperationRows. The §7.5 snapshot echo is pinned by protocol/fixtures/resolve_refs_snapshot_echo.ndjson.",
+      "uiExposure": "hidden"
     },
     {
       "operation": "Timeline",
@@ -289,7 +338,8 @@
       "corpusCase": "h_rollback_dirty_timeline",
       "kernelbenchSuite": "",
       "ciJob": "rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "A document lane, not a KnownOperation — declared in nonOperationRows."
+      "notes": "A document lane, not a KnownOperation — declared in nonOperationRows.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Loft",
@@ -302,7 +352,8 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "",
-      "notes": "Out of roadmap scope."
+      "notes": "Out of roadmap scope.",
+      "uiExposure": "unsupported"
     },
     {
       "operation": "Sweep",
@@ -315,7 +366,36 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "",
-      "notes": "Out of roadmap scope."
+      "notes": "Out of roadmap scope.",
+      "uiExposure": "unsupported"
+    },
+    {
+      "operation": "PlaceComponent",
+      "mode": "generator or blob source, optional mate",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_component_ops.cpp; worker/tests/test_component_mate_solver.cpp; worker/tests/test_component_mate_reseat.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/component_ops.rs; src-tauri/tests/component_rebake.rs",
+      "frontendTest": "src/modules/library/placementController.test.ts; src/modules/library/placementSolver.test.ts",
+      "playwrightTest": "e2e/library-browse-place-snap.spec.ts; e2e/library-place-freespace.spec.ts",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; linux-worker; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
+      "notes": "Component Library WP-0.2 / spec §3.1. Mints a NewBody from a library component; the worker-minted body id is adopted at AcceptPrepared like every other NewBody op. An authored mate re-seats on regen (WP-3.1); a mate that cannot resolve emits planStep.needsRepair[] and STILL publishes at the frozen placement (SCHEMA §7.2 mate carve-out), pinned by place_component_with_an_unresolvable_mate_still_publishes_at_its_frozen_placement.",
+      "uiExposure": "exposed"
+    },
+    {
+      "operation": "DetachComponent",
+      "mode": "drop library identity, keep geometry",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_component_ops.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/component_ops.rs",
+      "frontendTest": "src/modules/modeling/register.test.ts",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; linux-worker; rust-8-0-1; frontend",
+      "notes": "Component Library WP-1.2 / spec §3.4. Backend and the CadClient/GeometryQueryService seam are complete and proven end-to-end (detach_component_preserves_body_and_volume_across_the_swap), but NO UI calls it yet — no menu item, no command, and the mock lane still throws — so uiExposure is hidden and no browser lane is claimed. Ticking this to exposed requires both a UI entry point and an e2e spec.",
+      "uiExposure": "hidden"
     }
   ],
   "corpusCases": {

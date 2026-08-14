@@ -1721,7 +1721,9 @@ async fn preview_binds_the_non_first_region_and_rejects_stale_inputs() {
     published(&regen_all(&mut rt).await, "two-region sketch");
 
     rt.enter_sketch(sid).await.expect("sync sketch");
-    let regions = rt.finish_sketch(sid).await.expect("derive regions").regions;
+    let region_result = rt.finish_sketch(sid).await.expect("derive regions");
+    let region_identity_version = region_result.region_identity_version;
+    let regions = region_result.regions;
     assert_eq!(regions.len(), 2, "both disjoint cells must be selectable");
     let first_area = region_triangle_area(&regions[0]);
     let selected_area = region_triangle_area(&regions[1]);
@@ -1745,7 +1747,9 @@ async fn preview_binds_the_non_first_region_and_rejects_stale_inputs() {
     let Operation::Known(KnownOperation::Extrude(params)) = &mut candidate.op else {
         unreachable!();
     };
-    params.profile.as_mut().unwrap().region = RegionId::new(regions[1].region_id.clone());
+    let profile = params.profile.as_mut().unwrap();
+    profile.region = RegionId::new(regions[1].region_id.clone());
+    profile.region_identity_version = Some(region_identity_version);
     candidate.inputs = candidate.op.derive_inputs();
 
     let preview = wm
@@ -1775,7 +1779,9 @@ async fn preview_binds_the_non_first_region_and_rejects_stale_inputs() {
     let Operation::Known(KnownOperation::Extrude(params)) = &mut stale_region else {
         unreachable!();
     };
-    params.profile.as_mut().unwrap().region = RegionId::new("r_stale");
+    let profile = params.profile.as_mut().unwrap();
+    profile.region = RegionId::new("r_stale");
+    profile.region_identity_version = Some(region_identity_version);
     let stale_error = wm
         .preview_op(
             stale_region,
@@ -1900,7 +1906,9 @@ async fn nested_inner_disk_parity_and_reopen_stability() {
     published(&regen_all(&mut rt).await, "nested sketch");
 
     rt.enter_sketch(sid).await.expect("sync sketch");
-    let regions = rt.finish_sketch(sid).await.expect("derive regions").regions;
+    let region_result = rt.finish_sketch(sid).await.expect("derive regions");
+    let region_identity_version = region_result.region_identity_version;
+    let regions = region_result.regions;
     assert_eq!(regions.len(), 2, "annulus + inner disk: {regions:#?}");
     let disk = regions
         .iter()
@@ -1933,7 +1941,7 @@ async fn nested_inner_disk_parity_and_reopen_stability() {
         unreachable!();
     };
     params.profile.as_mut().unwrap().region = RegionId::new(disk.region_id.clone());
-    params.profile.as_mut().unwrap().region_identity_version = Some(2);
+    params.profile.as_mut().unwrap().region_identity_version = Some(region_identity_version);
     candidate.inputs = candidate.op.derive_inputs();
 
     let preview = wm
@@ -1993,7 +2001,7 @@ async fn nested_inner_disk_parity_and_reopen_stability() {
         .profile
         .as_mut()
         .unwrap()
-        .region_identity_version = Some(2);
+        .region_identity_version = Some(region_identity_version);
     annulus_rec.inputs = annulus_rec.op.derive_inputs();
     add_op(&mut rt, annulus_rec);
     published(&regen_all(&mut rt).await, "commit annulus extrude");

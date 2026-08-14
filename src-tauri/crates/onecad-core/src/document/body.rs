@@ -614,8 +614,27 @@ impl BodyRegistry {
         }
     }
 
+    /// The next free `Body N` label.
+    ///
+    /// This used to be `format!("Body {}", self.bodies.len() + 1)` — a POSITION,
+    /// not an allocation. Delete `Body 1` of three and the next fresh body was
+    /// also called `Body 3`, so the tree showed two identical rows (the duplicate
+    /// names in the UX audit's pattern capture). Identity was never affected —
+    /// this is the human label only — but two identical rows make the tree
+    /// unreadable, and a label is how a user names the thing they mean.
+    ///
+    /// Scanning for the lowest unused number keeps every property the old form
+    /// had: deterministic (replay creates bodies in the same order, so it hands
+    /// out the same numbers), stable across save/reopen (names are persisted on
+    /// `BodyMeta`), and needing no counter to serialize. A user-renamed body
+    /// releases its number, which is correct — nothing is using it any more.
     fn default_name(&self) -> String {
-        format!("Body {}", self.bodies.len() + 1)
+        let used: std::collections::HashSet<&str> =
+            self.bodies.iter().map(|b| b.name.as_str()).collect();
+        (1..)
+            .map(|n| format!("Body {n}"))
+            .find(|name| !used.contains(name.as_str()))
+            .expect("an unbounded search for a free label always terminates")
     }
 }
 
@@ -659,6 +678,36 @@ mod tests {
         let v = serde_json::to_value(&merged).unwrap();
         assert_eq!(v["kind"], "merged");
         assert!(v.get("inputs").is_some() && v.get("winner").is_some());
+    }
+
+    /// U0 red evidence — display labels must be unique.
+    ///
+    /// `default_name` numbers from `self.bodies.len() + 1`, which is a POSITION,
+    /// not an allocation. Delete a body from the middle and the next fresh body
+    /// re-uses a label that is still on screen: the duplicate `Body 3` rows the
+    /// UX audit caught after a pattern commit. Identity is unaffected — this is
+    /// purely the human label — but two identical rows make the tree unreadable.
+    ///
+    /// RED until U6 replaces the position count with a collision-free allocation.
+    #[test]
+    fn fresh_body_names_never_collide_with_a_live_body() {
+        let mut reg = BodyRegistry::new();
+        for (i, n) in [1u128, 2, 3].iter().enumerate() {
+            reg.fold(i, rid(0xB0), BodyLifecycleEvent::Created { body: bid(*n) });
+        }
+        assert_eq!(reg.get(bid(3)).expect("third body").name, "Body 3");
+
+        // Remove the FIRST body: two remain, still named "Body 2" and "Body 3".
+        reg.fold(3, rid(0xB1), BodyLifecycleEvent::Deleted { body: bid(1) });
+        reg.fold(4, rid(0xB2), BodyLifecycleEvent::Created { body: bid(4) });
+
+        let names: Vec<&str> = reg.bodies.iter().map(|m| m.name.as_str()).collect();
+        let unique: std::collections::HashSet<&&str> = names.iter().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "display labels must be unique, got {names:?}"
+        );
     }
 
     #[test]

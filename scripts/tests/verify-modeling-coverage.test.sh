@@ -67,6 +67,18 @@ expect_coverage_failure \
   'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));x.nonOperationRows=[];fs.writeFileSync(p,JSON.stringify(x))' \
   "an undeclared non-operation row"
 
+expect_coverage_failure \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));delete x.rows[0].uiExposure;fs.writeFileSync(p,JSON.stringify(x))' \
+  "a row missing uiExposure"
+
+expect_coverage_failure \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.uiExposure==="exposed"&&r.supportStatus==="supported");r.playwrightTest="";fs.writeFileSync(p,JSON.stringify(x))' \
+  "an exposed supported row missing its browser lane"
+
+expect_coverage_failure \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.uiExposure==="hidden");r.playwrightTest="e2e/boolean-preview.spec.ts";fs.writeFileSync(p,JSON.stringify(x))' \
+  "a hidden row claiming browser exposure"
+
 echo "verify-modeling-contracts negative controls:"
 
 expect_contracts_failure() {

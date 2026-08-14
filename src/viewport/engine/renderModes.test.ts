@@ -28,18 +28,20 @@ describe("RENDER_MODES", () => {
     expect(RENDER_MODES.shaded.label).toBe("Shaded");
     expect(RENDER_MODES.shadedEdges.label).toBe("Shaded + edges");
     expect(RENDER_MODES.wireframe.label).toBe("Wireframe");
+    expect(RENDER_MODES.assemblyColors.label).toBe("Assembly colors");
   });
 
-  it("face/edge visibility: shaded = faces · shadedEdges = both · wireframe = edges", () => {
+  it("face/edge visibility: shaded = faces · shadedEdges = both · wireframe = edges · assemblyColors = both", () => {
     const vis = (id: RenderModeId) => [RENDER_MODES[id].faceVisible, RENDER_MODES[id].edgeVisible];
     expect(vis("shaded")).toEqual([true, false]);
     expect(vis("shadedEdges")).toEqual([true, true]);
     expect(vis("wireframe")).toEqual([false, true]);
+    expect(vis("assemblyColors")).toEqual([true, true]);
   });
 });
 
 describe("vertexColorKind (per-body FACE_COLORS substitution)", () => {
-  const KINDS: MaterialKind[] = ["standard", "shadedVertex"];
+  const KINDS: MaterialKind[] = ["standard", "shadedVertex", "assemblyColor"];
 
   it("maps every kind to a vertex-colored kind, and is idempotent", () => {
     for (const kind of KINDS) {
@@ -53,6 +55,11 @@ describe("vertexColorKind (per-body FACE_COLORS substitution)", () => {
     for (const def of Object.values(RENDER_MODES)) {
       expect(MATERIAL_KIND_VERTEX_COLORS[def.materialKind]).toBe(false);
     }
+  });
+
+  it("assemblyColor maps to the vertex-colored variant so imported face colors survive", () => {
+    expect(vertexColorKind("assemblyColor")).toBe("shadedVertex");
+    expect(MATERIAL_KIND_VERTEX_COLORS["assemblyColor"]).toBe(false);
   });
 
   it("covers every kind (a new kind with no entry would be undefined at runtime)", () => {

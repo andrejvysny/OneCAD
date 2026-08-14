@@ -28,11 +28,13 @@
 #include "io/MeshExport.h"
 #include "protocol/Dispatcher.h"
 #include "protocol/Envelope.h"
+#include "protocol/Limits.h"
 #include "protocol/SolverLane.h"
 #include "session/ClassifyElement.h"
 #include "session/ElementIdentity.h"
 #include "session/FaceProjection.h"
 #include "session/MassProperties.h"
+#include "session/BodyTopology.h"
 #include "session/PrepareOffsetFace.h"
 #include "session/PrepareEdgeOp.h"
 #include "session/PlanExecutor.h"
@@ -57,9 +59,6 @@ constexpr int kProtocolVersion = 1;
 constexpr const char* kWorkerVersion = "0.1.0";
 constexpr int kQuantizationVersion = 1;
 constexpr int kSolverPolicyVersion = 1;
-// SCHEMA §6 handshake transport limits (defaults).
-constexpr std::uint64_t kChunkSize = 1048576;          // 1 MiB
-constexpr std::uint64_t kInitialBulkCredit = 8388608;  // 8 MiB
 
 // Redirect OCCT's default messenger from std::cout to std::cerr. The default
 // printer writes to std::cout, which would corrupt our stdout frame stream, so
@@ -101,11 +100,25 @@ nlohmann::json make_hello_result() {
          }},
         {"quantizationVersion", kQuantizationVersion},
         {"solverPolicyVersion", kSolverPolicyVersion},
-        {"capabilities", nlohmann::json::array({"op.sketch", "op.extrude", "op.revolve", "op.fillet",
-                                                "op.chamfer", "op.boolean", "op.importStep",
-                                                "solver.planegcs", "tessellate.mesh1", "io.step",
-                                                "io.step.import"})},
-        {"limits", {{"chunkSize", kChunkSize}, {"initialBulkCredit", kInitialBulkCredit}}},
+        // One entry per capability this build actually dispatches. The list had
+        // drifted: six ops (hole/shell/both patterns/mirror/transform/offsetFace)
+        // shipped without ever being announced, and the three verbs added in the
+        // 2026-08-13/14 tranche (ClassifyElement, ExportGeometry, QueryBodyTopology)
+        // would have joined them. Nothing VERIFIES this list — the manifest compares
+        // version axes only and the hello fixture matches it as `$any` — which is
+        // exactly why it rotted, so it is completed here rather than extended by
+        // three and left half-true.
+        {"capabilities",
+         nlohmann::json::array({"op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
+                                "op.boolean", "op.hole", "op.shell", "op.linearPattern",
+                                "op.circularPattern", "op.mirrorBody", "op.transformBody",
+                                "op.offsetFace", "op.importStep", "op.placeComponent",
+                                "op.detachComponent", "solver.planegcs", "tessellate.mesh1",
+                                "io.step", "io.step.import", "io.geometry.export",
+                                "query.classifyElement", "query.bodyTopology"})},
+        {"limits",
+         {{"chunkSize", onecad::protocol::kChunkSize},
+          {"initialBulkCredit", onecad::protocol::kInitialBulkCredit}}},
     };
 }
 
@@ -303,6 +316,11 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "QueryMassProperties",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_query_mass_properties(session, r);
+        });
+    dispatcher.register_verb(
+        "QueryBodyTopology",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_query_body_topology(session, r);
         });
     dispatcher.register_verb(
         "ResolveRefs",

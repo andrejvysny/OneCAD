@@ -221,12 +221,15 @@ int main() {
     const std::string box_path = (dir / "w0_step_box.step").string();
     const std::string multi_path = (dir / "w0_step_multi.step").string();
     const std::string bad_path = (dir / "w0_step_garbage.step").string();
+    const std::string ambiguous_path = (dir / "w0_step_ambiguous.step").string();
 
     // --- 1. Generate the fixtures ------------------------------------------
     check(stepfx::write_step_fixture(stepfx::make_single_box(), box_path).empty(),
           "fixture: single box written");
     check(stepfx::write_step_fixture(stepfx::make_multi_solid(), multi_path).empty(),
           "fixture: multi-solid compound written");
+    check(stepfx::write_step_fixture(stepfx::make_ambiguous_order_solids(), ambiguous_path).empty(),
+          "fixture: ambiguous-order solids written");
     {
         // Truncated garbage: a plausible ISO-10303 header cut mid-token followed
         // by binary noise. Exercises the reader's error path, not its empty path.
@@ -319,6 +322,12 @@ int main() {
     const StepReadResult empty_path = onecad::io::read_step("", StepReadPolicy{});
     check(!empty_path.ok(), "empty path: read reports an error result");
 
+    const StepReadResult ambiguous = onecad::io::read_step(ambiguous_path, StepReadPolicy{});
+    check(!ambiguous.ok() && ambiguous.solids.empty(),
+          "ambiguous order: exact canonical tie refuses without traversal fallback");
+    check(ambiguous.error && ambiguous.error->starts_with(onecad::io::kAmbiguousImportOrder),
+          "ambiguous order: stable AMBIGUOUS_IMPORT_ORDER code");
+
     // --- 3. Interface_Static leak guard -------------------------------------
     // Init first: the knobs are registered by the STEP controller, so a snapshot
     // taken before Init would read "<absent>" for everything and pass vacuously.
@@ -395,6 +404,7 @@ int main() {
     std::filesystem::remove(bad_path, ec);
     std::filesystem::remove(box_path, ec);
     std::filesystem::remove(multi_path, ec);
+    std::filesystem::remove(ambiguous_path, ec);
     if (g_failures == 0) std::fprintf(stderr, "step_read: OK\n");
     return g_failures;
 }

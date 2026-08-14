@@ -92,6 +92,26 @@ kernel::validation::PublicationDecision publication_decision(
     return kernel::validation::evaluate_publication_policy(evidence, policy);
 }
 
+std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
+                                                 const std::string& operation,
+                                                 const std::string& role) {
+    kernel::validation::PublicationPolicy policy =
+        kernel::validation::single_solid_policy(operation + " " + role,
+                                                kernel::validation::PublicationTier::TierA);
+    policy.max_solid_count = -1;
+    const kernel::validation::PublicationDecision decision = publication_decision(shape, policy);
+    if (decision.publishable()) return std::nullopt;
+    OpOutcome failure = OpOutcome::fail("INVALID_MODELING_INPUT", decision.message);
+    failure.diagnostics.push_back({{"severity", "error"},
+                                   {"code", "INVALID_MODELING_INPUT"},
+                                   {"message", decision.message},
+                                   {"stage", "input-validation"},
+                                   {"evidence", decision.evidence.to_json()},
+                                   {"timings", decision.timings.to_json()},
+                                   {"role", role}});
+    return failure;
+}
+
 namespace {
 
 json ownership_repair(const json& input, const std::string& ref_id,
@@ -258,13 +278,19 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         return std::nullopt;
     }
 
-    if (region_identity_version.has_value() && *region_identity_version != 2) {
+    if (region_identity_version.has_value() &&
+        *region_identity_version != 2 && *region_identity_version != 3) {
         err = "profile: unsupported regionIdentityVersion " +
               std::to_string(*region_identity_version);
         return std::nullopt;
     }
     loop::LoopDetectorConfig detection_config = loop::makeRegionDetectionConfig();
-    detection_config.exactAnalyticFragments = region_identity_version == 2;
+    const bool exact_identity = region_identity_version == 2 || region_identity_version == 3;
+    detection_config.exactAnalyticFragments = exact_identity;
+    if (region_identity_version == 3) {
+        detection_config.curveRefinementPolicy =
+            loop::CurveRefinementPolicy::V3PhysicalProximity;
+    }
     loop::LoopDetector detector;
     detector.setConfig(detection_config);
     const loop::LoopDetectionResult det = detector.detect(*tr.sketch);
@@ -272,8 +298,11 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         const auto it = tr.index.internal_edge_to_wire.find(internalId);
         return it != tr.index.internal_edge_to_wire.end() ? it->second : internalId;
     };
+    const loop::RegionIdentityVersion table_version = region_identity_version == 3
+        ? loop::RegionIdentityVersion::V3
+        : loop::RegionIdentityVersion::V2;
     const loop::RegionTable table = loop::buildRegionTable(
-        det, map_edge, sk::constants::COINCIDENCE_TOLERANCE);
+        det, map_edge, sk::constants::COINCIDENCE_TOLERANCE, table_version);
     if (!table.success) {
         err = "profile: " + table.errorMessage;
         return std::nullopt;
@@ -283,9 +312,9 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         return std::nullopt;
     }
 
-    const bool exact_identity = region_identity_version == 2;
     if (exact_identity && region_id.empty()) {
-        err = "profile: regionIdentityVersion 2 requires regionId";
+        err = "profile: regionIdentityVersion " +
+              std::to_string(*region_identity_version) + " requires regionId";
         return std::nullopt;
     }
     const loop::RegionDefinition* selected = &table.regions.front();

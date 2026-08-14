@@ -28,8 +28,8 @@ use onecad_core::ids::{BodyId, DocumentId, DocumentRevision, JobId, TopoKey, Wor
 use onecad_core::math::Vec3;
 use onecad_core::regen::{
     CancelToken, ElementMapDelta, ElementMapEntry, EngineError, Fencing, ModelSnapshot,
-    OpFailureCode, Outcome, RegenExecutor, RegenRequest, RegenSession, SnapshotPublisher,
-    StoppedReason,
+    OpFailureCode, Outcome, PlanEvent, RegenExecutor, RegenRequest, RegenSession,
+    SnapshotPublisher, StepStatus, StoppedReason,
 };
 
 use support::*;
@@ -37,6 +37,38 @@ use support::*;
 const JOB: JobId = JobId(Uuid::from_u128(0x105));
 const REV: DocumentRevision = DocumentRevision(7);
 const EPOCH: WorkerEpoch = WorkerEpoch(3);
+
+fn prepared_mut(events: &mut [PlanEvent]) -> &mut onecad_core::regen::PlanPrepared {
+    events
+        .iter_mut()
+        .find_map(|event| match event {
+            PlanEvent::Prepared(prepared) => Some(prepared),
+            _ => None,
+        })
+        .expect("fake emits PlanPrepared")
+}
+
+async fn assert_stream_refused(mutation: fn(&mut Vec<PlanEvent>)) {
+    let tl = timeline_of(3);
+    let req = plan_request(&tl, RegenRequest::ToEnd { from: 0 }, JOB, REV, EPOCH);
+    let exec = RegenExecutor::new(FakeEngine::all_ok().with_event_mutation(mutation));
+    let mut session = RegenSession::with_timeline(tl);
+    let publisher = SnapshotPublisher::new();
+    let gate = move || (REV, EPOCH);
+    let cancel = CancelToken::new();
+    let out = exec
+        .run(req, &mut session, &gate, &cancel, &publisher)
+        .await;
+    assert!(
+        matches!(out, Outcome::EngineFailed(EngineError::Protocol { .. })),
+        "got {out:?}"
+    );
+    let log = exec.engine().log();
+    assert!(log.accepts.is_empty(), "must refuse before accept_prepared");
+    assert!(log.discards.contains(&JOB), "must discard prepared scratch");
+    assert!(publisher.latest().is_none());
+    assert!(session.bodies.is_empty());
+}
 
 /// A symmetric-tie NeedsRepair item (corpus case `f`: 0.91/0.91, margin 0.00 ⇒
 /// NeedsRepair, never a guess).
@@ -718,6 +750,76 @@ async fn bad_history_prefix_echo_is_protocol_error() {
     assert!(log.accepts.is_empty(), "must NOT accept on echo mismatch");
     assert!(log.discards.contains(&JOB), "discard on echo mismatch");
     assert!(publisher.latest().is_none(), "nothing published");
+}
+
+#[tokio::test]
+async fn malformed_terminal_rows_refuse_before_accept() {
+    let mutations: [fn(&mut Vec<PlanEvent>); 6] = [
+        |events| {
+            let prepared = prepared_mut(events);
+            prepared.per_step.insert(1, prepared.per_step[0].clone());
+        },
+        |events| prepared_mut(events).per_step.swap(0, 1),
+        |events| prepared_mut(events).per_step[1].step_index = 99,
+        |events| {
+            prepared_mut(events).per_step.pop();
+        },
+        |events| prepared_mut(events).last_valid_step = Some(1),
+        |events| {
+            let prepared = prepared_mut(events);
+            prepared.stopped_reason = StoppedReason::OpFailed;
+            prepared.per_step[2].status = StepStatus::NeedsRepair;
+        },
+    ];
+    for mutation in mutations {
+        assert_stream_refused(mutation).await;
+    }
+}
+
+#[tokio::test]
+async fn malformed_plan_step_sequence_refuses_before_accept() {
+    let mutations: [fn(&mut Vec<PlanEvent>); 4] = [
+        |events| events.insert(1, events[0].clone()),
+        |events| events.swap(0, 1),
+        |events| match &mut events[1] {
+            PlanEvent::Step(step) => step.step_index = 99,
+            _ => panic!("fake emits step events before terminal"),
+        },
+        |events| {
+            events.remove(1);
+        },
+    ];
+    for mutation in mutations {
+        assert_stream_refused(mutation).await;
+    }
+}
+
+#[tokio::test]
+async fn invalid_requested_step_order_refuses_before_accept() {
+    for duplicate in [false, true] {
+        let tl = timeline_of(3);
+        let mut req = plan_request(&tl, RegenRequest::ToEnd { from: 0 }, JOB, REV, EPOCH);
+        if duplicate {
+            req.ops[1].step_index = req.ops[0].step_index;
+        } else {
+            req.ops.swap(0, 1);
+        }
+        let exec = RegenExecutor::new(FakeEngine::all_ok());
+        let mut session = RegenSession::with_timeline(tl);
+        let publisher = SnapshotPublisher::new();
+        let gate = move || (REV, EPOCH);
+        let cancel = CancelToken::new();
+        let out = exec
+            .run(req, &mut session, &gate, &cancel, &publisher)
+            .await;
+        assert!(matches!(
+            out,
+            Outcome::EngineFailed(EngineError::Protocol { .. })
+        ));
+        let log = exec.engine().log();
+        assert!(log.accepts.is_empty());
+        assert!(log.discards.contains(&JOB));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

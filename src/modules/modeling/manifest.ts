@@ -71,9 +71,9 @@ export interface CommandApiService {
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
     mate?: PlaceComponentMate,
-  ): Promise<void>;
+  ): Promise<ApplyOperationResult>;
   /** `CadClient.detachComponent` — spec §3.4 `DetachComponent`. */
-  detachComponent(recordId: string): Promise<void>;
+  detachComponent(recordId: string): Promise<ApplyOperationResult>;
   /**
    * The generic kernel-preview lane (`CadClient.beginPreview`/`updatePreview`/
    * `endPreview`/`onPreviewResult`), routed through here per ADR-0002 —

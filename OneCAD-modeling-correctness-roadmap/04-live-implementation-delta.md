@@ -1,19 +1,36 @@
 # Live Implementation Delta
 
 Reviewed: 2026-08-13  
-Implementation state: uncommitted worktree after `c7df7c8`  
+Implementation state: uncommitted worktree at baseline `9933689`
 OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
 
 ## Since the 2026-08-11 review
+
+- **Atomic-publication P0 implemented, focused gates green:** strict plan parser/state machine,
+  malformed stream/terminal fixtures, discard-before-accept, release-only bundled worker resolver,
+  generated SHA/protocol/OCCT manifest verified before Ready, and prepared meshes bounded by the
+  advertised transport limits.
+- **Reference/profile hardening implemented:** ResolveRefs revision/body provenance rejects forged
+  echoes; ElementMap history unions `Modified()` + `Generated()` and deduplicates; exact import
+  ordering ties refuse; new sketches author Region Identity V3/`cell-v3` with physical-distance
+  proximity. V1/V2 are frozen and still accepted.
+- **Publication/coverage advanced, not closed:** decisions now carry evidence/timings and mutating
+  modeling inputs get Tier-A preflight. Coverage is keyed by operation+mode+support+UI exposure;
+  exposed supported rows require real-worker and browser lanes. Profile Intersect is hidden pending
+  full vertical proof. Corpus is now 9/9 with typed assertions and zero skips. The feature-gated
+  real-Tauri lane and case-v2 Boolean foundation are implemented. Measured overhead, all semantics,
+  Pattern cost, full browsers, native WDIO runtime, Chamfer/campaign breadth, and the Phase 6 release
+  matrix remain open.
 
 - **P3 is complete** (`f36c960`): 35 machine-readable contract rows over 16
   operations (`docs/qa/modeling-operation-contracts.json`), Transform through
   the Tier A validator, ImportStep policy row, UI mode disposition recorded,
   and `scripts/verify-modeling-contracts.mjs` enforcing all of it.
-- **P4 is complete** (`f36c960`, `f1415e8`): Boolean Intersect vertical across
-  C++/Rust/frontend/Playwright, Mirror and Linear/Circular Pattern Playwright
-  flows, critical mode closure tests, and a real-worker corpus executor with
-  zero unclassified corpus files.
+- **P4 remains partial.** C1/C2 landed (`1c76c41`, `39f5839`): Boolean Intersect
+  vertical across C++/Rust/frontend/Playwright, Mirror and Linear/Circular
+  Pattern Playwright flows, critical mode closure tests, and a real-worker corpus
+  executor with zero unclassified corpus files. C3/C4/C5/C6, Pattern
+  compatibility, and corpus-trust hardening remain before P4 can close.
 - **Phase 5 WP5.1 landed** (`b7b47e2`): mirror, far-origin translation,
   edge-order permutation and contour seed execute in the runner.
 - **Phase 5 WP5.1 residual (M3.5) closed, uncommitted** (2026-08-13):
@@ -43,14 +60,15 @@ OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
 - **Plan items C1 and C2 are complete** (2026-08-13). P4's coverage manifest was false in sixteen
   places and named a CI job that exists in no workflow; it is now true, and its verifier stats every
   cited path, resolves every job against the workflows, and runs WP4.5's five registry
-  cross-checks. WP4.4's corpus runs three cases instead of one — the blocker was that only case `a`
-  carried complete geometry, so `b` and `i` were enriched with executable entities derived from
-  their own frozen numbers — and classification now comes from the manifest, so the two artifacts
-  cannot disagree.
+  cross-checks. WP4.4's corpus now runs all nine cases with typed expectation models, no unsupported
+  table, and no silent skips; classification comes from the manifest, so the artifacts cannot
+  disagree. Frozen case JSON is unchanged by the 9/9 completion.
 - **Still owed from P2:** the manual Tauri smoke. Unchanged (plan Track D replaces it with an
   automated Tauri lane).
-- **Next in roadmap order:** plan item C1 — make the P4 coverage manifest true and give
-  `verify-modeling-coverage.mjs` teeth — then C2, before Phase 5 WP5.3's Boolean campaign.
+- **Next in roadmap order:** finish C4/C5/C6, native real-Tauri execution, Pattern budget, and
+  Phase 5 Chamfer/Boolean campaign breadth. C5 performance caps await measured Tier A/B and
+  cumulative Pattern cost; C6 needs a full
+  Chromium and WebKit zero-retry pass from persistent Vite with retained failure artifacts.
 
 The sections below are the 2026-08-11 review, kept for its evidence trail.
 

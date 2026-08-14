@@ -467,10 +467,13 @@ export interface CadClient {
    *
    * No `mate` is sent from here: the gesture's own transform is frozen into
    * `placement`, and regen-time re-seating of a recorded mate is the worker's
-   * job (WP-3.1). Geometry arrives via the usual
-   * `onProjectionUpdated`/`onDocumentChanged` event stream, same as every
-   * other mutating command — this resolves once the edit is APPLIED, not
-   * once it has regenerated.
+   * job (WP-3.1).
+   *
+   * Resolves with the CORRELATED regen result, like every other mutating
+   * command: callers must read its `terminal` (via `classifyRegen`) rather than
+   * treat a resolved promise as success. It used to resolve `void` the moment
+   * the edit applied, which made a placement whose regen failed downstream
+   * indistinguishable from one that seated.
    */
   placeComponent(
     componentId: string,
@@ -479,7 +482,7 @@ export interface CadClient {
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
     mate?: PlaceComponentMate,
-  ): Promise<void>;
+  ): Promise<ApplyOperationResult>;
 
   /**
    * Meshes a library component so the UI can SHOW it (WP-B6) — the card
@@ -583,21 +586,21 @@ export interface CadClient {
    * geometry as an ordinary body (spec §3.4) — the sanctioned in-place
    * `PlaceComponent` → `DetachComponent` op-type swap at the same record.
    */
-  detachComponent(recordId: string): Promise<void>;
+  detachComponent(recordId: string): Promise<ApplyOperationResult>;
 
   /**
    * Applies free-parameter overrides to an already-placed component instance
    * (spec §3.1 `params`; Component Library WP-2.3). Every requested key must
    * be declared `role: "free"` on the component's `[parameters]` signature
    * (`LibraryComponent.parameters`) — an unknown or non-free key is refused
-   * server-side, never silently dropped or silently applied. Resolves once
-   * the edit is applied, same as `placeComponent`/`detachComponent`; the
-   * regenerated geometry arrives via the usual projection event stream.
+   * server-side, never silently dropped or silently applied. Resolves with the
+   * correlated regen result, same as `placeComponent`/`detachComponent` — read
+   * its `terminal`, do not treat resolution as success.
    */
   setComponentParams(
     recordId: string,
     params: Record<string, ComponentParamValue>,
-  ): Promise<void>;
+  ): Promise<ApplyOperationResult>;
 
   /**
    * The read-only first half of the OffsetFace authoring transaction

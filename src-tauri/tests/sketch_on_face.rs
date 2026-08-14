@@ -768,7 +768,7 @@ fn region_extrude_record(rec: u128, sketch: SketchId, region: &str, dist: f64) -
         p.profile = Some(SketchRegionRef {
             sketch,
             region: RegionId::new(region),
-            region_identity_version: Some(2),
+            region_identity_version: Some(3),
             extra: Default::default(),
         });
     }

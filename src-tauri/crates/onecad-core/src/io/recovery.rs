@@ -239,6 +239,44 @@ mod tests {
         assert!(offers.is_empty());
     }
 
+    /// CHARACTERIZATION (data-integrity audit, 2026-08-14): **discovery is keyed to
+    /// the MARKER, not to the autosave file**, so an autosave whose marker has been
+    /// removed is unreachable no matter how recent or how large it is.
+    ///
+    /// This is the exact state `api::recover_document` leaves behind: it consumes
+    /// the marker (`remove_marker`) while deliberately KEEPING the autosave, on the
+    /// stated reasoning that "the autosave file itself is kept so a re-crash before
+    /// the next tick still recovers". The scan below shows that a kept autosave with
+    /// no marker offers nothing — the second crash finds an empty list.
+    ///
+    /// Recorded, not fixed: whether the fix is to keep the marker until the next
+    /// autosave supersedes it, to write a fresh marker at recovery, or to fall back
+    /// to scanning autosave files is a design call, and each has a different
+    /// stale-offer profile.
+    #[test]
+    fn an_autosave_whose_marker_was_consumed_is_not_offered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = DocumentId(Uuid::from_u128(0xDEC0));
+
+        write_marker(root, &marker(root, id, 1000)).unwrap();
+        std::fs::write(autosave_path(root, id), b"recovered work").unwrap();
+        // Control: with the marker present, a dead owner IS offered.
+        assert_eq!(scan_stale_markers(root, |_| false).unwrap().len(), 1);
+
+        // What `recover_document` does: consume the marker, keep the autosave.
+        remove_marker(root, id).unwrap();
+        assert!(
+            autosave_path(root, id).exists(),
+            "precondition: the recovered work is still on disk"
+        );
+
+        assert!(
+            scan_stale_markers(root, |_| false).unwrap().is_empty(),
+            "the surviving autosave is not discoverable once its marker is gone"
+        );
+    }
+
     #[test]
     fn scan_skips_foreign_files() {
         let tmp = tempfile::tempdir().unwrap();

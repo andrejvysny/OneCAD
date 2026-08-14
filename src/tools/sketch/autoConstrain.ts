@@ -72,6 +72,16 @@ export interface InferOptions {
   coincidenceTol?: number;
   /** Id minter for the emitted constraints. */
   nextConstraintId: () => string;
+  /**
+   * May a point that landed ON the sketch origin be anchored there? (U7)
+   *
+   * OFF by default, because "drawn near the origin" must never auto-fix
+   * geometry — the anchor is a response to the user ACCEPTING the origin snap,
+   * and this flag is how the caller says the origin was actually offered. With
+   * point snapping turned off the origin is not a snap target at all, so a
+   * coordinate that happens to be (0,0) is a coincidence, not a choice.
+   */
+  originAccepted?: boolean;
 }
 
 interface EntPoint {
@@ -380,6 +390,21 @@ export function inferConstraints(
     .filter((e) => (e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined)
     .map((e) => ({ id: e.id, center: e.center!, radius: e.radius! }));
   const seenPairs = new Set<string>();
+  /*
+   * One origin anchor per sketch — see the ORIGIN ANCHOR note below.
+   *
+   * Already anchored when either:
+   *   - existing geometry sits on the origin (it owns the anchor, so a later
+   *     batch never adds a second), or
+   *   - the sketch carries REFERENCE-LOCKED geometry. A sketch on a model face
+   *     is positioned by its host, and that projected boundary is already pinned
+   *     with its own `Fixed` constraints — pinning a user point to the local
+   *     origin on top of that adds a constraint the user never asked for.
+   */
+  let originAnchored =
+    opts.originAccepted !== true ||
+    existing.some((e) => e.referenceLocked === true) ||
+    refs.some((r) => Math.hypot(r.coord[0], r.coord[1]) <= coincTol);
 
   for (const e of newEntities) {
     // H/V for lines; if neither fires, try Perpendicular then Parallel (never both
@@ -398,6 +423,37 @@ export function inferConstraints(
 
     // Coincidence for each of this entity's points against the reference set.
     for (const pt of entityPoints(e)) {
+      /*
+       * ORIGIN ANCHOR (U7). A point accepted ON the sketch origin gets a `Fixed`
+       * pinning it there.
+       *
+       * Without it "start at the origin" is decoration: the two translation
+       * degrees of freedom survive every dimension the user then applies, which
+       * is why the audit's 60 × 40 rectangle drawn from the origin still read
+       * DOF 2. `Fixed` is already wired end to end (`sketchWireMap` lowers it to
+       * `{kind:"fixed", point, at}`), so this needs no protocol change.
+       *
+       * Emitted at most ONCE per batch: a rectangle has four segments meeting at
+       * that corner, and one anchor removes the freedom all four share — a second
+       * would be redundant, and redundancy reads as over-constrained.
+       *
+       * Coordinate-based, exactly like the endpoint-coincidence rule below: a
+       * point lands on (0,0) within `coincTol` because it was snapped there or
+       * typed there, and both are acceptance. Geometry merely drawn NEAR the
+       * origin is outside the tolerance and is left alone.
+       */
+      if (
+        !originAnchored &&
+        Math.hypot(pt.coord[0], pt.coord[1]) <= coincTol
+      ) {
+        originAnchored = true;
+        out.push({
+          id: opts.nextConstraintId(),
+          type: "Fixed",
+          entities: [e.id],
+          positions: [pt.position],
+        });
+      }
       const hit = refs.find(
         (r) => r.entityId !== e.id && Math.hypot(r.coord[0] - pt.coord[0], r.coord[1] - pt.coord[1]) <= coincTol,
       );

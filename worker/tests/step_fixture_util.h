@@ -114,6 +114,15 @@ inline TopoDS_Shape make_multi_solid() {
     return compound;
 }
 
+inline TopoDS_Shape make_ambiguous_order_solids() {
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    builder.Add(compound, BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 10, 10).Shape());
+    builder.Add(compound, BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 10, 10).Shape());
+    return compound;
+}
+
 // Mirrors src/io/ExportStep.cpp's writer sequence. Returns "" on success, else a
 // message. `schema` matches the SCHEMA §7.8 default the verb forwards.
 inline std::string write_step_fixture(const TopoDS_Shape& shape, const std::string& path,

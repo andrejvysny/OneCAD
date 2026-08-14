@@ -10,7 +10,8 @@
 #   ONECAD_WORKER_BUILD_DIR   isolated worker build directory
 #
 # Produces src-tauri/binaries/onecad-worker-<rust-host-triple>, the name Tauri's
-# bundle.externalBin expects. Run from anywhere; paths resolve to the repo root.
+# bundle.externalBin expects, plus a manifest binding that exact binary to its
+# hello compatibility axes. Run from anywhere; paths resolve to the repo root.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,4 +55,41 @@ DEST="${DEST_DIR}/onecad-worker-${TRIPLE}"
 cp "${BUILD_DIR}/onecad-worker" "${DEST}"
 chmod +x "${DEST}"
 
+HELLO_FRAME="$(mktemp)"
+trap 'rm -f "${HELLO_FRAME}"' EXIT
+"${DEST}" </dev/null >"${HELLO_FRAME}"
+
+MANIFEST="${DEST_DIR}/onecad-worker-manifest.json"
+bun -e '
+const [framePath, binaryPath, manifestPath] = process.argv.slice(1);
+const frame = new Uint8Array(await Bun.file(framePath).arrayBuffer());
+if (frame.length < 12 || new TextDecoder().decode(frame.slice(0, 4)) !== "OCW1") {
+  throw new Error("worker did not emit an OCW1 hello frame");
+}
+const header = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+const jsonLength = header.getUint32(4, true);
+const binaryLength = header.getUint32(8, true);
+if (binaryLength !== 0 || frame.length !== 12 + jsonLength) {
+  throw new Error("worker hello frame has an invalid length or binary tail");
+}
+const envelope = JSON.parse(new TextDecoder().decode(frame.slice(12)));
+if (envelope.t !== "hello" || envelope.seq !== 0 || !envelope.result) {
+  throw new Error("worker first frame is not the required hello");
+}
+const binary = new Uint8Array(await Bun.file(binaryPath).arrayBuffer());
+const binarySha256 = new Bun.CryptoHasher("sha256").update(binary).digest("hex");
+const hello = envelope.result;
+const manifest = {
+  manifestVersion: 1,
+  binarySha256,
+  protocolVersion: hello.protocolVersion,
+  workerVersion: hello.workerVersion,
+  quantizationVersion: hello.quantizationVersion,
+  solverPolicyVersion: hello.solverPolicyVersion,
+  occt: hello.occt,
+};
+await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+' "${HELLO_FRAME}" "${DEST}" "${MANIFEST}"
+
 echo "==> Staged sidecar: ${DEST}"
+echo "==> Staged manifest: ${MANIFEST}"

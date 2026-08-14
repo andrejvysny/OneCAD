@@ -46,6 +46,15 @@ import { ellipseParams, nearestOnEllipse } from "./ellipseMath";
 export type SnapKind =
   | "none"
   | "grid"
+  /**
+   * The sketch ORIGIN (0,0) — U7.
+   *
+   * Anchoring to it is what removes the two translation degrees
+   * of freedom every other dimension leaves behind; before this tier existed the
+   * origin was indistinguishable from any grid node, which is why "start at the
+   * origin" silently meant nothing (the UX audit's DOF-2 rectangle).
+   */
+  | "origin"
   | "endpoint"
   | "midpoint"
   | "center"
@@ -425,6 +434,7 @@ export function nearestOnCurve(p: Point2, e: SketchEntity): Point2 | null {
 // ── Ranked candidate ladder ───────────────────────────────────────────────────
 
 const KIND_LABEL: Record<string, string> = {
+  origin: "Origin",
   endpoint: "Endpoint",
   midpoint: "Midpoint",
   center: "Center",
@@ -439,6 +449,13 @@ const KIND_TIER: Record<string, number> = {
   endpoint: 0,
   midpoint: 1,
   center: 2,
+  // The origin sits with QUADRANT: below the three snaps that name a specific
+  // relationship to drawn geometry (endpoint / midpoint / center), above the
+  // two derived ones (intersection / onCurve). Ranking it top would let it steal
+  // a snap from an endpoint the cursor is visibly closer to, purely because the
+  // sketch happens to be drawn near (0,0); ranking it bottom would lose it to
+  // any stray curve passing the origin, which is the case the audit is about.
+  origin: 3,
   quadrant: 3,
   intersection: 4,
   onCurve: 5,
@@ -462,6 +479,11 @@ function collectPointCandidates(
     const d = dist(raw, point);
     if (d <= threshold) out.push({ point, kind, d, tier: KIND_TIER[kind] });
   };
+
+  // The origin exists in every sketch and needs no entity to hang off, but it is
+  // still a POINT snap: it follows the same guide-point preference as endpoint /
+  // midpoint / center, so "turn point snapping off" means all of them.
+  if (opts.enableGuidePoints) consider({ x: 0, y: 0 }, "origin");
 
   const cache = opts.cache;
   if (cache) {

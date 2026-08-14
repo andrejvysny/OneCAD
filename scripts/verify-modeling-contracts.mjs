@@ -12,6 +12,7 @@ const required = [
   "operation",
   "mode",
   "supportStatus",
+  "uiExposure",
   "inputTopLevelShapes",
   "requiresExactlyOneSolid",
   "emptyResultSemantics",
@@ -63,7 +64,7 @@ for (const [index, row] of contracts.rows.entries()) {
   if (keys.has(key)) fail(`row ${index} duplicates ${key}`);
   keys.add(key);
   operations.add(row.operation);
-  if ("uiExposure" in row && !uiExposures.has(row.uiExposure)) {
+  if (!uiExposures.has(row.uiExposure)) {
     fail(`row ${index} has invalid uiExposure ${row.uiExposure}`);
   }
   if (row.supportStatus === "unsupported" && row.uiExposure !== "unsupported") {

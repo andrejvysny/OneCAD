@@ -133,6 +133,18 @@ describe("extrude FSM", () => {
     expect(pick.state.targetBodyId).toBeNull();
   });
 
+  it("keeps Intersect and its target through the shared target-pick path", () => {
+    const armed: ExtrudeFsm = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    const pick = extrudeStep(armed, { kind: "setBooleanMode", mode: "Intersect", needsPick: true });
+    expect(pick.state.phase).toBe("targetPick");
+    expect(pick.state.booleanMode).toBe("Intersect");
+
+    const chosen = extrudeStep(pick.state, { kind: "pickTarget", bodyId: "b-intersect" });
+    expect(chosen.state.phase).toBe("armed");
+    expect(chosen.state.booleanMode).toBe("Intersect");
+    expect(chosen.state.targetBodyId).toBe("b-intersect");
+  });
+
   it("pickTarget arms with the body; cancelTargetPick reverts to NewBody", () => {
     const targetPick = extrudeStep(
       extrudeStep(extrudeInit(), { kind: "arm" }).state,
@@ -634,6 +646,19 @@ describe("revolve FSM", () => {
     expect(plain.targetBodyId).toBeNull();
   });
 
+  it("keeps an Intersect target through the revolve axis and target-pick states", () => {
+    const axisPick = revolveStep(revolveInit(), { kind: "arm" }).state;
+    const armed = revolveStep(axisPick, { kind: "pickAxis", lineId: "L1", valid: true }).state;
+    const pick = revolveStep(armed, { kind: "setBooleanMode", mode: "Intersect", needsPick: true });
+    expect(pick.state.phase).toBe("targetPick");
+    expect(pick.state.booleanMode).toBe("Intersect");
+
+    const chosen = revolveStep(pick.state, { kind: "pickTarget", bodyId: "b-intersect" });
+    expect(chosen.state.phase).toBe("armed");
+    expect(chosen.state.booleanMode).toBe("Intersect");
+    expect(chosen.state.targetBodyId).toBe("b-intersect");
+  });
+
   it("re-edit arms straight into armed with the seeded angle (skips axis-pick)", () => {
     const step = revolveStep(revolveInit(), { kind: "arm", angle: 120, hasAxis: true, axisLineId: "L2" });
     expect(step.effect).toBe("begin");
@@ -782,11 +807,24 @@ describe("linear pattern FSM", () => {
     expect(apply.state.phase).toBe("committing");
   });
 
-  it("clamps count to [2, 12] (integer)", () => {
+  /*
+   * U6: ONE range across TS / Rust / worker. The authoring range is 2–128 (the
+   * worker's `kMaxPatternCount`); the +/− buttons stop at 12 for ergonomics, but
+   * that is a CHIP bound, not a value policy. Out of range is REFUSED, never
+   * clamped — a clamp would commit a count the user never saw previewed.
+   */
+  it("accepts the full authoring range and refuses (never clamps) outside it", () => {
     const s = linearPatternStep(linearPatternInit(), { kind: "arm", bodyId: "b" }).state;
-    expect(linearPatternStep(s, { kind: "setCount", count: 1 }).state.count).toBe(2);
-    expect(linearPatternStep(s, { kind: "setCount", count: 99 }).state.count).toBe(12);
+    expect(linearPatternStep(s, { kind: "setCount", count: 20 }).state.count).toBe(20);
+    expect(linearPatternStep(s, { kind: "setCount", count: 128 }).state.count).toBe(128);
     expect(linearPatternStep(s, { kind: "setCount", count: 4.7 }).state.count).toBe(5);
+
+    // Refused: the state is untouched and nothing previews.
+    for (const count of [1, 0, 129, Number.NaN]) {
+      const step = linearPatternStep(s, { kind: "setCount", count });
+      expect(step.state.count, `count ${count}`).toBe(s.count);
+      expect(step.effect).toBe("none");
+    }
   });
 
   it("cancel resets; idle cancel is a no-op", () => {

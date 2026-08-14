@@ -18,12 +18,18 @@ struct RegionTable {
 
 using WireEdgeMapper = std::function<std::string(const sk::EntityID&)>;
 
+enum class RegionIdentityVersion {
+    V2,
+    V3,
+};
+
 // `mapBaseEdge` maps a LoopDetector base entity id to its wire entity id.
-// Simple unsplit, hole-free cells retain the legacy FNV identity. Material
-// boundaries with holes or intersection fragments use a complete cell
-// signature, while keeping the same r_<16hex> wire shape.
+// V2 preserves legacy simple-cell bytes. V3 always hashes complete analytic
+// provenance and normalized intervals, retaining the r_<16hex> wire shape.
 RegionTable buildRegionTable(const LoopDetectionResult& result,
                              const WireEdgeMapper& mapBaseEdge,
-                             double tolerance);
+                             double tolerance,
+                             RegionIdentityVersion identityVersion =
+                                 RegionIdentityVersion::V2);
 
 }  // namespace onecad::core::loop

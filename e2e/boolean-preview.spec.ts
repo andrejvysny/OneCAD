@@ -188,6 +188,22 @@ async function setupTwoBodies(page: Page): Promise<[string, string]> {
  *  engine's OWN `probePick` (exposed at `window.__vpEngine` under `?vpdebug`),
  *  mirroring `helpers.ts findExtrudeHandle`'s scanning approach. */
 async function findBodyScreenPoint(page: Page, bodyId: string): Promise<{ x: number; y: number }> {
+  // MC-R8. The camera MUST be settled before the scan, for the same reason
+  // `helpers.ts findFaceOnBody` and this file's own `extrudeRegionAt` wait: a probe
+  // returns a point valid for the camera it was taken with, and the click that
+  // follows raycasts against whatever camera is live a moment later.
+  //
+  // MEASURED (instrumented full chromium lane, all three tests, every run):
+  // `autoFitPending: true` both at entry and immediately after the scan, with the
+  // scanned point still hitting. The two extrudes in `twoBodies` each commit a body,
+  // and a new body schedules the DEBOUNCED auto-fit — so the fit is reliably
+  // scheduled-but-not-started right here, and whether its 250 ms timer fires before
+  // or after the click is pure timing. When it fires first the tween moves the
+  // camera, the click's ray misses the body, `ViewportRoot.runPick` gets no ref
+  // (a genuine miss, NOT the `"unsettled"` sketch-reload case that defers), the
+  // selection is cleared, and the boolean lane never opens — the spec then times out
+  // on `previewOwner === "boolean"`, which reads exactly like a product defect.
+  await waitForCameraSettled(page);
   let found: { x: number; y: number } | null = null;
   await expect(async () => {
     found = await page.evaluate((id) => {
@@ -232,9 +248,9 @@ async function bodySceneVisible(page: Page, bodyId: string): Promise<boolean | n
 }
 
 /**
- * Click the chip's "Apply" button (shared by boolean / pattern / mirror —
- * `ModelToolChips.tsx ApplyButton`). `page.getByRole("button", { name: "Apply" })
- * .click()` is unreliable here — verified empirically: the button is genuinely
+ * Click the chip's ✓ (shared by every model tool since U2 deleted the separate
+ * `Apply` button — `ModelToolChips.tsx ConfirmButtons`). A plain locator click is
+ * unreliable here — verified empirically: the button is genuinely
  * mounted (correct role/name/rect, receiving pointer events, `elementFromPoint`
  * resolves to itself) yet Playwright's locator-click occasionally never settles,
  * while a coordinate click on the SAME rect lands immediately. Root cause not
@@ -249,16 +265,14 @@ async function bodySceneVisible(page: Page, bodyId: string): Promise<boolean | n
  * was never applied. Re-clicking is safe because each attempt re-checks first:
  * once the lane has closed the loop exits without touching the button again.
  */
-async function clickApplyButton(page: Page): Promise<void> {
+async function clickConfirmButton(page: Page): Promise<void> {
   const laneClosed = async (): Promise<boolean> =>
     ((await extrudeDebug(page))?.previewOwner ?? null) === null;
   await expect(async () => {
     if (await laneClosed()) return;
     const rect = await page.evaluate(() => {
-      const apply = Array.from(document.querySelectorAll("button")).find(
-        (b) => b.textContent === "Apply",
-      );
-      return apply ? apply.getBoundingClientRect().toJSON() : null;
+      const confirm = document.querySelector('button[data-testid="chip-confirm"]');
+      return confirm ? confirm.getBoundingClientRect().toJSON() : null;
     });
     expect(rect).not.toBeNull();
     const r = rect as unknown as { x: number; y: number; width: number; height: number };
@@ -334,7 +348,7 @@ test("boolean commit: two bodies → pick target + tool → Apply lands ONE surv
     .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
     .toBe("boolean");
 
-  await clickApplyButton(page);
+  await clickConfirmButton(page);
 
   // The lane releases and the tool body is CONSUMED (the mock removes it — no real
   // fusion — same bookkeeping a real commit performs): the surviving row is exactly
@@ -367,7 +381,7 @@ test("boolean commit: Intersect mode is wired through the chip and labels the fe
     .toBe("boolean");
 
   await page.getByTestId("chip-boolean-intersect").click();
-  await clickApplyButton(page);
+  await clickConfirmButton(page);
 
   await expect
     .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })

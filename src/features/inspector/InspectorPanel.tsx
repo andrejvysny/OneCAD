@@ -10,6 +10,8 @@ import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useRepairStore } from "@/stores/repairStore";
 import { RepairPanel } from "@/features/repair/RepairPanel";
+import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
+import { editFeature } from "@/features/inspector/sections";
 import { InspectorSectionHost } from "@/modules/modeling/InspectorSectionHost";
 import { cn } from "@/ui/cn";
 import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
@@ -118,15 +120,35 @@ function SelectionState({
         : sel.kind === "sketchRegion"
           ? "Sketch profile"
           : "Sketch";
-  const dof = sketches[sketchId]?.dof ?? 0;
+  /*
+   * ONE constraint-status authority (U7).
+   *
+   * This branch used to hardcode `Under-constrained · DOF {dof}` with no status
+   * check and a `?? 0` default, so selecting a FULLY CONSTRAINED sketch in the
+   * tree rendered the impossible "Under-constrained · DOF 0" the UX audit caught
+   * — and an unknown sketch rendered it too. D14 fixed `sketchStatusText`, which
+   * the sketch chrome bar and the sketch-card branch below already use; this was
+   * the second, silent authority.
+   *
+   * Absent solve state is `dof: 0, status: "under"` rather than a guessed "ok":
+   * `sketchStatusText` then reports "Fully constrained · DOF 0", which is what
+   * zero remaining freedom means whatever the status label lags at.
+   */
+  const solve = sketches[sketchId];
+  const { label, tone } = sketchStatusText(solve?.status ?? "under", solve?.dof ?? 0);
 
   return (
     <>
       <div className="text-[15px] font-semibold text-ink">{name}</div>
       <div className="mt-0.5 text-[12px] text-ink-5">{statusName}</div>
       {isSketch && (
-        <div className="mt-1 text-[12px] font-medium text-warn">
-          Under-constrained · DOF {dof}
+        <div
+          className={cn(
+            "mt-1 text-[12px] font-medium",
+            tone === "ok" ? "text-ink-4" : "text-warn",
+          )}
+        >
+          {label}
         </div>
       )}
       <InspectorSectionHost />
@@ -149,6 +171,23 @@ function FeatureState({
         {feat?.kind ? `${cap(feat.kind)} feature` : "Feature"}
         {feat?.valueText ? ` · ${feat.valueText}` : ""}
       </div>
+      {feat?.status === "error" && (
+        <>
+          <div className="mt-3 rounded-sm border border-border bg-well px-2.5 py-2">
+            <div className="text-[12px] font-medium text-traffic-close">Feature failed</div>
+            {feat.statusMessage && <div className="mt-1 text-[12px] leading-normal text-ink-2">{feat.statusMessage}</div>}
+          </div>
+          <OperationDiagnosticDetails diagnostics={feat.diagnostics} />
+          <button
+            type="button"
+            data-testid="feature-edit-retry"
+            onClick={() => editFeature(feat)}
+            className="mt-3 rounded-sm bg-accent px-2.5 py-1.5 text-[12px] font-medium text-on-accent hover:bg-accent-hover"
+          >
+            Edit and retry
+          </button>
+        </>
+      )}
       <InspectorSectionHost />
     </>
   );

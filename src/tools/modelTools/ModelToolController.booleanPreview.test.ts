@@ -138,6 +138,49 @@ describe("ModelToolController boolean kernel preview", () => {
     await flush();
   }
 
+  /*
+   * U6 — preselect first, then act. Two valid bodies already selected IS the
+   * whole operation stated, so the tool arms on them instead of discarding half
+   * the selection and asking for a pick the user already made.
+   */
+  it("two preselected bodies arm outright, with the roles assigned in selection order", async () => {
+    build();
+    selectionStore.getState().set([
+      { kind: "body", id: "body1" },
+      { kind: "body", id: "body2" },
+    ]);
+    toolStore.getState().setTool("boolean");
+    await flush();
+
+    // No pick phase: the lane opened on the pair, roles in selection order.
+    expect(clientMock.beginPreview).toHaveBeenCalledWith({
+      opType: "Boolean",
+      inputs: [
+        { primary: { bodyId: "body1", kind: "body" } },
+        { primary: { bodyId: "body2", kind: "body" } },
+      ],
+      params: { operation: "Union", targetBodyId: "body1", toolBodyId: "body2" },
+    });
+    expect(toolChipStore.getState().targetName).toBe("Body 1");
+    expect(toolChipStore.getState().toolName).toBe("Body 2");
+  });
+
+  it("swap exchanges the roles and re-previews — a Cut is not symmetric", async () => {
+    build();
+    await armBoolean();
+    clientMock.updatePreview.mockClear();
+
+    toolChipStore.getState().onSwap?.();
+    // Past the coalescing trailing floor, so the re-preview actually goes out.
+    await new Promise((r) => setTimeout(r, 320));
+
+    expect(toolChipStore.getState().targetName).toBe("Body 2");
+    expect(toolChipStore.getState().toolName).toBe("Body 1");
+    const calls = clientMock.updatePreview.mock.calls;
+    const params = calls[calls.length - 1]?.[1];
+    expect(params).toMatchObject({ targetBodyId: "body2", toolBodyId: "body1" });
+  });
+
   it("arming opens exactly ONE session with both body refs and the live params", async () => {
     build();
     await armBoolean();
@@ -187,7 +230,7 @@ describe("ModelToolController boolean kernel preview", () => {
     build();
     await armBoolean();
 
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
     expect(clientMock.endPreview).not.toHaveBeenCalled(); // barrier open, nothing committed yet
 
@@ -210,7 +253,7 @@ describe("ModelToolController boolean kernel preview", () => {
     build();
     await armBoolean();
 
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
     const calls = clientMock.updatePreview.mock.calls;
     const [sessionId, , epoch] = calls[calls.length - 1];
@@ -232,7 +275,7 @@ describe("ModelToolController boolean kernel preview", () => {
 
     await controller.editBooleanFeature("feat-bool");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(toolStore.getState().modelTool).toBe("select");
@@ -249,7 +292,7 @@ describe("ModelToolController boolean kernel preview", () => {
     // that overwrite is real, correct, later behavior, not what THIS spec pins.
     clientMock.beginPreview.mockImplementationOnce(() => new Promise(() => {}));
 
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
     const calls = clientMock.updatePreview.mock.calls;
     const last = calls[calls.length - 1];
@@ -268,7 +311,7 @@ describe("ModelToolController boolean kernel preview", () => {
     expect(toolStore.getState().modelTool).toBe("boolean");
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(2); // preview RE-ARMED (in flight)
     expect(toolChipStore.getState().kind).toBe("booleanOp");
-    expect(toolChipStore.getState().onApply).toBeTypeOf("function");
+    expect(toolChipStore.getState().onConfirm).toBeTypeOf("function");
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
     expect(hint?.message).toContain("self-intersecting geometry");
@@ -284,7 +327,7 @@ describe("ModelToolController boolean kernel preview", () => {
 
   /** Apply, then let the exact-preview barrier lapse so the commit reaches endPreview. */
   async function applyAndSettle(): Promise<void> {
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     for (let i = 0; i < 6; i++) await flush();
   }
 
@@ -302,7 +345,7 @@ describe("ModelToolController boolean kernel preview", () => {
     expect(toolStore.getState().modelTool).toBe("boolean");
     expect(toolChipStore.getState().kind).toBe("booleanOp");
     expect(toolChipStore.getState().op).toBe("Cut"); // the authored value survived
-    expect(toolChipStore.getState().onApply).toBeTypeOf("function");
+    expect(toolChipStore.getState().onConfirm).toBeTypeOf("function");
     expect(toolChipStore.getState().onCancel).toBeTypeOf("function");
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
@@ -394,7 +437,7 @@ describe("ModelToolController boolean kernel preview", () => {
     expect(clientMock.beginPreview).not.toHaveBeenCalled();
 
     // Committing the re-edit still routes through the scalar update, not the lane.
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
     expect(clientMock.applyEditCommand).toHaveBeenCalledTimes(1);
     expect(clientMock.endPreview).not.toHaveBeenCalled();

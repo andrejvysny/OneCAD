@@ -195,6 +195,7 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
         return OpOutcome::fail("REF_UNRESOLVED", "Hole target body not found: " + target_id);
     }
     const TopoDS_Shape target_shape = target_rec->geom;
+    if (auto invalid = validate_modeling_input(target_shape, "Hole", "target")) return *invalid;
 
     // --- dimensional params (worker is an independent trust boundary) ---
     const std::string hole_type = read_str(params, "holeType", "simple");

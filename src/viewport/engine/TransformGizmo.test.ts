@@ -106,31 +106,59 @@ describe("TransformGizmo — raycast classification", () => {
     }
   });
 
-  it("classifies each ring by its rotation axis", () => {
+  it("classifies each rotation ARC by its rotation axis", () => {
     const { gizmo } = makeGizmo();
     for (const axis of AXES) {
       const [a, b] = AXES.filter((x) => x !== axis);
-      // 45° round the ring (82·cos45 ≈ 58) — deliberately AWAY from the six
-      // points where two rings genuinely cross on the axes.
-      const target = DIR[a].clone().multiplyScalar(58).addScaledVector(DIR[b], 58);
+      // U5: the arc is centred on the +45° bisector of its plane, at r=70 — so
+      // 70·cos45 ≈ 49.5 along both in-plane axes. No arrow reaches there (they
+      // are on the axes) and no quad does (its far corner is r≈44).
+      const target = DIR[a].clone().multiplyScalar(49.5).addScaledVector(DIR[b], 49.5);
       expect(gizmo.raycast(castIso(target))).toEqual<GizmoHit>({ kind: "ring", axis });
     }
+  });
+
+  /*
+   * U5 — the rotation handles no longer OVERLAP EACH OTHER.
+   *
+   * Three full circles of the same radius meet at six points, two rings deep, on
+   * the axes: exactly where the translation arrows also live. Which of the two
+   * rings you got there was a nearest-hit coin flip. The arcs sit on their own
+   * plane's 45° bisector, so no two of them share a point and none of them is on
+   * an axis — the on-axis radius that used to be a two-ring pile-up is now empty
+   * rotation-wise, and the arrow underneath wins cleanly.
+   */
+  it("no two rotation handles overlap, and none sits on an axis", () => {
+    const { gizmo } = makeGizmo();
+    for (const axis of AXES) {
+      // r=70 straight out along an axis: two full rings used to cross here.
+      const onAxis = DIR[axis].clone().multiplyScalar(70);
+      expect(gizmo.raycast(castIso(onAxis))?.kind).not.toBe("ring");
+    }
+  });
+
+  /*
+   * The edge-on case is CHARACTERISED, not claimed fixed. Any overlay handle
+   * coplanar with the view direction can be crossed — that is inherent to an
+   * unprojected, non-depth-tested widget, and nearest-hit is still the honest
+   * rule (the arc really is what the ray reaches first). What U5 changed is the
+   * SIZE of the region: a 52° arc in one quadrant instead of a full circle, so
+   * the angles at which it happens are a small fraction of what they were.
+   */
+  it("an arc coplanar with the view can still win over an arm it crosses", () => {
+    const { gizmo } = makeGizmo();
+    const target = new THREE.Vector3(40, 0, 0);
+    expect(gizmo.raycast(castAt(target, new THREE.Vector3(40, 400, 0)))).toEqual<GizmoHit>({
+      kind: "ring",
+      axis: "Z",
+    });
+    // Off that degenerate angle the same point is the arrow again.
+    expect(gizmo.raycast(castIso(target))).toEqual<GizmoHit>({ kind: "axis", axis: "X" });
   });
 
   it("misses cleanly in empty space beyond the outermost ring", () => {
     const { gizmo } = makeGizmo();
     expect(gizmo.raycast(castIso(new THREE.Vector3(300, 300, 0)))).toBeNull();
-  });
-
-  it("lets an EDGE-ON ring win over the arm it crosses (characterisation)", () => {
-    const { gizmo } = makeGizmo();
-    // Viewed straight down −Y, the Z ring collapses to a line through the X arm.
-    // Nearest-hit hands the grab to the ring, which IS what is under the cursor.
-    const target = new THREE.Vector3(40, 0, 0);
-    const edgeOn = gizmo.raycast(castAt(target, new THREE.Vector3(40, 400, 0)));
-    expect(edgeOn).toEqual<GizmoHit>({ kind: "ring", axis: "Z" });
-    // Off that degenerate angle the same point is the arrow again.
-    expect(gizmo.raycast(castIso(target))).toEqual<GizmoHit>({ kind: "axis", axis: "X" });
   });
 
   it("follows setPose: the same world ray hits nothing once the gizmo moves away", () => {
@@ -212,5 +240,51 @@ describe("TransformGizmo — highlight + lifetime", () => {
     gizmo.dispose();
     expect(root.children).toHaveLength(0);
     for (const s of spies) expect(s).toHaveBeenCalledTimes(1);
+  });
+});
+
+/*
+ * U5 — the widget's SCREEN FOOTPRINT is what chip placement has to clear.
+ *
+ * `worldRadius()` is the number `ViewportEngine.getInteractionOverlayBounds`
+ * turns into an exclusion box for the HUD. It has to cover the farthest thing a
+ * user can grab, not just the drawn silhouette: an invisible pick corridor that
+ * pokes out from under the chip is exactly the collision the audit photographed.
+ */
+describe("TransformGizmo screen footprint", () => {
+  it("reports a reach that covers every grabbable handle", () => {
+    const { gizmo, root } = makeGizmo();
+    gizmo.setScale(1);
+
+    const reach = gizmo.worldRadius();
+    const group = groupOf(root);
+    group.updateMatrixWorld(true);
+
+    // Measured off the actual VERTICES, not a bounding sphere: a curved tube's
+    // sphere is centred near the arc's midpoint and its radius covers the whole
+    // chord, which overstates the reach by ~15% and would make this assertion
+    // about the test's metric rather than the widget.
+    let farthest = 0;
+    const v = new THREE.Vector3();
+    for (const child of group.children) {
+      const mesh = child as THREE.Mesh;
+      const pos = mesh.geometry.getAttribute("position");
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(mesh.matrix);
+        farthest = Math.max(farthest, v.length());
+      }
+    }
+    expect(farthest).toBeLessThanOrEqual(reach + 1e-6);
+    // …and the reach is not wildly generous either: a box twice the widget would
+    // push the HUD off screen for no reason.
+    expect(farthest).toBeGreaterThan(reach * 0.7);
+  });
+
+  it("scales the reach with the widget", () => {
+    const { gizmo } = makeGizmo();
+    gizmo.setScale(1);
+    const unit = gizmo.worldRadius();
+    gizmo.setScale(4);
+    expect(gizmo.worldRadius()).toBeCloseTo(unit * 4, 6);
   });
 });

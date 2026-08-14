@@ -329,6 +329,59 @@ fn linear_pattern_v2_record(
     record
 }
 
+/// Builds an already-persisted future-version record. New authoring must use
+/// `linear_pattern_v2_record`; this loader fixture proves we retain unknown u8
+/// values until the worker can refuse them explicitly.
+fn loaded_linear_pattern_v3_record(
+    rec: u128,
+    source: BodyId,
+    dir: Vec3,
+    spacing: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    let operation: Operation = serde_json::from_value(serde_json::json!({
+        "opType": "LinearPattern",
+        "params": {
+            "sourceBodyId": source.to_string(),
+            "direction": [dir.x, dir.y, dir.z],
+            "spacing": spacing,
+            "count": count,
+            "fuseResult": fuse,
+            "resultPolicyVersion": 3
+        }
+    }))
+    .expect("future Pattern JSON loads losslessly");
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "LinearPattern",
+        operation,
+    )
+}
+
+fn assert_v1_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(record_id)))
+        .expect("pattern params persist");
+    assert_eq!(
+        params.get("resultPolicyVersion"),
+        None,
+        "V1 absence remains absent after reopen"
+    );
+}
+
+fn assert_v3_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(record_id)))
+        .expect("future pattern params persist");
+    assert_eq!(
+        params.get("resultPolicyVersion"),
+        Some(&serde_json::json!(3)),
+        "future numeric policy version survives load/save/reopen"
+    );
+}
+
 fn circular_pattern_record(
     rec: u128,
     source: BodyId,
@@ -571,6 +624,195 @@ async fn linear_pattern_three_boxes() {
     );
     wm.shutdown().await;
     eprintln!("LinearPattern PASS: legacy compound volume {vol} == 30000");
+}
+
+/// V1's historic aggregate result is intentionally unlike V2: even a fused,
+/// disconnected result mints `body_<opId>` and does not consume its source.
+/// Exercise a cold worker so a cache cannot hide a wrong persisted policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v1_fused_disjoint_survives_cold_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    add_op(
+        &mut rt,
+        linear_pattern_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            40.0,
+            3,
+            true,
+        ),
+    );
+    let _ = published(&regen_all(&mut rt).await, "V1 fused disjoint pattern");
+    let aggregate = body_of(OP_PATTERN);
+    assert!(rt.head_body_ids().contains(&source), "V1 preserves source");
+    assert!(
+        rt.head_body_ids().contains(&aggregate),
+        "V1 creates aggregate"
+    );
+    assert_v1_linear_pattern_record(&rt, OP_PATTERN);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v1-fused-disjoint.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-13T00:00:00Z".into(),
+            modified: "2026-08-13T00:00:00Z".into(),
+        },
+    )
+    .expect("save V1 fused disjoint pattern");
+    wm.shutdown().await;
+
+    let cold = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(cold.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("cold reopen");
+    let _ = published(
+        &regen_all(&mut reopened).await,
+        "cold V1 fused disjoint replay",
+    );
+    assert!(
+        reopened.head_body_ids().contains(&source),
+        "cold reopen keeps source"
+    );
+    assert!(
+        reopened.head_body_ids().contains(&aggregate),
+        "cold reopen recreates body_<opId>"
+    );
+    assert_v1_linear_pattern_record(&reopened, OP_PATTERN);
+    cold.shutdown().await;
+}
+
+/// The no-fuse V1 aggregate has the same identity contract, independently of
+/// the fused/disjoint compatibility path above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v1_nonfused_aggregate_survives_cold_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    add_op(
+        &mut rt,
+        linear_pattern_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(0.0, 1.0, 0.0),
+            40.0,
+            3,
+            false,
+        ),
+    );
+    let _ = published(&regen_all(&mut rt).await, "V1 non-fused pattern");
+    let aggregate = body_of(OP_PATTERN);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v1-nonfused.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-13T00:00:00Z".into(),
+            modified: "2026-08-13T00:00:00Z".into(),
+        },
+    )
+    .expect("save V1 non-fused pattern");
+    wm.shutdown().await;
+
+    let cold = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(cold.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("cold reopen");
+    let _ = published(&regen_all(&mut reopened).await, "cold V1 non-fused replay");
+    assert!(
+        reopened.head_body_ids().contains(&source),
+        "cold reopen keeps source"
+    );
+    assert!(
+        reopened.head_body_ids().contains(&aggregate),
+        "cold reopen recreates body_<opId>"
+    );
+    assert_v1_linear_pattern_record(&reopened, OP_PATTERN);
+    cold.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v3_load_save_reopen_refuses_execution() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    add_op(
+        &mut rt,
+        loaded_linear_pattern_v3_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            40.0,
+            3,
+            false,
+        ),
+    );
+    assert_v3_linear_pattern_record(&rt, OP_PATTERN);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v3-pattern.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-13T00:00:00Z".into(),
+            modified: "2026-08-13T00:00:00Z".into(),
+        },
+    )
+    .expect("save future pattern record before execution");
+    wm.shutdown().await;
+
+    let cold = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(cold.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
+    let mut reopened =
+        DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen V3 pattern");
+    assert_v3_linear_pattern_record(&reopened, OP_PATTERN);
+    let report = regen_all(&mut reopened).await;
+    let snapshot = published(&report, "V3 refusal keeps valid prefix published");
+    assert!(
+        snapshot.bodies.iter().any(|body| body.body == source),
+        "refusal keeps source"
+    );
+    assert!(
+        !snapshot
+            .bodies
+            .iter()
+            .any(|body| body.body == body_of(OP_PATTERN)),
+        "refusal does not mint a result body"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION" }),
+        "worker reports stable unsupported-version diagnostic"
+    );
+    assert_v3_linear_pattern_record(&reopened, OP_PATTERN);
+    cold.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "reviewed": "2026-08-14",
+  "residuals": [
+    {
+      "id": "MC-R1",
+      "status": "open",
+      "category": "profile-tolerance-performance",
+      "impact": "Dense or ill-conditioned sketches may exceed unmeasured latency targets.",
+      "affectedVersions": "regionIdentityVersion 3",
+      "reproduction": "Run dense near-tangent source/pair/fragment ceiling and cancellation sweeps.",
+      "owner": "P2 bounds and performance",
+      "mustNotWorsenTest": "worker/tests/test_region_table.cpp",
+      "reopeningTrigger": "P95 above 25 ms, refusal above 200 ms, or simple-sketch regression above 20%."
+    },
+    {
+      "id": "MC-R2",
+      "status": "open",
+      "category": "publication-policy",
+      "impact": "Structured evidence exists, but Tier A/B overhead and all semantic checks lack full measured closure.",
+      "affectedVersions": "all non-import operations",
+      "reproduction": "Run operation matrix with validator controls and collect build/validator timings.",
+      "owner": "P3 publication policy",
+      "mustNotWorsenTest": "worker/tests/test_fillet_builder.cpp",
+      "reopeningTrigger": "Invalid output publishes or Tier A/B exceeds 5%/15% P95."
+    },
+    {
+      "id": "MC-R3",
+      "status": "guard-only",
+      "category": "corpus-evidence",
+      "impact": "The frozen corpus executes 9 of 9, but must remain free of silent skips and raw expectation semantics.",
+      "affectedVersions": "frozen corpus b4ddccc",
+      "reproduction": "Run corpus_cases_are_classified_executed_or_unsupported with ONECAD_REQUIRE_WORKER=1.",
+      "owner": "P4 corpus harness",
+      "mustNotWorsenTest": "src-tauri/tests/corpus_executor.rs",
+      "reopeningTrigger": "Any silent skip, lost provenance, untyped expectation, or executable count below 9."
+    },
+    {
+      "id": "MC-R4",
+      "status": "open",
+      "category": "composition-gate",
+      "impact": "Mock browser tests do not prove the packaged Tauri and bundled worker composition.",
+      "affectedVersions": "desktop release",
+      "reproduction": "Relocate a release bundle, unset overrides, hide dev worker, run WDIO save/reopen flow.",
+      "owner": "P5 real Tauri lane",
+      "mustNotWorsenTest": "src-tauri/src/worker/mod.rs relocated resolver tests",
+      "reopeningTrigger": "Missing WDIO gate, wrong worker hash/fingerprint, or leaked app/worker process."
+    },
+    {
+      "id": "MC-R5",
+      "status": "open",
+      "category": "platform-release",
+      "impact": "No current 20-run stability sample or mandatory Windows worker-backed release matrix.",
+      "affectedVersions": "tagged/package releases",
+      "reproduction": "Inspect aggregate checks for candidate SHA and run Linux/macOS/Windows release matrix.",
+      "owner": "P6 release enforcement",
+      "mustNotWorsenTest": ".github/workflows/ci.yml",
+      "reopeningTrigger": "Release from SHA without aggregate green evidence or any unclassified flake."
+    },
+    {
+      "id": "MC-R7",
+      "status": "closed",
+      "category": "stale-evidence",
+      "impact": "CLOSED 2026-08-13. Never a product defect: commit c7df7c8 removed the click-away commit deliberately (D2) and the frozen interaction contract pins clickAwayPolicy 'cancel', but the e2e spec and the extrude/revolve arm hint text kept asserting and promising the removed gesture, because c7df7c8 shipped on the vitest/tsc/build gates without the browser lane. The spec now asserts click-away does NOT commit and leaves the tool armed; the hint reads 'Enter or the check to confirm'. Verified in the full lanes: chromium 200/200, webkit 200/200, retries 0.",
+      "affectedVersions": "predated the modeling-correctness work; reproduced on clean baseline 9933689",
+      "reproduction": "Historical: bunx playwright test --project=chromium e2e/extrude-commit-gesture.spec.ts -g 'click-away' failed 3/3 with --repeat-each=3, same on webkit. Now passes on both lanes.",
+      "owner": "extrude commit gesture",
+      "mustNotWorsenTest": "e2e/extrude-commit-gesture.spec.ts",
+      "reopeningTrigger": "A gate-shipping change that skips the browser lane again, or any spec re-asserting a gesture the frozen interaction contract does not carry."
+    },
+    {
+      "id": "MC-R8",
+      "status": "closed",
+      "category": "browser-lane-nondeterminism",
+      "impact": "CLOSED 2026-08-13 in commit 19088d0, root-caused rather than retried away. The Intersect boolean commit spec failed intermittently in a FULL chromium run only: previewOwner never became 'boolean' within the 20 s lane poll. The cause was NOT the projection-push race first assumed. An instrumented full lane measured autoFitPending true at probe entry in all three tests, every run: each extrude in twoBodies commits a body, a new body schedules the DEBOUNCED auto-fit, and whether that 250 ms timer fires before or after the probe's click is pure timing. When it fires first the tween moves the camera, the click's ray misses the body, runPick returns no ref (a genuine miss, not the deferred 'unsettled' case) and the selection clears. Fix: one waitForCameraSettled at the top of the spec's local findBodyScreenPoint, matching helpers.ts findFaceOnBody. Verified chromium 200/200 on 2026-08-13 and again on 2026-08-14.",
+      "affectedVersions": "e2e mock lane, chromium as observed 2026-08-13",
+      "reproduction": "Historical: E2E_PORT=<free> bunx playwright test --project=chromium (full suite, retries 0); the isolated spec never reproduced it.",
+      "owner": "boolean preview lane",
+      "mustNotWorsenTest": "e2e/boolean-preview.spec.ts",
+      "reopeningTrigger": "Any recurrence, or a retry being added to hide a lane failure instead of root-causing it. Two same-pattern scanners were audited and deliberately left unchanged (modelToolHelpers.ts findFacePoint, hole.spec.ts farthestPixelOnFace) — a timing edit to a shared helper needs its own two-lane evidence."
+    },
+    {
+      "id": "MC-R9",
+      "status": "open",
+      "category": "browser-lane-nondeterminism",
+      "impact": "e2e/revolve-commit.spec.ts:111 ('Revolve guidance') failed in ONE full chromium run that took 19 min instead of the usual 14 because the machine was loaded, and passes in isolation and on the clean re-run. Superficially MC-R8's signature, but NOT the same mechanism: that spec already calls waitForCameraSettled at both of its probe sites (:124, :130), so the debounced auto-fit cannot explain it. Un-root-caused, so the browser gate is measured green rather than reproducibly green.",
+      "affectedVersions": "e2e mock lane, chromium as observed 2026-08-14",
+      "reproduction": "Full chromium suite under load, retries 0. Not reproducible in isolation.",
+      "owner": "revolve commit lane",
+      "mustNotWorsenTest": "e2e/revolve-commit.spec.ts",
+      "reopeningTrigger": "Already open. Closes only on a measured root cause, never on a clean re-run or a retry."
+    },
+    {
+      "id": "MC-R6",
+      "status": "accepted",
+      "category": "process-risk",
+      "impact": "Direct pushes to master can bypass review and merge enforcement.",
+      "affectedVersions": "repository process",
+      "reproduction": "Inspect repository rules and release workflow provenance.",
+      "owner": "accepted user process decision",
+      "mustNotWorsenTest": "release gate must bind artifacts to one aggregate-green SHA",
+      "reopeningTrigger": "User requests protected merges or a release bypasses the SHA gate."
+    }
+  ],
+  "statusValues": {
+    "open": "A live residual. Not fixed, not accepted.",
+    "closed": "Fixed, with the root cause and the verifying evidence recorded in impact.",
+    "guard-only": "The underlying work is done; the entry survives as a must-not-worsen guard.",
+    "accepted": "A known risk the user has accepted as a process decision."
+  }
+}

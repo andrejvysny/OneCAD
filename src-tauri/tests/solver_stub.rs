@@ -201,33 +201,57 @@ async fn stub_resolve_refs_passthrough() {
         eprintln!("skip: stub binary not built");
         return;
     };
-    use onecad_core::document::refs::{AnchorIntent, ElementRef};
+    use onecad_core::document::refs::{AnchorIntent, ElementRef, PrimaryRef};
+    use onecad_core::ids::ElementId;
     use onecad_core::math::Vec3;
     use onecad_core::regen::{ResolveOutcome, ResolveRef, ResolveRequest};
 
+    let anchor = || {
+        Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        })
+    };
     let req = ResolveRequest {
         snapshot_id: SnapshotId(5012),
-        refs: vec![ResolveRef {
-            ref_id: "op_5.input0".into(),
-            element: ElementRef {
-                primary: None,
-                intent: None,
-                anchor: Some(AnchorIntent {
-                    world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
-                    surface_uv: None,
-                    local_frame: None,
-                    adjacency_hint: None,
+        refs: vec![
+            // A body to enumerate from, no element bound yet ⇒ the autoBind branch,
+            // which SCHEMA §7.5 requires to echo that body.
+            ResolveRef {
+                ref_id: "op_5.input0".into(),
+                element: ElementRef {
+                    primary: Some(PrimaryRef {
+                        body: BodyId(Uuid::from_u128(0x3)),
+                        element: ElementId::new(""),
+                        kind: ElementKind::Face,
+                        extra: Default::default(),
+                    }),
+                    intent: None,
+                    anchor: anchor(),
                     extra: Default::default(),
-                }),
-                extra: Default::default(),
+                },
             },
-        }],
+            // No primary body at all ⇒ the ONE resolution shape allowed to omit
+            // `bodyId`: a non-promotable missing-body `needsRepair` with no candidates.
+            ResolveRef {
+                ref_id: "op_5.input1".into(),
+                element: ElementRef {
+                    primary: None,
+                    intent: None,
+                    anchor: anchor(),
+                    extra: Default::default(),
+                },
+            },
+        ],
     };
     let res = wm.resolve_refs(req).await.expect("resolve refs");
-    assert_eq!(res.len(), 1);
+    assert_eq!(res.len(), 2);
     // The stub auto-binds an unbound ref (dry run — binds nothing).
     assert!(matches!(res[0].outcome, ResolveOutcome::AutoBind { .. }));
-    let _ = ElementKind::Face; // keep the import if the promote test is skipped.
+    assert!(matches!(res[1].outcome, ResolveOutcome::NeedsRepair { .. }));
 
     wm.shutdown().await;
 }

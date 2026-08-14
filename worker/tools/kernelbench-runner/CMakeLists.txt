@@ -6,6 +6,7 @@ add_library(benchmark_core STATIC
     ../../src/benchmark/GeometrySupportPair.cpp
     ../../src/benchmark/DeepAudit.cpp
     ../../src/benchmark/FilletRun.cpp
+    ../../src/benchmark/BooleanRun.cpp
     ../../src/benchmark/Artifacts.cpp
     ../../src/benchmark/Execution.cpp
     ../../src/benchmark/SemanticValidation.cpp

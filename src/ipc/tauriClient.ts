@@ -918,10 +918,22 @@ export function createTauriClient(): CadClient {
 
   async function applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
     const command = operationToEditCommand(op);
-    // A fresh op mints a recordId (addOperation); a parametric re-edit
-    // (updateOperationParams) targets an existing record and does NOT — only the
-    // former opts into failedSteps / affectedBodies correlation.
-    const recordId = command.cmd === "addOperation" ? command.record.recordId : undefined;
+    // BOTH shapes name a timeline record, so both opt into failedSteps /
+    // repairSteps / affectedBodies correlation: a fresh op mints its recordId
+    // (`addOperation.record.recordId`), a parametric re-edit targets an existing
+    // one (`updateOperationParams.record`).
+    //
+    // Before U1 only the fresh shape did. `failed_steps_of` keys on `rec.record_id`
+    // for ANY errored record (document_runtime.rs), so the re-edit correlation was
+    // available all along and simply unused — which meant a published-overall regen
+    // whose FAILING step was this very record settled as a success, and every
+    // re-edit family then reported it as one. No wire change was needed.
+    const recordId =
+      command.cmd === "addOperation"
+        ? command.record.recordId
+        : command.cmd === "updateOperationParams"
+          ? command.record
+          : undefined;
     return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op), recordId);
   }
 
@@ -1474,7 +1486,17 @@ export function createTauriClient(): CadClient {
         totalOps: projection.totalOps,
       };
     }
-    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command));
+    // A scalar re-edit names an existing timeline record, so it opts into the same
+    // per-record correlation a fresh op gets (U1) — without it, a regen that
+    // published other steps while THIS record errored settled as a success and
+    // every re-edit family reported it as one.
+    //
+    // Deliberately NOT correlated: `removeOperation` (the record is gone, so
+    // `failedSteps` can never name it), `setOperationSuppression` and
+    // `setRollback` (their effect is on DOWNSTREAM steps, so scoping the change to
+    // the named record's own bodies would drop exactly the bodies that moved).
+    const recordId = command.cmd === "updateOperationParams" ? command.record : undefined;
+    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command), recordId);
   }
 
   /** H2 escape hatch: forget the worker's poison keys (returns how many). */
@@ -1624,21 +1646,24 @@ export function createTauriClient(): CadClient {
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
     mate?: PlaceComponentMate,
-  ): Promise<void> {
+  ): Promise<ApplyOperationResult> {
     // `rotate` used to be dropped here — the real backend placed every
     // component unrotated regardless of the flip gesture (`A` key), only
     // masked because the mock lane's `commitPlaceComponent` DOES honor it.
     // `params` (WP-A3) is the same class of bug waiting to happen: the ghost
     // previews the auto-sized screw through `source.params`, so a commit that
     // dropped it would place a different size than the user saw.
-    await call(CMD.placeComponent, {
-      componentId,
-      componentVersion,
-      translate,
-      rotate,
-      params,
-      mate,
-    });
+    //
+    // `applyEdit`, not a bare `call`: the command returns a DocumentProjection
+    // and fires a regen, so it is an EDIT by every definition the rest of the
+    // app uses. Going through `call` meant the placement never learned its own
+    // regen terminal — a component whose mate failed downstream reported the
+    // same silent success as one that seated perfectly (U1 result-truth).
+    return applyEdit(
+      CMD.placeComponent,
+      { componentId, componentVersion, translate, rotate, params, mate },
+      "PlaceComponent",
+    );
   }
 
   async function componentPreviewMesh(
@@ -1707,15 +1732,22 @@ export function createTauriClient(): CadClient {
     return call<ComponentUpgrade | null>(CMD.componentUpgradeAvailable, { recordId });
   }
 
+  /* Both are edits on an EXISTING record, so they correlate on that `recordId`
+     (see `placeComponent` for why these left the bare-`call` lane). */
   async function setComponentParams(
     recordId: string,
     params: Record<string, ComponentParamValue>,
-  ): Promise<void> {
-    await call(CMD.setComponentParams, { recordId, params });
+  ): Promise<ApplyOperationResult> {
+    return applyEdit(
+      CMD.setComponentParams,
+      { recordId, params },
+      "SetComponentParams",
+      recordId,
+    );
   }
 
-  async function detachComponent(recordId: string): Promise<void> {
-    await call(CMD.detachComponent, { recordId });
+  async function detachComponent(recordId: string): Promise<ApplyOperationResult> {
+    return applyEdit(CMD.detachComponent, { recordId }, "DetachComponent", recordId);
   }
 
   /**

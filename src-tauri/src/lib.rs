@@ -29,6 +29,8 @@ pub mod logging;
 pub mod mesh_cache;
 pub mod recents;
 pub mod state;
+#[cfg(feature = "tauri-e2e")]
+mod tauri_e2e;
 pub mod worker;
 
 use std::future::Future;
@@ -264,8 +266,13 @@ pub fn run() {
     let mut log_guard = logging::init();
     logging::install_panic_hook();
 
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    #[cfg(feature = "tauri-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+
+    let app = builder
         .manage(AppState::default())
         .manage(ExitGuard::default())
         // Native window-close button (macOS traffic light / OS chrome): prevent the
@@ -406,6 +413,7 @@ pub fn run() {
             api::element_info,
             api::query_mass_properties,
             api::classify_element,
+            api::query_body_topology,
             library::list_library_components,
             library::reindex_library,
             library::resolve_component_source,
@@ -435,6 +443,8 @@ pub fn run() {
             api::confirm_exit,
             api::cancel_exit,
             api::log_event,
+            #[cfg(feature = "tauri-e2e")]
+            tauri_e2e::composition_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

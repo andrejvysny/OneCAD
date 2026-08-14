@@ -50,7 +50,7 @@ test("L from model mode opens the plane picker with Line armed", async ({ page }
   );
 });
 
-test("E from sketch mode finishes; region click + E arms Extrude", async ({ page }) => {
+test("E from sketch mode finishes AND arms Extrude on the sole region", async ({ page }) => {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
   const visibleSeedSketches = page
@@ -72,15 +72,24 @@ test("E from sketch mode finishes; region click + E arms Extrude", async ({ page
     y: (Math.min(...ys) + Math.max(...ys)) / 2,
   };
 
-  // E — the model-tool shortcut — finishes the sketch (same handoff as Enter):
-  // model mode, region-selection hint, select tool armed for the pick.
+  // E — the model-tool shortcut — finishes the sketch (same handoff as Enter) and
+  // carries the EXPLICIT Extrude intent through with it.
+  //
+  // U2: this used to land on "Select one closed sketch region, then choose
+  // Extrude" — the tool armed and then reset itself to Select, throwing the
+  // intent away and asking for it again. The interaction contract's answer is
+  // AwaitingSelection: keep the tool and name the exact next pick. With a SOLE
+  // extrudable region there is no pick left to name, so the tool arms outright
+  // (`enterRegionPick` has always armed a single region directly); with more than
+  // one it opens the multi-region pick instead.
   await page.keyboard.press("e");
   await expect(page.getByText(/^Editing /)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "New sketch", exact: true })).toBeVisible();
-  await expect(page.getByText("Select one closed sketch region, then choose Extrude")).toBeVisible();
   await waitForCameraSettled(page);
 
-  // Pick the filled region, then E again (or the Extrude button) arms the tool.
+  // The region the arm bound is the one the user drew — assert it is the same
+  // region a manual pick would have hit, so "armed directly" cannot hide a
+  // wrong-region bind.
   const client = await planePointToClient(page, snap.plane, centroid);
   await expect
     .poll(() =>
@@ -91,8 +100,6 @@ test("E from sketch mode finishes; region click + E arms Extrude", async ({ page
       ),
     )
     .toBe(true);
-  await clickAtClient(page, client.x, client.y);
-  await page.keyboard.press("e");
 
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Extrude", exact: true })).toHaveAttribute(

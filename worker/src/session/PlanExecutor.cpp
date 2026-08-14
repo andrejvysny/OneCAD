@@ -28,6 +28,7 @@
 #include "ops/PatternOp.h"
 #include "ops/RevolveOp.h"
 #include "ops/ShellOp.h"
+#include "protocol/Limits.h"
 #include "session/Signatures.h"
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
@@ -543,7 +544,8 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
 
 // Inline tessellation artifact on ExecutePlan (SCHEMA §7.2 artifacts.tessellate):
 // tessellate every prepared body into a MESH1 blob attached to the terminal resp's
-// binary tail (small → inlined per §5.2), referenced by result.artifacts.tessellate.
+// binary tail when it fits the transport limits advertised in hello. Larger meshes are
+// omitted: Rust then uses Tessellate, keeping control responses bounded.
 json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& resp) {
     if (!artifacts.is_object() || !artifacts.contains("tessellate") ||
         !artifacts["tessellate"].is_object()) {
@@ -552,12 +554,15 @@ json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& r
     const json& t = artifacts["tessellate"];
     const std::string lod = t.value("lod", std::string("coarse"));
     const bool include_edges = t.value("includeEdges", true);
-
     json meshes = json::array();
     for (const auto& [bid, rec] : job.bodies.all()) {
         tess::BodyMesh bm = tess::tessellate_body(rec.geom, bid, lod, include_edges, &job.partition,
                                                   &rec.face_colors);
         if (!bm.ok) continue;
+        if (bm.blob.size() > protocol::kChunkSize ||
+            resp.out_bin.size() + bm.blob.size() > protocol::kInitialBulkCredit) {
+            continue;
+        }
         const std::uint64_t off = resp.out_bin.size();
         resp.out_bin.insert(resp.out_bin.end(), bm.blob.begin(), bm.blob.end());
         const std::string section = "mesh:" + bid;

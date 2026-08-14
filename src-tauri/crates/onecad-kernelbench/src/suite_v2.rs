@@ -41,11 +41,11 @@
 use crate::case::{ExpectedDomain, Limits, MaterialDirection, QualityLimits, ResourceLimits};
 use crate::case_v2::{
     AdjacencyRelationV2, AnchorFrameV2, AnchorKindV2, CaseV2, ContinuityV2, Convexity, CurveKindV2,
-    FilletDefinition, GeneratorName, GeneratorV2, Geometry, MetamorphV2, Operation,
-    OperationFamily, OperationTypeV2, RadiusLaw, RecipeName, RecipeParameters, RotationCenterV2,
-    ScaleBand, SelectorAdjacencyV2, SelectorAnchorV2, SelectorModeV2, SelectorProvenanceV2,
-    SelectorV2, SizeType, SupportSurface, SurfaceDescriptorV2, SurfaceKindV2, TopologyRoleV2,
-    ValidatorTypeV2, ValidatorV2, SCHEMA_VERSION_V2,
+    EdgeSelectorV2, FilletDefinition, GeneratorName, GeneratorV2, Geometry, MetamorphV2, Operation,
+    OperationDefinition, OperationFamily, OperationTypeV2, RadiusLaw, RecipeName, RecipeParameters,
+    RotationCenterV2, ScaleBand, SelectorAdjacencyV2, SelectorAnchorV2, SelectorModeV2,
+    SelectorProvenanceV2, SelectorV2, SizeType, SupportSurface, SurfaceDescriptorV2, SurfaceKindV2,
+    TopologyRoleV2, ValidatorTypeV2, ValidatorV2, SCHEMA_VERSION_V2,
 };
 use crate::suite::{
     ContourSeed, EdgeOrderPermutation, GeneratedCase, Mirror, ParameterEpsilon, Rotation, Scale,
@@ -273,13 +273,13 @@ fn assemble(
         },
         operation: Operation {
             operation_type: OperationTypeV2::Fillet,
-            definition: FilletDefinition {
+            definition: OperationDefinition::Fillet(FilletDefinition {
                 radius_law: RadiusLaw::Constant { radius },
                 continuity: ContinuityV2::G1,
                 size_type: Some(SizeType::Radius),
-            },
+            }),
         },
-        selector: SelectorV2 {
+        selector: SelectorV2::Edge(EdgeSelectorV2 {
             mode: SelectorModeV2::Single,
             topology_role: TopologyRoleV2::SupportPairEdge,
             convexity: Some(Convexity::Convex),
@@ -301,7 +301,7 @@ fn assemble(
             adjacency: SelectorAdjacencyV2 {
                 relation: AdjacencyRelationV2::Single,
             },
-        },
+        }),
         expected_domain: domain,
         validators: validators(pair, domain, radius),
         metamorphs: metamorphs(domain),
@@ -557,7 +557,10 @@ mod tests {
     #[test]
     fn box_shaped_validators_stay_on_all_planar_pairs() {
         for case in base_cases() {
-            let curved = case.selector.surface_descriptors.iter().any(|descriptor| {
+            let SelectorV2::Edge(selector) = &case.selector else {
+                panic!("fillet matrix emitted non-edge selector")
+            };
+            let curved = selector.surface_descriptors.iter().any(|descriptor| {
                 descriptor
                     .adjacent_surface_kinds
                     .iter()
@@ -586,7 +589,7 @@ mod tests {
             let Some(dihedral) = case.geometry.parameters.dihedral_degrees else {
                 continue;
             };
-            let radius = case.operation.definition.radius_law.max_radius();
+            let radius = case.operation.max_radius();
             assert!(radius > 0.0, "{}: non-positive radius", case.case_id);
             assert!(
                 dihedral > 0.0 && dihedral < 180.0,

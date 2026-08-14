@@ -1,5 +1,9 @@
 # Manual-gate triage (P1 / M1, 2026-08-08)
 
+> Historical 2026-08-08 triage. It is not a current Phase 4/6 pass claim. Current
+> automated and release residuals live in `CURRENT_STATE.md`, `TODO.md`, and
+> `docs/qa/modeling-residuals-v1.json`; full browsers and real Tauri remain open.
+
 Every check in the historical `MANUAL_GATES_RUN.md` (archived at
 `docs/qa/archive/MANUAL_GATES_RUN-2026-08-04.md`, ~112 boxes across 16 sections)
 classified into exactly one destination:

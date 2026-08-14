@@ -338,6 +338,13 @@ fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) ->
         "AcceptPrepared" => handle_accept_prepared(writer, state, &req),
         "DiscardPrepared" => handle_discard_prepared(writer, state, &req),
         "Tessellate" => handle_tessellate(writer, state, &req),
+        // The stub has no BRep, but mirrors the real verb's strict addressing
+        // and returns its canonical single-prism placeholder topology.
+        "QueryBodyTopology" => handle_query_body_topology(writer, state, &req),
+        // Same story: no BRep behind them, but the addressing, the not-found
+        // convention and (for the bake) the on-disk side effect are real.
+        "ClassifyElement" => handle_classify_element(writer, state, &req),
+        "ExportGeometry" => handle_export_geometry(writer, state, &req),
         // --- solver lane (SCHEMA §7.4) ---
         "SketchUpsert" => handle_sketch_upsert(writer, state, &req),
         "BeginGesture" => handle_begin_gesture(writer, state, &req),
@@ -371,6 +378,196 @@ fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) ->
         return Some(0);
     }
     None
+}
+
+fn handle_query_body_topology<W: Write>(
+    writer: &mut W,
+    state: &mut StubState,
+    req: &ReqFrame,
+) -> Result<(), ProtocolError> {
+    let body_id = req.args.get("bodyId").and_then(Value::as_str).unwrap_or("");
+    let stamp = state.stamp();
+    if !body_id.starts_with("body_") {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::RefUnresolved,
+                message: format!("QueryBodyTopology: unknown bodyId '{body_id}'"),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    write_resp_value(
+        writer,
+        req.id,
+        stamp,
+        json!({ "solidCount": 1, "faceCount": 6 }),
+        &[],
+        &[],
+    )
+}
+
+/// `ClassifyElement` (SCHEMA §7.5) — the placement solver's hover query.
+///
+/// The stub has no BRep to classify, so it answers for the same canonical prism
+/// `QueryBodyTopology` reports: a planar face at the origin with a +Z normal.
+/// What it DOES mirror faithfully is the addressing and the not-found
+/// convention — either `elementId` or `topoKey` is required, a bad `bodyId` is
+/// `REF_UNRESOLVED`, and an element the head does not hold is `present: false`,
+/// an ANSWER rather than an error (the verb is re-issued every hover frame, so
+/// a miss must not look like a failure).
+fn handle_classify_element<W: Write>(
+    writer: &mut W,
+    state: &mut StubState,
+    req: &ReqFrame,
+) -> Result<(), ProtocolError> {
+    let body_id = req.args.get("bodyId").and_then(Value::as_str).unwrap_or("");
+    let element_id = req
+        .args
+        .get("elementId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let topo_key = req
+        .args
+        .get("topoKey")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let stamp = state.stamp();
+    if !body_id.starts_with("body_") {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::RefUnresolved,
+                message: format!("ClassifyElement: unknown bodyId '{body_id}'"),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    if element_id.is_empty() && topo_key.is_empty() {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::ProtocolError,
+                message: "ClassifyElement: one of elementId / topoKey is required".into(),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    // Only a face address resolves against the fiction; anything else is a miss.
+    let present = topo_key.starts_with("f:") || (topo_key.is_empty() && !element_id.is_empty());
+    if !present {
+        return write_resp_value(writer, req.id, stamp, json!({ "present": false }), &[], &[]);
+    }
+    write_resp_value(
+        writer,
+        req.id,
+        stamp,
+        json!({
+            "present": true,
+            "kind": "face",
+            "surfaceType": "plane",
+            "curveType": "",
+            "frame": { "origin": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0] },
+        }),
+        &[],
+        &[],
+    )
+}
+
+/// `ExportGeometry` (SCHEMA §7.8) — the component-authoring bake.
+///
+/// The stub writes a REAL file and reports its REAL byte count. A stub that
+/// returned a plausible `bytes` without writing anything would make the one
+/// thing this verb exists to do (produce a package payload on disk) untestable
+/// through the stub lane, which is the failure mode the whole stub is meant to
+/// avoid.
+fn handle_export_geometry<W: Write>(
+    writer: &mut W,
+    state: &mut StubState,
+    req: &ReqFrame,
+) -> Result<(), ProtocolError> {
+    let path = req.args.get("path").and_then(Value::as_str).unwrap_or("");
+    let codec = req
+        .args
+        .get("codec")
+        .and_then(Value::as_str)
+        .unwrap_or("brep");
+    let bodies = req
+        .args
+        .get("bodyIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let union_solids = req
+        .args
+        .get("union")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let stamp = state.stamp();
+    if path.is_empty() || bodies == 0 {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::ProtocolError,
+                message: "ExportGeometry: path and a non-empty bodyIds are required".into(),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    // Refused for the same reason the real worker refuses it: a component that
+    // bakes to more than one solid moves its failure to whoever places it.
+    if bodies > 1 && !union_solids {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::ProtocolError,
+                message: format!("ExportGeometry: {bodies} solids without union"),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    let payload = format!("onecad-worker-stub {codec} bake\n");
+    if let Err(error) = std::fs::write(path, payload.as_bytes()) {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::ProtocolError,
+                message: format!("ExportGeometry: cannot write '{path}': {error}"),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    write_resp_value(
+        writer,
+        req.id,
+        stamp,
+        json!({
+            "codec": codec,
+            "format": 1,
+            "solidCount": 1,
+            "bytes": payload.len(),
+        }),
+        &[],
+        &[],
+    )
 }
 
 fn handle_open_session<W: Write>(
@@ -991,13 +1188,28 @@ fn handle_resolve_refs<W: Write>(
                 .and_then(|p| p.get("elementId"))
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            let mut resolution = match existing {
-                Some(eid) => {
+            let mut resolution = match (existing, body_id.is_empty()) {
+                // SCHEMA §7.5: no body to enumerate candidates from. The real worker
+                // takes its missing-body branch here, and that non-promotable
+                // no-candidates shape is the ONLY resolution allowed to omit `bodyId`.
+                (_, true) => json!({
+                    "refId": ref_id,
+                    "outcome": "needsRepair",
+                    "needsRepair": {
+                        "refId": ref_id,
+                        "elementId": existing.unwrap_or(""),
+                        "ladderFailed": "descriptor",
+                        "reason": "no-candidates",
+                        "candidates": [],
+                        "uiLabel": "referenced body not found",
+                    },
+                }),
+                (Some(eid), false) => {
                     json!({ "refId": ref_id, "outcome": "unchanged", "elementId": eid, "topoKey": "f:0" })
                 }
                 // SCHEMA §7.5: `elementId` slot (empty — the stub holds no partition,
                 // so an autoBind resolves an unminted element); `topoKey` = evidence.
-                None => {
+                (None, false) => {
                     json!({ "refId": ref_id, "outcome": "autoBind", "elementId": "", "topoKey": "f:0", "score": 0.95, "margin": 0.5 })
                 }
             };

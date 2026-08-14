@@ -19,7 +19,9 @@
 //
 // V2 `resultPolicyVersion:2` keeps source as instance zero. Non-fused patterns
 // create only `body_<opId>:<k>` children for transformed instance `k+1`; fused
-// patterns modify source in place. Pattern faces remain ID-on-demand.
+// patterns modify source in place. Other present numeric versions refuse
+// `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`; records remain lossless in Rust.
+// Pattern faces remain ID-on-demand.
 #pragma once
 
 #include <string>

@@ -389,7 +389,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(clientMock.endPreview).not.toHaveBeenCalled(); // nothing reached the timeline
     expect(clientMock.applyOperation).not.toHaveBeenCalled();
     expect(viewportStore.getState().statusHint?.message).toContain(
-      "Cannot apply invalid preview: BRepFilletAPI: radius exceeds edge length",
+      "Cannot confirm invalid preview: BRepFilletAPI: radius exceeds edge length",
     );
     expect(toolStore.getState().modelTool).toBe("fillet"); // still armed on the same edges
   });
@@ -431,7 +431,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     await flush();
     expect(clientMock.endPreview).not.toHaveBeenCalled();
     expect(viewportStore.getState().statusHint?.message).toContain(
-      "Cannot apply invalid preview: thickness exceeds the thinnest wall",
+      "Cannot confirm invalid preview: thickness exceeds the thinnest wall",
     );
   });
 

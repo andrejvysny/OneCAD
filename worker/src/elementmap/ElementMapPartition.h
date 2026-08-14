@@ -116,9 +116,10 @@ public:
     // shape's image in `new_body_shape` and recomputing its TopoKey. Appends
     // removed/relabeled to `delta`.
     //   * IsDeleted → the element is dropped (delta.removed).
-    //   * a UNIQUE Modified image (or an unchanged survivor) → auto-binds
+    //   * a UNIQUE Modified/Generated image (or an unchanged survivor) → auto-binds
     //     (delta.relabeled if the TopoKey moved) — the fillet-survives-edit path.
-    //   * a SPLIT (Modified returns >1 images) is EXPLICIT LINEAGE, no forced 1:1
+    //   * a SPLIT (the deduped Modified+Generated union has >1 images) is EXPLICIT
+    //     LINEAGE, no forced 1:1
     //     (W-WP6, closes review finding 2): every image becomes a scored candidate
     //     (Scoring.h) narrowed by the entry's frozen descriptor + anchor; a confident
     //     unique winner binds, an ambiguous/symmetric split ⇒ NeedsRepair.

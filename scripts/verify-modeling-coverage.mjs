@@ -34,9 +34,10 @@ const root = resolve(import.meta.dirname, "..");
 const manifestPath = resolve(process.env.MODELING_COVERAGE_MANIFEST ??
   resolve(root, "docs/qa/modeling-operation-coverage.json"));
 const corpusDir = resolve(root, "corpus/cases");
-const required = ["operation", "mode", "supportStatus", "cppTest", "rustRealWorkerTest",
+const required = ["operation", "mode", "supportStatus", "uiExposure", "cppTest", "rustRealWorkerTest",
   "frontendTest", "playwrightTest", "corpusCase", "kernelbenchSuite", "ciJob", "notes"];
 const statuses = new Set(["supported", "deferred", "unsupported"]);
+const uiExposures = new Set(["exposed", "hidden", "mixed", "unsupported"]);
 const classifications = new Set(["operation", "solver", "antiGoal", "unsupported"]);
 
 /** Evidence lane → the CI job(s) that actually execute it. Any ONE satisfies. */
@@ -126,15 +127,29 @@ const corpus = new Set(readdirSync(corpusDir)
   .map((name) => JSON.parse(readFileSync(resolve(corpusDir, name), "utf8")).id));
 const covered = new Map();
 const operations = new Set();
+const tuples = new Set();
 
 for (const [index, row] of manifest.rows.entries()) {
   for (const field of required) {
     if (typeof row[field] !== "string") fail(`row ${index} missing string ${field}`);
   }
   if (!statuses.has(row.supportStatus)) fail(`row ${index} has invalid supportStatus`);
+  if (!uiExposures.has(row.uiExposure)) fail(`row ${index} has invalid uiExposure`);
   if (!row.operation || !row.mode) fail(`row ${index} needs operation and mode`);
   operations.add(row.operation);
   const where = `${row.operation}/${row.mode}`;
+  if (tuples.has(where)) fail(`row ${index} duplicates ${where}`);
+  tuples.add(where);
+  if (row.supportStatus === "unsupported" && row.uiExposure !== "unsupported") {
+    fail(`${where} unsupported capability must declare uiExposure unsupported`);
+  }
+  if (row.supportStatus === "supported" && ["exposed", "mixed"].includes(row.uiExposure)) {
+    if (list(row.rustRealWorkerTest).length === 0) fail(`${where} lacks a real-worker lane`);
+    if (list(row.playwrightTest).length === 0) fail(`${where} lacks a browser lane`);
+  }
+  if (row.uiExposure === "hidden" && list(row.playwrightTest).length !== 0) {
+    fail(`${where} is UI-hidden but cites a browser exposure lane`);
+  }
 
   // 1. Every cited path exists. A dead path is worse than an empty field: the
   //    empty field says "unproven", the dead path says "proven" and is not.

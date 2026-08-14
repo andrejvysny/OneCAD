@@ -40,24 +40,43 @@ const NO_RESULT = "the operation returned no result";
 const NO_REASON = "the operation failed without a reason";
 const TIMED_OUT = "the operation did not complete in time";
 
+/** How to read a result that carries no `terminal` discriminant. */
+export interface ClassifyOptions {
+  /**
+   * - `"infer"` (default) — the historical body-count inference, kept verbatim so
+   *   legacy fixtures and any client that has not populated the discriminant
+   *   behave exactly as they did before.
+   * - `"published"` — an empty body list is this command's NORMAL success. Use it
+   *   for commands the core marks `RegenHint::None` (body/sketch metadata) and
+   *   for callers that decide "did anything move?" themselves: inference would
+   *   report every one of those as a failure, because counting bodies cannot see
+   *   a metadata-only success (see `legacyInference`).
+   */
+  noTerminal?: "infer" | "published";
+}
+
 /**
  * Classifies one commit result.
  *
  * A resolved `errorMessage` is never a success, whatever the terminal says — that
  * is the invariant the whole work package exists for, so it is checked first.
  *
- * When `terminal` is absent the historical body-count inference runs instead, so
- * legacy fixtures and any client that has not populated the discriminant behave
- * exactly as they did before. Production results always carry it; see
- * `ApplyOperationResult.terminal`.
+ * Production results always carry a `terminal`; see `ApplyOperationResult.terminal`.
  */
-export function classifyRegen(res: ApplyOperationResult | null | undefined): RegenOutcome {
+export function classifyRegen(
+  res: ApplyOperationResult | null | undefined,
+  opts?: ClassifyOptions,
+): RegenOutcome {
   if (!res) return { kind: "failed", reason: NO_RESULT };
   if (res.errorMessage) {
     return { kind: "failed", reason: res.errorMessage, diagnostics: res.diagnostics };
   }
   const terminal: RegenTerminal | undefined = res.terminal;
-  if (terminal === undefined) return legacyInference(res);
+  if (terminal === undefined) {
+    return opts?.noTerminal === "published"
+      ? { kind: "published", result: res }
+      : legacyInference(res);
+  }
   switch (terminal) {
     case "published":
       return { kind: "published", result: res };

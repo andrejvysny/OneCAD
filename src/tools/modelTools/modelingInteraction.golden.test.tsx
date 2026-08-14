@@ -39,6 +39,27 @@ describe("modeling interaction contract", () => {
       expect(row.visibleCancel).toBe(true);
     }
   });
+
+  it("every row declares Enter support", () => {
+    for (const row of MODELING_INTERACTION_CONTRACT) {
+      expect(row.enterSupport, `${row.tool} must commit on Enter`).toBe(true);
+    }
+  });
+
+  // The two columns added 2026-08-14 are only meaningful if they track
+  // `primaryParameter`: a tool with no primary numeric value has nothing to type
+  // into and nothing to preview per keystroke.
+  it("primaryEntry and livePreviewOnEdit follow primaryParameter", () => {
+    for (const row of MODELING_INTERACTION_CONTRACT) {
+      if (row.primaryParameter === null) {
+        expect(row.primaryEntry, `${row.tool} has no primary value`).toBe("none");
+        expect(row.livePreviewOnEdit, `${row.tool} has nothing to preview live`).toBe(false);
+      } else {
+        expect(row.primaryEntry, `${row.tool} must accept type-to-enter`).toBe("typeToEnter");
+        expect(row.livePreviewOnEdit, `${row.tool} must preview every edit`).toBe(true);
+      }
+    }
+  });
 });
 
 describe("modeling interaction contract — chip probe", () => {
@@ -52,16 +73,16 @@ describe("modeling interaction contract — chip probe", () => {
   });
 
   it.each([
-    { tool: "booleanOp", setup: () => toolChipStore.getState().showBoolean("Union", WORLD, vi.fn(), vi.fn()) },
+    { tool: "booleanOp", setup: () => toolChipStore.getState().showBoolean("Union", WORLD, { onOp: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }) },
     {
       tool: "linearPattern",
-      setup: () => toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onSpacing: vi.fn(), onApply: vi.fn() }),
+      setup: () => toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onSpacing: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }),
     },
     {
       tool: "circularPattern",
-      setup: () => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onApply: vi.fn() }),
+      setup: () => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }),
     },
-    { tool: "mirror", setup: () => toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onApply: vi.fn() }) },
+    { tool: "mirror", setup: () => toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }) },
   ])("$tool chip has a visible cancel control", ({ setup }) => {
     render(<ModelToolChips />);
     act(() => setup());
@@ -76,5 +97,38 @@ describe("modeling interaction contract — chip probe", () => {
     render(<ModelToolChips />);
     act(() => setup());
     expect(screen.getByRole("button", { name: /cancel|✕/i })).toBeInTheDocument();
+  });
+
+  /*
+   * U0 red evidence. `Apply`, ✓ and Enter must call ONE `confirm` callback;
+   * `Cancel`, ✕ and Escape must call ONE `cancel`. Boolean, both patterns and
+   * mirror used to publish a separate `onApply` protocol instead, which is also
+   * why they had no Enter path (see modelingInteraction.keyboard.probe). U2
+   * deleted `onApply`: there is now one confirm slot and one cancel slot.
+   */
+  it.each([
+    { tool: "booleanOp", setup: () => toolChipStore.getState().showBoolean("Union", WORLD, { onOp: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }) },
+    {
+      tool: "linearPattern",
+      setup: () =>
+        toolChipStore
+          .getState()
+          .showLinearPattern("X", 3, 20, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onSpacing: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }),
+    },
+    {
+      tool: "circularPattern",
+      setup: () =>
+        toolChipStore
+          .getState()
+          .showCircularPattern("Z", 4, 360, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }),
+    },
+    { tool: "mirror", setup: () => toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }) },
+    { tool: "extrude", setup: () => toolChipStore.getState().showExtrude(10, WORLD, { onValue: vi.fn(), onSymmetric: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() }) },
+    { tool: "filletRadius", setup: () => toolChipStore.getState().showFillet(2, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel: vi.fn() }) },
+  ])("$tool chip confirms through the shared `onConfirm` protocol", ({ setup }) => {
+    act(() => setup());
+    const chip = toolChipStore.getState();
+    expect(chip.onConfirm).toBeTypeOf("function");
+    expect(chip.onCancel).toBeTypeOf("function");
   });
 });

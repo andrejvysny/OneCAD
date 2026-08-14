@@ -168,6 +168,9 @@ OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::stri
             return OpOutcome::fail("REF_UNRESOLVED",
                                    "TransformBody target body not found: " + id);
         }
+        if (auto invalid = validate_modeling_input(rec->geom, "TransformBody", "target")) {
+            return *invalid;
+        }
         sources.push_back(rec->geom);
     }
 

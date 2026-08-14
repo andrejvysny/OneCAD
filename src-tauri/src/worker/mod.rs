@@ -43,24 +43,22 @@ pub use manager::{RestartHook, SupervisorConfig, WorkerLifecycle, WorkerManager,
 /// The default dev-tree worker binary, relative to `src-tauri/`.
 pub const DEV_WORKER_PATH: &str = "../worker/build/onecad-worker";
 
-/// The `ONECAD_WORKER_PATH` override env var (highest precedence).
+/// The `ONECAD_WORKER_PATH` override env var (development and tests only).
 pub const WORKER_PATH_ENV: &str = "ONECAD_WORKER_PATH";
 
 /// The sidecar binary's basename as Tauri drops it beside the main executable in
 /// a bundled app (`externalBin` strips the target triple at install time).
 pub const BUNDLED_WORKER_NAME: &str = "onecad-worker";
 
-/// Resolves the worker binary path (SCHEMA-agnostic packaging seam) over a fixed
-/// precedence chain:
+/// Resolves the worker binary path (SCHEMA-agnostic packaging seam).
 ///
-/// 1. `ONECAD_WORKER_PATH` override — if it names a file that exists;
-/// 2. **release builds**: `<exe_dir>/onecad-worker` — where Tauri places the
-///    `externalBin` sidecar in a bundled app — then the dev fallback;
-/// 3. **debug builds**: the dev fallback `../worker/build/onecad-worker` FIRST,
-///    then `<exe_dir>/onecad-worker`. Tauri dev copies the staged
-///    `src-tauri/binaries/` sidecar beside the debug executable, and that staged
-///    copy drifts stale silently (it is only refreshed by
-///    `scripts/build-worker.sh`) — the dev-tree build is the source of truth.
+/// Release builds accept only `<exe_dir>/onecad-worker`, where Tauri places the
+/// bundled `externalBin` sidecar. They deliberately ignore environment and
+/// dev-tree paths so a relocated app cannot silently pair with another worker.
+/// Debug and `cfg(test)` builds use `ONECAD_WORKER_PATH`, then the dev-tree
+/// worker, then the sidecar beside the executable. Tauri dev copies the staged
+/// `src-tauri/binaries/` sidecar beside the debug executable, and that copy can
+/// drift stale; the dev-tree build remains the debug source of truth.
 ///
 /// Returns `None` when no candidate exists on disk, so the app keeps the
 /// [`PendingBackend`] fallback rather than spawning a missing binary.
@@ -74,7 +72,7 @@ pub fn resolve_worker_path() -> Option<PathBuf> {
         env_override,
         exe_dir,
         Path::new(DEV_WORKER_PATH),
-        cfg!(debug_assertions),
+        cfg!(any(debug_assertions, test)),
     )
 }
 
@@ -82,20 +80,14 @@ pub fn resolve_worker_path() -> Option<PathBuf> {
 /// precedence chain is unit-testable without touching the process-global
 /// environment or the real executable location.
 ///
-/// `env_override` always wins when it exists. `prefer_dev` (debug builds) swaps
-/// the remaining two rungs: `dev_fallback` before `<exe_dir>/onecad-worker`
-/// (with a `.exe` suffix on Windows); release order is bundled-then-dev.
+/// `allow_unbundled` is true only for debug/test callers. Production callers
+/// return the bundled path or `None`, without inspecting env/dev candidates.
 fn resolve_worker_path_from(
     env_override: Option<PathBuf>,
     exe_dir: Option<PathBuf>,
     dev_fallback: &Path,
-    prefer_dev: bool,
+    allow_unbundled: bool,
 ) -> Option<PathBuf> {
-    if let Some(path) = env_override {
-        if path.exists() {
-            return Some(path);
-        }
-    }
     let bundled = exe_dir.map(|dir| {
         let name = if cfg!(windows) {
             "onecad-worker.exe"
@@ -105,25 +97,32 @@ fn resolve_worker_path_from(
         dir.join(name)
     });
     let bundled = bundled.filter(|p| p.exists());
-    let dev = dev_fallback.exists().then(|| dev_fallback.to_path_buf());
 
-    if prefer_dev {
-        if let Some(dev) = dev {
-            // Debug-only observability: a staged sidecar beside the exe is being
-            // shadowed by the dev-tree build — say so, or a stale staged copy
-            // "works" invisibly the day this order changes.
-            if let Some(shadowed) = &bundled {
-                tracing::warn!(
-                    dev = %dev.display(),
-                    shadowed = %shadowed.display(),
-                    "worker resolve: dev-tree build preferred over staged sidecar (debug build)"
-                );
-            }
-            return Some(dev);
-        }
+    if !allow_unbundled {
         return bundled;
     }
-    bundled.or(dev)
+
+    if let Some(path) = env_override {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    let dev = dev_fallback.exists().then(|| dev_fallback.to_path_buf());
+
+    if let Some(dev) = dev {
+        // Debug-only observability: a staged sidecar beside the exe is being
+        // shadowed by the dev-tree build — say so, or a stale staged copy
+        // "works" invisibly the day this order changes.
+        if let Some(shadowed) = &bundled {
+            tracing::warn!(
+                dev = %dev.display(),
+                shadowed = %shadowed.display(),
+                "worker resolve: dev-tree build preferred over staged sidecar (debug build)"
+            );
+        }
+        return Some(dev);
+    }
+    bundled
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +300,14 @@ pub trait ElementQuery: Send + Sync {
         body: BodyId,
         topo_key: &str,
     ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError>;
+
+    /// `QueryBodyTopology` (SCHEMA §7.5): exact solid and face counts from the
+    /// head BRep, rather than an LOD-dependent mesh.
+    async fn query_body_topology(
+        &self,
+        body: BodyId,
+        body_id_label: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -931,6 +938,14 @@ impl ElementQuery for PendingBackend {
     ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
         Err(Self::not_ready())
     }
+
+    async fn query_body_topology(
+        &self,
+        _body: BodyId,
+        _body_id_label: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError> {
+        Err(Self::not_ready())
+    }
 }
 
 #[async_trait]
@@ -1056,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_env_override_when_it_exists() {
+    fn resolve_debug_prefers_env_override_when_it_exists() {
         let dir = tempfile::tempdir().unwrap();
         let over = dir.path().join("custom-worker");
         std::fs::write(&over, b"x").unwrap();
@@ -1065,51 +1080,61 @@ mod tests {
         std::fs::create_dir(&exe_dir).unwrap();
         std::fs::write(exe_dir.join(BUNDLED_WORKER_NAME), b"x").unwrap();
 
-        // Env wins in BOTH build modes.
-        for prefer_dev in [false, true] {
-            let got = resolve_worker_path_from(
-                Some(over.clone()),
-                Some(exe_dir.clone()),
-                Path::new("/nonexistent/dev/onecad-worker"),
-                prefer_dev,
-            );
-            assert_eq!(got, Some(over.clone()));
-        }
+        let got = resolve_worker_path_from(
+            Some(over.clone()),
+            Some(exe_dir),
+            Path::new("/nonexistent/dev/onecad-worker"),
+            true,
+        );
+        assert_eq!(got, Some(over));
     }
 
     #[test]
-    fn resolve_falls_through_missing_env_override_to_bundled() {
+    fn resolve_release_uses_relocated_bundled_worker() {
         let dir = tempfile::tempdir().unwrap();
-        let exe_dir = dir.path().join("bundle");
-        std::fs::create_dir(&exe_dir).unwrap();
+        let exe_dir = dir.path().join("relocated").join("app-bin");
+        std::fs::create_dir_all(&exe_dir).unwrap();
         let bundled = exe_dir.join(BUNDLED_WORKER_NAME);
-        std::fs::write(&bundled, b"x").unwrap();
+        std::fs::write(&bundled, b"bundle").unwrap();
+        let over = dir.path().join("custom-worker");
+        std::fs::write(&over, b"override").unwrap();
+        let dev = dir.path().join("dev-onecad-worker");
+        std::fs::write(&dev, b"dev").unwrap();
 
-        let got = resolve_worker_path_from(
-            Some(dir.path().join("does-not-exist")),
-            Some(exe_dir),
-            Path::new("/nonexistent/dev/onecad-worker"),
-            false,
-        );
+        let got = resolve_worker_path_from(Some(over), Some(exe_dir), &dev, false);
         assert_eq!(got, Some(bundled));
     }
 
     #[test]
-    fn resolve_falls_through_to_dev_fallback() {
+    fn resolve_release_never_selects_env_or_dev_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe_dir = dir.path().join("empty-bundle");
+        std::fs::create_dir(&exe_dir).unwrap();
+        let over = dir.path().join("custom-worker");
+        std::fs::write(&over, b"override").unwrap();
+        let dev = dir.path().join("dev-onecad-worker");
+        std::fs::write(&dev, b"dev").unwrap();
+
+        let got = resolve_worker_path_from(Some(over), Some(exe_dir), &dev, false);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_debug_falls_through_to_dev_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let exe_dir = dir.path().join("bundle"); // empty — no sidecar beside exe
         std::fs::create_dir(&exe_dir).unwrap();
         let dev = dir.path().join("dev-onecad-worker");
         std::fs::write(&dev, b"x").unwrap();
 
-        let got = resolve_worker_path_from(None, Some(exe_dir), &dev, false);
+        let got = resolve_worker_path_from(None, Some(exe_dir), &dev, true);
         assert_eq!(got, Some(dev));
     }
 
     #[test]
-    fn resolve_prefer_dev_wins_over_bundled_in_debug() {
-        // The stale-sidecar drift class: BOTH exist; prefer_dev picks the
-        // dev-tree build, release order picks the staged sidecar.
+    fn resolve_debug_prefers_dev_over_bundled() {
+        // The stale-sidecar drift class: BOTH exist; debug picks the dev-tree
+        // build. Release lockstep is covered separately above.
         let dir = tempfile::tempdir().unwrap();
         let exe_dir = dir.path().join("bundle");
         std::fs::create_dir(&exe_dir).unwrap();
@@ -1120,12 +1145,10 @@ mod tests {
 
         let debug = resolve_worker_path_from(None, Some(exe_dir.clone()), &dev, true);
         assert_eq!(debug, Some(dev.clone()));
-        let release = resolve_worker_path_from(None, Some(exe_dir), &dev, false);
-        assert_eq!(release, Some(bundled));
     }
 
     #[test]
-    fn resolve_prefer_dev_falls_back_to_bundled_when_dev_missing() {
+    fn resolve_debug_falls_back_to_bundled_when_dev_missing() {
         let dir = tempfile::tempdir().unwrap();
         let exe_dir = dir.path().join("bundle");
         std::fs::create_dir(&exe_dir).unwrap();
@@ -1144,12 +1167,12 @@ mod tests {
     #[test]
     fn resolve_returns_none_when_no_candidate_exists() {
         let dir = tempfile::tempdir().unwrap();
-        for prefer_dev in [false, true] {
+        for allow_unbundled in [false, true] {
             let got = resolve_worker_path_from(
                 Some(dir.path().join("missing-override")),
                 Some(dir.path().join("empty-bundle")),
                 &dir.path().join("missing-dev"),
-                prefer_dev,
+                allow_unbundled,
             );
             assert_eq!(got, None);
         }

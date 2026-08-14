@@ -212,6 +212,11 @@ struct LoopDetectorConfig {
     /// is proven equivalent to the established tessellated detector.
     bool exactAnalyticFragments = false;
 
+    /// V2 compares split parameters directly. V3 compares points in sketch
+    /// units so curve parameterization and model scale cannot merge splits.
+    CurveRefinementPolicy curveRefinementPolicy =
+        CurveRefinementPolicy::V2ParameterProximity;
+
     /// Tessellation tolerance for arcs/circles (mm)
     double tessellationTolerance = 0.05;
 
@@ -232,6 +237,11 @@ struct LoopDetectorConfig {
 
     /// Bound exact refinement work before the quadratic pair pass begins.
     size_t maxPlanarizedCurvePairs = 4096;
+
+    /// Bound analytic entities collected before intersection refinement. This
+    /// prevents a malformed profile from allocating an unbounded source list
+    /// before the curve-pair ceiling can refuse it.
+    size_t maxPlanarizedSources = 256;
 
     /// Bound fragments emitted after analytic splitting.
     size_t maxPlanarizedFragments = 8192;

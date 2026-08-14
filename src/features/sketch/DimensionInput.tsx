@@ -48,6 +48,25 @@ export interface DimensionInputProps {
    * controller's capture-phase Enter handler never double-fires (single confirm).
    */
   onConfirm?: () => void;
+  /**
+   * Live preview for the ARMED model-tool cluster (U3, contract column
+   * `livePreviewOnEdit`): called on EVERY parseable change with the
+   * document-domain value (mm / degrees), so the viewport follows the keystroke.
+   * Blur must never be the only update mechanism.
+   *
+   * Invalid or partial text ("2.", "25abc") emits nothing — it leaves the field
+   * editable and the last valid preview standing, and never clamps.
+   *
+   * The controller is what coalesces these into kernel requests; this is only the
+   * value edge (see `previewThrottle.ts`).
+   */
+  onPreview?: (value: number) => void;
+  /**
+   * Seed text for a type-to-enter arm (U3): the character the user typed on the
+   * canvas, which REPLACES the formatted value rather than appending to it.
+   * Subsequent characters edit normally, because the field now has focus.
+   */
+  initialText?: string;
   /** Commit the current text when the input loses focus (default true). */
   commitOnBlur?: boolean;
   /** Esc handler — when provided, Esc calls this instead of resetting the text. */
@@ -94,6 +113,8 @@ export function DimensionInput({
   onCommitExpr,
   expr,
   onConfirm,
+  onPreview,
+  initialText,
   commitOnBlur = true,
   onCancel,
   autoFocus = false,
@@ -139,8 +160,14 @@ export function DimensionInput({
    * and showing it would leave the user editing a value the variable overwrites
    * on the next regen. The resolved number rides the title attribute + the
    * suffix slot instead (see the read-only chip in `HistoryList`).
+   *
+   * A type-to-enter SEED outranks the binding: the user typed a digit on the
+   * canvas, which is an unbind gesture, so the field must show that digit and
+   * not the `=name` it is about to replace.
    */
-  const [text, setText] = useState(() => (expr ? `=${expr}` : formatValue(value)));
+  const [text, setText] = useState(
+    () => initialText ?? (expr ? `=${expr}` : formatValue(value)),
+  );
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -151,7 +178,61 @@ export function DimensionInput({
    * re-commit a dimension (pinned test) — the mm the constraint holds is
    * untouched.
    */
+  const seeded = useRef(initialText !== undefined);
+  /*
+   * The value THIS field last previewed. Live preview means our own edits come
+   * straight back as a new `value` prop, and re-formatting on that echo would
+   * rewrite the text under the cursor — typing "25." would become "25" the
+   * instant the 25 previewed, eating the decimal point.
+   */
+  const lastPreviewed = useRef<number | null>(null);
+  /*
+   * A type-to-enter seed IS a parseable change — the user typed a character and
+   * the viewport must follow it, exactly as if they had typed it into the field.
+   * It arrives as initial state rather than an input event, so it needs its own
+   * emit; every character after it comes through `onChange` normally.
+   */
   useEffect(() => {
+    if (initialText === undefined || !onPreview) return;
+    const n = parse(initialText);
+    if (Number.isFinite(n) && (!kind || isValidForKind(kind, n))) {
+      lastPreviewed.current = n;
+      onPreview(n);
+    }
+    // Mount-only: `initialText` changes identity with the remount key, so a new
+    // seed is a new component instance, not a new run of this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const lastUnit = useRef(unit);
+  const lastExpr = useRef(expr);
+  useEffect(() => {
+    const unitChanged = lastUnit.current !== unit;
+    lastUnit.current = unit;
+    // A BINDING change is a re-label for exactly the same reason a unit switch
+    // is: `=height` ⇄ a number is a change of what the field DENOTES, not an
+    // echo of a value this field previewed. Without this the echo guard below
+    // would swallow it whenever the resolved number happened to be unchanged.
+    const exprChanged = lastExpr.current !== expr;
+    lastExpr.current = expr;
+    // A type-to-enter seed owns the field until the user leaves it: the first
+    // `onPreview` pushes `value` back down, and re-formatting it here would
+    // overwrite the very characters being typed.
+    if (seeded.current) {
+      seeded.current = false;
+      return;
+    }
+    // A UNIT switch always re-displays: it is a pure re-label of the same
+    // document value (50.8 mm ⇄ 2 in) and has nothing to do with the echo guard.
+    // Only a VALUE that came back as this field's own last preview is suppressed.
+    if (
+      !unitChanged &&
+      !exprChanged &&
+      lastPreviewed.current !== null &&
+      lastPreviewed.current === value
+    )
+      return;
+    lastPreviewed.current = null;
     setText(expr ? `=${expr}` : formatValue(value));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, unit, expr]);
@@ -181,6 +262,25 @@ export function DimensionInput({
    * validation reject must NOT blur: the chip stays open + focused so the
    * user can correct the value in place.
    */
+  /**
+   * Text → document-domain number, or NaN when the text is not (yet) a value.
+   *
+   * ANGLE chips keep the plain float parse: the UI angle domain is degrees and
+   * its deg↔rad marshalling lives in `@/ipc/angleUnits`, which this module must
+   * not second-guess. Every other chip is a LENGTH, so it accepts a unit suffix
+   * (`25mm`, `2.5 cm`, `1 in`) or a BARE number read in the current display unit
+   * — and always emits MILLIMETRES, whatever the preference. It REJECTS text it
+   * only partly understood ("25abc"), where parseFloat would commit 25.
+   */
+  const parse = (raw: string): number => {
+    if (!isAngle) return parseLength(raw, unit) ?? Number.NaN;
+    // Angles are strict for the same reason lengths are: `parseFloat("12abc")`
+    // is 12, so a typo would silently commit — and under live preview it would
+    // also rewrite the field mid-keystroke. Only a complete number parses.
+    const t = raw.trim();
+    return /^[+-]?(\d+\.?\d*|\.\d+)$/.test(t) ? Number.parseFloat(t) : Number.NaN;
+  };
+
   const commit = (): boolean => {
     /*
      * WP-VE.2, checked BEFORE the numeric parse so `=height` can never fall
@@ -209,7 +309,7 @@ export function DimensionInput({
     // (`25mm`, `2.5 cm`, `1 in`) or a BARE number read in the current display
     // unit — and always emits MILLIMETRES, whatever the preference. It REJECTS
     // text it only partly understood ("25abc"), where parseFloat would commit 25.
-    const n = isAngle ? Number.parseFloat(text) : (parseLength(text, unit) ?? Number.NaN);
+    const n = parse(text);
     if (!Number.isFinite(n)) {
       if (kind) {
         flashError();
@@ -258,7 +358,24 @@ export function DimensionInput({
         /* A bindable field takes `=name`, so it must not ask for a numeric
            keypad — that would make the "=" unreachable on a touch keyboard. */
         inputMode={onCommitExpr ? "text" : "decimal"}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          if (!onPreview) return;
+          // A half-typed BINDING never previews: the field is showing `=h`, and
+          // emitting the stale number behind it would move the viewport to a
+          // value the user is not looking at. (`parse` already returns NaN for
+          // it; the explicit bail states the intent and survives a `parse`
+          // change.)
+          if (onCommitExpr && e.target.value.trim().startsWith("=")) return;
+          // Every PARSEABLE change previews; partial/invalid text emits nothing
+          // and leaves the FSM untouched (U3). Out-of-domain values are the
+          // caller's to refuse — never clamped here.
+          const n = parse(e.target.value);
+          if (Number.isFinite(n) && (!kind || isValidForKind(kind, n))) {
+            lastPreviewed.current = n;
+            onPreview(n);
+          }
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             // Apply the typed value, THEN confirm the op (armed cluster) — else
@@ -271,6 +388,10 @@ export function DimensionInput({
             if (onCancel) {
               onCancel();
             } else {
+              // Abandoning the edit abandons the preview claim with it: leaving
+              // `lastPreviewed` set would let the guard swallow the next
+              // legitimate echo of that same number.
+              lastPreviewed.current = null;
               setText(expr ? `=${expr}` : formatValue(value));
               ref.current?.blur();
             }

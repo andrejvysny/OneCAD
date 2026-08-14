@@ -376,6 +376,22 @@ describe("ModelToolController revolve kernel preview", () => {
     expect(engineMock.setPreviewTint).toHaveBeenCalledWith("cut"); // Cut tint reaches revolve
   });
 
+  it("switching to Intersect lowers the exact candidate with the selected target", async () => {
+    build({ regions: [R0] });
+    await armAndPickAxis();
+    const first = lastUpdate();
+    previewCb?.({ sessionId: first.sessionId, epoch: first.epoch, bodyId: "pb-1", bodies: [] });
+
+    toolChipStore.getState().onBooleanMode?.("Intersect");
+    await waitMs(220);
+
+    const latest = lastUpdate();
+    expect(latest.epoch).toBeGreaterThan(first.epoch);
+    expect(latest.params.booleanMode).toBe("Intersect");
+    expect(latest.params.targetBodyId).toBe("body1");
+    expect(engineMock.setPreviewTint).toHaveBeenLastCalledWith("normal");
+  });
+
   // ── (c) confirm = flush → barrier → endPreview(true) ─────────────────────────
 
   it("confirm flushes the final params, waits for the exact candidate, then commits IT", async () => {

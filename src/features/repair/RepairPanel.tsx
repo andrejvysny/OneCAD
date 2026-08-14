@@ -11,6 +11,7 @@ import {
   REPAIR_NOT_REBINDABLE,
 } from "@/features/inspector/historyActions";
 import type { NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
+import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
 
 type CandidateLoad =
   | { status: "loading" }
@@ -192,6 +193,7 @@ export function RepairPanel() {
           const open = expandedRefId === item.refId;
           const load = loads[loadKey(revision, snapshotId, item.refId)];
           const busy = busyRefId === item.refId;
+          const diagnostics = features.find((feature) => feature.id === item.opId)?.diagnostics;
           return (
             <div
               key={item.refId}
@@ -216,12 +218,31 @@ export function RepairPanel() {
                 />
                 <span className="flex-1">
                   <span className="block text-[12.5px] font-medium text-ink-2">{labelFor(item)}</span>
+                  {/*
+                    * The count comes from the SAME `ResolveRefs` response that
+                    * renders the selectable rows (U7).
+                    *
+                    * It used to come from the `needs-repair` EVENT
+                    * (`item.candidateCount`) while the rows came from a separate
+                    * `resolveRefs` call, so the panel could say "5 candidates"
+                    * directly above "No candidates to choose from" — the
+                    * contradiction the UX audit flagged (finding 06). The event's
+                    * count is a scoring hint, not a promise that any of them is
+                    * an eligible rebind target.
+                    *
+                    * Until that response lands the row shows the REASON only.
+                    * Saying nothing is honest; saying a number we have not
+                    * verified is not.
+                    */}
                   <span className="block text-[11.5px] text-ink-5">
-                    {reasonText(item.reason)} · {refTail(item.refId)} · {item.candidateCount}{" "}
-                    {item.candidateCount === 1 ? "candidate" : "candidates"}
+                    {reasonText(item.reason)} · {refTail(item.refId)}
+                    {load?.status === "ready" &&
+                      ` · ${load.candidates.length} ${load.candidates.length === 1 ? "candidate" : "candidates"}`}
                   </span>
                 </span>
               </button>
+
+              <OperationDiagnosticDetails diagnostics={diagnostics} />
 
               {open && (
                 <div className="border-t border-warn-border px-2.5 py-2">

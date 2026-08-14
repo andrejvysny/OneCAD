@@ -386,7 +386,17 @@ StepReadResult read_step(const std::string& path, const StepReadPolicy& policy,
                            "level touch-up)");
         }
 
-        out.solids = ops::ordered_solids(all);
+        const std::vector<ops::RankedSolid> ranked = ops::ranked_solids(all);
+        for (std::size_t k = 1; k < ranked.size(); ++k) {
+            if (!(ranked[k - 1].key < ranked[k].key) && !(ranked[k].key < ranked[k - 1].key)) {
+                out.error = std::string(kAmbiguousImportOrder) +
+                            ": two solids share the exact canonical ordering key";
+                out.solids.clear();
+                return out;
+            }
+        }
+        out.solids.reserve(ranked.size());
+        for (const ops::RankedSolid& solid : ranked) out.solids.push_back(solid.shape);
         if (out.solids.empty()) {
             add_diag(out, step_diag::kNoSolids,
                      "no solid recovered from " + std::to_string(shape_count) +

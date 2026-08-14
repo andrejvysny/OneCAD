@@ -260,12 +260,16 @@ fn sketch_op_record(sk: &Sketch) -> OperationRecord {
 }
 
 /// A Blind / NewBody extrude of the sketch region.
-fn extrude_op_record(sketch: SketchId, region: RegionId) -> OperationRecord {
+fn extrude_op_record(
+    sketch: SketchId,
+    region: RegionId,
+    region_identity_version: u32,
+) -> OperationRecord {
     let params = ExtrudeParams {
         profile: Some(SketchRegionRef {
             sketch,
             region,
-            region_identity_version: None,
+            region_identity_version: Some(region_identity_version),
             extra: Default::default(),
         }),
         distance: Scalar::new(EXTRUDE_DIST),
@@ -550,7 +554,11 @@ async fn m2_gate_full_slice() {
     add_op(&mut rt, sketch_op_record(&sketch));
     add_op(
         &mut rt,
-        extrude_op_record(sid, RegionId::new(region_id.clone())),
+        extrude_op_record(
+            sid,
+            RegionId::new(region_id.clone()),
+            finished.region_identity_version,
+        ),
     );
 
     let ext_report = regen_all(&mut rt).await;

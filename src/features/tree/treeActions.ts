@@ -26,6 +26,7 @@ import {
 } from "@/ipc/tauriCommandMap";
 import type { Rgba } from "@/ipc/types";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
+import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
 import type { ApplyOperationResult } from "@/ipc/types";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -94,6 +95,11 @@ function writeFaceColor(id: string, elementId: string, color?: Rgba): void {
  * Dispatch one metadata command with an optimistic local write. `revert` restores
  * the prior local state when the backend rejects — a silent revert would be worse
  * than the flip, so the failure is also surfaced as a sticky hint.
+ *
+ * A REJECTION is not the only failure shape (U1): a regen can resolve carrying
+ * `terminal:"failed"` + `errorMessage`, and this family used to read that as
+ * success — the optimistic flip stood, no hint appeared, and the caller was told
+ * `true`. `classifyRegen` is the one authority for that verdict.
  */
 async function dispatch(
   command: WireEditCommand,
@@ -101,7 +107,20 @@ async function dispatch(
   failLabel: string,
 ): Promise<boolean> {
   try {
-    applyEditResult(await createClient().applyEditCommand(command));
+    const res = await createClient().applyEditCommand(command);
+    // These commands are `RegenHint::None` on the core: they publish a projection
+    // and fire NO regen, so a result with no terminal and no bodies is their
+    // normal success, not the body-count inference's "failure".
+    const outcome = classifyRegen(res, { noTerminal: "published" });
+    const reason = failureReason(outcome);
+    if (reason !== null) {
+      revert();
+      errorHint(`${failLabel} failed: ${reason}`);
+      return false;
+    }
+    // `published`, `noop` and `needsRepair` all keep the record; these commands are
+    // metadata-only (`RegenHint::None`), so `noop` is their NORMAL success.
+    applyEditResult(res);
     return true;
   } catch (e) {
     revert();

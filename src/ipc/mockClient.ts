@@ -2701,7 +2701,7 @@ export const mockClient: CadClient = {
     rotate?: TransformRotationParams,
     params?: Record<string, ComponentParamValue>,
     mate?: PlaceComponentMate,
-  ): Promise<void> {
+  ): Promise<ApplyOperationResult> {
     const component = mockComponentByIdentity(componentId, componentVersion);
     if (!component) {
       throw new Error(
@@ -2718,6 +2718,10 @@ export const mockClient: CadClient = {
         changedBodies: res.changedBodies,
         removedBodies: res.removedBodies,
       });
+      // `withCursor` is what stamps the terminal, so the forced-terminal hook
+      // (`setMockRegenTerminal`) reaches this lane too — a placement must be
+      // provable against a failing regen on the mock lane like every other edit.
+      return withCursor(res);
     } finally {
       documentStore.getState().regenSettled();
     }
@@ -2866,7 +2870,7 @@ export const mockClient: CadClient = {
   async setComponentParams(
     recordId: string,
     params: Record<string, ComponentParamValue>,
-  ): Promise<void> {
+  ): Promise<ApplyOperationResult> {
     await wait();
     const stored = featureParams.get(recordId);
     if (!stored) {
@@ -2913,9 +2917,19 @@ export const mockClient: CadClient = {
       dirty: true,
       appliedOps: mockAppliedOps,
     });
+    // The mock's synthetic mesh is size-independent, so no body actually
+    // changes here — `noop` is the honest terminal, and `withCursor` still lets
+    // the forced-terminal hook override it.
+    return withCursor({
+      revision: mockRevision,
+      changedBodies: [],
+      removedBodies: [],
+      features: mockFeatures.map(cloneFeature),
+      terminal: "noop",
+    });
   },
 
-  async detachComponent(): Promise<void> {
+  async detachComponent(): Promise<ApplyOperationResult> {
     throw new Error("detachComponent: the mock lane has no placed components yet (WP-1.4/1.5)");
   },
 
@@ -3147,14 +3161,14 @@ export const mockClient: CadClient = {
       const regions = detectRegions(session.entities);
       lane.cacheSketchPlane(sketchId, session.plane);
       lane.cacheFinishedRegions(sketchId, regions);
-      return { regionIdentityVersion: 2, regions };
+      return { regionIdentityVersion: 3, regions };
     }
     if (documentStore.getState().sketches[sketchId]) {
       const plane = planeFor("XY");
       const regions = detectRegions(seededSketchRectangle());
       lane.cacheSketchPlane(sketchId, plane);
       lane.cacheFinishedRegions(sketchId, regions);
-      return { regionIdentityVersion: 2, regions };
+      return { regionIdentityVersion: 3, regions };
     }
     throw new Error(`getSketchRegions: unknown sketch ${sketchId}`);
   },

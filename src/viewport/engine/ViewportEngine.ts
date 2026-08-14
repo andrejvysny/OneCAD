@@ -57,6 +57,7 @@ import { GhostLayer, type GhostInstances } from "./GhostLayer";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
 import { buildBodyObject, type BodyObjectHandle } from "./BodyObject";
+import { worldPerPixel } from "./screenScale";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import type { PrismProfile } from "@/tools/preview/prismPreview";
 import type { Vec3 } from "@/tools/preview/depthProjection";
@@ -257,6 +258,8 @@ export class ViewportEngine {
   private previewMesh: PreviewMesh | null = null; // L1 extrude prism
   private dragHandle: DragHandle | null = null;
   private transformGizmo: TransformGizmo | null = null; // placement drag gizmo (WP-B W2)
+  /** Where the placement gizmo currently sits, for screen-bounds queries (U5). */
+  private transformGizmoOrigin: Vec3 | null = null;
   private revolvePreview: RevolvePreview | null = null; // L1 lathe + axis picker
   private ghostLayer: GhostLayer | null = null; // L1 pattern / mirror clones
   private regionPickLayer: RegionPickLayer | null = null; // multi-region extrude/revolve pick
@@ -695,10 +698,22 @@ export class ViewportEngine {
     if (this.sketch) {
       this.sketch.update(width * dpr, height * dpr, this.controls.getTarget(), this.controls.getDistance());
     }
-    // Keep the extrude handle a constant screen size across zoom/orbit.
-    if (this.dragHandle) this.dragHandle.setScale(this.planePixelWorld());
-    // Same for the placement gizmo — its arms ARE the grab targets.
-    if (this.transformGizmo?.visible) this.transformGizmo.setScale(this.planePixelWorld());
+    // Keep the two grab overlays a constant screen size across zoom/orbit.
+    //
+    // U5: both used to be fed `planePixelWorld()`, which measures at the ORBIT
+    // TARGET and ignores orthographic zoom — so a handle away from the pivot was
+    // sized for the wrong depth and every ortho zoom level scaled it identically.
+    // `worldPerPixel` measures at the overlay's OWN anchor, which is what every
+    // other constant-size layer here (OriginTriad, PlanePicker, contributions)
+    // has always used. One implementation, and the accurate one.
+    if (this.dragHandle) {
+      this.dragHandle.setScale(worldPerPixel(camera, this.dragHandle.worldAnchor(), height));
+    }
+    if (this.transformGizmo?.visible) {
+      this.transformGizmo.setScale(
+        worldPerPixel(camera, this.transformGizmo.worldAnchor(), height),
+      );
+    }
     this.rendererHandle.renderer.render(this.scene, camera);
     this.overlayDriver.update(camera, width, height);
     // Double-buffer disposal: geometries swapped out earlier are freed now, one
@@ -1397,6 +1412,7 @@ export class ViewportEngine {
    */
   showTransformGizmo(origin: Vec3): void {
     if (this.disposed) return;
+    this.transformGizmoOrigin = origin;
     if (!this.transformGizmo) {
       this.transformGizmo = new TransformGizmo({ root: this.interactionRoot, invalidate: () => this.invalidate() });
     }
@@ -1413,6 +1429,39 @@ export class ViewportEngine {
   /** True while the placement gizmo is on screen (gate / introspection probe). */
   isTransformGizmoVisible(): boolean {
     return this.transformGizmo?.visible ?? false;
+  }
+
+  /**
+   * The screen-space box an interaction overlay occupies, in CSS pixels (U5).
+   *
+   * There was no such API: `projectPoint` returns one point and the bounds
+   * helpers are world-space `Box3`s, so nothing could ask "where is the gizmo on
+   * screen?" — which is why the Transform chip anchored dead on the pivot and
+   * crossed every handle. Returns null when the overlay is hidden or its pivot
+   * is behind the camera.
+   *
+   * The gizmo is a constant-screen-size widget scaled uniformly, so its box is
+   * its projected pivot ± its reach expressed in pixels. That is derived from the
+   * same `planePixelWorld()` the scale itself uses, so the two cannot disagree.
+   */
+  getInteractionOverlayBounds(
+    id: "transformGizmo",
+  ): { x: number; y: number; width: number; height: number } | null {
+    if (id !== "transformGizmo") return null;
+    const gizmo = this.transformGizmo;
+    if (!gizmo || !gizmo.visible) return null;
+    const centre = this.transformGizmoOrigin;
+    if (!centre) return null;
+    const projected = this.projectPoint(centre);
+    if (!projected) return null;
+    const worldPerPx = Math.max(this.planePixelWorld(), 1e-9);
+    const reachPx = gizmo.worldRadius() / worldPerPx;
+    return {
+      x: projected.x - reachPx,
+      y: projected.y - reachPx,
+      width: reachPx * 2,
+      height: reachPx * 2,
+    };
   }
 
   /** Hover tint on one gizmo handle (null clears). */

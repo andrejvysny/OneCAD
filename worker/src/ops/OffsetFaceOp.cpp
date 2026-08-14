@@ -640,6 +640,7 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
                                "OffsetFace target body not found: " + target_id);
     }
     const TopoDS_Shape target_shape = target_rec->geom;
+    if (auto invalid = validate_modeling_input(target_shape, "OffsetFace", "target")) return *invalid;
     if (target_shape.IsNull()) {
         return OpOutcome::fail("REF_UNRESOLVED", "OffsetFace target body has no geometry");
     }
@@ -906,6 +907,20 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     if (!semantic.empty()) {
         WLOG_WARN("offsetFace: %s postcondition failed: %s", op_id.c_str(), semantic.c_str());
         return OpOutcome::fail("OP_FAILED", "OffsetFace: " + semantic);
+    }
+
+    // The SHARED publication gate, last (U7). OffsetFace was the one mutating
+    // operation that never ran it: its hand-rolled postconditions above are
+    // stricter in the semantic direction, but they produce no structured
+    // `PublicationDecision` evidence and nothing stopped them drifting from the
+    // policy every sibling operation is held to. Running both keeps the
+    // op-specific refusals (which say WHY in offset terms) and adds the common
+    // Tier A evidence the P3 contract rows promise.
+    const kernel::validation::PublicationDecision decision = publication_decision(
+        result, kernel::validation::single_solid_policy(
+                    "OffsetFace", kernel::validation::PublicationTier::TierA));
+    if (!decision.publishable()) {
+        return OpOutcome::fail(decision.code, decision.message);
     }
 
     // --- publish: modified in place + history through the offset image --------

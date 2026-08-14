@@ -20,6 +20,7 @@ const MODE_LABEL: Record<BooleanMode, string> = {
   NewBody: "New",
   Add: "Add",
   Cut: "Cut",
+  Intersect: "Intersect",
 };
 
 export function RevolveOverflow(props: RevolveOverflowProps): React.ReactElement {

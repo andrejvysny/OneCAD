@@ -30,7 +30,25 @@ describe("RepairPanel (inspector repair state)", () => {
     openRepair("f3", "f3.input0"); // f3 = the seeded Fillet feature
     expect(screen.getByText("Repair references")).toBeInTheDocument();
     expect(screen.getByText("Fillet")).toBeInTheDocument();
+    // U7: a COLLAPSED row states the reason only. The event's `candidateCount`
+    // is a scoring hint, not a promise that any of them is an eligible rebind
+    // target, so no count is claimed until the authoritative `resolveRefs`
+    // response that renders the selectable rows has landed.
+    expect(screen.getByText(/Ambiguous/i)).toBeInTheDocument();
+    // No NUMBER is claimed. (The reason text itself says "several candidates
+    // match", which is the scoring hint — not a count of eligible rebinds.)
+    expect(screen.queryByText(/\d+ candidates?/)).toBeNull();
+  });
+
+  it("states the count only once the authoritative response has landed", async () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    openRepair("f3", "f3.input0");
+
+    fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
+    // The mock resolves two candidates — the same two the rows render.
+    await screen.findByText("91%");
     expect(screen.getByText(/2 candidates/)).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^repair-candidate-f3\.input0-/)).toHaveLength(2);
   });
 
   it("falls back to an opId prefix when the feature is not in the projection", () => {
@@ -57,6 +75,35 @@ describe("RepairPanel (inspector repair state)", () => {
     const pcts = screen.getAllByText(/%$/).map((n) => n.textContent);
     expect(pcts).toEqual(["91%", "89%"]);
     spy.mockRestore();
+  });
+
+  /*
+   * U0 red evidence. The collapsed row's count comes from the `needs-repair`
+   * EVENT (`item.candidateCount`, RepairPanel.tsx:222) while the selectable rows
+   * come from a separate `resolveRefs` response (:117-145). Nothing reconciles
+   * them, so the panel can say "2 candidates" directly above "No candidates to
+   * choose from" — the exact contradiction the UX audit flagged (finding 06).
+   * RED until U7 derives the displayed count from the authoritative response.
+   */
+  it("never claims candidates exist above a list that has none", async () => {
+    const spy = vi.spyOn(mockClient, "resolveRefs").mockResolvedValue([
+      { refId: "f3.input0", snapshotId: 700, revision: 7, bodyId: "body1", candidates: [] },
+    ] as unknown as Awaited<ReturnType<typeof mockClient.resolveRefs>>);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    openRepair("f3", "f3.input0");
+
+    try {
+      fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
+      await screen.findByText("No candidates to choose from.");
+
+      // The event said 2. The authoritative response says 0. The user must never
+      // read both at once.
+      expect(screen.queryByText(/2 candidates/)).toBeNull();
+    } finally {
+      // A red assertion throws — restore in `finally` so the empty-candidate
+      // stub cannot leak into the next spec.
+      spy.mockRestore();
+    }
   });
 
   it("choosing a candidate promotes it then sends an EditOperationInput rebind", async () => {

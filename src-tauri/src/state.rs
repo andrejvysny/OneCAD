@@ -207,6 +207,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(feature = "tauri-e2e")]
+    pub(crate) fn composition_worker_hello(
+        &self,
+    ) -> Option<onecad_protocol::messages::HelloResult> {
+        self.live
+            .lock()
+            .expect("live worker slot poisoned")
+            .as_ref()
+            .and_then(WorkerManager::hello)
+    }
+
     /// Builds state over an explicit backend factory (tests inject a scripted
     /// backend). Production uses [`AppState::default`].
     ///

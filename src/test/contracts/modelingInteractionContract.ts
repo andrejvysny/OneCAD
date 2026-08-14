@@ -13,12 +13,25 @@
  *   - enterSupport: whether Enter commits
  *   - visibleCancel: whether a visible ✕ / Cancel control exists
  *   - clickAwayPolicy: "cancel" (click-away cancels focus, never commits)
+ *   - primaryEntry: how the primary numeric value receives keyboard input
+ *   - livePreviewOnEdit: whether every parseable edit updates the preview
  *   - requiredSelections: what must be selected before the tool arms
  *   - successSelection: which bodies are selected after a successful commit
  *   - reeditCapabilities: which stored fields survive a re-edit
+ *
+ * `primaryEntry` + `livePreviewOnEdit` were added 2026-08-14 as a deliberate
+ * user-visible-change decision (recorded in TODO.md, § MODELING UX UNIFICATION):
+ * they TIGHTEN the contract, turning D3/D4 from untracked gaps into red rows.
  */
 
 export type PreviewFidelity = "kernelExact" | "localExact" | "ghost" | "none";
+
+/**
+ * `typeToEnter` — a printable character while the tool is armed routes to the
+ * primary value with no prior click. `clickFirst` — the field must be focused
+ * before it accepts input. `none` — the tool has no primary numeric value.
+ */
+export type PrimaryEntry = "typeToEnter" | "clickFirst" | "none";
 
 export type SuccessSelectionPolicy =
   | "affectedExisting"
@@ -34,6 +47,8 @@ export interface ModelingInteractionRow {
   enterSupport: boolean;
   visibleCancel: boolean;
   clickAwayPolicy: "cancel";
+  primaryEntry: PrimaryEntry;
+  livePreviewOnEdit: boolean;
   requiredSelections: string;
   successSelection: SuccessSelectionPolicy;
   reeditCapabilities: string;
@@ -47,6 +62,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "sketch region",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -58,6 +75,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "sketch region + axis line",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -69,6 +88,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "edge(s)",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -80,6 +101,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "edge(s)",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -91,6 +114,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "face(s)",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -102,6 +127,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "none",
+    livePreviewOnEdit: false,
     requiredSelections: "target body + tool body",
     successSelection: "allChildOutputs",
     reeditCapabilities: "operation swap only; target/tool preserved",
@@ -113,6 +140,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "face(s)",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -124,6 +153,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "host face + point",
     successSelection: "affectedExisting",
     reeditCapabilities: "all stored fields preserved",
@@ -135,6 +166,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "source body",
     successSelection: "newBodies",
     reeditCapabilities: "axis + count + spacing + resultPolicyVersion + fuseResult preserved",
@@ -146,6 +179,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "source body",
     successSelection: "newBodies",
     reeditCapabilities: "axis + axisOrigin + count + angle + resultPolicyVersion + fuseResult preserved",
@@ -157,6 +192,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "none",
+    livePreviewOnEdit: false,
     requiredSelections: "source body",
     successSelection: "newBodies",
     reeditCapabilities: "plane + planePoint + fuseWithOriginal preserved",
@@ -168,6 +205,8 @@ export const MODELING_INTERACTION_CONTRACT: readonly ModelingInteractionRow[] = 
     enterSupport: true,
     visibleCancel: true,
     clickAwayPolicy: "cancel",
+    primaryEntry: "typeToEnter",
+    livePreviewOnEdit: true,
     requiredSelections: "body/bodies",
     successSelection: "copies",
     reeditCapabilities: "full placement (translate + rotate + center + copy) preserved",

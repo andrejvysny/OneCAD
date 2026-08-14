@@ -55,7 +55,7 @@ describe("ModelToolChips (M6b)", () => {
 
   it("renders nothing while cleared", () => {
     render(<ModelToolChips />);
-    expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
   });
 
   it("shell chip renders a mm dimension input", () => {
@@ -65,14 +65,14 @@ describe("ModelToolChips (M6b)", () => {
     expect(screen.getByText("mm")).toBeInTheDocument();
   });
 
-  it("linear-pattern chip dispatches axis / count / apply", () => {
+  it("linear-pattern chip dispatches axis / count / confirm", () => {
     const onAxis = vi.fn();
     const onCount = vi.fn();
     const onSpacing = vi.fn();
-    const onApply = vi.fn();
+    const onConfirm = vi.fn();
     render(<ModelToolChips />);
     act(() =>
-      toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis, onCount, onSpacing, onApply }),
+      toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis, onCount, onSpacing, onConfirm }),
     );
 
     // Axis toggle: X active, click Y.
@@ -80,55 +80,136 @@ describe("ModelToolChips (M6b)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Y" }));
     expect(onAxis).toHaveBeenCalledWith("Y");
 
-    // Count stepper shows 3; +/− dispatch neighbours.
-    expect(screen.getByTestId("pattern-count")).toHaveTextContent("3");
+    // The Total field shows 3; +/− dispatch neighbours (U6: it is an editable
+    // field now, so the count reads off `value`, not text content).
+    expect(screen.getByTestId("pattern-count")).toHaveValue("3");
     fireEvent.click(screen.getByRole("button", { name: "More instances" }));
     expect(onCount).toHaveBeenCalledWith(4);
     fireEvent.click(screen.getByRole("button", { name: "Fewer instances" }));
     expect(onCount).toHaveBeenCalledWith(2);
 
-    // Spacing input present + Apply commits.
+    // Spacing input present + ✓ commits (U2: one confirm vocabulary).
     expect(screen.getByLabelText("Dimension value")).toHaveValue("20");
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    expect(onApply).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  /*
+   * U6 — the one range policy, at the chip. The stepper stops at 12 so the
+   * common case stays one click per instance; TYPING reaches the worker's 128.
+   * An out-of-range entry is refused and marked, never clamped: a clamp would
+   * commit a count the user never saw previewed.
+   */
+  /*
+   * U4/D18 — the OperationHUD's shared result-summary slot. A body-lifecycle
+   * operation must state what it will produce BEFORE Apply: a count alone does
+   * not say whether the source survives, and the audit found that unanswerable
+   * without committing first. It doubles as the tool's accessible status, which
+   * is why it carries `role="status"` and lives OUTSIDE the aria-hidden canvas.
+   */
+  it("renders the result summary as the HUD's accessible status", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+        onAxis: vi.fn(),
+        onCount: vi.fn(),
+        onSpacing: vi.fn(),
+        onConfirm: vi.fn(),
+      }),
+    );
+    act(() => toolChipStore.getState().setResultSummary("Linear pattern · 3 total · 2 new bodies · source retained"));
+
+    const summary = screen.getByTestId("chip-result-summary");
+    expect(summary).toHaveTextContent("2 new bodies · source retained");
+    expect(summary).toHaveAttribute("role", "status");
+    expect(summary).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("shows no summary slot for an operation with no body lifecycle to state", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showFillet(2, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel: vi.fn() }),
+    );
+    expect(screen.queryByTestId("chip-result-summary")).toBeNull();
+  });
+
+  it("Total accepts a typed count past the stepper bound, and refuses past the worker maximum", () => {
+    const onCount = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+        onAxis: vi.fn(),
+        onCount,
+        onSpacing: vi.fn(),
+        onConfirm: vi.fn(),
+      }),
+    );
+
+    const total = screen.getByTestId("pattern-count");
+    fireEvent.change(total, { target: { value: "20" } });
+    expect(onCount).toHaveBeenCalledWith(20);
+
+    onCount.mockClear();
+    fireEvent.change(total, { target: { value: "200" } });
+    expect(onCount).not.toHaveBeenCalled();
+    // The text stays exactly as typed — editable, not rewritten — and is marked.
+    expect(total).toHaveValue("200");
+    expect(total).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("the stepper stops at its own bounds without clamping a typed value", () => {
+    const onCount = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showLinearPattern("X", 12, 20, WORLD, {
+        onAxis: vi.fn(),
+        onCount,
+        onSpacing: vi.fn(),
+        onConfirm: vi.fn(),
+      }),
+    );
+    expect(screen.getByRole("button", { name: "More instances" })).toBeDisabled();
+    // …but typing straight past it still works.
+    fireEvent.change(screen.getByTestId("pattern-count"), { target: { value: "40" } });
+    expect(onCount).toHaveBeenCalledWith(40);
   });
 
   it("circular-pattern chip renders a degree input + axis toggle", () => {
-    const handlers = { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onApply: vi.fn() };
+    const handlers = { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onConfirm: vi.fn() };
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, handlers));
     expect(screen.getByRole("button", { name: "Z" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByLabelText("Dimension value")).toHaveValue("360");
     expect(screen.getByText("°")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    expect(handlers.onApply).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(handlers.onConfirm).toHaveBeenCalled();
   });
 
-  it("mirror chip dispatches plane pick + apply", () => {
+  it("mirror chip dispatches plane pick + confirm", () => {
     const onPlane = vi.fn();
-    const onApply = vi.fn();
+    const onConfirm = vi.fn();
     render(<ModelToolChips />);
-    act(() => toolChipStore.getState().showMirror("XY", WORLD, { onPlane, onApply }));
+    act(() => toolChipStore.getState().showMirror("XY", WORLD, { onPlane, onConfirm }));
     expect(screen.getByRole("button", { name: "XY" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "YZ" }));
     expect(onPlane).toHaveBeenCalledWith("YZ");
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    expect(onApply).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(onConfirm).toHaveBeenCalled();
   });
 
   // ── WP0 red test — every armed model tool has a visible cancel control ───────
 
   it.each([
-    { kind: "booleanOp", setup: () => toolChipStore.getState().showBoolean("Union", WORLD, vi.fn(), vi.fn()) },
+    { kind: "booleanOp", setup: () => toolChipStore.getState().showBoolean("Union", WORLD, { onOp: vi.fn(), onConfirm: vi.fn() }) },
     {
       kind: "linearPattern",
-      setup: () => toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onSpacing: vi.fn(), onApply: vi.fn() }),
+      setup: () => toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onSpacing: vi.fn(), onConfirm: vi.fn() }),
     },
     {
       kind: "circularPattern",
-      setup: () => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onApply: vi.fn() }),
+      setup: () => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onConfirm: vi.fn() }),
     },
-    { kind: "mirror", setup: () => toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onApply: vi.fn() }) },
+    { kind: "mirror", setup: () => toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn() }) },
   ])("$kind chip has a visible cancel button", ({ setup }) => {
     render(<ModelToolChips />);
     act(() => setup());
@@ -894,7 +975,7 @@ describe("critical mode closure", () => {
     toolChipStore.getState().clear();
   });
 
-  it("extrude overflow offers New Body / Add / Cut but not Intersect", () => {
+  it("extrude overflow hides Intersect pending vertical proof", () => {
     render(<ModelToolChips />);
     act(() =>
       toolChipStore.getState().showExtrude(
@@ -917,7 +998,7 @@ describe("critical mode closure", () => {
     expect(screen.queryByTestId("chip-bool-intersect")).toBeNull();
   });
 
-  it("revolve overflow offers New Body / Add / Cut but not Intersect", () => {
+  it("revolve overflow hides Intersect pending vertical proof", () => {
     render(<ModelToolChips />);
     act(() =>
       toolChipStore.getState().showRevolve(
@@ -943,10 +1024,10 @@ describe("critical mode closure", () => {
   it("mirror chip has no fuse/union toggle", () => {
     render(<ModelToolChips />);
     act(() =>
-      toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onApply: vi.fn() }),
+      toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn() }),
     );
     expect(screen.getByRole("button", { name: "XY" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
   });
 
@@ -957,10 +1038,10 @@ describe("critical mode closure", () => {
         onAxis: vi.fn(),
         onCount: vi.fn(),
         onSpacing: vi.fn(),
-        onApply: vi.fn(),
+        onConfirm: vi.fn(),
       }),
     );
-    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
   });
 
@@ -971,10 +1052,10 @@ describe("critical mode closure", () => {
         onAxis: vi.fn(),
         onCount: vi.fn(),
         onAngle: vi.fn(),
-        onApply: vi.fn(),
+        onConfirm: vi.fn(),
       }),
     );
-    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
   });
 });

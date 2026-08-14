@@ -25,6 +25,7 @@ import { useDocumentStore } from "@/stores/documentStore";
 import { useSelectionStore, primarySelection } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
+import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
 import type {
   ComponentParamValue,
   ComponentParameterSpec,
@@ -165,7 +166,15 @@ export function ComponentParametersSection() {
   const commit = async (key: string, value: ComponentParamValue) => {
     setPending(key);
     try {
-      await createClient().setComponentParams(featureId as string, { [key]: value });
+      const res = await createClient().setComponentParams(featureId as string, { [key]: value });
+      // The command applies the edit and then RE-BAKES the component's geometry
+      // (WP-F1.3), so resolving is not the same as succeeding: a re-bake that
+      // fails comes back as `terminal: "failed"` with no thrown error.
+      const reason = failureReason(classifyRegen(res));
+      if (reason !== null) {
+        errorHint(`Parameter edit failed: ${reason}`);
+        return;
+      }
       viewportStore.getState().setStatusHint("Component updated");
       await load();
     } catch (e) {

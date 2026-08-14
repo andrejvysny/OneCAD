@@ -172,7 +172,10 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
         const io::StepReadResult read = io::read_step(path, io::StepReadPolicy{}, ctx.cancel);
         if (read.cancelled) return OpOutcome::cancelled();
         if (!read.ok()) {
-            return OpOutcome::fail("OP_FAILED",
+            const std::string code = read.error->starts_with(io::kAmbiguousImportOrder)
+                                         ? io::kAmbiguousImportOrder
+                                         : "OP_FAILED";
+            return OpOutcome::fail(code,
                                    "ImportStep: " + *read.error + " for source " + label);
         }
         for (const io::StepReadDiagnostic& d : read.diagnostics) {
