@@ -24,13 +24,49 @@ function renderStatusBar() {
 describe("StatusBar", () => {
   beforeEach(() => resetStores());
 
-  it("shows DOF for a selected sketch, — for a body, and the mono read-out", () => {
+  /*
+   * AMENDED (LGU-1 WP-A, F1's neighbour). This asserted "DOF: 0" for the
+   * default selection — which is `sketch2`, a sketch the document registry
+   * reports at DOF 3. The zero came from `viewportStore.dofBadge`, which only
+   * the LIVE sketch session ever writes, so in model mode it was null and the
+   * bar rendered a confident 0 about a sketch it was not reading. The read-out
+   * now takes the selected sketch's own number.
+   */
+  it("shows the selected sketch's own DOF, — for a body, and the mono read-out", () => {
     renderStatusBar();
-    expect(screen.getByText("DOF: 0")).toBeInTheDocument();
+    expect(screen.getByText("DOF: 3")).toBeInTheDocument();
     expect(screen.getByText(/273\.00/)).toBeInTheDocument();
 
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
     expect(screen.getByText("DOF: —")).toBeInTheDocument();
+  });
+
+  /*
+   * A face has no degrees of freedom. The old gate was `sel.kind !== "body"`,
+   * so selecting one lit the read-out up and printed a stale sketch's number.
+   */
+  it("shows no DOF for a face selection in model mode", () => {
+    renderStatusBar();
+    act(() =>
+      selectionStore.getState().set([
+        { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0", elementId: "el_top" },
+      ]),
+    );
+    expect(screen.getByText("DOF: —")).toBeInTheDocument();
+  });
+
+  /*
+   * The other half of the same defect: a leftover `dofBadge` from the last
+   * edited sketch must not be reported beside an unrelated model selection.
+   */
+  it("ignores a stale dofBadge once the sketch session is over", () => {
+    renderStatusBar();
+    act(() => {
+      viewportStore.setState({ dofBadge: 7 });
+      selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    });
+    expect(screen.getByText("DOF: —")).toBeInTheDocument();
+    expect(screen.queryByText("DOF: 7")).toBeNull();
   });
 
   it("styles an error hint red and an info hint dimmed", () => {

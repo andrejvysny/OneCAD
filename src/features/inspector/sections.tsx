@@ -575,13 +575,21 @@ export function SketchDimensionsSection() {
 
 // ── Constraints ──────────────────────────────────────────────────────────────
 
-/** Model mode, sketch selected: the prompt. There is no live session to list. */
+/*
+ * Model mode, sketch selected: the prompt. There is no live session to list.
+ *
+ * The copy names the action that is actually available HERE (LGU-1 WP-A, F1's
+ * neighbour). It used to read "Select geometry to constrain." — a sketch-mode
+ * instruction shown in model mode, where there is no sketch geometry to select
+ * and nothing to constrain it with. The section label stays "Constraints"
+ * because `inspectorContract.ts` freezes it.
+ */
 export function ConstraintsHintSection() {
   return (
     <>
       <SectionLabel className="pb-1.5 pt-3.5">Constraints</SectionLabel>
       <div className="text-[12px] leading-normal text-ink-6">
-        Select geometry to constrain.
+        Open the sketch to add constraints.
       </div>
     </>
   );

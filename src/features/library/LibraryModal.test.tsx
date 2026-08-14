@@ -100,13 +100,21 @@ describe("LibraryModal", () => {
     expect(screen.getByText("onecad.std.iso4762")).toBeInTheDocument();
   });
 
-  it("canPlace unset: says placing needs an open project, no Place button", async () => {
+  /*
+   * AMENDED (LGU-1 WP-A, canvas D2-A): the "needs a project" sentence became a
+   * DISABLED PLACE BUTTON reading "Place — open a project first". Same refusal,
+   * said where the user is looking for the action rather than as a note beside
+   * its absence.
+   */
+  it("canPlace unset: the Place action is present but disabled, and says why", async () => {
     listLibraryComponents.mockResolvedValue([iso4762]);
     render(<LibraryModal open onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId("library-modal-card")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("library-modal-card"));
 
-    expect(screen.getByText("Open a project to place this component.")).toBeInTheDocument();
+    const place = screen.getByTestId("detail-place-disabled");
+    expect(place).toHaveTextContent("Place — open a project first");
+    expect(place).toBeDisabled();
     expect(screen.queryByText("Place in scene")).toBeNull();
   });
 
@@ -140,12 +148,20 @@ describe("LibraryModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("reindex reloads the list and drives the tasks chip begin→end", async () => {
+  /*
+   * AMENDED (LGU-1 WP-A, defect F9): "Reindex" was a developer verb holding the
+   * most prominent slot beside Search. The action survives unchanged — same
+   * call, same tasks-chip begin/end — behind the header overflow as
+   * "Rebuild index".
+   */
+  it("rebuilding the index reloads the list and drives the tasks chip begin→end", async () => {
     listLibraryComponents.mockResolvedValueOnce([]).mockResolvedValueOnce([iso4762]);
     render(<LibraryModal open onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/No components indexed yet/)).toBeInTheDocument());
 
-    fireEvent.click(screen.getByLabelText("Reindex library"));
+    expect(screen.queryByLabelText("Reindex library")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Library options"));
+    fireEvent.click(screen.getByTestId("library-rebuild-index"));
     await waitFor(() =>
       expect(tasksStore.getState().tasks.some((t) => t.id === "library.reindex")).toBe(true),
     );

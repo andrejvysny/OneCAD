@@ -21,9 +21,12 @@ export function LibraryStatusSection() {
 
   if (count === null) return null;
 
-  return (
-    <span className="text-ink-6">
-      {count} {count === 1 ? "component" : "components"}
-    </span>
-  );
+  /*
+   * "Library: 2 items", not "2 components" (LGU-1 WP-A, defect F5). The bare
+   * count sat in a status bar full of statements ABOUT THE OPEN DOCUMENT, so it
+   * read as "this document contains 2 components" — the one thing it is not.
+   * Naming the library makes the subject explicit, and "items" keeps it from
+   * being mistaken for a count of placed instances.
+   */
+  return <span className="text-ink-6">Library: {count} items</span>;
 }

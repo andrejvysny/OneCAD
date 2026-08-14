@@ -21,6 +21,22 @@ describe("TemplateGrid", () => {
     vi.restoreAllMocks();
   });
 
+  /*
+   * LGU-1 canvas D9. "Save as Template…" is a palette-only command, so the
+   * feature was discoverable only by already knowing it existed. The teach card
+   * names the menu path where the user is already looking at templates — and
+   * stays when there are none, which is exactly when the hint is worth most.
+   */
+  it("teaches how templates get made, including when there are none", () => {
+    const { rerender } = render(<TemplateGrid templates={TEMPLATES} onUse={() => {}} />);
+    expect(screen.getByTestId("template-teach-card")).toHaveTextContent(
+      "Save any project as a template — File → Save as Template",
+    );
+
+    rerender(<TemplateGrid templates={[]} onUse={() => {}} />);
+    expect(screen.getByTestId("template-teach-card")).toBeInTheDocument();
+  });
+
   it("renders one card per template, with its own preview when it has one", () => {
     const { container } = render(<TemplateGrid templates={TEMPLATES} onUse={() => {}} />);
     expect(screen.getAllByTestId("template-card")).toHaveLength(2);

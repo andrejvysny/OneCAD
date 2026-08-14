@@ -19,9 +19,8 @@ import { useEffect, useState } from "react";
 import { createClient } from "@/ipc/client";
 import type { LibraryComponent } from "@/ipc/types";
 import { TextInput } from "@/ui/TextInput";
-import { Button } from "@/ui/Button";
 import { LibraryModal } from "@/features/library/LibraryModal";
-import { ComponentThumbnail } from "@/features/library/ComponentThumbnail";
+import { ComponentCard } from "@/features/library/ComponentCard";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -40,7 +39,6 @@ export function StartLibraryPanel() {
   const [components, setComponents] = useState<LibraryComponent[]>([]);
   const [state, setState] = useState<LoadState>("loading");
   const [query, setQuery] = useState("");
-  const [reindexing, setReindexing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   const load = () => {
@@ -56,22 +54,17 @@ export function StartLibraryPanel() {
 
   useEffect(load, []);
 
-  const reindex = async () => {
-    setReindexing(true);
-    try {
-      await createClient().reindexLibrary();
-      load();
-    } finally {
-      setReindexing(false);
-    }
-  };
-
   const filtered = components.filter((c) => matches(c, query));
   const selected = filtered.find((c) => `${c.id}@${c.version}` === selectedKey) ?? null;
 
   return (
     <div className="flex gap-4">
       <div className="min-w-0 flex-1">
+        {/*
+          No Reindex button here (LGU-1 WP-A, defect F9). The grid re-reads the
+          catalog on mount, and the manual rebuild now lives in the library
+          modal's overflow menu — one home for a maintenance verb, not two.
+        */}
         <div className="mb-4 flex items-center gap-1.5">
           <TextInput
             leadingIcon="search"
@@ -81,14 +74,6 @@ export function StartLibraryPanel() {
             wrapperClassName="w-[220px]"
             aria-label="Search library components"
           />
-          <Button
-            variant="secondary"
-            onClick={() => void reindex()}
-            disabled={reindexing}
-            aria-label="Reindex library"
-          >
-            {reindexing ? "Reindexing…" : "Reindex"}
-          </Button>
         </div>
 
         {state === "loading" && (
@@ -116,28 +101,14 @@ export function StartLibraryPanel() {
           <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
             {filtered.map((c) => {
               const key = `${c.id}@${c.version}`;
-              const isSelected = selectedKey === key;
               return (
-                <button
+                <ComponentCard
                   key={key}
-                  type="button"
-                  data-testid="start-library-card"
-                  data-selected={isSelected || undefined}
+                  component={c}
+                  selected={selectedKey === key}
                   onClick={() => setSelectedKey(key)}
-                  title={c.id}
-                  className={`flex flex-col gap-1 rounded-lg border p-2 text-left transition-[box-shadow,border-color] duration-150 hover:border-card-hover-border hover:shadow-card-hover ${
-                    isSelected ? "border-accent ring-1 ring-accent" : "border-border bg-surface"
-                  }`}
-                >
-                  <ComponentThumbnail
-                    componentId={c.id}
-                    componentVersion={c.version}
-                    size={192}
-                    className="aspect-square w-full rounded bg-well object-contain"
-                  />
-                  <div className="truncate text-[12px] font-semibold text-ink">{c.name}</div>
-                  <div className="truncate text-[10.5px] text-ink-6">{c.version}</div>
-                </button>
+                  testId="start-library-card"
+                />
               );
             })}
           </div>

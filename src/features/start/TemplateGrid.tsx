@@ -55,6 +55,24 @@ export function TemplateGrid({ templates, onUse }: TemplateGridProps) {
           </div>
         </button>
       ))}
+
+      {/*
+        The self-teaching card (LGU-1 canvas D9). "Save as Template…" is a
+        palette-only command, so the feature was discoverable exactly by
+        knowing it already existed. A non-interactive last cell teaches the
+        verb where the user is already looking at templates — deliberately not
+        a button: it explains a menu path, and a card that looks clickable but
+        opens nothing is worse than one that never claimed to.
+      */}
+      <div
+        data-testid="template-teach-card"
+        className="flex min-h-[120px] flex-col items-center justify-center rounded-lg border border-dashed border-border p-4 text-center"
+      >
+        <Icon name="template" size={20} strokeWidth={1.4} className="mb-2 text-ink-7" />
+        <div className="text-[11.5px] leading-normal text-ink-6">
+          Save any project as a template — File → Save as Template
+        </div>
+      </div>
     </div>
   );
 }

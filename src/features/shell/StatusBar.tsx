@@ -44,13 +44,30 @@ export function StatusBar() {
   );
 
   const sketching = mode === "sketch";
-  // Prototype: showDof = sketch-mode OR (a non-body entity is selected).
-  const showDof = sketching || (!!sel && sel.kind !== "body");
+  /*
+   * DOF belongs to a SKETCH, so the read-out appears only when one is in scope
+   * and reads that sketch's own number (LGU-1 WP-A, F1's neighbour).
+   *
+   * This used to be `sketching || (sel && sel.kind !== "body")` over
+   * `dofBadge ?? 0`, which said two untrue things at once. `dofBadge` is
+   * written ONLY by the live sketch session (`sketchService`,
+   * `SketchController`), so in model mode it is either null — rendered as a
+   * confident "DOF: 0" — or a leftover from whichever sketch was edited last,
+   * reported next to a selection it has nothing to do with. Selecting a FACE
+   * lit it up too, and a face has no degrees of freedom.
+   */
+  const selectedSketchId =
+    sel?.kind === "sketchRegion" ? sel.sketchId : sel?.kind === "sketch" ? sel.id : null;
+  const selectedSketch = useDocumentStore((s) =>
+    selectedSketchId ? s.sketches[selectedSketchId] : undefined,
+  );
+  const dof = sketching ? dofBadge ?? activeSketch?.dof ?? null : selectedSketch?.dof ?? null;
+  const showDof = dof !== null;
   const persp = projection === "persp";
   const statusLeft = sketching
     ? `Sketch mode — ${activeSketch?.name ?? "Sketch"}`
     : "Ready";
-  const dofText = showDof ? `DOF: ${dofBadge ?? 0}` : "DOF: —";
+  const dofText = showDof ? `DOF: ${dof}` : "DOF: —";
 
   return (
     <div className="absolute inset-x-0 bottom-0 z-[26] flex h-[34px] items-center gap-3 border-t border-border bg-statusbar px-3.5 text-[12px]">

@@ -154,25 +154,30 @@ function SelectionState({
    * the sketch chrome bar and the sketch-card branch below already use; this was
    * the second, silent authority.
    *
-   * Absent solve state is `dof: 0, status: "under"` rather than a guessed "ok":
-   * `sketchStatusText` then reports "Fully constrained · DOF 0", which is what
-   * zero remaining freedom means whatever the status label lags at.
+   * ABSENT solve state renders NO placard at all (LGU-1 WP-A, defect F1).
+   * Defaulting it to `dof: 0, status: "under"` made `sketchStatusText` report
+   * "Fully constrained · DOF 0" for a sketch the registry has never heard of —
+   * the strongest possible claim, made on no evidence, which the screenshot
+   * audit caught on screen in model mode. The `dof === 0` guard INSIDE
+   * `sketchStatusText` is a different thing and stays: there the zero is a real
+   * solver result whose status label is merely lagging. Here there is no solve
+   * at all, and the honest render is silence.
    */
   const solve = sketches[sketchId];
-  const { label, tone } = sketchStatusText(solve?.status ?? "under", solve?.dof ?? 0);
+  const status = solve ? sketchStatusText(solve.status, solve.dof) : null;
 
   return (
     <>
       <div className="text-[15px] font-semibold text-ink">{name}</div>
       <div className="mt-0.5 text-[12px] text-ink-5">{statusName}</div>
-      {isSketch && (
+      {isSketch && status !== null && (
         <div
           className={cn(
             "mt-1 text-[12px] font-medium",
-            tone === "ok" ? "text-ink-4" : "text-warn",
+            status.tone === "ok" ? "text-ink-4" : "text-warn",
           )}
         >
-          {label}
+          {status.label}
         </div>
       )}
       <InspectorSectionHost />

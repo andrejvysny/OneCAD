@@ -95,6 +95,20 @@ export function isValidVersion(version: string): boolean {
  * package uses. Uniqueness is checked separately — a duplicate would silently
  * overwrite the earlier row when the record is built.
  */
+/*
+ * The dialog opens pre-filled with the BODY's name, which for most bodies is
+ * whatever the tree auto-generated — "Body 2". That default then becomes a
+ * permanent library identity, and `suggestedId` mints `mine.body-2` from it
+ * (LGU-1 WP-A, defect F10).
+ *
+ * A WARNING, not a refusal. "Body 2" is a legal name and the backend's id rules
+ * stay the authority on what is acceptable; this only makes sure the user
+ * chose it rather than inherited it.
+ */
+export function isPlaceholderName(name: string): boolean {
+  return /^(body|sketch|feature)\s*\d*$/i.test(name.trim());
+}
+
 export function isValidAttachmentName(name: string): boolean {
   return /^[a-z0-9_-]+$/.test(name);
 }
@@ -369,6 +383,14 @@ export function SaveAsComponentDialog({ bodyId, bodyName, onClose }: SaveAsCompo
           wrapperClassName="mt-1 w-full"
           onKeyDown={(e) => e.stopPropagation()}
         />
+        {isPlaceholderName(name) && (
+          <div
+            className="mt-1 text-[11.5px] text-warn-strong"
+            data-testid="save-as-component-name-warning"
+          >
+            This will be this part&rsquo;s permanent library name — give it a real one.
+          </div>
+        )}
 
         <label className="mt-3 block text-[11.5px] text-ink-5" htmlFor="sac-id">
           Id

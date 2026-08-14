@@ -66,16 +66,19 @@ describe("StartLibraryPanel", () => {
     expect(screen.getByText(/No matches for/)).toBeInTheDocument();
   });
 
-  it("reindexes and reloads the list", async () => {
-    listLibraryComponents.mockResolvedValue([]);
+  /*
+   * AMENDED (LGU-1 WP-A, defect F9). This grid no longer offers a Reindex
+   * button at all: it reads the catalog on mount, and the manual rebuild has
+   * ONE home now — the library modal's overflow menu — rather than a copy on
+   * every surface that happens to list components.
+   */
+  it("offers no reindex verb of its own", async () => {
+    listLibraryComponents.mockResolvedValue([SHCS]);
     render(<StartLibraryPanel />);
     await waitFor(() => expect(listLibraryComponents).toHaveBeenCalledTimes(1));
 
-    listLibraryComponents.mockResolvedValue([SHCS]);
-    fireEvent.click(screen.getByLabelText("Reindex library"));
-
-    await waitFor(() => expect(reindexLibrary).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByText("Socket Head Cap Screw")).toBeInTheDocument());
+    expect(screen.queryByLabelText("Reindex library")).toBeNull();
+    expect(reindexLibrary).not.toHaveBeenCalled();
   });
 
   it("selecting a card shows details and says placing needs a project — no arm gesture", async () => {
@@ -86,9 +89,14 @@ describe("StartLibraryPanel", () => {
     fireEvent.click(screen.getByTestId("start-library-card"));
 
     expect(screen.getByText("onecad.std.iso4762")).toBeInTheDocument();
-    expect(screen.getByText("Open a project to place this component.")).toBeInTheDocument();
+    // AMENDED (LGU-1 WP-A, canvas D2-A): the refusal moved onto the Place
+    // action itself as a disabled button, rather than sitting beside its
+    // absence as a sentence.
+    expect(screen.getByTestId("detail-place-disabled")).toHaveTextContent(
+      "Place — open a project first",
+    );
 
     fireEvent.click(screen.getByLabelText("Close library"));
-    expect(screen.queryByText("Open a project to place this component.")).toBeNull();
+    expect(screen.queryByTestId("detail-place-disabled")).toBeNull();
   });
 });

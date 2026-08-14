@@ -146,7 +146,7 @@ test.describe("viewport navigation", () => {
   test("wheeling over the canvas selects nothing", async ({ page }) => {
     await page.mouse.wheel(0, 240);
     // A selection would surface in the inspector; nothing should be picked.
-    await expect(page.getByText("Select geometry to constrain.")).toBeVisible();
+    await expect(page.getByText("Open the sketch to add constraints.")).toBeVisible();
   });
 
   test("the page itself never scrolls", async ({ page }) => {

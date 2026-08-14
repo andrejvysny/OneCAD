@@ -112,6 +112,41 @@
   /* ---- Inset well ---- */
   --color-well: #f0f2f5;
 
+  /* ---- Component-library source badges (LGU-1 D1-A) ----
+     Deliberately NOT --color-* names: these are a three-part set (fg/bg/line)
+     that only ever travels together on one 9px pill, so they are consumed as
+     arbitrary values (`text-[var(--badge-mine-fg)]`) rather than generating
+     nine Tailwind color utilities nothing else would use.
+     Light `fg`s are checked >=4.5:1 on --color-surface #ffffff. */
+  --badge-parametric-fg: #2e6fe0;
+  --badge-parametric-bg: rgb(46 111 224 / 0.08);
+  --badge-parametric-line: rgb(46 111 224 / 0.28);
+  --badge-static-fg: #5c646e;
+  --badge-static-bg: rgb(92 100 110 / 0.08);
+  --badge-static-line: rgb(92 100 110 / 0.24);
+  --badge-mine-fg: #157347;
+  --badge-mine-bg: rgb(21 115 71 / 0.08);
+  --badge-mine-line: rgb(21 115 71 / 0.26);
+
+  /* The live designation string (LGU-1 D1-A/D2-A/D3-C) — a BOM identity like
+     "ISO 4762 M6x20", rendered mono. Tracks the accent blue but is its own
+     token: it is an identity, not an interactive affordance, and must not
+     start following --color-accent if that ever moves for hover reasons. */
+  --designation-fg: #2e6fe0;
+
+  /* Armed-tool state line (LGU-1 D5-A). The INVALID tone deliberately reuses
+     the existing --color-traffic-close via `text-traffic-close` rather than
+     minting a second red. */
+  --state-previewing-fg: #157347;
+
+  /* Embedded-package install banners (LGU-1 D8-A). Declared with the badges
+     because they share the tint-plus-hairline construction; consumed by
+     WP-G. */
+  --banner-info-bg: rgb(46 111 224 / 0.07);
+  --banner-info-line: rgb(46 111 224 / 0.28);
+  --banner-warn-bg: rgb(178 107 16 / 0.07);
+  --banner-warn-line: rgb(178 107 16 / 0.28);
+
   /* Host-face reference geometry in a sketch (`referenceLocked`, SCHEMA §7.3):
      projected, immovable, still bounds regions. Rendered SOLID (unlike dashed
      construction) but recessive — the prototype's ink-4/ink-5 neighbour, pulled
@@ -285,6 +320,30 @@
 
   /* ---- Inset well (recedes BELOW the panel, so darker than it) ---- */
   --color-well: #1a1d21;
+
+  /* ---- Component-library source badges (LGU-1 D1-A) ----
+     Lifted off the light values the same way --color-accent is: each light
+     `fg` sits near 2.5:1 on the #2a2e34 surface. Tint alphas go UP because a
+     7-8% wash is invisible on a dark ground. */
+  --badge-parametric-fg: #8db9f7;
+  --badge-parametric-bg: rgb(74 141 240 / 0.16);
+  --badge-parametric-line: rgb(74 141 240 / 0.35);
+  --badge-static-fg: #a5adb8;
+  --badge-static-bg: rgb(160 168 180 / 0.12);
+  --badge-static-line: rgb(160 168 180 / 0.3);
+  --badge-mine-fg: #7fd3a0;
+  --badge-mine-bg: rgb(63 174 106 / 0.14);
+  --badge-mine-line: rgb(63 174 106 / 0.32);
+
+  /* ---- Designation / armed-state line ---- */
+  --designation-fg: #7fa9f2;
+  --state-previewing-fg: #3fae6a;
+
+  /* ---- Install banners (LGU-1 D8-A) ---- */
+  --banner-info-bg: rgb(74 141 240 / 0.1);
+  --banner-info-line: rgb(74 141 240 / 0.35);
+  --banner-warn-bg: rgb(217 154 61 / 0.09);
+  --banner-warn-line: rgb(217 154 61 / 0.35);
 
   /* ---- Sketch reference geometry ---- */
   --color-sketch-reference: #8b9bb0;

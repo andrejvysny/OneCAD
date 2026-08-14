@@ -26,9 +26,9 @@ import { useSelectionStore, primarySelection } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
 import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
+import { currentParamValue, formatDesignation } from "@/modules/library/designation";
 import type {
   ComponentParamValue,
-  ComponentParameterSpec,
   ComponentUpgrade,
   LibraryComponent,
 } from "@/ipc/types";
@@ -38,43 +38,16 @@ function errorHint(text: string): void {
   viewportStore.getState().setStatusHint(text, { severity: "error", sticky: true });
 }
 
-/**
- * Substitutes every `{key}` in a designation template with `values[key]`
- * (stringified) when present; a placeholder with no known value (a
- * `role: "table"`/`"computed"` key, e.g. `{head_d}` — not resolvable
- * client-side without the dimension table) is left verbatim rather than
- * blanked, so a partially-known designation stays legible instead of reading
- * as broken.
+/*
+ * `formatDesignation` and `currentValue` MOVED to
+ * `@/modules/library/designation.ts` (LGU-1 WP-A): the designation is now
+ * rendered by the card grids, the detail panel and the armed-tool panel as
+ * well, and this section is no longer its only consumer. Re-exported here so
+ * the name stays importable from where it has always lived.
  */
-export function formatDesignation(
-  template: string,
-  values: Readonly<Record<string, ComponentParamValue>>,
-): string {
-  return template.replace(/\{(\w+)\}/g, (whole, key: string) =>
-    key in values ? String(values[key]) : whole,
-  );
-}
+export { formatDesignation } from "@/modules/library/designation";
 
-/**
- * The current value for a `role: "free"` param: an override, else the package's
- * own default.
- *
- * `value` wins over `key` because the two mean different things in the two
- * package kinds a free param can come from: a generator's string-domain param
- * spells its default in `key` (`thread = { key = "M6" }`, spec §2.1) while a
- * `document` package's param puts the SOURCE VARIABLE NAME there and the number
- * in `value` (WP-F1.3). Reading `key` first would show a document param's
- * default as the literal variable name. No package declares both.
- */
-function currentValue(
-  spec: ComponentParameterSpec,
-  stored: Record<string, ComponentParamValue>,
-  key: string,
-): ComponentParamValue | undefined {
-  if (key in stored) return stored[key];
-  if (spec.value !== undefined) return spec.value;
-  return spec.key;
-}
+const currentValue = currentParamValue;
 
 /** `"<id>@<version>"` — the catalog key the replace picker selects by. */
 function componentKey(id: string, version: string): string {

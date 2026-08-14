@@ -14,16 +14,17 @@
  * commits happens later, in the 3D view, per that controller's own doc
  * comment.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/icons/Icon";
 import { TextInput } from "@/ui/TextInput";
-import { Button } from "@/ui/Button";
+import { Popover } from "@/ui/Popover";
+import { MenuItem } from "@/ui/MenuItem";
 import { createClient } from "@/ipc/client";
 import type { LibraryComponent } from "@/ipc/types";
 import { tasksStore } from "@/stores/tasksStore";
-import { ComponentThumbnail } from "./ComponentThumbnail";
-import { ComponentPreview3D } from "./ComponentPreview3D";
+import { ComponentCard } from "./ComponentCard";
+import { ComponentDetailRail } from "./ComponentDetailRail";
 import { armPlacement } from "@/modules/library/placementController";
 
 export interface LibraryModalProps {
@@ -53,21 +54,14 @@ function matches(component: LibraryComponent, query: string): boolean {
   );
 }
 
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="mb-2.5">
-      <div className="mb-0.5 text-[10.5px] uppercase tracking-[0.06em] text-ink-6">{label}</div>
-      <div className="text-[12.5px] text-ink-2">{children}</div>
-    </div>
-  );
-}
-
 export function LibraryModal({ open, onClose, canPlace, initialSelection }: LibraryModalProps) {
   const [components, setComponents] = useState<LibraryComponent[]>([]);
   const [state, setState] = useState<LoadState>("loading");
   const [query, setQuery] = useState("");
   const [reindexing, setReindexing] = useState(false);
   const [selected, setSelected] = useState<LibraryComponent | null>(null);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLButtonElement>(null);
 
   const load = () => {
     setState("loading");
@@ -137,14 +131,50 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
       >
         <div className="flex flex-none items-center justify-between border-b border-border px-4 py-2.5">
           <div className="text-[13px] font-semibold text-ink-3">Library</div>
-          <button
-            type="button"
-            aria-label="Close library"
-            onClick={onClose}
-            className="flex h-6 w-6 items-center justify-center rounded-sm text-ink-6 hover:bg-well hover:text-ink-2"
+          <div className="flex items-center gap-1">
+            {/*
+              "Rebuild index" lives in an overflow, not on the toolbar (LGU-1
+              WP-A, defect F9). Reindexing is maintenance for a catalog that
+              already reindexes itself — this modal re-reads it on every open —
+              so a primary button spent the most prominent slot beside Search on
+              a developer verb ("Reindex") that most users would either ignore
+              or click hoping it did something for them.
+            */}
+            <button
+              type="button"
+              ref={overflowRef}
+              aria-label="Library options"
+              aria-haspopup="menu"
+              onClick={() => setOverflowOpen((v) => !v)}
+              className="flex h-6 w-6 items-center justify-center rounded-sm text-ink-6 hover:bg-well hover:text-ink-2"
+            >
+              <Icon name="overflow" size={13} strokeWidth={1.8} />
+            </button>
+            <button
+              type="button"
+              aria-label="Close library"
+              onClick={onClose}
+              className="flex h-6 w-6 items-center justify-center rounded-sm text-ink-6 hover:bg-well hover:text-ink-2"
+            >
+              <Icon name="x" size={13} strokeWidth={1.8} />
+            </button>
+          </div>
+          <Popover
+            open={overflowOpen}
+            onClose={() => setOverflowOpen(false)}
+            anchorRef={overflowRef}
+            placement="bottom-end"
+            width={190}
           >
-            <Icon name="x" size={13} strokeWidth={1.8} />
-          </button>
+            <MenuItem
+              label={reindexing ? "Rebuilding index…" : "Rebuild index"}
+              data-testid="library-rebuild-index"
+              onClick={() => {
+                setOverflowOpen(false);
+                void reindex();
+              }}
+            />
+          </Popover>
         </div>
 
         <div className="flex min-h-0 flex-1">
@@ -158,14 +188,6 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
                 wrapperClassName="min-w-0 flex-1"
                 aria-label="Search library components"
               />
-              <Button
-                variant="secondary"
-                onClick={() => void reindex()}
-                disabled={reindexing}
-                aria-label="Reindex library"
-              >
-                {reindexing ? "Reindexing…" : "Reindex"}
-              </Button>
             </div>
 
             <div className="min-h-0 flex-1 overflow-auto p-3">
@@ -196,26 +218,13 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
                     const key = `${c.id}@${c.version}`;
                     const isSelected = selectedKey === key;
                     return (
-                      <button
+                      <ComponentCard
                         key={key}
-                        type="button"
-                        data-testid="library-modal-card"
-                        data-selected={isSelected || undefined}
+                        component={c}
+                        selected={isSelected}
                         onClick={() => setSelected(isSelected ? null : c)}
-                        title={c.id}
-                        className={`flex flex-col gap-1 rounded-lg border p-2 text-left transition-[box-shadow,border-color] duration-150 hover:border-card-hover-border hover:shadow-card-hover ${
-                          isSelected ? "border-accent ring-1 ring-accent" : "border-border bg-surface"
-                        }`}
-                      >
-                        <ComponentThumbnail
-                          componentId={c.id}
-                          componentVersion={c.version}
-                          size={192}
-                          className="aspect-square w-full rounded bg-well object-contain"
-                        />
-                        <div className="truncate text-[12px] font-semibold text-ink">{c.name}</div>
-                        <div className="truncate text-[10.5px] text-ink-6">{c.version}</div>
-                      </button>
+                        testId="library-modal-card"
+                      />
                     );
                   })}
                 </div>
@@ -230,82 +239,15 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
               </div>
             )}
             {selected && (
-              <>
-                <div className="mb-3 flex items-center gap-2">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-well text-ink-8">
-                    <Icon name="cube" size={20} strokeWidth={1.5} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13.5px] font-semibold text-ink">{selected.name}</div>
-                    <div className="truncate text-[11px] text-ink-6">{selected.id}</div>
-                  </div>
-                </div>
-
-                {/* The live, orbitable preview (WP-B6) — one WebGL context, mounted
-                    only while a component is selected in this modal. */}
-                <div className="mb-3 h-[260px]">
-                  <ComponentPreview3D componentId={selected.id} componentVersion={selected.version} fill />
-                </div>
-
-                <Row label="Version">{selected.version}</Row>
-                <Row label="Source">{selected.sourceKind}</Row>
-                {selected.category.length > 0 && (
-                  <Row label="Category">{selected.category.join(", ")}</Row>
-                )}
-                {selected.tags.length > 0 && (
-                  <Row label="Tags">
-                    <div className="flex flex-wrap gap-1">
-                      {selected.tags.map((t) => (
-                        <span key={t} className="rounded-sm bg-chip px-1.5 py-0.5 text-[10.5px] text-ink-3">
-                          {t}
-                        </span>
-                      ))}
-                    </div>
-                  </Row>
-                )}
-                {Object.keys(selected.attachments).length > 0 && (
-                  <Row label="Attachments">
-                    <ul className="list-inside list-disc">
-                      {Object.entries(selected.attachments).map(([key, a]) => (
-                        <li key={key} className="truncate">
-                          {key} — {a.on}
-                        </li>
-                      ))}
-                    </ul>
-                  </Row>
-                )}
-                {Object.entries(selected.parameters).filter(([, p]) => p.role === "free").length > 0 && (
-                  <Row label="Free parameters">
-                    <ul className="list-inside list-disc">
-                      {Object.entries(selected.parameters)
-                        .filter(([, p]) => p.role === "free")
-                        .map(([key, spec]) => (
-                          <li key={key}>
-                            {key}
-                            {spec.domain ? ` (${spec.domain.map(String).join(" / ")})` : ""}
-                          </li>
-                        ))}
-                    </ul>
-                  </Row>
-                )}
-
-                {canPlace ? (
-                  <Button
-                    variant="primary"
-                    className="mt-1"
-                    onClick={() => {
-                      armPlacement(selected);
-                      onClose();
-                    }}
-                  >
-                    Place in scene
-                  </Button>
-                ) : (
-                  <div className="mt-1 text-[11px] leading-normal text-ink-7">
-                    Open a project to place this component.
-                  </div>
-                )}
-              </>
+              <ComponentDetailRail
+                key={`${selected.id}@${selected.version}`}
+                component={selected}
+                canPlace={canPlace}
+                onPlace={(component) => {
+                  armPlacement(component);
+                  onClose();
+                }}
+              />
             )}
           </div>
         </div>
