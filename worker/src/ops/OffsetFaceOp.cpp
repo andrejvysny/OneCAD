@@ -2,6 +2,7 @@
 #include "ops/OffsetFaceOp.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -23,6 +24,8 @@
 #include <BRepOffset_MakeOffset.hxx>
 #include <BRepOffset_Mode.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAbs_JoinType.hxx>
 #include <GeomAbs_Shape.hxx>
@@ -36,6 +39,7 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -71,22 +75,54 @@ FaceSample sample_face(const TopoDS_Face& face) {
     FaceSample out;
     if (face.IsNull()) return out;
     try {
+        Standard_Real u_min, u_max, v_min, v_max;
+        BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+        if (!std::isfinite(u_min) || !std::isfinite(u_max) ||
+            !std::isfinite(v_min) || !std::isfinite(v_max) ||
+            !(u_max > u_min) || !(v_max > v_min)) {
+            return out;
+        }
+        // Center first, then a deterministic interior grid. The classifier is the
+        // authority: a UV-box midpoint may sit in a hole or outside a concave trim.
+        static constexpr std::array<double, 9> fractions{
+            0.5, 0.25, 0.75, 0.125, 0.375, 0.625, 0.875, 0.0625, 0.9375};
         BRepAdaptor_Surface surf(face);
-        const double u = 0.5 * (surf.FirstUParameter() + surf.LastUParameter());
-        const double v = 0.5 * (surf.FirstVParameter() + surf.LastVParameter());
-        if (!std::isfinite(u) || !std::isfinite(v)) return out;
-        BRepLProp_SLProps props(surf, u, v, 1, Precision::Confusion());
-        if (!props.IsNormalDefined()) return out;
-        gp_Dir n = props.Normal();
-        // The pcurve normal follows the SURFACE; the topological outward normal
-        // additionally follows the face orientation (a REVERSED face points the
-        // other way). Every σ / plane-shift decision below reads THIS normal.
-        if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+        BRepTopAdaptor_FClass2d classifier(face, Precision::PConfusion());
+        for (const double fu : fractions) {
+            const double u = u_min + fu * (u_max - u_min);
+            for (const double fv : fractions) {
+                const double v = v_min + fv * (v_max - v_min);
+                if (classifier.Perform(gp_Pnt2d(u, v), Standard_False) != TopAbs_IN)
+                    continue;
+                BRepLProp_SLProps props(surf, u, v, 1, Precision::Confusion());
+                if (!props.IsNormalDefined()) continue;
+                gp_Dir n = props.Normal();
+                if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+                out.ok = true;
+                out.point = props.Value();
+                out.normal = n;
+                out.u = u;
+                out.v = v;
+                return out;
+            }
+        }
+    } catch (const Standard_Failure&) {
+        out.ok = false;
+    }
+    return out;
+}
+
+PlaneInfo plane_info(const TopoDS_Face& face) {
+    PlaneInfo out;
+    if (surface_kind(face) != SurfaceKind::Plane) return out;
+    try {
+        BRepAdaptor_Surface surf(face, true);
+        const gp_Pln plane = surf.Plane();
+        gp_Dir normal = plane.Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
         out.ok = true;
-        out.point = props.Value();
-        out.normal = n;
-        out.u = u;
-        out.v = v;
+        out.location = plane.Location();
+        out.normal = normal;
     } catch (const Standard_Failure&) {
         out.ok = false;
     }
@@ -423,7 +459,7 @@ struct DistancePlan {
 
 DistancePlan plan_distances(DistanceType type, double distance, bool chain_flag,
                             const std::vector<TopoDS_Face>& faces,
-                            const TopoDS_Face& opposite, double tol) {
+                            const TopoDS_Face& opposite, double semantic_tol) {
     DistancePlan out;
     if (faces.empty()) {
         out.error = "OffsetFace has no operative faces";
@@ -450,12 +486,12 @@ DistancePlan plan_distances(DistanceType type, double distance, bool chain_flag,
                 first = info;
                 continue;
             }
-            if (!coaxial(first.axis, info.axis, tol)) {
+            if (!coaxial(first.axis, info.axis, semantic_tol)) {
                 out.error = std::string(distance_type_name(type)) +
                             " requires a COAXIAL cylindrical operative set";
                 return out;
             }
-            if (std::abs(first.radius - info.radius) > tol) {
+            if (std::abs(first.radius - info.radius) > semantic_tol) {
                 out.error = std::string(distance_type_name(type)) +
                             " requires an EQUAL-RADIUS cylindrical operative set";
                 return out;
@@ -470,11 +506,11 @@ DistancePlan plan_distances(DistanceType type, double distance, bool chain_flag,
         const double d = static_cast<double>(first.sigma) * (target - first.radius);
         // Preflight: OCCT happily returns a "valid" inside-out cylinder for
         // R + σd ≤ 0 (spike trap a). Never clamp — refuse.
-        if (first.radius + static_cast<double>(first.sigma) * d <= tol) {
+        if (first.radius + static_cast<double>(first.sigma) * d <= semantic_tol) {
             out.error = std::string(distance_type_name(type)) +
                         " would drive the cylinder radius to " +
                         std::to_string(first.radius + static_cast<double>(first.sigma) * d) +
-                        " (must exceed " + std::to_string(tol) + ")";
+                        " (must exceed " + std::to_string(semantic_tol) + ")";
             return out;
         }
         out.d.assign(faces.size(), d);
@@ -499,19 +535,20 @@ DistancePlan plan_distances(DistanceType type, double distance, bool chain_flag,
         out.error = "Total distance requires a planar oppositeFaceId reference";
         return out;
     }
-    const of::FaceSample sel = of::sample_face(faces[0]);
-    const of::FaceSample opp = of::sample_face(opposite);
-    if (!sel.ok || !opp.ok) {
-        out.error = "Total distance could not sample the selected/opposite face";
+    const of::PlaneInfo sel = of::plane_info(faces[0]);
+    const of::PlaneInfo opp = of::plane_info(opposite);
+    if (!sel.ok || !opp.ok || !of::sample_face(faces[0]).ok ||
+        !of::sample_face(opposite).ok) {
+        out.error = "Total distance could not prove the selected/opposite trimmed planes";
         return out;
     }
     const double anti = gp_Vec(sel.normal).Dot(gp_Vec(opp.normal));
-    if (anti > -of::kRadialDotMin) {
+    if (anti > -std::cos(of::kSemanticAngularTol)) {
         out.error = "Total distance requires ANTI-PARALLEL selected/opposite planes";
         return out;
     }
-    const double t = gp_Vec(opp.point, sel.point).Dot(gp_Vec(sel.normal));
-    if (t <= tol) {
+    const double t = gp_Vec(opp.location, sel.location).Dot(gp_Vec(sel.normal));
+    if (t <= semantic_tol) {
         out.error = "Total distance: the opposite face is not at a positive thickness";
         return out;
     }
@@ -566,17 +603,26 @@ std::string check_semantics(const BRepOffset_MakeOffset& mo, const TopoDS_Shape&
         }
         const of::SurfaceKind kind = of::surface_kind(faces[i]);
         if (kind == of::SurfaceKind::Plane) {
-            const of::FaceSample before = of::sample_face(faces[i]);
-            if (!before.ok) return "operated face " + keys[i] + " is not samplable";
+            const of::PlaneInfo before = of::plane_info(faces[i]);
+            if (!before.ok || !of::sample_face(faces[i]).ok)
+                return "operated face " + keys[i] + " has no provable trimmed-plane sample";
             for (const TopoDS_Face& sf : succ) {
-                if (of::surface_kind(sf) != of::SurfaceKind::Plane) {
+                const of::PlaneInfo after = of::plane_info(sf);
+                if (!after.ok) {
                     return "operated plane " + keys[i] + " did not stay planar";
                 }
-                const of::FaceSample after = of::sample_face(sf);
-                if (!after.ok) return "operated plane " + keys[i] + " successor is not samplable";
-                const double moved =
-                    gp_Vec(before.point, after.point).Dot(gp_Vec(before.normal));
-                if (std::abs(moved - d[i]) > of::kSemanticTol) {
+                if (!of::sample_face(sf).ok) {
+                    return "operated plane " + keys[i] +
+                           " successor has no provable trimmed-domain sample";
+                }
+                const double alignment =
+                    gp_Vec(before.normal).Dot(gp_Vec(after.normal));
+                if (alignment < std::cos(of::kSemanticAngularTol)) {
+                    return "operated plane " + keys[i] + " changed orientation";
+                }
+                const double moved = gp_Vec(before.location, after.location)
+                                         .Dot(gp_Vec(before.normal));
+                if (std::abs(moved - d[i]) > of::kSemanticLengthTol) {
                     return "operated plane " + keys[i] + " moved " + std::to_string(moved) +
                            " but " + std::to_string(d[i]) + " was requested";
                 }
@@ -592,10 +638,10 @@ std::string check_semantics(const BRepOffset_MakeOffset& mo, const TopoDS_Shape&
                 }
                 BRepAdaptor_Surface surf(sf);
                 const gp_Cylinder cyl = surf.Cylinder();
-                if (!coaxial(before.axis, cyl.Axis(), of::kSemanticTol)) {
+                if (!coaxial(before.axis, cyl.Axis(), of::kSemanticLengthTol)) {
                     return "operated cylinder " + keys[i] + " lost its axis";
                 }
-                if (std::abs(cyl.Radius() - predicted) > of::kSemanticTol) {
+                if (std::abs(cyl.Radius() - predicted) > of::kSemanticLengthTol) {
                     return "operated cylinder " + keys[i] + " reached radius " +
                            std::to_string(cyl.Radius()) + " but " + std::to_string(predicted) +
                            " was predicted";
@@ -765,30 +811,44 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
         }
     }
 
-    const double tol = of::build_tolerance(target_shape);
+    const double construction_tol = of::build_tolerance(target_shape);
 
     // --- per-face signed d ----------------------------------------------------
-    const DistancePlan plan =
-        plan_distances(type, distance, chain_flag, operative, opposite, tol);
+    // Construction uncertainty must never decide what the user asked for. Absolute
+    // Radius/Total planning and semantic equality use the owned semantic tolerance;
+    // only BRepOffset_MakeOffset receives the construction tolerance below.
+    const DistancePlan plan = plan_distances(type, distance, chain_flag, operative, opposite,
+                                             of::kSemanticLengthTol);
     if (!plan.ok) {
         return OpOutcome::fail("OP_FAILED", "OffsetFace: " + plan.error);
     }
-    double max_abs_d = 0.0;
-    for (const double v : plan.d) max_abs_d = std::max(max_abs_d, std::abs(v));
+    double minimum_abs_d = std::numeric_limits<double>::infinity();
+    for (const double value : plan.d)
+        minimum_abs_d = std::min(minimum_abs_d, std::abs(value));
     // Observability (docs/DEBUGGING.md): a REGEN-frequency line, never drag-frequency.
-    WLOG_DEBUG("offsetFace: %s type=%s faces=%zu d0=%.6f t=%.6f tol=%.3e", op_id.c_str(),
+    WLOG_DEBUG("offsetFace: %s type=%s faces=%zu d0=%.6f t=%.6f buildTol=%.3e", op_id.c_str(),
                distance_type_name(type), operative.size(), plan.d.empty() ? 0.0 : plan.d[0],
-               plan.thickness, tol);
+               plan.thickness, construction_tol);
 
-    // --- identity no-op -------------------------------------------------------
-    if (max_abs_d <= tol) {
-        ctx.bodies.create(target_id, op_id, target_shape);
-        const std::vector<RankedSolid> solids = ranked_solids(target_shape);
-        std::optional<session::RankKey> key;
-        if (solids.size() == 1) key = solids[0].key;
-        out.body_events.push_back({"modified", target_id, key});
-        out.body_ids.push_back(target_id);
-        return out;  // no history applied: the shape is literally unchanged
+    // An identity or sub-resolution request is a refusal, never a successful
+    // `modified` event carrying unchanged geometry. Imported B-Rep uncertainty may
+    // make an edit unbuildable; it may not silently redefine the requested intent.
+    if (!std::isfinite(minimum_abs_d) || minimum_abs_d < of::kMinimumFeatureChange) {
+        const std::string message =
+            "OffsetFace: effective change " + std::to_string(minimum_abs_d) +
+            " mm is below the supported minimum " +
+            std::to_string(of::kMinimumFeatureChange) + " mm";
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", "OFFSET_FACE_CHANGE_TOO_SMALL"},
+                                       {"message", message},
+                                       {"stage", "preflight"},
+                                       {"evidence",
+                                        {{"minimumEffectiveChangeMm", minimum_abs_d},
+                                         {"minimumSupportedChangeMm",
+                                          of::kMinimumFeatureChange},
+                                         {"constructionToleranceMm", construction_tol}}}});
+        return failure;
     }
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
@@ -833,7 +893,7 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     BRepOffset_MakeOffset mo;
     TopoDS_Shape result;
     try {
-        mo.Initialize(build_input, /*Offset*/ 0.0, tol, BRepOffset_Skin,
+        mo.Initialize(build_input, /*Offset*/ 0.0, construction_tol, BRepOffset_Skin,
                       /*Intersection*/ Standard_False, /*SelfInter*/ Standard_False,
                       GeomAbs_Intersection, /*Thickening*/ Standard_False,
                       /*RemoveIntEdges*/ Standard_False);

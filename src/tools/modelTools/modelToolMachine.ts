@@ -1032,8 +1032,8 @@ export function offsetValueInDomain(distance: number, type: OffsetDistanceType):
 /**
  * Whether the armed offset may be committed. Distinct from
  * {@link offsetValueInDomain}: a `0.0004 mm` offset is a legal number to HOLD
- * (the user is mid-typing) but SCHEMA §7.3 rebuilds it to an identity no-op, so
- * writing a history row for it would produce a feature that visibly does nothing.
+ * (the user is mid-typing) but SCHEMA §7.3 refuses it as sub-resolution, so
+ * writing a history row for it would guarantee a recoverable kernel failure.
  */
 export function offsetCanConfirm(s: OffsetFaceFsm): boolean {
   if (s.faceCount <= 0) return false;

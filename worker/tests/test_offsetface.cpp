@@ -21,6 +21,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepGProp.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -38,6 +39,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -536,21 +538,24 @@ void test_traps() {
     }
 }
 
-// `|d| ≤ tol` ⇒ identity no-op SUCCESS: the body is republished UNCHANGED with a
-// `modified` event (SCHEMA §7.3), never a silent skip and never a rebuild.
+// Identity and sub-resolution edits are REFUSED. Construction tolerance may make
+// a requested change unbuildable; it must never turn the feature into unchanged
+// geometry with a successful `modified` event.
 void test_identity_noop() {
-    {
+    for (const double distance : {0.0, 5.0e-5}) {
         const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
         BodyStore bodies;
         bodies.create("body_1", "op_seed", box);
         em::ElementMapPartition part;
-        const ops::OpOutcome o =
-            run_offset(bodies, part, offset_params("body_1", {key_near(box, 5, 5, 10)}, 0.0));
-        check(o.status == ops::OpOutcome::Status::Ok, "identity(Offset 0): Ok");
-        check(o.body_events.size() == 1 && o.body_events[0].kind == "modified",
-              "identity(Offset 0): modified event");
+        const ops::OpOutcome o = run_offset(
+            bodies, part,
+            offset_params("body_1", {key_near(box, 5, 5, 10)}, distance));
+        check(o.status == ops::OpOutcome::Status::Failed &&
+                  o.error_message.find("below the supported minimum") != std::string::npos,
+              "identity/sub-resolution Offset: named refusal");
+        check(o.body_events.empty(), "identity/sub-resolution Offset: no lifecycle event");
         check(bodies.contains("body_1") && bodies.get("body_1")->geom.IsSame(box),
-              "identity(Offset 0): the SAME shape is republished");
+              "identity/sub-resolution Offset: predecessor stays untouched");
     }
     {  // Radius equal to the current radius is the absolute-type identity.
         const TopoDS_Shape cyl = BRepPrimAPI_MakeCylinder(10.0, 20.0).Shape();
@@ -559,10 +564,41 @@ void test_identity_noop() {
         bodies.create("body_1", "op_seed", cyl);
         em::ElementMapPartition part;
         const ops::OpOutcome o = run_offset(
-            bodies, part, offset_params("body_1", {of::face_topokey(lats.at(0))}, 10.0, "Radius"));
-        check(o.status == ops::OpOutcome::Status::Ok, "identity(Radius==R): Ok");
+            bodies, part,
+            offset_params("body_1", {of::face_topokey(lats.at(0))}, 10.0,
+                          "Radius"));
+        check(o.status == ops::OpOutcome::Status::Failed && o.body_events.empty(),
+              "identity(Radius==R): refused without publication");
         check(bodies.contains("body_1") && bodies.get("body_1")->geom.IsSame(cyl),
-              "identity(Radius==R): the SAME shape is republished");
+              "identity(Radius==R): predecessor stays untouched");
+    }
+}
+
+void test_trimmed_face_sampling() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    const TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(5.0, 5.0, -1.0), gp_Dir(0.0, 0.0, 1.0)), 2.0, 12.0).Shape();
+    BRepAlgoAPI_Cut cut(box, bore);
+    cut.Build();
+    check(cut.IsDone() && !cut.Shape().IsNull(), "trimmed sample: holed box built");
+
+    TopoDS_Face top;
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Current());
+        const of::PlaneInfo plane = of::plane_info(face);
+        if (plane.ok && std::abs(plane.location.Z() - 10.0) < 1.0e-7) {
+            top = face;
+            break;
+        }
+    }
+    check(!top.IsNull(), "trimmed sample: top face with central hole found");
+    if (top.IsNull()) return;
+    const of::FaceSample sample = of::sample_face(top);
+    check(sample.ok, "trimmed sample: an interior point is found away from the UV-center hole");
+    if (sample.ok) {
+        BRepTopAdaptor_FClass2d classifier(top, 1.0e-9);
+        check(classifier.Perform(gp_Pnt2d(sample.u, sample.v), Standard_False) == TopAbs_IN,
+              "trimmed sample: returned UV is provably inside the trimmed domain");
     }
 }
 
@@ -900,6 +936,7 @@ int main() {
     test_total_on_box();
     test_traps();
     test_identity_noop();
+    test_trimmed_face_sampling();
     test_history_relabels_tracked_faces();
     test_ladder_rung_and_needs_repair();
     test_prepare_closure_expansion();

@@ -970,6 +970,9 @@ pub const HOLE_CS_ANGLES_DEG: [f64; 4] = [82.0, 90.0, 100.0, 120.0];
 /// Ø8" across a parametric edit. Which types are legal for a given selection is
 /// [`OffsetFaceParams::validate`]'s job — only [`Offset`](Self::Offset) admits a
 /// multi-face set.
+/// Smallest authored Offset delta the kernel contract can distinguish (mm).
+pub const OFFSET_MIN_EFFECTIVE_CHANGE_MM: f64 = 1.0e-3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OffsetDistanceType {
     /// Signed delta along the topological outward normal (positive grows
@@ -2370,7 +2373,14 @@ impl OffsetFaceParams {
                     ));
                 }
             }
-            OffsetDistanceType::Offset => {}
+            OffsetDistanceType::Offset => {
+                if self.distance.value.abs() < OFFSET_MIN_EFFECTIVE_CHANGE_MM {
+                    return Err(format!(
+                        "OffsetFace Offset distance magnitude must be at least {} mm (got {})",
+                        OFFSET_MIN_EFFECTIVE_CHANGE_MM, self.distance.value
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -3963,7 +3973,16 @@ mod tests {
             };
             assert!(p.validate().is_ok());
         }
-        // An `Offset` delta, by contrast, is SIGNED — negative pulls material in.
+        // An `Offset` delta is SIGNED, but identity/sub-resolution edits are not
+        // authorable features: the worker refuses them rather than republishing
+        // unchanged geometry as a successful modification.
+        for bad in [0.0, 5.0e-4, -5.0e-4] {
+            let p = OffsetFaceParams {
+                distance: Scalar::new(bad),
+                ..offset_params()
+            };
+            assert!(p.validate().unwrap_err().contains("at least"));
+        }
         let p = OffsetFaceParams {
             distance: Scalar::new(-2.5),
             ..offset_params()

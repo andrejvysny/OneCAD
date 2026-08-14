@@ -1420,17 +1420,23 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
     geometrically (boss +1, hole −1; requires `|n_out·r̂| ≈ 1`);
     `d = σ(distance − R)` for Radius, `d = σ(distance/2 − R)` for Diameter.
     Valid for ONE face or a coaxial equal-radius same-σ cylindrical set.
-    Preflight `R + σd > tol` — the OCCT negative-radius inside-out result is
-    never allowed.
+    Preflight `R + σd > semanticLengthTol` — the OCCT negative-radius
+    inside-out result is never allowed.
   - `Total` (single planar face, chain OFF, `oppositeFaceId` present):
     thickness `t = n·(p_sel − p_opp)` against the PERSISTED opposite face
     (re-resolved verbatim each regen, never re-discovered); `d = distance − t`.
-- `|d| ≤ tol` ⇒ identity no-op SUCCESS (body unchanged, `modified` event).
+- Construction tolerance and semantic operation resolution are separate. Every
+  effective `|d|` must be at least `0.001 mm`; an identity or sub-resolution
+  request is a recoverable `OP_FAILED` with no lifecycle event. Existing B-Rep
+  tolerance may make an edit unbuildable, but may never turn it into unchanged
+  geometry reported as success.
 - Validity gate beyond `IsDone` + `BRepCheck`: exactly one solid, positive
-  finite volume, no self-interference, AND semantic postconditions (each
-  operated plane moved by exactly `d`; each operated cylinder coaxial at the
-  predicted radius). Any miss ⇒ recoverable `OP_FAILED`; the result is never
-  published. Values are NEVER clamped.
+  finite volume, no self-interference, AND semantic postconditions. Operated
+  planes retain orientation and move by exactly `d`; operated cylinders remain
+  coaxial at the predicted radius; every measurement/anchor sample is proven
+  inside the trimmed face domain. Any miss or unprovable measurement ⇒
+  recoverable `OP_FAILED`; the result is never published. Values are NEVER
+  clamped.
 - Lineage: `modified` on `targetBodyId` (+ `rankKey`); element history folds via
   the offset image (`OffsetFacesFromShapes`/`OffsetEdgesFromShapes` — the public
   `Generated`/`Modified` lists are empty for faces, spike-characterized) through
@@ -3084,6 +3090,16 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-14 — §7.3 `OffsetFace` semantic-resolution hardening.** The
+  construction tolerance passed to OCCT no longer defines whether a requested
+  edit exists. Effective changes below `0.001 mm` (including exact identities
+  for Offset/Radius/Diameter/Total) are refused without a lifecycle event;
+  they are never republished as unchanged `modified` bodies. Planar successors
+  must preserve plane orientation as well as displacement, and all face samples
+  used for anchors or semantic measurements are classified inside the trimmed
+  domain. Payload shape is unchanged; Rust validation, worker execution, frontend
+  authoring limits and the worker adversarial fixtures are the cross-track
+  evidence for this semantic contract change.
 - **2026-08-14 — §7.3 NEW op `Gear`** (Gear Generator G1). A fully parametric
   generated gear body: no sketch, no host, MINTS `body_<opId>` (D1) from a
   typed recipe block plus a placement that is EITHER a planar face (Hole's

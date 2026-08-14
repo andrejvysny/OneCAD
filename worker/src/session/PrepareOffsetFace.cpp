@@ -147,19 +147,21 @@ std::vector<OppositeCandidate> find_opposites(const TopoDS_Shape& body, int sele
     TopExp::MapShapes(body, TopAbs_FACE, faces);
     if (selected_ordinal < 1 || selected_ordinal > faces.Extent()) return out;
     const TopoDS_Face selected = TopoDS::Face(faces(selected_ordinal));
-    const of::FaceSample sel = of::sample_face(selected);
-    if (!sel.ok) return out;
+    const of::PlaneInfo sel = of::plane_info(selected);
+    if (!sel.ok || !of::sample_face(selected).ok) return out;
     const double area = area_of(selected);
     if (!(area > 0.0)) return out;  // an unmeasurable face backs nothing
 
     for (int ord = 1; ord <= faces.Extent(); ++ord) {  // ordinal order — deterministic
         if (ord == selected_ordinal) continue;
         const TopoDS_Face cand = TopoDS::Face(faces(ord));
-        if (of::surface_kind(cand) != of::SurfaceKind::Plane) continue;
-        const of::FaceSample c = of::sample_face(cand);
-        if (!c.ok) continue;
-        if (gp_Vec(sel.normal).Dot(gp_Vec(c.normal)) > -of::kRadialDotMin) continue;
-        const double t = gp_Vec(c.point, sel.point).Dot(gp_Vec(sel.normal));
+        const of::PlaneInfo c = of::plane_info(cand);
+        if (!c.ok || !of::sample_face(cand).ok) continue;
+        if (gp_Vec(sel.normal).Dot(gp_Vec(c.normal)) >
+            -std::cos(of::kSemanticAngularTol)) {
+            continue;
+        }
+        const double t = gp_Vec(c.location, sel.location).Dot(gp_Vec(sel.normal));
         if (t <= kMinThickness) continue;
 
         // (3) footprint coverage.
@@ -352,8 +354,8 @@ Envelope handle_prepare_offset_face(Session& session, const Envelope& req) {
         if (first.ok) {
             const bool same_axis =
                 first.axis.Direction().IsParallel(info.axis.Direction(), Precision::Angular()) &&
-                gp_Lin(first.axis).Distance(info.axis.Location()) <= of::kSemanticTol;
-            if (!same_axis || std::abs(first.radius - info.radius) > of::kSemanticTol ||
+                gp_Lin(first.axis).Distance(info.axis.Location()) <= of::kSemanticLengthTol;
+            if (!same_axis || std::abs(first.radius - info.radius) > of::kSemanticLengthTol ||
                 first.sigma != info.sigma) {
                 cylindrical_set = false;
                 break;
