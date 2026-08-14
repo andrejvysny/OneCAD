@@ -1,18 +1,18 @@
 /*
- * Which occupant of the LEFT sidebar region is showing (Component Library
- * WP-1.4). `Slots.ShellLeft` hosts one full-bleed panel worth of space;
- * `ModelTreePanel` (modeling) and `LibraryPanel` (library) both register
- * into it and each render `null` when they aren't the active tab, reading
- * this shared store — a VS Code-style sidebar-tabs pattern that needs no
- * platform/slot changes (`SlotHost` still just mounts every registered
- * panel; only their OWN render output is conditional).
+ * Which occupant of the LEFT sidebar region is showing. `Slots.ShellLeft`
+ * hosts one full-bleed panel worth of space; `ModelTreePanel` and
+ * `VariablesPanel` (both modeling) register into it and each render `null`
+ * when they aren't the active tab, reading this shared store — a VS
+ * Code-style sidebar-tabs pattern that needs no platform/slot changes
+ * (`SlotHost` still just mounts every registered panel; only their OWN
+ * render output is conditional).
  *
  * UI-only, transient, no persistence — same category as `viewportStore`'s
  * chrome state, not document/document-module state.
  */
 import { createStore, useStore } from "zustand";
 
-export type SidebarTab = "model" | "library";
+export type SidebarTab = "model" | "variables";
 
 interface SidebarTabState {
   activeTab: SidebarTab;

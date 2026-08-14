@@ -9,17 +9,18 @@
  * PLACING a component, though, mints a `PlaceComponent` record on a live
  * document (`CommandApiService.placeComponent` → `DocumentRuntime`), which
  * genuinely does not exist yet on this screen. Rather than fake an arm/drag
- * gesture with nowhere to land it, a selected card shows `ComponentDetails`
- * and says plainly that placing needs an open project — the same "say it is
- * not there" discipline the Extensions ▸ Browse empty state and the P1
- * embedded-source test gap already follow in this codebase.
+ * gesture with nowhere to land it, a selected card opens the shared
+ * `LibraryModal` without `canPlace`, which says plainly that placing needs
+ * an open project — the same "say it is not there" discipline the
+ * Extensions ▸ Browse empty state and the P1 embedded-source test gap
+ * already follow in this codebase.
  */
 import { useEffect, useState } from "react";
 import { createClient } from "@/ipc/client";
 import type { LibraryComponent } from "@/ipc/types";
 import { TextInput } from "@/ui/TextInput";
 import { Button } from "@/ui/Button";
-import { ComponentDetails } from "./ComponentDetails";
+import { LibraryModal } from "@/features/library/LibraryModal";
 import { ComponentThumbnail } from "@/features/library/ComponentThumbnail";
 
 type LoadState = "loading" | "ready" | "error";
@@ -122,7 +123,7 @@ export function StartLibraryPanel() {
                   type="button"
                   data-testid="start-library-card"
                   data-selected={isSelected || undefined}
-                  onClick={() => setSelectedKey(isSelected ? null : key)}
+                  onClick={() => setSelectedKey(key)}
                   title={c.id}
                   className={`flex flex-col gap-1 rounded-lg border p-2 text-left transition-[box-shadow,border-color] duration-150 hover:border-card-hover-border hover:shadow-card-hover ${
                     isSelected ? "border-accent ring-1 ring-accent" : "border-border bg-surface"
@@ -143,7 +144,11 @@ export function StartLibraryPanel() {
         )}
       </div>
 
-      {selected && <ComponentDetails component={selected} onClose={() => setSelectedKey(null)} />}
+      <LibraryModal
+        open={selectedKey !== null}
+        onClose={() => setSelectedKey(null)}
+        initialSelection={selected}
+      />
     </div>
   );
 }

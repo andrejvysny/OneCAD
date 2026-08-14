@@ -88,7 +88,7 @@ describe("StartLibraryPanel", () => {
     expect(screen.getByText("onecad.std.iso4762")).toBeInTheDocument();
     expect(screen.getByText("Open a project to place this component.")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText("Close details"));
+    fireEvent.click(screen.getByLabelText("Close library"));
     expect(screen.queryByText("Open a project to place this component.")).toBeNull();
   });
 });

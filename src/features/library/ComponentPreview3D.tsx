@@ -29,8 +29,14 @@ export interface ComponentPreview3DProps {
   componentId: string;
   componentVersion: string;
   params?: Record<string, ComponentParamValue>;
-  /** Square edge in CSS pixels. */
+  /** Square edge in CSS pixels. Ignored when `fill` is set. */
   size?: number;
+  /**
+   * Measure and track the parent container's size instead of a fixed square —
+   * for a preview pane whose own dimensions come from its layout (the library
+   * modal), not a caller-chosen constant.
+   */
+  fill?: boolean;
 }
 
 type State = "loading" | "ready" | "unavailable";
@@ -40,6 +46,7 @@ export function ComponentPreview3D({
   componentVersion,
   params,
   size = 220,
+  fill = false,
 }: ComponentPreview3DProps) {
   const host = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<State>("loading");
@@ -59,6 +66,7 @@ export function ComponentPreview3D({
 
     let renderer: THREE.WebGLRenderer | null = null;
     let mesh: THREE.Mesh | null = null;
+    let resizeObserver: ResizeObserver | null = null;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 1000);
     addPreviewLights(scene);
@@ -121,15 +129,23 @@ export function ComponentPreview3D({
         }
         mesh = buildPreviewObject(parseMeshPayload(first.mesh));
 
+        // In `fill` mode the outer div's own layout (CSS, not this constant)
+        // decides the size — measure it once up front so the very first frame
+        // is already correctly proportioned, then track further changes below.
+        const initialRect = fill ? mount.parentElement?.getBoundingClientRect() : null;
+        const initialWidth = initialRect && initialRect.width > 0 ? initialRect.width : size;
+        const initialHeight = initialRect && initialRect.height > 0 ? initialRect.height : size;
+
         renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        renderer.setSize(size, size, false);
+        renderer.setSize(initialWidth, initialHeight, false);
         renderer.setClearColor(palette.clear(), 0);
         mount.appendChild(renderer.domElement);
         renderer.domElement.style.touchAction = "none";
         renderer.domElement.style.cursor = "grab";
 
         scene.add(mesh);
+        camera.aspect = initialWidth / initialHeight;
         frameObject(camera, mesh);
         // Seed the orbit from the framed camera so the first drag continues
         // from what the user is already looking at.
@@ -144,6 +160,19 @@ export function ComponentPreview3D({
         renderer.domElement.addEventListener("pointerup", endDrag);
         renderer.domElement.addEventListener("pointercancel", endDrag);
 
+        if (fill && mount.parentElement) {
+          const container = mount.parentElement;
+          resizeObserver = new ResizeObserver((entries) => {
+            const rect = entries[0]?.contentRect;
+            if (!rect || rect.width <= 0 || rect.height <= 0 || !renderer || !mesh) return;
+            camera.aspect = rect.width / rect.height;
+            renderer.setSize(rect.width, rect.height, false);
+            frameObject(camera, mesh);
+            applyCamera();
+          });
+          resizeObserver.observe(container);
+        }
+
         applyCamera();
         setState("ready");
       } catch {
@@ -155,6 +184,7 @@ export function ComponentPreview3D({
 
     return () => {
       disposed = true;
+      resizeObserver?.disconnect();
       const canvas = renderer?.domElement;
       canvas?.removeEventListener("pointerdown", onPointerDown);
       canvas?.removeEventListener("pointermove", onPointerMove);
@@ -170,17 +200,20 @@ export function ComponentPreview3D({
     // `paramsKey` stands in for `params` (see above); `paramsRef` is read, not
     // depended on, so a new object with the same values changes nothing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [componentId, componentVersion, paramsKey, size]);
+  }, [componentId, componentVersion, paramsKey, size, fill]);
 
   return (
     <div
       data-testid="component-preview-3d"
       data-state={state}
-      className="relative flex items-center justify-center rounded-md border border-border bg-well"
-      style={{ width: size, height: size }}
+      className={
+        "relative flex items-center justify-center overflow-hidden rounded-md border border-border bg-well" +
+        (fill ? " h-full w-full" : "")
+      }
+      style={fill ? undefined : { width: size, height: size }}
       title={state === "ready" ? "Drag to orbit" : undefined}
     >
-      <div ref={host} />
+      <div ref={host} className={fill ? "absolute inset-0" : undefined} />
       {state !== "ready" && (
         <div className="absolute text-[11.5px] text-ink-7">
           {state === "loading" ? "Rendering…" : "No preview available"}

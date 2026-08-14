@@ -47,12 +47,10 @@ describe("File ▸ Rename…", () => {
     expect(screen.getByTestId("document-title")).toHaveTextContent("Bracket v2");
   });
 
-  it("keeps the app wordmark and the document name apart", () => {
+  it("renders no app wordmark — the window chrome already says which app this is", () => {
     renderWithPlatform(<TitleBar />);
-    // One string ("OneCAD — Bracket v2") mixed two different questions and put
-    // the changing half behind the fixed one.
-    expect(screen.getByTestId("app-wordmark")).toHaveTextContent("OneCAD");
-    expect(screen.getByTestId("document-title")).not.toHaveTextContent("OneCAD");
+    expect(screen.queryByTestId("app-wordmark")).not.toBeInTheDocument();
+    expect(screen.queryByText("OneCAD")).not.toBeInTheDocument();
   });
 
   it("the title itself is a label, not a rename affordance", async () => {

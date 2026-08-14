@@ -8,29 +8,30 @@
  */
 
 /*
- * AMENDED 2026-08-13 (WP-VE.2) — an explicit user-visible change, recorded in
- * `TODO.md`, not a refactor going green: modeling gained a DOCUMENT-LEVEL
- * "Variables" section. It is the only section that is not about the current
- * selection, so it renders throughout Model mode and sits LAST (priority 500,
- * after Dependencies) — below everything that IS about what the user picked.
- * Sketch mode is unchanged: a sketch dimension is a solver value with no
- * `Scalar` behind it and nothing there can be bound to a variable.
+ * AMENDED 2026-08-14 (UI/UX pass) — an explicit user-visible change, recorded
+ * in `TODO.md`, not a refactor going green: the document-level "Variables"
+ * section (added 2026-08-13, WP-VE.2) moved OUT of the right inspector into
+ * its own left-sidebar tab (`VariablesPanel`, replacing the old sidebar
+ * Library tab — the library browser is now a full-size modal). It was the
+ * only section not about the current selection, so removing it un-freezes
+ * nothing about the selection-driven sections below — they keep their prior
+ * relative order.
  */
 
 /** Ordered `SectionLabel` texts per inspector state. */
 export const INSPECTOR_SECTIONS_CONTRACT: Readonly<Record<string, readonly string[]>> = {
-  /** Model mode, nothing selected — the document-level Variables table only. */
-  empty: ["Variables"],
+  /** Model mode, nothing selected — no selection-driven section applies. */
+  empty: [],
   /** A solid body. */
-  body: ["Appearance", "History", "Variables"],
+  body: ["Appearance", "History"],
   /** A promoted face (body + elementId known). */
-  face: ["Appearance", "History", "Variables"],
+  face: ["Appearance", "History"],
   /** An edge — no appearance section, faces only. */
-  edge: ["History", "Variables"],
+  edge: ["History"],
   /** A sketch, which additionally carries the DOF-driven Constraints block. */
-  sketch: ["History", "Constraints", "Variables"],
+  sketch: ["History", "Constraints"],
   /** A filled sketch region — same sections as its owning sketch. */
-  sketchRegion: ["History", "Constraints", "Variables"],
+  sketchRegion: ["History", "Constraints"],
   /**
    * Sketch mode. The Constraints section is unconditional — an empty sketch
    * shows the label with a "No constraints yet." body rather than hiding it, so

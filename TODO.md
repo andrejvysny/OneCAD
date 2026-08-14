@@ -1,6 +1,52 @@
 # OneCAD-Tauri Migration TODO
 
-## NEXT — post-merge plan (2026-08-14)
+## UI/UX PASS — library modal, titlebar reorder, Variables sidebar tab (2026-08-14) — LANDED
+
+Plan: `~/.claude/plans/act-as-ui-ux-expert-sparkling-dahl.md`. Three reported
+UX defects, fixed together since the first shares a component with the third:
+
+1. Library component-detail 3D preview overflowed its box, clipping over the
+   title text (`ComponentPreview3D` host div had no `overflow-hidden`, and
+   camera framing never re-ran on resize).
+2. Titlebar element order was wrong and carried a redundant "OneCAD" wordmark
+   the window chrome already conveys.
+3. Editor-mode Library lived in the left sidebar as a cramped tab.
+
+### USER-VISIBLE CHANGE DECISION (required by `src/test/contracts/README.md`)
+
+**The Library browser moved from an inline sidebar card/tab to a full-size
+`LibraryModal`**, shared by the Start screen and a new editor toolbar tool —
+this is a product change, not a refactor being made to pass:
+
+- `inspectorContract.ts`'s `INSPECTOR_SECTIONS_CONTRACT` loses `"Variables"`
+  from every state array. The document-level Variables table moved out of the
+  right inspector into its own left-sidebar tab (`VariablesPanel`), which
+  replaced the old sidebar Library tab now that browsing is a modal.
+- `shellContract.ts`'s `EDITOR_MOUNT_ORDER_CONTRACT` loses `"LibraryPanel"`
+  (deleted), gains `"VariablesPanel"` in the same `Slots.ShellLeft` priority
+  110 slot, and gains `"LibraryModalHost"` at the end of `Slots.ShellOverlay`
+  (priority 150, after `SaveAsComponentHost`).
+- A new `"Library"` toolbar tool (`onecad.library.tool.openLibrary`) opens the
+  modal — its own group (`library.insert`, priority 10), sorting first with
+  its own separator ahead of Select/Sketch/Extrude, since inserting a
+  component is not a modelling edit. `toolbarContract.ts` is unaffected (its
+  golden probe only registers the modeling module; this tool is
+  library-owned).
+- Titlebar (`TitleBar.tsx`, not contract-frozen): reordered to
+  `[doc name] → [home] → [workspace switcher] → [File] → [Generators]`, and
+  the "OneCAD" wordmark was deleted outright.
+
+### Owed follow-up (flagged during the pass, not blocking)
+
+- `ComponentPreview3D` has no `webglcontextlost` handler on its live orbit
+  canvas (the offscreen thumbnail rasterizer does). It is now reachable from a
+  bigger, more prominent, longer-lived surface (the modal) than the old
+  sidebar card — worth hardening if GPU-context-loss reports show up.
+- The "Library" toolbar tool's icon reuses the existing `"cube"` glyph (same
+  as every other component-library affordance) rather than a new, more
+  specific icon — a design call, not a default.
+
+
 
 One trunk again. Everything below is ordered by what a **daily-driver** needs, in
 the product's own priority order (functional 3D-print + machined parts, light

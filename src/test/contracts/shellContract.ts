@@ -37,6 +37,17 @@
  * `null` whenever no body is being authored, so nothing above it moved and
  * nothing new is visible until the user opens it. Overlay LAST is the same
  * rule the region itself follows: a modal has to cover every region above it.
+ *
+ * AMENDED 2026-08-14 (UI/UX pass) — recorded in TODO.md. `LibraryPanel` LEFT
+ * `Slots.ShellLeft` — the library browser is now a full-size `LibraryModal`,
+ * opened from a toolbar tool rather than docked in the sidebar. `VariablesPanel`
+ * (modeling) took its exact slot/priority (110, right after `ModelTreePanel`),
+ * keeping the same tab-strip mechanism `SidebarTabHeader` documents.
+ * `LibraryModalHost` joined `Slots.ShellOverlay` AFTER `SaveAsComponentHost`
+ * (priority 150): it is opened from the toolbar, so at mount time it is never
+ * the most-recently-requested overlay, and it renders `null` until the
+ * "Library" tool activates it — same "nothing new is visible until opened"
+ * reasoning as `SaveAsComponentHost` above.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",
@@ -54,7 +65,7 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "SketchChromeBar",
   "SketchConstraintToolbar",
   "ModelTreePanel",
-  "LibraryPanel",
+  "VariablesPanel",
   "InspectorPanel",
   "RepairBanner",
   "TimelineStoppedBanner",
@@ -66,4 +77,5 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "CustomizeWorkspaceSheet",
   "MissingExtensionDialog",
   "SaveAsComponentHost",
+  "LibraryModalHost",
 ];

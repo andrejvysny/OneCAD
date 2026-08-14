@@ -3,7 +3,7 @@
  * platform debt (the slot existed with zero consumers since MODULAR-PLATFORM).
  * Deliberately minimal per the plan: a static indexed-component count, not a
  * feature. Fetches once on mount rather than sharing a store with
- * `LibraryPanel` — nothing here needs to live-track the panel's search/filter
+ * `LibraryModal` — nothing here needs to live-track the modal's search/filter
  * state, only the index size.
  */
 import { useEffect, useState } from "react";

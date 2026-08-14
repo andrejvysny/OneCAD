@@ -65,19 +65,27 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator('[data-testid="viewport-canvas"] canvas')).toBeVisible();
 });
 
-test("browse, arm, hover-snap, commit — one new named body", async ({ page }) => {
-  await page.getByTestId("sidebar-tab-library").click();
-
-  // Scoped by name: the opt-in catalog seeds the whole shipped set (WP-F3), so
-  // an unscoped `library-card` locator resolves four elements, not one.
-  const card = page.getByTestId("library-card").filter({ hasText: "Socket Head Cap Screw" });
+/**
+ * Opens the Library modal from the toolbar, selects the SHCS fixture by
+ * name (the opt-in catalog seeds the whole shipped set, WP-F3, so an
+ * unscoped `library-modal-card` locator would resolve four elements, not
+ * one), and clicks "Place in scene" — which arms the gesture and closes the
+ * modal. The commit itself happens later, back in the viewport.
+ */
+async function armScrew(page: Page) {
+  await page.getByRole("button", { name: "Library" }).click();
+  const card = page.getByTestId("library-modal-card").filter({ hasText: "Socket Head Cap Screw" });
   await expect(card).toBeVisible();
+  await card.click();
+  await page.getByRole("button", { name: "Place in scene" }).click();
+  await expect(page.getByRole("dialog", { name: "Library" })).not.toBeVisible();
+}
 
+test("browse, arm, hover-snap, commit — one new named body", async ({ page }) => {
   const before = await bodyNames(page);
   expect(before).toHaveLength(1); // the vpdemo box, nothing placed yet
 
-  await card.click();
-  await expect(card).toHaveAttribute("data-armed", "true");
+  await armScrew(page);
 
   const face = await findFaceOnBody(page);
   await page.mouse.move(face.x, face.y);
@@ -88,9 +96,8 @@ test("browse, arm, hover-snap, commit — one new named body", async ({ page }) 
   await page.mouse.down();
   await page.mouse.up();
 
-  // Commit tears the gesture down (ghost cleared) and un-arms the card.
+  // Commit tears the gesture down (ghost cleared).
   await expect.poll(() => previewBodyCount(page)).toBe(0);
-  await expect(card).not.toHaveAttribute("data-armed", "true");
 
   await expect.poll(() => bodyNames(page)).toHaveLength(2);
   const after = await bodyNames(page);
@@ -98,15 +105,9 @@ test("browse, arm, hover-snap, commit — one new named body", async ({ page }) 
 });
 
 test("Escape cancels an armed-but-uncommitted placement cleanly", async ({ page }) => {
-  await page.getByTestId("sidebar-tab-library").click();
-
-  const card = page.getByTestId("library-card").filter({ hasText: "Socket Head Cap Screw" });
-  await expect(card).toBeVisible();
-
   const before = await bodyNames(page);
 
-  await card.click();
-  await expect(card).toHaveAttribute("data-armed", "true");
+  await armScrew(page);
 
   const face = await findFaceOnBody(page);
   await page.mouse.move(face.x, face.y);
@@ -114,7 +115,6 @@ test("Escape cancels an armed-but-uncommitted placement cleanly", async ({ page 
 
   await page.keyboard.press("Escape");
 
-  await expect(card).not.toHaveAttribute("data-armed", "true");
   await expect.poll(() => previewBodyCount(page)).toBe(0);
   expect(await bodyNames(page)).toEqual(before);
 });

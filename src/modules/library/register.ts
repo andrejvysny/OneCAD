@@ -17,11 +17,12 @@
 import type { InspectorContext, ModuleScope, Platform } from "@/platform";
 import { Slots } from "@/platform";
 import { LIBRARY_MODULE_ID } from "./manifest";
-import { LibraryCommands, LibraryMenuItems, LibraryPanels } from "./panelIds";
+import { LibraryCommands, LibraryMenuItems, LibraryPanels, LibraryTools } from "./panelIds";
 import { LibraryInspectorPriorities, LibraryInspectorSections } from "./inspectorSectionIds";
-import { LibraryPanel } from "@/features/library/LibraryPanel";
+import { LibraryModalHost } from "@/features/library/LibraryModalHost";
 import { LibraryStatusSection } from "@/features/library/LibraryStatusSection";
 import { ComponentParametersSection } from "@/features/library/ComponentParametersSection";
+import { libraryModalStore } from "./libraryModalStore";
 import { configurePlacementController } from "./placementController";
 import {
   configureAuthoringController,
@@ -42,24 +43,38 @@ export function contributeLibrary(_scope: ModuleScope): void {
 }
 
 /**
- * Registers the library's editor UI. `ShellLeft` already hosts modeling's
- * `ModelTreePanel` (priority 100, full-bleed `left:0` sidebar) — this joins
- * it at priority 110 (mounts AFTER, per `shellContract.ts`'s pinned order)
- * rather than a competing slot: both panels render into the SAME physical
- * space and use `sidebarTabStore` (a shared, tiny UI-only store — no
- * document/document-module state) to decide which one shows its content,
- * the same "one region, several tab-like occupants" pattern a VS Code-style
- * sidebar uses. Neither panel's OWN registration/positioning changed to make
- * this work — `ModelTreePanel` only gained a `SidebarTabHeader` + an early
- * return when it isn't the active tab.
+ * Registers the library's editor UI. The library grid/search/detail no
+ * longer sits in `Slots.ShellLeft` beside modeling's `ModelTreePanel` — it
+ * lives in the full-size `LibraryModal`, opened by the `OpenLibrary` toolbar
+ * tool below. The sidebar's left column is modeling's alone now (Variables
+ * takes the tab slot Library used to share — see `modules/modeling/ui.ts`).
  */
 export function contributeLibraryUi(scope: ModuleScope): void {
+  // The modal itself, mounted once and toggled by `libraryModalStore` — same
+  // `Slots.ShellOverlay` pattern `SaveAsComponentHost` below uses.
   scope.registerPanel({
-    id: LibraryPanels.LibraryPanel,
-    slot: Slots.ShellLeft,
+    id: LibraryPanels.LibraryModalHost,
+    slot: Slots.ShellOverlay,
     title: "Library",
-    priority: 110,
-    component: LibraryPanel,
+    // AFTER SaveAsComponentHost (140): opened from the toolbar, so it is
+    // never the most-recently-requested overlay at mount time.
+    priority: 150,
+    component: LibraryModalHost,
+  });
+
+  // The toolbar's own "insert" group — deliberately its own group/priority
+  // band, lower than every model-editing tool (`model.create` starts at
+  // 100), so it sorts first and gets its own separator: placing a component
+  // is an insertion, not a modelling op like Select/Sketch/Extrude.
+  scope.registerTool({
+    id: LibraryTools.OpenLibrary,
+    title: "Library",
+    icon: "cube",
+    group: "library.insert",
+    priority: 10,
+    scopes: [ModelingScopes.Model],
+    activate: () => libraryModalStore.getState().open(),
+    deactivate: () => libraryModalStore.getState().close(),
   });
 
   // WP-1.6: the tasks-chip status row's first real StatusSection producer.

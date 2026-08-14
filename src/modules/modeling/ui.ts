@@ -33,6 +33,7 @@ import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
 import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolbar";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
+import { VariablesPanel } from "@/features/inspector/VariablesPanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { RepairBanner } from "@/features/repair/RepairBanner";
 import { TimelineStoppedBanner } from "@/features/repair/TimelineStoppedBanner";
@@ -80,6 +81,15 @@ export function contributeModelingUi(scope: ModuleScope): void {
     title: "Model",
     priority: 100,
     component: ModelTreePanel,
+  });
+  // Takes the sidebar-tab slot Library used to share (WP-1.4's original
+  // pattern) — mounts AFTER ModelTree, per `shellContract.ts`'s pinned order.
+  scope.registerPanel({
+    id: ModelingPanels.VariablesPanel,
+    slot: Slots.ShellLeft,
+    title: "Variables",
+    priority: 110,
+    component: VariablesPanel,
   });
   scope.registerPanel({
     id: ModelingPanels.Inspector,

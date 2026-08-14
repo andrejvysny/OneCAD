@@ -29,8 +29,6 @@ export const ModelingInspectorSections = {
   ConstraintsHint: sectionId("constraints.hint"),
   ConstraintsList: sectionId("constraints.list"),
   Dependencies: sectionId("dependencies"),
-  /** Document-level, selection-independent — hence LAST (WP-VE.2). */
-  Variables: sectionId("variables"),
 } as const;
 
 export const ModelingInspectorPriorities = {
@@ -39,5 +37,4 @@ export const ModelingInspectorPriorities = {
   History: 200,
   Constraints: 300,
   Dependencies: 400,
-  Variables: 500,
 } as const;

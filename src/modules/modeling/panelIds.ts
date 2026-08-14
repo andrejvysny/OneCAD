@@ -29,6 +29,8 @@ export const ModelingPanels = {
   SketchChromeBar: panelId("sketchChromeBar"),
   SketchConstraintToolbar: panelId("sketchConstraintToolbar"),
   ModelTree: panelId("modelTree"),
+  /** The left-sidebar "Variables" tab — shares `Slots.ShellLeft` with `ModelTree`. */
+  VariablesPanel: panelId("variablesPanel"),
   Inspector: panelId("inspector"),
   RepairBanner: panelId("repairBanner"),
   TimelineStoppedBanner: panelId("timelineStoppedBanner"),

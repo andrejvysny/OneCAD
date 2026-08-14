@@ -131,6 +131,8 @@ async function openTimelineOn(page: Page, featureId: string): Promise<void> {
 
 test("add, re-value and delete a document variable from the inspector", async ({ page }) => {
   await openEditorDebug(page);
+  // Variables lives in its own left-sidebar tab now, not the right inspector.
+  await page.getByTestId("sidebar-tab-variables").click();
 
   await expect(page.getByTestId("variables-empty")).toBeVisible();
 
@@ -176,9 +178,14 @@ test("add, re-value and delete a document variable from the inspector", async ({
 
 test("typing =name into a past extrude's value binds it to a variable", async ({ page }) => {
   await openEditorDebug(page);
+  // Variables lives in its own left-sidebar tab now, not the right inspector.
+  await page.getByTestId("sidebar-tab-variables").click();
   await addVariable(page, "height", "25");
   await expect(page.getByTestId("variable-row-height")).toBeVisible();
 
+  // `drawAndExtrude` reads the Bodies listbox, which only renders on the
+  // Model tab (the two sidebar tabs share one `Slots.ShellLeft` footprint).
+  await page.getByTestId("sidebar-tab-model").click();
   const featureId = await drawAndExtrude(page);
   await openTimelineOn(page, featureId);
 
