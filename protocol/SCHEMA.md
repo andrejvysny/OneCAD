@@ -1079,17 +1079,30 @@ OneCAD-CPP `ExtrudeParams`.
   string could carry no anchor/intent, so a ToFace target would be
   **un-repairable** across parametric edits, violating Invariants 2/3; the typed
   ref lets the resolution ladder rebind it. Absent for non-`ToFace` extrudes.
+- `ToFace` means the SELECTED BOUNDED FACE, not merely its underlying support
+  surface. V1 accepts only a planar target parallel to the profile plane and
+  proves that the projected profile is fully covered by the selected trimmed
+  face. A laterally disjoint, smaller, or holed target is refused. Tilted and
+  curved targets are refused until exact variable-height termination is
+  implemented; a constant-distance flat cap is never substituted.
 
-- **Draft is applied or refused, never silently dropped.** A non-zero
-  `draftAngleDeg` must add at least one eligible side face, the builder must
-  complete, and the result must differ from the undrafted prism; otherwise the step
-  is a recoverable `OP_FAILED` carrying one of the draft diagnostic codes
+- **Draft is applied completely and measured, or refused — never silently
+  degraded.** V1 proves draft semantics only for a single-direction `Blind`
+  extrusion; any other end condition or `twoDirections:true` is refused until its
+  direction/neutral-plane contract is implemented. A non-zero `draftAngleDeg`
+  must be accepted on every eligible planar side face, every wall must have a
+  measurable result successor at the requested angle, the builder must complete,
+  and the result must differ from the undrafted prism. Otherwise the step is a
+  recoverable `OP_FAILED` carrying one of the draft diagnostic codes
   (`stage:"build"`, evidence `{draft:{angleDeg,eligibleFaces,addedFaces}}`):
 
   | code | meaning |
   |---|---|
   | `EXTRUDE_DRAFT_NO_PLANAR_FACE` | the profile has no planar side face to draft (e.g. a circular profile) |
   | `EXTRUDE_DRAFT_NO_FACE_ACCEPTED` | eligible walls existed; the kernel rejected every one |
+  | `EXTRUDE_DRAFT_PARTIAL_ACCEPTANCE` | the kernel accepted only part of the eligible wall set; partial fulfillment is forbidden |
+  | `EXTRUDE_DRAFT_END_CONDITION_UNSUPPORTED` | a non-Blind or two-direction request has no proven draft direction contract |
+  | `EXTRUDE_DRAFT_SEMANTIC_MISMATCH` | a wall successor is missing/unmeasurable or its measured angle differs from the request |
   | `EXTRUDE_DRAFT_NO_CHANGE` | the builder completed and changed nothing (adds `volumeBefore`/`volumeAfter`) |
   | `EXTRUDE_DRAFT_BUILD_FAILED` | the draft build itself failed or threw |
 
@@ -3090,6 +3103,18 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-14 — §7.3 `Extrude.ToFace` bounded-face hardening.** V1 now
+  proves full projected-profile coverage by the selected trimmed face and refuses
+  laterally disjoint, smaller, or holed targets. Tilted/curved targets are refused
+  until exact variable-height termination exists; the former constant-distance
+  flat-cap substitution is no longer a successful operation. Payload shape and
+  semantic-reference repair behavior are unchanged.
+- **2026-08-14 — §7.3 `Extrude` draft semantic hardening.** Drafting is
+  fail-closed: every eligible wall must be accepted, every wall must have a
+  measurable successor at the requested angle, and V1 permits non-zero draft only
+  on a single-direction Blind extrusion. This closes partial-application and
+  raw-distance/end-condition ambiguity without changing payload shape; new stable
+  diagnostic codes distinguish the refusal causes.
 - **2026-08-14 — §7.3 `OffsetFace` semantic-resolution hardening.** The
   construction tolerance passed to OCCT no longer defines whether a requested
   edit exists. Effective changes below `0.001 mm` (including exact identities

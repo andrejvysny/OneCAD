@@ -139,7 +139,8 @@ struct Run {
 };
 
 /// Extrudes `sketch` with the given draft and reports what came back.
-Run extrude(const json& sketch, double distance, double draft_deg) {
+Run extrude(const json& sketch, double distance, double draft_deg,
+            const std::string& end_condition = "Blind") {
     BodyStore bodies;
     em::ElementMapPartition part;
     Ctx c;
@@ -152,7 +153,7 @@ Run extrude(const json& sketch, double distance, double draft_deg) {
                 {{"sketchId", "sk1"},
                  {"distance", distance},
                  {"draftAngleDeg", draft_deg},
-                 {"extrudeMode", "Blind"},
+                 {"extrudeMode", end_condition},
                  {"booleanMode", "NewBody"}}}};
     Run run;
     run.outcome = ops::execute_extrude(ctx, op, "ope");
@@ -278,6 +279,13 @@ void square_prism_taper_matches_the_closed_form() {
     }
 }
 
+void non_blind_draft_is_refused_until_its_direction_contract_is_proven() {
+    const Run run = extrude(rect_sketch("sk1", 10.0, 10.0), 10.0, 5.0,
+                            "ThroughAll");
+    check_refusal(run, "EXTRUDE_DRAFT_END_CONDITION_UNSUPPORTED",
+                  "non-Blind draft");
+}
+
 // ── Mixed and near-limit ────────────────────────────────────────────────────
 
 /// A slot profile — two straight flanks and two semicircular caps.
@@ -330,6 +338,8 @@ void near_limit_angle_refuses_safely() {
             check(code == "EXTRUDE_DRAFT_NO_PLANAR_FACE" ||
                       code == "EXTRUDE_DRAFT_NO_FACE_ACCEPTED" ||
                       code == "EXTRUDE_DRAFT_NO_CHANGE" ||
+                      code == "EXTRUDE_DRAFT_PARTIAL_ACCEPTANCE" ||
+                      code == "EXTRUDE_DRAFT_SEMANTIC_MISMATCH" ||
                       code == "EXTRUDE_DRAFT_BUILD_FAILED",
                   label + ": diagnostic code is from the draft vocabulary, got '" + code + "'");
         } else {
@@ -385,6 +395,7 @@ int main() {
     circular_profile_is_applied_or_refused();
     distinct_defects_get_distinct_codes();
     square_prism_taper_matches_the_closed_form();
+    non_blind_draft_is_refused_until_its_direction_contract_is_proven();
     mixed_planar_and_curved_profile_is_applied_or_refused();
     near_limit_angle_refuses_safely();
     a_sub_epsilon_angle_is_a_clean_no_op();

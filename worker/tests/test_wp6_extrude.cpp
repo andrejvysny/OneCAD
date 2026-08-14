@@ -6,12 +6,22 @@
 #include <utility>
 #include <vector>
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
@@ -51,6 +61,15 @@ TopoDS_Shape face_by_center(const TopoDS_Shape& shape, double cx, double cy, dou
         if (best_d2 < 0.0 || d2 < best_d2) { best_d2 = d2; best = faces(i); }
     }
     return best;
+}
+
+json semantic_face_ref(const std::string& body_id, const std::string& element_id,
+                       const TopoDS_Shape& face) {
+    return {{"primary", {{"bodyId", body_id}, {"elementId", element_id}, {"kind", "face"}}},
+            {"intent", {{"kind", "face"},
+                         {"descriptor", em::ElementMapPartition::descriptor_to_json(
+                                            em::ElementMapPartition::describe(face))}}},
+            {"anchor", {{"worldPoint", {0.0, 0.0, 0.0}}}}};
 }
 
 // Sketch params: a w×h rectangle on the XY plane. World map (u,v)->(-v,u,0), so a
@@ -108,6 +127,77 @@ void test_to_face() {
     if (bodies.contains("body_ope"))
         check_near(onecad::session::shape_volume(bodies.get("body_ope")->geom), 2000.0, 1.0,
                    "toFace: reaches z=20 → volume 2000");
+}
+
+void test_to_face_refuses_a_laterally_disjoint_bounded_face() {
+    const TopoDS_Shape target =
+        BRepPrimAPI_MakeBox(gp_Pnt(50, 50, 20), 10.0, 10.0, 10.0).Shape();
+    const TopoDS_Shape bottom = face_by_center(target, 55, 55, 20);
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", target);
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"},
+               {"opId", "ope"},
+               {"params",
+                {{"sketchId", "sk1"},
+                 {"extrudeMode", "ToFace"},
+                 {"booleanMode", "NewBody"},
+                 {"targetFace", semantic_face_ref("body_target", "el_tf", bottom)}}}};
+    const ops::OpOutcome outcome = ops::execute_extrude(ctx, op, "ope");
+    check(outcome.status == ops::OpOutcome::Status::Failed,
+          "toFace disjoint bounded face: refused");
+    check(outcome.error_message.find("does not cover") != std::string::npos,
+          "toFace disjoint bounded face: refusal names bounded coverage");
+    check(!bodies.contains("body_ope"), "toFace disjoint bounded face: no body published");
+}
+
+void test_to_face_refuses_tilted_surface_until_exact_termination_exists() {
+    const TopoDS_Shape base =
+        BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 0), 10.0, 10.0, 10.0).Shape();
+    gp_Trsf rotation;
+    rotation.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0)), 0.2);
+    gp_Trsf translation;
+    translation.SetTranslation(gp_Vec(0, 0, 20));
+    BRepBuilderAPI_Transform xf(base, translation * rotation, Standard_True);
+    const TopoDS_Shape target = xf.Shape();
+    TopoDS_Shape tilted;
+    for (TopExp_Explorer it(target, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Current());
+        BRepAdaptor_Surface surface(face, true);
+        if (surface.GetType() != GeomAbs_Plane) continue;
+        const double z = std::abs(surface.Plane().Axis().Direction().Z());
+        if (z > 0.9 && z < 0.999) {
+            tilted = face;
+            break;
+        }
+    }
+    check(!tilted.IsNull(), "toFace tilted: target face found");
+    if (tilted.IsNull()) return;
+
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", target);
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"},
+               {"opId", "ope"},
+               {"params",
+                {{"sketchId", "sk1"},
+                 {"extrudeMode", "ToFace"},
+                 {"booleanMode", "NewBody"},
+                 {"targetFace", semantic_face_ref("body_target", "el_tf", tilted)}}}};
+    const ops::OpOutcome outcome = ops::execute_extrude(ctx, op, "ope");
+    check(outcome.status == ops::OpOutcome::Status::Failed,
+          "toFace tilted: refused instead of flat-cap success");
+    check(outcome.error_message.find("tilted target faces are refused") != std::string::npos,
+          "toFace tilted: refusal names unsupported exact termination");
+    check(!bodies.contains("body_ope"), "toFace tilted: no body published");
 }
 
 // A ToFace target whose body is gone ⇒ NeedsRepair STATE (never Err, never a bind).
@@ -281,6 +371,8 @@ void test_boolean_ignores_face_ref_at_input0() {
 
 int main() {
     test_to_face();
+    test_to_face_refuses_a_laterally_disjoint_bounded_face();
+    test_to_face_refuses_tilted_surface_until_exact_termination_exists();
     test_to_face_unresolved_needs_repair();
     test_to_next();
     test_to_next_miss_fails();

@@ -9,9 +9,11 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -22,7 +24,11 @@
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -30,6 +36,7 @@
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
 #include "elementmap/Ladder.h"
@@ -48,11 +55,20 @@ constexpr double kToFaceMin = 1e-3;  // RegenerationEngine.cpp:61 kMinValue (ToF
 constexpr double kThroughAllFallback = 1.0e5;    // RegenerationEngine.cpp:856
 constexpr double kDraftAngleEpsilon = 1e-4;      // RegenerationEngine.cpp:59
 constexpr double kSideFaceDotThreshold = 0.9;    // RegenerationEngine.cpp:60
+constexpr double kDraftSemanticAngleTolerance = 1.0e-6;  // radians
+constexpr double kToFaceAngularTolerance = 1.0e-7;        // radians
+constexpr double kToFaceCoverageRelativeTolerance = 1.0e-8;
 
 double solid_volume(const TopoDS_Shape& shape) {
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
     return props.Mass();
+}
+
+double face_area(const TopoDS_Shape& shape) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return std::abs(props.Mass());
 }
 
 std::string input_body(const json& op, std::size_t index) {
@@ -188,7 +204,8 @@ struct ToFaceResolve {
     std::string error;                 // hard error (e.g. non-planar / coincident)
 };
 
-ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt& origin,
+ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
+                              const TopoDS_Face& profile, const gp_Pnt& origin,
                               const gp_Dir& ref_dir, const std::string& ref_id) {
     ToFaceResolve out;
     if (!face_ref.is_object()) {
@@ -222,8 +239,12 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
     }
     gp_Pln target_pln;
     gp_Dir target_n;
-    if (res[0].bound_shape.ShapeType() != TopAbs_FACE ||
-        !planar_face_plane_normal(TopoDS::Face(res[0].bound_shape), target_pln, target_n)) {
+    if (res[0].bound_shape.ShapeType() != TopAbs_FACE) {
+        out.error = "ToFace target did not resolve to a face";
+        return out;
+    }
+    const TopoDS_Face target_face = TopoDS::Face(res[0].bound_shape);
+    if (!planar_face_plane_normal(target_face, target_pln, target_n)) {
         out.error = "ToFace target face is not planar";
         return out;
     }
@@ -234,9 +255,48 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
         out.error = "ToFace target plane is parallel to the extrude direction";
         return out;
     }
+    const double target_angle = std::acos(std::clamp(std::abs(denominator), 0.0, 1.0));
+    if (target_angle > kToFaceAngularTolerance) {
+        out.error =
+            "ToFace tilted target faces are refused until exact variable-height termination is available";
+        return out;
+    }
     const double distance = numerator / denominator;
     if (std::abs(distance) < kToFaceMin) {
         out.error = "ToFace target coincides with the sketch plane";
+        return out;
+    }
+
+    // "Up to selected face" means the translated profile must be contained by the
+    // bounded target face, not merely coplanar with its underlying surface.
+    try {
+        gp_Trsf translation;
+        translation.SetTranslation(gp_Vec(ref_dir) * distance);
+        BRepBuilderAPI_Transform moved(profile, translation, Standard_True);
+        if (!moved.IsDone() || moved.Shape().IsNull()) {
+            out.error = "ToFace could not project the profile onto the selected face";
+            return out;
+        }
+        BRepAlgoAPI_Common common(moved.Shape(), target_face);
+        common.SetRunParallel(Standard_False);
+        common.Build();
+        if (!common.IsDone() || common.HasErrors()) {
+            out.error = "ToFace could not prove bounded-face coverage";
+            return out;
+        }
+        const double expected_area = face_area(profile);
+        const double covered_area = face_area(common.Shape());
+        const double area_tolerance =
+            std::max(1.0e-8, expected_area * kToFaceCoverageRelativeTolerance);
+        if (!(expected_area > 0.0) ||
+            std::abs(covered_area - expected_area) > area_tolerance) {
+            out.error =
+                "ToFace selected face does not cover the entire projected profile";
+            return out;
+        }
+    } catch (const Standard_Failure& failure) {
+        out.error = std::string("ToFace bounded-face proof failed: ") +
+                    (failure.GetMessageString() ? failure.GetMessageString() : "OCCT");
         return out;
     }
     out.distance = distance;
@@ -271,7 +331,7 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
 
         BRepOffsetAPI_DraftAngle draft(shape);
         const gp_Pln neutral_plane = plane;
-        std::size_t eligible_faces = 0;
+        std::vector<TopoDS_Face> eligible_faces;
         std::size_t added_faces = 0;
         for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
             const TopoDS_Face face = TopoDS::Face(exp.Current());
@@ -280,7 +340,7 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
             gp_Dir face_normal = surf.Plane().Axis().Direction();
             if (face.Orientation() == TopAbs_REVERSED) face_normal.Reverse();
             if (std::abs(face_normal.Dot(draft_dir)) > kSideFaceDotThreshold) continue;  // top/bottom
-            ++eligible_faces;
+            eligible_faces.push_back(face);
             draft.Add(face, draft_dir, angle_rad, neutral_plane, true);
             if (!draft.AddDone()) {
                 draft.Remove(face);
@@ -294,10 +354,10 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
         const auto counts = [&](double angle) {
             return nlohmann::json{{"draft",
                                    {{"angleDeg", angle},
-                                    {"eligibleFaces", eligible_faces},
+                                    {"eligibleFaces", eligible_faces.size()},
                                     {"addedFaces", added_faces}}}};
         };
-        if (eligible_faces == 0) {
+        if (eligible_faces.empty()) {
             // No planar wall exists at all — a circular profile, for instance.
             failure = {"EXTRUDE_DRAFT_NO_PLANAR_FACE",
                        "Extrude draft refused: no eligible planar side faces",
@@ -312,8 +372,68 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
                        counts(draft_angle_deg)};
             return std::nullopt;
         }
+        if (added_faces != eligible_faces.size()) {
+            failure = {"EXTRUDE_DRAFT_PARTIAL_ACCEPTANCE",
+                       "Extrude draft refused: OCCT accepted only part of the eligible side set",
+                       counts(draft_angle_deg)};
+            return std::nullopt;
+        }
         draft.Build();
         if (draft.IsDone() && !draft.Shape().IsNull()) {
+            TopTools_IndexedMapOfShape result_faces;
+            TopExp::MapShapes(draft.Shape(), TopAbs_FACE, result_faces);
+            std::size_t measured_faces = 0;
+            double maximum_angle_error = 0.0;
+            for (const TopoDS_Face& original : eligible_faces) {
+                gp_Pln before_plane;
+                gp_Dir before_normal;
+                if (!planar_face_plane_normal(original, before_plane, before_normal)) {
+                    failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
+                               "Extrude draft refused: an eligible wall became unmeasurable",
+                               counts(draft_angle_deg)};
+                    return std::nullopt;
+                }
+                const TopTools_ListOfShape& successors = draft.Modified(original);
+                bool measured_successor = false;
+                for (TopTools_ListIteratorOfListOfShape it(successors); it.More(); it.Next()) {
+                    if (it.Value().ShapeType() != TopAbs_FACE ||
+                        result_faces.FindIndex(it.Value()) == 0) {
+                        continue;
+                    }
+                    gp_Pln after_plane;
+                    gp_Dir after_normal;
+                    if (!planar_face_plane_normal(TopoDS::Face(it.Value()), after_plane,
+                                                  after_normal)) {
+                        continue;
+                    }
+                    const double dot = std::clamp(
+                        std::abs(gp_Vec(before_normal).Dot(gp_Vec(after_normal))), 0.0, 1.0);
+                    const double measured_angle = std::acos(dot);
+                    maximum_angle_error =
+                        std::max(maximum_angle_error,
+                                 std::abs(measured_angle - std::abs(angle_rad)));
+                    measured_successor = true;
+                    ++measured_faces;
+                }
+                if (!measured_successor) {
+                    failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
+                               "Extrude draft refused: an eligible wall has no measurable successor",
+                               counts(draft_angle_deg)};
+                    return std::nullopt;
+                }
+            }
+            if (measured_faces < eligible_faces.size() ||
+                maximum_angle_error > kDraftSemanticAngleTolerance) {
+                nlohmann::json evidence = counts(draft_angle_deg);
+                evidence["draft"]["measuredFaces"] = measured_faces;
+                evidence["draft"]["maximumAngleErrorRad"] = maximum_angle_error;
+                evidence["draft"]["angleToleranceRad"] =
+                    kDraftSemanticAngleTolerance;
+                failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
+                           "Extrude draft refused: resulting wall angle does not match the request",
+                           std::move(evidence)};
+                return std::nullopt;
+            }
             const double before = solid_volume(shape);
             const double after = solid_volume(draft.Shape());
             const double tolerance = std::max(1e-9, std::abs(before) * 1e-10);
@@ -449,7 +569,8 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         if (m == "Blind" || m == "Symmetric") return blind;
         if (m == "ThroughAll") return through_all_distance(blind, origin, ref_dir, ref_shape);
         if (m == "ToFace") {
-            ToFaceResolve tf = resolve_to_face(ctx, face_ref, origin, ref_dir, ref_id);
+            ToFaceResolve tf =
+                resolve_to_face(ctx, face_ref, *profile, origin, ref_dir, ref_id);
             if (tf.needs_repair) { nr = tf.needs_repair; return std::nullopt; }
             if (!tf.distance) { err = tf.error; return std::nullopt; }
             return tf.distance;
@@ -463,6 +584,20 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         err = "Extrude: unknown end condition '" + m + "'";
         return std::nullopt;
     };
+
+    if (std::abs(draft_angle) > kDraftAngleEpsilon &&
+        (two_dirs || mode_str != "Blind")) {
+        const std::string message =
+            "Extrude draft refused: only a single-direction Blind end condition has proven draft semantics";
+        return draft_refusal(
+            DraftFailure{"EXTRUDE_DRAFT_END_CONDITION_UNSUPPORTED", message,
+                         nlohmann::json{{"draft",
+                                         {{"angleDeg", draft_angle},
+                                          {"eligibleFaces", 0},
+                                          {"addedFaces", 0},
+                                          {"endCondition", mode_str},
+                                          {"twoDirections", two_dirs}}}}});
+    }
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
