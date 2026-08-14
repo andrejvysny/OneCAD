@@ -38,8 +38,20 @@ that the change was unintended.
 
 | Suite | Rows | Recorded |
 |---|---|---|
-| `fillet/foundation:t0` | 136 | 2026-08-09, GH-0 WP0.3 |
+| `fillet/foundation:t0` | 136 | 2026-08-14, semantic-publication hardening |
 | `fillet/matrix:m1` | 120 | 2026-08-09, GH-0 WP0.3 |
+
+### 2026-08-14 T0 semantic update
+
+The production tolerance-growth gate intentionally changed eight `onecad/base`
+`valence4-*` rows from pass to characterization refusal. Their input maximum
+B-Rep tolerance is ~`1e-7 mm`; OCCT's otherwise BRep-valid outputs inflate it to
+`0.0086–0.4008 mm`, beyond the owned Fillet ceiling
+`max(0.001 mm, 2 × input + 0.000001 mm)`. The suite remains 136 records with
+128 passes, 8 characterizations, zero gating failures, zero differential
+regressions, and stable replay. Only those eight Linux normalized digests and the
+portable semantic counts were re-recorded from Actions run 48; this is the named
+policy change the manifest is meant to expose, not a geometry-baseline refresh.
 
 Both were captured with the worker built from `~/.onecad-occt/8.0.1` (pinned OCCT
 8.0.1). A different OCCT build is expected to move digests — that is the point of
