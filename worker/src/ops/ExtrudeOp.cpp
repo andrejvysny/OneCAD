@@ -27,7 +27,6 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
@@ -395,14 +394,14 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
                 }
                 const TopTools_ListOfShape& successors = draft.Modified(original);
                 bool measured_successor = false;
-                for (TopTools_ListIteratorOfListOfShape it(successors); it.More(); it.Next()) {
-                    if (it.Value().ShapeType() != TopAbs_FACE ||
-                        result_faces.FindIndex(it.Value()) == 0) {
+                for (const TopoDS_Shape& successor : successors) {
+                    if (successor.ShapeType() != TopAbs_FACE ||
+                        result_faces.FindIndex(successor) == 0) {
                         continue;
                     }
                     gp_Pln after_plane;
                     gp_Dir after_normal;
-                    if (!planar_face_plane_normal(TopoDS::Face(it.Value()), after_plane,
+                    if (!planar_face_plane_normal(TopoDS::Face(successor), after_plane,
                                                   after_normal)) {
                         continue;
                     }
