@@ -24,6 +24,21 @@ nlohmann::json audit_evidence(double radius,
           {"outputAudit", output.to_json()}};
 }
 
+nlohmann::json blend_evidence_json(const FilletSemanticResult &semantics) {
+  const BlendEvidence &blend = semantics.evidence.blend;
+  return {{"generatedFaceCount", semantics.evidence.generated_face_count},
+          {"supportFaceCount", semantics.evidence.support_face_count},
+          {"boundaryCount", blend.boundaries},
+          {"sampleCount", blend.samples},
+          {"maximumTangencyRadians", blend.maximum_tangency_radians},
+          {"allowedTangencyRadians", semantics.allowed_tangency_radians},
+          {"maximumSectionRadiusError", blend.maximum_profile_error},
+          {"allowedSectionRadiusError", semantics.allowed_profile_error},
+          {"minimumSectionRadius", blend.minimum_section_radius},
+          {"maximumSectionRadius", blend.maximum_section_radius},
+          {"coordinateMagnitude", blend.coordinate_magnitude}};
+}
+
 } // namespace
 
 FilletBuilder::FilletBuilder(TopoDS_Shape body,
@@ -126,10 +141,17 @@ FilletBuildResult FilletBuilder::accept_result() {
                                 "Fillet result failed shape audit",
                                 "FILLET_INVALID_RESULT", output_audit);
   }
-  const FilletSemanticResult semantics = validate_result(*builder_, analysis_);
+  const FilletSemanticResult semantics = validate_result(
+      *builder_, analysis_, body_, shape, requested_, radius_);
   if (!semantics.ok) {
-    return fail_with_diagnostic("GEOMETRY_INVALID", semantics.message,
-                                "FILLET_SEMANTIC_CHECK_FAILED", output_audit);
+    FilletBuildResult failure = fail_with_diagnostic(
+        "GEOMETRY_INVALID", semantics.message,
+        "FILLET_SEMANTIC_CHECK_FAILED", output_audit);
+    if (!failure.diagnostics.empty())
+      failure.diagnostics.front().evidence["blendEvidence"] =
+          blend_evidence_json(semantics);
+    failure.fillet_evidence = semantics.evidence;
+    return failure;
   }
 
   FilletBuildResult result;
@@ -138,6 +160,7 @@ FilletBuildResult FilletBuilder::accept_result() {
   result.analysis = analysis_;
   result.input_audit = input_audit_;
   result.output_audit = output_audit;
+  result.fillet_evidence = semantics.evidence;
   return result;
 }
 

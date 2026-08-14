@@ -122,6 +122,7 @@ add_library(worker_core STATIC
     src/kernel/fillet/FilletBuilder.cpp
     src/kernel/fillet/EdgeContour.cpp
     src/kernel/fillet/FilletSemanticChecks.cpp
+    src/kernel/fillet/BlendEvidence.cpp
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
     src/ops/BooleanOp.cpp

@@ -1206,8 +1206,11 @@ Fillet execution is constant-radius only. `radius` MUST be finite and at least
 `1e-3` mm. The worker MUST NOT clamp it or retry with a different radius. OCCT
 contours are authoritative: duplicate requested edges on one contour are built
 once, and every requested edge MUST belong to a known contour. A successful
-contour MUST retain a constant law equal to the requested radius and publish
-generated blend-face evidence.
+contour MUST retain a constant law equal to the requested radius. Publication
+then independently measures builder-history-derived blend faces inside the actual
+result: at least two measurable support boundaries, interior curvature samples,
+section radius within the scale/conditioning budget, and G1 tangency within its
+angular budget. Missing evidence is UNKNOWN and therefore refused.
 
 Before publication, Fillet rejects null/invalid/non-single-solid/non-positive
 results, self-interference, OCCT partial results, and `BadShape`. Shape audit
@@ -3103,6 +3106,12 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-14 — §7.3 Fillet geometric-proof hardening.** Production Fillet
+  now uses the same neutral trimmed-domain measurement core as kernelbench:
+  builder-history blend/support faces, measured section radius, and measured G1
+  boundary tangency. Missing samples/boundaries are UNKNOWN and refuse commit;
+  OCCT's assigned radius law and generated-face count remain supporting evidence,
+  not the final semantic authority. Payload shape is unchanged.
 - **2026-08-14 — §7.3 `Extrude.ToFace` bounded-face hardening.** V1 now
   proves full projected-profile coverage by the selected trimmed face and refuses
   laterally disjoint, smaller, or holed targets. Tilted/curved targets are refused

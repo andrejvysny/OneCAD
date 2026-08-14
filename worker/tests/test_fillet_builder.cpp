@@ -64,6 +64,19 @@ void test_single_and_duplicate_contour() {
   check(one.ok && one.output_audit.publishable(),
         "single edge fillet publishes valid solid");
   check(one.analysis.contours.size() == 1, "single edge owns one contour");
+  check(one.fillet_evidence.generated_face_count > 0 &&
+            one.fillet_evidence.support_face_count >= 2 &&
+            one.fillet_evidence.blend.boundaries >= 2 &&
+            one.fillet_evidence.blend.samples > 0,
+        "single edge fillet carries measured blend/support evidence");
+  check(one.fillet_evidence.blend.maximum_profile_error <=
+            kf::fillet_section_radius_limit(
+                1.0, one.fillet_evidence.blend.coordinate_magnitude),
+        "single edge fillet proves the resulting section radius");
+  check(one.fillet_evidence.blend.maximum_tangency_radians <=
+            kf::fillet_tangency_limit(
+                1.0, one.fillet_evidence.blend.coordinate_magnitude),
+        "single edge fillet proves G1 support tangency");
   check(one.output_audit.tolerances.face <= 1.0e-6 &&
             one.output_audit.tolerances.edge <= 1.0e-6 &&
             one.output_audit.tolerances.vertex <= 1.0e-6,
