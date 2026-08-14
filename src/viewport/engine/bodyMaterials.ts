@@ -56,6 +56,8 @@ const VERTEX_COLOR_BASE = new THREE.Color(1, 1, 1);
 export class BodyMaterialLibrary {
   private readonly sets = new Map<MaterialKind, BodyMaterialSet>();
   private readonly savedFaceStates = new Map<MaterialKind, SavedFaceState>();
+  /** Per-body material sets for the assembly-colors mode. */
+  private readonly assemblySets = new Map<string, BodyMaterialSet>();
   private dimmed = false;
   /** Face color override (Cut tint); `null` = the palette default. Never a borrowed instance. */
   private faceColor: THREE.Color | null = null;
@@ -69,6 +71,22 @@ export class BodyMaterialLibrary {
       // A set born while the library is dimmed still needs the dim; its saved
       // prior is its constructor defaults, so undimming restores it correctly.
       if (this.dimmed) this.applyDim(kind, set);
+    }
+    return set;
+  }
+
+  /**
+   * Material set for a specific body in `assemblyColor` mode. Colors are
+   * deterministic from `bodyId` so they are stable across reloads and sessions,
+   * and the set is cached per body so repeated calls return the same instance.
+   */
+  getAssemblyColor(bodyId: string): BodyMaterialSet {
+    let set = this.assemblySets.get(bodyId);
+    if (!set) {
+      set = this.create("assemblyColor");
+      set.face.color.copy(assemblyColorForBody(bodyId));
+      this.assemblySets.set(bodyId, set);
+      if (this.dimmed) this.applyDim("assemblyColor", set);
     }
     return set;
   }
@@ -193,6 +211,12 @@ export class BodyMaterialLibrary {
       set.edge.color.copy(palette.bodyEdge());
       set.edgeWire.color.copy(palette.bodyEdgeWire());
     }
+    // Assembly-color sets keep their per-body face color; only the edges follow
+    // the theme, exactly like the shared sets.
+    for (const set of this.assemblySets.values()) {
+      set.edge.color.copy(palette.bodyEdge());
+      set.edgeWire.color.copy(palette.bodyEdgeWire());
+    }
   }
 
   /**
@@ -213,6 +237,35 @@ export class BodyMaterialLibrary {
       set.edgeWire.dispose();
     }
     this.sets.clear();
+    for (const set of this.assemblySets.values()) {
+      set.face.dispose();
+      set.edge.dispose();
+      set.edgeWire.dispose();
+    }
+    this.assemblySets.clear();
     this.savedFaceStates.clear();
   }
+}
+
+/**
+ * Deterministic, visually-distinct color for a body id. Uses a hash to spread
+ * body ids evenly around the hue wheel, then fixes saturation and lightness to
+ * the pastel/mid-tone range common in CAD assembly views.
+ */
+function assemblyColorForBody(bodyId: string): THREE.Color {
+  const c = new THREE.Color();
+  c.setHSL(hashHue(bodyId), 0.58, 0.62);
+  return c;
+}
+
+/** Hash a string to a hue in [0, 1). */
+function hashHue(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  // Mix the low bits so similar UUIDs (same prefix) still spread well.
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h % 1000) / 1000;
 }

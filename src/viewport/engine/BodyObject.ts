@@ -72,8 +72,18 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
   const kindFor = (def: RenderModeDef): MaterialKind =>
     entry.hasVertexColors ? vertexColorKind(def.materialKind) : def.materialKind;
 
+  // Assembly colors need a per-body material so each body can be tinted
+  // independently without leaking onto other bodies. This lookup is also used
+  // when the active mode is assemblyColors, so the shared material discipline is
+  // preserved for every other mode.
+  const setFor = (def: RenderModeDef): BodyMaterialSet => {
+    const kind = kindFor(def);
+    if (kind === "assemblyColor") return library.getAssemblyColor(entry.bodyId);
+    return library.get(kind);
+  };
+
   const defaultDef = RENDER_MODES[DEFAULT_RENDER_MODE];
-  const materials = library.get(kindFor(defaultDef));
+  const materials = setFor(defaultDef);
   const group = new THREE.Group();
   group.name = `body:${entry.bodyId}`;
   group.userData.bodyId = entry.bodyId;
@@ -99,7 +109,7 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
     },
     applyMode(def: RenderModeDef) {
       faceMesh.visible = def.faceVisible;
-      const set = library.get(kindFor(def));
+      const set = setFor(def);
       faceMesh.material = set.face;
       if (edges) {
         edges.visible = def.edgeVisible;
