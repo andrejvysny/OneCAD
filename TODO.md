@@ -1,5 +1,105 @@
 # OneCAD-Tauri Migration TODO
 
+## DATA-INTEGRITY AUDIT (2026-08-14) — INVESTIGATION ONLY, NO FIX LANDED
+
+Question asked: **can OneCAD lose or corrupt a user's document, and how?** Eight probes over the
+persistence lane. Two probes are committed as executable evidence; everything else is a read with
+`file:line`. **No fix is implemented — which of DI-1…DI-5 gets built, and in what order, is a
+product call.**
+
+### Why this ran at all — the ledger was wrong in BOTH directions
+
+The two entries this repo carried as open data-integrity defects turned out to be closed:
+
+- **VF-M6** (`imports.rs` blob lifecycle, 3 defects) was fixed 2026-08-08 and the box was never
+  ticked. Six days as a phantom open bug.
+- **The W5 promoted-id seam** is real as a mechanism but its consumer was deleted in `1fe0cef`;
+  it is latent, not user-reachable.
+
+Both are corrected in place. The rule this suggests: an open box that cites `file:line` must be
+re-verified against the live tree before it is believed — line numbers drift, and a fix landing in
+another package does not tick anyone else's box.
+
+### Verified SAFE (each with the evidence that would have caught the bug)
+
+- [x] **Crash recovery exists and is well built.** 30 s *debounced* autosave (not a fixed cadence),
+      pid-stamped session marker, and both writers serialized on one persistence lane with the
+      documented lock order runtime → release → lane (`src-tauri/src/autosave.rs:1-40,62,124`).
+      Zero autosave activity with no document open.
+- [x] **The container write is atomic.** Sibling temp → `fsync` → `rename` → parent-dir `fsync`
+      (`onecad-core/src/io/container.rs:37-44,383`), with a crash-between-temp-and-rename test at
+      `:1367` and a dedicated `save_to_temp_for_test` seam at `:339`. A crash or a full disk cannot
+      leave a short, valid-looking `.onecad`.
+- [x] **Import blob refcount vs undo is not a loss window.** A save drops blobs no live record
+      names, but the in-session carrier is INSERT-ONLY (`document_runtime.rs:2114,2184,2256` — no
+      remove/retain/clear anywhere) and the undo stack is memory-only (`edit/undo.rs:317`, nothing
+      in `container.rs` persists it). So the sequence that would strand a record — remove import →
+      save → undo → regen — still has the bytes. Suppressed and rolled-back records pin their blobs
+      deliberately (`io/imports.rs:179-183`).
+- [x] **A save cannot capture a half-committed regen.** `build_save_payload` runs under the runtime
+      lock; only the container write is off-lock, on a blocking thread, under the lane
+      (`autosave.rs:27-40`). Regen commits under the same lock in `finish_regen`.
+- [x] **Unknown module state round-trips verbatim** per ADR-0004, pinned by
+      `container.rs:1296 unknown_module_state_survives_open_modify_save` plus an odd-payload case
+      at `:1345`.
+- [x] **Every `EditCommand` has a real inverse.** The `Inverse` family covers records, cursor,
+      sketches, bodies, datums, variables, module state and repair, with `Composite` for
+      multi-subsystem commands (`edit/undo.rs:48-127`). The one `Inverse::Noop` producer is a
+      genuine no-op (`edit/session.rs:900` — rolling to the row the bar already sits on).
+
+### FINDINGS — recorded, not fixed
+
+- [ ] **DI-1 (HIGH) — a recovered document is unprotected against the NEXT crash.**
+      `api::recover_document` consumes the crash marker (`api/mod.rs:796`) while deliberately
+      keeping the autosave file, on the stated reasoning that "the autosave file itself is kept so a
+      re-crash before the next tick still recovers". That reasoning is false: discovery iterates
+      `*.session.json` MARKERS (`io/recovery.rs:140-181`), so a kept autosave with no marker is
+      unreachable. **Probe committed:**
+      `io::recovery::tests::an_autosave_whose_marker_was_consumed_is_not_offered`, with the
+      marker-present control right above it. Fix options differ in their stale-offer profile: keep
+      the marker until the next autosave supersedes it · write a fresh marker at recovery · scan
+      autosave files as a fallback. ~½ day including the lane test.
+- [ ] **DI-2 (MEDIUM-HIGH) — `recover_document` never ticks the autosave loop.** It sets
+      `dirty = true` (`document_runtime.rs:2073-2076`) but does not call `state.note_mutation()`,
+      and the autosave loop is driven ONLY by that tick — it never reads `is_dirty`
+      (`autosave.rs:255-282`). Protection is incidental, from the tick a *published* regen bumps
+      (`lib.rs:174-176`). If the recovery replay fails, no-ops or is cancelled, nothing is
+      autosaved — and by DI-1 there is no marker either. One line to fix; the value is in the test.
+- [ ] **DI-3 (MEDIUM) — two commands mutate persisted state with no tick and no dirty flag.**
+      `promote_selection` (`api/mod.rs:1378`) and `prepare_edge_op` (`api/mod.rs:2207`) both write
+      `regen.elements` (`document_runtime.rs:3260`), which `build_save_payload` persists as
+      `doc.elements` (`:1914`). Neither calls `note_mutation`, and Rust reports `dirty:false`, so
+      `appStore.requestClose` takes the clean fast path and closes without a prompt. The rows are
+      identity plumbing rather than user intent, which is why this is not HIGH — but "persisted by
+      save, invisible to both the autosave tick and the unsaved guard" is a state no other mutation
+      is in. Audit rows: all 55 Tauri commands were classified; these two plus DI-2 are the only
+      mutating rows without a tick, and no non-mutating row has a spurious one.
+- [ ] **DI-4 (MEDIUM) — an authored FACE COLOUR survives as data but stops being paintable after a
+      reopen.** `SetFaceColor` keys on the Rust-minted `ElementId`; the frontend paints it through
+      exactly two paths (`meshSync.resolveAuthoredFaceColors`) and both bottom out in the worker's
+      element-map partition, which is minted on demand and dies with the process. `BindElementIds`
+      has ONE production call site — inside `promote_selection` — and nothing re-binds a persisted
+      id at open. **Probe committed:** `src-tauri/tests/face_color_reopen.rs`, real worker, save →
+      fresh worker → reopen. Measured: the colour is still in the reopened projection under the same
+      id, the mesh id table carries TopoKeys (`idsHaveElementIds:false`) and `elementInfo` answers
+      `None`. In-session controls sit beside both measurements, and the assertion was
+      **mutation-proved** (inverting it reds the test). Same root as the W5 seam, so one fix —
+      re-binding persisted ElementIds at open — closes both.
+- [ ] **DI-5 (LOW-MEDIUM) — the STEP round-trip is lossy on the way out.** Import keeps XCAF names
+      and colours (BinXCAF replay, `SCHEMA.md:2373`), but export is a bare `STEPControl_Writer`
+      (`worker/src/io/ExportStep.cpp:12,52,59`) with no XCAF document, so names and colours are
+      dropped. A file that came in coloured leaves grey. Relevant to the machined-parts priority,
+      where the exported STEP is the deliverable.
+
+Gates for the audit itself (measured 2026-08-14): `cargo fmt --all --check` clean · `cargo clippy
+--workspace --all-targets -D warnings` clean · worker-backed
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1101 passed / 0 failed across 76
+result lines**, including the two new probes. (That count is not comparable to the 810/69 figure in
+the session-8 ledger — this run tallies every result line, doc-tests included. The number that
+matters is zero failures.) The `face_color_reopen` assertion was mutation-proved: inverting it reds
+the test, reverting it greens it again. No frontend or browser gate is owed — no `src/` file
+changed.
+
 ## NOW — MODELING UX UNIFICATION, U0–U7 (2026-08-14, plan `~/.claude/plans/bright-munching-oasis.md`)
 
 Source: the two documents in `UX/` — the senior UX audit (2026-08-11) and the b022edf7-pinned
@@ -1766,7 +1866,22 @@ User priorities: 3D-print + machined parts + daily driver; light multi-part (no 
   - [x] **W4.5 BACKEND GATE (2026-08-02, commit 7a39f47)**: XcafCodec canonical BinXCAF (storage v12 pinned; AddShape label-collapse guarded), XcafRead GEOMETRIC face binder (TShape identity impossible across readers; ambiguous keys dropped never guessed; solid-label color FILL — XCAF doesn't inherit downward, whole-part-blue was 0/6), ImportOp xbf codec + BodyRecord face_colors → Mesh1 FACE_COLORS (color-less bodies byte-identical, asserted). **THIRD stdout defect**: TDocStd_Application PRIVATE messenger → 58B ANSI on fd1 per bad .xbf — re-pointed, 0-byte pinned. Per-ordinal productNames (per-root named nothing on multi-solid). xbf byte-deterministic (content-addressing). ctest 84/84 · cargo 654/0 · colored-fixture match 10/10.
   - [x] **W4.5-FE GATE (2026-08-02, commit 885d92e)**: FACE_COLORS ingestion — de-index preserves triangle ordinals (Picker/Highlight/Ghost verified + real-raycast pin of three.js non-indexed faceIndex semantics); shadedVertex MaterialKind white-base; unset faces baked from body token + theme REBAKE in-place (negative-checked ×3); mock lane + e2e live-scene assertions. tsc 0 · FE 2223/162 · e2e step-import 4/4 · hex clean.
   - **WP-A COMPLETE 2026-08-02** (W6 probe-preflight-dialog + progress frames deferred by design). Real STEP import: Start Screen + File menu → XCAF names+colors → first-class downstream ops → process-death-stable identity.
-  - [ ] SEAM (W5 finding, pre-existing SKETCH-ON-FACE): promoted-but-unconsumed ElementId does not survive process death (`DocumentRuntime::promoted` in-memory; HostFace attachment is not an op input, so the partition never mints it) ⇒ after reopen, re-promoting a face pick yields a fresh id that will never equal the persisted `SketchDto.hostFace.elementId` — exactly the comparison face-sketch dblclick re-entry uses; same mismatch possible without reopen (promotion cache keyed (body, TopoKey), regen may renumber ordinals). Route to face-sketch re-entry owner.
+  - [x] SEAM (W5 finding, pre-existing SKETCH-ON-FACE) — **LATENT, not user-reachable.** Re-traced
+        2026-08-14. The identity half is REAL and unchanged: `DocumentRuntime::promoted` is in-memory
+        (`document_runtime.rs:503`), `host_face` is stripped from the wire before the worker sees it
+        (`worker/wire.rs:275`, pinned by `sketch_host_face_is_dropped_from_the_wire_params`), so the
+        partition can never echo an `existing` id and a post-reopen promotion mints a fresh UUID
+        (`regen/engine.rs:759`). What is GONE is the consumer: the dblclick re-entry that compared the
+        two was deleted in `1fe0cef` — double-click now selects the connected body
+        (`ViewportRoot.tsx:414-437`), and `e2e/sketch-on-face.spec.ts:378,392` pins that it must never
+        enter sketch mode. Surviving `hostFace` readers use presence or `bodyId` only
+        (`reattachActions.ts:46`, `ModelToolController.ts:1576`). The finding's second clause is stale
+        too: the promotion cache has been keyed `(SnapshotId, BodyId, TopoKey)` since VF-M4, with
+        descriptor-pinned cross-generation reuse, so an ordinal renumber yields a MISS, never a wrong
+        bind. **What would wake it:** any new consumer comparing a fresh promotion to a persisted
+        `hostFace.elementId`. The two doc comments that advertised that contract now say so
+        (`src-tauri/src/dto.rs`, `document_runtime.rs::sketch_host_face`). No reopen+re-entry test
+        exists in any suite — `sketch_on_face.rs:1597` reopens but never re-promotes.
 - [ ] **WP-B BODY-TRANSFORM** (in flight 2026-08-03):
   - [x] **W0 GATE (2026-08-03, commit 0dc8c91)**: core TransformBodyParams + `can_fold_transform` lineage query; **edit-safety gate REFINED from blanket-ban to edit-time seeding** — level-1 partition rebinds stay exact under rigid motion (new worker `apply_placement` moves stored anchors WITH the body, fixing the pre-existing stale-anchor latent in `apply_history`), so healthy transform-then-fillet resolves 0 needsRepair; params edit or suppress toggle on a TransformBody seeds NeedsRepair on downstream lineage refs (rides the command's undo entry, cleared by repair resolution). Worker TransformOp (normative T∘R, copy:false modify-in-place id-preserved, copy:true §2 N-body minting). Proofs: ctest 85/85 · cargo 680/0 vs real worker (transform_body 8/8: healthy flow clean, edit ⇒ seeded NeedsRepair never silent re-bind, undo exact hash, multi-target, T∘R order pin). NOTE: implementing agent died at spend limit AFTER completing code+tests; orchestrator verified all suites + safety pieces directly and committed.
   - [x] **W1 GATE (2026-08-03, commit a540e74)**: FSM full-vector state (chip value = view of addressed component — axis switch can't clobber siblings); fold = backend query AND stored-targets==selection (per-body query would widen single-body records); NO PreviewOp lane (rigid ghost kernel-exact, documented); mock transformMesh1 re-derives bbox/FACE_BBOXES from moved data (pinned numerically). FE 2299/166 · e2e 124/124.
@@ -1806,7 +1921,15 @@ NOT next: assemblies/mates, Loft/Sweep, drawings.
 - [x] VF-M3 (FIXED H4) `AcquireElementIds` stale-snapshot fallback promotes nearest-centroid with NO score/margin/NeedsRepair (`ElementIdentity.cpp:50-66`; `snapshotId` request field ignored) — a pick against an already-regenerated snapshot mints a persistent id for an arbitrary face. Fixed on BOTH halves: Rust `gate_stale_pick` + worker `REF_UNRESOLVED` on a non-head `snapshotId`, plus a proportional anchor-fallback veto (`1.0·descriptor.size + 1 mm`, NOT the 0.85 descriptor gate).
 - [x] VF-M4 (FIXED H4) promoted-ElementId cache (`document_runtime.rs:2024`) keyed (body, topoKey) never invalidated by regen — returns a WRONG id (not just missing) after ordinal renumber; blast radius: face-dblclick re-entry, sketch-on-face arming, selection stamps, worker double-mint (one face, two ids). Supersedes the TODO.md:20 process-death seam (in-session aliasing is the sharper half). Re-keyed `(SnapshotId,BodyId,TopoKey)→PromotionEntry`, 2-generation prune, descriptor-pinned cross-generation reuse.
 - [ ] VF-M5 from-0 replay ladder scores stale WORLD anchors (`Scoring.cpp:82-86`, localFrame migrated but unread) — congruent-decoy binds at the old anchor position after a translating edit (H5-B residual; incremental path immune, so behavior differs by checkpoint availability). Plus 1 mm anchor-scale floor makes sub-2 mm parts NeedsRepair-by-default.
-- [ ] VF-M6 imports: converted-blob size never checked pre-authoring (`imports.rs:288` caps source only) → over-cap conversion = permanently unsaveable document (save fails whole); 7-day workspace sweep ignores the pid it embeds (`imports.rs:216`) — second instance can delete a live instance's blobs; macOS $TMPDIR purge (~3 d) deletes materialized blobs and `materialize` (`imports.rs:183`) never re-creates (bookkeeping check, not `is_file`).
+- [x] VF-M6 imports — **ALL THREE FIXED 2026-08-08**, see § VF-M5+VF-M6 DEFECT FIXES. This box was
+      never ticked and read as an open data-integrity defect for six days; re-verified against the
+      live tree 2026-08-14. Converted-blob cap `src-tauri/src/imports.rs:369` (rejects before the
+      record is authored, so the "permanently unsaveable document" cannot be created); PID-aware
+      sweep `:266` via `is_process_alive` (`libc::kill(pid,0)`, and non-unix treats unknown pids as
+      ALIVE so it never guesses); `materialize` `:183` gates on `path.is_file()`, so a $TMPDIR purge
+      re-creates the blob instead of arming the job against a missing file. Original finding text:
+      converted-blob size never checked pre-authoring; 7-day sweep ignored the pid it embeds;
+      `materialize` did a bookkeeping check rather than `is_file`.
 - [ ] VF-M7 `HoleOp.cpp:106` (and `ShellOp.cpp:89`) apply a partition entry's topoKey ordinal to the TARGET body without checking `entry->body_id` — cross-body elementId binds the Nth face of the wrong map silently (`FaceProjection.cpp:96` does it right).
 - [x] VF-M8 (FIXED W4) undo of a multi-transform cascade suppression restores repair state in the wrong order (`undo.rs:174` .rev() vs `session.rs:803` outward wrap) — first gate's seeds survive undo, regen stays truncated until a bogus manual repair.
 - [ ] Minors (agent transcripts, fold into adjacent fixes): malformed-frame worker teardown deferred to ping (~10 s window); 1 GiB per-frame reserve on header trust; `existing` set always empty in AdoptingEngine (D1 uniqueness vs base inert); checkpointId minted differently Rust vs worker; ladder margin two conventions + Hungarian-assigned candidate absent from evidence; split/merged events bypass D1 validation (unreachable today); interner silent no-op on lock poison; Hole depth (0,1e-3) session-accepts/worker-rejects + no cbDepth<depth cross-check; settingsStore no quota guard.

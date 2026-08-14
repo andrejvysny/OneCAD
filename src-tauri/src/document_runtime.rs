@@ -3976,11 +3976,14 @@ fn sketch_geometry_token(sketch: &Sketch) -> String {
 
 /// The host-face identity of a face-attached sketch, for the projection.
 ///
-/// Only the `primary` binding is projected — that is the pair the frontend
-/// compares a promoted face pick against (SKETCH-ON-FACE W3: double-clicking a
-/// face re-enters a sketch already hosted there). A `HostFace` attachment with no
-/// `primary` is a face bound by evidence alone; it has no id to compare, so it
-/// projects as `None` rather than as a fabricated one.
+/// Only the `primary` binding is projected. It was built as the pair the frontend
+/// compared a promoted face pick against (SKETCH-ON-FACE W3: double-clicking a face
+/// re-entered a sketch already hosted there); that consumer was removed in
+/// `1fe0cef`, and today the projection is read for presence and for its `body_id`
+/// only — see [`crate::dto::SketchHostFaceDto`] for the seam a new comparing
+/// consumer would have to close first. A `HostFace` attachment with no `primary` is
+/// a face bound by evidence alone; it has no id to project, so it projects as
+/// `None` rather than as a fabricated one.
 fn sketch_host_face(sketch: &Sketch) -> Option<SketchHostFaceDto> {
     match &sketch.attachment {
         SketchAttachment::HostFace { face, .. } => {

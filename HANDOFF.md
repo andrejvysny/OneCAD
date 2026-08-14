@@ -44,9 +44,47 @@ user's explicit call).
    mechanism cannot explain it. Still un-root-caused, still recorded, still not
    retried away.
 
+## Session 9b — the data-integrity audit
+
+Asked "what next", the direction chosen was data-integrity defects, scope **investigate first,
+then decide**. That scope was the right call, because the two recorded defects were not open:
+VF-M6 had been fixed on 2026-08-08 with the box never ticked, and the W5 promoted-id seam lost its
+consumer in `1fe0cef`. **The ledger was wrong in both directions** — this repo has repeatedly
+recorded closed-but-open (MC-R8, D1, D9, D14) and now open-but-closed. Treat an open box citing
+`file:line` as a hypothesis until re-verified; line numbers drift and a fix landing in one package
+never ticks another package's box.
+
+So the audit went and looked instead. Eight probes, full table in `TODO.md` § DATA-INTEGRITY AUDIT.
+
+**Safe, with the evidence that would have caught the bug:** crash recovery exists and is well built
+· the container write is atomic and has a crash-simulation test · the import-blob carrier is
+insert-only and the undo stack never persists, so the remove→save→undo sequence has no loss window
+· a save snapshots under the runtime lock · unknown module state round-trips verbatim · every
+`EditCommand` has a real inverse.
+
+**Five findings, none fixed** — DI-1 (HIGH) a recovered document is unprotected against the next
+crash, because recovery consumes the marker and discovery is marker-keyed, contradicting the
+comment that says otherwise; DI-2 `recover_document` never ticks the autosave loop; DI-3
+`promote_selection` / `prepare_edge_op` persist state with no tick and no dirty flag, so the close
+prompt is skipped; DI-4 an authored face colour reopens as data but neither paint path can find its
+face; DI-5 STEP export drops XCAF names and colours.
+
+Two probes are committed as executable evidence rather than prose:
+`src-tauri/tests/face_color_reopen.rs` (real worker, save → fresh worker → reopen, in-session
+controls beside both measurements, assertion mutation-proved) and
+`io::recovery::tests::an_autosave_whose_marker_was_consumed_is_not_offered`.
+
+DI-4 and the W5 seam share one root — nothing re-binds a persisted `ElementId` at open — so one fix
+closes both.
+
 ### How to resume
 
-The program is complete and committed. Next is a product call, not a task:
+The UX program is complete and committed. The audit is complete and NOT committed. Next is a
+product call, not a task:
+
+0. **Decide which of DI-1…DI-5 to build.** DI-1 + DI-2 are the same half-day and are the only ones
+   that lose real work. DI-4 is the interesting one architecturally (persisted-id re-binding).
+
 
 1. **U8 (typed face/datum/axis references)** — queued since planning, never
    scheduled against the other roadmap tracks.

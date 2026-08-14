@@ -56,15 +56,19 @@ pub enum SketchStatus {
 
 /// The model face a sketch is hosted on (`types.ts` `SketchHostFace`).
 ///
-/// Projected from [`SketchAttachment::HostFace`](onecad_core::sketch::SketchAttachment)
-/// so the frontend can answer "is there already a sketch on this face?" without a
-/// round-trip — the double-click-a-face re-entry (SKETCH-ON-FACE W3). Identity
-/// ONLY: the frozen basis, the anchor and the worker-owned `intent` descriptor are
-/// deliberately NOT projected (the sketch's own `plane` is the basis authority,
-/// and the descriptor is evidence the core never interprets).
+/// Projected from [`SketchAttachment::HostFace`](onecad_core::sketch::SketchAttachment).
+/// Identity ONLY: the frozen basis, the anchor and the worker-owned `intent`
+/// descriptor are deliberately NOT projected (the sketch's own `plane` is the basis
+/// authority, and the descriptor is evidence the core never interprets).
 ///
 /// `body_id`/`element_id` render exactly as [`BodyDto::id`] and a promoted
-/// `elementId` do, so a face pick's promoted id compares `==` against this.
+/// `elementId` do. **Nothing in the frontend compares them today**: the
+/// double-click-a-face re-entry this was built for (SKETCH-ON-FACE W3) was removed
+/// in `1fe0cef` — double-click now selects the connected body, pinned by
+/// `e2e/sketch-on-face.spec.ts`. Any future consumer that DOES compare a fresh
+/// promotion against a persisted `element_id` must first read the seam recorded in
+/// `TODO.md` (W5): promotion ids are minted in memory and never survive process
+/// death, so the comparison fails on the first reopen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SketchHostFaceDto {

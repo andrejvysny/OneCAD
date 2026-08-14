@@ -1,8 +1,30 @@
 # Current State
 
-Last verified: 2026-08-14 15:05 — modeling UX unification U0–U7 complete; both browser lanes green, tranche committed
+Last verified: 2026-08-14 16:20 — UX tranche committed (`0e58185`); data-integrity audit run, five findings recorded, no fix landed
 
-## NOW — MODELING UX UNIFICATION (sessions 8–9)
+## NOW — DATA-INTEGRITY AUDIT (session 9, uncommitted)
+
+- **Question:** can OneCAD lose or corrupt a user's document? Eight probes over the persistence
+  lane; full findings table in `TODO.md` § DATA-INTEGRITY AUDIT.
+- **Safe, with evidence:** crash recovery exists (30 s debounced autosave + pid marker + one
+  persistence lane) · the container write is atomic (temp → fsync → rename → parent fsync, with a
+  crash-simulation test) · the import-blob carrier is insert-only and the undo stack is memory-only,
+  so no unreplayable-record window · a save snapshots under the runtime lock · unknown module state
+  round-trips verbatim · every `EditCommand` has a real inverse.
+- **Five findings, none fixed:** DI-1 a recovered document is unprotected against the next crash
+  (recovery consumes the marker, and discovery is marker-keyed) · DI-2 `recover_document` never
+  ticks the autosave loop · DI-3 `promote_selection` / `prepare_edge_op` persist state with no tick
+  and no dirty flag, so close skips the prompt · DI-4 authored face colours reopen as data but stop
+  being paintable · DI-5 STEP export drops XCAF names/colours.
+- **Two probes committed as executable evidence:** `src-tauri/tests/face_color_reopen.rs` (real
+  worker, save → fresh worker → reopen; mutation-proved) and
+  `io::recovery::tests::an_autosave_whose_marker_was_consumed_is_not_offered`.
+- **Ledger corrections:** VF-M6 was fixed 2026-08-08 and never ticked; the W5 seam is latent, not
+  live; MC-R8 is closed (`19088d0`) and MC-R9 was missing from the residual register entirely. The
+  register now carries an explicit `status` field instead of closure buried in prose.
+- **Blockers:** none. Which findings get fixed is a product call, not a defect queue.
+
+## Previous — MODELING UX UNIFICATION (sessions 8–9)
 
 - **Branch:** `master`, **in sync with `origin/master` at `4ac8565`** (session 8's "2 ahead,
   nothing pushed" is stale: `cf6273d`/`dc4bd5e` plus `9559b8f`, `19088d0`, `f9df6b7`, `4ac8565`
