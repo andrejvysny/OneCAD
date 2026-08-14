@@ -162,7 +162,8 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
 
     const kernel::validation::PublicationDecision decision = publication_decision(
         result, kernel::validation::single_solid_policy(
-                    "Shell", kernel::validation::PublicationTier::TierB));
+                    "Shell", result_validation_tier(
+                                 ctx, kernel::validation::PublicationTier::TierB)));
     if (!decision.publishable()) {
         return OpOutcome::fail(decision.code, decision.message);
     }

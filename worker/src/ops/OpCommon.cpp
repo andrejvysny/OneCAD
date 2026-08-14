@@ -92,12 +92,20 @@ kernel::validation::PublicationDecision publication_decision(
     return kernel::validation::evaluate_publication_policy(evidence, policy);
 }
 
+kernel::validation::PublicationTier result_validation_tier(
+    const OpContext& ctx, kernel::validation::PublicationTier authoritative) {
+    if (ctx.validation_mode == ValidationMode::PreviewInteractive)
+        return kernel::validation::PublicationTier::TierA;
+    return authoritative;
+}
+
 std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
                                                  const std::string& operation,
                                                  const std::string& role) {
     kernel::validation::PublicationPolicy policy =
         kernel::validation::single_solid_policy(operation + " " + role,
                                                 kernel::validation::PublicationTier::TierA);
+    policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
     policy.max_solid_count = -1;
     const kernel::validation::PublicationDecision decision = publication_decision(shape, policy);
     if (decision.publishable()) return std::nullopt;

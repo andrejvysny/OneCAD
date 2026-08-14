@@ -290,8 +290,12 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     }
     kernel::validation::PublicationPolicy policy;
     policy.name = "Hole";
+    policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
     policy.max_solid_count = -1;  // Legacy Hole preserves its documented split-host residual.
-    policy.tier = kernel::validation::PublicationTier::TierB;
+    policy.tier = result_validation_tier(
+        ctx, kernel::validation::PublicationTier::TierB);
+    policy.require_closed_manifold =
+        policy.tier == kernel::validation::PublicationTier::TierB;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable()) {
         if (ordered_solids(br.shape).empty()) {

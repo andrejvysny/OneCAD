@@ -382,7 +382,9 @@ OpOutcome execute_gear(OpContext& ctx, const json& op, const std::string& op_id)
     // --- publication: the FULL audit (SCHEMA §7.3) -------------------------
     const kernel::validation::PublicationDecision decision = publication_decision(
         built.shape,
-        kernel::validation::single_solid_policy("Gear", kernel::validation::PublicationTier::TierB));
+        kernel::validation::single_solid_policy(
+            "Gear", result_validation_tier(
+                        ctx, kernel::validation::PublicationTier::TierB)));
     if (!decision.publishable()) {
         return OpOutcome::fail(decision.code, decision.message);
     }

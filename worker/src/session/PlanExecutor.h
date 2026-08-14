@@ -58,10 +58,10 @@ struct CandidateResult {
 
 // Execute one complete candidate step: predecessor input resolution, operation,
 // NeedsRepair handling, and rollback. ExecutePlan and PreviewOp both use this.
-CandidateResult execute_candidate_op(ScratchJob& job, const nlohmann::json& op,
-                                     const std::string& op_id,
-                                     std::string& last_sketch_id,
-                                     const onecad::CancelToken& cancel);
+CandidateResult execute_candidate_op(
+    ScratchJob& job, const nlohmann::json& op, const std::string& op_id,
+    std::string& last_sketch_id, const onecad::CancelToken& cancel,
+    ops::ValidationMode validation_mode = ops::ValidationMode::CommitAuthoritative);
 
 // Stable diagnostic projection shared by ExecutePlan and PreviewOp. Op findings
 // retain order; the terminal failure diagnostic is last.

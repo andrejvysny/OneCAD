@@ -282,7 +282,8 @@ Envelope handle_preview_op(Session& session, const Envelope& req,
     const std::string op_id =
         input.op.value("opId", std::string("preview"));
     CandidateResult outcome = execute_candidate_op(
-        job, input.op, op_id, last_sketch_id, cancel);
+        job, input.op, op_id, last_sketch_id, cancel,
+        ops::ValidationMode::PreviewInteractive);
     if (outcome.status == CandidateResult::Status::Cancelled) {
         return err(req, "CANCELLED", "preview cancelled");
     }

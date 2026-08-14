@@ -127,6 +127,9 @@ void test_shape_audit_policy() {
   const TopoDS_Shape box = ft::box();
   const validation::ShapeAuditResult box_audit = validation::audit_shape(box);
   check(box_audit.publishable(), "analytic box passes audit");
+  check(box_audit.tolerances_checked && box_audit.structure_checked &&
+            box_audit.stray_topology_count == 0 && box_audit.volume_checked,
+        "analytic box carries complete structural/tolerance/volume evidence");
   check(box_audit.tolerances.face <= 1.0e-7 &&
             box_audit.tolerances.edge <= 1.0e-7 &&
             box_audit.tolerances.vertex <= 1.0e-7,
@@ -167,6 +170,20 @@ void test_shape_audit_policy() {
         "non-solid shape fails audit");
 
   BRep_Builder builder;
+  TopoDS_Compound solid_with_stray_face;
+  builder.MakeCompound(solid_with_stray_face);
+  builder.Add(solid_with_stray_face, box);
+  for (TopExp_Explorer it(ft::box(), TopAbs_FACE); it.More(); it.Next()) {
+    builder.Add(solid_with_stray_face, it.Current());
+    break;
+  }
+  const validation::ShapeAuditResult stray_audit =
+      validation::audit_shape(solid_with_stray_face);
+  check(stray_audit.solid_count == 1 && stray_audit.stray_topology_count == 1 &&
+            !stray_audit.publishable(),
+        "one solid plus stray face is not a publishable Body");
+
+
   TopoDS_Solid empty_solid;
   builder.MakeSolid(empty_solid);
   const validation::ShapeAuditResult empty_audit =

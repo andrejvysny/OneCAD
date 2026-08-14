@@ -169,7 +169,8 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
         const kernel::validation::PublicationDecision decision = publication_decision(
             result, kernel::validation::single_solid_policy(
                         std::string(op_name) + " fused result",
-                        kernel::validation::PublicationTier::TierB));
+                        result_validation_tier(
+                            ctx, kernel::validation::PublicationTier::TierB)));
         if (!decision.publishable()) {
             if (ordered_solids(result).size() > 1) {
                 return OpOutcome::fail("PATTERN_DISJOINT_RESULT",

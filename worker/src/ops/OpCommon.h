@@ -50,6 +50,12 @@ bool read_bool_strict(const nlohmann::json& params, const char* key, bool dflt,
 kernel::validation::PublicationDecision publication_decision(
     const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy);
 
+// Preview may use Tier A evidence for responsiveness, while commit/gate execution
+// must retain the authoritative tier requested by the operation. Structural Body,
+// BRep, volume and tolerance checks remain mandatory at every tier.
+kernel::validation::PublicationTier result_validation_tier(
+    const OpContext& ctx, kernel::validation::PublicationTier authoritative);
+
 // Mutating operations must refuse an invalid modeling input before invoking OCCT.
 // Import remains separate because its advisory/healing policy is versioned.
 std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,

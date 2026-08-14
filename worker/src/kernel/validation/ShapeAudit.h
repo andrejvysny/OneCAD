@@ -12,7 +12,11 @@ namespace onecad::kernel::validation {
 
 enum class PublicationTier { TierA, TierB };
 
-enum class TopLevelShapePolicy { Any, SolidLike };
+// Structural policy for geometry admitted as a document Body. `SolidSet` permits
+// transparent COMPOUND/COMPSOLID wrappers containing only solids; `SingleBody`
+// additionally requires exactly one solid occurrence. Neither permits stray
+// shells/faces/wires/edges/vertices beside the solid payload.
+enum class TopLevelShapePolicy { Any, SolidSet, SingleBody };
 
 enum class PublicationDisposition { Publishable, LifecycleOnly, Refused };
 
@@ -33,7 +37,12 @@ struct ShapeEvidence {
   bool brep_valid = false;
   TopAbs_ShapeEnum top_level_shape = TopAbs_SHAPE;
   int solid_count = 0;
+  // Number of non-solid topological children found outside the mapped solids.
+  // A compound containing one valid solid plus a stray face is not a valid Body.
+  int stray_topology_count = 0;
+  bool structure_checked = false;
   double volume = 0.0;
+  bool volume_checked = false;
   int self_interference_count = 0;
   bool self_interference_checked = false;
   int open_edge_count = 0;
@@ -46,6 +55,7 @@ struct ShapeEvidence {
   double scale_diagonal = 0.0;
   bool micro_topology_checked = false;
   ShapeTolerances tolerances;
+  bool tolerances_checked = false;
   double validator_duration_ms = 0.0;
   std::string error;
 
@@ -62,7 +72,12 @@ struct PublicationPolicy {
   int max_solid_count = 1;  // -1 permits any count above the minimum.
   bool require_positive_volume = true;
   bool require_brep_valid = true;
+  bool require_finite_tolerances = true;
+  // Disabled when negative. Operations may set an absolute ceiling after their
+  // construction/input tolerance budget has been characterized.
+  double maximum_tolerance = -1.0;
   PublicationTier tier = PublicationTier::TierA;
+  bool require_closed_manifold = false;
   bool allow_empty_lifecycle = false;
 };
 

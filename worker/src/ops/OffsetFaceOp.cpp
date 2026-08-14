@@ -918,7 +918,8 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     // Tier A evidence the P3 contract rows promise.
     const kernel::validation::PublicationDecision decision = publication_decision(
         result, kernel::validation::single_solid_policy(
-                    "OffsetFace", kernel::validation::PublicationTier::TierA));
+                    "OffsetFace", result_validation_tier(
+                                      ctx, kernel::validation::PublicationTier::TierB)));
     if (!decision.publishable()) {
         return OpOutcome::fail(decision.code, decision.message);
     }

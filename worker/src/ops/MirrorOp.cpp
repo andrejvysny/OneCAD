@@ -96,9 +96,9 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
     if (result.IsNull()) {
         return OpOutcome::fail("GEOMETRY_INVALID", "MirrorBody produced null shape");
     }
-    const kernel::validation::PublicationTier tier =
-        fuse_with_original ? kernel::validation::PublicationTier::TierB
-                           : kernel::validation::PublicationTier::TierA;
+    const kernel::validation::PublicationTier tier = fuse_with_original
+        ? result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)
+        : kernel::validation::PublicationTier::TierA;
     const kernel::validation::PublicationDecision decision = publication_decision(
         result, kernel::validation::single_solid_policy(
                     fuse_with_original ? "MirrorBody fused result" : "MirrorBody result", tier));
