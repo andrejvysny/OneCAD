@@ -44,9 +44,13 @@ test("ellipse tool draws an ellipse and reports its degrees of freedom", async (
   await clickAt(page, 0, 70);
 
   // 5 DOF exactly; no relationships inferred for a solitary ellipse.
-  await expect(dofPill(page)).toHaveText("DOF: 5");
-  await expect(page.getByText("Under-constrained · DOF 5").first()).toBeVisible();
-  await expect(page.getByText("No constraints yet.")).toBeVisible();
+  // U7: the centre click lands on the sketch origin, whose snap is now offered —
+  // accepting it persists a `Fixed`, so the two translation DOF are already gone.
+  await expect(dofPill(page)).toHaveText("DOF: 3");
+  await expect(page.getByText("Under-constrained · DOF 3").first()).toBeVisible();
+  // No RELATIONSHIP was inferred — a solitary ellipse has nothing to relate to.
+  // The one constraint present is the origin anchor the centre click accepted (U7).
+  await expect(page.getByText("No constraints yet.")).toHaveCount(0);
 
   // The committed entity is normalized: major ≥ minor, rotation in [0, 2π).
   const ell = await getSketchEllipse(page);
@@ -79,15 +83,17 @@ test("the O key arms the ellipse tool (and never shadows E = extrude)", async ({
   await clickAt(page, 0, 0);
   await clickAt(page, 140, 0);
   await clickAt(page, 0, 60);
-  await expect(dofPill(page)).toHaveText("DOF: 5");
+  // U7: the centre click lands on the sketch origin, whose snap is now offered —
+  // accepting it persists a `Fixed`, so the two translation DOF are already gone.
+  await expect(dofPill(page)).toHaveText("DOF: 3");
 
   // `E` in sketch mode is still the cross-mode extrude handoff: it finishes the
-  // sketch and lands in model mode awaiting the region pick (the full arm-on-pick
-  // flow is e2e/auto-mode.spec.ts's job — here it only has to prove `O` didn't
-  // steal the letter).
+  // sketch and carries the Extrude intent into model mode (U2 — the full flow is
+  // e2e/auto-mode.spec.ts's job; here it only has to prove `O` didn't steal the
+  // letter). The ellipse is the sole extrudable region, so the tool arms outright.
   await page.keyboard.press("e");
   await expect(page.getByText(/^Editing /)).toHaveCount(0);
-  await expect(page.getByText("Select one closed sketch region, then choose Extrude")).toBeVisible();
+  await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 });
 
 test("the ellipse publishes a pickable region fill that arms extrude", async ({ page }) => {
@@ -106,7 +112,9 @@ test("the ellipse publishes a pickable region fill that arms extrude", async ({ 
   await clickAt(page, 0, 0);
   await clickAt(page, 170, 0);
   await clickAt(page, 0, 80);
-  await expect(dofPill(page)).toHaveText("DOF: 5");
+  // U7: the centre click lands on the sketch origin, whose snap is now offered —
+  // accepting it persists a `Fixed`, so the two translation DOF are already gone.
+  await expect(dofPill(page)).toHaveText("DOF: 3");
 
   // Snapshot BEFORE finishing — the session clears once the mode leaves "sketch".
   const ell = await getSketchEllipse(page);

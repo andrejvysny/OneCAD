@@ -807,11 +807,24 @@ describe("linear pattern FSM", () => {
     expect(apply.state.phase).toBe("committing");
   });
 
-  it("clamps count to [2, 12] (integer)", () => {
+  /*
+   * U6: ONE range across TS / Rust / worker. The authoring range is 2–128 (the
+   * worker's `kMaxPatternCount`); the +/− buttons stop at 12 for ergonomics, but
+   * that is a CHIP bound, not a value policy. Out of range is REFUSED, never
+   * clamped — a clamp would commit a count the user never saw previewed.
+   */
+  it("accepts the full authoring range and refuses (never clamps) outside it", () => {
     const s = linearPatternStep(linearPatternInit(), { kind: "arm", bodyId: "b" }).state;
-    expect(linearPatternStep(s, { kind: "setCount", count: 1 }).state.count).toBe(2);
-    expect(linearPatternStep(s, { kind: "setCount", count: 99 }).state.count).toBe(12);
+    expect(linearPatternStep(s, { kind: "setCount", count: 20 }).state.count).toBe(20);
+    expect(linearPatternStep(s, { kind: "setCount", count: 128 }).state.count).toBe(128);
     expect(linearPatternStep(s, { kind: "setCount", count: 4.7 }).state.count).toBe(5);
+
+    // Refused: the state is untouched and nothing previews.
+    for (const count of [1, 0, 129, Number.NaN]) {
+      const step = linearPatternStep(s, { kind: "setCount", count });
+      expect(step.state.count, `count ${count}`).toBe(s.count);
+      expect(step.effect).toBe("none");
+    }
   });
 
   it("cancel resets; idle cancel is a no-op", () => {

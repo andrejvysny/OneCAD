@@ -1,4 +1,178 @@
-# Handoff — Finishing the modeling-correctness roadmap
+# Handoff — Modeling UX unification (the `UX/` audit + hardening spec)
+
+Session 9 · 2026-08-14
+
+> **SEVEN THREADS IN THIS FILE.** Session 9 (this one) closed the program: it ran
+> the two browser lanes session 8 owed and committed the tranche. Session 8, which
+> implemented the whole delta program, follows immediately below — read it for the
+> reasoning, and read `TODO.md` § MODELING UX UNIFICATION beside it, that section
+> is the per-package evidence ledger and the authority on what was measured.
+> Session 7 and earlier are history.
+
+## Session 9 — the two lanes, and the gate commit
+
+### What it did
+
+Session 8 ended with exactly one gate owed: U5's browser lanes. Both were run,
+one at a time, retries 0:
+
+| Lane | Result |
+| --- | --- |
+| `E2E_PORT=4191 bun run e2e -- --project=chromium` | **200/200**, 14.2 min |
+| `E2E_PORT=4193 bun run e2e -- --project=webkit` | **200/200**, 8.6 min |
+
+No failure in either, so no triage was needed, and neither MC-R8 nor MC-R9
+reappeared. The U0–U7 tranche was then committed (**commit only, no push** — the
+user's explicit call).
+
+### Three corrections to session 8's state — the docs had drifted
+
+1. **`master` was NOT "2 commits ahead, nothing pushed".** It is in sync with
+   `origin/master` at `4ac8565`; `git reflog show origin/master` records pushes at
+   2026-08-13 22:50 and 2026-08-14 08:20 / 09:22. Four commits landed after
+   `dc4bd5e` (`9559b8f`, `19088d0`, `f9df6b7`, `4ac8565`), presumably from the
+   session sharing this tree. **Check the reflog before quoting an ahead-count
+   here** — a concurrent session makes that number stale within hours.
+2. **MC-R8 is CLOSED, not carried.** `19088d0` root-caused it: the DEBOUNCED
+   auto-fit a new body schedules moves the camera under `boolean-preview.spec.ts`'s
+   unsettled screen-point probe, the click's ray then misses the body and the
+   selection clears. Fix is one `waitForCameraSettled` in `findBodyScreenPoint`.
+   It is NOT the projection-push race everyone (including session 7's note) had
+   assumed.
+3. **MC-R9 is therefore not "the same signature class".** `revolve-commit.spec.ts`
+   already settles the camera at both probe sites (`:124`, `:130`), so MC-R8's
+   mechanism cannot explain it. Still un-root-caused, still recorded, still not
+   retried away.
+
+### How to resume
+
+The program is complete and committed. Next is a product call, not a task:
+
+1. **U8 (typed face/datum/axis references)** — queued since planning, never
+   scheduled against the other roadmap tracks.
+2. The manual Tauri smoke (spec §14) for this program still has no evidence and
+   needs the native stack.
+3. Nothing is pushed for the tranche commit. Say so before pushing; the tree is
+   shared.
+
+---
+
+## Session 8 — the modeling UX unification program
+
+### Goal
+
+The user supplied two documents in `UX/` and asked for a thorough analysis, a plan,
+and then "continue autonomously and fully implement plan and UX hardening":
+
+- `onecad-modeling-ux-audit-interaction-system-roadmap.html` — a senior UX audit
+  (2026-08-11). Verdict: the direct-modeling primitives are good, the interaction
+  RULES are fragmented per tool. Nine ranked findings.
+- `onecad-modeling-ux-implementation-hardening-specification-b022edf7.md` — a
+  coding-agent brief pinned to commit `b022edf7`: 19 defects (D1–D19), nine work
+  packages (WP0–WP8).
+
+### The finding that shaped everything: the spec was 21 commits stale
+
+HEAD is `4ac8565`; the spec is pinned at `b022edf7`. Executing it as written would
+have redone closed work — and, worse, trusted three "closed" claims that
+re-verification showed were only PARTLY closed:
+
+- **D9/WP1** — `classifyRegen` existed and worked, but **11 call sites bypassed it**.
+- **D1** — the ✕ was added; ✓ and Enter parity were not. Four tools had no Enter path
+  at all while the frozen contract claimed `enterSupport: true` for all twelve.
+- **D14** — the pure function was fixed; `InspectorPanel` still hardcoded
+  `Under-constrained · DOF {dof}`, and its own test fixtures were DOF-3 only, which
+  locked the bug in.
+
+Plus six defects in neither document (boolean selection, position-derived body names,
+the origin not being a reference at all, repair count vs rows, `OffsetFaceOp`'s
+missing publication gate, two divergent screen-scale implementations).
+
+So the approved plan (`~/.claude/plans/bright-munching-oasis.md`) is the re-verified
+DELTA, not the spec. **If you are tempted to go back to the spec text, read the drift
+ledger at the top of that plan first.**
+
+### Approved decisions (taken with the user before any code)
+
+1. Full U0–U7 scope; U8 (typed refs) queued.
+2. The frozen contract gains `primaryEntry` + `livePreviewOnEdit` columns — a
+   TIGHTENING, which the frozen-contract rule permits.
+3. Pattern count: 2–12 stepper, typed entry to the worker's 128.
+4. ✓/✕ everywhere; the accent `Apply` button is deleted.
+
+### Done, and why (one line each — full evidence in TODO.md)
+
+- **U0** — 32 reds, each paired with a green control so no red could be blamed on its
+  fixture. Two new contract columns. Tests only.
+- **U1** — all 11 bypassing sites classify; the re-edit correlation root cause turned
+  out to need **no wire change** (`updateOperationParams` already carries the record
+  id, and `failed_steps_of` keys on it). Found a real defect while doing it: the
+  body-count fallback called every metadata-only command a failure, so
+  `classifyRegen` gained an explicit `noTerminal` option.
+- **U2** — `onApply` deleted, one table-driven Enter router, one refusal wording. Also
+  fixed the sketch→Extrude handoff, which armed the tool and then reset it to Select;
+  **the browser lane caught that, not the unit tests.**
+- **U3** — `onPreview` + type-to-enter. Two real defects surfaced: the angle parser
+  accepted `12abc`, and our own preview echoed back and ate the keystroke. The first
+  echo guard was too broad and broke the unit re-label — **again caught by the lane.**
+- **U4** — one OperationHUD frame + result summaries (`Cut · Body 1 survives · Body 2
+  is consumed`). D6's union deferred a second time, deliberately.
+- **U5** — three full 82px tori → compact ±26° arcs; new `getInteractionOverlayBounds`;
+  the chip finally offsets clear of the widget; one screen-scale implementation.
+- **U6** — unique body labels (Rust), one pattern-count range, `Total` label, boolean
+  roles + Swap, ghost-fidelity disclosure.
+- **U7** — one constraint-status authority, candidate-count truth, the sketch ORIGIN
+  becomes a real snap tier that persists a `Fixed` when accepted, `OffsetFaceOp` runs
+  the shared publication gate.
+
+### Dead ends and corrections — do not redo these
+
+- **Do not rank the origin snap above everything.** Tried it; it steals snaps from
+  nearer endpoints and reds four `snapEngine` specs. It sits with QUADRANT.
+- **Do not anchor the origin purely on coordinates.** Tried it; a face-hosted sketch
+  then double-anchors (`sketchOnFace.test.ts` catches it) and geometry merely drawn at
+  screen centre gets fixed. It is gated on `InferOptions.originAccepted`.
+- **Do not put the rotation arcs in the negative quadrant.** Tried it; they end up
+  behind the widget from the default iso camera and the arrows win the raycast.
+- **Do not claim the edge-on ring ambiguity is fixed.** It is REDUCED (52° of arc
+  instead of a full circle). Any coplanar overlay handle can still be crossed; the
+  characterisation spec says so.
+- **Do not run two e2e lanes concurrently.** Two vite servers fight over port 4177
+  (strictPort) and the second run dies on `page.goto`. One lane at a time.
+
+### How to resume
+
+1. Run the `handoff` skill with "resume".
+2. **First task: run U5's browser lanes.** Nothing else is owed.
+   ```bash
+   pkill -f playwright; pkill -f "vite --port"
+   bun run e2e -- --project=chromium
+   bun run e2e -- --project=webkit
+   ```
+   U5 changed gizmo geometry, screen scale and chip placement — the lane is the only
+   real check for all three. If a gizmo spec fails, `e2e/modelToolHelpers.ts`
+   `findGizmoHandle` brute-force-scans the canvas at 3px steps, so a changed handle
+   footprint shows up there first.
+3. If both lanes pass, the program is complete and ready for a gate commit. **The user
+   has not authorized a commit** — ask.
+4. The manual Tauri smoke (spec §14) has never been run for this program and needs a
+   machine with the native stack.
+
+### Open questions
+
+- Is U8 (typed face/datum/axis references) queued straight after this, or behind other
+  roadmap tracks?
+- MC-R8 and the new MC-R9 are both un-root-caused full-suite-only nondeterminism. They
+  are recorded, not retried away. *(Session 9: MC-R8 is in fact closed by `19088d0`;
+  MC-R9 stands, and is not the same mechanism. See the session 9 block above.)*
+
+### Pointers
+
+- Plan → `~/.claude/plans/bright-munching-oasis.md` (drift ledger + per-package scope)
+- Evidence ledger → `TODO.md` § MODELING UX UNIFICATION, one block per package
+- Snapshot → `CURRENT_STATE.md` · Source documents → `UX/`
+
+---
 
 Session 7 · 2026-08-13
 

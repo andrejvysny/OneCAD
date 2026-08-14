@@ -39,6 +39,22 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("83.3 mm")).toBeInTheDocument();
   });
 
+  /*
+   * U0 red evidence. D14 fixed `constraintStatus.ts` — the pure function guards
+   * `dof === 0` — but `InspectorPanel`'s SelectionState branch never consults it:
+   * it hardcodes `Under-constrained · DOF {dof}` with no status check and a
+   * `?? 0` default (InspectorPanel.tsx:119-123). So a fully-constrained sketch
+   * selected in the tree still renders the impossible string the audit caught,
+   * and an UNKNOWN sketch renders it too. RED until U7 unifies the authority.
+   */
+  it("never renders Under-constrained for a sketch the solver reports at DOF 0", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => documentStore.getState().setSketchSolve("sketch2", 0, "ok"));
+
+    expect(screen.queryByText(/Under-constrained/)).toBeNull();
+    expect(screen.getByText("Fully constrained · DOF 0")).toBeInTheDocument();
+  });
+
   it("shows body status + full history when a body is selected", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));

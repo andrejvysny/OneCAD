@@ -111,6 +111,32 @@ describe("reattachSketch action", () => {
     spy.mockRestore();
   });
 
+  /*
+   * U0 red evidence. This family decides success with its own heuristic —
+   * `res.revision > before || changedBodies.length > 0` (reattachActions.ts:54).
+   * A regen that bumps the revision AND resolves carrying `terminal:"failed"` +
+   * `errorMessage` therefore reads as a successful reattach: the classifier
+   * (`src/ipc/regenOutcome.ts`) is never consulted. RED until U1 adopts it here.
+   */
+  it("reports a RESOLVED failure as a failure, not a revision bump", async () => {
+    const spy = vi.spyOn(mockClient, "reattachSketch").mockResolvedValue({
+      revision: documentStore.getState().revision + 1,
+      features: [],
+      changedBodies: [],
+      removedBodies: [],
+      terminal: "failed",
+      errorMessage: "host plane no longer resolves",
+    } as unknown as Awaited<ReturnType<typeof mockClient.reattachSketch>>);
+
+    const ok = await reattachSketch("sketch2", { kind: "world", plane: "XZ" });
+
+    expect(ok).toBe(false);
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.severity).toBe("error");
+    expect(hint?.message).toContain("host plane no longer resolves");
+    spy.mockRestore();
+  });
+
   it("reports a NO-OP result instead of claiming success (the core's silent host-face drop)", async () => {
     // `UpdateSketchAttachment` skips the host-face stamp when the sketch record
     // precedes its host body, and says nothing on the wire. The observable is

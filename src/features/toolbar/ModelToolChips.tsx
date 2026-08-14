@@ -23,6 +23,12 @@ import { HoleChipCluster } from "./HoleChipCluster";
 import { ExtrudeOverflow } from "./ExtrudeChipControls";
 import { EdgeOpOverflow } from "./EdgeOpChipControls";
 import { RevolveOverflow } from "./RevolveChipControls";
+import {
+  acceptCount,
+  PATTERN_COUNT_MAX,
+  PATTERN_COUNT_MIN,
+  PATTERN_STEPPER_MAX,
+} from "@/tools/modelTools/modelToolMachine";
 import { useToolChipStore, toolChipStore, MODEL_TOOL_CHIP_ID } from "@/stores/toolChipStore";
 import { LENGTH_SUFFIX } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
@@ -100,46 +106,80 @@ function SegmentToggle<T extends string>({
 }
 
 /** A −/n/+ count stepper for the pattern instance count. */
+/**
+ * `Total` — the instance count, INCLUDING the source (U6).
+ *
+ * The label matters: "count" left it ambiguous whether 3 meant three instances
+ * or three COPIES, and the two differ by exactly the body the user is looking
+ * at. Pattern V2 keeps the source as instance zero, so `Total 3` is the source
+ * plus two children — which is what the result summary then states.
+ *
+ * Range: the buttons step 2–12 (the common case, one click per instance) while
+ * TYPING reaches the worker's 128. An out-of-range entry is refused, not
+ * clamped, and the field says what the range is instead of silently disagreeing
+ * with the preview.
+ */
 function CountStepper({ count, onCount }: { count: number; onCount: (n: number) => void }) {
+  const [text, setText] = useState(String(count));
+  const [rejected, setRejected] = useState(false);
+  useEffect(() => {
+    setText(String(count));
+    setRejected(false);
+  }, [count]);
+
+  const submit = (raw: string): void => {
+    const n = Number.parseInt(raw.trim(), 10);
+    if (acceptCount(n) === null) {
+      setRejected(true);
+      return;
+    }
+    setRejected(false);
+    onCount(n);
+  };
+
   return (
     <div className="inline-flex items-center gap-0.5">
       <button
         type="button"
         aria-label="Fewer instances"
+        disabled={count <= PATTERN_COUNT_MIN}
         onClick={() => onCount(count - 1)}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2"
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2 disabled:opacity-40"
       >
         −
       </button>
-      <span
+      <span className="text-[11.5px] text-ink-5">Total</span>
+      <input
         data-testid="pattern-count"
-        className="min-w-[16px] text-center font-mono text-[11.5px] text-ink-2"
-      >
-        {count}
-      </span>
+        aria-label="Total instances"
+        aria-invalid={rejected}
+        title={`Total instances, including the source (${PATTERN_COUNT_MIN}–${PATTERN_COUNT_MAX})`}
+        className={cn(
+          "w-8 bg-transparent text-center font-mono text-[11.5px] outline-none",
+          rejected ? "text-traffic-close" : "text-ink-2",
+        )}
+        value={text}
+        inputMode="numeric"
+        onChange={(e) => {
+          setText(e.target.value);
+          submit(e.target.value);
+        }}
+        onBlur={() => setText(String(count))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") submit(text);
+          e.stopPropagation();
+        }}
+      />
       <button
         type="button"
         aria-label="More instances"
+        disabled={count >= PATTERN_STEPPER_MAX}
         onClick={() => onCount(count + 1)}
-        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2"
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2 disabled:opacity-40"
       >
         +
       </button>
     </div>
-  );
-}
-
-/** The accent Apply button shared by the boolean / pattern / mirror chips. */
-function ApplyButton() {
-  return (
-    <button
-      type="button"
-      data-testid="chip-apply"
-      onClick={() => toolChipStore.getState().onApply?.()}
-      className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
-    >
-      Apply
-    </button>
   );
 }
 
@@ -158,7 +198,16 @@ function CancelButton({ onCancel }: { onCancel?: () => void }) {
   );
 }
 
-/** The shared ✓/✕ commit/cancel pair on the armed extrude / revolve cluster. */
+/**
+ * The shared ✓/✕ commit/cancel pair — the ONE confirmation vocabulary for every
+ * model tool (U2).
+ *
+ * Boolean, both patterns and mirror used to render an accent `Apply` text button
+ * wired to a separate `onApply` callback, which is also why they had no Enter
+ * path: two vocabularies meant two protocols. The body-lifecycle meaning that
+ * button carried belongs in the result summary, where `3 total · 2 new bodies ·
+ * source retained` says more than the word "Apply" ever did.
+ */
 function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCancel?: () => void }) {
   return (
     <>
@@ -378,8 +427,13 @@ export function ModelToolChips() {
   const worldPos = useToolChipStore((s) => s.worldPos);
   const anchorAxisFrom = useToolChipStore((s) => s.anchorAxisFrom);
   const anchorOffsetPx = useToolChipStore((s) => s.anchorOffsetPx);
-  /** Whether the armed owner wired a ✓ (fillet/shell: fresh arm yes, re-edit no). */
-  const hasConfirm = useToolChipStore((s) => s.onConfirm !== null);
+  /** Type-to-enter arm (U3): remounting on `token` is what focuses the field, and
+   *  `seed` is the character that replaces the formatted value. */
+  const primaryEntry = useToolChipStore((s) => s.primaryEntry);
+  const targetName = useToolChipStore((s) => s.targetName);
+  const toolName = useToolChipStore((s) => s.toolName);
+  const onSwap = useToolChipStore((s) => s.onSwap);
+  const resultSummary = useToolChipStore((s) => s.resultSummary);
   // A plain DOM host, created once; the engine owns its DOM position.
   const [host] = useState(() => {
     const el = document.createElement("div");
@@ -406,27 +460,73 @@ export function ModelToolChips() {
 
   if (kind === "none" || !worldPos) return null;
 
-  const numericChip = (suffix: string) => (
-    <DimensionInput value={value} suffix={suffix} onCommit={(v) => toolChipStore.getState().onValue?.(v)} />
+  /*
+   * Every armed model-tool numeric field, in one place (U3).
+   *
+   *   - `onPreview` fires on every parseable keystroke, so the viewport follows
+   *     the typing. It routes to `onValue`, the same channel a drag uses, so the
+   *     controller's existing coalescing/fencing applies unchanged.
+   *   - `commitOnBlur` is OFF: an armed model tool commits on Enter or ✓ only.
+   *     Nothing is lost, because the value already went out through `onPreview`.
+   *   - `primaryEntry` seeds + focuses the field when the user typed on canvas.
+   */
+  const primaryField = (suffix: string, opts?: { onConfirm?: boolean }) => (
+    <DimensionInput
+      key={primaryEntry ? `primary-${primaryEntry.token}` : `primary-${anchorKey}`}
+      value={value}
+      suffix={suffix}
+      initialText={primaryEntry?.seed}
+      autoFocus={primaryEntry !== null}
+      commitOnBlur={false}
+      onPreview={(v) => toolChipStore.getState().onValue?.(v)}
+      onCommit={(v) => toolChipStore.getState().onValue?.(v)}
+      onConfirm={opts?.onConfirm ? () => toolChipStore.getState().onConfirm?.() : undefined}
+    />
   );
 
+  const numericChip = (suffix: string) => primaryField(suffix);
+
+  /*
+   * The OperationHUD frame (U4) — ONE wrapper for every armed model tool.
+   *
+   * Each branch below still owns its operation-specific content, but the frame
+   * around it is shared, so a tool cannot quietly acquire its own tone, its own
+   * validity treatment, or no accessible status at all:
+   *
+   *   - the border takes the WARN tone while `valueError` is set, which used to
+   *     be hand-rolled in the offsetFace branch and absent everywhere else;
+   *   - `resultSummary` renders in a common slot ABOVE the controls, so a
+   *     body-lifecycle operation states what it will produce BEFORE Apply — the
+   *     audit's "3 total instances · 2 new bodies · source retained" (D18);
+   *   - that summary is also the tool's `aria-live` status. It lives here rather
+   *     than in the canvas subtree, which is `aria-hidden` decoration.
+   */
   const panel = (children: React.ReactNode) => (
-    <div className="pointer-events-auto inline-flex items-center gap-1 rounded-full border border-border bg-surface px-1.5 py-1 shadow-popover">
-      {children}
+    <div
+      data-testid="operation-hud"
+      className={cn(
+        "pointer-events-auto inline-flex flex-col items-stretch gap-1 rounded-2xl border bg-surface px-1.5 py-1 shadow-popover",
+        valueError ? "border-warn-border" : "border-border",
+      )}
+    >
+      {resultSummary && (
+        <div
+          data-testid="chip-result-summary"
+          role="status"
+          aria-live="polite"
+          className="px-1.5 pt-0.5 text-[11px] text-ink-5"
+        >
+          {resultSummary}
+        </div>
+      )}
+      <div className="inline-flex items-center gap-1">{children}</div>
     </div>
   );
 
   // The armed extrude / revolve cluster commits on chip-input Enter via `onConfirm`
   // (apply typed value THEN confirm — single fire; the input stops propagation so
   // the controller's capture-phase Enter never double-fires).
-  const clusterInput = (unit: string) => (
-    <DimensionInput
-      value={value}
-      suffix={unit}
-      onCommit={(v) => toolChipStore.getState().onValue?.(v)}
-      onConfirm={() => toolChipStore.getState().onConfirm?.()}
-    />
-  );
+  const clusterInput = (unit: string) => primaryField(unit, { onConfirm: true });
   const confirmButtons = (
     <ConfirmButtons
       onConfirm={() => toolChipStore.getState().onConfirm?.()}
@@ -565,38 +665,31 @@ export function ModelToolChips() {
       </>,
     );
   } else if (kind === "filletRadius" || kind === "shellThickness") {
-    // Edge-op preview wave: a FRESH fillet/chamfer/shell arm wires ✓/✕ and gets
-    // the same armed cluster the extrude/revolve chips use — release no longer
-    // commits, so the visible confirm is the only way out other than Enter.
+    // Fillet / chamfer / shell, fresh arm AND re-edit: the same armed cluster the
+    // extrude/revolve chips use. Release no longer commits, so the visible ✓ (or
+    // Enter, which calls the same `onConfirm`) is the only way out.
     //
-    // The EDGE-OP re-edit wires ✓ too (W3): its type is editable there, and a pure
-    // Fillet⇄Chamfer flip changes no number, so an input-only commit trigger could
-    // never fire for one. The SHELL re-edit has no type to flip and keeps the bare
-    // numeric chip it always was.
-    content = hasConfirm
-      ? panel(
-          <>
-            {clusterInput(LENGTH_SUFFIX)}
-            {edgeOpOverflow}
-            {confirmButtons}
-          </>,
-        )
-      : numericChip(LENGTH_SUFFIX);
+    // U2 deleted the bare-numeric fallback this branch used to fall back to when
+    // no ✓ was wired: `armShell` and both `showFillet` sites all wire ✓/✕, so it
+    // was already unreachable — and an armed operation that renders NO cancel is
+    // exactly what the interaction contract forbids.
+    content = panel(
+      <>
+        {clusterInput(LENGTH_SUFFIX)}
+        {edgeOpOverflow}
+        {confirmButtons}
+      </>,
+    );
   } else if (kind === "offsetFace") {
     // SCHEMA §7.3 OffsetFace: `[distance] [type segments] [⌒] [✓ ✕]`.
     //
-    // The panel takes a WARN border while `valueError` is set. The value itself is
-    // never rewritten — a refused entry leaves the last valid number in the field
-    // (SCHEMA §7.3 forbids clamping, and a clamped number would desynchronize the
-    // stored param from the preview the user approved), so the border is the only
-    // signal that the last thing typed did not take.
-    content = (
-      <div
-        className={cn(
-          "pointer-events-auto inline-flex items-center gap-1 rounded-full border bg-surface px-1.5 py-1 shadow-popover",
-          valueError ? "border-warn-border" : "border-border",
-        )}
-      >
+    // The WARN border while `valueError` is set now comes from the shared HUD
+    // frame (U4) rather than this branch's own copy of it — the value itself is
+    // still never rewritten, so a refused entry leaves the last valid number in
+    // the field (SCHEMA §7.3 forbids clamping, and a clamped number would
+    // desynchronize the stored param from the preview the user approved).
+    content = panel(
+      <>
         {clusterInput(LENGTH_SUFFIX)}
         <DistanceTypeSegments
           active={distanceType}
@@ -609,7 +702,7 @@ export function ModelToolChips() {
           onToggle={() => toolChipStore.getState().onChainTangent?.(!chainTangentFaces)}
         />
         {confirmButtons}
-      </div>
+      </>,
     );
   } else if (kind === "hole") {
     // WP-C T3. The cluster's own shape depends on `holeType`, so it lives in its
@@ -669,8 +762,7 @@ export function ModelToolChips() {
         />
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
         {numericChip(LENGTH_SUFFIX)}
-        <ApplyButton />
-        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
+        {confirmButtons}
       </>,
     );
   } else if (kind === "circularPattern") {
@@ -685,8 +777,7 @@ export function ModelToolChips() {
         />
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
         {numericChip("°")}
-        <ApplyButton />
-        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
+        {confirmButtons}
       </>,
     );
   } else if (kind === "transform") {
@@ -722,14 +813,44 @@ export function ModelToolChips() {
           testid={(p) => `chip-mirror-plane-${p.toLowerCase()}`}
           onPick={(p) => toolChipStore.getState().onPlane?.(p)}
         />
-        <ApplyButton />
-        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
+        {confirmButtons}
       </>,
     );
   } else {
     // booleanOp
     content = panel(
       <>
+        {/*
+          * ROLE BADGES (U6). A Boolean is not symmetric — which body survives is
+          * the whole decision — so the chip states both operands by NAME before
+          * the user commits. Named, not colour-coded: a colour-only cue is
+          * unreadable to a third of users and unreadable against a body that
+          * happens to be the same colour.
+          */}
+        {(targetName || toolName) && (
+          <span className="inline-flex items-center gap-1 px-1 text-[11px]">
+            <span className="text-ink-5">Target</span>
+            <span data-testid="chip-bool-target" className="font-medium text-ink-2">
+              {targetName}
+            </span>
+            <span className="text-ink-5">Tool</span>
+            <span data-testid="chip-bool-tool" className="font-medium text-ink-2">
+              {toolName}
+            </span>
+          </span>
+        )}
+        {onSwap && (
+          <button
+            type="button"
+            data-testid="chip-bool-swap"
+            aria-label="Swap target and tool"
+            title="Swap target and tool"
+            onClick={() => toolChipStore.getState().onSwap?.()}
+            className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+          >
+            ⇄
+          </button>
+        )}
         <div className="flex overflow-hidden rounded-full">
           {BOOLEAN_OPS.map((o) => (
             <button
@@ -746,8 +867,7 @@ export function ModelToolChips() {
             </button>
           ))}
         </div>
-        <ApplyButton />
-        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
+        {confirmButtons}
       </>,
     );
   }

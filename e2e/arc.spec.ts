@@ -22,9 +22,11 @@ test("arc tool draws a center-start-end arc and Esc cancels mid-gesture cleanly"
   await clickAt(page, 120, 0);
   await clickAt(page, 0, 120);
 
-  // Arc present: 5 DOF exactly (mock solveDof: center 2 + radius 1 + 2 angles).
-  await expect(dofPill(page)).toHaveText("DOF: 5");
-  await expect(page.getByText("Under-constrained · DOF 5").first()).toBeVisible();
+  // Arc present: mock solveDof is center 2 + radius 1 + 2 angles = 5, less the
+  // two the origin anchor removes (U7 — the centre click lands on the origin,
+  // where the snap is now offered, and accepting it persists a `Fixed`).
+  await expect(dofPill(page)).toHaveText("DOF: 3");
+  await expect(page.getByText("Under-constrained · DOF 3").first()).toBeVisible();
 
   // ── mid-gesture Esc ──
   const arcBtn = page.getByRole("button", { name: "Arc", exact: true });
@@ -38,5 +40,5 @@ test("arc tool draws a center-start-end arc and Esc cancels mid-gesture cleanly"
   // entity was committed (DOF unchanged).
   await expect(page.getByText(/^Editing /)).toBeVisible();
   await expect(arcBtn).toHaveAttribute("aria-pressed", "true");
-  await expect(dofPill(page)).toHaveText("DOF: 5");
+  await expect(dofPill(page)).toHaveText("DOF: 3");
 });

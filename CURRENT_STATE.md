@@ -1,5 +1,59 @@
 # Current State
 
+Last verified: 2026-08-14 15:05 — modeling UX unification U0–U7 complete; both browser lanes green, tranche committed
+
+## NOW — MODELING UX UNIFICATION (sessions 8–9)
+
+- **Branch:** `master`, **in sync with `origin/master` at `4ac8565`** (session 8's "2 ahead,
+  nothing pushed" is stale: `cf6273d`/`dc4bd5e` plus `9559b8f`, `19088d0`, `f9df6b7`, `4ac8565`
+  were all pushed by 2026-08-14 09:22, per `git reflog show origin/master`). Working tree
+  **dirty**: 43 modified files + 5 new test files + the untracked `UX/` source documents.
+  **+2513 / −385.** The U0–U7 program itself is still uncommitted.
+- **What landed:** all eight packages of the delta program in
+  `~/.claude/plans/bright-munching-oasis.md` — U0 (red evidence + two new frozen-contract
+  columns), U1 (result truth), U2 (one confirmation grammar), U3 (live numeric contract),
+  U4 (OperationHUD + result summaries), U5 (gizmo arcs + collision-safe HUD), U6 (tool entry,
+  roles, ranges, unique body labels), U7 (repair + sketch truth). Per-package detail, evidence
+  and every deliberate omission are recorded in `TODO.md` § MODELING UX UNIFICATION.
+- **Gates measured this session:**
+  - `bunx tsc --noEmit` clean · `bun run build` clean
+  - `bun run test` **255 files / 4250 tests, all green** (baseline was 250 / 4182)
+  - worker Release build + stage · `ctest --test-dir worker/build` **119/119**
+  - `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D warnings` clean
+  - `ONECAD_WORKER_PATH=… ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`
+    **810 passed / 0 failed over 69 targets**
+  - coverage + contract verifiers pass · hex gate empty
+  - Playwright, retries 0: **chromium 200/200 · webkit 200/200** at the U4, U6 and U7 gates
+- **U5's browser lanes: RUN AND GREEN (session 9, 2026-08-14).** `chromium 200/200` in 14.2 min
+  (`E2E_PORT=4191`) and `webkit 200/200` in 8.6 min (`E2E_PORT=4193`), retries 0, one lane at a
+  time. That was the program's last owed gate — U5 changed gizmo geometry, screen scale and chip
+  anchoring, and only the browser can check those. No failures, so no triage; MC-R8/MC-R9 did not
+  reappear.
+- **Blockers:** none. Every gate this program owes is now measured green.
+
+### Deliberate omissions (each with its reason recorded in TODO.md)
+
+- **D6's discriminated `ToolEditorDescriptor` union** — deferred a second time. No red test forces
+  it, it is pure internal type-safety, and the store gained four fields this session, so a union
+  rewrite would land on a moving target. The behavioural half of D6 shipped in U2/U3/U4.
+- **Shell's thickness drag handle** — a handle needs a direction and the shell arm has none
+  (`EntityRef.anchor` carries no normal). Guessing one is worse than omitting it. Needs a face
+  normal on the prepare response: a wire change with its own gate.
+- **U8 typed face/datum/axis references** — never in scope for this program; still queued.
+- **OffsetFace's shared publication gate has no end-to-end negative control** and none is claimed;
+  its own postconditions already cover every Tier A check but the audit-error path.
+
+### Residuals opened/carried
+
+- **MC-R8** — **CLOSED**, root-caused and fixed in `19088d0` (the debounced auto-fit moved the
+  camera under the boolean spec's unsettled screen-point probe; one `waitForCameraSettled` at the
+  top of `findBodyScreenPoint`). Not a projection-push race, which was the earlier guess.
+- **MC-R9** (NEW) — `e2e/revolve-commit.spec.ts:111` failed in ONE loaded full chromium run
+  (19 min vs the usual 14) and passes in isolation and on the clean re-run. Same signature class.
+- Manual Tauri smoke for this program has **not** been run.
+
+## Previous — modeling-correctness roadmap (session 7)
+
 Last verified: 2026-08-13 23:10 — ladder run, tranche committed, MC-R7 closed on both browser lanes
 
 - **Branch:** `master`, 2 commits ahead of `origin/master` (`cf6273d` code +

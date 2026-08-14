@@ -205,6 +205,32 @@ describe("treeActions — optimistic write + revert", () => {
     apply.mockRestore();
   });
 
+  /*
+   * U0 red evidence. `dispatch` (treeActions.ts:98-113) catches a REJECTION only.
+   * A regen that RESOLVES carrying `terminal:"failed"` + `errorMessage` is the
+   * documented failure shape (`ApplyOperationResult.errorMessage`, types.ts:1362),
+   * and `classifyRegen` exists to read it — but this family never adopted it, so
+   * the optimistic flip stands, no hint appears, and the caller is told `true`.
+   * RED until U1 routes every family through the classifier.
+   */
+  it("reverts the visibility flip when the backend RESOLVES a failure", async () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand").mockResolvedValue({
+      revision: 3,
+      features: [],
+      changedBodies: [],
+      removedBodies: [],
+      terminal: "failed",
+      errorMessage: "body is suppressed",
+    } as unknown as Awaited<ReturnType<typeof mockClient.applyEditCommand>>);
+
+    expect(await setBodyVisible("body1", false)).toBe(false);
+    expect(body("body1").visible).toBe(true); // reverted
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.severity).toBe("error");
+    expect(hint?.message).toContain("body is suppressed");
+    apply.mockRestore();
+  });
+
   it("reverts the name and hints when a rename is rejected", async () => {
     const apply = vi
       .spyOn(mockClient, "applyEditCommand")

@@ -889,10 +889,22 @@ export function createTauriClient(): CadClient {
 
   async function applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
     const command = operationToEditCommand(op);
-    // A fresh op mints a recordId (addOperation); a parametric re-edit
-    // (updateOperationParams) targets an existing record and does NOT — only the
-    // former opts into failedSteps / affectedBodies correlation.
-    const recordId = command.cmd === "addOperation" ? command.record.recordId : undefined;
+    // BOTH shapes name a timeline record, so both opt into failedSteps /
+    // repairSteps / affectedBodies correlation: a fresh op mints its recordId
+    // (`addOperation.record.recordId`), a parametric re-edit targets an existing
+    // one (`updateOperationParams.record`).
+    //
+    // Before U1 only the fresh shape did. `failed_steps_of` keys on `rec.record_id`
+    // for ANY errored record (document_runtime.rs), so the re-edit correlation was
+    // available all along and simply unused — which meant a published-overall regen
+    // whose FAILING step was this very record settled as a success, and every
+    // re-edit family then reported it as one. No wire change was needed.
+    const recordId =
+      command.cmd === "addOperation"
+        ? command.record.recordId
+        : command.cmd === "updateOperationParams"
+          ? command.record
+          : undefined;
     return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op), recordId);
   }
 
@@ -1445,7 +1457,17 @@ export function createTauriClient(): CadClient {
         totalOps: projection.totalOps,
       };
     }
-    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command));
+    // A scalar re-edit names an existing timeline record, so it opts into the same
+    // per-record correlation a fresh op gets (U1) — without it, a regen that
+    // published other steps while THIS record errored settled as a success and
+    // every re-edit family reported it as one.
+    //
+    // Deliberately NOT correlated: `removeOperation` (the record is gone, so
+    // `failedSteps` can never name it), `setOperationSuppression` and
+    // `setRollback` (their effect is on DOWNSTREAM steps, so scoping the change to
+    // the named record's own bodies would drop exactly the bodies that moved).
+    const recordId = command.cmd === "updateOperationParams" ? command.record : undefined;
+    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command), recordId);
   }
 
   /** H2 escape hatch: forget the worker's poison keys (returns how many). */

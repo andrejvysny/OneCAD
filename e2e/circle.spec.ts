@@ -30,10 +30,14 @@ test("circle tool draws a circle and reports its degrees of freedom", async ({ p
   await clickAt(page, 120, 0);
 
   // Circle present: 3 DOF exactly (mock solveDof: center 2 + radius 1).
-  await expect(dofPill(page)).toHaveText("DOF: 3");
-  await expect(page.getByText("Under-constrained · DOF 3").first()).toBeVisible();
-  // No relationships inferred for a solitary circle.
-  await expect(page.getByText("No constraints yet.")).toBeVisible();
+  // U7: the first click lands ON the sketch origin (screen centre), where the
+  // origin snap is now offered — accepting it persists a `Fixed` that pins the
+  // centre, so two translation DOF are gone before any dimension is applied.
+  await expect(dofPill(page)).toHaveText("DOF: 1");
+  await expect(page.getByText("Under-constrained · DOF 1").first()).toBeVisible();
+  // No RELATIONSHIP was inferred — a solitary circle has nothing to relate to.
+  // The one constraint present is the origin anchor the centre click accepted.
+  await expect(page.getByText("No constraints yet.")).toHaveCount(0);
 
   // Finish cleanly back to model mode; the circle persists as a sketch.
   await page.keyboard.press("Enter");

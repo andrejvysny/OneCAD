@@ -1,5 +1,410 @@
 # OneCAD-Tauri Migration TODO
 
+## NOW — MODELING UX UNIFICATION, U0–U7 (2026-08-14, plan `~/.claude/plans/bright-munching-oasis.md`)
+
+Source: the two documents in `UX/` — the senior UX audit (2026-08-11) and the b022edf7-pinned
+hardening specification. **The spec is 21 commits stale**; HEAD is `4ac8565`. The plan is the
+re-verified DELTA, not the spec as written. Re-verification found three defects the spec and
+`TODO.md` both record as CLOSED that are only PARTLY closed, plus six that are in neither document.
+Full drift ledger + evidence in the plan file. Approved scope: U0–U7 (U8 typed references queued).
+
+### U5's browser lanes — RUN, both green (2026-08-14, session 9)
+
+- [x] **Both full lanes, retries 0, one at a time: `chromium 200/200` (14.2 min, `E2E_PORT=4191`)
+      and `webkit 200/200` (8.6 min, `E2E_PORT=4193`).** This is the gate U5 owed — it changed the
+      transform gizmo's geometry (82px tori → ±26° arcs), its screen scale and the placement chip's
+      anchor, and the browser is the only real check for all three. No failure in either lane, so
+      no triage was needed; neither MC-R8 nor MC-R9 reappeared. Ports were verified free before
+      each launch (a concurrent session has held 4177/4187 before, and a collision reads as
+      `ERR_CONNECTION_REFUSED`, i.e. exactly like a product failure).
+- [x] Gate commit of the U0–U7 tranche — authorized this session, **commit only, no push**.
+- [ ] Manual Tauri smoke (spec §14) has never been run for this program; needs the native stack.
+
+Carried forward, each with its reason in the package block below: D6's discriminated
+`ToolEditorDescriptor` union · Shell's thickness handle (needs a face normal on the prepare
+response) · U8 typed references · MC-R9 browser nondeterminism (MC-R8 is CLOSED — root-caused and
+fixed in `19088d0`).
+
+Approved product decisions, taken before U0:
+- the frozen interaction contract gains `primaryEntry` + `livePreviewOnEdit` columns (TIGHTENING —
+  more rows red, never edited afterwards to make an implementation pass);
+- pattern count keeps a 2–12 stepper with direct numeric entry up to the worker's 128;
+- ✓/✕ becomes the single confirm vocabulary for all twelve tools; `ApplyButton` goes away, and the
+  body-lifecycle meaning it carried moves into U4's result-summary slot.
+
+### U0 — red evidence + contract teeth (2026-08-14) — GATE PASSED
+
+Tests only; **no production file changed** other than the frozen contract's two new columns (the
+user-visible-change decision recorded above, per `src/test/contracts/README.md`). 32 new reds, each
+paired with a green control so no red can be blamed on its fixture.
+
+- [x] **Contract columns + self-check.** `modelingInteractionContract.ts` gains `primaryEntry`
+      (`typeToEnter|clickFirst|none`) and `livePreviewOnEdit`. `modelingInteraction.golden.test.tsx`
+      asserts every row declares Enter support and that both new columns track `primaryParameter`.
+- [x] **D1 is only half-closed — 4 reds.** `modelingInteraction.golden.test.tsx`: boolean,
+      linearPattern, circularPattern and mirror still publish `onApply` instead of the shared
+      `onConfirm`/`onCancel` pair. Extrude + fillet are the green controls.
+- [x] **The Enter column was never enforced — 4 reds.** New
+      `modelingInteraction.keyboard.probe.test.ts` arms each of those four through its re-edit entry
+      point and dispatches a real capture-phase Enter on `window`.
+      `ModelToolController.onKeyDown:8022-8064` routes Enter for the other tools only, so nothing
+      commits. Each has a control that fires the chip's own callback and reaches the client once.
+- [x] **D3 + D4 — 4 reds.** New `modelingInteraction.numeric.probe.test.ts`: typing while armed does
+      not reach the primary value (no router listens), and no keystroke rebuilds the ghost (blur/Enter
+      only). Controls assert the chip published the seeded value, so the arm itself is proven.
+- [x] **D9/WP1 is only partly adopted — 12 reds.** New
+      `ModelToolController.terminalFamilies.test.ts`: transform, boolean, shell, offsetFace, fillet and
+      hole re-edit each announce a RESOLVED `failed`+message and `needsRepair` as a NON-STICKY
+      success. Six `published` controls green. Root cause recorded for U1: `applyOperation` mints a
+      `recordId` only for `addOperation` (`tauriClient.ts:890`), so an `updateOperationParams` re-edit
+      has no per-record correlation and a published-overall regen whose failing step is this record
+      never settles as failed (`tauriClient.ts:505-547`).
+- [x] **Two more families, same defect — 2 reds.** `treeActions.test.ts` (`dispatch` catches a
+      REJECTION only) and `reattachActions.test.ts` (own `revision > before` heuristic).
+- [x] **Boolean success selection contradicts its own contract row — 2 reds.** New
+      `modelingInteraction.selection.probe.test.ts`: a split Cut selects the stored target instead of
+      the child outputs (`ModelToolController.ts:7454`, `:7536`), and does so even when the commit
+      FAILED. The contract row says `allChildOutputs`.
+- [x] **D14 is only half-closed — 1 red.** `InspectorPanel.tsx:119-123` hardcodes
+      `Under-constrained · DOF {dof}` with no status check and a `?? 0` default, so a
+      fully-constrained sketch still renders the impossible string. `constraintStatus.ts` was fixed;
+      this second authority was not. The existing `InspectorPanel.test.tsx` fixtures are DOF-3 only,
+      which is why it went unnoticed.
+- [x] **Candidate copy can contradict the candidate list — 1 red.** `RepairPanel.test.tsx`: the
+      header count comes from the `needs-repair` event, the rows from a separate `resolveRefs`
+      response, so "2 candidates" can sit directly above "No candidates to choose from" (audit
+      finding 06).
+- [x] **Body display labels are position-derived — 1 red (Rust).**
+      `onecad-core/src/document/body.rs::fresh_body_names_never_collide_with_a_live_body`. Measured:
+      delete `Body 1` of three, create one, get `["Body 2", "Body 3", "Body 3"]`. `default_name()` is
+      `format!("Body {}", self.bodies.len() + 1)` — a position, not an allocation.
+- [x] **The sketch origin is not a reference at all — 2 reds.** New
+      `src/tools/sketch/originSnap.probe.test.ts`: `computeSnap` has no origin tier (endpoint /
+      midpoint / center / quadrant / intersection / onCurve / grid / align / polar only) and
+      `inferConstraints` never anchors an endpoint on (0,0). So the audit's "rectangle on the origin
+      still reports DOF 2" is STRUCTURAL — D14 fixed only the label. `"Fixed"` already exists as a
+      constraint type, so the fix needs no protocol change. A third spec is the green control: an
+      oblique line away from the origin must still infer nothing.
+
+Gates (measured, 2026-08-14): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test`
+**255 files / 4231 tests — 32 failed, 4199 passed**, exactly the 32 intended reds and **zero
+pre-existing tests broken** (baseline was 250 files / 4182 tests, all passing; +5 files, +49 tests =
+32 reds + 17 green controls) · `cargo fmt --all --check` clean · `cargo clippy -p onecad-core
+--all-targets -D warnings` clean · `cargo test -p onecad-core --lib` **263 passed / 1 failed** (the
+intended red) · `verify-modeling-coverage.mjs` and `verify-modeling-contracts.mjs` pass · hex gate
+empty.
+
+NOT run at this gate, and not claimed: worker CTest, the worker-backed `cargo test --workspace`
+lane, and both Playwright lanes. U0 changed no production behaviour, so none of them can move; they
+are owed at the first package that does (U1).
+
+Deliberately NOT covered by U0's terminal matrix: `confirmExtrude` (`:6784`) and the two revolve
+paths (`:2639`, `:2724`), which use the legacy body-count inference rather than the classifier.
+Their fixtures need a profile/region arm that the six re-edit families do not; U1 must add them
+rather than treat the matrix as complete.
+
+### U1 — result truth, completed (2026-08-14) — GATE PASSED
+
+**Unresolved question 1 is ANSWERED: no wire change.** `updateOperationParams` already carries the
+target record id (`WireEditCommand.record`), and `failed_steps_of` keys on `rec.record_id` for ANY
+errored timeline record (`document_runtime.rs:3759`) with no add/update distinction. The re-edit
+correlation was available all along and simply unused. `tauriClient.applyOperation` and
+`applyEditCommand` now pass it, so a published-overall regen whose FAILING step is this record
+settles as `failed` for its own awaiter. `removeOperation`, `setOperationSuppression` and
+`setRollback` are deliberately NOT correlated — the first names a record that no longer exists, and
+the other two act on DOWNSTREAM steps, so scoping the change to the named record's own bodies would
+drop exactly the bodies that moved.
+
+- [x] **All 11 bypassing sites now classify.** `commitTransform`, boolean re-edit + fresh, hole/shell/
+      offsetFace/edge-op re-edit, `treeActions.dispatch`, `reattachSketch`, and both legacy
+      body-count sites (`confirmExtrude`, `confirmRevolve` × 2). One new shared
+      `settleScalarEdit()` covers the four `updateOperationParams` re-edits so they cannot drift.
+- [x] **`classifyRegen` gained an explicit `noTerminal` option**, and this was a REAL defect found by
+      the change: metadata-only commands (`RegenHint::None`) publish a projection, run no regen, and
+      return no terminal — so the body-count fallback called every eye-click and every rename a
+      FAILURE and reverted it. `treeActions` and `reattachSketch` pass `noTerminal: "published"`;
+      every other caller keeps the historical inference verbatim.
+- [x] **A `needsRepair` record is never rolled back and never reads as success**, now in extrude and
+      revolve too (both previously rolled it back because it changes no bodies). Each family reports
+      it as the ask it is: sticky, `info`, "… needs repair".
+- [x] **Boolean success selection is `allChildOutputs`** per its contract row — new
+      `booleanResultSelection()` selects everything the regen published for the record, falling back
+      to the target only when it published nothing. Both boolean paths select ONLY on `published`, so
+      a failed commit no longer moves the selection.
+- [x] **The terminal matrix is complete.** `ModelToolController.terminalFamilies.test.ts` now covers
+      extrude and revolve re-edit as well (the honest gap U0 recorded), 8 families × 3 terminals.
+      Their fixtures needed a sketch/region read and a delivered mesh ingest, which is why U0 left
+      them out. **Proved non-vacuous by mutation**: restoring `confirmExtrude`'s body-count check
+      reds `extrude re-edit · failed with a reason` while its `published` control stays green.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **255 files /
+4237 tests — 16 failed, 4221 passed**. The 16 are exactly U0's remaining reds (8 → U2, 4 → U3,
+4 → U7); U1's own 16 went green and **no pre-existing test regressed**.
+
+NOT run: worker CTest and the worker-backed `cargo test --workspace` (no Rust/C++ file changed) and
+both Playwright lanes — owed at the first package that changes rendered behaviour (U2).
+
+### U2 — one confirmation grammar (2026-08-14) — GATE PASSED
+
+- [x] **`onApply` is deleted.** Boolean, both patterns and mirror publish the same `onConfirm` /
+      `onCancel` pair as every other tool; `showBoolean` also stopped being the one `show*` that took
+      positional handlers. `ApplyButton` is gone — `ConfirmButtons` (✓/✕) is the single confirm
+      vocabulary for all twelve tools, per the approved decision.
+- [x] **One table-driven Enter router.** `armedConfirm()` replaces the hand-enumerated `if` chain
+      that simply omitted boolean/linear/circular/mirror. A table cannot silently omit a tool: a new
+      reducer without a row is visible. The frozen contract's `enterSupport` column is green for all
+      twelve rows for the first time.
+- [x] **No armed model tool renders without a cancel.** The fillet/shell bare-numeric fallback was
+      already unreachable (`armShell` and both `showFillet` sites all wire ✓/✕) and is deleted.
+- [x] **Reducer event names unified on `confirm`**, with `apply` kept as an accepted alias so a stale
+      caller cannot silently become a no-op. Refusal wording unified on "Cannot confirm invalid
+      preview: …" (it forked "confirm"/"apply" across six sites).
+- [x] **The sketch→Extrude handoff no longer throws the intent away.** Pressing `E` while sketching
+      used to finish the sketch and then `resetToSelect("Select one closed sketch region, then choose
+      Extrude")` — it armed and immediately reset to Select, which is the "arms then resets" defect
+      the spec names. It now keeps the tool and enters the region pick; with a SOLE extrudable region
+      `enterRegionPick` arms outright, so `E` in a one-region sketch lands straight on "Drag the arrow
+      to set depth". Caught by the browser lane, not by unit tests.
+
+**User-visible changes** (deliberate, recorded per `src/test/contracts/README.md`): the accent `Apply`
+button is replaced by ✓ everywhere; `E` from sketch mode arms Extrude directly on a single region.
+Two e2e specs encoded the old behaviour and were rewritten (`auto-mode`, `ellipse`) — the rewrite
+keeps the region-identity assertion so "armed directly" cannot hide a wrong-region bind. `chip-apply`
+is now `chip-confirm` in four specs.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **255 files / 4237 tests — 8 failed,
+4229 passed** (the 8 are U3's 4 and U7's 4; no pre-existing test regressed) · full Playwright lanes,
+retries 0: **chromium 200/200**, **webkit 200/200**. MC-R8's boolean-preview lane passed in this
+chromium run; that is one clean sample, NOT a root cause, so MC-R8 stays open.
+
+### U3 — live numeric contract (2026-08-14) — GATE PASSED
+
+Closes D3 (blur-gated values) and D4 (no type-to-enter), the two columns U0 added to the frozen
+contract.
+
+- [x] **`DimensionInput` gained `onPreview` + `initialText`.** `onPreview` fires on every PARSEABLE
+      change with the document-domain value; partial text emits nothing, stays editable and never
+      clamps. `initialText` is the type-to-enter seed — the character typed on the canvas REPLACES
+      the formatted value, and it previews too (it is a parseable change like any other).
+- [x] **One numeric field for every armed model chip.** `clusterInput` and `numericChip` both route
+      through a single `primaryField()`: live `onPreview`, `commitOnBlur={false}` (an armed model
+      tool commits on Enter or ✓ only — nothing is lost, the value already went out through the
+      preview), and the type-to-enter seed/focus.
+- [x] **The type-to-enter router is controller-owned**, not chip-owned — a chip growing its own
+      keyboard behaviour is the fragmentation this program removes. A printable `0-9 . -` on the
+      canvas calls `toolChipStore.beginPrimaryEntry(char)`, guarded on: nothing editable focused
+      (`isEditableTarget` — which is what the command palette and inspector editors are), no
+      modifier, and `PRIMARY_VALUE_CHIPS.has(kind)`. That set is keyed on the CHIP, not on the
+      reducers: the chip IS the editor, so it cannot drift from what is on screen the way a parallel
+      FSM table would, and boolean/mirror/axis-pick/region-select correctly have nothing a digit
+      could mean.
+- [x] **Two real defects the live path exposed, both fixed:**
+      - **the angle parse accepted trailing junk.** `Number.parseFloat("12abc")` is 12, so an angle
+        typo silently committed 12 — and under live preview it ALSO rewrote the field mid-keystroke.
+        Angles are now as strict as lengths: only a complete number parses.
+      - **our own preview echoed back and ate the keystroke.** Live preview means the edit returns
+        as a new `value` prop, and re-formatting on that echo rewrote the text under the cursor:
+        typing `25.` collapsed to `25` the instant the 25 previewed. The field now ignores the echo
+        of the value it last previewed. **The first version of that guard was too broad and the
+        browser lane caught it**: it also suppressed the re-label on a UNIT switch, so 50.8 mm no
+        longer re-read as 2 in (`e2e/units.spec.ts:155`). A unit change always re-displays; only a
+        value echo is suppressed.
+- [x] **The probe drives both halves of the real path.** `modelingInteraction.numeric.probe.test.tsx`
+      renders the chip AND the controller: the canvas keystroke goes to `window` (where the
+      controller listens), everything after it goes to the focused field (where a browser sends it).
+      Simulating the second character on `window` would be testing something no browser does. Four
+      specs per tool incl. a seeded-value control and a partial-text/no-clamp spec.
+
+**Deliberately NOT migrated:** `HoleChipCluster`'s two raw `<input>`s (hole depth, counterbore /
+countersink). They are SECONDARY parameters whose domain includes `null` ("Thru"), which is not a
+`DimensionInput` domain, and a second `aria-label="Dimension value"` would make the primary-value
+locator every spec uses ambiguous. The existing rationale in that file still holds; the "one numeric
+field" rule is about the PRIMARY value, which already routes through `DimensionInput`.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **255 files / 4239 tests — 4 failed,
+4235 passed**; the 4 are U7's, and **no pre-existing test regressed** · full Playwright lanes,
+retries 0: **chromium 200/200**, **webkit 200/200** (re-run clean after the units fix — the first
+run was 199/1 and is not claimed).
+
+### U7 — repair and sketch truth (2026-08-14) — GATE PASSED
+
+Taken before U4–U6 because it closed the last four U0 reds and the native toolchain was warm; the
+packages are independent, so the order costs nothing.
+
+- [x] **One constraint-status authority.** `InspectorPanel`'s SelectionState branch reads
+      `sketchStatusText` instead of hardcoding `Under-constrained · DOF {dof}`. This was the second,
+      silent authority D14 left behind — the pure function was fixed, this branch was not, so a
+      fully-constrained sketch selected in the TREE still rendered the impossible string.
+- [x] **Candidate copy cannot contradict the candidate list.** The count now comes from the same
+      `ResolveRefs` response that renders the rows; a collapsed row states the REASON only until
+      that response lands. The `needs-repair` event's `candidateCount` is a scoring hint, not a
+      promise that any of them is an eligible rebind target (audit finding 06).
+- [x] **The sketch origin is a real reference.** It is now a snap tier — ranked WITH quadrant:
+      below the three snaps that name a relationship to drawn geometry, above the two derived ones,
+      because ranking it top would steal a snap from a nearer endpoint and ranking it bottom would
+      lose it to any stray curve passing the origin. `autoConstrain` emits ONE `Fixed` per sketch for
+      a point accepted on it, which is what removes the two translation DOF every other dimension
+      leaves behind (the audit's 60×40 rectangle reading DOF 2). `Fixed` was already wired end to
+      end, so no protocol change. Skipped when the sketch is already anchored — existing geometry on
+      the origin, or REFERENCE-LOCKED geometry (a sketch on a model face is positioned by its host
+      and its projected boundary carries its own `Fixed` constraints; `sketchOnFace.test.ts` caught
+      that case).
+- [x] **`OffsetFaceOp` runs the shared publication gate.** It was the one mutating operation that
+      never did.
+
+**Honest limit on the OffsetFace change:** its own postconditions (null, `BRepCheck`, exactly one
+solid, positive volume above `kMinVolume`, self-interference, semantic delta) are equal or stricter
+than every Tier A check except the audit-error path, and no real offset input was found that
+produces a non-solid-like result — so **there is no end-to-end negative control, and none is
+claimed**. The change buys the structured `PublicationDecision` evidence the P3 contract rows promise
+for every other operation, and stops future drift. `ImportOp` remains uncovered by design (its
+advisory/healing policy is versioned separately).
+
+Gates: `bunx tsc --noEmit` clean · `bun run test` **255 files / 4240 tests, ALL GREEN — every U0 red
+is now closed** · worker Release build + `ctest --test-dir worker/build` **119/119** ·
+`cargo fmt --all --check` clean.
+
+### U6 — tool entry, roles, and result truth (2026-08-14) — GATE PASSED
+
+- [x] **Unique body display labels.** `default_name` scans for the lowest FREE `Body N` instead of
+      `bodies.len() + 1`, which was a position, not an allocation: deleting `Body 1` of three made the
+      next fresh body `Body 3` as well. Measured before the fix: `["Body 2", "Body 3", "Body 3"]`.
+      Deterministic, stable across save/reopen, and needs no counter to serialize.
+- [x] **One pattern-count range across TS/Rust/worker.** `PATTERN_COUNT_MIN/STEPPER_MAX/COUNT_MAX`
+      (2 / 12 / 128) replace the silent 2–12 clamp. The +/− buttons still step 2–12 — one click per
+      instance for the common case — while TYPING reaches the worker's `kMaxPatternCount`. Out of
+      range is REFUSED and marked, never clamped: a clamp would commit a count the user never saw
+      previewed.
+- [x] **`Total`, not "count".** The label states that the number includes the source — the two
+      readings differ by exactly the body the user is looking at.
+- [x] **Boolean states its roles.** Two preselected bodies now ARM outright with roles assigned in
+      selection order, instead of discarding half the selection and asking for a pick already made;
+      one body still enters `AwaitingSelection: Pick the tool body`. The chip names both operands and
+      offers **Swap** — a Cut is not symmetric, and before this "did I pick the right target?" could
+      only be answered by cancelling. Swap RE-OPENS the preview lane rather than re-sending params:
+      a session's operand refs are fixed at `beginPreview`.
+- [x] **Ghost fidelity is disclosed.** Pattern and Mirror arm hints read "… · placement preview,
+      validated on Apply · Enter or ✓ to confirm". They have no kernel candidate — the viewport shows
+      the source mesh transformed locally, which proves placement and nothing else — and a translucent
+      shape looks identical to an exact candidate.
+- [x] **Mirror's fuse default matched to the record.** Re-edit fell back to `true` where
+      `MirrorBodyParams.fuse_with_original` is `#[serde(default)] bool` — i.e. `false`. A legacy record
+      with no `fuseWithOriginal` loaded non-fused in Rust but would have re-edited as fused, and
+      committing that silently flips the result mode.
+
+**Dropped after checking the source, not implemented blind:** the plan listed "mirror gains the
+`resultPolicyVersion` symmetry the patterns have". `MirrorBodyParams` has no such field, so there is
+nothing to preserve — the asymmetry is correct, and adding one would be a record/wire change with its
+own gate. The pattern `fuseResult ?? true` fallback is likewise left alone: absent means V1 legacy
+aggregate semantics, which `TODO.md`'s Pattern compatibility baseline pins.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **255 files / 4244 tests, all green** ·
+`cargo clippy --workspace --all-targets -D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace --no-fail-fast` **810 passed / 0 failed across 69 targets** · worker `ctest` 119/119 ·
+full Playwright lanes, retries 0: **chromium 200/200**, **webkit 200/200**.
+
+**The origin anchor is a user-visible change and the browser lane priced it.** Geometry whose point
+lands on the origin now loses two translation DOF, so five specs that draw from screen centre (which
+IS the origin) reported new numbers: circle 3→1, arc 5→3, ellipse 5→3, and a solitary circle/ellipse
+is no longer "No constraints yet". All five were updated with the reason, not the number alone.
+Tightened while doing so: the anchor is gated on `InferOptions.originAccepted`, which the controller
+sets from the same point-snap preference that puts the origin in the snap ladder — so with point
+snapping OFF a coordinate that happens to be (0,0) is a coincidence, not an accepted relation, and
+"do not auto-fix geometry merely because it was drawn near the origin" holds.
+
+**New residual — MC-R9 (full-suite-only, observed once).**
+`e2e/revolve-commit.spec.ts:111` ("Revolve guidance …") failed in ONE full chromium run that took
+19 min instead of the usual 14 (the box was loaded), and passes in isolation and in the clean
+re-run. Superficially the same signature class as MC-R8, but **not the same root cause**: MC-R8 was
+the debounced auto-fit moving the camera under an unsettled probe (`19088d0`), and this spec already
+calls `waitForCameraSettled` at both of its probe sites (`:124`, `:130`). Recorded, not retried
+away: two clean full lanes are the claim, one loaded run is the caveat.
+
+### U4 — OperationHUD + result summaries (2026-08-14) — GATE PASSED
+
+- [x] **One HUD frame for every armed model tool.** `panel()` is now the shared OperationHUD: common
+      tone (the WARN border on `valueError`, previously hand-rolled in the offsetFace branch and
+      absent everywhere else), a common result-summary slot above the controls, and a common
+      `role="status" aria-live="polite"` region. The offsetFace branch's private copy of the frame is
+      deleted. A tool can no longer quietly acquire its own tone, its own validity treatment, or no
+      accessible status at all.
+- [x] **D18 — every body-lifecycle operation states its result BEFORE Apply.** The audit's complaint
+      was that the user cannot tell whether instances are linked, merged, copied or editable later
+      until after committing, and a count alone cannot say it: `3` is the same number whether the
+      source survives or is folded away. So the summary names the LIFECYCLE:
+      - `Linear pattern · 3 total · 2 new bodies · source retained` (V2 keeps the source as instance
+        zero, hence N−1 children), or `· fused into the source`;
+      - `Circular pattern · …` the same way;
+      - `Mirror · 1 new body · source retained`;
+      - `Cut · Body 1 survives · Body 2 is consumed` — a Boolean CONSUMES its tool body, the single
+        most surprising thing about the operation and the one the audit found unstated;
+      - `Move · 2 bodies in place` / `Copy · 2 bodies · sources retained`.
+      It is published from the same place that rebuilds each ghost, so it cannot drift from what the
+      viewport is showing.
+
+**`ToolChipState` remains a flat object — deliberately, and this is the second time it has been
+deferred.** The spec's D6 asks for a discriminated `ToolEditorDescriptor` union. No red test forces
+it; it is pure internal type-safety; and the store gained four fields in this program (`primaryEntry`,
+`onSwap`/`targetName`/`toolName`, `resultSummary`), so a union rewrite now would land on a moving
+target. The behavioural half of D6 — one confirm protocol, one numeric field, one HUD frame — is
+what U2/U3/U4 actually delivered, and that is what a user or a future tool can observe. The type
+refactor stays a separate pass with its own gate.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **255 files /
+4247 tests, all green** · coverage + contract verifiers pass · hex gate empty · full Playwright
+lanes, retries 0: **chromium 200/200**, **webkit 200/200**.
+
+### U5 — gizmo overlay + collision-safe HUD (2026-08-14) — GATE PASSED
+
+Closes D5, the audit's P0 #2. **No transform semantics changed** — world-axis-only, frozen pivot,
+fold, copy and align are untouched. This is grab geometry and placement.
+
+- [x] **Three full 82px tori → three compact double-headed ARCS.** `TubeGeometry` over a ±26° sweep
+      at r=70, centred on each plane's 45° bisector — where no arrow lives (they are on the axes) and
+      no quad reaches (its far corner is r≈44) — with a cone at each end so the handle reads as
+      grabbable rather than decorative. Classification stays `{kind:"ring", axis}`, so the gesture and
+      `e2e/modelToolHelpers.findGizmoHandle` are unchanged.
+- [x] **The pick corridor is now 6px (12px across) against a 2.2px stroke** — a trackpad user no
+      longer has to land on a hairline.
+- [x] **The rotation handles no longer overlap EACH OTHER.** Three full circles of one radius meet at
+      six points, two rings deep, exactly where the translation arrows live; which ring you got was a
+      coin flip. The arcs share no point and none sits on an axis, so the arrow underneath wins
+      cleanly — pinned by a new spec.
+- [x] **`ViewportEngine.getInteractionOverlayBounds("transformGizmo")`** — the projected screen box.
+      No such API existed (`projectPoint` returns one point; the bounds helpers are world-space
+      `Box3`s), which is why nothing could ask where the gizmo was on screen.
+- [x] **The chip sits clear of the widget.** `TransformChipOpts` was the one `*ChipOpts` that did not
+      extend `ChipAnchorOpts`, so `resolveChipAnchor` never ran for it and the chip anchored dead on
+      the pivot — across the stems, the handle intersections and the pivot itself. It now offsets
+      along the active axis by the gizmo's own projected reach plus the shared gap, so the two cannot
+      drift apart when the geometry changes.
+- [x] **One screen-scale implementation.** Both overlays were fed `planePixelWorld()`, which measures
+      at the ORBIT TARGET and ignores orthographic zoom — so a handle away from the pivot was sized
+      for the wrong depth and every ortho zoom level scaled it identically. They now use
+      `screenScale.worldPerPixel` at each overlay's OWN anchor, which is what every other
+      constant-size layer (OriginTriad, PlanePicker, contributions) already used.
+
+**The edge-on case is characterised, not claimed fixed.** Any overlay handle coplanar with the view
+direction can be crossed; that is inherent to an unprojected, non-depth-tested widget, and
+nearest-hit remains the honest rule. What changed is the SIZE of the region — a 52° arc in one
+quadrant instead of a full circle. The old characterisation spec is kept, with its reasoning updated.
+
+**Shell's thickness handle is NOT implemented, deliberately.** A drag handle needs a direction, and
+the shell arm has none: `EntityRef.anchor` carries `worldPoint`/`surfaceUv` and no normal, and
+nothing in the shell path probes one (fillet and offsetFace get theirs from their own prepare
+responses). The spec's own rule — "the handle must not imply a valid direction where the operation
+cannot define one" — makes guessing worse than omitting. It needs a face normal on the prepare
+response, which is a wire change with its own gate.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **255 files /
+4248 tests, all green** · full Playwright lanes at the gate, retries 0.
+
+Unresolved questions:
+1. ~~Wire-level record correlation for `updateOperationParams`~~ — answered in U1: not needed.
+2. Is U8 (typed face/datum/axis references) queued straight after U7, or behind other roadmap tracks?
+3. MC-R8 is still un-root-caused. U2 and U6 touch that lane; the browser gate is not claimable for
+   those two packages until it is.
+
 ## NOW — modeling-correctness hardening completion (2026-08-13)
 
 Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one commit ahead of
@@ -67,15 +472,19 @@ Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one c
       **webkit 200/200**, **chromium 200/200** on the rerun. MC-R7 is closed in
       `docs/qa/modeling-residuals-v1.json` as stale evidence rather than a product
       defect.
-- [ ] **MC-R8 — the boolean-preview lane is nondeterministic in a full chromium run.**
-      The first of the two chromium runs above was 199/1 on
-      `e2e/boolean-preview.spec.ts:356` (Intersect chip): the 20 s poll on
-      `previewOwner === "boolean"` timed out at `null`, so the boolean lane never
-      opened. It is 9/9 in isolation (`--repeat-each=3`) and 200/200 on the immediate
-      full rerun, and the signature matches the projection-push race already bisected
-      to before the Platform refactor. NOT fixed, NOT retried away — recorded so the
-      browser gate is not claimed as reproducibly green. Root-cause the race between
-      the region click and the sketch-visibility commit's projection push.
+- [x] **MC-R8 — CLOSED with a root cause and a fix, commit `19088d0`.** The symptom was
+      `e2e/boolean-preview.spec.ts:356` (Intersect chip) timing out at `previewOwner === null`
+      in a FULL chromium run only, 9/9 green in isolation. The race is NOT the projection push
+      first guessed at: an instrumented full lane measured `autoFitPending: true` at probe entry
+      in all three tests, every run. Each extrude in `twoBodies` commits a body, a new body
+      schedules the DEBOUNCED auto-fit, and whether that 250 ms timer fires before or after the
+      probe's click is pure timing — when it fires first the tween moves the camera and the ray
+      misses the body, so `runPick` returns no ref (a genuine miss, not the deferred
+      `"unsettled"` case) and the selection clears. Fix is one `waitForCameraSettled` at the top
+      of the local `findBodyScreenPoint`, matching `helpers.ts findFaceOnBody`. No retry added.
+      Two latent same-pattern scanners were audited and deliberately left alone
+      (`modelToolHelpers.ts findFacePoint`, `hole.spec.ts farthestPixelOnFace`) — a timing edit
+      to a shared helper needs its own two-lane evidence.
 - [x] ~~**Pre-existing browser defect**~~ — superseded by the MC-R7 entry above; kept for the
       measurement that found it: `e2e/extrude-commit-gesture.spec.ts:135`
       "clicking empty canvas away from the handle commits (click-away)" fails deterministically

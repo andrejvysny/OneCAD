@@ -137,7 +137,7 @@ describe("the modeling tools report every regen terminal honestly", () => {
     applyOperation.mockResolvedValue(result(row));
     await controller.editLinearPatternFeature("feat-lp");
     await flush();
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
   }
 

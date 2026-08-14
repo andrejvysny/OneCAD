@@ -9,6 +9,7 @@
  */
 import { createClient } from "@/ipc/client";
 import { applyEditResult } from "@/features/inspector/historyActions";
+import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
 import type { SketchAttachTarget } from "@/ipc/types";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -51,6 +52,22 @@ export async function reattachSketch(
   const before = documentStore.getState().revision;
   try {
     const res = await createClient().reattachSketch(sketchId, target);
+    // A resolved result is not a success (U1). This family decided the verdict
+    // with its own `revision > before` heuristic, so a regen that bumped the
+    // revision AND reported `failed` read as a successful reattach. Classify
+    // first; the revision/body heuristic below then only distinguishes the
+    // SILENT-DROP no-op described above, which is what it was written for.
+    // No terminal ⇒ do not claim a failure: the silent-drop case below is exactly
+    // a legitimate result with no changed bodies, and inference cannot tell the
+    // two apart. The revision/body heuristic then reports it as the no-op it is.
+    const outcome = classifyRegen(res, { noTerminal: "published" });
+    const reason = failureReason(outcome);
+    if (reason !== null) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Reattach failed: ${reason}`, { severity: "error", sticky: true });
+      return false;
+    }
     applyEditResult(res);
     const moved = res.revision > before || (res.changedBodies?.length ?? 0) > 0;
     if (moved) {

@@ -102,7 +102,7 @@ describe("ModelToolController errorMessage WP0", () => {
     expect(toolChipStore.getState().kind).toBe("linearPattern");
 
     // Commit through the chip's onApply handler.
-    toolChipStore.getState().onApply?.();
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     // The commit should NOT have announced a success hint.

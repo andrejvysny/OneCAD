@@ -61,7 +61,12 @@ import { logDebug } from "@/debug/log";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
 import { documentStore, nextAppliedOps, nextDatumName, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
-import { toolChipStore, MODEL_TOOL_CHIP_ID, DEFAULT_CHIP_OFFSET_PX } from "@/stores/toolChipStore";
+import {
+  toolChipStore,
+  MODEL_TOOL_CHIP_ID,
+  DEFAULT_CHIP_OFFSET_PX,
+  PRIMARY_VALUE_CHIPS,
+} from "@/stores/toolChipStore";
 import {
   autoModeFor,
   hasMaterial,
@@ -865,10 +870,24 @@ export class ModelToolController {
         if (s.pendingExtrudeSketch !== lastPending) {
           lastPending = s.pendingExtrudeSketch;
           if (s.pendingExtrudeSketch && toolStore.getState().mode === "model") {
+            const sketchId = s.pendingExtrudeSketch;
             viewportStore.getState().setPendingExtrude(null);
-            this.resetToSelect("Select one closed sketch region, then choose Extrude", {
-              sticky: true,
-            });
+            // The sketch→Extrude handoff (`activateTool.finishSketchToTool`) is an
+            // EXPLICIT Extrude intent: the user pressed Extrude while sketching, so
+            // the sketch was finished and the tool armed for them.
+            //
+            // U2: this used to `resetToSelect("Select one closed sketch region, then
+            // choose Extrude")` — it threw the intent away and asked for it again,
+            // the "arms then resets to Select" defect. The contract's answer is
+            // AwaitingSelection: keep the tool, name the exact next pick, and filter
+            // the viewport to the valid picks — which is precisely the region pick.
+            if (toolStore.getState().modelTool === "extrude") {
+              void this.armExtrudePick(sketchId);
+            } else {
+              this.resetToSelect("Select one closed sketch region, then choose Extrude", {
+                sticky: true,
+              });
+            }
           }
         }
       }),
@@ -2636,18 +2655,22 @@ export class ModelToolController {
           }),
         );
         if (gen !== this.commitGen) return;
-        this.applyResult(res);
-        // Op-scoped bodies (finding 2): a re-edit's result is already this record's
-        // own bodies — take ALL of them (a Cut re-edit yields split children).
-        const bodyIds = res.changedBodies.map((b) => b.bodyId);
-        if (bodyIds.length > 0) this.finishRevolveAll(bodyIds, gen, loaded);
-        else {
+        // Classifier, not a body count (U1): an empty result can be a legitimate
+        // `noop`, and a `needsRepair` record must never be rolled back.
+        const outcome = classifyRegen(res);
+        if (!keepsRecord(outcome)) {
           this.commitRevolveBodyUnsub?.();
           this.commitRevolveBodyUnsub = null;
           await this.rollbackFailedCommit();
           if (gen !== this.commitGen) return;
-          this.onRevolveCommitFailed(0, 1, res.errorMessage ?? "Revolve failed", gen);
+          this.onRevolveCommitFailed(0, 1, failureReason(outcome) ?? "Revolve failed", gen);
+          return;
         }
+        this.applyResult(res);
+        // Op-scoped bodies (finding 2): a re-edit's result is already this record's
+        // own bodies — take ALL of them (a Cut re-edit yields split children).
+        const bodyIds = outcome.kind === "published" ? res.changedBodies.map((b) => b.bodyId) : [];
+        this.finishRevolveAll(bodyIds, gen, loaded, outcome.kind === "needsRepair");
       } catch (e) {
         if (gen !== this.commitGen) return;
         this.commitRevolveBodyUnsub?.();
@@ -2659,6 +2682,8 @@ export class ModelToolController {
 
     const total = regionIds.length;
     const committedBodyIds: string[] = [];
+    /** Any region left in `needsRepair` — kept, never rolled back, reported as an ask. */
+    let needsRepair = false;
     for (let k = 0; k < total; k++) {
       // The open lane session for THIS region. Sessions are opened in `regionIds`
       // order at axis pick and sliced in lockstep by `onRevolveCommitFailed`, so the
@@ -2722,26 +2747,37 @@ export class ModelToolController {
         }
       }
       if (gen !== this.commitGen) return;
-      // Extrude parity: a removal-ONLY result is a SUCCESS (a Cut revolve that
-      // consumes its target entirely changes no body but removes one).
-      if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+      // Extrude parity, now through the classifier (U1): a removal-ONLY result is
+      // a SUCCESS (a Cut revolve that consumes its target entirely changes no body
+      // but removes one), a `noop` is not a failure, and a `needsRepair` record is
+      // exactly what repair operates on — rolling it back would delete it.
+      const outcome = classifyRegen(res);
+      if (!keepsRecord(outcome)) {
         this.commitRevolveBodyUnsub?.();
         this.commitRevolveBodyUnsub = null;
         await this.rollbackFailedCommit();
         if (gen !== this.commitGen) return;
-        this.onRevolveCommitFailed(k, total, res?.errorMessage ?? "Revolve failed", gen);
+        this.onRevolveCommitFailed(k, total, failureReason(outcome) ?? "Revolve failed", gen);
         return;
       }
-      this.applyResult(res);
+      const published = res as ApplyOperationResult;
+      this.applyResult(published);
+      if (outcome.kind === "needsRepair") needsRepair = true;
+      if (outcome.kind !== "published") continue;
       // Op-scoped bodies (finding 2): each region's op result carries only its own
       // bodies (incl. split children) — collect them all across the loop.
-      for (const b of res.changedBodies) committedBodyIds.push(b.bodyId);
+      for (const b of published.changedBodies) committedBodyIds.push(b.bodyId);
     }
-    this.finishRevolveAll(committedBodyIds, gen, loaded);
+    this.finishRevolveAll(committedBodyIds, gen, loaded, needsRepair);
   }
 
   /** Wait for ALL committed revolve bodies to enter the scene, then teardown + select. */
-  private finishRevolveAll(bodyIds: string[], gen: number, loaded: Set<string>): void {
+  private finishRevolveAll(
+    bodyIds: string[],
+    gen: number,
+    loaded: Set<string>,
+    needsRepair = false,
+  ): void {
     const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
     const done = (): void => {
       if (this.commitRevolveBodyTimer) {
@@ -2751,7 +2787,7 @@ export class ModelToolController {
       this.commitRevolveBodyUnsub?.();
       this.commitRevolveBodyUnsub = null;
       if (gen !== this.commitGen) return;
-      this.finishRevolve(bodyIds);
+      this.finishRevolve(bodyIds, needsRepair);
     };
     if (pending.size === 0) {
       done();
@@ -2848,7 +2884,7 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  private finishRevolve(bodyIds: string[]): void {
+  private finishRevolve(bodyIds: string[], needsRepair = false): void {
     this.deps.engine.hideRevolvePreview();
     this.deps.engine.setOrbitSuppressed(false);
     // The lane sessions were CONSUMED by the commit (endPreview(true)) — drop their
@@ -2892,7 +2928,12 @@ export class ModelToolController {
       // here, so an extra undo step is the only cost.
       if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     }
-    this.resetToSelect(completionHint);
+    // A region left in `needsRepair` is an ask, not a success (U1).
+    if (needsRepair) {
+      this.resetToSelect("Revolve needs repair", { severity: "info", sticky: true });
+    } else {
+      this.resetToSelect(completionHint);
+    }
     this.updateDebug();
   }
 
@@ -3314,19 +3355,60 @@ export class ModelToolController {
 
   private startBooleanFromSelection(): void {
     const selected = selectionStore.getState().selected;
-    const body = selected.find((r) => r.kind === "body");
+    const bodies = selected.filter((r) => r.kind === "body");
+    const body = bodies[0];
     if (!body) {
       const verdict = getToolApplicability("boolean", selected, this.applicabilityCtx());
       viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     this.boolean = booleanStep(booleanInit(), { kind: "start", targetBodyId: body.id }).state;
+    // PRESELECT FIRST, THEN ACT (U6): two valid bodies already selected means the
+    // user has stated the whole operation — assign the roles deterministically
+    // (selection order: first is the target, the rest are tools) and arm, instead
+    // of discarding half the selection and asking for a pick they already made.
+    const tool = bodies[1];
+    if (tool) {
+      this.boolean = booleanStep(this.boolean, { kind: "pickTool", toolBodyId: tool.id }).state;
+      toolStore.setState({ phase: "armed" });
+      this.showArmedBooleanChip(tool.id);
+      viewportStore
+        .getState()
+        .setStatusHint("Choose Union / Cut / Intersect · Enter or ✓ to confirm", { sticky: true });
+      this.updateDebug();
+      void this.armBooleanPreview();
+      return;
+    }
     toolStore.setState({ phase: "armed" });
     // Modal: the click picks the tool BODY, so an LMB drag must not orbit instead.
     this.deps.engine.setOrbitSuppressed(true);
+    // AwaitingSelection: name the exact next pick.
     viewportStore.getState().setStatusHint("Pick the tool body to combine", { sticky: true });
     this.updateDebug();
   }
+
+  /** Swap which body is the target and which is the tool, then re-preview (U6).
+   *  A Cut is not symmetric — which body survives is the whole decision — and
+   *  re-picking to change your mind means starting the operation over. */
+  private swapBooleanRoles(): void {
+    const { targetBodyId, toolBodyId } = this.boolean;
+    if (this.boolean.phase !== "armed" || !targetBodyId || !toolBodyId) return;
+    let fsm = booleanStep(booleanInit(), { kind: "start", targetBodyId: toolBodyId }).state;
+    fsm = booleanStep(fsm, { kind: "pickTool", toolBodyId: targetBodyId }).state;
+    this.boolean = booleanStep(fsm, { kind: "setOp", op: this.boolean.op }).state;
+    selectionStore.getState().set([
+      { kind: "body", id: toolBodyId },
+      { kind: "body", id: targetBodyId },
+    ]);
+    this.showArmedBooleanChip(targetBodyId);
+    // The open lane session was opened for the OLD pair, and a session's operand
+    // refs are fixed at `beginPreview` — so a swap RE-OPENS it rather than
+    // re-sending params the session cannot honour.
+    this.cancelPreview();
+    void this.armBooleanPreview();
+  }
+
+
 
   // ── shell ──────────────────────────────────────────────────────────────────
   //
@@ -3457,7 +3539,7 @@ export class ModelToolController {
     if (this.previewFailure) {
       viewportStore
         .getState()
-        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
           severity: "error",
           sticky: true,
         });
@@ -3495,6 +3577,24 @@ export class ModelToolController {
   }
 
   /** Thickness-only parametric re-edit — deep-merges into the stored params. */
+  /**
+   * The shared settle step for a SCALAR re-edit (`updateOperationParams`).
+   *
+   * Shell, OffsetFace, Fillet/Chamfer and Hole all re-edit the same way — one
+   * deep-merged params command, one projection — and all four used to treat a
+   * resolved promise as success, so a regen carrying `failed`/`timeout` printed
+   * "… updated" and hydrated a document that had not changed (U1).
+   *
+   * Hydration happens only when the record SURVIVES: a failed regen has nothing
+   * to project, while `noop`/`needsRepair` do and must not be rolled back —
+   * `needsRepair` is the state repair itself operates on.
+   */
+  private settleScalarEdit(res: ApplyOperationResult): { failure: string | null; repaired: boolean } {
+    const outcome = classifyRegen(res);
+    if (keepsRecord(outcome)) this.applyResult(res);
+    return { failure: failureReason(outcome), repaired: outcome.kind === "needsRepair" };
+  }
+
   private async commitShellEdit(editFeatureId: string): Promise<void> {
     const thickness = this.shell.thickness;
     // Move to `committing` so the document-revision bump this commit causes does
@@ -3506,6 +3606,7 @@ export class ModelToolController {
     // The result message is captured, not published, until the tool has been reset —
     // see `resetToSelect` for why publishing first would lose it.
     let failure: string | null = null;
+    let repaired = false;
     try {
       // A re-edit changes ONLY the thickness: deep-merge into the stored params so the
       // shell's open faces + target survive (a whole-params replace would wipe them).
@@ -3515,7 +3616,7 @@ export class ModelToolController {
           thickness: { value: thickness },
         }),
       );
-      this.applyResult(res);
+      ({ failure, repaired } = this.settleScalarEdit(res));
     } catch (e) {
       failure = errMessage(e);
     }
@@ -3525,6 +3626,8 @@ export class ModelToolController {
     this.shellStoredParams = undefined;
     if (failure !== null) {
       this.resetToSelect(`Shell failed: ${failure}`, { severity: "error", sticky: true });
+    } else if (repaired) {
+      this.resetToSelect("Shell needs repair", { severity: "info", sticky: true });
     } else {
       this.resetToSelect("Shell thickness updated");
     }
@@ -4052,7 +4155,7 @@ export class ModelToolController {
     if (this.previewFailure) {
       viewportStore
         .getState()
-        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
           severity: "error",
           sticky: true,
         });
@@ -4121,6 +4224,7 @@ export class ModelToolController {
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
     let failure: string | null = null;
+    let repaired = false;
     try {
       // A re-edit changes ONLY the distance: deep-merge into the stored params so
       // the frozen closure, the opposite face and the target survive verbatim (a
@@ -4133,13 +4237,15 @@ export class ModelToolController {
           distance: { value: distance },
         }),
       );
-      this.applyResult(res);
+      ({ failure, repaired } = this.settleScalarEdit(res));
     } catch (e) {
       failure = errMessage(e);
     }
     this.resetOffsetFaceState();
     if (failure !== null) {
       this.resetToSelect(`Offset face failed: ${failure}`, { severity: "error", sticky: true });
+    } else if (repaired) {
+      this.resetToSelect("Offset face needs repair", { severity: "info", sticky: true });
     } else {
       this.resetToSelect("Offset distance updated");
     }
@@ -4460,7 +4566,7 @@ export class ModelToolController {
     if (this.previewFailure) {
       viewportStore
         .getState()
-        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
           severity: "error",
           sticky: true,
         });
@@ -4483,12 +4589,15 @@ export class ModelToolController {
     // so it takes the plain applyOperation path.
     if (editFeatureId) {
       let failure: string | null = null;
+      let repaired = false;
       try {
-        this.applyResult(await this.client.applyOperation(op));
+        ({ failure, repaired } = this.settleScalarEdit(await this.client.applyOperation(op)));
       } catch (e) {
         failure = errMessage(e);
       }
-      this.finishHole(failure === null ? "Hole updated" : `Hole failed: ${failure}`, failure !== null);
+      if (failure !== null) this.finishHole(`Hole failed: ${failure}`, true);
+      else if (repaired) this.finishHole("Hole needs repair", false, { severity: "info" });
+      else this.finishHole("Hole updated", false);
       return;
     }
 
@@ -4509,14 +4618,21 @@ export class ModelToolController {
     this.finishHole("Hole", false);
   }
 
-  private finishHole(hint: string, failed: boolean): void {
+  /** `opts` carries the one case that is neither a plain success nor a failure:
+   *  a `needsRepair` terminal, which is sticky (it is an ask) but `info`. */
+  private finishHole(hint: string, failed: boolean, opts?: { severity: "info" }): void {
     this.hole = holeInit();
     this.holeEditFeatureId = undefined;
     this.holeTopoKey = undefined;
     this.clearToolHover();
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
-    this.resetToSelect(hint, failed ? { severity: "error", sticky: true } : undefined);
+    const hintOpts = failed
+      ? ({ severity: "error", sticky: true } as const)
+      : opts
+        ? ({ severity: opts.severity, sticky: true } as const)
+        : undefined;
+    this.resetToSelect(hint, hintOpts);
     this.updateDebug();
   }
 
@@ -4604,13 +4720,15 @@ export class ModelToolController {
       spacing: seedSpacing,
     }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick axis + count + spacing, then Apply", { sticky: true });
+    viewportStore.getState().setStatusHint(GHOST_FIDELITY_HINT("Pick axis, total and spacing"), {
+      sticky: true,
+    });
     this.rebuildLinearGhost();
     toolChipStore.getState().showLinearPattern(this.linear.axis, this.linear.count, this.linear.spacing, this.bodyCenter(bodyId), {
       onAxis: (a) => this.onLinearAxis(a),
       onCount: (n) => this.onLinearCount(n),
       onSpacing: (v) => this.onLinearSpacing(v),
-      onApply: () => void this.commitLinear(),
+      onConfirm: () => void this.commitLinear(),
       onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
@@ -4632,7 +4750,29 @@ export class ModelToolController {
     this.rebuildLinearGhost();
   }
 
+  /**
+   * What the armed operation will produce, stated BEFORE Apply (U4/D18).
+   *
+   * The audit's complaint was that "the user cannot tell whether instances are
+   * linked, merged, copied, or editable later" until after the commit. A count
+   * alone does not say it: `3` is the same number whether the source survives or
+   * is folded away. So the summary names the lifecycle in words — how many
+   * bodies appear, and what happens to the one already on screen.
+   *
+   * Pattern V2 keeps the source as instance zero, which is why a non-fused
+   * pattern of N produces N−1 new bodies and retains the source.
+   */
+  private publishPatternSummary(kind: "Linear" | "Circular", count: number): void {
+    const fused = this.patternFuseResult;
+    const created = Math.max(0, count - 1);
+    const outcome = fused
+      ? "fused into the source"
+      : `${created} new ${created === 1 ? "body" : "bodies"} · source retained`;
+    toolChipStore.getState().setResultSummary(`${kind} pattern · ${count} total · ${outcome}`);
+  }
+
   private rebuildLinearGhost(): void {
+    this.publishPatternSummary("Linear", this.linear.count);
     if (!this.linear.bodyId) return;
     const entry = getEntry(this.linear.bodyId);
     if (!entry) return;
@@ -4646,7 +4786,7 @@ export class ModelToolController {
     if (this.linear.phase !== "armed" || !this.linear.bodyId) return;
     const { bodyId, axis, spacing, count } = this.linear;
     const editFeatureId = this.patternEditFeatureId;
-    this.linear = linearPatternStep(this.linear, { kind: "apply" }).state;
+    this.linear = linearPatternStep(this.linear, { kind: "confirm" }).state;
     const op: OperationOp = {
       opType: "LinearPattern",
       featureId: editFeatureId,
@@ -4699,13 +4839,15 @@ export class ModelToolController {
       angle: seedAngle,
     }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick axis + count + angle, then Apply", { sticky: true });
+    viewportStore.getState().setStatusHint(GHOST_FIDELITY_HINT("Pick axis, total and angle"), {
+      sticky: true,
+    });
     this.rebuildCircularGhost();
     toolChipStore.getState().showCircularPattern(this.circular.axis, this.circular.count, this.circular.angle, this.bodyCenter(bodyId), {
       onAxis: (a) => this.onCircularAxis(a),
       onCount: (n) => this.onCircularCount(n),
       onAngle: (v) => this.onCircularAngle(v),
-      onApply: () => void this.commitCircular(),
+      onConfirm: () => void this.commitCircular(),
       onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
@@ -4728,6 +4870,7 @@ export class ModelToolController {
   }
 
   private rebuildCircularGhost(): void {
+    this.publishPatternSummary("Circular", this.circular.count);
     if (!this.circular.bodyId) return;
     const entry = getEntry(this.circular.bodyId);
     if (!entry) return;
@@ -4741,7 +4884,7 @@ export class ModelToolController {
     if (this.circular.phase !== "armed" || !this.circular.bodyId) return;
     const { bodyId, axis, angle, count, origin } = this.circular;
     const editFeatureId = this.patternEditFeatureId;
-    this.circular = circularPatternStep(this.circular, { kind: "apply" }).state;
+    this.circular = circularPatternStep(this.circular, { kind: "confirm" }).state;
     const op: OperationOp = {
       opType: "CircularPattern",
       featureId: editFeatureId,
@@ -4789,11 +4932,13 @@ export class ModelToolController {
       planePoint: seedPlanePoint,
     }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick a mirror plane, then Apply", { sticky: true });
+    viewportStore.getState().setStatusHint(GHOST_FIDELITY_HINT("Pick a mirror plane"), {
+      sticky: true,
+    });
     this.rebuildMirrorGhost();
     toolChipStore.getState().showMirror(this.mirror.plane, this.bodyCenter(bodyId), {
       onPlane: (p) => this.onMirrorPlane(p),
-      onApply: () => void this.commitMirror(),
+      onConfirm: () => void this.commitMirror(),
       onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
@@ -4806,6 +4951,13 @@ export class ModelToolController {
   }
 
   private rebuildMirrorGhost(): void {
+    toolChipStore
+      .getState()
+      .setResultSummary(
+        this.patternFuseResult
+          ? "Mirror · fused into the source"
+          : "Mirror · 1 new body · source retained",
+      );
     if (!this.mirror.bodyId) return;
     const entry = getEntry(this.mirror.bodyId);
     if (!entry) return;
@@ -4819,7 +4971,7 @@ export class ModelToolController {
     if (this.mirror.phase !== "armed" || !this.mirror.bodyId) return;
     const { bodyId, plane, planePoint } = this.mirror;
     const editFeatureId = this.patternEditFeatureId;
-    this.mirror = mirrorStep(this.mirror, { kind: "apply" }).state;
+    this.mirror = mirrorStep(this.mirror, { kind: "confirm" }).state;
     const op: OperationOp = {
       opType: "MirrorBody",
       featureId: editFeatureId,
@@ -4974,7 +5126,12 @@ export class ModelToolController {
       return;
     }
     const planePoint = storedVec3(stored?.planePoint) ?? undefined;
-    const fuseWithOriginal = typeof stored?.fuseWithOriginal === "boolean" ? stored.fuseWithOriginal : true;
+    // Absent ⇒ FALSE, matching the record's own `#[serde(default)] bool`
+    // (`MirrorBodyParams.fuse_with_original`). The fallback used to be `true`,
+    // which disagreed with the authority: a legacy record with no
+    // `fuseWithOriginal` loads NON-fused in Rust but would have re-edited as
+    // fused here — and committing that would silently flip the result mode.
+    const fuseWithOriginal = stored?.fuseWithOriginal === true;
     toolStore.getState().setTool("mirror");
     this.armMirror(bodyId, featureId, plane, planePoint, fuseWithOriginal);
   }
@@ -5101,6 +5258,25 @@ export class ModelToolController {
     this.updateDebug();
   }
 
+  /**
+   * The world point the placement chip offsets AWAY from: the pivot displaced
+   * along the active axis, so `anchorAxisFrom → worldPos` names a direction the
+   * overlay driver can push the chip perpendicular to.
+   */
+  private transformChipAnchorFrom(): Vec3 {
+    const pivot = this.bodiesCenter(this.transform.targets);
+    const dir = WORLD_AXIS[this.transform.axis];
+    return [pivot[0] + dir[0], pivot[1] + dir[1], pivot[2] + dir[2]];
+  }
+
+  /** Clear of the gizmo's projected box, plus the usual chip gap. Falls back to
+   *  the shared default when the engine cannot answer (no canvas yet). */
+  private transformChipOffsetPx(): number {
+    const bounds = this.deps.engine.getInteractionOverlayBounds?.("transformGizmo") ?? null;
+    if (!bounds) return DEFAULT_CHIP_OFFSET_PX;
+    return Math.round(bounds.height / 2) + DEFAULT_CHIP_OFFSET_PX;
+  }
+
   private showTransformChip(): void {
     toolChipStore
       .getState()
@@ -5118,9 +5294,26 @@ export class ModelToolController {
           onCopy: (c) => this.onTransformEvent({ kind: "setCopy", copy: c }),
           onAlign: () => this.toggleAlign(),
         },
-        { copy: this.transform.copy },
+        {
+          copy: this.transform.copy,
+          // Sit BESIDE the pivot, on the axis this placement is actually moving
+          // along, and far enough out to clear the whole widget (U5). The offset
+          // is the gizmo's own projected reach, read from the engine, so the two
+          // cannot drift apart when the geometry changes.
+          anchorAxisFrom: this.transformChipAnchorFrom(),
+          anchorOffsetPx: this.transformChipOffsetPx(),
+        },
       );
     toolChipStore.getState().setAlignPhase(this.transform.alignPhase);
+    // A placement either MOVES the bodies already selected or leaves them alone
+    // and produces copies — the same gesture, two different outcomes (U4/D18).
+    const n = this.transform.targets.length;
+    const noun = `${n} ${n === 1 ? "body" : "bodies"}`;
+    toolChipStore
+      .getState()
+      .setResultSummary(
+        this.transform.copy ? `Copy · ${noun} · sources retained` : `Move · ${noun} in place`,
+      );
   }
 
   /** One chip edit: step the FSM, then re-publish the chip's view + the ghost. */
@@ -5593,7 +5786,7 @@ export class ModelToolController {
     const params = transformParamsOf(this.transform);
     const editFeatureId = this.transformEditFeatureId;
     const armed = this.transform;
-    this.transform = transformStep(this.transform, { kind: "apply" }).state;
+    this.transform = transformStep(this.transform, { kind: "confirm" }).state;
     this.hideTransformGhost();
     this.hideTransformGizmo();
     toolChipStore.getState().clear();
@@ -5605,34 +5798,58 @@ export class ModelToolController {
       inputs: params.targets.map((bodyId) => ({ primary: { bodyId, kind: "body" as const } })),
       params,
     };
-    try {
-      const res = await this.client.applyOperation(op);
-      this.applyResult(res);
-      this.endAlign();
-      // A copy leaves the sources untouched and produces NEW body ids in
-      // `changedBodies` (`body_<opId>:<k>`, see the comment above) — select
-      // those, not the sources. A non-copy move keeps the same id, so the
-      // targets ARE the changed bodies and this falls back to them unchanged.
-      const created = (res.changedBodies ?? [])
-        .map((r) => r.bodyId)
-        .filter((id) => !params.targets.includes(id));
-      const toSelect = created.length > 0 ? created : params.targets;
-      selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
-      this.transform = transformInit();
-      this.transformEditFeatureId = undefined;
-      this.transformArmedInverse = null;
-      this.resetToSelect(placementHint(params));
-    } catch (e) {
-      // A refused placement stays ARMED with the reason — unlike pattern/mirror,
-      // which reset to select. The user's numbers are still on screen and still
-      // valid to adjust; throwing them away to read the error would be hostile.
+    /** A refused placement stays ARMED with the reason — unlike pattern/mirror,
+     *  which reset to select. The user's numbers are still on screen and still
+     *  valid to adjust; throwing them away to read the error would be hostile. */
+    const rearm = (reason: string): void => {
       this.transform = armed;
       this.rebuildTransformGhost();
       this.showTransformChip();
       this.updateTransformGizmo();
       viewportStore
         .getState()
-        .setStatusHint(`Move failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+        .setStatusHint(`Move failed: ${reason}`, { severity: "error", sticky: true });
+    };
+    try {
+      const res = await this.client.applyOperation(op);
+      // WP0.3's classifier, not a resolved promise: a regen that RESOLVES
+      // carrying `failed`/`timeout` is a failure, and `needsRepair` is neither a
+      // failure nor a success (U1).
+      const outcome = classifyRegen(res);
+      const reason = failureReason(outcome);
+      if (reason !== null) {
+        rearm(reason);
+        this.updateDebug();
+        return;
+      }
+      this.applyResult(res);
+      this.endAlign();
+      if (outcome.kind === "published") {
+        // A copy leaves the sources untouched and produces NEW body ids in
+        // `changedBodies` (`body_<opId>:<k>`, see the comment above) — select
+        // those, not the sources. A non-copy move keeps the same id, so the
+        // targets ARE the changed bodies and this falls back to them unchanged.
+        const created = (res.changedBodies ?? [])
+          .map((r) => r.bodyId)
+          .filter((id) => !params.targets.includes(id));
+        const toSelect = created.length > 0 ? created : params.targets;
+        selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
+      }
+      // `noop`/`needsRepair` publish nothing of their own, so the selection stays
+      // where the user put it — moving it onto bodies this op did not produce is
+      // the mis-report WP0.3 forbids.
+      this.transform = transformInit();
+      this.transformEditFeatureId = undefined;
+      this.transformArmedInverse = null;
+      if (outcome.kind === "needsRepair") {
+        // An ask, not a failure: `info` + sticky, and the record STANDS (it is
+        // what repair operates on). Same wording shape as the pattern family.
+        this.resetToSelect("Move needs repair", { severity: "info", sticky: true });
+      } else {
+        this.resetToSelect(placementHint(params));
+      }
+    } catch (e) {
+      rearm(errMessage(e));
     }
     this.updateDebug();
   }
@@ -6672,6 +6889,9 @@ export class ModelToolController {
     const finalDepth = this.extrude.depth;
     const total = this.previewSessions.length;
     const committedBodyIds: string[] = [];
+    /** Any region left in `needsRepair` — kept, never rolled back, and reported
+     *  as the ask it is rather than as a bare success (U1). */
+    let needsRepair = false;
 
     // Profile-record guarantee (EXTRUDE-COMMIT-FIX): the regen planner resolves the
     // profile ONLY from the sketch's `Sketch` timeline record, and no interactive
@@ -6782,11 +7002,16 @@ export class ModelToolController {
           `changed=[${res?.changedBodies.map((b) => b.bodyId).join(", ") ?? ""}] ` +
           `removed=[${res?.removedBodies.join(", ") ?? ""}] error=${res?.errorMessage ?? "none"}`,
       );
-      if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+      // WP0.3's classifier, not a body count (U1). Counting bodies cannot tell a
+      // failure from a `noop`, a delete-only success, or a record left in
+      // `needsRepair` — and it called the last one a FAILURE and rolled back the
+      // very record repair operates on.
+      const outcome = classifyRegen(res);
+      if (!keepsRecord(outcome)) {
         traceWarn(
           "extrude",
-          `commit ${k + 1}/${total}: REGEN FAILED (no changed bodies) — rolling back errored record: ` +
-            `${res?.errorMessage ?? "no error message"}`,
+          `commit ${k + 1}/${total}: REGEN FAILED — rolling back errored record: ` +
+            `${failureReason(outcome) ?? "no error message"}`,
         );
         this.commitBodyUnsub?.();
         this.commitBodyUnsub = null;
@@ -6794,16 +7019,19 @@ export class ModelToolController {
         // retried ✓ replaces it instead of stacking a duplicate.
         await this.rollbackFailedCommit();
         if (gen !== this.commitGen) return;
-        this.onExtrudeCommitFailed(k, total, res?.errorMessage, gen);
+        this.onExtrudeCommitFailed(k, total, failureReason(outcome) ?? undefined, gen);
         return;
       }
-      this.applyResult(res);
+      const published = res as ApplyOperationResult;
+      this.applyResult(published);
+      if (outcome.kind === "needsRepair") needsRepair = true;
+      if (outcome.kind !== "published") continue; // nothing of this op's own to select
       // Op-scoped bodies (finding 2): res.changedBodies now carries ONLY this region's
       // op bodies (incl. split children) — collect them all, not just [0]. The union
       // is deduped + selected in finishExtrude.
-      for (const b of res.changedBodies) committedBodyIds.push(b.bodyId);
+      for (const b of published.changedBodies) committedBodyIds.push(b.bodyId);
     }
-    this.finishExtrudeAll(committedBodyIds, gen, loaded);
+    this.finishExtrudeAll(committedBodyIds, gen, loaded, needsRepair);
   }
 
   /**
@@ -6890,7 +7118,12 @@ export class ModelToolController {
    * `loaded` carries the bodies that already arrived DURING the commit loop (via the
    * pre-loop subscription); the same subscription now also drives completion.
    */
-  private finishExtrudeAll(bodyIds: string[], gen: number, loaded: Set<string>): void {
+  private finishExtrudeAll(
+    bodyIds: string[],
+    gen: number,
+    loaded: Set<string>,
+    needsRepair: boolean,
+  ): void {
     this.commitBodyId = bodyIds[bodyIds.length - 1] ?? null;
     const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
     trace(
@@ -6905,7 +7138,7 @@ export class ModelToolController {
       this.commitBodyUnsub?.();
       this.commitBodyUnsub = null;
       if (gen !== this.commitGen) return;
-      this.finishExtrude(bodyIds);
+      this.finishExtrude(bodyIds, needsRepair);
     };
     if (pending.size === 0) {
       done();
@@ -6923,7 +7156,7 @@ export class ModelToolController {
     this.commitBodyTimer = setTimeout(done, bodyLoadTimeoutMs);
   }
 
-  private finishExtrude(bodyIds: string[]): void {
+  private finishExtrude(bodyIds: string[], needsRepair = false): void {
     trace("extrude", `finish: teardown + select bodies=[${bodyIds.join(", ")}]`);
     const wasCut = this.extrude.booleanMode === "Cut";
     this.engine.hideExtrudePreview();
@@ -6959,7 +7192,14 @@ export class ModelToolController {
       completionHint = wasCut ? "Cut completed" : "Extruded";
       if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     }
-    this.resetToSelect(completionHint);
+    // A region left in `needsRepair` published no geometry but was NOT rolled
+    // back — the record is what repair operates on. Say so instead of reporting
+    // a bare "Extruded" over a timeline that has stopped (U1).
+    if (needsRepair) {
+      this.resetToSelect("Extrude needs repair", { severity: "info", sticky: true });
+    } else {
+      this.resetToSelect(completionHint);
+    }
     this.commitBodyId = null;
     this.updateDebug();
   }
@@ -7110,7 +7350,7 @@ export class ModelToolController {
       );
       viewportStore
         .getState()
-        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
           severity: "error",
           sticky: true,
         });
@@ -7164,6 +7404,7 @@ export class ModelToolController {
     // The result message is captured, not published, until the tool has been reset —
     // see `resetToSelect` for why publishing first would lose it.
     let failure: string | null = null;
+    let repaired = false;
     try {
       // A re-edit changes only the size and (optionally) the TYPE: deep-merge into
       // the stored params so the fillet's edgeIds + typed edges survive (a
@@ -7190,7 +7431,7 @@ export class ModelToolController {
       const res = await this.client.applyEditCommand(
         updateScalarParamsCommand(editFeatureId, kind, base, patch),
       );
-      this.applyResult(res);
+      ({ failure, repaired } = this.settleScalarEdit(res));
     } catch (e) {
       failure = errMessage(e);
     }
@@ -7201,6 +7442,8 @@ export class ModelToolController {
     this.filletPreparedRevision = null;
     if (failure !== null) {
       this.resetToSelect(`${kind} failed: ${failure}`, { severity: "error", sticky: true });
+    } else if (repaired) {
+      this.resetToSelect(`${kind} needs repair`, { severity: "info", sticky: true });
     } else {
       this.resetToSelect(`${kind} ${kind === "Chamfer" ? "distance" : "radius"} updated`);
     }
@@ -7340,19 +7583,38 @@ export class ModelToolController {
     this.sendPreview();
   }
 
-  /** Re-publish full Boolean controls after every failed preview/commit re-arm. */
-  private showArmedBooleanChip(): void {
+  /**
+   * The armed Boolean chip — the single place it is published (fresh arm, role
+   * swap, and every failed-preview/commit re-arm).
+   *
+   * It names the ROLES (U6). A Boolean is not symmetric: which body survives is
+   * the whole decision, and before this the chip showed only the operation, so
+   * "did I pick the right one as the target?" could not be answered without
+   * cancelling. Swap answers it in place instead of making the user re-pick.
+   */
+  private showArmedBooleanChip(anchorBodyId?: string): void {
     const target = this.boolean.targetBodyId;
     const tool = this.boolean.toolBodyId;
     if (!target || !tool) return;
-    toolChipStore.getState().showBoolean(
-      this.boolean.op,
-      this.bodyCenter(tool),
-      (op) => this.setBooleanOp(op),
-      () => void this.commitBoolean(),
-      () => toolStore.getState().setTool("select"),
-    );
-    this.previewArmHint = "Choose Union / Cut / Intersect, then Apply";
+    const names = documentStore.getState().bodies;
+    const nameOf = (id: string): string => names[id]?.name ?? id;
+    toolChipStore.getState().showBoolean(this.boolean.op, this.bodyCenter(anchorBodyId ?? tool), {
+      onOp: (op) => this.setBooleanOp(op),
+      onConfirm: () => void this.commitBoolean(),
+      onCancel: () => toolStore.getState().setTool("select"),
+      onSwap: () => this.swapBooleanRoles(),
+      targetName: nameOf(target),
+      toolName: nameOf(tool),
+    });
+    // A Boolean CONSUMES its tool body — the operand the user can still see is
+    // about to stop existing, which is the single most surprising thing about the
+    // operation and the one the audit found unstated before Apply (U4/D18).
+    toolChipStore
+      .getState()
+      .setResultSummary(
+        `${this.boolean.op} · ${nameOf(target)} survives · ${nameOf(tool)} is consumed`,
+      );
+    this.previewArmHint = "Choose Union / Cut / Intersect · Enter or ✓ to confirm";
   }
 
   /** Complete canonical Boolean params for both exact preview and commit — the
@@ -7441,17 +7703,25 @@ export class ModelToolController {
     // would be a fresh authoring of consumed inputs, and `applyOperation` would
     // append a SECOND boolean instead of editing the existing record.
     if (editFeatureId && storedParams) {
-      this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
+      this.boolean = booleanStep(this.boolean, { kind: "confirm" }).state;
       toolChipStore.getState().clear();
       // The result message is captured, not published, until the tool has been reset —
       // see `resetToSelect` for why publishing first would lose it.
       let failure: string | null = null;
+      let repaired = false;
       try {
         const res = await this.client.applyEditCommand(
           updateScalarParamsCommand(editFeatureId, "Boolean", storedParams, { operation }),
         );
-        this.applyResult(res);
-        selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
+        // A resolved result is not a success (U1) — the same classifier the fresh
+        // path below has always used.
+        const outcome = classifyRegen(res);
+        failure = failureReason(outcome);
+        repaired = outcome.kind === "needsRepair";
+        if (keepsRecord(outcome)) this.applyResult(res);
+        if (outcome.kind === "published") {
+          selectionStore.getState().set(this.booleanResultSelection(res, targetBodyId));
+        }
       } catch (e) {
         failure = errMessage(e);
       }
@@ -7460,6 +7730,8 @@ export class ModelToolController {
       this.booleanStoredParams = undefined;
       if (failure !== null) {
         this.resetToSelect(`${operation} failed: ${failure}`, { severity: "error", sticky: true });
+      } else if (repaired) {
+        this.resetToSelect(`${operation} needs repair`, { severity: "info", sticky: true });
       } else {
         this.resetToSelect(`Boolean changed to ${operation}`);
       }
@@ -7486,7 +7758,7 @@ export class ModelToolController {
       return;
     }
     const gen = ++this.commitGen;
-    this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
+    this.boolean = booleanStep(this.boolean, { kind: "confirm" }).state;
     toolStore.setState({ phase: "committing" });
     toolChipStore.getState().clear();
 
@@ -7533,12 +7805,39 @@ export class ModelToolController {
     this.engine.clearPreviewBody();
     this.engine.setPreviewTint("normal");
     this.throttle.reset();
-    selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
+    if (outcome.kind === "published") {
+      selectionStore.getState().set(this.booleanResultSelection(res as ApplyOperationResult, targetBodyId));
+    }
     this.boolean = booleanInit();
     this.booleanEditFeatureId = undefined;
     this.booleanStoredParams = undefined;
-    this.resetToSelect(`${operation} applied`);
+    if (outcome.kind === "needsRepair") {
+      this.resetToSelect(`${operation} needs repair`, { severity: "info", sticky: true });
+    } else {
+      this.resetToSelect(`${operation} applied`);
+    }
     this.updateDebug();
+  }
+
+  /**
+   * Boolean's `successSelection: "allChildOutputs"` (frozen interaction contract).
+   *
+   * A Boolean can survive as one body (Union/Common) or split into several
+   * (a Cut that severs the target), and the deterministic child ids are exactly
+   * what the regen published for this record. Selecting the stored TARGET instead
+   * — which is what every boolean path did before U1 — points the user at one
+   * arbitrary member of a split, or at a body the op consumed.
+   *
+   * The target is the fallback for a result that published no bodies of its own,
+   * so a metadata-shaped success still leaves a sane selection.
+   */
+  private booleanResultSelection(
+    res: ApplyOperationResult,
+    targetBodyId: string,
+  ): { kind: "body"; id: string }[] {
+    const outputs = (res.changedBodies ?? []).map((r) => r.bodyId);
+    const ids = outputs.length > 0 ? outputs : [targetBodyId];
+    return ids.map((id) => ({ kind: "body" as const, id }));
   }
 
   /** A failed exact-preview barrier or a failed/regen-failing commit returns the
@@ -7639,11 +7938,15 @@ export class ModelToolController {
     toolChipStore.getState().showBoolean(
       operation,
       this.bodyCenter(toolRetired ? targetBodyId : toolBodyId),
-      (next) => this.setBooleanOp(next),
-      () => void this.commitBoolean(),
-      () => toolStore.getState().setTool("select"),
+      {
+        onOp: (next) => this.setBooleanOp(next),
+        onConfirm: () => void this.commitBoolean(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
     );
-    viewportStore.getState().setStatusHint("Change the boolean operation · Apply", { sticky: true });
+    viewportStore
+      .getState()
+      .setStatusHint("Change the boolean operation · Enter or ✓ to confirm", { sticky: true });
     this.updateDebug();
   }
 
@@ -7962,6 +8265,42 @@ export class ModelToolController {
 
   // ── keyboard ──────────────────────────────────────────────────────────────────
 
+  /**
+   * The one Enter table (U2). Every model tool commits the same way: release keeps
+   * it armed, and Enter — or the chip ✓, which calls the identical `onConfirm` —
+   * is what writes to the timeline.
+   *
+   * Before U2 this was a hand-enumerated `if` chain that simply omitted boolean,
+   * both patterns and mirror, so those four had no Enter path at all while the
+   * frozen contract declared `enterSupport: true` for all twelve rows. A table
+   * cannot silently omit a tool: adding a reducer without a row here is visible.
+   *
+   * Order matters only in that at most one tool is armed at a time; `onToolChange`
+   * tears the others down, so the first match IS the armed tool.
+   */
+  private armedConfirm(): (() => void) | null {
+    const armed: [boolean, () => void][] = [
+      [this.extrude.phase === "armed", () => void this.confirmExtrude()],
+      [this.revolve.phase === "armed", () => void this.confirmRevolve()],
+      [this.fillet.phase === "armed", () => void this.commitFillet()],
+      [this.shell.phase === "armed", () => void this.commitShell()],
+      [this.offsetFace.phase === "armed", () => void this.commitOffsetFace()],
+      [this.hole.phase === "armed", () => void this.commitHole()],
+      [this.boolean.phase === "armed", () => void this.commitBoolean()],
+      [this.linear.phase === "armed", () => void this.commitLinear()],
+      [this.circular.phase === "armed", () => void this.commitCircular()],
+      [this.mirror.phase === "armed", () => void this.commitMirror()],
+      // A placement is the one row with an extra guard: an OUTSTANDING align pick
+      // holds Enter back, because committing the pre-align placement is not what
+      // the user means mid-gesture.
+      [
+        this.transform.phase === "armed" && this.transform.alignPhase === null,
+        () => void this.commitTransform(),
+      ],
+    ];
+    return armed.find(([isArmed]) => isArmed)?.[1] ?? null;
+  }
+
   private onKeyDown = (e: KeyboardEvent): void => {
     // Esc cancels the datum tool from EITHER phase (base pick / offset) and owns
     // the key, so the global Esc-ladder does not also fire.
@@ -8016,51 +8355,40 @@ export class ModelToolController {
       this.confirmRegionSelect();
       return;
     }
-    // Enter confirms the armed extrude/revolve (capture phase). Skipped when a chip
-    // input has focus — DimensionInput consumes Enter itself and stops propagation,
-    // so this only fires for a canvas-focused Enter (no double-commit).
+    // Enter confirms whichever model tool is armed (capture phase). Skipped when a
+    // chip input has focus — DimensionInput consumes Enter itself and stops
+    // propagation, so this only fires for a canvas-focused Enter (no double-commit).
     if (e.key === "Enter" && !isEditableTarget(e.target)) {
-      if (this.extrude.phase === "armed") {
+      const confirm = this.armedConfirm();
+      if (confirm) {
         e.preventDefault();
-        void this.confirmExtrude();
+        confirm();
         return;
       }
-      if (this.revolve.phase === "armed") {
-        e.preventDefault();
-        void this.confirmRevolve();
-        return;
-      }
-      // Edge ops + shell join the same explicit gesture: release keeps them armed,
-      // Enter (or the chip ✓) is what writes to the timeline.
-      if (this.fillet.phase === "armed") {
-        e.preventDefault();
-        void this.commitFillet();
-        return;
-      }
-      if (this.shell.phase === "armed") {
-        e.preventDefault();
-        void this.commitShell();
-        return;
-      }
-      if (this.offsetFace.phase === "armed") {
-        e.preventDefault();
-        void this.commitOffsetFace();
-        return;
-      }
-      if (this.hole.phase === "armed") {
-        e.preventDefault();
-        void this.commitHole();
-        return;
-      }
-      // A placement joins the same explicit gesture: nothing writes to the
-      // timeline until Enter or the chip ✓. An OUTSTANDING align pick holds it
-      // back — the user is mid-gesture, and committing the pre-align placement
-      // is not what "Enter" means there.
-      if (this.transform.phase === "armed" && this.transform.alignPhase === null) {
-        e.preventDefault();
-        void this.commitTransform();
-        return;
-      }
+    }
+    // Type-to-enter (U3, contract column `primaryEntry`). A printable number
+    // character on the CANVAS routes to the armed tool's primary numeric value
+    // with no prior click — the chip field takes focus and the character replaces
+    // the formatted value, then normal editing continues in the field.
+    //
+    // Guards, in order of how easily each would misfire:
+    //   - anything already editable owns its own keys (`isEditableTarget` covers
+    //     input/textarea/select/contenteditable, which is what the command
+    //     palette and the inspector editors are);
+    //   - a modifier makes it a shortcut, not a value (⌘Z, ⌥drag, ⌃C);
+    //   - the armed chip must actually HAVE a primary value — a boolean or a
+    //     mirror has nothing a digit could mean.
+    if (
+      isPrimaryEntryChar(e.key) &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !isEditableTarget(e.target) &&
+      PRIMARY_VALUE_CHIPS.has(toolChipStore.getState().kind)
+    ) {
+      e.preventDefault();
+      toolChipStore.getState().beginPrimaryEntry(e.key);
+      return;
     }
     if (e.key === "Alt") {
       this.altHeld = true;
@@ -8375,6 +8703,32 @@ function axisLineIdFromParams(stored: Record<string, unknown> | undefined): stri
 }
 
 /** True when a keyboard event targets a text field (skip the capture-Enter commit). */
+/**
+ * Does this key start a numeric value?
+ *
+ * Digits and `.` are unambiguous. `-` is included because several primary values
+ * are legitimately signed (a negative pattern angle, a negative datum offset);
+ * an illegal minus simply leaves the field holding text that does not parse,
+ * which previews nothing and commits nothing — the same as any other partial
+ * entry, and strictly better than swallowing the keystroke.
+ */
+/**
+ * The arm hint for a GHOST-fidelity tool (U6, spec §9 "preview fidelity taxonomy").
+ *
+ * Pattern and Mirror have no kernel candidate: what the viewport shows is the
+ * SOURCE mesh transformed locally, which proves placement and nothing else — not
+ * that the kernel can build it, and not that the result publishes. Every other
+ * modeling tool shows an exact candidate, so a translucent shape looks identical
+ * in both cases and the user cannot tell them apart. Saying so is the difference
+ * between an honest preview and a promise the tool cannot keep.
+ */
+const GHOST_FIDELITY_HINT = (action: string): string =>
+  `${action} · placement preview, validated on Apply · Enter or ✓ to confirm`;
+
+function isPrimaryEntryChar(key: string): boolean {
+  return key.length === 1 && (/[0-9]/.test(key) || key === "." || key === "-");
+}
+
 function isEditableTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const tag = el.tagName;

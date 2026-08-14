@@ -248,9 +248,9 @@ async function bodySceneVisible(page: Page, bodyId: string): Promise<boolean | n
 }
 
 /**
- * Click the chip's "Apply" button (shared by boolean / pattern / mirror —
- * `ModelToolChips.tsx ApplyButton`). `page.getByRole("button", { name: "Apply" })
- * .click()` is unreliable here — verified empirically: the button is genuinely
+ * Click the chip's ✓ (shared by every model tool since U2 deleted the separate
+ * `Apply` button — `ModelToolChips.tsx ConfirmButtons`). A plain locator click is
+ * unreliable here — verified empirically: the button is genuinely
  * mounted (correct role/name/rect, receiving pointer events, `elementFromPoint`
  * resolves to itself) yet Playwright's locator-click occasionally never settles,
  * while a coordinate click on the SAME rect lands immediately. Root cause not
@@ -265,16 +265,14 @@ async function bodySceneVisible(page: Page, bodyId: string): Promise<boolean | n
  * was never applied. Re-clicking is safe because each attempt re-checks first:
  * once the lane has closed the loop exits without touching the button again.
  */
-async function clickApplyButton(page: Page): Promise<void> {
+async function clickConfirmButton(page: Page): Promise<void> {
   const laneClosed = async (): Promise<boolean> =>
     ((await extrudeDebug(page))?.previewOwner ?? null) === null;
   await expect(async () => {
     if (await laneClosed()) return;
     const rect = await page.evaluate(() => {
-      const apply = Array.from(document.querySelectorAll("button")).find(
-        (b) => b.textContent === "Apply",
-      );
-      return apply ? apply.getBoundingClientRect().toJSON() : null;
+      const confirm = document.querySelector('button[data-testid="chip-confirm"]');
+      return confirm ? confirm.getBoundingClientRect().toJSON() : null;
     });
     expect(rect).not.toBeNull();
     const r = rect as unknown as { x: number; y: number; width: number; height: number };
@@ -350,7 +348,7 @@ test("boolean commit: two bodies → pick target + tool → Apply lands ONE surv
     .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
     .toBe("boolean");
 
-  await clickApplyButton(page);
+  await clickConfirmButton(page);
 
   // The lane releases and the tool body is CONSUMED (the mock removes it — no real
   // fusion — same bookkeeping a real commit performs): the surviving row is exactly
@@ -383,7 +381,7 @@ test("boolean commit: Intersect mode is wired through the chip and labels the fe
     .toBe("boolean");
 
   await page.getByTestId("chip-boolean-intersect").click();
-  await clickApplyButton(page);
+  await clickConfirmButton(page);
 
   await expect
     .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })

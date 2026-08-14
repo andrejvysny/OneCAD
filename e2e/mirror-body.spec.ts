@@ -18,9 +18,9 @@ async function documentBodyIds(page: Page): Promise<string[]> {
   );
 }
 
-async function clickApplyButton(page: Page): Promise<void> {
-  await expect(page.getByTestId("chip-apply")).toBeVisible();
-  await page.getByTestId("chip-apply").click();
+async function clickConfirmButton(page: Page): Promise<void> {
+  await expect(page.getByTestId("chip-confirm")).toBeVisible();
+  await page.getByTestId("chip-confirm").click();
 }
 
 test("mirror body: select body → M → YZ plane → Apply creates a mirrored copy", async ({
@@ -37,7 +37,7 @@ test("mirror body: select body → M → YZ plane → Apply creates a mirrored c
   await expect(chip).toBeVisible();
 
   await page.getByTestId("chip-mirror-plane-yz").click();
-  await clickApplyButton(page);
+  await clickConfirmButton(page);
 
   await expect.poll(async () => await getFeatureLabels(page)).toContain("Mirror");
   const after = await documentBodyIds(page);

@@ -909,6 +909,20 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
         return OpOutcome::fail("OP_FAILED", "OffsetFace: " + semantic);
     }
 
+    // The SHARED publication gate, last (U7). OffsetFace was the one mutating
+    // operation that never ran it: its hand-rolled postconditions above are
+    // stricter in the semantic direction, but they produce no structured
+    // `PublicationDecision` evidence and nothing stopped them drifting from the
+    // policy every sibling operation is held to. Running both keeps the
+    // op-specific refusals (which say WHY in offset terms) and adds the common
+    // Tier A evidence the P3 contract rows promise.
+    const kernel::validation::PublicationDecision decision = publication_decision(
+        result, kernel::validation::single_solid_policy(
+                    "OffsetFace", kernel::validation::PublicationTier::TierA));
+    if (!decision.publishable()) {
+        return OpOutcome::fail(decision.code, decision.message);
+    }
+
     // --- publish: modified in place + history through the offset image --------
     of::OffsetImageHistory history(mo.OffsetFacesFromShapes(), mo.OffsetEdgesFromShapes(), result);
     ctx.bodies.create(target_id, op_id, result);
