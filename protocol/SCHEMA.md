@@ -1219,8 +1219,10 @@ angular budget. Missing evidence is UNKNOWN and therefore refused.
 Before publication, Fillet rejects null/invalid/non-single-solid/non-positive
 results, self-interference, OCCT partial results, and `BadShape`. Shape audit
 evidence records solid count, volume, self-interference count, and per-kind
-input/output maximum tolerances. Tolerances are measured only in this milestone;
-they are not mutated and no uncalibrated tolerance-growth rejection applies.
+input/output maximum tolerances. Output tolerance is capped at
+`max(0.001 mm, 2 × inputMaxTolerance + 0.000001 mm)`; exceeding that owned
+budget refuses publication. Tolerances are measured and gated, never silently
+inflated or rewritten.
 `Simulate()`/`Sect()` are characterization tools only and never production
 acceptance gates. Kernel refusals retain top-level `OP_FAILED` or
 `GEOMETRY_INVALID` and attach bounded `FILLET_*` diagnostics through §8.
@@ -1455,8 +1457,9 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   planes retain orientation and move by exactly `d`; operated cylinders remain
   coaxial at the predicted radius; every measurement/anchor sample is proven
   inside the trimmed face domain. Any miss or unprovable measurement ⇒
-  recoverable `OP_FAILED`; the result is never published. Values are NEVER
-  clamped.
+  recoverable `OP_FAILED`; the result is never published. Output B-Rep tolerance
+  is capped at `max(0.001 mm, 2 × constructionTolerance)` and is never silently
+  inflated. Values are NEVER clamped.
 - Lineage: `modified` on `targetBodyId` (+ `rankKey`); element history folds via
   the offset image (`OffsetFacesFromShapes`/`OffsetEdgesFromShapes` — the public
   `Generated`/`Modified` lists are empty for faces, spike-characterized) through
@@ -3121,7 +3124,8 @@ sign-off) once fixtures exist.
   builder-history blend/support faces, measured section radius, and measured G1
   boundary tangency. Missing samples/boundaries are UNKNOWN and refuse commit;
   OCCT's assigned radius law and generated-face count remain supporting evidence,
-  not the final semantic authority. Payload shape is unchanged.
+  not the final semantic authority. The same gate adds a conservative output
+  tolerance-growth ceiling derived from the input audit. Payload shape is unchanged.
 - **2026-08-14 — §7.3 `Extrude.ToFace` bounded-face hardening.** V1 now
   proves full projected-profile coverage by the selected trimmed face and refuses
   laterally disjoint, smaller, or holed targets. Tilted/curved targets are refused

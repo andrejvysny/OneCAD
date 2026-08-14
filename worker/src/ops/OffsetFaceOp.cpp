@@ -976,10 +976,14 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     // policy every sibling operation is held to. Running both keeps the
     // op-specific refusals (which say WHY in offset terms) and adds the common
     // Tier A evidence the P3 contract rows promise.
-    const kernel::validation::PublicationDecision decision = publication_decision(
-        result, kernel::validation::single_solid_policy(
-                    "OffsetFace", result_validation_tier(
-                                      ctx, kernel::validation::PublicationTier::TierB)));
+    kernel::validation::PublicationPolicy publication_policy =
+        kernel::validation::single_solid_policy(
+            "OffsetFace", result_validation_tier(
+                              ctx, kernel::validation::PublicationTier::TierB));
+    publication_policy.maximum_tolerance =
+        std::max(1.0e-3, construction_tol * 2.0);
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(result, publication_policy);
     if (!decision.publishable()) {
         return OpOutcome::fail(decision.code, decision.message);
     }

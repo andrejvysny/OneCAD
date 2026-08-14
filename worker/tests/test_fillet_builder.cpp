@@ -167,6 +167,13 @@ void test_shape_audit_policy() {
   check(decision_json["timings"]["buildMs"] == 0.0 &&
             decision_json["timings"]["validatorMs"].get<double>() >= 0.0,
         "publication decision serializes build and validator timings");
+  validation::PublicationPolicy tolerance_policy = tier_a_policy;
+  tolerance_policy.maximum_tolerance = fast_box.tolerances.maximum();
+  check(validation::evaluate_publication_policy(fast_box, tolerance_policy).publishable(),
+        "measured tolerance at the policy ceiling passes");
+  tolerance_policy.maximum_tolerance = fast_box.tolerances.maximum() * 0.5;
+  check(!validation::evaluate_publication_policy(fast_box, tolerance_policy).publishable(),
+        "tolerance growth beyond the owned ceiling refuses publication");
   const validation::PublicationPolicy tier_b_policy =
       validation::single_solid_policy("Tier B box", validation::PublicationTier::TierB);
   const validation::ShapeEvidence deep_box =

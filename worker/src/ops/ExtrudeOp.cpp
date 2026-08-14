@@ -68,6 +68,12 @@ double face_area(const TopoDS_Shape& shape) {
     return std::abs(props.Mass());
 }
 
+double shape_max_tolerance(const TopoDS_Shape& shape) {
+    return std::max({BRep_Tool::MaxTolerance(shape, TopAbs_FACE),
+                     BRep_Tool::MaxTolerance(shape, TopAbs_EDGE),
+                     BRep_Tool::MaxTolerance(shape, TopAbs_VERTEX)});
+}
+
 std::string input_body(const json& op, std::size_t index) {
     if (!op.contains("inputs") || !op["inputs"].is_array() || op["inputs"].size() <= index) return "";
     const json& in = op["inputs"][index];
@@ -680,9 +686,12 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
 
     // --- boolean mode dispatch ---
     if (*boolean_mode == app::BooleanMode::NewBody) {
-        const kernel::validation::PublicationDecision decision = publication_decision(
-            tool_shape, kernel::validation::single_solid_policy(
-                            "Extrude", kernel::validation::PublicationTier::TierA));
+        kernel::validation::PublicationPolicy policy =
+            kernel::validation::single_solid_policy(
+                "Extrude", kernel::validation::PublicationTier::TierA);
+        policy.maximum_tolerance = 1.0e-3;
+        const kernel::validation::PublicationDecision decision =
+            publication_decision(tool_shape, policy);
         if (!decision.publishable()) {
             return OpOutcome::fail(decision.code, decision.message);
         }
@@ -715,6 +724,8 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         ctx, kernel::validation::PublicationTier::TierB);
     policy.require_closed_manifold =
         policy.tier == kernel::validation::PublicationTier::TierB;
+    policy.maximum_tolerance =
+        std::max(1.0e-3, shape_max_tolerance(old_target) * 2.0 + 1.0e-6);
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {

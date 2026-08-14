@@ -1,5 +1,6 @@
 #include "kernel/fillet/FilletBuilder.h"
 
+#include <algorithm>
 #include <utility>
 
 #include <Standard_Failure.hxx>
@@ -132,10 +133,12 @@ FilletBuildResult FilletBuilder::accept_result() {
   }
   const validation::ShapeAuditResult output_audit =
       validation::audit_shape(shape);
+  validation::PublicationPolicy output_policy =
+      validation::single_solid_policy("Fillet", validation::PublicationTier::TierB);
+  output_policy.maximum_tolerance =
+      std::max(1.0e-3, input_audit_.tolerances.maximum() * 2.0 + 1.0e-6);
   const validation::PublicationDecision decision =
-      validation::evaluate_publication_policy(
-          output_audit,
-          validation::single_solid_policy("Fillet", validation::PublicationTier::TierB));
+      validation::evaluate_publication_policy(output_audit, output_policy);
   if (!decision.publishable()) {
     return fail_with_diagnostic("GEOMETRY_INVALID",
                                 "Fillet result failed shape audit",
