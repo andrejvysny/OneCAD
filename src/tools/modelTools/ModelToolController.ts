@@ -21,6 +21,7 @@ import type {
   BooleanOperation,
   FeatureRecord,
   FilletParams,
+  GearParams,
   HoleParams,
   OffsetCurrentDims,
   OffsetDistanceType,
@@ -107,8 +108,18 @@ import {
   type HoleFsm,
 } from "./holeMachine";
 import { holeStandardPatch } from "./holeStandards";
+import {
+  gearFsmFromParams,
+  gearInit,
+  gearParamsOf,
+  gearStep,
+  gearValueText,
+  type GearEvent,
+  type GearFsm,
+} from "./gearMachine";
+import { groundPlanePoint } from "@/modules/library/placementSolver";
 import { getToolApplicability, resolveTargetSketchId } from "./toolApplicability";
-import type { HoleChipOpts } from "@/stores/toolChipStore";
+import type { HoleChipOpts, GearChipOpts } from "@/stores/toolChipStore";
 import {
   measureAdd,
   measureInit,
@@ -347,6 +358,7 @@ const OFFSET_FACE_TRAILING_MS = 160;
  * clicking the face again moves the hole rather than starting a second one.
  */
 const HOLE_ARMED_HINT = "Hole: set the size, click again to move it · Enter or ✓ to apply";
+const GEAR_ARMED_HINT = "Gear: set the teeth and size, click again to move it · Enter or ✓ to apply";
 
 /**
  * How many armed edges contribute to the drag-direction mean. The mean only has
@@ -517,7 +529,15 @@ interface ToolPreviewSession {
 }
 
 /** Which tool owns the currently open preview sessions (drives hints + params). */
-type PreviewOwner = "extrude" | "revolve" | "edgeOp" | "shell" | "offsetFace" | "boolean" | "hole";
+type PreviewOwner =
+  | "extrude"
+  | "revolve"
+  | "edgeOp"
+  | "shell"
+  | "offsetFace"
+  | "boolean"
+  | "hole"
+  | "gear";
 
 export class ModelToolController {
   private extrude: ExtrudeFsm = extrudeInit();
@@ -715,6 +735,9 @@ export class ModelToolController {
   // Hole context (WP-C T3): the FSM holds every param; only identity lives here.
   private hole: HoleFsm = holeInit();
   private holeEditFeatureId: string | undefined;
+  private gear: GearFsm = gearInit();
+  private gearEditFeatureId: string | undefined;
+  private gearTopoKey: string | undefined;
   /**
    * The armed seat's snapshot TopoKey. Kept OUTSIDE the FSM (which stores only
    * the minted `SemanticRef`) purely so a re-click can recognise "same face" on a
@@ -1007,6 +1030,7 @@ export class ModelToolController {
     this.cancelShell();
     this.cancelOffsetFace();
     this.cancelHole();
+    this.cancelGear();
     this.cancelPattern();
     this.cancelTransform();
     this.endDatumPick();
@@ -1031,6 +1055,7 @@ export class ModelToolController {
     else if (tool === "shell") void this.armShellFromSelection();
     else if (tool === "offsetFace") void this.armOffsetFaceFromSelection();
     else if (tool === "hole") this.startHole();
+    else if (tool === "gear") this.startGear();
     else if (tool === "linearPattern") this.armLinearFromSelection();
     else if (tool === "circularPattern") this.armCircularFromSelection();
     else if (tool === "mirror") this.armMirrorFromSelection();
@@ -4684,6 +4709,362 @@ export class ModelToolController {
     this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }
 
+  // ── gear (Gear Generator G1-h) ───────────────────────────────────────────
+  //
+  // Mirrors the Hole block above almost verbatim: pick a flat seat, arm at the
+  // clicked point, edit via the chip cluster, commit. The one structural
+  // difference is `gearInputs()` — a gear has no HOST body to echo (it mints
+  // one), so it contributes only its placement face, never a body ref
+  // (SCHEMA §7.3 / `wire_op_inputs`'s Gear arm).
+
+  private startGear(): void {
+    this.gear = gearStep(this.gear, { kind: "start" }).state;
+    this.deps.engine.setOrbitSuppressed(true);
+    viewportStore
+      .getState()
+      .setStatusHint("Click a flat face, or empty space to place the gear · Esc cancels", { sticky: true });
+    this.updateDebug();
+  }
+
+  /** The picked face's planar frame, or `null` when the face is not flat — a
+   *  gear's axis is that face's inward normal, so a curved seat has none. */
+  private gearFaceFrame(bodyId: string, topoKey: string): PlanarFaceFrame | null {
+    const entry = getEntry(bodyId);
+    if (!entry) return null;
+    const ordinal = entry.faceIndex.ordinalForId(topoKey);
+    if (ordinal < 0) return null;
+    return faceFrame(entry.view, ordinal);
+  }
+
+  /**
+   * A click while the gear tool is picking (or re-positioning). A body FACE
+   * seats the gear on it (axis = inward normal, `tryPickHoleFace`'s
+   * promotion-then-arm shape). A click that hits nothing — empty space, no
+   * body under the cursor at all — is EQUALLY valid (SCHEMA §7.3 `GearFrame`
+   * exists exactly so a gear can be authored with no host body to click): it
+   * drops the gear on the world XY ground plane, mirroring the Component
+   * Library's own free-space placement (`placementController.ts`'s
+   * `groundPlanePoint` fallback) rather than inventing new ray math.
+   */
+  private async tryPickGearFace(clientX: number, clientY: number): Promise<void> {
+    if (this.gear.phase !== "facePick" && this.gear.phase !== "armed") return;
+    const hit = this.engine.probePick(clientX, clientY);
+    if (!hit || hit.kind !== "face" || hit.bodyId.startsWith("preview:")) {
+      this.tryPickGearGround(clientX, clientY);
+      return;
+    }
+    if (!this.gearFaceFrame(hit.bodyId, hit.topoKey)) {
+      viewportStore.getState().setStatusHint("Gear: that face is not flat — a gear needs a flat seat", {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    const point: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
+
+    const armedFace = this.gear.face as SemanticRef | null;
+    if (this.gear.phase === "armed" && armedFace?.primary.bodyId === hit.bodyId) {
+      const sameFace = hit.elementId
+        ? armedFace.primary.elementId === hit.elementId
+        : this.gearTopoKey === hit.topoKey;
+      if (sameFace) {
+        this.gear = gearStep(this.gear, { kind: "movePoint", point }).state;
+        this.showGearChip();
+        this.sendPreview();
+        this.updateDebug();
+        return;
+      }
+    }
+
+    const gen = ++this.armGen;
+    let elementId = hit.elementId;
+    if (!elementId && hit.topoKey) {
+      const promoted = await promoteOne(this.client, hit.bodyId, {
+        topoKey: hit.topoKey,
+        anchor: { worldPoint: point },
+      });
+      if (gen !== this.armGen) return;
+      if (!promoted?.elementId) return;
+      elementId = promoted.elementId;
+    }
+    if (toolStore.getState().modelTool !== "gear") return;
+    const face: SemanticRef = {
+      primary: { bodyId: hit.bodyId, elementId, kind: "face" },
+      anchor: { worldPoint: point },
+    };
+    this.gearTopoKey = hit.topoKey;
+    this.gear = gearStep(this.gear, { kind: "pickFace", face, point }).state;
+    this.showGearChip();
+    viewportStore.getState().setStatusHint(GEAR_ARMED_HINT, { sticky: true });
+    this.previewArmHint = this.gearEditFeatureId ? null : GEAR_ARMED_HINT;
+    this.updateDebug();
+    if (!this.gearEditFeatureId) await this.openGearPreview(gen);
+  }
+
+  /** Free-space placement: no face under the cursor, so drop the gear on the
+   *  world XY ground plane (world Z-up, so this is the plane a part is usually
+   *  modelled on) — the same `screenRay` → `groundPlanePoint` chain the
+   *  Component Library's `placementController.ts` already uses for its own
+   *  free-space drop. Axis is world Z, `xDir` world X: an identity frame,
+   *  same convention that module uses for a component with no attachment. */
+  private tryPickGearGround(clientX: number, clientY: number): void {
+    const ray = this.engine.screenRay(clientX, clientY);
+    const point = ray ? groundPlanePoint(ray.origin, ray.dir) : null;
+    if (!point) {
+      viewportStore.getState().setStatusHint(
+        "Gear: click a face, or empty space at a shallower angle to place it on the ground plane",
+        { severity: "error", sticky: true },
+      );
+      return;
+    }
+
+    // Re-positioning an already-armed FRAME gear: there is only one ground
+    // plane, so any further ground click just moves it — no new preview
+    // session (mirrors the face branch's "same face" fast path above).
+    if (this.gear.phase === "armed" && this.gear.frame !== null) {
+      this.gear = gearStep(this.gear, { kind: "movePoint", point }).state;
+      this.showGearChip();
+      this.sendPreview();
+      this.updateDebug();
+      return;
+    }
+
+    const gen = ++this.armGen;
+    this.gear = gearStep(this.gear, {
+      kind: "pickFrame",
+      origin: point,
+      axis: [0, 0, 1],
+      xDir: [1, 0, 0],
+    }).state;
+    this.showGearChip();
+    viewportStore.getState().setStatusHint(GEAR_ARMED_HINT, { sticky: true });
+    this.previewArmHint = this.gearEditFeatureId ? null : GEAR_ARMED_HINT;
+    this.updateDebug();
+    if (!this.gearEditFeatureId) void this.openGearPreview(gen);
+  }
+
+  /** (Re)publish the armed gear cluster with the FSM's current numbers. */
+  private showGearChip(): void {
+    const anchor = this.gear.point ?? [0, 0, 0];
+    toolChipStore.getState().showGear(
+      this.gear.teeth,
+      this.gear.module,
+      anchor,
+      {
+        onTeeth: (v) => this.onGearEvent({ kind: "setTeeth", teeth: v }),
+        onModule: (v) => this.onGearEvent({ kind: "setModule", module: v }),
+        onHeight: (v) => this.onGearEvent({ kind: "setHeight", height: v }),
+        onPressureAngle: (deg) => this.onGearEvent({ kind: "setPressureAngle", angleDeg: deg }),
+        onShift: (v) => this.onGearEvent({ kind: "setShift", shift: v }),
+        onClearance: (v) => this.onGearEvent({ kind: "setClearance", clearance: v }),
+        onHead: (v) => this.onGearEvent({ kind: "setHead", head: v }),
+        onBacklash: (v) => this.onGearEvent({ kind: "setBacklash", backlash: v }),
+        onUndercut: (v) => this.onGearEvent({ kind: "setUndercut", undercut: v }),
+        onPropertiesFromTool: (v) => this.onGearEvent({ kind: "setPropertiesFromTool", on: v }),
+        onSampleCount: (v) => this.onGearEvent({ kind: "setSampleCount", sampleCount: v }),
+        onAxleHole: (v) => this.onGearEvent({ kind: "setAxleHole", on: v }),
+        onAxleHoleDiameter: (v) => this.onGearEvent({ kind: "setAxleHoleDiameter", value: v }),
+        onOffsetHole: (v) => this.onGearEvent({ kind: "setOffsetHole", on: v }),
+        onOffsetHoleDiameter: (v) => this.onGearEvent({ kind: "setOffsetHoleDiameter", value: v }),
+        onOffsetHoleOffset: (v) => this.onGearEvent({ kind: "setOffsetHoleOffset", value: v }),
+        onConfirm: () => void this.commitGear(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      this.gearChipOpts(),
+    );
+  }
+
+  private gearChipOpts(): GearChipOpts {
+    return {
+      height: this.gear.height,
+      pressureAngleDeg: this.gear.pressureAngleDeg,
+      shift: this.gear.shift,
+      clearance: this.gear.clearance,
+      head: this.gear.head,
+      backlash: this.gear.backlash,
+      undercut: this.gear.undercut,
+      propertiesFromTool: this.gear.propertiesFromTool,
+      sampleCount: this.gear.sampleCount,
+      axleHole: this.gear.axleHole,
+      axleHoleDiameter: this.gear.axleHoleDiameter,
+      offsetHole: this.gear.offsetHole,
+      offsetHoleDiameter: this.gear.offsetHoleDiameter,
+      offsetHoleOffset: this.gear.offsetHoleOffset,
+    };
+  }
+
+  private onGearEvent(e: GearEvent): void {
+    const before = this.gear;
+    this.gear = gearStep(this.gear, e).state;
+    if (this.gear === before) return;
+    this.showGearChip();
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  private async openGearPreview(gen: number): Promise<void> {
+    this.closePreviewSessions();
+    let params: PreviewParams;
+    try {
+      params = this.gearPreviewParams();
+    } catch {
+      return; // not yet a complete gear — nothing honest to preview
+    }
+    const draft: PreviewDraft = {
+      opType: "Gear",
+      inputs: this.gearInputs(),
+      params,
+    };
+    let session: PreviewSession;
+    try {
+      session = await this.deps.client.beginPreview(draft);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      traceWarn("gear", `Gear preview session failed: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen) {
+      void this.deps.client.endPreview(session.sessionId, false);
+      return;
+    }
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [], failure: null }];
+    this.previewOwner = "gear";
+    this.previewParamsFn = () => this.gearPreviewParams();
+    this.previewPending = false;
+    this.previewFailure = null;
+    this.stalePreviewRetryAttempted = false;
+    this.throttle.reset();
+    this.throttle.setTrailingMs(SHELL_TRAILING_MS);
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  /** A gear has no host body — its only echoed ref is the placement face, when
+   *  one is picked (a frame placement contributes nothing at all). */
+  private gearInputs(): SemanticRef[] {
+    const face = this.gear.face as SemanticRef | null;
+    return face ? [face] : [];
+  }
+
+  private gearParams(): GearParams {
+    return gearParamsOf(this.gear);
+  }
+
+  private gearPreviewParams(): PreviewParams {
+    return { ...this.gearParams() };
+  }
+
+  private async commitGear(): Promise<void> {
+    if (this.gear.phase !== "armed") return;
+    if (this.previewFailure) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const step = gearStep(this.gear, { kind: "confirm" });
+    if (step.effect !== "commit") return;
+    this.gear = step.state; // → committing
+    toolStore.setState({ phase: "committing" });
+    const editFeatureId = this.gearEditFeatureId;
+    const gen = ++this.commitGen;
+    const op: OperationOp = {
+      opType: "Gear",
+      featureId: editFeatureId,
+      inputs: this.gearInputs(),
+      params: this.gearParams(),
+    };
+
+    if (editFeatureId) {
+      let failure: string | null = null;
+      let repaired = false;
+      try {
+        ({ failure, repaired } = this.settleScalarEdit(await this.client.applyOperation(op)));
+      } catch (e) {
+        failure = errMessage(e);
+      }
+      if (failure !== null) this.finishGear(`Gear failed: ${failure}`, true);
+      else if (repaired) this.finishGear("Gear needs repair", false, { severity: "info" });
+      else this.finishGear("Gear updated", false);
+      return;
+    }
+
+    const outcome = await this.commitPreviewedOp(op, gen);
+    if (outcome.kind === "superseded") return;
+    if (outcome.kind === "failed") {
+      this.gear = gearStep(this.gear, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`Gear failed: ${outcome.reason}`, { severity: "error", sticky: true });
+      await this.openGearPreview(this.armGen);
+      this.updateDebug();
+      return;
+    }
+    this.applyResult(outcome.res);
+    this.teardownPreviewedTool();
+    this.finishGear(`Gear ${gearValueText(this.gear.teeth, this.gear.module)}`, false);
+  }
+
+  private finishGear(hint: string, failed: boolean, opts?: { severity: "info" }): void {
+    this.gear = gearInit();
+    this.gearEditFeatureId = undefined;
+    this.gearTopoKey = undefined;
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
+    toolChipStore.getState().clear();
+    const hintOpts = failed
+      ? ({ severity: "error", sticky: true } as const)
+      : opts
+        ? ({ severity: opts.severity, sticky: true } as const)
+        : undefined;
+    this.resetToSelect(hint, hintOpts);
+    this.updateDebug();
+  }
+
+  /** Re-arm the gear tool on an existing Gear feature — every field including
+   *  the frozen placement is seeded, mirroring `editHoleFeature`. */
+  async editGearFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    if (!feat || feat.opType !== "Gear") return;
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return;
+    const seeded = gearFsmFromParams(stored);
+    if (!seeded) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit this gear: its stored parameters are unavailable", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    toolStore.getState().setTool("gear"); // fires cancelGear (clears the seed fields)
+    this.armGen++;
+    this.gearEditFeatureId = featureId; // set AFTER the tool-change cancel
+    this.gear = seeded;
+    this.deps.engine.setOrbitSuppressed(true);
+    this.showGearChip();
+    viewportStore.getState().setStatusHint(GEAR_ARMED_HINT, { sticky: true });
+    this.updateDebug();
+  }
+
+  private cancelGear(): void {
+    this.closePreviewSessions();
+    this.previewArmHint = null;
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
+    this.gear = gearInit();
+    this.gearEditFeatureId = undefined;
+    this.gearTopoKey = undefined;
+    toolChipStore.getState().clear();
+    this.updateDebug();
+  }
+
   // ── linear pattern ───────────────────────────────────────────────────────
   //
   // Chip-driven: axis (X/Y/Z) + count (2–12) + spacing (mm) + Apply. A live ghost
@@ -6217,6 +6598,16 @@ export class ModelToolController {
       });
       return;
     }
+    if (this.gear.phase === "facePick" || this.gear.phase === "armed") {
+      this.setToolHover(this.engine.probePick(e.clientX, e.clientY), {
+        as: "element",
+        allow: (h) =>
+          h.kind === "face" &&
+          !h.bodyId.startsWith("preview:") &&
+          this.gearFaceFrame(h.bodyId, h.topoKey) !== null,
+      });
+      return;
+    }
     if (this.boolean.phase === "pickTool") {
       this.setToolHover(this.engine.probePick(e.clientX, e.clientY), {
         as: "body",
@@ -6356,6 +6747,15 @@ export class ModelToolController {
     if (this.hole.phase === "facePick" || this.hole.phase === "armed") {
       if (wasClick && !this.isExcludedClickAwayTarget(e.target)) {
         void this.tryPickHoleFace(e.clientX, e.clientY);
+      }
+      return;
+    }
+
+    // The gear tool owns every viewport CLICK the same way Hole does: the first
+    // places the gear seat, each later one moves it.
+    if (this.gear.phase === "facePick" || this.gear.phase === "armed") {
+      if (wasClick && !this.isExcludedClickAwayTarget(e.target)) {
+        void this.tryPickGearFace(e.clientX, e.clientY);
       }
       return;
     }
@@ -8154,6 +8554,15 @@ export class ModelToolController {
       holeCsDiameter: this.hole.csDiameter,
       holeCsAngleDeg: this.hole.csAngleDeg,
       holeEdit: this.holeEditFeatureId ?? null,
+      // Gear tool (Gear Generator G1-h). Mirrors the hole surface above.
+      gearPhase: this.gear.phase,
+      gearTeeth: this.gear.teeth,
+      gearModule: this.gear.module,
+      gearHeight: this.gear.height,
+      gearPoint: this.gear.point ? [...this.gear.point] : null,
+      gearHasFace: this.gear.face !== null,
+      gearHasFrame: this.gear.frame !== null,
+      gearEdit: this.gearEditFeatureId ?? null,
       // Placement tool (WP-B W1). `transformFold` is the record a ✓ would
       // REWRITE — the one bit of the fold decision that has no visible surface,
       // and therefore the one e2e has to read here rather than infer from the
@@ -8286,6 +8695,7 @@ export class ModelToolController {
       [this.shell.phase === "armed", () => void this.commitShell()],
       [this.offsetFace.phase === "armed", () => void this.commitOffsetFace()],
       [this.hole.phase === "armed", () => void this.commitHole()],
+      [this.gear.phase === "armed", () => void this.commitGear()],
       [this.boolean.phase === "armed", () => void this.commitBoolean()],
       [this.linear.phase === "armed", () => void this.commitLinear()],
       [this.circular.phase === "armed", () => void this.commitCircular()],
@@ -8579,6 +8989,7 @@ export class ModelToolController {
     this.cancelShell();
     this.cancelOffsetFace();
     this.cancelHole();
+    this.cancelGear();
     this.cancelPattern();
     this.cancelTransform();
     this.endDatumPick();

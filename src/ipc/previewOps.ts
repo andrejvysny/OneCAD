@@ -47,6 +47,8 @@ import type {
   ExtrudeParams,
   FeatureBooleanMode,
   FilletParams,
+  GearParams,
+  GearFrame,
   HoleParams,
   HoleType,
   OffsetDistanceType,
@@ -338,6 +340,90 @@ function positiveDim(v: unknown, what: string): number {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) throw new Error(`${what} must be greater than zero`);
   return n;
+}
+
+/**
+ * Mirrors `gearParamsOf` (`tools/modelTools/gearMachine.ts`) — SCHEMA §7.6's
+ * "preview callers MUST NOT maintain a second ad-hoc mapper" applies, so this
+ * restates the SAME rules the FSM builder applies rather than inventing any:
+ * exactly one placement mode, the active recipe block only, every inactive
+ * block spelled `null`, and bore dimensions gated on their own flag.
+ *
+ * A Gear has NO target body — it mints one — so unlike every other builder here
+ * there is no `targetBodyId` to demand.
+ */
+function gearOp(s: PreviewSessionState): OperationOp {
+  const recipe = s.latestParams.recipe;
+  if (recipe !== "involuteExternal") {
+    throw new Error(`Unsupported Gear recipe ${String(recipe)}`);
+  }
+  const placement = s.latestParams.placement as
+    | { face?: unknown; frame?: unknown; point?: unknown }
+    | undefined;
+  if (!placement) throw new Error("Gear requires a placement");
+
+  const point = placement.point;
+  if (!Array.isArray(point) || point.length !== 3 || point.some((c) => !Number.isFinite(c))) {
+    throw new Error("Gear requires a [x, y, z] world point");
+  }
+  const face = (placement.face ?? null) as SemanticRef | null;
+  const frame = (placement.frame ?? null) as GearFrame | null;
+  if (face === null && frame === null) {
+    throw new Error("Gear requires a placement face or frame");
+  }
+  if (face !== null && frame !== null) {
+    throw new Error("Gear placement cannot carry both a face and a frame");
+  }
+  if (face !== null && !face.primary?.bodyId) {
+    throw new Error("Gear placement face requires a body");
+  }
+
+  const inv = s.latestParams.involuteExternal as Record<string, unknown> | undefined;
+  if (!inv) throw new Error("Gear requires its involuteExternal block");
+
+  const teeth = Number(inv.teeth);
+  if (!Number.isFinite(teeth) || teeth < 3) throw new Error("Gear teeth must be at least 3");
+  const num = (v: unknown, fallback: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  const flag = (v: unknown): boolean => v === true;
+  const axleHole = flag(inv.axleHole);
+  const offsetHole = flag(inv.offsetHole);
+
+  const params: GearParams = {
+    recipe: "involuteExternal",
+    placement: {
+      face,
+      frame: frame === null ? null : { ...frame },
+      point: [point[0], point[1], point[2]] as [number, number, number],
+    },
+    involuteExternal: {
+      teeth: Math.round(teeth),
+      module: positiveDim(inv.module, "Gear module"),
+      height: positiveDim(inv.height, "Gear height"),
+      pressureAngleDeg: positiveDim(inv.pressureAngleDeg, "Gear pressureAngleDeg"),
+      shift: num(inv.shift, 0),
+      // Refused by the session and the worker in this version; emitted as the
+      // only values they accept so the payload shape is already correct.
+      helixAngleDeg: 0,
+      doubleHelix: false,
+      propertiesFromTool: flag(inv.propertiesFromTool),
+      undercut: flag(inv.undercut),
+      backlash: num(inv.backlash, 0),
+      clearance: num(inv.clearance, 0.25),
+      head: num(inv.head, 0),
+      sampleCount: Math.max(2, Math.round(num(inv.sampleCount, 20))),
+      axleHole,
+      axleHoleDiameter: axleHole ? positiveDim(inv.axleHoleDiameter, "Gear axleHoleDiameter") : null,
+      offsetHole,
+      offsetHoleDiameter: offsetHole
+        ? positiveDim(inv.offsetHoleDiameter, "Gear offsetHoleDiameter")
+        : null,
+      offsetHoleOffset: offsetHole
+        ? positiveDim(inv.offsetHoleOffset, "Gear offsetHoleOffset")
+        : null,
+    },
+  };
+  return { opType: "Gear", opId: s.opId, params, ...(s.inputs ? { inputs: s.inputs } : {}) };
 }
 
 /**
@@ -655,6 +741,7 @@ export const OP_BUILDERS: Partial<Record<OpType, PreviewOpBuilder>> = {
   Shell: shellOp,
   Boolean: booleanOp,
   Hole: holeOp,
+  Gear: gearOp,
   OffsetFace: offsetFaceOp,
   PlaceComponent: placeComponentOp,
 };

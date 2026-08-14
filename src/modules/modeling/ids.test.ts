@@ -14,10 +14,12 @@ const contractTools = (entries: typeof MODEL_TOOLS_CONTRACT): string[] =>
   entries.filter((e) => !isSeparator(e)).map((e) => (isSeparator(e) ? "" : e.id));
 
 describe("modeling id maps", () => {
-  it("cover exactly the tools the shipped toolbar contains", () => {
-    expect(Object.keys(ModelingModelTools).sort()).toEqual(
-      contractTools(MODEL_TOOLS_CONTRACT).sort(),
-    );
+  it("the shipped toolbar contains exactly the tools NOT opted out via toolbarHidden", () => {
+    // `id maps` cover every REGISTERED tool (next test) — `toolbarHidden` (e.g.
+    // Gear, presented in the title-bar Generators menu instead) is a narrower,
+    // toolbar-only opt-out, so the toolbar CONTRACT is a subset of the id map.
+    const visibleModel = MODEL_TOOL_DESCRIPTORS.filter((d) => !d.toolbarHidden).map((d) => d.tool);
+    expect(visibleModel.sort()).toEqual(contractTools(MODEL_TOOLS_CONTRACT).sort());
     expect(Object.keys(ModelingSketchTools).sort()).toEqual(
       contractTools(SKETCH_TOOLS_CONTRACT).sort(),
     );

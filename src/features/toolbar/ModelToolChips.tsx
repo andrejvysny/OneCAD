@@ -20,6 +20,7 @@ import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { HoleChipCluster } from "./HoleChipCluster";
+import { GearChipCluster } from "./GearChipCluster";
 import { ExtrudeOverflow } from "./ExtrudeChipControls";
 import { EdgeOpOverflow } from "./EdgeOpChipControls";
 import { RevolveOverflow } from "./RevolveChipControls";
@@ -710,6 +711,14 @@ export function ModelToolChips() {
     content = panel(
       <>
         <HoleChipCluster />
+        {confirmButtons}
+      </>,
+    );
+  } else if (kind === "gear") {
+    // Gear Generator G1-h. Same shape as the hole branch above.
+    content = panel(
+      <>
+        <GearChipCluster />
         {confirmButtons}
       </>,
     );

@@ -42,6 +42,15 @@ import {
   DEFAULT_HOLE_CS_ANGLE,
   DEFAULT_HOLE_CS_DIAMETER,
 } from "@/tools/modelTools/holeMachine";
+import {
+  DEFAULT_GEAR_HEIGHT,
+  DEFAULT_GEAR_PRESSURE_ANGLE,
+  DEFAULT_GEAR_CLEARANCE,
+  DEFAULT_GEAR_SAMPLE_COUNT,
+  DEFAULT_GEAR_AXLE_HOLE_DIAMETER,
+  DEFAULT_GEAR_OFFSET_HOLE_DIAMETER,
+  DEFAULT_GEAR_OFFSET_HOLE_OFFSET,
+} from "@/tools/modelTools/gearMachine";
 import type {
   AlignPhase,
   PatternAxis,
@@ -229,6 +238,52 @@ export interface HoleChipOpts {
 }
 
 /**
+ * Handlers the armed GEAR cluster wires (Gear Generator G1-h, SCHEMA §7.3
+ * `Gear.involuteExternal`). `onModule`/`onTeeth` are the two headline numbers
+ * (`value`/`count` in the shared state, mirroring how patterns already use
+ * `count` for an instance tally) — every other field is a Tooth/Bores/Accuracy
+ * detail behind the cluster's own segments.
+ */
+export interface GearChipHandlers {
+  onTeeth: (teeth: number) => void;
+  onModule: (module: number) => void;
+  onHeight: (height: number) => void;
+  onPressureAngle: (angleDeg: number) => void;
+  onShift: (shift: number) => void;
+  onClearance: (clearance: number) => void;
+  onHead: (head: number) => void;
+  onBacklash: (backlash: number) => void;
+  onUndercut: (undercut: boolean) => void;
+  onPropertiesFromTool: (on: boolean) => void;
+  onSampleCount: (sampleCount: number) => void;
+  onAxleHole: (on: boolean) => void;
+  onAxleHoleDiameter: (v: number) => void;
+  onOffsetHole: (on: boolean) => void;
+  onOffsetHoleDiameter: (v: number) => void;
+  onOffsetHoleOffset: (v: number) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/** The armed gear's current numbers — everything the cluster renders. */
+export interface GearChipOpts {
+  height?: number;
+  pressureAngleDeg?: number;
+  shift?: number;
+  clearance?: number;
+  head?: number;
+  backlash?: number;
+  undercut?: boolean;
+  propertiesFromTool?: boolean;
+  sampleCount?: number;
+  axleHole?: boolean;
+  axleHoleDiameter?: number;
+  offsetHole?: boolean;
+  offsetHoleDiameter?: number;
+  offsetHoleOffset?: number;
+}
+
+/**
  * Handlers the armed OFFSET FACE cluster wires (SCHEMA §7.3):
  * `[distance] [Offset|Total|Radius|Diameter] [⌒ tangent] [✓] [✕]`.
  */
@@ -282,6 +337,8 @@ export type ChipKind =
   | "transform"
   /** The armed machined-hole cluster (WP-C T3). */
   | "hole"
+  /** The armed involute-gear cluster (Gear Generator G1-h). */
+  | "gear"
   | "regionSelect"
   | "dimension"
   /** A sketch EDIT tool's live parameter (fillet radius / offset distance —
@@ -304,6 +361,7 @@ export const PRIMARY_VALUE_CHIPS: ReadonlySet<ChipKind> = new Set<ChipKind>([
   "shellThickness",
   "offsetFace",
   "hole",
+  "gear",
   "linearPattern",
   "circularPattern",
   "transform",
@@ -387,6 +445,40 @@ export interface ToolChipState {
   onCsDiameter: ((v: number) => void) | null;
   onCsAngle: ((deg: number) => void) | null;
   onStandard: ((thread: string, fit: HoleFit) => void) | null;
+  /**
+   * Armed gear tooth block (Gear Generator G1-h). `value`/`count` above carry
+   * module/teeth (the two headline numbers); every other involute field lives
+   * here, prefixed so it can never collide with another cluster's state.
+   */
+  gearHeight: number;
+  gearPressureAngleDeg: number;
+  gearShift: number;
+  gearClearance: number;
+  gearHead: number;
+  gearBacklash: number;
+  gearUndercut: boolean;
+  gearPropertiesFromTool: boolean;
+  gearSampleCount: number;
+  gearAxleHole: boolean;
+  gearAxleHoleDiameter: number;
+  gearOffsetHole: boolean;
+  gearOffsetHoleDiameter: number;
+  gearOffsetHoleOffset: number;
+  onTeeth: ((teeth: number) => void) | null;
+  onGearHeight: ((height: number) => void) | null;
+  onGearPressureAngle: ((angleDeg: number) => void) | null;
+  onGearShift: ((shift: number) => void) | null;
+  onGearClearance: ((clearance: number) => void) | null;
+  onGearHead: ((head: number) => void) | null;
+  onGearBacklash: ((backlash: number) => void) | null;
+  onGearUndercut: ((undercut: boolean) => void) | null;
+  onGearPropertiesFromTool: ((on: boolean) => void) | null;
+  onGearSampleCount: ((sampleCount: number) => void) | null;
+  onGearAxleHole: ((on: boolean) => void) | null;
+  onGearAxleHoleDiameter: ((v: number) => void) | null;
+  onGearOffsetHole: ((on: boolean) => void) | null;
+  onGearOffsetHoleDiameter: ((v: number) => void) | null;
+  onGearOffsetHoleOffset: ((v: number) => void) | null;
   /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
   /** Armed extrude draft angle in DEGREES — 0 renders the segment collapsed. */
@@ -518,6 +610,14 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     handlers: HoleChipHandlers,
     opts?: HoleChipOpts,
+  ): void;
+  /** Show the armed involute-gear cluster at the picked axis point (G1-h). */
+  showGear(
+    teeth: number,
+    module: number,
+    worldPos: [number, number, number],
+    handlers: GearChipHandlers,
+    opts?: GearChipOpts,
   ): void;
   showShell(
     value: number,
@@ -688,6 +788,35 @@ const CLEARED = {
   onCsDiameter: null,
   onCsAngle: null,
   onStandard: null,
+  gearHeight: DEFAULT_GEAR_HEIGHT,
+  gearPressureAngleDeg: DEFAULT_GEAR_PRESSURE_ANGLE,
+  gearShift: 0,
+  gearClearance: DEFAULT_GEAR_CLEARANCE,
+  gearHead: 0,
+  gearBacklash: 0,
+  gearUndercut: false,
+  gearPropertiesFromTool: false,
+  gearSampleCount: DEFAULT_GEAR_SAMPLE_COUNT,
+  gearAxleHole: false,
+  gearAxleHoleDiameter: DEFAULT_GEAR_AXLE_HOLE_DIAMETER,
+  gearOffsetHole: false,
+  gearOffsetHoleDiameter: DEFAULT_GEAR_OFFSET_HOLE_DIAMETER,
+  gearOffsetHoleOffset: DEFAULT_GEAR_OFFSET_HOLE_OFFSET,
+  onTeeth: null,
+  onGearHeight: null,
+  onGearPressureAngle: null,
+  onGearShift: null,
+  onGearClearance: null,
+  onGearHead: null,
+  onGearBacklash: null,
+  onGearUndercut: null,
+  onGearPropertiesFromTool: null,
+  onGearSampleCount: null,
+  onGearAxleHole: null,
+  onGearAxleHoleDiameter: null,
+  onGearOffsetHole: null,
+  onGearOffsetHoleDiameter: null,
+  onGearOffsetHoleOffset: null,
   regionCount: 1,
   draftAngleDeg: 0,
   showDraft: false,
@@ -845,6 +974,48 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       onCsDiameter: handlers.onCsDiameter,
       onCsAngle: handlers.onCsAngle,
       onStandard: handlers.onStandard,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+    });
+  },
+  showGear(teeth, module, worldPos, handlers, opts) {
+    set({
+      ...CLEARED,
+      kind: "gear",
+      value: module,
+      count: teeth,
+      worldPos,
+      gearHeight: opts?.height ?? DEFAULT_GEAR_HEIGHT,
+      gearPressureAngleDeg: opts?.pressureAngleDeg ?? DEFAULT_GEAR_PRESSURE_ANGLE,
+      gearShift: opts?.shift ?? 0,
+      gearClearance: opts?.clearance ?? DEFAULT_GEAR_CLEARANCE,
+      gearHead: opts?.head ?? 0,
+      gearBacklash: opts?.backlash ?? 0,
+      gearUndercut: opts?.undercut ?? false,
+      gearPropertiesFromTool: opts?.propertiesFromTool ?? false,
+      gearSampleCount: opts?.sampleCount ?? DEFAULT_GEAR_SAMPLE_COUNT,
+      gearAxleHole: opts?.axleHole ?? false,
+      gearAxleHoleDiameter: opts?.axleHoleDiameter ?? DEFAULT_GEAR_AXLE_HOLE_DIAMETER,
+      gearOffsetHole: opts?.offsetHole ?? false,
+      gearOffsetHoleDiameter: opts?.offsetHoleDiameter ?? DEFAULT_GEAR_OFFSET_HOLE_DIAMETER,
+      gearOffsetHoleOffset: opts?.offsetHoleOffset ?? DEFAULT_GEAR_OFFSET_HOLE_OFFSET,
+      onValue: handlers.onModule,
+      onCount: handlers.onTeeth,
+      onTeeth: handlers.onTeeth,
+      onGearHeight: handlers.onHeight,
+      onGearPressureAngle: handlers.onPressureAngle,
+      onGearShift: handlers.onShift,
+      onGearClearance: handlers.onClearance,
+      onGearHead: handlers.onHead,
+      onGearBacklash: handlers.onBacklash,
+      onGearUndercut: handlers.onUndercut,
+      onGearPropertiesFromTool: handlers.onPropertiesFromTool,
+      onGearSampleCount: handlers.onSampleCount,
+      onGearAxleHole: handlers.onAxleHole,
+      onGearAxleHoleDiameter: handlers.onAxleHoleDiameter,
+      onGearOffsetHole: handlers.onOffsetHole,
+      onGearOffsetHoleDiameter: handlers.onOffsetHoleDiameter,
+      onGearOffsetHoleOffset: handlers.onOffsetHoleOffset,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
     });

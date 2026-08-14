@@ -127,6 +127,16 @@ export interface ToolDefinition extends Contribution {
    * are opaque to the platform — it only routes them past the toolbar.
    */
   readonly flyout?: string;
+  /**
+   * Absent from `FloatingToolbar`'s rendered row while remaining fully
+   * registered (shortcut, command palette, and any other surface — e.g.
+   * `generatorsMenu` below — all still work). Opaque to the platform, like
+   * `flyout` and `group`: it only routes past the toolbar.
+   */
+  readonly toolbarHidden?: boolean;
+  /** Presented as a row in the title-bar "Generators" menu
+   *  (`src/features/shell/GeneratorsMenu.tsx`). Opaque to the platform. */
+  readonly generatorsMenu?: boolean;
   readonly defaultShortcut?: Shortcut;
   /**
    * How the chord is WRITTEN in the UI. Not derivable from `defaultShortcut`:

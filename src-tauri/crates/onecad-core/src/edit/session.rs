@@ -686,6 +686,9 @@ impl DocumentSession {
         validate_transform_body(&record.op)?;
         // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
         validate_hole(&record.op)?;
+        // Gear params must satisfy the SCHEMA §7.3 recipe-conditional blocks and
+        // the exactly-one-of face/frame placement rule (all entry paths).
+        validate_gear(&record.op)?;
         // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
         // invariants (all entry paths).
         validate_offset_face(&record.op)?;
@@ -786,6 +789,9 @@ impl DocumentSession {
         validate_transform_body(&op)?;
         // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
         validate_hole(&op)?;
+        // Gear params must satisfy the SCHEMA §7.3 recipe-conditional blocks and
+        // the exactly-one-of face/frame placement rule (all entry paths).
+        validate_gear(&op)?;
         // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
         // invariants (all entry paths).
         validate_offset_face(&op)?;
@@ -1902,6 +1908,24 @@ fn validate_transform_body(op: &Operation) -> Result<(), DomainError> {
 /// [`HoleParams::validate`]: crate::document::record::HoleParams::validate
 fn validate_hole(op: &Operation) -> Result<(), DomainError> {
     let Operation::Known(KnownOperation::Hole(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
+/// Validates a [`KnownOperation::Gear`] record's params: the SCHEMA §7.3
+/// recipe-conditional blocks (checked BOTH ways, so a stale block left by a
+/// recipe switch cannot ride the record), the exactly-one-of face/frame
+/// placement rule, and every dimension's domain. Non-gear and opaque ops are
+/// trivially valid.
+///
+/// Enforced here for the same single-writer reason as [`validate_hole`]: the
+/// worker never sees a param it does not read, so a stale inactive recipe block
+/// would otherwise survive indefinitely and resurrect on the next recipe switch.
+///
+/// [`GearParams::validate`]: crate::document::record::GearParams::validate
+fn validate_gear(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::Gear(p)) = op else {
         return Ok(());
     };
     p.validate().map_err(DomainError::Validation)

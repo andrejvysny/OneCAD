@@ -1,3 +1,51 @@
+# Current State
+
+Last verified: 2026-08-14 18:40 — Gear Generator G0 complete + G1 all layers except the chip UI
+
+## NOW — GEAR GENERATOR (session 19, uncommitted)
+
+- **Branch:** `master` at `f5b686f` (the Component-Library merge landed DURING this
+  session — the tree moved under the gear work; nothing conflicted, the gear files
+  are additive). Working tree **dirty**: 21 modified + 20 new files, **+1474
+  insertions** in tracked files plus the untracked gear tree. **Nothing committed.**
+- **What this is:** a NEW feature track (port of `freecad.gears` as a native `Gear`
+  op), deliberately parallel to the T0–T2 queue below. It touches no
+  data-integrity code.
+- **Full gate, measured this session:**
+  - `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D warnings` clean
+  - `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1259 passed / 0 failed**
+  - `ctest --test-dir worker/build` **131/131** (was 119 before this work)
+  - `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **4455/4455** (271 files)
+  - hex gate empty
+  - Cross-check vs the real reference implementation: **2673/2673 compared agree**,
+    24 refusals all one legitimate degenerate case
+- **Key decisions:**
+  - opType is **`Gear`**, not `Generator` — `ComponentSourceRef::Generator` already exists.
+  - Publication is **`TierB`** (the spec said TierA; the spec had the tiers inverted).
+  - Helical/herringbone are refused **BY NAME** as `UNSUPPORTED`, not silently
+    flattened to a spur gear; the fields exist and round-trip so the payload will
+    not change shape when the sweep infrastructure lands.
+  - Fillets deliberately **not** implemented — upstream's index-based insertion is
+    the fragility this port refuses to carry.
+  - Matched an upstream BUG on purpose (its undercut trim branch is unreachable);
+    parity is the goal and the deviation is documented in `InvoluteMath.h`.
+  - Two frozen contracts changed (`toolbarContract`, `keymapContract`) under the
+    explicit user-visible-change decision recorded in `TODO.md` § G1.
+- **Blockers:** none for the gear work.
+- **Caveat that will bite the app (not the tests):** the STAGED sidecar
+  `src-tauri/binaries/onecad-worker-aarch64-apple-darwin` is from 12:02; the built
+  worker is 18:12. `cargo test` was valid via `ONECAD_WORKER_PATH`, but **the
+  packaged app does not contain the Gear op**. Restage with
+  `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1 scripts/build-worker.sh Release`
+  (this is TODO's existing T0 item, now with a second reason).
+- **Owed for the G1 gate:** the controller + chip UI (`ModelToolController`,
+  `toolChipStore.showGear`, `GearChipCluster.tsx`), plus
+  `src-tauri/tests/gear_ops.rs`, `protocol/fixtures/gear_*.ndjson`, `e2e/gear.spec.ts`.
+- **Defect found in the repo's own test convention:** `test_polygon_fill.cpp`'s
+  "exit code == failure count" idiom reports PASS when the failure count is a
+  multiple of 256 (8-bit exit status). Hit for real during mutation testing. All
+  gear tests clamp; that file still has the raw idiom.
+
 ## BRANCHES MERGED (2026-08-14) — one trunk again
 
 `OneCAD-Component-Library` and `master` have merged. Every section below belongs

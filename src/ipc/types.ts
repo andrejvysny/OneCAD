@@ -1030,6 +1030,8 @@ export type OpType =
   | "Hole"
   /** Direct-modelling face offset (SCHEMA §7.3 `op.offsetFace`, 2026-08-06). */
   | "OffsetFace"
+  /** Generated parametric gear body (SCHEMA §7.3 `Gear`; Gear Generator G1). */
+  | "Gear"
   /**
    * Place a library component instance (spec §3.1; Component Library WP-1.5).
    * PREVIEW-ONLY here: the ghost session this op-type drives is always
@@ -1178,6 +1180,93 @@ export interface HoleParams {
   cbDepth?: number | null;
   csDiameter?: number | null;
   csAngleDeg?: number | null;
+}
+
+/**
+ * Which gear a {@link GearParams} block describes (SCHEMA §7.3 `Gear.recipe`).
+ *
+ * A closed union, never a free-form string: ADR-0002 keeps the modeling kernel
+ * closed, so a recipe is a variant the core team adds alongside its §7.3 entry.
+ */
+export type GearRecipe = "involuteExternal";
+
+/**
+ * An explicit frozen placement frame for a gear on a datum / in world space.
+ *
+ * `xDir` fixes the gear's angular PHASE and is carried rather than derived:
+ * phasing is what makes a pair of gears mesh, and a derived x-axis would
+ * silently rotate the teeth whenever the axis changed.
+ */
+export interface GearFrame {
+  origin: [number, number, number];
+  axis: [number, number, number];
+  xDir: [number, number, number];
+}
+
+/**
+ * Where a generated gear sits (SCHEMA §7.3 `Gear.placement`).
+ *
+ * EXACTLY ONE of `face` / `frame` is non-null — both set, or neither, is
+ * rejected by the Rust session AND independently by the worker. With a face,
+ * `point` is the frozen world centre the worker re-projects onto the resolved
+ * plane each regen (fenced at 1e-3 mm, Hole's semantics) and the gear's axis is
+ * that face's INWARD normal; with a frame, `point` must equal `frame.origin`.
+ */
+export interface GearPlacement {
+  face: SemanticRef | null;
+  frame: GearFrame | null;
+  point: [number, number, number];
+}
+
+/**
+ * External involute gear parameters (SCHEMA §7.3 `Gear.involuteExternal`).
+ *
+ * ALWAYS RAW MILLIMETRES AND DEGREES. `clearance`, `head` and `shift` are
+ * dimensionless COEFFICIENTS (multiples of module) per gear-design convention,
+ * not lengths — a UI that appends "mm" to them is lying.
+ *
+ * `helixAngleDeg` and `doubleHelix` are present so the payload will not change
+ * shape when helical gears land, but a non-zero / true value is refused as
+ * `UNSUPPORTED` in this version. The chip must not offer them as live controls.
+ */
+export interface InvoluteExternalParams {
+  teeth: number;
+  module: number;
+  height: number;
+  pressureAngleDeg: number;
+  shift: number;
+  helixAngleDeg: number;
+  doubleHelix: boolean;
+  propertiesFromTool: boolean;
+  undercut: boolean;
+  backlash: number;
+  clearance: number;
+  head: number;
+  /** Spline samples per curve segment — an accuracy knob that changes topology. */
+  sampleCount: number;
+  axleHole: boolean;
+  axleHoleDiameter?: number | null;
+  offsetHole: boolean;
+  offsetHoleDiameter?: number | null;
+  offsetHoleOffset?: number | null;
+}
+
+/**
+ * Gear op params (SCHEMA §7.3 `Gear`, Rust `GearParams`; Gear Generator G1).
+ *
+ * The recipe blocks follow Hole's conditional-block contract: `recipe` selects
+ * which block is non-null and **every inactive recipe key is spelled `null`**,
+ * never omitted. The wire mapper enforces that on the way out, so the chip
+ * cluster must CLEAR a block when the recipe flips rather than leaving a stale
+ * one behind — a stale block is rejected by the Rust session.
+ *
+ * Lineage is a NewBody MINT (`body_<opId>`, decision D1): a gear has no target
+ * body and modifies nothing.
+ */
+export interface GearParams {
+  recipe: GearRecipe;
+  placement: GearPlacement;
+  involuteExternal?: InvoluteExternalParams | null;
 }
 
 /**
@@ -1562,6 +1651,13 @@ export type OperationOp =
       featureId?: string;
       inputs?: SemanticRef[];
       params: OffsetFaceParams;
+    }
+  | {
+      opType: "Gear";
+      opId?: string;
+      featureId?: string;
+      inputs?: SemanticRef[];
+      params: GearParams;
     }
   /**
    * Ghost-preview only (see {@link PlaceComponentParams}). `featureId`/`inputs`

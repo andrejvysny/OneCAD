@@ -1142,6 +1142,30 @@ function mutateOp(op: OperationOp): {
     // always cancelled, never committed, so this must never actually run.
     throw new Error("PlaceComponent must not reach commitOp — preview-only op type");
   }
+  if (op.opType === "Gear") {
+    // MOCK LIMIT: no real involute geometry — generating it here would be a
+    // second, worse gear implementation living in the mock. The GEOMETRY is
+    // pinned against the real kernel by `worker/tests/test_gear_tool.cpp`,
+    // `test_gear_op.cpp` and the G0 sampler oracles; what the mock lane owns is
+    // the UI chain — placement pick -> chips -> committed record -> re-edit seed.
+    //
+    // Unlike every other op here a Gear MINTS a body (D1 `body_<opId>`) and has
+    // no target, so the mock reports the id the real worker would mint rather
+    // than re-emitting a host.
+    const featureId = op.featureId ?? nextFeatureId();
+    const bodyId = op.opId ? `body_${op.opId}` : `body_${featureId}`;
+    const teeth = op.params.involuteExternal?.teeth ?? 0;
+    const modulus = op.params.involuteExternal?.module ?? 0;
+    // Mirrors the real projection's display naming for a gear.
+    const valueText = `${teeth}T m${modulus}`;
+    const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
+    if (editing) {
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+    } else {
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Gear", label: "Gear", valueText, status: "ok" }];
+    }
+    return { changed: [bodyId], removed: [], label: "Gear", featureId };
+  }
   // Boolean: MOCK removes the tool body, keeps the target (no real fusion).
   const { targetBodyId, toolBodyId, operation } = op.params;
   syntheticBodies.delete(toolBodyId);

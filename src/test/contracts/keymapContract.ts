@@ -21,6 +21,7 @@ export const MODEL_KEYS_CONTRACT: readonly KeyBinding[] = [
   { key: "m", action: { type: "tool", tool: "mirror" } },
   { key: "t", action: { type: "tool", tool: "transform" } },
   { key: "h", shift: true, action: { type: "tool", tool: "hole" } },
+  { key: "g", shift: true, action: { type: "tool", tool: "gear" } },
   { key: "?", shift: true, action: { type: "tool", tool: "measure" } },
   { key: "i", shift: true, action: { type: "isolate" } },
 ];

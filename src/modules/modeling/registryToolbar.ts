@@ -59,6 +59,7 @@ export function toolbarFromRegistry(platform: Platform, scope: ToolScope): ToolE
   const entries: ToolEntry[] = [];
   let group: string | undefined;
   for (const def of registeredTools(platform, scope)) {
+    if (def.toolbarHidden) continue;
     const resolved = toolFromId(def.id);
     if (!resolved) continue;
     if (group !== undefined && def.group !== group) entries.push({ sep: true });

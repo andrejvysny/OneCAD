@@ -58,3 +58,6 @@ skills-lock.json
 
 # Sample CAD exports used for manual import testing.
 STEP/
+
+# Local-only gear cross-check harness run artifacts (scripts/gear-crosscheck).
+__pycache__/

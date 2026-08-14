@@ -51,6 +51,7 @@ export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
   { key: "t", action: tool("transform"), scope: "model" },
   // Hole — an exact shift chord; plain `h` cannot be claimed here (it is Home).
   { key: "h", shift: true, action: tool("hole"), scope: "model" },
+  { key: "g", shift: true, action: tool("gear"), scope: "model" },
   // Measure. `?` (⇧/) is free in BOTH tables and reads as "what is this?".
   // Declared as an exact shift chord so a plain-key press can never claim it.
   // It is also in NO_CROSS_MODE — see `keymap.ts`.

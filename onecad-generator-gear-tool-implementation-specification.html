@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OneCAD Generator &amp; Gear Tool — Implementation Specification</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #1a2029;
+    --ink-2: #3d4856;
+    --ink-3: #6b7684;
+    --paper: #fafaf8;
+    --card: #ffffff;
+    --line: #e3e1db;
+    --line-2: #d0cdc4;
+    --accent: #9a3b26;      /* tooling red */
+    --accent-soft: #f6e9e5;
+    --steel: #2b4a5e;       /* deep steel blue */
+    --steel-soft: #e8eff3;
+    --ok: #2e6b46;
+    --ok-soft: #e6f0ea;
+    --warn: #8a6a1c;
+    --warn-soft: #f7f0dd;
+    --bad: #96322a;
+    --bad-soft: #f8e9e7;
+    --mono-bg: #f2f1ed;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif; font-size: 15.5px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 6% 120px; }
+
+  /* Masthead */
+  header.mast {
+    border-bottom: 3px double var(--line-2); padding: 44px 0 26px; margin-bottom: 10px;
+  }
+  .doc-kind {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: .22em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 14px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .doc-kind::after { content: ""; flex: 1; height: 1px; background: var(--line-2); }
+  h1 {
+    font-family: 'Source Serif 4', Georgia, serif; font-weight: 600;
+    font-size: clamp(30px, 4.6vw, 44px); line-height: 1.12; margin: 0 0 16px; letter-spacing: -0.01em;
+  }
+  .lede { font-size: 17px; color: var(--ink-2); max-width: 780px; font-style: italic; font-family: 'Source Serif 4', serif; }
+  .pin {
+    display: flex; flex-wrap: wrap; gap: 8px 26px; margin-top: 22px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--ink-3);
+  }
+  .pin b { color: var(--ink-2); font-weight: 600; }
+
+  /* TOC */
+  nav.toc {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 18px 26px; margin: 28px 0 54px; column-count: 2; column-gap: 48px;
+    font-size: 13.5px;
+  }
+  nav.toc a { color: var(--ink-2); text-decoration: none; display: block; padding: 3px 0; }
+  nav.toc a:hover { color: var(--accent); }
+  nav.toc a .n { font-family: 'IBM Plex Mono', monospace; color: var(--accent); margin-right: 9px; font-size: 12px; }
+  @media (max-width: 720px) { nav.toc { column-count: 1; } }
+
+  /* Sections */
+  section { margin: 64px 0 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--line-2); padding-bottom: 10px; margin-bottom: 24px; }
+  .sec-num { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--accent); font-weight: 600; letter-spacing: .08em; }
+  h2 { font-family: 'Source Serif 4', serif; font-size: 27px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  h3 { font-size: 17px; font-weight: 700; margin: 34px 0 10px; color: var(--ink); }
+  h4 { font-size: 14px; font-weight: 700; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+  p { margin: 12px 0; }
+  ul, ol { padding-left: 24px; }
+  li { margin: 5px 0; }
+  strong { font-weight: 600; }
+  code {
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px;
+    background: var(--mono-bg); padding: 1.5px 5px; border-radius: 4px; color: var(--steel);
+  }
+
+  /* Cards & callouts */
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--card);
+    padding: 14px 20px; margin: 18px 0; border-radius: 0 6px 6px 0; font-size: 14.5px;
+  }
+  .callout.steel { border-color: var(--steel); background: var(--steel-soft); }
+  .callout.ok { border-color: var(--ok); background: var(--ok-soft); }
+  .callout.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .callout.bad { border-color: var(--bad); background: var(--bad-soft); }
+  .callout .t { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .1em; display: block; margin-bottom: 5px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 18px 0; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  .mini {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; font-size: 14px;
+  }
+  .mini .t { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--steel); display: block; margin-bottom: 6px; }
+
+  /* Tables */
+  .tbl-wrap { overflow-x: auto; margin: 16px 0 26px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th {
+    text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3);
+    padding: 10px 14px; border-bottom: 2px solid var(--line-2); white-space: nowrap;
+  }
+  td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12px; }
+  td.mono, .mono { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; }
+  .sub-row td { background: var(--paper); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; font-weight: 600; color: var(--steel); letter-spacing: .06em; text-transform: uppercase; }
+
+  /* Pills */
+  .pill {
+    display: inline-block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600;
+    padding: 2px 8px; border-radius: 20px; letter-spacing: .05em; white-space: nowrap;
+  }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); border: 1px solid #bcd6c6; }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); border: 1px solid #e3d5ac; }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); border: 1px solid #e5bcb6; }
+  .pill.steel { background: var(--steel-soft); color: var(--steel); border: 1px solid #c2d2dc; }
+  .pill.new { background: var(--accent-soft); color: var(--accent); border: 1px solid #e3c2b8; }
+
+  /* Formula block */
+  .formula {
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px; background: var(--mono-bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 12px 18px; margin: 12px 0;
+    overflow-x: auto; white-space: pre; color: var(--ink-2); line-height: 1.8;
+  }
+
+  /* Phase cards */
+  .phase {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    margin: 22px 0; overflow: hidden;
+  }
+  .phase-head {
+    display: flex; align-items: center; gap: 14px; padding: 16px 24px;
+    background: linear-gradient(180deg, #fdfdfc, #f6f5f1); border-bottom: 1px solid var(--line);
+  }
+  .phase-id {
+    font-family: 'IBM Plex Mono', monospace; font-weight: 600; font-size: 13px;
+    background: var(--steel); color: #fff; padding: 4px 11px; border-radius: 5px; white-space: nowrap;
+  }
+  .phase-title { font-weight: 700; font-size: 16px; }
+  .phase-goal { margin-left: auto; font-size: 12px; color: var(--ink-3); font-family: 'IBM Plex Mono', monospace; text-align: right; }
+  .phase-body { padding: 6px 24px 18px; font-size: 14px; }
+  .phase-body ul { margin: 8px 0; }
+  .gate {
+    margin: 14px 24px 18px; padding: 12px 18px; border: 1px dashed var(--ok);
+    border-radius: 8px; background: var(--ok-soft); font-size: 13.5px;
+  }
+  .gate .t { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--ok); display: block; margin-bottom: 4px; }
+
+  footer {
+    margin-top: 90px; padding-top: 22px; border-top: 1px solid var(--line-2);
+    font-size: 12.5px; color: var(--ink-3); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+</style>
+<style>
+.ha-img-placeholder{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;background:#f4f4f5;border:1px dashed #d4d4d8;border-radius:8px;color:#71717a;font-size:12px;font-family:system-ui,sans-serif;min-height:80px;padding:16px;box-sizing:border-box;animation:ha-img-pulse 1.5s ease-in-out infinite}
+.ha-img-placeholder.ha-failed{animation:none;opacity:.7}
+@keyframes ha-img-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@media(prefers-color-scheme:dark){.ha-img-placeholder{background:#27272a;border-color:#3f3f46;color:#a1a1aa}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="mast">
+  <div class="doc-kind">Implementation Specification · OneCAD Project</div>
+  <h1>The Generator Framework &amp; the Gear Generator</h1>
+  <p class="lede">An abstract parametric Generator operation for OneCAD — typed, recipe-driven, closed under ADR-0002 — with full gear-type parity against the FreeCAD <code>freecad.gears</code> workbench as its first and proving instance.</p>
+  <div class="pin">
+    <span><b>Repo</b> github.com/andrejvysny/OneCAD</span>
+    <span><b>Pinned HEAD</b> 4ac8565</span>
+    <span><b>Reference</b> freecad.gears v1.3.0 (GPL-3.0)</span>
+    <span><b>Issued</b> 2026-08-14</span>
+    <span><b>Status</b> Approved plan → specification</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#s1"><span class="n">1</span>Executive summary</a>
+  <a href="#s2"><span class="n">2</span>Reference analysis — freecad.gears</a>
+  <a href="#s3"><span class="n">3</span>OneCAD architecture integration</a>
+  <a href="#s4"><span class="n">4</span>Framework design — the Generator operation</a>
+  <a href="#s5"><span class="n">5</span>Parameter schema — all gear recipes</a>
+  <a href="#s6"><span class="n">6</span>Geometry construction &amp; OCCT capability plan</a>
+  <a href="#s7"><span class="n">7</span>Topological naming &amp; generated geometry</a>
+  <a href="#s8"><span class="n">8</span>Validation &amp; publication policy</a>
+  <a href="#s9"><span class="n">9</span>User experience</a>
+  <a href="#s10"><span class="n">10</span>Testing &amp; oracle strategy</a>
+  <a href="#s11"><span class="n">11</span>Licensing</a>
+  <a href="#s12"><span class="n">12</span>Phased implementation plan</a>
+  <a href="#s13"><span class="n">13</span>Risks &amp; open questions</a>
+</nav>
+
+<!-- ============================================================ -->
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Executive summary</h2></div>
+
+  <p>OneCAD gains an abstract <strong>Generator</strong> operation: a single typed <code>KnownOperation</code> variant whose parameters are a discriminated union of <em>recipes</em>. A recipe is a fully parametric solid generator — no sketch required — that takes a placement reference (a planar face or datum plane, plus a frozen center point) and a typed parameter block, and mints a new body (<code>body_&lt;opId&gt;</code>, decision D1). The first recipe family is <strong>gears</strong>, achieving functional parity with the twelve gear types of the FreeCAD <code>freecad.gears</code> workbench: involute external, involute rack, internal involute, cycloid, cycloid rack, hypocycloid cam, spherical-involute bevel, crown, ZA worm, GT/HTD timing, T-profile timing, and lantern.</p>
+
+  <p>The design is deliberately unoriginal where OneCAD already has a proven pattern. The Generator is <strong>a Hole that mints instead of cuts</strong>: Hole's conditional-parameter contract, four-boundary validation, frozen-point placement fencing, exact-preview-for-free via <code>PreviewOp</code>, and bespoke chip-cluster UI are copied wholesale. What is genuinely new is geometry infrastructure — the worker today has no B-spline construction, no helix, no sweep or loft, and no 2D fillet wrapper. Those are built once, in the kernel's geometry layer, and serve every future generator (springs, cams, threads) as well as any future loft/sweep work.</p>
+
+  <div class="grid2">
+    <div class="mini"><span class="t">What ships first (G0–G1)</span>A pure-C++ gear math core cross-validated against the reference implementation, plus the Generator op plumbed end-to-end with the involute spur recipe: schema, Rust, worker, exact preview, history node, chip UI, and a full analytic oracle test suite.</div>
+    <div class="mini"><span class="t">What is structurally excluded</span>No addon-extensible generators (ADR-0002 — recipes are typed enum variants). No arbitrary-execution hatch. No 2D-wire output mode. No assembly kinematics in v1 (a mating helper is a G5 option). Gear tooth sub-geometry is not ElementRef-referenceable.</div>
+    <div class="mini"><span class="t">Biggest technical risk</span>Helical sweep infrastructure (PipeShell Frenet + solid sewing) — the exact point where the reference addon is fragile and under-tested. Isolated into phase G2 so extrude-only recipes ship independently.</div>
+    <div class="mini"><span class="t">Validation posture</span>TierA publication (full <code>audit_shape</code> evidence including self-interference) from day one — making gears the second operation after fillet with deep validation, advancing the project's uniform-validation goal rather than adding to its asymmetry.</div>
+  </div>
+
+  <div class="callout steel"><span class="t">Strategic note</span>Generated parametric parts are where a local-first, correctness-first CAD can be strictly better than the incumbent ecosystem: the gear's parameters live in the same typed operation contract the UI and any future agent client share, its failures surface as graded refusals (<code>NeedsRepair</code> / <code>OP_FAILED</code>), and its geometry is oracle-tested against closed-form mathematics — none of which is true of the reference implementation this spec ports.</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Reference analysis — freecad.gears</h2></div>
+
+  <h3>2.1 Structure</h3>
+  <p>The addon (v1.3.0, GPL-3.0) separates cleanly into a pure-math layer (<code>pygears/</code>: numpy-based, FreeCAD-independent) and a FreeCAD feature layer (<code>freecad/gears/</code>: 12 feature classes + kinematic connectors + workbench chrome). The feature layer converts sampled point arrays into B-reps through FreeCAD's <code>Part</code> module — a thin Python wrapper over OCCT — which means every construction call maps 1:1 onto an OCCT C++ API. <code>freecad/part.py</code> is an import shim, and <code>pygears/transformation.py</code> (symbolic matrices via sympy) is dead code at runtime.</p>
+
+  <h3>2.2 Gear-type inventory and construction patterns</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Type</th><th>Profile mathematics</th><th>2D → solid construction</th><th>Key OCCT APIs</th><th>Port difficulty</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Involute external</strong><br><span class="mono">spur / helical / herringbone</span></td><td>Circle involute flank + trochoid undercut; closed-form da/df/dg; profile shift, backlash, clearance</td><td>Prism (β=0) or helical PipeShell sweep, mid-plane mirror for double helix; axle/offset hole cuts</td><td><code>GeomAPI_Interpolate</code>, <code>BRepPrimAPI_MakePrism</code>, <code>BRepOffsetAPI_MakePipeShell</code>, <code>BRepAlgoAPI_Cut</code>, <code>ChFi2d_FilletAPI</code></td><td><span class="pill ok">core</span></td></tr>
+      <tr><td><strong>Involute rack</strong></td><td>Straight-flanked trapezoid (the generating tool profile); closed form</td><td>Extrude; helical via 2/3-section loft of translated wires</td><td><code>GC_MakeSegment</code>, <code>BRepOffsetAPI_ThruSections</code></td><td><span class="pill ok">core</span></td></tr>
+      <tr><td><strong>Internal involute</strong><br><span class="mono">ring gear</span></td><td>Same involute math; head↔clearance swap, backlash negation, da↔df swap on output</td><td>Profile as inner wire of an annulus (face with hole) → extrude / helical sweep</td><td><code>BRepBuilderAPI_MakeFace</code> (multi-wire), as above</td><td><span class="pill ok">core</span></td></tr>
+      <tr><td><strong>Cycloid</strong></td><td>Epicycloid + hypocycloid branches; degenerate straight radial flank at d1 = d/2</td><td>As involute external</td><td>As involute external</td><td><span class="pill ok">core</span></td></tr>
+      <tr><td><strong>Cycloid rack</strong></td><td>Curtate cycloid flanks; closed-form branch ends</td><td>As involute rack</td><td>As involute rack</td><td><span class="pill steel">G3</span></td></tr>
+      <tr><td><strong>Timing GT/HTD</strong></td><td>Tangent circular arcs only, from a hard-coded 7-row standard table (gt2…htd8)</td><td>Arc wire × z → extrude</td><td><code>GC_MakeArcOfCircle</code>, <code>MakePrism</code></td><td><span class="pill steel">G4</span></td></tr>
+      <tr><td><strong>Timing T</strong></td><td>Straight flanks + head/root arcs; flank endpoints via two 1-D line∩circle solves (upstream uses scipy minimize)</td><td>Extrude</td><td>Segments, arcs, <code>ChFi2d</code> (absolute radii)</td><td><span class="pill steel">G4</span></td></tr>
+      <tr><td><strong>Lantern</strong></td><td>Involute of circle offset by roller radius (parallel curve); φ_min by 1-D Newton</td><td>Extrude</td><td>Interpolate, arcs, <code>MakePrism</code></td><td><span class="pill steel">G4</span></td></tr>
+      <tr><td><strong>Hypocycloid cam</strong><br><span class="mono">cycloidal reducer</span></td><td>Closed-form cam curve per lobe; pressure-angle clamping by 1°-scan</td><td>Cam extrusion + pin cylinders as an <em>unfused compound</em></td><td>Interpolate, <code>Cut</code> (center bore), <code>MakeCompound</code></td><td><span class="pill warn">policy exception</span></td></tr>
+      <tr><td><strong>Bevel</strong><br><span class="mono">straight / spiral</span></td><td>Spherical involute on unit sphere (3D parametric curve), central projection to back cone; ~90-term closed-form endpoint; <strong>pressure angle stored complemented (90−α)</strong></td><td>Ruled loft between inner/outer cone-distance-scaled wires; spiral = 20 loft sections with radius-proportional twist</td><td><code>BRepOffsetAPI_ThruSections</code>, 3D rotations, scaling</td><td><span class="pill bad">hardest</span></td></tr>
+      <tr><td><strong>Crown</strong><br><span class="mono">face gear</span></td><td>Tooth space = trapezoid sections in tangent planes; no curves</td><td>Annulus blank minus N lofted tooth-space solids (boolean cut)</td><td><code>ThruSections</code>, <code>BRepAlgoAPI_Cut</code> (tool list)</td><td><span class="pill warn">moderate</span></td></tr>
+      <tr><td><strong>Worm (ZA)</strong></td><td>Trapezoidal thread mapped to helix; true arc root/tip + sampled helical flanks</td><td>Helical PipeShell sweep, lead from β = atan(m·t/d)</td><td><code>Geom_CylindricalHelix</code> (hand-built), <code>MakePipeShell</code></td><td><span class="pill warn">moderate</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>2.3 Dependency displacement</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Upstream dependency</th><th>Where used</th><th>OneCAD replacement</th></tr></thead>
+    <tbody>
+      <tr><td><code>numpy</code></td><td>All samplers: linspace, vstack, trig, 2×2 solve</td><td>Trivial loops over <code>std::vector</code> of point structs; hand-written 2×2 solve</td></tr>
+      <tr><td><code>scipy.optimize.root</code></td><td>Lantern φ_min (monotone 1-D root)</td><td>Newton with bisection fallback, ~15 lines</td></tr>
+      <tr><td><code>scipy.optimize.minimize</code></td><td>Timing-T flank endpoints</td><td>Closed-form line∩circle quadratic (the geometry is exactly that)</td></tr>
+      <tr><td><code>sympy</code></td><td>None at runtime (one offline derivation, already inlined)</td><td>Not needed</td></tr>
+      <tr><td><code>Part.BSplineCurve().interpolate</code></td><td>Every analytic curve, ~20 samples/segment</td><td><code>GeomAPI_Interpolate</code> (cubic, through-points — identical semantics)</td></tr>
+      <tr><td><code>ChFi2d.FilletAPI</code></td><td>Head/root profile fillets</td><td><code>ChFi2d_FilletAPI</code> directly</td></tr>
+      <tr><td><code>Part.makeHelix</code></td><td>Helical sweep spines</td><td>Hand-built <code>Geom_CylindricalHelix</code> (what FreeCAD does internally)</td></tr>
+      <tr><td><code>BRepOffsetAPI.MakePipeShell</code> (Frenet)</td><td>Helical gears, worm</td><td><code>BRepOffsetAPI_MakePipeShell</code> + <code>SetFrenetMode</code></td></tr>
+      <tr><td><code>Part.makeLoft</code></td><td>Helical racks, bevel, crown</td><td><code>BRepOffsetAPI_ThruSections</code> (solid/ruled flags map 1:1)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>2.4 Upstream fragilities — explicitly not ported</h3>
+  <ul>
+    <li><strong>Unsewn helical solids.</strong> Upstream's <code>helical_extrusion</code> carries a compound-extraction hack ("why the heck is makeShell from this empty after mirroring?") with <code>sewShape()</code> commented out; the single unit test for it is <code>xfail</code>. OneCAD sews and validates (<code>BRepCheck_Analyzer</code> + TierA audit) or refuses.</li>
+    <li><strong>Index-based fillet insertion.</strong> Fillets are inserted at hard-coded edge positions with a pop-and-retry fallback. OneCAD identifies fillet sites geometrically (position/tangent), which is robust to sampler point-count changes.</li>
+    <li><strong>Bevel overflow warn-and-continue.</strong> Height ≥ cone distance prints a warning then produces garbage. OneCAD refuses with <code>OP_FAILED</code> and a diagnostic — the project's fail-closed rule applied to generated geometry.</li>
+    <li><strong>Ruled-loft bevel approximation.</strong> The mid-face between inner/outer spherical involutes is interpolated, not the true surface; spiral bevel is a radius-proportional twist, not Gleason geometry. The math is ported as-is (parity goal), but the schema and UI copy state the approximation honestly.</li>
+    <li><strong>Rack <code>simplified</code> mode.</strong> A constant-topology fake (middle teeth bridged) that exists only to dodge FreeCAD's topological naming problem. Unnecessary in OneCAD — see §7.</li>
+    <li><strong><code>transformGeometry</code> per-tooth replication.</strong> Re-parameterizing copies invite tolerance creep; OneCAD uses location transforms (<code>TopLoc_Location</code>) for exact per-tooth copies.</li>
+    <li><strong><code>height = 0</code> 2D-wire mode.</strong> OneCAD has a real sketch system; a 2D gear profile is a possible future <em>sketch</em> generator, not a gear op mode.</li>
+    <li><strong>Connector kinematics.</strong> Gear-pair placement/phasing is assembly math, not geometry generation. Deferred to the G5 mating-helper option.</li>
+  </ul>
+
+  <div class="callout bad"><span class="t">Testing debt upstream</span>The reference has exactly one unit test (marked xfail) plus screenshot SSIM regression. There are no volume checks, no analytic curve checks, no diameter checks. <strong>There is no upstream ground truth to port.</strong> The oracle suite in §10 is therefore a build item of this project, not a nice-to-have — the Python cross-check harness (C++ sampler output vs reference output over a parameter sweep) is the only practical equivalence evidence available.</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>OneCAD architecture integration</h2></div>
+
+  <h3>3.1 The Hole precedent — copied, not reinvented</h3>
+  <p>Hole (WP-C T3) is the newest operation and the closest analog to a generated feature: fully parametric (no sketch), typed conditional parameter blocks, face-pick placement with a frozen world point re-projected onto the resolved face each regen (fenced at 1e-3&nbsp;mm), exact preview, and one history node regardless of profile subtype. The Generator inherits every one of these patterns:</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Contract</th><th>Hole (existing)</th><th>Generator (this spec)</th></tr></thead>
+    <tbody>
+      <tr><td>Conditional params</td><td><code>holeType</code> selects which block is non-null; validated four times (FSM, wire mapper, Rust, worker)</td><td><code>recipe</code> selects which params block is non-null; same four-boundary validation, same null-spelling rule</td></tr>
+      <tr><td>Placement</td><td>Planar face <code>ElementRef</code> + frozen world point, inward-normal axis, 1e-3 reprojection fence</td><td>Identical; axis = the gear's rotation axis (inward normal). Datum-plane placement via explicit frozen frame</td></tr>
+      <tr><td>Preview</td><td><code>PreviewOp</code> runs the same candidate executor on a throwaway head copy; preview == commit by construction</td><td>Identical; drag/param edits throttle at the existing 200 ms trailing floor</td></tr>
+      <tr><td>Body lifecycle</td><td>Modified host (id preserved)</td><td><strong>NewBody mint</strong>: <code>body_&lt;opId&gt;</code>, <code>created</code> event, empty element-map delta — the MirrorOp / Extrude-NewBody pattern</td></tr>
+      <tr><td>Validation trust boundaries</td><td>FSM → wire mapper → <code>edit/session.rs</code> → worker <code>read_dims</code></td><td>Identical four; the worker re-validates unconditionally (independent trust boundary)</td></tr>
+      <tr><td>Failure semantics</td><td>Non-planar face ⇒ recoverable <code>OP_FAILED</code>; ref failures ⇒ <code>NeedsRepair</code>, never Err</td><td>Invalid params / impossible geometry (e.g. bevel overflow, z &lt; z_min) ⇒ recoverable <code>OP_FAILED</code> with bounded diagnostics; stale placement ⇒ <code>NeedsRepair</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>3.2 Touch map — every file a new operation touches</h3>
+  <p>Verified against HEAD <code>4ac8565</code>. In order of the data flow:</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Layer</th><th>File</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">protocol</td><td class="mono">protocol/SCHEMA.md</td><td>New §7.3 subsection family for <code>op.generator</code> (recipe-conditional payloads, invariants, failure codes, lineage rules); opType enum sentence; §14 changelog entry</td></tr>
+      <tr><td class="mono">protocol</td><td class="mono">protocol/fixtures/*.ndjson</td><td>Fixture bump: <code>execute_plan</code> + <code>preview_op</code> + error-path scripts (subset-match driver, both worker and stub)</td></tr>
+      <tr><td class="mono">rust-core</td><td class="mono">crates/onecad-core/src/document/record.rs</td><td><code>KnownOperation::Generator(GeneratorParams)</code> variant; per-recipe params structs; <code>validate()</code>; <code>derive_inputs()</code> (placement refs only); <code>element_refs_mut()</code>; <code>op_type()</code>; hand-written serde; <code>KNOWN_OP_TYPES</code></td></tr>
+      <tr><td class="mono">rust-core</td><td class="mono">crates/onecad-core/src/edit/session.rs</td><td><code>validate_generator(&record.op)</code> call sites at authoring entry points (single-writer doctrine — never at deserialize)</td></tr>
+      <tr><td class="mono">worker</td><td class="mono">worker/src/session/PlanExecutor.cpp</td><td>One dispatch arm in <code>run_single_op</code></td></tr>
+      <tr><td class="mono">worker</td><td class="mono">worker/src/ops/GeneratorOp.{h,cpp}</td><td>Executor: ref preflight, host-free context, placement resolution, recipe dispatch, publication decision, NewBody mint</td></tr>
+      <tr><td class="mono">worker</td><td class="mono">worker/src/ops/gear/GearTool.{h,cpp}</td><td>Pure session-state-free solid builders per recipe (HoleTool pattern), one file pair per recipe family</td></tr>
+      <tr><td class="mono">worker</td><td class="mono">worker/src/kernel/geometry/{BSpline,Helix,Sweep,Fillet2d}.{h,cpp}</td><td><strong>New capability layer</strong> — see §6</td></tr>
+      <tr><td class="mono">worker</td><td class="mono">worker/src/kernel/geometry/gear/*.cpp</td><td>Pure-C++ samplers (no OCCT handles) — involute, cycloid, spherical-involute, arc tables, etc.</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/ipc/types.ts</td><td><code>OpType</code> + <code>OperationOp</code> + <code>GeneratorParams</code> union, <code>SemanticRef</code> placement</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/ipc/tauriCommandMap.ts · previewOps.ts</td><td>Wire mapper (null-spelled inactive recipe blocks) shared by commit and preview lanes — SCHEMA §7.6 forbids a second mapper</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/stores/toolStore.ts · modules/modeling/{ids,tools,bindings}.ts · tools/activateTool.ts · toolApplicability.ts</td><td>Tool id <code>"generator"</code>, descriptor, keybinding, MODEL_ONLY mode, applicability gate</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/tools/modelTools/generatorMachine.ts</td><td>Pure-reducer FSM (<code>idle → facePick → armed → committing</code>), one <code>generatorParamsOf</code> builder shared by preview and commit, re-edit seed</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/tools/modelTools/ModelToolController.ts</td><td>Controller methods (start/pick/chip/preview/commit/re-edit/cancel)</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/stores/toolChipStore.ts · features/toolbar/GeneratorChipCluster.tsx · ModelToolChips.tsx</td><td>Chip kind + bespoke cluster: recipe picker, per-recipe parameter sections, computed read-outs (da/df/dw), preset popover</td></tr>
+      <tr><td class="mono">frontend</td><td class="mono">src/ipc/mockClient.ts</td><td>Mock-lane op case</td></tr>
+      <tr><td class="mono">tests</td><td colspan="2">Eight layers — enumerated in §10.3</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout"><span class="t">ADR-0002 compliance</span>The Generator is a new typed <code>KnownOperation</code> variant — the modeling kernel stays closed. Recipes are enum variants with typed payloads, never free-form recipe strings; no addon can register one; <code>Operation::Opaque</code> remains forward-compatibility, not a plugin path. The "abstract Generator" framing lives in code organization (a <code>gear/</code> recipe directory today, a sibling <code>spring/</code> directory when a second family appears) and in shared seams — placement, minting, publication, FSM shape — not in a runtime registry shipped in v1.</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Framework design — the Generator operation</h2></div>
+
+  <h3>4.1 One operation, not twelve</h3>
+  <p>A single <code>Generator</code> op with a recipe union wins over twelve per-type ops on schema surface (one §7.3 family), UI (one tool, one chip cluster with a recipe picker — exactly how Hole collapses simple/counterbore/countersink into one feature), history (one node kind, re-editable across recipe changes while keeping record identity), and preview (one lane). The cost — a discriminated union where only the active recipe's block is non-null — is already paid: Hole's conditional-block contract is the proven pattern, enforced at all four trust boundaries.</p>
+
+  <h3>4.2 Wire payload shape</h3>
+  <div class="formula">{
+  "opType": "Generator",
+  "opId": "op_…",
+  "stepIndex": n,
+  "inputs": [ <semanticRef placement-face-or-empty> ],
+  "params": {
+    "recipe": "involuteExternal",
+    "placement": {
+      "face":   <typedElementRef | null>,   // null ⇒ datum/explicit frame
+      "frame":  <frozenFrame | null>,        // origin + Z-up axis, frozen at authoring
+      "point":  [x, y, z]                    // world-space center, frozen, re-projected per regen
+    },
+    "involuteExternal": { …block… },
+    "involuteRack":      null,   // every inactive recipe spelled null
+    "internalInvolute":  null,
+    …                              // one key per recipe family
+  },
+  "determinism": { "parallel": …, "occtOptions": … }
+}</div>
+  <p>Dimensional parameters ride the existing scalar convention (<code>number | {value, expr?}</code>, §7.3 header). Units are millimetres and degrees, matching every existing op; fillet radii keep upstream's convention of multiples of module where the standard literature does, and are absolute where it doesn't (timing-T) — the schema table in §5 marks which is which.</p>
+
+  <h3>4.3 Shared seams every recipe inherits</h3>
+  <ul>
+    <li><strong>Placement.</strong> Face pick (Hole semantics: re-project frozen point onto resolved face, inward normal = gear axis) <em>or</em> an explicit frozen frame for datum/world placement. Placement refs are the op's only <code>derive_inputs</code> contribution.</li>
+    <li><strong>Minting.</strong> <code>ctx.bodies.create("body_" + op_id, op_id, shape)</code> + <code>created</code> body event + empty delta. Compound recipes (hypocycloid cam with pins) mint ordinal children <code>body_&lt;opId&gt;:&lt;k&gt;</code> under the ranked-solids rule — no free-form compounds in the document.</li>
+    <li><strong>Publication.</strong> <code>publication_decision</code> with per-recipe <code>PublicationPolicy</code> (§8). Empty, invalid, or self-intersecting results are refused with <code>GEOMETRY_INVALID</code>/<code>OP_FAILED</code> — never published, never warn-and-continue.</li>
+    <li><strong>Preview.</strong> Exact, via the shared candidate executor; the chip edits params against a live ghost at the existing throttle floor.</li>
+    <li><strong>History.</strong> One named node per generator instance: <code>Gear — Involute 20T m2</code>-style display naming from recipe + headline params; full param re-edit via <code>updateOperationParams</code>.</li>
+    <li><strong>Determinism.</strong> Samplers are pure functions of params (no wall-clock, no hash-order iteration); construction honors <code>ctx.parallel</code>/<code>ctx.occtOptions</code>; the kernelbench double-run discipline applies from G1.</li>
+  </ul>
+
+  <h3>4.4 What the abstraction buys later</h3>
+  <p>The second recipe family (e.g. compression/extension springs — helix + sweep, already paid for in G2) drops into the same schema section, the same FSM shape, the same chip cluster shell, and the same publication path without touching placement, minting, preview, or history code. That is the test the abstraction must pass; until a second family exists, no general registry ships.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Parameter schema — all gear recipes</h2></div>
+
+  <p>Complete parity tables, extracted from the reference source (every <code>addProperty</code> with defaults and constraints). Units: lengths mm, angles degrees; "×m" = multiple of module. Read-only computed values are returned in the op's result DTO and displayed in the chip — they are never stored as params.</p>
+
+  <h3>5.1 <code>involuteExternal</code> — spur / helical / herringbone</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Constraint / meaning</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">teeth</td><td>int</td><td>15</td><td>≥ 3 (upstream allows to 10000)</td></tr>
+      <tr><td class="mono">module</td><td>length</td><td>1</td><td>&gt; 0; normal module when <code>propertiesFromTool</code></td></tr>
+      <tr><td class="mono">height</td><td>length</td><td>5</td><td>&gt; 0 (no zero-wire mode — §2.4)</td></tr>
+      <tr><td class="mono">pressureAngle</td><td>angle</td><td>20</td><td>α; transverse α_t = atan(tan α / cos β) when propertiesFromTool</td></tr>
+      <tr><td class="mono">shift</td><td>float</td><td>0</td><td>profile shift coefficient x</td></tr>
+      <tr><td class="mono">helixAngle</td><td>angle</td><td>0</td><td>β; 0 ⇒ spur prism path</td></tr>
+      <tr><td class="mono">doubleHelix</td><td>bool</td><td>false</td><td>herringbone: mirrored half-height sweeps</td></tr>
+      <tr><td class="mono">propertiesFromTool</td><td>bool</td><td>false</td><td>recompute α_t, m_t from normal (tool) values</td></tr>
+      <tr><td class="mono">undercut</td><td>bool</td><td>false</td><td>trochoid root curve; forces rootFillet = 0 (hard rule, not silent — UI disables with explanation)</td></tr>
+      <tr><td class="mono">headFillet / rootFillet</td><td>float</td><td>0</td><td>×m, geometric site identification (not edge indices)</td></tr>
+      <tr><td class="mono">backlash / reversedBacklash</td><td>length / bool</td><td>0 / false</td><td>arc-length thinning at pitch circle</td></tr>
+      <tr><td class="mono">clearance</td><td>float</td><td>0.25</td><td>×m; dedendum = m + c</td></tr>
+      <tr><td class="mono">head</td><td>float</td><td>0</td><td>×m extra addendum</td></tr>
+      <tr><td class="mono">simple</td><td>bool</td><td>false</td><td>true ⇒ plain pitch cylinder (fast stand-in; honest name: "blank")</td></tr>
+      <tr><td class="mono">sampleCount</td><td>int</td><td>20</td><td>spline samples per curve segment (accuracy knob)</td></tr>
+      <tr><td class="mono">axleHole / axleHoleSize</td><td>bool / length</td><td>false / 10</td><td>central bore cut</td></tr>
+      <tr><td class="mono">offsetHole / offsetHoleSize / offsetHoleOffset</td><td>bool / length / length</td><td>false / 10 / 10</td><td>secondary bore</td></tr>
+      <tr><td class="mono">computed</td><td colspan="3">pitchDiameter, addendumDiameter, rootDiameter, transverseModule, transversePitch, angularBacklash</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>5.2 <code>involuteRack</code> · <code>cycloidRack</code></h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">teeth · module · height · pressureAngle</td><td>int · length · length · angle</td><td>15 · 1 · 5 · 20</td><td>as external</td></tr>
+      <tr><td class="mono">thickness</td><td>length</td><td>5</td><td>back-side depth below roots</td></tr>
+      <tr><td class="mono">helixAngle · doubleHelix · propertiesFromTool</td><td>angle · bool · bool</td><td>0 · false · false</td><td>helical ⇒ 2/3-section loft</td></tr>
+      <tr><td class="mono">head · clearance · headFillet · rootFillet</td><td>float</td><td>0 · 0.25 · 0 · 0</td><td>×m</td></tr>
+      <tr><td class="mono">addEndings</td><td>bool</td><td>true</td><td>extend ends to a full pitch multiple</td></tr>
+      <tr><td class="mono">(cycloid) innerDiameter · outerDiameter</td><td>float</td><td>7.5 · 7.5</td><td>×m rolling-circle diameters</td></tr>
+      <tr><td class="mono">(cycloid) sampleCount</td><td>int</td><td>15</td><td>per branch</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>Not ported:</strong> upstream <code>simplified</code> (constant-topology fake) — unnecessary under OneCAD's naming ladder, and tooth-count topology changes are handled honestly via <code>NeedsRepair</code> on downstream refs (§7).</p>
+
+  <h3>5.3 <code>internalInvolute</code> — ring gear</h3>
+  <p>Same involute block as 5.1 plus <code>thickness</code> (rim; outside diameter = dw + 2·thickness), minus <code>undercut</code> (forced false). Upstream swaps head↔clearance, negates backlash, and swaps da↔df in reported values, with default <code>head = −0.4</code>. <strong>Design decision for OneCAD:</strong> keep upstream mesh semantics but expose <em>internal-native</em> parameter names in the schema (<code>internalClearance</code>, <code>internalHead</code>) with the swap performed in the sampler — the ported swap logic is a known confusion source and the schema is where it gets documented once, normatively.</p>
+
+  <h3>5.4 <code>cycloid</code></h3>
+  <p><code>teeth</code> (≥ 2) · <code>module</code> · <code>height</code> · <code>innerDiameter</code> (×m, default expression z/2 ⇒ straight radial flank) · <code>outerDiameter</code> (×m, 7.5) · <code>helixAngle</code> · <code>doubleHelix</code> · <code>clearance</code> · <code>head</code> · <code>backlash</code> · fillets · <code>sampleCount</code> 20.</p>
+
+  <h3>5.5 Advanced recipes (G4 schemas, parity-complete)</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Recipe</th><th>Headline params (defaults)</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">bevel</td><td>teeth 15 · module 1 · height 5 · pressureAngle 20 · pitchAngle 45 (0 &lt; δ ≤ 45°) · clearance 0.1 · backlash 0 · spiralAngle 0 · sampleCount 20 · resetOrigin true</td><td>Refuse height ≥ cone distance (upstream only warns). Spiral ⇒ 20-section loft. <strong>Sampler internally uses the complemented angle convention — encapsulated there, never leaked into the wire schema.</strong></td></tr>
+      <tr><td class="mono">worm</td><td>threads 3 (1–10) · module 1 · length 5 · diameter 5 · pressureAngle 20 · leftHand false · head 0 · clearance 0.25</td><td>ZA only; computed lead angle β = atan(m·t/d)</td></tr>
+      <tr><td class="mono">crown</td><td>teeth 15 · matingTeeth 15 · module 1 · faceWidth 2 · thickness 5 · pressureAngle 20 · sectionCount 4 · blankPreview true</td><td>blankPreview = cheap interactive mode (annulus, no cuts), forced off at commit</td></tr>
+      <tr><td class="mono">timingBelt</td><td>teeth 15 · profile enum [gt2, gt3, gt5, gt8, htd3, htd5, htd8] · height 5</td><td>Arc tables are normative data (7 rows, in spec appendix); radii surfaced as read-only computed values</td></tr>
+      <tr><td class="mono">timingT</td><td>pitch 5 · teeth 15 · toothHeight 1.2 · pitchLineOffset 0.6 · flankAngle 40 · height 5 · backlash 0 · headFillet 0.4 · rootFillet 0.4</td><td>Fillets absolute (not ×m) — documented exception</td></tr>
+      <tr><td class="mono">lantern</td><td>teeth 15 · module 1 · rollerRadius 1 · height 5 · sampleCount 10 · head 0</td><td>φ_min via ported Newton solve</td></tr>
+      <tr><td class="mono">hypocycloidCam</td><td>pinCircleRadius 66 · rollerDiameter 3 · eccentricity 1.5 · pressureAngleLimit 50 · pressureAngleOffset 0.01 · lobes 42 · segmentCount 42 · boreRadius 30 · includePins true · pinHeight 20 · centerPins true · secondDisk true · diskHeight 10</td><td><strong>Multi-body recipe:</strong> cam disk(s) + pins as ordinal child bodies (§4.3), never an unfused compound</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Geometry construction &amp; OCCT capability plan</h2></div>
+
+  <h3>6.1 Capability audit (worker, HEAD 4ac8565)</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Capability</th><th>Status</th><th>Needed by</th></tr></thead>
+    <tbody>
+      <tr><td>Prism / revolve / cylinder / cone / checked booleans / transforms / face-with-hole / STEP / audit machinery</td><td><span class="pill ok">wrapped</span></td><td>All recipes</td></tr>
+      <tr><td>B-spline interpolation (<code>GeomAPI_Interpolate</code> / <code>PointsToBSpline</code>)</td><td><span class="pill new">build in G2</span></td><td>Every non-arc profile (involute, cycloid, bevel, lantern, cam, worm flanks)</td></tr>
+      <tr><td>Helical spine (<code>Geom_CylindricalHelix</code> hand-built)</td><td><span class="pill new">build in G2</span></td><td>Helical gears, worm</td></tr>
+      <tr><td>Pipe sweep (<code>BRepOffsetAPI_MakePipeShell</code>, Frenet) + sewing + closure validation</td><td><span class="pill new">build in G2</span></td><td>Helical gears, worm</td></tr>
+      <tr><td>Section loft (<code>BRepOffsetAPI_ThruSections</code>, solid/ruled)</td><td><span class="pill new">build in G2/G4</span></td><td>Helical racks (G3), bevel + crown (G4)</td></tr>
+      <tr><td>2D fillet (<code>ChFi2d_FilletAPI</code>)</td><td><span class="pill new">build in G1</span></td><td>Head/root fillets, timing-T</td></tr>
+      <tr><td>Curve sampling (<code>GCPnts</code>)</td><td><span class="pill new">build in G2</span></td><td>Deviation checks, diagnostics</td></tr>
+    </tbody>
+  </table></div>
+  <p>Note the phasing trick: although spur gears need B-splines for the involute flank, the <em>sampler</em> is pure C++ and lands in G0; the G1 worker path can interpolate through the same points with per-segment construction, and the dedicated wrappers replace any interim code in G2. Spur-extruded recipes (involute external, racks, internal, cycloid, timing, lantern) need nothing beyond G1's 2D fillet wrapper plus existing prisms and booleans.</p>
+
+  <h3>6.2 New kernel geometry layer</h3>
+  <p>New files under <code>worker/src/kernel/geometry/</code> (beside the existing <code>EdgeChainer</code>):</p>
+  <ul>
+    <li><code>BSpline.{h,cpp}</code> — interpolate-through-points wrapper with explicit degree/tolerance policy and failure mapping (non-convergence ⇒ graded refusal, not empty curve).</li>
+    <li><code>Helix.{h,cpp}</code> — cylindrical helix spine from pitch/height/handedness (the <code>makeHelix</code> equivalent).</li>
+    <li><code>Sweep.{h,cpp}</code> — Frenet pipe-shell of a planar face along a spine; sews the result, validates closure, and <em>checks face normal orientation</em> (the exact upstream xfail). Double-helix as half-height sweep + location-mirror, no compound hack.</li>
+    <li><code>Loft.{h,cpp}</code> — <code>ThruSections</code> wrapper (solid/ruled flags), section-count policy.</li>
+    <li><code>Fillet2d.{h,cpp}</code> — planar fillet insertion with <strong>geometric site identification</strong>: sites found by position/tangent classification, never by edge index.</li>
+  </ul>
+
+  <h3>6.3 Construction recipes (2D → solid), per gear</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Recipe</th><th>Pipeline</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">involuteExternal spur</td><td>Sample tooth (undercut ⊕ involute ⊕ tip ⊕ mirror) → interpolate → fillet sites → full profile wire (z location-copies) → face → <code>MakePrism</code> → optional bore cuts (<code>checked_boolean</code>)</td></tr>
+      <tr><td class="mono">involuteExternal helical</td><td>Same face → Frenet pipe sweep (twist = h·tan β·2/d) → herringbone: half-height + location-mirror → sew → validate</td></tr>
+      <tr><td class="mono">racks</td><td>Tooth (lines / cycloid branches) → translate × (n−1) → base rectangle → face → extrude, or 2/3-section loft for helical</td></tr>
+      <tr><td class="mono">internalInvolute</td><td>Profile as inner wire + outer circle → face-with-hole → extrude / sweep</td></tr>
+      <tr><td class="mono">bevel</td><td>Unit-sphere tooth wire → rotate × z (3D) → scale point sets to inner/outer cone distance → ruled loft (spiral: 20 twisted sections) → optional z-flip</td></tr>
+      <tr><td class="mono">crown</td><td>Annulus extrude → per-tooth trapezoid-section loft × t → single multi-tool <code>BRepAlgoAPI_Cut</code></td></tr>
+      <tr><td class="mono">worm</td><td>Thread profile (true arcs + helical flank splines) × threads → face → Frenet sweep with lead from β</td></tr>
+      <tr><td class="mono">timing / lantern / cycloid / hypocycloidCam</td><td>Profile wire × z → face → extrude (cam: + bore cut; pins as separate child bodies)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>Topological naming &amp; generated geometry</h2></div>
+
+  <p>A gear's faces and edges are entirely generated — their count and identity change with the tooth count. Binding a downstream <code>ElementRef</code> to "tooth N's flank" across a parameter edit is exactly the silent-wrong-bind scenario OneCAD's ladder exists to prevent. The policy:</p>
+  <ul>
+    <li><strong>Only the generated body's root id, its placement inputs, and (when present) the bore axis/cylindrical faces carry referenceable identity.</strong> Bore faces are stable sub-features (present iff the corresponding hole param is on) and may mint refs — this is what makes a gear shaft-hole usable by downstream Hole/Extrude-on-face flows.</li>
+    <li><strong>Tooth flanks, tips, roots, fillets are not referenceable.</strong> Picking them for a downstream op yields a truthful UI refusal ("generated tooth geometry is not stable across parameter edits"), not a bind that breaks later. The schema states this normatively; the picking layer enforces it by filtering body sub-shape kinds.</li>
+    <li><strong>Parameter edits that change topology are ordinary param edits</strong> (record identity preserved, like Hole profile flips). Downstream refs bound to the placement face or bore survive; refs bound to anything else on the gear were never allowed to exist.</li>
+    <li>The generator's own empty element-map delta (NewBody, nothing pre-existing tracked) keeps <code>apply_history</code> out of the loop entirely for these ops.</li>
+  </ul>
+  <div class="callout ok"><span class="t">Consistency</span>This is the project's core value proposition — deterministic <code>NeedsRepair</code> over silent wrong binds — applied one level down: it is better to declare tooth geometry unreferenceable than to let a descriptor bind to a plausible-but-wrong flank after a tooth-count edit.</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2>Validation &amp; publication policy</h2></div>
+
+  <ul>
+    <li><strong>Input side:</strong> placement refs go through the standard preflight (<code>operation_ref_ownership_repairs</code>); there is no host body to validate — generators are upstream-free beyond placement.</li>
+    <li><strong>Parameter side:</strong> four-boundary validation (FSM → wire mapper → <code>edit/session.rs</code> → worker). The worker's re-validation is unconditional and includes geometric feasibility: teeth ranges, fillet ≤ space available, bevel height &lt; cone distance, undercut ⇒ rootFillet = 0, helical handedness consistency. Every refusal is a bounded <code>{severity, code, message, stage, evidence}</code> diagnostic — never a silent fallback.</li>
+    <li><strong>Publication side:</strong> single-solid recipes ⇒ <code>single_solid_policy("Generator", TierA)</code> — full <code>audit_shape</code> evidence (null shape, <code>BRepCheck_Analyzer</code>, exactly-one-solid, finite positive volume, tolerance ceiling, self-interference via <code>BRepAlgoAPI_Check</code>). The hypocycloid-cam family mints ordinal child bodies, each audited under the same TierA policy. <strong>This makes Generator the second operation family after fillet with deep post-op validation</strong> — a deliberate contribution to the project's uniform-validation goal, not an exception from it.</li>
+    <li><strong>Failure semantics:</strong> impossible geometry ⇒ recoverable <code>OP_FAILED</code> / <code>GEOMETRY_INVALID</code> with actionable message (which param, which constraint, suggested range); stale placement ⇒ <code>NeedsRepair</code>; preview failures block commit structurally (SCHEMA §7.6 rule).</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s9">
+  <div class="sec-head"><span class="sec-num">09</span><h2>User experience</h2></div>
+
+  <h3>9.1 Flow</h3>
+  <ol>
+    <li><strong>Entry</strong> — toolbar (Model flyout) or keybinding; FSM enters <code>facePick</code>: "Click a flat face to place the gear, or press Enter for the XY datum."</li>
+    <li><strong>Placement</strong> — face click freezes the center point (Hole semantics); Enter uses the default datum frame. Axis = gear rotation axis, displayed as a temporary glyph.</li>
+    <li><strong>Armed</strong> — exact preview ghost appears immediately with default recipe (involute external, sensible defaults); chip cluster opens.</li>
+    <li><strong>Recipe &amp; params</strong> — recipe picker (segmented or dropdown) at chip top; parameter sections below; every keystroke re-previews (200 ms trailing floor); computed read-outs (da/df/dw/lead angle) update live; invalid combinations disable fields with inline explanation (e.g. root fillet under undercut) rather than silently zeroing.</li>
+    <li><strong>Commit</strong> — ✓/Enter; blocked while the preview reports a structural failure. History node appears as <code>Gear — Involute 20T m2</code>.</li>
+    <li><strong>Re-edit</strong> — L1 params replace via the FSM seed (Hole pattern).</li>
+  </ol>
+
+  <h3>9.2 Chip cluster</h3>
+  <p>Bespoke <code>GeneratorChipCluster.tsx</code> (no generic form renderer exists — matching the per-op chip convention): recipe picker; grouped parameter sections (Base / Tooth / Helix / Fillets / Holes / Accuracy) reusing the shared chip primitives (<code>SegmentToggle</code>, <code>CountStepper</code>, <code>DimensionInput</code>); computed-values strip; a presets popover (preferred module series, standard pressure angles, the timing-belt profile table). All colors from <code>tokens.css</code>; no raw hex; theme-safe by construction.</p>
+
+  <h3>9.3 Honest-geometry copy</h3>
+  <p>Where a recipe is an approximation (bevel mid-face ruled loft; spiral bevel not Gleason; pressure-angle clamping on the cam), the chip says so in one plain sentence behind an info affordance. This matches the project's policy of surfacing limitations in-product rather than in footnotes.</p>
+
+  <h3>9.4 Explicitly out</h3>
+  <p>No 2D-wire mode; no rack simplified-topology switch; no connector/kinematic placement in v1 (G5 option: a mating helper that computes center distance for a selected gear pair — including the shifted-pair Newton solve — and applies tooth-phasing offset, as a placement-time assist rather than an operation); no loft/sweep generalization of the gear paths.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s10">
+  <div class="sec-head"><span class="sec-num">10</span><h2>Testing &amp; oracle strategy</h2></div>
+
+  <h3>10.1 The oracle problem</h3>
+  <p>The reference implementation has no numeric oracles. OneCAD's suite is therefore built from three independent legs, each sufficient to catch a different failure class:</p>
+  <ol>
+    <li><strong>Closed-form analytic oracles</strong> — da/df/dw/dg, transverse pitch, lead angle, arc-table radii: pure arithmetic, per recipe, table-driven.</li>
+    <li><strong>Cross-check harness</strong> — a local Python script runs the reference addon and the C++ samplers over a parameter sweep (teeth × module × α × β × shift × undercut × fillets, plus per-recipe edge cases) and diffs sampled profile points within tolerance. This is equivalence evidence against a shipping implementation. <em>Runs locally only — GPL reference code is never wired into OneCAD CI</em> (license hygiene and determinism).</li>
+    <li><strong>Kernel oracles</strong> — per-recipe gtest: BRepCheck validity, exact-one-solid, analytic volume bounds (bounding estimates with generous tolerance for splined profiles; exact for arc/line profiles like timing), curve-deviation checks (sampled BSpline points vs analytic curve ≤ 1e-6-quantized tolerance), determinism double-run byte-identity.</li>
+  </ol>
+
+  <h3>10.2 Test layers (Generator, per recipe family as it lands)</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Layer</th><th>Location</th><th>Pins</th></tr></thead>
+    <tbody>
+      <tr><td>Sampler unit (pure C++)</td><td class="mono">worker/tests/test_gear_math_*.cpp</td><td>Closed-form diameters; curve endpoint/tangent identities; degenerate cases (z_min, straight-flank cycloid, dg ≤ df)</td></tr>
+      <tr><td>Kernel gtest</td><td class="mono">worker/tests/test_generator_op_*.cpp</td><td>Validity, solid count, volume bounds, deviation, determinism, refusal matrix (overflow, bad ranges), bore cuts</td></tr>
+      <tr><td>Rust integration (real sidecar)</td><td class="mono">src-tauri/tests/generator_ops.rs</td><td>Preview == commit; save/reopen identity; param re-edit (incl. topology-changing tooth count); placement rebind + fencing; cross-body ref isolation</td></tr>
+      <tr><td>Rust serde unit</td><td class="mono">record.rs #[cfg(test)]</td><td>Wire shape matches SCHEMA key-for-key; conditional blocks both directions</td></tr>
+      <tr><td>Protocol fixtures</td><td class="mono">protocol/fixtures/generator_*.ndjson</td><td>execute_plan + preview + error paths against worker and stub</td></tr>
+      <tr><td>FSM / mapper / controller / mock units</td><td class="mono">src/tools/modelTools/*.test.ts · src/ipc/*.test.ts</td><td>Phase transitions; null-spelling; preview/commit parity; mock-lane op</td></tr>
+      <tr><td>Playwright (mock lane)</td><td class="mono">e2e/generator.spec.ts</td><td>UI chain: entry → pick → chip shape per recipe → commit → history row → re-edit seed (geometry assertions deliberately live in the layers above)</td></tr>
+      <tr><td>Kernelbench (stretch)</td><td class="mono">case_v2.rs + worker benchmark</td><td>Generator recipe cases with metamorphic transforms — extends the robustness harness past fillet/boolean, feeding KERNELBENCH-BREADTH</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s11">
+  <div class="sec-head"><span class="sec-num">11</span><h2>Licensing</h2></div>
+
+  <p><code>freecad.gears</code> is GPL-3.0; OneCAD is AGPL-3.0. GPLv3 §13 explicitly permits combination with AGPL-3.0 code — the derivation is lawful one-way. The port retains attribution (source headers naming the upstream project and authors per file; a NOTICE entry). The timing-belt arc tables and profile mathematics are engineering-standard data and formulas, ported as facts.</p>
+  <p><strong>Boundary condition:</strong> this is sound while OneCAD remains AGPL. If proprietary relicensing is ever contemplated, the ported sampler files become a contamination boundary and the clean-room question must be re-opened then — recorded here so the decision is explicit when it matters, not discovered during diligence.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s12">
+  <div class="sec-head"><span class="sec-num">12</span><h2>Phased implementation plan</h2></div>
+
+  <p>Phases follow the repo's named-work-package discipline: each lands at a gate with evidence in <code>TODO.md</code>/<code>CURRENT_STATE.md</code>, conventional commits only at completed gates, red-first where a bug class is being excluded. Gear work sequences behind MODEL-CORRECTNESS-P0 (or runs as an explicitly parallel feature track) and never lands on a red master.</p>
+
+  <div class="phase">
+    <div class="phase-head"><span class="phase-id">G0</span><span class="phase-title">Gear math core + oracle harness</span><span class="phase-goal">pure C++ · no OCCT in samplers</span></div>
+    <div class="phase-body">
+      <ul>
+        <li>Port all samplers to pure C++: involute (flank + trochoid undercut + shift/backlash rotations), cycloid (epi/hypo branches + degenerate straight flank), racks, internal swap semantics, spherical-involute bevel (incl. the ~90-term endpoint, encapsulated complemented-angle convention), crown sections, worm thread, GT/HTD arc tables, timing-T, lantern, hypocycloid cam.</li>
+        <li>Replace scipy: 1-D Newton + bisection/golden-section helpers; closed-form line∩circle for timing-T; port <code>compute_shifted_gears</code> as a utility.</li>
+        <li>Port polyline trim/merge (undercut↔involute intersection) with real diagnostics instead of swallowed exceptions.</li>
+        <li>Python cross-check harness: C++ samplers vs reference addon over a parameter sweep; local-only, never in CI.</li>
+        <li>Closed-form oracle table per recipe feeding all later kernel tests.</li>
+      </ul>
+    </div>
+    <div class="gate"><span class="t">Gate</span>Sampler unit tests green; cross-check harness reports point agreement within tolerance across the full sweep; oracle table reviewed against two independent sources (reference code + gear-design literature).</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="phase-id">G1</span><span class="phase-title">Generator op skeleton — involute spur first</span><span class="phase-goal">framework seam proven end-to-end</span></div>
+    <div class="phase-body">
+      <ul>
+        <li>Schema: §7.3 Generator family (recipe-conditional payload, null-spelling, placement, failure codes, lineage), opType enum, §14 changelog; fixture bump.</li>
+        <li>Rust: <code>KnownOperation::Generator</code> with per-recipe structs, validate / derive_inputs / element_refs_mut / serde / KNOWN_OP_TYPES; <code>validate_generator</code> call sites.</li>
+        <li>Worker: <code>GeneratorOp</code> executor + <code>gear/GearTool</code> spur builder (sampler → wire → face → prism → bore cuts); dispatch arm; D1 minting; TierA single-solid publication; <code>Fillet2d</code> wrapper with geometric site identification.</li>
+        <li>Frontend: full touch map — types, mapper + preview parity, tool registration, <code>generatorMachine.ts</code>, controller methods, chip cluster with recipe picker + computed read-outs, mock client.</li>
+        <li>Tests: all eight layers of §10.2 for the spur recipe.</li>
+      </ul>
+    </div>
+    <div class="gate"><span class="t">Gate</span>Involute spur committable from UI with exact preview; analytic oracles green; preview == commit byte-identical; save/reopen and tooth-count re-edit behave per §7; refusal matrix proven red-first.</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="phase-id">G2</span><span class="phase-title">Helical infrastructure</span><span class="phase-goal">the risk peak, isolated</span></div>
+    <div class="phase-body">
+      <ul>
+        <li><code>BSpline</code>, <code>Helix</code>, <code>Sweep</code> (Frenet pipe + sew + closure + face-normal orientation checks), <code>Loft</code>, <code>GCPnts</code> wrappers in <code>kernel/geometry/</code>.</li>
+        <li>Double-helix via half-height sweep + location-mirror — no compound hack; unsewn-tolerance and splitter-edge hygiene verified.</li>
+        <li>Helical + herringbone involute recipes live end-to-end.</li>
+        <li>Stretch: kernelbench <code>OperationTypeV2</code> Generator arm with metamorphic transforms.</li>
+      </ul>
+    </div>
+    <div class="gate"><span class="t">Gate</span>Helical solids pass TierA (incl. self-interference and normal orientation); double-run determinism; sweep failure modes mapped to graded refusals.</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="phase-id">G3</span><span class="phase-title">Recipe breadth — extrude-led families</span><span class="phase-goal">racks · internal · cycloid</span></div>
+    <div class="phase-body">
+      <ul>
+        <li><code>involuteRack</code> (extrude; helical via the G2 loft wrapper), <code>cycloid</code>, <code>cycloidRack</code>, <code>internalInvolute</code> (face-with-hole; internal-native parameter naming with the swap encapsulated in the sampler).</li>
+        <li>Each recipe ships with its §10.2 test set before the next begins.</li>
+      </ul>
+    </div>
+    <div class="gate"><span class="t">Gate</span>Four more recipes committable; oracles per recipe green; no regression on G1/G2 suites.</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="phase-id">G4</span><span class="phase-title">Advanced types — individually gated</span><span class="phase-goal">parity completion</span></div>
+    <div class="phase-body">
+      <ul>
+        <li><code>bevel</code> (ruled loft, spiral variant, refusal on height overflow, honest approximation copy), <code>worm</code> (ZA via G2 sweep), <code>crown</code> (multi-tool cut; blankPreview forced off at commit), <code>timingBelt</code> + <code>timingT</code>, <code>lantern</code>, <code>hypocycloidCam</code> (ordinal child bodies, per-body TierA).</li>
+        <li>Each is an independent work package — any subset may ship; order by user value (suggestion: timing → worm → crown → lantern → cam → bevel, leaving the hardest last).</li>
+      </ul>
+    </div>
+    <div class="gate"><span class="t">Gate</span>Per recipe: cross-check agreement, kernel oracles, refusal paths, UI copy where approximate. Full set ⇒ functional parity with the reference workbench.</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="phase-id">G5</span><span class="phase-title">Placement &amp; workflow polish</span><span class="phase-goal">optional, value-ranked</span></div>
+    <div class="phase-body">
+      <ul>
+        <li>Gear-pair mating helper: center distance from pitch diameters (shifted-pair Newton solve), tooth-phasing parity offset, internal/rack special cases — a placement-time assist, not an op.</li>
+        <li>Preset library in the chip (module series, standard pressure angles, belt table picker).</li>
+        <li>Performance review: preview throttling for high-tooth-count helical sweeps; sampler point-count adaptive policy.</li>
+      </ul>
+    </div>
+    <div class="gate"><span class="t">Gate</span>Only if scheduled; nothing here blocks the parity story.</div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s13">
+  <div class="sec-head"><span class="sec-num">13</span><h2>Risks &amp; open questions</h2></div>
+
+  <h3>Ranked risks</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>#</th><th>Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Helical sweep fragility (upstream's exact failure point: unsewn shells, wrong normals, mirror hacks)</td><td>Isolated in G2 with orientation checks as gate criteria; spur/rack/internal/cycloid ship without it; worst case, helical recipes defer while the framework and 6+ recipes are live.</td></tr>
+      <tr><td>2</td><td>Bevel endpoint expression port error (~90-term closed form, complemented-angle convention)</td><td>Encapsulated in the sampler; cross-check harness covers bevel specifically; numeric fallback (1-D root on the sphere-curve/tip-circle intersection) standing by if the closed form proves brittle.</td></tr>
+      <tr><td>3</td><td>Oracle absence upstream means "parity" is unverifiable except by cross-check against the same possibly-wrong source</td><td>Three-leg strategy (§10.1): closed-form arithmetic is independent of both implementations; literature values (Elements of Metric Gear Technology) spot-check the tables.</td></tr>
+      <tr><td>4</td><td>Effort realism for one founder: G0+G1 is multi-week; full G4 comparable per advanced type</td><td>Phase gates are independently shippable; G1 alone delivers visible product value; the plan explicitly does not compress the existing correctness roadmap.</td></tr>
+      <tr><td>5</td><td>Scope creep into assembly kinematics (connectors) or 2D-profile generation</td><td>Both explicitly out (§9.4); mating helper only as G5 option; a future sketch-side gear-profile generator is a separate spec if ever wanted.</td></tr>
+      <tr><td>6</td><td>CI reality: Playwright not yet in the frontend lane; master was red on e2e at last review</td><td>No gear work lands on red master; e2e specs land in the repo and run in the mock lane locally until the CI gap closes (tracked in the project task list).</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Open questions (non-blocking)</h3>
+  <ul>
+    <li><strong>Internal-gear naming:</strong> internal-native param names (<code>internalClearance</code>/<code>internalHead</code>) with sampler-side swap — recommended — vs literal upstream naming for parity readers.</li>
+    <li><strong>Referenceable bore faces:</strong> mint refs for bore cylinders (enables downstream shaft features) vs nothing referenceable at all in v1. Recommendation: bore faces yes, teeth never.</li>
+    <li><strong>Mating helper (G5):</strong> wanted at all, and if so, placement-assist vs a true assembly-kinematics feature later.</li>
+    <li><strong>Timing-T fillet convention:</strong> keep upstream's absolute radii (documented exception) or normalize to ×m for cross-recipe consistency (deviates from upstream).</li>
+    <li><strong>Second generator family:</strong> springs (helix + sweep, nearly free after G2) vs threads vs cams — the choice that will retroactively validate the framework abstraction.</li>
+  </ul>
+</section>
+
+<footer>
+  <span>OneCAD · Generator &amp; Gear Tool Implementation Specification</span>
+  <span>HEAD 4ac8565 · freecad.gears v1.3.0 · 2026-08-14</span>
+</footer>
+
+</div>
+<script>
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && window.parent !== window) {
+    window.parent.postMessage({ type: 'close-fullscreen' }, '*');
+  }
+});
+</script>
+<!-- broken-img-handler -->
+<script>
+(function(){
+  if(window.__brokenImgHandler)return;
+  window.__brokenImgHandler=true;
+  var MAX=5,DELAYS=[2000,4000,8000,16000,32000];
+  var TOKEN=/^__(?:IMG|EMBED)_[a-zA-Z0-9_-]+__/;
+  var SENTINEL=new RegExp('^/api/published/[^/]+/(?:assets|embeds)/[^/?#]*-missing(?:[?#]|$)');
+  var NOISE=/^[\s\u2018\u2019\u201c\u201d]+|[\s\u2018\u2019\u201c\u201d]+$/g;
+  function canSrcEverResolve(src){
+    var bare=src.replace(NOISE,'');
+    return !TOKEN.test(bare)&&!SENTINEL.test(bare);
+  }
+  document.addEventListener('error',function(e){
+    var img=e.target;
+    if(!img||img.tagName!=='IMG')return;
+    var liveSrc=img.getAttribute('src');
+    var src=img.dataset.haOriginalSrc||liveSrc;
+    if(!src)return;
+    if(img.dataset.haOriginalSrc&&liveSrc&&liveSrc!==img.dataset.haOriginalSrc&&liveSrc.indexOf('_r=')<0){src=liveSrc;img.dataset.haOriginalSrc=src;img.dataset.haRetryCount='0'}
+    else if(!img.dataset.haOriginalSrc){img.dataset.haOriginalSrc=src}
+    var attempt=canSrcEverResolve(src)?parseInt(img.dataset.haRetryCount||'0',10):MAX;
+    if(img.dataset.haPhId){var old=document.getElementById(img.dataset.haPhId);if(old)old.remove()}
+    var ph=document.createElement('div');
+    ph.className='ha-img-placeholder'+(attempt>=MAX?' ha-failed':'');
+    ph.id='ha-ph-'+Math.random().toString(36).slice(2,9);
+    var w=img.getAttribute('width');var h=img.getAttribute('height');
+    if(w)ph.style.width=w+(isNaN(Number(w))?'':'px');
+    else if(img.style.width)ph.style.width=img.style.width;
+    else if(img.width>1)ph.style.width=img.width+'px';
+    if(h)ph.style.height=h+(isNaN(Number(h))?'':'px');
+    else if(img.style.height)ph.style.height=img.style.height;
+    else if(img.height>1)ph.style.height=img.height+'px';
+    ph.textContent=attempt>=MAX?'Image unavailable':'Loading image\u2026';
+    img.dataset.haPhId=ph.id;
+    if(img.dataset.haOrigDisplay==null)img.dataset.haOrigDisplay=img.style.display||'';
+    img.style.display='none';
+    img.insertAdjacentElement('afterend',ph);
+    if(attempt<MAX){
+      img.dataset.haRetryCount=String(attempt+1);
+      setTimeout(function(){
+        if(!img.isConnected)return;
+        if(img.dataset.haOriginalSrc!==src)return;
+        if(img.complete&&img.naturalWidth>0)return;
+        var curSrc=img.getAttribute('src');
+        if(curSrc&&curSrc.indexOf(src)!==0)return;
+        var fresh=src+(src.indexOf('?')>=0?'&':'?')+'_r='+(attempt+1)+'_'+Date.now();
+        img.src=fresh;
+      },DELAYS[attempt]);
+    }
+  },true);
+  document.addEventListener('load',function(e){
+    var img=e.target;
+    if(!img||img.tagName!=='IMG')return;
+    if(img.dataset.haPhId){
+      var ph=document.getElementById(img.dataset.haPhId);
+      if(ph)ph.remove();
+      delete img.dataset.haPhId;
+      img.style.display=img.dataset.haOrigDisplay||'';
+      delete img.dataset.haOrigDisplay;
+      delete img.dataset.haOriginalSrc;
+      delete img.dataset.haRetryCount;
+    }
+  },true);
+})();
+</script>
+</body>
+</html>

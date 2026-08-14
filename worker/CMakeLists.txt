@@ -187,6 +187,18 @@ add_library(worker_core STATIC
     src/session/FaceProjection.cpp
     # --- COMPONENT-LIBRARY P0.1: interactive surface classification (SCHEMA §7.5) ---
     src/session/ClassifyElement.cpp
+    # --- GEAR-GENERATOR G0: pure-math gear samplers (no OCCT), SCHEMA §7.3
+    #     `Gear` op family (Gear Generator implementation plan, phase G0). ---
+    src/kernel/gear/InvoluteMath.cpp
+    src/kernel/gear/TimingMath.cpp
+    src/kernel/gear/TimingTMath.cpp
+    src/kernel/gear/LanternMath.cpp
+    src/kernel/gear/WormMath.cpp
+    # --- GEAR-GENERATOR G1: new kernel geometry capability + the gear solid
+    #     builder (SCHEMA §7.3 `Gear`). ---
+    src/kernel/geometry/BSpline.cpp
+    src/ops/gear/GearTool.cpp
+    src/ops/GearOp.cpp
     # --- W-WP2 kernel port (mirrors OneCAD-CPP src/kernel onecad_kernel lib) ---
     src/kernel/geometry/EdgeChainer.cpp
     src/kernel/modeling/FaceExtrudeProfileBuilder.cpp

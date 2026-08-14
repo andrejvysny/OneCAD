@@ -568,6 +568,13 @@ fn wire_op_inputs(
         Operation::Known(KnownOperation::Hole(p)) => {
             vec![body_input_ref(p.target_body), element_ref_wire(&p.face)]
         }
+        // Gear: the placement FACE only. Unlike every other op here a gear has
+        // NO host body — it MINTS one (D1) — so there is no body slot to echo,
+        // and a FRAME placement contributes no ref at all. The face resolves
+        // through the ladder exactly like a Hole seat (SCHEMA §7.3).
+        Operation::Known(KnownOperation::Gear(p)) => {
+            p.placement.face.iter().map(element_ref_wire).collect()
+        }
         // OffsetFace: the operative faces in stored order, then the `Total`
         // opposite face LAST when present (SCHEMA §7.3 — the slot order is
         // NORMATIVE and is mirrored verbatim by `KnownOperation::element_refs_mut`,
@@ -6478,6 +6485,7 @@ mod body_wire_tests {
                 | KnownOperation::ImportStep(_)
                 | KnownOperation::TransformBody(_)
                 | KnownOperation::Hole(_)
+                | KnownOperation::Gear(_)
                 | KnownOperation::OffsetFace(_)
                 | KnownOperation::PlaceComponent(_)
                 | KnownOperation::DetachComponent(_) => {}

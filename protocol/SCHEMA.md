@@ -852,9 +852,10 @@ Each op in `ExecutePlan.ops` is:
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
 | `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
 | `TransformBody` | `Hole` | `OffsetFace` | `PlaceComponent` | `DetachComponent`
-(the M6a breadth ops, the 2026-08-02 `ImportStep`/`TransformBody`, and the
-Component Library ops extend the original vertical slice — see the
-[Changelog](#14-changelog)).
+| `Gear`
+(the M6a breadth ops, the 2026-08-02 `ImportStep`/`TransformBody`, the
+Component Library ops, and the 2026-08-14 `Gear` generator extend the original
+vertical slice — see the [Changelog](#14-changelog)).
 `Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values
 keep OneCAD-CPP `operationTypeName` spelling (PascalCase). Spec §3.2/§3.3's
 `SetComponentParams`/`ReplaceComponent` are NOT `opType` values at all — both
@@ -1233,6 +1234,90 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   invariant violations, OCCT boolean failure — all name the reason.
 - Standard-size TABLES (M-series clearance, SHCS counterbores, DIN 74
   countersinks) are a FRONTEND concern — params always carry raw mm.
+
+**Gear** (`op.gear`) — a fully parametric generated gear body. No sketch, no
+host body: the op MINTS a new body from a typed parameter block and a
+placement. Added 2026-08-14 (Gear Generator G1).
+
+```json
+// inputs: [ semanticRef(placement face) ]   — EMPTY for a frame placement
+// params
+{ "recipe": "involuteExternal",
+  "placement": {
+    "face":  { /* ElementRef: elementId/topoKey + descriptor/anchor evidence */ },
+    "frame": null,
+    "point": [25.0, 10.0, 30.0]
+  },
+  "involuteExternal": {
+    "teeth": 20, "module": 2.0, "height": 5.0,
+    "pressureAngleDeg": 20.0, "shift": 0.0,
+    "helixAngleDeg": 0.0, "doubleHelix": false,
+    "propertiesFromTool": false, "undercut": false,
+    "backlash": 0.0, "clearance": 0.25, "head": 0.0,
+    "sampleCount": 20,
+    "axleHole": false, "axleHoleDiameter": 10.0,
+    "offsetHole": false, "offsetHoleDiameter": 10.0, "offsetHoleOffset": 10.0
+  }
+}
+```
+
+- `recipe` selects which recipe block is non-null. **Every inactive recipe key
+  MUST be spelled `null`**, never omitted — the same conditional-block contract
+  `Hole`'s `cb*`/`cs*` fields carry, validated at all four trust boundaries
+  (FSM → wire mapper → `edit/session.rs` → worker). `recipe` ∈
+  `"involuteExternal"` in this version; the key set is versioned by this
+  section, not by an addon (ADR-0002 — recipes are typed variants, never
+  free-form strings, and no addon can register one).
+- **Placement is EITHER a face or a frame, never both and never neither.**
+  - `face` non-null: `point` is a world-space centre frozen at authoring and
+    MUST lie on the resolved face — the worker re-projects onto the face plane
+    and fails past **1e-3 mm**, the same fence `Hole` uses. The gear's axis is
+    the face's INWARD normal (−outward) at `point`, so the body grows into the
+    material side, and the op contributes exactly one `derive_inputs` entry.
+  - `frame` non-null (`{origin, axis, xDir}`, all world-space): datum/world
+    placement, frozen at authoring, no input refs, no reprojection. `xDir`
+    fixes the gear's angular phase — which matters for a meshing pair, so it
+    is carried explicitly rather than derived from the axis.
+  - `point` is REQUIRED and is the body's centre in both modes; with a frame it
+    MUST equal `frame.origin`.
+- Angles are DEGREES with a `Deg` suffix, matching `Hole`'s `csAngleDeg`.
+  Lengths are mm. `clearance`, `head` and `shift` are dimensionless
+  coefficients (multiples of module) per gear-design convention, NOT lengths.
+- **Lineage: `NewBody` mint.** `body_<opId>` (decision D1), one `created` body
+  event, and an **empty element-map delta** — the op tracks no pre-existing
+  element, so `apply_history` is not involved. Never `modified`; a `Gear` op
+  has no target body to modify.
+- **Referenceability is deliberately narrow.** Only the minted body's root id,
+  the placement input, and (when the corresponding parameter is on) the BORE
+  cylindrical faces carry referenceable identity. **Tooth flanks, tips, roots
+  and fillets are NOT referenceable and MUST NOT be promoted**: their count and
+  identity change with `teeth`, so a descriptor bound to "tooth 7's flank"
+  is the silent-wrong-bind scenario §10's ladder exists to prevent. The worker
+  refuses such a promotion by name rather than minting an id that will
+  mis-resolve after the next parameter edit. A parameter edit that changes
+  tooth count is an ordinary param edit (record identity preserved); downstream
+  refs bound to the placement or a bore survive, and refs to anything else on
+  the gear were never allowed to exist.
+- **Publication: `single_solid_policy("Gear", TierB)`** — the FULL audit,
+  including self-interference via `BRepAlgoAPI_Check`. A generated profile is
+  exactly where a bad parameter combination produces a plausible-looking but
+  self-intersecting solid, so this op does not take the lighter tier.
+- Failures are recoverable `OP_FAILED` / `GEOMETRY_INVALID` naming the
+  parameter at fault: `teeth` below 3, non-positive `module`/`height`,
+  `pressureAngleDeg` outside (0, 90), a shift/clearance combination with no
+  valid tooth depth, a bore that reaches the tooth roots, a flank that will not
+  interpolate at the requested `sampleCount`, or a profile that will not close.
+  A stale/unresolvable placement ref is `NeedsRepair`, never `Err`.
+- **`helixAngleDeg` ≠ 0 and `doubleHelix` = true are `UNSUPPORTED`** in this
+  version (§8) — helical and herringbone gears need the Frenet sweep
+  infrastructure scheduled for a later phase. The fields are present and
+  round-trip so the payload does not change shape when that lands, the same
+  forward-compatibility posture `Loft`/`Sweep` carry as `KnownOperation`
+  variants.
+- `sampleCount` is an ACCURACY knob (spline samples per curve segment), not a
+  geometric parameter: it changes the fidelity of the flank approximation and
+  therefore the body's topology, so it participates in the plan hash like any
+  other parameter.
 
 **Boolean** (`op.boolean`) — standalone body-body boolean. Field names from
 OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from the
@@ -2999,6 +3084,35 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-14 — §7.3 NEW op `Gear`** (Gear Generator G1). A fully parametric
+  generated gear body: no sketch, no host, MINTS `body_<opId>` (D1) from a
+  typed recipe block plus a placement that is EITHER a planar face (Hole's
+  frozen-point semantics and its 1e-3 mm reprojection fence, axis = inward
+  normal) or an explicit frozen frame. `recipe` selects which recipe block is
+  non-null and every inactive key is spelled `null`, reusing Hole's
+  conditional-block contract at all four trust boundaries rather than inventing
+  a second one; `recipe` ∈ `involuteExternal` for now, and the key set is
+  versioned by §7.3 rather than by any addon (ADR-0002 — typed variants, never
+  free-form strings). Purely ADDITIVE: one new `opType` value, no existing
+  payload changes shape, no existing caller changes.
+  - Publication takes `single_solid_policy("Gear", TierB)` — the full audit
+    including self-interference — because a generated profile is precisely
+    where a bad parameter combination yields a plausible but self-intersecting
+    solid. This is the second op family after Fillet/Chamfer to take the deep
+    tier deliberately rather than by inheritance.
+  - **Referenceability is narrowed on purpose**: the minted body root, the
+    placement input and the optional BORE faces are referenceable; tooth
+    flanks/tips/roots are NOT, and a promotion attempt is refused BY NAME. A
+    tooth's identity changes with the tooth count, so binding a descriptor to
+    one is the silent-wrong-bind case §10 exists to prevent — declaring the
+    sub-geometry unreferenceable is the honest form of that rule, not an
+    exception to it.
+  - `helixAngleDeg` ≠ 0 and `doubleHelix` = true are **`UNSUPPORTED`** in this
+    version (the Frenet sweep infrastructure is a later phase). The fields are
+    present and round-trip so the payload will not change shape when helical
+    lands — the same forward-compatibility posture `Loft`/`Sweep` already carry.
+  No fixture bump is owed by this entry alone: the op adds files rather than
+  moving any existing shape, and its own fixtures land with the worker path.
 - **2026-08-14 — §7.2 the mate carve-out, written down.** The hardening entry below
   states that a `completed` stream "contains only `ok` rows"; `PlaceComponent` has
   always published an `ok` row carrying `planStep.needsRepair[]` when its mate could

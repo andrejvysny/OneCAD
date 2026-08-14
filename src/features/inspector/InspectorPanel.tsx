@@ -12,6 +12,8 @@ import { useRepairStore } from "@/stores/repairStore";
 import { RepairPanel } from "@/features/repair/RepairPanel";
 import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
 import { editFeature } from "@/features/inspector/sections";
+import { GearPropertiesPanel, GearSelectedSummary } from "@/features/inspector/GearPropertiesPanel";
+import { useToolChipStore } from "@/stores/toolChipStore";
 import { InspectorSectionHost } from "@/modules/modeling/InspectorSectionHost";
 import { cn } from "@/ui/cn";
 import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
@@ -48,17 +50,31 @@ export function InspectorPanel() {
   const activeSketchId = useViewportStore((s) => s.activeSketchId);
   const repairPanelOpen = useRepairStore((s) => s.panelOpen);
   const repairItemCount = useRepairStore((s) => s.items.length);
+  // Gear Generator G1-h: an armed gear (fresh placement OR `editGearFeature`
+  // re-edit) owns the panel outright — its properties form has too many fields
+  // for the floating chip (see `GearPropertiesPanel`'s header comment).
+  const gearArmed = useToolChipStore((s) => s.kind === "gear");
 
   const sketching = mode === "sketch";
   // Enter the REPAIR state from the banner (panel open) OR by selecting a feature
   // that is itself in NeedsRepair — but only while there is something to repair.
   const selFeatureNeedsRepair =
     sel?.kind === "feature" && features.find((f) => f.id === sel.id)?.status === "needsRepair";
-  const showRepair = !sketching && repairItemCount > 0 && (repairPanelOpen || selFeatureNeedsRepair);
+  const showRepair = !gearArmed && !sketching && repairItemCount > 0 && (repairPanelOpen || selFeatureNeedsRepair);
+  // A FEATURE-ROW selection that resolves to an already-committed Gear op
+  // (FreeCAD's "select an object, see its properties"). Deliberately NOT
+  // extended to a BODY-tree selection: nothing in the projection correlates a
+  // bodyId back to the feature that minted it (`body_<opId>`'s `opId` is the
+  // WORKER's plan-step id, not the record's own — confirmed different on the
+  // mock lane), so a body click stays on the ordinary `SelectionState` below
+  // until that mapping is real. A history-row click already reaches this.
+  const gearFeatureId = !gearArmed ? resolveGearFeatureId(sel, features) : null;
 
   return (
     <div className="absolute bottom-[34px] right-0 top-0 z-20 box-border w-[260px] overflow-auto border-l border-border bg-panel p-4">
-      {sketching ? (
+      {gearArmed ? (
+        <GearPropertiesPanel />
+      ) : sketching ? (
         <SketchState
           sketchName={sketches[activeSketchId ?? ""]?.name ?? "Sketch"}
           dof={sketches[activeSketchId ?? ""]?.dof ?? 0}
@@ -66,6 +82,8 @@ export function InspectorPanel() {
         />
       ) : showRepair ? (
         <RepairPanel />
+      ) : gearFeatureId ? (
+        <GearSelectedSummary featureId={gearFeatureId} />
       ) : sel && sel.kind === "feature" ? (
         <FeatureState featureId={sel.id} features={features} />
       ) : sel ? (
@@ -78,6 +96,12 @@ export function InspectorPanel() {
       )}
     </div>
   );
+}
+
+/** `null` unless `sel` is a feature row whose `opType` is Gear. */
+function resolveGearFeatureId(sel: EntityRef | null, features: FeatureMeta[]): string | null {
+  if (!sel || sel.kind !== "feature") return null;
+  return features.find((f) => f.id === sel.id)?.opType === "Gear" ? sel.id : null;
 }
 
 function EmptyState() {

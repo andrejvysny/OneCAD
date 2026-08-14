@@ -1,3 +1,169 @@
+# Handoff — Gear Generator (G0 math core + G1 framework)
+
+Session 19 · 2026-08-14
+
+> A NEW feature track, deliberately parallel to the T0–T2 queue in `TODO.md`.
+> It touches no data-integrity code and nothing in it blocks or is blocked by
+> that work. `TODO.md` § GEAR GENERATOR — G0 and § G1 are the authoritative
+> gate records.
+
+## Goal
+
+Port [`freecad.gears`](https://github.com/looooo/freecad.gears) (v1.3.0, GPL-3.0)
+as a native OneCAD **`Gear`** operation: a fully parametric generated gear body,
+no sketch, no host, minting `body_<opId>`.
+
+## Original plan
+
+`~/.claude/plans/enumerated-nibbling-crescent.md` (approved). User decisions
+taken before any code:
+
+- **Separate track**, starts now, independent of DI-1…DI-5.
+- **opType is `Gear`, NOT `Generator`** — `ComponentSourceRef::Generator`
+  already exists in `record.rs` and the collision would be permanent.
+- Recipes in scope: involute external (spur/helical), timing GT/HTD, timing-T,
+  lantern, worm ZA. Out: racks, internal, cycloid, bevel, crown, hypocycloid cam.
+- **Bore-face referenceability is IN** (not deferred).
+
+## What the planning pass was actually for
+
+The supplied specification (`onecad-generator-gear-tool-implementation-specification.html`,
+pinned to `4ac8565`) had good upstream research and **three wrong claims about
+OneCAD's own architecture**. Each would have been a real defect if built as
+written:
+
+1. **TierA/TierB were inverted.** The spec has gears publishing at `TierA` for
+   "deep validation from day one". `TierA` is the LIGHT tier; `TierB` runs
+   `BRepAlgoAPI_Check` self-interference (`ShapeAudit.cpp:220-274`), and
+   Fillet/Chamfer already use `TierB`. Building it as written would have shipped
+   gears with *weaker* validation than the spec's own stated intent.
+2. `crates/onecad-core/…` is not a path here — Rust lives under `src-tauri/crates/…`.
+3. `§7.3` is not a reservable slot; it is one section holding every op's payload
+   as a `####` subsection. A new op appends.
+
+Also found: ordinal child minting (`body_<opId>:<k>`) already exists and is
+general (`OpCommon.h` `ranked_solids`/`publish_boolean_result`), and the element
+map is mint-on-demand (`ElementMapPartition.h:11-13`), so "teeth are not
+referenceable" costs one guard rather than new infrastructure.
+
+## Done so far (and why)
+
+### G0 — five pure-C++ samplers, no OCCT by construction
+
+`worker/src/kernel/gear/` (`onecad::kernel::gear`), following the
+`loop/PolygonFill` precedent. `GearTypes.h` holds the shared 2D vocabulary and
+the line/arc/interpolated segment kinds the wire builder consumes.
+
+`InvoluteMath` · `TimingMath` (GT/HTD, 7-row normative table) · `TimingTMath` ·
+`LanternMath` · `WormMath`.
+
+**Two deliberate improvements on upstream**, both documented in-header:
+
+- **Timing-T flank endpoints are closed form.** Upstream runs
+  `scipy.optimize.minimize` on a squared distance whose true answer is a
+  line∩circle intersection; the objective is flat at its optimum, so it stops
+  early — **up to 5.1e-6 mm of measured error**.
+- **The lantern root solve is bracketed.** Upstream's objective has a **spurious
+  root at φ=0 for every parameter set** and nothing prevents an unguarded
+  `scipy.optimize.root` landing there. Differentiating in closed form gives
+  `g'(φ) = 2(1−cos φ)(r₀φ − r_r)`, proving the meaningful root is unique on
+  `(r_r/r₀, ∞)`; the solve brackets there, excluding the degenerate root by
+  construction rather than by luck.
+
+### G1 — the framework, end to end except the chip UI
+
+- **SCHEMA §7.3 `Gear`** + `opType` enum + §14 changelog. Recipe-conditional
+  payload with null-spelling (Hole's contract), placement that is exactly one of
+  face/frame, TierB publication, referenceability stated normatively.
+- **Rust** `KnownOperation::Gear`, `validate()` checked both ways,
+  `derive_inputs` (placement only — a gear has no host), `scalars_mut`
+  (dimensions only; `clearance`/`shift` are coefficients, deliberately NOT
+  variable-drivable), `validate_gear` at both authoring entry points.
+- **Worker** `kernel/geometry/BSpline` (first member of the new geometry
+  capability layer), `ops/gear/GearTool`, `ops/GearOp`, PlanExecutor dispatch.
+- **Frontend** types, `gearParams` wire mapper, `gearOp` PREVIEW builder,
+  `gearMachine.ts` FSM, tool/keybinding/id registration, mock-lane op.
+
+## The finding that justifies the cross-check harness existing
+
+**The reference's undercut trim branch is unreachable.** `InvoluteTooth.points`
+computes `s = trimfunc(...)` then guards on `isinstance(s, ndarray)` — but
+`trimfunc` returns a Python **list**, so the guard is never true and the trimmed
+result is discarded every time. Every undercut gear freecad.gears has ever
+produced silently took the `nearestpts` fallback.
+
+This port first implemented the *intended* behaviour and disagreed with the
+reference on **224 of 2673** swept cases. It now matches reachable behaviour
+(parity is the goal; users' existing gears look the way they look), documented in
+`InvoluteMath.h` with the reasoning. **Reading the source did not catch this. The
+sweep did.**
+
+## Dead ends / things already ruled out — do not redo these
+
+- **Do not "fix" the upstream trim branch.** It is dead code upstream by a type
+  bug; matching it is deliberate. Changing it is a schema/versioning decision,
+  not a bug fix.
+- **A self-intersecting-but-BRep-valid gear was searched for and not found**
+  (extreme backlash, large negative shift, oversized head/clearance). That is why
+  the `TierB`-vs-`TierA` mutant survives — stated as a known gap in
+  `test_gear_op.cpp` rather than papered over. If you find such a parameter set,
+  add it there.
+- **`WebFetch` is not trustworthy for porting exact math** — it paraphrases
+  through a small model. All upstream sources were pulled byte-exact with `curl`
+  into the scratchpad. Do the same.
+- **Fillets were deliberately NOT implemented.** Upstream inserts them by
+  hard-coded edge index with a pop-and-retry fallback — precisely the fragility
+  the plan refuses to carry. `Fillet2d` with geometric site identification is
+  still owed; deferring beat doing it badly.
+
+## Two defects found in the repo itself (not the gear work)
+
+1. **`test_polygon_fill.cpp`'s "exit code == failure count" idiom is unsound.**
+   POSIX truncates exit status to 8 bits, so a run failing exactly 256 assertions
+   exits `0` and reports PASS. **Hit for real** — a mutant printing hundreds of
+   FAILs exited clean and briefly made a genuine bug look like a passing test.
+   All seven gear tests clamp; `test_polygon_fill.cpp` still has the raw idiom and
+   is safe only because its assertion count is small.
+2. **The staged sidecar is stale.** `src-tauri/binaries/onecad-worker-*` is from
+   12:02, `worker/build/onecad-worker` from 18:12. This session's `cargo test`
+   was valid because `ONECAD_WORKER_PATH` overrode resolution — but **the
+   packaged app does not contain the Gear op**. This is TODO's existing T0 item,
+   now with a second reason to restage.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Env: `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1`. Worker build dir already
+   configured at `worker/build`.
+3. **Next task is G1-h** — the controller + chip UI (see `TODO.md` § G1 "STILL
+   OWED"). Mirror the Hole surface: `ModelToolController.ts` (~185 Hole
+   references; `startHole`/`tryPickHoleFace`/`onHoleEvent`/`openHolePreview`/
+   `commitHole` around lines 4348-4530 are the template), `toolChipStore.showHole`
+   → `showGear`, and `features/toolbar/HoleChipCluster.tsx` → `GearChipCluster.tsx`.
+   The FSM (`gearMachine.ts`), wire mapper and preview builder are DONE and
+   tested — including a byte-identical preview==commit assertion — so this is
+   wiring, not design.
+4. Re-run the cross-check after any sampler change:
+   `/tmp/gearenv/bin/python3 scripts/gear-crosscheck/crosscheck.py --pygears <checkout>`
+   (see its README; local-only, never CI).
+
+## Open questions
+
+- **Gear icon.** `circularPattern` is borrowed (radial-repetition reading),
+  following the `offsetFace`→`pushpull` precedent. A real gear glyph is a design
+  pass someone should schedule.
+- **Fillets** — confirm they land as G1.5 (before the other recipes) or after.
+- **Where the other four G0 recipes surface.** Their math is done and oracle-
+  tested but no op/schema path exists yet; the plan sequences them after helical.
+
+## Pointers
+
+- Tasks → `TODO.md` § GEAR GENERATOR (G0 + G1) · Snapshot → `CURRENT_STATE.md`
+- Plan → `~/.claude/plans/enumerated-nibbling-crescent.md`
+- Cross-check harness → `scripts/gear-crosscheck/README.md`
+
+---
+
 # Handoff — merging `OneCAD-Component-Library` into `master`
 
 Session 18 · 2026-08-14

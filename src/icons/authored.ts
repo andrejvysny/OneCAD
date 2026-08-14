@@ -178,6 +178,21 @@ export const AUTHORED_ICONS = {
     { d: "M21.5 12 L19.5 10 H15.5 L17.5 12" },
     { d: "M17.5 12 L15.5 10 V16 L17.5 18" },
   ],
+
+  // Gear: a toothed rim (8 teeth, evenly spaced) around a plain circle — the
+  // silhouette that reads as "gear" at toolbar size without the bezier-tooth
+  // complexity a literal involute profile would need. Was `circularPattern`
+  // (radial-repetition reading) until this WP; that borrow is retired now that
+  // a real glyph exists. The rim is primary; the accent is the axle bore at
+  // centre — the rotation axis every gear turns about, same "one verb" role
+  // `hole`'s drilling arrow and `point`'s dot play for their own tools.
+  gear: [
+    { d: "M12 12 m-6.2 0 a6.2 6.2 0 1 0 12.4 0 a6.2 6.2 0 1 0 -12.4 0" },
+    {
+      d: "M18.3 12 L21 12M16.5 16.5 L18.4 18.4M12 18.3 L12 21M7.5 16.5 L5.6 18.4M5.7 12 L3 12M7.5 7.5 L5.6 5.6M12 5.7 L12 3M16.5 7.5 L18.4 5.6",
+    },
+    { d: "M12 12 m-1.8 0 a1.8 1.8 0 1 0 3.6 0 a1.8 1.8 0 1 0 -3.6 0", tone: "accent", filled: true },
+  ],
 } as const satisfies Record<string, IconDef>;
 
 export type AuthoredIconName = keyof typeof AUTHORED_ICONS;

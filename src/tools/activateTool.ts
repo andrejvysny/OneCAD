@@ -62,6 +62,9 @@ const MODEL_ONLY: ReadonlySet<Tool> = new Set([
   "transform",
   // A hole is machined INTO a solid's face — model mode only (WP-C T3).
   "hole",
+  // A gear produces a SOLID (it mints a body), which only exists in model mode —
+  // even though its placement may be a datum rather than a picked face.
+  "gear",
   // Measure inspects SOLIDS, which only exist in model mode. A toolbar CLICK is
   // an explicit intent, so it finishes the sketch first like every other model
   // tool. Its ambient `?` KEYSTROKE is deliberately inert in sketch mode instead

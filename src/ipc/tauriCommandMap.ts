@@ -44,6 +44,7 @@ import type {
   RevolveParams,
   Rgba,
   SemanticRef,
+  GearParams,
   HoleParams,
   ShellParams,
   TransformBodyParams,
@@ -279,6 +280,7 @@ type WireOperation = (
   | { opType: "TransformBody"; params: WireTransformBodyParams }
   | { opType: "Hole"; params: WireHoleParams }
   | { opType: "OffsetFace"; params: WireOffsetFaceParams }
+  | { opType: "Gear"; params: WireGearParams }
   | { opType: "PlaceComponent"; params: WirePlaceComponentParams }
 ) & { opId?: string };
 
@@ -500,6 +502,117 @@ function filletParams(p: FilletParams, inputs?: SemanticRef[]): WireFilletParams
     );
   }
   return wire;
+}
+
+/** Rust `GearFrame` (record.rs; SCHEMA §7.3 `Gear.placement.frame`). */
+interface WireGearFrame {
+  origin: WireVec3;
+  axis: WireVec3;
+  xDir: WireVec3;
+}
+
+/** Rust `GearPlacement`. Exactly one of `face` / `frame` is non-null. */
+interface WireGearPlacement {
+  face: WireElementRef | null;
+  frame: WireGearFrame | null;
+  point: WireVec3;
+}
+
+/** Rust `InvoluteExternalParams`. Dimensions are `Scalar`; coefficients are bare. */
+interface WireInvoluteExternalParams {
+  teeth: number;
+  module: WireScalar;
+  height: WireScalar;
+  pressureAngleDeg: WireScalar;
+  shift: number;
+  helixAngleDeg: number;
+  doubleHelix: boolean;
+  propertiesFromTool: boolean;
+  undercut: boolean;
+  backlash: number;
+  clearance: number;
+  head: number;
+  sampleCount: number;
+  axleHole: boolean;
+  axleHoleDiameter: WireScalar | null;
+  offsetHole: boolean;
+  offsetHoleDiameter: WireScalar | null;
+  offsetHoleOffset: WireScalar | null;
+}
+
+/**
+ * Rust `GearParams` (record.rs; SCHEMA §7.3 `Gear`).
+ *
+ * Every INACTIVE recipe block is spelled explicitly `null` rather than omitted —
+ * the same contract `WireHoleParams` carries for `cb*`/`cs*`.
+ */
+interface WireGearParams {
+  recipe: string;
+  placement: WireGearPlacement;
+  involuteExternal: WireInvoluteExternalParams | null;
+}
+
+/**
+ * SCHEMA §7.3 `Gear`.
+ *
+ * Two rules this mapper is responsible for, both of which the Rust session and
+ * the worker independently re-check:
+ *
+ *  - **Recipe blocks are gated on `recipe`, not on presence.** A caller that
+ *    leaves a stale `involuteExternal` on params it has re-typed to another
+ *    recipe marshals a clean payload rather than a record the session must
+ *    reject. This is `holeParams`'s rule, applied to a wider union.
+ *  - **Bore dimensions are gated on their own flag.** A diameter left behind
+ *    after a bore was switched off is dropped here, so toggling it back on
+ *    cannot silently resurrect a stale number.
+ */
+function gearParams(p: GearParams): WireGearParams {
+  const involute = p.recipe === "involuteExternal" ? (p.involuteExternal ?? null) : null;
+
+  const placement: WireGearPlacement = {
+    face: null,
+    frame: null,
+    point: [...p.placement.point],
+  };
+  if (p.placement.face) {
+    placement.face = faceElementRef(p.placement.face);
+  } else if (p.placement.frame) {
+    placement.frame = {
+      origin: [...p.placement.frame.origin],
+      axis: [...p.placement.frame.axis],
+      xDir: [...p.placement.frame.xDir],
+    };
+  }
+
+  const optional = (active: boolean, v: number | null | undefined): WireScalar | null =>
+    active && typeof v === "number" && Number.isFinite(v) ? scalar(v) : null;
+
+  return {
+    recipe: p.recipe,
+    placement,
+    involuteExternal: involute
+      ? {
+          teeth: involute.teeth,
+          module: scalar(involute.module),
+          height: scalar(involute.height),
+          pressureAngleDeg: scalar(involute.pressureAngleDeg),
+          shift: involute.shift,
+          helixAngleDeg: involute.helixAngleDeg,
+          doubleHelix: involute.doubleHelix,
+          propertiesFromTool: involute.propertiesFromTool,
+          undercut: involute.undercut,
+          backlash: involute.backlash,
+          clearance: involute.clearance,
+          head: involute.head,
+          sampleCount: involute.sampleCount,
+          axleHole: involute.axleHole,
+          axleHoleDiameter: optional(involute.axleHole, involute.axleHoleDiameter),
+          offsetHole: involute.offsetHole,
+          offsetHoleDiameter: optional(involute.offsetHole, involute.offsetHoleDiameter),
+          offsetHoleOffset: optional(involute.offsetHole, involute.offsetHoleOffset),
+        }
+      : null,
+  };
 }
 
 /**
@@ -737,6 +850,8 @@ export function wireOperation(op: OperationOp): WireOperation {
       return { ...identity, opType: "Hole", params: holeParams(op.params) };
     case "OffsetFace":
       return { ...identity, opType: "OffsetFace", params: offsetFaceParams(op.params) };
+    case "Gear":
+      return { ...identity, opType: "Gear", params: gearParams(op.params) };
     case "PlaceComponent":
       return { ...identity, opType: "PlaceComponent", params: placeComponentParams(op.params) };
   }

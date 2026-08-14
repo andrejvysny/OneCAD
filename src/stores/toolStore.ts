@@ -47,6 +47,8 @@ export type ModelTool =
   | "transform"
   /** Machined hole on a planar face (WP-C T3 Hole). */
   | "hole"
+  /** Generated parametric gear body (Gear Generator G1; SCHEMA §7.3 Gear). */
+  | "gear"
   /** Measure (W2-B): a READ-ONLY inspection tool — picks nothing into history. */
   | "measure";
 

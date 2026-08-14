@@ -1369,6 +1369,9 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
                 FeatureKind::Extrude
             }
             KnownOperation::Revolve(_) => FeatureKind::Revolve,
+            // A Gear MINTS a solid body, so it buckets with the solid creators
+            // rather than the dress-up ops — the same reading `Extrude` gets.
+            KnownOperation::Gear(_) => FeatureKind::Extrude,
             // OffsetFace joins the Fillet/Chamfer/Shell dress-up bucket: it is a
             // face-level modifier of an existing body, not a body producer.
             // `FeatureKind` is a coarse icon grouping (see `default_label` for why
@@ -1475,6 +1478,20 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
             "length",
         )
         .bound(&p.distance),
+        // A gear's row text is tooth count + module (mirrors `gearMachine.ts
+        // gearValueText` exactly — checked live on the mock lane, which formats
+        // this independently). NOT `dimensioned`: `displayValue`
+        // (`HistoryList.tsx`) prefers `primary`+`primary_kind` over `text`
+        // outright when `primary` is set, so a `Some(module)` here would render
+        // the row as a bare "2 mm" and silently discard the "20T m2" text this
+        // computes — text_only is the only form that shows what it says. This
+        // also matches the Gear cluster living in the sidebar properties panel,
+        // not a one-number inline row (same reasoning `canBindFeatureValue`
+        // already applies to Hole).
+        KnownOperation::Gear(p) => FeatureValue::text_only(match p.involute() {
+            Some(inv) => format!("{}T m{}", inv.teeth, inv.module.value),
+            None => String::new(),
+        }),
         KnownOperation::Revolve(p) => FeatureValue::dimensioned(
             format!("{:.1}°", p.angle_deg.value),
             p.angle_deg.value,
@@ -1584,6 +1601,7 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::Sketch(_) => "Sketch",
             KnownOperation::Extrude(_) => "Extrude",
             KnownOperation::Revolve(_) => "Revolve",
+            KnownOperation::Gear(_) => "Gear",
             KnownOperation::Fillet(_) => "Fillet",
             KnownOperation::Chamfer(_) => "Chamfer",
             KnownOperation::Shell(_) => "Shell",
@@ -1875,6 +1893,23 @@ mod tests {
             }
         }));
         check(&hole, "Ø6.0", Some(6.0), Some("diameter"));
+
+        // A gear's row is text-only, DELIBERATELY not `dimensioned`: `displayValue`
+        // (`HistoryList.tsx`) prefers `primary`+`primary_kind` over `text` outright
+        // once `primary` is set, so a "one editable number" here would silently
+        // discard the teeth+module text and show a bare "2 mm" instead.
+        let gear = from_json(serde_json::json!({
+            "opType": "Gear",
+            "params": {
+                "recipe": "involuteExternal",
+                "placement": { "face": null, "frame": {"origin":[0.0,0.0,0.0],"axis":[0.0,0.0,1.0],"xDir":[1.0,0.0,0.0]}, "point": [0.0,0.0,0.0] },
+                "involuteExternal": {
+                    "teeth": 20, "module": 2.0, "height": 5.0, "pressureAngleDeg": 20.0,
+                    "clearance": 0.25, "sampleCount": 20
+                }
+            }
+        }));
+        check(&gear, "20T m2", None, None);
 
         // ── No single primary dimension ⇒ the row stays read-only ──────────────
         let boolean = from_json(serde_json::json!({

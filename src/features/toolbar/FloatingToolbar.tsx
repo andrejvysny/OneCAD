@@ -65,7 +65,8 @@ export function FloatingToolbar() {
       return tools.filter(
         (t) =>
           (t.scopes === undefined || t.scopes.length === 0 || t.scopes.includes(token)) &&
-          !(t.group !== undefined && hidden.has(t.group)),
+          !(t.group !== undefined && hidden.has(t.group)) &&
+          !t.toolbarHidden,
       );
     },
     // `tools` is the subscription: a registry change gives a new snapshot.

@@ -112,6 +112,8 @@ function toolDefinition(d: ModelingToolDescriptor): ToolDefinition {
     group: d.group,
     priority: d.priority,
     flyout: d.family,
+    toolbarHidden: d.toolbarHidden,
+    generatorsMenu: d.generatorsMenu,
     scopes: [scopeToken(d.scope)],
     defaultShortcut: shortcutOf(d),
     shortcutLabel: d.shortcut,

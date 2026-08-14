@@ -1,5 +1,6 @@
 import { useDocumentStore } from "@/stores/documentStore";
 import { FileMenu } from "./FileMenu";
+import { GeneratorsMenu } from "./GeneratorsMenu";
 import { TitleBarButton } from "./TitleBarButton";
 import { closeProject } from "./fileActions";
 import { WorkspaceSwitcher } from "@/features/workspace/WorkspaceSwitcher";
@@ -10,11 +11,11 @@ import { PaletteButton } from "@/features/palette/PaletteButton";
  * native macOS traffic lights (Tauri titleBarStyle Overlay draws them over the
  * webview, so the app does not paint its own) and is a drag region.
  *
- * Left to right: OneCAD wordmark, home, File, workspace, document name. ⌘K on
- * the right. Every button is a `TitleBarButton` — one geometry, one hover, one
- * radius. There is deliberately NO mode toggle: the editor mode follows the
- * picked tool + context (AUTO-MODE, see tools/activateTool.ts) and the StatusBar
- * shows it.
+ * Left to right: OneCAD wordmark, home, File, Generators, workspace, document
+ * name. ⌘K on the right. Every button is a `TitleBarButton` — one geometry,
+ * one hover, one radius. There is deliberately NO mode toggle: the editor mode
+ * follows the picked tool + context (AUTO-MODE, see tools/activateTool.ts) and
+ * the StatusBar shows it.
  *
  * The wordmark and the document name are SEPARATE, at opposite ends of the
  * control group, rather than one "OneCAD — Bracket v2" string. They answer
@@ -61,6 +62,9 @@ export function TitleBar() {
         onClick={() => void closeProject()}
       />
       <FileMenu />
+      {/* Parametric shape generators (gears today, more later) — a body-mint
+          tool family that doesn't belong in the general modeling toolbar. */}
+      <GeneratorsMenu />
       {/* Workspace is GLOBAL context, so it sits with the window's identity and
           never becomes another toolbar layer (prototype 2a). */}
       <WorkspaceSwitcher />

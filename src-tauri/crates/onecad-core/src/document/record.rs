@@ -77,6 +77,7 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "TransformBody",
     "Hole",
     "OffsetFace",
+    "Gear",
     "PlaceComponent",
     "DetachComponent",
 ];
@@ -315,6 +316,9 @@ pub enum KnownOperation {
     TransformBody(TransformBodyParams),
     Hole(HoleParams),
     OffsetFace(OffsetFaceParams),
+    /// A generated gear body (Gear Generator G1, SCHEMA §7.3).
+    /// Mints `body_<opId>`; no host body, no sketch.
+    Gear(GearParams),
     /// Instantiate a library component (Component Library WP-0.2; spec §3.1).
     /// New v2 op, no OneCAD-CPP analogue.
     PlaceComponent(PlaceComponentParams),
@@ -368,6 +372,9 @@ impl KnownOperation {
                 refs
             }
             KnownOperation::Hole(p) => vec![&mut p.face],
+            // A gear's ONLY topological input is its placement face; a frame
+            // placement contributes none.
+            KnownOperation::Gear(p) => p.placement.face.iter_mut().collect(),
             // A typed body-edge Revolve axis is an `inputs[0]` semantic ref.
             // Legacy axes intentionally have no slot, preserving their payload.
             KnownOperation::Revolve(p) => match p.axis.as_mut() {
@@ -472,6 +479,28 @@ impl KnownOperation {
                 }
                 out
             }
+            // Gear: the DIMENSIONS a variable may drive. `shift`, `clearance`,
+            // `head` and `backlash` are deliberately absent — they are
+            // dimensionless coefficients (multiples of module), not lengths,
+            // so binding them to a length variable would be a category error.
+            KnownOperation::Gear(p) => {
+                let mut out = Vec::new();
+                if let Some(inv) = p.involute_external.as_mut() {
+                    out.push(("Gear.module", &mut inv.module));
+                    out.push(("Gear.height", &mut inv.height));
+                    out.push(("Gear.pressureAngleDeg", &mut inv.pressure_angle_deg));
+                    if let Some(s) = inv.axle_hole_diameter.as_mut() {
+                        out.push(("Gear.axleHoleDiameter", s));
+                    }
+                    if let Some(s) = inv.offset_hole_diameter.as_mut() {
+                        out.push(("Gear.offsetHoleDiameter", s));
+                    }
+                    if let Some(s) = inv.offset_hole_offset.as_mut() {
+                        out.push(("Gear.offsetHoleOffset", s));
+                    }
+                }
+                out
+            }
             KnownOperation::OffsetFace(p) => vec![("OffsetFace.distance", &mut p.distance)],
             KnownOperation::PlaceComponent(p) => {
                 let [tx, ty, tz] = &mut p.placement.translate;
@@ -526,6 +555,7 @@ impl Operation {
                 KnownOperation::ImportStep(_) => "ImportStep",
                 KnownOperation::TransformBody(_) => "TransformBody",
                 KnownOperation::Hole(_) => "Hole",
+                KnownOperation::Gear(_) => "Gear",
                 KnownOperation::OffsetFace(_) => "OffsetFace",
                 KnownOperation::PlaceComponent(_) => "PlaceComponent",
                 KnownOperation::DetachComponent(_) => "DetachComponent",
@@ -721,6 +751,21 @@ impl Operation {
                 if let Some(primary) = &p.face.primary {
                     inputs.push_body(primary.body);
                     inputs.push_element(primary.element.clone());
+                }
+            }
+
+            // Gear: MINTS a body, so it has no host to depend on. Its only
+            // topological input is the placement face, and only when the
+            // placement is a face at all — a frame placement is frozen world
+            // data and depends on nothing. An intent-only face ref contributes
+            // no element dep and is bound by the ladder at regen time (the same
+            // rule Hole and Fillet edge refs follow).
+            KnownOperation::Gear(p) => {
+                if let Some(face) = &p.placement.face {
+                    if let Some(primary) = &face.primary {
+                        inputs.push_body(primary.body);
+                        inputs.push_element(primary.element.clone());
+                    }
                 }
             }
 
@@ -1875,6 +1920,317 @@ impl HoleParams {
             return Err(format!(
                 "Hole cs* params are countersink-only (got a {kind} hole)"
             ));
+        }
+        Ok(())
+    }
+}
+
+/// Which gear the [`GearParams`] recipe block describes (SCHEMA §7.3 `Gear`).
+///
+/// A typed enum, never a free-form string: ADR-0002 keeps the modeling kernel
+/// closed, so a recipe is a variant the core team adds, not something an addon
+/// registers. New recipes extend this enum and §7.3 together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GearRecipe {
+    /// External involute gear — spur today, helical/herringbone once the
+    /// sweep infrastructure lands (see [`InvoluteExternalParams::helix_angle_deg`]).
+    InvoluteExternal,
+}
+
+/// Where a generated gear sits. **Exactly one of `face` / `frame` is set** —
+/// the two placement modes are mutually exclusive and neither is optional, so
+/// this is validated both ways rather than defaulted.
+///
+/// This mirrors [`HoleParams`]'s placement contract deliberately: a frozen
+/// world point re-projected onto the resolved face every regen, fenced at
+/// 1e-3 mm, with the axis taken as the face's INWARD normal. What a gear adds
+/// is the second mode — a fully explicit frozen frame for datum/world
+/// placement, which a hole never needs because a hole always has a host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GearPlacement {
+    /// The planar face the gear is seated on. Resolved through the ladder
+    /// (§10) like a Hole face. `None` ⇒ this is a frame placement.
+    #[serde(default)]
+    pub face: Option<ElementRef>,
+    /// Explicit frozen frame for datum/world placement. `None` ⇒ face
+    /// placement.
+    #[serde(default)]
+    pub frame: Option<GearFrame>,
+    /// World-space gear centre, frozen at authoring. With a face this is
+    /// re-projected onto the resolved plane each regen; with a frame it must
+    /// equal [`GearFrame::origin`].
+    pub point: Vec3,
+}
+
+/// An explicit, frozen placement frame. `x_dir` fixes the gear's angular
+/// PHASE — carried rather than derived because tooth phasing is what makes a
+/// pair of gears mesh, and a derived x-axis would silently rotate the teeth
+/// when the axis changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GearFrame {
+    pub origin: Vec3,
+    /// The gear's rotation axis; the body grows along it.
+    pub axis: Vec3,
+    /// Reference direction in the gear's plane, fixing the angular phase.
+    pub x_dir: Vec3,
+}
+
+/// External involute gear parameters (SCHEMA §7.3 `Gear.involuteExternal`).
+///
+/// `clearance`, `head` and `shift` are dimensionless COEFFICIENTS (multiples of
+/// module) per gear-design convention, not lengths — hence plain `f64` rather
+/// than [`Scalar`]: they are not dimensions a variable could drive, and giving
+/// them expression slots would invite `clearance = someLength` which is a
+/// category error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvoluteExternalParams {
+    /// Tooth count, >= 3.
+    pub teeth: u32,
+    /// Module in mm (the normal module when `properties_from_tool`).
+    pub module: Scalar,
+    /// Extrusion height in mm.
+    pub height: Scalar,
+    /// Pressure angle in DEGREES (the `Deg` suffix matches `Hole::cs_angle_deg`).
+    pub pressure_angle_deg: Scalar,
+    /// Profile shift coefficient x.
+    #[serde(default)]
+    pub shift: f64,
+    /// Helix angle in degrees. **Must be 0 in this version** — helical gears
+    /// need the Frenet sweep infrastructure; the field exists so the payload
+    /// will not change shape when that lands (SCHEMA §7.3).
+    #[serde(default)]
+    pub helix_angle_deg: f64,
+    /// Herringbone. **Must be false in this version**, same reason.
+    #[serde(default)]
+    pub double_helix: bool,
+    /// Recompute transverse pressure angle / module from the normal (tool)
+    /// values using the helix angle.
+    #[serde(default)]
+    pub properties_from_tool: bool,
+    /// Trochoid root curve. Forces `root_fillet` to 0 where fillets exist.
+    #[serde(default)]
+    pub undercut: bool,
+    /// Arc-length tooth thinning at the pitch circle, in mm.
+    #[serde(default)]
+    pub backlash: f64,
+    /// Dedendum clearance coefficient (×module).
+    pub clearance: f64,
+    /// Extra addendum coefficient (×module).
+    #[serde(default)]
+    pub head: f64,
+    /// Spline samples per curve segment — an ACCURACY knob that changes the
+    /// body's topology, so it participates in the plan hash like any parameter.
+    pub sample_count: u32,
+    #[serde(default)]
+    pub axle_hole: bool,
+    #[serde(default)]
+    pub axle_hole_diameter: Option<Scalar>,
+    #[serde(default)]
+    pub offset_hole: bool,
+    #[serde(default)]
+    pub offset_hole_diameter: Option<Scalar>,
+    #[serde(default)]
+    pub offset_hole_offset: Option<Scalar>,
+}
+
+/// A generated gear body (SCHEMA §7.3 `Gear`, Gear Generator G1).
+///
+/// **Lineage is a `NewBody` mint** — `body_<opId>` (D1), one `created` event,
+/// an empty element-map delta. There is no target body: unlike every other
+/// feature op, a gear has no host to modify, and its only topological input is
+/// its placement.
+///
+/// The recipe blocks follow [`HoleParams`]'s conditional-block contract:
+/// `recipe` selects which block is non-null, every inactive block is spelled
+/// `null` rather than omitted, and [`Self::validate`] checks it **both ways**
+/// so a stale block left behind by a recipe switch cannot sit in the record
+/// invisibly and reappear later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GearParams {
+    pub recipe: GearRecipe,
+    pub placement: GearPlacement,
+    /// Non-null iff `recipe == InvoluteExternal`.
+    #[serde(default)]
+    pub involute_external: Option<InvoluteExternalParams>,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl GearParams {
+    /// The active recipe block's parameters, when the record is well formed.
+    #[must_use]
+    pub fn involute(&self) -> Option<&InvoluteExternalParams> {
+        match self.recipe {
+            GearRecipe::InvoluteExternal => self.involute_external.as_ref(),
+        }
+    }
+
+    /// Validates the SCHEMA §7.3 `Gear` invariants, returning a human-facing
+    /// reason on failure. Checked at every authoring entry point (see
+    /// [`crate::edit::session`]), NOT at deserialize time — a document written
+    /// by another build must still open and round-trip, the same single-writer
+    /// rule [`HoleParams::validate`] follows.
+    ///
+    /// # Errors
+    /// Returns a human-facing reason when a recipe block is missing or stale,
+    /// when the placement is not exactly one of face/frame, or when a
+    /// dimension is outside its domain.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_placement()?;
+        match self.recipe {
+            GearRecipe::InvoluteExternal => {
+                let p = self.involute_external.as_ref().ok_or_else(|| {
+                    "Gear involuteExternal params are required for an involuteExternal recipe"
+                        .to_string()
+                })?;
+                p.validate()
+            }
+        }
+    }
+
+    fn validate_placement(&self) -> Result<(), String> {
+        let pl = &self.placement;
+        match (&pl.face, &pl.frame) {
+            (Some(_), Some(_)) => {
+                return Err(
+                    "Gear placement carries BOTH a face and a frame; exactly one is allowed".into(),
+                )
+            }
+            (None, None) => {
+                return Err(
+                    "Gear placement carries neither a face nor a frame; exactly one is required"
+                        .into(),
+                )
+            }
+            _ => {}
+        }
+        if !pl.point.is_finite() {
+            return Err("Gear placement point has a non-finite component".into());
+        }
+        if let Some(face) = &pl.face {
+            if let Some(primary) = &face.primary {
+                if primary.kind != ElementKind::Face {
+                    return Err("Gear placement face requires a FACE primary".into());
+                }
+            }
+        }
+        if let Some(frame) = &pl.frame {
+            if !frame.origin.is_finite() || !frame.axis.is_finite() || !frame.x_dir.is_finite() {
+                return Err("Gear placement frame has a non-finite component".into());
+            }
+            if !is_direction(&frame.axis) {
+                return Err("Gear placement frame axis is degenerate".into());
+            }
+            if !is_direction(&frame.x_dir) {
+                return Err("Gear placement frame xDir is degenerate".into());
+            }
+            // The point IS the origin in frame mode; two sources of truth for
+            // the same position would drift apart under a later edit.
+            if !frame.origin.approx_eq(&pl.point, 1e-9) {
+                return Err("Gear placement point must equal the frame origin".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// True when `v` can serve as a direction — finite and not the zero vector.
+/// A zero axis would make the gear's frame unbuildable in the worker, so it is
+/// refused at authoring rather than discovered at regen.
+fn is_direction(v: &Vec3) -> bool {
+    v.is_finite() && (v.x != 0.0 || v.y != 0.0 || v.z != 0.0)
+}
+
+impl InvoluteExternalParams {
+    /// # Errors
+    /// Returns a human-facing reason when any dimension is outside its domain.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.teeth < 3 {
+            return Err(format!(
+                "Gear teeth must be at least 3 (got {})",
+                self.teeth
+            ));
+        }
+        positive("Gear module", self.module.value)?;
+        positive("Gear height", self.height.value)?;
+        let alpha = self.pressure_angle_deg.value;
+        if !(alpha > 0.0 && alpha < 90.0) {
+            return Err(format!(
+                "Gear pressureAngleDeg must be in (0, 90) (got {alpha})"
+            ));
+        }
+        if self.sample_count < 2 {
+            return Err(format!(
+                "Gear sampleCount must be at least 2 (got {})",
+                self.sample_count
+            ));
+        }
+        if !self.shift.is_finite() || !self.backlash.is_finite() {
+            return Err("Gear shift/backlash must be finite".into());
+        }
+        if self.backlash < 0.0 {
+            return Err(format!(
+                "Gear backlash must not be negative (got {})",
+                self.backlash
+            ));
+        }
+        if !self.clearance.is_finite() || self.clearance < 0.0 {
+            return Err("Gear clearance must be finite and non-negative".into());
+        }
+        if !self.head.is_finite() {
+            return Err("Gear head must be finite".into());
+        }
+        // Helical is UNSUPPORTED in this version (SCHEMA §7.3). Refused by
+        // name rather than silently flattened to a spur gear, which would
+        // hand back a body that is not what was asked for.
+        if self.helix_angle_deg != 0.0 {
+            return Err(
+                "Gear helixAngleDeg must be 0 in this version (helical gears are not yet supported)"
+                    .into(),
+            );
+        }
+        if self.double_helix {
+            return Err(
+                "Gear doubleHelix must be false in this version (herringbone gears are not yet supported)"
+                    .into(),
+            );
+        }
+        // Bore blocks, checked BOTH ways so a stale dimension left by toggling
+        // a bore off cannot reappear when it is toggled back on.
+        Self::bore(
+            self.axle_hole,
+            self.axle_hole_diameter.as_ref(),
+            "axleHole",
+            "axleHoleDiameter",
+        )?;
+        Self::bore(
+            self.offset_hole,
+            self.offset_hole_diameter.as_ref(),
+            "offsetHole",
+            "offsetHoleDiameter",
+        )?;
+        if self.offset_hole {
+            let off = self.offset_hole_offset.as_ref().ok_or_else(|| {
+                "Gear offsetHoleOffset is required when offsetHole is on".to_string()
+            })?;
+            positive("Gear offsetHoleOffset", off.value)?;
+        } else if self.offset_hole_offset.is_some() {
+            return Err("Gear offsetHoleOffset is offsetHole-only (got offsetHole = false)".into());
+        }
+        Ok(())
+    }
+
+    fn bore(on: bool, dia: Option<&Scalar>, flag: &str, field: &str) -> Result<(), String> {
+        if on {
+            let d = dia.ok_or_else(|| format!("Gear {field} is required when {flag} is on"))?;
+            positive(&format!("Gear {field}"), d.value)?;
+        } else if dia.is_some() {
+            return Err(format!("Gear {field} is {flag}-only (got {flag} = false)"));
         }
         Ok(())
     }
@@ -4043,5 +4399,274 @@ mod tests {
             extra: Extra::new(),
         });
         assert!(params.validate().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Gear (SCHEMA §7.3, Gear Generator G1)
+    // ---------------------------------------------------------------
+
+    fn involute_block() -> InvoluteExternalParams {
+        InvoluteExternalParams {
+            teeth: 20,
+            module: Scalar::new(2.0),
+            height: Scalar::new(5.0),
+            pressure_angle_deg: Scalar::new(20.0),
+            shift: 0.0,
+            helix_angle_deg: 0.0,
+            double_helix: false,
+            properties_from_tool: false,
+            undercut: false,
+            backlash: 0.0,
+            clearance: 0.25,
+            head: 0.0,
+            sample_count: 20,
+            axle_hole: false,
+            axle_hole_diameter: None,
+            offset_hole: false,
+            offset_hole_diameter: None,
+            offset_hole_offset: None,
+        }
+    }
+
+    /// A gear placed on a picked face (the common authoring path).
+    fn gear_params() -> GearParams {
+        GearParams {
+            recipe: GearRecipe::InvoluteExternal,
+            placement: GearPlacement {
+                face: Some(hole_face_ref()),
+                frame: None,
+                point: Vec3::new_unchecked(25.0, 10.0, 30.0),
+            },
+            involute_external: Some(involute_block()),
+            extra: Extra::new(),
+        }
+    }
+
+    /// A gear placed on an explicit frozen frame (datum/world placement).
+    fn gear_params_frame() -> GearParams {
+        GearParams {
+            recipe: GearRecipe::InvoluteExternal,
+            placement: GearPlacement {
+                face: None,
+                frame: Some(GearFrame {
+                    origin: Vec3::new_unchecked(1.0, 2.0, 3.0),
+                    axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                    x_dir: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                }),
+                point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+            },
+            involute_external: Some(involute_block()),
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn gear_round_trips_through_the_wire_shape() {
+        let op = Operation::Known(KnownOperation::Gear(gear_params()));
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["opType"], "Gear");
+        // SCHEMA §7.3 key spelling, checked key-for-key rather than by
+        // round-trip alone: a rename would round-trip happily and still break
+        // the worker.
+        let p = &json["params"];
+        assert!(p["placement"]["face"].is_object());
+        assert!(p["placement"]["frame"].is_null());
+        assert_eq!(p["recipe"], "involuteExternal");
+        let inv = &p["involuteExternal"];
+        assert_eq!(inv["teeth"], 20);
+        assert_eq!(inv["module"]["value"], 2.0);
+        assert_eq!(inv["pressureAngleDeg"]["value"], 20.0);
+        assert_eq!(inv["sampleCount"], 20);
+        assert_eq!(inv["clearance"], 0.25);
+
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn gear_frame_placement_round_trips() {
+        let op = Operation::Known(KnownOperation::Gear(gear_params_frame()));
+        let json = serde_json::to_value(&op).unwrap();
+        assert!(json["params"]["placement"]["face"].is_null());
+        assert_eq!(
+            json["params"]["placement"]["frame"]["axis"],
+            serde_json::json!([0.0, 0.0, 1.0])
+        );
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn gear_is_a_known_op_type() {
+        assert!(KNOWN_OP_TYPES.contains(&"Gear"));
+        assert_eq!(
+            Operation::Known(KnownOperation::Gear(gear_params())).op_type(),
+            "Gear"
+        );
+    }
+
+    #[test]
+    fn gear_derives_only_its_placement_face_as_input() {
+        // A gear MINTS its body, so it must never claim a host-body dependency.
+        let inputs = Operation::Known(KnownOperation::Gear(gear_params())).derive_inputs();
+        assert_eq!(inputs.bodies.len(), 1, "only the placement face's body");
+        assert_eq!(inputs.elements.len(), 1, "only the placement face element");
+
+        // A frame placement depends on nothing at all.
+        let none = Operation::Known(KnownOperation::Gear(gear_params_frame())).derive_inputs();
+        assert!(none.bodies.is_empty());
+        assert!(none.elements.is_empty());
+    }
+
+    #[test]
+    fn gear_exposes_its_placement_face_as_a_mutable_ref() {
+        let mut op = KnownOperation::Gear(gear_params());
+        assert_eq!(op.element_refs_mut().len(), 1);
+        let mut framed = KnownOperation::Gear(gear_params_frame());
+        assert!(framed.element_refs_mut().is_empty());
+    }
+
+    #[test]
+    fn gear_exposes_only_dimensional_scalars() {
+        let mut op = KnownOperation::Gear(gear_params());
+        let names: Vec<&str> = op.scalars_mut().into_iter().map(|(n, _)| n).collect();
+        assert!(names.contains(&"Gear.module"));
+        assert!(names.contains(&"Gear.height"));
+        assert!(names.contains(&"Gear.pressureAngleDeg"));
+        // Coefficients are NOT drivable dimensions — binding `clearance` to a
+        // length variable would be a category error, so it must not appear.
+        assert!(!names.iter().any(|n| n.contains("clearance")));
+        assert!(!names.iter().any(|n| n.contains("shift")));
+    }
+
+    #[test]
+    fn gear_accepts_its_canonical_forms() {
+        assert!(gear_params().validate().is_ok());
+        assert!(gear_params_frame().validate().is_ok());
+    }
+
+    #[test]
+    fn gear_placement_must_be_exactly_one_of_face_or_frame() {
+        let mut both = gear_params();
+        both.placement.frame = Some(GearFrame {
+            origin: Vec3::new_unchecked(25.0, 10.0, 30.0),
+            axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+            x_dir: Vec3::new_unchecked(1.0, 0.0, 0.0),
+        });
+        assert!(both.validate().is_err(), "face AND frame must be refused");
+
+        let mut neither = gear_params();
+        neither.placement.face = None;
+        assert!(neither.validate().is_err(), "neither must be refused");
+    }
+
+    #[test]
+    fn gear_frame_origin_must_equal_the_frozen_point() {
+        // Two sources of truth for one position would drift apart on the next
+        // edit; the record is refused rather than silently preferring one.
+        let mut p = gear_params_frame();
+        p.placement.point = Vec3::new_unchecked(9.0, 9.0, 9.0);
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn gear_frame_directions_must_be_real_directions() {
+        let mut p = gear_params_frame();
+        p.placement.frame.as_mut().unwrap().axis = Vec3::new_unchecked(0.0, 0.0, 0.0);
+        assert!(p.validate().is_err(), "a zero axis is not a direction");
+
+        let mut q = gear_params_frame();
+        q.placement.frame.as_mut().unwrap().x_dir = Vec3::new_unchecked(0.0, 0.0, 0.0);
+        assert!(q.validate().is_err(), "a zero xDir is not a direction");
+    }
+
+    #[test]
+    fn gear_requires_the_recipe_block_its_recipe_names() {
+        let mut p = gear_params();
+        p.involute_external = None;
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn gear_refuses_dimensions_outside_their_domain() {
+        for mutate in [
+            (|i: &mut InvoluteExternalParams| i.teeth = 2) as fn(&mut InvoluteExternalParams),
+            |i| i.module = Scalar::new(0.0),
+            |i| i.height = Scalar::new(0.0),
+            |i| i.pressure_angle_deg = Scalar::new(0.0),
+            |i| i.pressure_angle_deg = Scalar::new(90.0),
+            |i| i.sample_count = 1,
+            |i| i.backlash = -1.0,
+            |i| i.clearance = -0.1,
+        ] {
+            let mut p = gear_params();
+            mutate(p.involute_external.as_mut().unwrap());
+            assert!(
+                p.validate().is_err(),
+                "expected a refusal for an out-of-domain dimension"
+            );
+        }
+    }
+
+    #[test]
+    fn gear_refuses_helical_until_the_sweep_infrastructure_lands() {
+        // Refused BY NAME rather than silently flattened to a spur gear —
+        // returning a body that is not what was asked for is the worse failure.
+        let mut helical = gear_params();
+        helical.involute_external.as_mut().unwrap().helix_angle_deg = 15.0;
+        assert!(helical.validate().is_err());
+
+        let mut herringbone = gear_params();
+        herringbone.involute_external.as_mut().unwrap().double_helix = true;
+        assert!(herringbone.validate().is_err());
+    }
+
+    #[test]
+    fn gear_bore_blocks_are_checked_both_ways() {
+        // On without its dimension.
+        let mut on_no_dim = gear_params();
+        on_no_dim.involute_external.as_mut().unwrap().axle_hole = true;
+        assert!(on_no_dim.validate().is_err());
+
+        // A stale dimension left behind after toggling the bore OFF must be
+        // rejected, or it silently reappears the next time it is toggled on.
+        let mut off_with_dim = gear_params();
+        off_with_dim
+            .involute_external
+            .as_mut()
+            .unwrap()
+            .axle_hole_diameter = Some(Scalar::new(10.0));
+        assert!(off_with_dim.validate().is_err());
+
+        // The valid on-form is accepted.
+        let mut ok = gear_params();
+        {
+            let inv = ok.involute_external.as_mut().unwrap();
+            inv.axle_hole = true;
+            inv.axle_hole_diameter = Some(Scalar::new(10.0));
+        }
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn gear_offset_bore_requires_its_offset() {
+        let mut p = gear_params();
+        {
+            let inv = p.involute_external.as_mut().unwrap();
+            inv.offset_hole = true;
+            inv.offset_hole_diameter = Some(Scalar::new(6.0));
+        }
+        assert!(
+            p.validate().is_err(),
+            "offset is required when the bore is on"
+        );
+
+        p.involute_external.as_mut().unwrap().offset_hole_offset = Some(Scalar::new(12.0));
+        assert!(p.validate().is_ok());
+
+        // ...and a stale offset with the bore off is refused.
+        let mut stale = gear_params();
+        stale.involute_external.as_mut().unwrap().offset_hole_offset = Some(Scalar::new(12.0));
+        assert!(stale.validate().is_err());
     }
 }

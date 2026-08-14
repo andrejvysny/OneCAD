@@ -99,6 +99,9 @@ export function editFeature(item: FeatureMeta): void {
     case "Hole":
       void c?.editHoleFeature(item.id);
       return;
+    case "Gear":
+      void c?.editGearFeature(item.id);
+      return;
     case "Boolean":
       // Operation swap only — a Boolean's tool body is CONSUMED, so there is
       // nothing to re-pick (see `editBooleanFeature`).

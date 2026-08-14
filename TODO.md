@@ -1,5 +1,433 @@
 # OneCAD-Tauri Migration TODO
 
+## NEXT — post-merge plan (2026-08-14)
+
+One trunk again. Everything below is ordered by what a **daily-driver** needs, in
+the product's own priority order (functional 3D-print + machined parts, light
+multi-part, STEP as the machined deliverable): first do not lose the user's work,
+then tell the user the truth about what happened, then make the exported artifact
+faithful, then pay the measurement debt.
+
+Sequencing preference stands: clear USER manual gates first, then one deep work
+package at a time.
+
+### T0 — merge aftercare (do before anything else; hours, not days)
+
+- [ ] **Rebuild the worker in this worktree.** `worker/build/onecad-worker` and
+      `src-tauri/binaries/onecad-worker-{aarch64-apple-darwin,manifest.json}` here
+      date from 12:01, BEFORE the merge — no `ClassifyElement`/`ExportGeometry`,
+      no component ops, an uncapped `PreviewOp`, and a manifest bound to that old
+      binary's hash. `bundle.externalBin` makes every cargo command need the
+      staged file, and `manager.rs` refuses a worker whose SHA-256 disagrees with
+      the manifest, so this BLOCKS cargo and the app here:
+      `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1 scripts/build-worker.sh Release`.
+- [ ] **Manual Tauri smoke of the merged stack.** Never run for either program,
+      and this is the first time they meet in the real app. Minimum path: place a
+      component from the library onto a hole rim (mate seats), edit a free
+      parameter (re-bake), bind a past extrude to `=name`, confirm through the
+      new ✓/✕ vocabulary with live numeric entry, switch to assembly colours,
+      save, reopen. Watch `logs/dev.jsonl` for `"level":"ERROR"` and `regen:`.
+- [ ] **Run the real-Tauri WDIO composition lane (MC-R4).** The `tauri-composition`
+      CI job exists and its invocation was fixed, but the lane has still never
+      executed on any machine. It is the only gate that proves the PACKAGED app
+      and its bundled worker compose — precisely the axis the merge disturbed
+      (new verbs, new binary hash, a re-manifested sidecar).
+
+### T1 — data integrity (HIGHEST; "can lose the user's work" class)
+
+The audit that landed in `8133bcd` found these and deliberately implemented no
+fix. For a daily driver they outrank every feature below.
+
+- [ ] **DI-1 + DI-2 together (~½ day).** They share a lane and a test: recovery
+      consumes the crash marker while keeping an autosave that discovery can no
+      longer reach, AND never ticks the autosave loop, so a recovered document is
+      unprotected against the next crash from two directions at once. Pick one of
+      DI-1's three options (keep the marker until the next autosave supersedes it
+      · write a fresh marker at recovery · scan autosave files as a fallback) —
+      they differ only in stale-offer profile. DI-2 is one `note_mutation()` call;
+      the value is the test.
+- [ ] **DI-3 (~2 h).** `promote_selection` and `prepare_edge_op` write
+      `regen.elements`, which `build_save_payload` persists, with no tick and no
+      dirty flag — so close takes the clean fast path and skips the prompt. The
+      audit classified all 55 commands; these are the only mutating rows without
+      a tick, so this closes the class, not just two cases.
+
+### T2 — finish the result-truth doctrine
+
+- [ ] **`upsertVariable` / `removeVariable` / `replaceComponent`.** The last three
+      kernel-touching commands exempt from `regenOutcome` (see § MERGE for the
+      two implementation options). **A product decision is owed first**, and it is
+      small but real: a variable edit that SAVES while its downstream regen FAILS
+      has two truths, and the UI currently states one. Decide what the user is
+      told, then the code is mechanical. Do not "fix" it by throwing — the
+      variable really was saved.
+
+### T3 — make the machined-parts deliverable faithful
+
+- [ ] **DI-5 — STEP export is lossy.** Import replays XCAF names and colours;
+      export is a bare `STEPControl_Writer` with no XCAF document, so a file that
+      came in coloured leaves grey. For the machined-parts priority the exported
+      STEP *is* the deliverable, which makes this the highest-value non-integrity
+      item on the list.
+- [ ] **DI-4 — an authored face colour stops being paintable after a reopen.**
+      Nothing re-binds a persisted `ElementId` at open, so both frontend paint
+      paths come up empty. Same root as the retired W5 seam: **one fix closes
+      both**, and it also makes DI-5's export worth doing on a reopened document
+      rather than only on a freshly authored one. Sequence DI-4 before DI-5 if
+      only one lands.
+
+### T4 — hardening and measurement debt (the open residuals)
+
+- [ ] **MC-R5 — release enforcement.** No current 20-run stability sample and no
+      mandatory Windows worker-backed release matrix. Blocks calling any build a
+      release rather than a build.
+- [ ] **MC-R2 — publication overhead is unmeasured.** Structured
+      `PublicationDecision` evidence and timings exist; the Tier A/B budgets
+      (5%/15% P95) have never been closed with numbers.
+- [ ] **MC-R1 — profile/region latency ceilings unmeasured** under
+      `regionIdentityVersion: 3` (P95 25 ms, refusal 200 ms, ≤20% simple-sketch
+      regression).
+- [ ] **MC-R9 — browser-lane nondeterminism.** `revolve-commit.spec.ts:111` failed
+      once in a loaded 19-minute chromium run and passes in isolation. It closes
+      only on a measured root cause — never on a clean re-run, which this merge's
+      426/426 explicitly is NOT evidence against.
+- [ ] **MC-R3 stays guard-only:** the corpus executes 9/9 and must not regain a
+      silent skip or an untyped expectation.
+
+### T5 — carried forward from the UX program, and one debt this merge created
+
+- [ ] **`DetachComponent` has no UI entry point.** Its backend and service seam
+      are complete and proven, the manifest row says `uiExposure: "hidden"`
+      because of it, and the mock lane still throws. Flipping the row to
+      `exposed` requires a menu item AND an e2e spec **together** — the coverage
+      verifier will reject one without the other, which is the intended pressure.
+- [ ] D6's discriminated `ToolEditorDescriptor` union.
+- [ ] Shell's thickness handle (needs a face normal on the prepare response).
+- [ ] U8 typed references.
+
+### Not owed
+
+The worker's `capabilities[]` and the stub's verb parity were completed during
+the merge; `scoringVersion 3`, region identity V3 and the mesh-limit contract are
+consistent across both tracks. No fixture bump is outstanding.
+
+## GEAR GENERATOR — G1 framework + involute spur (2026-08-14) — IN PROGRESS
+
+Plan: `~/.claude/plans/enumerated-nibbling-crescent.md`. The framework phase —
+schema, Rust, worker op and frontend for a committable involute spur gear.
+
+### USER-VISIBLE CHANGE DECISION (required by `src/test/contracts/README.md`)
+
+**A new `gear` tool is added to the model toolbar**, so two frozen contracts
+change deliberately — this is a product addition, NOT a refactor being made to
+pass:
+
+- `toolbarContract.ts` gains `{ id: "gear", icon: "circularPattern",
+  label: "Gear", shortcut: "⇧G" }` in the **model.solid** group after `Combine`.
+  A gear MINTS a body, so it belongs with the solid creators rather than the
+  modifiers.
+- `keymapContract.ts` gains `⇧G → tool("gear")` (model scope). `G` unshifted is
+  the sketch-mode polygon tool and is untouched.
+
+**ICON DEBT:** `circularPattern` is borrowed for its radial-repetition reading.
+There is no gear glyph in the registry and authoring one is a design pass, not a
+side effect of this work — the same "no new icon was minted" call already made
+for OffsetFace (`pushpull`). A proper gear glyph is owed.
+
+### Landed so far
+
+- **SCHEMA §7.3 `Gear`** + `opType` enum entry + §14 changelog. Recipe-conditional
+  payload with null-spelling (Hole's contract), placement that is exactly one of
+  face/frame, TierB publication, and the referenceability rule stated normatively.
+- **Rust** `KnownOperation::Gear` with `GearParams`/`GearPlacement`/`GearFrame`/
+  `InvoluteExternalParams`, `validate()` checked both ways, `derive_inputs`
+  (placement only — a gear has no host), `element_refs_mut`, `scalars_mut`
+  (dimensions only; coefficients like `clearance` are deliberately NOT
+  variable-drivable), `KNOWN_OP_TYPES`, and `validate_gear` at both authoring
+  entry points. 15 unit tests.
+- **Worker** `kernel/geometry/BSpline` (the first member of the new geometry
+  capability layer), `ops/gear/GearTool` (profile -> wire -> face -> prism ->
+  bores), `ops/GearOp` (placement resolution, D1 mint, TierB publication) and the
+  `PlanExecutor` dispatch arm. ctest **131/131**.
+- **Frontend** types, the `gearParams` wire mapper, the `gearOp` PREVIEW builder
+  (same rules, per SCHEMA §7.6's one-mapper rule), `gearMachine.ts` FSM,
+  tool/keybinding/id registration, and the mock-lane op. vitest **4422/4422**.
+
+### Gate evidence (measured 2026-08-14)
+
+- `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D warnings` clean
+- `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1259 passed / 0 failed**
+- `ctest --test-dir worker/build` **131/131** (was 119 before the gear work)
+- `bunx tsc --noEmit` clean · `bun run build` clean · `bun run test` **4455/4455** (271 files)
+- hex gate empty
+
+The compiler did real work here: adding the variant broke FIVE exhaustive matches
+(`scalars_mut`, `derive_inputs`, `dto.rs` × 2, and `wire.rs`'s deliberate
+`_covered` guard whose comment says "a new variant fails to compile below until
+it is given a decision"). Each needed a real decision, not a wildcard — notably
+`wire_op_inputs`, where a Gear contributes ONLY its placement face because it has
+no host body to echo.
+
+### STILL OWED for the G1 gate ("involute spur committable from UI")
+
+The FSM, wire mapper, preview builder, tool registration and mock lane are done
+and tested (33 gear-specific frontend tests, including a byte-identical
+preview==commit assertion). **The controller + chip UI is not built**, so the
+tool can be activated but has no parameter surface yet. This is wiring, not
+design — the Hole surface is the template throughout.
+
+**G1-h.1–h.4 DONE (2026-08-14), redesigned mid-flight — see below.**
+
+- [x] **G1-h.1 `ModelToolController` methods.** `startGear` · `tryPickGearFace`
+      (promotes TopoKey → ElementId first, mirroring `tryPickHoleFace`) ·
+      `onGearEvent` · `openGearPreview` · `commitGear` · `cancelGear` ·
+      `editGearFeature` seeded through `gearFsmFromParams`. `gearInputs()` is the
+      one structural divergence from Hole's mirror: a Gear has no HOST body to
+      echo (SCHEMA §7.3 / `wire_op_inputs`'s Gear arm), so it contributes only
+      its placement face.
+- [x] **G1-h.2 `toolChipStore.showGear` + `GearChipHandlers`/`GearChipOpts`**,
+      mirroring `showHole` — `value`/`count` carry module/teeth (reused, not
+      duplicated); 14 gear-prefixed fields carry the rest.
+- [x] **G1-h.3/h.4, REDESIGNED.** The first pass put all 16 involute fields in
+      the floating chip (Base/Tooth/Bores/Accuracy segments, mirroring Hole) —
+      the user saw it live and correctly rejected it: a single floating strip
+      that wide is unreadable. Landed instead, FreeCAD-precedented:
+      - `features/toolbar/GearChipCluster.tsx` is now MINIMAL — `Gear · {teeth}T
+        m{module}` + the shared ✓/✕, nothing else.
+      - `features/inspector/GearPropertiesPanel.tsx` (new) hosts every field, in
+        the right-sidebar properties panel (`InspectorPanel`), reading/writing
+        the SAME `toolChipStore` gear state + `onXxx` handlers the chip would
+        have — one state, two views. Renders whenever `toolChipStore.kind ===
+        "gear"` (a fresh placement OR an `editGearFeature` re-edit), taking
+        priority over every other panel state.
+      - `features/inspector/GearSelectedSummary.tsx` (same file): selecting an
+        EXISTING Gear's HISTORY ROW (`sel.kind === "feature"`, `opType ===
+        "Gear"`) shows a read-only params card + an "Edit parameters" button
+        that calls `editGearFeature` — the FreeCAD "select an object, see its
+        properties" moment the user asked for, second-hand off the request.
+      - **NOT wired: selecting the body in the TREE** (as opposed to its history
+        row). There is no bodyId→authoring-featureId correlation ANYWHERE in the
+        projection to resolve it from — confirmed by reading
+        `HistorySelectionSection` (`sections.tsx`), whose own doc comment
+        already admits its body branch is `features.slice(0, 3)`, a stub, not a
+        real per-body lookup. `body_<opId>`'s `opId` is the WORKER's plan-step
+        id, not the record's own — checked live on the mock lane (a committed
+        Gear's `bodyId` was `body_<preview-session-uuid>`, not `body_mf100`),
+        so the tempting "strip the `body_` prefix" shortcut is wrong, not just
+        untested. A real fix needs a projection field (`BodyDto` or a sibling
+        map) carrying the minting feature's id — cross-cutting (Rust dto.rs +
+        mock + `types.ts`), owed as its own WP, not bolted on here.
+      - Manually verified end to end on the mock lane (`playwright-cli`): arm →
+        sidebar edits teeth/module/bores live → ✓ commits (rev advances, no
+        error) → history row reads `20T m2` → row click shows the read-only
+        card → "Edit parameters" swaps to the live panel → ✓ re-applies.
+      - **Real bug caught in passing**: `dto.rs feature_value` had no `Gear` arm
+        at all (fell into the wildcard `text_only("")`) — a REAL-backend Gear
+        row would have shown BLANK, while the mock lane already formats
+        `"{teeth}T m{module}"` independently. Added the arm — `text_only`, NOT
+        `dimensioned`: `HistoryList.tsx displayValue` prefers `primary`+
+        `primary_kind` over `text` outright once `primary` is set, so a
+        `Some(module)` primary would have silently DISCARDED the "20T m2" text
+        and shown a bare "2 mm" instead. Caught before shipping, pinned in
+        `dto.rs`'s `primary_value_is_the_row_editable_dimension_per_op_type`
+        test. Gear is deliberately NOT in `featureValueEdit.ts WIRE_FIELD`
+        either (no inline one-number edit) — same reasoning `canBindFeatureValue`
+        already documents for Hole: `commitGear` wholesale-replaces the op from
+        the FSM, so a merge-patch inline edit would silently discard any other
+        field a real per-field editor might set. `cargo test --workspace` full
+        run green (0 failed) after the change.
+- [x] **Free-space placement, added post-h.4 (user caught it live).** The FSM's
+      `pickFrame` path (mutually exclusive with `face`, SCHEMA §7.3
+      `GearPlacement`) existed since G1's framework phase but had no UI trigger
+      — a click that missed every face just errored "click a flat FACE". Fixed:
+      `tryPickGearFace` now falls back to `tryPickGearGround` on a miss (no hit,
+      not a face, or a preview body) — `engine.screenRay` → `groundPlanePoint`
+      (`@/modules/library/placementSolver`, world Z=0 ground plane), the EXACT
+      chain the Component Library's own free-space drop
+      (`placementController.ts`) already uses; not new math. Frame =
+      `{origin: hitPoint, axis:[0,0,1], xDir:[1,0,0]}` — world Z-up identity,
+      same convention a component with no attachment uses. Re-clicking ground
+      while already frame-armed moves it (no new preview session), mirroring
+      the face branch's "same face" fast path. Verified live: chip arms at the
+      clicked empty-space point, sidebar edits, ✓ commits clean (`rev` advances,
+      `error=none`).
+- [x] **Moved into a new title-bar "Generators" menu, added post-h.4 (user
+      called out the toolbar as the wrong home for it).** Plan:
+      `~/.claude/plans/fuzzy-leaping-rocket.md`. Gear was a body-mint tool
+      mixed into the general `model.solid` toolbar group alongside
+      Extrude/Fillet/Combine; the user wanted it in a dedicated top-bar
+      dropdown that is explicitly meant to be **the future home for more
+      generator types** (FreeCAD keeps its gear family in its own toolbar, not
+      the general one). Investigated splitting into per-recipe buttons
+      (FreeCAD has ~13) first — scoped down to Spur-only for now: only
+      `involuteExternal` has any backend (SCHEMA/Rust/worker); Timing GT/HTD,
+      Timing-T, Lantern, Worm are math-only (`worker/src/kernel/gear/
+      *Math.cpp`, G0) with `GearOp.cpp` actively rejecting any other recipe
+      string. Each becomes its own future WP (tool id + backend) that lands in
+      the SAME menu automatically once built — no more shell edits needed.
+      - **No new registry** — `platform.tools` already carries every
+        registered tool. Two new optional `ToolDefinition`/`ToolPresentation`
+        fields (`toolbarHidden`, `generatorsMenu`), threaded the same way
+        `flyout` already is. Precedent for "registered but toolbar-invisible"
+        already existed (`FloatingToolbar.tsx`'s `hiddenToolGroups` workspace
+        filter) — this generalizes that shape into a real field instead of a
+        runtime-only override.
+      - `GeneratorsMenu.tsx` (new, `src/features/shell/`) mirrors
+        `WorkspaceSwitcher.tsx`'s registry-projection pattern exactly (not
+        `FileMenu.tsx`'s hardcoded rows) — reads `platform.tools` filtered to
+        `generatorsMenu === true`, activates via `platform.toolHost.activate`
+        (identical path a toolbar click takes, never a hand-rolled
+        `setTool`), hides itself entirely when nothing has opted in. Zero
+        modeling-specific imports — a future non-gear generator from a
+        different module appears with no edit to this file.
+      - `⇧G` and ⌘K discoverability are UNCHANGED (per explicit product
+        decision) — `toolbarHidden` only removes the `FloatingToolbar` row;
+        the tool stays fully registered.
+      - `MODEL_TOOLS_CONTRACT` (`toolbarContract.ts`) lost the Gear row;
+        `registryToolbar.ts`'s golden PROBE gained a `toolbarHidden` skip so
+        it keeps reflecting production, and `ids.test.ts`'s "toolbar contract
+        == id map" assertion was corrected to "toolbar contract == id map
+        MINUS toolbarHidden entries" — a real invariant fix, not a probe
+        edit, since the id map (shortcut/palette reachability) and the
+        toolbar's visible set are now deliberately different sets.
+      - New `GeneratorsMenu.test.tsx`, boots the REAL modeling module
+        (`renderWithPlatform`) so Gear's own flag is what proves the row
+        exists, not a test fixture.
+      - Verified live via `playwright-cli`: Gear icon gone from the model
+        toolbar; "Generators ▾" between File and Design; opens to a "Gear ⇧G"
+        row; click arms the SAME facePick/ground-plane gesture as before;
+        `⇧G` still arms it directly.
+      - Gate: `tsc` clean, `bun run test` 272 files / 4459 (up from 271/4456),
+        hex gate empty.
+- [x] **Real gear glyph, added post-h.4 (user flagged the borrowed icon).**
+      `icons/authored.ts gear` — an 8-tooth rim (primary) + accent axle bore,
+      same "one verb gets the accent" grammar as `hole`'s drilling arrow.
+      Replaces the `circularPattern` borrow in `tools.ts`, `toolbarContract.ts`.
+- [ ] **G1-g.1 `src-tauri/tests/gear_ops.rs`** (real sidecar): preview == commit,
+      save/reopen identity, param re-edit incl. a tooth-count topology change,
+      placement rebind + the 1e-3 mm fence, cross-body ref isolation.
+- [ ] **G1-g.2 `protocol/fixtures/gear_*.ndjson`** — `execute_plan` + `preview_op`
+      + error paths, against BOTH the worker and the stub.
+- [ ] **G1-g.3 `e2e/gear.spec.ts`** (mock lane): entry → pick → chip → commit →
+      history row → re-edit seed. Geometry assertions stay in the layers below.
+- [ ] **G1-h.5** re-run the full four-suite gate + the cross-check harness.
+
+Owed but NOT blocking G1: a real gear icon (see the icon-debt note above), and
+`Fillet2d` with geometric site identification.
+
+### Deliberate scope limits, each refused BY NAME rather than silently ignored
+
+- `helixAngleDeg` ≠ 0 and `doubleHelix` are **UNSUPPORTED** in this version
+  (they need the Frenet sweep infrastructure). The fields exist and round-trip so
+  the payload will not change shape later; the FSM does not offer them as
+  controls at all, because a control that always fails is worse than none.
+- Fillets (`headFillet`/`rootFillet`) are **not implemented**. `Fillet2d` with
+  geometric site identification is still owed; the plan scheduled it here, and it
+  is deferred rather than done badly — upstream's index-based insertion is
+  exactly the fragility this port refuses to carry.
+
+## GEAR GENERATOR — G0 gear math core (2026-08-14) — GATE PASSED
+
+Plan: `~/.claude/plans/enumerated-nibbling-crescent.md`. Port of
+`freecad.gears` v1.3.0 (GPL-3.0) as a native `Gear` operation. **A separate
+feature track, deliberately NOT jumping the T0–T2 queue above** — G0 is
+worker-only, adds no Rust/frontend/schema surface, and nothing in it blocks or
+is blocked by the data-integrity work.
+
+Approved scope (user decisions taken before G0): op named **`Gear`**, not
+`Generator` — `ComponentSourceRef::Generator` already exists in `record.rs` and
+the collision would be permanent. Recipes in scope: involute external
+(spur/helical), timing GT/HTD, timing-T, lantern, worm ZA. Out: racks, internal,
+cycloid, bevel, crown, hypocycloid cam. Bore-face referenceability is IN (G1).
+
+**Three corrections to the source specification**, verified against live code —
+each would have been a real defect if built as written:
+- **TierA/TierB were inverted.** The spec has gears publishing at `TierA` for
+  "deep validation from day one". `TierA` is the LIGHT tier; `TierB` is the one
+  running `BRepAlgoAPI_Check` self-interference (`ShapeAudit.cpp:220-274`), and
+  Fillet/Chamfer already use `TierB`. G1 must use `TierB`.
+- **`crates/onecad-core/…` is not a path in this repo**; Rust lives under
+  `src-tauri/crates/…`.
+- **`§7.3` is not a reservable slot** — it is one section holding every op's
+  payload as a `####` subsection. A new op appends, it does not claim a number.
+
+Also: ordinal child-body minting (`body_<opId>:<k>`) already exists and is
+general (`OpCommon.h` `ranked_solids`/`publish_boolean_result`), so a future
+multi-body recipe reuses it rather than building it; and the element map is
+mint-on-demand (`ElementMapPartition.h:11-13` — "entries exist ONLY for elements
+referenced by an op input or minted on demand"), so "teeth are not referenceable"
+costs one guard at the `AcquireElementIds` promotion site, not new infrastructure.
+
+### Landed
+
+Five pure-C++ samplers under `worker/src/kernel/gear/` (namespace
+`onecad::kernel::gear`), **no OCCT by construction** — the `PolygonFill`
+precedent. `GearTypes.h` carries the shared 2D vocabulary and the
+line/arc/interpolated segment kinds the G2 wire builder will consume.
+
+- [x] `InvoluteMath` — factors, involute + trochoid-undercut sampling, tooth assembly
+- [x] `TimingMath` — GT/HTD, the 7-row normative section table, 4/6-arc branches
+- [x] `TimingTMath` — trapezoidal T profile
+- [x] `LanternMath` — offset-involute (parallel curve) flank
+- [x] `WormMath` — ZA trapezoidal thread wrapped to the cylinder
+- [x] `scripts/gear-crosscheck/` — the §10.1 leg-2 harness (see its README)
+
+### Two improvements on upstream, both deliberate and documented
+
+- **Timing-T flank endpoints are closed form.** Upstream runs
+  `scipy.optimize.minimize` on a squared distance whose true answer is a
+  line∩circle intersection. The objective is flat at its optimum so it stops
+  early — **up to 5.1e-6 mm of measured error**. Solved exactly here; root
+  selection is justified geometrically, not fitted.
+- **The lantern root solve is bracketed.** Upstream's objective has a SPURIOUS
+  ROOT AT φ=0 for every parameter set, and upstream calls `scipy.optimize.root`
+  from a heuristic guess with nothing preventing it landing there. Differentiating
+  in closed form gives `g'(φ) = 2(1−cos φ)(r₀φ − r_r)`, which proves the
+  meaningful root is unique on `(r_r/r₀, ∞)`; the solve brackets there, so the
+  degenerate root is excluded by construction rather than by luck.
+
+### The finding that justifies the harness existing
+
+**The reference's undercut trim branch is unreachable.** `InvoluteTooth.points`
+computes `s = trimfunc(...)` then guards on `isinstance(s, ndarray)` — but
+`trimfunc` returns a Python *list*, so the guard is never true and the trimmed
+result is discarded every time. Every undercut gear freecad.gears has ever
+produced silently took the `nearestpts` fallback. This port first implemented
+the *intended* behaviour and disagreed with the reference on **224 of 2673**
+swept cases. Now matches reachable behaviour, documented in `InvoluteMath.h`
+with the reasoning for choosing parity over the "better" geometry.
+**Reading the source did not catch this. The sweep did.**
+
+### Gate evidence (measured 2026-08-14)
+
+- **Cross-check: `cases=2697 compared=2673 refused=24 mismatched=0`** — full
+  agreement with the reference across the sweep.
+- All 24 refusals reviewed via `--show-refusals`: one condition
+  (`module=2, diameter=5, clearance=0.25` → worm root radius exactly 0), correctly
+  fail-closed where upstream emits a degenerate shape.
+- **`ctest --test-dir worker/build` 129/129**, up from 119; five new gear tests.
+- Every sampler compiles standalone under `g++ -Wall -Wextra`, zero warnings.
+- **Mutation-proved**, not just green: ~30 mutants across the five files, all
+  killed. Three real gaps were found and closed this way — `head` was inert in
+  every involute oracle case, worm arc interior points were checked for radius
+  but not angular position, and one surviving mutant was measured (≤3.6e-12 mm)
+  and recorded in-code as genuinely equivalent rather than papered over.
+
+### Defect found in the repo's existing test convention
+
+`test_polygon_fill.cpp`'s "exit code == failure count" idiom is **unsound for
+large failure counts**: POSIX truncates exit status to 8 bits, so a run failing
+exactly 256 (or 512, …) assertions exits `0` and reports PASS. Hit for real —
+a mutant printing hundreds of FAIL lines exited clean. All five gear tests clamp
+their status. **`test_polygon_fill.cpp` still has the raw idiom**; it is
+currently safe only because its assertion count is small. Worth fixing when that
+file is next touched.
+
+### Owed before G1
+
+Nothing blocking. Not yet done, and out of G0's scope by plan: no schema, Rust,
+worker-op or frontend surface exists yet — G0 is math only. `docs/` is untouched.
+
 ## MERGE — `OneCAD-Component-Library` × `master` (2026-08-14) — GATE PASSED
 
 Two programs ran in parallel from merge-base `39f5839` (2026-08-13): master's

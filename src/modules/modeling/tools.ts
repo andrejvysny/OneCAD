@@ -35,6 +35,18 @@ interface ToolPresentation {
    * others live in its dropdown. Absent ⇒ the tool owns its own button.
    */
   readonly family?: string;
+  /**
+   * Absent from the floating toolbar's visible row — still registered (so
+   * `⌘K`/its shortcut keep working, `FloatingToolbar.tsx`'s own
+   * `hiddenToolGroups` precedent for "registered but not toolbar real estate"
+   * already establishes this is a legitimate split), just presented somewhere
+   * else instead. Set alongside {@link ToolPresentation.generatorsMenu} today;
+   * a future non-generator use is free to set this alone.
+   */
+  readonly toolbarHidden?: boolean;
+  /** Presented as a row in the title-bar "Generators" menu (`GeneratorsMenu.tsx`)
+   *  instead of, or in addition to, the floating toolbar. */
+  readonly generatorsMenu?: boolean;
 }
 
 /**
@@ -61,6 +73,15 @@ export const MODEL_TOOL_DESCRIPTORS: readonly ModelToolDescriptor[] = [
   { tool: "revolve", scope: "model", icon: "revolve", label: "Revolve", shortcut: "R", group: "model.solid", priority: 210 },
   { tool: "fillet", scope: "model", icon: "fillet", label: "Fillet / Chamfer", shortcut: "F", group: "model.solid", priority: 220 },
   { tool: "boolean", scope: "model", icon: "boolean", label: "Combine", shortcut: "B", group: "model.solid", priority: 230 },
+  // A gear MINTS a body, but it is a GENERATED-SHAPE tool, not a general solid
+  // op — it lives in the title-bar "Generators" menu (`GeneratorsMenu.tsx`),
+  // not the floating toolbar (`toolbarHidden`), and registers itself there via
+  // `generatorsMenu`. Own glyph (`icons/authored.ts gear`) — was
+  // `circularPattern` (borrowed for its radial-repetition reading) until then.
+  // `group`/`priority` are kept (still needed for the registry/ids machinery
+  // and for a future toolbar re-enable) even though they no longer place a
+  // visible button.
+  { tool: "gear", scope: "model", icon: "gear", label: "Gear", shortcut: "⇧G", group: "model.solid", priority: 240, toolbarHidden: true, generatorsMenu: true },
 
   // Body-level modifiers. `pushpull` is the live registry glyph for "move this
   // face"; no new icon was minted for OffsetFace.

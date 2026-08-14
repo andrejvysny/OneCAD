@@ -24,6 +24,7 @@ export const ModelingModelTools = {
   revolve: "onecad.modeling.tool.model.revolve",
   fillet: "onecad.modeling.tool.model.fillet",
   boolean: "onecad.modeling.tool.model.boolean",
+  gear: "onecad.modeling.tool.model.gear",
   shell: "onecad.modeling.tool.model.shell",
   offsetFace: "onecad.modeling.tool.model.offsetFace",
   hole: "onecad.modeling.tool.model.hole",
