@@ -490,8 +490,15 @@ jobs:
           ONECAD_WORKER_BUILD_DIR: ${{ github.workspace }}/worker/build-tauri-e2e
         run: scripts/build-worker.sh Release
       - name: Build seed Tauri test artifact
+        # NO `--` before the flags. `tauri build` is `[OPTIONS] [ARGS]...`, and
+        # everything after `--` is forwarded to `cargo build` — which accepts
+        # `--features` and `--config` (so they looked fine) and then rejects
+        # `--bundles` with "unexpected argument '--bundles' found". All three are
+        # tauri's OWN options; the separator was making cargo parse them. This lane
+        # had never executed on any machine, which is why a broken invocation
+        # survived here.
         run: >-
-          bun run tauri build --
+          bun run tauri build
           --features tauri-e2e
           --config src-tauri/tauri.e2e.conf.json
           --bundles app
@@ -515,8 +522,9 @@ jobs:
             await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
           ' "$staged" src-tauri/binaries/onecad-worker-manifest.json
       - name: Build lockstep Tauri test artifact
+        # Same fix as the seed build above — see the comment there.
         run: >-
-          bun run tauri build --
+          bun run tauri build
           --features tauri-e2e
           --config src-tauri/tauri.e2e.conf.json
           --bundles app
