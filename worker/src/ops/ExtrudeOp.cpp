@@ -21,7 +21,6 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAbs_SurfaceType.hxx>
-#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
@@ -32,7 +31,6 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Dir.hxx>
-#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -147,34 +145,40 @@ double through_all_distance(double blind_sign_source, const gp_Pnt& origin, cons
     return sign * kThroughAllFallback;
 }
 
-// Smallest positive distance along `dir` at which the PROFILE actually reaches a
-// bounded face of `body`. The legacy port (RegenerationEngine.cpp:223-241) took the
-// nearest ray-PLANE distance from one origin, which could bind a face plane the
-// profile never crosses (review defect: ToNext onto a laterally offset pillar).
-// Rays are cast from every profile wire vertex plus the area centroid against the
-// body's bounded faces; -1 if nothing ahead is ever hit.
-double to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir, const TopoDS_Shape& body) {
-    std::vector<gp_Pnt> samples;
-    for (TopExp_Explorer exp(profile, TopAbs_VERTEX); exp.More(); exp.Next()) {
-        samples.push_back(BRep_Tool::Pnt(TopoDS::Vertex(exp.Current())));
-    }
+// Smallest positive distance along `dir` at which ANY part of the swept profile
+// reaches the bounded target body. This is a whole-profile boolean probe, not a
+// finite set of rays: a tiny interior ledge must be found even when no profile
+// vertex or centroid lies above it.
+double to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir,
+                        const TopoDS_Shape& body) {
     GProp_GProps props;
     BRepGProp::SurfaceProperties(profile, props);
-    samples.push_back(props.CentreOfMass());
+    const gp_Pnt origin = props.CentreOfMass();
+    const double sweep_distance = through_all_distance(1.0, origin, dir, &body);
+    if (!std::isfinite(sweep_distance) || sweep_distance <= kMinValue) return -1.0;
 
-    IntCurvesFace_ShapeIntersector inter;
-    inter.Load(body, 1e-7);
-    double best = -1.0;
-    for (const gp_Pnt& p : samples) {
-        // Start past 1e-4 so a profile lying ON a body face skips its host face.
-        inter.Perform(gp_Lin(p, dir), 1e-4, RealLast());
-        if (!inter.IsDone()) continue;
-        for (int i = 1; i <= inter.NbPnt(); ++i) {
-            const double t = inter.WParameter(i);
-            if (t > 1e-4 && (best < 0.0 || t < best)) best = t;
+    try {
+        BRepPrimAPI_MakePrism sweep(profile, gp_Vec(dir) * sweep_distance,
+                                    Standard_True);
+        if (sweep.Shape().IsNull()) return -1.0;
+        BRepAlgoAPI_Common common(sweep.Shape(), body);
+        common.SetRunParallel(Standard_False);
+        common.Build();
+        if (!common.IsDone() || common.HasErrors() || common.Shape().IsNull())
+            return -1.0;
+
+        double best = -1.0;
+        for (TopExp_Explorer exp(common.Shape(), TopAbs_VERTEX); exp.More();
+             exp.Next()) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(exp.Current()));
+            const double distance = gp_Vec(origin, point).Dot(gp_Vec(dir));
+            if (distance > 1.0e-4 && (best < 0.0 || distance < best))
+                best = distance;
         }
+        return best;
+    } catch (const Standard_Failure&) {
+        return -1.0;
     }
-    return best;
 }
 
 TopoDS_Shape make_prism(const TopoDS_Shape& profile, const gp_Dir& dir, double signed_distance,

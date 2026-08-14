@@ -1085,6 +1085,10 @@ OneCAD-CPP `ExtrudeParams`.
   face. A laterally disjoint, smaller, or holed target is refused. Tilted and
   curved targets are refused until exact variable-height termination is
   implemented; a constant-distance flat cap is never substituted.
+- `ToNext` intersects the target body with the entire forward profile sweep and
+  terminates at the minimum positive projection of that bounded intersection.
+  Finite rays from vertices/centroid are not sufficient evidence: a tiny interior
+  ledge must terminate the feature even when every such sample misses it.
 
 - **Draft is applied completely and measured, or refused — never silently
   degraded.** V1 proves draft semantics only for a single-direction `Blind`
@@ -3106,6 +3110,12 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-14 — §7.3 `Extrude.ToNext` whole-profile termination.** The
+  finite vertex-plus-centroid ray heuristic is replaced by a bounded boolean
+  intersection of the target body with the complete forward profile sweep; the
+  minimum positive projection of the intersection topology is the termination
+  distance. Tiny interior contacts therefore cannot be missed. Payload shape is
+  unchanged.
 - **2026-08-14 — §7.3 Fillet geometric-proof hardening.** Production Fillet
   now uses the same neutral trimmed-domain measurement core as kernelbench:
   builder-history blend/support faces, measured section radius, and measured G1

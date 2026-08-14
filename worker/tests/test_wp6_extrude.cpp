@@ -291,6 +291,43 @@ void test_to_next_skips_missed_nearer_face() {
                    "toNext skip: binds the face the profile reaches (z=8), not the nearer plane");
 }
 
+void test_to_next_finds_a_tiny_interior_first_contact() {
+    const TopoDS_Shape ceiling =
+        BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 8), 10.0, 10.0, 2.0).Shape();
+    // Attached underside boss: first contact z=5 over x∈[-8,-7], y∈[2,3].
+    // Profile corners and centroid all miss it; finite-ray sampling returned z=8.
+    const TopoDS_Shape boss =
+        BRepPrimAPI_MakeBox(gp_Pnt(-8, 2, 5), 1.0, 1.0, 3.0).Shape();
+    BRepAlgoAPI_Fuse fuse(ceiling, boss);
+    fuse.Build();
+    check(fuse.IsDone() && !fuse.Shape().IsNull(),
+          "toNext tiny contact: connected target built");
+
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", fuse.Shape());
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"},
+               {"opId", "ope"},
+               {"params",
+                {{"sketchId", "sk1"},
+                 {"extrudeMode", "ToNext"},
+                 {"booleanMode", "NewBody"},
+                 {"targetBodyId", "body_target"}}}};
+    const ops::OpOutcome outcome = ops::execute_extrude(ctx, op, "ope");
+    check(outcome.status == ops::OpOutcome::Status::Ok,
+          "toNext tiny contact: whole-profile probe succeeds");
+    check(bodies.contains("body_ope"), "toNext tiny contact: body created");
+    if (bodies.contains("body_ope")) {
+        check_near(onecad::session::shape_volume(bodies.get("body_ope")->geom),
+                   500.0, 1.0,
+                   "toNext tiny contact: first swept-region contact is z=5");
+    }
+}
+
 // Draft: a 10×10 profile extruded 10mm with a 10° draft tapers the side faces
 // inward ⇒ volume strictly below the 1000 straight prism.
 void test_draft() {
@@ -377,6 +414,7 @@ int main() {
     test_to_next();
     test_to_next_miss_fails();
     test_to_next_skips_missed_nearer_face();
+    test_to_next_finds_a_tiny_interior_first_contact();
     test_draft();
     test_boolean_target_from_body_ref();
     test_boolean_ignores_face_ref_at_input0();
