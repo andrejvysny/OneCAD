@@ -23,10 +23,7 @@
 #include <GeomAbs_SurfaceType.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
-#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
-#include <TopTools_IndexedMapOfShape.hxx>
-#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -389,8 +386,22 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
         }
         draft.Build();
         if (draft.IsDone() && !draft.Shape().IsNull()) {
-            TopTools_IndexedMapOfShape result_faces;
-            TopExp::MapShapes(draft.Shape(), TopAbs_FACE, result_faces);
+            std::vector<gp_Dir> result_wall_normals;
+            for (TopExp_Explorer exp(draft.Shape(), TopAbs_FACE); exp.More(); exp.Next()) {
+                gp_Pln candidate_plane;
+                gp_Dir candidate_normal;
+                if (!planar_face_plane_normal(TopoDS::Face(exp.Current()), candidate_plane,
+                                              candidate_normal)) {
+                    continue;
+                }
+                if (std::abs(candidate_normal.Dot(draft_dir)) >
+                    kSideFaceDotThreshold) {
+                    continue;
+                }
+                result_wall_normals.push_back(candidate_normal);
+            }
+
+            std::vector<bool> used(result_wall_normals.size(), false);
             std::size_t measured_faces = 0;
             double maximum_angle_error = 0.0;
             for (const TopoDS_Face& original : eligible_faces) {
@@ -402,46 +413,33 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
                                counts(draft_angle_deg)};
                     return std::nullopt;
                 }
-                const TopTools_ListOfShape& successors = draft.Modified(original);
-                bool measured_successor = false;
-                for (const TopoDS_Shape& successor : successors) {
-                    if (successor.ShapeType() != TopAbs_FACE ||
-                        result_faces.FindIndex(successor) == 0) {
-                        continue;
+                std::size_t best = result_wall_normals.size();
+                double best_error = std::numeric_limits<double>::infinity();
+                for (std::size_t i = 0; i < result_wall_normals.size(); ++i) {
+                    if (used[i]) continue;
+                    const double measured_angle = before_normal.Angle(result_wall_normals[i]);
+                    const double error =
+                        std::abs(measured_angle - std::abs(angle_rad));
+                    if (error < best_error) {
+                        best = i;
+                        best_error = error;
                     }
-                    gp_Pln after_plane;
-                    gp_Dir after_normal;
-                    if (!planar_face_plane_normal(TopoDS::Face(successor), after_plane,
-                                                  after_normal)) {
-                        continue;
-                    }
-                    const double dot = std::clamp(
-                        std::abs(gp_Vec(before_normal).Dot(gp_Vec(after_normal))), 0.0, 1.0);
-                    const double measured_angle = std::acos(dot);
-                    maximum_angle_error =
-                        std::max(maximum_angle_error,
-                                 std::abs(measured_angle - std::abs(angle_rad)));
-                    measured_successor = true;
-                    ++measured_faces;
                 }
-                if (!measured_successor) {
+                if (best == result_wall_normals.size() ||
+                    best_error > kDraftSemanticAngleTolerance) {
+                    nlohmann::json evidence = counts(draft_angle_deg);
+                    evidence["draft"]["measuredFaces"] = measured_faces;
+                    evidence["draft"]["minimumUnmatchedAngleErrorRad"] = best_error;
+                    evidence["draft"]["angleToleranceRad"] =
+                        kDraftSemanticAngleTolerance;
                     failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
-                               "Extrude draft refused: an eligible wall has no measurable successor",
-                               counts(draft_angle_deg)};
+                               "Extrude draft refused: an eligible wall has no successor at the requested angle",
+                               std::move(evidence)};
                     return std::nullopt;
                 }
-            }
-            if (measured_faces < eligible_faces.size() ||
-                maximum_angle_error > kDraftSemanticAngleTolerance) {
-                nlohmann::json evidence = counts(draft_angle_deg);
-                evidence["draft"]["measuredFaces"] = measured_faces;
-                evidence["draft"]["maximumAngleErrorRad"] = maximum_angle_error;
-                evidence["draft"]["angleToleranceRad"] =
-                    kDraftSemanticAngleTolerance;
-                failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
-                           "Extrude draft refused: resulting wall angle does not match the request",
-                           std::move(evidence)};
-                return std::nullopt;
+                used[best] = true;
+                ++measured_faces;
+                maximum_angle_error = std::max(maximum_angle_error, best_error);
             }
             const double before = solid_volume(shape);
             const double after = solid_volume(draft.Shape());

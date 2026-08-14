@@ -65,11 +65,14 @@ TopoDS_Shape face_by_center(const TopoDS_Shape& shape, double cx, double cy, dou
 
 json semantic_face_ref(const std::string& body_id, const std::string& element_id,
                        const TopoDS_Shape& face) {
+    const km::ElementDescriptor descriptor =
+        em::ElementMapPartition::describe(face);
     return {{"primary", {{"bodyId", body_id}, {"elementId", element_id}, {"kind", "face"}}},
             {"intent", {{"kind", "face"},
                          {"descriptor", em::ElementMapPartition::descriptor_to_json(
-                                            em::ElementMapPartition::describe(face))}}},
-            {"anchor", {{"worldPoint", {0.0, 0.0, 0.0}}}}};
+                                            descriptor)}}},
+            {"anchor", {{"worldPoint", {descriptor.center.X(), descriptor.center.Y(),
+                                           descriptor.center.Z()}}}}};
 }
 
 // Sketch params: a w×h rectangle on the XY plane. World map (u,v)->(-v,u,0), so a
