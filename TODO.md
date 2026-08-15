@@ -1179,6 +1179,36 @@ red CI checks. Scope was deliberately bounded — see the deferred list at the e
   51/51 across the touched specs, but under load and without a pre-fix local repro, so
   CI remains the confirmation there.
 
+### CI at `8c00c4d` — two RED jobs, neither caused by this work
+
+Both were investigated rather than assumed. Evidence, not opinion:
+
+- **`linux-kernelbench` — `fillet/foundation:t0` digest mismatch, 8 `valence4-*` cases,
+  `onecad|base|linux-x64` only.** NOT this branch's doing:
+  - The kernelbench fillet path is `benchmark/FilletRun.cpp` → `kernel::fillet::FilletBuilder`.
+    Nothing this branch touched (`ops/{ExtrudeOp,OffsetFaceOp,OpCommon,RevolveOp}`) is
+    reachable from it, and the build enables no LTO/fast-math/`-march=native`, so an
+    additive function in another TU cannot perturb its arithmetic.
+  - **Measured, not argued:** built the worker at `69be0c2` in a detached worktree and ran
+    T0 on this host against the same run at branch HEAD — **0 of 136 normalizedDigests
+    differ.** Two back-to-back local runs at one binary also differ in 0 of 136, so the
+    suite is deterministic and the comparison is meaningful.
+  - CI ran both jobs on the SAME runner (`prx-lxc`) with the SAME `OCCT_PRIMARY_BUILD_ID`
+    (`onecad-occt-8.0.1-b8f597c67781-kp1`), and only the `onecad` backend moved — `raw-occt`
+    is untouched, which also rules out a plain OCCT/toolchain swap.
+  - Remaining suspect is the runner's PERSISTENT incremental build dir
+    (`/home/github-runner/worker-build/8.0.1`): this branch's edits forced TUs to recompile
+    there for the first time in a while. That is a runner-hygiene question.
+    **Do NOT re-record the baseline to go green** — that would disarm the tripwire. Next
+    step is a clean rebuild on `prx-lxc` and a re-run; only if it still differs is a
+    justified re-record correct.
+- **`frontend` — `InspectorPanel.test.tsx > commits an inline value edit as ONE params
+  patch on the stored op`, "expected applyEditCommand to be called at least once".**
+  A pre-existing timing flake: this branch changes **zero** files under `src/`
+  (`git diff --stat 69be0c2..HEAD -- src/` is empty), the test passes 5/5 in isolation and
+  the full suite passes 4462/4462 on a quiet machine. It failed once locally only while the
+  machine was saturated.
+
 **Deferred by decision — open, NOT done:**
 - Production OffsetFace suppress → offset → reblend. The recognizer is finite-sampled
   (9 samples/edge, 5×5 UV/face), so a false positive would destroy user-authored
