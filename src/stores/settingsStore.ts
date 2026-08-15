@@ -151,28 +151,65 @@ export interface SettingsState {
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
 const STORAGE_KEY = "onecad.settings";
 
+/**
+ * The canonical defaults for the two NESTED boolean sections.
+ *
+ * Immutable and exported so `merge` below, the store initializer and the tests
+ * cannot drift apart about what a fresh install believes. A missing key MUST
+ * fall back to the value here, and an explicit `false` in a persisted blob MUST
+ * survive — the two requirements together are why the merge is written as a
+ * per-key coercion instead of a spread.
+ */
+export const SNAP_DEFAULTS: Readonly<SnapSettings> = Object.freeze({
+  grid: true,
+  sketchGuideLines: true,
+  sketchGuidePoints: true,
+  quadrant: true,
+  intersection: true,
+  onCurve: true,
+  dimensionRound: true,
+  polarTracking: true,
+  guidePoints3d: true,
+  distantEdges: false,
+});
+
+export const SHOW_DEFAULTS: Readonly<ShowSettings> = Object.freeze({
+  guidePoints: true,
+  snappingHints: true,
+  liveDimensions: true,
+  constraintChips: true,
+  coincidentBadges: false,
+});
+
+/**
+ * Deep-merge one nested boolean section against its defaults.
+ *
+ * zustand's default `merge` is a SHALLOW spread: a persisted `snapTo` object
+ * REPLACES the defaults wholesale, so a blob written by an older build (or a
+ * hand-edited one, or a partially-written one) silently drops every key it does
+ * not mention — those settings then read `undefined`, which is falsy, so a
+ * missing key turns a snap source OFF instead of leaving it at its default.
+ *
+ * Rules: unknown keys are ignored (they cannot be typed), a non-boolean value
+ * falls back to the default (never coerced — `"false"` is truthy and would flip
+ * a switch the user turned off), and an explicit `false` is preserved.
+ */
+export function mergeBooleanRecord<T extends object>(defaults: Readonly<T>, persisted: unknown): T {
+  const out = { ...defaults } as T;
+  if (persisted === null || typeof persisted !== "object") return out;
+  const src = persisted as Record<string, unknown>;
+  for (const key of Object.keys(defaults) as (keyof T & string)[]) {
+    const v = src[key];
+    if (typeof v === "boolean") out[key] = v as T[keyof T & string];
+  }
+  return out;
+}
+
 export const settingsStore = createStore<SettingsState>()(
   persist(
     (set) => ({
-      snapTo: {
-        grid: true,
-        sketchGuideLines: true,
-        sketchGuidePoints: true,
-        quadrant: true,
-        intersection: true,
-        onCurve: true,
-        dimensionRound: true,
-        polarTracking: true,
-        guidePoints3d: true,
-        distantEdges: false,
-      },
-      show: {
-        guidePoints: true,
-        snappingHints: true,
-        liveDimensions: true,
-        constraintChips: true,
-        coincidentBadges: false,
-      },
+      snapTo: { ...SNAP_DEFAULTS },
+      show: { ...SHOW_DEFAULTS },
       experimentalWebGpu: false,
       navigation: { inputDevice: "auto" },
       displayMode: DEFAULT_RENDER_MODE,
@@ -274,11 +311,22 @@ export const settingsStore = createStore<SettingsState>()(
       // current one. A SAME-version blob can still carry a garbage displayMode,
       // theme, displayUnit or snapRadius (hand-edited localStorage, or a rolled-back build
       // that wrote an id a newer registry no longer has) — coerce them here
-      // too, on every hydration, not just across a version bump. Mirrors
-      // zustand's default shallow-merge shape so nothing else about persist's
-      // merge changes.
+      // too, on every hydration, not just across a version bump.
+      //
+      // The nested sections are DEEP-merged (SNAP P1). zustand's default merge
+      // is a shallow spread, so a persisted `snapTo`/`show` object replaced the
+      // defaults wholesale and every key it omitted read `undefined` — falsy,
+      // which silently turned that snap source or overlay OFF. See
+      // `mergeBooleanRecord`.
       merge: (persisted, current) => {
-        const merged = { ...current, ...(persisted as Partial<SettingsState>) };
+        const blob = (persisted ?? {}) as Partial<SettingsState>;
+        const merged = { ...current, ...blob };
+        merged.snapTo = mergeBooleanRecord<SnapSettings>(SNAP_DEFAULTS, blob.snapTo);
+        merged.show = mergeBooleanRecord<ShowSettings>(SHOW_DEFAULTS, blob.show);
+        merged.navigation = {
+          ...current.navigation,
+          ...(blob.navigation && typeof blob.navigation === "object" ? blob.navigation : {}),
+        };
         merged.displayMode = coerceRenderMode(merged.displayMode);
         merged.theme = coerceTheme(merged.theme);
         merged.displayUnit = coerceLengthUnit(merged.displayUnit);

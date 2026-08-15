@@ -39,12 +39,23 @@ import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sk
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
-import { applySolvedCurves, applySolvedPositions } from "@/ipc/sketchWireMap";
+import { applySketchSolveResult } from "./solveResult";
 import { promoteOne } from "@/ipc/promote";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
-import { buildSnapCache, computeSnap, type SnapCandidateCache, type SnapResult } from "./snapEngine";
-import { emptyLatch, type SnapLatch } from "./snapTypes";
-import { legacyDecisionTrace, projectionFailureTrace, recordSnapTrace } from "./snapTrace";
+import {
+  buildSnapCache,
+  computeSnap,
+  legacySnapDecision,
+  type SnapCandidateCache,
+  type SnapResult,
+} from "./snapEngine";
+import { emptyLatch, type SnapDecision, type SnapLatch } from "./snapTypes";
+import {
+  latestSnapTrace,
+  legacyDecisionTrace,
+  projectionFailureTrace,
+  recordSnapTrace,
+} from "./snapTrace";
 import { SNAP_RADIUS_PX } from "./snapRadius";
 import { inferConstraints, entityPoints } from "./autoConstrain";
 
@@ -233,6 +244,35 @@ export interface SketchControllerDeps {
  * written only by the commit turn itself, so reading it there is what makes it
  * see the segment that actually settled.)
  */
+/**
+ * A pointer sample captured BY VALUE (SNAP P1).
+ *
+ * `pendingMove` used to hold the live `PointerEvent`. A rAF that ran a frame
+ * later then read `.altKey` off an object whose modifier state had already
+ * moved on, and kept the DOM event alive across frames for no reason. Only
+ * these numbers matter to the snap path.
+ */
+interface PendingPointerSample {
+  clientX: number;
+  clientY: number;
+  buttons: number;
+  altKey: boolean;
+}
+
+const samplePointer = (e: PointerEvent): PendingPointerSample => ({
+  clientX: e.clientX,
+  clientY: e.clientY,
+  buttons: e.buttons,
+  altKey: e.altKey,
+});
+
+/** Every accepted intent a commit may reason about: the anchors already placed,
+ *  then the click that committed. Order is placement order. */
+function commitIntents(dims: CommitIntentContext | undefined): readonly AcceptedSnapIntent[] {
+  if (!dims) return [];
+  return dims.clickIntent ? [...dims.priorAnchorIntents, dims.clickIntent] : dims.priorAnchorIntents;
+}
+
 interface DimCommitContext {
   toolId: string;
   /** Gesture anchors BEFORE the committing click (they identify the phase and
@@ -245,6 +285,37 @@ interface DimCommitContext {
   arcMode?: boolean;
 }
 
+/**
+ * The snap decision a click ACCEPTED, frozen with everything that decided it
+ * (SNAP §5.8).
+ *
+ * The queued commit turn must not re-read `this.altHeld`, `this.lastSnap` or the
+ * live settings: a fast click burst settles each commit one turn later, by which
+ * time those fields describe a LATER pointer state. Alt released between the
+ * click and its queued turn used to give that click normal inference; an origin
+ * snap from a LATER click used to anchor an EARLIER one.
+ */
+export interface AcceptedSnapIntent {
+  decision: SnapDecision;
+  /** Alt as it was in the click's own synchronous stack. */
+  suppressInference: boolean;
+  settingsRevision: number;
+  interactionEpoch: number;
+}
+
+/**
+ * `DimCommitContext` plus the placement provenance of the gesture.
+ *
+ * `priorAnchorIntents` are the intents of the anchors already placed (the line
+ * chain's start, the rectangle's first corner…); `clickIntent` is the one the
+ * committing click just accepted. Together they are the ONLY evidence the
+ * commit path may use to decide what to persist.
+ */
+interface CommitIntentContext extends DimCommitContext {
+  priorAnchorIntents: readonly AcceptedSnapIntent[];
+  clickIntent: AcceptedSnapIntent | null;
+}
+
 export class SketchController {
   // Set FIRST in dispose(); every rAF callback + queued write-back bails on it so a
   // late frame / settled RPC never touches a torn-down controller.
@@ -252,12 +323,20 @@ export class SketchController {
   private machine: ToolMachine | null = null;
   private machineState: ToolState | null = null;
   private lastSnap: SnapResult | null = null;
-  // Coordinates the cursor actually SNAPPED to the origin at, since the last
-  // commit (P1 audit: `originAccepted` used to be one settings-boolean, so the
-  // origin anchor picked "the first new point found near (0,0)" — a coordinate
-  // guess, not evidence the user snapped there. Consumed and cleared by
-  // `commitNow`, so it only ever carries this gesture's own points).
-  private originSnapPoints: Array<[number, number]> = [];
+  /**
+   * The accepted intents of the anchors this gesture has already PLACED
+   * (SNAP P1) — the replacement for `originSnapPoints`.
+   *
+   * That array carried bare coordinates and lived across commits, so a queued
+   * batch could consume an origin snap that belonged to a later click. These
+   * are per-anchor, immutable, and handed to the commit BY VALUE.
+   */
+  private anchorIntents: AcceptedSnapIntent[] = [];
+  /** The most recent accepted intent (hover or click), for the click to freeze. */
+  private lastIntent: AcceptedSnapIntent | null = null;
+  /** Bumped whenever a snap-relevant preference changes; frozen into an intent
+   *  so a commit can tell which policy was in force when the click happened. */
+  private settingsRevision = 0;
   private altHeld = false;
   // Drag-to-arc (SP-4 W3): an LMB drag off the last chain anchor PROMOTED the line
   // tool into tangent-arc mode, and the release commits the arc instead of being
@@ -328,7 +407,10 @@ export class SketchController {
   private downY = 0;
   private downButton = -1;
   private moved = false;
-  private pendingMove: PointerEvent | null = null;
+  /** VALUES, never the live `PointerEvent` (SNAP P1): a retained event keeps a
+   *  DOM object alive across frames and reads modifier state that has since
+   *  changed — the queued frame must see the pointer as it was when sampled. */
+  private pendingMove: PendingPointerSample | null = null;
   private moveScheduled = false;
   // Idle-hover hit-test (select tool): rAF-coalesced so a fast mouse only raycasts
   // once per frame (P2). Carries the latest client point; the flag gates scheduling.
@@ -409,6 +491,12 @@ export class SketchController {
     window.addEventListener("pointercancel", this.onWindowPointerCancel);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
+    // STALE FEEDBACK (SNAP P1): the cursor leaving the viewport — over a floating
+    // panel, or off the window entirely — used to leave the last snap marker,
+    // hint chip and rubber-band frozen on screen advertising a placement the
+    // pointer is no longer anywhere near.
+    c.addEventListener("pointerleave", this.onPointerLeave);
+    window.addEventListener("blur", this.onWindowBlur);
 
     // React to mode + tool changes.
     let lastMode = toolStore.getState().mode;
@@ -424,6 +512,21 @@ export class SketchController {
           lastTool = s.sketchTool;
           this.selectMachine(s.sketchTool);
         }
+      }),
+    );
+
+    // A snap-SOURCE change re-poses the whole candidate field, so the retained
+    // target may no longer exist. Bump the epoch rather than letting a latched
+    // candidate from a now-disabled source survive (SNAP §5.6 reset list).
+    let lastSnapTo = settingsStore.getState().snapTo;
+    let lastSnapRadius = settingsStore.getState().snapRadius;
+    this.unsubs.push(
+      settingsStore.subscribe((s) => {
+        if (s.snapTo === lastSnapTo && s.snapRadius === lastSnapRadius) return;
+        lastSnapTo = s.snapTo;
+        lastSnapRadius = s.snapRadius;
+        this.settingsRevision++;
+        this.bumpInteraction("settings");
       }),
     );
 
@@ -970,7 +1073,7 @@ export class SketchController {
     this.machine = null;
     this.machineState = null;
     this.lastSnap = null;
-    this.originSnapPoints = [];
+    this.bumpInteraction("sessionTeardown");
     this.arcDragging = false;
     this.clearLiveDimGesture();
     this.snapCache = null;
@@ -1068,6 +1171,7 @@ export class SketchController {
     // A tool change is a new gesture: nothing typed carries over, and the
     // previous tool's last segment is not this one's angle reference.
     this.clearLiveDimGesture();
+    this.bumpInteraction("toolChange");
     this.dimensionActive = tool === "dimension";
     this.selectActive = tool === "select";
     this.trimActive = tool === "trim";
@@ -1363,13 +1467,73 @@ export class SketchController {
     return result;
   }
 
-  /** Record the winning snap for this pointer event, AND — when it actually
-   *  landed on the origin — its coordinate, so the next commit can anchor the
-   *  exact point the user snapped rather than guessing by proximity. */
-  private noteSnap(snap: SnapResult): void {
+  /**
+   * Record the accepted placement for this pointer sample, freezing everything
+   * that decided it into an immutable {@link AcceptedSnapIntent}.
+   *
+   * Alt and the settings revision are read HERE — in the event's own
+   * synchronous stack — precisely so the queued commit turn cannot read a later
+   * value (SNAP §5.8).
+   */
+  private noteSnap(snap: SnapResult, raw?: Point2): void {
     this.lastSnap = snap;
-    if (snap.kind === "origin") this.originSnapPoints.push([snap.point.x, snap.point.y]);
+    this.lastIntent = {
+      decision: legacySnapDecision(snap, raw ?? snap.point, latestSnapTrace()?.traceId ?? 0),
+      suppressInference: this.altHeld,
+      settingsRevision: this.settingsRevision,
+      interactionEpoch: this.interactionEpoch,
+    };
   }
+
+  /**
+   * Invalidate every queued pointer frame and drop the retained snap target.
+   *
+   * Called whenever the MEANING of an in-flight frame changes: a click landed,
+   * the tool or gesture phase changed, the session switched, Alt went up or
+   * down, a snap source was toggled, the pointer left, or the window blurred.
+   * The `why` is trace-only.
+   */
+  private bumpInteraction(why: string): void {
+    this.interactionEpoch++;
+    this.pendingMove = null;
+    this.snapLatch = emptyLatch();
+    logDebug("snap", `latch reset: ${why}`, { epoch: this.interactionEpoch, why });
+  }
+
+  /**
+   * Drop the TRANSIENT snap feedback — marker, guides, hint chip — without
+   * ending an armed multi-click gesture.
+   *
+   * The distinction is deliberate: a pointer that wanders over a floating panel
+   * has not cancelled the polyline the user is halfway through, so the anchors,
+   * the machine state and the live-dimension chips all survive. Only the
+   * feedback that claims "your click will land HERE" goes away.
+   */
+  private clearTransientSnapFeedback(): void {
+    this.lastSnap = null;
+    this.lastIntent = null;
+    // No explicit `invalidate()`: `setSketchSnap(null, …)` hides the indicator,
+    // which schedules a frame ITSELF and only when something was actually
+    // visible. Adding one here would repaint on every idle pointerleave, which
+    // the on-demand render contract forbids (viewport README).
+    this.deps.engine.setSketchSnap(null, false);
+  }
+
+  private onPointerLeave = (): void => {
+    if (!this.machine && !this.dimensionActive) return;
+    this.bumpInteraction("pointerleave");
+    this.clearTransientSnapFeedback();
+  };
+
+  private onWindowBlur = (): void => {
+    if (!this.machine && !this.dimensionActive) return;
+    // Alt is released outside the window on some platforms and the keyup never
+    // arrives — a blurred window must not leave the sketch permanently
+    // Alt-suppressed.
+    this.altHeld = false;
+    this.bumpInteraction("blur");
+    this.clearTransientSnapFeedback();
+  };
 
   /** Where the polar fan is centred: the chain's LAST placed anchor, or null
    *  when no gesture is in progress — which makes the whole tier inert, so an
@@ -1451,18 +1615,31 @@ export class SketchController {
     }
     if (!this.machine && !this.dimensionActive) return;
     this.maybeStartArcDrag(e);
-    this.pendingMove = e;
+    this.pendingMove = samplePointer(e);
     if (e.buttons !== 0 && this.downButton === 0) this.moved = true;
     if (this.moveScheduled) return;
     this.moveScheduled = true;
+    // FENCED (SNAP P1): a frame scheduled before a click, a tool change or a
+    // session switch describes a phase that no longer exists. Publishing its
+    // preview/snap would overwrite the state the newer event just established.
+    const epoch = this.interactionEpoch;
     requestAnimationFrame(() => {
       if (this.disposed) return;
       this.moveScheduled = false;
+      if (epoch !== this.interactionEpoch) {
+        this.pendingMove = null;
+        return;
+      }
       const ev = this.pendingMove;
       this.pendingMove = null;
       if (!ev) return;
       const snap = this.snapAt(ev.clientX, ev.clientY);
-      if (!snap) return;
+      if (!snap) {
+        // The cursor left the plane (grazing / behind the camera): drop the
+        // stale marker rather than leaving it advertising the last good point.
+        this.clearTransientSnapFeedback();
+        return;
+      }
       this.noteSnap(snap);
       // A live-dim chip set already says everything the hint label would —
       // showing both lets the snap hint visually collide with the chips it
@@ -1500,7 +1677,10 @@ export class SketchController {
    *  successful commit; this also covers the degenerate click it ignored). */
   private commitArcDrag(e: PointerEvent): void {
     if (!this.machine || !this.machineState) return;
-    const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
+    this.bumpInteraction("arcDragCommit");
+    // Same rule as an ordinary click: recomputed here, never inherited from the
+    // last pointer sample (SNAP §7.3).
+    const snap = this.snapAt(e.clientX, e.clientY, "click");
     if (!snap) return;
     this.noteSnap(snap);
     const dims = this.dimCommitContext();
@@ -1585,11 +1765,17 @@ export class SketchController {
       return;
     }
     if (!this.machine || !this.machineState) return;
-    const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
+    // The click OWNS this frame: drop any queued move and invalidate it before
+    // the decision is taken, so a rAF sampled at the previous position cannot
+    // publish a preview over the phase this click is about to create.
+    this.bumpInteraction("click");
+    // Recomputed for THIS click's own coordinates. NO `?? this.lastSnap`
+    // fallback (SNAP §7.3): a projection failure makes the click inert, because
+    // committing at the previous pointer position is a placement the user never
+    // made — and the fallback also carried the previous point's snap KIND into
+    // this point's rounding decision.
+    const snap = this.snapAt(e.clientX, e.clientY, "click");
     if (!snap) return;
-    // The CLICK's own snap is the last winning one for `dimQuantumNow` below: a
-    // move rAF may never have run (a tap, or a click in the same frame), and a
-    // stale kind from the previous position would decide this point's rounding.
     this.noteSnap(snap);
     // Captured BEFORE the step consumes the anchors / the commit clears the locks.
     const dims = this.dimCommitContext();
@@ -1606,14 +1792,17 @@ export class SketchController {
     this.closeLiveDims();
   }
 
-  /** The live-dimension facts of the gesture as it stands RIGHT NOW — see
-   *  {@link DimCommitContext} for why this is captured rather than read later. */
-  private dimCommitContext(): DimCommitContext | null {
+  /** The live-dimension facts AND the placement provenance of the gesture as it
+   *  stands RIGHT NOW — see {@link DimCommitContext} and
+   *  {@link AcceptedSnapIntent} for why both are captured rather than read later. */
+  private dimCommitContext(): CommitIntentContext | null {
     if (!this.machine || !this.machineState) return null;
     return {
       toolId: this.machine.id,
       anchors: [...this.machineState.anchors],
       locks: { ...this.liveDim.locks },
+      priorAnchorIntents: [...this.anchorIntents],
+      clickIntent: this.lastIntent,
       ...(this.machineState.sides !== undefined ? { sides: this.machineState.sides } : {}),
       ...(this.machineState.arcMode ? { arcMode: true } : {}),
     };
@@ -1626,13 +1815,25 @@ export class SketchController {
    * Extracted from `onPointerUp` so the chip's Enter (Wave 3) commits through
    * exactly THIS path rather than a second copy that drifts from it.
    */
-  private applySteppedClick(stepped: ToolStep, dims: DimCommitContext | null): void {
+  private applySteppedClick(stepped: ToolStep, dims: CommitIntentContext | null): void {
     this.machineState = stepped.state;
     this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
     const committed = stepped.committed ?? [];
     if (committed.length > 0) {
       void this.commit(this.decorate(committed), stepped.committedConstraints, dims ?? undefined);
     }
+    /*
+     * ANCHOR INTENT LIFETIME (SNAP P1). The click's own intent is already
+     * frozen inside `dims`; what remains is what the NEXT step may still use:
+     *   - gesture finished     ⇒ nothing carries over;
+     *   - the click committed  ⇒ its point becomes the next leg's start anchor,
+     *                            so its intent — and only its intent — carries;
+     *   - the click only armed ⇒ it joins the anchors already placed.
+     */
+    const clickIntent = dims?.clickIntent ?? null;
+    if (stepped.done) this.anchorIntents = [];
+    else if (committed.length > 0) this.anchorIntents = clickIntent ? [clickIntent] : [];
+    else if (clickIntent) this.anchorIntents.push(clickIntent);
     if (stepped.done) {
       this.deps.engine.setSketchGhost(null, null);
       this.lastChainLineId = null; // a fresh chain has no previous segment
@@ -1892,7 +2093,7 @@ export class SketchController {
   private commit(
     committed: DraftEntity[],
     specs?: ToolConstraintSpec[],
-    dims?: DimCommitContext,
+    dims?: CommitIntentContext,
   ): Promise<void> {
     return enqueueSketchMutation(() => this.commitNow(committed, specs, dims));
   }
@@ -1900,7 +2101,7 @@ export class SketchController {
   private async commitNow(
     committed: DraftEntity[],
     specs?: ToolConstraintSpec[],
-    dims?: DimCommitContext,
+    dims?: CommitIntentContext,
   ): Promise<void> {
     if (this.disposed) return;
     const gen = sketchStore.getState().sessionGeneration;
@@ -1926,7 +2127,7 @@ export class SketchController {
     // solved positions back into the geometry (backend point UUIDs were already
     // reverse-mapped to `entityId.Position` keys by the client). No-op when the
     // solve returned no movement (identity upsert) — same array reference.
-    const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
+    const solvedEntities = applySketchSolveResult(entities, result);
 
     const next: SketchSession = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
     sketchStore.getState().setSession(next);
@@ -1959,16 +2160,25 @@ export class SketchController {
     session: SketchSession,
     newEntities: SketchEntity[],
     specs: ToolConstraintSpec[] | undefined,
-    dims: DimCommitContext | undefined,
+    dims: CommitIntentContext | undefined,
   ): { toolAuthored: SketchConstraint[]; dimAuthored: SketchConstraint[] } {
     const nextId = (): string => sketchStore.getState().nextConstraintId();
-    // Consume-and-clear: these are the origin snaps observed since the LAST
-    // commit, i.e. exactly the points this batch is about to author (P1 audit
-    // fix — anchoring used to be a settings-boolean gating a coordinate-
-    // proximity guess; now it targets the specific point(s) that actually
-    // snapped there this gesture).
-    const originSnapTargets = this.originSnapPoints;
-    this.originSnapPoints = [];
+    /*
+     * PLACEMENT PROVENANCE (SNAP P1). Everything below comes from the intents
+     * FROZEN at their own clicks — never from `this.altHeld` or a mutable list
+     * that outlives the gesture.
+     *
+     * The old `originSnapPoints` array accumulated bare coordinates across
+     * commits, so a burst of clicks could hand click B's origin snap to click
+     * A's queued batch; and `this.altHeld` read inside this (queued) turn
+     * reported Alt as it is NOW, not as it was when the click happened.
+     */
+    const intents = commitIntents(dims);
+    const originSnapTargets = intents
+      .filter((i) => i.decision.primaryKind === "origin")
+      .map((i) => [i.decision.point.x, i.decision.point.y] as [number, number]);
+    // Alt is the COMMITTING click's, captured in its own synchronous stack.
+    const suppressInference = dims?.clickIntent?.suppressInference ?? false;
     // Tool-authored constraints resolve their index refs against the id-assigned
     // entities and SUPPRESS the intra-batch half of the inference — see
     // `resolveToolConstraints` for why the draw path cannot afford a duplicate.
@@ -1979,7 +2189,7 @@ export class SketchController {
       // rounding); the constraint half was missing, so a deliberately free
       // placement could still come back welded or Horizontal. An empty kind set
       // is the honest encoding: the rules still run, they simply emit nothing.
-      ...(this.altHeld ? { kinds: EMPTY_KINDS } : {}),
+      ...(suppressInference ? { kinds: EMPTY_KINDS } : {}),
       originSnapTargets,
       existingConstraints: session.constraints,
     });
@@ -2298,7 +2508,7 @@ export class SketchController {
     }
     if (this.sessionStale(gen)) return; // exited / superseded during await
 
-    const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
+    const solvedEntities = applySketchSolveResult(entities, result);
     const next: SketchSession = {
       ...session,
       entities: solvedEntities,
@@ -2797,10 +3007,10 @@ export class SketchController {
     if (this.dragPlane) {
       this.dragAccum = { ...this.dragAccum, ...res!.positions };
       this.dragCurves = mergeCurves(this.dragCurves, res!.curves);
-      const moved = applySolvedCurves(
-        applySolvedPositions(this.dragBase, this.dragAccum),
-        this.dragCurves,
-      );
+      const moved = applySketchSolveResult(this.dragBase, {
+        solvedPositions: this.dragAccum,
+        solvedCurves: this.dragCurves,
+      });
       this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus);
     }
   }
@@ -2868,7 +3078,7 @@ export class SketchController {
     // while the worker's copy moved — the silent-revert class SP-2 exists to close.
     const positions = restore ? {} : result?.solvedPositions ?? {};
     const curves = restore ? {} : result?.solvedCurves ?? {};
-    const entities = applySolvedCurves(applySolvedPositions(base, positions), curves);
+    const entities = applySketchSolveResult(base, { solvedPositions: positions, solvedCurves: curves });
     const next: SketchSession = {
       ...session,
       entities,
@@ -3076,7 +3286,12 @@ export class SketchController {
       e.preventDefault();
       return;
     }
-    if (e.key === "Alt") this.altHeld = true;
+    // Alt TRANSITION (SNAP §5.6): pressing it suppresses snapping wholesale, so
+    // every candidate the latch is holding stops existing this instant.
+    if (e.key === "Alt" && !this.altHeld) {
+      this.altHeld = true;
+      this.bumpInteraction("altDown");
+    }
     // Polygon side count: 3-9 belong to the armed polygon machine, so they are
     // claimed HERE (capture phase) before the global keymap ladder ever sees them.
     // ARMED + live dimensions on, a digit is the RADIUS chip's (already claimed
@@ -3177,7 +3392,10 @@ export class SketchController {
   }
 
   private onKeyUp = (e: KeyboardEvent): void => {
-    if (e.key === "Alt") this.altHeld = false;
+    if (e.key === "Alt" && this.altHeld) {
+      this.altHeld = false;
+      this.bumpInteraction("altUp");
+    }
   };
 
   dispose(): void {
@@ -3210,6 +3428,8 @@ export class SketchController {
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);
     c.removeEventListener("pointerup", this.onPointerUp);
+    c.removeEventListener("pointerleave", this.onPointerLeave);
+    window.removeEventListener("blur", this.onWindowBlur);
     window.removeEventListener("pointerup", this.onWindowPointerUp);
     window.removeEventListener("pointercancel", this.onWindowPointerCancel);
     window.removeEventListener("keydown", this.onKeyDown, true);

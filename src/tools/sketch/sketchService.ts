@@ -16,7 +16,8 @@ import { getViewportEngine } from "@/viewport/engineBridge";
 import { documentStore, docSketchStatus } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { sketchStore, type SketchSnapshot } from "@/stores/sketchStore";
-import { applySolvedPositions, isDimensional } from "@/ipc/sketchWireMap";
+import { isDimensional } from "@/ipc/sketchWireMap";
+import { applySketchSolveResult } from "./solveResult";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { isConflictStatus } from "./dimensionTool";
@@ -136,10 +137,16 @@ async function editConstraintValueNow(
   const result = await client.sketchUpsert(session.sketchId, session.entities, constraints);
   if (sessionSuperseded(gen)) return;
 
-  const next = { ...session, constraints, dof: result.dof, status: result.status };
+  // BOTH solve channels: editing a `Radius` moves no point at all, so a
+  // positions-only publication left the rendered circle at its old size while
+  // the backend held the new one (SNAP P1).
+  const solvedEntities = applySketchSolveResult(session.entities, result);
+  const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, next.entities, next.status);
+  // `constraints` passed through: this call CHANGED a constraint value, so the
+  // witness/dimension geometry the viewport draws would otherwise stay stale.
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
 
@@ -218,17 +225,22 @@ async function commitDimensionConstraintNow(
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);
-    getViewportEngine()?.updateSketchSession(reverted.plane, reverted.entities, reverted.status);
+    getViewportEngine()?.updateSketchSession(
+      reverted.plane,
+      reverted.entities,
+      reverted.status,
+      reverted.constraints,
+    );
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
     return { rejected: true, hint }; // rejected: no undo snapshot pushed
   }
 
-  const solvedEntities = applySolvedPositions(session.entities, result.solvedPositions ?? {});
+  const solvedEntities = applySketchSolveResult(session.entities, result);
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
   sketchStore.getState().pushUndoSnapshot(before, { kind: "commitDimension" });
@@ -802,11 +814,11 @@ async function commitReducedSketch(
   }
   if (sessionSuperseded(gen)) return false;
 
-  const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
+  const solvedEntities = applySketchSolveResult(entities, result);
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
   return true;
@@ -884,18 +896,23 @@ async function applyConstraintNow(
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);
-    getViewportEngine()?.updateSketchSession(reverted.plane, reverted.entities, reverted.status);
+    getViewportEngine()?.updateSketchSession(
+      reverted.plane,
+      reverted.entities,
+      reverted.status,
+      reverted.constraints,
+    );
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
     viewportStore.getState().setStatusHint(hint);
     return { rejected: true }; // rejected: no undo snapshot pushed
   }
 
-  const solvedEntities = applySolvedPositions(session.entities, result.solvedPositions ?? {});
+  const solvedEntities = applySketchSolveResult(session.entities, result);
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
   sketchStore.getState().pushUndoSnapshot(before, { kind: "applyConstraint" });
@@ -973,7 +990,7 @@ async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<voi
   }
   if (sessionSuperseded(gen)) return;
 
-  const solvedEntities = applySolvedPositions(snapshot.entities, result.solvedPositions ?? {});
+  const solvedEntities = applySketchSolveResult(snapshot.entities, result);
   const next = {
     ...session,
     entities: solvedEntities,
@@ -983,7 +1000,7 @@ async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<voi
   };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
 }

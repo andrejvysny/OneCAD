@@ -50,6 +50,43 @@ provenance from hover through persisted constraints, and screen-stable rendering
 - Seam: 19 controller test files stub `ViewportEngine`; each gained a `planeScreenMetric` stub
   returning the isotropic 1px-per-unit metric that matches their `planePixelWorld: 1`.
 
+### P1 — reconcile solves and fence interaction intent — DONE
+
+- [x] `src/tools/sketch/solveResult.ts` (NEW) — `applySketchSolveResult` applies BOTH solve
+      channels, positions before curves (an arc's endpoints are rebuilt from the SOLVED centre).
+      Ten publication sites routed through it; four of them previously applied positions only, so a
+      `Radius` edit — whose whole result rides `solvedCurves` — rendered the old radius while the
+      backend held the new one. `solveResult.test.ts` includes a STRUCTURAL guard: no production
+      file outside the helper may import both halves, and neither `SketchController.ts` nor
+      `sketchService.ts` may call them at all.
+- [x] Every constraint-CHANGING publication now passes `next.constraints` to
+      `updateSketchSession` (7 sites in `sketchService.ts`), so witness/dimension geometry cannot
+      stay stale. The drag-preview publication deliberately does not — it changes no constraint.
+- [x] Interaction epoch (`SketchController.interactionEpoch`) + `bumpInteraction(why)`. Every
+      scheduled rAF captures the epoch and drops itself on a mismatch. Reset on: click, arc-drag
+      commit, tool change, session teardown, Alt down, Alt up, pointerleave, window blur, and a
+      snap-source/radius settings change (new `settingsStore` subscription).
+- [x] `pendingMove` holds a `PendingPointerSample` (numbers + Alt) instead of the live
+      `PointerEvent` — a retained event reports modifier state that has since moved on.
+- [x] Stale-feedback cleanup: container `pointerleave` + window `blur` clear the marker, guides and
+      hint WITHOUT ending an armed multi-click gesture. Blur also releases Alt (the keyup never
+      arrives on some platforms). No explicit `invalidate()` — `setSketchSnap(null)` schedules its
+      own frame only when something was visible, per the on-demand render contract.
+- [x] `snapAt(...) ?? this.lastSnap` DELETED from both commit paths (click, arc-drag release). A
+      projection failure now makes the click inert and traces once.
+- [x] Atomic click intent: `AcceptedSnapIntent` + `CommitIntentContext` replace the mutable
+      `originSnapPoints` list and the queued read of `this.altHeld`. Alt and the settings revision
+      are frozen in the click's own synchronous stack; `buildCommitConstraints` derives
+      `originSnapTargets` and `suppressInference` from the frozen intents only.
+      `legacySnapDecision` in `snapEngine.ts` is the documented P1→P2 bridge (deleted in P2).
+- [x] Deep settings hydration: `SNAP_DEFAULTS`/`SHOW_DEFAULTS` + `mergeBooleanRecord`. zustand's
+      default shallow merge let a persisted `snapTo` REPLACE the defaults, so every key an older or
+      partial blob omitted read `undefined` — falsy — silently turning that snap source OFF. A
+      non-boolean value falls back rather than being coerced (`"false"` is truthy).
+- [x] `SnapKind`/`GuideLine` moved to `snapTypes.ts`, re-exported from `snapEngine.ts` so the ~20
+      existing importers are untouched.
+- Gate: `bunx tsc --noEmit` clean · `bun run test` **287 files / 4792 passed / 78 skipped**.
+
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
 Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`

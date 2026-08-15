@@ -42,47 +42,20 @@
 import type { SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { ellipseParams, nearestOnEllipse } from "./ellipseMath";
+import type {
+  GuideLine,
+  SnapCandidate,
+  SnapDecision,
+  SnapKind,
+  SnapSource,
+} from "./snapTypes";
 
-export type SnapKind =
-  | "none"
-  | "grid"
-  /**
-   * The sketch ORIGIN (0,0) — U7.
-   *
-   * Anchoring to it is what removes the two translation degrees
-   * of freedom every other dimension leaves behind; before this tier existed the
-   * origin was indistinguishable from any grid node, which is why "start at the
-   * origin" silently meant nothing (the UX audit's DOF-2 rectangle).
-   */
-  | "origin"
-  | "endpoint"
-  | "midpoint"
-  | "center"
-  | "quadrant"
-  | "intersection"
-  | "onCurve"
-  | "alignH"
-  | "alignV"
-  | "alignHV"
-  | "polar";
-
-/**
- * A dashed guide the indicator draws through the snapped point.
- *
- * The H/V arms are stated as a CONSTANT COORDINATE (vertical ⇒ constant x,
- * horizontal ⇒ constant y) because they are always axis-aligned. `ref` is the
- * reference point that produced the alignment (the other vertex the cursor
- * lined up with) — the indicator draws the guide only between `ref` and the
- * snapped point, not across the whole plane (P2 hardening: a full-plane
- * cross read as excessive even at low opacity). A polar guide is one ray of
- * a fan centred on the gesture's `origin` anchor, carrying that anchor plus
- * a unit direction; the indicator draws it from `origin` to the snapped
- * point only, not symmetrically past the anchor in the unused direction.
+/*
+ * `SnapKind` and `GuideLine` now live in `snapTypes.ts` — the composable model
+ * needs them and must not depend on this module. Re-exported so the ~20
+ * existing importers keep working unchanged.
  */
-export type GuideLine =
-  | { orientation: "vertical"; value: number; ref: Point2 }
-  | { orientation: "horizontal"; value: number; ref: Point2 }
-  | { orientation: "polar"; origin: Point2; dir: Point2 };
+export type { GuideLine, SnapKind } from "./snapTypes";
 
 export interface SnapResult {
   point: Point2;
@@ -749,6 +722,82 @@ export function computeSnap(
   }
 
   return { point: raw, kind: "none", label: null, guides: [], snapped: false };
+}
+
+/**
+ * Wrap a legacy single-winner {@link SnapResult} as a {@link SnapDecision}
+ * carrying exactly one accepted candidate — the P1→P2 BRIDGE.
+ *
+ * P1 needs the decision SHAPE (so the commit path can capture an immutable
+ * intent at click time) before P2 supplies the real composable arbitration.
+ * Encoding the legacy answer honestly means: one candidate, claiming the whole
+ * point, with a zero semantic bias, because this engine did not rank on
+ * distance-plus-bias at all. P2 deletes this function.
+ */
+export function legacySnapDecision(
+  result: SnapResult,
+  raw: Point2,
+  traceId: number,
+): SnapDecision {
+  if (!result.snapped) {
+    return {
+      raw,
+      point: result.point,
+      accepted: [],
+      rejected: [],
+      primaryId: null,
+      primaryKind: "none",
+      label: null,
+      guides: [],
+      snapped: false,
+      traceId,
+    };
+  }
+  const id = `legacy:${result.kind}`;
+  const candidate: SnapCandidate = {
+    id,
+    source: legacySource(result.kind),
+    kind: result.kind,
+    projection: { kind: "point", point: result.point },
+    previewPoint: result.point,
+    claims: ["point"],
+    errorPx: 0,
+    semanticBiasPx: 0,
+    scorePx: 0,
+    label: result.label ?? "",
+    guides: result.guides,
+    refs: [],
+    relationIntents: [],
+  };
+  return {
+    raw,
+    point: result.point,
+    accepted: [candidate],
+    rejected: [],
+    primaryId: id,
+    primaryKind: result.kind,
+    label: result.label,
+    guides: result.guides,
+    snapped: true,
+    traceId,
+  };
+}
+
+function legacySource(kind: SnapKind): SnapSource {
+  switch (kind) {
+    case "onCurve":
+      return "curve";
+    case "alignH":
+    case "alignV":
+    case "alignHV":
+      return "guide";
+    case "polar":
+      return "polar";
+    case "grid":
+      return "grid";
+    default:
+      return "geometryPoint";
+  }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

@@ -6,7 +6,12 @@
  * blob relies entirely on `merge` to recover).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { settingsStore } from "./settingsStore";
+import {
+  mergeBooleanRecord,
+  settingsStore,
+  SNAP_DEFAULTS,
+  SHOW_DEFAULTS,
+} from "./settingsStore";
 import { DEFAULT_THEME } from "@/theme/themes";
 import {
   DEFAULT_SNAP_RADIUS,
@@ -323,5 +328,87 @@ describe("settingsStore coincident badges", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.show.coincidentBadges).toBe(true);
+  });
+});
+
+/*
+ * Deep hydration of the NESTED boolean sections (SNAP P1).
+ *
+ * zustand's default `merge` is a shallow spread: a persisted `snapTo` object
+ * REPLACED the defaults wholesale, so every key the blob omitted read
+ * `undefined` — falsy — and the corresponding snap source came up OFF. That is
+ * silent, permanent, and indistinguishable from the user having turned it off.
+ */
+describe("settingsStore deep hydration", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    localStorage.clear();
+    settingsStore.setState({ snapTo: { ...SNAP_DEFAULTS }, show: { ...SHOW_DEFAULTS } });
+  });
+
+  it("a SAME-version partial snapTo keeps the defaults for absent keys", async () => {
+    seed(10, { snapTo: { grid: false } });
+    await settingsStore.persist.rehydrate();
+    const s = settingsStore.getState();
+    expect(s.snapTo.grid).toBe(false); // the explicit choice survives
+    expect(s.snapTo.quadrant).toBe(true); // …and the rest are not silently off
+    expect(s.snapTo.onCurve).toBe(true);
+    expect(s.snapTo.polarTracking).toBe(true);
+    expect(s.snapTo.dimensionRound).toBe(true);
+  });
+
+  it("a SAME-version partial show keeps the defaults for absent keys", async () => {
+    seed(10, { show: { snappingHints: false } });
+    await settingsStore.persist.rehydrate();
+    const s = settingsStore.getState();
+    expect(s.show.snappingHints).toBe(false);
+    expect(s.show.guidePoints).toBe(true);
+    expect(s.show.liveDimensions).toBe(true);
+    expect(s.show.constraintChips).toBe(true);
+    expect(s.show.coincidentBadges).toBe(false); // an off-by-default stays off
+  });
+
+  it("null / wrong-typed sections fall back to the defaults wholesale", async () => {
+    seed(10, { snapTo: null, show: "nope" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().snapTo).toEqual(SNAP_DEFAULTS);
+    expect(settingsStore.getState().show).toEqual(SHOW_DEFAULTS);
+  });
+
+  it("a wrong-typed VALUE falls back rather than being coerced", async () => {
+    // `"false"` is a truthy string: coercing it would turn a switch the user
+    // deliberately turned off back ON.
+    seed(10, { snapTo: { grid: "false", quadrant: 0, onCurve: 1 } });
+    await settingsStore.persist.rehydrate();
+    const s = settingsStore.getState();
+    expect(s.snapTo.grid).toBe(true);
+    expect(s.snapTo.quadrant).toBe(true);
+    expect(s.snapTo.onCurve).toBe(true);
+  });
+
+  it("unknown nested keys are ignored", async () => {
+    seed(10, { snapTo: { grid: true, notARealSetting: true } });
+    await settingsStore.persist.rehydrate();
+    expect(Object.keys(settingsStore.getState().snapTo).sort()).toEqual(
+      Object.keys(SNAP_DEFAULTS).sort(),
+    );
+  });
+
+  it("a corrupt navigation section falls back without losing the rest", async () => {
+    seed(10, { navigation: 42, snapTo: { grid: false } });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().navigation.inputDevice).toBe("auto");
+    expect(settingsStore.getState().snapTo.grid).toBe(false);
+  });
+
+  it("mergeBooleanRecord preserves an explicit false and every default", () => {
+    expect(mergeBooleanRecord(SNAP_DEFAULTS, { grid: false })).toEqual({
+      ...SNAP_DEFAULTS,
+      grid: false,
+    });
+    expect(mergeBooleanRecord(SNAP_DEFAULTS, undefined)).toEqual(SNAP_DEFAULTS);
+    expect(mergeBooleanRecord(SNAP_DEFAULTS, [])).toEqual(SNAP_DEFAULTS);
   });
 });
