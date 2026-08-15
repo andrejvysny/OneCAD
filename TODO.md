@@ -221,6 +221,50 @@ P4 item that reshapes the scene graph rather than a leaf renderer, it touches pi
 independent of everything above — so it is owed as its own change with its own integration tests,
 not folded into a rendering commit.
 
+### P5 — extend ellipse snap geometry — DONE
+
+The ellipse was a documented SEAM: no intersections, no extrema, only its centre and a
+nearest-point-on-curve. Defensible as a legacy port; indefensible once an ellipse is a first-class
+sketch entity, because you cannot snap to where a line crosses it or to the end of its major axis.
+
+- [x] **Extrema** — the four axis points at eccentric 0/π/2/π/3π/2, as `quadrant` candidates with
+      stable index ids (`quadrant:<id>:0..3`). DERIVED coordinates: no point entity lives there, so
+      they carry no `ref` and can author nothing. The decision now says so explicitly — an accepted
+      extremum emits a `derived-point-not-persistable` trace row, because silence there reads as a
+      persistence bug rather than a property of the geometry.
+- [x] **Line ∩ ellipse** — closed form in the ellipse's LOCAL frame, with a numerically stable
+      quadratic (sign-matched root then Vieta, so the near-zero root is not lost to cancellation)
+      and a scale-aware discriminant clamp for the tangent case.
+- [x] **Ellipse ∩ circle / arc / ellipse** — parameterize one ellipse, solve the other's implicit.
+      TWO isolation mechanisms, because one is not enough: sign changes of `g` bracket transversal
+      roots, and sign changes of `g'` bracket the STATIONARY points where a tangency lives — a
+      tangent contact touches zero without changing sign, so a sign-change scan alone misses every
+      one of them. A stationary point is accepted only inside a scale-aware `implicitTol`. Roots are
+      sorted by the first curve's parameter and deduped, so a candidate id means the same point.
+      Arc contacts are filtered through the arc's own sweep.
+- [x] **Broad phase** — sweep-and-prune over exact AABBs (the ellipse's is its exact support
+      function, not a bounding circle) replaces the unconditional all-pairs scan, which paid a
+      512-sample root isolation for every pair in the sketch including ones on opposite sides of the
+      drawing. `lastBroadPhaseStats()` exposes the counters.
+- [x] `src/test/snap-decision/ellipse.test.ts` (NEW, 28 cases): extrema at every rotation, secant /
+      tangent / near-tangent-from-both-sides / disjoint / contained / segment-clipped line cases, the
+      near-zero-root cancellation case, 0-and-4-root ellipse×circle, a tangent circle reporting ONE
+      contact, arc sweep filtering, ellipse×ellipse, metamorphic invariance across 9 decades of
+      coordinate magnitude (1e-3 … 1e6) with a RELATIVE residual, exact rotated-ellipse bounds
+      proven to actually bound the curve, broad-phase pruning counters, and order/cache determinism.
+- Gate: `bunx tsc --noEmit` clean · `bun run test` **293 files / 4917 passed / 78 skipped** ·
+  `bun run build` clean.
+
+### Documentation
+
+- [x] `protocol/SCHEMA.md` — §7.3 kind count and contract, §14 changelog (P3).
+- [x] `src/viewport/engine/README.md` — a new section covering the screen metric, grid ownership,
+      guide rendering, DPR, adaptive tessellation and ref-based selected points.
+- [x] Module headers rewritten to describe the FINAL policy: `snapEngine.ts` no longer documents a
+      priority ladder or "grid gets first refusal", `liveToolMachines.ts` states that it applies
+      accepted numeric values rather than owning the rounding decision, and `autoConstrain`'s
+      callers document the structural/inferred split.
+
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
 Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`

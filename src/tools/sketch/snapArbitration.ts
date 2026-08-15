@@ -391,6 +391,17 @@ export function resolveSnap(input: ArbitrationInput): ArbitrationOutput {
     });
   }
 
+  // PLACEMENT-ONLY, said out loud (SNAP §11.1). A circle/arc/ellipse extremum is
+  // a DERIVED coordinate: no point entity exists there, so nothing can be
+  // constrained to it. It is a perfectly good place to click, and the trace
+  // records why the relation the user might expect does not appear — silence
+  // here reads as a bug in persistence rather than a property of the geometry.
+  for (const c of set.members) {
+    if (c.kind === "quadrant" && c.relationIntents.length === 0) {
+      rejected.push({ candidateId: c.id, reason: "derived-point-not-persistable" });
+    }
+  }
+
   const visible = set.members.filter((c) => c.source !== "numeric");
   return {
     decision: {

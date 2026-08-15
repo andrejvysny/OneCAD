@@ -167,6 +167,54 @@ scene
 └── interactionRoot     (hover/selected highlight meshes — F-WP5)
 ```
 
+## Screen metrics, grid ownership, guides and DPR (SNAP P0/P4)
+
+**`planeScreenMetric(at)` is the snap distance authority.** It returns the local
+2×2 plane→screen Jacobian at a plane point, in CSS pixels per plane unit
+(`planeMetric.ts` holds the pure math so it is testable with no renderer).
+`planePixelWorld()` remains for callers that genuinely want one scalar (drag
+handles, degeneracy floors), but snap arbitration must not use it: under an
+oblique or perspective view a plane unit projects to a different pixel length
+along u than along v, so a scalar threshold turns the snap radius into an
+invisible ellipse. Null means the point is behind the camera, non-finite, or the
+view is edge-on — treat that as "no snap this frame", never as "reuse the last
+one".
+
+**One effective grid.** In model mode the world XY grid follows
+`viewportStore.gridVisible`. Entering sketch mode hands that preference to the
+sketch-plane grid and hides the world one **without touching the store**;
+exiting restores it. `applyGridVisibility()` is the single owner, called from
+`setGridVisible`, `enterSketch` (before the first frame) and `exitSketch`.
+Snap-to-grid is `settingsStore.snapTo.grid` and is deliberately independent —
+hiding the drawing must never silently stop the snapping.
+
+**Guides are `Line2`, and their dash cadence is CSS-relative.**
+`LineDashedMaterial` measures `dashSize`/`gapSize` in WORLD units, so a constant
+there is a solid line at one zoom and a handful of enormous strokes at another.
+`SnapIndicator` gives each guide its own material and recomputes dash/gap per
+frame from the plane→screen scale the engine passes it, holding 6px on / 4px off
+at every zoom. Marker glyphs are one per snap family — the marker is the only
+feedback when snapping hints are off.
+
+**DPR is not a load-time constant.** `dpr.ts` owns `MAX_DPR` and the CSS→device
+conversion. Fat-line `linewidth` is in DEVICE pixels, so a width baked at import
+time renders wrong the moment a window moves to a different-DPR display — and
+`ResizeObserver` never fires for that, because the CSS box did not change.
+`ViewportEngine.syncDpr()` checks the ratio each frame and re-sizes the drawing
+buffer; `SketchObject.update` re-converts every authored CSS width when the
+capped ratio moves.
+
+**Curve tessellation is adaptive** (`curveTessellation.ts`): segment counts come
+from a 0.35 CSS px sagitta budget with a 25% rebuild band, floors of 8 (24 for an
+ellipse) and a 2048 cap. This is a RENDERING budget only — snap candidates,
+hit-testing and the solver all work against the exact analytic curve, and
+changing the segment count must never move a snap point.
+
+**Selected sketch points are held as REFS**, not coordinates
+(`setSketchSelectedPointRefs`), and re-resolved on every `setSession`. The
+coordinate form froze the ring where the point was at selection time, so a solve
+that moved the point left the ring behind.
+
 ## Environment & shading
 
 Bodies are lit as a **studio setup**, not by a headlight: `NeutralToneMapping`
