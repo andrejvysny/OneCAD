@@ -1,8 +1,26 @@
 # Current State
 
-Last verified: 2026-08-14 18:40 — Gear Generator G0 complete + G1 all layers except the chip UI
+Last verified: 2026-08-15 — kernel semantic-publication hardening close-out
 
-## NOW — GEAR GENERATOR (session 19, uncommitted)
+## NOW — KERNEL HARDENING CLOSE-OUT (branch `kernel/semantic-publication-hardening`, PR #4)
+
+- **Where:** git worktree `../OneCAD-kernel-hardening` on
+  `kernel/semantic-publication-hardening`, continuing from `69be0c2`. 14 branch commits
+  plus this work package. The branch is 2 behind `master` (both frontend-only; no
+  rebase needed).
+- **What landed:** the four gaps an independent review left open — exact `Extrude.ToNext`
+  directional extremum (edge/face interiors, plus explicit SEATED-profile semantics),
+  the OffsetFace worker trust boundary (strict typed arrays, `inputs[]` arity, typed-ref↔id
+  equality), Revolve strict `booleanMode` + checked axis-sketch solve, and the missing
+  closure-face rebind regression test. Plus the Gear modeling-coverage row and the two
+  evidence lanes it required. Full detail + the load-bearing proofs: `TODO.md` §
+  "GATE — kernel semantic-publication hardening close-out (2026-08-15)".
+- **Explicitly NOT done** (deferred, recorded in `TODO.md`): production OffsetFace reblend,
+  a central precision/tolerance module, micro-edge/sliver-face publication enforcement.
+- **Sidecar:** restaged from this worktree's build, so `src-tauri/binaries/` matches the
+  worker under test.
+
+## PREVIOUS — GEAR GENERATOR (session 19)
 
 - **Branch:** `master` at `f5b686f` (the Component-Library merge landed DURING this
   session — the tree moved under the gear work; nothing conflicted, the gear files

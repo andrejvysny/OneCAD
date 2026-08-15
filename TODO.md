@@ -1078,6 +1078,114 @@ Unresolved questions:
 3. MC-R8 is still un-root-caused. U2 and U6 touch that lane; the browser gate is not claimable for
    those two packages until it is.
 
+## GATE — kernel semantic-publication hardening close-out (2026-08-15)
+
+Branch `kernel/semantic-publication-hardening` (PR #4), continuing from `69be0c2`. An
+independent review of that head accepted the OffsetFace checkpoint but refused to close
+the wider program, naming four gaps. This section closes exactly those four, plus the
+red CI checks. Scope was deliberately bounded — see the deferred list at the end.
+
+- [x] **Exact `Extrude.ToNext` directional extremum.** The whole-profile boolean probe
+      that landed earlier still read first contact off the intersection's
+      `TopAbs_VERTEX` set, which is correct only for polyhedra: on a curved face the
+      minimum along the extrude direction is generally interior, so ToNext terminated
+      LATE. Replaced with an exact extremum (`minimum_directional_projection` — a
+      gauge-plane reduction solved by `BRepExtrema_DistShapeShape`), covering edge and
+      face interiors. An unestablished extremum is `Unprovable`/UNKNOWN and refuses by
+      name; it is never downgraded to the vertex answer.
+      Two adversarial fixtures added in `test_wp6_extrude.cpp` — a face-interior contact
+      (cylinder bottom generatrix) and an edge-interior one (tilted rim low point).
+      **Both proven load-bearing:** with the exact extremum neutralized they report
+      16.6834 and 22.8284 against 14.0 and 17.1716.
+- [x] **`ToNext` seated semantics stated, not accidental.** Making the extremum exact
+      exposed that "next" is not "nearest". `wire_contract::extrude_to_next_cut`
+      regressed to 7999.99 (a 1e-4 cut) because a sketch drawn ON the target body makes
+      the intersection begin at the sketch plane, so its true minimum is the seat.
+      Termination is now defined per contiguous run: a run starting at the sketch plane
+      is the SEAT and terminates at its EXIT; otherwise at the first contact. A void
+      splits the intersection, so a seated run correctly ends at the void's near wall.
+      The old vertex scan reproduced this only by accident (seat vertices sat exactly at
+      the plane and its epsilon filter dropped them). Now covered directly by
+      `test_to_next_seated_profile_stops_at_the_material_exit`.
+- [x] **OffsetFace worker trust boundary.** `faceIds`/`primaryFaceIds` were the only two
+      `is_array()` sites in `worker/src/ops/` that silently FILTERED non-string elements.
+      Ids pair positionally with `inputs[]` (and the `Total` opposite is read at slot
+      `faceIds.size()`), so one dropped element re-paired every remaining ref with a
+      neighbour's evidence. Added `read_string_array_strict` to `OpCommon` (beside the
+      existing `read_scalar_strict`/`read_bool_strict`), plus an `inputs[]` arity check
+      and a typed-ref↔bare-id equality check mirroring the Rust validator the worker had
+      been trusting blindly. New codes `OFFSET_FACE_MALFORMED_FACE_IDS` /
+      `OFFSET_FACE_REF_MISMATCH`, covered by `test_malformed_wire_contract`.
+- [x] **Revolve semantic-input defects.** `boolean_mode_of` mapped every unknown string
+      to `NewBody`, so a typo minted a fresh body where a cut was asked for. Now strict,
+      refused before any OCCT work, echoing the offending token (Extrude's precedent).
+      The axis-sketch `solve()` result was discarded, so an unconverged solve placed the
+      axis from stale seed positions and a wrong-but-nonzero axis passed the
+      degenerate-length guard. Now checked, using `OpCommon`'s idiom. Both covered by new
+      cases in `test_revolve_boolean_modes.cpp`; **the axis guard was proven
+      load-bearing.** Both revolve tests' `return g_failures` was also clamped — an exit
+      status that is a multiple of 256 reports PASS.
+- [x] **Non-primary rebind regression test.** `session.rs`'s `*primary == old_id` guard
+      was unreachable by any fixture: `offset_face_op` seeded `primary_face_ids`
+      identical to `face_ids` in 100% of cases, so deleting the guard left the suite
+      green. Added `offset_face_op_with_primary` plus a test that rebinds a closure-only
+      face and asserts design intent is untouched. **Proven load-bearing** (forcing the
+      guard true fails both it and its complement).
+- [x] **Gear modeling-coverage row** — the red `frontend` CI job. `Gear` was in
+      `KnownOperation`, worker dispatch and SCHEMA §7.3 with no manifest row (three
+      verifier failures). The row is `supported`/`exposed`, which the verifier only
+      accepts with real-worker and browser lanes, so the two artifacts owed since the G1
+      gate were written rather than the row mislabelled: `src-tauri/tests/gear_ops.rs`
+      (first Rust-side real-worker coverage of the Gear wire path — typed params → serde
+      → OCW1 → OCCT → adoption → MESH1) and `e2e/gear.spec.ts`.
+
+- [x] **`e2e-webkit` flake** — the timeout was `auto-mode.spec.ts` "double-clicking a
+      finished sketch re-enters its edit session", stuck in
+      `while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click()`.
+      That loop polls a condition by RE-CLICKING. `count()` is a one-shot snapshot and
+      the eye's `aria-checked` only re-renders after the click promise resolves
+      (`setSketchVisible` writes the store optimistically; React flushes behind
+      `sketchStaticSync`'s viewport work — measured 3–130 ms on WebKit locally, worse on
+      a loaded runner). So the loop re-read a STALE count of 1 for a switch it had
+      already clicked and called `.first().click()` on a locator that by then matched
+      nothing — click had no element to wait for and burned the full 45 s timeout. The
+      same staleness could also land a second click and turn the sketch back ON
+      (`EyeToggle` is a pure `onChange(!on)`).
+      Replaced all **24 copies** across 23 specs with one `hideSeedSketches()` helper in
+      `e2e/helpers.ts` that walks the STABLE row set and gates each click on
+      `toHaveAttribute("aria-checked","false")`, ending on `toHaveCount(0)` — a strictly
+      stronger postcondition than the loop's exit test. No `waitForTimeout`, no raised
+      timeouts.
+      **Honest limit:** the flake did NOT reproduce locally in 10 pre-fix WebKit runs.
+      The diagnosis is instrumentation-backed (a probe measured the stale-count window
+      directly: `before=1 immediatelyAfterClick=1 settled=0 lagMs=54`), and post-fix runs
+      are WebKit **30/30** on the offending spec and **51/51** across all 23 touched
+      specs — but the next CI run is the real confirmation. The chromium sweep over the
+      same 23 specs was abandoned at 10/51 (no failures) because the machine was
+      saturated; worth re-running.
+
+### Gate evidence (measured 2026-08-15, worktree `../OneCAD-kernel-hardening`)
+
+- `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D warnings` clean
+- `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1265 passed / 0 failed**
+- `ctest --test-dir worker/build` **133/133** (was 131)
+- `bunx tsc --noEmit` clean · `bun run test` **4462 / 272 files**
+- `verify-modeling-coverage.mjs` **29 rows, 9 corpus cases, 16 CI jobs, 19 registry
+  operations** + its negative controls · `verify-modeling-contracts.mjs` **37 rows,
+  18 operations** · hex gate empty
+- Playwright: see the two browser-lane items above.
+
+**Deferred by decision — open, NOT done:**
+- Production OffsetFace suppress → offset → reblend. The recognizer is finite-sampled
+  (9 samples/edge, 5×5 UV/face), so a false positive would destroy user-authored
+  geometry. Needs its own adversarial design/review cycle.
+- Central precision/tolerance module. Absolute literals remain scattered across
+  Extrude/OffsetFace over a six-order-of-magnitude range (0.01 mm – 10 m).
+  `kToNextContactEpsilon` is named and documented but still absolute.
+- Micro-edge/sliver-face publication ENFORCEMENT. `ShapeAudit` collects
+  `micro_edge_count` / `sliver_face_count` / ratios, but `evaluate_publication_policy`
+  never reads them — evidence without a policy.
+
 ## NOW — modeling-correctness hardening completion (2026-08-13)
 
 Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one commit ahead of
@@ -1095,7 +1203,11 @@ Source: user-supplied completion plan. Baseline `9933689`; clean `master`, one c
       analytic fail-closed. Worker full 119/119 + tsc. Still open: separated public tolerance knobs,
       production cancellation breadth, source/pair/fragment ceiling matrix, measured perf targets.
 - [ ] P3 structured `PublicationDecision` evidence/timings + Tier-A modeling-input preflight done.
-      Still open: all semantic evidence routing, measured Tier A/B overhead, Pattern fuse/topology budget.
+      Semantic evidence routing CLOSED by the 2026-08-15 gate above (OffsetFace tolerance
+      separation + V2 primary intent, Fillet measured radius/tangency, Hole/Import result
+      policy, the `PlanExecutor` `SingleBody` backstop, exact ToNext, worker trust boundary).
+      Still open: measured Tier A/B overhead, Pattern fuse/topology budget, and micro/sliver
+      publication ENFORCEMENT (the evidence is collected, the policy does not read it).
 - [ ] P4 mode-aware coverage + corpus **9/9** done. Real-worker corpus: all frozen cases,
       typed assertions, zero skips; verifier controls 15/15. Still open: full zero-retry browsers,
       complete C4 mode matrix, Intersect promotion, real diagnostic browser vertical.

@@ -1093,9 +1093,22 @@ OneCAD-CPP `ExtrudeParams`.
   curved targets are refused until exact variable-height termination is
   implemented; a constant-distance flat cap is never substituted.
 - `ToNext` intersects the target body with the entire forward profile sweep and
-  terminates at the minimum positive projection of that bounded intersection.
+  terminates at the EXACT directional minimum of that bounded intersection —
+  extrema in EDGE and FACE interiors included, not only its topological vertices.
   Finite rays from vertices/centroid are not sufficient evidence: a tiny interior
-  ledge must terminate the feature even when every such sample misses it.
+  ledge must terminate the feature even when every such sample misses it, and a
+  curved first contact (a cylinder's bottom generatrix, a tilted rim's low point)
+  carries no vertex to sample at all. An extremum that cannot be established is
+  UNKNOWN and refuses the operation by name — never downgraded to the weaker
+  vertex answer.
+- **"Next" is not simply "nearest".** Each solid of the intersection is one
+  contiguous material run. A run that begins AT the sketch plane is the profile's
+  own SEAT — the sketch was drawn on (or inside) the target body, which is how a
+  through-pocket is normally authored — and the next face is then where the sweep
+  LEAVES that material: the run's maximum, not its minimum. A void inside the
+  body splits the intersection, so a seated run ends at the void's near wall,
+  which is the correct termination there too. With no seated run the profile
+  starts in free space and termination is the minimum of the intersection.
 
 - **Draft is applied completely and measured, or refused — never silently
   degraded.** V1 proves draft semantics only for a single-direction `Blind`
@@ -1445,6 +1458,20 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   uses this distinction and must never infer a primary from closure geometry.
   Absent version + absent primary ids is the legacy contract. Other present
   versions, an empty V2 primary set, duplicates, or non-subset ids are refused.
+- **Malformed typed arrays are refused, never filtered.** A present `faceIds` /
+  `primaryFaceIds` that is not an array, or that carries a non-string or
+  empty-string element, fails `OP_FAILED` with diagnostic
+  `OFFSET_FACE_MALFORMED_FACE_IDS`. Dropping the offending element instead would
+  shorten the id list while `inputs[]` kept its length, silently pairing every
+  remaining id with a NEIGHBOUR's evidence and reading the `Total` opposite from
+  the wrong slot. For the same reason a PRESENT `inputs[]` must carry exactly the
+  normative count (one per operative face, plus the Total opposite), and each
+  typed slot's `primary.elementId` must equal the id it is paired with —
+  otherwise `OFFSET_FACE_REF_MISMATCH`. An absent or empty `inputs[]` stays legal
+  (the partition-tracked rung needs no typed evidence), and a pre-promotion
+  `"f:N"` TopoKey is not an `ElementId`, so it is exempt from the equality check.
+  The worker enforces all of this independently of Rust: it is a trust boundary,
+  not a mirror of the producer.
 - `faceIds` is the FULL FROZEN operative set — picked faces PLUS the tangent
   chain, expanded once at authoring by `PrepareOffsetFace`
   ([§7.6](#prepareoffsetface)) and persisted. The worker NEVER re-expands at
@@ -3146,6 +3173,29 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-15 — §7.3 `Extrude.ToNext` exact directional extremum.** The
+  whole-profile boolean probe now reports the EXACT minimum of the intersection
+  along the extrude direction, including extrema in edge and face interiors,
+  instead of scanning the intersection's topological vertices. A curved first
+  contact carries no vertex, so the vertex scan terminated LATER than the geometry
+  does. The seated case (a sketch drawn on the target body's own face) is now
+  stated explicitly — termination is the seated run's EXIT, which the vertex scan
+  only reproduced by accident because a seat's vertices sat exactly on the sketch
+  plane and were dropped by its epsilon filter. An unestablished extremum is
+  UNKNOWN and refuses by name. Payload shape is unchanged.
+- **2026-08-15 — §7.3 OffsetFace wire-contract strictness.** A present
+  `faceIds`/`primaryFaceIds` that is not an array of non-empty strings is refused
+  with `OFFSET_FACE_MALFORMED_FACE_IDS` rather than filtered; a present `inputs[]`
+  must carry the normative slot count, and each typed slot's `primary.elementId`
+  must match its paired id or the record is refused with
+  `OFFSET_FACE_REF_MISMATCH`. Well-formed payloads are byte-identical, so no
+  fixture moves.
+- **2026-08-15 — §7.3 Revolve semantic-input strictness.** An unknown or
+  non-string `booleanMode` is refused by name instead of falling back to
+  `NewBody` (which minted a fresh body where a cut was asked for), and the axis
+  sketch's solve result is checked before its endpoints are consumed — an
+  unconverged solve can no longer place the revolution axis from stale seed
+  positions.
 - **2026-08-15 — §7.3 OffsetFace V2 primary intent.** Fresh records retain
   `faceIds` as the frozen full G1 closure and add `primaryFaceIds` as the non-empty
   user-picked subset, gated by `resultPolicyVersion:2`. This is the deterministic
