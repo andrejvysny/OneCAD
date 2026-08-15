@@ -66,6 +66,9 @@ function makeEngineMock() {
     updateSketchSession: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
     planePixelWorld: vi.fn(() => 1),
+    // Isotropic 1px-per-unit metric: matches `planePixelWorld: 1` above, so a
+    // plane distance IS a screen-pixel distance in these tests.
+    planeScreenMetric: vi.fn(() => ({ m00: 1, m01: 0, m10: 0, m11: 1 })),
     getCameraDistance: vi.fn(() => 100),
   };
 }

@@ -103,26 +103,28 @@ describe("SketchObject — referenceLocked material", () => {
     obj.dispose();
   });
 
-  it("still tints on hover and selection (locked geometry is selectable), as a halo behind its own color", () => {
+  it("still tints on hover and selection (locked geometry is selectable)", () => {
     const { obj, root } = build([seg("locked", true)]);
     obj.setHover(["locked"]);
-    // The entity's own color survives — only a halo is added underneath it
-    // (P1 audit fix: selection/hover used to wipe the semantic color).
-    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchReference().getHex());
-    expect(haloColor(root)).toBe(palette.hover3d().getHex());
+    // Hover is a COLOR swap at the normal stroke weight, no halo underneath.
+    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.hover3d().getHex());
+    expect(haloCount(root)).toBe(0);
     obj.setHover([]);
     obj.setSelection(["locked"]);
+    // Selection keeps the entity's own color and adds a halo underneath it
+    // (P1 audit fix: selection used to wipe the semantic color).
     expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchReference().getHex());
     expect(haloColor(root)).toBe(palette.sketchSelected().getHex());
     obj.dispose();
   });
 
-  it("selection wins over hover for the halo, and only draws one", () => {
+  it("selection wins over hover, and only draws one halo", () => {
     const { obj, root } = build([seg("locked", true)]);
     obj.setHover(["locked"]);
     obj.setSelection(["locked"]);
     expect(haloCount(root)).toBe(1);
     expect(haloColor(root)).toBe(palette.sketchSelected().getHex());
+    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchReference().getHex());
     obj.dispose();
   });
 
@@ -143,12 +145,12 @@ describe("SketchObject — angle reference highlight + arc preview", () => {
     obj.dispose();
   });
 
-  it("selection and hover halo over the angle reference color without replacing it", () => {
+  it("hover recolors the angle reference; selection halos it without replacing its color", () => {
     const { obj, root } = build([seg("ref")]);
     obj.setAngleReference("ref");
     obj.setHover(["ref"]);
-    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchAngleRef().getHex());
-    expect(haloColor(root)).toBe(palette.hover3d().getHex());
+    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.hover3d().getHex());
+    expect(haloCount(root)).toBe(0);
     obj.setHover([]);
     obj.setSelection(["ref"]);
     expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchAngleRef().getHex());

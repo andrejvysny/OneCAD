@@ -59,17 +59,16 @@ export function cssLineWidth(cssPx: number): number {
   return cssPx * Math.min(dpr, MAX_DPR);
 }
 
-const LINE_WIDTH = cssLineWidth(2);
-const PREVIEW_WIDTH = cssLineWidth(1.5);
-const TRIM_GHOST_WIDTH = cssLineWidth(3);
-const SELECTED_WIDTH = cssLineWidth(2.5);
-/** Selection/hover HALO width — drawn BEHIND the entity's own semantic-color
- *  line (P1 audit fix), wide enough to read as an outline rather than a
- *  slightly-fatter version of the same stroke. */
-const SELECTION_HALO_WIDTH = cssLineWidth(4.5);
+const LINE_WIDTH = cssLineWidth(1.25);
+const PREVIEW_WIDTH = cssLineWidth(1);
+const TRIM_GHOST_WIDTH = cssLineWidth(2);
+/** Selection HALO width — drawn BEHIND the entity's own semantic-color line
+ *  (P1 audit fix), wide enough to read as an outline rather than a
+ *  slightly-fatter version of the same stroke. Hover has no halo. */
+const SELECTION_HALO_WIDTH = cssLineWidth(2.5);
 /** The angle-preview arc is a lightweight annotation glyph, not geometry —
  *  thinner than every real entity line so it never competes with them. */
-const ANGLE_ARC_WIDTH = cssLineWidth(1);
+const ANGLE_ARC_WIDTH = cssLineWidth(0.75);
 /**
  * Endpoint/midpoint/centroid AFFORDANCE opacity while idle — not permanent
  * document content (Sketcher UX cleanup, Track B1b). The three tiers are NOT
@@ -336,17 +335,18 @@ export class SketchObject {
     this.matUnder = mk(palette.sketchUnder());
     this.matFull = mk(palette.sketchFull());
     this.matConflict = mk(palette.sketchConflict());
-    // Halo materials, not primary-line materials (P1 audit fix) — see
-    // `rebuildEntities`. Wide, so they read as an outline behind whatever
-    // semantic color the entity's own line is drawn in.
+    // Selection is a HALO material (P1 audit fix) — see `rebuildEntities`:
+    // wider than a stroke, so it reads as an outline behind whatever semantic
+    // color the entity's own line is drawn in. Hover is a plain LINE_WIDTH
+    // color swap, so nothing gets fatter under the cursor.
     this.matSelected = mk(palette.sketchSelected(), { linewidth: SELECTION_HALO_WIDTH });
-    this.matHover = mk(palette.hover3d(), { linewidth: SELECTION_HALO_WIDTH });
+    this.matHover = mk(palette.hover3d());
     this.matConstruction = mk(palette.sketchConstruction(), { dashed: true, dashSize: 3, gapSize: 2 });
     // SOLID, deliberately: construction is dashed because it is not real
     // geometry, whereas reference geometry IS real (it bounds regions) — it just
     // is not YOURS to move. Colour carries the difference, not the stroke.
     this.matReference = mk(palette.sketchReference());
-    this.matAngleRef = mk(palette.sketchAngleRef(), { linewidth: SELECTED_WIDTH });
+    this.matAngleRef = mk(palette.sketchAngleRef());
     this.matPreview = mk(palette.sketchUnder(), { linewidth: PREVIEW_WIDTH, transparent: true, opacity: 0.9 });
     this.matTrimGhost = mk(palette.destructive(), { linewidth: TRIM_GHOST_WIDTH, transparent: true, opacity: 0.95 });
     this.matAngleArc = mk(palette.sketchAngleRef(), {
@@ -596,27 +596,32 @@ export class SketchObject {
     for (const e of this.entities) {
       const positions = entityPolyline(e);
       if (positions.length < 6) continue;
-      // Selection/hover no longer REPLACE the entity's own color (P1 audit
-      // fix): a wider halo renders BEHIND it instead, so an under/full/
-      // conflict (or reference/construction/angle-ref) color stays visible
-      // while selected rather than being wiped by one flat selection tint.
-      // Locked/snappable geometry still lights up like anything else under
-      // the cursor — it just does so as a halo now, not a replacement.
+      // SELECTION does not REPLACE the entity's own color (P1 audit fix): a
+      // wider halo renders BEHIND it instead, so an under/full/conflict (or
+      // reference/construction/angle-ref) color stays visible while selected
+      // rather than being wiped by one flat selection tint.
+      //
+      // HOVER is a pure COLOR swap at the normal stroke weight — no halo. A
+      // hover halo made every line under the cursor read as suddenly heavier,
+      // which is a width change the user never asked for; the transient
+      // feedback carries fine in color alone.
       const isSelected = this.selected.has(e.id);
       const isHovered = !isSelected && this.hovered.has(e.id);
-      if (isSelected || isHovered) {
-        const halo = this.buildLine(positions, isSelected ? this.matSelected : this.matHover);
+      if (isSelected) {
+        const halo = this.buildLine(positions, this.matSelected);
         halo.renderOrder = RENDER_ORDER.SKETCH_CURVES_HALO;
         halo.userData.selectionHalo = true;
         this.entityGroup.add(halo);
       }
-      const mat = this.angleRefId === e.id
-        ? this.matAngleRef
-        : e.referenceLocked
-          ? this.matReference
-          : e.construction
-            ? this.matConstruction
-            : statusMat;
+      const mat = isHovered
+        ? this.matHover
+        : this.angleRefId === e.id
+          ? this.matAngleRef
+          : e.referenceLocked
+            ? this.matReference
+            : e.construction
+              ? this.matConstruction
+              : statusMat;
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }

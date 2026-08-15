@@ -44,8 +44,11 @@ import type { EntityRef } from "@/stores/selectionStore";
 import { SketchObject } from "./SketchObject";
 import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
+import { computePlaneScreenMetric, newPlaneMetricScratch } from "./planeMetric";
 import type { SketchConstraint, SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
 import type { SnapResult } from "@/tools/sketch/snapEngine";
+import type { PlaneScreenMetric } from "@/tools/sketch/snapTypes";
+import { latestSnapTrace } from "@/tools/sketch/snapTrace";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle, type DragHandleMode } from "./DragHandle";
@@ -328,6 +331,9 @@ export class ViewportEngine {
   private ghostEl: HTMLElement | null = null;
   private ghostRegistered = false;
   private readonly _plane = new THREE.Plane();
+  // Scratch for `planeScreenMetric` — it runs on every pointer frame, so it
+  // allocates nothing after construction (SNAP P2 perf budget).
+  private readonly _metricScratch = newPlaneMetricScratch();
 
   // Render-on-demand
   private dirty = true;
@@ -545,6 +551,9 @@ export class ViewportEngine {
       bounds: bounds
         ? { min: bounds.min.toArray(), max: bounds.max.toArray() }
         : null,
+      // SNAP P0: the last arbitration, whether or not it reached the log ring —
+      // this is what makes "why did it snap there?" answerable from an e2e spec.
+      snapTrace: latestSnapTrace(),
     };
   }
 
@@ -1195,7 +1204,36 @@ export class ViewportEngine {
     return worldToPlanePoint(this.sketchPlane, hit);
   }
 
-  /** World units per screen pixel at the plane (sizes snap thresholds). */
+  /**
+   * The local plane→screen Jacobian at `at`, in CSS pixels per plane unit —
+   * the metric every snap distance is measured through (SNAP §5.3).
+   *
+   * `planePixelWorld()` below is ONE scalar. Under an oblique or perspective
+   * view a plane unit is worth a different number of pixels along u than along
+   * v, so a scalar threshold silently changes the effective snap reach with
+   * direction. This measures the real thing: project `at`, `at + (1,0)` and
+   * `at + (0,1)`, and take the two screen deltas as the matrix columns.
+   *
+   * Null when any of the three points is behind the camera, projects to a
+   * non-finite value, or the metric is degenerate (an edge-on view, |det| below
+   * `METRIC_DET_EPS`). Callers must treat null as "no snap this frame",
+   * never as "fall back to the last one".
+   *
+   * The returned object is a REUSED scratch — copy it if you need to keep it
+   * across frames. Zero allocation per call is deliberate (pointer-rate path).
+   */
+  planeScreenMetric(at: Point2): PlaneScreenMetric | null {
+    if (!this.canvas || !this.sketchPlane) return null;
+    return computePlaneScreenMetric(
+      this.sketchPlane,
+      this.rig.getCamera(),
+      this.viewportSize(),
+      at,
+      this._metricScratch,
+    );
+  }
+
+  /** World units per screen pixel at the plane (sizes non-snap tolerances). */
   planePixelWorld(): number {
     const height = Math.max(this.viewportSize().height, 1);
     const dist = this.controls?.getDistance() ?? 260;

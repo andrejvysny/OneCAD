@@ -1,5 +1,55 @@
 # OneCAD-Tauri Migration TODO
 
+## SKETCH SNAP ENGINE HARDENING (2026-08-15, branch `fix/sketch-snap-decision-v3`)
+
+Implements the "OneCAD Sketch Snap Engine Hardening" specification: P0–P5, six dependency-ordered
+phase commits off `5106f80`. The program replaces the single-winner snap ladder with a composable
+candidate/decision model, screen-space (metric-aware) scoring, deterministic retention, explicit
+provenance from hover through persisted constraints, and screen-stable rendering.
+
+**User-visible decisions taken in this program** (recorded here per the frozen-contract rules):
+
+- `snapTo.autoConstrainMode` replaces the implicit "always infer" policy with **Off / Minimal /
+  Standard**. Fresh and migrated users default to **Standard**, which preserves today's H/V and
+  Perpendicular behaviour while making the newly-persistent Parallel/Tangent/point-axis intents an
+  explicit, named choice. Settings persist `version` goes 10 → 11 in P3.
+- Two ADDITIVE constraint kinds — `HorizontalPoints` / `VerticalPoints` — reach all four layers in
+  P3. They are geometric (no value), distinct from the line-only `Horizontal`/`Vertical` and from
+  zero-valued `HorizontalDistance`/`VerticalDistance`. SCHEMA's kind count goes 18 → 20.
+- Grid capture becomes **cell-relative** (0.35 × the smaller projected cell, capped by the user's
+  point reach) instead of the general point radius, so a mid-cell region always survives for cursor
+  numeric rounding. The legacy `gridRequireProximity` hack is deleted in P2.
+- In sketch mode exactly **one** grid is effective: the world XY grid hides and the active
+  sketch-plane grid follows `viewportStore.gridVisible`. Snap-to-grid stays independent
+  (`settingsStore.snapTo.grid`).
+
+### P0 — snap decision observability and failure matrix — DONE
+
+- [x] `src/tools/sketch/snapTypes.ts` (NEW) — the whole public vocabulary: `PlaneScreenMetric`,
+      `SnapCandidate`/`SnapDecision`/`SnapLatch`, `SnapProjection`, `SnapRelationIntent`,
+      `FrontendPointRef`, plus the normative constants (`releaseRadiusPx`, `GRID_REACH_FACTOR`,
+      `SEMANTIC_BIAS_PX`, `HYSTERESIS_ADVANTAGE_PX`, `gridReachPx`) and the metric helpers.
+- [x] `src/viewport/engine/planeMetric.ts` (NEW) — the plane→screen Jacobian, extracted PURE so the
+      accuracy table runs in vitest with no renderer. `ViewportEngine.planeScreenMetric(at)`
+      delegates to it with a reused scratch (zero allocation per pointer frame).
+- [x] `src/tools/sketch/snapTrace.ts` (NEW) — trace minting, the emission policy (changed accepted
+      set · click · latch reset · projection failure — never a repeat frame), the retained
+      `latestSnapTrace()`, and `legacyDecisionTrace` so P0 ships observability BEFORE the P2
+      rewrite. Candidate rows are flattened to strings in the log ctx because `log.ts` caps nesting
+      at 2 levels and would otherwise swallow `claims`/`refs`.
+- [x] `ViewportEngine.debugSnapshot()` carries `snapTrace` (the `?vpdebug` / Playwright surface).
+- [x] `SketchController.snapAt` gained an `origin` argument, traces every sample, and traces a
+      PROJECTION FAILURE explicitly instead of returning a bare null.
+- [x] `src/test/snap-decision/` (NEW) — the shared table: `cameras.ts` (7 camera cases incl.
+      perspective/orthographic oblique and near-edge), `scenarios.ts` (19 named geometry cases,
+      quoted by the later phases), `metric.test.ts`, `gridLadder.test.ts`, `determinism.test.ts`,
+      `trace.test.ts`.
+- Gate: `bunx tsc --noEmit` clean · `bunx vitest run src/test/snap-decision
+  src/tools/sketch/snapEngine.test.ts src/viewport/engine/ViewportEngine.test.ts` 174 passed ·
+  `bun run test` **286 files / 4771 passed / 78 skipped** (baseline was 282 / 4695).
+- Seam: 19 controller test files stub `ViewportEngine`; each gained a `planeScreenMetric` stub
+  returning the isotropic 1px-per-unit metric that matches their `planePixelWorld: 1`.
+
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
 Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`

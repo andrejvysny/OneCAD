@@ -43,6 +43,8 @@ import { applySolvedCurves, applySolvedPositions } from "@/ipc/sketchWireMap";
 import { promoteOne } from "@/ipc/promote";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { buildSnapCache, computeSnap, type SnapCandidateCache, type SnapResult } from "./snapEngine";
+import { emptyLatch, type SnapLatch } from "./snapTypes";
+import { legacyDecisionTrace, projectionFailureTrace, recordSnapTrace } from "./snapTrace";
 import { SNAP_RADIUS_PX } from "./snapRadius";
 import { inferConstraints, entityPoints } from "./autoConstrain";
 
@@ -287,6 +289,17 @@ export class SketchController {
   // "once per sketch edit" (perf; see snapAt).
   private snapCacheKey: SketchEntity[] | null = null;
   private snapCache: SnapCandidateCache | null = null;
+
+  /**
+   * Monotonic interaction epoch (SNAP P0/P1). Bumped whenever the meaning of a
+   * queued pointer frame changes — tool change, gesture phase end, session
+   * switch, Alt transition, snap-setting change, pointer leave, blur. A
+   * scheduled rAF captures it and drops itself if it no longer matches, so a
+   * frame queued before a click can never publish over the phase after it.
+   */
+  private interactionEpoch = 0;
+  /** Retained snap target across frames (P2 owns the transition; P0 traces it). */
+  private snapLatch: SnapLatch = emptyLatch();
 
   // Dimension tool (non-drawing): a pick-accumulator FSM + its open chip.
   private dimensionActive = false;
@@ -1271,9 +1284,27 @@ export class SketchController {
     return settingsStore.getState().snapTo.dimensionRound && !this.altHeld;
   }
 
-  private snapAt(clientX: number, clientY: number): SnapResult | null {
+  private snapAt(
+    clientX: number,
+    clientY: number,
+    origin: "hover" | "click" = "hover",
+  ): SnapResult | null {
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
-    if (!raw) return null;
+    if (!raw) {
+      // A click whose cursor cannot be projected is INERT — never silently
+      // reused from the previous position. Traced once so the miss is visible.
+      recordSnapTrace(
+        projectionFailureTrace({
+          interactionEpoch: this.interactionEpoch,
+          sessionGeneration: sketchStore.getState().sessionGeneration,
+          origin,
+          client: { x: clientX, y: clientY },
+          altHeld: this.altHeld,
+          priorLatch: this.snapLatch,
+        }),
+      );
+      return null;
+    }
     const session = sketchStore.getState().session;
     const sessionEntities = session?.entities ?? null;
     // Reference-equality cache: a commit replaces the array (applySolvedPositions
@@ -1284,8 +1315,9 @@ export class SketchController {
       this.snapCacheKey = sessionEntities;
     }
     const settings = settingsStore.getState();
-    return computeSnap(raw, sessionEntities ?? [], {
-      gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
+    const gridStep = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
+    const result = computeSnap(raw, sessionEntities ?? [], {
+      gridStep,
       pixelWorld: this.deps.engine.planePixelWorld(),
       snapPx: this.snapPx(),
       enableGrid: settings.snapTo.grid,
@@ -1302,6 +1334,33 @@ export class SketchController {
       recentPoints: this.machineState?.anchors ?? [],
       cache: this.snapCache ?? undefined,
     });
+    recordSnapTrace(
+      legacyDecisionTrace({
+        result,
+        raw,
+        client: { x: clientX, y: clientY },
+        origin,
+        interactionEpoch: this.interactionEpoch,
+        sessionGeneration: sketchStore.getState().sessionGeneration,
+        projection: viewportStore.getState().projection === "persp" ? "perspective" : "orthographic",
+        metric: this.deps.engine.planeScreenMetric(raw),
+        gridStep,
+        pointRadiusPx: this.snapPx(),
+        sources: {
+          grid: settings.snapTo.grid,
+          guideLines: settings.snapTo.sketchGuideLines,
+          guidePoints: settings.snapTo.sketchGuidePoints,
+          quadrant: settings.snapTo.quadrant,
+          intersection: settings.snapTo.intersection,
+          onCurve: settings.snapTo.onCurve,
+          polar: settings.snapTo.polarTracking,
+          dimensionRound: settings.snapTo.dimensionRound,
+        },
+        altHeld: this.altHeld,
+        priorLatch: this.snapLatch,
+      }),
+    );
+    return result;
   }
 
   /** Record the winning snap for this pointer event, AND — when it actually
