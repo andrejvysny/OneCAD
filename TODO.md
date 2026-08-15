@@ -296,6 +296,39 @@ isolation (512 samples per pair before refinement) affordable at all.
       zoom, adaptive tessellation growing with projected size, `show.guidePoints` not touching snap
       behaviour, and the grid moving to the sketch plane and back.
 
+**Full e2e lane: 434 passed, 14 failed (7 specs x 2 browsers). FIVE are pre-existing, TWO were
+mine and are fixed.** Every one was reproduced on an untouched `5106f80` worktree (carrying ONLY
+the helper fix below, so the lane is comparable) before being attributed:
+
+| spec | baseline | branch | verdict |
+|---|---|---|---|
+| `auto-mode.spec.ts:26` | fail | fail | pre-existing |
+| `datum-sketch.spec.ts:82` | fail | fail | pre-existing |
+| `filletChamfer.spec.ts:181` | fail | fail | pre-existing |
+| `filletChamfer.spec.ts:211` | fail | fail | pre-existing |
+| `live-dim-mouse-rounding.spec.ts:62` | fail | fail | pre-existing — **byte-identical** received value (`0.0015151297763438265`), i.e. the behaviour it measures is unchanged |
+| `polygon.spec.ts:23` | pass | fail → **fixed** | mine |
+| `live-dim-polygon.spec.ts:31` | pass | fail → **fixed** | mine |
+
+**The two polygon failures found a real defect and then a real behaviour change.**
+
+The defect: the origin anchor was being authored TWICE — once by coordinate inference
+(`originSnapTargets`) and once by intent (`FixedOrigin`) — whenever the two disagreed about WHICH
+point to anchor. A polygon's centre click becomes the construction circumcircle's centre, not the
+first vertex, so the two `Fixed` constraints did not dedupe and removed 4 DOF for one snap. Fixed
+by making INTENT the sole owner: `inferConstraints` is no longer given `originSnapTargets` (with
+none it emits no `Fixed` at all), and `persistIntents` also treats an already-authored `Fixed` in
+this batch as an existing anchor.
+
+The behaviour change, **recorded because it is user-visible**: a polygon whose centre snaps to the
+origin now anchors there (DOF 4 → 2; with a typed radius, 3 → 1). It previously did not, because
+the anchor rode on coordinate inference and `resolveToolConstraints` suppresses the whole inferred
+set whenever a tool authors its own specs — which every polygon (and slot) does. So "start the
+shape at the origin" removed no degrees of freedom at all for exactly those shapes: the DOF-2
+defect the origin work exists to close, one shape further along. SNAP §12's matrix requires the
+anchor (origin + minimal/standard ⇒ one `Fixed` per sketch), and the two e2e expectations that
+encoded the old number are updated with that explanation rather than the engine being bent back.
+
 **A PRE-EXISTING master defect was blocking the e2e lane, and is fixed here.**
 `enterSketchViaPlanePicker` (`e2e/helpers.ts:251`) asserted `getByText("Select a sketch plane")`
 without `exact`. `c064e81` — on master, before this branch — added "Select a sketch plane to

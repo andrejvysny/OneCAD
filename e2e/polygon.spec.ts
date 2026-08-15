@@ -40,7 +40,16 @@ test("polygon tool changes its side count with a digit key and settles at DOF 4"
   await clickAt(page, 0, 0); // centre
   await clickAt(page, 140, 0); // one vertex — the rest of the ring follows
 
-  await expect(dofPill(page)).toHaveText("DOF: 4");
+  // 4 (a regular n-gon: 2 translation + 1 rotation + 1 size) − 2, because the
+  // centre click SNAPPED TO THE ORIGIN and that intent is now persisted as a
+  // `Fixed` on the construction circumcircle's centre (SNAP P3).
+  //
+  // It used to be 4: the origin anchor came from coordinate inference, and
+  // `resolveToolConstraints` suppresses the whole inferred set whenever a tool
+  // authors its own specs — which every polygon does. So "start the polygon at
+  // the origin" removed no degrees of freedom at all, which is exactly the
+  // DOF-2 defect the origin work exists to close, one shape further along.
+  await expect(dofPill(page)).toHaveText("DOF: 2");
   // 5 ring lines + the construction circumcircle.
   expect(await getSketchEntityCount(page)).toBe(6);
   // The side count is sticky, so the tool re-arms at 5.

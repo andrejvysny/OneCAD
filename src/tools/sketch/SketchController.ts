@@ -2266,19 +2266,19 @@ export class SketchController {
       kinds: STRUCTURAL_KINDS,
     });
     const inferKinds = suppressInference ? EMPTY_KINDS : autoKindsFor(mode);
-    const originSnapTargets =
-      suppressInference || mode === "off"
-        ? []
-        : intents
-            .filter((i) => i.decision.primaryKind === "origin")
-            .map((i) => [i.decision.point.x, i.decision.point.y] as [number, number]);
     const inferred =
       inferKinds.size === 0
         ? []
         : inferConstraints(newEntities, session.entities, {
             nextConstraintId: nextId,
             kinds: inferKinds,
-            originSnapTargets,
+            // NO `originSnapTargets` (SNAP P3). The origin anchor is an INTENT
+            // mapping now — `snapPersistence` authors it against the point the
+            // click actually became. Feeding the coordinate path as well
+            // authored it TWICE whenever the two disagreed about which point to
+            // anchor (a polygon's centre click becomes the construction
+            // circumcircle's centre, not the first vertex), removing 4 DOF for
+            // one snap. With no targets, `inferConstraints` emits no `Fixed`.
             existingConstraints: session.constraints,
           });
     // Dedupe structural against inferred: a chain's weld is reachable both ways
@@ -2350,9 +2350,13 @@ export class SketchController {
       existing: [...session.constraints, ...alreadyAuthored],
       // A sketch on a model face is positioned by its host and its projected
       // boundary is already pinned, so a user point must not be anchored on top.
+      // `alreadyAuthored` counts too: this batch's own tool/inferred sets are as
+      // real an anchor as a persisted one, and two anchors for one snap remove
+      // 4 DOF where the user asked for 2.
       originAnchored:
         session.entities.some((e) => e.referenceLocked === true) ||
-        session.constraints.some((c) => c.type === "Fixed"),
+        session.constraints.some((c) => c.type === "Fixed") ||
+        alreadyAuthored.some((c) => c.type === "Fixed"),
     });
     if (dropped.length > 0) {
       logDebug("snap", `intent: persisted ${constraints.length}, dropped ${dropped.length}`, {
