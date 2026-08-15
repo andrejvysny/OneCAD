@@ -1110,10 +1110,11 @@ export class ViewportEngine {
     this.sketch?.setAngleReference(id);
   }
 
-  /** Endpoint/midpoint/centroid AFFORDANCE — full opacity while relevant
-   *  (hover, selection, or a point-relevant tool), dim otherwise. */
-  setSketchPointAffordance(active: boolean): void {
-    this.sketch?.setPointAffordance(active);
+  /** Endpoint/midpoint/centroid AFFORDANCE — full opacity per tier while that
+   *  tier is relevant (hover, selection, or a point-relevant tool), dim/hidden
+   *  otherwise. See `SketchObject.setPointAffordance` for the per-tier rules. */
+  setSketchPointAffordance(state: { endpoints: boolean; midpoints: boolean; centroids: boolean }): void {
+    this.sketch?.setPointAffordance(state);
   }
 
   /** Show/clear the dashed angle-preview arc between a chained leg and its

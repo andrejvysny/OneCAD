@@ -94,6 +94,60 @@ describe("layoutDimensionLines", () => {
   });
 });
 
+describe("layoutDimensionLines — axis-correct witness geometry (P1 hardening)", () => {
+  it("Distance across two DIFFERENT entities resolves the actual target points, not entities[0]'s own line", () => {
+    const l1: SketchEntity = { id: "l1", type: "Line", p0: [0, 0], p1: [10, 0] };
+    const l2: SketchEntity = { id: "l2", type: "Line", p0: [20, 0], p1: [20, 5] };
+    const c: SketchConstraint = {
+      id: "d1",
+      type: "Distance",
+      entities: ["l1", "l2"],
+      positions: ["End", "Start"],
+      value: 10,
+    };
+    const dims = layoutDimensionLines([l1, l2], [c]);
+    expect(dims).toHaveLength(1);
+    // l1.End = p1 = (10,0); l2.Start = p0 = (20,0) — NOT l1's own (0,0)/(10,0).
+    expect(dims[0].ticks[0][0]).toEqual({ x: 10, y: 0 });
+    expect(dims[0].ticks[1][0]).toEqual({ x: 20, y: 0 });
+    expect(dims[0].value).toBe(10);
+  });
+
+  it("HorizontalDistance on an ANGLED line forces a horizontal baseline, not one parallel to the line", () => {
+    const diag: SketchEntity = { id: "diag", type: "Line", p0: [0, 0], p1: [10, 10] };
+    const c: SketchConstraint = { id: "h1", type: "HorizontalDistance", entities: ["diag"], value: 10 };
+    const dims = layoutDimensionLines([diag], [c]);
+    expect(dims).toHaveLength(1);
+    const [base0, base1] = dims[0].baseline;
+    expect(base0.y).toBe(base1.y); // truly horizontal — the old bug drew this at the line's own 45°
+    expect(base0.x).toBe(0);
+    expect(base1.x).toBe(10);
+  });
+
+  it("VerticalDistance on an ANGLED line forces a vertical baseline", () => {
+    const diag: SketchEntity = { id: "diag", type: "Line", p0: [0, 0], p1: [10, 10] };
+    const c: SketchConstraint = { id: "v1", type: "VerticalDistance", entities: ["diag"], value: 10 };
+    const dims = layoutDimensionLines([diag], [c]);
+    expect(dims).toHaveLength(1);
+    const [base0, base1] = dims[0].baseline;
+    expect(base0.x).toBe(base1.x); // truly vertical
+    expect(base0.y).toBe(0);
+    expect(base1.y).toBe(10);
+  });
+
+  it("skips a HorizontalDistance with no horizontal span (a vertical edge)", () => {
+    const vert: SketchEntity = { id: "vert", type: "Line", p0: [5, 0], p1: [5, 10] };
+    const c: SketchConstraint = { id: "h2", type: "HorizontalDistance", entities: ["vert"], value: 0 };
+    expect(layoutDimensionLines([vert], [c])).toEqual([]);
+  });
+
+  it("skips a VerticalDistance with no vertical span (a horizontal edge)", () => {
+    const horiz: SketchEntity = { id: "horiz", type: "Line", p0: [0, 5], p1: [10, 5] };
+    const c: SketchConstraint = { id: "v2", type: "VerticalDistance", entities: ["horiz"], value: 0 };
+    expect(layoutDimensionLines([horiz], [c])).toEqual([]);
+  });
+});
+
 /*
  * The passive-measurement case (Sketcher UX cleanup, Track B3) — a merely
  * SELECTED, unconstrained edge. `layoutDimensionLines` no longer emits
@@ -115,6 +169,17 @@ describe("hasAuthoredLength", () => {
       false,
     );
     expect(hasAuthoredLength("bottom", [distanceOn("top")])).toBe(false);
+  });
+
+  it("is true when the entity is the SECOND target of a point-to-point constraint", () => {
+    const c: SketchConstraint = {
+      id: "d1",
+      type: "Distance",
+      entities: ["bottom", "top"],
+      positions: ["End", "Start"],
+      value: 12,
+    };
+    expect(hasAuthoredLength("top", [c])).toBe(true);
   });
 
   it("HorizontalDistance and VerticalDistance both count as authored length", () => {

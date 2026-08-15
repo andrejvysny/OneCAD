@@ -42,16 +42,23 @@ export function ConstraintBadgeLayer() {
     }
   }
 
+  // Constraint ids the solver reports in conflict (SCHEMA §7.4) — tint their
+  // badges. Computed before the Coincident filter below: a conflicting
+  // Coincident is diagnostic information, not clutter, and must survive that
+  // filter even when the preference is off (P1 fix — hiding a constraint the
+  // solver is complaining about would silently drop the only on-canvas sign
+  // something is wrong there).
+  const conflicting = useMemo(() => new Set(conflictingIds), [conflictingIds]);
   // A shared vertex already communicates "these meet here" — a Coincident
   // badge on top of it adds little and is the single biggest source of
   // per-corner clutter (Sketcher UX cleanup, Track B2). Hidden by default,
-  // opt back in via the snap popover's "Coincident badges" row.
+  // opt back in via the snap popover's "Coincident badges" row — UNLESS the
+  // solver is reporting it in conflict, which always shows through.
   const badges = useMemo(() => {
     const all = layoutBadges(session);
-    return showCoincident ? all : all.filter((b) => b.kind !== "Coincident");
-  }, [session, showCoincident]);
-  // Constraint ids the solver reports in conflict (SCHEMA §7.4) — tint their badges.
-  const conflicting = useMemo(() => new Set(conflictingIds), [conflictingIds]);
+    if (showCoincident) return all;
+    return all.filter((b) => b.kind !== "Coincident" || conflicting.has(b.id));
+  }, [session, showCoincident, conflicting]);
   const plane = session?.plane ?? null;
   const refs = useRef(new Map<string, HTMLDivElement>());
 

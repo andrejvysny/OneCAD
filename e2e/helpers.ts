@@ -151,10 +151,18 @@ async function pickFromToolFlyout(page: Page, label: string): Promise<void> {
   throw new Error(`no toolbar button or flyout member named "${label}"`);
 }
 
-/** The status-bar DOF pill (e.g. "DOF: 3"). Sketch mode always shows it. */
+/**
+ * The sketch DOF settle probe (e.g. "DOF: 3"). Backed by `SketchChromeBar`'s
+ * `data-testid="sketch-dof"` sr-only node, not visible on-screen text — the
+ * status bar used to duplicate this pill for e2e's benefit alone (a real
+ * user saw the same number three times: chrome pill, Inspector, status bar).
+ * That copy is gone; this probe is the one stable, dedicated node, present
+ * for the lifetime of an active sketch (mirrors the old status-bar node's
+ * "DOF: N" text exactly, so every existing exact/regex assertion here still
+ * matches unchanged).
+ */
 export function dofPill(page: Page): Locator {
-  // Only the status-bar pill starts with "DOF:"; the chrome/inspector use "DOF N".
-  return page.getByText(/^DOF: \d/);
+  return page.getByTestId("sketch-dof");
 }
 
 /** Sketch rows in the model tree (the mock seeds three; entering adds one). */

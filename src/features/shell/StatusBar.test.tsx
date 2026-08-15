@@ -33,27 +33,33 @@ describe("StatusBar", () => {
    * bar rendered a confident 0 about a sketch it was not reading. The read-out
    * now takes the selected sketch's own number.
    */
-  it("shows the selected sketch's own DOF, — for a body, and the mono read-out", () => {
+  /*
+   * FURTHER AMENDED (Sketcher UX hardening, P1/P2). A body/face selection has
+   * no DOF at all — the row used to render a meaningless "DOF: —" placeholder
+   * for that case; the whole segment (separator included) is now simply
+   * absent instead.
+   */
+  it("shows the selected sketch's own DOF, and nothing for a body, plus the mono read-out", () => {
     renderStatusBar();
     expect(screen.getByText("DOF: 3")).toBeInTheDocument();
     expect(screen.getByText(/273\.00/)).toBeInTheDocument();
 
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
-    expect(screen.getByText("DOF: —")).toBeInTheDocument();
+    expect(screen.queryByText(/^DOF:/)).toBeNull();
   });
 
   /*
    * A face has no degrees of freedom. The old gate was `sel.kind !== "body"`,
    * so selecting one lit the read-out up and printed a stale sketch's number.
    */
-  it("shows no DOF for a face selection in model mode", () => {
+  it("shows no DOF segment for a face selection in model mode", () => {
     renderStatusBar();
     act(() =>
       selectionStore.getState().set([
         { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0", elementId: "el_top" },
       ]),
     );
-    expect(screen.getByText("DOF: —")).toBeInTheDocument();
+    expect(screen.queryByText(/^DOF:/)).toBeNull();
   });
 
   /*
@@ -66,8 +72,7 @@ describe("StatusBar", () => {
       viewportStore.setState({ dofBadge: 7 });
       selectionStore.getState().set([{ kind: "body", id: "body1" }]);
     });
-    expect(screen.getByText("DOF: —")).toBeInTheDocument();
-    expect(screen.queryByText("DOF: 7")).toBeNull();
+    expect(screen.queryByText(/^DOF:/)).toBeNull();
   });
 
   it("styles an error hint red and an info hint dimmed", () => {
@@ -116,29 +121,26 @@ describe("StatusBar", () => {
   });
 
   /*
-   * A2 (Sketcher UX cleanup): FOV/Persp-Ortho are dead controls while sketching
-   * (sketch mode force-sets ortho), so both are noise during active editing.
-   * DOF stays visible in EVERY mode, deliberately — e2e's `dofPill`/
-   * `clickAtAwaitingDofChange` poll this exact segment as a settle gate
-   * across ~47 specs during active sketch editing; only its color-token
-   * duplication was the real bug (see the tone test below), not its
-   * visibility.
+   * A2 (Sketcher UX cleanup) + P1 hardening follow-up: FOV/Persp-Ortho are
+   * dead controls while sketching (sketch mode force-sets ortho), so both
+   * are noise during active editing. DOF no longer duplicates here either —
+   * `SketchChromeBar`'s own status pill is the DOF surface while sketching,
+   * and its `data-testid="sketch-dof"` sr-only node is now e2e's settle
+   * probe (`dofPill` in `e2e/helpers.ts`), so this row dropping its copy
+   * doesn't need a DOM contract change on the test side.
    */
-  it("hides FOV and Persp/Ortho while actively editing a sketch, but keeps DOF", () => {
+  it("hides FOV, Persp/Ortho, AND its own DOF copy while actively editing a sketch", () => {
     renderStatusBar();
     act(() => toolStore.getState().setMode("sketch", "sketch2"));
 
     expect(screen.queryByTestId("fov")).toBeNull();
     expect(screen.queryByRole("tab", { name: "Ortho" })).toBeNull();
-    expect(screen.getByText(/^DOF: /)).toBeInTheDocument();
+    expect(screen.queryByText(/^DOF:/)).toBeNull();
   });
 
-  it("colors DOF neutrally, never as a warning, in both modes", () => {
+  it("colors DOF neutrally, never as a warning, in model mode", () => {
     renderStatusBar();
     expect(screen.getByText("DOF: 3")).toHaveClass("text-dof-neutral");
-
-    act(() => toolStore.getState().setMode("sketch", "sketch2"));
-    expect(screen.getByText(/^DOF: /)).toHaveClass("text-dof-neutral");
   });
 
   it("still shows DOF and FOV for a model-mode sketch-row selection", () => {

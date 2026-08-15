@@ -66,11 +66,19 @@ const SELECTED_WIDTH = cssLineWidth(2.5);
 /** The angle-preview arc is a lightweight annotation glyph, not geometry —
  *  thinner than every real entity line so it never competes with them. */
 const ANGLE_ARC_WIDTH = cssLineWidth(1);
-/** Endpoint/midpoint/centroid AFFORDANCE opacity while idle — faintly
- *  visible, not permanent document content (Sketcher UX cleanup, Track B1b).
- *  `setPointAffordance` restores full opacity on hover/selection/any
- *  point-relevant tool. */
-const DIM_OPACITY = 0.35;
+/**
+ * Endpoint/midpoint/centroid AFFORDANCE opacity while idle — not permanent
+ * document content (Sketcher UX cleanup, Track B1b). The three tiers are NOT
+ * equal: an idle rectangle should read as faint corners with no midpoint/
+ * centroid clutter at all, matching the progressive-disclosure gate — a flat
+ * 0.35 for all three (the earlier value here) put midpoint/centroid dots on
+ * screen at the same weight as endpoints even when nothing was selected.
+ * `setPointAffordance` restores full opacity per-tier on hover/selection/a
+ * point-relevant tool.
+ */
+const ENDPOINT_IDLE_OPACITY = 0.3;
+const MIDPOINT_IDLE_OPACITY = 0;
+const CENTROID_IDLE_OPACITY = 0;
 
 /** Flat local xyz (z=0) polyline for an entity, in plane coords. */
 export function entityPolyline(e: {
@@ -257,7 +265,7 @@ export class SketchObject {
       size: 10,
       sizeAttenuation: false,
       transparent: true,
-      opacity: DIM_OPACITY,
+      opacity: ENDPOINT_IDLE_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
@@ -272,7 +280,7 @@ export class SketchObject {
       size: 6,
       sizeAttenuation: false,
       transparent: true,
-      opacity: DIM_OPACITY,
+      opacity: MIDPOINT_IDLE_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
@@ -287,7 +295,7 @@ export class SketchObject {
       size: 7,
       sizeAttenuation: false,
       transparent: true,
-      opacity: DIM_OPACITY,
+      opacity: CENTROID_IDLE_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
@@ -536,20 +544,25 @@ export class SketchObject {
   }
 
   /**
-   * Endpoint/midpoint/centroid AFFORDANCE (Sketcher UX cleanup, Track B1b):
-   * `active` restores full opacity, otherwise the markers sit at `DIM_OPACITY`
-   * — faintly visible, not permanent document content. WHOLE-SKETCH, not
-   * per-entity: hovering one entity brightens every point in the sketch, not
-   * just that entity's own. A material-opacity write + one `invalidate()`,
-   * no `setAttribute`/`computeBoundingSphere` — cheap enough to call at
+   * Endpoint/midpoint/centroid AFFORDANCE (Sketcher UX cleanup, Track B1b/P1
+   * hardening): each tier's own flag restores ITS material to full opacity,
+   * otherwise it sits at its own idle constant (endpoints faint, midpoints/
+   * centroids hidden). Still WHOLE-SKETCH per tier, not per-entity — a true
+   * per-entity reveal needs per-vertex alpha (a shader material keyed off a
+   * vertex attribute), not a per-tier material opacity; that's future work.
+   * The caller (`ViewportRoot`) narrows WHICH tier lights up from what's
+   * actually hovered/selected/tool-relevant, so hovering one line's BODY no
+   * longer also lights up every midpoint/centroid in the sketch — only its
+   * own endpoints do, matching what that hover can actually snap to. A
+   * material-opacity write + one `invalidate()` per changed tier, no
+   * `setAttribute`/`computeBoundingSphere` — cheap enough to call at
    * hover-change frequency (the caller already dedupes hover to actual
    * transitions; this does not add its own throttling).
    */
-  setPointAffordance(active: boolean): void {
-    const opacity = active ? 1 : DIM_OPACITY;
-    this.pointsMat.opacity = opacity;
-    this.midpointsMat.opacity = opacity;
-    this.centroidsMat.opacity = opacity;
+  setPointAffordance(state: { endpoints: boolean; midpoints: boolean; centroids: boolean }): void {
+    this.pointsMat.opacity = state.endpoints ? 1 : ENDPOINT_IDLE_OPACITY;
+    this.midpointsMat.opacity = state.midpoints ? 1 : MIDPOINT_IDLE_OPACITY;
+    this.centroidsMat.opacity = state.centroids ? 1 : CENTROID_IDLE_OPACITY;
     this.deps.invalidate();
   }
 

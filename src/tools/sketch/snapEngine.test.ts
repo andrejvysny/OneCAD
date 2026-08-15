@@ -74,7 +74,7 @@ describe("computeSnap priority", () => {
     const r = computeSnap({ x: 10.2, y: 60 }, [], { ...base, recentPoints: [{ x: 10, y: 0 }] });
     expect(r.kind).toBe("alignV");
     expect(r.point.x).toBe(10);
-    expect(r.guides).toEqual([{ orientation: "vertical", value: 10 }]);
+    expect(r.guides).toEqual([{ orientation: "vertical", value: 10, ref: { x: 10, y: 0 } }]);
   });
 
   it("snaps both axes but does NOT label 'Aligned' when x and y match two unrelated points", () => {
@@ -533,7 +533,7 @@ describe("computeSnap polar tier", () => {
     const r = computeSnap({ x: 0.2, y: 60 }, [], opts);
     expect(r.kind).toBe("alignV");
     expect(r.label).toBe("Vertical");
-    expect(r.guides).toEqual([{ orientation: "vertical", value: 0 }]);
+    expect(r.guides).toEqual([{ orientation: "vertical", value: 0, ref: anchor }]);
   });
 
   it("labels the reference direction Parallel and its normal Perpendicular", () => {

@@ -70,15 +70,18 @@ export type SnapKind =
  * A dashed guide the indicator draws through the snapped point.
  *
  * The H/V arms are stated as a CONSTANT COORDINATE (vertical ⇒ constant x,
- * horizontal ⇒ constant y) because they are always axis-aligned and span the
- * whole plane. A polar guide is one ray of a fan centred on the gesture's
- * anchor, so it carries that anchor plus a unit direction and is drawn
- * symmetrically about it — the same LINE, stated the only way an arbitrary
- * angle can be.
+ * horizontal ⇒ constant y) because they are always axis-aligned. `ref` is the
+ * reference point that produced the alignment (the other vertex the cursor
+ * lined up with) — the indicator draws the guide only between `ref` and the
+ * snapped point, not across the whole plane (P2 hardening: a full-plane
+ * cross read as excessive even at low opacity). A polar guide is one ray of
+ * a fan centred on the gesture's `origin` anchor, carrying that anchor plus
+ * a unit direction; the indicator draws it from `origin` to the snapped
+ * point only, not symmetrically past the anchor in the unused direction.
  */
 export type GuideLine =
-  | { orientation: "vertical"; value: number }
-  | { orientation: "horizontal"; value: number }
+  | { orientation: "vertical"; value: number; ref: Point2 }
+  | { orientation: "horizontal"; value: number; ref: Point2 }
   | { orientation: "polar"; origin: Point2; dir: Point2 };
 
 export interface SnapResult {
@@ -664,8 +667,10 @@ function guideSnap(
   }
   if (vGuide === null && hGuide === null) return null;
   const guides: GuideLine[] = [];
-  if (vGuide !== null) guides.push({ orientation: "vertical", value: vGuide });
-  if (hGuide !== null) guides.push({ orientation: "horizontal", value: hGuide });
+  // `vPt`/`hPt` are set in the same branch as `vGuide`/`hGuide` above, so
+  // non-null here is guaranteed, not merely hoped for.
+  if (vGuide !== null) guides.push({ orientation: "vertical", value: vGuide, ref: vPt! });
+  if (hGuide !== null) guides.push({ orientation: "horizontal", value: hGuide, ref: hPt! });
   const both = vGuide !== null && hGuide !== null;
   // "Aligned" means the cursor sits on BOTH axes of the SAME reference point —
   // a true 2D coincidence. When vGuide/hGuide instead come from two unrelated

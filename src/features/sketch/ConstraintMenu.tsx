@@ -80,7 +80,7 @@ export function ConstraintMenu() {
         size="sm"
         variant="secondary"
         aria-label="Constraints"
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
         className={cn(
           "shrink-0 whitespace-nowrap text-ink-3",
@@ -88,10 +88,17 @@ export function ConstraintMenu() {
         )}
         onClick={() => setOpen((v) => !v)}
       >
-        Constraints
+        {/* Tier 2: icon-bearing label collapses to icon+chevron only — one
+            step past Construction's own collapse (`SketchChromeBar`'s
+            priority order), narrower than the trigger's own row. */}
+        <span className="@max-[760px]/canvas:hidden">Constraints</span>
         <Icon name="chevronDown" size={11} strokeWidth={2} />
       </Button>
 
+      {/* `Popover` renders its own `role="dialog"` wrapper unconditionally —
+          matching `aria-haspopup="dialog"` above without this component
+          needing to assert a role of its own. The inner toolbar keeps its
+          own name; an AT reading the dialog falls through to it. */}
       <Popover
         open={open}
         onClose={() => setOpen(false)}

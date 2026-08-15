@@ -44,6 +44,11 @@ import { SHELL_MODULE_ID, contributeShellChrome } from "@/modules/shell/register
  * The regions inside the work area, in render order. `"viewport"` is the host's
  * own canvas, which is platform-owned and never a contribution (spec §25).
  */
+/** Top offset of the fused toolbar stack (was `FloatingToolbar`'s own
+ *  `top-3`). Owned here, not by a features/toolbar constant: the stack's
+ *  position is a shell layout decision, not either row's own. */
+const TOOLBAR_STACK_TOP = 12;
+
 export const EDITOR_REGIONS: readonly (SlotId | "viewport")[] = [
   "viewport",
   Slots.ViewportOverlay,
@@ -129,14 +134,41 @@ export function EditorShell() {
   return (
     <div className="flex h-full w-full select-none flex-col overflow-hidden bg-surface font-ui">
       <SlotHost slot={Slots.ShellTop} filter={isVisible} />
-      <div className="relative min-h-0 flex-1">
-        {EDITOR_REGIONS.map((region) =>
-          region === "viewport" ? (
-            <ViewportRoot key={region} className="absolute inset-x-0 bottom-[34px] top-0" />
-          ) : (
-            <SlotHost key={region} slot={region} filter={isVisible} />
-          ),
-        )}
+      {/* `@container/canvas` gives the toolbar stack below a definite-width
+          ancestor to query against. It must NOT go on the stack itself: that
+          div is shrink-to-fit (absolute + left-1/2 + -translate-x-1/2, no
+          declared width), and `container-type: inline-size` forces size
+          containment on the queried element's own inline axis — the exact
+          bug the sketch chrome's header comment documents (collapsed the
+          pill to ~0px, so every `@min-[…]` read as never-true). This div,
+          the flex-1 canvas region, has a real width from layout, so it's
+          the query context every collapse tier below reads. */}
+      <div className="@container/canvas relative min-h-0 flex-1">
+        {EDITOR_REGIONS.map((region) => {
+          if (region === "viewport") {
+            return <ViewportRoot key={region} className="absolute inset-x-0 bottom-[34px] top-0" />;
+          }
+          if (region === Slots.ToolbarContextual) {
+            // Rendered inside the ToolbarPrimary branch below: the two stack
+            // as one fused shell with a single owned width/border/shadow,
+            // not two independently positioned regions that only look fused
+            // when their content happens to be the same width.
+            return null;
+          }
+          if (region === Slots.ToolbarPrimary) {
+            return (
+              <div
+                key={region}
+                style={{ top: TOOLBAR_STACK_TOP }}
+                className="absolute left-1/2 z-30 flex -translate-x-1/2 flex-col items-stretch"
+              >
+                <SlotHost slot={Slots.ToolbarPrimary} filter={isVisible} />
+                <SlotHost slot={Slots.ToolbarContextual} filter={isVisible} />
+              </div>
+            );
+          }
+          return <SlotHost key={region} slot={region} filter={isVisible} />;
+        })}
       </div>
     </div>
   );

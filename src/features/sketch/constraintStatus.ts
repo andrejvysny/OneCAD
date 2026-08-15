@@ -55,7 +55,9 @@ export function sketchStatusIsAlert(tone: StatusTone): boolean {
 /** Inspector card body sentence. */
 export function sketchStatusSentence(status: SketchStatus, dof: number): string {
   if (status === "ok" || dof === 0) return "Sketch is fully defined.";
-  if (status === "over") return `Over-constrained by ${dof}. Remove a conflicting constraint.`;
+  // DOF is not a redundant-constraint count — "over-constrained by N" claims a
+  // number the solver never reports. State the fact, not a fabricated count.
+  if (status === "over") return "Sketch is over-constrained. Remove or change a conflicting constraint.";
   if (status === "error") return "Conflicting constraints. Remove one to resolve.";
   return `${dof} degrees of freedom remain. Add distance or coincident constraints to fully define.`;
 }

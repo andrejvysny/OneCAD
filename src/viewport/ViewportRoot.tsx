@@ -42,6 +42,7 @@ import {
 } from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
+import type { ConstraintPosition } from "@/ipc/types";
 import { entityPointCoord } from "@/features/sketch/badgeLayout";
 import { createClient } from "@/ipc/client";
 import { promoteOne } from "@/ipc/promote";
@@ -485,15 +486,33 @@ export function ViewportRoot({ className }: { className?: string }) {
             engine.setSketchHover([]);
           }
           // Endpoint/midpoint/centroid AFFORDANCE (Sketcher UX cleanup, Track
-          // B1b): dim only when truly idle — Select tool, nothing hovered,
-          // nothing selected. Any hover, selection, or other tool (dimension/
-          // trim/fillet/drawing tools all snap to these points) keeps them lit.
+          // B1b/P1 hardening): dim/hide only when truly idle — Select tool,
+          // nothing hovered, nothing selected. Any hover, selection, or other
+          // tool (dimension/trim/fillet/drawing tools all snap to these
+          // points) keeps endpoints lit — every tool snaps to an endpoint.
+          // Midpoints/centroids are narrower: they light up for a
+          // point-relevant TOOL (a non-Select tool is presumed to care about
+          // every point kind it can snap to) or when the hover/selection is
+          // SPECIFICALLY that point kind — not for merely hovering an
+          // entity's body with the Select tool, which used to brighten every
+          // midpoint/centroid in the whole sketch off one line hover.
+          // "Center" is the closest available signal for centroid relevance
+          // (a circle/arc's own center pick) — `s.hover`/`s.selected` carry no
+          // separate closed-loop-centroid point kind to key off directly.
+          const sketchTool = toolStore.getState().sketchTool;
           const idle =
-            toolStore.getState().sketchTool === "select" &&
-            !s.hover &&
-            !s.constraintHover &&
-            s.selected.length === 0;
-          engine.setSketchPointAffordance(!idle);
+            sketchTool === "select" && !s.hover && !s.constraintHover && s.selected.length === 0;
+          const toolIsPointRelevant = sketchTool !== "select";
+          const hoverPos = s.hover?.point;
+          const selectedHasPos = (pos: ConstraintPosition) =>
+            s.selected.some((sel) => sel.point === pos);
+          engine.setSketchPointAffordance({
+            endpoints: !idle,
+            midpoints:
+              !idle && (toolIsPointRelevant || hoverPos === "Midpoint" || selectedHasPos("Midpoint")),
+            centroids:
+              !idle && (toolIsPointRelevant || hoverPos === "Center" || selectedHasPos("Center")),
+          });
         };
         applySketchSelection();
         cleanups.push(sketchSelectionStore.subscribe(applySketchSelection));

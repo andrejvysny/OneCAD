@@ -29,7 +29,6 @@ export function StatusBar() {
   const setProjection = useViewportStore((s) => s.setProjection);
   const fov = useViewportStore((s) => s.fov);
   const cursor = useViewportStore((s) => s.cursor);
-  const dofBadge = useViewportStore((s) => s.dofBadge);
   const statusHint = useViewportStore((s) => s.statusHint);
   const workerState = useWorkerStore((s) => s.state);
   // H7b: > 0 while a regen job is out (real lane: regen-started/finished; mock:
@@ -46,28 +45,31 @@ export function StatusBar() {
   const sketching = mode === "sketch";
   /*
    * DOF belongs to a SKETCH, so the read-out appears only when one is in scope
-   * and reads that sketch's own number (LGU-1 WP-A, F1's neighbour).
-   *
-   * This used to be `sketching || (sel && sel.kind !== "body")` over
-   * `dofBadge ?? 0`, which said two untrue things at once. `dofBadge` is
-   * written ONLY by the live sketch session (`sketchService`,
-   * `SketchController`), so in model mode it is either null — rendered as a
-   * confident "DOF: 0" — or a leftover from whichever sketch was edited last,
-   * reported next to a selection it has nothing to do with. Selecting a FACE
-   * lit it up too, and a face has no degrees of freedom.
+   * and reads that sketch's own number (LGU-1 WP-A, F1's neighbour). Model
+   * mode reads the SELECTED sketch's own `dof` field rather than the live
+   * `dofBadge` (which is written only by an active sketch session and would
+   * otherwise leak whichever sketch was last edited next to an unrelated
+   * selection — selecting a FACE used to light it up too, and a face has no
+   * degrees of freedom).
    */
   const selectedSketchId =
     sel?.kind === "sketchRegion" ? sel.sketchId : sel?.kind === "sketch" ? sel.id : null;
   const selectedSketch = useDocumentStore((s) =>
     selectedSketchId ? s.sketches[selectedSketchId] : undefined,
   );
-  const dof = sketching ? dofBadge ?? activeSketch?.dof ?? null : selectedSketch?.dof ?? null;
+  // In sketch mode the DOF number already has a home: `SketchChromeBar`'s
+  // status pill. Showing it a SECOND time here was never a UX call — it was
+  // kept only because ~47 e2e specs polled this exact node as a settle gate;
+  // that gate now lives on `SketchChromeBar`'s own `data-testid="sketch-dof"`
+  // probe (`e2e/helpers.ts`'s `dofPill`), so this row is free to drop its
+  // sketch-mode copy. The model-mode case (a sketch/region SELECTED, not
+  // being edited) is the only place StatusBar remains the sole DOF surface.
+  const dof = sketching ? null : (selectedSketch?.dof ?? null);
   const showDof = dof !== null;
   const persp = projection === "persp";
   const statusLeft = sketching
     ? `Sketch mode — ${activeSketch?.name ?? "Sketch"}`
     : "Ready";
-  const dofText = showDof ? `DOF: ${dof}` : "DOF: —";
 
   return (
     <div className="absolute inset-x-0 bottom-0 z-[26] flex h-[34px] items-center gap-3 border-t border-border bg-statusbar px-3.5 text-[12px]">
@@ -89,15 +91,16 @@ export function StatusBar() {
         </>
       )}
       <WorkerStatusIndicator state={workerState} />
-      {/* Kept visible in sketch mode too — despite reading as a 3rd copy of
-          SketchChromeBar's status, e2e's `dofPill`/`clickAtAwaitingDofChange`
-          poll THIS exact segment as a settle gate during active sketch
-          editing across ~47 specs; hiding it here breaks that contract. Only
-          the color-token duplication was the real bug (fixed below). */}
-      <span aria-hidden="true" className="h-[14px] w-px bg-border" />
-      <span className={cn("font-medium", showDof ? "text-dof-neutral" : "text-ink-6")}>
-        {dofText}
-      </span>
+      {/* Only when a sketch/region is SELECTED in model mode — never while
+          sketching (see `dof` above) and never a bare "DOF: —" placeholder
+          for state that has no DOF at all (a body, a face, nothing
+          selected): the whole segment, separator included, is absent then. */}
+      {showDof && (
+        <>
+          <span aria-hidden="true" className="h-[14px] w-px bg-border" />
+          <span className="font-medium text-dof-neutral">DOF: {dof}</span>
+        </>
+      )}
       {/* Renders nothing while nothing is running (prototype 2a). */}
       <TasksChip />
       <SlotHost slot={Slots.StatusSection} />

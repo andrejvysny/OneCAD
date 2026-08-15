@@ -54,8 +54,22 @@ const TRIAD_OPACITY = 0.65;
  *  length — clear of the line's end cap without floating detached from it. */
 const LABEL_REACH = 1.12;
 
+/**
+ * Below this on-screen distance (CSS px) between the origin and an axis's
+ * label, that label hides (P2 hardening). A plane-normal orthographic view —
+ * an XY sketch dead-on, say — projects the near-parallel-to-camera axis's
+ * whole leg to almost no screen length, so its label lands back on top of
+ * the origin: the busiest snap target in the scene, and the one place a
+ * "Z" glyph helps least (there is no orientation ambiguity left to resolve
+ * for an axis you're looking straight down).
+ */
+const NEAR_ORIGIN_HIDE_PX = 8;
+
 const AXES = ["x", "y", "z"] as const;
 type Axis = (typeof AXES)[number];
+
+/** World origin — this group never translates, so it's always here. */
+const ORIGIN = new THREE.Vector3(0, 0, 0);
 
 /** Flat rgb pairs (both ends of each leg) in +X/+Y/+Z order. */
 function legColors(colors: TriadColors): number[] {
@@ -160,9 +174,30 @@ export class OriginTriad {
     // Label world positions ride the SAME constant-on-screen-size scale the
     // legs just got — a fixed reach just past each tip, no separate sizing.
     const reach = this.legLength * LABEL_REACH;
-    this.deps.overlay.setWorldPos(this.labelIds.x, new THREE.Vector3(reach, 0, 0));
-    this.deps.overlay.setWorldPos(this.labelIds.y, new THREE.Vector3(0, reach, 0));
-    this.deps.overlay.setWorldPos(this.labelIds.z, new THREE.Vector3(0, 0, reach));
+    const tips: Record<Axis, THREE.Vector3> = {
+      x: new THREE.Vector3(reach, 0, 0),
+      y: new THREE.Vector3(0, reach, 0),
+      z: new THREE.Vector3(0, 0, reach),
+    };
+    // Origin is always world (0,0,0) — this group never translates.
+    const originPx = this.projectToScreenPx(ORIGIN, camera, width, height);
+    for (const axis of AXES) {
+      this.deps.overlay.setWorldPos(this.labelIds[axis], tips[axis]);
+      const tipPx = this.projectToScreenPx(tips[axis], camera, width, height);
+      this.labels[axis].style.display =
+        originPx.distanceTo(tipPx) < NEAR_ORIGIN_HIDE_PX ? "none" : "";
+    }
+  }
+
+  /** NDC → CSS-px screen position, for the near-origin label hide check. */
+  private projectToScreenPx(
+    worldPos: THREE.Vector3,
+    camera: THREE.Camera,
+    width: number,
+    height: number,
+  ): THREE.Vector2 {
+    const ndc = worldPos.clone().project(camera);
+    return new THREE.Vector2((ndc.x * 0.5 + 0.5) * width, (1 - (ndc.y * 0.5 + 0.5)) * height);
   }
 
   /**

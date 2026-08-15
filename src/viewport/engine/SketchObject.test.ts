@@ -165,14 +165,24 @@ describe("SketchObject — point affordance (Sketcher UX cleanup, Track B1b)", (
     obj.dispose();
   });
 
-  it("setPointAffordance(true) brings all three marker materials to full opacity", () => {
+  it("setPointAffordance({...all true}) brings all three marker materials to full opacity", () => {
     const { obj, root } = build([seg("a")]);
     const dim = markerMaterials(root).map((m) => m.opacity);
-    obj.setPointAffordance(true);
+    obj.setPointAffordance({ endpoints: true, midpoints: true, centroids: true });
     for (const mat of markerMaterials(root)) expect(mat.opacity).toBe(1);
 
-    obj.setPointAffordance(false);
+    obj.setPointAffordance({ endpoints: false, midpoints: false, centroids: false });
     markerMaterials(root).forEach((mat, i) => expect(mat.opacity).toBe(dim[i]));
+    obj.dispose();
+  });
+
+  it("each tier's flag controls only its own marker material", () => {
+    const { obj, root } = build([seg("a")]);
+    obj.setPointAffordance({ endpoints: true, midpoints: false, centroids: false });
+    const [endpointsMat, midpointsMat, centroidsMat] = markerMaterials(root);
+    expect(endpointsMat.opacity).toBe(1);
+    expect(midpointsMat.opacity).toBeLessThan(1);
+    expect(centroidsMat.opacity).toBeLessThan(1);
     obj.dispose();
   });
 });

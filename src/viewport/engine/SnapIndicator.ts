@@ -4,7 +4,8 @@
  * Renders, in `interactionRoot` (plane-local under the plane basis):
  *   - a constant-size marker at the snapped point (THREE.Points, sizeAttenuation
  *     off ⇒ crisp regardless of zoom),
- *   - dashed H/V alignment guide lines spanning the plane,
+ *   - dashed H/V/polar alignment guide lines from their reference point to
+ *     the snapped point (not spanning the plane — see `show()`),
  * plus a hint chip ("Endpoint" / "Vertical" / …) via the HtmlOverlayDriver,
  * honoring `settingsStore.show.snappingHints`.
  *
@@ -19,7 +20,6 @@ import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import { planeBasisMatrix, planePointToWorld } from "./sketchBasis";
 
-const GUIDE_EXTENT = 5000;
 const HINT_ID = "__sketch_snap_hint";
 
 interface SnapIndicatorDeps {
@@ -201,20 +201,25 @@ export class SnapIndicator {
     pos.setXYZ(0, snap.point.x, snap.point.y, 0);
     pos.needsUpdate = true;
 
-    // Guides (plane-local dashed segments across the plane). One explicit branch
-    // per orientation: a polar guide is a line through an ORIGIN along a unit
-    // DIR, not a constant coordinate, so it is drawn symmetrically about its
-    // anchor rather than across a fixed axis.
+    // Guides (plane-local dashed segments) — REFERENCE point to snapped
+    // point only, not a fixed span across the whole plane (P2 hardening): a
+    // full-viewport cross read as excessive even faded, and a
+    // local segment is what actually shows the reader WHICH relationship
+    // just snapped, not merely "something is aligned somewhere." A guide
+    // this short can be exactly zero length when the cursor sits ON the
+    // reference (or ON the polar anchor) — degenerate, so it's skipped
+    // rather than drawing a stray zero-length dash.
     const seg: number[] = [];
     for (const g of snap.guides) {
       if (g.orientation === "vertical") {
-        seg.push(g.value, -GUIDE_EXTENT, 0, g.value, GUIDE_EXTENT, 0);
+        if (g.ref.y === snap.point.y) continue;
+        seg.push(g.value, g.ref.y, 0, g.value, snap.point.y, 0);
       } else if (g.orientation === "horizontal") {
-        seg.push(-GUIDE_EXTENT, g.value, 0, GUIDE_EXTENT, g.value, 0);
+        if (g.ref.x === snap.point.x) continue;
+        seg.push(g.ref.x, g.value, 0, snap.point.x, g.value, 0);
       } else {
-        const dx = g.dir.x * GUIDE_EXTENT;
-        const dy = g.dir.y * GUIDE_EXTENT;
-        seg.push(g.origin.x - dx, g.origin.y - dy, 0, g.origin.x + dx, g.origin.y + dy, 0);
+        if (g.origin.x === snap.point.x && g.origin.y === snap.point.y) continue;
+        seg.push(g.origin.x, g.origin.y, 0, snap.point.x, snap.point.y, 0);
       }
     }
     this.guides.geometry.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));

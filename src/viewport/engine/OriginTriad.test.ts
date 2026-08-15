@@ -199,6 +199,44 @@ describe("OriginTriad", () => {
     triad.dispose();
   });
 
+  it("hides an axis's label when the camera looks straight down that axis (P2 hardening)", () => {
+    const overlayEl = document.createElement("div");
+    const overlay = fakeOverlay();
+    const triad = new OriginTriad(
+      { x: new THREE.Color(1, 0, 0), y: new THREE.Color(0, 1, 0), z: new THREE.Color(0, 0, 1) },
+      { overlay, overlayEl },
+    );
+    // perspAt(50) sits ON the +Z axis looking at the origin — the Z leg
+    // projects to (near) zero screen length, its label lands back on the
+    // origin, and the X/Y legs stay fully visible cross-hairs.
+    triad.update(perspAt(50), 1000, 800, 1);
+    const displayFor = (letter: string) =>
+      Array.from(overlayEl.children).find((el) => el.textContent === letter)?.getAttribute("style") ??
+      "";
+    expect(displayFor("Z")).toContain("display: none");
+    expect(displayFor("X")).not.toContain("display: none");
+    expect(displayFor("Y")).not.toContain("display: none");
+    triad.dispose();
+  });
+
+  it("keeps every label visible from an oblique (isometric-like) camera", () => {
+    const overlayEl = document.createElement("div");
+    const overlay = fakeOverlay();
+    const triad = new OriginTriad(
+      { x: new THREE.Color(1, 0, 0), y: new THREE.Color(0, 1, 0), z: new THREE.Color(0, 0, 1) },
+      { overlay, overlayEl },
+    );
+    const iso = new THREE.PerspectiveCamera(50, 4 / 3, 0.1, 10_000);
+    iso.position.set(200, 200, 200);
+    iso.lookAt(0, 0, 0);
+    iso.updateMatrixWorld(true);
+    triad.update(iso, 1000, 800, 1);
+    for (const el of Array.from(overlayEl.children)) {
+      expect(el.getAttribute("style") ?? "").not.toContain("display: none");
+    }
+    triad.dispose();
+  });
+
   it("unregisters every label and detaches its element on dispose", () => {
     const overlay = fakeOverlay();
     const overlayEl = document.createElement("div");
