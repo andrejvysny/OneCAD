@@ -1,5 +1,49 @@
 # OneCAD-Tauri Migration TODO
 
+## MODELING CANVAS UX — V1: the value arrow becomes a screen overlay (2026-08-15) — FE GATE PASSED
+
+Plan: `~/.claude/plans/act-as-senior-ux-ui-robust-wozniak.md`. Five packages (V1 arrow ·
+V2 split HUD · V3 revolve angle handle + sweep path · V4 shell thickness handle · V5 body
+delete); **V1 only is landed.** Founder captures of extrude/revolve/fillet/shell drove it.
+
+The U0–U7 program (`0e58185`) never touched the value handle — U5 redesigned `TransformGizmo`
+alone — so the arrow every drag-a-distance tool shares (extrude · fillet/chamfer · offsetFace,
+one `DragHandle` instance) still had all three defects the captures show.
+
+- [x] **The arrow was invisible on the face it operates on, and that was structural.** Its fill
+      is `palette.hoverAccent()` and a selected face is `palette.selected3d()` — **the same
+      token**, `--color-accent`. Blue on blue by construction, in both themes. The fix is a new
+      `--color-overlay-halo` (near-white light / near-black dark, both blocks) drawn as an
+      outset silhouette BEHIND the fill, which is how the reference tools keep a blue handle on
+      a blue body. Near-white, not `#ffffff`: white is three.js's default material color and a
+      halo taking it would be indistinguishable from every un-themed material in the
+      theme-staleness probes. `refreshColors()` re-reads it — it is the one handle material that
+      inverts, so omitting it would strand a white outline on the dark canvas.
+- [x] **It read as geometry because it WAS geometry.** A cylinder + cone in the world: near
+      edge-on it collapsed to a hairline, and pointing at the camera — the commonest camera for
+      a depth drag — to a dot. It is now a flat `ShapeGeometry` silhouette (5 px shaft, 14 px
+      head, 44 px reach) that `orient(camera)` billboards every frame: facing the viewer, length
+      along the axis's own SCREEN direction. When the axis projects to nothing the last good
+      angle is HELD, so a full-length grabbable arrow stays on screen instead of the dot.
+      Nothing about the world axis, the anchor, or the drag math moved.
+- [x] **`getInteractionOverlayBounds("valueHandle")`** — the projected box, beside U5's
+      `"transformGizmo"` and through the same `projectPoint` path. V2 consumes it so the chip
+      can stay off the arrow; nothing reads it yet.
+
+**Correction to the plan's own claim, measured:** the pick corridor did NOT need widening — it
+was 21.6 px across (a 10.8 px-radius cylinder, ~2× the visible cone) and is now 14 px, matched
+to the visible head instead of an invisible envelope sitting over the model. Still above the
+12 px trackpad floor, and still rotationally symmetric about the axis so the billboard roll
+cannot change what is grabbable.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **277 files / 4512 tests, all
+green** · `bun run build` clean · hex gate empty. **The Playwright lanes were NOT run — the
+user authorized this commit explicitly without them.** They are owed: this changes rendered
+geometry and the grab corridor, and `e2e/helpers.ts:435` `findExtrudeHandle` scans for the
+handle at a 6 px step, which the narrower corridor still admits but only the lane can prove.
+No Rust/C++/protocol change, and none possible to gate here anyway — the staged sidecar is
+stale (`src-tauri/binaries/…` 12:02 against an 18:12 `worker/build/onecad-worker`).
+
 ## LGU-1 — Library & Generators Unification (2026-08-14) — WP-A GATE PASSED
 
 Plan: `~/.claude/plans/act-as-senior-software-inherited-sprout.md`. A nine-package

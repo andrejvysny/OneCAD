@@ -188,6 +188,19 @@ const LIGHT_LEVELS: Record<"light" | "dark", Record<"webgl" | "webgpu", LightLev
   },
 };
 
+/** The CSS-pixel box a constant-screen-size overlay of radius `reachPx` covers. */
+function boxAround(
+  centre: { x: number; y: number },
+  reachPx: number,
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: centre.x - reachPx,
+    y: centre.y - reachPx,
+    width: reachPx * 2,
+    height: reachPx * 2,
+  };
+}
+
 function lightLevels(isWebGPU: boolean): LightLevels {
   const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   return LIGHT_LEVELS[theme][isWebGPU ? "webgpu" : "webgl"];
@@ -708,6 +721,9 @@ export class ViewportEngine {
     // has always used. One implementation, and the accurate one.
     if (this.dragHandle) {
       this.dragHandle.setScale(worldPerPixel(camera, this.dragHandle.worldAnchor(), height));
+      // …and billboard it, so the flat arrow always faces the viewer and runs
+      // along its axis's SCREEN direction rather than collapsing edge-on.
+      this.dragHandle.orient(camera);
     }
     if (this.transformGizmo?.visible) {
       this.transformGizmo.setScale(
@@ -1445,9 +1461,19 @@ export class ViewportEngine {
    * same `planePixelWorld()` the scale itself uses, so the two cannot disagree.
    */
   getInteractionOverlayBounds(
-    id: "transformGizmo",
+    id: "transformGizmo" | "valueHandle",
   ): { x: number; y: number; width: number; height: number } | null {
-    if (id !== "transformGizmo") return null;
+    if (id === "valueHandle") {
+      const handle = this.dragHandle;
+      if (!handle?.visible) return null;
+      const anchor = handle.worldAnchor();
+      const projected = this.projectPoint([anchor.x, anchor.y, anchor.z]);
+      if (!projected) return null;
+      // The arrow is billboarded, so it reaches `reachPx` from its anchor in
+      // whatever screen direction its axis points — the box that holds every
+      // such direction is the square of that radius.
+      return boxAround(projected, handle.reachPx());
+    }
     const gizmo = this.transformGizmo;
     if (!gizmo || !gizmo.visible) return null;
     const centre = this.transformGizmoOrigin;
@@ -1455,13 +1481,7 @@ export class ViewportEngine {
     const projected = this.projectPoint(centre);
     if (!projected) return null;
     const worldPerPx = Math.max(this.planePixelWorld(), 1e-9);
-    const reachPx = gizmo.worldRadius() / worldPerPx;
-    return {
-      x: projected.x - reachPx,
-      y: projected.y - reachPx,
-      width: reachPx * 2,
-      height: reachPx * 2,
-    };
+    return boxAround(projected, gizmo.worldRadius() / worldPerPx);
   }
 
   /** Hover tint on one gizmo handle (null clears). */

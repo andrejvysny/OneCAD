@@ -197,6 +197,15 @@
   /* Cyan 3D hover highlight — distinct from --color-accent, which drives
      preview/UI hover states. */
   --color-viewport-hover: #00acc1;
+  /* Outline drawn behind a screen-space overlay handle. The value arrow is
+     --color-accent and so is a selected face (--color-accent drives both), so
+     the arrow is invisible on the very face it operates on without an outline
+     in the OPPOSITE tone. It therefore inverts between themes, like
+     --color-body-edge-wire, rather than tracking the surface it sits on.
+     Near-white rather than pure white on purpose: `#ffffff` is three.js's
+     default material color, so a halo that took it would be indistinguishable
+     from every un-themed material in the theme-staleness probes. */
+  --color-overlay-halo: #fbfcfe;
 
   /* ---- Radii ---- */
   --radius-sm: 6px;
@@ -380,6 +389,9 @@
 
   /* ---- Viewport interaction ---- */
   --color-viewport-hover: #26c6da;
+  /* Inverted (see the light block): on a dark canvas a white outline glows and
+     the arrow loses its edge, so the halo goes near-black. */
+  --color-overlay-halo: #11141a;
 }
 
 /*

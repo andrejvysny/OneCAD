@@ -50,7 +50,8 @@ export type TokenName =
   | "--color-sketch-done"
   | "--color-sketch-sel"
   | "--color-sketch-angle-ref"
-  | "--color-viewport-hover";
+  | "--color-viewport-hover"
+  | "--color-overlay-halo";
 
 // rgb() mirrors of the token values in tokens.css (non-browser fallback only).
 // MUST be kept in step with tokens.css by hand — nothing enforces it, because
@@ -84,6 +85,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-sel": "rgb(217, 119, 6)",
     "--color-sketch-angle-ref": "rgb(139, 92, 246)",
     "--color-viewport-hover": "rgb(0, 172, 193)",
+    "--color-overlay-halo": "rgb(251, 252, 254)",
   },
   dark: {
     "--color-border": "rgb(52, 56, 63)",
@@ -113,6 +115,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-sel": "rgb(240, 162, 74)",
     "--color-sketch-angle-ref": "rgb(167, 139, 250)",
     "--color-viewport-hover": "rgb(38, 198, 218)",
+    "--color-overlay-halo": "rgb(17, 20, 26)",
   },
 };
 
@@ -184,6 +187,12 @@ export const palette = {
   hoverAccent: () => tokenColor("--color-accent"),
   /** Cyan 3D-viewport hover (hovering a body/face/edge in the scene) — distinct from hoverAccent. */
   hover3d: () => tokenColor("--color-viewport-hover"),
+  /**
+   * Outline behind a screen-space overlay handle (the value arrow). INVERTS
+   * between themes: the arrow's own fill is `--color-accent`, which is also the
+   * selected-face fill, so only an opposite-tone outline separates the two.
+   */
+  overlayHalo: () => tokenColor("--color-overlay-halo"),
   /** Selected face tint (UI-side; panels/lists). */
   selectedTint: () => tokenColor("--color-sel-bg"),
   /**
