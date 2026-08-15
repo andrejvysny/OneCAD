@@ -360,14 +360,21 @@ fn loaded_linear_pattern_v3_record(
     )
 }
 
-fn assert_v1_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+fn assert_legacy_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(record_id)))
+        .expect("pattern params persist");
+    assert_eq!(params.get("resultPolicyVersion"), None);
+}
+
+fn assert_v2_linear_pattern_record(rt: &DocumentRuntime, record_id: u128) {
     let params = rt
         .operation_params(RecordId(Uuid::from_u128(record_id)))
         .expect("pattern params persist");
     assert_eq!(
         params.get("resultPolicyVersion"),
-        None,
-        "V1 absence remains absent after reopen"
+        Some(&serde_json::json!(2)),
+        "absent V1 migrates to V2 on writable reopen"
     );
 }
 
@@ -630,7 +637,7 @@ async fn linear_pattern_three_boxes() {
 /// disconnected result mints `body_<opId>` and does not consume its source.
 /// Exercise a cold worker so a cache cannot hide a wrong persisted policy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn linear_pattern_v1_fused_disjoint_survives_cold_reopen() {
+async fn linear_pattern_v1_fused_disjoint_migrates_and_refuses_cold_reopen() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary");
         return;
@@ -656,7 +663,7 @@ async fn linear_pattern_v1_fused_disjoint_survives_cold_reopen() {
         rt.head_body_ids().contains(&aggregate),
         "V1 creates aggregate"
     );
-    assert_v1_linear_pattern_record(&rt, OP_PATTERN);
+    assert_legacy_linear_pattern_record(&rt, OP_PATTERN);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v1-fused-disjoint.onecad");
@@ -686,17 +693,17 @@ async fn linear_pattern_v1_fused_disjoint_survives_cold_reopen() {
         "cold reopen keeps source"
     );
     assert!(
-        reopened.head_body_ids().contains(&aggregate),
-        "cold reopen recreates body_<opId>"
+        !reopened.head_body_ids().contains(&aggregate),
+        "V1 aggregate is retired during V2 migration"
     );
-    assert_v1_linear_pattern_record(&reopened, OP_PATTERN);
+    assert_v2_linear_pattern_record(&reopened, OP_PATTERN);
     cold.shutdown().await;
 }
 
 /// The no-fuse V1 aggregate has the same identity contract, independently of
 /// the fused/disjoint compatibility path above.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn linear_pattern_v1_nonfused_aggregate_survives_cold_reopen() {
+async fn linear_pattern_v1_nonfused_aggregate_migrates_to_v2_children() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary");
         return;
@@ -742,10 +749,10 @@ async fn linear_pattern_v1_nonfused_aggregate_survives_cold_reopen() {
         "cold reopen keeps source"
     );
     assert!(
-        reopened.head_body_ids().contains(&aggregate),
-        "cold reopen recreates body_<opId>"
+        !reopened.head_body_ids().contains(&aggregate),
+        "V1 aggregate is retired during V2 migration"
     );
-    assert_v1_linear_pattern_record(&reopened, OP_PATTERN);
+    assert_v2_linear_pattern_record(&reopened, OP_PATTERN);
     cold.shutdown().await;
 }
 

@@ -1492,10 +1492,14 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 
 - `count` is an integer `[2,128]`; `|spacing| ≥ 1e-9`; `direction` non-zero
   (normalized). Instance `i ∈ [1, count)` is translated `direction·spacing·i`.
-- **Absent `resultPolicyVersion` is frozen V1:** `fuseResult:true` fuses source +
-  instances into legacy aggregate body `body_<opId>`; `false` gathers the same into
-  one compound body. Source remains unchanged. This compatibility path permits its
-  historic aggregate/compound result and does not apply V2 connected-solid policy.
+- **Absent `resultPolicyVersion` is the raw-worker V1 interpretation:**
+  `fuseResult:true` fuses source + instances into legacy aggregate body
+  `body_<opId>`; `false` gathers the same into one compound body; source remains
+  unchanged. On every writable `.onecad` open, core migrates such records to V2,
+  clears the stale aggregate outputs/body/element cache, and seeds persisted
+  NeedsRepair on every downstream record that named the retired aggregate. No V2
+  child is selected automatically. A direct raw worker plan that bypasses document
+  loading still reads absence as V1 for protocol compatibility.
 - **`resultPolicyVersion:2`:** source is instance zero. With `fuseResult:false`, it
   emits exactly `count−1` created children `body_<opId>:<k>`, where child `k` is
   transformed instance `k+1`; source emits no lifecycle event and stays unchanged.
@@ -1504,7 +1508,8 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   source body visibility/color, but not source face identities or face colors. New
   authoring emits only integer `2`. Other numeric versions load and re-save verbatim,
   but execution refuses recoverably with `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`.
-  Re-edit preserves both legacy absence and stored `fuseResult`. Count reduction removes only tail children;
+  Re-edit preserves stored `fuseResult`; writable-open migration means legacy absence
+  does not reach a normal re-edit. Count reduction removes only tail children;
   retained child IDs remain stable, and suppression removes children without
   modifying source.
 
@@ -3133,6 +3138,12 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-15 — §7.3 absent Pattern V1 writable-open migration.** Core
+  rewrites absent-version Linear/Circular Pattern records to V2 before typed
+  decode, retires their aggregate body/element/output cache, and seeds persisted
+  NeedsRepair on every downstream record containing the old aggregate BodyId.
+  No one-to-many child guess is allowed. Raw worker absence remains V1 for protocol
+  compatibility; newer numeric versions remain losslessly round-trippable.
 - **2026-08-15 — §7.2 body health + §7.3 Import quarantine.** Additive
   `bodyEvents[].health` carries `quarantined` only when final imported geometry
   remains invalid or unprovable after healing/scaling. Rust persists the state in

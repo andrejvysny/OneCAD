@@ -8,7 +8,8 @@
 //!
 //! Open policy (V1/V2 §9.2/§9.3):
 //!
-//! * **Same version** → no migration, read/write.
+//! * **Same version** → read/write after idempotent policy normalizations (legacy
+//!   region ids and absent-version Pattern V1 → V2 + downstream repair seeds).
 //! * **Older version** → build a [`MigrationPlan`], apply it. If the chain does not
 //!   reach the current version, or any step's confidence is below `High`, the
 //!   document opens **read-only** with a [`MigrationReport`] (guided report).
@@ -17,9 +18,10 @@
 //!   unknown fields via `extra` (the record codec already does this), so the
 //!   document loads without a transform but is never written back.
 //!
-//! The v2.0 registry is an **empty chain** — the structure exists (and is tested
-//! against synthetic future/legacy fixtures) so the later `.onecad` v1.1 importer
-//! drops in as one registered step.
+//! The version-step registry remains an **empty chain**. Same-version policy
+//! normalizations live outside it because they do not change
+//! `globalSchemaVersion`, but they still mark records/caches stale and emit
+//! migration diagnostics.
 
 use std::collections::BTreeMap;
 
@@ -355,6 +357,159 @@ fn sanitize_region_ids(value: &mut Value) -> Vec<Diagnostic> {
     diags
 }
 
+fn value_contains_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text == needle,
+        Value::Array(values) => values.iter().any(|v| value_contains_string(v, needle)),
+        Value::Object(values) => values.values().any(|v| value_contains_string(v, needle)),
+        _ => false,
+    }
+}
+
+/// Same-version policy migration for absent-version Pattern V1 records. V2 changes
+/// body identity (one aggregate becomes modified-source or ordinal children), so
+/// every downstream reference to the retired aggregate is seeded NeedsRepair.
+/// No child is selected automatically.
+fn migrate_absent_pattern_result_policies(value: &mut Value) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut retired_bodies = Vec::<String>::new();
+    let mut repair_seeds = Vec::<Value>::new();
+
+    {
+        let Some(records) = value
+            .pointer_mut("/timeline/records")
+            .and_then(Value::as_array_mut)
+        else {
+            return diagnostics;
+        };
+
+        for index in 0..records.len() {
+            let op_type = records[index]
+                .get("opType")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if !matches!(op_type.as_str(), "LinearPattern" | "CircularPattern") {
+                continue;
+            }
+            let already_versioned = records[index]
+                .pointer("/params/resultPolicyVersion")
+                .is_some();
+            if already_versioned {
+                continue;
+            }
+            let Some(pattern_id) = records[index]
+                .get("recordId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            else {
+                diagnostics.push(Diagnostic::warning(
+                    "pattern-result-policy-v2-migration-skipped",
+                    "an absent-version Pattern has no readable recordId; left unchanged",
+                ));
+                continue;
+            };
+
+            let downstream: Vec<(usize, usize, String)> = records
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .filter(|(_, record)| value_contains_string(record, &pattern_id))
+                .map(|(position, record)| {
+                    let step = record
+                        .get("stepIndex")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| usize::try_from(v).ok())
+                        .unwrap_or(position);
+                    let record_id = record
+                        .get("recordId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("downstream-op")
+                        .to_owned();
+                    (position, step, record_id)
+                })
+                .collect();
+
+            let Some(params) = records[index]
+                .get_mut("params")
+                .and_then(Value::as_object_mut)
+            else {
+                diagnostics.push(Diagnostic::warning(
+                    "pattern-result-policy-v2-migration-skipped",
+                    format!("Pattern {pattern_id} has no params object; left unchanged"),
+                ));
+                continue;
+            };
+            params.insert("resultPolicyVersion".into(), Value::from(2u8));
+            if let Some(outputs) = records[index]
+                .get_mut("outputs")
+                .and_then(Value::as_array_mut)
+            {
+                outputs.clear();
+            }
+            retired_bodies.push(pattern_id.clone());
+            diagnostics.push(Diagnostic::info(
+                "pattern-result-policy-v2-migrated",
+                format!("migrated {op_type} {pattern_id} from absent V1 to V2"),
+            ));
+
+            for (_position, step, downstream_id) in downstream {
+                repair_seeds.push(serde_json::json!({
+                    "stepIndex": step,
+                    "refId": format!("{downstream_id}.patternV1Aggregate"),
+                    "ladderFailed": "descriptor",
+                    "reason": "no-candidates",
+                    "candidates": [],
+                    "uiLabel": format!(
+                        "Pattern V1 aggregate {pattern_id} migrated to V2 outputs; reselect this body reference"
+                    ),
+                    "seeded": true
+                }));
+            }
+        }
+    }
+
+    if retired_bodies.is_empty() {
+        return diagnostics;
+    }
+
+    if let Some(bodies) = value
+        .pointer_mut("/bodies/bodies")
+        .and_then(Value::as_array_mut)
+    {
+        bodies.retain(|body| {
+            body.get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !retired_bodies.iter().any(|retired| retired == id))
+        });
+    }
+    if let Some(elements) = value.get_mut("elements").and_then(Value::as_object_mut) {
+        elements.retain(|_, entry| {
+            entry
+                .get("body")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !retired_bodies.iter().any(|retired| retired == id))
+        });
+    }
+    if !repair_seeds.is_empty() {
+        if !value.get("repair").is_some_and(Value::is_array) {
+            value["repair"] = Value::Array(Vec::new());
+        }
+        if let Some(repair) = value.get_mut("repair").and_then(Value::as_array_mut) {
+            for seed in repair_seeds {
+                let duplicate = repair.iter().any(|item| {
+                    item.get("stepIndex") == seed.get("stepIndex")
+                        && item.get("refId") == seed.get("refId")
+                });
+                if !duplicate {
+                    repair.push(seed);
+                }
+            }
+        }
+    }
+    diagnostics
+}
+
 /// Runs the version-aware open policy over a raw document value (plan task 5).
 ///
 /// * `stored_version` is the manifest's `globalSchemaVersion`.
@@ -372,7 +527,8 @@ pub fn open_policy(
     match stored_version.cmp(&target_version) {
         Ordering::Equal => {
             // Same version: still normalize legacy placeholder region ids (M4a).
-            let diagnostics = sanitize_region_ids(&mut value);
+            let mut diagnostics = sanitize_region_ids(&mut value);
+            diagnostics.extend(migrate_absent_pattern_result_policies(&mut value));
             let records_changed = !diagnostics.is_empty();
             Ok(MigratedValue {
                 value,
@@ -424,7 +580,8 @@ pub fn open_policy(
             });
             // Also normalize legacy placeholder region ids on the migrated value (M4a).
             let region_diags = sanitize_region_ids(&mut value);
-            let records_changed = applied || !region_diags.is_empty();
+            let pattern_diags = migrate_absent_pattern_result_policies(&mut value);
+            let records_changed = applied || !region_diags.is_empty() || !pattern_diags.is_empty();
             let mut diagnostics = Vec::new();
             if applied {
                 diagnostics.push(Diagnostic::info(
@@ -439,6 +596,7 @@ pub fn open_policy(
                 ));
             }
             diagnostics.extend(region_diags);
+            diagnostics.extend(pattern_diags);
             if let Some(reason) = &read_only_reason {
                 diagnostics.push(Diagnostic::warning("migration-read-only", reason.clone()));
             }
@@ -607,6 +765,58 @@ mod tests {
             .filter(|d| d.code == "region-id-legacy-reset")
             .count();
         assert_eq!(n, 2, "one diagnostic per reset (the two placeholders)");
+    }
+
+    #[test]
+    fn absent_patterns_migrate_to_v2_and_seed_downstream_repair() {
+        let value = serde_json::json!({
+            "timeline": { "records": [
+                { "recordId": "pattern-1", "stepIndex": 0, "opType": "LinearPattern",
+                  "params": { "sourceBodyId": "source", "count": 3, "fuseResult": false },
+                  "outputs": ["pattern-1"] },
+                { "recordId": "consumer-1", "stepIndex": 1, "opType": "Hole",
+                  "params": { "targetBodyId": "pattern-1" },
+                  "inputs": { "bodies": ["pattern-1"] } },
+                { "recordId": "pattern-2", "stepIndex": 2, "opType": "CircularPattern",
+                  "params": { "resultPolicyVersion": 2 } },
+                { "recordId": "pattern-3", "stepIndex": 3, "opType": "LinearPattern",
+                  "params": { "resultPolicyVersion": 3 } },
+                { "recordId": "hole-1", "stepIndex": 4, "opType": "Hole", "params": {} }
+            ]},
+            "bodies": { "bodies": [
+                { "id": "pattern-1", "name": "Legacy aggregate", "visible": true,
+                  "createdBy": "pattern-1" },
+                { "id": "source", "name": "Source", "visible": true,
+                  "createdBy": "source" }
+            ]},
+            "elements": { "el_old": { "body": "pattern-1", "kind": "face" } },
+            "repair": []
+        });
+        let out = open_policy(&MigrationRegistry::new(), value, 1, 1).unwrap();
+        let records = &out.value["timeline"]["records"];
+        assert_eq!(records[0]["params"]["resultPolicyVersion"], 2);
+        assert_eq!(records[0]["outputs"], serde_json::json!([]));
+        assert_eq!(records[2]["params"]["resultPolicyVersion"], 2);
+        assert_eq!(records[3]["params"]["resultPolicyVersion"], 3);
+        assert!(records[4]["params"].get("resultPolicyVersion").is_none());
+        assert!(out.value["bodies"]["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|body| body["id"] != "pattern-1"));
+        assert!(out.value["elements"].get("el_old").is_none());
+        assert_eq!(out.value["repair"][0]["stepIndex"], 1);
+        assert_eq!(out.value["repair"][0]["reason"], "no-candidates");
+        assert_eq!(out.value["repair"][0]["seeded"], true);
+        assert!(out.records_changed);
+        assert!(out
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "pattern-result-policy-v2-migrated"));
+
+        let second = open_policy(&MigrationRegistry::new(), out.value, 1, 1).unwrap();
+        assert!(!second.records_changed, "migration is idempotent");
+        assert_eq!(second.value["repair"].as_array().unwrap().len(), 1);
     }
 
     #[test]
