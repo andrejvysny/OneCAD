@@ -168,7 +168,17 @@ export type SketchConstraintType =
   | "Angle"
   | "Radius"
   | "Diameter"
-  | "Symmetric";
+  | "Symmetric"
+  /**
+   * Two points share a Y / an X — the POINT-PAIR axis alignments (SNAP P3).
+   *
+   * What an H/V alignment guide actually asserts, and expressible by neither
+   * existing kind: `Horizontal`/`Vertical` are LINE-only (they constrain one
+   * entity), and a zero-valued `HorizontalDistance`/`VerticalDistance` is a
+   * user-visible DRIVING dimension. SCHEMA §7.3 carries both.
+   */
+  | "HorizontalPoints"
+  | "VerticalPoints";
 
 /** Which point of an entity a positional constraint references. */
 export type ConstraintPosition = "Start" | "End" | "Center" | "Midpoint";

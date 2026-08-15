@@ -409,6 +409,18 @@ TranslateResult translate(const json& args) {
             else if (role == "end") cp = sk::CurvePosition::End;
             if (p.empty() || cv.empty()) fail = "OnCurve: unresolved refs";
             else added = sketch->addPointOnCurve(p, cv, cp);
+        } else if (type == "HorizontalPoints" || type == "VerticalPoints") {
+            // POINT-PAIR axis alignment (SNAP P3). Both slots are POINTS, so
+            // both go through `resolve_point` and an unresolved handle FAILS
+            // LOUDLY — silently dropping it would move the DOF count without
+            // any constraint existing to explain it.
+            const sk::EntityID a = idx.resolve_point(ent(0), pos(0));
+            const sk::EntityID b = idx.resolve_point(ent(1), pos(1));
+            if (a.empty() || b.empty()) fail = type + ": unresolved point handle";
+            else if (type == "HorizontalPoints")
+                added = sketch->addConstraint(std::make_unique<cs::HorizontalPointsConstraint>(a, b));
+            else
+                added = sketch->addConstraint(std::make_unique<cs::VerticalPointsConstraint>(a, b));
         } else if (type == "Parallel") {
             added = sketch->addParallel(internal(ent(0)), internal(ent(1)));
         } else if (type == "Perpendicular") {

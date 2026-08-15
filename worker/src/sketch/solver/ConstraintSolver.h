@@ -483,6 +483,11 @@ inline int getConstraintDOFReduction(ConstraintType type) {
         case ConstraintType::Fixed:         return 2;
         case ConstraintType::Midpoint:      return 2;
         case ConstraintType::Symmetric:     return 2;
+        // SNAP P3: one shared coordinate, so one DOF — the same reduction the
+        // line-only forms make, because PlaneGCS lowers all four to the same
+        // primitive.
+        case ConstraintType::HorizontalPoints: return 1;
+        case ConstraintType::VerticalPoints:   return 1;
     }
     return 0;
 }

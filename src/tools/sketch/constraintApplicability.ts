@@ -53,7 +53,7 @@ export interface ApplicableConstraint {
 
 /**
  * Wire-encodability per constraint type (mirrors `toWireConstraint`,
- * src/ipc/sketchWireMap.ts). All 18 `SketchConstraintType` kinds are mapped by
+ * src/ipc/sketchWireMap.ts). All 20 `SketchConstraintType` kinds are mapped by
  * `toWireConstraint` (the last 5 — Fixed/OnCurve/Tangent/Concentric/Symmetric —
  * landed with the constraint-apply WP), so every entry is `true` today. The
  * table stays as the guard: `evaluateApplicability` filters its output through
@@ -80,6 +80,8 @@ export const WIRE_ENCODABLE: Record<SketchConstraintType, boolean> = {
   Radius: true,
   Diameter: true,
   Symmetric: true,
+  HorizontalPoints: true, // SNAP P3 — two point slots, arc-endpoint roles included
+  VerticalPoints: true,
 };
 
 /** Mirrors `isDimensional` (sketchWireMap.ts:254-261/336-338); duplicated (not
@@ -293,8 +295,14 @@ export function evaluateApplicability(
     push("Coincident", [a, b]);
     push("HorizontalDistance", [a, b]);
     push("VerticalDistance", [a, b]);
+    // SNAP P3: two points ALWAYS support the point-pair axis alignments — they
+    // say "these share a coordinate" and need no line between them.
+    push("HorizontalPoints", [a, b]);
+    push("VerticalPoints", [a, b]);
     const line = findLineBetweenPoints(entities, a as SketchConstraintTargetPoint, b as SketchConstraintTargetPoint);
     if (line) {
+      // The LINE-only forms stay offered when the two points ARE one line's
+      // ends: that constrains the entity, a stronger and different statement.
       push("Horizontal", [line]);
       push("Vertical", [line]);
     }

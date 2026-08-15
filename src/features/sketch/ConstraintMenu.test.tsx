@@ -43,7 +43,7 @@ describe("ConstraintMenu", () => {
     expect(screen.queryByRole("button", { name: "Add constraint" })).toBeNull();
   });
 
-  it("renders a closed trigger; opening it shows all 16 constraint buttons, all disabled with no selection", async () => {
+  it("renders a closed trigger; opening it shows all 18 constraint buttons, all disabled with no selection", async () => {
     const user = userEvent.setup();
     render(<ConstraintMenu />);
     enterSketch(twoLines, []);
@@ -53,7 +53,7 @@ describe("ConstraintMenu", () => {
 
     const bar = screen.getByRole("toolbar", { name: "Constraints" });
     const buttons = bar.querySelectorAll("button");
-    expect(buttons).toHaveLength(16);
+    expect(buttons).toHaveLength(18);
     buttons.forEach((b) => expect(b).toBeDisabled());
   });
 

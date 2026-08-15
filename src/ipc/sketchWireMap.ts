@@ -168,6 +168,15 @@ export type WireConstraint =
       curve: string;
       position?: "start" | "end";
     }
+  /** SNAP P3 — two POINT slots, no value. Both accept the arc owner+role form. */
+  | {
+      kind: "horizontalPoints" | "verticalPoints";
+      id: string;
+      point1: string;
+      point2: string;
+      point1Position?: "start" | "end";
+      point2Position?: "start" | "end";
+    }
   | { kind: "parallel"; id: string; line1: string; line2: string }
   | { kind: "perpendicular"; id: string; line1: string; line2: string }
   | { kind: "tangent"; id: string; entity1: string; entity2: string }
@@ -519,6 +528,21 @@ function toWireConstraint(
       if (!point || !line) return null;
       const out: WireConstraint = { kind: "midpoint", id, point: point.id, line };
       if (point.position) out.pointPosition = point.position;
+      return out;
+    }
+    case "HorizontalPoints":
+    case "VerticalPoints": {
+      const a = slot(0);
+      const b = slot(1);
+      if (!a || !b) return null;
+      const out: WireConstraint = {
+        kind: c.type === "HorizontalPoints" ? "horizontalPoints" : "verticalPoints",
+        id,
+        point1: a.id,
+        point2: b.id,
+      };
+      if (a.position) out.point1Position = a.position;
+      if (b.position) out.point2Position = b.position;
       return out;
     }
     case "Parallel":

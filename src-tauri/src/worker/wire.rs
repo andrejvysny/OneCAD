@@ -3593,6 +3593,39 @@ fn wire_constraint(c: &Constraint) -> Value {
             }
             v
         }
+        // SNAP P3. Both slots are POINTS, so the `positions` discipline is
+        // exactly `Coincident`'s: emitted only when a side names an arc
+        // endpoint, absent otherwise.
+        Constraint::HorizontalPoints {
+            point1,
+            point1_position,
+            point2,
+            point2_position,
+            ..
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "HorizontalPoints", "entities": [s(point1), s(point2)],
+            });
+            if let Some(p) = point_roles(&[*point1_position, *point2_position]) {
+                v["positions"] = p;
+            }
+            v
+        }
+        Constraint::VerticalPoints {
+            point1,
+            point1_position,
+            point2,
+            point2_position,
+            ..
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "VerticalPoints", "entities": [s(point1), s(point2)],
+            });
+            if let Some(p) = point_roles(&[*point1_position, *point2_position]) {
+                v["positions"] = p;
+            }
+            v
+        }
     }
 }
 

@@ -133,3 +133,101 @@ describe("toWireConstraint — S4b geometric kinds", () => {
     expect(map.constraint.has("cF")).toBe(true);
   });
 });
+
+/*
+ * The POINT-PAIR axis alignments (SNAP P3).
+ *
+ * Both slots are POINTS, so both accept the arc owner+role form — the shape
+ * SCHEMA §7.3 generalized from `Coincident`. These pin that the marshaller
+ * emits exactly that and never confuses them with the line-only H/V or with a
+ * zero-valued H/V-Distance.
+ */
+describe("toWireConstraint — HorizontalPoints / VerticalPoints", () => {
+  const ents = (): SketchEntity[] => [
+    line("l1", [0, 0], [10, 0]),
+    line("l2", [20, 5], [30, 5]),
+    arc("a1", [0, 0], 5, [5, 0], [0, 5]),
+  ];
+
+  it("marshals two ordinary points with no positions noise", () => {
+    const map = createIdMap("sk", "XY");
+    const constraints: SketchConstraint[] = [
+      { id: "c1", type: "VerticalPoints", entities: ["l1", "l2"], positions: ["Start", "End"] },
+    ];
+    const ops = marshalUpsert(map, { entities: ents(), constraints }, mint);
+    const wire = addConstraintOp(ops)?.constraint as Record<string, unknown>;
+    expect(wire.kind).toBe("verticalPoints");
+    // Both sides resolved to minted point uuids, so no owner+role rides along.
+    expect(wire.point1Position).toBeUndefined();
+    expect(wire.point2Position).toBeUndefined();
+    expect(typeof wire.point1).toBe("string");
+    expect(typeof wire.point2).toBe("string");
+  });
+
+  it("carries an ARC endpoint as owner + role on one side only", () => {
+    const map = createIdMap("sk", "XY");
+    const constraints: SketchConstraint[] = [
+      { id: "c1", type: "HorizontalPoints", entities: ["a1", "l2"], positions: ["Start", "End"] },
+    ];
+    const ops = marshalUpsert(map, { entities: ents(), constraints }, mint);
+    const wire = addConstraintOp(ops)?.constraint as Record<string, unknown>;
+    expect(wire.kind).toBe("horizontalPoints");
+    expect(wire.point1Position).toBe("start");
+    expect(wire.point2Position).toBeUndefined();
+  });
+
+  it("is NOT the line-only Horizontal — different kind, different slots", () => {
+    const map = createIdMap("sk", "XY");
+    const lineOps = marshalUpsert(
+      map,
+      { entities: ents(), constraints: [{ id: "c1", type: "Horizontal", entities: ["l1"] }] },
+      mint,
+    );
+    const lineWire = addConstraintOp(lineOps)?.constraint as Record<string, unknown>;
+    expect(lineWire.kind).toBe("horizontal");
+    expect(lineWire.line).toBeDefined();
+    expect(lineWire.point1).toBeUndefined();
+
+    const map2 = createIdMap("sk2", "XY");
+    const pointOps = marshalUpsert(
+      map2,
+      {
+        entities: ents(),
+        constraints: [
+          {
+            id: "c1",
+            type: "HorizontalPoints",
+            entities: ["l1", "l2"],
+            positions: ["Start", "Start"],
+          },
+        ],
+      },
+      mint,
+    );
+    const pointWire = addConstraintOp(pointOps)?.constraint as Record<string, unknown>;
+    expect(pointWire.point1).toBeDefined();
+    expect(pointWire.line).toBeUndefined();
+    // …and it carries NO value, which is what separates it from H/V-Distance.
+    expect(pointWire.value).toBeUndefined();
+  });
+
+  it("drops to null when a point slot cannot be resolved", () => {
+    const map = createIdMap("sk", "XY");
+    const ops = marshalUpsert(
+      map,
+      {
+        entities: ents(),
+        constraints: [
+          {
+            id: "c1",
+            type: "HorizontalPoints",
+            entities: ["l1", "ghost"],
+            positions: ["Start", "Start"],
+          },
+        ],
+      },
+      mint,
+    );
+    expect(addConstraintOp(ops)).toBeUndefined();
+  });
+});

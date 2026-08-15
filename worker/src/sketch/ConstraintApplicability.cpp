@@ -146,7 +146,14 @@ ConstraintApplicabilityResult evaluateConstraintApplicability(
         result.applicableConstraints.insert(ConstraintType::Coincident);
         result.applicableConstraints.insert(ConstraintType::HorizontalDistance);
         result.applicableConstraints.insert(ConstraintType::VerticalDistance);
+        // SNAP P3: two points always support the POINT-PAIR axis alignments —
+        // they say "these share a coordinate" and need no line between them.
+        result.applicableConstraints.insert(ConstraintType::HorizontalPoints);
+        result.applicableConstraints.insert(ConstraintType::VerticalPoints);
         if (hasLineBetweenPoints(sketch, selectedEntityIds[0], selectedEntityIds[1])) {
+            // The LINE-only forms remain offered when the two points happen to
+            // be one line's ends: that constrains the ENTITY, which is a
+            // different (and stronger) statement about the drawing.
             result.applicableConstraints.insert(ConstraintType::Horizontal);
             result.applicableConstraints.insert(ConstraintType::Vertical);
         }

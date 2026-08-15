@@ -134,6 +134,46 @@ here because they change user-visible behaviour):
 C++ `SnapManager` parity record) is migrated to `SnapDecision`, and once the ~6 remaining
 `SnapResult` importers move. Tracked here; not a P3–P5 blocker.
 
+### P3 — persist accepted inference intent — DONE
+
+Cross-track. Two ADDITIVE constraint kinds reach all four layers, and placement INTENT replaces
+coordinate re-derivation as the evidence a relation is persisted from.
+
+- [x] **C++**: `ConstraintType::HorizontalPoints`/`VerticalPoints` APPENDED (no enumerator
+      renumbered), `HorizontalPointsConstraint`/`VerticalPointsConstraint` (1 DOF, error `|dy|`/`|dx|`,
+      midpoint icon), solver dispatch through PlaneGCS `addConstraintHorizontal`/`Vertical` on the
+      two points directly, `Sketch::validate` cases, the DOF table, `WireSketch` decode with a LOUD
+      unresolved-handle failure, and applicability for any two points.
+      New ctest `sketch_point_axis` (6 cases incl. the solver actually moving a point).
+- [x] **Rust**: two `Constraint` variants (geometric — `value()` is `None`), `id()`/`entities()`,
+      `wire_constraint` emitting the generic `{type, entities, positions?}` form with `Coincident`'s
+      `positions` discipline. `entities_table_matches_cpp` now covers 20 kinds; two new serde tests.
+- [x] **Protocol**: SCHEMA §7.3 kind count 18 → 20, per-kind contract + wire examples + the
+      "MUST NOT reinterpret one as the other" rule, §14 changelog entry. Additive: no existing
+      constraint's bytes change and no fixture was rewritten.
+- [x] **Frontend**: `SketchConstraintType`, `WireConstraint`, `toWireConstraint`,
+      `CONSTRAINT_PRESENTATION` (distinct accessible labels "Horizontal/Vertical point alignment"),
+      `GEOMETRIC_TYPES`, `WIRE_ENCODABLE`, and applicability (two points ALWAYS offer the point-pair
+      forms; the line-only forms still require a line between them, and both are offered when both
+      apply because they are different statements).
+- [x] `AutoConstrainMode` = off / minimal / standard, persisted at settings **version 11**;
+      migrated and fresh users both land on `standard`, which is exactly what every pre-v11 build
+      did. Surfaced in the Snap popover as its own "Keep relationships" section with a per-mode
+      explanation — a segmented control, because two switches could express "off but standard".
+- [x] **Structural vs inferred split** (`SketchController.buildCommitConstraints`): structural welds
+      run with an EMPTY reference set (intra-batch Coincident only) and are ALWAYS emitted — they
+      survive Alt and mode `off`, because a rectangle whose corners do not weld is not a rectangle.
+      Inferred coordinate rules are gated by the mode. The two are deduped by canonical key.
+- [x] `commitPointProvenance.ts` (NEW) — the normative per-tool click → committed-point table
+      (§9.3), including the placement-only rows (a circle's radius click, an ellipse's axis clicks,
+      a 3-point arc's through-point, a slot's width click, a centre rectangle's centre).
+- [x] `snapPersistence.ts` (NEW) — accepted intent → constraints, with the mode matrix, Alt
+      suppression, one origin anchor per sketch, symmetric-aware canonical dedupe, and a typed
+      drop reason for every intent that does NOT persist.
+- Gate: worker `ctest` **135/135** (134 before this phase, plus the new `sketch_point_axis`) · `cargo fmt`/`clippy`/`test --workspace` clean ·
+  `bunx tsc --noEmit` clean · `bun run test` **290 files / 4862 passed / 78 skipped** ·
+  `bun run build` clean.
+
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
 Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`

@@ -15,6 +15,47 @@ import {
 import type { DevicePref } from "@/viewport/engine/navInput";
 import { coerceRenderMode, DEFAULT_RENDER_MODE, type RenderModeId } from "@/viewport/engine/renderModes";
 
+/**
+ * How much of an ACCEPTED placement intent a commit turns into a constraint
+ * (SNAP P3).
+ *
+ * Three states, not one boolean, because they separate three different things:
+ *   `off`      — structural tool topology ONLY. A rectangle's corners still
+ *                weld (or the shape falls apart mechanically), but nothing
+ *                relates the new geometry to what was already drawn.
+ *   `minimal`  — plus the accepted POINT relations: Coincident, Midpoint,
+ *                FixedOrigin, OnCurve. These restate where the user visibly
+ *                clicked.
+ *   `standard` — plus the accepted DIRECTION relations: Horizontal/Vertical,
+ *                the point-pair axis alignments, Parallel, Perpendicular,
+ *                Tangent. These are stronger design assertions.
+ *
+ * Alt suppresses inferred intent under EVERY mode, and never suppresses
+ * structural tool topology.
+ */
+export type AutoConstrainMode = "off" | "minimal" | "standard";
+
+export const AUTO_CONSTRAIN_MODES: readonly AutoConstrainMode[] = ["off", "minimal", "standard"];
+
+export const AUTO_CONSTRAIN_LABEL: Record<AutoConstrainMode, string> = {
+  off: "Off",
+  minimal: "Minimal",
+  standard: "Standard",
+};
+
+/** Fresh installs and every migrated blob land here: it preserves the H/V and
+ *  Perpendicular behaviour every previous build had, while making the newly
+ *  persistent point-axis / Parallel / Tangent intents an explicit named choice. */
+export const DEFAULT_AUTO_CONSTRAIN: AutoConstrainMode = "standard";
+
+/** Narrow an untrusted value (persisted blob, hand-edited localStorage, a
+ *  rolled-back build) to a known mode. */
+export function coerceAutoConstrainMode(v: unknown): AutoConstrainMode {
+  return AUTO_CONSTRAIN_MODES.includes(v as AutoConstrainMode)
+    ? (v as AutoConstrainMode)
+    : DEFAULT_AUTO_CONSTRAIN;
+}
+
 export interface SnapSettings {
   grid: boolean;
   sketchGuideLines: boolean;
@@ -138,6 +179,13 @@ export interface SettingsState {
    * just on migrate (see `merge`), same as displayMode / theme / displayUnit.
    */
   snapRadius: SnapRadiusId;
+  /**
+   * How much accepted placement INTENT a commit persists as constraints.
+   * TOP-LEVEL for the same reason as `snapRadius`: `snapTo` is exclusively
+   * booleans the popover renders as switches, and a three-state value in there
+   * would make the switch-row pin test unrepresentable.
+   */
+  autoConstrainMode: AutoConstrainMode;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
@@ -146,6 +194,7 @@ export interface SettingsState {
   setTheme(theme: ThemePref): void;
   setDisplayUnit(unit: LengthUnitId): void;
   setSnapRadius(radius: SnapRadiusId): void;
+  setAutoConstrainMode(mode: AutoConstrainMode): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -216,6 +265,7 @@ export const settingsStore = createStore<SettingsState>()(
       theme: DEFAULT_THEME,
       displayUnit: DEFAULT_LENGTH_UNIT,
       snapRadius: DEFAULT_SNAP_RADIUS,
+      autoConstrainMode: DEFAULT_AUTO_CONSTRAIN,
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -240,10 +290,13 @@ export const settingsStore = createStore<SettingsState>()(
       setSnapRadius(radius) {
         set({ snapRadius: radius });
       },
+      setAutoConstrainMode(mode) {
+        set({ autoConstrainMode: mode });
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 10,
+      version: 11,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -305,6 +358,15 @@ export const settingsStore = createStore<SettingsState>()(
         if (s && version < 10) {
           s.show = { coincidentBadges: false, ...(s.show as Partial<ShowSettings>) } as ShowSettings;
         }
+        if (s && version < 11) {
+          // v10 → v11 added the auto-constrain MODE. A pre-v11 blob has no key,
+          // so it lands on `standard` — which is exactly what every pre-v11
+          // build did (H/V + Perpendicular inferred, always). The mode is new;
+          // the behaviour a migrated user gets is not.
+          s.autoConstrainMode = coerceAutoConstrainMode(
+            (s as Partial<SettingsState>).autoConstrainMode,
+          );
+        }
         return s as unknown as SettingsState;
       },
       // `migrate` only runs when the persisted blob's version differs from the
@@ -331,6 +393,7 @@ export const settingsStore = createStore<SettingsState>()(
         merged.theme = coerceTheme(merged.theme);
         merged.displayUnit = coerceLengthUnit(merged.displayUnit);
         merged.snapRadius = coerceSnapRadius(merged.snapRadius);
+        merged.autoConstrainMode = coerceAutoConstrainMode(merged.autoConstrainMode);
         return merged;
       },
     },

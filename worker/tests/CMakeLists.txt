@@ -39,6 +39,13 @@ add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)
 target_link_libraries(test_sketch_arc_endpoints PRIVATE worker_core)
 add_test(NAME sketch_arc_endpoints COMMAND test_sketch_arc_endpoints)
 
+# --- SNAP P3: the POINT-PAIR axis alignments (HorizontalPoints/VerticalPoints):
+#     error/DOF, the solver actually moving a point onto the alignment, the loud
+#     unresolved-handle failure, and applicability for two points. ---
+add_executable(test_sketch_point_axis test_sketch_point_axis.cpp)
+target_link_libraries(test_sketch_point_axis PRIVATE worker_core)
+add_test(NAME sketch_point_axis COMMAND test_sketch_point_axis)
+
 # --- SP-2 W1: the generalized drag entry `Sketch::solveWithTargets` (point AND
 #     radius targets, explicit pin set, advisory tag(−1) drives) + the
 #     `entityPointIds` handle-order map SCHEMA §7.4's gesture kinds build on. ---

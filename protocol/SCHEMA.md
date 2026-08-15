@@ -1064,11 +1064,38 @@ the full authoritative sketch so replay is deterministic.
     positions directly would add two redundant equations and become singular on a
     180° arc) — and skips any point an explicit `Fixed` constraint already holds.
     An `Ellipse` is not registered with PlaneGCS at all, so it carries no pins.
-- `constraints[].type` ∈ the 18 kinds (verbatim from OneCAD-CPP
-  `SketchTypes.h ConstraintType`): `Coincident`, `Horizontal`, `Vertical`,
+- `constraints[].type` ∈ the 20 kinds — the 18 ported verbatim from OneCAD-CPP
+  `SketchTypes.h ConstraintType` (`Coincident`, `Horizontal`, `Vertical`,
   `Fixed`, `Midpoint`, `OnCurve`, `Parallel`, `Perpendicular`, `Tangent`,
   `Concentric`, `Equal`, `Distance`, `HorizontalDistance`, `VerticalDistance`,
-  `Angle`, `Radius`, `Diameter`, `Symmetric`.
+  `Angle`, `Radius`, `Diameter`, `Symmetric`) plus the two POINT-PAIR axis
+  alignments added by the snap-engine hardening program: `HorizontalPoints`,
+  `VerticalPoints`.
+  - **`HorizontalPoints` / `VerticalPoints`.** Two `entities`, both POINT slots
+    (so both accept the owner+role `positions` form an arc endpoint needs), no
+    `value`. `HorizontalPoints` asserts the two points share a **y**;
+    `VerticalPoints` asserts they share an **x**. Each removes **1** DOF.
+
+    These are deliberately NOT expressible with the existing kinds:
+    `Horizontal`/`Vertical` are **line-form only** (one `entities` slot, and the
+    C++ class stores a single `m_lineId`), so they cannot state an alignment
+    between two points that no single line joins; and a zero-valued
+    `HorizontalDistance`/`VerticalDistance` is a **driving dimension** — it
+    renders, edits and deletes as a dimension, which is not what an inferred
+    alignment is. A reader MUST NOT reinterpret one as the other.
+
+    ```json
+    {"id": "…", "type": "VerticalPoints", "entities": ["e1", "e2"]}
+    // an ARC endpoint on either side rides the same `positions` form Coincident uses:
+    {"id": "…", "type": "HorizontalPoints", "entities": ["a1", "e2"],
+     "positions": ["start", ""]}
+    ```
+
+    **Compatibility.** Purely additive: no existing constraint's bytes change,
+    and a document that never authors one is byte-identical to before. A reader
+    older than this entry does not know the kinds and MUST refuse them by name
+    rather than silently dropping them (§13). Minimum compatible worker: any
+    build carrying `HorizontalPointsConstraint` / `VerticalPointsConstraint`.
   - **Units.** The `Angle` constraint's `value` is in **radians** on the wire
     (parity with OneCAD-CPP `AngleConstraint`/PlaneGCS and Rust
     `Constraint::Angle`), distinct from op-param angles (`angleDeg`,
@@ -3197,6 +3224,18 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-15 — §7.3 two ADDITIVE sketch constraint kinds: `HorizontalPoints`
+  and `VerticalPoints`.** The kind count goes 18 → 20. Both take two POINT slots
+  (owner+role `positions` accepted on either side) and carry no value;
+  `HorizontalPoints` equates the two points' **y**, `VerticalPoints` their **x**,
+  each removing 1 DOF. They exist because a frontend H/V alignment guide asserts
+  a relation between two POINTS, which neither the line-only
+  `Horizontal`/`Vertical` nor a zero-valued `HorizontalDistance`/`VerticalDistance`
+  can express — the first constrains an entity, the second is a user-visible
+  driving dimension. Purely additive: every previously authored constraint's
+  bytes are unchanged and no fixture is rewritten; new per-kind snapshots were
+  added. Enumerators are APPENDED in the C++ `ConstraintType`, so no existing
+  enumerator value moves.
 - **2026-08-15 — §7.3 `Extrude.ToNext` exact directional extremum.** The
   whole-profile boolean probe now reports the EXACT minimum of the intersection
   along the extrude direction, including extrema in edge and face interiors,

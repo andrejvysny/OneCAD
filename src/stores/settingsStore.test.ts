@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
+  DEFAULT_AUTO_CONSTRAIN,
   mergeBooleanRecord,
   settingsStore,
   SNAP_DEFAULTS,
@@ -168,7 +169,7 @@ describe("settingsStore displayUnit", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.displayUnit).toBe("in");
-    expect(JSON.parse(raw!).version).toBe(10);
+    expect(JSON.parse(raw!).version).toBe(11);
   });
 });
 
@@ -345,7 +346,11 @@ describe("settingsStore deep hydration", () => {
   });
   afterEach(() => {
     localStorage.clear();
-    settingsStore.setState({ snapTo: { ...SNAP_DEFAULTS }, show: { ...SHOW_DEFAULTS } });
+    settingsStore.setState({
+      snapTo: { ...SNAP_DEFAULTS },
+      show: { ...SHOW_DEFAULTS },
+      autoConstrainMode: DEFAULT_AUTO_CONSTRAIN,
+    });
   });
 
   it("a SAME-version partial snapTo keeps the defaults for absent keys", async () => {
@@ -401,6 +406,27 @@ describe("settingsStore deep hydration", () => {
     await settingsStore.persist.rehydrate();
     expect(settingsStore.getState().navigation.inputDevice).toBe("auto");
     expect(settingsStore.getState().snapTo.grid).toBe(false);
+  });
+
+  it("a pre-v11 blob migrates to the STANDARD auto-constrain mode", async () => {
+    // Not a fresh-install-parity backfill by accident: `standard` IS what every
+    // pre-v11 build did (H/V + Perpendicular always inferred). The mode is new;
+    // the behaviour a migrated user gets is unchanged.
+    seed(10, { snapTo: { grid: true } });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().autoConstrainMode).toBe("standard");
+  });
+
+  it("an unknown persisted auto-constrain mode coerces to standard", async () => {
+    seed(11, { autoConstrainMode: "aggressive" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().autoConstrainMode).toBe(DEFAULT_AUTO_CONSTRAIN);
+  });
+
+  it("an explicit auto-constrain mode survives hydration", async () => {
+    seed(11, { autoConstrainMode: "off" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().autoConstrainMode).toBe("off");
   });
 
   it("mergeBooleanRecord preserves an explicit false and every default", () => {

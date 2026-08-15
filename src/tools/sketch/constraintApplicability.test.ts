@@ -63,7 +63,16 @@ describe("evaluateApplicability — 2 targets (mirrors the prototype test 1:1)",
   // proto_sketch_constraint_applicability.cpp:44-48 (pointPoint)
   it("point & point (no joining line) ⇒ Distance, Coincident, H/V-Distance — NOT H/V", () => {
     const rs = evaluateApplicability([T("p1"), T("p3")], entities);
-    expect(typesOf(rs)).toEqual(["Distance", "Coincident", "HorizontalDistance", "VerticalDistance"]);
+    // SNAP P3 added the POINT-PAIR axis alignments, which two points always
+    // support; the LINE-only H/V still require a line between them.
+    expect(typesOf(rs)).toEqual([
+      "Distance",
+      "Coincident",
+      "HorizontalDistance",
+      "VerticalDistance",
+      "HorizontalPoints",
+      "VerticalPoints",
+    ]);
   });
 
   // proto_sketch_constraint_applicability.cpp:50-54 (pointLine), extended by the
@@ -270,6 +279,11 @@ describe("hasLineBetweenPoints port (ConstraintApplicability.cpp:32-50, used at 
       "Coincident",
       "HorizontalDistance",
       "VerticalDistance",
+      // Both semantic forms are offered here, and they are NOT the same action:
+      // the point-pair kinds constrain these two points, the line-only ones
+      // constrain the line they happen to be the ends of.
+      "HorizontalPoints",
+      "VerticalPoints",
       "Horizontal",
       "Vertical",
     ]);
@@ -372,10 +386,12 @@ describe("encodability invariant (S4b design item 3)", () => {
     "Tangent",
     "Equal",
     "Midpoint",
+    "HorizontalPoints",
+    "VerticalPoints",
   ];
 
-  it("WIRE_ENCODABLE defines all 18 SketchConstraintType kinds", () => {
-    expect(Object.keys(WIRE_ENCODABLE)).toHaveLength(18);
+  it("WIRE_ENCODABLE defines all 20 SketchConstraintType kinds", () => {
+    expect(Object.keys(WIRE_ENCODABLE)).toHaveLength(20);
   });
 
   it("every type the matrix can ever emit is wire-encodable (never offer what the wire can't send)", () => {
@@ -404,7 +420,7 @@ describe("encodability invariant (S4b design item 3)", () => {
     expect([...seen].sort()).toEqual([...MATRIX_EMITTABLE_TYPES].sort());
   });
 
-  it("all 18 SketchConstraintType kinds are represented in MATRIX_EMITTABLE_TYPES", () => {
+  it("all 20 SketchConstraintType kinds are represented in MATRIX_EMITTABLE_TYPES", () => {
     // Tangent/Equal/Midpoint are frontend-extension rules (not ported from the
     // C++ matrix — see the module header) but are now offered like every other
     // kind, so the matrix's emittable set covers the FULL SketchConstraintType
@@ -412,7 +428,7 @@ describe("encodability invariant (S4b design item 3)", () => {
     expect(MATRIX_EMITTABLE_TYPES).toContain("Equal");
     expect(MATRIX_EMITTABLE_TYPES).toContain("Midpoint");
     expect(MATRIX_EMITTABLE_TYPES).toContain("Tangent");
-    expect(MATRIX_EMITTABLE_TYPES).toHaveLength(18);
+    expect(MATRIX_EMITTABLE_TYPES).toHaveLength(20);
   });
 });
 
@@ -463,6 +479,8 @@ describe("Ellipse curve — no applicable constraints (cpp:62-67)", () => {
       "Coincident",
       "HorizontalDistance",
       "VerticalDistance",
+      "HorizontalPoints",
+      "VerticalPoints",
     ]);
     // …and it can be pinned to a line's midpoint (it marshals as a real wire point).
     expect(typesOf(evaluateApplicability([center, T("line")], entities))).toContain("Midpoint");

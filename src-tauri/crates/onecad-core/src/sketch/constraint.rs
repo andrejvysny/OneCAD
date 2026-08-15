@@ -1,4 +1,4 @@
-//! Sketch constraints — the 18 kinds ported field-for-field from OneCAD-CPP
+//! Sketch constraints — 20 kinds: the 18 ported field-for-field from OneCAD-CPP
 //! (`SketchTypes.h ConstraintType` + the `constraints/Constraints.h` classes +
 //! `Sketch.h` add* helpers).
 //!
@@ -74,7 +74,7 @@ impl CurvePosition {
     }
 }
 
-/// A geometric or dimensional constraint (18 kinds; C++ `ConstraintType`).
+/// A geometric or dimensional constraint (20 kinds; C++ `ConstraintType`).
 ///
 /// Internally tagged on `"kind"`. Every variant carries a [`ConstraintId`]
 /// (`id`); [`Constraint::entities`] returns the referenced entity ids.
@@ -312,6 +312,45 @@ pub enum Constraint {
         /// The mirror-axis line entity (C++ `axisLine`).
         axis: EntityId,
     },
+    /// Two points share a Y coordinate — the segment between them is horizontal
+    /// (C++ `HorizontalPointsConstraint`; SNAP P3).
+    ///
+    /// DISTINCT from [`Constraint::Horizontal`], which is LINE-form only and
+    /// constrains one entity, and from a zero-valued
+    /// [`Constraint::HorizontalDistance`], which is a user-visible DRIVING
+    /// dimension carrying a [`Scalar`]. This kind is geometric: `value()` is
+    /// `None`.
+    HorizontalPoints {
+        /// Constraint identity.
+        id: ConstraintId,
+        /// First point entity, or the owner of the referenced point.
+        point1: EntityId,
+        /// Which point of `point1` (default `Arbitrary` ⇒ `point1` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point1_position: CurvePosition,
+        /// Second point entity, or the owner of the referenced point.
+        point2: EntityId,
+        /// Which point of `point2` (default `Arbitrary` ⇒ `point2` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point2_position: CurvePosition,
+    },
+    /// Two points share an X coordinate — the segment between them is vertical
+    /// (C++ `VerticalPointsConstraint`; SNAP P3). See
+    /// [`Constraint::HorizontalPoints`] for why this is its own kind.
+    VerticalPoints {
+        /// Constraint identity.
+        id: ConstraintId,
+        /// First point entity, or the owner of the referenced point.
+        point1: EntityId,
+        /// Which point of `point1` (default `Arbitrary` ⇒ `point1` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point1_position: CurvePosition,
+        /// Second point entity, or the owner of the referenced point.
+        point2: EntityId,
+        /// Which point of `point2` (default `Arbitrary` ⇒ `point2` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point2_position: CurvePosition,
+    },
 }
 
 impl Constraint {
@@ -336,7 +375,9 @@ impl Constraint {
             | Self::Angle { id, .. }
             | Self::Radius { id, .. }
             | Self::Diameter { id, .. }
-            | Self::Symmetric { id, .. } => id,
+            | Self::Symmetric { id, .. }
+            | Self::HorizontalPoints { id, .. }
+            | Self::VerticalPoints { id, .. } => id,
         }
     }
 
@@ -350,7 +391,9 @@ impl Constraint {
             Self::Radius { entity, .. } | Self::Diameter { entity, .. } => vec![entity],
             Self::Coincident { point1, point2, .. }
             | Self::HorizontalDistance { point1, point2, .. }
-            | Self::VerticalDistance { point1, point2, .. } => vec![point1, point2],
+            | Self::VerticalDistance { point1, point2, .. }
+            | Self::HorizontalPoints { point1, point2, .. }
+            | Self::VerticalPoints { point1, point2, .. } => vec![point1, point2],
             Self::Midpoint { point, line, .. } => vec![point, line],
             Self::OnCurve { point, curve, .. } => vec![point, curve],
             Self::Parallel { line1, line2, .. }
@@ -582,11 +625,68 @@ mod tests {
                 },
                 vec![p1, p2, ax],
             ),
+            (
+                Constraint::HorizontalPoints {
+                    id: cid(19),
+                    point1: p1,
+                    point1_position: CurvePosition::Arbitrary,
+                    point2: p2,
+                    point2_position: CurvePosition::Arbitrary,
+                },
+                vec![p1, p2],
+            ),
+            (
+                Constraint::VerticalPoints {
+                    id: cid(20),
+                    point1: p1,
+                    point1_position: CurvePosition::Arbitrary,
+                    point2: p2,
+                    point2_position: CurvePosition::Arbitrary,
+                },
+                vec![p1, p2],
+            ),
         ];
-        assert_eq!(cases.len(), 18, "all 18 constraint kinds covered");
+        assert_eq!(cases.len(), 20, "all 20 constraint kinds covered");
         for (c, want) in cases {
             assert_eq!(c.entities(), want, "entities() mismatch for {:?}", c.id());
         }
+    }
+
+    /// The point-axis kinds are GEOMETRIC: they carry no driving value, which
+    /// is the whole difference from a zero-valued Horizontal/VerticalDistance.
+    #[test]
+    fn point_axis_kinds_are_geometric() {
+        let h = Constraint::HorizontalPoints {
+            id: cid(1),
+            point1: eid(1),
+            point1_position: CurvePosition::Arbitrary,
+            point2: eid(2),
+            point2_position: CurvePosition::Arbitrary,
+        };
+        assert!(h.value().is_none());
+        // Round-trips through serde with no `positions` noise for plain points.
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["kind"], "horizontalPoints");
+        assert!(json.get("point1Position").is_none());
+        let back: Constraint = serde_json::from_value(json).unwrap();
+        assert_eq!(back, h);
+    }
+
+    /// An ARC endpoint role survives the round trip on both new kinds.
+    #[test]
+    fn point_axis_kinds_carry_arc_endpoint_roles() {
+        let v = Constraint::VerticalPoints {
+            id: cid(2),
+            point1: eid(1),
+            point1_position: CurvePosition::Start,
+            point2: eid(2),
+            point2_position: CurvePosition::End,
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["point1Position"], "start");
+        assert_eq!(json["point2Position"], "end");
+        let back: Constraint = serde_json::from_value(json).unwrap();
+        assert_eq!(back, v);
     }
 
     #[test]

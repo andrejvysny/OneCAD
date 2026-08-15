@@ -1158,6 +1158,34 @@ bool ConstraintSolver::translateConstraint(SketchConstraint* constraint, int tag
         return true;
     }
 
+    // POINT-PAIR axis alignment (SNAP P3). PlaneGCS has no separate primitive:
+    // `addConstraintHorizontal(p1, p2)` already means "these two points share a
+    // Y", and the line-only `HorizontalConstraint` above merely resolves the
+    // line's endpoints first. These kinds name the two points directly.
+    if (auto* hPoints = dynamic_cast<HorizontalPointsConstraint*>(constraint)) {
+        auto* p1 = getPoint(hPoints->point1());
+        auto* p2 = getPoint(hPoints->point2());
+        if (!p1 || !p2) {
+            return false;
+        }
+        auto gp1 = makePoint(p1);
+        auto gp2 = makePoint(p2);
+        gcsSystem_->addConstraintHorizontal(gp1, gp2, tagId, true);
+        return true;
+    }
+
+    if (auto* vPoints = dynamic_cast<VerticalPointsConstraint*>(constraint)) {
+        auto* p1 = getPoint(vPoints->point1());
+        auto* p2 = getPoint(vPoints->point2());
+        if (!p1 || !p2) {
+            return false;
+        }
+        auto gp1 = makePoint(p1);
+        auto gp2 = makePoint(p2);
+        gcsSystem_->addConstraintVertical(gp1, gp2, tagId, true);
+        return true;
+    }
+
     if (auto* parallel = dynamic_cast<ParallelConstraint*>(constraint)) {
         auto* line1 = getLine(parallel->line1());
         auto* line2 = getLine(parallel->line2());

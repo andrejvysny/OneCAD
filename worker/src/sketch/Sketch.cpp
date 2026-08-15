@@ -785,6 +785,22 @@ ConstraintSupportResult Sketch::validateConstraintSupport(const SketchConstraint
             }
             return {};
         }
+        case ConstraintType::HorizontalPoints: {
+            const auto* c = dynamic_cast<const HorizontalPointsConstraint*>(&constraint);
+            if (!c || !hasType(*this, c->point1(), EntityType::Point) ||
+                !hasType(*this, c->point2(), EntityType::Point)) {
+                return unsupportedConstraint("Horizontal point alignment requires two points");
+            }
+            return {};
+        }
+        case ConstraintType::VerticalPoints: {
+            const auto* c = dynamic_cast<const VerticalPointsConstraint*>(&constraint);
+            if (!c || !hasType(*this, c->point1(), EntityType::Point) ||
+                !hasType(*this, c->point2(), EntityType::Point)) {
+                return unsupportedConstraint("Vertical point alignment requires two points");
+            }
+            return {};
+        }
     }
 
     return unsupportedConstraint("Unknown constraint type");

@@ -4,7 +4,10 @@ import { SectionLabel } from "@/ui/SectionLabel";
 import { Switch } from "@/ui/Switch";
 import { SegmentedToggle } from "@/ui/SegmentedToggle";
 import {
+  AUTO_CONSTRAIN_LABEL,
+  AUTO_CONSTRAIN_MODES,
   useSettingsStore,
+  type AutoConstrainMode,
   type SnapKey,
   type ShowKey,
 } from "@/stores/settingsStore";
@@ -31,6 +34,17 @@ const RADIUS_OPTIONS: { value: SnapRadiusId; label: string }[] = SNAP_RADIUS_ORD
   value: id,
   label: SNAP_RADIUS_LABEL[id],
 }));
+
+const AUTO_CONSTRAIN_OPTIONS: { value: AutoConstrainMode; label: string }[] =
+  AUTO_CONSTRAIN_MODES.map((m) => ({ value: m, label: AUTO_CONSTRAIN_LABEL[m] }));
+
+/** One line per mode, so the control says what it DOES rather than making the
+ *  user infer three states from three words. */
+const AUTO_CONSTRAIN_HELP: Record<AutoConstrainMode, string> = {
+  off: "Shapes still hold together; nothing is related to existing geometry.",
+  minimal: "Keeps the points you snapped to: coincident, midpoint, on-curve, origin.",
+  standard: "Also keeps directions: horizontal, vertical, parallel, perpendicular, tangent.",
+};
 
 const SHOW_ROWS: { key: ShowKey; label: string }[] = [
   { key: "guidePoints", label: "Guide points" },
@@ -81,6 +95,8 @@ export function SnapPopover({ open, onClose, anchorRef }: SnapPopoverProps) {
   const setShow = useSettingsStore((s) => s.setShow);
   const snapRadius = useSettingsStore((s) => s.snapRadius);
   const setSnapRadius = useSettingsStore((s) => s.setSnapRadius);
+  const autoConstrainMode = useSettingsStore((s) => s.autoConstrainMode);
+  const setAutoConstrainMode = useSettingsStore((s) => s.setAutoConstrainMode);
   const inputDevice = useSettingsStore((s) => s.navigation.inputDevice);
   const setInputDevice = useSettingsStore((s) => s.setInputDevice);
   const detected = useViewportStore((s) => s.detectedInputDevice);
@@ -116,6 +132,29 @@ export function SnapPopover({ open, onClose, anchorRef }: SnapPopoverProps) {
           ariaLabel="Snap radius"
           size="sm"
         />
+      </div>
+
+      <div className="mx-3.5 my-1.5 h-px bg-border-subtle" />
+
+      {/* SHOWING a relationship, SNAPPING to it and KEEPING it are three
+          separate decisions, so this is its own section rather than another
+          "Snap to" switch. Three states, so a segmented control — two
+          independent switches could express "off but standard", which is
+          meaningless. */}
+      <SectionLabel className="px-3.5 pb-0.5 pt-1.5">Keep relationships</SectionLabel>
+      <div className="px-3.5 pb-1 pt-0.5">
+        <SegmentedToggle
+          options={AUTO_CONSTRAIN_OPTIONS}
+          value={autoConstrainMode}
+          onChange={setAutoConstrainMode}
+          ariaLabel="Auto-constrain"
+          size="sm"
+          className="w-full"
+        />
+        <p className="pt-1.5 text-[11px] leading-snug text-ink-4">
+          {AUTO_CONSTRAIN_HELP[autoConstrainMode]} Hold Alt while clicking to place one point
+          freely.
+        </p>
       </div>
 
       <div className="mx-3.5 my-1.5 h-px bg-border-subtle" />

@@ -366,6 +366,80 @@ gp_Pnt2d VerticalConstraint::getIconPosition(const Sketch& sketch) const {
     return midpoint(start, end);
 }
 
+HorizontalPointsConstraint::HorizontalPointsConstraint(const PointID& point1, const PointID& point2)
+    : SketchConstraint(),
+      m_point1(point1),
+      m_point2(point2) {
+}
+
+std::vector<EntityID> HorizontalPointsConstraint::referencedEntities() const {
+    return {m_point1, m_point2};
+}
+
+bool HorizontalPointsConstraint::isSatisfied(const Sketch& sketch, double tolerance) const {
+    gp_Pnt2d p1;
+    gp_Pnt2d p2;
+    if (!getPointPosition(sketch, m_point1, p1) || !getPointPosition(sketch, m_point2, p2)) {
+        return false;
+    }
+    return std::abs(p1.Y() - p2.Y()) <= tolerance;
+}
+
+double HorizontalPointsConstraint::getError(const Sketch& sketch) const {
+    gp_Pnt2d p1;
+    gp_Pnt2d p2;
+    if (!getPointPosition(sketch, m_point1, p1) || !getPointPosition(sketch, m_point2, p2)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::abs(p1.Y() - p2.Y());
+}
+
+gp_Pnt2d HorizontalPointsConstraint::getIconPosition(const Sketch& sketch) const {
+    gp_Pnt2d p1;
+    gp_Pnt2d p2;
+    if (!getPointPosition(sketch, m_point1, p1) || !getPointPosition(sketch, m_point2, p2)) {
+        return gp_Pnt2d(0.0, 0.0);
+    }
+    return midpoint(p1, p2);
+}
+
+VerticalPointsConstraint::VerticalPointsConstraint(const PointID& point1, const PointID& point2)
+    : SketchConstraint(),
+      m_point1(point1),
+      m_point2(point2) {
+}
+
+std::vector<EntityID> VerticalPointsConstraint::referencedEntities() const {
+    return {m_point1, m_point2};
+}
+
+bool VerticalPointsConstraint::isSatisfied(const Sketch& sketch, double tolerance) const {
+    gp_Pnt2d p1;
+    gp_Pnt2d p2;
+    if (!getPointPosition(sketch, m_point1, p1) || !getPointPosition(sketch, m_point2, p2)) {
+        return false;
+    }
+    return std::abs(p1.X() - p2.X()) <= tolerance;
+}
+
+double VerticalPointsConstraint::getError(const Sketch& sketch) const {
+    gp_Pnt2d p1;
+    gp_Pnt2d p2;
+    if (!getPointPosition(sketch, m_point1, p1) || !getPointPosition(sketch, m_point2, p2)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::abs(p1.X() - p2.X());
+}
+
+gp_Pnt2d VerticalPointsConstraint::getIconPosition(const Sketch& sketch) const {
+    gp_Pnt2d p1;
+    gp_Pnt2d p2;
+    if (!getPointPosition(sketch, m_point1, p1) || !getPointPosition(sketch, m_point2, p2)) {
+        return gp_Pnt2d(0.0, 0.0);
+    }
+    return midpoint(p1, p2);
+}
+
 ParallelConstraint::ParallelConstraint(const EntityID& line1, const EntityID& line2)
     : SketchConstraint(),
       m_line1(line1),

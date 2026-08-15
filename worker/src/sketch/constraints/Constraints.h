@@ -178,6 +178,76 @@ private:
     EntityID m_lineId;
 };
 
+/**
+ * @brief HorizontalPoints constraint - two points share a Y coordinate
+ *
+ * The POINT-PAIR form of horizontality (SNAP P3): the segment between the two
+ * points is horizontal, whether or not any line entity joins them. This is what
+ * a frontend H alignment guide asserts, and it is deliberately NOT
+ * `HorizontalConstraint` (which stores one line id and constrains that entity)
+ * nor a zero-valued `HorizontalDistanceConstraint` (which is a user-visible
+ * DIMENSION with a driving value).
+ *
+ * DOF removed: 1 (fixes the Y difference to 0)
+ */
+class HorizontalPointsConstraint : public SketchConstraint {
+public:
+    HorizontalPointsConstraint(const PointID& point1, const PointID& point2);
+
+    ConstraintType type() const override { return ConstraintType::HorizontalPoints; }
+    std::string typeName() const override { return "HorizontalPoints"; }
+    std::string toString() const override { return "HorizontalPoints"; }
+
+    std::vector<EntityID> referencedEntities() const override;
+    int degreesRemoved() const override { return 1; }
+
+    bool isSatisfied(const Sketch& sketch, double tolerance) const override;
+    double getError(const Sketch& sketch) const override;
+
+    gp_Pnt2d getIconPosition(const Sketch& sketch) const override;
+
+    const PointID& point1() const { return m_point1; }
+    const PointID& point2() const { return m_point2; }
+
+private:
+    HorizontalPointsConstraint() = default;
+    PointID m_point1;
+    PointID m_point2;
+};
+
+/**
+ * @brief VerticalPoints constraint - two points share an X coordinate
+ *
+ * See @ref HorizontalPointsConstraint for why this is distinct from both
+ * `VerticalConstraint` and a zero-valued `VerticalDistanceConstraint`.
+ *
+ * DOF removed: 1 (fixes the X difference to 0)
+ */
+class VerticalPointsConstraint : public SketchConstraint {
+public:
+    VerticalPointsConstraint(const PointID& point1, const PointID& point2);
+
+    ConstraintType type() const override { return ConstraintType::VerticalPoints; }
+    std::string typeName() const override { return "VerticalPoints"; }
+    std::string toString() const override { return "VerticalPoints"; }
+
+    std::vector<EntityID> referencedEntities() const override;
+    int degreesRemoved() const override { return 1; }
+
+    bool isSatisfied(const Sketch& sketch, double tolerance) const override;
+    double getError(const Sketch& sketch) const override;
+
+    gp_Pnt2d getIconPosition(const Sketch& sketch) const override;
+
+    const PointID& point1() const { return m_point1; }
+    const PointID& point2() const { return m_point2; }
+
+private:
+    VerticalPointsConstraint() = default;
+    PointID m_point1;
+    PointID m_point2;
+};
+
 //==============================================================================
 // RELATIONAL CONSTRAINTS
 //==============================================================================

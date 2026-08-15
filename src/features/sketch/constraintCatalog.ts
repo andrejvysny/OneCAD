@@ -2,8 +2,9 @@
  * Shared presentation catalog for constraint kinds — the SINGLE glyph + icon +
  * label source for every constraint UI (toolbar, context chips, sketch canvas
  * badges via badgeLayout.ts, and the inspector's ConstraintList). No other
- * module defines its own table. The record covers all 18 kinds so any consumer
- * can label anything the applicability matrix emits (incl. H-/V-Distance).
+ * module defines its own table. The record covers all 20 kinds so any consumer
+ * can label anything the applicability matrix emits (incl. H-/V-Distance and the
+ * point-pair axis alignments).
  *
  * TWO representations. `icon` is the drawn two-tone symbol from the CAD icon
  * family and is what every DOM surface renders, INCLUDING the canvas badge
@@ -38,6 +39,15 @@ export const CONSTRAINT_PRESENTATION: Record<
   Radius: { glyph: "R", icon: "constraintRadius", label: "Radius" },
   Diameter: { glyph: "⌀", icon: "constraintDiameter", label: "Diameter" },
   Symmetric: { glyph: "⋈", icon: "constraintSymmetric", label: "Symmetric" },
+  // SNAP P3. Same visual FAMILY as the line-only H/V (they assert the same
+  // direction), distinct LABELS because they constrain a point pair rather than
+  // an entity — the accessible name is what tells a reader which one they have.
+  HorizontalPoints: {
+    glyph: "H··",
+    icon: "constraintHorizontal",
+    label: "Horizontal point alignment",
+  },
+  VerticalPoints: { glyph: "V··", icon: "constraintVertical", label: "Vertical point alignment" },
 };
 
 /** Ordered geometric kinds the toolbar surfaces (design item 4). */
@@ -54,6 +64,8 @@ export const GEOMETRIC_TYPES: SketchConstraintType[] = [
   "Tangent",
   "Equal",
   "Midpoint",
+  "HorizontalPoints",
+  "VerticalPoints",
 ];
 
 /** Ordered dimensional kinds the toolbar surfaces (each opens the Dimension chip). */

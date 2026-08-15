@@ -36,7 +36,7 @@ import { viewportStore, type Projection, type StatusSeverity } from "@/stores/vi
 import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
 import { selectionStore, topoRefId } from "@/stores/selectionStore";
 import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sketchSelectionStore";
-import { settingsStore } from "@/stores/settingsStore";
+import { settingsStore, type AutoConstrainMode } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { applySketchSolveResult } from "./solveResult";
@@ -52,11 +52,46 @@ import {
 } from "./snapTypes";
 import { mintTraceId, projectionFailureTrace, recordSnapTrace, traceCandidates } from "./snapTrace";
 import { SNAP_RADIUS_PX } from "./snapRadius";
-import { inferConstraints, entityPoints } from "./autoConstrain";
+import { AUTO_KINDS_V2, inferConstraints, entityPoints } from "./autoConstrain";
+import { commitPointRefs, orderSlotCaps } from "./commitPointProvenance";
+import { canonicalKey as canonicalConstraintKey, persistAcceptedIntents } from "./snapPersistence";
 
 /** Alt-held placement: infer nothing (spec §38). Module-level so the commit path
  *  allocates no set per commit. */
 const EMPTY_KINDS: ReadonlySet<SketchConstraintType> = new Set<SketchConstraintType>();
+
+/**
+ * STRUCTURAL topology — the welds a compound shape needs to stay one shape.
+ *
+ * Coincident only, and always run against an EMPTY reference set so it can bind
+ * nothing outside the batch. This is not an inference and not a preference:
+ * without it a rectangle's corners come apart on the first drag, so it survives
+ * Alt and auto-constrain mode `off` (SNAP §9.2).
+ */
+const STRUCTURAL_KINDS: ReadonlySet<SketchConstraintType> = new Set<SketchConstraintType>([
+  "Coincident",
+]);
+
+/** The coordinate-inference kinds each auto-constrain mode allows. The
+ *  intent-only relations (point-axis, Parallel off a polar ray) are NOT here —
+ *  they come from `snapPersistence`, because no coordinate rule can tell
+ *  whether the user aimed at them. */
+function autoKindsFor(mode: AutoConstrainMode): ReadonlySet<SketchConstraintType> {
+  switch (mode) {
+    case "off":
+      return EMPTY_KINDS;
+    case "minimal":
+      return MINIMAL_AUTO_KINDS;
+    case "standard":
+      return AUTO_KINDS_V2;
+  }
+}
+
+const MINIMAL_AUTO_KINDS: ReadonlySet<SketchConstraintType> = new Set<SketchConstraintType>([
+  "Coincident",
+  "Midpoint",
+  "Fixed",
+]);
 import { entityEndTangent, unitDir } from "./arcMath";
 import {
   commitDimensionConstraint,
@@ -2212,26 +2247,58 @@ export class SketchController {
      * reported Alt as it is NOW, not as it was when the click happened.
      */
     const intents = commitIntents(dims);
-    const originSnapTargets = intents
-      .filter((i) => i.decision.primaryKind === "origin")
-      .map((i) => [i.decision.point.x, i.decision.point.y] as [number, number]);
     // Alt is the COMMITTING click's, captured in its own synchronous stack.
     const suppressInference = dims?.clickIntent?.suppressInference ?? false;
-    // Tool-authored constraints resolve their index refs against the id-assigned
-    // entities and SUPPRESS the intra-batch half of the inference — see
-    // `resolveToolConstraints` for why the draw path cannot afford a duplicate.
-    const inferred = inferConstraints(newEntities, session.entities, {
+    const mode = settingsStore.getState().autoConstrainMode;
+    /*
+     * TWO SETS, and the split is the point (SNAP §9.2).
+     *
+     * STRUCTURAL — the welds a compound shape needs to hold together. Authored
+     * with `existing: []` so ONLY intra-batch coincidence can fire, and always
+     * emitted: a rectangle whose corners do not weld is not a rectangle, so
+     * neither Alt nor auto-constrain `off` may remove it.
+     *
+     * INFERRED — everything relating the new geometry to what was already
+     * drawn. Gated by the mode, and suppressed wholesale by Alt.
+     */
+    const structural = inferConstraints(newEntities, [], {
       nextConstraintId: nextId,
-      // Alt-held placement authors NOTHING automatic (spec §38). Alt already
-      // suppressed SNAPPING (`suppress` into computeSnap, and dimension
-      // rounding); the constraint half was missing, so a deliberately free
-      // placement could still come back welded or Horizontal. An empty kind set
-      // is the honest encoding: the rules still run, they simply emit nothing.
-      ...(suppressInference ? { kinds: EMPTY_KINDS } : {}),
-      originSnapTargets,
-      existingConstraints: session.constraints,
+      kinds: STRUCTURAL_KINDS,
     });
-    const toolAuthored = resolveToolConstraints(specs, newEntities, inferred, nextId);
+    const inferKinds = suppressInference ? EMPTY_KINDS : autoKindsFor(mode);
+    const originSnapTargets =
+      suppressInference || mode === "off"
+        ? []
+        : intents
+            .filter((i) => i.decision.primaryKind === "origin")
+            .map((i) => [i.decision.point.x, i.decision.point.y] as [number, number]);
+    const inferred =
+      inferKinds.size === 0
+        ? []
+        : inferConstraints(newEntities, session.entities, {
+            nextConstraintId: nextId,
+            kinds: inferKinds,
+            originSnapTargets,
+            existingConstraints: session.constraints,
+          });
+    // Dedupe structural against inferred: a chain's weld is reachable both ways
+    // (intra-batch coincidence AND a Coincident inferred against the previous
+    // segment), and two identical equations read as over-constrained.
+    const merged = [...structural];
+    const seen = new Set(structural.map(canonicalConstraintKey));
+    for (const c of inferred) {
+      const key = canonicalConstraintKey(c);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(c);
+    }
+    const toolAuthored = resolveToolConstraints(specs, newEntities, merged, nextId);
+    // INTENT-BASED relations: the ones no coordinate rule can produce, because
+    // they are only true if the user actually snapped to them — the point-axis
+    // alignments, Parallel/Perpendicular off a polar ray, an OnCurve from a
+    // curve or intersection snap (SNAP §9.5).
+    const persisted = this.persistIntents(intents, newEntities, dims, toolAuthored, session, mode);
+    toolAuthored.push(...persisted);
     if (!dims || Object.keys(dims.locks).length === 0) return { toolAuthored, dimAuthored: [] };
     const dimSpecs = dimConstraintSpecs(dims.toolId, dims.anchors, dims.locks, {
       // Read HERE rather than captured at the click: this field is written only
@@ -2244,6 +2311,57 @@ export class SketchController {
     });
     const resolved = resolveDimConstraints(dimSpecs, newEntities, nextId);
     return { toolAuthored, dimAuthored: dedupeDimConstraints(resolved, toolAuthored) };
+  }
+
+  /**
+   * Turn the gesture's ACCEPTED intents into constraints, joined to the points
+   * the commit actually authored (SNAP §9.3/§9.5).
+   *
+   * This is the half that coordinate inference structurally cannot do: an
+   * alignment guide, a polar ray's Parallel, an OnCurve off a curve snap are
+   * true only because the user aimed at them, and nothing about the committed
+   * coordinates can recover that after the fact.
+   */
+  private persistIntents(
+    intents: readonly AcceptedSnapIntent[],
+    newEntities: SketchEntity[],
+    dims: CommitIntentContext | undefined,
+    alreadyAuthored: readonly SketchConstraint[],
+    session: SketchSession,
+    mode: AutoConstrainMode,
+  ): SketchConstraint[] {
+    if (!dims || intents.length === 0) return [];
+    let refs = commitPointRefs({
+      toolId: dims.toolId,
+      entities: newEntities,
+      priorAnchorCount: Math.max(0, intents.length - 1),
+      ...(dims.arcMode ? { arcMode: true } : {}),
+      ...(dims.sides !== undefined ? { sides: dims.sides } : {}),
+    });
+    if (dims.toolId === "slot") refs = orderSlotCaps(refs, newEntities, dims.anchors);
+    const placed = intents.map((intent, i) => ({
+      decision: intent.decision,
+      suppressInference: intent.suppressInference,
+      target: refs[i] ?? null,
+    }));
+    const { constraints, dropped } = persistAcceptedIntents(placed, {
+      mode,
+      nextConstraintId: () => sketchStore.getState().nextConstraintId(),
+      existing: [...session.constraints, ...alreadyAuthored],
+      // A sketch on a model face is positioned by its host and its projected
+      // boundary is already pinned, so a user point must not be anchored on top.
+      originAnchored:
+        session.entities.some((e) => e.referenceLocked === true) ||
+        session.constraints.some((c) => c.type === "Fixed"),
+    });
+    if (dropped.length > 0) {
+      logDebug("snap", `intent: persisted ${constraints.length}, dropped ${dropped.length}`, {
+        persisted: constraints.map((c) => c.type),
+        dropped: dropped.map((d) => `${d.kind}:${d.reason}`),
+        mode,
+      });
+    }
+    return constraints;
   }
 
   /**

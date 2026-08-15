@@ -58,7 +58,18 @@ enum class ConstraintType {
     Diameter,
 
     // Symmetry
-    Symmetric
+    Symmetric,
+
+    // Point-pair axis alignment (SNAP P3). APPENDED, never inserted: every
+    // enumerator above keeps its value, so no serialized form or switch table
+    // that was written against the 18-kind enum can be silently renumbered.
+    //
+    // DISTINCT from Horizontal/Vertical above, which are LINE-only and say
+    // "this entity is axis-aligned". These say "these two POINTS share a
+    // coordinate" and are what a frontend alignment guide actually asserts —
+    // the two points need not be the ends of any one line.
+    HorizontalPoints,
+    VerticalPoints
 };
 
 /**
