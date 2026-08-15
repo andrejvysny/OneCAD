@@ -13,7 +13,9 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -52,6 +54,11 @@ constexpr double kSideFaceDotThreshold = 0.9;    // RegenerationEngine.cpp:60
 constexpr double kDraftSemanticAngleTolerance = 1.0e-6;  // radians
 constexpr double kToFaceAngularTolerance = 1.0e-7;        // radians
 constexpr double kToFaceCoverageRelativeTolerance = 1.0e-8;
+// Contact within this of the sketch plane is the profile's OWN SEAT (a sketch drawn
+// on a face of the target body), not the "next" face. Absolute mm: this is a
+// start-exclusion threshold, not a feature-resolution one, so it does not carry the
+// scale sensitivity the model-wide precision contract still owes.
+constexpr double kToNextContactEpsilon = 1.0e-4;
 
 double solid_volume(const TopoDS_Shape& shape) {
     GProp_GProps props;
@@ -148,39 +155,174 @@ double through_all_distance(double blind_sign_source, const gp_Pnt& origin, cons
     return sign * kThroughAllFallback;
 }
 
-// Smallest positive distance along `dir` at which ANY part of the swept profile
-// reaches the bounded target body. This is a whole-profile boolean probe, not a
-// finite set of rays: a tiny interior ledge must be found even when no profile
-// vertex or centroid lies above it.
-double to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir,
-                        const TopoDS_Shape& body) {
+// EXACT minimum of the linear functional `(p - origin)·dir` over `shape`, including
+// extrema that fall in an EDGE or FACE interior. A `TopAbs_VERTEX` scan answers this
+// only for polyhedra: on a curved face the lowest point along `dir` is generally
+// interior (a horizontal cylinder's bottom generatrix carries no vertex at all), so
+// the vertex-only form reported a LATER first contact than the geometry has.
+//
+// Reduced to a distance extremum against a gauge plane placed BEHIND the shape:
+// every shape point is ahead of the plane, so `distance-to-plane == projection -
+// planeLevel`, and `BRepExtrema_DistShapeShape` solves that minimum exactly for
+// analytic and NURBS geometry alike. The gauge face is deliberately over-sized so the
+// perpendicular foot of the extremum is provably inside its trim.
+//
+// `nullopt` means UNKNOWN — never a silent fallback to the weaker vertex answer.
+// Committed modeling refuses UNKNOWN.
+std::optional<double> minimum_directional_projection(const TopoDS_Shape& shape,
+                                                     const gp_Pnt& origin,
+                                                     const gp_Dir& dir) {
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) return std::nullopt;
+    Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    const gp_Vec axis(dir);
+    const gp_Pnt centre((xmin + xmax) * 0.5, (ymin + ymax) * 0.5, (zmin + zmax) * 0.5);
+    double lo = 0.0;
+    for (int corner = 0; corner < 8; ++corner) {
+        const gp_Pnt p((corner & 1) ? xmax : xmin, (corner & 2) ? ymax : ymin,
+                       (corner & 4) ? zmax : zmin);
+        const double proj = gp_Vec(origin, p).Dot(axis);
+        if (corner == 0 || proj < lo) lo = proj;
+    }
+    const double diag = gp_Pnt(xmin, ymin, zmin).Distance(gp_Pnt(xmax, ymax, zmax));
+    if (!std::isfinite(lo) || !std::isfinite(diag)) return std::nullopt;
+
+    const double margin = 0.01 * diag + 1.0;
+    const double gauge_level = lo - margin;
+    const double centre_level = gp_Vec(origin, centre).Dot(axis);
+    const gp_Pnt gauge_origin = centre.Translated(gp_Vec(dir) * (gauge_level - centre_level));
+    const double half = diag + margin;
+
+    try {
+        BRepBuilderAPI_MakeFace gauge(gp_Pln(gauge_origin, dir), -half, half, -half, half);
+        if (!gauge.IsDone()) return std::nullopt;
+        BRepExtrema_DistShapeShape extrema(shape, gauge.Face());
+        if (!extrema.IsDone() || extrema.NbSolution() < 1) return std::nullopt;
+        const double value = extrema.Value();
+        if (!std::isfinite(value)) return std::nullopt;
+
+        // A vertex projection is an UPPER bound on the true minimum, so folding the
+        // scan in can only tighten the answer. It is defence in depth, never the
+        // primary evidence.
+        double best = gauge_level + value;
+        for (TopExp_Explorer exp(shape, TopAbs_VERTEX); exp.More(); exp.Next()) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(exp.Current()));
+            best = std::min(best, gp_Vec(origin, point).Dot(axis));
+        }
+        return best;
+    } catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+}
+
+// The same extremum with the axis reversed: max_p (p−origin)·d == −min_p (p−origin)·(−d).
+std::optional<double> maximum_directional_projection(const TopoDS_Shape& shape,
+                                                     const gp_Pnt& origin,
+                                                     const gp_Dir& dir) {
+    const std::optional<double> reversed =
+        minimum_directional_projection(shape, origin, dir.Reversed());
+    if (!reversed) return std::nullopt;
+    return -*reversed;
+}
+
+enum class ToNextStatus {
+    Contact,     // `distance` is the proven termination
+    NoContact,   // nothing lies ahead of the profile — an honest negative
+    Unprovable,  // the extremum could not be established; refuse, never guess
+};
+
+struct ToNextResult {
+    ToNextStatus status = ToNextStatus::NoContact;
+    double distance = -1.0;
+};
+
+// The intersection run is SEATED when it starts at the sketch plane: the profile was
+// drawn on (or inside) the target body. A run whose minimum is this close to the lift
+// plane began there rather than being reached.
+constexpr double kToNextSeatThreshold = 2.0 * kToNextContactEpsilon;
+
+// Distance along `dir` at which the swept profile reaches the NEXT face of the bounded
+// target body. A whole-profile boolean probe, not a finite set of rays: a tiny interior
+// ledge must be found even when no profile vertex or centroid lies above it, AND the
+// termination is measured exactly (see `minimum_directional_projection`) rather than
+// sampled at the common's vertices.
+//
+// Two cases, because "next" is not simply "nearest":
+//   * the profile starts in FREE SPACE — terminate at the first contact, the minimum of
+//     the intersection;
+//   * the profile is SEATED on the body (a sketch drawn on one of its faces, which is
+//     how a through-pocket is normally authored) — the intersection begins at the
+//     sketch plane, so its minimum is the seat itself. The next face is then where the
+//     sweep LEAVES that material: the maximum of the seated run. A void inside the body
+//     splits the intersection into separate solids, so the seated run ends at the
+//     void's near wall, which is the correct "next" there too.
+// The old vertex scan reproduced the seated case only by accident — the seat's vertices
+// sit exactly at the sketch plane and were dropped by its epsilon filter, leaving the
+// exit vertices as the smallest survivor.
+ToNextResult to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir,
+                              const TopoDS_Shape& body) {
     GProp_GProps props;
     BRepGProp::SurfaceProperties(profile, props);
     const gp_Pnt origin = props.CentreOfMass();
     const double sweep_distance = through_all_distance(1.0, origin, dir, &body);
-    if (!std::isfinite(sweep_distance) || sweep_distance <= kMinValue) return -1.0;
+    if (!std::isfinite(sweep_distance) || sweep_distance <= kMinValue)
+        return {ToNextStatus::NoContact, -1.0};
 
     try {
-        BRepPrimAPI_MakePrism sweep(profile, gp_Vec(dir) * sweep_distance,
+        // Start the sweep just PAST the sketch plane. Excluding the profile's own seat
+        // geometrically — rather than by discarding common vertices under an epsilon —
+        // keeps the rule true for curved contact, where the relevant point is not a
+        // vertex at all.
+        gp_Trsf lift;
+        lift.SetTranslation(gp_Vec(dir) * kToNextContactEpsilon);
+        BRepBuilderAPI_Transform lifted(profile, lift, Standard_True);
+        if (!lifted.IsDone() || lifted.Shape().IsNull())
+            return {ToNextStatus::Unprovable, -1.0};
+        BRepPrimAPI_MakePrism sweep(lifted.Shape(), gp_Vec(dir) * sweep_distance,
                                     Standard_True);
-        if (sweep.Shape().IsNull()) return -1.0;
+        if (sweep.Shape().IsNull()) return {ToNextStatus::Unprovable, -1.0};
         BRepAlgoAPI_Common common(sweep.Shape(), body);
         common.SetRunParallel(Standard_False);
         common.Build();
         if (!common.IsDone() || common.HasErrors() || common.Shape().IsNull())
-            return -1.0;
+            return {ToNextStatus::Unprovable, -1.0};
 
-        double best = -1.0;
-        for (TopExp_Explorer exp(common.Shape(), TopAbs_VERTEX); exp.More();
-             exp.Next()) {
-            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(exp.Current()));
-            const double distance = gp_Vec(origin, point).Dot(gp_Vec(dir));
-            if (distance > 1.0e-4 && (best < 0.0 || distance < best))
-                best = distance;
+        // An empty intersection is an honest "nothing ahead", not a failure.
+        TopExp_Explorer probe(common.Shape(), TopAbs_VERTEX);
+        if (!probe.More()) return {ToNextStatus::NoContact, -1.0};
+
+        // Each solid of the intersection is one contiguous material run. A tangential
+        // contact yields no solid at all, so the whole shape is then the single run.
+        std::vector<TopoDS_Shape> runs;
+        for (TopExp_Explorer exp(common.Shape(), TopAbs_SOLID); exp.More(); exp.Next())
+            runs.push_back(exp.Current());
+        if (runs.empty()) runs.push_back(common.Shape());
+
+        double seat_exit = -1.0;
+        double first_contact = -1.0;
+        for (const TopoDS_Shape& run : runs) {
+            const std::optional<double> entry =
+                minimum_directional_projection(run, origin, dir);
+            if (!entry) return {ToNextStatus::Unprovable, -1.0};
+            if (*entry > kToNextSeatThreshold) {
+                if (first_contact < 0.0 || *entry < first_contact) first_contact = *entry;
+                continue;
+            }
+            // Seated run — the exit is what terminates the feature, so this is the
+            // only case that needs the far extremum too.
+            const std::optional<double> exit =
+                maximum_directional_projection(run, origin, dir);
+            if (!exit) return {ToNextStatus::Unprovable, -1.0};
+            seat_exit = std::max(seat_exit, *exit);
         }
-        return best;
+
+        const double distance = seat_exit > 0.0 ? seat_exit : first_contact;
+        if (!(distance > kToNextSeatThreshold)) return {ToNextStatus::NoContact, -1.0};
+        return {ToNextStatus::Contact, distance};
     } catch (const Standard_Failure&) {
-        return -1.0;
+        return {ToNextStatus::Unprovable, -1.0};
     }
 }
 
@@ -584,9 +726,18 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         }
         if (m == "ToNext") {
             if (!ref_shape) { err = "ToNext requires an existing target body"; return std::nullopt; }
-            const double d = to_next_distance(*profile, ref_dir, *ref_shape);
-            if (d <= 0.0) { err = "ToNext: no face found ahead of the extrude direction"; return std::nullopt; }
-            return d;
+            const ToNextResult next = to_next_distance(*profile, ref_dir, *ref_shape);
+            if (next.status == ToNextStatus::Unprovable) {
+                // UNKNOWN is refused by name, so it is never confused with the honest
+                // "there is nothing ahead" negative below.
+                err = "ToNext could not prove exact first contact against the target body";
+                return std::nullopt;
+            }
+            if (next.status != ToNextStatus::Contact) {
+                err = "ToNext: no face found ahead of the extrude direction";
+                return std::nullopt;
+            }
+            return next.distance;
         }
         err = "Extrude: unknown end condition '" + m + "'";
         return std::nullopt;

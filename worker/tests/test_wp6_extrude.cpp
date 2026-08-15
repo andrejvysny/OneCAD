@@ -1,6 +1,7 @@
 // test_wp6_extrude.cpp — W-WP6 extrude completion (scope C): ToFace / ToNext end
 // conditions (typed targetFace ref via the ladder) + draft angle. In-process via
 // execute_extrude with real OCCT. No framework: exit code == failure count.
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <utility>
@@ -10,6 +11,7 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -18,6 +20,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -331,6 +334,96 @@ void test_to_next_finds_a_tiny_interior_first_contact() {
     }
 }
 
+// A SEATED profile: the sketch sits on the target body's own face, which is how a
+// through-pocket is normally authored. "Next" is then where the sweep LEAVES that
+// material (z=6), not the sketch plane it started on — the intersection begins at the
+// profile, so its bare minimum is the seat itself and would extrude nothing.
+void test_to_next_seated_profile_stops_at_the_material_exit() {
+    const TopoDS_Shape target =
+        BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 0), 10.0, 10.0, 6.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", target);
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"}, {"opId", "ope"},
+               {"params", {{"sketchId", "sk1"}, {"extrudeMode", "ToNext"},
+                           {"booleanMode", "NewBody"}, {"targetBodyId", "body_target"}}}};
+    const ops::OpOutcome oc = ops::execute_extrude(ctx, op, "ope");
+    check(oc.status == ops::OpOutcome::Status::Ok,
+          "toNext seated: Ok (got '" + oc.error_message + "')");
+    if (bodies.contains("body_ope"))
+        check_near(onecad::session::shape_volume(bodies.get("body_ope")->geom), 600.0, 1.0,
+                   "toNext seated: terminates at the seated material's exit (z=6)");
+}
+
+// Shared driver for the curved-termination fixtures: 10×10 profile at z=0
+// (world x∈[-10,0], y∈[0,10]) extruded ToNext against `target`.
+double to_next_height(const TopoDS_Shape& target, const std::string& label) {
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", target);
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"},
+               {"opId", "ope"},
+               {"params",
+                {{"sketchId", "sk1"},
+                 {"extrudeMode", "ToNext"},
+                 {"booleanMode", "NewBody"},
+                 {"targetBodyId", "body_target"}}}};
+    const ops::OpOutcome outcome = ops::execute_extrude(ctx, op, "ope");
+    check(outcome.status == ops::OpOutcome::Status::Ok,
+          label + ": Ok (got '" + outcome.error_message + "')");
+    if (!bodies.contains("body_ope")) {
+        check(false, label + ": body created");
+        return -1.0;
+    }
+    // The profile area is 100, so the swept volume IS the termination distance ×100.
+    return onecad::session::shape_volume(bodies.get("body_ope")->geom) / 100.0;
+}
+
+// FACE-INTERIOR first contact. A cylinder lying along +X above the profile touches
+// the sweep first along its bottom generatrix (z = 20-6 = 14), which is interior to
+// the cylindrical face — no vertex sits there. The seam is pinned to +Z (the TOP of
+// the cylinder) so it cannot coincidentally land on the extremum.
+//
+// A TopAbs_VERTEX scan of the sweep∩body common answers 20-sqrt(36-25) ≈ 16.68 here
+// (where the prism's y=0 / y=10 walls cut the cylinder), i.e. a LATER contact than
+// the geometry has. This fixture fails on the vertex-only implementation.
+void test_to_next_curved_face_interior_contact() {
+    const TopoDS_Shape cylinder =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-20.0, 5.0, 20.0), gp_Dir(1, 0, 0),
+                                        gp_Dir(0, 0, 1)),
+                                 6.0, 40.0)
+            .Shape();
+    const double height = to_next_height(cylinder, "toNext curved face");
+    if (height > 0.0)
+        check_near(height, 14.0, 1.0e-3,
+                   "toNext curved face: terminates on the bottom generatrix (z=14), "
+                   "not the vertex ring at z≈16.68");
+}
+
+// EDGE-INTERIOR first contact. A cylinder tilted 45° in the YZ plane presents its
+// bottom rim circle to the sweep; the lowest point of that rim is at
+// z = 20 - 4/√2 ≈ 17.1716 and lies mid-arc. The rim's only vertex is its seam, which
+// is pinned to the HIGHEST point of the circle, so a vertex scan answers ≈22.83.
+void test_to_next_curved_edge_interior_contact() {
+    const TopoDS_Shape cylinder =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-5.0, 5.0, 20.0), gp_Dir(0, 1, 1),
+                                        gp_Dir(0, -1, 1)),
+                                 4.0, 20.0)
+            .Shape();
+    const double height = to_next_height(cylinder, "toNext curved edge");
+    if (height > 0.0)
+        check_near(height, 20.0 - 4.0 / std::sqrt(2.0), 1.0e-3,
+                   "toNext curved edge: terminates at the rim's low point, not its seam");
+}
+
 // Draft: a 10×10 profile extruded 10mm with a 10° draft tapers the side faces
 // inward ⇒ volume strictly below the 1000 straight prism.
 void test_draft() {
@@ -418,6 +511,9 @@ int main() {
     test_to_next_miss_fails();
     test_to_next_skips_missed_nearer_face();
     test_to_next_finds_a_tiny_interior_first_contact();
+    test_to_next_seated_profile_stops_at_the_material_exit();
+    test_to_next_curved_face_interior_contact();
+    test_to_next_curved_edge_interior_contact();
     test_draft();
     test_boolean_target_from_body_ref();
     test_boolean_ignores_face_ref_at_input0();
