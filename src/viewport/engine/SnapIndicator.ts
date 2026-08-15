@@ -136,7 +136,10 @@ export class SnapIndicator {
       gapSize: 4,
       depthTest: false,
       transparent: true,
-      opacity: 0.75,
+      // Weak by design (Sketcher UX cleanup, Track B4) — a TRANSIENT alignment
+      // guide, not geometry; it must never compete visually with real sketch
+      // entities, which is what 0.75 read as.
+      opacity: 0.3,
       toneMapped: false,
     });
     this.guides = new THREE.LineSegments(new THREE.BufferGeometry(), this.guideMat);
@@ -147,12 +150,16 @@ export class SnapIndicator {
 
     this.hintEl = document.createElement("div");
     this.hintEl.dataset.sketchSnapHint = "1";
-    this.hintEl.style.font = "500 11px var(--font-ui)";
-    this.hintEl.style.padding = "3px 7px";
-    this.hintEl.style.borderRadius = "5px";
+    this.hintEl.style.font = "500 10.5px var(--font-ui)";
+    this.hintEl.style.padding = "2px 6px";
+    this.hintEl.style.borderRadius = "4px";
     this.hintEl.style.whiteSpace = "nowrap";
     this.hintEl.style.pointerEvents = "none";
-    this.hintEl.style.background = "var(--color-tooltip)";
+    // Translucent scrim, not a solid tooltip box (Sketcher UX cleanup, Track
+    // B4) — this answers "what will my click do here?", it isn't floating
+    // app UI, and a solid dark chip read as the latter. Same color-mix()
+    // technique as SketchController's drag-preview fill.
+    this.hintEl.style.background = "color-mix(in srgb, var(--color-tooltip) 55%, transparent)";
     this.hintEl.style.color = "var(--color-tooltip-text)";
     this.hintEl.style.display = "none";
     deps.overlayEl.appendChild(this.hintEl);
@@ -224,9 +231,11 @@ export class SnapIndicator {
       }
       this.hintEl.textContent = snap.label;
       this.hintEl.style.display = "";
-      // Float the chip up-right of the marker.
-      this.hintEl.style.marginLeft = "12px";
-      this.hintEl.style.marginTop = "-18px";
+      // Sit close to the marker, not detached from it (Track B4) — a small
+      // nudge up-right so the text doesn't sit directly on the glyph, not the
+      // floating-tooltip distance this used to be.
+      this.hintEl.style.marginLeft = "6px";
+      this.hintEl.style.marginTop = "-8px";
     } else {
       this.hintEl.style.display = "none";
     }

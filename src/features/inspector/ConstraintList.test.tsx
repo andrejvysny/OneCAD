@@ -17,19 +17,19 @@ describe("ConstraintList", () => {
     sketchSelectionStore.setState({ selected: [], hover: null, constraintHover: null });
   });
 
-  it("renders one row per constraint with its glyph, type label, and entity summary", () => {
+  it("renders one row per constraint with its glyph and type label", () => {
     render(<ConstraintList constraints={constraints} onDelete={() => {}} />);
     expect(screen.getByTestId("constraint-row-c1")).toBeInTheDocument();
     expect(screen.getByTestId("constraint-row-c2")).toBeInTheDocument();
     expect(screen.getAllByText("Coincident")).toHaveLength(2);
     expect(screen.getByText("Horizontal")).toBeInTheDocument();
-    expect(screen.getAllByText("p1, p2")).toHaveLength(2); // c1 (Coincident) + c3 (Distance)
-    expect(screen.getByText("l1")).toBeInTheDocument();
   });
 
-  it("compacts entity summaries beyond 2 refs to first-id + count", () => {
+  it("does not render raw entity ids", () => {
     render(<ConstraintList constraints={constraints} onDelete={() => {}} />);
-    expect(screen.getByText("p1 +3")).toBeInTheDocument();
+    expect(screen.queryByText("p1, p2")).toBeNull();
+    expect(screen.queryByText("l1")).toBeNull();
+    expect(screen.queryByText("p1 +3")).toBeNull();
   });
 
   it("shows a value column for dimensional kinds, lengths with the display unit, Angle in degrees with °", () => {

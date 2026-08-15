@@ -2,13 +2,23 @@ import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { OriginTriad } from "./OriginTriad";
+import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 
-function makeTriad(): OriginTriad {
-  return new OriginTriad({
-    x: new THREE.Color(1, 0, 0),
-    y: new THREE.Color(0, 1, 0),
-    z: new THREE.Color(0, 0, 1),
-  });
+/** A fake driver — these tests exercise the 3D leg geometry only; the axis
+ *  labels are covered separately below. */
+function fakeOverlay(): HtmlOverlayDriver {
+  return { register: vi.fn(), unregister: vi.fn(), setWorldPos: vi.fn() } as unknown as HtmlOverlayDriver;
+}
+
+function makeTriad(overlay: HtmlOverlayDriver = fakeOverlay()): OriginTriad {
+  return new OriginTriad(
+    {
+      x: new THREE.Color(1, 0, 0),
+      y: new THREE.Color(0, 1, 0),
+      z: new THREE.Color(0, 0, 1),
+    },
+    { overlay, overlayEl: document.createElement("div") },
+  );
 }
 
 /** Perspective camera looking at the world origin from `distance` up the +Z axis. */
@@ -121,6 +131,16 @@ describe("OriginTriad", () => {
     triad.dispose();
   });
 
+  it("is recessive (translucent) relative to real geometry, and does not write depth", () => {
+    const triad = makeTriad();
+    const seg = triad.object3D.children[0] as LineSegments2;
+    const mat = seg.material as unknown as THREE.Material;
+    expect(mat.transparent).toBe(true);
+    expect(mat.opacity).toBeLessThan(1);
+    expect(mat.depthWrite).toBe(false);
+    triad.dispose();
+  });
+
   it("reuses one geometry across updates instead of rebuilding per frame", () => {
     const triad = makeTriad();
     triad.update(perspAt(250), 1000, 800, 1);
@@ -142,5 +162,53 @@ describe("OriginTriad", () => {
     expect(geoSpy).toHaveBeenCalledOnce();
     expect(matSpy).toHaveBeenCalledOnce();
     expect(triad.object3D.children.length).toBe(0);
+  });
+
+  // ── Axis labels (Sketcher UX cleanup, Track B5) ────────────────────────
+
+  it("registers one labeled overlay element per axis on construction", () => {
+    const overlay = fakeOverlay();
+    const triad = makeTriad(overlay);
+    expect(overlay.register).toHaveBeenCalledTimes(3);
+    const ids = (overlay.register as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(new Set(ids).size).toBe(3); // three distinct ids, one per axis
+    const texts = (overlay.register as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => (c[1] as HTMLElement).textContent)
+      .sort();
+    expect(texts).toEqual(["X", "Y", "Z"]);
+    triad.dispose();
+  });
+
+  it("moves each label to just past its own leg's tip on update", () => {
+    const overlay = fakeOverlay();
+    const triad = makeTriad(overlay);
+    triad.update(perspAt(50), 1000, 800, 1);
+    const reach = triad.legLength * 1.12;
+
+    const posFor = (id: string) => {
+      const calls = (overlay.setWorldPos as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: unknown[]) => c[0] === id,
+      );
+      return calls[calls.length - 1][1] as THREE.Vector3;
+    };
+    const ids = (overlay.register as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0] as string);
+    const [xId, yId, zId] = ids;
+    expect(posFor(xId)).toEqual(new THREE.Vector3(reach, 0, 0));
+    expect(posFor(yId)).toEqual(new THREE.Vector3(0, reach, 0));
+    expect(posFor(zId)).toEqual(new THREE.Vector3(0, 0, reach));
+    triad.dispose();
+  });
+
+  it("unregisters every label and detaches its element on dispose", () => {
+    const overlay = fakeOverlay();
+    const overlayEl = document.createElement("div");
+    const triad = new OriginTriad(
+      { x: new THREE.Color(1, 0, 0), y: new THREE.Color(0, 1, 0), z: new THREE.Color(0, 0, 1) },
+      { overlay, overlayEl },
+    );
+    expect(overlayEl.children.length).toBe(3);
+    triad.dispose();
+    expect(overlay.unregister).toHaveBeenCalledTimes(3);
+    expect(overlayEl.children.length).toBe(0);
   });
 });

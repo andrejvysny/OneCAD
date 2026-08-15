@@ -66,6 +66,11 @@ const SELECTED_WIDTH = cssLineWidth(2.5);
 /** The angle-preview arc is a lightweight annotation glyph, not geometry —
  *  thinner than every real entity line so it never competes with them. */
 const ANGLE_ARC_WIDTH = cssLineWidth(1);
+/** Endpoint/midpoint/centroid AFFORDANCE opacity while idle — faintly
+ *  visible, not permanent document content (Sketcher UX cleanup, Track B1b).
+ *  `setPointAffordance` restores full opacity on hover/selection/any
+ *  point-relevant tool. */
+const DIM_OPACITY = 0.35;
 
 /** Flat local xyz (z=0) polyline for an entity, in plane coords. */
 export function entityPolyline(e: {
@@ -252,6 +257,7 @@ export class SketchObject {
       size: 10,
       sizeAttenuation: false,
       transparent: true,
+      opacity: DIM_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
@@ -266,6 +272,7 @@ export class SketchObject {
       size: 6,
       sizeAttenuation: false,
       transparent: true,
+      opacity: DIM_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
@@ -280,6 +287,7 @@ export class SketchObject {
       size: 7,
       sizeAttenuation: false,
       transparent: true,
+      opacity: DIM_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
@@ -489,13 +497,13 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
-  /** Recolor from the current selection (sketch entity ids). A newly
-   *  selected, unconstrained edge also grows a read-only dimension line
-   *  showing its live length (Shapr3D convention) — see `rebuildDimensionLines`. */
+  /** Recolor from the current selection (sketch entity ids). A newly selected,
+   *  unconstrained edge's live-length label is `SelectionDimensionLabels`'
+   *  job (DOM overlay, not 3D geometry) — selection no longer touches the
+   *  dimension-line witnesses this class draws, which are authored-only. */
   setSelection(selectedIds: Iterable<string>): void {
     this.selected = new Set(selectedIds);
     this.rebuildEntities();
-    this.rebuildDimensionLines();
     this.deps.invalidate();
   }
 
@@ -524,6 +532,24 @@ export class SketchObject {
     if (this.angleRefId === id) return;
     this.angleRefId = id;
     this.rebuildEntities();
+    this.deps.invalidate();
+  }
+
+  /**
+   * Endpoint/midpoint/centroid AFFORDANCE (Sketcher UX cleanup, Track B1b):
+   * `active` restores full opacity, otherwise the markers sit at `DIM_OPACITY`
+   * — faintly visible, not permanent document content. WHOLE-SKETCH, not
+   * per-entity: hovering one entity brightens every point in the sketch, not
+   * just that entity's own. A material-opacity write + one `invalidate()`,
+   * no `setAttribute`/`computeBoundingSphere` — cheap enough to call at
+   * hover-change frequency (the caller already dedupes hover to actual
+   * transitions; this does not add its own throttling).
+   */
+  setPointAffordance(active: boolean): void {
+    const opacity = active ? 1 : DIM_OPACITY;
+    this.pointsMat.opacity = opacity;
+    this.midpointsMat.opacity = opacity;
+    this.centroidsMat.opacity = opacity;
     this.deps.invalidate();
   }
 
@@ -595,12 +621,13 @@ export class SketchObject {
     geo.computeBoundingSphere();
   }
 
-  /** Rebuild the dimension-line witnesses: permanent for a constrained edge,
-   *  read-only for a selected-but-unconstrained one (WP: sketch UX parity pass). */
+  /** Rebuild the dimension-line witnesses — authored constraints only (Track
+   *  B3); a merely-selected, unconstrained edge gets a lightweight DOM label
+   *  instead (`SelectionDimensionLabels`), not this 3D geometry. */
   private rebuildDimensionLines(): void {
     for (const c of [...this.dimLineGroup.children]) this.disposeLine(c);
     this.dimLineGroup.clear();
-    for (const dim of layoutDimensionLines(this.entities, this.constraints, this.selected)) {
+    for (const dim of layoutDimensionLines(this.entities, this.constraints)) {
       const segments: [Point2, Point2][] = [dim.baseline, ...dim.ticks, ...dim.arrows];
       for (const [a, b] of segments) {
         const line = this.buildLine([a.x, a.y, 0, b.x, b.y, 0], this.matDimLine);

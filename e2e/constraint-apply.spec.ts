@@ -90,7 +90,7 @@ test("Tangent (line + circle): shift-select both, apply, DOF drops by 1", async 
   await clickAtClient(page, circlePoint.x, circlePoint.y); // + circle body
   await page.keyboard.up("Shift");
 
-  const toolbar = constraintToolbar(page);
+  const toolbar = await constraintToolbar(page);
   const tangentBtn = toolbar.getByRole("button", { name: "Tangent", exact: true });
   await expect(tangentBtn).toBeEnabled();
   const rowsBefore = await rows(page).count();
@@ -134,7 +134,7 @@ test("Equal (line + line): shift-select both, apply, DOF drops by 1", async ({ p
   await clickAtClient(page, p2.x, p2.y); // + line 2
   await page.keyboard.up("Shift");
 
-  const toolbar = constraintToolbar(page);
+  const toolbar = await constraintToolbar(page);
   const equalBtn = toolbar.getByRole("button", { name: "Equal", exact: true });
   await expect(equalBtn).toBeEnabled();
   const rowsBefore = await rows(page).count();
@@ -184,7 +184,7 @@ test("Midpoint (circle center + line): shift-select both, apply, DOF drops by 2"
   await clickAtClient(page, linePoint.x, linePoint.y); // + the line body
   await page.keyboard.up("Shift");
 
-  const toolbar = constraintToolbar(page);
+  const toolbar = await constraintToolbar(page);
   const midpointBtn = toolbar.getByRole("button", { name: "Midpoint", exact: true });
   await expect(midpointBtn).toBeEnabled();
   const rowsBefore = await rows(page).count();

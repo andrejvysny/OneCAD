@@ -15,6 +15,7 @@ import * as THREE from "three";
 import { palette, resetPaletteCache } from "./palette";
 import { GridPlane } from "./GridPlane";
 import { OriginTriad } from "./OriginTriad";
+import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import { HighlightLayer } from "./HighlightLayer";
 import { GhostLayer } from "./GhostLayer";
 import { DragHandle } from "./DragHandle";
@@ -272,7 +273,15 @@ describe("refreshColors picks up a theme flip", () => {
   });
 
   it("OriginTriad rewrites its baked per-vertex axis colors", () => {
-    const triad = new OriginTriad({ x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() });
+    const overlay = {
+      register: vi.fn(),
+      unregister: vi.fn(),
+      setWorldPos: vi.fn(),
+    } as unknown as HtmlOverlayDriver;
+    const triad = new OriginTriad(
+      { x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() },
+      { overlay, overlayEl: document.createElement("div") },
+    );
     const colorsOf = () => {
       const attr = triad.object3D.children[0] as THREE.Object3D & {
         geometry: THREE.BufferGeometry;

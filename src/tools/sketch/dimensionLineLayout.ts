@@ -6,6 +6,15 @@
  * value chip badgeLayout already places stays the label; this only adds the
  * witness lines + arrowheads Shapr3D draws alongside it).
  *
+ * AUTHORED-ONLY (Sketcher UX cleanup, Track B3). This used to also emit a
+ * full witness for a merely-SELECTED, unconstrained edge — but that made
+ * passive selection feedback look identical to a real dimension constraint.
+ * The passive case now lives in `unconstrainedEdgeLabel`/`hasAuthoredLength`
+ * below: a lightweight midpoint + value, no offset/tick/arrow geometry at
+ * all (`SelectionDimensionLabels` is the only reader of those). `editable`
+ * accordingly dropped off `DimensionLine` — every line this module emits now
+ * IS a real, authored constraint.
+ *
  * Geometry lives in plane (u,v) — the engine draws it in `SketchObject`'s
  * plane-local group, same as every other sketch entity.
  */
@@ -24,10 +33,6 @@ export interface DimensionLine {
   arrows: [Point2, Point2][];
   /** mm length shown on the baseline. */
   value: number;
-  /** True when `id` is a real constraint id (editable via its existing
-   *  ConstraintBadgeLayer chip) — false for a selection-only measurement
-   *  (the edge's live length, shown read-only while nothing constrains it). */
-  editable: boolean;
 }
 
 const sub = (a: Point2, b: Point2): Point2 => ({ x: a.x - b.x, y: a.y - b.y });
@@ -97,7 +102,6 @@ function buildLine(
   e: SketchEntity,
   id: string,
   value: number,
-  editable: boolean,
   center: Point2,
   offset: number,
   armLen: number,
@@ -125,25 +129,20 @@ function buildLine(
     baseline: [base0, base1],
     arrows: [...arrowStrokes(base0, edgeDir, armLen), ...arrowStrokes(base1, scale(edgeDir, -1), armLen)],
     value,
-    editable,
   };
 }
 
 /**
- * A dimension line per qualifying edge, from two sources:
- *  - a Line entity carrying a Distance/HorizontalDistance/VerticalDistance
- *    constraint with a defined value — same trigger `badgeLayout.ts`'s
- *    dimensional badges already use for the SAME entity, so this is purely an
- *    additional visual for a value that's already shown (editable via that
- *    existing chip);
- *  - a SELECTED Line entity with no such constraint yet — its live length,
- *    read-only, so selecting any edge shows its measurement even before it's
- *    constrained (Shapr3D convention), without duplicating the constrained case.
+ * One dimension line per Line entity carrying a Distance/HorizontalDistance/
+ * VerticalDistance constraint with a defined value — same trigger
+ * `badgeLayout.ts`'s dimensional badges already use for the SAME entity, so
+ * this is purely an additional visual for a value that's already shown
+ * (editable via that existing chip). Authored constraints ONLY — see the
+ * module header for the passive-selection case.
  */
 export function layoutDimensionLines(
   entities: SketchEntity[],
   constraints: SketchConstraint[],
-  selectedEntityIds: Iterable<string> = [],
 ): DimensionLine[] {
   const byId = new Map(entities.map((e) => [e.id, e]));
   const { center, diag } = sketchExtent(entities);
@@ -159,17 +158,44 @@ export function layoutDimensionLines(
     const e = byId.get(entityId);
     if (!e || e.type !== "Line") continue;
     seen.add(entityId);
-    const dim = buildLine(e, c.id, c.value, true, center, offset, armLen);
-    if (dim) out.push(dim);
-  }
-  for (const entityId of selectedEntityIds) {
-    if (seen.has(entityId)) continue;
-    const e = byId.get(entityId);
-    if (!e || e.type !== "Line" || !e.p0 || !e.p1) continue;
-    seen.add(entityId);
-    const length = Math.hypot(e.p1[0] - e.p0[0], e.p1[1] - e.p0[1]);
-    const dim = buildLine(e, `sel-${entityId}`, length, false, center, offset, armLen);
+    const dim = buildLine(e, c.id, c.value, center, offset, armLen);
     if (dim) out.push(dim);
   }
   return out;
+}
+
+/** Whether `entityId` already carries an authored length constraint
+ *  (Distance/Horizontal/VerticalDistance) with a defined value — same
+ *  trigger `layoutDimensionLines` itself keys off. Exported so a passive-
+ *  measurement caller (`SelectionDimensionLabels`) can dedupe against an
+ *  already-constrained edge without re-deriving `LENGTH_TYPES` itself: that
+ *  edge's value already shows through the authored witness + its editable
+ *  chip, so a passive label on it would be a duplicate. */
+export function hasAuthoredLength(entityId: string, constraints: SketchConstraint[]): boolean {
+  return constraints.some(
+    (c) => LENGTH_TYPES.has(c.type) && c.value !== undefined && c.entities[0] === entityId,
+  );
+}
+
+export interface UnconstrainedEdgeLabel {
+  id: string;
+  at: Point2;
+  value: number;
+}
+
+/**
+ * Live length label anchor for a Line entity — the lightweight, witness-free
+ * passive-measurement case (Sketcher UX cleanup, Track B3): just a midpoint
+ * + value, no offset/tick/arrow geometry at all, so a merely-selected edge
+ * reads as a measurement, not a dimension constraint. Null for a non-Line or
+ * degenerate (missing p0/p1) entity. The caller is expected to have already
+ * excluded any entity `hasAuthoredLength` on.
+ */
+export function unconstrainedEdgeLabel(e: SketchEntity): UnconstrainedEdgeLabel | null {
+  if (e.type !== "Line" || !e.p0 || !e.p1) return null;
+  return {
+    id: `sel-${e.id}`,
+    at: { x: (e.p0[0] + e.p1[0]) / 2, y: (e.p0[1] + e.p1[1]) / 2 },
+    value: Math.hypot(e.p1[0] - e.p0[0], e.p1[1] - e.p0[1]),
+  };
 }

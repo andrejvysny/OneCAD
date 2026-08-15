@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SketchConstraint, SketchEntity } from "@/ipc/types";
-import { layoutDimensionLines } from "./dimensionLineLayout";
+import { hasAuthoredLength, layoutDimensionLines, unconstrainedEdgeLabel } from "./dimensionLineLayout";
 
 // A 20×10 rectangle, CCW from origin.
 const bottom: SketchEntity = { id: "bottom", type: "Line", p0: [0, 0], p1: [20, 0] };
@@ -87,30 +87,59 @@ describe("layoutDimensionLines", () => {
     }
   });
 
-  it("a constrained edge is editable, with the constraint's authored value", () => {
+  it("an authored dimension line carries the constraint's value", () => {
     const dims = layoutDimensionLines(rect, [distanceOn("bottom", 20)]);
-    expect(dims[0].editable).toBe(true);
+    expect(dims[0].id).toBe("dist-bottom");
     expect(dims[0].value).toBe(20);
   });
+});
 
-  it("a selected but unconstrained edge shows its live length, read-only", () => {
-    const dims = layoutDimensionLines(rect, [], ["bottom"]);
-    expect(dims).toHaveLength(1);
-    expect(dims[0].id).toBe("sel-bottom");
-    expect(dims[0].editable).toBe(false);
-    expect(dims[0].value).toBe(20); // bottom is (0,0)→(20,0)
+/*
+ * The passive-measurement case (Sketcher UX cleanup, Track B3) — a merely
+ * SELECTED, unconstrained edge. `layoutDimensionLines` no longer emits
+ * anything for it (authored-only); `SelectionDimensionLabels` composes these
+ * two pure helpers instead: `hasAuthoredLength` to dedupe against an already-
+ * constrained edge, `unconstrainedEdgeLabel` for the lightweight midpoint +
+ * value with NO offset/tick/arrow geometry.
+ */
+describe("hasAuthoredLength", () => {
+  it("is true for an entity with a defined-value length constraint", () => {
+    expect(hasAuthoredLength("bottom", [distanceOn("bottom")])).toBe(true);
   });
 
-  it("a selected edge that is ALSO constrained is not duplicated", () => {
-    const dims = layoutDimensionLines(rect, [distanceOn("bottom")], ["bottom"]);
-    expect(dims).toHaveLength(1);
-    expect(dims[0].id).toBe("dist-bottom");
-    expect(dims[0].editable).toBe(true);
+  it("is false when the constraint has no value, is the wrong type, or is on another entity", () => {
+    expect(hasAuthoredLength("bottom", [{ id: "c1", type: "Distance", entities: ["bottom"] }])).toBe(
+      false,
+    );
+    expect(hasAuthoredLength("bottom", [{ id: "c1", type: "Radius", entities: ["bottom"], value: 5 }])).toBe(
+      false,
+    );
+    expect(hasAuthoredLength("bottom", [distanceOn("top")])).toBe(false);
   });
 
-  it("selecting a non-Line entity or an unknown id is a no-op", () => {
-    expect(layoutDimensionLines(rect, [], ["nope"])).toEqual([]);
+  it("HorizontalDistance and VerticalDistance both count as authored length", () => {
+    expect(
+      hasAuthoredLength("bottom", [{ id: "h", type: "HorizontalDistance", entities: ["bottom"], value: 20 }]),
+    ).toBe(true);
+    expect(
+      hasAuthoredLength("right", [{ id: "v", type: "VerticalDistance", entities: ["right"], value: 10 }]),
+    ).toBe(true);
+  });
+});
+
+describe("unconstrainedEdgeLabel", () => {
+  it("gives a Line entity's midpoint + live length, no witness geometry", () => {
+    const label = unconstrainedEdgeLabel(bottom); // (0,0)→(20,0)
+    expect(label).toEqual({ id: "sel-bottom", at: { x: 10, y: 0 }, value: 20 });
+  });
+
+  it("is null for a non-Line entity", () => {
     const circle: SketchEntity = { id: "c", type: "Circle", center: [0, 0], radius: 5 };
-    expect(layoutDimensionLines([...rect, circle], [], ["c"])).toEqual([]);
+    expect(unconstrainedEdgeLabel(circle)).toBeNull();
+  });
+
+  it("is null for a Line missing an endpoint", () => {
+    const broken: SketchEntity = { id: "broken", type: "Line", p0: [0, 0] };
+    expect(unconstrainedEdgeLabel(broken)).toBeNull();
   });
 });

@@ -37,6 +37,7 @@ const SHOW_ROWS: { key: ShowKey; label: string }[] = [
   { key: "snappingHints", label: "Snapping hints" },
   { key: "liveDimensions", label: "Live dimensions" },
   { key: "constraintChips", label: "Constraint chips" },
+  { key: "coincidentBadges", label: "Coincident badges" },
 ];
 
 const DEVICE_OPTIONS: { value: DevicePref; label: string }[] = [

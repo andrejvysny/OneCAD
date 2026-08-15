@@ -7,6 +7,7 @@ import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
+import { toolStore } from "@/stores/toolStore";
 import { resetStores } from "@/test/resetStores";
 
 // WP-1.6: StatusBar now hosts `<SlotHost slot={Slots.StatusSection}/>`, which
@@ -112,6 +113,39 @@ describe("StatusBar", () => {
 
     act(() => settingsStore.getState().setDisplayUnit("mm"));
     expect(screen.getByText(/273\.00\s.*mm/)).toBeInTheDocument();
+  });
+
+  /*
+   * A2 (Sketcher UX cleanup): FOV/Persp-Ortho are dead controls while sketching
+   * (sketch mode force-sets ortho), so both are noise during active editing.
+   * DOF stays visible in EVERY mode, deliberately — e2e's `dofPill`/
+   * `clickAtAwaitingDofChange` poll this exact segment as a settle gate
+   * across ~47 specs during active sketch editing; only its color-token
+   * duplication was the real bug (see the tone test below), not its
+   * visibility.
+   */
+  it("hides FOV and Persp/Ortho while actively editing a sketch, but keeps DOF", () => {
+    renderStatusBar();
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+
+    expect(screen.queryByTestId("fov")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Ortho" })).toBeNull();
+    expect(screen.getByText(/^DOF: /)).toBeInTheDocument();
+  });
+
+  it("colors DOF neutrally, never as a warning, in both modes", () => {
+    renderStatusBar();
+    expect(screen.getByText("DOF: 3")).toHaveClass("text-dof-neutral");
+
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+    expect(screen.getByText(/^DOF: /)).toHaveClass("text-dof-neutral");
+  });
+
+  it("still shows DOF and FOV for a model-mode sketch-row selection", () => {
+    renderStatusBar();
+    expect(toolStore.getState().mode).toBe("model");
+    expect(screen.getByText("DOF: 3")).toBeInTheDocument();
+    expect(screen.getByTestId("fov")).toBeInTheDocument();
   });
 });
 

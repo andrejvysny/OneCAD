@@ -16,7 +16,11 @@ import { GearPropertiesPanel, GearSelectedSummary } from "@/features/inspector/G
 import { useToolChipStore } from "@/stores/toolChipStore";
 import { InspectorSectionHost } from "@/modules/modeling/InspectorSectionHost";
 import { cn } from "@/ui/cn";
-import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
+import {
+  sketchStatusText,
+  sketchStatusSentence,
+  sketchStatusToneClass,
+} from "@/features/sketch/constraintStatus";
 import type { SketchStatus } from "@/stores/documentStore";
 
 /**
@@ -171,12 +175,7 @@ function SelectionState({
       <div className="text-[15px] font-semibold text-ink">{name}</div>
       <div className="mt-0.5 text-[12px] text-ink-5">{statusName}</div>
       {isSketch && status !== null && (
-        <div
-          className={cn(
-            "mt-1 text-[12px] font-medium",
-            status.tone === "ok" ? "text-ink-4" : "text-warn",
-          )}
-        >
+        <div className={cn("mt-1 text-[12px] font-medium", sketchStatusToneClass(status.tone))}>
           {status.label}
         </div>
       )}
@@ -234,22 +233,25 @@ function SketchState({
   status: SketchStatus;
 }) {
   const { label, tone } = sketchStatusText(status, dof);
-  const solved = status === "ok";
+  // under/ok share the plain neutral card — under-constrained mid-sketch is
+  // normal, not a warning. over/error each get their own severity tint so a
+  // redundant constraint doesn't read as visually identical to a conflicting
+  // one.
+  const cardClass =
+    tone === "over"
+      ? "border-warn-border bg-warn-surface"
+      : tone === "error"
+        ? "border-danger-border bg-danger-surface"
+        : "border-border bg-well";
+  const bodyClass = tone === "over" ? "text-warn-strong" : tone === "error" ? "text-danger-strong" : "text-ink-5";
   return (
     <>
       <div className="text-[15px] font-semibold text-ink">{sketchName}</div>
 
       {/* DOF state card (1e treatment folded into 1c per WP spec). */}
-      <div
-        className={cn(
-          "mt-3 rounded-md border px-3 py-2.5",
-          solved ? "border-border bg-well" : "border-warn-border bg-warn-surface",
-        )}
-      >
-        <div className={cn("text-[12px] font-medium", tone === "ok" ? "text-ink-4" : "text-warn")}>
-          {label}
-        </div>
-        <div className={cn("mt-1 text-[12px] leading-normal", solved ? "text-ink-5" : "text-warn-strong")}>
+      <div className={cn("mt-3 rounded-md border px-3 py-2.5", cardClass)}>
+        <div className={cn("text-[12px] font-medium", sketchStatusToneClass(tone))}>{label}</div>
+        <div className={cn("mt-1 text-[12px] leading-normal", bodyClass)}>
           {sketchStatusSentence(status, dof)}
         </div>
       </div>

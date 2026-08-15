@@ -32,7 +32,6 @@ import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
 import { MeasurePanel } from "@/features/measure/MeasurePanel";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
-import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolbar";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
 import { VariablesPanel } from "@/features/inspector/VariablesPanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
@@ -69,12 +68,6 @@ export function contributeModelingUi(scope: ModuleScope): void {
     slot: Slots.ToolbarContextual,
     priority: 100,
     component: SketchChromeBar,
-  });
-  scope.registerPanel({
-    id: ModelingPanels.SketchConstraintToolbar,
-    slot: Slots.ToolbarContextual,
-    priority: 110,
-    component: SketchConstraintToolbar,
   });
 
   scope.registerPanel({

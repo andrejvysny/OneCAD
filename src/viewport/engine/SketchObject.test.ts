@@ -36,9 +36,9 @@ const seg = (id: string, referenceLocked?: boolean, construction?: boolean): Ske
 });
 
 /** Every committed-entity Line2 under `root` — excludes dimension-line
- *  witness segments (tagged `userData.dimLineWitness`), which a selected,
- *  unconstrained Line entity also grows (WP: sketch UX parity pass) and are
- *  not what these tests are counting. */
+ *  witness segments (tagged `userData.dimLineWitness`), which an AUTHORED
+ *  length constraint grows (Track B3: selection alone no longer does) and
+ *  are not what these tests are counting. */
 function entityLines(root: THREE.Object3D): Line2[] {
   const lines: Line2[] = [];
   root.traverse((o) => {
@@ -143,6 +143,36 @@ describe("SketchObject — angle reference highlight + arc preview", () => {
       if (o instanceof Line2) lines.push(o);
     });
     expect(lines.length).toBe(0);
+    obj.dispose();
+  });
+});
+
+/** The three marker materials (endpoints/midpoints/centroids), in the order
+ *  they're added to `entityGroup` — `selectedPoints` (a 4th `Points`
+ *  instance) is excluded, it isn't part of the affordance tier. */
+function markerMaterials(root: THREE.Object3D): THREE.PointsMaterial[] {
+  const mats: THREE.PointsMaterial[] = [];
+  root.traverse((o) => {
+    if (o instanceof THREE.Points) mats.push(o.material as THREE.PointsMaterial);
+  });
+  return mats.slice(0, 3);
+}
+
+describe("SketchObject — point affordance (Sketcher UX cleanup, Track B1b)", () => {
+  it("starts dim (not full opacity) on a freshly-built sketch", () => {
+    const { obj, root } = build([seg("a")]);
+    for (const mat of markerMaterials(root)) expect(mat.opacity).toBeLessThan(1);
+    obj.dispose();
+  });
+
+  it("setPointAffordance(true) brings all three marker materials to full opacity", () => {
+    const { obj, root } = build([seg("a")]);
+    const dim = markerMaterials(root).map((m) => m.opacity);
+    obj.setPointAffordance(true);
+    for (const mat of markerMaterials(root)) expect(mat.opacity).toBe(1);
+
+    obj.setPointAffordance(false);
+    markerMaterials(root).forEach((mat, i) => expect(mat.opacity).toBe(dim[i]));
     obj.dispose();
   });
 });

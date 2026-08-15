@@ -250,6 +250,11 @@ export class SketchStaticLayer {
       size: DOT_SIZE,
       sizeAttenuation: false,
       transparent: true,
+      // Endpoint dots are an AFFORDANCE, not document content (Sketcher UX
+      // cleanup, Track B1): start hidden, `applyTint` lights them only for
+      // the hovered/selected sketch — every model-mode sketch's dots being
+      // permanently lit was exactly the "shows everything at once" clutter.
+      opacity: 0,
       depthWrite: false,
       toneMapped: false,
     });
@@ -331,6 +336,7 @@ export class SketchStaticLayer {
     e.lineMat.color.copy(color);
     e.drawLineMat.color.copy(color);
     e.pointsMat.color.copy(color);
+    e.pointsMat.opacity = sketchSelected || sketchHovered ? 1 : 0;
     for (const [regionId, fill] of e.fills) {
       const regionKey = sketchStaticHitKey({ kind: "sketchRegion", sketchId: id, regionId });
       const selected = sketchSelected || this.selectedKeys.has(regionKey);

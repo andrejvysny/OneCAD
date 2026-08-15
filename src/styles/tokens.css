@@ -48,6 +48,24 @@
   /* DOF-card body text (prototype 1e warn card, line 462). */
   --color-warn-strong: #8a5b10;
 
+  /* ---- Danger / conflict (over-constrained's warn card has an amber twin;
+     conflicting/error constraints need their own red one so the two
+     severities read as visually distinct, not just different words).
+     Seeded from --color-traffic-close, scaled the same way warn-surface/
+     warn-border/warn-strong are scaled off --color-warn. ---- */
+  --color-danger-surface: #fdecec;
+  --color-danger-border: #f4c9c9;
+  --color-danger-strong: #c23a33;
+
+  /* ---- DOF / constraint status text (sketch chrome bar + inspector). Kept
+     separate from --color-sketch-under/--color-sketch-done (viewport
+     GEOMETRY colors) so restyling chrome text never silently restyles
+     sketch entities, and vice versa — same separation precedent as
+     --color-icon-accent vs --color-accent above. Seeded from those two for
+     visual consistency. ---- */
+  --color-dof-neutral: #2d7ff9;
+  --color-dof-ok: #1f9d55;
+
   /* ---- Canvas (viewport backgrounds) ---- */
   --color-canvas: #eaecef;
   --color-canvas-model: #eef0f3;
@@ -278,6 +296,15 @@
   --color-warn-surface: #3a2f1c;
   --color-warn-border: #5c4726;
   --color-warn-strong: #f0c47e;
+
+  /* ---- Danger / conflict ---- */
+  --color-danger-surface: #3a2020;
+  --color-danger-border: #5c2f2f;
+  --color-danger-strong: #ff8f89;
+
+  /* ---- DOF / constraint status text ---- */
+  --color-dof-neutral: #5aa2ff;
+  --color-dof-ok: #43c17a;
 
   /* ---- Canvas (viewport backgrounds) ---- */
   /* NOTE: --color-canvas is also the renderer clear color AND the fill PMREM

@@ -84,8 +84,10 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
   // Select tool: click one line's MIDPOINT → selects the LINE body (hitTestSketch
   // prioritizes vertex handles within tolerance, so a midpoint always hits the body).
   await selectSketchTool(page, "Select");
-  const toolbar = constraintToolbar(page);
   await clickPlanePoint(mid(snap.lines[0]));
+  // Re-opened after EVERY canvas click below — the menu is a Popover that
+  // closes on any outside click, including the selection-changing ones here.
+  let toolbar = await constraintToolbar(page);
   const horizontalBtn = toolbar.getByRole("button", { name: "Horizontal", exact: true });
   await expect(horizontalBtn).toBeEnabled(); // selection feedback: constraint toolbar lit up
 
@@ -94,6 +96,7 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
 
   // Click that same line's Start vertex → selects the point handle → Fixed applies.
   await clickPlanePoint({ x: snap.lines[0].p0[0], y: snap.lines[0].p0[1] });
+  toolbar = await constraintToolbar(page);
   const fixedBtn = toolbar.getByRole("button", { name: "Fixed", exact: true });
   await expect(fixedBtn).toBeEnabled();
   await fixedBtn.click();
@@ -107,6 +110,7 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
   await clickPlanePoint({ x: snap.lines[0].p1[0], y: snap.lines[0].p1[1] }); // + End
   await page.keyboard.up("Shift");
 
+  toolbar = await constraintToolbar(page);
   const distanceBtn = toolbar.getByRole("button", { name: "Distance", exact: true });
   await expect(distanceBtn).toBeEnabled();
   const rowsBeforeDistance = await rows().count();

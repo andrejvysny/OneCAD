@@ -163,7 +163,7 @@ describe("settingsStore displayUnit", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.displayUnit).toBe("in");
-    expect(JSON.parse(raw!).version).toBe(9);
+    expect(JSON.parse(raw!).version).toBe(10);
   });
 });
 
@@ -278,5 +278,50 @@ describe("settingsStore polar tracking + snap radius", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.snapRadius).toBe("s");
+  });
+});
+
+/*
+ * Coincident-badge visibility (Sketcher UX cleanup, Track B2). Unlike every
+ * other `show.*` backfill above, this is a behavior CHANGE for existing
+ * users, not fresh-install parity — Coincident badges used to always render.
+ * A pre-v10 blob therefore backfills OFF, the new default, same as a fresh
+ * install would get.
+ */
+describe("settingsStore coincident badges", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("a v9 blob (predates the key) migrates to OFF", async () => {
+    seed(9, {
+      show: { guidePoints: true, snappingHints: true, constraintChips: true },
+      displayUnit: "in",
+    });
+    await settingsStore.persist.rehydrate();
+    const s = settingsStore.getState();
+    expect(s.show.coincidentBadges).toBe(false);
+    // The migration must not disturb the settings that already existed.
+    expect(s.show.constraintChips).toBe(true);
+    expect(s.displayUnit).toBe("in");
+  });
+
+  it("a v10 blob's explicit ON survives hydration (never re-defaulted)", async () => {
+    seed(10, { show: { guidePoints: true, constraintChips: true, coincidentBadges: true } });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().show.coincidentBadges).toBe(true);
+  });
+
+  it("setShow updates the store and writes localStorage", () => {
+    settingsStore.getState().setShow("coincidentBadges", true);
+    expect(settingsStore.getState().show.coincidentBadges).toBe(true);
+
+    const raw = localStorage.getItem(STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw!).state.show.coincidentBadges).toBe(true);
   });
 });

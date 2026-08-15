@@ -28,7 +28,6 @@ export const ModelingPanels = {
   MeasurePanel: panelId("measurePanel"),
   FloatingToolbar: panelId("floatingToolbar"),
   SketchChromeBar: panelId("sketchChromeBar"),
-  SketchConstraintToolbar: panelId("sketchConstraintToolbar"),
   ModelTree: panelId("modelTree"),
   /** The left-sidebar "Variables" tab — shares `Slots.ShellLeft` with `ModelTree`. */
   VariablesPanel: panelId("variablesPanel"),

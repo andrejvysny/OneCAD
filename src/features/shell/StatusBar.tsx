@@ -89,32 +89,44 @@ export function StatusBar() {
         </>
       )}
       <WorkerStatusIndicator state={workerState} />
+      {/* Kept visible in sketch mode too — despite reading as a 3rd copy of
+          SketchChromeBar's status, e2e's `dofPill`/`clickAtAwaitingDofChange`
+          poll THIS exact segment as a settle gate during active sketch
+          editing across ~47 specs; hiding it here breaks that contract. Only
+          the color-token duplication was the real bug (fixed below). */}
       <span aria-hidden="true" className="h-[14px] w-px bg-border" />
-      <span className={cn("font-medium", showDof ? "text-warn" : "text-ink-6")}>
+      <span className={cn("font-medium", showDof ? "text-dof-neutral" : "text-ink-6")}>
         {dofText}
       </span>
       {/* Renders nothing while nothing is running (prototype 2a). */}
       <TasksChip />
       <SlotHost slot={Slots.StatusSection} />
       <span className="flex-1" />
-      <SegmentedToggle
-        ariaLabel="Projection"
-        size="sm"
-        value={projection}
-        onChange={(p: Projection) => setProjection(p)}
-        options={[
-          { value: "persp", label: "Persp" },
-          { value: "ortho", label: "Ortho" },
-        ]}
-      />
-      <span
-        data-testid="fov"
-        className="text-ink-5"
-        style={{ opacity: persp ? 1 : 0.35 }}
-      >
-        FOV <MonoValue>{fov}°</MonoValue>
-      </span>
-      <span aria-hidden="true" className="h-[14px] w-px bg-border" />
+      {/* Persp/Ortho + FOV are dead controls while sketching — sketch mode
+          force-sets ortho on entry and restores the prior projection on exit
+          (SketchController), so both would just be misleading here. */}
+      {!sketching && (
+        <>
+          <SegmentedToggle
+            ariaLabel="Projection"
+            size="sm"
+            value={projection}
+            onChange={(p: Projection) => setProjection(p)}
+            options={[
+              { value: "persp", label: "Persp" },
+              { value: "ortho", label: "Ortho" },
+            ]}
+          />
+          <span
+            data-testid="fov"
+            className="text-ink-5"
+            style={{ opacity: persp ? 1 : 0.35 }}
+          >
+            FOV <MonoValue>{fov}°</MonoValue>
+          </span>
+          <span aria-hidden="true" className="h-[14px] w-px bg-border" />
+        </>
+      )}
       <MonoValue className="whitespace-pre text-[11.5px]">
         {formatCursor(cursor, displayUnit)}
       </MonoValue>

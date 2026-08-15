@@ -395,7 +395,10 @@ export class ViewportEngine {
 
     // Always visible — NOT gated by gridVisible, so the viewport never loses
     // its sense of orientation.
-    this.triad = new OriginTriad({ x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() });
+    this.triad = new OriginTriad(
+      { x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() },
+      { overlay: this.overlayDriver, overlayEl },
+    );
     this.scene.add(this.triad.object3D);
 
     this.controls = new CadOrbitControls({
@@ -1105,6 +1108,12 @@ export class ViewportEngine {
   /** Tint the chain segment a live angle chip is measured against, or clear it. */
   setSketchAngleReference(id: string | null): void {
     this.sketch?.setAngleReference(id);
+  }
+
+  /** Endpoint/midpoint/centroid AFFORDANCE — full opacity while relevant
+   *  (hover, selection, or a point-relevant tool), dim otherwise. */
+  setSketchPointAffordance(active: boolean): void {
+    this.sketch?.setPointAffordance(active);
   }
 
   /** Show/clear the dashed angle-preview arc between a chained leg and its

@@ -232,6 +232,120 @@ geometry change for stored V2 records, hence the version bump; V1/V2 replay froz
 
 Staged C1–C6 with clean pause points after C3 and C4. Full pipeline, the five-layer
 false-positive defense, and the history-composition reasoning are in the plan file.
+## SKETCHER UX — progressive disclosure pass (2026-08-15) — BOTH TRACKS COMPLETE
+
+Plan: `~/.claude/plans/act-as-senior-frontend-lucky-parasol.md`. Two independent tracks —
+Track A (chrome: toolbars/status bar/Inspector) and Track B (viewport: point markers/
+constraint badges/dimension witness/snap feedback/origin triad) — fixing a "shows
+everything at once" Sketcher UI: three stacked top toolbars, DOF duplicated in three
+places (one styled as a warning), duplicate constraint command surfaces, raw entity IDs
+in the Inspector.
+
+- [x] **A1** DOF/status: `constraintStatus.ts` widened to a real 4-state `StatusTone`
+  (`under|ok|over|error`, was a 2-state `warn|ok` that colored normal "Under-constrained"
+  the same amber as an actual conflict). New `sketchStatusToneClass`/`sketchStatusIsAlert`
+  are the one place tone maps to a class — `SketchChromeBar`, `InspectorPanel` (both
+  branches) route through them instead of each hand-rolling the same ternary. New tokens
+  `--color-dof-neutral`/`--color-dof-ok` (both theme blocks) + a `--color-danger-*` triad
+  so "over" (amber) and "error" (red) read as distinct severities instead of sharing one
+  warn card.
+- [x] **A2** `StatusBar`: FOV + Persp/Ortho hidden while `mode === "sketch"` (sketch mode
+  force-sets ortho on entry — they're dead controls, not just clutter, while editing). DOF
+  segment hidden only during ACTIVE sketch editing (still shown for a model-mode
+  sketch-row selection, where it's the only quick glance available).
+- [x] **A3 — FROZEN CONTRACT AMENDED — explicit user-visible change**
+  (`src/test/contracts/shellContract.ts`, per `contracts/README.md`). `SketchConstraintToolbar`
+  LEFT the registry — its persistent floating pill (a third stacked sketch-mode toolbar
+  row, ~40px of its own) is retired. Its button grid (all 16 constraint kinds, enabled by
+  `useApplicableConstraints`) moved verbatim into new `ConstraintMenu`, a trigger +
+  popover mounted INSIDE `SketchChromeBar` — no new panel id, it's a plain child
+  component, not a registry contribution. `FloatingToolbar` and `SketchChromeBar` now
+  share layout math via new `src/features/toolbar/chromeLayout.ts` (`SKETCH_CHROME_TOP`
+  DERIVED from `TOOLBAR_TOP + TOOLBAR_ROW_HEIGHT`, replacing two independently
+  hand-copied `top-Npx` values) and visually fuse into one two-row pill (matched
+  rounding, shared hairline border) instead of reading as separate floating panels.
+  Nothing else in `EDITOR_MOUNT_ORDER_CONTRACT` moved. `useApplicableConstraints` /
+  `constraintApplicability.ts` / `constraintCatalog.ts` untouched — same shared
+  applicability derivation `ConstraintContextChips` already uses.
+- [x] **A5** Inspector `ConstraintList`: dropped raw entity-id column (`entitySummary()`,
+  "e1, e2") — pure noise next to the already-human-readable type label, single call site.
+  Hover linkage stays one-way (Inspector row → canvas highlight); reversing it needs
+  viewport/pick-layer files, deferred to Track B.
+- [x] **A4** Responsive collapse: `SketchChromeBar`'s editing pill is `@container`
+  (Tailwind v4 container queries), `max-w-[calc(100vw-24px)]` so it actually shrinks
+  with the viewport instead of just overflowing. Priority order: Construction's label
+  drops first (`@max-[560px]`, `X` shortcut still works), then `ConstraintMenu`'s label
+  (`@max-[460px]`), then the DOF text swaps to a bare "DOF N" chip (`@min-[361px]`
+  threshold). Sketch name and Cancel/Finish never collapse. Every text node is
+  `whitespace-nowrap`. Breakpoints are a first pass, not browser-verified — flagged for
+  visual QA.
+- [x] Track A (chrome layer) COMPLETE.
+
+### Track B — viewport annotations
+
+- [x] **B1a** `SketchStaticLayer` (model-mode, non-edited sketches): vertex dots start at
+  `opacity: 0`; `applyTint()` now also drives `pointsMat.opacity` (1 while that sketch is
+  selected/hovered, else 0) — it already computed the booleans, it just never applied them
+  to the dots.
+- [x] **B1b** `SketchObject` (live edit-mode sketch): new `setPointAffordance(active)` —
+  whole-material opacity write (`DIM_OPACITY = 0.35` idle, `1` active) across
+  endpoints/midpoints/centroids + one `invalidate()`, no geometry rebuild. Mirrored through
+  `ViewportEngine.setSketchPointAffordance()`. Wired in `ViewportRoot.tsx`'s existing
+  `applySketchSelection` (now also subscribed to `toolStore`): dim only when the Select
+  tool is active AND nothing is hovered/selected — any hover, selection, or other tool
+  (dimension/trim/fillet/drawing, all of which snap to these points) keeps them lit. Decided
+  scope: whole-sketch, not per-entity — simpler, matches the cheap opacity-uniform approach.
+- [x] **B2** Constraint badges (`ConstraintBadgeLayer`): non-editable badges (H/V/Coincident/
+  etc.) now render the SAME `CONSTRAINT_PRESENTATION` icon every other constraint surface
+  already used (toolbar/context-chips/Inspector), not a canvas-only text glyph — the
+  bordered/shadowed pill chrome dropped for a lighter `rounded-full` halo. Coincident badges
+  hidden by default: new `settingsStore.show.coincidentBadges` (default `false`, v9→v10
+  migration — a real behavior change for existing users, not fresh-install parity), toggle
+  added to `SnapPopover`'s Show section. `constraintCatalog.ts`'s stale "badges are
+  measured-text, can't swap to icons" comment corrected — they were already fixed-size boxes.
+- [x] **B3** Dimension witness vs authored constraint, visually AND structurally split.
+  `dimensionLineLayout.ts`'s `layoutDimensionLines()` is now AUTHORED-ONLY — `editable`
+  dropped off `DimensionLine` entirely, `selectedEntityIds` param removed. New
+  `hasAuthoredLength()` + `unconstrainedEdgeLabel()` give `SelectionDimensionLabels` a
+  lightweight midpoint+value computation for the passive-selection case — NO offset/tick/
+  arrow geometry at all, so a merely-selected edge shows an inline number, not a full
+  witness. `SketchObject.setSelection()` no longer calls `rebuildDimensionLines()` — 3D
+  dimension geometry now depends only on constraints/entities (via `setSession`), never on
+  selection. Precision confirmed already consistent (both paths shared `formatLength()` even
+  before this split) — the "172mm vs 121.566mm" mismatch is NOT here.
+- [x] **B4** Snap feedback softened, not restructured — `snapEngine`/`SnapIndicator` already
+  rendered only the single winning candidate, no multi-dot cloud to remove. Guide-line
+  opacity 0.75 → 0.3. Hint chip: solid `var(--color-tooltip)` box → translucent
+  `color-mix(in srgb, var(--color-tooltip) 55%, transparent)` scrim (same technique
+  `SketchController`'s drag-preview fill already uses), and its offset from the marker
+  shrunk (12px/-18px → 6px/-8px) so it reads as sitting AT the snap point, not a detached
+  floating tooltip.
+- [x] **B5** Origin triad: `OriginTriad` gained an `overlay`/`overlayEl` dependency (same
+  shape `SnapIndicator` already takes) and now registers three small "X"/"Y"/"Z" DOM labels,
+  positioned each frame in the existing `update()` (rides the same constant-on-screen-size
+  cadence the legs already use — no new per-frame cost class). Colored via live
+  `var(--color-axis-*)` reads, so no `refreshColors()` bookkeeping needed. `LineMaterial`
+  gained `transparent: true` + `opacity: 0.65` + `depthWrite: false` so the triad reads as
+  recessive relative to real geometry — the z-fight-vs-grid test re-verified green.
+  Arrowheads explicitly deferred (would need new per-leg geometry, against the class's
+  "one `LineSegments2`, built once" design) — decided v1 scope is labels only.
+- [x] **B6** Numeric precision — investigated and DESCOPED, no files touched. The suspected
+  `faceOffset.ts`/`mockClient.ts` `.toFixed(1)` call sites are INTENTIONALLY mm-fixed
+  1-decimal, mirroring the real Rust backend's `format!("{:.1} ...")` and pinned by Rust-side
+  tests (`extrude_value_text_and_kind` asserts `"25.0 mm"`). Changing them would silently
+  corrupt non-mm display units and break backend parity. If the original mismatch is still
+  real, it's an uncaptured code path (most likely a live drag-adjust chip) — needs a fresh
+  repro before anyone is assigned to it.
+- [x] tsc 0 · full vitest suite green (278 files / 4547 tests, +14 net over Track A's 4533)
+- [ ] Manual Tauri gate (USER): idle sketch chrome reads as one fused two-row pill, not
+  three; hover Constraints → popover opens with all 16 kinds, correct ones enabled;
+  narrow the window and confirm nothing wraps mid-word, labels drop in the documented
+  order instead; check both light and dark themes for the new DOF/danger tokens; idle
+  rectangle in sketch mode shows faint endpoints only (no midpoint/centroid/badge
+  clutter), brightens on hover/selection/non-select tools; select an unconstrained line →
+  lightweight inline label with no witness lines; add a real Distance constraint → full
+  dimension geometry appears; snap guides read as weak/dashed, hint chip sits near the
+  cursor not floating; origin triad shows small X/Y/Z labels, slightly recessive vs geometry
 
 ## SKETCH UX — Shapr3D render-parity pass (2026-08-15) — SHIPPED (`601534c` + follow-ups)
 
