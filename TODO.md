@@ -1173,7 +1173,11 @@ red CI checks. Scope was deliberately bounded — see the deferred list at the e
 - `verify-modeling-coverage.mjs` **29 rows, 9 corpus cases, 16 CI jobs, 19 registry
   operations** + its negative controls · `verify-modeling-contracts.mjs` **37 rows,
   18 operations** · hex gate empty
-- Playwright: see the two browser-lane items above.
+- Playwright chromium, FULL suite on an idle machine: **215 passed / 0 failed** (15.1 min;
+  213 before, +2 for the new gear spec) — this also completes the 23-spec sweep the
+  visibility-helper change touches. WebKit: 30/30 on the previously-failing spec and
+  51/51 across the touched specs, but under load and without a pre-fix local repro, so
+  CI remains the confirmation there.
 
 **Deferred by decision — open, NOT done:**
 - Production OffsetFace suppress → offset → reblend. The recognizer is finite-sampled
