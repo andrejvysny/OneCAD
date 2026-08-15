@@ -55,6 +55,20 @@
  * Parallel once it is H or V. Intra-batch relationships (e.g. a polyline's chained
  * segments) are detected by folding each processed entity into the reference sets
  * as we go.
+ *
+ * ── This module is the COORDINATE half only (SNAP P3) ────────────────────────
+ * Everything here works from where geometry ENDED UP. That is the right tool for
+ * exactly one job — the intra-batch welds a compound shape needs to hold
+ * together, which the controller runs with an EMPTY reference set and always
+ * emits (they survive Alt and auto-constrain mode `off`).
+ *
+ * It is the WRONG tool for relating new geometry to old, because a coordinate
+ * cannot distinguish "the user snapped here" from "these happen to coincide".
+ * The relations that are only true because the user aimed at them — an alignment
+ * guide's point-axis constraint, a polar ray's Parallel, an OnCurve off a curve
+ * snap — come from ACCEPTED SNAP INTENT instead (`snapPersistence.ts`), and the
+ * kinds this module may author at all are gated by the auto-constrain mode
+ * (`SketchController.autoKindsFor`).
  */
 import type {
   ConstraintPosition,

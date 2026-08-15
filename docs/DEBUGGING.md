@@ -124,6 +124,7 @@ grep, not the doc comment's aspiration:
 | `sink` | `logSink.ts`'s own diagnostics about itself — deliberately NEVER forwarded to Rust (the second recursion guard, `ev.tag === "sink"` check) | `src/debug/logSink.ts` |
 | `sketch` | Sketch session failures: enter/exit/switch, orphan cleanup, unmapped solved points | `src/tools/sketch/SketchController.ts`, `src/ipc/tauriClient.ts`, `src/ipc/sketchWireMap.ts` |
 | `mesh` | Body mesh ingest failures | `src/viewport/mesh/meshSync.ts` (~line 295) |
+| `snap` | One sketch snap ARBITRATION: the accepted candidate ids, every rejected one with its reason, the candidate rows (`id kind/source {claims} err+bias=score [refs]`), the plane→screen metric, the grid cell/reach in px, the source toggles, the prior latch and the captured Alt state. **Rate-limited by construction**: emitted only when the accepted set CHANGES, on a committed click, on a latch reset, or on a projection failure — an identical pointer frame emits nothing, which is what keeps it inside the drag-frequency policy below. The latest trace is ALWAYS retained in memory regardless of whether it logged, and is readable through `window.__vpEngine.debugSnapshot().snapTrace` | `src/tools/sketch/snapTrace.ts` `recordSnapTrace`; call site `SketchController.decisionAt` |
 | `boolean` / `extrude` / `revolve` / `measure` | Listed in the `log.ts` doc comment as "op/tool lanes" but are **not** standalone tags at any current call site — `boolean`/`extrude`/`revolve` surface only as `ctx.tool` under `fsm` (see above); `measure` has zero call sites today (the measure tool is read-only and unin­strumented) | n/a |
 
 ## 5. Enabling matrix
@@ -213,6 +214,9 @@ for l in open('logs/dev.jsonl'):
 ```bash
 jq -c 'select(.tag=="hint")' logs/dev.jsonl   # note: target is "fe", tag is "hint"
 grep '"tag":"hint"' logs/dev.jsonl
+
+# Why did the sketch snap THERE? Every accepted + rejected candidate, with reasons.
+jq -c 'select(.tag=="snap") | {msg, accepted: .ctx.accepted, rejected: .ctx.rejected}' logs/dev.jsonl
 ```
 
 **Frame-level protocol debug** (run with `RUST_LOG=info,onecad_lib=debug,fe=debug,worker=debug,onecad_protocol::frames=debug`):

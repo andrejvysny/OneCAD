@@ -68,20 +68,26 @@ export interface SnapSettings {
   onCurve: boolean;
   /**
    * Round a CURSOR-placed dimension to the zoom-adaptive quantum while drawing
-   * (SP-1). Lives under `snapTo` because it is a snap tier: it REPLACES the grid
-   * tier during a draw gesture (grid quantizes x/y independently, a draw gesture
-   * means length + angle), and every geometry tier above it still wins. Default
-   * on — a drawn length landing on a round number is what makes cursor-drawn
-   * geometry usable without typing.
+   * (SP-1). Default on — a drawn length landing on a round number is what makes
+   * cursor-drawn geometry usable without typing.
+   *
+   * Lives under `snapTo` because it IS a snap source: since SNAP P2 the rounding
+   * is an explicit candidate scored on screen displacement alongside every
+   * geometry, guide and grid candidate, and it COMPOSES with a directional one
+   * (a polar ray plus a rounded length is one accepted decision). It no longer
+   * "replaces the grid tier" — grid has its own cell-relative reach and the two
+   * simply compete, so a mid-cell cursor rounds and a near-node cursor snaps.
    */
   dimensionRound: boolean;
   /**
    * Snap the cursor onto a ray leaving the chain's last anchor at 0/45/90/135°,
    * or parallel/perpendicular to the direction the chain is travelling in
-   * (SP-5.5). Lives under `snapTo` because it is a snap tier: it sits between
-   * the geometry ladder and the H/V alignment guides, and loses every tie to
-   * them. Default on — it is inert until a gesture has placed an anchor, so it
-   * can never move a first click.
+   * (SP-5.5). Default on — it is inert until a gesture has placed an anchor, so
+   * it can never move a first click.
+   *
+   * A polar candidate claims only the ANGLE, so it composes with a rounded
+   * length rather than displacing it (SNAP §5.7) — the composition the old
+   * single-slot ladder could not represent at all.
    */
   polarTracking: boolean;
   /**

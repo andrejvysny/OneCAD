@@ -262,8 +262,19 @@ sketch entity, because you cannot snap to where a line crosses it or to the end 
       guide rendering, DPR, adaptive tessellation and ref-based selected points.
 - [x] Module headers rewritten to describe the FINAL policy: `snapEngine.ts` no longer documents a
       priority ladder or "grid gets first refusal", `liveToolMachines.ts` states that it applies
-      accepted numeric values rather than owning the rounding decision, and `autoConstrain`'s
-      callers document the structural/inferred split.
+      accepted numeric values rather than owning the rounding decision, `autoConstrain.ts` says in
+      its own header that it is the COORDINATE half only and names `snapPersistence.ts` as the
+      intent half, and `settingsStore`'s `dimensionRound`/`polarTracking` comments no longer claim
+      that rounding "replaces the grid tier".
+- [x] `docs/DEBUGGING.md` — the `snap` tag row (what it carries, and WHY it is inside the
+      drag-frequency policy: it emits only on a changed accepted set, a click, a latch reset or a
+      projection failure) plus a `jq` cookbook line for "why did it snap there?".
+- [x] `e2e/sketch-snap-composition.spec.ts` + `e2e/sketch-snap-rendering.spec.ts` (NEW) — polar +
+      rounded length composing, an alignment guide persisting as `VerticalPoints`, Alt vs
+      structural connectivity, auto-constrain `off`, an inert click after a projection failure;
+      and on the rendering side, a CSS-constant dash cadence across a real wheel zoom, adaptive
+      tessellation growing with projected size, `show.guidePoints` not touching snap behaviour, and
+      the grid moving to the sketch plane and back.
 
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
