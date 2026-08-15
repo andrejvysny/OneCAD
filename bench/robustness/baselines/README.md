@@ -38,7 +38,7 @@ that the change was unintended.
 
 | Suite | Rows | Recorded |
 |---|---|---|
-| `fillet/foundation:t0` | 136 | 2026-08-14, semantic-publication hardening |
+| `fillet/foundation:t0` | 136 | linux-x64 2026-08-14 · darwin-arm64 2026-08-15, semantic-publication hardening |
 | `fillet/matrix:m1` | 120 | 2026-08-09, GH-0 WP0.3 |
 
 ### 2026-08-14 T0 semantic update
@@ -52,6 +52,45 @@ B-Rep tolerance is ~`1e-7 mm`; OCCT's otherwise BRep-valid outputs inflate it to
 regressions, and stable replay. Only those eight Linux normalized digests and the
 portable semantic counts were re-recorded from Actions run 48; this is the named
 policy change the manifest is meant to expose, not a geometry-baseline refresh.
+
+### 2026-08-15 T0 darwin-arm64 completion of the update above
+
+**The 2026-08-14 update was half-applied.** It re-recorded the eight `valence4-*`
+Linux rows and left their **darwin-arm64 twins at their pre-gate values from
+`fc55419`**. The tolerance-growth gate is platform-independent, so those eight
+darwin rows had been stale — and the local darwin digest compare red — from
+`6a0cfb1` onward. Nothing caught it because no CI job compares darwin digests
+(the macOS lane runs the portable semantics gate; only `linux-kernelbench`
+compares digests), and the local compare is a manual step.
+
+Re-recorded here from a darwin-arm64 run, with the cause established BEFORE
+overwriting, per the rule above. The evidence that this is a stale baseline and
+not a regression:
+
+- **128 of the 136 darwin rows re-recorded to byte-identical values.** Only the
+  eight known cases moved. A build or environment problem would not be that
+  selective.
+- **Three independent builds agree exactly with each other** and disagreed
+  identically with the old baseline: a clean rebuild at branch HEAD, an
+  incremental build at branch HEAD, and a clean build in a detached worktree at
+  **`d7cd9f1` itself — the commit that recorded the baseline.** A baseline that
+  does not reproduce from its own commit is stale by definition.
+- **`semantic-compare` passed on darwin throughout**, before and after. The
+  portable, meaning-carrying gate never moved; only the byte-level digest did.
+
+This also **falsifies the build-hygiene hypothesis for darwin**: clean and
+incremental produced identical digests, so a persistent build tree was not the
+cause here.
+
+**The Linux row is a separate and still-open question, with the opposite sign.**
+CI at `8c00c4d` reports Linux now producing
+`8287fbb35f3c2f3e1f5920d43a0e0580ee0a2963bb611ba83baf0bc42e01f9b3` for
+`valence4-00` — which is the value that was current **before** `d7cd9f1`, i.e.
+the **pre-gate** digest. Linux is behaving as though the tolerance-growth gate
+were absent, even though Actions run 48 recorded it firing there. A stale binary
+in the persistent `LINUX_WORKER_BUILD` tree fits that signature exactly. Do NOT
+re-record the Linux rows: run `self-hosted.yml` `s3-worker` with
+`clean_build: true`, then `s4-kernelbench`, and decide from the result.
 
 Both were captured with the worker built from `~/.onecad-occt/8.0.1` (pinned OCCT
 8.0.1). A different OCCT build is expected to move digests — that is the point of

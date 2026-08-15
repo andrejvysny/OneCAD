@@ -1,5 +1,157 @@
 # OneCAD-Tauri Migration TODO
 
+## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
+
+Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`
+toward a OneCAD-owned modeling kernel, where OCCT is an implementation backend rather than the
+authority deciding whether an operation succeeded. Approved scope for execution is **WP0–WP3**;
+WP4–WP6 are planned but gated on a further checkpoint.
+
+**A large part of the source review's findings list was already closed on this branch and was
+re-derived against source before planning.** Recording it so the work is not done twice: the
+OffsetFace silent no-op (refused at `kMinimumFeatureChange`, `OffsetFaceOp.cpp:939-955`), the
+missing planar normal-orientation check (`:660`), unsafe mid-UV anchoring (`sample_face` uses
+`BRepTopAdaptor_FClass2d`, `:74-113`), benchmark-only validators (`BlendEvidence` is in
+`kernel/fillet/` and production Fillet consumes it), partial Draft acceptance
+(`EXTRUDE_DRAFT_PARTIAL_ACCEPTANCE`, `ExtrudeOp.cpp:523`), the global Body invariant
+(`PlanExecutor.cpp:449-467`), tilted ToFace (refused by name, `ExtrudeOp.cpp:407-410`), heuristic
+ToNext (exact extremum), and the `kMinVolume` "10 µm cube" doc bug (already reads "1 µm cube") are
+all CLOSED. Do not re-open them.
+
+### WP0 — PR #4 close-out — IN PROGRESS
+
+- [x] **`master` merged in** (`def327b`, 5 commits, all frontend). Merge, not rebase: the 23 commit
+      messages and the gate records that cite their SHAs stay valid, and no force-push is needed.
+      `git merge-tree` predicted and `git merge` confirmed **exactly one** textual conflict — the
+      `CURRENT_STATE.md` "NOW" header. `TODO.md` and `e2e/variables.spec.ts` auto-merged (the two
+      `variables.spec.ts` hunks are ~60 lines apart). Resolution keeps both narratives and corrects
+      master's superseded-gear note, which still listed `src-tauri/tests/gear_ops.rs` and
+      `e2e/gear.spec.ts` as owed — **this branch added both**. `protocol/fixtures/gear_*.ndjson` is
+      still genuinely owed.
+      Master touched **zero** files under `worker/`, `src-tauri/` or `protocol/`, so the C++ and
+      Rust suites cannot have been perturbed by the merge; they were re-run anyway.
+      Not fixed, deliberately: master carries an orphaned paragraph under three blank lines where it
+      deleted the `## NEXT — post-merge plan` heading. Restoring it here would conflict with the
+      peer session currently editing `master`.
+- [x] **Frontend flake — root-caused as a CLASS, not an instance.** The full suite went red on
+      `ModelToolController.wave2.test.ts:486`, a *different* test from the one CI reported
+      (`InspectorPanel.test.tsx`), and 18/18 green in isolation. Both are the same defect, and both
+      files' own comments already name it: **`vi.waitFor` budgets WALL-CLOCK on work that is pure
+      microtasks.** Vitest runs files in parallel workers, so a starved event loop blows the budget
+      while the assertion is already satisfiable. Raising the budget is not a fix and had already
+      been tried — `InspectorPanel` was at **4 s** and went red anyway.
+      Replaced with `settleUntil` (`src/test/settle.ts`), which polls by **event-loop turns**
+      instead of milliseconds. The number of turns needed to drain N chained promises is a property
+      of the code, not of the machine, so it is load-independent. React callers pass an `act`-aware
+      turn. This is still polling and is documented as such: the strictly deterministic alternative
+      is for the controller to expose its in-flight commit promise, but those commits are
+      fire-and-forget BY DESIGN, so exposing one would reshape production to serve a test.
+      **Proven load-bearing** by `src/test/settle.test.ts`: a condition that only becomes true after
+      5 turns passes at the default and is asserted to REJECT at `{turns: 1}` — the two are written
+      as a complementary pair so a future collapse to a single flush cannot pass both.
+- [x] **`linux-kernelbench` — the previous triage was WRONG, and the real cause is now measured.**
+      The 2026-08-15 entry below concluded "NOT this branch's doing" from a comparison that could
+      not have detected it: it built `69be0c2` and branch HEAD and found 0/136 differences, but
+      **both of those are AFTER the baseline commit `d7cd9f1`**, so any change introduced at or
+      before `d7cd9f1` is invisible to that test. It also asserted the fillet path was untouched by
+      naming only `ops/{ExtrudeOp,OffsetFaceOp,OpCommon,RevolveOp}` — while `6a0cfb1`'s
+      tolerance-growth gate changes `FilletBuilder`'s publication ceiling directly.
+      What the correct comparison — **build vs the recorded BASELINE** — shows:
+      - **darwin-arm64: the stored rows were stale, not the code.** `d7cd9f1` re-recorded ONLY the
+        eight `valence4-*` **linux-x64** rows (its own README says so: "Only those eight Linux
+        normalized digests … were re-recorded") and left the eight **darwin** twins at their
+        pre-gate values from `fc55419`. The gate is platform-independent, so the local darwin
+        compare has been red since `6a0cfb1` — undetected because **no CI job compares darwin
+        digests** (macOS runs the portable semantics gate; only `linux-kernelbench` compares
+        digests) and the local compare is manual.
+      - **The build-hygiene hypothesis is FALSIFIED on darwin.** A clean rebuild
+        (`rm -rf worker/build` + full rebuild) and the incremental build produced
+        **byte-identical** digests, and so did a clean build in a detached worktree at
+        **`d7cd9f1` itself**. A baseline that does not reproduce from its own commit is stale by
+        definition.
+      - **`semantic-compare` passed on darwin throughout**, before and after. Only the byte-level
+        digest moved; the portable meaning-carrying gate never did.
+      - **Re-recorded the 8 darwin rows** with the cause written into
+        `bench/robustness/baselines/README.md` first, per its own rule. Selectivity is the proof
+        this is not a build problem: **128 of 136 darwin rows re-recorded to byte-identical
+        values**; only the 8 known cases moved. All three builds now compare **136/136 OK**.
+        This also unblocks WP1, whose entire safety argument is "digests must be byte-identical at
+        every gate" — an argument that could not be made on darwin while 8 rows were stale.
+- [x] **`clean_build` input added to `self-hosted.yml`** for the Linux half. One
+      `rm -rf "$WORKER_BUILD"` step in `s3-worker`, guarded by the input, targeting the env var
+      rather than a literal. Off by default; a wipe costs a full worker build.
+- [ ] **Linux is a SEPARATE, still-open question, with the opposite sign.** CI at `8c00c4d`
+      reports Linux producing
+      `8287fbb35f3c2f3e1f5920d43a0e0580ee0a2963bb611ba83baf0bc42e01f9b3` for `valence4-00` — which
+      is the value that was current **before** `d7cd9f1`, i.e. the **pre-gate** digest. Linux is
+      behaving as though the tolerance-growth gate were absent, even though Actions run 48 recorded
+      it firing there (that run is where the `0.0086–0.4008 mm` inflation figures came from). A
+      stale binary in the persistent `LINUX_WORKER_BUILD` tree fits that signature exactly — the
+      hygiene hypothesis survives on Linux even though it died on darwin.
+      **Do NOT re-record the Linux rows.** Dispatch `s3-worker` with `clean_build: true`, then
+      `s4-kernelbench`, and decide from the result. Needs the branch pushed first (a
+      `workflow_dispatch` input only exists on a pushed ref) — NOT AUTHORIZED YET.
+- [ ] Refresh the PR #4 body against the merged head (it still names `69be0c2`, claims Gear
+      coverage is missing, and lists jobs as running).
+
+#### WP0 gate evidence (measured 2026-08-15 on the merged tree, worktree `../OneCAD-kernel-hardening`)
+
+- `ctest --test-dir worker/build --output-on-failure` — **133/133**, 30.4 s
+- `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -D warnings` clean
+- `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` — **1265 passed / 0 failed /
+  0 ignored across 83 targets**
+- `bunx tsc --noEmit` clean · `bun run build` clean
+- `bun run test` — **4535 passed / 279 files** (was 4530/278 with one red; +5 is `settle.test.ts`)
+- `verify-modeling-coverage.mjs` **29 rows, 9 corpus cases, 16 CI jobs, 19 registry operations** ·
+  `verify-modeling-contracts.mjs` **37 rows, 18 operations** · hex gate empty
+- kernelbench `fillet/foundation:t0` both backends, darwin-arm64 — `compare` **136/136 OK** and
+  `semantic-compare` **OK**, verified against THREE independent builds (clean HEAD, incremental
+  HEAD, and a clean detached build at `d7cd9f1`) after the darwin re-record above
+- Playwright: NOT RE-RUN after the merge. Master's 5 commits are frontend-only and its own gate
+  recorded **425 passed / 1 failed** (`filletChamfer.spec.ts:198`, a pointer-drag flake it logged
+  as a second MC-R9 datapoint). Owed before the WP0 gate closes.
+
+### WP1 — `GeometryPrecisionContext` + publication enforcement — NOT STARTED
+
+Must land before WP3, which chains three OCCT algorithms and inherits every tolerance decision.
+
+**The finding that changes the design.** "Evidence collected but not enforced" understates it — the
+detector is *inverted*, and both halves were verified in source:
+
+1. `collect_micro_topology` (`ShapeAudit.cpp:126-130`) does **not** skip degenerate edges, while its
+   sibling `collect_manifold_evidence` (`:94`) does. A degenerate edge (sphere pole, cone apex) has
+   `BRepGProp::LinearProperties` mass ≈ 0, so its ratio is 0 < 1e-9 and it is counted as a micro
+   edge. `max_micro_edge_count = 0` today would refuse **every sphere and every cone-apex revolve**.
+2. The thresholds are ratios to the global bbox diagonal. On a 100 mm part the micro-edge threshold
+   is ≈1.7e-7 mm — about OCCT's own `Confusion`; on a 0.01 mm part, 1.7e-11 mm. The repo's own
+   fixture confirms the detector is unreachable in range: to make either counter fire,
+   `worker/tools/kernelbench-runner/audit_fixtures.cpp:104-113` compounds a **1e6 mm box with a
+   1e-4 mm face** — a 1e10 scale spread, four orders beyond the supported 1e6.
+
+So enforcement-as-is would miss every real defect *and* break spheres. Redefine, then enforce.
+Full design, the per-literal disposition table (R/B/F), the codes and the G0–G4 gate ladder are in
+the plan file. Key constraints carried here: `deep_audit` is **not** a free measurement lane (its
+output is inside the normalized digest and `result-v1.schema.json` sets
+`additionalProperties: false` on `microTopology`) — measure via a new ctest census instead; and
+`PublicationDecision::code` must **not** be repurposed for per-reason codes, since it is the SCHEMA
+§8 taxonomy code at 16 sites and kernelbench's `failure_class`.
+
+### WP2 — ToNext adversarial campaign — NOT STARTED
+
+Verification, not a known defect. Extends `test_wp6_extrude.cpp` with the topology classes the
+"one connected intersection solid = one contiguous material run" rule has not been proven against.
+
+### WP3 — OffsetFace DirectModeler V1 (`resultPolicyVersion: 3`) — NOT STARTED
+
+The canonical case is pushing a **side** face of a filleted box, not the top: today
+`tangent_closure` sweeps the fillet in, `check_semantics` accepts it as a cylinder that reached
+`R + σd`, and the op succeeds while inflating R2 into R4 and dragging the opposite wall along. For a
+10³ box with one R2 vertical fillet pushed +2: today **1405.664**, V3 **1191.4159**. That is a
+geometry change for stored V2 records, hence the version bump; V1/V2 replay frozen and byte-identical.
+
+Staged C1–C6 with clean pause points after C3 and C4. Full pipeline, the five-layer
+false-positive defense, and the history-composition reasoning are in the plan file.
+
 ## SKETCH UX — Shapr3D render-parity pass (2026-08-15) — SHIPPED (`601534c` + follow-ups)
 
 Vertex ring→filled-dot markers, persistent midpoint/centroid dots, permanent dimension
