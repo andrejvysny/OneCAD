@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TopExp.hxx>
@@ -69,6 +70,12 @@ void check_rel(double got, double want, double rel, const std::string& msg) {
 }
 
 double vol(const TopoDS_Shape& s) { return onecad::session::shape_volume(s); }
+
+int solid_count(const TopoDS_Shape& shape) {
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+    return solids.Extent();
+}
 
 TopoDS_Shape box_20_20_25() { return BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape(); }
 
@@ -128,15 +135,22 @@ json hole_op(const TopoDS_Shape& host, const json& extra) {
                 {"params", params}};
 }
 
-// Run one Hole against a fresh 20×20×25 box; returns the outcome and leaves the
-// result in `bodies`.
-ops::OpOutcome run_hole(BodyStore& bodies, em::ElementMapPartition& part, const json& extra) {
-    const TopoDS_Shape box = box_20_20_25();
-    bodies.create("body_1", "op0", box);
-    const json op = hole_op(box, extra);
+ops::OpOutcome run_hole_on_host(BodyStore& bodies,
+                                    em::ElementMapPartition& part,
+                                    const TopoDS_Shape& host,
+                                    const json& extra) {
+    bodies.create("body_1", "op0", host);
+    const json op = hole_op(host, extra);
     Ctx c;
     ops::OpContext ctx = c.make(bodies, part);
     return ops::execute_hole(ctx, op, "ophl");
+}
+
+// Run one Hole against a fresh 20×20×25 box; returns the outcome and leaves the
+// result in `bodies`.
+ops::OpOutcome run_hole(BodyStore& bodies, em::ElementMapPartition& part,
+                        const json& extra) {
+    return run_hole_on_host(bodies, part, box_20_20_25(), extra);
 }
 
 // ── 1. Simple THROUGH-ALL: removed = π·r²·t, t = the full 25 mm thickness ──────
@@ -311,6 +325,86 @@ void test_conditional_invariants() {
     }
 }
 
+TopoDS_Shape bridge_host() {
+    const TopoDS_Shape left =
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 8.0, 20.0, 25.0).Shape();
+    const TopoDS_Shape bridge =
+        BRepPrimAPI_MakeBox(gp_Pnt(8, 8, 0), 4.0, 4.0, 25.0).Shape();
+    const TopoDS_Shape right =
+        BRepPrimAPI_MakeBox(gp_Pnt(12, 0, 0), 8.0, 20.0, 25.0).Shape();
+    BRepAlgoAPI_Fuse first(left, bridge);
+    first.Build();
+    BRepAlgoAPI_Fuse second(first.Shape(), right);
+    second.Build();
+    return second.Shape();
+}
+
+void test_result_policy_versions() {
+    const TopoDS_Shape host = bridge_host();
+    check(!host.IsNull() && solid_count(host) == 1,
+          "result policy: connected bridge host starts as one solid");
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome outcome = run_hole_on_host(
+            bodies, part, host, json{{"depth", nullptr}});
+        check(outcome.status == ops::OpOutcome::Status::Ok,
+              "result policy legacy: split-host residual remains replayable");
+        check(bodies.contains("body_1") &&
+                  solid_count(bodies.get("body_1")->geom) == 2,
+              "result policy legacy: one Body may retain two residual solids");
+    }
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome outcome = run_hole_on_host(
+            bodies, part, host,
+            json{{"depth", nullptr}, {"resultPolicyVersion", 2}});
+        check(outcome.status == ops::OpOutcome::Status::Failed &&
+                  outcome.error_code == "OP_FAILED" &&
+                  !outcome.diagnostics.empty() &&
+                  outcome.diagnostics.front().value("code", "") ==
+                      "HOLE_DISJOINT_RESULT",
+              "result policy V2: disconnected result is named-refused");
+        check(outcome.body_events.empty() && bodies.contains("body_1") &&
+                  bodies.get("body_1")->geom.IsSame(host),
+              "result policy V2: refusal leaves predecessor untouched");
+    }
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome outcome = run_hole_on_host(
+            bodies, part, host, json{{"resultPolicyVersion", 3}});
+        check(outcome.status == ops::OpOutcome::Status::Failed &&
+                  outcome.error_code == "OP_FAILED" &&
+                  !outcome.diagnostics.empty() &&
+                  outcome.diagnostics.front().value("code", "") ==
+                      "UNSUPPORTED_HOLE_RESULT_POLICY_VERSION",
+              "result policy future: unsupported version refuses by name");
+    }
+}
+
+void test_quarantined_host_is_not_modelable() {
+    const TopoDS_Shape host = box_20_20_25();
+    BodyStore bodies;
+    bodies.create("body_1", "op0", host);
+    bodies.quarantine("body_1", "fixture failed import validation");
+    em::ElementMapPartition part;
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome outcome =
+        ops::execute_hole(ctx, hole_op(host, json{{"resultPolicyVersion", 2}}),
+                          "ophl");
+    check(outcome.status == ops::OpOutcome::Status::Failed &&
+              outcome.error_code == "OP_FAILED" &&
+              !outcome.diagnostics.empty() &&
+              outcome.diagnostics.front().value("code", "") ==
+                  "QUARANTINED_MODELING_INPUT",
+          "quarantine: visible imported geometry cannot enter Hole modeling");
+    check(bodies.get("body_1")->geom.IsSame(host),
+          "quarantine: rejected modeling leaves imported geometry untouched");
+}
+
 // ── 8. DETERMINISM: two independent runs are BIT-EQUAL (same geometry signature).
 //      This is also what makes preview == commit: `PlanExecutor::execute_candidate_op`
 //      is the one path both lanes take, so an identical predecessor snapshot plus
@@ -344,6 +438,8 @@ int main() {
     test_point_fences();
     test_non_planar_face();
     test_conditional_invariants();
+    test_result_policy_versions();
+    test_quarantined_host_is_not_modelable();
     test_determinism();
     if (g_failures == 0) std::fprintf(stderr, "test_hole_op: all checks passed\n");
     return g_failures;

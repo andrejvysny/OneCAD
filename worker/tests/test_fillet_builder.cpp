@@ -64,6 +64,19 @@ void test_single_and_duplicate_contour() {
   check(one.ok && one.output_audit.publishable(),
         "single edge fillet publishes valid solid");
   check(one.analysis.contours.size() == 1, "single edge owns one contour");
+  check(one.fillet_evidence.generated_face_count > 0 &&
+            one.fillet_evidence.support_face_count >= 2 &&
+            one.fillet_evidence.blend.boundaries >= 2 &&
+            one.fillet_evidence.blend.samples > 0,
+        "single edge fillet carries measured blend/support evidence");
+  check(one.fillet_evidence.blend.maximum_profile_error <=
+            kf::fillet_section_radius_limit(
+                1.0, one.fillet_evidence.blend.coordinate_magnitude),
+        "single edge fillet proves the resulting section radius");
+  check(one.fillet_evidence.blend.maximum_tangency_radians <=
+            kf::fillet_tangency_limit(
+                1.0, one.fillet_evidence.blend.coordinate_magnitude),
+        "single edge fillet proves G1 support tangency");
   check(one.output_audit.tolerances.face <= 1.0e-6 &&
             one.output_audit.tolerances.edge <= 1.0e-6 &&
             one.output_audit.tolerances.vertex <= 1.0e-6,
@@ -127,6 +140,9 @@ void test_shape_audit_policy() {
   const TopoDS_Shape box = ft::box();
   const validation::ShapeAuditResult box_audit = validation::audit_shape(box);
   check(box_audit.publishable(), "analytic box passes audit");
+  check(box_audit.tolerances_checked && box_audit.structure_checked &&
+            box_audit.stray_topology_count == 0 && box_audit.volume_checked,
+        "analytic box carries complete structural/tolerance/volume evidence");
   check(box_audit.tolerances.face <= 1.0e-7 &&
             box_audit.tolerances.edge <= 1.0e-7 &&
             box_audit.tolerances.vertex <= 1.0e-7,
@@ -151,6 +167,13 @@ void test_shape_audit_policy() {
   check(decision_json["timings"]["buildMs"] == 0.0 &&
             decision_json["timings"]["validatorMs"].get<double>() >= 0.0,
         "publication decision serializes build and validator timings");
+  validation::PublicationPolicy tolerance_policy = tier_a_policy;
+  tolerance_policy.maximum_tolerance = fast_box.tolerances.maximum();
+  check(validation::evaluate_publication_policy(fast_box, tolerance_policy).publishable(),
+        "measured tolerance at the policy ceiling passes");
+  tolerance_policy.maximum_tolerance = fast_box.tolerances.maximum() * 0.5;
+  check(!validation::evaluate_publication_policy(fast_box, tolerance_policy).publishable(),
+        "tolerance growth beyond the owned ceiling refuses publication");
   const validation::PublicationPolicy tier_b_policy =
       validation::single_solid_policy("Tier B box", validation::PublicationTier::TierB);
   const validation::ShapeEvidence deep_box =
@@ -167,6 +190,20 @@ void test_shape_audit_policy() {
         "non-solid shape fails audit");
 
   BRep_Builder builder;
+  TopoDS_Compound solid_with_stray_face;
+  builder.MakeCompound(solid_with_stray_face);
+  builder.Add(solid_with_stray_face, box);
+  for (TopExp_Explorer it(ft::box(), TopAbs_FACE); it.More(); it.Next()) {
+    builder.Add(solid_with_stray_face, it.Current());
+    break;
+  }
+  const validation::ShapeAuditResult stray_audit =
+      validation::audit_shape(solid_with_stray_face);
+  check(stray_audit.solid_count == 1 && stray_audit.stray_topology_count == 1 &&
+            !stray_audit.publishable(),
+        "one solid plus stray face is not a publishable Body");
+
+
   TopoDS_Solid empty_solid;
   builder.MakeSolid(empty_solid);
   const validation::ShapeAuditResult empty_audit =

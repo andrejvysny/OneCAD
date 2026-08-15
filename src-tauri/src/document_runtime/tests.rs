@@ -270,6 +270,7 @@ impl GeometryEngine for FakeBackend {
                     step_index: step,
                     body_events,
                     body_rank_keys: Default::default(),
+                    body_health: Default::default(),
                     element_map_delta: ElementMapDelta::default(),
                     needs_repair: vec![],
                     signatures: sigs(step),
@@ -652,6 +653,7 @@ fn hole_record_at(seed: u128, body: BodyId, face: &str, anchor: Vec3) -> Operati
         cb_depth: None,
         cs_diameter: None,
         cs_angle_deg: None,
+        result_policy_version: Some(2),
         extra: Default::default(),
     }));
     OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Hole", op)
@@ -2753,6 +2755,7 @@ fn offset_face_inputs_hydrate_faces_then_the_opposite_face() {
     let under = Vec3::new_unchecked(1.0, 0.0, 0.0);
     let op = Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
         face_ids: vec![ElementId::new("f:1"), ElementId::new("f:2")],
+        primary_face_ids: vec![ElementId::new("f:1")],
         faces: vec![at("f:1", top), at("f:2", top)],
         distance: Scalar::new(12.0),
         distance_type: OffsetDistanceType::Offset,
@@ -2760,6 +2763,7 @@ fn offset_face_inputs_hydrate_faces_then_the_opposite_face() {
         opposite_face_id: Some(ElementId::new("f:9")),
         opposite_face: Some(at("f:9", under)),
         target_body: body,
+        result_policy_version: Some(2),
         extra: Default::default(),
     }));
 

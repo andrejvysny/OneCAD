@@ -1,8 +1,29 @@
 # Current State
 
-Last verified: 2026-08-14 23:xx — LGU-1 WP-A landed (frontend lanes green)
+Last verified: 2026-08-15 — kernel semantic-publication hardening close-out, `master` merged in
 
-## NOW — LGU-1, LIBRARY & GENERATORS UNIFICATION (session 20)
+## NOW — KERNEL HARDENING CLOSE-OUT (branch `kernel/semantic-publication-hardening`, PR #4)
+
+- **Where:** git worktree `../OneCAD-kernel-hardening` on
+  `kernel/semantic-publication-hardening`, continuing from `69be0c2`. 23 branch commits
+  plus the merge of `master` at `def327b` (5 commits, all frontend). The merge had
+  exactly ONE textual conflict — this header — and `TODO.md` / `e2e/variables.spec.ts`
+  auto-merged.
+- **What landed:** the four gaps an independent review left open — exact `Extrude.ToNext`
+  directional extremum (edge/face interiors, plus explicit SEATED-profile semantics),
+  the OffsetFace worker trust boundary (strict typed arrays, `inputs[]` arity, typed-ref↔id
+  equality), Revolve strict `booleanMode` + checked axis-sketch solve, and the missing
+  closure-face rebind regression test. Plus the Gear modeling-coverage row and the two
+  evidence lanes it required. Full detail + the load-bearing proofs: `TODO.md` §
+  "GATE — kernel semantic-publication hardening close-out (2026-08-15)".
+- **Explicitly NOT done** (deferred, recorded in `TODO.md`): production OffsetFace reblend,
+  a central precision/tolerance module, micro-edge/sliver-face publication enforcement.
+  All three are now planned as WP1–WP3 of the continuation program — see `TODO.md`
+  § "KERNEL CONTINUATION".
+- **Sidecar:** restaged from this worktree's build, so `src-tauri/binaries/` matches the
+  worker under test.
+
+## PREVIOUS — LGU-1, LIBRARY & GENERATORS UNIFICATION (session 20, on `master`)
 
 - **Branch:** `master`. Two commits this session, both frontend-only.
   1. The UI/UX pass that was sitting uncommitted in the tree (library browser
@@ -40,10 +61,12 @@ Last verified: 2026-08-14 23:xx — LGU-1 WP-A landed (frontend lanes green)
 
 > The section below described the gear work as uncommitted on `f5b686f`. It
 > LANDED as `b9bcaf7`, and `TODO.md` § GEAR GENERATOR records G1-h.1–h.4 as
-> done — including the chip UI this header once said was missing. Still owed
-> for G1's own gate: `src-tauri/tests/gear_ops.rs`,
-> `protocol/fixtures/gear_*.ndjson`, `e2e/gear.spec.ts`, and the four-suite
-> re-run. Read the rest of this section as history.
+> done — including the chip UI this header once said was missing. `master`'s
+> copy of this note also listed `src-tauri/tests/gear_ops.rs` and
+> `e2e/gear.spec.ts` as owed; THIS BRANCH ADDED BOTH (they were required by the
+> `Gear` modeling-coverage row), and the four-suite re-run is recorded in the
+> 2026-08-15 gate. Still genuinely owed: `protocol/fixtures/gear_*.ndjson`.
+> Read the rest of this section as history.
 
 - **Branch:** `master` at `f5b686f` (the Component-Library merge landed DURING this
   session — the tree moved under the gear work; nothing conflicted, the gear files

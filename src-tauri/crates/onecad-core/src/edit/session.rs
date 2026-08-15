@@ -2398,12 +2398,25 @@ fn set_input(
             p.face = face;
         }
         (InputPath::OffsetFaceFace { index }, KnownOperation::OffsetFace(p)) => {
-            set_offset_face(
-                &mut p.faces,
-                &mut p.face_ids,
-                *index,
-                want_element(reference)?,
-            )?;
+            let old_id = p.face_ids.get(*index).cloned();
+            let face = want_element(reference)?;
+            let new_id = face
+                .primary
+                .as_ref()
+                .map(|primary| primary.element.clone())
+                .ok_or_else(|| {
+                    DomainError::InvalidReference(
+                        "an offset-face ref must carry a primary element id".into(),
+                    )
+                })?;
+            set_offset_face(&mut p.faces, &mut p.face_ids, *index, face)?;
+            if let Some(old_id) = old_id {
+                for primary in &mut p.primary_face_ids {
+                    if *primary == old_id {
+                        *primary = new_id.clone();
+                    }
+                }
+            }
         }
         (InputPath::OffsetFaceOpposite, KnownOperation::OffsetFace(p)) => {
             let face = want_element(reference)?;

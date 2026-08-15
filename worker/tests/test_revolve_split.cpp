@@ -169,5 +169,7 @@ int main() {
           "revolve-split: replay child :1 volume stable");
 
     if (g_failures == 0) std::fprintf(stderr, "revolve_split: OK\n");
-    return g_failures;
+    // An exit status that is a multiple of 256 reports PASS to the shell, so the raw
+    // failure count must never be returned directly.
+    return g_failures == 0 ? 0 : 1;
 }

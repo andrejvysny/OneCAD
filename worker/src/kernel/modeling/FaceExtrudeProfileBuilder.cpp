@@ -360,17 +360,18 @@ std::optional<TopoDS_Face> buildMergedFaceFromBoundary(const gp_Pln& referencePl
         // Keep the un-fixed face; validity is checked below.
     }
 
-    bool validFace = true;
     try {
         BRepCheck_Analyzer analyzer(mergedFace);
-        validFace = analyzer.IsValid();
+        if (!analyzer.IsValid()) {
+            errorOut = "Merged profile face is invalid";
+            return std::nullopt;
+        }
+    } catch (const Standard_Failure& failure) {
+        errorOut = std::string("Merged profile face validity is unknown: ") +
+                   (failure.GetMessageString() ? failure.GetMessageString() : "OCCT analyzer raised");
+        return std::nullopt;
     } catch (...) {
-        // Some OCCT analyzers can throw on otherwise usable planar faces.
-        // Keep the face and rely on downstream build checks.
-        validFace = true;
-    }
-    if (!validFace) {
-        errorOut = "Merged profile face is invalid";
+        errorOut = "Merged profile face validity is unknown: analyzer raised";
         return std::nullopt;
     }
 

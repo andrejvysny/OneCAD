@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -49,10 +50,7 @@ async function armExtrude(page: Page): Promise<void> {
   // Hide the seeded body + sketches so the region click hits the new profile and
   // not an occluding face (it stays listed in the tree, so body COUNTS are stable).
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
   await selectSketchTool(page, "Rectangle");

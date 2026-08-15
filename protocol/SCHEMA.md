@@ -665,6 +665,13 @@ diagnostics are consumed per carrier.
   worker mints and Rust adopts+fences, rather than Rust pre-minting (split/merge body
   counts are unknowable before OCCT executes, so pre-minting could never cover them
   anyway).
+- **`bodyEvents[].health` — OPTIONAL admission state.** Valid only on `created` or
+  `modified`; values are `healthy` and `quarantined`. Absence means `healthy` for
+  backward compatibility. A quarantined body remains in the body registry and is
+  tessellated/exportable, but every modeling operation that names it (as a whole
+  body or through a sub-element ref) returns top-level `OP_FAILED` with diagnostic
+  `QUARANTINED_MODELING_INPUT`. Rust persists the state in `BodyMeta.health` only
+  when quarantined, so existing healthy documents remain byte-identical.
 - **`bodyEvents[].rankKey` — OPTIONAL identity-tripwire evidence (VF-B6).** An op
   whose child ordinals are a **geometric rank** MAY attach, to each `created` (and
   the single-solid `modified` that op would otherwise have produced), the exact key
@@ -1103,17 +1110,47 @@ OneCAD-CPP `ExtrudeParams`.
   string could carry no anchor/intent, so a ToFace target would be
   **un-repairable** across parametric edits, violating Invariants 2/3; the typed
   ref lets the resolution ladder rebind it. Absent for non-`ToFace` extrudes.
+- `ToFace` means the SELECTED BOUNDED FACE, not merely its underlying support
+  surface. V1 accepts only a planar target parallel to the profile plane and
+  proves that the projected profile is fully covered by the selected trimmed
+  face. A laterally disjoint, smaller, or holed target is refused. Tilted and
+  curved targets are refused until exact variable-height termination is
+  implemented; a constant-distance flat cap is never substituted.
+- `ToNext` intersects the target body with the entire forward profile sweep and
+  terminates at the EXACT directional minimum of that bounded intersection —
+  extrema in EDGE and FACE interiors included, not only its topological vertices.
+  Finite rays from vertices/centroid are not sufficient evidence: a tiny interior
+  ledge must terminate the feature even when every such sample misses it, and a
+  curved first contact (a cylinder's bottom generatrix, a tilted rim's low point)
+  carries no vertex to sample at all. An extremum that cannot be established is
+  UNKNOWN and refuses the operation by name — never downgraded to the weaker
+  vertex answer.
+- **"Next" is not simply "nearest".** Each solid of the intersection is one
+  contiguous material run. A run that begins AT the sketch plane is the profile's
+  own SEAT — the sketch was drawn on (or inside) the target body, which is how a
+  through-pocket is normally authored — and the next face is then where the sweep
+  LEAVES that material: the run's maximum, not its minimum. A void inside the
+  body splits the intersection, so a seated run ends at the void's near wall,
+  which is the correct termination there too. With no seated run the profile
+  starts in free space and termination is the minimum of the intersection.
 
-- **Draft is applied or refused, never silently dropped.** A non-zero
-  `draftAngleDeg` must add at least one eligible side face, the builder must
-  complete, and the result must differ from the undrafted prism; otherwise the step
-  is a recoverable `OP_FAILED` carrying one of the draft diagnostic codes
+- **Draft is applied completely and measured, or refused — never silently
+  degraded.** V1 proves draft semantics only for a single-direction `Blind`
+  extrusion; any other end condition or `twoDirections:true` is refused until its
+  direction/neutral-plane contract is implemented. A non-zero `draftAngleDeg`
+  must be accepted on every eligible planar side face, every wall must have a
+  measurable result successor at the requested angle, the builder must complete,
+  and the result must differ from the undrafted prism. Otherwise the step is a
+  recoverable `OP_FAILED` carrying one of the draft diagnostic codes
   (`stage:"build"`, evidence `{draft:{angleDeg,eligibleFaces,addedFaces}}`):
 
   | code | meaning |
   |---|---|
   | `EXTRUDE_DRAFT_NO_PLANAR_FACE` | the profile has no planar side face to draft (e.g. a circular profile) |
   | `EXTRUDE_DRAFT_NO_FACE_ACCEPTED` | eligible walls existed; the kernel rejected every one |
+  | `EXTRUDE_DRAFT_PARTIAL_ACCEPTANCE` | the kernel accepted only part of the eligible wall set; partial fulfillment is forbidden |
+  | `EXTRUDE_DRAFT_END_CONDITION_UNSUPPORTED` | a non-Blind or two-direction request has no proven draft direction contract |
+  | `EXTRUDE_DRAFT_SEMANTIC_MISMATCH` | a wall successor is missing/unmeasurable or its measured angle differs from the request |
   | `EXTRUDE_DRAFT_NO_CHANGE` | the builder completed and changed nothing (adds `volumeBefore`/`volumeAfter`) |
   | `EXTRUDE_DRAFT_BUILD_FAILED` | the draft build itself failed or threw |
 
@@ -1217,14 +1254,19 @@ Fillet execution is constant-radius only. `radius` MUST be finite and at least
 `1e-3` mm. The worker MUST NOT clamp it or retry with a different radius. OCCT
 contours are authoritative: duplicate requested edges on one contour are built
 once, and every requested edge MUST belong to a known contour. A successful
-contour MUST retain a constant law equal to the requested radius and publish
-generated blend-face evidence.
+contour MUST retain a constant law equal to the requested radius. Publication
+then independently measures builder-history-derived blend faces inside the actual
+result: at least two measurable support boundaries, interior curvature samples,
+section radius within the scale/conditioning budget, and G1 tangency within its
+angular budget. Missing evidence is UNKNOWN and therefore refused.
 
 Before publication, Fillet rejects null/invalid/non-single-solid/non-positive
 results, self-interference, OCCT partial results, and `BadShape`. Shape audit
 evidence records solid count, volume, self-interference count, and per-kind
-input/output maximum tolerances. Tolerances are measured only in this milestone;
-they are not mutated and no uncalibrated tolerance-growth rejection applies.
+input/output maximum tolerances. Output tolerance is capped at
+`max(0.001 mm, 2 × inputMaxTolerance + 0.000001 mm)`; exceeding that owned
+budget refuses publication. Tolerances are measured and gated, never silently
+inflated or rewritten.
 `Simulate()`/`Sect()` are characterization tools only and never production
 acceptance gates. Kernel refusals retain top-level `OP_FAILED` or
 `GEOMETRY_INVALID` and attach bounded `FILLET_*` diagnostics through §8.
@@ -1241,7 +1283,8 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   "holeType": "counterbore",
   "diameter": 5.5, "depth": 20.0,
   "cbDiameter": 9.5, "cbDepth": 5.4,
-  "csDiameter": null, "csAngleDeg": null }
+  "csDiameter": null, "csAngleDeg": null,
+  "resultPolicyVersion": 2 }
 ```
 
 - `point` — world-space hole center, frozen at authoring; MUST lie on the
@@ -1253,6 +1296,12 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   countersink (csDiameter > diameter; csAngleDeg ∈ {82, 90, 100, 120}).
 - Tool solid = drill cylinder (+ cb cylinder / cs cone seated at the face) cut
   from the host: lineage = `modified` on `targetBodyId`, nothing minted.
+- `resultPolicyVersion` is absent on legacy records and literal `2` on all fresh
+  authoring. Absence preserves the frozen split-host residual. V2 requires the
+  modified host to remain exactly one connected solid; a severing cut returns
+  top-level `OP_FAILED` plus diagnostic `HOLE_DISJOINT_RESULT`, with no lifecycle
+  event. Any other present version similarly carries diagnostic
+  `UNSUPPORTED_HOLE_RESULT_POLICY_VERSION`; it is never read as legacy.
 - Failures recoverable `OP_FAILED`: non-planar resolved face, point off face,
   drill deeper than through-all extent is fine (clamped = through), cb/cs
   invariant violations, OCCT boolean failure — all name the reason.
@@ -1409,6 +1458,8 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 // inputs: [ semanticRef(face) per faceIds entry, in order; + semanticRef(opposite face) LAST iff distanceType == "Total" ]
 // params
 { "faceIds": ["el_…a1", "el_…b2"],
+  "primaryFaceIds": ["el_…a1"],
+  "resultPolicyVersion": 2,
   "distance": 2.5,
   "distanceType": "Offset",       // Offset | Total | Radius | Diameter (default Offset)
   "chainTangentFaces": true,      // default true — authoring metadata (see below)
@@ -1425,6 +1476,26 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   Total opposite face (when present) LAST — the Rust repair paths
   (`InputPath::OffsetFaceFace{index}` / `OffsetFaceOpposite`) and the frontend
   `inputPathFor` table mirror it.
+- Fresh authoring emits `resultPolicyVersion:2` and a non-empty
+  `primaryFaceIds` subset of `faceIds`. It is the user-picked DESIGN-face intent;
+  `faceIds` remains the full frozen closure. Imported-blend suppression/rebuild
+  uses this distinction and must never infer a primary from closure geometry.
+  Absent version + absent primary ids is the legacy contract. Other present
+  versions, an empty V2 primary set, duplicates, or non-subset ids are refused.
+- **Malformed typed arrays are refused, never filtered.** A present `faceIds` /
+  `primaryFaceIds` that is not an array, or that carries a non-string or
+  empty-string element, fails `OP_FAILED` with diagnostic
+  `OFFSET_FACE_MALFORMED_FACE_IDS`. Dropping the offending element instead would
+  shorten the id list while `inputs[]` kept its length, silently pairing every
+  remaining id with a NEIGHBOUR's evidence and reading the `Total` opposite from
+  the wrong slot. For the same reason a PRESENT `inputs[]` must carry exactly the
+  normative count (one per operative face, plus the Total opposite), and each
+  typed slot's `primary.elementId` must equal the id it is paired with —
+  otherwise `OFFSET_FACE_REF_MISMATCH`. An absent or empty `inputs[]` stays legal
+  (the partition-tracked rung needs no typed evidence), and a pre-promotion
+  `"f:N"` TopoKey is not an `ElementId`, so it is exempt from the equality check.
+  The worker enforces all of this independently of Rust: it is a trust boundary,
+  not a mirror of the producer.
 - `faceIds` is the FULL FROZEN operative set — picked faces PLUS the tangent
   chain, expanded once at authoring by `PrepareOffsetFace`
   ([§7.6](#prepareoffsetface)) and persisted. The worker NEVER re-expands at
@@ -1444,17 +1515,24 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
     geometrically (boss +1, hole −1; requires `|n_out·r̂| ≈ 1`);
     `d = σ(distance − R)` for Radius, `d = σ(distance/2 − R)` for Diameter.
     Valid for ONE face or a coaxial equal-radius same-σ cylindrical set.
-    Preflight `R + σd > tol` — the OCCT negative-radius inside-out result is
-    never allowed.
+    Preflight `R + σd > semanticLengthTol` — the OCCT negative-radius
+    inside-out result is never allowed.
   - `Total` (single planar face, chain OFF, `oppositeFaceId` present):
     thickness `t = n·(p_sel − p_opp)` against the PERSISTED opposite face
     (re-resolved verbatim each regen, never re-discovered); `d = distance − t`.
-- `|d| ≤ tol` ⇒ identity no-op SUCCESS (body unchanged, `modified` event).
+- Construction tolerance and semantic operation resolution are separate. Every
+  effective `|d|` must be at least `0.001 mm`; an identity or sub-resolution
+  request is a recoverable `OP_FAILED` with no lifecycle event. Existing B-Rep
+  tolerance may make an edit unbuildable, but may never turn it into unchanged
+  geometry reported as success.
 - Validity gate beyond `IsDone` + `BRepCheck`: exactly one solid, positive
-  finite volume, no self-interference, AND semantic postconditions (each
-  operated plane moved by exactly `d`; each operated cylinder coaxial at the
-  predicted radius). Any miss ⇒ recoverable `OP_FAILED`; the result is never
-  published. Values are NEVER clamped.
+  finite volume, no self-interference, AND semantic postconditions. Operated
+  planes retain orientation and move by exactly `d`; operated cylinders remain
+  coaxial at the predicted radius; every measurement/anchor sample is proven
+  inside the trimmed face domain. Any miss or unprovable measurement ⇒
+  recoverable `OP_FAILED`; the result is never published. Output B-Rep tolerance
+  is capped at `max(0.001 mm, 2 × constructionTolerance)` and is never silently
+  inflated. Values are NEVER clamped.
 - Lineage: `modified` on `targetBodyId` (+ `rankKey`); element history folds via
   the offset image (`OffsetFacesFromShapes`/`OffsetEdgesFromShapes` — the public
   `Generated`/`Modified` lists are empty for faces, spike-characterized) through
@@ -1473,10 +1551,14 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 
 - `count` is an integer `[2,128]`; `|spacing| ≥ 1e-9`; `direction` non-zero
   (normalized). Instance `i ∈ [1, count)` is translated `direction·spacing·i`.
-- **Absent `resultPolicyVersion` is frozen V1:** `fuseResult:true` fuses source +
-  instances into legacy aggregate body `body_<opId>`; `false` gathers the same into
-  one compound body. Source remains unchanged. This compatibility path permits its
-  historic aggregate/compound result and does not apply V2 connected-solid policy.
+- **Absent `resultPolicyVersion` is the raw-worker V1 interpretation:**
+  `fuseResult:true` fuses source + instances into legacy aggregate body
+  `body_<opId>`; `false` gathers the same into one compound body; source remains
+  unchanged. On every writable `.onecad` open, core migrates such records to V2,
+  clears the stale aggregate outputs/body/element cache, and seeds persisted
+  NeedsRepair on every downstream record that named the retired aggregate. No V2
+  child is selected automatically. A direct raw worker plan that bypasses document
+  loading still reads absence as V1 for protocol compatibility.
 - **`resultPolicyVersion:2`:** source is instance zero. With `fuseResult:false`, it
   emits exactly `count−1` created children `body_<opId>:<k>`, where child `k` is
   transformed instance `k+1`; source emits no lifecycle event and stays unchanged.
@@ -1485,7 +1567,8 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   source body visibility/color, but not source face identities or face colors. New
   authoring emits only integer `2`. Other numeric versions load and re-save verbatim,
   but execution refuses recoverably with `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`.
-  Re-edit preserves both legacy absence and stored `fuseResult`. Count reduction removes only tail children;
+  Re-edit preserves stored `fuseResult`; writable-open migration means legacy absence
+  does not reach a normal re-edit. Count reduction removes only tail children;
   retained child IDs remain stable, and suppression removes children without
   modifying source.
 
@@ -1565,6 +1648,12 @@ advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
   one — with **no** `deleted` parent (creation ex nihilo). Bodies SHOULD be
   named from STEP product names where recoverable (delivered via the step's
   diagnostics/metadata, not the id).
+- **Post-heal quarantine is fail-closed.** Every final solid is re-checked after
+  unit scaling. A failed `BRepCheck_Analyzer`, or an analyzer exception (UNKNOWN),
+  still publishes the shape for view/export but marks its `created` event
+  `health:"quarantined"` and emits `IMPORT_QUARANTINED`. Quarantined bodies are
+  persisted as such and cannot be targets/tools/supports of normal modeling
+  operations; no validator exception is interpreted as healthy geometry.
 - **Failure is recoverable**: a malformed/unreadable file is `OP_FAILED` on the
   step (publish ≤ m−1, Invariant 6), NEVER `PROTOCOL_ERROR` — a user data
   problem must not tear down the worker. Diagnostics vocabulary: `STEP_SEWN`,
@@ -3108,6 +3197,85 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-15 — §7.3 `Extrude.ToNext` exact directional extremum.** The
+  whole-profile boolean probe now reports the EXACT minimum of the intersection
+  along the extrude direction, including extrema in edge and face interiors,
+  instead of scanning the intersection's topological vertices. A curved first
+  contact carries no vertex, so the vertex scan terminated LATER than the geometry
+  does. The seated case (a sketch drawn on the target body's own face) is now
+  stated explicitly — termination is the seated run's EXIT, which the vertex scan
+  only reproduced by accident because a seat's vertices sat exactly on the sketch
+  plane and were dropped by its epsilon filter. An unestablished extremum is
+  UNKNOWN and refuses by name. Payload shape is unchanged.
+- **2026-08-15 — §7.3 OffsetFace wire-contract strictness.** A present
+  `faceIds`/`primaryFaceIds` that is not an array of non-empty strings is refused
+  with `OFFSET_FACE_MALFORMED_FACE_IDS` rather than filtered; a present `inputs[]`
+  must carry the normative slot count, and each typed slot's `primary.elementId`
+  must match its paired id or the record is refused with
+  `OFFSET_FACE_REF_MISMATCH`. Well-formed payloads are byte-identical, so no
+  fixture moves.
+- **2026-08-15 — §7.3 Revolve semantic-input strictness.** An unknown or
+  non-string `booleanMode` is refused by name instead of falling back to
+  `NewBody` (which minted a fresh body where a cut was asked for), and the axis
+  sketch's solve result is checked before its endpoints are consumed — an
+  unconverged solve can no longer place the revolution axis from stale seed
+  positions.
+- **2026-08-15 — §7.3 OffsetFace V2 primary intent.** Fresh records retain
+  `faceIds` as the frozen full G1 closure and add `primaryFaceIds` as the non-empty
+  user-picked subset, gated by `resultPolicyVersion:2`. This is the deterministic
+  input imported-blend suppress/reconstruct/reblend needs; legacy absence remains
+  readable and geometric guessing is forbidden.
+- **2026-08-15 — §7.3 absent Pattern V1 writable-open migration.** Core
+  rewrites absent-version Linear/Circular Pattern records to V2 before typed
+  decode, retires their aggregate body/element/output cache, and seeds persisted
+  NeedsRepair on every downstream record containing the old aggregate BodyId.
+  No one-to-many child guess is allowed. Raw worker absence remains V1 for protocol
+  compatibility; newer numeric versions remain losslessly round-trippable.
+- **2026-08-15 — §7.2 body health + §7.3 Import quarantine.** Additive
+  `bodyEvents[].health` carries `quarantined` only when final imported geometry
+  remains invalid or unprovable after healing/scaling. Rust persists the state in
+  `BodyMeta`; healthy omission stays byte-identical. Quarantined bodies remain
+  view/export-capable but every modeling reference to them returns `OP_FAILED`
+  with diagnostic `QUARANTINED_MODELING_INPUT`.
+- **2026-08-15 — §7.3 Hole result policy V2.** Fresh authoring emits
+  `resultPolicyVersion:2` and requires exactly one connected output solid;
+  severing cuts refuse `HOLE_DISJOINT_RESULT`. Absent preserves the legacy
+  split-host residual for old files; unsupported present versions refuse by name.
+- **2026-08-14 — §7.3 `Extrude.ToNext` whole-profile termination.** The
+  finite vertex-plus-centroid ray heuristic is replaced by a bounded boolean
+  intersection of the target body with the complete forward profile sweep; the
+  minimum positive projection of the intersection topology is the termination
+  distance. Tiny interior contacts therefore cannot be missed. Payload shape is
+  unchanged.
+- **2026-08-14 — §7.3 Fillet geometric-proof hardening.** Production Fillet
+  now uses the same neutral trimmed-domain measurement core as kernelbench:
+  builder-history blend/support faces, measured section radius, and measured G1
+  boundary tangency. Missing samples/boundaries are UNKNOWN and refuse commit;
+  OCCT's assigned radius law and generated-face count remain supporting evidence,
+  not the final semantic authority. The same gate adds a conservative output
+  tolerance-growth ceiling derived from the input audit. Payload shape is unchanged.
+- **2026-08-14 — §7.3 `Extrude.ToFace` bounded-face hardening.** V1 now
+  proves full projected-profile coverage by the selected trimmed face and refuses
+  laterally disjoint, smaller, or holed targets. Tilted/curved targets are refused
+  until exact variable-height termination exists; the former constant-distance
+  flat-cap substitution is no longer a successful operation. Payload shape and
+  semantic-reference repair behavior are unchanged.
+- **2026-08-14 — §7.3 `Extrude` draft semantic hardening.** Drafting is
+  fail-closed: every eligible wall must be accepted, every wall must have a
+  measurable successor at the requested angle, and V1 permits non-zero draft only
+  on a single-direction Blind extrusion. This closes partial-application and
+  raw-distance/end-condition ambiguity without changing payload shape; new stable
+  diagnostic codes distinguish the refusal causes.
+- **2026-08-14 — §7.3 `OffsetFace` semantic-resolution hardening.** The
+  construction tolerance passed to OCCT no longer defines whether a requested
+  edit exists. Effective changes below `0.001 mm` (including exact identities
+  for Offset/Radius/Diameter/Total) are refused without a lifecycle event;
+  they are never republished as unchanged `modified` bodies. Planar successors
+  must preserve plane orientation as well as displacement, and all face samples
+  used for anchors or semantic measurements are classified inside the trimmed
+  domain. Payload shape is unchanged; Rust validation, worker execution, frontend
+  authoring limits and the worker adversarial fixtures are the cross-track
+  evidence for this semantic contract change.
 - **2026-08-14 — §7.3 NEW op `Gear`** (Gear Generator G1). A fully parametric
   generated gear body: no sketch, no host, MINTS `body_<opId>` (D1) from a
   typed recipe block plus a placement that is EITHER a planar face (Hole's

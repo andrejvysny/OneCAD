@@ -118,7 +118,11 @@ import {
   type GearFsm,
 } from "./gearMachine";
 import { groundPlanePoint } from "@/modules/library/placementSolver";
-import { getToolApplicability, resolveTargetSketchId } from "./toolApplicability";
+import {
+  getToolApplicability,
+  resolveTargetSketchId,
+  type ToolApplicabilityContext,
+} from "./toolApplicability";
 import type { HoleChipOpts, GearChipOpts } from "@/stores/toolChipStore";
 import {
   measureAdd,
@@ -696,6 +700,8 @@ export class ModelToolController {
   private offsetPicks: EntityRef[] = [];
   /** The FROZEN operative closure as typed refs — exactly what the record holds. */
   private offsetFaces: SemanticRef[] = [];
+  /** V2 user-picked design-face ids, a subset of the full closure above. */
+  private offsetPrimaryFaceIds: string[] = [];
   /** Snapshot TopoKeys parallel to {@link offsetFaces} (local mesh lookups only). */
   private offsetTopoKeys: string[] = [];
   /** The `Total` opposite face's typed ref; undefined for every other type. */
@@ -1235,8 +1241,9 @@ export class ModelToolController {
   /** Sketch-existence slice `toolApplicability.ts` needs for its extrude/revolve
    *  document-level fallback — kept as a private helper so every applicability
    *  call site derives it identically. */
-  private applicabilityCtx(): { sketches: Record<string, { id: string; visible: boolean }> } {
-    return { sketches: documentStore.getState().sketches };
+  private applicabilityCtx(): ToolApplicabilityContext {
+    const document = documentStore.getState();
+    return { sketches: document.sketches, bodies: document.bodies };
   }
 
   /** Tool-first entry: fetch the sketch's regions and open the extrude region pick. */
@@ -3868,13 +3875,22 @@ export class ModelToolController {
       return false;
     }
     const faces: SemanticRef[] = [];
+    const primaryFaceIds: string[] = [];
     const keys: string[] = [];
     for (const ev of res.faces) {
       const ref = await this.promoteOffsetEvidence(gen, bodyId, ev);
       if (gen !== this.armGen) return false;
       if (!ref) return false; // `promoteOne` published the stale-pick hint
       faces.push(ref);
+      if (ev.picked && ref.primary.elementId) primaryFaceIds.push(ref.primary.elementId);
       keys.push(ev.topoKey);
+    }
+    if (primaryFaceIds.length === 0) {
+      viewportStore.getState().setStatusHint("Offset face: primary design-face intent was lost", {
+        severity: "error",
+        sticky: true,
+      });
+      return false;
     }
     let opposite: SemanticRef | undefined;
     if (res.oppositeFace) {
@@ -3893,6 +3909,7 @@ export class ModelToolController {
       return false;
     }
     this.offsetFaces = faces;
+    this.offsetPrimaryFaceIds = [...new Set(primaryFaceIds)];
     this.offsetTopoKeys = keys;
     this.offsetOppositeFace = opposite;
     this.offsetTargetBodyId = bodyId;
@@ -4086,6 +4103,8 @@ export class ModelToolController {
     const s = this.offsetFace;
     const params: OffsetFaceParams = {
       faces: [...this.offsetFaces],
+      primaryFaceIds: [...this.offsetPrimaryFaceIds],
+      resultPolicyVersion: 2,
       distance,
       distanceType: s.distanceType,
       chainTangentFaces: s.chainTangentFaces,
@@ -4327,6 +4346,7 @@ export class ModelToolController {
     this.offsetFace = offsetFaceInit();
     this.offsetPicks = [];
     this.offsetFaces = [];
+    this.offsetPrimaryFaceIds = [];
     this.offsetTopoKeys = [];
     this.offsetOppositeFace = undefined;
     this.offsetTargetBodyId = "";

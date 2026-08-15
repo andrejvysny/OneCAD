@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -33,10 +34,7 @@ test("the end-condition segments author ThroughAll and enter/escape the ToFace p
   page,
 }) => {
   await openEditorDebug(page);
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   const targetVisibility = bodyOptions(page).first().getByRole("switch");
   await targetVisibility.click();
   await enterSketchViaPlanePicker(page);

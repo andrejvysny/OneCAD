@@ -97,6 +97,18 @@ pub struct SplitOrigin {
     pub k: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BodyHealth {
+    #[default]
+    Healthy,
+    Quarantined,
+}
+
+fn body_health_is_healthy(health: &BodyHealth) -> bool {
+    *health == BodyHealth::Healthy
+}
+
 /// Per-body document metadata (identity + name + visibility + provenance).
 ///
 /// `created_by` is the [`RecordId`] of the op that first produced the body
@@ -110,6 +122,10 @@ pub struct BodyMeta {
     pub name: String,
     /// Whether the body is shown in the viewport.
     pub visible: bool,
+    /// Quarantined geometry remains visible/exportable but is excluded from
+    /// modeling until a repair workflow promotes it back to Healthy.
+    #[serde(default, skip_serializing_if = "body_health_is_healthy")]
+    pub health: BodyHealth,
     /// User-authored body color as sRGB+A (`[r,g,b,a]`). `None` means "use the
     /// theme's neutral body fill". Additive + skipped when `None` ⇒ legacy
     /// documents serialize byte-identically.
@@ -157,6 +173,7 @@ impl BodyMeta {
             id,
             name: name.into(),
             visible: true,
+            health: BodyHealth::Healthy,
             color: None,
             face_colors: BTreeMap::new(),
             created_by,
@@ -367,6 +384,18 @@ impl BodyRegistry {
         }
     }
 
+    /// Updates derived admission health after a worker step. Returns false for an
+    /// unknown body. This follows the same accepted-step gate as geometry.
+    pub fn set_health(&mut self, id: BodyId, health: BodyHealth) -> bool {
+        match self.bodies.iter_mut().find(|b| b.id == id) {
+            Some(body) => {
+                body.health = health;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Records the geometric rank key the producing op published for a body
     /// (SCHEMA §7.2 `bodyEvents[].rankKey`). Returns `false` if the body is not
     /// active. Derived evidence — it takes no undo entry and bumps no revision.
@@ -548,6 +577,7 @@ impl BodyRegistry {
                         id: child,
                         name: pm.name.clone(),
                         visible: pm.visible,
+                        health: pm.health,
                         color: pm.color,
                         face_colors: pm.face_colors.clone(),
                         created_by: pm.created_by,
@@ -574,6 +604,7 @@ impl BodyRegistry {
                     id: winner,
                     name: m.name,
                     visible: m.visible,
+                    health: m.health,
                     color: m.color,
                     face_colors: m.face_colors.clone(),
                     created_by: m.created_by,
@@ -838,6 +869,19 @@ mod tests {
             back.get(bid(1)).unwrap().geom_stamp,
             Some([8_500_000_000, 8_500_000, 0, 0, 6])
         );
+    }
+
+    #[test]
+    fn quarantined_health_is_additive_and_survives_round_trip() {
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, rid(1), BodyLifecycleEvent::Created { body: bid(1) });
+        let healthy = serde_json::to_value(&reg).unwrap();
+        assert!(healthy["bodies"][0].get("health").is_none());
+        assert!(reg.set_health(bid(1), BodyHealth::Quarantined));
+        let value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(value["bodies"][0]["health"], "quarantined");
+        let back: BodyRegistry = serde_json::from_value(value).unwrap();
+        assert_eq!(back.get(bid(1)).unwrap().health, BodyHealth::Quarantined);
     }
 
     #[test]

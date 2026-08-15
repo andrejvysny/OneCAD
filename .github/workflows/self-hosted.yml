@@ -26,6 +26,25 @@ on:
           - s2-occt
           - s3-worker
           - s4-kernelbench
+      clean_build:
+        # WHY THIS EXISTS. `WORKER_BUILD` is persistent and no job ever cleans
+        # it, which is what makes S3 incremental — and also makes it the prime
+        # suspect whenever a kernelbench digest moves without a matching source
+        # change. On 2026-08-15 eight `valence4-*` `normalizedDigest` rows moved
+        # on `onecad|base|linux-x64` only, while the same two builds compared
+        # 0-of-136 different on a developer Mac and both CI jobs ran on the same
+        # runner at the same OCCT build id. A clean rebuild is the experiment
+        # that distinguishes a stale incremental tree from a real regression.
+        #
+        # It is an INPUT, not a default, because wiping the tree costs the full
+        # worker build every time. Leave it false for ordinary runs.
+        description: >-
+          Wipe the persistent worker build tree before configuring (s3-worker
+          only). Use to test whether a digest difference is stale incremental
+          state. Costs a full rebuild.
+        type: boolean
+        required: false
+        default: false
 
 # Long campaigns must never run two at a time: the runner has 4 cores and one
 # persistent OCCT prefix. Queue instead of cancelling — a cancelled campaign
@@ -299,6 +318,17 @@ jobs:
 
       - name: Stdout hygiene gate
         run: scripts/check-worker-stdout-hygiene.sh
+
+      - name: Wipe the persistent build tree (clean_build only)
+        # Guarded by the input, and the path is the env var rather than a
+        # literal so this can never target the workspace. It is outside the
+        # workspace by design (see the WORKER_BUILD comment above), so
+        # actions/checkout's `git clean -ffdx` does not reach it.
+        if: inputs.clean_build
+        run: |
+          set -euo pipefail
+          echo "::notice::wiping $WORKER_BUILD for a clean rebuild"
+          rm -rf "$WORKER_BUILD"
 
       - name: Configure worker
         # Mirrors ci.yml's worker-8-0-1 job. ONECAD_OCCT_BUILD_ID must match the

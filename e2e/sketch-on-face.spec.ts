@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  hideSeedSketches,
   openEditorDebug,
   waitForCameraSettled,
   selectSketchTool,
@@ -39,10 +40,7 @@ import {
  *  pick; a finished FACE sketch lies flush on its host and would claim the
  *  double-click through the static-sketch branch. */
 async function hideVisibleSketches(page: Page): Promise<void> {
-  const visible = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visible.count()) > 0) await visible.first().click();
+  await hideSeedSketches(page);
 }
 
 /**

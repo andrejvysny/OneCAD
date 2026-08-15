@@ -85,11 +85,43 @@ bool read_bool_strict(const json& params, const char* key, bool dflt,
     return true;
 }
 
+bool read_string_array_strict(const json& params, const char* key,
+                              std::vector<std::string>& value_out,
+                              std::string& error_out) {
+    value_out.clear();
+    if (!params.is_object() || !params.contains(key)) return true;
+    const json& value = params[key];
+    if (!value.is_array()) {
+        error_out = std::string(key) + " must be an array of ids";
+        return false;
+    }
+    for (const json& entry : value) {
+        if (!entry.is_string()) {
+            error_out = std::string(key) + " must contain only string ids";
+            return false;
+        }
+        std::string id = entry.get<std::string>();
+        if (id.empty()) {
+            error_out = std::string(key) + " must not contain an empty id";
+            return false;
+        }
+        value_out.push_back(std::move(id));
+    }
+    return true;
+}
+
 kernel::validation::PublicationDecision publication_decision(
     const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy) {
     const kernel::validation::ShapeEvidence evidence =
         kernel::validation::collect_shape_evidence(shape, policy.tier);
     return kernel::validation::evaluate_publication_policy(evidence, policy);
+}
+
+kernel::validation::PublicationTier result_validation_tier(
+    const OpContext& ctx, kernel::validation::PublicationTier authoritative) {
+    if (ctx.validation_mode == ValidationMode::PreviewInteractive)
+        return kernel::validation::PublicationTier::TierA;
+    return authoritative;
 }
 
 std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
@@ -98,6 +130,7 @@ std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
     kernel::validation::PublicationPolicy policy =
         kernel::validation::single_solid_policy(operation + " " + role,
                                                 kernel::validation::PublicationTier::TierA);
+    policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
     policy.max_solid_count = -1;
     const kernel::validation::PublicationDecision decision = publication_decision(shape, policy);
     if (decision.publishable()) return std::nullopt;
@@ -110,6 +143,27 @@ std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
                                    {"timings", decision.timings.to_json()},
                                    {"role", role}});
     return failure;
+}
+
+std::optional<OpOutcome> validate_modeling_body(
+    const session::BodyRecord& body, const std::string& operation,
+    const std::string& role) {
+    if (!body.modeling_eligible()) {
+        const std::string message = operation + " cannot use quarantined " + role +
+                                    " body " + body.id +
+                                    (body.health_reason.empty()
+                                         ? std::string{}
+                                         : ": " + body.health_reason);
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", "QUARANTINED_MODELING_INPUT"},
+                                       {"message", message},
+                                       {"stage", "input-validation"},
+                                       {"role", role},
+                                       {"bodyId", body.id}});
+        return failure;
+    }
+    return validate_modeling_input(body.geom, operation, role);
 }
 
 namespace {

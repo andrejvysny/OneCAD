@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -173,10 +174,7 @@ async function twoBodies(page: Page): Promise<[string, string]> {
 async function setupTwoBodies(page: Page): Promise<[string, string]> {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click(); // hide the seeded body
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
 
   const [targetId, toolId] = await twoBodies(page);
   expect(targetId).not.toBe(toolId);

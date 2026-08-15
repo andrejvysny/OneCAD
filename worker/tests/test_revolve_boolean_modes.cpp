@@ -290,6 +290,91 @@ void test_intersect_disjoint_refuses() {
           "revolve-empty: target geometry is unchanged");
 }
 
+// --- Case 5: an unknown booleanMode is a MALFORMED RECORD, never a NewBody. ---
+void test_unknown_boolean_mode_refuses() {
+    // The lenient mapping silently minted a fresh body here: a user (or a producer
+    // bug) asking for "Subtract" would get a floating revolved solid instead of a cut,
+    // with the target left untouched and no diagnostic anywhere.
+    Session s;
+    std::vector<json> body_events;
+    const Envelope prepared = run_plan(s, body_events,
+                                       -10, -10, 40, 10, 30.0,
+                                       0, 0, 20,
+                                       2, 5, 8, 25,
+                                       "Subtract");
+
+    check(prepared.ok == true, "revolve-mode: recoverable failure still prepares the prefix");
+    check(prepared.result.value("stoppedReason", "") == "opFailed",
+          "revolve-mode: stops at the refused revolve step");
+    const json& steps = prepared.result["perStepResults"];
+    check(steps.size() == 4 && steps[3].value("status", "") == "opFailed",
+          "revolve-mode: failed step is reported as opFailed");
+    check(steps.size() == 4 &&
+              steps[3].value("message", "").find("unknown boolean mode 'Subtract'") !=
+                  std::string::npos,
+          "revolve-mode: refusal names the offending token");
+
+    const onecad::session::BodyStore bodies = s.bodies_copy();
+    check(bodies.all().size() == 1 && bodies.contains("body_op1"),
+          "revolve-mode: no body minted by an unknown mode");
+}
+
+// --- Case 6: an axis sketch whose constraints do not solve must refuse. ---
+void test_unsolved_axis_sketch_refuses() {
+    // The axis lives in its OWN sketch, so the profile builder (which does check its
+    // solve) cannot shadow the axis path. Two contradictory Distance constraints on
+    // the SAME endpoint pair translate cleanly but cannot be satisfied, so `solve()`
+    // reports failure. Consuming the endpoints anyway would build the revolution
+    // around stale seed positions — and a wrong-but-nonzero axis sails past the
+    // degenerate-length guard.
+    Session s;
+    s.open("doc", 0, 3, "determinism");
+
+    json axis_ents = json::array({json{{"id", "ax"}, {"type", "Line"},
+                                       {"p0", {0.0, 0.0}}, {"p1", {0.0, 20.0}}}});
+    json axis_cons = json::array({
+        json{{"id", "d1"}, {"type", "Distance"}, {"entities", json::array({"ax", "ax"})},
+             {"positions", json::array({"Start", "End"})}, {"value", 10.0}},
+        json{{"id", "d2"}, {"type", "Distance"}, {"entities", json::array({"ax", "ax"})},
+             {"positions", json::array({"Start", "End"})}, {"value", 30.0}},
+    });
+
+    json ops = json::array({
+        sketch_op("op0", 0, "sk_a", "XY", rect("a", -10, -10, 40, 10)),
+        json{{"opType", "Extrude"}, {"opId", "op1"}, {"stepIndex", 1},
+             {"params", {{"sketchId", "sk_a"}, {"distance", 30.0},
+                         {"extrudeMode", "Blind"}, {"booleanMode", "NewBody"}}}},
+        sketch_op("op2", 2, "sk_t", "XZ", rect("t", 2, 5, 8, 25)),
+        json{{"opType", "Sketch"}, {"opId", "op3"}, {"stepIndex", 3},
+             {"params", {{"sketchId", "sk_axis"}, {"plane", {{"kind", "XZ"}}},
+                         {"entities", axis_ents}, {"constraints", axis_cons}}}},
+        json{{"opType", "Revolve"}, {"opId", "op4"}, {"stepIndex", 4},
+             {"params", {{"sketchId", "sk_t"}, {"angleDeg", 360.0},
+                         {"booleanMode", "Cut"}, {"targetBodyId", "body_op1"},
+                         {"axis", {{"kind", "sketchLine"}, {"sketchId", "sk_axis"},
+                                   {"lineId", "ax"}}}}}},
+    });
+
+    CancelToken tok;
+    HandlerContext ctx{tok, [](int) {}, [](Envelope&) {}};
+    json args = {{"jobId", 1}, {"documentRevision", 0}, {"workerEpoch", 3},
+                 {"expectedBaseHash", kEmpty},
+                 {"prefixHashes", json::array({"a", "b", "c", "d", "e"})},
+                 {"targetStep", 4}, {"ops", ops}};
+    const Envelope prepared =
+        onecad::session::handle_execute_plan(s, Envelope::request(1, "ExecutePlan", args), ctx);
+
+    check(prepared.ok == true, "revolve-axis: recoverable failure still prepares the prefix");
+    check(prepared.result.value("stoppedReason", "") == "opFailed",
+          "revolve-axis: stops at the refused revolve step");
+    const json& steps = prepared.result["perStepResults"];
+    const std::string message = steps.size() == 5 ? steps[4].value("message", "") : "";
+    check(steps.size() == 5 && steps[4].value("status", "") == "opFailed",
+          "revolve-axis: failed step is reported as opFailed (got '" + message + "')");
+    check(message.find("axis sketch solve failed") != std::string::npos,
+          "revolve-axis: refusal names the unsolved axis sketch (got '" + message + "')");
+}
+
 }  // namespace
 
 int main() {
@@ -297,6 +382,10 @@ int main() {
     test_cut_removes_nothing();
     test_intersect_single_solid_zslab();
     test_intersect_disjoint_refuses();
+    test_unknown_boolean_mode_refuses();
+    test_unsolved_axis_sketch_refuses();
     if (g_failures == 0) std::fprintf(stderr, "revolve_boolean_modes: OK\n");
-    return g_failures;
+    // An exit status that is a multiple of 256 reports PASS to the shell, so the raw
+    // failure count must never be returned directly.
+    return g_failures == 0 ? 0 : 1;
 }

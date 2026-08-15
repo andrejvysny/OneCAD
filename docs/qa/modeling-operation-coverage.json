@@ -300,6 +300,20 @@
       "uiExposure": "exposed"
     },
     {
+      "operation": "Gear",
+      "mode": "involuteExternal (face/frame placement)",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_gear_op.cpp; worker/tests/test_gear_tool.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/gear_ops.rs",
+      "frontendTest": "src/tools/modelTools/gearMachine.test.ts",
+      "playwrightTest": "e2e/gear.spec.ts",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
+      "notes": "Helical/herringbone are forward-compatibility payload, refused by the session and the worker until the Frenet sweep lands; no corpus case exists because OneCAD-CPP has no gear oracle.",
+      "uiExposure": "exposed"
+    },
+    {
       "operation": "ImportStep",
       "mode": "XCAF",
       "supportStatus": "supported",

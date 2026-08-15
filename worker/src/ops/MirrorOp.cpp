@@ -47,7 +47,7 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
         return OpOutcome::fail("REF_UNRESOLVED", "MirrorBody source body not found: " + source_id);
     }
     const TopoDS_Shape source = source_rec->geom;
-    if (auto invalid = validate_modeling_input(source, "MirrorBody", "source")) return *invalid;
+    if (auto invalid = validate_modeling_body(*source_rec, "MirrorBody", "source")) return *invalid;
 
     double px = 0.0, py = 0.0, pz = 0.0;
     double nx = 0.0, ny = 0.0, nz = 1.0;
@@ -96,9 +96,9 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
     if (result.IsNull()) {
         return OpOutcome::fail("GEOMETRY_INVALID", "MirrorBody produced null shape");
     }
-    const kernel::validation::PublicationTier tier =
-        fuse_with_original ? kernel::validation::PublicationTier::TierB
-                           : kernel::validation::PublicationTier::TierA;
+    const kernel::validation::PublicationTier tier = fuse_with_original
+        ? result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)
+        : kernel::validation::PublicationTier::TierA;
     const kernel::validation::PublicationDecision decision = publication_decision(
         result, kernel::validation::single_solid_policy(
                     fuse_with_original ? "MirrorBody fused result" : "MirrorBody result", tier));

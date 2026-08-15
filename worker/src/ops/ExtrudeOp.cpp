@@ -9,9 +9,13 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -19,7 +23,6 @@
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAbs_SurfaceType.hxx>
-#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
@@ -27,12 +30,13 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Dir.hxx>
-#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
 
@@ -48,11 +52,25 @@ constexpr double kToFaceMin = 1e-3;  // RegenerationEngine.cpp:61 kMinValue (ToF
 constexpr double kThroughAllFallback = 1.0e5;    // RegenerationEngine.cpp:856
 constexpr double kDraftAngleEpsilon = 1e-4;      // RegenerationEngine.cpp:59
 constexpr double kSideFaceDotThreshold = 0.9;    // RegenerationEngine.cpp:60
+constexpr double kDraftSemanticAngleTolerance = 1.0e-6;  // radians
+constexpr double kToFaceAngularTolerance = 1.0e-7;        // radians
+constexpr double kToFaceCoverageRelativeTolerance = 1.0e-8;
+// Contact within this of the sketch plane is the profile's OWN SEAT (a sketch drawn
+// on a face of the target body), not the "next" face. Absolute mm: this is a
+// start-exclusion threshold, not a feature-resolution one, so it does not carry the
+// scale sensitivity the model-wide precision contract still owes.
+constexpr double kToNextContactEpsilon = 1.0e-4;
 
 double solid_volume(const TopoDS_Shape& shape) {
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
     return props.Mass();
+}
+
+double face_area(const TopoDS_Shape& shape) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return std::abs(props.Mass());
 }
 
 std::string input_body(const json& op, std::size_t index) {
@@ -132,34 +150,175 @@ double through_all_distance(double blind_sign_source, const gp_Pnt& origin, cons
     return sign * kThroughAllFallback;
 }
 
-// Smallest positive distance along `dir` at which the PROFILE actually reaches a
-// bounded face of `body`. The legacy port (RegenerationEngine.cpp:223-241) took the
-// nearest ray-PLANE distance from one origin, which could bind a face plane the
-// profile never crosses (review defect: ToNext onto a laterally offset pillar).
-// Rays are cast from every profile wire vertex plus the area centroid against the
-// body's bounded faces; -1 if nothing ahead is ever hit.
-double to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir, const TopoDS_Shape& body) {
-    std::vector<gp_Pnt> samples;
-    for (TopExp_Explorer exp(profile, TopAbs_VERTEX); exp.More(); exp.Next()) {
-        samples.push_back(BRep_Tool::Pnt(TopoDS::Vertex(exp.Current())));
+// EXACT minimum of the linear functional `(p - origin)·dir` over `shape`, including
+// extrema that fall in an EDGE or FACE interior. A `TopAbs_VERTEX` scan answers this
+// only for polyhedra: on a curved face the lowest point along `dir` is generally
+// interior (a horizontal cylinder's bottom generatrix carries no vertex at all), so
+// the vertex-only form reported a LATER first contact than the geometry has.
+//
+// Reduced to a distance extremum against a gauge plane placed BEHIND the shape:
+// every shape point is ahead of the plane, so `distance-to-plane == projection -
+// planeLevel`, and `BRepExtrema_DistShapeShape` solves that minimum exactly for
+// analytic and NURBS geometry alike. The gauge face is deliberately over-sized so the
+// perpendicular foot of the extremum is provably inside its trim.
+//
+// `nullopt` means UNKNOWN — never a silent fallback to the weaker vertex answer.
+// Committed modeling refuses UNKNOWN.
+std::optional<double> minimum_directional_projection(const TopoDS_Shape& shape,
+                                                     const gp_Pnt& origin,
+                                                     const gp_Dir& dir) {
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) return std::nullopt;
+    Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    const gp_Vec axis(dir);
+    const gp_Pnt centre((xmin + xmax) * 0.5, (ymin + ymax) * 0.5, (zmin + zmax) * 0.5);
+    double lo = 0.0;
+    for (int corner = 0; corner < 8; ++corner) {
+        const gp_Pnt p((corner & 1) ? xmax : xmin, (corner & 2) ? ymax : ymin,
+                       (corner & 4) ? zmax : zmin);
+        const double proj = gp_Vec(origin, p).Dot(axis);
+        if (corner == 0 || proj < lo) lo = proj;
     }
+    const double diag = gp_Pnt(xmin, ymin, zmin).Distance(gp_Pnt(xmax, ymax, zmax));
+    if (!std::isfinite(lo) || !std::isfinite(diag)) return std::nullopt;
+
+    const double margin = 0.01 * diag + 1.0;
+    const double gauge_level = lo - margin;
+    const double centre_level = gp_Vec(origin, centre).Dot(axis);
+    const gp_Pnt gauge_origin = centre.Translated(gp_Vec(dir) * (gauge_level - centre_level));
+    const double half = diag + margin;
+
+    try {
+        BRepBuilderAPI_MakeFace gauge(gp_Pln(gauge_origin, dir), -half, half, -half, half);
+        if (!gauge.IsDone()) return std::nullopt;
+        BRepExtrema_DistShapeShape extrema(shape, gauge.Face());
+        if (!extrema.IsDone() || extrema.NbSolution() < 1) return std::nullopt;
+        const double value = extrema.Value();
+        if (!std::isfinite(value)) return std::nullopt;
+
+        // A vertex projection is an UPPER bound on the true minimum, so folding the
+        // scan in can only tighten the answer. It is defence in depth, never the
+        // primary evidence.
+        double best = gauge_level + value;
+        for (TopExp_Explorer exp(shape, TopAbs_VERTEX); exp.More(); exp.Next()) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(exp.Current()));
+            best = std::min(best, gp_Vec(origin, point).Dot(axis));
+        }
+        return best;
+    } catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+}
+
+// The same extremum with the axis reversed: max_p (p−origin)·d == −min_p (p−origin)·(−d).
+std::optional<double> maximum_directional_projection(const TopoDS_Shape& shape,
+                                                     const gp_Pnt& origin,
+                                                     const gp_Dir& dir) {
+    const std::optional<double> reversed =
+        minimum_directional_projection(shape, origin, dir.Reversed());
+    if (!reversed) return std::nullopt;
+    return -*reversed;
+}
+
+enum class ToNextStatus {
+    Contact,     // `distance` is the proven termination
+    NoContact,   // nothing lies ahead of the profile — an honest negative
+    Unprovable,  // the extremum could not be established; refuse, never guess
+};
+
+struct ToNextResult {
+    ToNextStatus status = ToNextStatus::NoContact;
+    double distance = -1.0;
+};
+
+// The intersection run is SEATED when it starts at the sketch plane: the profile was
+// drawn on (or inside) the target body. A run whose minimum is this close to the lift
+// plane began there rather than being reached.
+constexpr double kToNextSeatThreshold = 2.0 * kToNextContactEpsilon;
+
+// Distance along `dir` at which the swept profile reaches the NEXT face of the bounded
+// target body. A whole-profile boolean probe, not a finite set of rays: a tiny interior
+// ledge must be found even when no profile vertex or centroid lies above it, AND the
+// termination is measured exactly (see `minimum_directional_projection`) rather than
+// sampled at the common's vertices.
+//
+// Two cases, because "next" is not simply "nearest":
+//   * the profile starts in FREE SPACE — terminate at the first contact, the minimum of
+//     the intersection;
+//   * the profile is SEATED on the body (a sketch drawn on one of its faces, which is
+//     how a through-pocket is normally authored) — the intersection begins at the
+//     sketch plane, so its minimum is the seat itself. The next face is then where the
+//     sweep LEAVES that material: the maximum of the seated run. A void inside the body
+//     splits the intersection into separate solids, so the seated run ends at the
+//     void's near wall, which is the correct "next" there too.
+// The old vertex scan reproduced the seated case only by accident — the seat's vertices
+// sit exactly at the sketch plane and were dropped by its epsilon filter, leaving the
+// exit vertices as the smallest survivor.
+ToNextResult to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir,
+                              const TopoDS_Shape& body) {
     GProp_GProps props;
     BRepGProp::SurfaceProperties(profile, props);
-    samples.push_back(props.CentreOfMass());
+    const gp_Pnt origin = props.CentreOfMass();
+    const double sweep_distance = through_all_distance(1.0, origin, dir, &body);
+    if (!std::isfinite(sweep_distance) || sweep_distance <= kMinValue)
+        return {ToNextStatus::NoContact, -1.0};
 
-    IntCurvesFace_ShapeIntersector inter;
-    inter.Load(body, 1e-7);
-    double best = -1.0;
-    for (const gp_Pnt& p : samples) {
-        // Start past 1e-4 so a profile lying ON a body face skips its host face.
-        inter.Perform(gp_Lin(p, dir), 1e-4, RealLast());
-        if (!inter.IsDone()) continue;
-        for (int i = 1; i <= inter.NbPnt(); ++i) {
-            const double t = inter.WParameter(i);
-            if (t > 1e-4 && (best < 0.0 || t < best)) best = t;
+    try {
+        // Start the sweep just PAST the sketch plane. Excluding the profile's own seat
+        // geometrically — rather than by discarding common vertices under an epsilon —
+        // keeps the rule true for curved contact, where the relevant point is not a
+        // vertex at all.
+        gp_Trsf lift;
+        lift.SetTranslation(gp_Vec(dir) * kToNextContactEpsilon);
+        BRepBuilderAPI_Transform lifted(profile, lift, Standard_True);
+        if (!lifted.IsDone() || lifted.Shape().IsNull())
+            return {ToNextStatus::Unprovable, -1.0};
+        BRepPrimAPI_MakePrism sweep(lifted.Shape(), gp_Vec(dir) * sweep_distance,
+                                    Standard_True);
+        if (sweep.Shape().IsNull()) return {ToNextStatus::Unprovable, -1.0};
+        BRepAlgoAPI_Common common(sweep.Shape(), body);
+        common.SetRunParallel(Standard_False);
+        common.Build();
+        if (!common.IsDone() || common.HasErrors() || common.Shape().IsNull())
+            return {ToNextStatus::Unprovable, -1.0};
+
+        // An empty intersection is an honest "nothing ahead", not a failure.
+        TopExp_Explorer probe(common.Shape(), TopAbs_VERTEX);
+        if (!probe.More()) return {ToNextStatus::NoContact, -1.0};
+
+        // Each solid of the intersection is one contiguous material run. A tangential
+        // contact yields no solid at all, so the whole shape is then the single run.
+        std::vector<TopoDS_Shape> runs;
+        for (TopExp_Explorer exp(common.Shape(), TopAbs_SOLID); exp.More(); exp.Next())
+            runs.push_back(exp.Current());
+        if (runs.empty()) runs.push_back(common.Shape());
+
+        double seat_exit = -1.0;
+        double first_contact = -1.0;
+        for (const TopoDS_Shape& run : runs) {
+            const std::optional<double> entry =
+                minimum_directional_projection(run, origin, dir);
+            if (!entry) return {ToNextStatus::Unprovable, -1.0};
+            if (*entry > kToNextSeatThreshold) {
+                if (first_contact < 0.0 || *entry < first_contact) first_contact = *entry;
+                continue;
+            }
+            // Seated run — the exit is what terminates the feature, so this is the
+            // only case that needs the far extremum too.
+            const std::optional<double> exit =
+                maximum_directional_projection(run, origin, dir);
+            if (!exit) return {ToNextStatus::Unprovable, -1.0};
+            seat_exit = std::max(seat_exit, *exit);
         }
+
+        const double distance = seat_exit > 0.0 ? seat_exit : first_contact;
+        if (!(distance > kToNextSeatThreshold)) return {ToNextStatus::NoContact, -1.0};
+        return {ToNextStatus::Contact, distance};
+    } catch (const Standard_Failure&) {
+        return {ToNextStatus::Unprovable, -1.0};
     }
-    return best;
 }
 
 TopoDS_Shape make_prism(const TopoDS_Shape& profile, const gp_Dir& dir, double signed_distance,
@@ -188,7 +347,8 @@ struct ToFaceResolve {
     std::string error;                 // hard error (e.g. non-planar / coincident)
 };
 
-ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt& origin,
+ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
+                              const TopoDS_Face& profile, const gp_Pnt& origin,
                               const gp_Dir& ref_dir, const std::string& ref_id) {
     ToFaceResolve out;
     if (!face_ref.is_object()) {
@@ -222,8 +382,12 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
     }
     gp_Pln target_pln;
     gp_Dir target_n;
-    if (res[0].bound_shape.ShapeType() != TopAbs_FACE ||
-        !planar_face_plane_normal(TopoDS::Face(res[0].bound_shape), target_pln, target_n)) {
+    if (res[0].bound_shape.ShapeType() != TopAbs_FACE) {
+        out.error = "ToFace target did not resolve to a face";
+        return out;
+    }
+    const TopoDS_Face target_face = TopoDS::Face(res[0].bound_shape);
+    if (!planar_face_plane_normal(target_face, target_pln, target_n)) {
         out.error = "ToFace target face is not planar";
         return out;
     }
@@ -234,9 +398,48 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
         out.error = "ToFace target plane is parallel to the extrude direction";
         return out;
     }
+    const double target_angle = std::acos(std::clamp(std::abs(denominator), 0.0, 1.0));
+    if (target_angle > kToFaceAngularTolerance) {
+        out.error =
+            "ToFace tilted target faces are refused until exact variable-height termination is available";
+        return out;
+    }
     const double distance = numerator / denominator;
     if (std::abs(distance) < kToFaceMin) {
         out.error = "ToFace target coincides with the sketch plane";
+        return out;
+    }
+
+    // "Up to selected face" means the translated profile must be contained by the
+    // bounded target face, not merely coplanar with its underlying surface.
+    try {
+        gp_Trsf translation;
+        translation.SetTranslation(gp_Vec(ref_dir) * distance);
+        BRepBuilderAPI_Transform moved(profile, translation, Standard_True);
+        if (!moved.IsDone() || moved.Shape().IsNull()) {
+            out.error = "ToFace could not project the profile onto the selected face";
+            return out;
+        }
+        BRepAlgoAPI_Common common(moved.Shape(), target_face);
+        common.SetRunParallel(Standard_False);
+        common.Build();
+        if (!common.IsDone() || common.HasErrors()) {
+            out.error = "ToFace could not prove bounded-face coverage";
+            return out;
+        }
+        const double expected_area = face_area(profile);
+        const double covered_area = face_area(common.Shape());
+        const double area_tolerance =
+            std::max(1.0e-8, expected_area * kToFaceCoverageRelativeTolerance);
+        if (!(expected_area > 0.0) ||
+            std::abs(covered_area - expected_area) > area_tolerance) {
+            out.error =
+                "ToFace selected face does not cover the entire projected profile";
+            return out;
+        }
+    } catch (const Standard_Failure& failure) {
+        out.error = std::string("ToFace bounded-face proof failed: ") +
+                    (failure.GetMessageString() ? failure.GetMessageString() : "OCCT");
         return out;
     }
     out.distance = distance;
@@ -271,7 +474,7 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
 
         BRepOffsetAPI_DraftAngle draft(shape);
         const gp_Pln neutral_plane = plane;
-        std::size_t eligible_faces = 0;
+        std::vector<TopoDS_Face> eligible_faces;
         std::size_t added_faces = 0;
         for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
             const TopoDS_Face face = TopoDS::Face(exp.Current());
@@ -280,7 +483,7 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
             gp_Dir face_normal = surf.Plane().Axis().Direction();
             if (face.Orientation() == TopAbs_REVERSED) face_normal.Reverse();
             if (std::abs(face_normal.Dot(draft_dir)) > kSideFaceDotThreshold) continue;  // top/bottom
-            ++eligible_faces;
+            eligible_faces.push_back(face);
             draft.Add(face, draft_dir, angle_rad, neutral_plane, true);
             if (!draft.AddDone()) {
                 draft.Remove(face);
@@ -294,10 +497,10 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
         const auto counts = [&](double angle) {
             return nlohmann::json{{"draft",
                                    {{"angleDeg", angle},
-                                    {"eligibleFaces", eligible_faces},
+                                    {"eligibleFaces", eligible_faces.size()},
                                     {"addedFaces", added_faces}}}};
         };
-        if (eligible_faces == 0) {
+        if (eligible_faces.empty()) {
             // No planar wall exists at all — a circular profile, for instance.
             failure = {"EXTRUDE_DRAFT_NO_PLANAR_FACE",
                        "Extrude draft refused: no eligible planar side faces",
@@ -312,8 +515,69 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
                        counts(draft_angle_deg)};
             return std::nullopt;
         }
+        if (added_faces != eligible_faces.size()) {
+            failure = {"EXTRUDE_DRAFT_PARTIAL_ACCEPTANCE",
+                       "Extrude draft refused: OCCT accepted only part of the eligible side set",
+                       counts(draft_angle_deg)};
+            return std::nullopt;
+        }
         draft.Build();
         if (draft.IsDone() && !draft.Shape().IsNull()) {
+            std::vector<gp_Dir> result_wall_normals;
+            for (TopExp_Explorer exp(draft.Shape(), TopAbs_FACE); exp.More(); exp.Next()) {
+                gp_Pln candidate_plane;
+                gp_Dir candidate_normal;
+                if (!planar_face_plane_normal(TopoDS::Face(exp.Current()), candidate_plane,
+                                              candidate_normal)) {
+                    continue;
+                }
+                if (std::abs(candidate_normal.Dot(draft_dir)) >
+                    kSideFaceDotThreshold) {
+                    continue;
+                }
+                result_wall_normals.push_back(candidate_normal);
+            }
+
+            std::vector<bool> used(result_wall_normals.size(), false);
+            std::size_t measured_faces = 0;
+            double maximum_angle_error = 0.0;
+            for (const TopoDS_Face& original : eligible_faces) {
+                gp_Pln before_plane;
+                gp_Dir before_normal;
+                if (!planar_face_plane_normal(original, before_plane, before_normal)) {
+                    failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
+                               "Extrude draft refused: an eligible wall became unmeasurable",
+                               counts(draft_angle_deg)};
+                    return std::nullopt;
+                }
+                std::size_t best = result_wall_normals.size();
+                double best_error = std::numeric_limits<double>::infinity();
+                for (std::size_t i = 0; i < result_wall_normals.size(); ++i) {
+                    if (used[i]) continue;
+                    const double measured_angle = before_normal.Angle(result_wall_normals[i]);
+                    const double error =
+                        std::abs(measured_angle - std::abs(angle_rad));
+                    if (error < best_error) {
+                        best = i;
+                        best_error = error;
+                    }
+                }
+                if (best == result_wall_normals.size() ||
+                    best_error > kDraftSemanticAngleTolerance) {
+                    nlohmann::json evidence = counts(draft_angle_deg);
+                    evidence["draft"]["measuredFaces"] = measured_faces;
+                    evidence["draft"]["minimumUnmatchedAngleErrorRad"] = best_error;
+                    evidence["draft"]["angleToleranceRad"] =
+                        kDraftSemanticAngleTolerance;
+                    failure = {"EXTRUDE_DRAFT_SEMANTIC_MISMATCH",
+                               "Extrude draft refused: an eligible wall has no successor at the requested angle",
+                               std::move(evidence)};
+                    return std::nullopt;
+                }
+                used[best] = true;
+                ++measured_faces;
+                maximum_angle_error = std::max(maximum_angle_error, best_error);
+            }
             const double before = solid_volume(shape);
             const double after = solid_volume(draft.Shape());
             const double tolerance = std::max(1e-9, std::abs(before) * 1e-10);
@@ -419,8 +683,8 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     const session::BodyRecord* target_rec =
         (*boolean_mode != app::BooleanMode::NewBody) ? ref_rec : nullptr;
     const TopoDS_Shape* ref_shape = ref_rec ? &ref_rec->geom : nullptr;
-    if (ref_shape) {
-        if (auto invalid = validate_modeling_input(*ref_shape, "Extrude", "target")) return *invalid;
+    if (ref_rec) {
+        if (auto invalid = validate_modeling_body(*ref_rec, "Extrude", "target")) return *invalid;
     }
 
     const double distance = read_scalar(params, "distance", 10.0);
@@ -449,20 +713,44 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         if (m == "Blind" || m == "Symmetric") return blind;
         if (m == "ThroughAll") return through_all_distance(blind, origin, ref_dir, ref_shape);
         if (m == "ToFace") {
-            ToFaceResolve tf = resolve_to_face(ctx, face_ref, origin, ref_dir, ref_id);
+            ToFaceResolve tf =
+                resolve_to_face(ctx, face_ref, *profile, origin, ref_dir, ref_id);
             if (tf.needs_repair) { nr = tf.needs_repair; return std::nullopt; }
             if (!tf.distance) { err = tf.error; return std::nullopt; }
             return tf.distance;
         }
         if (m == "ToNext") {
             if (!ref_shape) { err = "ToNext requires an existing target body"; return std::nullopt; }
-            const double d = to_next_distance(*profile, ref_dir, *ref_shape);
-            if (d <= 0.0) { err = "ToNext: no face found ahead of the extrude direction"; return std::nullopt; }
-            return d;
+            const ToNextResult next = to_next_distance(*profile, ref_dir, *ref_shape);
+            if (next.status == ToNextStatus::Unprovable) {
+                // UNKNOWN is refused by name, so it is never confused with the honest
+                // "there is nothing ahead" negative below.
+                err = "ToNext could not prove exact first contact against the target body";
+                return std::nullopt;
+            }
+            if (next.status != ToNextStatus::Contact) {
+                err = "ToNext: no face found ahead of the extrude direction";
+                return std::nullopt;
+            }
+            return next.distance;
         }
         err = "Extrude: unknown end condition '" + m + "'";
         return std::nullopt;
     };
+
+    if (std::abs(draft_angle) > kDraftAngleEpsilon &&
+        (two_dirs || mode_str != "Blind")) {
+        const std::string message =
+            "Extrude draft refused: only a single-direction Blind end condition has proven draft semantics";
+        return draft_refusal(
+            DraftFailure{"EXTRUDE_DRAFT_END_CONDITION_UNSUPPORTED", message,
+                         nlohmann::json{{"draft",
+                                         {{"angleDeg", draft_angle},
+                                          {"eligibleFaces", 0},
+                                          {"addedFaces", 0},
+                                          {"endCondition", mode_str},
+                                          {"twoDirections", two_dirs}}}}});
+    }
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
@@ -542,9 +830,15 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
 
     // --- boolean mode dispatch ---
     if (*boolean_mode == app::BooleanMode::NewBody) {
-        const kernel::validation::PublicationDecision decision = publication_decision(
-            tool_shape, kernel::validation::single_solid_policy(
-                            "Extrude", kernel::validation::PublicationTier::TierA));
+        kernel::validation::PublicationPolicy policy =
+            kernel::validation::single_solid_policy(
+                "Extrude", kernel::validation::PublicationTier::TierA);
+        // A fresh body has no input tolerance to grow FROM, so the ceiling is the
+        // authoring resolution outright.
+        policy.maximum_tolerance =
+            kernel::validation::precision_of(tool_shape).authoring_resolution();
+        const kernel::validation::PublicationDecision decision =
+            publication_decision(tool_shape, policy);
         if (!decision.publishable()) {
             return OpOutcome::fail(decision.code, decision.message);
         }
@@ -571,8 +865,18 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
     kernel::validation::PublicationPolicy policy;
     policy.name = "Extrude boolean";
+    policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
     policy.max_solid_count = -1;
-    policy.tier = kernel::validation::PublicationTier::TierB;
+    policy.tier = result_validation_tier(
+        ctx, kernel::validation::PublicationTier::TierB);
+    policy.require_closed_manifold =
+        policy.tier == kernel::validation::PublicationTier::TierB;
+    // Grows from the TARGET's tolerance: a boolean inherits whatever uncertainty
+    // the body it modifies arrived with, and may double it plus a slack term.
+    {
+        const auto prec = kernel::validation::precision_of(old_target);
+        policy.maximum_tolerance = prec.tolerance_ceiling(prec.input_tolerance, 2.0, 1.0e-6);
+    }
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {

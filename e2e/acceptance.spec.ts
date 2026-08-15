@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -59,10 +60,7 @@ const mid = (l: SketchLineSnapshot): { x: number; y: number } => ({
 test("full acceptance ribbon: plane picker → constrain → dimension → delete → extrude", async ({ page }) => {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   await enterSketchViaPlanePicker(page); // AC1
   // Entering the plane picker kicks off an animated camera re-home
   // (CadOrbitControls, 250ms) — settle before any click/projection races it

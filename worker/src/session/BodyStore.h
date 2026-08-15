@@ -33,12 +33,22 @@ namespace onecad::session {
 // a real OCCT shape. Nothing else in BodyStore references the concrete payload.
 using BodyGeometry = TopoDS_Shape;
 
+enum class BodyHealth { Healthy, Quarantined };
+
+inline const char* body_health_name(BodyHealth health) {
+    return health == BodyHealth::Quarantined ? "quarantined" : "healthy";
+}
+
 // One registered body: identity, provenance, geometry, visibility, appearance.
 struct BodyRecord {
     std::string id;            // BodyId (e.g. "body_op_5")
     std::string provenance;    // producing opId (SCHEMA §7.3 op.opId)
     BodyGeometry geom;         // real TopoDS_Shape (W-WP5)
     bool visible = true;
+    BodyHealth health = BodyHealth::Healthy;
+    std::string health_reason;
+
+    bool modeling_eligible() const { return health == BodyHealth::Healthy; }
 
     // Authored per-face appearance, indexed by `TopExp::MapShapes(geom, TopAbs_FACE)`
     // order — the SAME order `tess::tessellate_body` walks, which is what makes the
@@ -64,6 +74,8 @@ public:
         r.provenance = std::move(provenance);
         r.geom = std::move(geom);
         r.visible = true;
+        r.health = BodyHealth::Healthy;
+        r.health_reason.clear();
         // Appearance belongs to the SHAPE, so replacing the shape must clear it: a
         // boolean/fillet result reusing a BodyId has a different face set, and a
         // stale color vector would land on the wrong faces (or trip the size guard
@@ -82,6 +94,14 @@ public:
     BodyRecord* get_mut(const std::string& id) {
         auto it = bodies_.find(id);
         return it != bodies_.end() ? &it->second : nullptr;
+    }
+
+    bool quarantine(const std::string& id, std::string reason) {
+        BodyRecord* body = get_mut(id);
+        if (body == nullptr) return false;
+        body->health = BodyHealth::Quarantined;
+        body->health_reason = std::move(reason);
+        return true;
     }
 
     // Remove a body (e.g. a boolean tool consumed by the operation). No-op if

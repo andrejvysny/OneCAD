@@ -360,6 +360,7 @@ fn hole_params(body: BodyId, element: &str, at: Vec3, diameter: f64) -> HolePara
         cb_depth: None,
         cs_diameter: None,
         cs_angle_deg: None,
+        result_policy_version: Some(2),
         extra: Default::default(),
     }
 }

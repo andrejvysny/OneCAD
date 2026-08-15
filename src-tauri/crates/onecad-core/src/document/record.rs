@@ -970,6 +970,9 @@ pub const HOLE_CS_ANGLES_DEG: [f64; 4] = [82.0, 90.0, 100.0, 120.0];
 /// Ø8" across a parametric edit. Which types are legal for a given selection is
 /// [`OffsetFaceParams::validate`]'s job — only [`Offset`](Self::Offset) admits a
 /// multi-face set.
+/// Smallest authored Offset delta the kernel contract can distinguish (mm).
+pub const OFFSET_MIN_EFFECTIVE_CHANGE_MM: f64 = 1.0e-3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OffsetDistanceType {
     /// Signed delta along the topological outward normal (positive grows
@@ -1090,7 +1093,7 @@ fn default_true() -> bool {
     true
 }
 
-fn de_pattern_result_policy_version<'de, D: Deserializer<'de>>(
+fn de_optional_result_policy_version<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u8>, D::Error> {
     Option::<u8>::deserialize(deserializer)
@@ -1426,7 +1429,7 @@ pub struct LinearPatternParams {
     /// explicitly and makes child/body lineage part of the persisted contract.
     #[serde(
         default,
-        deserialize_with = "de_pattern_result_policy_version",
+        deserialize_with = "de_optional_result_policy_version",
         skip_serializing_if = "Option::is_none"
     )]
     pub result_policy_version: Option<u8>,
@@ -1458,7 +1461,7 @@ pub struct CircularPatternParams {
     /// See [`LinearPatternParams::result_policy_version`].
     #[serde(
         default,
-        deserialize_with = "de_pattern_result_policy_version",
+        deserialize_with = "de_optional_result_policy_version",
         skip_serializing_if = "Option::is_none"
     )]
     pub result_policy_version: Option<u8>,
@@ -1791,6 +1794,8 @@ impl TransformBodyParams {
 ///
 /// Standard-size tables (M-series clearance, SHCS counterbores, DIN 74
 /// countersinks) are a **frontend** concern: these params always carry raw mm.
+pub const HOLE_RESULT_POLICY_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HoleParams {
@@ -1826,6 +1831,14 @@ pub struct HoleParams {
     /// REQUIRED iff `hole_type == Countersink`.
     #[serde(default)]
     pub cs_angle_deg: Option<Scalar>,
+    /// Absent preserves the legacy split-host residual. Fresh authoring writes V2,
+    /// which refuses any result that is not exactly one connected solid.
+    #[serde(
+        default,
+        deserialize_with = "de_optional_result_policy_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1861,6 +1874,13 @@ impl HoleParams {
         }
         if !self.point.is_finite() {
             return Err("Hole point has a non-finite component".into());
+        }
+        if let Some(version) = self.result_policy_version {
+            if version != HOLE_RESULT_POLICY_VERSION {
+                return Err(format!(
+                    "Hole resultPolicyVersion {version} is unsupported (expected {HOLE_RESULT_POLICY_VERSION})"
+                ));
+            }
         }
         positive("Hole diameter", self.diameter.value)?;
         if let Some(d) = &self.depth {
@@ -2258,11 +2278,17 @@ impl InvoluteExternalParams {
 /// (SCHEMA §7.6) and persisted. The worker never re-expands at regen, so an
 /// upstream edit cannot silently widen or narrow what the op operates on;
 /// `chain_tangent_faces` survives only as authoring metadata for re-edit UX.
+pub const OFFSET_FACE_RESULT_POLICY_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OffsetFaceParams {
     /// The operative faces as bare ids (SCHEMA `faceIds`), in slot order.
     pub face_ids: Vec<ElementId>,
+    /// V2 user-picked design faces. Must be a non-empty subset of `face_ids`;
+    /// dependent blend/support faces remain only in the frozen full closure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_face_ids: Vec<ElementId>,
     /// The typed per-face semantic refs, one per [`face_ids`](Self::face_ids)
     /// entry in the SAME order. `default` so a SCHEMA §7.3 wire payload (which
     /// carries the refs in `inputs[]`, not in params) still parses.
@@ -2287,6 +2313,12 @@ pub struct OffsetFaceParams {
     /// The body this op modifies in place (SCHEMA `targetBodyId`).
     #[serde(rename = "targetBodyId")]
     pub target_body: BodyId,
+    #[serde(
+        default,
+        deserialize_with = "de_optional_result_policy_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -2340,6 +2372,34 @@ impl OffsetFaceParams {
                 ));
             }
         }
+        match self.result_policy_version {
+            None if !self.primary_face_ids.is_empty() => {
+                return Err("OffsetFace primaryFaceIds requires resultPolicyVersion 2".into())
+            }
+            Some(OFFSET_FACE_RESULT_POLICY_VERSION) => {
+                if self.primary_face_ids.is_empty() {
+                    return Err("OffsetFace V2 requires at least one primary face".into());
+                }
+                for (index, id) in self.primary_face_ids.iter().enumerate() {
+                    if !self.face_ids.contains(id) {
+                        return Err(format!(
+                            "OffsetFace primaryFaceIds[{index}] {id} is not in the frozen faceIds closure"
+                        ));
+                    }
+                    if self.primary_face_ids[..index].contains(id) {
+                        return Err(format!(
+                            "OffsetFace primaryFaceIds contains duplicate {id}"
+                        ));
+                    }
+                }
+            }
+            Some(version) => {
+                return Err(format!(
+                    "OffsetFace resultPolicyVersion {version} is unsupported (expected {OFFSET_FACE_RESULT_POLICY_VERSION})"
+                ))
+            }
+            None => {}
+        }
         if !self.distance.value.is_finite() {
             return Err(format!(
                 "OffsetFace distance must be finite (got {})",
@@ -2370,7 +2430,14 @@ impl OffsetFaceParams {
                     ));
                 }
             }
-            OffsetDistanceType::Offset => {}
+            OffsetDistanceType::Offset => {
+                if self.distance.value.abs() < OFFSET_MIN_EFFECTIVE_CHANGE_MM {
+                    return Err(format!(
+                        "OffsetFace Offset distance magnitude must be at least {} mm (got {})",
+                        OFFSET_MIN_EFFECTIVE_CHANGE_MM, self.distance.value
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -3425,6 +3492,7 @@ mod tests {
             cb_depth: None,
             cs_diameter: None,
             cs_angle_deg: None,
+            result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
             extra: Extra::new(),
         }
     }
@@ -3475,6 +3543,7 @@ mod tests {
         // The inapplicable block renders as explicit `null`, matching the SCHEMA
         // example — "not a countersink" is authored, not omitted.
         assert!(p["csDiameter"].is_null() && p["csAngleDeg"].is_null());
+        assert_eq!(p["resultPolicyVersion"], serde_json::json!(2));
         assert_eq!(p["face"]["primary"]["kind"], serde_json::json!("face"));
     }
 
@@ -3689,6 +3758,29 @@ mod tests {
     }
 
     #[test]
+    fn hole_result_policy_absence_and_future_values_round_trip() {
+        let mut legacy = hole_params();
+        legacy.result_policy_version = None;
+        assert!(legacy.validate().is_ok());
+        let legacy_json =
+            serde_json::to_value(Operation::Known(KnownOperation::Hole(legacy))).unwrap();
+        assert!(legacy_json["params"].get("resultPolicyVersion").is_none());
+
+        let mut future =
+            serde_json::to_value(Operation::Known(KnownOperation::Hole(hole_params()))).unwrap();
+        future["params"]["resultPolicyVersion"] = serde_json::json!(3);
+        let parsed: Operation = serde_json::from_value(future.clone()).unwrap();
+        let Operation::Known(KnownOperation::Hole(params)) = &parsed else {
+            panic!("expected Hole");
+        };
+        assert!(params.validate().unwrap_err().contains("unsupported"));
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["params"]["resultPolicyVersion"],
+            future["params"]["resultPolicyVersion"]
+        );
+    }
+
+    #[test]
     fn shell_typed_faces_serialize_and_legacy_empty_round_trips() {
         let legacy = serde_json::json!({
             "opType": "Shell",
@@ -3734,6 +3826,7 @@ mod tests {
     fn offset_params() -> OffsetFaceParams {
         OffsetFaceParams {
             face_ids: vec![ElementId::new("el_f1")],
+            primary_face_ids: vec![ElementId::new("el_f1")],
             faces: vec![offset_ref("el_f1")],
             distance: Scalar::new(2.5),
             distance_type: OffsetDistanceType::Offset,
@@ -3741,6 +3834,7 @@ mod tests {
             opposite_face_id: None,
             opposite_face: None,
             target_body: body(1),
+            result_policy_version: Some(OFFSET_FACE_RESULT_POLICY_VERSION),
             extra: Extra::new(),
         }
     }
@@ -3963,7 +4057,16 @@ mod tests {
             };
             assert!(p.validate().is_ok());
         }
-        // An `Offset` delta, by contrast, is SIGNED — negative pulls material in.
+        // An `Offset` delta is SIGNED, but identity/sub-resolution edits are not
+        // authorable features: the worker refuses them rather than republishing
+        // unchanged geometry as a successful modification.
+        for bad in [0.0, 5.0e-4, -5.0e-4] {
+            let p = OffsetFaceParams {
+                distance: Scalar::new(bad),
+                ..offset_params()
+            };
+            assert!(p.validate().unwrap_err().contains("at least"));
+        }
         let p = OffsetFaceParams {
             distance: Scalar::new(-2.5),
             ..offset_params()

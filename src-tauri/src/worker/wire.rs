@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use onecad_core::document::body::BodyLifecycleEvent;
+use onecad_core::document::body::{BodyHealth, BodyLifecycleEvent};
 use onecad_core::document::record::{
     ExtrudeMode, FrozenPlacement, KnownOperation, OffsetDistanceType, Operation,
 };
@@ -720,6 +720,7 @@ pub fn parse_plan_step(payload: &Value, envelope_step: usize) -> Result<PlanStep
         step_index,
         body_events: parse_body_events(payload.get("bodyEvents"))?,
         body_rank_keys: parse_body_rank_keys(payload.get("bodyEvents")),
+        body_health: parse_body_health(payload.get("bodyEvents"))?,
         element_map_delta: parse_element_delta(payload.get("elementMapDelta"))?,
         needs_repair: parse_needs_repair(payload.get("needsRepair"), step_index)?,
         signatures: parse_signatures(payload.get("signatures")),
@@ -760,6 +761,29 @@ fn parse_body_event(ev: &Value) -> Result<BodyLifecycleEvent, String> {
         }),
         other => Err(format!("unknown bodyEvent kind {other:?}")),
     }
+}
+
+fn parse_body_health(v: Option<&Value>) -> Result<BTreeMap<BodyId, BodyHealth>, String> {
+    let mut out = BTreeMap::new();
+    let Some(events) = v.and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for event in events {
+        let Some(raw) = event.get("health") else {
+            continue;
+        };
+        let health = match raw.as_str() {
+            Some("healthy") => BodyHealth::Healthy,
+            Some("quarantined") => BodyHealth::Quarantined,
+            _ => return Err("bodyEvent health must be healthy or quarantined".into()),
+        };
+        let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+        if kind != "created" && kind != "modified" {
+            return Err("bodyEvent health is valid only on created/modified events".into());
+        }
+        out.insert(body_field(event, "bodyId")?, health);
+    }
+    Ok(out)
 }
 
 /// Collects the OPTIONAL SCHEMA §7.2 `bodyEvents[].rankKey` evidence (VF-B6) into a
@@ -4322,7 +4346,7 @@ mod tests {
         let op = Uuid::from_u128(0x10);
         let payload = json!({
             "stepIndex": 3,
-            "bodyEvents": [ { "kind": "created", "bodyId": format!("body_{op}") } ],
+            "bodyEvents": [ { "kind": "created", "bodyId": format!("body_{op}"), "health": "quarantined" } ],
             "elementMapDelta": {
                 "added": [ { "elementId": "el_1", "topoKey": "f:2", "kind": "face", "bodyId": format!("body_{op}") } ],
                 "removed": ["el_9"], "relabeled": []
@@ -4335,6 +4359,10 @@ mod tests {
         assert_eq!(step.step_index, 3);
         assert!(
             matches!(step.body_events[0], BodyLifecycleEvent::Created { body } if body == BodyId(op))
+        );
+        assert_eq!(
+            step.body_health.get(&BodyId(op)),
+            Some(&BodyHealth::Quarantined)
         );
         assert_eq!(step.element_map_delta.added[0].body, BodyId(op));
         assert_eq!(step.element_map_delta.removed[0], ElementId::new("el_9"));
@@ -5971,6 +5999,7 @@ mod body_wire_tests {
 
         let multi = lower(OffsetFaceParams {
             face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+            primary_face_ids: vec![ElementId::new("el_f1")],
             faces: vec![face("el_f1"), face("el_f2")],
             distance: Scalar::new(2.5),
             distance_type: OffsetDistanceType::Offset,
@@ -5978,10 +6007,13 @@ mod body_wire_tests {
             opposite_face_id: None,
             opposite_face: None,
             target_body: body,
+            result_policy_version: Some(2),
             extra: Default::default(),
         });
         assert_eq!(multi["opType"], json!("OffsetFace"));
         assert_eq!(multi["params"]["faceIds"], json!(["el_f1", "el_f2"]));
+        assert_eq!(multi["params"]["primaryFaceIds"], json!(["el_f1"]));
+        assert_eq!(multi["params"]["resultPolicyVersion"], json!(2));
         assert_eq!(multi["params"]["distance"], json!({ "value": 2.5 }));
         assert_eq!(multi["params"]["distanceType"], json!("Offset"));
         assert_eq!(multi["params"]["chainTangentFaces"], json!(true));
@@ -6006,6 +6038,7 @@ mod body_wire_tests {
 
         let total = lower(OffsetFaceParams {
             face_ids: vec![ElementId::new("el_top")],
+            primary_face_ids: vec![ElementId::new("el_top")],
             faces: vec![face("el_top")],
             distance: Scalar::new(12.0),
             distance_type: OffsetDistanceType::Total,
@@ -6013,6 +6046,7 @@ mod body_wire_tests {
             opposite_face_id: Some(ElementId::new("el_bottom")),
             opposite_face: Some(face("el_bottom")),
             target_body: body,
+            result_policy_version: Some(2),
             extra: Default::default(),
         });
         assert_eq!(total["params"]["distanceType"], json!("Total"));

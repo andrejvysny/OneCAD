@@ -117,11 +117,14 @@ add_library(worker_core STATIC
     src/elementmap/Assignment.cpp
     src/elementmap/Ladder.cpp
     src/kernel/diagnostics/OperationDiagnostic.cpp
+    src/kernel/validation/GeometryPrecision.cpp
     src/kernel/validation/ShapeAudit.cpp
     src/kernel/fillet/FilletAnalyzer.cpp
     src/kernel/fillet/FilletBuilder.cpp
     src/kernel/fillet/EdgeContour.cpp
     src/kernel/fillet/FilletSemanticChecks.cpp
+    src/kernel/fillet/BlendEvidence.cpp
+    src/kernel/fillet/BlendRecognizer.cpp
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
     src/ops/BooleanOp.cpp

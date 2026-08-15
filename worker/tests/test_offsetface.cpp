@@ -21,6 +21,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepGProp.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -38,6 +39,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -153,8 +155,12 @@ json offset_params(const std::string& body_id, std::vector<std::string> keys, do
                    const std::string& opposite = {}) {
     json ids = json::array();
     for (const std::string& k : keys) ids.push_back(k);
+    json primary = json::array();
+    if (!keys.empty()) primary.push_back(keys.front());
     json p = {{"targetBodyId", body_id},
               {"faceIds", std::move(ids)},
+              {"primaryFaceIds", std::move(primary)},
+              {"resultPolicyVersion", 2},
               {"distance", distance},
               {"distanceType", type},
               {"chainTangentFaces", chain}};
@@ -536,21 +542,24 @@ void test_traps() {
     }
 }
 
-// `|d| ≤ tol` ⇒ identity no-op SUCCESS: the body is republished UNCHANGED with a
-// `modified` event (SCHEMA §7.3), never a silent skip and never a rebuild.
+// Identity and sub-resolution edits are REFUSED. Construction tolerance may make
+// a requested change unbuildable; it must never turn the feature into unchanged
+// geometry with a successful `modified` event.
 void test_identity_noop() {
-    {
+    for (const double distance : {0.0, 5.0e-5}) {
         const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
         BodyStore bodies;
         bodies.create("body_1", "op_seed", box);
         em::ElementMapPartition part;
-        const ops::OpOutcome o =
-            run_offset(bodies, part, offset_params("body_1", {key_near(box, 5, 5, 10)}, 0.0));
-        check(o.status == ops::OpOutcome::Status::Ok, "identity(Offset 0): Ok");
-        check(o.body_events.size() == 1 && o.body_events[0].kind == "modified",
-              "identity(Offset 0): modified event");
+        const ops::OpOutcome o = run_offset(
+            bodies, part,
+            offset_params("body_1", {key_near(box, 5, 5, 10)}, distance));
+        check(o.status == ops::OpOutcome::Status::Failed &&
+                  o.error_message.find("below the supported minimum") != std::string::npos,
+              "identity/sub-resolution Offset: named refusal");
+        check(o.body_events.empty(), "identity/sub-resolution Offset: no lifecycle event");
         check(bodies.contains("body_1") && bodies.get("body_1")->geom.IsSame(box),
-              "identity(Offset 0): the SAME shape is republished");
+              "identity/sub-resolution Offset: predecessor stays untouched");
     }
     {  // Radius equal to the current radius is the absolute-type identity.
         const TopoDS_Shape cyl = BRepPrimAPI_MakeCylinder(10.0, 20.0).Shape();
@@ -559,10 +568,81 @@ void test_identity_noop() {
         bodies.create("body_1", "op_seed", cyl);
         em::ElementMapPartition part;
         const ops::OpOutcome o = run_offset(
-            bodies, part, offset_params("body_1", {of::face_topokey(lats.at(0))}, 10.0, "Radius"));
-        check(o.status == ops::OpOutcome::Status::Ok, "identity(Radius==R): Ok");
+            bodies, part,
+            offset_params("body_1", {of::face_topokey(lats.at(0))}, 10.0,
+                          "Radius"));
+        check(o.status == ops::OpOutcome::Status::Failed && o.body_events.empty(),
+              "identity(Radius==R): refused without publication");
         check(bodies.contains("body_1") && bodies.get("body_1")->geom.IsSame(cyl),
-              "identity(Radius==R): the SAME shape is republished");
+              "identity(Radius==R): predecessor stays untouched");
+    }
+}
+
+// The authoring-resolution boundary, straddled.
+//
+// WHY THIS EXISTS. `test_identity_noop` proves 0 and 5e-5 are refused, but both
+// are refused by ANY plausible threshold, so neither pins the value. When the
+// refusal moved to `GeometryPrecisionContext::authoring_resolution()` the whole
+// worker suite still passed with the context perturbed 1.0e-3 -> 1.1e-3: the
+// rename was wired but nothing PROVED it was, which by this repo's own rule
+// ("a guard no fixture can trip is not a guard") is not good enough.
+//
+// Straddling the boundary fixes that. 1.05e-3 mm sits between the real value and
+// the perturbed one, so it flips from accepted to refused the moment the context
+// moves — the sensitivity the old fixtures lacked.
+void test_authoring_resolution_boundary() {
+    const auto offset_by = [](double distance) {
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+        BodyStore bodies;
+        bodies.create("body_1", "op_seed", box);
+        em::ElementMapPartition part;
+        return run_offset(bodies, part,
+                          offset_params("body_1", {key_near(box, 5, 5, 10)}, distance));
+    };
+
+    // Just BELOW: refused by name, with the boundary echoed in the message.
+    const ops::OpOutcome below = offset_by(9.9e-4);
+    check(below.status == ops::OpOutcome::Status::Failed &&
+              below.error_message.find("below the supported minimum") != std::string::npos,
+          "authoring boundary: 9.9e-4 mm is refused");
+    // The threshold is rendered INTO the wire message, so a "pure rename" that
+    // changed the printed digits would not be pure. Pin the rendered text.
+    check(below.error_message.find("0.001000") != std::string::npos,
+          "authoring boundary: the refusal message still renders 0.001000 mm, got: " +
+              below.error_message);
+
+    // Just ABOVE: accepted. This is the assertion that has teeth — it is the one
+    // that reds when the context moves.
+    const ops::OpOutcome above = offset_by(1.05e-3);
+    check(above.status == ops::OpOutcome::Status::Ok,
+          "authoring boundary: 1.05e-3 mm is accepted, got: " + above.error_message);
+}
+
+void test_trimmed_face_sampling() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    const TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(5.0, 5.0, -1.0), gp_Dir(0.0, 0.0, 1.0)), 2.0, 12.0).Shape();
+    BRepAlgoAPI_Cut cut(box, bore);
+    cut.Build();
+    check(cut.IsDone() && !cut.Shape().IsNull(), "trimmed sample: holed box built");
+
+    TopoDS_Face top;
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Current());
+        const of::PlaneInfo plane = of::plane_info(face);
+        if (plane.ok && std::abs(plane.location.Z() - 10.0) < 1.0e-7) {
+            top = face;
+            break;
+        }
+    }
+    check(!top.IsNull(), "trimmed sample: top face with central hole found");
+    if (top.IsNull()) return;
+    const of::FaceSample sample = of::sample_face(top);
+    check(sample.ok, "trimmed sample: an interior point is found away from the UV-center hole");
+    if (sample.ok) {
+        BRepTopAdaptor_FClass2d classifier(top, 1.0e-9);
+        check(classifier.Perform(gp_Pnt2d(sample.u, sample.v), Standard_False) == TopAbs_IN,
+              "trimmed sample: returned UV is provably inside the trimmed domain");
     }
 }
 
@@ -639,6 +719,85 @@ void test_ladder_rung_and_needs_repair() {
         check(o.needs_repair.size() == 1, "unresolved: one NeedsRepair item");
         check(o.body_events.empty(), "unresolved: nothing published");
         check_near(volume_of(bodies.get("body_1")->geom), 1000.0, 1e-9, "unresolved: body untouched");
+    }
+}
+
+// The worker is an INDEPENDENT trust boundary: a malformed typed array must be
+// refused, not filtered into a different valid request. Silently dropping one
+// element shortens `faceIds` while `inputs[]` keeps its length, so every remaining
+// id would be paired with its neighbour's evidence (and the Total opposite would be
+// read from the wrong slot entirely).
+void test_malformed_wire_contract() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    const std::string top = key_near(box, 5, 5, 10);
+    const int top_ord = face_ordinal_near(box, 5, 5, 10);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(box, TopAbs_FACE, faces);
+    const TopoDS_Shape top_face = faces(top_ord);
+
+    auto seeded = [&](json params, json inputs = json()) {
+        BodyStore bodies;
+        bodies.create("body_1", "op_seed", box);
+        em::ElementMapPartition part;
+        return run_offset(bodies, part, std::move(params), "op_off", std::move(inputs));
+    };
+    auto refused_by_code = [&](const ops::OpOutcome& o, const char* code) {
+        return o.status == ops::OpOutcome::Status::Failed && o.error_code == "OP_FAILED" &&
+               !o.diagnostics.empty() && o.diagnostics.front().value("code", "") == code;
+    };
+
+    {  // (a) a non-string element in `faceIds`
+        json p = offset_params("body_1", {top}, 2.0);
+        p["faceIds"].push_back(42);
+        const ops::OpOutcome o = seeded(p);
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "malformed faceIds element: refused by code (" + o.error_message + ")");
+        check(o.body_events.empty(), "malformed faceIds element: nothing published");
+    }
+    {  // (b) `faceIds` present but not an array
+        json p = offset_params("body_1", {top}, 2.0);
+        p["faceIds"] = top;
+        const ops::OpOutcome o = seeded(p);
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "non-array faceIds: refused by code (" + o.error_message + ")");
+    }
+    {  // (c) a non-string element in `primaryFaceIds` must NOT degrade into the
+       //     misleading "V2 requires primaryFaceIds" absence message.
+        json p = offset_params("body_1", {top}, 2.0);
+        p["primaryFaceIds"].push_back(7);
+        const ops::OpOutcome o = seeded(p);
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "malformed primaryFaceIds element: refused by code (" + o.error_message + ")");
+        check(o.error_message.find("primaryFaceIds") != std::string::npos,
+              "malformed primaryFaceIds element: names the offending key");
+    }
+    {  // (d) a typed ref whose own elementId disagrees with the id it is paired with
+        json inputs = json::array({json{
+            {"primary", {{"bodyId", "body_1"}, {"elementId", "el_other"}, {"kind", "face"}}},
+            {"intent",
+             {{"kind", "face"},
+              {"descriptor", em::ElementMapPartition::descriptor_to_json(
+                                 em::ElementMapPartition::describe(top_face))}}},
+            {"anchor", {{"worldPoint", {5.0, 5.0, 10.0}}}}}});
+        const ops::OpOutcome o =
+            seeded(offset_params("body_1", {"el_top"}, 2.0), std::move(inputs));
+        check(refused_by_code(o, "OFFSET_FACE_REF_MISMATCH"),
+              "ref/id mismatch: refused by code (" + o.error_message + ")");
+        check(o.needs_repair.empty(),
+              "ref/id mismatch: a malformed record is not a repairable reference");
+    }
+    {  // (e) a present `inputs[]` of the wrong length
+        json inputs = json::array({json{
+            {"primary", {{"bodyId", "body_1"}, {"elementId", "el_top"}, {"kind", "face"}}},
+            {"intent",
+             {{"kind", "face"},
+              {"descriptor", em::ElementMapPartition::descriptor_to_json(
+                                 em::ElementMapPartition::describe(top_face))}}},
+            {"anchor", {{"worldPoint", {5.0, 5.0, 10.0}}}}}});
+        json p = offset_params("body_1", {"el_top", "el_second"}, 2.0);
+        const ops::OpOutcome o = seeded(p, std::move(inputs));
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "inputs arity: refused by code (" + o.error_message + ")");
     }
 }
 
@@ -900,8 +1059,11 @@ int main() {
     test_total_on_box();
     test_traps();
     test_identity_noop();
+    test_authoring_resolution_boundary();
+    test_trimmed_face_sampling();
     test_history_relabels_tracked_faces();
     test_ladder_rung_and_needs_repair();
+    test_malformed_wire_contract();
     test_prepare_closure_expansion();
     test_prepare_total_opposite();
     test_prepare_refusals_and_fence();

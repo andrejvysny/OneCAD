@@ -89,8 +89,16 @@ inline constexpr double kTangentAngleTol = 1.0e-4;
 // every kernel behaviour at, so lowering it silently re-opens un-spiked territory.
 inline constexpr double kBuildToleranceFloor = 1.0e-4;
 
-// Semantic-postcondition tolerance (mm for a plane shift, mm for a radius).
-inline constexpr double kSemanticTol = 1.0e-6;
+// Semantic measurement tolerances are independent of OCCT's construction
+// tolerance. They answer whether the requested model change was achieved.
+inline constexpr double kSemanticLengthTol = 1.0e-6;
+inline constexpr double kSemanticAngularTol = 1.0e-7;
+
+// Minimum authored geometric change now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. A smaller non-zero request
+// is not an identity: it is refused because the kernel cannot honestly prove it at
+// the supported feature resolution. The value is unchanged (1e-3 mm); it is now
+// the SAME number Extrude, Fillet, Hole and Shell refuse below, stated once.
 
 // `|n_out · r̂|` must reach this for a cylindrical σ to be derivable at all.
 inline constexpr double kRadialDotMin = 1.0 - 1.0e-6;
@@ -98,17 +106,20 @@ inline constexpr double kRadialDotMin = 1.0 - 1.0e-6;
 // Relative tolerance for the Total material-column / footprint-coverage volumes.
 inline constexpr double kColumnRelTol = 1.0e-6;
 
-// Minimum publishable volume, mm³ (a 10 µm cube). The build tolerance is a LENGTH,
-// so it is the wrong yardstick here; a face driven onto its opposite collapses to
-// ~0 and would otherwise pass IsDone + BRepCheck (spike trap b).
-inline constexpr double kMinVolume = 1.0e-9;
+// Minimum publishable volume now comes from the precision context —
+// `GeometryPrecisionContext::minimum_volume()`, which is the authoring resolution
+// CUBED. That derives the 1e-9 mm³ this constant used to assert, and makes its old
+// "a 1 µm cube" comment arithmetic rather than a claim. The build tolerance is a
+// LENGTH, so it is the wrong yardstick here; a face driven onto its opposite
+// collapses to ~0 and would otherwise pass IsDone + BRepCheck (spike trap b).
 
 enum class SurfaceKind { Plane, Cylinder, Other };
 SurfaceKind surface_kind(const TopoDS_Face& face);
 
-// A geometric sample of a face at its mid-UV parameter: the surface point, the
-// ORIENTATION-CORRECTED outward normal, and the (u,v) it was taken at. This is both
-// the σ probe and the `anchor` the authoring verb returns.
+// A deterministic geometric sample proven to lie inside the TRIMMED face domain:
+// the surface point, the ORIENTATION-CORRECTED outward normal, and its (u,v). This
+// is both the σ probe and the `anchor` the authoring verb returns. No sample means
+// UNKNOWN, which committed modeling treats as refusal.
 struct FaceSample {
     bool ok = false;
     gp_Pnt point{0.0, 0.0, 0.0};
@@ -117,6 +128,13 @@ struct FaceSample {
     double v = 0.0;
 };
 FaceSample sample_face(const TopoDS_Face& face);
+
+struct PlaneInfo {
+    bool ok = false;
+    gp_Pnt location{0.0, 0.0, 0.0};
+    gp_Dir normal{0.0, 0.0, 1.0};
+};
+PlaneInfo plane_info(const TopoDS_Face& face);
 
 // Cylindrical face geometry + the SIGN CONVENTION the absolute distance types need.
 // `sigma = sign(n_out · r̂)` where `r̂` is the axis→sample unit radial: +1 for a boss

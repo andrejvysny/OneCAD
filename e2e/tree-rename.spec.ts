@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -95,13 +96,6 @@ async function commitUnrelatedExtrude(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
   await commitExtrudeAtHandle(page);
-}
-
-async function hideSeedSketches(page: Page): Promise<void> {
-  const visible = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visible.count()) > 0) await visible.first().click();
 }
 
 test("renaming a body via the context menu SURVIVES a later unrelated commit", async ({ page }) => {

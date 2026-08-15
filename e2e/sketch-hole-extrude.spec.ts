@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -38,10 +39,7 @@ interface NestedSketch {
 async function drawNestedSketch(page: Page): Promise<NestedSketch> {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
 

@@ -33,9 +33,21 @@ export interface ToolApplicability {
  *  module never imports a store, only the two fields the sketch fallback needs. */
 export interface ToolApplicabilityContext {
   sketches: Record<string, { id: string; visible: boolean }>;
+  bodies?: Record<string, { health?: "healthy" | "quarantined" }>;
 }
 
 const ENABLED: ToolApplicability = { enabled: true };
+const BODY_MODELING_TOOLS = new Set<Tool>([
+  "fillet",
+  "boolean",
+  "shell",
+  "offsetFace",
+  "linearPattern",
+  "circularPattern",
+  "mirror",
+  "transform",
+  "hole",
+]);
 
 /**
  * Pure port of `ModelToolController.pickTargetSketchId`: an explicitly
@@ -106,6 +118,15 @@ function requireKind(
   return selected.some((r) => r.kind === kind) ? ENABLED : { enabled: false, reason };
 }
 
+function selectedBodyIds(selected: readonly EntityRef[]): string[] {
+  const ids = new Set<string>();
+  for (const ref of selected) {
+    if (ref.kind === "body") ids.add(ref.id);
+    else if ("bodyId" in ref && typeof ref.bodyId === "string") ids.add(ref.bodyId);
+  }
+  return [...ids];
+}
+
 /**
  * Applicability of `tool` given the current selection (and, for the
  * extrude/revolve document-level fallback, which sketches exist). Called
@@ -118,6 +139,18 @@ export function getToolApplicability(
   selected: readonly EntityRef[],
   ctx: ToolApplicabilityContext,
 ): ToolApplicability {
+  if (BODY_MODELING_TOOLS.has(tool)) {
+    const quarantined = selectedBodyIds(selected).find(
+      (id) => ctx.bodies?.[id]?.health === "quarantined",
+    );
+    if (quarantined) {
+      return {
+        enabled: false,
+        reason: "Quarantined imported geometry is view/export-only until repaired",
+        severity: "error",
+      };
+    }
+  }
   switch (tool) {
     case "extrude":
       return regionApplicability(

@@ -8,6 +8,7 @@
 #include <TopoDS_Shape.hxx>
 
 #include "kernel/diagnostics/OperationDiagnostic.h"
+#include "kernel/fillet/BlendEvidence.h"
 #include "kernel/fillet/FilletAnalyzer.h"
 #include "kernel/validation/ShapeAudit.h"
 #include "util/Cancel.h"
@@ -23,6 +24,7 @@ struct FilletBuildResult {
   FilletAnalysis analysis;
   validation::ShapeAuditResult input_audit;
   validation::ShapeAuditResult output_audit;
+  FilletResultEvidence fillet_evidence;
   std::vector<diagnostics::OperationDiagnostic> diagnostics;
 };
 

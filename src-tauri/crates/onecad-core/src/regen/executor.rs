@@ -90,7 +90,7 @@ use super::planner::{HistoryPrefixHash, RegenPlanner};
 use super::snapshot::{
     BodySnapshot, Lod, MeshKey, ModelSnapshot, RepairSummary, SnapshotPublisher,
 };
-use crate::document::body::BodyLifecycleEvent;
+use crate::document::body::{BodyHealth, BodyLifecycleEvent};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cancellation
@@ -232,6 +232,7 @@ struct BufferedStep {
     body_events: Vec<BodyLifecycleEvent>,
     /// SCHEMA §7.2 `rankKey` evidence, applied after the lifecycle fold (VF-B6).
     rank_keys: BTreeMap<crate::ids::BodyId, crate::document::repair::RankKey>,
+    health: BTreeMap<crate::ids::BodyId, BodyHealth>,
     added: Vec<super::engine::ElementMapEntry>,
     relabeled: Vec<super::engine::ElementMapEntry>,
     removed: Vec<crate::ids::ElementId>,
@@ -287,6 +288,7 @@ impl Scratch {
                 by,
                 body_events: event.body_events,
                 rank_keys: event.body_rank_keys,
+                health: event.body_health,
                 added: event.element_map_delta.added,
                 relabeled: event.element_map_delta.relabeled,
                 removed: event.element_map_delta.removed,
@@ -324,6 +326,9 @@ impl Scratch {
             // Body lifecycle (§2.2 identity rules applied inside `fold`).
             for be in buf.body_events {
                 self.bodies.fold(step, buf.by, be);
+            }
+            for (body, health) in buf.health {
+                self.bodies.set_health(body, health);
             }
             // VF-B6 identity evidence, stamped AFTER the fold so the body exists.
             // Rides the same `last_valid` gate as the geometry it describes: a stamp

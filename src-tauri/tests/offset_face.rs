@@ -651,6 +651,7 @@ async fn offset_top_face_grows_box() {
         offset_record(
             OFFSET_REC,
             OffsetFaceParams {
+                primary_face_ids: face_ids.clone(),
                 face_ids,
                 faces: refs,
                 distance: Scalar::new(5.0),
@@ -659,6 +660,7 @@ async fn offset_top_face_grows_box() {
                 opposite_face_id: None,
                 opposite_face: None,
                 target_body: body,
+                result_policy_version: Some(2),
                 extra: Default::default(),
             },
         ),
@@ -768,6 +770,7 @@ async fn offset_face_radius_resizes_cylinder_boss() {
         offset_record(
             OFFSET_REC,
             OffsetFaceParams {
+                primary_face_ids: face_ids.clone(),
                 face_ids,
                 faces: refs,
                 distance: Scalar::new(12.0), // absolute target radius, not a delta
@@ -776,6 +779,7 @@ async fn offset_face_radius_resizes_cylinder_boss() {
                 opposite_face_id: None,
                 opposite_face: None,
                 target_body: body,
+                result_policy_version: Some(2),
                 extra: Default::default(),
             },
         ),
@@ -831,6 +835,7 @@ async fn offset_survives_benign_upstream_edit() {
         offset_record(
             OFFSET_REC,
             OffsetFaceParams {
+                primary_face_ids: face_ids.clone(),
                 face_ids,
                 faces: refs,
                 distance: Scalar::new(5.0),
@@ -839,6 +844,7 @@ async fn offset_survives_benign_upstream_edit() {
                 opposite_face_id: None,
                 opposite_face: None,
                 target_body: body,
+                result_policy_version: Some(2),
                 extra: Default::default(),
             },
         ),
@@ -921,6 +927,7 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
         offset_record(
             OFFSET_REC,
             OffsetFaceParams {
+                primary_face_ids: face_ids.clone(),
                 face_ids,
                 faces: refs,
                 distance: Scalar::new(5.0),
@@ -929,6 +936,7 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
                 opposite_face_id: None,
                 opposite_face: None,
                 target_body: body,
+                result_policy_version: Some(2),
                 extra: Default::default(),
             },
         ),
@@ -1191,17 +1199,19 @@ async fn prepare_offset_face_handshake_and_fence() {
             OFFSET_REC,
             OffsetFaceParams {
                 face_ids: vec![ElementId::new("el_placeholder")],
+                primary_face_ids: vec![ElementId::new("el_placeholder")],
                 faces: vec![face_ref(
                     body,
                     &ElementId::new("el_placeholder"),
                     anchor_of(plain.faces[0].anchor.as_ref().expect("anchor")),
                 )],
-                distance: Scalar::new(0.0),
+                distance: Scalar::new(1.0),
                 distance_type: OffsetDistanceType::Offset,
                 chain_tangent_faces: true,
                 opposite_face_id: None,
                 opposite_face: None,
                 target_body: body,
+                result_policy_version: Some(2),
                 extra: Default::default(),
             },
         ),
@@ -1268,6 +1278,7 @@ async fn offset_face_deterministic_across_processes() {
             offset_record(
                 OFFSET_REC,
                 OffsetFaceParams {
+                    primary_face_ids: face_ids.clone(),
                     face_ids,
                     faces: refs,
                     distance: Scalar::new(5.0),
@@ -1276,6 +1287,7 @@ async fn offset_face_deterministic_across_processes() {
                     opposite_face_id: None,
                     opposite_face: None,
                     target_body: body,
+                    result_policy_version: Some(2),
                     extra: Default::default(),
                 },
             ),

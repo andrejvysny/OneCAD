@@ -83,7 +83,7 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
                                std::string(op_name) + " source body not found: " + source_id);
     }
     const TopoDS_Shape source = source_rec->geom;
-    if (auto invalid = validate_modeling_input(source, op_name, "source")) return *invalid;
+    if (auto invalid = validate_modeling_body(*source_rec, op_name, "source")) return *invalid;
     if (result_policy == PatternResultPolicy::V2) {
         const kernel::validation::PublicationDecision source_decision = publication_decision(
             source, kernel::validation::single_solid_policy(
@@ -169,7 +169,8 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
         const kernel::validation::PublicationDecision decision = publication_decision(
             result, kernel::validation::single_solid_policy(
                         std::string(op_name) + " fused result",
-                        kernel::validation::PublicationTier::TierB));
+                        result_validation_tier(
+                            ctx, kernel::validation::PublicationTier::TierB)));
         if (!decision.publishable()) {
             if (ordered_solids(result).size() > 1) {
                 return OpOutcome::fail("PATTERN_DISJOINT_RESULT",

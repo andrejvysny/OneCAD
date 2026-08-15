@@ -19,6 +19,7 @@ use onecad_core::document::record::{
     DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams, FrozenPlacement, HoleParams,
     HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord,
     PlaceComponentParams, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
+    HOLE_RESULT_POLICY_VERSION,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -2337,6 +2338,7 @@ fn hole_op(hole_type: HoleType, diameter: f64, cb: Option<(f64, f64)>) -> Operat
         cb_depth: cb.map(|(_, t)| Scalar::new(t)),
         cs_diameter: None,
         cs_angle_deg: None,
+        result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
         extra: Default::default(),
     }))
 }
@@ -2722,8 +2724,20 @@ fn hole_face_rebind_refuses_an_evidence_only_ref_and_a_mismatched_op() {
 
 /// An `Offset` push-pull over `faces`, or a `Total` one when `opposite` is set.
 fn offset_face_op(faces: &[&str], opposite: Option<&str>) -> Operation {
+    offset_face_op_with_primary(faces, faces, opposite)
+}
+
+/// As [`offset_face_op`], but with the V2 design-face intent stated separately from
+/// the frozen G1 closure. Seeding the two identically — which every other fixture
+/// here does — cannot exercise the closure-only rebind path at all.
+fn offset_face_op_with_primary(
+    faces: &[&str],
+    primary: &[&str],
+    opposite: Option<&str>,
+) -> Operation {
     Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
         face_ids: faces.iter().map(|f| ElementId::new(*f)).collect(),
+        primary_face_ids: primary.iter().map(|f| ElementId::new(*f)).collect(),
         faces: faces.iter().map(|f| face_ref_at(BX(), f)).collect(),
         distance: Scalar::new(2.5),
         distance_type: match opposite {
@@ -2734,6 +2748,7 @@ fn offset_face_op(faces: &[&str], opposite: Option<&str>) -> Operation {
         opposite_face_id: opposite.map(ElementId::new),
         opposite_face: opposite.map(|o| face_ref_at(BX(), o)),
         target_body: BX(),
+        result_policy_version: Some(2),
         extra: Default::default(),
     }))
 }
@@ -2759,6 +2774,53 @@ fn stored_offset(sess: &DocumentSession) -> OffsetFaceParams {
     p.clone()
 }
 
+/// Rebinding a face that is in the frozen G1 closure but NOT in the design intent
+/// must leave `primary_face_ids` byte-identical. The complement of
+/// `offset_face_rebind_writes_the_typed_ref_and_mirrors_the_bare_id`: together they
+/// pin both branches of the `*primary == old_id` guard, which nothing else reaches
+/// because every other fixture seeds the two vectors identically.
+#[test]
+fn offset_face_rebind_of_a_closure_face_leaves_primary_intent_unchanged() {
+    let mut doc = Document::new(DocumentId(u(0x60)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Offset face",
+        offset_face_op_with_primary(&["el_design", "el_closure"], &["el_design"], None),
+        vec![BX()],
+    )]);
+    let mut sess = DocumentSession::new(doc);
+
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::OffsetFaceFace { index: 1 },
+        reference: InputRef::Element(face_ref_at(BX(), "el_fresh")),
+    })
+    .expect("closure-face rebind");
+
+    let p = stored_offset(&sess);
+    assert_eq!(
+        p.face_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["el_design", "el_fresh"],
+        "the rebound closure member follows the repaired reference"
+    );
+    assert_eq!(
+        p.primary_face_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["el_design"],
+        "design intent is untouched: the user never picked the closure face"
+    );
+    assert!(
+        p.validate().is_ok(),
+        "primary intent stays a subset of the closure after the rebind"
+    );
+}
+
 /// `OffsetFaceFace{k}` writes the whole typed ref and keeps its bare mirror in
 /// lockstep, matching the Shell/Fillet dual-field discipline.
 #[test]
@@ -2781,6 +2843,14 @@ fn offset_face_rebind_writes_the_typed_ref_and_mirrors_the_bare_id() {
             .collect::<Vec<_>>(),
         vec!["el_a", "el_fresh"],
         "the bare id mirror follows the typed ref"
+    );
+    assert_eq!(
+        p.primary_face_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["el_a", "el_fresh"],
+        "V2 primary intent follows an explicit repair rebind"
     );
     assert_eq!(
         p.faces[1].primary.as_ref().map(|x| x.element.to_string()),

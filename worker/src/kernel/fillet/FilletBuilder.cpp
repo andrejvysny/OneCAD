@@ -1,10 +1,12 @@
 #include "kernel/fillet/FilletBuilder.h"
 
+#include <algorithm>
 #include <utility>
 
 #include <Standard_Failure.hxx>
 
 #include "kernel/fillet/FilletSemanticChecks.h"
+#include "kernel/validation/GeometryPrecision.h"
 
 namespace onecad::kernel::fillet {
 
@@ -22,6 +24,21 @@ nlohmann::json audit_evidence(double radius,
             {"selfInterferenceCount", output.self_interference_count}}},
           {"inputAudit", input.to_json()},
           {"outputAudit", output.to_json()}};
+}
+
+nlohmann::json blend_evidence_json(const FilletSemanticResult &semantics) {
+  const BlendEvidence &blend = semantics.evidence.blend;
+  return {{"generatedFaceCount", semantics.evidence.generated_face_count},
+          {"supportFaceCount", semantics.evidence.support_face_count},
+          {"boundaryCount", blend.boundaries},
+          {"sampleCount", blend.samples},
+          {"maximumTangencyRadians", blend.maximum_tangency_radians},
+          {"allowedTangencyRadians", semantics.allowed_tangency_radians},
+          {"maximumSectionRadiusError", blend.maximum_profile_error},
+          {"allowedSectionRadiusError", semantics.allowed_profile_error},
+          {"minimumSectionRadius", blend.minimum_section_radius},
+          {"maximumSectionRadius", blend.maximum_section_radius},
+          {"coordinateMagnitude", blend.coordinate_magnitude}};
 }
 
 } // namespace
@@ -117,19 +134,31 @@ FilletBuildResult FilletBuilder::accept_result() {
   }
   const validation::ShapeAuditResult output_audit =
       validation::audit_shape(shape);
+  validation::PublicationPolicy output_policy =
+      validation::single_solid_policy("Fillet", validation::PublicationTier::TierB);
+  // Grows from the INPUT body's tolerance. `input_audit_.tolerances.maximum()` and
+  // `precision_of(body_).input_tolerance` are the same three-way max over
+  // face/edge/vertex; the audit's is reused so the input is measured once.
+  output_policy.maximum_tolerance = validation::precision_of(body_).tolerance_ceiling(
+      input_audit_.tolerances.maximum(), 2.0, 1.0e-6);
   const validation::PublicationDecision decision =
-      validation::evaluate_publication_policy(
-          output_audit,
-          validation::single_solid_policy("Fillet", validation::PublicationTier::TierB));
+      validation::evaluate_publication_policy(output_audit, output_policy);
   if (!decision.publishable()) {
     return fail_with_diagnostic("GEOMETRY_INVALID",
                                 "Fillet result failed shape audit",
                                 "FILLET_INVALID_RESULT", output_audit);
   }
-  const FilletSemanticResult semantics = validate_result(*builder_, analysis_);
+  const FilletSemanticResult semantics = validate_result(
+      *builder_, analysis_, body_, shape, requested_, radius_);
   if (!semantics.ok) {
-    return fail_with_diagnostic("GEOMETRY_INVALID", semantics.message,
-                                "FILLET_SEMANTIC_CHECK_FAILED", output_audit);
+    FilletBuildResult failure = fail_with_diagnostic(
+        "GEOMETRY_INVALID", semantics.message,
+        "FILLET_SEMANTIC_CHECK_FAILED", output_audit);
+    if (!failure.diagnostics.empty())
+      failure.diagnostics.front().evidence["blendEvidence"] =
+          blend_evidence_json(semantics);
+    failure.fillet_evidence = semantics.evidence;
+    return failure;
   }
 
   FilletBuildResult result;
@@ -138,6 +167,7 @@ FilletBuildResult FilletBuilder::accept_result() {
   result.analysis = analysis_;
   result.input_audit = input_audit_;
   result.output_audit = output_audit;
+  result.fillet_evidence = semantics.evidence;
   return result;
 }
 

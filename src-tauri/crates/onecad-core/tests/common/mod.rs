@@ -358,6 +358,7 @@ pub fn offset_face_ref(el: &str, surface: &str, x: f64) -> ElementRef {
 pub fn op_offset_face_offset_multi() -> Operation {
     Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
         face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+        primary_face_ids: vec![ElementId::new("el_f1")],
         faces: vec![
             offset_face_ref("el_f1", "plane", 0.0),
             offset_face_ref("el_f2", "plane", 40.0),
@@ -368,6 +369,7 @@ pub fn op_offset_face_offset_multi() -> Operation {
         opposite_face_id: None,
         opposite_face: None,
         target_body: body_a(),
+        result_policy_version: Some(2),
         extra: Default::default(),
     }))
 }
@@ -376,6 +378,7 @@ pub fn op_offset_face_offset_multi() -> Operation {
 pub fn op_offset_face_radius() -> Operation {
     Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
         face_ids: vec![ElementId::new("el_cyl")],
+        primary_face_ids: vec![ElementId::new("el_cyl")],
         faces: vec![offset_face_ref("el_cyl", "cylinder", 5.0)],
         distance: Scalar::new(6.0),
         distance_type: OffsetDistanceType::Radius,
@@ -383,6 +386,7 @@ pub fn op_offset_face_radius() -> Operation {
         opposite_face_id: None,
         opposite_face: None,
         target_body: body_a(),
+        result_policy_version: Some(2),
         extra: Default::default(),
     }))
 }
@@ -392,6 +396,7 @@ pub fn op_offset_face_radius() -> Operation {
 pub fn op_offset_face_total() -> Operation {
     Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
         face_ids: vec![ElementId::new("el_top")],
+        primary_face_ids: vec![ElementId::new("el_top")],
         faces: vec![offset_face_ref("el_top", "plane", 0.0)],
         distance: Scalar::new(12.0),
         distance_type: OffsetDistanceType::Total,
@@ -399,6 +404,7 @@ pub fn op_offset_face_total() -> Operation {
         opposite_face_id: Some(ElementId::new("el_bottom")),
         opposite_face: Some(offset_face_ref("el_bottom", "plane", 0.0)),
         target_body: body_a(),
+        result_policy_version: Some(2),
         extra: Default::default(),
     }))
 }

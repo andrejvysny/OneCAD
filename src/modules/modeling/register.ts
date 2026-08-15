@@ -136,6 +136,7 @@ function toolDefinition(d: ModelingToolDescriptor): ToolDefinition {
           canActivate: () =>
             getToolApplicability(d.tool, selectionStore.getState().selected, {
               sketches: documentStore.getState().sketches,
+              bodies: documentStore.getState().bodies,
             }),
           // The answer above moves with the selection (and with which sketches
           // exist), neither of which a generic toolbar watches. One shared

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>  // std::abort
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -184,6 +185,7 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
         // rank. Absence = "no claim" (SCHEMA §7.2), so a step that never ranks its
         // bodies stays byte-identical to the pre-VF-B6 wire.
         if (e.rank_key) be["rankKey"] = *e.rank_key;
+        if (e.health) be["health"] = *e.health;
         body_events.push_back(std::move(be));
     }
     json payload = {
@@ -266,7 +268,8 @@ struct ExecResult {
 // / Boolean run OCCT; other verbs are UNSUPPORTED this WP.
 ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string& op_id,
                              std::string& last_sketch_id, const onecad::CancelToken& cancel,
-                             bool post_upstream_edit, bool from_zero_replay) {
+                             bool post_upstream_edit, bool from_zero_replay,
+                             ops::ValidationMode validation_mode) {
     const std::string op_type = get_str(op, "opType");
     const json params = (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
@@ -280,7 +283,7 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     const OpDeterminism det = read_determinism(op);
     ops::OpContext octx{job.bodies,       &job.sketches,    job.partition, &last_sketch_id,
                         det.parallel,     det.occt_options, &cancel,       post_upstream_edit,
-                        from_zero_replay};
+                        from_zero_replay, validation_mode};
 
     if (op_type == "Extrude") return ops::execute_extrude(octx, op, op_id);
     if (op_type == "Boolean") return ops::execute_boolean(octx, op, op_id);
@@ -386,16 +389,100 @@ bool step_is_post_edit(const ScratchJob& job, const json& op) {
     if (!op.contains("stepIndex") || !op["stepIndex"].is_number()) return false;
     return op["stepIndex"].get<std::uint64_t>() > *job.edited_from;
 }
+
+std::optional<ops::OpOutcome> validate_operation_body_inputs(
+    const ScratchJob& job, const json& op) {
+    if (!op.contains("inputs") || !op["inputs"].is_array()) return std::nullopt;
+    for (const json& input : op["inputs"]) {
+        if (!input.is_object() || !input.contains("primary") ||
+            !input["primary"].is_object()) {
+            continue;
+        }
+        const std::string body_id = get_str(input["primary"], "bodyId");
+        const session::BodyRecord* body =
+            body_id.empty() ? nullptr : job.bodies.get(body_id);
+        if (body == nullptr || body->modeling_eligible()) continue;
+        const std::string message = "Operation cannot reference quarantined body " +
+                                    body_id +
+                                    (body->health_reason.empty()
+                                         ? std::string{}
+                                         : ": " + body->health_reason);
+        ops::OpOutcome failure =
+            ops::OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", "QUARANTINED_MODELING_INPUT"},
+                                       {"message", message},
+                                       {"stage", "input-validation"},
+                                       {"bodyId", body_id}});
+        return failure;
+    }
+    return std::nullopt;
+}
+
+std::optional<ops::OpOutcome> validate_published_bodies(
+    const ScratchJob& job, const json& op, const ops::OpOutcome& outcome) {
+    const std::string op_type = get_str(op, "opType");
+    // Quarantined imports and the versioned legacy aggregate contracts are explicit
+    // compatibility exceptions. Every healthy published Body is held to the global
+    // exactly-one-connected-solid invariant here, after the operation-local checks
+    // and before scratch state can become a successful candidate.
+    const json params = op.contains("params") && op["params"].is_object()
+                            ? op["params"]
+                            : json::object();
+    const bool legacy_aggregate =
+        (op_type == "Hole" && !params.contains("resultPolicyVersion")) ||
+        ((op_type == "LinearPattern" || op_type == "CircularPattern") &&
+         !params.contains("resultPolicyVersion"));
+
+    std::set<std::string> published;
+    for (const session::BodyEvent& event : outcome.body_events) {
+        if (event.kind == "created" || event.kind == "modified")
+            published.insert(event.body_id);
+    }
+    for (const std::string& body_id : published) {
+        const session::BodyRecord* body = job.bodies.get(body_id);
+        if (!body) {
+            return ops::OpOutcome::fail(
+                "GEOMETRY_INVALID", "Published body is missing from scratch state: " + body_id);
+        }
+        if (op_type == "ImportStep" && !body->modeling_eligible()) continue;
+        kernel::validation::PublicationPolicy policy;
+        policy.name = op_type + " body " + body_id;
+        policy.allowed_top_level_shapes = legacy_aggregate
+            ? kernel::validation::TopLevelShapePolicy::SolidSet
+            : kernel::validation::TopLevelShapePolicy::SingleBody;
+        policy.max_solid_count = legacy_aggregate ? -1 : 1;
+        policy.tier = kernel::validation::PublicationTier::TierA;
+        const kernel::validation::PublicationDecision decision =
+            ops::publication_decision(body->geom, policy);
+        if (!decision.publishable()) {
+            ops::OpOutcome failure = ops::OpOutcome::fail(decision.code, decision.message);
+            failure.diagnostics.push_back({{"severity", "error"},
+                                           {"code", decision.code},
+                                           {"message", decision.message},
+                                           {"stage", "publication-invariant"},
+                                           {"bodyId", body_id},
+                                           {"evidence", decision.evidence.to_json()}});
+            return failure;
+        }
+    }
+    return std::nullopt;
+}
 }  // namespace
 
 CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
                                      const std::string& op_id,
                                      std::string& last_sketch_id,
-                                     const onecad::CancelToken& cancel) {
+                                     const onecad::CancelToken& cancel,
+                                     ops::ValidationMode validation_mode) {
     CandidateResult result;
     result.ref_bindings = collect_ref_bindings(op, op_id);
     if (cancel.cancelled()) {
         result.status = CandidateResult::Status::Cancelled;
+        return result;
+    }
+    if (const auto failure = validate_operation_body_inputs(job, op)) {
+        merge_outcome(result, *failure);
         return result;
     }
 
@@ -412,9 +499,16 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
                            result.needs_repair);
     }
     if (result.needs_repair.empty()) {
-        merge_outcome(
-            result, run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit,
-                                  job.from_zero_replay));
+        ops::OpOutcome outcome =
+            run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit,
+                          job.from_zero_replay, validation_mode);
+        if (outcome.status == ops::OpOutcome::Status::Ok) {
+            if (const auto invariant_failure =
+                    validate_published_bodies(job, op, outcome)) {
+                outcome = *invariant_failure;
+            }
+        }
+        merge_outcome(result, std::move(outcome));
     } else {
         result.status = CandidateResult::Status::NeedsRepair;
     }

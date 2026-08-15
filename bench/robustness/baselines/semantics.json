@@ -14,18 +14,20 @@
         "supported": 72
       },
       "failureClass": {
-        "kernelRejected": 24,
-        "none": 112
+        "kernelRejected": 32,
+        "none": 104
       },
       "generator": {
         "fillet-foundation": 136
       },
       "verdict": {
-        "pass": 136
+        "characterization": 8,
+        "pass": 128
       }
     },
     "differential": {
-      "same-status": 136
+      "same-status": 120,
+      "status-difference": 16
     },
     "replay": {
       "stable": 136,

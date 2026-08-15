@@ -48,8 +48,8 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
 
     const TopoDS_Shape old_target = target_rec->geom;
     const TopoDS_Shape tool_shape = tool_rec->geom;
-    if (auto invalid = validate_modeling_input(old_target, "Boolean", "target")) return *invalid;
-    if (auto invalid = validate_modeling_input(tool_shape, "Boolean", "tool")) return *invalid;
+    if (auto invalid = validate_modeling_body(*target_rec, "Boolean", "target")) return *invalid;
+    if (auto invalid = validate_modeling_body(*tool_rec, "Boolean", "tool")) return *invalid;
     std::shared_ptr<BRepBuilderAPI_MakeShape> builder;
     BooleanResult br = checked_boolean(old_target, tool_shape, *mode, ctx.parallel, ctx.occt_options,
                                        ctx.cancel, builder);
@@ -57,8 +57,12 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
     kernel::validation::PublicationPolicy policy;
     policy.name = "Boolean";
+    policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
     policy.max_solid_count = -1;
-    policy.tier = kernel::validation::PublicationTier::TierB;
+    policy.tier = result_validation_tier(
+        ctx, kernel::validation::PublicationTier::TierB);
+    policy.require_closed_manifold =
+        policy.tier == kernel::validation::PublicationTier::TierB;
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {

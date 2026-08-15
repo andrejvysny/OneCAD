@@ -307,6 +307,8 @@ OpOutcome execute_gear(OpContext& ctx, const json& op, const std::string& op_id)
             return OpOutcome::fail("REF_UNRESOLVED",
                                    "Gear placement body not found: " + host_id);
         }
+        if (auto invalid = validate_modeling_body(*host_rec, "Gear", "placement"))
+            return *invalid;
         const TopoDS_Shape host_shape = host_rec->geom;
 
         std::optional<em::LadderRef> ref = placement_face_ref(op, params, op_id);
@@ -382,7 +384,9 @@ OpOutcome execute_gear(OpContext& ctx, const json& op, const std::string& op_id)
     // --- publication: the FULL audit (SCHEMA §7.3) -------------------------
     const kernel::validation::PublicationDecision decision = publication_decision(
         built.shape,
-        kernel::validation::single_solid_policy("Gear", kernel::validation::PublicationTier::TierB));
+        kernel::validation::single_solid_policy(
+            "Gear", result_validation_tier(
+                        ctx, kernel::validation::PublicationTier::TierB)));
     if (!decision.publishable()) {
         return OpOutcome::fail(decision.code, decision.message);
     }

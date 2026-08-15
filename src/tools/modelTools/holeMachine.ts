@@ -70,6 +70,8 @@ export interface HoleFsm {
   /** Countersink block — same retention rule. */
   csDiameter: number;
   csAngleDeg: number;
+  /** Absent on a re-edited legacy Hole; fresh authoring uses strict V2. */
+  resultPolicyVersion?: 2;
   /**
    * Whether the user has authored a diameter yet. A pristine arm takes a standards
    * preset or a profile default wholesale; once a size is theirs it survives
@@ -118,6 +120,7 @@ export function holeInit(): HoleFsm {
     cbDepth: DEFAULT_HOLE_CB_DEPTH,
     csDiameter: DEFAULT_HOLE_CS_DIAMETER,
     csAngleDeg: DEFAULT_HOLE_CS_ANGLE,
+    resultPolicyVersion: 2,
     touched: false,
   };
 }
@@ -270,6 +273,7 @@ export function holeParamsOf(s: HoleFsm): HoleParams {
     cbDepth: cb ? s.cbDepth : null,
     csDiameter: cs ? s.csDiameter : null,
     csAngleDeg: cs ? s.csAngleDeg : null,
+    ...(s.resultPolicyVersion === 2 ? { resultPolicyVersion: 2 as const } : {}),
   };
 }
 
@@ -312,6 +316,8 @@ export function holeFsmFromParams(stored: Record<string, unknown> | undefined): 
   if (!Array.isArray(raw) || raw.length !== 3 || raw.some((c) => typeof c !== "number")) return null;
   const diameter = wireScalar(stored.diameter);
   if (diameter === undefined) return null;
+  const policy = stored.resultPolicyVersion;
+  if (policy !== undefined && policy !== 2) return null;
   const holeType = stored.holeType;
   const base = holeInit();
   return {
@@ -329,6 +335,7 @@ export function holeFsmFromParams(stored: Record<string, unknown> | undefined): 
     cbDepth: wireScalar(stored.cbDepth) ?? base.cbDepth,
     csDiameter: wireScalar(stored.csDiameter) ?? base.csDiameter,
     csAngleDeg: wireScalar(stored.csAngleDeg) ?? base.csAngleDeg,
+    resultPolicyVersion: policy === 2 ? 2 : undefined,
     // A restored size is an authored one.
     touched: true,
   };

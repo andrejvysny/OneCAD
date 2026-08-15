@@ -183,9 +183,17 @@ add_executable(test_prepare_edge_op test_prepare_edge_op.cpp)
 target_link_libraries(test_prepare_edge_op PRIVATE worker_core)
 add_test(NAME prepare_edge_op COMMAND test_prepare_edge_op)
 
+# The identity harness for GeometryPrecisionContext. Asserts every accessor
+# against the INLINED literal it is going to replace, so a later call-site move
+# that reds a suite is provably the move and not the number. Must stay green
+# with zero digest movement at every gate of the precision migration.
+add_executable(test_geometry_precision test_geometry_precision.cpp)
+target_link_libraries(test_geometry_precision PRIVATE worker_core)
+add_test(NAME geometry_precision COMMAND test_geometry_precision)
+
 # F1: constant-radius fillet construction, structured failure evidence, OCCT
 # history, and non-gating simulation/vertex characterization.
-foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization)
+foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization blend_recognizer)
     add_executable(test_${_t} test_${_t}.cpp)
     target_link_libraries(test_${_t} PRIVATE worker_core)
     add_test(NAME ${_t} COMMAND test_${_t})
@@ -197,6 +205,12 @@ endforeach()
 add_executable(test_offsetface_spike test_offsetface_spike.cpp)
 target_link_libraries(test_offsetface_spike PRIVATE worker_core)
 add_test(NAME offsetface_spike COMMAND test_offsetface_spike)
+
+# Imported-blend direct-model reconstruction spike: recognize a history-free
+# constant-radius fillet, suppress it, and prove the sharp support body is restored.
+add_executable(test_offsetface_reblend_spike test_offsetface_reblend_spike.cpp)
+target_link_libraries(test_offsetface_reblend_spike PRIVATE worker_core)
+add_test(NAME offsetface_reblend_spike COMMAND test_offsetface_reblend_spike)
 
 # --- OFFSET-FACE W1: the `op.offsetFace` executor (SCHEMA §7.3) + the read-only
 #     `PrepareOffsetFace` authoring handshake (§7.6). Exact analytic volumes/radii,

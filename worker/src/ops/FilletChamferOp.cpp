@@ -193,10 +193,10 @@ std::optional<OpOutcome> build_fillet(
     return failure;
 }
 
-std::optional<OpOutcome> validate_chamfer(const TopoDS_Shape& result) {
+std::optional<OpOutcome> validate_chamfer(
+    const TopoDS_Shape& result, kernel::validation::PublicationTier tier) {
     const kernel::validation::PublicationDecision decision = publication_decision(
-        result, kernel::validation::single_solid_policy(
-                    "Chamfer", kernel::validation::PublicationTier::TierB));
+        result, kernel::validation::single_solid_policy("Chamfer", tier));
     if (!decision.publishable()) return OpOutcome::fail(decision.code, decision.message);
     return std::nullopt;
 }
@@ -204,6 +204,7 @@ std::optional<OpOutcome> validate_chamfer(const TopoDS_Shape& result) {
 std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
                                        const std::vector<TopoDS_Edge>& edges, double radius,
                                        bool two_distance, double distance2,
+                                       kernel::validation::PublicationTier validation_tier,
                                        std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
                                        TopoDS_Shape& result) {
     TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
@@ -230,7 +231,7 @@ std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
     if (!chamfer->IsDone()) return OpOutcome::fail("OP_FAILED", "Chamfer operation failed");
     result = chamfer->Shape();
     builder = chamfer;
-    return validate_chamfer(result);
+    return validate_chamfer(result, validation_tier);
 }
 
 struct EdgeValues {
@@ -364,7 +365,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
         return OpOutcome::fail("REF_UNRESOLVED",
                                std::string(name) + " target body not found: " + target_id);
     }
-    if (auto invalid = validate_modeling_input(target->geom, name, "target")) return *invalid;
+    if (auto invalid = validate_modeling_body(*target, name, "target")) return *invalid;
     const EdgeValues values = read_values(op, mode);
     if (values.stop) return *values.stop;
     EdgeResolution resolved = resolve_edges(ctx, op, op_id, target_id, target->geom, name);
@@ -386,8 +387,10 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
                                                      values.radius, fillet_builder, result)
                                                : build_chamfer(
                                                      target->geom, resolved.edges, values.radius,
-                                                     values.two_distance, values.distance2, builder,
-                                                     result);
+                                                     values.two_distance, values.distance2,
+                                                     result_validation_tier(
+                                                         ctx, kernel::validation::PublicationTier::TierB),
+                                                     builder, result);
         if (failure) return std::move(*failure);
     } catch (const Standard_Failure& error) {
         return OpOutcome::fail(

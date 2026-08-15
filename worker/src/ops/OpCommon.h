@@ -45,16 +45,37 @@ std::string read_str(const nlohmann::json& o, const char* key, const std::string
 bool read_bool_strict(const nlohmann::json& params, const char* key, bool dflt,
                       bool& value_out, std::string& error_out);
 
+// A typed array of ids. Absence yields an empty vector and `true` (the caller owns
+// the "is absence legal here?" question); a PRESENT non-array, a non-string element,
+// or an empty-string element is an error. Filtering a malformed element out instead
+// would silently SHORTEN the array and shift every positional `inputs[]` pairing —
+// the worker is an independent trust boundary and must refuse, never repair.
+bool read_string_array_strict(const nlohmann::json& params, const char* key,
+                              std::vector<std::string>& value_out,
+                              std::string& error_out);
+
 // Collect policy-tier evidence and classify one operation result. Callers own
 // lifecycle changes only after this returns `Publishable` or `LifecycleOnly`.
 kernel::validation::PublicationDecision publication_decision(
     const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy);
+
+// Preview may use Tier A evidence for responsiveness, while commit/gate execution
+// must retain the authoritative tier requested by the operation. Structural Body,
+// BRep, volume and tolerance checks remain mandatory at every tier.
+kernel::validation::PublicationTier result_validation_tier(
+    const OpContext& ctx, kernel::validation::PublicationTier authoritative);
 
 // Mutating operations must refuse an invalid modeling input before invoking OCCT.
 // Import remains separate because its advisory/healing policy is versioned.
 std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
                                                  const std::string& operation,
                                                  const std::string& role);
+
+// Body-aware trust boundary: quarantined imported geometry remains visible and
+// exportable, but cannot enter any modeling operation.
+std::optional<OpOutcome> validate_modeling_body(
+    const session::BodyRecord& body, const std::string& operation,
+    const std::string& role);
 
 // Operation-local semantic-ref ownership preflight. The generic ladder deliberately
 // accepts refs against their own named bodies; these operations instead require

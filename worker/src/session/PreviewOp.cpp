@@ -149,7 +149,9 @@ bool seed_profile_sketch(Session& session, const Envelope& req, const json& op,
 json body_events_json(const std::vector<BodyEvent>& events) {
     json out = json::array();
     for (const BodyEvent& event : events) {
-        out.push_back({{"kind", event.kind}, {"bodyId", event.body_id}});
+        json value = {{"kind", event.kind}, {"bodyId", event.body_id}};
+        if (event.health) value["health"] = *event.health;
+        out.push_back(std::move(value));
     }
     return out;
 }
@@ -282,7 +284,8 @@ Envelope handle_preview_op(Session& session, const Envelope& req,
     const std::string op_id =
         input.op.value("opId", std::string("preview"));
     CandidateResult outcome = execute_candidate_op(
-        job, input.op, op_id, last_sketch_id, cancel);
+        job, input.op, op_id, last_sketch_id, cancel,
+        ops::ValidationMode::PreviewInteractive);
     if (outcome.status == CandidateResult::Status::Cancelled) {
         return err(req, "CANCELLED", "preview cancelled");
     }
