@@ -37,11 +37,14 @@ namespace {
 
 constexpr double kMinAngleDeg = 1e-3;  // RegenerationEngine.cpp:62 kMinAngleDeg
 
-app::BooleanMode boolean_mode_of(const std::string& s) {
+// An unknown mode is a MALFORMED RECORD, not a NewBody request: falling back would
+// mint a fresh body where the user asked for a cut. Mirrors ExtrudeOp.cpp.
+std::optional<app::BooleanMode> boolean_mode_of(const std::string& s) {
+    if (s == "NewBody") return app::BooleanMode::NewBody;
     if (s == "Add") return app::BooleanMode::Add;
     if (s == "Cut") return app::BooleanMode::Cut;
     if (s == "Intersect") return app::BooleanMode::Intersect;
-    return app::BooleanMode::NewBody;
+    return std::nullopt;
 }
 
 const json* find_sketch(const OpContext& ctx, const std::string& sid_in,
@@ -82,7 +85,17 @@ bool axis_from_sketch_line(const OpContext& ctx, const std::string& sketch_id,
         err = "Revolve: axis sketch translate failed: " + tr.error;
         return false;
     }
-    tr.sketch->solve();
+    // An unconverged solve leaves the seed positions in place, so the axis would be
+    // built from geometry that does not satisfy the sketch's own constraints — and a
+    // wrong-but-nonzero axis sails past the degenerate-length guard below. Same
+    // discipline the profile already gets in OpCommon::build_profile_face.
+    const core::sketch::SolveResult solve = tr.sketch->solve();
+    if (!solve.success) {
+        err = "Revolve: axis sketch solve failed: " +
+              (solve.errorMessage.empty() ? std::string("constraint solve did not converge")
+                                          : solve.errorMessage);
+        return false;
+    }
     auto it = tr.index.wire_to_internal.find(line_id);
     if (it == tr.index.wire_to_internal.end()) {
         err = "Revolve: axis line '" + line_id + "' not found in sketch";
@@ -218,6 +231,18 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
+    // Refuse a malformed boolean mode BEFORE any OCCT work — and never coerce a
+    // non-string through `read_str`'s default.
+    if (params.contains("booleanMode") && !params["booleanMode"].is_string()) {
+        return OpOutcome::fail("OP_FAILED", "Revolve: malformed booleanMode");
+    }
+    const std::string boolean_mode_str = read_str(params, "booleanMode", "NewBody");
+    const std::optional<app::BooleanMode> boolean_mode_opt = boolean_mode_of(boolean_mode_str);
+    if (!boolean_mode_opt) {
+        return OpOutcome::fail("OP_FAILED",
+                               "Revolve: unknown boolean mode '" + boolean_mode_str + "'");
+    }
+
     double angle_deg = 360.0;
     std::string angle_error;
     if (!read_scalar_strict(params, "angleDeg", 360.0, angle_deg, angle_error)) {
@@ -299,7 +324,7 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
         return OpOutcome::fail("OP_FAILED", "Revolve failed");
     }
 
-    const app::BooleanMode boolean_mode = boolean_mode_of(read_str(params, "booleanMode", "NewBody"));
+    const app::BooleanMode boolean_mode = *boolean_mode_opt;
 
     OpOutcome out;
     if (boolean_mode == app::BooleanMode::NewBody) {
