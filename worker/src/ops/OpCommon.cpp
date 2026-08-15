@@ -85,6 +85,31 @@ bool read_bool_strict(const json& params, const char* key, bool dflt,
     return true;
 }
 
+bool read_string_array_strict(const json& params, const char* key,
+                              std::vector<std::string>& value_out,
+                              std::string& error_out) {
+    value_out.clear();
+    if (!params.is_object() || !params.contains(key)) return true;
+    const json& value = params[key];
+    if (!value.is_array()) {
+        error_out = std::string(key) + " must be an array of ids";
+        return false;
+    }
+    for (const json& entry : value) {
+        if (!entry.is_string()) {
+            error_out = std::string(key) + " must contain only string ids";
+            return false;
+        }
+        std::string id = entry.get<std::string>();
+        if (id.empty()) {
+            error_out = std::string(key) + " must not contain an empty id";
+            return false;
+        }
+        value_out.push_back(std::move(id));
+    }
+    return true;
+}
+
 kernel::validation::PublicationDecision publication_decision(
     const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy) {
     const kernel::validation::ShapeEvidence evidence =

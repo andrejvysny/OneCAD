@@ -45,6 +45,15 @@ std::string read_str(const nlohmann::json& o, const char* key, const std::string
 bool read_bool_strict(const nlohmann::json& params, const char* key, bool dflt,
                       bool& value_out, std::string& error_out);
 
+// A typed array of ids. Absence yields an empty vector and `true` (the caller owns
+// the "is absence legal here?" question); a PRESENT non-array, a non-string element,
+// or an empty-string element is an error. Filtering a malformed element out instead
+// would silently SHORTEN the array and shift every positional `inputs[]` pairing —
+// the worker is an independent trust boundary and must refuse, never repair.
+bool read_string_array_strict(const nlohmann::json& params, const char* key,
+                              std::vector<std::string>& value_out,
+                              std::string& error_out);
+
 // Collect policy-tier evidence and classify one operation result. Callers own
 // lifecycle changes only after this returns `Publishable` or `LifecycleOnly`.
 kernel::validation::PublicationDecision publication_decision(

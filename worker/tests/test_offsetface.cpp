@@ -682,6 +682,85 @@ void test_ladder_rung_and_needs_repair() {
     }
 }
 
+// The worker is an INDEPENDENT trust boundary: a malformed typed array must be
+// refused, not filtered into a different valid request. Silently dropping one
+// element shortens `faceIds` while `inputs[]` keeps its length, so every remaining
+// id would be paired with its neighbour's evidence (and the Total opposite would be
+// read from the wrong slot entirely).
+void test_malformed_wire_contract() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    const std::string top = key_near(box, 5, 5, 10);
+    const int top_ord = face_ordinal_near(box, 5, 5, 10);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(box, TopAbs_FACE, faces);
+    const TopoDS_Shape top_face = faces(top_ord);
+
+    auto seeded = [&](json params, json inputs = json()) {
+        BodyStore bodies;
+        bodies.create("body_1", "op_seed", box);
+        em::ElementMapPartition part;
+        return run_offset(bodies, part, std::move(params), "op_off", std::move(inputs));
+    };
+    auto refused_by_code = [&](const ops::OpOutcome& o, const char* code) {
+        return o.status == ops::OpOutcome::Status::Failed && o.error_code == "OP_FAILED" &&
+               !o.diagnostics.empty() && o.diagnostics.front().value("code", "") == code;
+    };
+
+    {  // (a) a non-string element in `faceIds`
+        json p = offset_params("body_1", {top}, 2.0);
+        p["faceIds"].push_back(42);
+        const ops::OpOutcome o = seeded(p);
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "malformed faceIds element: refused by code (" + o.error_message + ")");
+        check(o.body_events.empty(), "malformed faceIds element: nothing published");
+    }
+    {  // (b) `faceIds` present but not an array
+        json p = offset_params("body_1", {top}, 2.0);
+        p["faceIds"] = top;
+        const ops::OpOutcome o = seeded(p);
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "non-array faceIds: refused by code (" + o.error_message + ")");
+    }
+    {  // (c) a non-string element in `primaryFaceIds` must NOT degrade into the
+       //     misleading "V2 requires primaryFaceIds" absence message.
+        json p = offset_params("body_1", {top}, 2.0);
+        p["primaryFaceIds"].push_back(7);
+        const ops::OpOutcome o = seeded(p);
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "malformed primaryFaceIds element: refused by code (" + o.error_message + ")");
+        check(o.error_message.find("primaryFaceIds") != std::string::npos,
+              "malformed primaryFaceIds element: names the offending key");
+    }
+    {  // (d) a typed ref whose own elementId disagrees with the id it is paired with
+        json inputs = json::array({json{
+            {"primary", {{"bodyId", "body_1"}, {"elementId", "el_other"}, {"kind", "face"}}},
+            {"intent",
+             {{"kind", "face"},
+              {"descriptor", em::ElementMapPartition::descriptor_to_json(
+                                 em::ElementMapPartition::describe(top_face))}}},
+            {"anchor", {{"worldPoint", {5.0, 5.0, 10.0}}}}}});
+        const ops::OpOutcome o =
+            seeded(offset_params("body_1", {"el_top"}, 2.0), std::move(inputs));
+        check(refused_by_code(o, "OFFSET_FACE_REF_MISMATCH"),
+              "ref/id mismatch: refused by code (" + o.error_message + ")");
+        check(o.needs_repair.empty(),
+              "ref/id mismatch: a malformed record is not a repairable reference");
+    }
+    {  // (e) a present `inputs[]` of the wrong length
+        json inputs = json::array({json{
+            {"primary", {{"bodyId", "body_1"}, {"elementId", "el_top"}, {"kind", "face"}}},
+            {"intent",
+             {{"kind", "face"},
+              {"descriptor", em::ElementMapPartition::descriptor_to_json(
+                                 em::ElementMapPartition::describe(top_face))}}},
+            {"anchor", {{"worldPoint", {5.0, 5.0, 10.0}}}}}});
+        json p = offset_params("body_1", {"el_top", "el_second"}, 2.0);
+        const ops::OpOutcome o = seeded(p, std::move(inputs));
+        check(refused_by_code(o, "OFFSET_FACE_MALFORMED_FACE_IDS"),
+              "inputs arity: refused by code (" + o.error_message + ")");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 4. `PrepareOffsetFace` (SCHEMA §7.6) — read-only, fenced, minting-free
 // ═══════════════════════════════════════════════════════════════════════════
@@ -943,6 +1022,7 @@ int main() {
     test_trimmed_face_sampling();
     test_history_relabels_tracked_faces();
     test_ladder_rung_and_needs_repair();
+    test_malformed_wire_contract();
     test_prepare_closure_expansion();
     test_prepare_total_opposite();
     test_prepare_refusals_and_fence();

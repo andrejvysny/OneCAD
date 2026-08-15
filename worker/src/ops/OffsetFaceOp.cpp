@@ -359,6 +359,45 @@ json input_at(const json& op, std::size_t index) {
     return op["inputs"][index];
 }
 
+// A persisted record whose typed id arrays or `inputs[]` arity do not satisfy the
+// §7.3 contract. Distinct from `UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION`
+// (a version this build does not implement) — this record is malformed at any version.
+OpOutcome malformed_face_ids(const std::string& detail) {
+    OpOutcome failure = OpOutcome::fail("OP_FAILED", "OffsetFace " + detail);
+    failure.diagnostics.push_back({{"severity", "error"},
+                                   {"code", "OFFSET_FACE_MALFORMED_FACE_IDS"},
+                                   {"message", failure.error_message},
+                                   {"stage", "preflight"}});
+    return failure;
+}
+
+// A typed `inputs[]` slot whose own `primary.elementId` disagrees with the bare
+// `faceIds[i]` it is paired with. Rust already enforces the lockstep on authoring
+// (`record.rs` OffsetFaceParams::validate); the worker must not simply trust it.
+OpOutcome mismatched_face_ref(const std::string& detail) {
+    OpOutcome failure = OpOutcome::fail("OP_FAILED", "OffsetFace " + detail);
+    failure.diagnostics.push_back({{"severity", "error"},
+                                   {"code", "OFFSET_FACE_REF_MISMATCH"},
+                                   {"message", failure.error_message},
+                                   {"stage", "preflight"}});
+    return failure;
+}
+
+// The typed `inputs[]` slot paired with a bare id must name the SAME element. Absent
+// typed evidence stays legal (partition-only records), and a pre-promotion "f:N"
+// TopoKey is not an ElementId so it is not comparable.
+std::optional<OpOutcome> check_ref_pairing(const json& op, std::size_t index,
+                                           const std::string& id, const char* label) {
+    const json in = input_at(op, index);
+    if (!in.is_object() || !in.contains("primary") || !in["primary"].is_object())
+        return std::nullopt;
+    const std::string element = read_str(in["primary"], "elementId");
+    if (element.empty() || id.empty() || id.rfind("f:", 0) == 0) return std::nullopt;
+    if (element == id) return std::nullopt;
+    return mismatched_face_ref(std::string(label) + " typed ref names '" + element +
+                               "' but its paired id is '" + id + "'");
+}
+
 json synthetic_needs_repair(const std::string& ref_id, const std::string& element_id,
                             const std::string& label) {
     return json{{"refId", ref_id},
@@ -693,11 +732,14 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     }
 
     // --- params ---------------------------------------------------------------
+    // Typed arrays are refused, never filtered: `faceIds[i]` pairs POSITIONALLY with
+    // `inputs[i]` (and the Total opposite sits at slot `faceIds.size()`), so dropping
+    // one malformed element would silently rebind every remaining ref to its
+    // neighbour's evidence.
     std::vector<std::string> face_ids;
-    if (params.contains("faceIds") && params["faceIds"].is_array()) {
-        for (const json& v : params["faceIds"]) {
-            if (v.is_string()) face_ids.push_back(v.get<std::string>());
-        }
+    std::string ids_error;
+    if (!read_string_array_strict(params, "faceIds", face_ids, ids_error)) {
+        return malformed_face_ids(ids_error);
     }
     if (face_ids.empty()) {
         return OpOutcome::fail("OP_FAILED", "OffsetFace requires a non-empty faceIds");
@@ -715,11 +757,9 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
                  {"stage", "preflight"}});
             return failure;
         }
-        if (params.contains("primaryFaceIds") &&
-            params["primaryFaceIds"].is_array()) {
-            for (const json& value : params["primaryFaceIds"]) {
-                if (value.is_string()) primary_face_ids.push_back(value.get<std::string>());
-            }
+        if (!read_string_array_strict(params, "primaryFaceIds", primary_face_ids,
+                                      ids_error)) {
+            return malformed_face_ids(ids_error);
         }
         if (primary_face_ids.empty()) {
             return OpOutcome::fail("OP_FAILED",
@@ -769,6 +809,28 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     const std::string opposite_id = read_str(params, "oppositeFaceId");
     if (type == DistanceType::Total && opposite_id.empty()) {
         return OpOutcome::fail("OP_FAILED", "Total distanceType requires oppositeFaceId");
+    }
+
+    // --- `inputs[]` contract (SCHEMA §7.3: one typed ref per face, same order, the
+    //     Total opposite LAST). Absent/empty inputs remains the legal partition-only
+    //     record; a PRESENT array of the wrong length would silently pair each id
+    //     with a neighbour's evidence.
+    const std::size_t expected_inputs =
+        face_ids.size() + (type == DistanceType::Total ? 1u : 0u);
+    if (op.contains("inputs") && op["inputs"].is_array() && !op["inputs"].empty() &&
+        op["inputs"].size() != expected_inputs) {
+        return malformed_face_ids("inputs carries " + std::to_string(op["inputs"].size()) +
+                                  " refs for " + std::to_string(expected_inputs) +
+                                  " ids");
+    }
+    for (std::size_t i = 0; i < face_ids.size(); ++i) {
+        if (std::optional<OpOutcome> bad = check_ref_pairing(op, i, face_ids[i], "faceIds"))
+            return *bad;
+    }
+    if (type == DistanceType::Total) {
+        if (std::optional<OpOutcome> bad =
+                check_ref_pairing(op, face_ids.size(), opposite_id, "oppositeFaceId"))
+            return *bad;
     }
 
     // --- resolve the operative faces (+ the Total opposite, LAST slot) --------
