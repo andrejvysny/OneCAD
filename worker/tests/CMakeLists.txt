@@ -183,6 +183,14 @@ add_executable(test_prepare_edge_op test_prepare_edge_op.cpp)
 target_link_libraries(test_prepare_edge_op PRIVATE worker_core)
 add_test(NAME prepare_edge_op COMMAND test_prepare_edge_op)
 
+# The identity harness for GeometryPrecisionContext. Asserts every accessor
+# against the INLINED literal it is going to replace, so a later call-site move
+# that reds a suite is provably the move and not the number. Must stay green
+# with zero digest movement at every gate of the precision migration.
+add_executable(test_geometry_precision test_geometry_precision.cpp)
+target_link_libraries(test_geometry_precision PRIVATE worker_core)
+add_test(NAME geometry_precision COMMAND test_geometry_precision)
+
 # F1: constant-radius fillet construction, structured failure evidence, OCCT
 # history, and non-gating simulation/vertex characterization.
 foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization blend_recognizer)

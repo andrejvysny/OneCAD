@@ -117,6 +117,7 @@ add_library(worker_core STATIC
     src/elementmap/Assignment.cpp
     src/elementmap/Ladder.cpp
     src/kernel/diagnostics/OperationDiagnostic.cpp
+    src/kernel/validation/GeometryPrecision.cpp
     src/kernel/validation/ShapeAudit.cpp
     src/kernel/fillet/FilletAnalyzer.cpp
     src/kernel/fillet/FilletBuilder.cpp

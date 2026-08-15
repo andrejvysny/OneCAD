@@ -91,6 +91,39 @@ all CLOSED. Do not re-open them.
       **Do NOT re-record the Linux rows.** Dispatch `s3-worker` with `clean_build: true`, then
       `s4-kernelbench`, and decide from the result. Needs the branch pushed first (a
       `workflow_dispatch` input only exists on a pushed ref) — NOT AUTHORIZED YET.
+- [ ] **`filletChamfer` ×2 — a MASTER PRODUCT REGRESSION, not a flake, and NOT this branch's.**
+      Master recorded this as "a pointer-drag gesture that did not flip the armed edge-op type",
+      filed it as a second MC-R9 nondeterminism datapoint, and moved on. It is neither
+      nondeterministic nor a test problem: it reproduces **4/4 (two tests × chromium + webkit)** and
+      **2/2 on an idle machine in isolation**.
+      Measured, by instrumenting `onPointerDown` directly rather than reasoning from the outside:
+      ```
+      {"mode":"model","button":0,"filletPhase":"armed","extrudePhase":"idle",
+       "excluded":true,"hot":true,"degraded":false,"x":888,"y":398}
+      ```
+      `hot: true` — the press IS on the value handle. `excluded: true` — and
+      `isExcludedClickAwayTarget(e.target)` refuses it, so the fillet branch never runs, `grabEdge`
+      never fires, `filletPhase` stays `armed`, and the drag silently does nothing. On other runs
+      the press does not reach the controller at all, which is the same story one DOM layer up.
+      **Cause:** `ce3d6bf` ("the value arrow becomes a 2D screen overlay") moved the arrow into
+      screen space, and the model-tool chip now sits ON it. The press lands on the chip, which the
+      click-away exclusion is correct to refuse. That commit anticipated exactly this — it added
+      `getInteractionOverlayBounds("valueHandle")`, "the projected box a chip needs to stay off the
+      arrow", and says **"Nothing reads it yet; V2 will."** It also states **"Playwright lanes not
+      run (authorized), and owed."** This is that debt coming due.
+      **User impact, not just test impact:** wherever the chip overlaps the arrow, the arrow cannot
+      be grabbed at all.
+      **Fix is master's own V2** (make the chip clear `getInteractionOverlayBounds("valueHandle")`),
+      which is UI work outside this branch's scope. Recorded here, NOT worked around — narrowing
+      the exclusion or moving the test's press point would hide a real defect.
+      Two hypotheses were tested and REFUTED first, both by experiment rather than argument:
+      restoring the pre-`ce3d6bf` pick radius (10.8px, from `CONE_RADIUS_PX * HIT_PAD`) did not fix
+      it; and orienting the billboarded pick envelope before raycasting did not either. Both
+      experiments were reverted.
+      A latent issue was noticed while doing so and deliberately NOT fixed, for want of a failing
+      test to justify it: `DragHandle.orient()` runs only inside the render loop, while `setAxis()`
+      leaves the group on the WORLD axis, so a pick between the two tests a corridor that is not on
+      screen. Harmless today; it will matter once the chip stops covering the arrow.
 - [ ] Refresh the PR #4 body against the merged head (it still names `69be0c2`, claims Gear
       coverage is missing, and lists jobs as running).
 
@@ -107,11 +140,38 @@ all CLOSED. Do not re-open them.
 - kernelbench `fillet/foundation:t0` both backends, darwin-arm64 — `compare` **136/136 OK** and
   `semantic-compare` **OK**, verified against THREE independent builds (clean HEAD, incremental
   HEAD, and a clean detached build at `d7cd9f1`) after the darwin re-record above
-- Playwright: NOT RE-RUN after the merge. Master's 5 commits are frontend-only and its own gate
-  recorded **425 passed / 1 failed** (`filletChamfer.spec.ts:198`, a pointer-drag flake it logged
-  as a second MC-R9 datapoint). Owed before the WP0 gate closes.
+- Playwright, both projects, retries 0: **426 passed / 4 failed** (24.4 min). The 4 are two
+  `filletChamfer.spec.ts` tests × both browsers — see the root cause below. Everything else green.
 
-### WP1 — `GeometryPrecisionContext` + publication enforcement — NOT STARTED
+### WP1 — `GeometryPrecisionContext` + publication enforcement — G0 DONE
+
+- [x] **G0 — the context lands, nothing uses it.**
+      `worker/src/kernel/validation/GeometryPrecision.{h,cpp}` + the identity harness
+      `worker/tests/test_geometry_precision.cpp` (ctest `geometry_precision`).
+      v1 reproduces today's values BIT-FOR-BIT, and the harness asserts that against the literals
+      **inlined**, not by including their headers — including the constant by reference would be
+      circular, since deleting it would delete the assertion with it. Covered: the `kMinValue`
+      family (1e-3) at four scales, `kMinVolume` (1e-9), and BOTH tolerance-ceiling shapes —
+      Extrude/Fillet's `max(1e-3, tol*2 + 1e-6)` and OffsetFace's `max(1e-3, construction*2 + 0)`.
+      The ceiling accessor takes its base EXPLICITLY for that reason: the operations disagree about
+      the right base and the epsilon, and defaulting either would silently change one of them.
+      **The conditioning proof is the load-bearing one.** `linear_resolution`/`semantic_length`
+      carry a `coordinate_magnitude * 1e-14` term copied from `BlendEvidence.cpp`, and the harness
+      asserts it never reaches an existing threshold — at the origin, at the t0 metamorph's own
+      translation `[1000,-2000,3000]`, and at 1 km. That is what makes adding conditioning to a
+      "pure rename" safe, and it is asserted at the exact coordinates the pinned digests use.
+      **Gate: `ctest` 134/134 · kernelbench `fillet/foundation:t0` `compare` 136/136 UNCHANGED.**
+      Exactly the required G0 property — the context exists and moved nothing.
+      **Proven load-bearing:** `kAuthoringResolutionMm` 1.0e-3 → 1.1e-3 reds **9 assertions** with
+      the observed values recorded (`0.0011000000000000001` vs `0.001`; `1.331e-09` vs `1e-09`),
+      across all four scales and both ceiling shapes. Restored and re-verified green.
+      Deliberately NOT absorbed, each with its reason in the header: ElementMap/rank-key
+      quantization (identity-critical), `kThroughAllFallback` + `kFaceOvershoot` (synthetic tool
+      extents, not resolutions), `kTangentAngleTol` + `kBuildToleranceFloor` +
+      `kToNextContactEpsilon` (each documents a non-precision reason in its own comment), and the
+      dimensionless direction-vector degeneracy guards.
+- [ ] G1 (renames) · G2 (`reason_code`) · G3 (micro/sliver redefinition + census) · G4 (TierB
+      enablement — the only gate allowed to move a digest).
 
 Must land before WP3, which chains three OCCT algorithms and inherits every tolerance decision.
 
