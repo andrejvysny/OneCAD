@@ -185,7 +185,7 @@ add_test(NAME prepare_edge_op COMMAND test_prepare_edge_op)
 
 # F1: constant-radius fillet construction, structured failure evidence, OCCT
 # history, and non-gating simulation/vertex characterization.
-foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization)
+foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization blend_recognizer)
     add_executable(test_${_t} test_${_t}.cpp)
     target_link_libraries(test_${_t} PRIVATE worker_core)
     add_test(NAME ${_t} COMMAND test_${_t})
