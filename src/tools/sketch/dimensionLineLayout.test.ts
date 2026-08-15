@@ -86,4 +86,31 @@ describe("layoutDimensionLines", () => {
       expect([base0, base1]).toContainEqual(start);
     }
   });
+
+  it("a constrained edge is editable, with the constraint's authored value", () => {
+    const dims = layoutDimensionLines(rect, [distanceOn("bottom", 20)]);
+    expect(dims[0].editable).toBe(true);
+    expect(dims[0].value).toBe(20);
+  });
+
+  it("a selected but unconstrained edge shows its live length, read-only", () => {
+    const dims = layoutDimensionLines(rect, [], ["bottom"]);
+    expect(dims).toHaveLength(1);
+    expect(dims[0].id).toBe("sel-bottom");
+    expect(dims[0].editable).toBe(false);
+    expect(dims[0].value).toBe(20); // bottom is (0,0)→(20,0)
+  });
+
+  it("a selected edge that is ALSO constrained is not duplicated", () => {
+    const dims = layoutDimensionLines(rect, [distanceOn("bottom")], ["bottom"]);
+    expect(dims).toHaveLength(1);
+    expect(dims[0].id).toBe("dist-bottom");
+    expect(dims[0].editable).toBe(true);
+  });
+
+  it("selecting a non-Line entity or an unknown id is a no-op", () => {
+    expect(layoutDimensionLines(rect, [], ["nope"])).toEqual([]);
+    const circle: SketchEntity = { id: "c", type: "Circle", center: [0, 0], radius: 5 };
+    expect(layoutDimensionLines([...rect, circle], [], ["c"])).toEqual([]);
+  });
 });

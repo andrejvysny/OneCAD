@@ -1,5 +1,18 @@
 # OneCAD-Tauri Migration TODO
 
+## SKETCH UX — Shapr3D render-parity pass (2026-08-15) — SHIPPED (`601534c` + follow-ups)
+
+Vertex ring→filled-dot markers, persistent midpoint/centroid dots, permanent dimension
+lines (witness ticks + arrows) on constrained edges, live length label offset off the
+line, selected-endpoint highlight ring, Coincident badge off its vertex, Fixed badge as
+a lock icon + Disconnect action, "Constraint chips" visibility toggle, `snapEngine`
+"Aligned" false-positive fix (only a true single-point coincidence, not two unrelated
+axis matches). Follow-up: selecting ANY line now shows a read-only dimension line +
+length label even before it's constrained (`SelectionDimensionLabels`, new shell panel
+— `EDITOR_MOUNT_ORDER_CONTRACT` amended, right after `ConstraintBadgeLayer`).
+- [x] tsc 0 · full vitest suite green (one pre-existing flaky `ModelToolController.wave2` test, unrelated, passes standalone)
+- [ ] Manual Tauri gate (USER): draw + select an edge → read-only length line/label appears; add a Distance constraint → editable chip takes over, no duplicate; origin-pin lock icon + Disconnect chip; endpoint selection shows the highlight ring
+
 ## MODELING CANVAS UX — V1: the value arrow becomes a screen overlay (2026-08-15) — FE GATE PASSED
 
 Plan: `~/.claude/plans/act-as-senior-ux-ui-robust-wozniak.md`. Five packages (V1 arrow ·

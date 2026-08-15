@@ -189,6 +189,7 @@ export class SketchObject {
   private plane: SketchPlane | null = null;
   private entities: SketchEntity[] = [];
   private status: SketchSolveStatus = "UnderConstrained";
+  private constraints: SketchConstraint[] = [];
   private selected = new Set<string>();
   private hovered = new Set<string>();
   /** The chain segment a live angle chip is measured against, or null. */
@@ -247,7 +248,7 @@ export class SketchObject {
     // TEST stays on so solid bodies still occlude sketch content behind them.
     this.pointsMat = new THREE.PointsMaterial({
       color: palette.sketchVertex(),
-      map: buildRingTexture() ?? undefined,
+      map: buildDotTexture(0.7) ?? undefined,
       size: 10,
       sizeAttenuation: false,
       transparent: true,
@@ -402,6 +403,7 @@ export class SketchObject {
     this.plane = plane;
     this.entities = entities;
     this.status = status;
+    if (constraints) this.constraints = constraints;
     planeBasisMatrix(plane, this._basis);
     this.planeGroup.matrixAutoUpdate = false;
     this.planeGroup.matrix.copy(this._basis);
@@ -410,7 +412,7 @@ export class SketchObject {
     this.rebuildPoints();
     this.rebuildMidpoints();
     this.rebuildCentroids();
-    if (constraints) this.rebuildDimensionLines(constraints);
+    this.rebuildDimensionLines();
     this.deps.invalidate();
   }
 
@@ -487,10 +489,13 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
-  /** Recolor from the current selection (sketch entity ids). */
+  /** Recolor from the current selection (sketch entity ids). A newly
+   *  selected, unconstrained edge also grows a read-only dimension line
+   *  showing its live length (Shapr3D convention) — see `rebuildDimensionLines`. */
   setSelection(selectedIds: Iterable<string>): void {
     this.selected = new Set(selectedIds);
     this.rebuildEntities();
+    this.rebuildDimensionLines();
     this.deps.invalidate();
   }
 
@@ -590,15 +595,20 @@ export class SketchObject {
     geo.computeBoundingSphere();
   }
 
-  /** Rebuild the permanent dimension-line witnesses (WP: sketch UX parity pass). */
-  private rebuildDimensionLines(constraints: SketchConstraint[]): void {
+  /** Rebuild the dimension-line witnesses: permanent for a constrained edge,
+   *  read-only for a selected-but-unconstrained one (WP: sketch UX parity pass). */
+  private rebuildDimensionLines(): void {
     for (const c of [...this.dimLineGroup.children]) this.disposeLine(c);
     this.dimLineGroup.clear();
-    for (const dim of layoutDimensionLines(this.entities, constraints)) {
+    for (const dim of layoutDimensionLines(this.entities, this.constraints, this.selected)) {
       const segments: [Point2, Point2][] = [dim.baseline, ...dim.ticks, ...dim.arrows];
       for (const [a, b] of segments) {
         const line = this.buildLine([a.x, a.y, 0, b.x, b.y, 0], this.matDimLine);
         line.renderOrder = RENDER_ORDER.DIM_LINE;
+        // Tags a witness segment as NOT a committed entity — a scene-wide
+        // `Line2` traversal (e.g. a test counting entity lines) needs a way
+        // to tell the two apart without knowing this group exists.
+        line.userData.dimLineWitness = true;
         this.dimLineGroup.add(line);
       }
     }

@@ -19,6 +19,7 @@ const panelId = (name: string) =>
 
 export const ModelingPanels = {
   ConstraintBadgeLayer: panelId("constraintBadgeLayer"),
+  SelectionDimensionLabels: panelId("selectionDimensionLabels"),
   LiveDimChips: panelId("liveDimChips"),
   ConstraintContextChips: panelId("constraintContextChips"),
   ModelToolChips: panelId("modelToolChips"),

@@ -22,6 +22,12 @@ export interface DimensionLine {
   baseline: [Point2, Point2];
   /** Two short inward-pointing arrowhead strokes at each baseline end. */
   arrows: [Point2, Point2][];
+  /** mm length shown on the baseline. */
+  value: number;
+  /** True when `id` is a real constraint id (editable via its existing
+   *  ConstraintBadgeLayer chip) — false for a selection-only measurement
+   *  (the edge's live length, shown read-only while nothing constrains it). */
+  editable: boolean;
 }
 
 const sub = (a: Point2, b: Point2): Point2 => ({ x: a.x - b.x, y: a.y - b.y });
@@ -85,15 +91,59 @@ function arrowStrokes(base: Point2, dirTowardOther: Point2, armLen: number): [Po
   ];
 }
 
+/** Build one dimension line's geometry for a Line entity, or null if its
+ *  endpoints are coincident (no direction to offset perpendicular to). */
+function buildLine(
+  e: SketchEntity,
+  id: string,
+  value: number,
+  editable: boolean,
+  center: Point2,
+  offset: number,
+  armLen: number,
+): DimensionLine | null {
+  if (!e.p0 || !e.p1) return null;
+  const p0 = xy(e.p0);
+  const p1 = xy(e.p1);
+  const edgeDir = norm(sub(p1, p0));
+  if (edgeDir.x === 0 && edgeDir.y === 0) return null; // degenerate edge
+  const mid = scale(add(p0, p1), 0.5);
+  // Perpendicular candidate that points AWAY from the sketch's own centroid —
+  // this is what puts the baseline outside the shape, matching the reference:
+  // a rectangle's top/right edges dimension outward, not inward.
+  let n = rot90(edgeDir);
+  if ((mid.x - center.x) * n.x + (mid.y - center.y) * n.y < 0) n = scale(n, -1);
+
+  const base0 = add(p0, scale(n, offset));
+  const base1 = add(p1, scale(n, offset));
+  return {
+    id,
+    ticks: [
+      [p0, base0],
+      [p1, base1],
+    ],
+    baseline: [base0, base1],
+    arrows: [...arrowStrokes(base0, edgeDir, armLen), ...arrowStrokes(base1, scale(edgeDir, -1), armLen)],
+    value,
+    editable,
+  };
+}
+
 /**
- * One dimension line per Line entity carrying a Distance/HorizontalDistance/
- * VerticalDistance constraint with a defined value — same trigger
- * `badgeLayout.ts`'s dimensional badges already use for the SAME entity, so
- * this is purely an additional visual for a value that's already shown.
+ * A dimension line per qualifying edge, from two sources:
+ *  - a Line entity carrying a Distance/HorizontalDistance/VerticalDistance
+ *    constraint with a defined value — same trigger `badgeLayout.ts`'s
+ *    dimensional badges already use for the SAME entity, so this is purely an
+ *    additional visual for a value that's already shown (editable via that
+ *    existing chip);
+ *  - a SELECTED Line entity with no such constraint yet — its live length,
+ *    read-only, so selecting any edge shows its measurement even before it's
+ *    constrained (Shapr3D convention), without duplicating the constrained case.
  */
 export function layoutDimensionLines(
   entities: SketchEntity[],
   constraints: SketchConstraint[],
+  selectedEntityIds: Iterable<string> = [],
 ): DimensionLine[] {
   const byId = new Map(entities.map((e) => [e.id, e]));
   const { center, diag } = sketchExtent(entities);
@@ -107,31 +157,19 @@ export function layoutDimensionLines(
     const entityId = c.entities[0];
     if (!entityId || seen.has(entityId)) continue;
     const e = byId.get(entityId);
+    if (!e || e.type !== "Line") continue;
+    seen.add(entityId);
+    const dim = buildLine(e, c.id, c.value, true, center, offset, armLen);
+    if (dim) out.push(dim);
+  }
+  for (const entityId of selectedEntityIds) {
+    if (seen.has(entityId)) continue;
+    const e = byId.get(entityId);
     if (!e || e.type !== "Line" || !e.p0 || !e.p1) continue;
     seen.add(entityId);
-
-    const p0 = xy(e.p0);
-    const p1 = xy(e.p1);
-    const edgeDir = norm(sub(p1, p0));
-    if (edgeDir.x === 0 && edgeDir.y === 0) continue; // degenerate edge
-    const mid = scale(add(p0, p1), 0.5);
-    // Perpendicular candidate that points AWAY from the sketch's own centroid
-    // — this is what puts the baseline outside the shape, matching the
-    // reference: a rectangle's top/right edges dimension outward, not inward.
-    let n = rot90(edgeDir);
-    if ((mid.x - center.x) * n.x + (mid.y - center.y) * n.y < 0) n = scale(n, -1);
-
-    const base0 = add(p0, scale(n, offset));
-    const base1 = add(p1, scale(n, offset));
-    out.push({
-      id: c.id,
-      ticks: [
-        [p0, base0],
-        [p1, base1],
-      ],
-      baseline: [base0, base1],
-      arrows: [...arrowStrokes(base0, edgeDir, armLen), ...arrowStrokes(base1, scale(edgeDir, -1), armLen)],
-    });
+    const length = Math.hypot(e.p1[0] - e.p0[0], e.p1[1] - e.p0[1]);
+    const dim = buildLine(e, `sel-${entityId}`, length, false, center, offset, armLen);
+    if (dim) out.push(dim);
   }
   return out;
 }

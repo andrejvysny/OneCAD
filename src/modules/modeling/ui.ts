@@ -23,6 +23,7 @@ import { contributeModelingTree } from "./treeProvider";
 import { createDatumViewportContribution } from "./datumViewport";
 
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
+import { SelectionDimensionLabels } from "@/features/sketch/SelectionDimensionLabels";
 import { LiveDimChips } from "@/features/sketch/LiveDimChips";
 import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips";
 import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
@@ -44,6 +45,7 @@ export { ModelingPanels };
 export function contributeModelingUi(scope: ModuleScope): void {
   const overlays = [
     { id: ModelingPanels.ConstraintBadgeLayer, component: ConstraintBadgeLayer },
+    { id: ModelingPanels.SelectionDimensionLabels, component: SelectionDimensionLabels },
     { id: ModelingPanels.LiveDimChips, component: LiveDimChips },
     { id: ModelingPanels.ConstraintContextChips, component: ConstraintContextChips },
     { id: ModelingPanels.ModelToolChips, component: ModelToolChips },

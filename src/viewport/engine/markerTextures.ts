@@ -34,11 +34,13 @@ export function buildRingTexture(): THREE.Texture | null {
   });
 }
 
-/** Filled circle — edge midpoint / closed-loop centroid marker. */
-export function buildDotTexture(): THREE.Texture | null {
+/** Filled circle — edge midpoint / closed-loop centroid / vertex marker.
+ *  `radiusFraction` is of the half-canvas size (default 0.4, a smaller dot
+ *  for the lower-emphasis midpoint/centroid glyphs). */
+export function buildDotTexture(radiusFraction = 0.4): THREE.Texture | null {
   return canvasTexture((ctx, c) => {
     ctx.beginPath();
-    ctx.arc(c, c, c * 0.4, 0, Math.PI * 2);
+    ctx.arc(c, c, c * radiusFraction, 0, Math.PI * 2);
     ctx.fill();
   });
 }

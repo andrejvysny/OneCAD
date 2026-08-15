@@ -55,6 +55,7 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "WorkspacePlaceholder",
   "ViewportRoot",
   "ConstraintBadgeLayer",
+  "SelectionDimensionLabels",
   "LiveDimChips",
   "ConstraintContextChips",
   "ModelToolChips",

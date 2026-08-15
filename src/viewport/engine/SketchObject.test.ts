@@ -35,12 +35,21 @@ const seg = (id: string, referenceLocked?: boolean, construction?: boolean): Ske
   construction,
 });
 
-/** Entity id → the color its Line2 was drawn with, in scene order. */
-function colorsOf(root: THREE.Object3D, ids: string[]): Map<string, number> {
+/** Every committed-entity Line2 under `root` — excludes dimension-line
+ *  witness segments (tagged `userData.dimLineWitness`), which a selected,
+ *  unconstrained Line entity also grows (WP: sketch UX parity pass) and are
+ *  not what these tests are counting. */
+function entityLines(root: THREE.Object3D): Line2[] {
   const lines: Line2[] = [];
   root.traverse((o) => {
-    if (o instanceof Line2) lines.push(o);
+    if (o instanceof Line2 && !o.userData.dimLineWitness) lines.push(o);
   });
+  return lines;
+}
+
+/** Entity id → the color its Line2 was drawn with, in scene order. */
+function colorsOf(root: THREE.Object3D, ids: string[]): Map<string, number> {
+  const lines = entityLines(root);
   expect(lines.length).toBe(ids.length);
   return new Map(lines.map((l, i) => [ids[i], (l.material as LineMaterial).color.getHex()]));
 }
@@ -61,11 +70,7 @@ describe("SketchObject — referenceLocked material", () => {
     expect(colors.get("locked")).not.toBe(colors.get("free"));
 
     // SOLID, not dashed — the visual contrast with construction is color only.
-    const lines: Line2[] = [];
-    root.traverse((o) => {
-      if (o instanceof Line2) lines.push(o);
-    });
-    expect((lines[1].material as LineMaterial).dashed).toBeFalsy();
+    expect((entityLines(root)[1].material as LineMaterial).dashed).toBeFalsy();
     obj.dispose();
   });
 
@@ -119,20 +124,13 @@ describe("SketchObject — angle reference highlight + arc preview", () => {
   it("draws a dashed arc line for a non-degenerate preview, and none below the length floor", () => {
     const { obj, root } = build([]);
     obj.setAnglePreview({ center: { x: 0, y: 0 }, radius: 10, fromDeg: 0, toDeg: 90 });
-    const lines: Line2[] = [];
-    root.traverse((o) => {
-      if (o instanceof Line2) lines.push(o);
-    });
+    const lines = entityLines(root);
     expect(lines.length).toBe(1);
     expect((lines[0].material as LineMaterial).dashed).toBe(true);
     expect((lines[0].material as LineMaterial).color.getHex()).toBe(palette.sketchAngleRef().getHex());
 
     obj.setAnglePreview({ center: { x: 0, y: 0 }, radius: 0, fromDeg: 0, toDeg: 90 });
-    const after: Line2[] = [];
-    root.traverse((o) => {
-      if (o instanceof Line2) after.push(o);
-    });
-    expect(after.length).toBe(0); // a zero-radius preview draws nothing
+    expect(entityLines(root).length).toBe(0); // a zero-radius preview draws nothing
     obj.dispose();
   });
 
