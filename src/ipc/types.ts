@@ -1298,6 +1298,9 @@ export type OffsetDistanceType = "Offset" | "Total" | "Radius" | "Diameter";
  */
 export interface OffsetFaceParams {
   faces: SemanticRef[];
+  /** V2 user-picked design-face ids; a non-empty subset of the full closure. */
+  primaryFaceIds?: string[];
+  resultPolicyVersion?: 2;
   /** The USER's value, read per {@link OffsetFaceParams.distanceType}. Never clamped. */
   distance: number;
   distanceType: OffsetDistanceType;

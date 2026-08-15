@@ -1421,6 +1421,8 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 // inputs: [ semanticRef(face) per faceIds entry, in order; + semanticRef(opposite face) LAST iff distanceType == "Total" ]
 // params
 { "faceIds": ["el_…a1", "el_…b2"],
+  "primaryFaceIds": ["el_…a1"],
+  "resultPolicyVersion": 2,
   "distance": 2.5,
   "distanceType": "Offset",       // Offset | Total | Radius | Diameter (default Offset)
   "chainTangentFaces": true,      // default true — authoring metadata (see below)
@@ -1437,6 +1439,12 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   Total opposite face (when present) LAST — the Rust repair paths
   (`InputPath::OffsetFaceFace{index}` / `OffsetFaceOpposite`) and the frontend
   `inputPathFor` table mirror it.
+- Fresh authoring emits `resultPolicyVersion:2` and a non-empty
+  `primaryFaceIds` subset of `faceIds`. It is the user-picked DESIGN-face intent;
+  `faceIds` remains the full frozen closure. Imported-blend suppression/rebuild
+  uses this distinction and must never infer a primary from closure geometry.
+  Absent version + absent primary ids is the legacy contract. Other present
+  versions, an empty V2 primary set, duplicates, or non-subset ids are refused.
 - `faceIds` is the FULL FROZEN operative set — picked faces PLUS the tangent
   chain, expanded once at authoring by `PrepareOffsetFace`
   ([§7.6](#prepareoffsetface)) and persisted. The worker NEVER re-expands at
@@ -3138,6 +3146,11 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-15 — §7.3 OffsetFace V2 primary intent.** Fresh records retain
+  `faceIds` as the frozen full G1 closure and add `primaryFaceIds` as the non-empty
+  user-picked subset, gated by `resultPolicyVersion:2`. This is the deterministic
+  input imported-blend suppress/reconstruct/reblend needs; legacy absence remains
+  readable and geometric guessing is forbidden.
 - **2026-08-15 — §7.3 absent Pattern V1 writable-open migration.** Core
   rewrites absent-version Linear/Circular Pattern records to V2 before typed
   decode, retires their aggregate body/element/output cache, and seeds persisted

@@ -177,6 +177,8 @@ interface WireHoleParams {
  */
 interface WireOffsetFaceParams {
   faceIds: string[];
+  primaryFaceIds?: string[];
+  resultPolicyVersion?: 2;
   faces: WireElementRef[];
   distance: WireScalar;
   distanceType: OffsetDistanceType;
@@ -675,14 +677,25 @@ function holeParams(p: HoleParams): WireHoleParams {
  */
 function offsetFaceParams(p: OffsetFaceParams): WireOffsetFaceParams {
   const faces = p.faces.map(faceElementRef);
+  const faceIds = faces.map((f) => f.primary?.elementId ?? "");
   const wire: WireOffsetFaceParams = {
-    faceIds: faces.map((f) => f.primary?.elementId ?? ""),
+    faceIds,
     faces,
     distance: scalar(p.distance),
     distanceType: p.distanceType,
     chainTangentFaces: p.chainTangentFaces,
     targetBodyId: bareBodyId(p.targetBodyId),
   };
+  if (p.resultPolicyVersion === 2) {
+    const primary = p.primaryFaceIds ?? [];
+    if (primary.length === 0 || primary.some((id) => !faceIds.includes(id))) {
+      throw new Error("OffsetFace V2 primaryFaceIds must be a non-empty subset of faceIds");
+    }
+    wire.primaryFaceIds = [...new Set(primary)];
+    wire.resultPolicyVersion = 2;
+  } else if (p.primaryFaceIds && p.primaryFaceIds.length > 0) {
+    throw new Error("OffsetFace primaryFaceIds requires resultPolicyVersion 2");
+  }
   if (p.distanceType === "Total" && p.oppositeFace) {
     const opposite = faceElementRef(p.oppositeFace);
     wire.oppositeFaceId = opposite.primary?.elementId ?? "";

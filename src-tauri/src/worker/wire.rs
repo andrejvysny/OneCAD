@@ -5922,6 +5922,7 @@ mod body_wire_tests {
 
         let multi = lower(OffsetFaceParams {
             face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+            primary_face_ids: vec![ElementId::new("el_f1")],
             faces: vec![face("el_f1"), face("el_f2")],
             distance: Scalar::new(2.5),
             distance_type: OffsetDistanceType::Offset,
@@ -5929,10 +5930,13 @@ mod body_wire_tests {
             opposite_face_id: None,
             opposite_face: None,
             target_body: body,
+            result_policy_version: Some(2),
             extra: Default::default(),
         });
         assert_eq!(multi["opType"], json!("OffsetFace"));
         assert_eq!(multi["params"]["faceIds"], json!(["el_f1", "el_f2"]));
+        assert_eq!(multi["params"]["primaryFaceIds"], json!(["el_f1"]));
+        assert_eq!(multi["params"]["resultPolicyVersion"], json!(2));
         assert_eq!(multi["params"]["distance"], json!({ "value": 2.5 }));
         assert_eq!(multi["params"]["distanceType"], json!("Offset"));
         assert_eq!(multi["params"]["chainTangentFaces"], json!(true));
@@ -5957,6 +5961,7 @@ mod body_wire_tests {
 
         let total = lower(OffsetFaceParams {
             face_ids: vec![ElementId::new("el_top")],
+            primary_face_ids: vec![ElementId::new("el_top")],
             faces: vec![face("el_top")],
             distance: Scalar::new(12.0),
             distance_type: OffsetDistanceType::Total,
@@ -5964,6 +5969,7 @@ mod body_wire_tests {
             opposite_face_id: Some(ElementId::new("el_bottom")),
             opposite_face: Some(face("el_bottom")),
             target_body: body,
+            result_policy_version: Some(2),
             extra: Default::default(),
         });
         assert_eq!(total["params"]["distanceType"], json!("Total"));

@@ -40,6 +40,10 @@ expression: rec
         }
       }
     ],
+    "primaryFaceIds": [
+      "el_cyl"
+    ],
+    "resultPolicyVersion": 2,
     "targetBodyId": "00000000-0000-0000-0000-00000000b0d1"
   },
   "inputs": {

@@ -2278,11 +2278,17 @@ impl InvoluteExternalParams {
 /// (SCHEMA §7.6) and persisted. The worker never re-expands at regen, so an
 /// upstream edit cannot silently widen or narrow what the op operates on;
 /// `chain_tangent_faces` survives only as authoring metadata for re-edit UX.
+pub const OFFSET_FACE_RESULT_POLICY_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OffsetFaceParams {
     /// The operative faces as bare ids (SCHEMA `faceIds`), in slot order.
     pub face_ids: Vec<ElementId>,
+    /// V2 user-picked design faces. Must be a non-empty subset of `face_ids`;
+    /// dependent blend/support faces remain only in the frozen full closure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_face_ids: Vec<ElementId>,
     /// The typed per-face semantic refs, one per [`face_ids`](Self::face_ids)
     /// entry in the SAME order. `default` so a SCHEMA §7.3 wire payload (which
     /// carries the refs in `inputs[]`, not in params) still parses.
@@ -2307,6 +2313,12 @@ pub struct OffsetFaceParams {
     /// The body this op modifies in place (SCHEMA `targetBodyId`).
     #[serde(rename = "targetBodyId")]
     pub target_body: BodyId,
+    #[serde(
+        default,
+        deserialize_with = "de_optional_result_policy_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -2359,6 +2371,34 @@ impl OffsetFaceParams {
                     primary.body, self.target_body
                 ));
             }
+        }
+        match self.result_policy_version {
+            None if !self.primary_face_ids.is_empty() => {
+                return Err("OffsetFace primaryFaceIds requires resultPolicyVersion 2".into())
+            }
+            Some(OFFSET_FACE_RESULT_POLICY_VERSION) => {
+                if self.primary_face_ids.is_empty() {
+                    return Err("OffsetFace V2 requires at least one primary face".into());
+                }
+                for (index, id) in self.primary_face_ids.iter().enumerate() {
+                    if !self.face_ids.contains(id) {
+                        return Err(format!(
+                            "OffsetFace primaryFaceIds[{index}] {id} is not in the frozen faceIds closure"
+                        ));
+                    }
+                    if self.primary_face_ids[..index].contains(id) {
+                        return Err(format!(
+                            "OffsetFace primaryFaceIds contains duplicate {id}"
+                        ));
+                    }
+                }
+            }
+            Some(version) => {
+                return Err(format!(
+                    "OffsetFace resultPolicyVersion {version} is unsupported (expected {OFFSET_FACE_RESULT_POLICY_VERSION})"
+                ))
+            }
+            None => {}
         }
         if !self.distance.value.is_finite() {
             return Err(format!(
@@ -3786,6 +3826,7 @@ mod tests {
     fn offset_params() -> OffsetFaceParams {
         OffsetFaceParams {
             face_ids: vec![ElementId::new("el_f1")],
+            primary_face_ids: vec![ElementId::new("el_f1")],
             faces: vec![offset_ref("el_f1")],
             distance: Scalar::new(2.5),
             distance_type: OffsetDistanceType::Offset,
@@ -3793,6 +3834,7 @@ mod tests {
             opposite_face_id: None,
             opposite_face: None,
             target_body: body(1),
+            result_policy_version: Some(OFFSET_FACE_RESULT_POLICY_VERSION),
             extra: Extra::new(),
         }
     }

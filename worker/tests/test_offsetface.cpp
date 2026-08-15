@@ -155,8 +155,12 @@ json offset_params(const std::string& body_id, std::vector<std::string> keys, do
                    const std::string& opposite = {}) {
     json ids = json::array();
     for (const std::string& k : keys) ids.push_back(k);
+    json primary = json::array();
+    if (!keys.empty()) primary.push_back(keys.front());
     json p = {{"targetBodyId", body_id},
               {"faceIds", std::move(ids)},
+              {"primaryFaceIds", std::move(primary)},
+              {"resultPolicyVersion", 2},
               {"distance", distance},
               {"distanceType", type},
               {"chainTangentFaces", chain}};

@@ -2722,6 +2722,7 @@ fn hole_face_rebind_refuses_an_evidence_only_ref_and_a_mismatched_op() {
 fn offset_face_op(faces: &[&str], opposite: Option<&str>) -> Operation {
     Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
         face_ids: faces.iter().map(|f| ElementId::new(*f)).collect(),
+        primary_face_ids: faces.iter().map(|f| ElementId::new(*f)).collect(),
         faces: faces.iter().map(|f| face_ref_at(BX(), f)).collect(),
         distance: Scalar::new(2.5),
         distance_type: match opposite {
@@ -2732,6 +2733,7 @@ fn offset_face_op(faces: &[&str], opposite: Option<&str>) -> Operation {
         opposite_face_id: opposite.map(ElementId::new),
         opposite_face: opposite.map(|o| face_ref_at(BX(), o)),
         target_body: BX(),
+        result_policy_version: Some(2),
         extra: Default::default(),
     }))
 }
@@ -2779,6 +2781,14 @@ fn offset_face_rebind_writes_the_typed_ref_and_mirrors_the_bare_id() {
             .collect::<Vec<_>>(),
         vec!["el_a", "el_fresh"],
         "the bare id mirror follows the typed ref"
+    );
+    assert_eq!(
+        p.primary_face_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["el_a", "el_fresh"],
+        "V2 primary intent follows an explicit repair rebind"
     );
     assert_eq!(
         p.faces[1].primary.as_ref().map(|x| x.element.to_string()),

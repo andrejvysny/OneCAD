@@ -332,6 +332,7 @@ namespace {
 namespace of = offsetface;
 
 enum class DistanceType { Offset, Total, Radius, Diameter };
+constexpr int kResultPolicyVersion2 = 2;
 
 bool parse_distance_type(const std::string& s, DistanceType& out) {
     if (s.empty() || s == "Offset") { out = DistanceType::Offset; return true; }
@@ -700,6 +701,46 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     }
     if (face_ids.empty()) {
         return OpOutcome::fail("OP_FAILED", "OffsetFace requires a non-empty faceIds");
+    }
+    std::vector<std::string> primary_face_ids;
+    if (params.contains("resultPolicyVersion")) {
+        if (!params["resultPolicyVersion"].is_number_integer() ||
+            params["resultPolicyVersion"].get<int>() != kResultPolicyVersion2) {
+            OpOutcome failure = OpOutcome::fail(
+                "OP_FAILED", "OffsetFace resultPolicyVersion is unsupported");
+            failure.diagnostics.push_back(
+                {{"severity", "error"},
+                 {"code", "UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION"},
+                 {"message", failure.error_message},
+                 {"stage", "preflight"}});
+            return failure;
+        }
+        if (params.contains("primaryFaceIds") &&
+            params["primaryFaceIds"].is_array()) {
+            for (const json& value : params["primaryFaceIds"]) {
+                if (value.is_string()) primary_face_ids.push_back(value.get<std::string>());
+            }
+        }
+        if (primary_face_ids.empty()) {
+            return OpOutcome::fail("OP_FAILED",
+                                   "OffsetFace V2 requires primaryFaceIds");
+        }
+        std::set<std::string> seen_primary;
+        for (const std::string& id : primary_face_ids) {
+            if (std::find(face_ids.begin(), face_ids.end(), id) == face_ids.end()) {
+                return OpOutcome::fail(
+                    "OP_FAILED",
+                    "OffsetFace primaryFaceIds must be a subset of faceIds");
+            }
+            if (!seen_primary.insert(id).second) {
+                return OpOutcome::fail("OP_FAILED",
+                                       "OffsetFace primaryFaceIds contains duplicates");
+            }
+        }
+    } else if (params.contains("primaryFaceIds")) {
+        return OpOutcome::fail(
+            "OP_FAILED",
+            "OffsetFace primaryFaceIds requires resultPolicyVersion 2");
     }
     // Presence is asked separately from the value: `read_scalar`'s default cannot
     // distinguish an ABSENT `distance` (a malformed record) from a legitimate 0, and
