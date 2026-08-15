@@ -255,6 +255,26 @@ sketch entity, because you cannot snap to where a line crosses it or to the end 
 - Gate: `bunx tsc --noEmit` clean · `bun run test` **293 files / 4917 passed / 78 skipped** ·
   `bun run build` clean.
 
+### Performance baseline (recorded, not gated)
+
+`src/test/snap-decision/performance.test.ts` (NEW). Deliberately NOT a hard CI gate — wall clock on
+a shared runner is a property of the machine, and an assertion tight enough to catch a real
+regression is loose enough to flake, which trains everyone to ignore it. What IS asserted is the
+machine-independent SHAPE of the cost: the cache is built once per edit, a warm-cache pointer
+decision does no all-pairs work (proved by the broad-phase counters not moving), the broad phase
+prunes, and the accepted set stays bounded however dense the sketch.
+
+Measured on this machine (M-series, Release-equivalent JIT):
+
+| case | measurement | spec target |
+|---|---|---|
+| cache build, 200 entities | **0.7 ms** (160 of 19 900 pairs tested) | ≤16 ms |
+| cache build, 500 entities | **1.2 ms** (400 of 124 750 pairs tested) | p95 ≤50 ms |
+| pointer decision, warm cache (1 700 cached points, 400 intersections) | **0.768 ms/sample** | p95 ≤2 ms at 2 000 candidates |
+
+The broad phase prunes 99.2% / 99.7% of pairs respectively, which is what keeps the ellipse root
+isolation (512 samples per pair before refinement) affordable at all.
+
 ### Documentation
 
 - [x] `protocol/SCHEMA.md` — §7.3 kind count and contract, §14 changelog (P3).
