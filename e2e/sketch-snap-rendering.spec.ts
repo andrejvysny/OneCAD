@@ -200,8 +200,11 @@ test("the grid control moves to the sketch plane and back", async ({ page }) => 
   // In sketch mode the WORLD grid steps aside — one effective grid (SNAP §10.4).
   expect(await worldGridVisible()).toBe(false);
 
-  await page.keyboard.press("Escape");
-  await page.keyboard.press("Escape");
-  // …and comes back at the preference the user left it at, untouched.
-  await expect.poll(worldGridVisible, { timeout: 5000 }).toBe(true);
+  // Enter with no open chain is the global finish-sketch action — Escape only
+  // walks the in-gesture ladder and does not necessarily leave the session.
+  await page.keyboard.press("Enter");
+  await waitForCameraSettled(page);
+  // …and the world grid comes back at the preference the user left it at,
+  // untouched: sketch mode borrowed the surface, it did not change the setting.
+  await expect.poll(worldGridVisible, { timeout: 8000 }).toBe(true);
 });

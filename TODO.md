@@ -289,12 +289,25 @@ isolation (512 samples per pair before refinement) affordable at all.
 - [x] `docs/DEBUGGING.md` — the `snap` tag row (what it carries, and WHY it is inside the
       drag-frequency policy: it emits only on a changed accepted set, a click, a latch reset or a
       projection failure) plus a `jq` cookbook line for "why did it snap there?".
-- [x] `e2e/sketch-snap-composition.spec.ts` + `e2e/sketch-snap-rendering.spec.ts` (NEW) — polar +
-      rounded length composing, an alignment guide persisting as `VerticalPoints`, Alt vs
-      structural connectivity, auto-constrain `off`, an inert click after a projection failure;
-      and on the rendering side, a CSS-constant dash cadence across a real wheel zoom, adaptive
-      tessellation growing with projected size, `show.guidePoints` not touching snap behaviour, and
-      the grid moving to the sketch plane and back.
+- [x] `e2e/sketch-snap-composition.spec.ts` + `e2e/sketch-snap-rendering.spec.ts` (NEW, **9 cases,
+      all passing**) — polar + rounded length composing, an alignment guide persisting as
+      `VerticalPoints`, Alt vs structural connectivity, auto-constrain `off`, an inert click after a
+      projection failure; and on the rendering side, a CSS-constant dash cadence across a real wheel
+      zoom, adaptive tessellation growing with projected size, `show.guidePoints` not touching snap
+      behaviour, and the grid moving to the sketch plane and back.
+
+**A PRE-EXISTING master defect was blocking the e2e lane, and is fixed here.**
+`enterSketchViaPlanePicker` (`e2e/helpers.ts:251`) asserted `getByText("Select a sketch plane")`
+without `exact`. `c064e81` — on master, before this branch — added "Select a sketch plane to
+begin." to the inspector's empty state, so the locator resolves to TWO elements and fails
+Playwright's strict mode. That blocks EVERY spec that enters a sketch through the plane picker,
+which is most of them.
+
+Reproduced on the untouched baseline before changing anything: a worktree at `5106f80` running
+`e2e/line.spec.ts` fails with the identical strict-mode violation, and neither `e2e/helpers.ts` nor
+either of the two colliding production strings is touched by this branch (`git diff 5106f80..HEAD`
+on all three is empty). The fix is one word — `{ exact: true }` — in the test helper only; no
+production code changed. With it, `e2e/line.spec.ts` passes on this branch.
 
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 

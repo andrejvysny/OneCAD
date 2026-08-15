@@ -9,6 +9,7 @@ import {
   getSketchConstraints,
   getSketchSnapshot,
   planePointToClient,
+  selectSketchTool,
   setSnapPref,
 } from "./helpers";
 
@@ -86,24 +87,34 @@ test("an alignment guide PERSISTS as a point-axis constraint", async ({ page }) 
   await setSnapPref(page, "polarTracking", false);
   await setSnapPref(page, "sketchGuideLines", true);
 
-  // Line 1 — the reference the guide will align to.
-  await clickAt(page, -160, -60);
-  await clickAtAwaitingDofChange(page, -60, -60);
+  // Line 1 — the reference the guide will align to. Kept in the RIGHT half of
+  // the viewport: the alignment target below is a fixed offset from its
+  // endpoint, and the left half is where the floating panels live (a click that
+  // lands on a panel never reaches the controller at all).
+  await clickAt(page, 40, -60);
+  await clickAtAwaitingDofChange(page, 150, -60);
   await page.keyboard.press("Escape");
 
   const before = await getSketchSnapshot(page);
   expect(before.lines).toHaveLength(1);
   const ref = before.lines[0].p1;
 
-  // Line 2 starts well away, and ENDS aligned with line 1's endpoint: the same
-  // x, a long way up. That is a VerticalPoints assertion, and nothing about the
-  // final coordinates alone could tell it from a coincidence.
-  await clickAt(page, 60, 60);
-  const aligned = await planePointToClient(page, before.plane, { x: ref[0], y: ref[1] + 80 });
-  await page.mouse.move(aligned.x, aligned.y);
-  await page.mouse.move(aligned.x, aligned.y); // settle
-  await clickAtClient(page, aligned.x, aligned.y);
+  // Line 2 starts elsewhere and ENDS aligned with line 1's endpoint — the same
+  // x, a modest distance away in y. That is a VerticalPoints assertion, and
+  // nothing about the final coordinates alone could tell it from a coincidence.
+  await clickAt(page, 40, 60);
+  const aligned = await planePointToClient(page, before.plane, { x: ref[0], y: ref[1] });
+  // Offset in SCREEN space, so the target is guaranteed to stay on canvas
+  // whatever the plane basis and zoom happen to be.
+  const target = { x: aligned.x, y: aligned.y - 70 };
+  await page.mouse.move(target.x, target.y);
+  await page.mouse.move(target.x, target.y); // settle: two samples, one decision
+  await clickAtClient(page, target.x, target.y);
   await page.keyboard.press("Escape");
+
+  // The second line really committed — otherwise the constraint assertion below
+  // would be vacuously about line 1.
+  await expect.poll(async () => (await getSketchSnapshot(page)).lines.length, { timeout: 5000 }).toBe(2);
 
   await expect
     .poll(async () => (await getSketchConstraints(page)).map((c) => c.type), {
@@ -118,9 +129,11 @@ test("Alt suppresses inference but NOT the shape's own structure", async ({ page
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
 
-  // A rectangle with Alt held throughout: its four corner welds are STRUCTURAL
-  // and must survive, because a rectangle whose corners come apart is not a
-  // rectangle. Everything inferred must not.
+  // A RECTANGLE, not a line: a single line has no intra-batch weld at all, so it
+  // could not show the structural/inferred split this asserts. A rectangle's
+  // four corner Coincidents are structural and must survive Alt, because a
+  // rectangle whose corners come apart is not a rectangle.
+  await selectSketchTool(page, "Rectangle");
   await page.keyboard.down("Alt");
   await clickAt(page, -140, -70);
   await clickAtAwaitingDofChange(page, -20, 10);
@@ -144,11 +157,14 @@ test("auto-constrain OFF keeps the shape together and nothing else", async ({ pa
     w.__stores?.settings.getState().setAutoConstrainMode("off");
   });
 
+  await selectSketchTool(page, "Rectangle");
   await clickAt(page, -140, -70);
   await clickAtAwaitingDofChange(page, -20, 10);
 
   const constraints = await getSketchConstraints(page);
+  // The shape holds together…
   expect(constraints.filter((c) => c.type === "Coincident").length).toBeGreaterThan(0);
+  // …and nothing relates it to anything, not even its own axis alignment.
   expect(constraints.some((c) => c.type === "Horizontal" || c.type === "Vertical")).toBe(false);
   expect(constraints.some((c) => c.type === "Fixed")).toBe(false);
 });

@@ -248,7 +248,13 @@ export async function enterSketchViaPlanePicker(page: Page): Promise<void> {
   await waitForCameraSettled(page);
   await page.getByRole("button", { name: "New sketch", exact: true }).click();
   // Plane-pick phase chrome (activeSketchId still null).
-  await expect(page.getByText("Select a sketch plane")).toBeVisible();
+  //
+  // `exact` is load-bearing: the inspector's empty state reads "Select a sketch
+  // plane to begin." (added by c064e81), so a substring match resolves to TWO
+  // elements and fails Playwright's strict mode — which blocked every spec that
+  // enters a sketch this way. The CHROME BAR's line is the plane-pick phase
+  // signal; the inspector's is an unrelated placeholder.
+  await expect(page.getByText("Select a sketch plane", { exact: true })).toBeVisible();
 
   const center = await toPage(page, 0, 0);
   const chip = page.locator("[data-plane-pick-label]");
