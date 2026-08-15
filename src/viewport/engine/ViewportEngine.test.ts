@@ -135,6 +135,29 @@ describe("ViewportEngine lifecycle", () => {
     engine.dispose();
   });
 
+  it("planePixelWorld() scales with orthographic zoom (snap threshold sizing)", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    engine.setProjection("ortho");
+
+    const ortho = (engine as any).rig.ortho as THREE.OrthographicCamera;
+    ortho.zoom = 1;
+    ortho.updateProjectionMatrix();
+    const atZoom1 = engine.planePixelWorld();
+
+    // Zooming IN (zoom > 1) must shrink world-units-per-pixel — a stale value
+    // here inflates the sketch snap threshold and starves grid snap in favor
+    // of whatever geometry now falls inside the oversized radius.
+    ortho.zoom = 2;
+    ortho.updateProjectionMatrix();
+    const atZoom2 = engine.planePixelWorld();
+
+    expect(atZoom2).toBeCloseTo(atZoom1 / 2, 6);
+
+    engine.dispose();
+  });
+
   it("renders every split preview body and restores every hidden head body", () => {
     const engine = new ViewportEngine();
     const target = new THREE.Group();

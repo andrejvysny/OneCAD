@@ -73,6 +73,14 @@
   /* Start-screen desktop behind the card (prototype 1a, line 40). */
   --color-canvas-start: #eceef1;
 
+  /* ---- Ground grid (viewport, GridPlane.ts) ---- */
+  /* Dedicated tokens, NOT --color-border/--color-border-strong: those two are
+     nearly indistinguishable from --color-canvas by design (subtle chrome
+     dividers), which made the grid read as almost invisible. Kept separate so
+     restyling UI borders never silently washes the grid out again. */
+  --color-viewport-grid-minor: #c9ccd2;
+  --color-viewport-grid-major: #a9adb6;
+
   /* ---- Origin axis triad (viewport, always-visible XYZ at the origin) ---- */
   --color-axis-x: #c45c5c;
   --color-axis-y: #5ca05c;
@@ -316,6 +324,13 @@
      signal, and a neutral dark would lose it. */
   --color-canvas-sketch: #1b2130;
   --color-canvas-start: #1e2126;
+
+  /* ---- Ground grid (viewport, GridPlane.ts) ---- */
+  /* See light block for why these are dedicated, not --color-border. Lighter
+     than the light-theme pair (dark grid lines need to lift AWAY from a dark
+     canvas, not toward black) but the same contrast-increase intent. */
+  --color-viewport-grid-minor: #3d424b;
+  --color-viewport-grid-major: #545b66;
 
   /* ---- Origin axis triad ---- */
   --color-axis-x: #e07a7a;

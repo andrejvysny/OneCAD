@@ -27,6 +27,8 @@ import * as THREE from "three";
 export type TokenName =
   | "--color-border"
   | "--color-border-strong"
+  | "--color-viewport-grid-minor"
+  | "--color-viewport-grid-major"
   | "--color-canvas"
   | "--color-canvas-sketch"
   | "--color-ink"
@@ -63,6 +65,8 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
   light: {
     "--color-border": "rgb(226, 228, 232)",
     "--color-border-strong": "rgb(216, 219, 224)",
+    "--color-viewport-grid-minor": "rgb(201, 204, 210)",
+    "--color-viewport-grid-major": "rgb(169, 173, 182)",
     "--color-canvas": "rgb(234, 236, 239)",
     "--color-canvas-sketch": "rgb(244, 247, 252)",
     "--color-ink": "rgb(27, 29, 33)",
@@ -96,6 +100,8 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
   dark: {
     "--color-border": "rgb(52, 56, 63)",
     "--color-border-strong": "rgb(67, 73, 82)",
+    "--color-viewport-grid-minor": "rgb(61, 66, 75)",
+    "--color-viewport-grid-major": "rgb(84, 91, 102)",
     "--color-canvas": "rgb(35, 38, 43)",
     "--color-canvas-sketch": "rgb(27, 33, 48)",
     "--color-ink": "rgb(232, 234, 237)",
@@ -179,9 +185,9 @@ function tokenColor(name: TokenName): THREE.Color {
 /** Named viewport colors, resolved from design tokens on first access. */
 export const palette = {
   /** Grid minor lines. */
-  gridMinor: () => tokenColor("--color-border"),
+  gridMinor: () => tokenColor("--color-viewport-grid-minor"),
   /** Grid major lines. */
-  gridMajor: () => tokenColor("--color-border-strong"),
+  gridMajor: () => tokenColor("--color-viewport-grid-major"),
   /** Renderer clear color = base viewport canvas background. */
   clear: () => tokenColor("--color-canvas"),
   /** Neutral body face material. */

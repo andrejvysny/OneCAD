@@ -490,10 +490,25 @@ describe("auto-constraint policy — the V2 default set", () => {
     expect(types(inferConstraints([v], [], v2()))).toEqual(["Vertical"]);
   });
 
-  it("still infers Perpendicular", () => {
+  it("still infers Perpendicular for a line that actually touches the reference", () => {
     const ref: SketchEntity = { id: "r1", type: "Line", p0: [0, 0], p1: deg(30) };
-    const l: SketchEntity = { id: "e1", type: "Line", p0: [100, 100], p1: [100 + deg(120)[0], 100 + deg(120)[1]] };
+    // `l` starts exactly at `ref`'s far endpoint — a genuine connection.
+    const start = deg(30);
+    const l: SketchEntity = { id: "e1", type: "Line", p0: start, p1: [start[0] + deg(120)[0], start[1] + deg(120)[1]] };
     expect(types(inferConstraints([l], [ref], v2()))).toContain("Perpendicular");
+  });
+
+  it("does NOT infer Perpendicular for an unrelated line elsewhere in the sketch (P1 audit fix — locality gate)", () => {
+    const ref: SketchEntity = { id: "r1", type: "Line", p0: [0, 0], p1: deg(30) };
+    // Same angle relationship as above, but nowhere near `ref` — no shared
+    // endpoint, so V2's default policy must not bind them just because the
+    // angle happens to be ~90°.
+    const l: SketchEntity = { id: "e1", type: "Line", p0: [100, 100], p1: [100 + deg(120)[0], 100 + deg(120)[1]] };
+    expect(types(inferConstraints([l], [ref], v2()))).not.toContain("Perpendicular");
+    // …and the legacy oracle-parity scan (no locality gate) still finds it.
+    expect(
+      types(inferConstraints([l], [ref], { nextConstraintId: () => "x", kinds: AUTO_KINDS_LEGACY })),
+    ).toContain("Perpendicular");
   });
 
   it("still infers Coincident — it is the weld until shared topology lands (§36)", () => {
@@ -574,7 +589,7 @@ describe("auto-constraint suppression — the Alt escape hatch (spec §38)", () 
     const fresh: SketchEntity = { id: "z", type: "Line", p0: [0, 0], p1: [100, 0] };
     const out = inferConstraints([fresh], [existing], {
       nextConstraintId: () => "c1",
-      originAccepted: true,
+      originSnapTargets: [[0, 0]],
       kinds: NONE,
     });
     expect(out).toEqual([]);
@@ -586,7 +601,7 @@ describe("auto-constraint suppression — the Alt escape hatch (spec §38)", () 
     let n = 0;
     const out = inferConstraints([fresh], [existing], {
       nextConstraintId: () => `c${++n}`,
-      originAccepted: true,
+      originSnapTargets: [[0, 0]],
     });
     const kinds = new Set(out.map((c) => c.type));
     expect(kinds.has("Horizontal")).toBe(true);

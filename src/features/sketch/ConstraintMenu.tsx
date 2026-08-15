@@ -79,19 +79,18 @@ export function ConstraintMenu() {
         ref={trigger}
         size="sm"
         variant="secondary"
-        aria-label="Constraints"
+        aria-label="Add constraint"
         aria-haspopup="dialog"
         aria-expanded={open}
-        className={cn(
-          "shrink-0 whitespace-nowrap text-ink-3",
-          open && "bg-hover-3 text-ink-2",
-        )}
+        className={cn("w-full justify-between whitespace-nowrap text-ink-3", open && "bg-hover-3 text-ink-2")}
         onClick={() => setOpen((v) => !v)}
       >
-        {/* Tier 2: icon-bearing label collapses to icon+chevron only — one
-            step past Construction's own collapse (`SketchChromeBar`'s
-            priority order), narrower than the trigger's own row. */}
-        <span className="@max-[760px]/canvas:hidden">Constraints</span>
+        {/* Named "Add constraint", not "Constraints" — this trigger lives
+            directly above the inspector's own "Constraints" list section
+            (`ConstraintsListSection`, label frozen by inspectorContract.ts),
+            so reusing that word here would collide on-screen and in every
+            text query. */}
+        <span>Add constraint</span>
         <Icon name="chevronDown" size={11} strokeWidth={2} />
       </Button>
 

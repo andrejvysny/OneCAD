@@ -15,6 +15,7 @@ import { editFeature } from "@/features/inspector/sections";
 import { GearPropertiesPanel, GearSelectedSummary } from "@/features/inspector/GearPropertiesPanel";
 import { useToolChipStore } from "@/stores/toolChipStore";
 import { InspectorSectionHost } from "@/modules/modeling/InspectorSectionHost";
+import { ConstraintMenu } from "@/features/sketch/ConstraintMenu";
 import { cn } from "@/ui/cn";
 import {
   sketchStatusText,
@@ -78,12 +79,17 @@ export function InspectorPanel() {
     <div className="absolute bottom-[34px] right-0 top-0 z-20 box-border w-[260px] overflow-auto border-l border-border bg-panel p-4">
       {gearArmed ? (
         <GearPropertiesPanel />
-      ) : sketching ? (
+      ) : sketching && activeSketchId && sketches[activeSketchId] ? (
         <SketchState
-          sketchName={sketches[activeSketchId ?? ""]?.name ?? "Sketch"}
-          dof={sketches[activeSketchId ?? ""]?.dof ?? 0}
-          status={sketches[activeSketchId ?? ""]?.status ?? "under"}
+          sketchName={sketches[activeSketchId].name}
+          dof={sketches[activeSketchId].dof}
+          status={sketches[activeSketchId].status}
         />
+      ) : sketching ? (
+        // Plane-pick phase (no activeSketchId yet) or the sketch registry
+        // hasn't caught up: no solve state exists, so claim nothing about DOF
+        // (mirrors SelectionState's "absent solve state renders no placard").
+        <div className="text-[12px] text-ink-6">Select a sketch plane to begin.</div>
       ) : showRepair ? (
         <RepairPanel />
       ) : gearFeatureId ? (
@@ -254,6 +260,12 @@ function SketchState({
         <div className={cn("mt-1 text-[12px] leading-normal", bodyClass)}>
           {sketchStatusSentence(status, dof)}
         </div>
+      </div>
+
+      {/* Moved here from the top chrome bar (Sketcher UX cleanup): constraint
+          discovery lives with the DOF card it feeds, not the toolbar. */}
+      <div className="mt-3">
+        <ConstraintMenu />
       </div>
 
       <InspectorSectionHost />

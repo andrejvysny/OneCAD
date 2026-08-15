@@ -183,6 +183,8 @@ describe("InspectorPanel", () => {
 
     expect(screen.getByText("Sketch 2")).toBeInTheDocument();
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
+    // Constraint discovery lives here now too (moved off the top chrome bar).
+    expect(screen.getByRole("button", { name: "Add constraint" })).toBeInTheDocument();
     expect(screen.getByText("Constraints")).toBeInTheDocument();
     // One row per constraint now (grouping/counting is gone) — 4 Coincident rows
     // plus Horizontal/Distance/Angle, each its own row with its own value column.

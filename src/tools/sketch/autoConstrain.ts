@@ -9,9 +9,21 @@
  *     the default match tolerance is tight (1e-6). The mock solver is an identity
  *     solve — it will not pull non-coincident points together — so coincidence is
  *     only inferred where snapping already made the points equal.
+ *   - Midpoint (V2-only, no legacy equivalent): a new point that lands ON an
+ *     existing line's computed midpoint — the same marker `snapEngine` already
+ *     offers at tier 1 — authors `Midpoint(point, line)`. Same tight tolerance
+ *     and same "only where snapping already made it exact" reasoning as
+ *     Coincident; skipped when the point already welded to an endpoint instead
+ *     (`inferMidpointPartner`).
  *   - Perpendicular: a NON-axis line meeting a reference line at 90±5°
  *     (AutoConstrainer.h `perpendicularTolerance = 5°`). Gated behind H/V exactly
  *     like C++ `inferLineConstraints` (`hasOrientationConstraint` blocks it).
+ *     V2-ONLY LOCALITY GATE (P1 audit fix): the reference must also actually
+ *     TOUCH the new line (share an endpoint within tolerance) — an unrelated
+ *     line elsewhere in the sketch whose angle happens to be close to 90° must
+ *     never bind. `AUTO_KINDS_LEGACY` skips this gate and keeps
+ *     `inferPerpendicularPartner`'s true global scan for oracle parity — see
+ *     `connectedRefLines`.
  *   - Parallel: a NON-axis line within ±5° of a reference line's direction
  *     (`parallelTolerance = 5°`). Also gated behind H/V — H/V wins over Parallel,
  *     matching the legacy precedence.
@@ -50,6 +62,7 @@ import type {
   SketchConstraintType,
   SketchEntity,
 } from "@/ipc/types";
+import { pointCoordOf } from "./sketchTopology";
 
 /** ±5° in radians (AutoConstrainer.h default; shared by H/V/perp/parallel/tangent). */
 export const HV_TOLERANCE_RAD = (5 * Math.PI) / 180;
@@ -88,14 +101,26 @@ export const AUTO_KINDS_V2: ReadonlySet<SketchConstraintType> = new Set<SketchCo
   "Vertical",
   "Perpendicular",
   "Coincident",
-  "Fixed", // the origin anchor only — already gated behind `originAccepted`
+  "Midpoint", // a point landing on an existing line's midpoint marker
+  "Fixed", // the origin anchor only — already gated behind `originSnapTargets`
 ]);
 
-/** Every kind the legacy C++ `AutoConstrainer` inferred. Pre-V2 behaviour, kept
- *  so the parity suite can still exercise the ported rules explicitly. */
+/**
+ * Every kind the legacy C++ `AutoConstrainer` inferred. Pre-V2 behaviour, kept
+ * so the parity suite can still exercise the ported rules explicitly.
+ *
+ * Listed explicitly rather than spreading `AUTO_KINDS_V2` — `Midpoint` is a
+ * V2-only addition with no `AutoConstrainer` equivalent (see
+ * `inferMidpointPartner`), so a spread would silently hand it to the parity
+ * suite too and change what "legacy" means out from under it.
+ */
 export const AUTO_KINDS_LEGACY: ReadonlySet<SketchConstraintType> =
   new Set<SketchConstraintType>([
-    ...AUTO_KINDS_V2,
+    "Horizontal",
+    "Vertical",
+    "Perpendicular",
+    "Coincident",
+    "Fixed",
     "Parallel",
     "Tangent",
     "Concentric",
@@ -111,15 +136,23 @@ export interface InferOptions {
   /** Id minter for the emitted constraints. */
   nextConstraintId: () => string;
   /**
-   * May a point that landed ON the sketch origin be anchored there? (U7)
-   *
-   * OFF by default, because "drawn near the origin" must never auto-fix
-   * geometry — the anchor is a response to the user ACCEPTING the origin snap,
-   * and this flag is how the caller says the origin was actually offered. With
-   * point snapping turned off the origin is not a snap target at all, so a
-   * coordinate that happens to be (0,0) is a coincidence, not a choice.
+   * Coordinates the cursor actually SNAPPED to the sketch origin at during
+   * this gesture (U7 / P1 audit fix). A new point is anchored ONLY when it
+   * matches one of these — not merely for landing near (0,0), which used to
+   * be indistinguishable from a coincidence, and not "the first new point
+   * found near the origin in the batch", which used to guess when a batch
+   * placed several points. Empty/omitted ⇒ nothing is anchored: "drawn near
+   * the origin" must never auto-fix geometry on its own.
    */
-  originAccepted?: boolean;
+  originSnapTargets?: readonly [number, number][];
+  /**
+   * The sketch's constraints BEFORE this batch, so the origin anchor can be
+   * skipped when the origin is already Fixed for real (P1 audit fix — this
+   * used to be inferred from "some existing point sits at (0,0)", which
+   * cannot tell a genuinely anchored origin from a merely free point that
+   * happens to be there).
+   */
+  existingConstraints?: readonly SketchConstraint[];
 }
 
 interface EntPoint {
@@ -303,6 +336,35 @@ export function inferTangentPartner(
 }
 
 /**
+ * Best Midpoint partner for a new point: the reference LINE whose computed
+ * midpoint the point sits ON (within `tol`), nearest wins, ties broken by
+ * stable id order (same shape as the Coincident determinism fix above).
+ *
+ * V2-only rule — a point landing on the midpoint MARKER `snapEngine` already
+ * offers (tier 1, `kind: "midpoint"`) is exactly as much an accepted relation
+ * as landing on an endpoint, so it earns the same auto-authored treatment
+ * (P1 audit finding: this was previously entirely absent). No legacy
+ * `AutoConstrainer` equivalent exists to port or pin — the ORIGINAL C++ only
+ * ever authored `Tangent` off a line's midpoint-adjacent geometry, never a
+ * `Midpoint` constraint itself.
+ */
+export function inferMidpointPartner(coord: [number, number], refs: RefLine[], tol: number): string | null {
+  let best: string | null = null;
+  let bestD = Infinity;
+  for (const r of refs) {
+    if (dist2(r.p0, r.p1) < MIN_GEOMETRY_SIZE) continue;
+    const mid: [number, number] = [(r.p0[0] + r.p1[0]) / 2, (r.p0[1] + r.p1[1]) / 2];
+    const d = dist2(coord, mid);
+    if (d > tol) continue;
+    if (d < bestD || (d === bestD && best !== null && r.id < best)) {
+      bestD = d;
+      best = r.id;
+    }
+  }
+  return best;
+}
+
+/**
  * Nearest concentric partner for a circle/arc CENTER: the closest existing
  * circle/arc center within tol (verbatim from `AutoConstrainer::inferConcentric`
  * — the running best is SEEDED at `tol` itself, so a candidate must beat it with
@@ -413,6 +475,33 @@ function inferCircularConstraints(
   if (equalPartner) out.push({ id: nextConstraintId(), type: "Equal", entities: [e.id, equalPartner] });
 }
 
+/**
+ * Reference lines that touch `p0`/`p1` within `tol`, stably ordered by id.
+ *
+ * V2 POLICY GATE for auto-Perpendicular (audit finding, not a legacy defect):
+ * `inferPerpendicularPartner` itself is the C++ `AutoConstrainer` port and
+ * scans EVERY reference line by angle alone — matching legacy exactly, which
+ * is why it stays untouched (`autoConstrain.test.ts` pins that global scan).
+ * But an unconnected line elsewhere in the sketch binding just because its
+ * angle happens to land near 90° is not a relationship the user asked for, so
+ * V2's default policy narrows the candidate set to lines that actually SHARE
+ * an endpoint with the new line before handing it to the (unmodified) scorer.
+ * The stable id sort makes an exact angle tie deterministic instead of
+ * array-order dependent (the same class of bug P1 already fixed for
+ * Coincident, just not yet for Perpendicular).
+ */
+function connectedRefLines(
+  p0: [number, number],
+  p1: [number, number],
+  refs: RefLine[],
+  tol: number,
+): RefLine[] {
+  const touches = (a: [number, number], b: [number, number]): boolean => dist2(a, b) <= tol;
+  return refs
+    .filter((r) => touches(r.p0, p0) || touches(r.p0, p1) || touches(r.p1, p0) || touches(r.p1, p1))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
 export function inferConstraints(
   newEntities: SketchEntity[],
   existing: SketchEntity[],
@@ -432,21 +521,35 @@ export function inferConstraints(
     .filter((e) => (e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined)
     .map((e) => ({ id: e.id, center: e.center!, radius: e.radius! }));
   const seenPairs = new Set<string>();
+  const originSnapTargets = opts.originSnapTargets ?? [];
   /*
    * One origin anchor per sketch — see the ORIGIN ANCHOR note below.
    *
    * Already anchored when either:
-   *   - existing geometry sits on the origin (it owns the anchor, so a later
-   *     batch never adds a second), or
    *   - the sketch carries REFERENCE-LOCKED geometry. A sketch on a model face
    *     is positioned by its host, and that projected boundary is already pinned
    *     with its own `Fixed` constraints — pinning a user point to the local
-   *     origin on top of that adds a constraint the user never asked for.
+   *     origin on top of that adds a constraint the user never asked for; or
+   *   - a `Fixed` constraint ALREADY resolves to the origin coordinate.
+   *     Position-based proximity is deliberately NOT used here (P1 audit fix):
+   *     a free point that merely happens to sit at (0,0) is not an anchor, and
+   *     checking coordinates alone could never tell the two apart.
    */
+  const byId = new Map(existing.map((e) => [e.id, e]));
   let originAnchored =
-    opts.originAccepted !== true ||
+    originSnapTargets.length === 0 ||
     existing.some((e) => e.referenceLocked === true) ||
-    refs.some((r) => Math.hypot(r.coord[0], r.coord[1]) <= coincTol);
+    (opts.existingConstraints ?? []).some((c) => {
+      if (c.type !== "Fixed") return false;
+      for (let i = 0; i < c.entities.length; i++) {
+        const position = c.positions?.[i];
+        if (!position) continue;
+        const e = byId.get(c.entities[i]);
+        const coord = e ? pointCoordOf(e, position) : null;
+        if (coord && Math.hypot(coord[0], coord[1]) <= coincTol) return true;
+      }
+      return false;
+    });
 
   for (const e of newEntities) {
     // H/V for lines; if neither fires, try Perpendicular then Parallel (never both
@@ -457,7 +560,14 @@ export function inferConstraints(
         out.push({ id: opts.nextConstraintId(), type: hv, entities: [e.id] });
       } else if (dist2(e.p0, e.p1) >= MIN_GEOMETRY_SIZE) {
         const perp = kinds.has("Perpendicular")
-          ? inferPerpendicularPartner(e.p0, e.p1, refLines)
+          ? inferPerpendicularPartner(
+              e.p0,
+              e.p1,
+              // Legacy keeps AutoConstrainer's true global scan (oracle parity);
+              // V2's restricted policy requires the reference to actually touch
+              // this line first — see `connectedRefLines`.
+              kinds === AUTO_KINDS_LEGACY ? refLines : connectedRefLines(e.p0, e.p1, refLines, coincTol),
+            )
           : null;
         if (perp) out.push({ id: opts.nextConstraintId(), type: "Perpendicular", entities: [e.id, perp] });
         const par = kinds.has("Parallel") ? inferParallelPartner(e.p0, e.p1, refLines) : null;
@@ -481,15 +591,18 @@ export function inferConstraints(
        * that corner, and one anchor removes the freedom all four share — a second
        * would be redundant, and redundancy reads as over-constrained.
        *
-       * Coordinate-based, exactly like the endpoint-coincidence rule below: a
-       * point lands on (0,0) within `coincTol` because it was snapped there or
-       * typed there, and both are acceptance. Geometry merely drawn NEAR the
-       * origin is outside the tolerance and is left alone.
+       * Targeted, not merely coordinate-based (P1 audit fix): a point anchors
+       * only when it matches an ACTUAL origin snap this gesture accepted
+       * (`originSnapTargets`), not "the first new point found near (0,0)" —
+       * geometry merely drawn near the origin, or a later point of the same
+       * batch that happens to also land there, is left alone.
        */
       if (
         kinds.has("Fixed") &&
         !originAnchored &&
-        Math.hypot(pt.coord[0], pt.coord[1]) <= coincTol
+        originSnapTargets.some(
+          (t) => Math.hypot(t[0] - pt.coord[0], t[1] - pt.coord[1]) <= coincTol,
+        )
       ) {
         originAnchored = true;
         out.push({
@@ -531,6 +644,18 @@ export function inferConstraints(
             type: "Coincident",
             entities: [e.id, hit.entityId],
             positions: [pt.position, hit.position],
+          });
+        }
+      } else if (kinds.has("Midpoint")) {
+        // Only when this point did NOT already weld to an endpoint — a point
+        // exactly on a stored endpoint is that relation, not a midpoint one.
+        const midPartner = inferMidpointPartner(pt.coord, refLines, coincTol);
+        if (midPartner) {
+          out.push({
+            id: opts.nextConstraintId(),
+            type: "Midpoint",
+            entities: [e.id, midPartner],
+            positions: [pt.position],
           });
         }
       }

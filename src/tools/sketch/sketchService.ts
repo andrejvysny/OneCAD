@@ -10,6 +10,7 @@ import type {
   SketchConstraintType,
   SketchEntity,
   SketchSession,
+  SketchUpsertResult,
 } from "@/ipc/types";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { documentStore, docSketchStatus } from "@/stores/documentStore";
@@ -155,6 +156,32 @@ async function editConstraintValueNow(
 }
 
 /**
+ * The restore-after-reject upsert, guarded against ITS OWN failure (P1 audit
+ * hardening). `applyConstraintNow`/`commitDimensionConstraintNow` both
+ * author a candidate edit, and on a conflicting solve re-upsert the PRIOR
+ * constraints to roll back — a real second network mutation, not a local
+ * undo. Unguarded, a failure here used to throw out of an `async` function
+ * with no `.catch()` at the call site (`openAppliedDimensionChip`'s
+ * `void commit...().then(...)`), leaving an unhandled rejection AND the
+ * frontend stuck showing the rejected CANDIDATE state with no explanation —
+ * exactly the divergence the audit flagged. This does not remove the second
+ * mutation (that needs the backend's own atomic candidate transaction, P2 —
+ * see TODO.md); it only bounds today's failure mode with `null` instead of a
+ * throw, so callers can show an honest re-sync warning.
+ */
+async function restoreUpsert(client: CadClient, session: SketchSession): Promise<SketchUpsertResult | null> {
+  try {
+    return await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
+  } catch {
+    return null;
+  }
+}
+
+/** Appended to a reject hint when the post-reject restore itself failed —
+ *  the document may now disagree with what's on screen. */
+const RESYNC_WARNING = " — and the sketch could not be re-synced; reopen it to be safe";
+
+/**
  * Author a NEW dimensional constraint (Dimension tool) → re-solve, refresh
  * geometry + DOF. If the solve reports over-constrained/conflicting, REJECT it:
  * remove the constraint, re-solve to the prior state, and surface a status hint
@@ -185,8 +212,9 @@ async function commitDimensionConstraintNow(
     // Reject-on-conflict: name the clashing constraint from the failed solve BEFORE
     // dropping the dimension and restoring the previous solve.
     const hint = rejectConflictHint(constraints, result.conflicting, constraint.id, "Dimension");
-    const restore = await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
+    const restore = await restoreUpsert(client, session);
     if (sessionSuperseded(gen)) return { rejected: true, hint };
+    if (!restore) return { rejected: true, hint: `${hint}${RESYNC_WARNING}` };
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);
@@ -833,9 +861,9 @@ async function applyConstraintNow(
     new Map(session.entities.map((e) => [e.id, e])),
   );
   if (blocker) {
-    viewportStore
-      .getState()
-      .setStatusHint(`${constraint.type} cannot reference a midpoint`, { severity: "error" });
+    const reason =
+      blocker === "derivedPoint" ? "reference a midpoint" : "target that point role on that entity";
+    viewportStore.getState().setStatusHint(`${constraint.type} cannot ${reason}`, { severity: "error" });
     return { rejected: true }; // no upsert, no undo snapshot — nothing changed
   }
 
@@ -847,8 +875,12 @@ async function applyConstraintNow(
   if (isConflictStatus(result.status)) {
     // Reject-on-conflict: name the clashing constraint, then drop this one + restore.
     const hint = rejectConflictHint(constraints, result.conflicting, constraint.id, "Constraint");
-    const restore = await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
+    const restore = await restoreUpsert(client, session);
     if (sessionSuperseded(gen)) return { rejected: true };
+    if (!restore) {
+      viewportStore.getState().setStatusHint(`${hint}${RESYNC_WARNING}`, { severity: "error", sticky: true });
+      return { rejected: true };
+    }
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);

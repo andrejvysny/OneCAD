@@ -70,6 +70,28 @@ describe("computeSnap priority", () => {
     expect(r.point).toEqual({ x: 10, y: 10 });
   });
 
+  it("gridRequireProximity: still snaps when the cursor is close to an intersection", () => {
+    // (12,7) is within the 8-unit threshold of grid point (10,10) — same case
+    // as the unconditional test above, just proximity-gated (2nd+ point of a
+    // draw gesture with dimension-round on).
+    const r = computeSnap({ x: 12, y: 7 }, [circle], { ...base, gridRequireProximity: true });
+    expect(r.kind).toBe("grid");
+    expect(r.point).toEqual({ x: 10, y: 10 });
+  });
+
+  it("gridRequireProximity: falls through to 'none' when the cursor is mid-cell", () => {
+    // gridStep=10's half-diagonal (7.07) is inside the default 8-unit
+    // threshold, so no point in that grid can ever miss it — shrink the
+    // threshold (snapPx=3) so a genuine cell-center miss is representable.
+    const r = computeSnap({ x: 25, y: 25 }, [circle], {
+      ...base,
+      snapPx: 3,
+      gridRequireProximity: true,
+    });
+    expect(r.kind).toBe("none");
+    expect(r.point).toEqual({ x: 25, y: 25 });
+  });
+
   it("emits an H/V alignment guide from a recent point", () => {
     const r = computeSnap({ x: 10.2, y: 60 }, [], { ...base, recentPoints: [{ x: 10, y: 0 }] });
     expect(r.kind).toBe("alignV");

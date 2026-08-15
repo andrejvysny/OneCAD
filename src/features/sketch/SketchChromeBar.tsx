@@ -4,10 +4,7 @@ import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useDocumentStore } from "@/stores/documentStore";
-import { sketchStore, useSketchStore } from "@/stores/sketchStore";
 import { runAction } from "@/shortcuts/useShortcuts";
-import { sketchStatusText, sketchStatusToneClass } from "./constraintStatus";
-import { ConstraintMenu } from "./ConstraintMenu";
 
 /**
  * Sketch chrome row (prototype 1c), shown only in sketch mode, second row of
@@ -17,15 +14,18 @@ import { ConstraintMenu } from "./ConstraintMenu";
  * width, border, shadow and position belong to the stack wrapper, not here.
  * Two variants: before a sketch exists (no activeSketchId) a "Select a
  * sketch plane" prompt with Cancel; once entered, the editing pill (name +
- * DOF + Constraints menu + Construction + Cancel + Finish). Cancel discards
- * straight to model mode (matching Esc). Finish routes through the same
- * `finishSketch` shortcut action as Enter: it drains the sketch mutation
- * queue first, then returns to model selection and prompts for a profile.
- * Compact layout per 1c — no flex spacer (that is the docked-bar 1d variant).
+ * Cancel + Finish). Cancel discards straight to model mode (matching Esc).
+ * Finish routes through the same `finishSketch` shortcut action as Enter: it
+ * drains the sketch mutation queue first, then returns to model selection
+ * and prompts for a profile. Compact layout per 1c — no flex spacer (that is
+ * the docked-bar 1d variant).
  *
- * `ConstraintMenu` retired the third, separately-floating
- * `SketchConstraintToolbar` row: constraint discovery now lives behind a
- * trigger in THIS row instead of its own pill (Sketcher UX cleanup, Track A3).
+ * DOF/constraint-status text lives ONLY in the inspector panel's
+ * `SketchState` card now (`InspectorPanel.tsx`) — this row used to duplicate
+ * it, which meant two places could show a stale/mismatched status mid-solve.
+ * `ConstraintMenu` and the Construction toggle moved out too: Constraints
+ * into the same inspector card, Construction into `FloatingToolbar`'s tool
+ * row (it is a sticky draw MODIFIER, not chrome about the sketch itself).
  *
  * RESPONSIVE (Track A4/A5): every text node is `whitespace-nowrap` — nothing
  * mid-word wraps. On top of that, a priority collapse (narrowest tier first)
@@ -33,10 +33,8 @@ import { ConstraintMenu } from "./ConstraintMenu";
  * puts around the whole toolbar stack — NOT this row itself, which stays
  * shrink-to-fit (an earlier attempt querying the shrink-to-fit row directly
  * collapsed it to ~0px; see `EditorShell.tsx`'s comment on that div).
- * Collapse order, least-important label first: Construction text → icon
- * only, Constraints text → icon+chevron (in `ConstraintMenu`), status label
- * → "DOF N" only, Cancel text → icon only. The sketch name, active tool and
- * Finish never collapse.
+ * Collapse order, least-important label first: Cancel text → icon only. The
+ * sketch name, active tool and Finish never collapse.
  */
 export function SketchChromeBar() {
   const mode = useToolStore((s) => s.mode);
@@ -45,7 +43,6 @@ export function SketchChromeBar() {
   const sketch = useDocumentStore((s) =>
     activeSketchId ? s.sketches[activeSketchId] : undefined,
   );
-  const construction = useSketchStore((s) => s.constructionMode);
 
   if (mode !== "sketch") return null;
 
@@ -75,7 +72,6 @@ export function SketchChromeBar() {
 
   const name = sketch?.name ?? "Sketch";
   const dof = sketch?.dof ?? 0;
-  const { label, tone } = sketchStatusText(sketch?.status ?? "under", dof);
 
   return (
     <div className="flex h-[38px] items-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
@@ -90,44 +86,13 @@ export function SketchChromeBar() {
       <span className="shrink-0 whitespace-nowrap text-[12.5px] font-semibold text-sel-text">
         Editing {name}
       </span>
-      <span
-        className={cn("shrink-0 whitespace-nowrap text-[12px] font-medium", sketchStatusToneClass(tone))}
-      >
-        {/* Tier 3: "Under-constrained · DOF 3" collapses to "DOF 3" — the
-            count is the actionable half, the tone word is redundant with the
-            label's own color. */}
-        <span className="@max-[660px]/canvas:hidden">{label}</span>
-        <span className="hidden @max-[660px]/canvas:inline">DOF {dof}</span>
-      </span>
-      {/* E2E-only settle probe (sr-only — never shown to a real user). The
-          visible label above changes wording/format across tiers and
-          statuses; this stays a fixed "DOF: N" so `dofPill()`
-          (`e2e/helpers.ts`) has one stable node to poll, instead of the
-          status bar's redundant third copy of the same number (P1 fix —
-          Sketcher UX hardening). */}
+      {/* E2E-only settle probe (sr-only — never shown to a real user; the
+          visible status now lives solely in the inspector panel's
+          `SketchState` card). Stays a fixed "DOF: N" so `dofPill()`
+          (`e2e/helpers.ts`) has one stable node to poll. */}
       <span data-testid="sketch-dof" data-dof={dof} className="sr-only">
         DOF: {dof}
       </span>
-      <ConstraintMenu />
-      {/* Sticky construction DRAW mode only — flipping an existing selection is the
-          X key's job (it needs the selection context this button doesn't have), so
-          the pressed state here always reads the mode and nothing else. */}
-      <Button
-        size="sm"
-        variant="secondary"
-        aria-pressed={construction}
-        aria-label="Construction"
-        title="Construction (X)"
-        className={cn(
-          "shrink-0 whitespace-nowrap",
-          construction ? "border-transparent bg-sel-bg text-sel-text" : "text-ink-3",
-        )}
-        onClick={() => sketchStore.getState().toggleConstructionMode()}
-      >
-        <Icon name="line" size={12} strokeWidth={2} />
-        {/* Tier 1 (first to go, least important label in the row). */}
-        <span className="@max-[880px]/canvas:hidden">Construction</span>
-      </Button>
       <Button
         size="sm"
         variant="secondary"

@@ -37,14 +37,35 @@ const seg = (id: string, referenceLocked?: boolean, construction?: boolean): Ske
 
 /** Every committed-entity Line2 under `root` — excludes dimension-line
  *  witness segments (tagged `userData.dimLineWitness`), which an AUTHORED
- *  length constraint grows (Track B3: selection alone no longer does) and
- *  are not what these tests are counting. */
+ *  length constraint grows (Track B3: selection alone no longer does), and
+ *  selection/hover HALO lines (tagged `userData.selectionHalo`, see
+ *  `haloColor`), which are a separate underlay, not the entity's own color. */
 function entityLines(root: THREE.Object3D): Line2[] {
   const lines: Line2[] = [];
   root.traverse((o) => {
-    if (o instanceof Line2 && !o.userData.dimLineWitness) lines.push(o);
+    if (o instanceof Line2 && !o.userData.dimLineWitness && !o.userData.selectionHalo) lines.push(o);
   });
   return lines;
+}
+
+/** The selection/hover halo's color, or undefined when none is drawn. These
+ *  tests never select/hover more than one entity at a time, so "the" halo is
+ *  unambiguous. */
+function haloColor(root: THREE.Object3D): number | undefined {
+  let color: number | undefined;
+  root.traverse((o) => {
+    if (o instanceof Line2 && o.userData.selectionHalo) color = (o.material as LineMaterial).color.getHex();
+  });
+  return color;
+}
+
+/** How many halo lines are currently drawn. */
+function haloCount(root: THREE.Object3D): number {
+  let n = 0;
+  root.traverse((o) => {
+    if (o instanceof Line2 && o.userData.selectionHalo) n++;
+  });
+  return n;
 }
 
 /** Entity id → the color its Line2 was drawn with, in scene order. */
@@ -82,12 +103,32 @@ describe("SketchObject — referenceLocked material", () => {
     obj.dispose();
   });
 
-  it("still tints on hover and selection (locked geometry is selectable)", () => {
+  it("still tints on hover and selection (locked geometry is selectable), as a halo behind its own color", () => {
     const { obj, root } = build([seg("locked", true)]);
     obj.setHover(["locked"]);
-    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.hover3d().getHex());
+    // The entity's own color survives — only a halo is added underneath it
+    // (P1 audit fix: selection/hover used to wipe the semantic color).
+    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchReference().getHex());
+    expect(haloColor(root)).toBe(palette.hover3d().getHex());
+    obj.setHover([]);
     obj.setSelection(["locked"]);
-    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchSelected().getHex());
+    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchReference().getHex());
+    expect(haloColor(root)).toBe(palette.sketchSelected().getHex());
+    obj.dispose();
+  });
+
+  it("selection wins over hover for the halo, and only draws one", () => {
+    const { obj, root } = build([seg("locked", true)]);
+    obj.setHover(["locked"]);
+    obj.setSelection(["locked"]);
+    expect(haloCount(root)).toBe(1);
+    expect(haloColor(root)).toBe(palette.sketchSelected().getHex());
+    obj.dispose();
+  });
+
+  it("draws no halo when neither selected nor hovered", () => {
+    const { obj, root } = build([seg("locked", true)]);
+    expect(haloCount(root)).toBe(0);
     obj.dispose();
   });
 });
@@ -102,14 +143,16 @@ describe("SketchObject — angle reference highlight + arc preview", () => {
     obj.dispose();
   });
 
-  it("selection and hover still win over the angle reference", () => {
+  it("selection and hover halo over the angle reference color without replacing it", () => {
     const { obj, root } = build([seg("ref")]);
     obj.setAngleReference("ref");
     obj.setHover(["ref"]);
-    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.hover3d().getHex());
+    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchAngleRef().getHex());
+    expect(haloColor(root)).toBe(palette.hover3d().getHex());
     obj.setHover([]);
     obj.setSelection(["ref"]);
-    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchSelected().getHex());
+    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchAngleRef().getHex());
+    expect(haloColor(root)).toBe(palette.sketchSelected().getHex());
     obj.dispose();
   });
 

@@ -374,13 +374,17 @@ export async function getDatumNames(page: Page): Promise<string[]> {
 
 /**
  * The constraint-discovery menu's button grid (ConstraintMenu.tsx —
- * role="toolbar" aria-label="Constraints"), opened from its "Constraints"
- * trigger in `SketchChromeBar` if not already open. ConstraintContextChips
- * renders a SECOND floating row with the exact same button labels near the
- * selection centroid whenever the applicable set is non-empty, so any
- * geometric/dimensional constraint button lookup MUST be scoped to this
- * one — an unscoped `getByRole("button", { name: "Horizontal" })` resolves
- * to two elements (strict-mode violation) as soon as something is selected.
+ * role="toolbar" aria-label="Constraints"), opened from its "Add constraint"
+ * trigger in the inspector panel's sketch card if not already open (moved off
+ * `SketchChromeBar` — Sketcher UX cleanup, top-bar/panel split). Renamed off
+ * "Constraints" because that trigger now sits directly above the inspector's
+ * OWN "Constraints" list section (frozen label, inspectorContract.ts), and
+ * shared it as a button name too. ConstraintContextChips renders a SECOND
+ * floating row with the exact same button labels near the selection centroid
+ * whenever the applicable set is non-empty, so any geometric/dimensional
+ * constraint button lookup MUST be scoped to this one — an unscoped
+ * `getByRole("button", { name: "Horizontal" })` resolves to two elements
+ * (strict-mode violation) as soon as something is selected.
  *
  * The menu is a Popover (Sketcher UX cleanup, Track A3 — it replaced a
  * persistent, always-mounted toolbar) and closes on any outside click,
@@ -391,7 +395,7 @@ export async function getDatumNames(page: Page): Promise<string[]> {
 export async function constraintToolbar(page: Page): Promise<Locator> {
   const toolbar = page.getByRole("toolbar", { name: "Constraints" });
   if (!(await toolbar.isVisible().catch(() => false))) {
-    await page.getByRole("button", { name: "Constraints" }).click();
+    await page.getByRole("button", { name: "Add constraint" }).click();
     await expect(toolbar).toBeVisible();
   }
   return toolbar;

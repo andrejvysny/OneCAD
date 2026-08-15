@@ -34,13 +34,13 @@ describe("ConstraintMenu", () => {
 
   it("is hidden in model mode", () => {
     render(<ConstraintMenu />);
-    expect(screen.queryByRole("button", { name: "Constraints" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add constraint" })).toBeNull();
   });
 
   it("is hidden in sketch mode with no active session", () => {
     render(<ConstraintMenu />);
     act(() => toolStore.getState().setMode("sketch"));
-    expect(screen.queryByRole("button", { name: "Constraints" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add constraint" })).toBeNull();
   });
 
   it("renders a closed trigger; opening it shows all 16 constraint buttons, all disabled with no selection", async () => {
@@ -49,7 +49,7 @@ describe("ConstraintMenu", () => {
     enterSketch(twoLines, []);
 
     expect(screen.queryByRole("toolbar", { name: "Constraints" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Constraints" }));
+    await user.click(screen.getByRole("button", { name: "Add constraint" }));
 
     const bar = screen.getByRole("toolbar", { name: "Constraints" });
     const buttons = bar.querySelectorAll("button");
@@ -61,7 +61,7 @@ describe("ConstraintMenu", () => {
     const user = userEvent.setup();
     render(<ConstraintMenu />);
     enterSketch(twoLines, [{ entityId: "e1" }, { entityId: "e2" }]);
-    await user.click(screen.getByRole("button", { name: "Constraints" }));
+    await user.click(screen.getByRole("button", { name: "Add constraint" }));
 
     // line & line ⇒ Distance, Parallel, Perpendicular, Angle.
     expect(screen.getByRole("button", { name: "Parallel" })).toBeEnabled();
@@ -78,7 +78,7 @@ describe("ConstraintMenu", () => {
     const user = userEvent.setup();
     render(<ConstraintMenu />);
     enterSketch(twoLines, [{ entityId: "e1" }, { entityId: "e2" }]);
-    await user.click(screen.getByRole("button", { name: "Constraints" }));
+    await user.click(screen.getByRole("button", { name: "Add constraint" }));
 
     await user.click(screen.getByRole("button", { name: "Parallel" }));
 

@@ -257,6 +257,34 @@ describe("SketchController live dimensions (Wave 2 wiring)", () => {
     expect(entities()[1].p1).toEqual([10, 3]);
   });
 
+  it("grid beats rounding for the SECOND point too, when the cursor is close to an intersection", async () => {
+    // Regression: grid used to be disabled outright for any point past the
+    // first whenever dimensionRound was on, so a 2nd+ vertex could never land
+    // on a grid line even with the cursor right on top of one.
+    engineMock.getCameraDistance.mockReturnValue(1000); // chooseGridStep(1000).minor = 50
+    enable();
+    settingsStore.getState().setSnap("grid", true);
+    click(0, 0); // first anchor, trivially on-grid
+    click(52, 2); // 2.8 units from grid intersection (50,0) — well inside the 8px reach
+    await flushSketchMutations();
+
+    expect(entities()[0].p1).toEqual([50, 0]);
+  });
+
+  it("rounding is the fallback when the cursor is nowhere near a grid intersection", async () => {
+    engineMock.getCameraDistance.mockReturnValue(1000); // gridStep 50, quantum 5mm
+    enable();
+    settingsStore.getState().setSnap("grid", true);
+    click(0, 0);
+    click(25, 25); // cell-center, 35.4 units from the nearest intersection — outside reach
+    await flushSketchMutations();
+
+    const line = entities()[0];
+    expect(lengthOf(line)).toBeCloseTo(35, 9); // 35.355 → 7 × 5mm quantum, not a grid vertex
+    expect(line.p1).not.toEqual([50, 50]);
+    expect(line.p1).not.toEqual([0, 0]);
+  });
+
   // ── locks project into geometry AND into constraints ────────────────────────
 
   it("a locked length pins the segment exactly and rides the SAME upsert as the entity", async () => {

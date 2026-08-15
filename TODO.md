@@ -6499,6 +6499,83 @@ Two findings that reshape this phase. Both verified, both should be read before 
 - **Measured blast radius: 99 files reference `SketchEntity`; 992 sites read an inline coordinate** (`.p0`/`.p1`/`.center`/`.start`/`.end`). This is a multi-session refactor and must be sequenced with its own sub-gates — starting it mid-session would leave the tree half-migrated.
 - Suggested first slice when it begins: make `addEntityOps` REUSE an existing point uuid when auto-Coincident welds two endpoints (one shared point instead of two + a constraint), behind the id-map, with the delete-cascade and `frontendSolvedPositions` reverse-map updated together. That is the smallest change that makes sharing real, and everything else in P4/P5 builds on it.
 
+### Constraint V2 — post-P0-P3 audit hardening (2026-08-15)
+
+An external audit of `bb25048` (the P0-P3 commit) confirmed its own stated
+scope accurately — P2/P4/P6/P7 are correctly "not started", not silently
+skipped — but found several concrete, bounded bugs in what DID land. Scope
+decision: fixed those bugs; did NOT attempt P2 (atomic backend candidate
+transaction) or P4 (shared topology) as "hardening" — both need a SCHEMA
+revision + cross-track sign-off per this file's own Execution rules, and P4
+is already scoped above. Full FE suite green throughout (4687/4687), tsc/
+build/hex-gate clean.
+
+- [x] **Auto-Perpendicular locality gate** (`autoConstrain.ts`): V2's default
+  policy now requires the reference line to actually TOUCH the new line
+  (shared endpoint within `coincTol`) before considering it — an unrelated
+  line elsewhere in the sketch could bind just because its angle landed near
+  90°. `inferPerpendicularPartner` itself is UNTOUCHED (oracle-pinned C++
+  parity); the gate is a candidate-set filter (`connectedRefLines`) applied
+  only when `kinds !== AUTO_KINDS_LEGACY`. Same helper also gives the V2 path
+  a stable id tie-break on an exact angle tie (Coincident already had this;
+  Perpendicular didn't). `AUTO_KINDS_LEGACY` is now listed explicitly rather
+  than spread from `AUTO_KINDS_V2`, so V2-only kinds (Midpoint) can't leak
+  into the parity suite by construction.
+- [x] **Midpoint auto-constraint** (`autoConstrain.ts`, new
+  `inferMidpointPartner`): a point landing on an existing line's midpoint
+  marker (the same one `snapEngine` already offers at tier 1) now authors
+  `Midpoint(point, line)`, same tight-tolerance reasoning as Coincident. Added
+  to `AUTO_KINDS_V2`. No legacy equivalent — V2-only, nothing to pin.
+- [x] **Origin-anchor correctness** (`autoConstrain.ts` + `SketchController.ts`):
+  replaced `originAccepted: boolean` (a settings-toggle proxy, plus "already
+  anchored" was a coordinate-proximity guess) with `originSnapTargets:
+  [number,number][]` — the actual coordinates the cursor snapped to `kind:
+  "origin"` at THIS gesture (`SketchController.noteSnap`, consumed/cleared
+  per commit) — and `existingConstraints`, so "already anchored" checks for a
+  REAL `Fixed` constraint resolving to (0,0) via `pointCoordOf`, not "some
+  point happens to sit there". Fixes both the false-negative (a free point at
+  the origin blocking the real anchor) and the false-positive (a multi-point
+  batch anchoring the wrong point by array order). Test fixtures updated
+  (`autoConstrain.test.ts`, `originSnap.probe.test.ts`) to the new API, not
+  just re-pinned — this is our own feature's test suite, not an oracle.
+- [x] **`constraintMarshalBlocker` gap** (`sketchTopology.ts`): was only
+  refusing `pointWireForm(...) === "none"` (a derived midpoint); a position an
+  entity doesn't have at all (`pointWireForm` returns `null`, e.g.
+  `Circle.Start`) sailed through the preflight. New `"invalidPoint"` drop
+  reason, distinct hint text.
+- [x] **Selection/hover no longer erase the entity's semantic color**
+  (`SketchObject.ts`): `matSelected`/`matHover` are now HALO materials — wider
+  width, `RENDER_ORDER.SKETCH_CURVES_HALO` (new tier, behind
+  `SKETCH_CURVES`), tagged `userData.selectionHalo` — drawn BEHIND the
+  entity's own under/full/conflict (or reference/construction/angle-ref)
+  line, which is always drawn now regardless of selection state. Previously
+  selecting/hovering fully replaced the color, so a partially-constrained
+  entity's status was invisible the moment it was clicked. `SketchObject.
+  test.ts` rewritten to assert base color + halo color separately. Per-entity
+  Blue/Orange/Green itself is NOT done — that needs real per-entity/
+  per-component DOF, which needs P4 topology; today's status is still
+  sketch-global (`statusMaterial()`), matching the audit's own recommended
+  sequencing (halo mechanism first, real per-entity color after P4/P6).
+- [x] **Reject-on-conflict restore hardened, not made atomic**
+  (`sketchService.ts`, new `restoreUpsert`): `applyConstraintNow` and
+  `commitDimensionConstraintNow` both do candidate-upsert → conflict →
+  restore-upsert (the old rollback-by-second-mutation the audit flagged). The
+  restore call was UNGUARDED — a failure threw out of an `async` fn with no
+  `.catch()` at `openAppliedDimensionChip`'s call site, leaving an unhandled
+  rejection and the frontend stuck on the rejected candidate state with no
+  explanation. `restoreUpsert` now catches and returns `null`; both callers
+  surface a `RESYNC_WARNING`-suffixed hint instead of silently diverging. The
+  SECOND MUTATION ITSELF IS STILL THERE — removing it is P2's job (an
+  atomic backend candidate/reject primitive), not a hardening pass.
+- Explicitly NOT done, and why: connected double-click selection / rigid
+  group drag (need P4 topology), pin-all endpoint dragging (needs P6
+  mobility + P7 solver-native drag, worker-side), per-entity Blue/Orange/
+  Green (needs P4), First/Last anchoring, Absolute/H/V dimension mode
+  selector, ellipse solver parity, constraint-candidate-from-visible-intent
+  architecture (the report's own recommended long-term fix for the
+  Perpendicular/origin class of bug — the locality gate above is the
+  proportionate interim fix, not that rewrite).
+
 ## Execution rules
 - Orchestrator: decisions/review only. WPs → Opus 4.8 subagents.
 - RISKY WP = extra independent review pass.

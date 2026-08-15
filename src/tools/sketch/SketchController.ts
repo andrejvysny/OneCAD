@@ -250,6 +250,12 @@ export class SketchController {
   private machine: ToolMachine | null = null;
   private machineState: ToolState | null = null;
   private lastSnap: SnapResult | null = null;
+  // Coordinates the cursor actually SNAPPED to the origin at, since the last
+  // commit (P1 audit: `originAccepted` used to be one settings-boolean, so the
+  // origin anchor picked "the first new point found near (0,0)" — a coordinate
+  // guess, not evidence the user snapped there. Consumed and cleared by
+  // `commitNow`, so it only ever carries this gesture's own points).
+  private originSnapPoints: Array<[number, number]> = [];
   private altHeld = false;
   // Drag-to-arc (SP-4 W3): an LMB drag off the last chain anchor PROMOTED the line
   // tool into tangent-arc mode, and the release commits the arc instead of being
@@ -951,6 +957,7 @@ export class SketchController {
     this.machine = null;
     this.machineState = null;
     this.lastSnap = null;
+    this.originSnapPoints = [];
     this.arcDragging = false;
     this.clearLiveDimGesture();
     this.snapCache = null;
@@ -1226,12 +1233,14 @@ export class SketchController {
    * The rounding granularity a CURSOR-placed dimension lands on right now, or
    * null for "do not round".
    *
-   * Three ways to get null, all of them "something more specific already decided
-   * where this point goes": the pref is off, Alt suppresses snapping wholesale,
-   * or a GEOMETRY snap won (endpoint … onCurve, and the alignment guides) — those
-   * tiers place the point EXACTLY on real geometry, and rounding afterwards would
-   * quietly move it off. Only a free point (`none`) or the grid tier — which
-   * rounding REPLACES during a draw gesture — is ours to quantize.
+   * Gets null whenever something more specific already decided where this
+   * point goes: the pref is off, Alt suppresses snapping wholesale, a GEOMETRY
+   * snap won (endpoint … onCurve, the alignment guides), or GRID won this
+   * frame (`kind === "grid"` — {@link dimensionRoundingActive} already made
+   * grid proximity-gated while armed, so a grid hit here means the cursor was
+   * genuinely close to an intersection and gets to keep it; rounding the
+   * length on top would just pull it back off). Only a genuinely free point
+   * (`none`) is ours to quantize.
    *
    * Locks are unaffected: a typed value pins whatever this returns.
    */
@@ -1239,19 +1248,23 @@ export class SketchController {
     if (!settingsStore.getState().snapTo.dimensionRound) return null;
     if (this.altHeld) return null;
     const kind = this.lastSnap?.kind;
-    if (kind !== undefined && kind !== "none" && kind !== "grid") return null;
+    if (kind !== undefined && kind !== "none") return null;
     const minor = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
     return dimQuantum(minor, settingsStore.getState().displayUnit);
   }
 
   /**
-   * Is the dimension quantum currently REPLACING the grid snap tier?
+   * Is the dimension quantum the fallback for grid this frame?
    *
    * Grid quantizes x and y independently; a draw gesture in progress means a
-   * LENGTH and an ANGLE, so the two tiers answer different questions and running
-   * both would let the grid pull the point back off the rounded length. Only
-   * while a machine is armed (≥1 anchor) — with nothing placed there is no
-   * dimension to round, so the grid is still the right tier for the first point.
+   * LENGTH and an ANGLE, so the two tiers answer different questions for the
+   * SAME point. Rather than one replacing the other outright, grid gets first
+   * refusal — proximity-gated (see `gridRequireProximity` in snapEngine.ts) so
+   * it only claims the point when the cursor is actually near an intersection
+   * — and dimension-round only fires off the resulting `kind: "none"` miss
+   * (`dimQuantumNow` above). Only while a machine is armed (≥1 anchor) — with
+   * nothing placed there is no dimension to round, so grid stays unconditional
+   * (as always) for the first point.
    */
   private dimensionRoundingActive(): boolean {
     if (!this.machineState || this.machineState.anchors.length === 0) return false;
@@ -1275,7 +1288,8 @@ export class SketchController {
       gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
       pixelWorld: this.deps.engine.planePixelWorld(),
       snapPx: this.snapPx(),
-      enableGrid: settings.snapTo.grid && !this.dimensionRoundingActive(),
+      enableGrid: settings.snapTo.grid,
+      gridRequireProximity: this.dimensionRoundingActive(),
       enableGuideLines: settings.snapTo.sketchGuideLines,
       enableGuidePoints: settings.snapTo.sketchGuidePoints,
       enableQuadrant: settings.snapTo.quadrant,
@@ -1288,6 +1302,14 @@ export class SketchController {
       recentPoints: this.machineState?.anchors ?? [],
       cache: this.snapCache ?? undefined,
     });
+  }
+
+  /** Record the winning snap for this pointer event, AND — when it actually
+   *  landed on the origin — its coordinate, so the next commit can anchor the
+   *  exact point the user snapped rather than guessing by proximity. */
+  private noteSnap(snap: SnapResult): void {
+    this.lastSnap = snap;
+    if (snap.kind === "origin") this.originSnapPoints.push([snap.point.x, snap.point.y]);
   }
 
   /** Where the polar fan is centred: the chain's LAST placed anchor, or null
@@ -1382,7 +1404,7 @@ export class SketchController {
       if (!ev) return;
       const snap = this.snapAt(ev.clientX, ev.clientY);
       if (!snap) return;
-      this.lastSnap = snap;
+      this.noteSnap(snap);
       // A live-dim chip set already says everything the hint label would —
       // showing both lets the snap hint visually collide with the chips it
       // has nothing new to add next to (SP-1 UX).
@@ -1421,7 +1443,7 @@ export class SketchController {
     if (!this.machine || !this.machineState) return;
     const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
     if (!snap) return;
-    this.lastSnap = snap;
+    this.noteSnap(snap);
     const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
     logSketchStep(this.machine.id, "arcDrag", stepped);
@@ -1509,7 +1531,7 @@ export class SketchController {
     // The CLICK's own snap is the last winning one for `dimQuantumNow` below: a
     // move rAF may never have run (a tap, or a click in the same frame), and a
     // stale kind from the previous position would decide this point's rounding.
-    this.lastSnap = snap;
+    this.noteSnap(snap);
     // Captured BEFORE the step consumes the anchors / the commit clears the locks.
     const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
@@ -1881,6 +1903,13 @@ export class SketchController {
     dims: DimCommitContext | undefined,
   ): { toolAuthored: SketchConstraint[]; dimAuthored: SketchConstraint[] } {
     const nextId = (): string => sketchStore.getState().nextConstraintId();
+    // Consume-and-clear: these are the origin snaps observed since the LAST
+    // commit, i.e. exactly the points this batch is about to author (P1 audit
+    // fix — anchoring used to be a settings-boolean gating a coordinate-
+    // proximity guess; now it targets the specific point(s) that actually
+    // snapped there this gesture).
+    const originSnapTargets = this.originSnapPoints;
+    this.originSnapPoints = [];
     // Tool-authored constraints resolve their index refs against the id-assigned
     // entities and SUPPRESS the intra-batch half of the inference — see
     // `resolveToolConstraints` for why the draw path cannot afford a duplicate.
@@ -1892,10 +1921,8 @@ export class SketchController {
       // placement could still come back welded or Horizontal. An empty kind set
       // is the honest encoding: the rules still run, they simply emit nothing.
       ...(this.altHeld ? { kinds: EMPTY_KINDS } : {}),
-      // The origin is only anchorable when it was actually OFFERED as a snap —
-      // the same preference that puts it in the snap ladder. With point snapping
-      // off, a point at (0,0) is a coincidence, not an accepted relation.
-      originAccepted: settingsStore.getState().snapTo.sketchGuidePoints,
+      originSnapTargets,
+      existingConstraints: session.constraints,
     });
     const toolAuthored = resolveToolConstraints(specs, newEntities, inferred, nextId);
     if (!dims || Object.keys(dims.locks).length === 0) return { toolAuthored, dimAuthored: [] };

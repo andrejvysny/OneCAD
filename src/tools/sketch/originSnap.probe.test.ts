@@ -38,7 +38,7 @@ const OPTS: SnapOptions = {
 let n = 0;
 const nextConstraintId = (): string => `c${++n}`;
 /** The origin was offered as a snap and the user landed on it — see `InferOptions`. */
-const ACCEPTED = { nextConstraintId, originAccepted: true };
+const ACCEPTED = { nextConstraintId, originSnapTargets: [[0, 0]] as [number, number][] };
 
 /** A deliberately oblique line so `inferHV` cannot fire — anything this probe
  *  sees in the output is an origin relation, not an orientation one. */

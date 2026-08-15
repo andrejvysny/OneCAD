@@ -106,6 +106,16 @@ export interface SnapOptions {
    */
   snapPx?: number;
   enableGrid: boolean;
+  /**
+   * Gate the grid tier by proximity (within the pixel threshold) instead of
+   * its default unconditional nearest-round. Set while a draw gesture is
+   * armed AND dimension-round is on: the two tiers answer different
+   * questions for the SAME point (grid quantizes x/y, dimension-round
+   * quantizes length), so grid only gets to answer when the raw cursor is
+   * actually near an intersection — otherwise length-rounding (applied
+   * downstream, off `kind: "none"`) is the more useful fallback.
+   */
+  gridRequireProximity?: boolean;
   enableGuideLines: boolean;
   enableGuidePoints: boolean;
   /** Circle/arc 0/90/180/270° quadrant snaps (default on). */
@@ -732,7 +742,10 @@ export function computeSnap(
       x: Math.round(raw.x / opts.gridStep) * opts.gridStep,
       y: Math.round(raw.y / opts.gridStep) * opts.gridStep,
     };
-    return { point, kind: "grid", label: "Grid", guides: [], snapped: true };
+    const close = !opts.gridRequireProximity || Math.hypot(point.x - raw.x, point.y - raw.y) <= threshold;
+    if (close) {
+      return { point, kind: "grid", label: "Grid", guides: [], snapped: true };
+    }
   }
 
   return { point: raw, kind: "none", label: null, guides: [], snapped: false };

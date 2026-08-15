@@ -216,7 +216,10 @@ export function pointCoordOf(
  */
 export type ConstraintDropReason =
   /** Names a derived point (a Line's virtual midpoint) as a POINT slot. */
-  "derivedPoint";
+  | "derivedPoint"
+  /** Names a position the entity does not have at all (e.g. `Circle.Start`,
+   *  `Line.Center`) — `pointWireForm` returns `null`, not `"none"`, for this. */
+  | "invalidPoint";
 
 /**
  * Can this constraint be put on the wire at all? `null` means yes.
@@ -249,7 +252,12 @@ export function constraintMarshalBlocker(
     if (!e) continue; // a missing entity is a different failure, not this one
     // `arcRole` is expressible under EVERY kind since P3 — only a derived
     // point (a Line's virtual midpoint) has no wire form at all.
-    if (pointWireForm(e.type, position) === "none") return "derivedPoint";
+    const form = pointWireForm(e.type, position);
+    if (form === "none") return "derivedPoint";
+    // A position the entity does not have (e.g. `Circle.Start`) used to sail
+    // through this preflight — only `"none"` was checked — and fail or drop
+    // silently downstream in marshalling instead of being refused loudly here.
+    if (form === null) return "invalidPoint";
   }
   return null;
 }

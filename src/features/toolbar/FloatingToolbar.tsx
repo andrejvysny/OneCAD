@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useReducer } from "react";
 import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { sketchStore, useSketchStore } from "@/stores/sketchStore";
 import {
   usePlatform,
   useRegistryEntries,
@@ -110,6 +111,11 @@ export function FloatingToolbar() {
 
   const flyoutDefault = useToolStore((s) => s.flyoutDefault);
   const setFlyoutDefault = useToolStore((s) => s.setFlyoutDefault);
+  // STICKY draw modifier (W1-B), not an exclusive tool — it applies alongside
+  // whatever draw tool is active, so it renders as a plain toggle appended
+  // after the registry-driven slots rather than going through
+  // `platform.toolHost.activate()` (which would deactivate the current tool).
+  const constructionMode = useSketchStore((s) => s.constructionMode);
 
   return (
     <div
@@ -163,6 +169,18 @@ export function FloatingToolbar() {
           </Fragment>
         );
       })}
+      {mode === "sketch" && (
+        <>
+          <Separator />
+          <ToolButton
+            icon="line"
+            label="Construction"
+            shortcut="X"
+            active={constructionMode}
+            onClick={() => sketchStore.getState().toggleConstructionMode()}
+          />
+        </>
+      )}
     </div>
   );
 }

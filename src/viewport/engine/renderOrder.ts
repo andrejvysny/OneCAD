@@ -51,6 +51,14 @@ export const RENDER_ORDER = {
   HIGHLIGHT_EDGE: 3,
   /** Static sketch vertex dots. */
   STATIC_POINTS: 3,
+  /** Selection/hover halo, BEHIND the entity's own semantic-color line (P1
+   *  audit fix — selecting/hovering an entity must not erase its
+   *  under/full/conflict color, only add a tint underneath it). Shares the
+   *  numeric tier with STATIC_CURVES/HIGHLIGHT_FACE, which belong to a
+   *  different object graph (model-mode static sketches / body faces) and
+   *  never co-render with edit-mode `SketchObject` content, so there is no
+   *  real collision. */
+  SKETCH_CURVES_HALO: 2,
   /** Edit-mode committed entities + rubber-band preview. */
   SKETCH_CURVES: 3,
   /** Edit-mode endpoint/center markers. */

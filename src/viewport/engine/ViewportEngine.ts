@@ -1205,7 +1205,7 @@ export class ViewportEngine {
       return (2 * dist * Math.tan((fov * Math.PI) / 360)) / height;
     }
     const oc = cam as THREE.OrthographicCamera;
-    return (oc.top - oc.bottom) / height;
+    return (oc.top - oc.bottom) / (oc.zoom || 1) / height;
   }
 
   /**

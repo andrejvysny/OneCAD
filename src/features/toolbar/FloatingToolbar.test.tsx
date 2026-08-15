@@ -6,6 +6,7 @@ import { ICON_MONO } from "@/icons/Icon";
 import { resetStores } from "@/test/resetStores";
 import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform";
 import { selectionStore } from "@/stores/selectionStore";
+import { sketchStore } from "@/stores/sketchStore";
 import {
   addonId,
   contributionId,
@@ -259,5 +260,52 @@ describe("FloatingToolbar", () => {
     // but it's the active tool, so it stays enabled.
     act(() => selectionStore.getState().clear());
     expect(screen.getByRole("button", { name: "Combine" })).toHaveAttribute("aria-disabled", "false");
+  });
+});
+
+// ── W1-B: the Construction toggle (moved from SketchChromeBar) ────────────────
+
+describe("FloatingToolbar — construction toggle", () => {
+  beforeEach(() => resetStores());
+
+  it("is absent in model mode", () => {
+    renderWithPlatform(<FloatingToolbar />);
+    expect(screen.queryByRole("button", { name: "Construction" })).toBeNull();
+  });
+
+  it("appears once sketch mode is entered and mirrors constructionMode as its pressed state", async () => {
+    const user = userEvent.setup();
+    renderWithPlatform(<FloatingToolbar />);
+    await user.click(screen.getByRole("button", { name: "New sketch" }));
+
+    const btn = screen.getByRole("button", { name: "Construction" });
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(btn);
+    expect(sketchStore.getState().constructionMode).toBe(true);
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(btn);
+    expect(sketchStore.getState().constructionMode).toBe(false);
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("reflects a mode flip driven from elsewhere (the X shortcut) without deactivating the current tool", async () => {
+    const user = userEvent.setup();
+    renderWithPlatform(<FloatingToolbar />);
+    await user.click(screen.getByRole("button", { name: "New sketch" }));
+    await user.click(screen.getByRole("button", { name: "Circle" }));
+
+    act(() => sketchStore.getState().toggleConstructionMode());
+    expect(screen.getByRole("button", { name: "Construction" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // The sticky modifier applies ALONGSIDE the active draw tool — toggling
+    // it must not steal Circle's own active/pressed state.
+    expect(screen.getByRole("button", { name: "Circle" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });

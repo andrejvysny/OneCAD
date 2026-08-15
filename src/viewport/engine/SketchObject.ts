@@ -63,6 +63,10 @@ const LINE_WIDTH = cssLineWidth(2);
 const PREVIEW_WIDTH = cssLineWidth(1.5);
 const TRIM_GHOST_WIDTH = cssLineWidth(3);
 const SELECTED_WIDTH = cssLineWidth(2.5);
+/** Selection/hover HALO width — drawn BEHIND the entity's own semantic-color
+ *  line (P1 audit fix), wide enough to read as an outline rather than a
+ *  slightly-fatter version of the same stroke. */
+const SELECTION_HALO_WIDTH = cssLineWidth(4.5);
 /** The angle-preview arc is a lightweight annotation glyph, not geometry —
  *  thinner than every real entity line so it never competes with them. */
 const ANGLE_ARC_WIDTH = cssLineWidth(1);
@@ -332,8 +336,11 @@ export class SketchObject {
     this.matUnder = mk(palette.sketchUnder());
     this.matFull = mk(palette.sketchFull());
     this.matConflict = mk(palette.sketchConflict());
-    this.matSelected = mk(palette.sketchSelected(), { linewidth: SELECTED_WIDTH });
-    this.matHover = mk(palette.hover3d());
+    // Halo materials, not primary-line materials (P1 audit fix) — see
+    // `rebuildEntities`. Wide, so they read as an outline behind whatever
+    // semantic color the entity's own line is drawn in.
+    this.matSelected = mk(palette.sketchSelected(), { linewidth: SELECTION_HALO_WIDTH });
+    this.matHover = mk(palette.hover3d(), { linewidth: SELECTION_HALO_WIDTH });
     this.matConstruction = mk(palette.sketchConstruction(), { dashed: true, dashSize: 3, gapSize: 2 });
     // SOLID, deliberately: construction is dashed because it is not real
     // geometry, whereas reference geometry IS real (it bounds regions) — it just
@@ -589,19 +596,27 @@ export class SketchObject {
     for (const e of this.entities) {
       const positions = entityPolyline(e);
       if (positions.length < 6) continue;
-      // Selection/hover tints still win — locked geometry is selectable and
-      // snappable, so it has to light up like anything else under the cursor.
-      const mat = this.selected.has(e.id)
-        ? this.matSelected
-        : this.hovered.has(e.id)
-          ? this.matHover
-          : this.angleRefId === e.id
-            ? this.matAngleRef
-            : e.referenceLocked
-              ? this.matReference
-              : e.construction
-                ? this.matConstruction
-                : statusMat;
+      // Selection/hover no longer REPLACE the entity's own color (P1 audit
+      // fix): a wider halo renders BEHIND it instead, so an under/full/
+      // conflict (or reference/construction/angle-ref) color stays visible
+      // while selected rather than being wiped by one flat selection tint.
+      // Locked/snappable geometry still lights up like anything else under
+      // the cursor — it just does so as a halo now, not a replacement.
+      const isSelected = this.selected.has(e.id);
+      const isHovered = !isSelected && this.hovered.has(e.id);
+      if (isSelected || isHovered) {
+        const halo = this.buildLine(positions, isSelected ? this.matSelected : this.matHover);
+        halo.renderOrder = RENDER_ORDER.SKETCH_CURVES_HALO;
+        halo.userData.selectionHalo = true;
+        this.entityGroup.add(halo);
+      }
+      const mat = this.angleRefId === e.id
+        ? this.matAngleRef
+        : e.referenceLocked
+          ? this.matReference
+          : e.construction
+            ? this.matConstruction
+            : statusMat;
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }
