@@ -34,7 +34,9 @@ use onecad_core::ids::{
     SketchId, VariableId,
 };
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, WorldPlane};
+use onecad_core::sketch::{
+    Constraint, CurvePosition, Sketch, SketchAttachment, SketchEntity, WorldPlane,
+};
 
 // ── id helpers ───────────────────────────────────────────────────────────────
 
@@ -221,7 +223,9 @@ fn base_sketch() -> Sketch {
     sk.add_constraint(Constraint::Distance {
         id: cid(1),
         entity1: eid(1),
+        entity1_position: CurvePosition::Arbitrary,
         entity2: eid(2),
+        entity2_position: CurvePosition::Arbitrary,
         value: s(40.0),
     })
     .unwrap();

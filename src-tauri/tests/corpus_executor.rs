@@ -50,7 +50,9 @@ use onecad_core::regen::{
     PlanPrepared, PlanRequest, PolicyVersions, RegenPlanner, RegenRequest, ResolveOutcome,
     ResolveRef, ResolveRequest, SessionMode, StoppedReason,
 };
-use onecad_core::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, WorldPlane};
+use onecad_core::sketch::{
+    Constraint, CurvePosition, Sketch, SketchAttachment, SketchEntity, WorldPlane,
+};
 
 use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::wire::{sketch_wire, GestureTarget};

@@ -177,20 +177,25 @@ fn rect_sketch(sid: SketchId, base: u128, w: f64, h: f64) -> Sketch {
     sk.add_constraint(Constraint::Fixed {
         id: c(9),
         point: p0s,
+        point_position: CurvePosition::Arbitrary,
         at: Vec2::new_unchecked(0.0, 0.0),
     })
     .unwrap();
     sk.add_constraint(Constraint::HorizontalDistance {
         id: c(10),
         point1: p0s,
+        point1_position: CurvePosition::Arbitrary,
         point2: p0e,
+        point2_position: CurvePosition::Arbitrary,
         value: Scalar::new(w),
     })
     .unwrap();
     sk.add_constraint(Constraint::VerticalDistance {
         id: c(11),
         point1: p1s,
+        point1_position: CurvePosition::Arbitrary,
         point2: p1e,
+        point2_position: CurvePosition::Arbitrary,
         value: Scalar::new(h),
     })
     .unwrap();

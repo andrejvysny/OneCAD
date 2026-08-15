@@ -3432,21 +3432,43 @@ fn wire_constraint(c: &Constraint) -> Value {
         Constraint::Vertical { line, .. } => {
             json!({ "id": cid(c), "type": "Vertical", "entities": [s(line)] })
         }
-        Constraint::Fixed { point, .. } => {
-            json!({ "id": cid(c), "type": "Fixed", "entities": [s(point)] })
+        Constraint::Fixed {
+            point,
+            point_position,
+            ..
+        } => {
+            let mut v = json!({ "id": cid(c), "type": "Fixed", "entities": [s(point)] });
+            if let Some(p) = point_roles(&[*point_position]) {
+                v["positions"] = p;
+            }
+            v
         }
-        Constraint::Midpoint { point, line, .. } => {
-            json!({ "id": cid(c), "type": "Midpoint", "entities": [s(point), s(line)] })
+        Constraint::Midpoint {
+            point,
+            point_position,
+            line,
+            ..
+        } => {
+            let mut v =
+                json!({ "id": cid(c), "type": "Midpoint", "entities": [s(point), s(line)] });
+            if let Some(p) = point_roles(&[*point_position, CurvePosition::Arbitrary]) {
+                v["positions"] = p;
+            }
+            v
         }
+        // `positions[0]` = which point of `point`; `positions[1]` = where on the
+        // CURVE it is pinned. Two different concepts sharing one array — never
+        // conflate them (SCHEMA §7.3, SKETCH-V2 P3).
         Constraint::OnCurve {
             point,
+            point_position,
             curve,
             position,
             ..
         } => json!({
             "id": cid(c), "type": "OnCurve",
             "entities": [s(point), s(curve)],
-            "positions": ["", curve_position_str(*position)],
+            "positions": [curve_position_role(*point_position), curve_position_str(*position)],
         }),
         Constraint::Parallel { line1, line2, .. } => {
             json!({ "id": cid(c), "type": "Parallel", "entities": [s(line1), s(line2)] })
@@ -3465,31 +3487,55 @@ fn wire_constraint(c: &Constraint) -> Value {
         } => json!({ "id": cid(c), "type": "Equal", "entities": [s(entity1), s(entity2)] }),
         Constraint::Distance {
             entity1,
+            entity1_position,
             entity2,
+            entity2_position,
             value,
             ..
-        } => json!({
-            "id": cid(c), "type": "Distance",
-            "entities": [s(entity1), s(entity2)], "value": value.value,
-        }),
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "Distance",
+                "entities": [s(entity1), s(entity2)], "value": value.value,
+            });
+            if let Some(p) = point_roles(&[*entity1_position, *entity2_position]) {
+                v["positions"] = p;
+            }
+            v
+        }
         Constraint::HorizontalDistance {
             point1,
+            point1_position,
             point2,
+            point2_position,
             value,
             ..
-        } => json!({
-            "id": cid(c), "type": "HorizontalDistance",
-            "entities": [s(point1), s(point2)], "value": value.value,
-        }),
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "HorizontalDistance",
+                "entities": [s(point1), s(point2)], "value": value.value,
+            });
+            if let Some(p) = point_roles(&[*point1_position, *point2_position]) {
+                v["positions"] = p;
+            }
+            v
+        }
         Constraint::VerticalDistance {
             point1,
+            point1_position,
             point2,
+            point2_position,
             value,
             ..
-        } => json!({
-            "id": cid(c), "type": "VerticalDistance",
-            "entities": [s(point1), s(point2)], "value": value.value,
-        }),
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "VerticalDistance",
+                "entities": [s(point1), s(point2)], "value": value.value,
+            });
+            if let Some(p) = point_roles(&[*point1_position, *point2_position]) {
+                v["positions"] = p;
+            }
+            v
+        }
         Constraint::Angle {
             line1,
             line2,
@@ -3507,12 +3553,22 @@ fn wire_constraint(c: &Constraint) -> Value {
         }),
         Constraint::Symmetric {
             point1,
+            point1_position,
             point2,
+            point2_position,
             axis,
             ..
-        } => json!({
-            "id": cid(c), "type": "Symmetric", "entities": [s(point1), s(point2), s(axis)],
-        }),
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "Symmetric", "entities": [s(point1), s(point2), s(axis)],
+            });
+            if let Some(p) =
+                point_roles(&[*point1_position, *point2_position, CurvePosition::Arbitrary])
+            {
+                v["positions"] = p;
+            }
+            v
+        }
     }
 }
 
@@ -3520,10 +3576,29 @@ fn cid(c: &Constraint) -> String {
     c.id().to_string()
 }
 
+/// The `positions` array for a constraint whose point slots MAY name an
+/// owner+role, or `None` when every slot is `Arbitrary`.
+///
+/// Emitting nothing in the all-arbitrary case is what keeps every constraint
+/// authored before SKETCH-V2 P3 byte-identical on the wire — the same
+/// discipline `Coincident` has used since W0b.
+fn point_roles(roles: &[CurvePosition]) -> Option<Value> {
+    if roles.iter().all(CurvePosition::is_arbitrary) {
+        return None;
+    }
+    Some(Value::Array(
+        roles
+            .iter()
+            .map(|r| Value::String(curve_position_role(*r).to_string()))
+            .collect(),
+    ))
+}
+
 fn curve_position_str(p: CurvePosition) -> &'static str {
     match p {
         CurvePosition::Start => "Start",
         CurvePosition::End => "End",
+        CurvePosition::Center => "Center",
         CurvePosition::Arbitrary => "Arbitrary",
     }
 }
@@ -4815,7 +4890,9 @@ mod solver_wire_tests {
         sk.add_constraint(Constraint::Distance {
             id: cid(2),
             entity1: p0,
+            entity1_position: CurvePosition::Arbitrary,
             entity2: p1,
+            entity2_position: CurvePosition::Arbitrary,
             value: Scalar::new(40.0),
         })
         .unwrap();

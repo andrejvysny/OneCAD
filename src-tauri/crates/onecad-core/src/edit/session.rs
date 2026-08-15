@@ -2759,31 +2759,52 @@ fn validate_positive_dimension(c: &Constraint) -> Result<(), DomainError> {
 /// geometric constraint.
 fn constraint_with_value(c: &Constraint, value: Scalar) -> Option<Constraint> {
     Some(match c {
+        // NOTE: the *_position fields ride through a value edit. Dropping them
+        // would silently re-bind an arc-endpoint dimension to the arc's centre
+        // the first time the user retyped its value.
         Constraint::Distance {
             id,
             entity1,
+            entity1_position,
             entity2,
+            entity2_position,
             ..
         } => Constraint::Distance {
             id: *id,
             entity1: *entity1,
+            entity1_position: *entity1_position,
             entity2: *entity2,
+            entity2_position: *entity2_position,
             value,
         },
         Constraint::HorizontalDistance {
-            id, point1, point2, ..
+            id,
+            point1,
+            point1_position,
+            point2,
+            point2_position,
+            ..
         } => Constraint::HorizontalDistance {
             id: *id,
             point1: *point1,
+            point1_position: *point1_position,
             point2: *point2,
+            point2_position: *point2_position,
             value,
         },
         Constraint::VerticalDistance {
-            id, point1, point2, ..
+            id,
+            point1,
+            point1_position,
+            point2,
+            point2_position,
+            ..
         } => Constraint::VerticalDistance {
             id: *id,
             point1: *point1,
+            point1_position: *point1_position,
             point2: *point2,
+            point2_position: *point2_position,
             value,
         },
         Constraint::Angle {
@@ -2909,6 +2930,7 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
 mod tests {
     use super::*;
     use crate::ids::{ConstraintId, DocumentId, EntityId};
+    use crate::sketch::CurvePosition;
     use crate::sketch::WorldPlane;
     use uuid::Uuid;
 
@@ -3069,7 +3091,9 @@ mod tests {
         s.add_constraint(Constraint::Distance {
             id: cid(1),
             entity1: eid(1),
+            entity1_position: CurvePosition::Arbitrary,
             entity2: eid(2),
+            entity2_position: CurvePosition::Arbitrary,
             value: Scalar::new(10.0),
         })
         .unwrap();
@@ -3451,7 +3475,9 @@ mod tests {
             constraint: Constraint::HorizontalDistance {
                 id: cid(1),
                 point1: eid(1),
+                point1_position: CurvePosition::Arbitrary,
                 point2: eid(2),
+                point2_position: CurvePosition::Arbitrary,
                 value: Scalar::new(-10.0),
             },
         }];

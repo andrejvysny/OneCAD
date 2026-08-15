@@ -229,11 +229,16 @@ describe("Midpoint — frontend extension (evaluateApplicability header)", () =>
     expect(rs.some((r) => r.type === "Midpoint")).toBe(true);
   });
 
-  it("EXCLUDED: an Arc's Start/End (unmappable — no synthesized wire point) + a Line", () => {
+  // FLIPPED by SKETCH-V2 P3. This asserted EXCLUDED while an arc endpoint had no
+  // expressible wire form outside `Coincident` — the matrix hid the option
+  // because choosing it would have been silently dropped at upsert. SCHEMA §7.3
+  // now carries the owner+role form on every point-taking slot, so the option is
+  // real and is offered.
+  it("INCLUDED: an Arc's Start/End + a Line (owner+role is now expressible)", () => {
     const rs = evaluateApplicability([T("arc", "Start"), T("line")], entities);
-    expect(rs.some((r) => r.type === "Midpoint")).toBe(false);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(true);
     const rsEnd = evaluateApplicability([T("arc", "End"), T("line")], entities);
-    expect(rsEnd.some((r) => r.type === "Midpoint")).toBe(false);
+    expect(rsEnd.some((r) => r.type === "Midpoint")).toBe(true);
   });
 
   it("EXCLUDED: a Line's own virtual Midpoint position + a DIFFERENT line", () => {

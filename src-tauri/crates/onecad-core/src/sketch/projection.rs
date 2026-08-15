@@ -46,7 +46,7 @@
 
 use crate::ids::{ConstraintId, EntityId};
 use crate::math::{Vec2, Vec3};
-use crate::sketch::{Constraint, SketchEntity};
+use crate::sketch::{Constraint, CurvePosition, SketchEntity};
 
 /// The kernel-exact frame of the seed face (SCHEMA §7.6 `exact`): the `gp_Pln`
 /// origin plus the orientation-corrected unit normal (reversed for a
@@ -160,6 +160,8 @@ pub fn projected_sketch_content(
             constraints.push(Constraint::Fixed {
                 id: mint_constraint(),
                 point: id,
+                // A projected point IS the point — no owner+role indirection.
+                point_position: CurvePosition::Arbitrary,
                 at: *at,
             });
             id

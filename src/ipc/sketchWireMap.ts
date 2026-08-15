@@ -46,6 +46,12 @@ import type {
 import { planeFor } from "./mockSketch";
 import { fromWireDimensionValue, toWireDimensionValue } from "./angleUnits";
 import { logWarn } from "@/debug/log";
+// `@/ipc` → `@/tools/sketch` is an established direction here (`mockSketch.ts`
+// imports ellipseMath, `localSolver.ts` prismPreview, `mockClient.ts` four such
+// modules); the architecture law binds `src/platform/**`, not this layer. The
+// edge buys ONE owner for the point-address format and the (type × position)
+// resolution table — see `sketchTopology.ts`.
+import { defaultPointRole, pointCoordOf, pointKeyOf } from "@/tools/sketch/sketchTopology";
 
 /** The 18 constraint-type tokens the worker wire emits (== `SketchConstraintType`). */
 const CONSTRAINT_TYPES: ReadonlySet<string> = new Set<SketchConstraintType>([
@@ -136,20 +142,73 @@ export type WireConstraint =
     }
   | { kind: "horizontal"; id: string; line: string }
   | { kind: "vertical"; id: string; line: string }
-  | { kind: "fixed"; id: string; point: string; at: [number, number] }
-  | { kind: "midpoint"; id: string; point: string; line: string }
+  | {
+      kind: "fixed";
+      id: string;
+      point: string;
+      pointPosition?: "start" | "end";
+      at: [number, number];
+    }
+  | {
+      kind: "midpoint";
+      id: string;
+      point: string;
+      pointPosition?: "start" | "end";
+      line: string;
+    }
   // OnCurve `position` is the Rust `CurvePosition` (camelCase); OMITTED here so it
   // defaults to `Arbitrary` (the applicability path never pins an endpoint).
-  | { kind: "onCurve"; id: string; point: string; curve: string; position?: "start" | "end" }
+  | {
+      kind: "onCurve";
+      id: string;
+      point: string;
+      // The POINT's own role. DISTINCT from `position` below, which says where on
+      // the CURVE the point is pinned — two different concepts (SCHEMA §7.3).
+      pointPosition?: "start" | "end";
+      curve: string;
+      position?: "start" | "end";
+    }
   | { kind: "parallel"; id: string; line1: string; line2: string }
   | { kind: "perpendicular"; id: string; line1: string; line2: string }
   | { kind: "tangent"; id: string; entity1: string; entity2: string }
   | { kind: "concentric"; id: string; entity1: string; entity2: string }
   | { kind: "equal"; id: string; entity1: string; entity2: string }
-  | { kind: "symmetric"; id: string; point1: string; point2: string; axis: string }
-  | { kind: "distance"; id: string; entity1: string; entity2: string; value: WireScalar }
-  | { kind: "horizontalDistance"; id: string; point1: string; point2: string; value: WireScalar }
-  | { kind: "verticalDistance"; id: string; point1: string; point2: string; value: WireScalar }
+  | {
+      kind: "symmetric";
+      id: string;
+      point1: string;
+      point1Position?: "start" | "end";
+      point2: string;
+      point2Position?: "start" | "end";
+      axis: string;
+    }
+  | {
+      kind: "distance";
+      id: string;
+      entity1: string;
+      entity1Position?: "start" | "end";
+      entity2: string;
+      entity2Position?: "start" | "end";
+      value: WireScalar;
+    }
+  | {
+      kind: "horizontalDistance";
+      id: string;
+      point1: string;
+      point1Position?: "start" | "end";
+      point2: string;
+      point2Position?: "start" | "end";
+      value: WireScalar;
+    }
+  | {
+      kind: "verticalDistance";
+      id: string;
+      point1: string;
+      point1Position?: "start" | "end";
+      point2: string;
+      point2Position?: "start" | "end";
+      value: WireScalar;
+    }
   | { kind: "angle"; id: string; line1: string; line2: string; value: WireScalar }
   | { kind: "radius"; id: string; entity: string; value: WireScalar }
   | { kind: "diameter"; id: string; entity: string; value: WireScalar };
@@ -227,8 +286,11 @@ export function cloneIdMap(map: SketchIdMap): SketchIdMap {
   };
 }
 
-const pointKey = (entityId: string, position: ConstraintPosition): string =>
-  `${entityId}.${position}`;
+/** The point-address minter. Re-exported shape kept local for call-site brevity;
+ *  the ONE implementation lives in `sketchTopology` (SKETCH-V2 P0.5) so this
+ *  module, `selectGesture.pointRef`, `frontendSolvedPositions`' output keys and
+ *  `applySolvedPositions`' parse can no longer drift apart. */
+const pointKey = pointKeyOf;
 
 /** Mint a real UUID v4 (crypto.randomUUID, with an RFC-4122 fallback for jsdom). */
 export function mintUuid(): string {
@@ -373,9 +435,10 @@ function arcEndpointRef(
 }
 
 /** Current plane coord of a point ref (entity + optional position) — the `at` a
- *  `Fixed` constraint pins to. Mirrors `resolveTargetPoint` (constraintTarget.ts)
- *  over the frontend inlined-coordinate entities; kept local so this ipc-layer
- *  module stays free of a `tools/sketch` import. */
+ *  `Fixed` constraint pins to. Delegates to `sketchTopology.pointCoordOf`, the
+ *  single owner of the (type × position) table; this used to be a third private
+ *  copy that disagreed with the other two by answering a wrong position with a
+ *  fallback coordinate. */
 function pointCoord(
   entities: SketchEntity[],
   entityId: string,
@@ -383,24 +446,13 @@ function pointCoord(
 ): [number, number] | null {
   const e = entities.find((x) => x.id === entityId);
   if (!e) return null;
-  switch (e.type) {
-    case "Point":
-      return e.p0 ?? null;
-    case "Line":
-      if (position === "End") return e.p1 ?? null;
-      if (position === "Midpoint" && e.p0 && e.p1)
-        return [(e.p0[0] + e.p1[0]) / 2, (e.p0[1] + e.p1[1]) / 2];
-      return e.p0 ?? null; // Start (default)
-    case "Circle":
-    case "Ellipse":
-      return e.center ?? null;
-    case "Arc":
-      if (position === "Start") return e.start ?? null;
-      if (position === "End") return e.end ?? null;
-      return e.center ?? null;
-    default:
-      return null;
-  }
+  // An ABSENT position keeps its old meaning exactly — "this slot IS the point"
+  // (SCHEMA §7.3), i.e. the entity's defining point. What changed (SKETCH-V2
+  // P0.5) is that a position the entity does not actually have now resolves to
+  // null instead of silently falling back to that same defining point: a
+  // hydrated `Fixed` naming `Circle.Start` used to pin the CENTRE. Dropping it
+  // loudly beats binding the wrong point — and the drop is now reported.
+  return pointCoordOf(e, position ?? defaultPointRole(e.type));
 }
 
 const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
@@ -429,15 +481,22 @@ function toWireConstraint(
   // Dimensional value crosses in the WIRE domain (Angle: deg→rad; BUG-2).
   const val: WireScalar = { value: toWireDimensionValue(c.type, c.value ?? 0) };
 
+  /**
+   * A POINT slot: either an ordinary point ref, or an ARC endpoint addressed as
+   * the arc's uuid + a role. The worker mints an arc's endpoints as real solver
+   * points and registers `<id>.start`/`<id>.end` (W0b).
+   *
+   * SKETCH-V2 P3 hoisted this out of `Coincident`. It used to be the ONLY kind
+   * that could express the owner+role form, so every other constraint on an arc
+   * endpoint resolved null and was silently dropped by `marshalUpsert` — the
+   * user clicked, the DOF did not move, and nothing said why.
+   */
+  const slot = (i: number): { id: string; position?: "start" | "end" } | null =>
+    arcEndpointRef(map, entities, c.entities[i], pos[i]) ??
+    (ref(i) ? { id: ref(i)! } : null);
+
   switch (c.type) {
     case "Coincident": {
-      // Each side is either an ordinary point ref or an ARC endpoint (the arc's
-      // uuid + a role). W0b: the worker mints an arc's endpoints as real solver
-      // points and registers `<id>.start`/`<id>.end`, so this is what lets a
-      // wall weld to a cap instead of being dropped on the floor.
-      const slot = (i: number): { id: string; position?: "start" | "end" } | null =>
-        arcEndpointRef(map, entities, c.entities[i], pos[i]) ??
-        (ref(i) ? { id: ref(i)! } : null);
       const a = slot(0);
       const b = slot(1);
       if (!a || !b) return null;
@@ -455,9 +514,12 @@ function toWireConstraint(
       return line ? { kind: "vertical", id, line } : null;
     }
     case "Midpoint": {
-      const point = ref(0);
+      const point = slot(0);
       const line = map.entity.get(c.entities[1]);
-      return point && line ? { kind: "midpoint", id, point, line } : null;
+      if (!point || !line) return null;
+      const out: WireConstraint = { kind: "midpoint", id, point: point.id, line };
+      if (point.position) out.pointPosition = point.position;
+      return out;
     }
     case "Parallel":
     case "Perpendicular": {
@@ -471,19 +533,37 @@ function toWireConstraint(
       return e1 && e2 ? { kind: "equal", id, entity1: e1, entity2: e2 } : null;
     }
     case "Distance": {
-      const e1 = ref(0);
-      const e2 = ref(1);
-      return e1 && e2 ? { kind: "distance", id, entity1: e1, entity2: e2, value: val } : null;
+      const e1 = slot(0);
+      const e2 = slot(1);
+      if (!e1 || !e2) return null;
+      const out: WireConstraint = {
+        kind: "distance", id, entity1: e1.id, entity2: e2.id, value: val,
+      };
+      if (e1.position) out.entity1Position = e1.position;
+      if (e2.position) out.entity2Position = e2.position;
+      return out;
     }
     case "HorizontalDistance": {
-      const p1 = ref(0);
-      const p2 = ref(1);
-      return p1 && p2 ? { kind: "horizontalDistance", id, point1: p1, point2: p2, value: val } : null;
+      const p1 = slot(0);
+      const p2 = slot(1);
+      if (!p1 || !p2) return null;
+      const out: WireConstraint = {
+        kind: "horizontalDistance", id, point1: p1.id, point2: p2.id, value: val,
+      };
+      if (p1.position) out.point1Position = p1.position;
+      if (p2.position) out.point2Position = p2.position;
+      return out;
     }
     case "VerticalDistance": {
-      const p1 = ref(0);
-      const p2 = ref(1);
-      return p1 && p2 ? { kind: "verticalDistance", id, point1: p1, point2: p2, value: val } : null;
+      const p1 = slot(0);
+      const p2 = slot(1);
+      if (!p1 || !p2) return null;
+      const out: WireConstraint = {
+        kind: "verticalDistance", id, point1: p1.id, point2: p2.id, value: val,
+      };
+      if (p1.position) out.point1Position = p1.position;
+      if (p2.position) out.point2Position = p2.position;
+      return out;
     }
     case "Angle": {
       const l1 = map.entity.get(c.entities[0]);
@@ -502,15 +582,23 @@ function toWireConstraint(
     // Point slots resolve position-aware via `ref`; whole-entity slots (curve /
     // axis / circle-arc) resolve directly through `map.entity`.
     case "Fixed": {
-      const point = ref(0);
+      const point = slot(0);
       const at = pointCoord(entities, c.entities[0], pos[0]);
-      return point && at ? { kind: "fixed", id, point, at } : null;
+      if (!point || !at) return null;
+      const out: WireConstraint = { kind: "fixed", id, point: point.id, at };
+      if (point.position) out.pointPosition = point.position;
+      return out;
     }
     case "OnCurve": {
-      const point = ref(0);
+      const point = slot(0);
       const curve = map.entity.get(c.entities[1]);
-      // Authored from applicability ⇒ Arbitrary position (omit `position`).
-      return point && curve ? { kind: "onCurve", id, point, curve } : null;
+      if (!point || !curve) return null;
+      // `position` (where on the CURVE) stays omitted — authored from
+      // applicability ⇒ Arbitrary. `pointPosition` is the separate question of
+      // WHICH point is being constrained; conflating them is a wire bug.
+      const out: WireConstraint = { kind: "onCurve", id, point: point.id, curve };
+      if (point.position) out.pointPosition = point.position;
+      return out;
     }
     case "Tangent":
     case "Concentric": {
@@ -521,12 +609,16 @@ function toWireConstraint(
         : null;
     }
     case "Symmetric": {
-      const point1 = ref(0);
-      const point2 = ref(1);
+      const point1 = slot(0);
+      const point2 = slot(1);
       const axis = map.entity.get(c.entities[2]);
-      return point1 && point2 && axis
-        ? { kind: "symmetric", id, point1, point2, axis }
-        : null;
+      if (!point1 || !point2 || !axis) return null;
+      const sym: WireConstraint = {
+        kind: "symmetric", id, point1: point1.id, point2: point2.id, axis,
+      };
+      if (point1.position) sym.point1Position = point1.position;
+      if (point2.position) sym.point2Position = point2.position;
+      return sym;
     }
     default:
       return null;
@@ -551,10 +643,47 @@ export function isDimensional(type: SketchConstraintType): boolean {
  *   - dimensional value changed in place   → SetDimension
  * Mutates `map` to record the new mappings.
  */
+/** Why a constraint could not be put on the wire (SKETCH-V2 P0.5). */
+export interface DroppedConstraint {
+  /** FRONTEND constraint id. */
+  id: string;
+  type: SketchConstraintType;
+  reason:
+    /** Targets an arc Start/End under a kind other than `Coincident` — the only
+     *  kind whose wire shape carries the owner+role form today. Lifted by the P3
+     *  protocol change (SCHEMA §7.3 generalizes `PointRef` to every slot). */
+    | "arcEndpointRole"
+    /** A ref this id-map has never minted (a stale or out-of-table point). */
+    | "unmappedRef";
+}
+
+/** Classify why `toWireConstraint` refused `c`. */
+function dropReason(
+  c: SketchConstraint,
+  entities: SketchEntity[],
+): DroppedConstraint["reason"] {
+  const arcEndpoint = c.entities.some((eid, i) => {
+    const p = c.positions?.[i];
+    return (
+      (p === "Start" || p === "End") && entities.find((e) => e.id === eid)?.type === "Arc"
+    );
+  });
+  return arcEndpoint && c.type !== "Coincident" ? "arcEndpointRole" : "unmappedRef";
+}
+
 export function marshalUpsert(
   map: SketchIdMap,
   next: { entities: SketchEntity[]; constraints: SketchConstraint[] },
   mint: () => string = mintUuid,
+  /** Called once per constraint that could not be marshalled. Additive: the
+   *  return value and every existing call site are unchanged.
+   *
+   *  DO NOT wire this on the hydration / re-marshal path. A slot's arc-endpoint
+   *  Coincidents are routinely unmappable (TODO.md:6373), so every sketch
+   *  re-entry would report drops the user did not cause. It exists for the
+   *  AUTHORING path, where a drop means the constraint the user just asked for
+   *  silently did nothing. */
+  onDrop?: (d: DroppedConstraint) => void,
 ): SketchEditOp[] {
   const ops: SketchEditOp[] = [];
 
@@ -629,10 +758,13 @@ export function marshalUpsert(
         map.constraint.set(c.id, id);
         map.constraintValue.set(c.id, c.value);
         ops.push({ op: "addConstraint", constraint: wire });
+      } else if (onDrop) {
+        // Unmappable (a ref this map never minted, or an arc Start/End under a
+        // kind other than Coincident). The solver still runs on the geometry, so
+        // nothing breaks — but the constraint the caller asked for is NOT there.
+        // Reporting it is the whole point: this used to be silent.
+        onDrop({ id: c.id, type: c.type, reason: dropReason(c, next.entities) });
       }
-      // Unmappable constraints (a ref this map has never minted, or an arc
-      // Start/End under a kind other than Coincident) are skipped — the solver
-      // still runs on the geometry; documented seam.
     } else if (isDimensional(c.type) && map.constraintValue.get(c.id) !== c.value) {
       // In-place dimension edit (the DimensionInput chip / editConstraintValue). The
       // cache holds UI-domain values; the wire carries the wire domain (Angle: deg→rad).

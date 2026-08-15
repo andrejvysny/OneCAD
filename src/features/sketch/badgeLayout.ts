@@ -9,6 +9,7 @@ import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { CONSTRAINT_PRESENTATION } from "./constraintCatalog";
 import { formatUnitless } from "@/units/format";
 import { formatDimensionValue } from "./dimensionFormat";
+import { pointCoordOf } from "@/tools/sketch/sketchTopology";
 
 export interface ConstraintBadge {
   id: string;
@@ -38,19 +39,18 @@ export interface ConstraintBadge {
 
 const mid = (a: [number, number], b: [number, number]): Point2 => ({ x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 });
 
-/** The (u,v) coord of an entity's named point (Start/End/Center/Midpoint). */
+/**
+ * The (u,v) coord of an entity's named point (Start/End/Center/Midpoint).
+ *
+ * Thin `Point2` adapter over `sketchTopology.pointCoordOf` (SKETCH-V2 P0.5),
+ * which owns the (type × position) table this used to re-implement. One
+ * behaviour change: a free `Point`'s `Center` now resolves to its coordinate
+ * instead of null, because `Point.Start`/`Point.Center` are two addresses for
+ * one point and the alias makes that explicit.
+ */
 export function entityPointCoord(e: SketchEntity, position: ConstraintPosition): Point2 | null {
-  if (position === "Center" && e.center) return { x: e.center[0], y: e.center[1] };
-  if (position === "Start") {
-    if (e.type === "Arc" && e.start) return { x: e.start[0], y: e.start[1] };
-    if (e.p0) return { x: e.p0[0], y: e.p0[1] };
-  }
-  if (position === "End") {
-    if (e.type === "Arc" && e.end) return { x: e.end[0], y: e.end[1] };
-    if (e.p1) return { x: e.p1[0], y: e.p1[1] };
-  }
-  if (position === "Midpoint" && e.p0 && e.p1) return mid(e.p0, e.p1);
-  return null;
+  const p = pointCoordOf(e, position);
+  return p ? { x: p[0], y: p[1] } : null;
 }
 
 /** Representative anchor for a badge on an entity (line midpoint / circle center). */

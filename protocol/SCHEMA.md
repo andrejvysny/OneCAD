@@ -961,14 +961,38 @@ the full authoritative sketch so replay is deterministic.
     reserved tag `0`): it adds four parameters and four independent equations, so
     the diagnosed `dof` is unchanged, and — being internal — it MUST NOT appear
     in `conflicting[]` or be reported as a redundant constraint. Consequences,
-    both normative: a `Coincident` MAY name an arc with `positions` `Start`/`End`
-    (the example above), and a `SolveDrag` MAY address `<id>.start` as its
-    `pointId` (§7.4). A reader that does not mint them MUST fail such a
-    constraint loudly rather than silently binding the arc's center.
+    both normative: **any** point-taking constraint slot MAY name an arc with
+    `positions` `Start`/`End` (see **PointRef** below), and a `SolveDrag` MAY
+    address `<id>.start` as its `pointId` (§7.4). A reader that does not mint
+    them MUST fail such a constraint loudly rather than silently binding the
+    arc's center.
     The arc's stored parameterization is unchanged — it is still
     center + radius + `startAngle`/`endAngle`, and a reader echoing solved
     geometry back MUST echo whichever endpoint form the request carried
     (`start`/`end` coordinates, or `startAngle`/`endAngle`).
+
+  - **`PointRef` — how a constraint slot names a point (normative).** A slot that
+    takes a POINT is either:
+      1. a **point-entity id** — the entity referenced IS the point; or
+      2. an **owner id + a role**, where the role names one of the owner's
+         registered point handles: `<id>.start`, `<id>.end`, `<id>.center`,
+         `<id>.p0`, `<id>.p1`.
+    The role travels in the constraint's `positions` array, positionally aligned
+    with `entities`. **An ABSENT `positions` array and an EMPTY-STRING slot are
+    equivalent and both mean form (1)** — this convention was implemented on both
+    sides long before it was written down, and is now normative.
+    Every point-taking slot of every kind accepts both forms:
+    `Coincident` (point1, point2) · `Fixed` (point) · `Midpoint` (point) ·
+    `OnCurve` (point) · `HorizontalDistance` (point1, point2) ·
+    `VerticalDistance` (point1, point2) · `Symmetric` (point1, point2) ·
+    `Distance` (entity1/entity2, when that slot is a point).
+    A role naming a handle the reader has not registered MUST fail loudly
+    (`OP_FAILED`) — never silently bind the owner entity instead.
+  - **`OnCurve` carries TWO different positions and they must not be conflated.**
+    `positions[0]` is the POINT's own role (a `PointRef` role, per above);
+    `positions[1]` is the `CurvePosition` saying where ON THE CURVE the point is
+    pinned. A producer that writes the curve position into slot 0 has authored a
+    different constraint than it intended.
   - A `Circle`/`Arc`/`Ellipse` returned by the solver lane
     (`enter_sketch`/`get_sketch` return wire) carries an **optional `centerRef`**
     — the backend point-entity uuid of its center — alongside the inlined
@@ -3736,6 +3760,41 @@ sign-off) once fixtures exist.
     arc rules.
   * **Not changed**: any existing wire shape, any region id, the DOF of any
     sketch without locked geometry, and the `construction` semantics.
+- **2026-08-15 — §7.3 `PointRef` generalizes from `Coincident` to EVERY
+  point-taking slot; `CurvePosition` gains `Center`; the empty-role convention
+  becomes normative** (SKETCH-V2 P3; **additive, no existing shape moves, no
+  fixture bump** — `protocol/fixtures/` unchanged, and the new position fields
+  are `serde(default)` + `skip_serializing_if`, so every constraint authored
+  before this entry serializes byte-identically. Verified: `sketch_freeze` 4/4
+  green with zero golden edits).
+  This finishes what the 2026-08-01 entry started. Arc `Start`/`End` became real,
+  addressable handles then, but only `Coincident` could NAME one: the Rust typed
+  model carried `point*_position` on that variant alone (`sketch/constraint.rs`)
+  and `wire_constraint` emitted `positions` only for it. Every other kind
+  resolved an arc endpoint to null, and the frontend marshaller dropped it before
+  the wire — so a user could apply a `Distance` to an arc endpoint, see the DOF
+  not move, and get no error, no hint and no log.
+  * **Generalized `PointRef`** (§7.3): a point slot is a point-entity id, or an
+    owner id + a role naming a registered handle. Applies to `Coincident`,
+    `Fixed`, `Midpoint`, `OnCurve`, `HorizontalDistance`, `VerticalDistance`,
+    `Symmetric`, and `Distance` when a slot is a point.
+  * **`Center` joins the role vocabulary** (§7.3), aligning it with §7.4's
+    `drag.role` table, which has always carried `center`. One grammar, one string
+    form: §7.4 `positions` keys and `SolveDrag.pointId` use the same handles.
+  * **Empty role is normative** (§7.3): absent `positions` ≡ empty-string slot ≡
+    "this slot IS a point entity". Previously implemented on both sides,
+    documented nowhere.
+  * **`OnCurve` disambiguated** (§7.3): `positions[0]` is the POINT's role,
+    `positions[1]` is the curve position. Different concepts, one array.
+  * **Reader obligation generalized**: an unregistered handle MUST fail loudly,
+    never silently bind the owner. Lifted from the arc-only sentence.
+  * **Not changed**: any entity wire shape, any region id, the DOF of any sketch,
+    the internal arc-rules contract (reserved tag `0`), or the naive-dof
+    deviation.
+  * **Implementation note, not normative**: the C++ worker already resolved
+    `positions[i]` generically for every kind (`WireSketch.cpp` `resolve_point`),
+    so this was a Rust-side and frontend-side change — the worker gained test
+    coverage, not code.
 - **2026-08-01 — §7.3 an `Arc`'s START/END are real, addressable points;
   §7.4 naive-dof gains a −4-per-endpoint-bearing-arc term** (W0b arc-endpoint
   handles; **aligns the implementation with text this document has always

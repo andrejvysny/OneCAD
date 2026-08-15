@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { detectConflicts } from "./mockConflicts";
-import { inferConstraints } from "@/tools/sketch/autoConstrain";
+import { AUTO_KINDS_LEGACY, inferConstraints } from "@/tools/sketch/autoConstrain";
 import type { SketchConstraint, SketchEntity } from "./types";
 
 const line = (id: string, p0: [number, number], p1: [number, number]): SketchEntity => ({
@@ -162,7 +162,15 @@ describe("detectConflicts — no false positives on autoConstrain-inferred batch
 
     const newEntities = [lineH, lineJoin, lineParallel, circleNear];
     let nextId = 0;
-    const out = inferConstraints(newEntities, existing, { nextConstraintId: () => `c${nextId++}` });
+    // AUTO_KINDS_LEGACY on purpose: this test guards `detectConflicts` against
+    // false positives on a RICH batch, and Parallel/Concentric/Equal still reach
+    // a document by MANUAL application even though V2 policy no longer infers
+    // them (SKETCH-V2 P1). Using the restricted default here would quietly drop
+    // three kinds of conflict coverage.
+    const out = inferConstraints(newEntities, existing, {
+      nextConstraintId: () => `c${nextId++}`,
+      kinds: AUTO_KINDS_LEGACY,
+    });
 
     // Sanity: the batch actually exercises every kind the test name promises.
     const kinds = new Set(out.map((c) => c.type));

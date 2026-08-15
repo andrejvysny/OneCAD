@@ -19,6 +19,7 @@ import type {
   EnterSketchTarget,
   GestureTarget,
   SketchConstraint,
+  SketchConstraintType,
   SketchEntity,
   SketchPlane,
   SketchSession,
@@ -44,6 +45,10 @@ import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { buildSnapCache, computeSnap, type SnapCandidateCache, type SnapResult } from "./snapEngine";
 import { SNAP_RADIUS_PX } from "./snapRadius";
 import { inferConstraints, entityPoints } from "./autoConstrain";
+
+/** Alt-held placement: infer nothing (spec §38). Module-level so the commit path
+ *  allocates no set per commit. */
+const EMPTY_KINDS: ReadonlySet<SketchConstraintType> = new Set<SketchConstraintType>();
 import { entityEndTangent, unitDir } from "./arcMath";
 import {
   commitDimensionConstraint,
@@ -1881,6 +1886,12 @@ export class SketchController {
     // `resolveToolConstraints` for why the draw path cannot afford a duplicate.
     const inferred = inferConstraints(newEntities, session.entities, {
       nextConstraintId: nextId,
+      // Alt-held placement authors NOTHING automatic (spec §38). Alt already
+      // suppressed SNAPPING (`suppress` into computeSnap, and dimension
+      // rounding); the constraint half was missing, so a deliberately free
+      // placement could still come back welded or Horizontal. An empty kind set
+      // is the honest encoding: the rules still run, they simply emit nothing.
+      ...(this.altHeld ? { kinds: EMPTY_KINDS } : {}),
       // The origin is only anchorable when it was actually OFFERED as a snap —
       // the same preference that puts it in the snap ladder. With point snapping
       // off, a point at (0,0) is a coincidence, not an accepted relation.

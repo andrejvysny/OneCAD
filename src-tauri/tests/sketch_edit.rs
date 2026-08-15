@@ -24,7 +24,7 @@ use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{ConstraintId, EntityId, SketchId};
 use onecad_core::math::Vec2;
 use onecad_core::regen::GeometryEngine;
-use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::DocumentRuntime;
 use onecad_lib::dto::SketchSolveStatus;
@@ -396,6 +396,7 @@ fn redundant_line_sketch(sid: SketchId) -> Sketch {
     sk.add_constraint(Constraint::Fixed {
         id: cid(C_FIX),
         point: eid(P0),
+        point_position: CurvePosition::Arbitrary,
         at: Vec2::new_unchecked(0.0, 0.0),
     })
     .unwrap();

@@ -104,6 +104,7 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::Fixed {
                 id: cid(4),
                 point: eid(P0),
+                point_position: CurvePosition::Arbitrary,
                 at: v2(0.0, 0.0),
             },
         ),
@@ -112,6 +113,7 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::Midpoint {
                 id: cid(5),
                 point: eid(P2),
+                point_position: CurvePosition::Arbitrary,
                 line: eid(LINE_A),
             },
         ),
@@ -120,6 +122,7 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::OnCurve {
                 id: cid(6),
                 point: eid(P2),
+                point_position: CurvePosition::Arbitrary,
                 curve: eid(CIRCLE),
                 position: CurvePosition::Arbitrary,
             },
@@ -169,7 +172,9 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::Distance {
                 id: cid(12),
                 entity1: eid(P0),
+                entity1_position: CurvePosition::Arbitrary,
                 entity2: eid(P1),
+                entity2_position: CurvePosition::Arbitrary,
                 value: Scalar::new(40.0),
             },
         ),
@@ -178,7 +183,9 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::HorizontalDistance {
                 id: cid(13),
                 point1: eid(P0),
+                point1_position: CurvePosition::Arbitrary,
                 point2: eid(P1),
+                point2_position: CurvePosition::Arbitrary,
                 value: Scalar::new(40.0),
             },
         ),
@@ -187,7 +194,9 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::VerticalDistance {
                 id: cid(14),
                 point1: eid(P0),
+                point1_position: CurvePosition::Arbitrary,
                 point2: eid(P2),
+                point2_position: CurvePosition::Arbitrary,
                 value: Scalar::new(20.0),
             },
         ),
@@ -222,7 +231,9 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
             Constraint::Symmetric {
                 id: cid(18),
                 point1: eid(P0),
+                point1_position: CurvePosition::Arbitrary,
                 point2: eid(P1),
+                point2_position: CurvePosition::Arbitrary,
                 axis: eid(LINE_B),
             },
         ),
@@ -271,7 +282,9 @@ fn canonical_sketch() -> Sketch {
     s.add_constraint(Constraint::Distance {
         id: cid(3),
         entity1: eid(P0),
+        entity1_position: CurvePosition::Arbitrary,
         entity2: eid(P1),
+        entity2_position: CurvePosition::Arbitrary,
         value: Scalar::new(40.0),
     })
     .unwrap();

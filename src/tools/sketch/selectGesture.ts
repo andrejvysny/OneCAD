@@ -17,6 +17,7 @@
 import type { ConstraintPosition, SketchEntity, SketchEntityType } from "@/ipc/types";
 import type { SketchSel } from "@/stores/sketchSelectionStore";
 import { sameSketchSel } from "@/stores/sketchSelectionStore";
+import { pointKeyOf } from "./sketchTopology";
 
 /** The gesture target kinds SCHEMA §7.4 defines. */
 export type GestureKind = "point" | "arcEnd" | "radius" | "entityBody";
@@ -100,9 +101,11 @@ export function isDraggableHandle(
   return handleKind(type, position) !== null;
 }
 
-/** The gesture point ref for `beginGesture`: `"<entityId>.<Position>"` (null for a body). */
+/** The gesture point ref for `beginGesture`: `"<entityId>.<Position>"` (null for a body).
+ *  Minted through `sketchTopology.pointKeyOf` so this ref, the id-map keys and the
+ *  solver's `positions` keys cannot drift apart (SKETCH-V2 P0.5). */
 export function pointRef(sel: SketchSel): string | null {
-  return sel.point ? `${sel.entityId}.${sel.point}` : null;
+  return sel.point ? pointKeyOf(sel.entityId, sel.point) : null;
 }
 
 /** A resolved drag intent: the picked target + everything `beginGesture` needs. */

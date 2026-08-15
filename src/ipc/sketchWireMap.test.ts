@@ -157,7 +157,11 @@ describe("marshalUpsert — constraints", () => {
     });
   });
 
-  it("an arc Start/End under a kind OTHER than Coincident is still skipped", () => {
+  // SKETCH-V2 P3 flipped this. It used to assert the constraint was DROPPED —
+  // the arc endpoint had no expressible wire form under any kind but Coincident,
+  // so the user applied a Distance and nothing happened, silently. §7.3 now
+  // generalizes the owner+role form to every point-taking slot.
+  it("an arc Start/End is now marshalled under a kind OTHER than Coincident", () => {
     const map = createIdMap("sk", "XY");
     const arcEntity: SketchEntity = { id: "e1", type: "Arc", center: [0, 0], radius: 5, start: [5, 0], end: [0, 5] };
     const ops = marshalUpsert(
@@ -165,8 +169,32 @@ describe("marshalUpsert — constraints", () => {
       { entities: [arcEntity, line("e2", [0, 0], [10, 0])], constraints: [{ id: "c1", type: "Distance", entities: ["e1", "e2"], positions: ["Start", "Start"], value: 4 }] },
       mint,
     );
-    expect(ops.some((o) => o.op === "addConstraint")).toBe(false);
-    expect(map.constraint.has("c1")).toBe(false);
+    const c = ops.find((o) => o.op === "addConstraint");
+    expect(c).toBeDefined();
+    // The arc side rides as the ARC's uuid + a role; the line side is an
+    // ordinary minted point and carries no role at all.
+    expect(c).toMatchObject({
+      op: "addConstraint",
+      constraint: { kind: "distance", entity1Position: "start", value: { value: 4 } },
+    });
+    expect((c as { constraint: Record<string, unknown> }).constraint.entity2Position).toBeUndefined();
+    expect(map.constraint.has("c1")).toBe(true);
+  });
+
+  it("a NON-arc point slot still emits no role (the wire shape is unchanged for it)", () => {
+    const map = createIdMap("sk", "XY");
+    const ops = marshalUpsert(
+      map,
+      {
+        entities: [line("e1", [0, 0], [10, 0]), line("e2", [0, 5], [10, 5])],
+        constraints: [{ id: "c1", type: "HorizontalDistance", entities: ["e1", "e2"], positions: ["Start", "End"], value: 4 }],
+      },
+      mint,
+    );
+    const c = ops.find((o) => o.op === "addConstraint") as { constraint: Record<string, unknown> };
+    expect(c.constraint.kind).toBe("horizontalDistance");
+    expect(c.constraint.point1Position).toBeUndefined();
+    expect(c.constraint.point2Position).toBeUndefined();
   });
 });
 

@@ -152,6 +152,7 @@ async fn user_constraints_round_trip_through_real_worker() {
         Constraint::Fixed {
             id: cid(0x90),
             point: eid(0x01),
+            point_position: CurvePosition::Arbitrary,
             at: Vec2::new_unchecked(3.0, 4.0),
         },
         "Fixed",
@@ -211,7 +212,9 @@ async fn user_constraints_round_trip_through_real_worker() {
         Constraint::Symmetric {
             id: cid(0x90),
             point1: eid(0x01),
+            point1_position: CurvePosition::Arbitrary,
             point2: eid(0x02),
+            point2_position: CurvePosition::Arbitrary,
             axis: eid(0x10),
         },
         "Symmetric",
@@ -231,6 +234,7 @@ async fn user_constraints_round_trip_through_real_worker() {
         Constraint::OnCurve {
             id: cid(0x90),
             point: eid(0x01),
+            point_position: CurvePosition::Arbitrary,
             curve: eid(0x10),
             position: CurvePosition::Arbitrary,
         },
@@ -270,6 +274,7 @@ async fn user_constraints_round_trip_through_real_worker() {
         Constraint::Midpoint {
             id: cid(0x90),
             point: eid(0x01),
+            point_position: CurvePosition::Arbitrary,
             line: eid(0x10),
         },
         "Midpoint",
@@ -402,4 +407,57 @@ async fn arc_endpoint_coincidents_weld_a_slot_through_real_worker() {
     );
 
     wm.shutdown().await;
+}
+
+/// SKETCH-V2 P3 — a NON-`Coincident` constraint may now name an arc endpoint.
+///
+/// Before this, `Constraint::Distance` carried no position fields and
+/// `wire_constraint` emitted `positions` only for `Coincident`, so an arc
+/// endpoint resolved to null: the frontend marshaller dropped the constraint
+/// before the wire, the DOF did not move, and the user got no error, no hint and
+/// no log. The C++ worker could ALWAYS resolve these — `WireSketch.cpp` routes
+/// every kind's point slots through one `resolve_point` — so this test is the
+/// coverage that seam never had, not a test of new worker code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn distance_to_an_arc_endpoint_solves_through_real_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+
+    // A free point at the origin, and an arc centred at (100,0) with radius 20
+    // sweeping 0 → π/2, so its START point sits at (120, 0).
+    let (p, c, a) = (0x21, 0x22, 0x23);
+    let geometry = vec![
+        point(p, 0.0, 0.0),
+        point(c, 100.0, 0.0),
+        SketchEntity::arc(
+            eid(a),
+            eid(c),
+            20.0,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+            false,
+        )
+        .expect("finite arc"),
+    ];
+
+    assert_constrains(
+        &wm,
+        0x5c08,
+        geometry,
+        Constraint::Distance {
+            id: cid(0x30),
+            entity1: eid(p),
+            // The free point IS the point — the empty/absent role (SCHEMA §7.3).
+            entity1_position: CurvePosition::Arbitrary,
+            entity2: eid(a),
+            // The arc is the OWNER; `Start` picks its `<id>.start` handle.
+            entity2_position: CurvePosition::Start,
+            value: onecad_core::document::variables::Scalar::new(100.0),
+        },
+        "Distance(point, arc.start)",
+    )
+    .await;
 }

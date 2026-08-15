@@ -481,7 +481,7 @@ async fn real_worker_post_edit_revision_fencing_two_cycles() {
 fn rectangle_sketch() -> (onecad_core::sketch::Sketch, onecad_core::ids::EntityId) {
     use onecad_core::ids::{ConstraintId, EntityId, SketchId};
     use onecad_core::math::Vec2;
-    use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+    use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
     let eid = |n: u128| EntityId(Uuid::from_u128(n));
     let cid = |n: u128| ConstraintId(Uuid::from_u128(n));
@@ -534,6 +534,7 @@ fn rectangle_sketch() -> (onecad_core::sketch::Sketch, onecad_core::ids::EntityI
     sk.add_constraint(Constraint::Fixed {
         id: cid(5),
         point: p0,
+        point_position: CurvePosition::Arbitrary,
         at: Vec2::new_unchecked(0.0, 0.0),
     })
     .unwrap();

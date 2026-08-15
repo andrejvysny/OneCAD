@@ -53,6 +53,10 @@ pub enum CurvePosition {
     Start,
     /// Pin to the curve's end point.
     End,
+    /// Pin to the owner's centre point (circle / arc / ellipse). Added by
+    /// SKETCH-V2 P3 so §7.3's role vocabulary matches §7.4's `drag.role` table,
+    /// which has always carried `center`.
+    Center,
     /// Pin anywhere on the curve (point may slide; C++ default).
     #[default]
     Arbitrary,
@@ -124,8 +128,11 @@ pub enum Constraint {
     Fixed {
         /// Constraint identity.
         id: ConstraintId,
-        /// The pinned point entity.
+        /// The pinned point entity, or the owner of the referenced point.
         point: EntityId,
+        /// Which point of `point` (default `Arbitrary` ⇒ `point` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point_position: CurvePosition,
         /// Fixed position in sketch coordinates.
         at: Vec2,
     },
@@ -133,8 +140,11 @@ pub enum Constraint {
     Midpoint {
         /// Constraint identity.
         id: ConstraintId,
-        /// The constrained point entity.
+        /// The constrained point entity, or the owner of the referenced point.
         point: EntityId,
+        /// Which point of `point` (default `Arbitrary` ⇒ `point` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point_position: CurvePosition,
         /// The line entity.
         line: EntityId,
     },
@@ -143,8 +153,13 @@ pub enum Constraint {
     OnCurve {
         /// Constraint identity.
         id: ConstraintId,
-        /// The constrained point entity.
+        /// The constrained point entity, or the owner of the referenced point.
         point: EntityId,
+        /// Which point of `point` (default `Arbitrary` ⇒ `point` IS the point).
+        /// DISTINCT from `position` below: this names the POINT, that names
+        /// where on the CURVE it is pinned. Conflating them is a wire bug.
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point_position: CurvePosition,
         /// The curve entity.
         curve: EntityId,
         /// Where on the curve the point is pinned.
@@ -203,8 +218,15 @@ pub enum Constraint {
         id: ConstraintId,
         /// First entity.
         entity1: EntityId,
+        /// Which point of `entity1` when it is a POINT slot (default
+        /// `Arbitrary` ⇒ `entity1` IS the point, or is a curve).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        entity1_position: CurvePosition,
         /// Second entity.
         entity2: EntityId,
+        /// Which point of `entity2` when it is a POINT slot.
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        entity2_position: CurvePosition,
         /// Distance value (mm), expression-capable.
         value: Scalar,
     },
@@ -213,10 +235,16 @@ pub enum Constraint {
     HorizontalDistance {
         /// Constraint identity.
         id: ConstraintId,
-        /// First point entity.
+        /// First point entity, or the owner of the referenced point.
         point1: EntityId,
-        /// Second point entity.
+        /// Which point of `point1` (default `Arbitrary` ⇒ `point1` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point1_position: CurvePosition,
+        /// Second point entity, or the owner of the referenced point.
         point2: EntityId,
+        /// Which point of `point2` (default `Arbitrary` ⇒ `point2` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point2_position: CurvePosition,
         /// Signed distance value (mm), expression-capable.
         value: Scalar,
     },
@@ -225,10 +253,16 @@ pub enum Constraint {
     VerticalDistance {
         /// Constraint identity.
         id: ConstraintId,
-        /// First point entity.
+        /// First point entity, or the owner of the referenced point.
         point1: EntityId,
-        /// Second point entity.
+        /// Which point of `point1` (default `Arbitrary` ⇒ `point1` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point1_position: CurvePosition,
+        /// Second point entity, or the owner of the referenced point.
         point2: EntityId,
+        /// Which point of `point2` (default `Arbitrary` ⇒ `point2` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point2_position: CurvePosition,
         /// Signed distance value (mm), expression-capable.
         value: Scalar,
     },
@@ -265,10 +299,16 @@ pub enum Constraint {
     Symmetric {
         /// Constraint identity.
         id: ConstraintId,
-        /// First point entity.
+        /// First point entity, or the owner of the referenced point.
         point1: EntityId,
-        /// Second point entity.
+        /// Which point of `point1` (default `Arbitrary` ⇒ `point1` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point1_position: CurvePosition,
+        /// Second point entity, or the owner of the referenced point.
         point2: EntityId,
+        /// Which point of `point2` (default `Arbitrary` ⇒ `point2` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point2_position: CurvePosition,
         /// The mirror-axis line entity (C++ `axisLine`).
         axis: EntityId,
     },
@@ -409,6 +449,7 @@ mod tests {
                 Constraint::Fixed {
                     id: cid(4),
                     point: p1,
+                    point_position: CurvePosition::Arbitrary,
                     at: Vec2::new_unchecked(1.0, 2.0),
                 },
                 vec![p1],
@@ -417,6 +458,7 @@ mod tests {
                 Constraint::Midpoint {
                     id: cid(5),
                     point: p1,
+                    point_position: CurvePosition::Arbitrary,
                     line: l1,
                 },
                 vec![p1, l1],
@@ -425,6 +467,7 @@ mod tests {
                 Constraint::OnCurve {
                     id: cid(6),
                     point: p1,
+                    point_position: CurvePosition::Arbitrary,
                     curve: cu,
                     position: CurvePosition::Arbitrary,
                 },
@@ -474,7 +517,9 @@ mod tests {
                 Constraint::Distance {
                     id: cid(12),
                     entity1: e1,
+                    entity1_position: CurvePosition::Arbitrary,
                     entity2: e2,
+                    entity2_position: CurvePosition::Arbitrary,
                     value: Scalar::new(40.0),
                 },
                 vec![e1, e2],
@@ -483,7 +528,9 @@ mod tests {
                 Constraint::HorizontalDistance {
                     id: cid(13),
                     point1: p1,
+                    point1_position: CurvePosition::Arbitrary,
                     point2: p2,
+                    point2_position: CurvePosition::Arbitrary,
                     value: Scalar::new(10.0),
                 },
                 vec![p1, p2],
@@ -492,7 +539,9 @@ mod tests {
                 Constraint::VerticalDistance {
                     id: cid(14),
                     point1: p1,
+                    point1_position: CurvePosition::Arbitrary,
                     point2: p2,
+                    point2_position: CurvePosition::Arbitrary,
                     value: Scalar::new(10.0),
                 },
                 vec![p1, p2],
@@ -526,7 +575,9 @@ mod tests {
                 Constraint::Symmetric {
                     id: cid(18),
                     point1: p1,
+                    point1_position: CurvePosition::Arbitrary,
                     point2: p2,
+                    point2_position: CurvePosition::Arbitrary,
                     axis: ax,
                 },
                 vec![p1, p2, ax],
@@ -555,6 +606,7 @@ mod tests {
         let fixed = Constraint::Fixed {
             id: cid(3),
             point: eid(1),
+            point_position: CurvePosition::Arbitrary,
             at: Vec2::new_unchecked(0.0, 0.0),
         };
         assert!(fixed.value().is_none());

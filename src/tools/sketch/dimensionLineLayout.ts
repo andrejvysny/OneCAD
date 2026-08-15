@@ -20,6 +20,7 @@
  */
 import type { ConstraintPosition, SketchConstraint, SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
+import { pointCoordOf } from "./sketchTopology";
 
 const LENGTH_TYPES = new Set(["Distance", "HorizontalDistance", "VerticalDistance"]);
 
@@ -46,22 +47,13 @@ const norm = (a: Point2): Point2 => {
 const rot90 = (a: Point2): Point2 => ({ x: -a.y, y: a.x });
 const xy = (p: [number, number]): Point2 => ({ x: p[0], y: p[1] });
 
-/** The (u,v) coord of an entity's named point — local twin of
- *  `badgeLayout.ts`'s `entityPointCoord` (not imported: `tools/sketch` has
- *  no existing dependency on `features/sketch` and this is a ~10-line pure
- *  lookup, not worth introducing a new cross-layer edge for). */
+/** The (u,v) coord of an entity's named point. Thin `Point2` adapter over
+ *  `sketchTopology.pointCoordOf` (SKETCH-V2 P0.5) — this was one of three
+ *  near-identical private copies of the same lookup; the cross-layer worry the
+ *  old comment cited is moot now that the owner sits in `tools/sketch`. */
 function resolvePoint(e: SketchEntity, position: ConstraintPosition): Point2 | null {
-  if (position === "Center" && e.center) return xy(e.center);
-  if (position === "Start") {
-    if (e.type === "Arc" && e.start) return xy(e.start);
-    if (e.p0) return xy(e.p0);
-  }
-  if (position === "End") {
-    if (e.type === "Arc" && e.end) return xy(e.end);
-    if (e.p1) return xy(e.p1);
-  }
-  if (position === "Midpoint" && e.p0 && e.p1) return scale(add(xy(e.p0), xy(e.p1)), 0.5);
-  return null;
+  const p = pointCoordOf(e, position);
+  return p ? xy(p) : null;
 }
 
 /**

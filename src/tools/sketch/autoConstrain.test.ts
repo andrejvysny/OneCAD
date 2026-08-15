@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  AUTO_KINDS_LEGACY,
   inferHV,
   inferConstraints,
   lineAngle,
@@ -38,7 +39,7 @@ describe("inferConstraints", () => {
   let n = 0;
   const opts = () => {
     n = 0;
-    return { nextConstraintId: () => `c${++n}` };
+    return { nextConstraintId: () => `c${++n}`, kinds: AUTO_KINDS_LEGACY };
   };
 
   it("adds Horizontal for a horizontal new line", () => {
@@ -187,7 +188,7 @@ describe("inferConcentricPartner", () => {
     const existingLine: SketchEntity = { id: "l1", type: "Line", p0: [10, 10], p1: [40, 10] };
     const existingPoint: SketchEntity = { id: "p1", type: "Point", p0: [10, 10] };
     const circle: SketchEntity = { id: "c1", type: "Circle", center: [10, 10], radius: 5 };
-    const cs = inferConstraints([circle], [existingLine, existingPoint], { nextConstraintId: ids() });
+    const cs = inferConstraints([circle], [existingLine, existingPoint], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     // The circle's center lands exactly on the line's Start and on the Point ⇒ Coincident,
     // but neither is a Circle/Arc so there is no concentric partner to match against.
     expect(cs.some((c) => c.type === "Concentric")).toBe(false);
@@ -225,7 +226,7 @@ describe("inferConstraints — perpendicular / parallel / tangent + precedence",
   let n = 0;
   const opts = () => {
     n = 0;
-    return { nextConstraintId: () => `c${++n}` };
+    return { nextConstraintId: () => `c${++n}`, kinds: AUTO_KINDS_LEGACY };
   };
 
   it("infers Perpendicular for two non-axis lines meeting at 90°", () => {
@@ -322,7 +323,7 @@ describe("entityPoints / inferConstraints — Ellipse", () => {
 
   it("auto-coincides its centre with an existing endpoint it was snapped to", () => {
     const existing: SketchEntity[] = [{ id: "l1", type: "Line", p0: [0, 0], p1: [10, 0] }];
-    const out = inferConstraints([ell], existing, { nextConstraintId: ids() });
+    const out = inferConstraints([ell], existing, { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     expect(out).toEqual([
       {
         id: "c1",
@@ -335,7 +336,7 @@ describe("entityPoints / inferConstraints — Ellipse", () => {
 
   it("infers nothing from the ellipse CURVE (no H/V, no Tangent, no Parallel)", () => {
     const existing: SketchEntity[] = [{ id: "l1", type: "Line", p0: [0, 50], p1: [40, 50] }];
-    expect(inferConstraints([ell], existing, { nextConstraintId: ids() })).toEqual([]);
+    expect(inferConstraints([ell], existing, { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY })).toEqual([]);
   });
 });
 
@@ -353,7 +354,7 @@ describe("inferConstraints — locked reference geometry participates", () => {
   let n = 0;
   const opts = () => {
     n = 0;
-    return { nextConstraintId: () => `c${++n}` };
+    return { nextConstraintId: () => `c${++n}`, kinds: AUTO_KINDS_LEGACY };
   };
 
   /** A projected boundary segment: locked, but geometrically ordinary. */
@@ -404,7 +405,7 @@ describe("inferConstraints — Concentric / Equal", () => {
   it("circle-over-circle emits Concentric then Equal", () => {
     const existing: SketchEntity = { id: "e1", type: "Circle", center: [0, 0], radius: 10 };
     const next: SketchEntity = { id: "e2", type: "Circle", center: [1, 1], radius: 10.2 }; // dist √2mm, Δr 0.2mm
-    const cs = inferConstraints([next], [existing], { nextConstraintId: ids() });
+    const cs = inferConstraints([next], [existing], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     const concentric = cs.find((c) => c.type === "Concentric");
     const equal = cs.find((c) => c.type === "Equal");
     expect(concentric).toMatchObject({ entities: ["e2", "e1"] });
@@ -421,7 +422,7 @@ describe("inferConstraints — Concentric / Equal", () => {
     // tight Coincident snap tolerance) so Concentric fires without the gate tripping.
     const circle: SketchEntity = { id: "C", type: "Circle", center: [11, 10], radius: 10 };
     const arc: SketchEntity = { id: "A", type: "Arc", center: [10, 10], radius: 10, start: [10, 0], end: [0, 10] };
-    const cs = inferConstraints([arc], [line, circle], { nextConstraintId: ids() });
+    const cs = inferConstraints([arc], [line, circle], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     const tan = cs.findIndex((c) => c.type === "Tangent");
     const con = cs.findIndex((c) => c.type === "Concentric");
     const eq = cs.findIndex((c) => c.type === "Equal");
@@ -435,7 +436,7 @@ describe("inferConstraints — Concentric / Equal", () => {
   it("a same-batch Coincident between two Centers suppresses Concentric (not Equal)", () => {
     const existing: SketchEntity = { id: "e1", type: "Circle", center: [5, 5], radius: 10 };
     const next: SketchEntity = { id: "e2", type: "Circle", center: [5, 5], radius: 10.3 }; // exact-snapped center
-    const cs = inferConstraints([next], [existing], { nextConstraintId: ids() });
+    const cs = inferConstraints([next], [existing], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     expect(cs.some((c) => c.type === "Coincident" && c.positions?.[0] === "Center")).toBe(true);
     expect(cs.some((c) => c.type === "Concentric")).toBe(false);
     expect(cs.find((c) => c.type === "Equal")).toMatchObject({ entities: ["e2", "e1"] });
@@ -444,7 +445,7 @@ describe("inferConstraints — Concentric / Equal", () => {
   it("intra-batch: two new circles in one commit still infer Concentric/Equal", () => {
     const circleA: SketchEntity = { id: "cA", type: "Circle", center: [0, 0], radius: 5 };
     const circleB: SketchEntity = { id: "cB", type: "Circle", center: [1, 1], radius: 5.1 };
-    const cs = inferConstraints([circleA, circleB], [], { nextConstraintId: ids() });
+    const cs = inferConstraints([circleA, circleB], [], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     expect(cs.find((c) => c.type === "Concentric")).toMatchObject({ entities: ["cB", "cA"] });
     expect(cs.find((c) => c.type === "Equal")).toMatchObject({ entities: ["cB", "cA"] });
   });
@@ -452,7 +453,7 @@ describe("inferConstraints — Concentric / Equal", () => {
   it("an Ellipse emits neither Concentric nor Equal", () => {
     const existing: SketchEntity = { id: "c1", type: "Circle", center: [10, 0], radius: 8 };
     const ellipse: SketchEntity = { id: "el1", type: "Ellipse", center: [10, 0], majorR: 8, minorR: 3, rotation: 0 };
-    const cs = inferConstraints([ellipse], [existing], { nextConstraintId: ids() });
+    const cs = inferConstraints([ellipse], [existing], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     expect(cs.some((c) => c.type === "Concentric")).toBe(false);
     expect(cs.some((c) => c.type === "Equal")).toBe(false);
     expect(cs.some((c) => c.type === "Coincident")).toBe(true); // centre still coincides, per entityPoints
@@ -461,7 +462,135 @@ describe("inferConstraints — Concentric / Equal", () => {
   it("3mm center offset + 2mm radius delta ⇒ neither fires (both outside tolerance)", () => {
     const existing: SketchEntity = { id: "c1", type: "Circle", center: [0, 0], radius: 10 };
     const next: SketchEntity = { id: "c2", type: "Circle", center: [3, 0], radius: 12 };
-    const cs = inferConstraints([next], [existing], { nextConstraintId: ids() });
+    const cs = inferConstraints([next], [existing], { nextConstraintId: ids(), kinds: AUTO_KINDS_LEGACY });
     expect(cs).toEqual([]);
+  });
+});
+
+/*
+ * Constraint V2 policy (SKETCH-V2 P1, spec §35).
+ *
+ * The blocks above exercise `AUTO_KINDS_LEGACY` — they are the C++
+ * `AutoConstrainer` parity record and must keep passing so the ported rules stay
+ * pinned. THIS block exercises the DEFAULT, which is the product policy: four
+ * kinds are no longer authored behind the user's back.
+ */
+describe("auto-constraint policy — the V2 default set", () => {
+  let n = 0;
+  const v2 = () => {
+    n = 0;
+    return { nextConstraintId: () => `c${++n}` }; // no `kinds` ⇒ AUTO_KINDS_V2
+  };
+  const types = (cs: { type: string }[]) => cs.map((c) => c.type);
+
+  it("still infers Horizontal and Vertical", () => {
+    const h: SketchEntity = { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] };
+    const v: SketchEntity = { id: "e2", type: "Line", p0: [0, 0], p1: [0, 40] };
+    expect(types(inferConstraints([h], [], v2()))).toEqual(["Horizontal"]);
+    expect(types(inferConstraints([v], [], v2()))).toEqual(["Vertical"]);
+  });
+
+  it("still infers Perpendicular", () => {
+    const ref: SketchEntity = { id: "r1", type: "Line", p0: [0, 0], p1: deg(30) };
+    const l: SketchEntity = { id: "e1", type: "Line", p0: [100, 100], p1: [100 + deg(120)[0], 100 + deg(120)[1]] };
+    expect(types(inferConstraints([l], [ref], v2()))).toContain("Perpendicular");
+  });
+
+  it("still infers Coincident — it is the weld until shared topology lands (§36)", () => {
+    const a: SketchEntity = { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] };
+    const b: SketchEntity = { id: "e2", type: "Line", p0: [40, 0], p1: [40, 40] };
+    expect(types(inferConstraints([b], [a], v2()))).toContain("Coincident");
+  });
+
+  it("no longer infers Parallel", () => {
+    const ref: SketchEntity = { id: "r1", type: "Line", p0: [0, 0], p1: deg(30) };
+    const l: SketchEntity = { id: "e1", type: "Line", p0: [0, 50], p1: [deg(30)[0], 50 + deg(30)[1]] };
+    expect(types(inferConstraints([l], [ref], v2()))).not.toContain("Parallel");
+    // …and the rule itself still works when explicitly requested.
+    expect(
+      types(inferConstraints([l], [ref], { nextConstraintId: () => "x", kinds: AUTO_KINDS_LEGACY })),
+    ).toContain("Parallel");
+  });
+
+  it("no longer infers Tangent", () => {
+    const ref: SketchEntity = { id: "r1", type: "Line", p0: [0, 0], p1: [40, 0] };
+    const arc: SketchEntity = { id: "e1", type: "Arc", center: [40, 20], radius: 20, start: [40, 0], end: [60, 20] };
+    expect(types(inferConstraints([arc], [ref], v2()))).not.toContain("Tangent");
+  });
+
+  it("no longer infers Concentric or Equal", () => {
+    const a: SketchEntity = { id: "cA", type: "Circle", center: [10, 10], radius: 5 };
+    const b: SketchEntity = { id: "cB", type: "Circle", center: [10, 10], radius: 5 };
+    const out = types(inferConstraints([b], [a], v2()));
+    expect(out).not.toContain("Concentric");
+    expect(out).not.toContain("Equal");
+  });
+});
+
+describe("auto-constraint determinism — the coincidence partner is not array order", () => {
+  const ids = () => {
+    let n = 0;
+    return () => `c${++n}`;
+  };
+
+  /** Two reference lines already welded at (40,0): a new endpoint landing there
+   *  has TWO equally-valid partners, and the old `refs.find` picked whichever
+   *  came first in `existing`. */
+  const a: SketchEntity = { id: "a", type: "Line", p0: [0, 0], p1: [40, 0] };
+  const b: SketchEntity = { id: "b", type: "Line", p0: [40, 0], p1: [40, 40] };
+  const fresh: SketchEntity = { id: "z", type: "Line", p0: [40, 0], p1: [80, 40] };
+
+  it("binds the same partner regardless of the order of `existing`", () => {
+    const one = inferConstraints([fresh], [a, b], { nextConstraintId: ids() });
+    const two = inferConstraints([fresh], [b, a], { nextConstraintId: ids() });
+    const coincOf = (cs: { type: string; entities: string[]; positions?: string[] }[]) =>
+      cs.filter((c) => c.type === "Coincident").map((c) => [c.entities, c.positions]);
+    expect(coincOf(one)).toEqual(coincOf(two));
+  });
+
+  it("prefers the NEAREST reference point over an equally-tolerated farther one", () => {
+    const near: SketchEntity = { id: "near", type: "Line", p0: [40, 0], p1: [40, 40] };
+    const far: SketchEntity = { id: "far", type: "Line", p0: [40.5, 0], p1: [80, 0] };
+    const out = inferConstraints([fresh], [far, near], {
+      nextConstraintId: ids(),
+      coincidenceTol: 1.0,
+    });
+    const c = out.find((x) => x.type === "Coincident")!;
+    expect(c.entities).toContain("near");
+  });
+});
+
+describe("auto-constraint suppression — the Alt escape hatch (spec §38)", () => {
+  /** What `SketchController` passes when Alt was held at commit. */
+  const NONE = new Set<never>();
+
+  it("an EMPTY kind set authors nothing at all", () => {
+    // Geometry deliberately rich enough that every rule would otherwise fire:
+    // an axis-aligned line (H), landing on an existing endpoint (Coincident),
+    // starting at the origin (Fixed anchor).
+    // The EXISTING line must stay clear of the origin — the origin anchor is
+    // one-per-sketch, and a reference point already sitting there consumes it.
+    const existing: SketchEntity = { id: "a", type: "Line", p0: [100, 0], p1: [140, 0] };
+    const fresh: SketchEntity = { id: "z", type: "Line", p0: [0, 0], p1: [100, 0] };
+    const out = inferConstraints([fresh], [existing], {
+      nextConstraintId: () => "c1",
+      originAccepted: true,
+      kinds: NONE,
+    });
+    expect(out).toEqual([]);
+  });
+
+  it("…and the SAME geometry under the default policy does author them", () => {
+    const existing: SketchEntity = { id: "a", type: "Line", p0: [100, 0], p1: [140, 0] };
+    const fresh: SketchEntity = { id: "z", type: "Line", p0: [0, 0], p1: [100, 0] };
+    let n = 0;
+    const out = inferConstraints([fresh], [existing], {
+      nextConstraintId: () => `c${++n}`,
+      originAccepted: true,
+    });
+    const kinds = new Set(out.map((c) => c.type));
+    expect(kinds.has("Horizontal")).toBe(true);
+    expect(kinds.has("Fixed")).toBe(true);
+    expect(kinds.has("Coincident")).toBe(true);
   });
 });

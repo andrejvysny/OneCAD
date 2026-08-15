@@ -110,9 +110,13 @@ function isCurve(t: SketchConstraintTarget): boolean {
  * real wire point (`sketchWireMap.ts` §"Constraint → AddConstraint op": only a
  * Point entity, a Line's Start/End, or a Circle/Arc's Center are ever minted as
  * a wire point uuid — `addEntityOps`/`resolveRef`). A Line's virtual "Midpoint"
- * position and an Arc's Start/End are NOT minted, so a Midpoint authored against
- * one of those would marshal to `null` and be SILENTLY DROPPED at upsert time —
- * this predicate keeps `evaluateApplicability` from ever offering that dead end.
+ * is NOT minted, so a constraint authored against it would marshal to `null` and
+ * be SILENTLY DROPPED at upsert time — this predicate keeps
+ * `evaluateApplicability` from ever offering that dead end.
+ *
+ * An Arc's Start/End USED to fail here too. SKETCH-V2 P3 made them expressible:
+ * SCHEMA §7.3 generalized the owner+role point form from `Coincident` to every
+ * point-taking slot, so they now marshal as "the arc's uuid + a role".
  */
 function marshalsAsPoint(position: ConstraintPosition, entityKind: SketchEntityType): boolean {
   switch (entityKind) {
@@ -120,8 +124,10 @@ function marshalsAsPoint(position: ConstraintPosition, entityKind: SketchEntityT
       return true; // a free Point entity's own position (always "Start")
     case "Line":
       return position === "Start" || position === "End";
-    case "Circle":
     case "Arc":
+      // Centre is a minted point; Start/End ride as owner+role (P3).
+      return position === "Center" || position === "Start" || position === "End";
+    case "Circle":
     case "Ellipse":
       return position === "Center";
     default:

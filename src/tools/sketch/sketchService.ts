@@ -26,6 +26,7 @@ import { extendPieces } from "./extendMath";
 import { filletGeometry, type FilletFailure, type LineEnd } from "./sketchFilletMath";
 import { buildChain, offsetChain, type OffsetFailure } from "./offsetMath";
 import { draftToEntityFields, type DraftEntity } from "./toolMachine";
+import { constraintMarshalBlocker } from "./sketchTopology";
 
 /*
  * ALL session mutators are serialized through one promise chain. Each reads
@@ -822,6 +823,21 @@ async function applyConstraintNow(
   const id = sketchStore.getState().nextConstraintId();
   const constraint = buildAppliedConstraint(applicable, id);
   if (!constraint) return { rejected: false };
+
+  // LOUD DROP (SKETCH-V2 P0.5). A constraint the marshaller cannot express used
+  // to be dropped on the way to the wire with no error, no hint and no log: the
+  // user clicked, the DOF did not move, and nothing said why. Refuse it here,
+  // before any upsert, so the failure is visible and the document is untouched.
+  const blocker = constraintMarshalBlocker(
+    constraint,
+    new Map(session.entities.map((e) => [e.id, e])),
+  );
+  if (blocker) {
+    viewportStore
+      .getState()
+      .setStatusHint(`${constraint.type} cannot reference a midpoint`, { severity: "error" });
+    return { rejected: true }; // no upsert, no undo snapshot — nothing changed
+  }
 
   const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
   const constraints = [...session.constraints, constraint];

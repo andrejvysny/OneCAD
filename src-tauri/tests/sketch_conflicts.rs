@@ -21,7 +21,7 @@ use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{ConstraintId, EntityId, SketchId};
 use onecad_core::math::Vec2;
 use onecad_core::regen::GeometryEngine;
-use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::DocumentRuntime;
 use onecad_lib::dto::SketchSolveStatus;
@@ -117,6 +117,7 @@ async fn conflicting_ids_surface_on_upsert_and_session_enter() {
                     constraint: Constraint::Fixed {
                         id: cid(0x90),
                         point: eid(0x01),
+                        point_position: CurvePosition::Arbitrary,
                         at: Vec2::new_unchecked(0.0, 0.0),
                     },
                 },
@@ -124,6 +125,7 @@ async fn conflicting_ids_surface_on_upsert_and_session_enter() {
                     constraint: Constraint::Fixed {
                         id: cid(0x91),
                         point: eid(0x02),
+                        point_position: CurvePosition::Arbitrary,
                         at: Vec2::new_unchecked(10.0, 0.0),
                     },
                 },
@@ -131,7 +133,9 @@ async fn conflicting_ids_surface_on_upsert_and_session_enter() {
                     constraint: Constraint::HorizontalDistance {
                         id: cid(0x92),
                         point1: eid(0x01),
+                        point1_position: CurvePosition::Arbitrary,
                         point2: eid(0x02),
+                        point2_position: CurvePosition::Arbitrary,
                         value: Scalar::new(25.0),
                     },
                 },
@@ -225,7 +229,9 @@ async fn clean_sketch_reports_empty_conflicting() {
                     constraint: Constraint::HorizontalDistance {
                         id: cid(0x90),
                         point1: eid(0x01),
+                        point1_position: CurvePosition::Arbitrary,
                         point2: eid(0x02),
+                        point2_position: CurvePosition::Arbitrary,
                         value: Scalar::new(10.0),
                     },
                 },

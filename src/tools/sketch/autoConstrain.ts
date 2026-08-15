@@ -47,6 +47,7 @@
 import type {
   ConstraintPosition,
   SketchConstraint,
+  SketchConstraintType,
   SketchEntity,
 } from "@/ipc/types";
 
@@ -67,9 +68,46 @@ export const CONCENTRIC_TOLERANCE = 2.0;
 /** function-local `constexpr RADIUS_TOLERANCE = 0.5` (AutoConstrainer.cpp:699). */
 export const EQUAL_RADIUS_TOLERANCE = 0.5;
 
+/**
+ * The kinds auto-inference may author under Constraint V2 policy (spec §35).
+ *
+ * `Parallel`, `Tangent`, `Concentric` and `Equal` are DELIBERATELY absent: they
+ * are strong design assertions the user did not ask for, and silently authoring
+ * them is what makes a sketch feel possessed. They remain fully implemented and
+ * oracle-pinned below — this is a policy gate, not a deletion, because
+ * `autoConstrain.test.ts` is the C++ `AutoConstrainer` parity record and deleting
+ * the rules would destroy that evidence.
+ *
+ * `Coincident` is still here ON PURPOSE and must stay until shared vertex
+ * topology lands (spec §36): today it IS the weld between chained segments, so
+ * removing it first would leave polylines visually touching and mechanically
+ * falling apart. P4 replaces it with shared vertices, and only then does it go.
+ */
+export const AUTO_KINDS_V2: ReadonlySet<SketchConstraintType> = new Set<SketchConstraintType>([
+  "Horizontal",
+  "Vertical",
+  "Perpendicular",
+  "Coincident",
+  "Fixed", // the origin anchor only — already gated behind `originAccepted`
+]);
+
+/** Every kind the legacy C++ `AutoConstrainer` inferred. Pre-V2 behaviour, kept
+ *  so the parity suite can still exercise the ported rules explicitly. */
+export const AUTO_KINDS_LEGACY: ReadonlySet<SketchConstraintType> =
+  new Set<SketchConstraintType>([
+    ...AUTO_KINDS_V2,
+    "Parallel",
+    "Tangent",
+    "Concentric",
+    "Equal",
+  ]);
+
 export interface InferOptions {
   angleToleranceRad?: number;
   coincidenceTol?: number;
+  /** Kinds inference may author. Defaults to `AUTO_KINDS_V2` — the restricted
+   *  policy set — so a new caller gets the safe behaviour without opting in. */
+  kinds?: ReadonlySet<SketchConstraintType>;
   /** Id minter for the emitted constraints. */
   nextConstraintId: () => string;
   /**
@@ -353,8 +391,11 @@ function inferCircularConstraints(
   refCircular: RefCircular[],
   out: SketchConstraint[],
   nextConstraintId: () => string,
+  kinds: ReadonlySet<SketchConstraintType>,
 ): void {
-  const concentricPartner = inferConcentricPartner(center, refCircular);
+  const concentricPartner = kinds.has("Concentric")
+    ? inferConcentricPartner(center, refCircular)
+    : null;
   if (concentricPartner) {
     const centerCoincidentAlready = out.some(
       (c) =>
@@ -368,7 +409,7 @@ function inferCircularConstraints(
       out.push({ id: nextConstraintId(), type: "Concentric", entities: [e.id, concentricPartner] });
     }
   }
-  const equalPartner = inferEqualRadiusPartner(radius, refCircular);
+  const equalPartner = kinds.has("Equal") ? inferEqualRadiusPartner(radius, refCircular) : null;
   if (equalPartner) out.push({ id: nextConstraintId(), type: "Equal", entities: [e.id, equalPartner] });
 }
 
@@ -379,6 +420,7 @@ export function inferConstraints(
 ): SketchConstraint[] {
   const tol = opts.angleToleranceRad ?? HV_TOLERANCE_RAD;
   const coincTol = opts.coincidenceTol ?? 1e-6;
+  const kinds = opts.kinds ?? AUTO_KINDS_V2;
   const out: SketchConstraint[] = [];
 
   // Reference points + lines grow as we process each new entity (intra-batch).
@@ -411,12 +453,14 @@ export function inferConstraints(
     // when a line is already H/V — the legacy `hasOrientationConstraint` gate).
     if (e.type === "Line" && e.p0 && e.p1) {
       const hv = inferHV(e.p0, e.p1, tol);
-      if (hv) {
+      if (hv && kinds.has(hv)) {
         out.push({ id: opts.nextConstraintId(), type: hv, entities: [e.id] });
       } else if (dist2(e.p0, e.p1) >= MIN_GEOMETRY_SIZE) {
-        const perp = inferPerpendicularPartner(e.p0, e.p1, refLines);
+        const perp = kinds.has("Perpendicular")
+          ? inferPerpendicularPartner(e.p0, e.p1, refLines)
+          : null;
         if (perp) out.push({ id: opts.nextConstraintId(), type: "Perpendicular", entities: [e.id, perp] });
-        const par = inferParallelPartner(e.p0, e.p1, refLines);
+        const par = kinds.has("Parallel") ? inferParallelPartner(e.p0, e.p1, refLines) : null;
         if (par) out.push({ id: opts.nextConstraintId(), type: "Parallel", entities: [e.id, par] });
       }
     }
@@ -443,6 +487,7 @@ export function inferConstraints(
        * origin is outside the tolerance and is left alone.
        */
       if (
+        kinds.has("Fixed") &&
         !originAnchored &&
         Math.hypot(pt.coord[0], pt.coord[1]) <= coincTol
       ) {
@@ -454,9 +499,29 @@ export function inferConstraints(
           positions: [pt.position],
         });
       }
-      const hit = refs.find(
-        (r) => r.entityId !== e.id && Math.hypot(r.coord[0] - pt.coord[0], r.coord[1] - pt.coord[1]) <= coincTol,
-      );
+      // DETERMINISM (SKETCH-V2 P1). This used to be `refs.find(...)`, which
+      // returns the first ARRAY-ORDER match — so when a new point landed on an
+      // already-welded junction (two or more reference points at one coordinate)
+      // the partner it bound to depended on the order of `existing`, and
+      // reordering entities silently changed the authored constraint. Pick the
+      // nearest instead, breaking an exact tie on the point address so the
+      // result is a function of the geometry alone.
+      let hit: EntPoint | undefined;
+      let hitD = Infinity;
+      for (const r of kinds.has("Coincident") ? refs : []) {
+        if (r.entityId === e.id) continue;
+        const d = Math.hypot(r.coord[0] - pt.coord[0], r.coord[1] - pt.coord[1]);
+        if (d > coincTol) continue;
+        if (
+          d < hitD ||
+          (d === hitD &&
+            hit !== undefined &&
+            `${r.entityId}.${r.position}` < `${hit.entityId}.${hit.position}`)
+        ) {
+          hit = r;
+          hitD = d;
+        }
+      }
       if (hit) {
         const pairKey = [`${e.id}.${pt.position}`, `${hit.entityId}.${hit.position}`].sort().join("|");
         if (!seenPairs.has(pairKey)) {
@@ -474,7 +539,7 @@ export function inferConstraints(
     // Tangent for an arc starting on a reference line's endpoint. Runs BELOW the
     // Coincident loop — not for ordering's sake but because the weld gate reads
     // the Coincidents this entity just emitted (`weldedTo`).
-    if (e.type === "Arc" && e.center && e.start) {
+    if (kinds.has("Tangent") && e.type === "Arc" && e.center && e.start) {
       const tangentLine = inferTangentPartner(e.center, e.start, refLines);
       if (tangentLine && !weldedTo(out, e.id, tangentLine)) {
         out.push({ id: opts.nextConstraintId(), type: "Tangent", entities: [e.id, tangentLine] });
@@ -485,7 +550,7 @@ export function inferConstraints(
     // neither — see `entityPoints`). Runs after Tangent (just above) and
     // Coincident, satisfying both legacy orderings in one pass.
     if ((e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined) {
-      inferCircularConstraints(e, e.center, e.radius, refCircular, out, opts.nextConstraintId);
+      inferCircularConstraints(e, e.center, e.radius, refCircular, out, opts.nextConstraintId, kinds);
     }
 
     refs.push(...entityPoints(e));

@@ -260,6 +260,7 @@ fn add_rectangle_constraints(
         .add_constraint(Constraint::Fixed {
             id: constraint_id("drag-rect:fixed-opposite"),
             point: points[2],
+            point_position: CurvePosition::Arbitrary,
             at: positions[2],
         })
         .map_err(|e| format!("rectangle fixed point: {e:?}"))?;
