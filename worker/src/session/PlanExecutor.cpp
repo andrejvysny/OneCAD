@@ -185,6 +185,7 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
         // rank. Absence = "no claim" (SCHEMA §7.2), so a step that never ranks its
         // bodies stays byte-identical to the pre-VF-B6 wire.
         if (e.rank_key) be["rankKey"] = *e.rank_key;
+        if (e.health) be["health"] = *e.health;
         body_events.push_back(std::move(be));
     }
     json payload = {
@@ -389,19 +390,47 @@ bool step_is_post_edit(const ScratchJob& job, const json& op) {
     return op["stepIndex"].get<std::uint64_t>() > *job.edited_from;
 }
 
+std::optional<ops::OpOutcome> validate_operation_body_inputs(
+    const ScratchJob& job, const json& op) {
+    if (!op.contains("inputs") || !op["inputs"].is_array()) return std::nullopt;
+    for (const json& input : op["inputs"]) {
+        if (!input.is_object() || !input.contains("primary") ||
+            !input["primary"].is_object()) {
+            continue;
+        }
+        const std::string body_id = get_str(input["primary"], "bodyId");
+        const session::BodyRecord* body =
+            body_id.empty() ? nullptr : job.bodies.get(body_id);
+        if (body == nullptr || body->modeling_eligible()) continue;
+        const std::string message = "Operation cannot reference quarantined body " +
+                                    body_id +
+                                    (body->health_reason.empty()
+                                         ? std::string{}
+                                         : ": " + body->health_reason);
+        ops::OpOutcome failure =
+            ops::OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", "QUARANTINED_MODELING_INPUT"},
+                                       {"message", message},
+                                       {"stage", "input-validation"},
+                                       {"bodyId", body_id}});
+        return failure;
+    }
+    return std::nullopt;
+}
+
 std::optional<ops::OpOutcome> validate_published_bodies(
     const ScratchJob& job, const json& op, const ops::OpOutcome& outcome) {
     const std::string op_type = get_str(op, "opType");
-    // Import's advisory-invalid behavior and the two frozen aggregate contracts are
-    // explicit compatibility exceptions. Every other published Body is held to the
-    // global exactly-one-connected-solid invariant here, after the operation-local
-    // checks and before scratch state can become a successful candidate.
-    if (op_type == "ImportStep") return std::nullopt;
+    // Quarantined imports and the versioned legacy aggregate contracts are explicit
+    // compatibility exceptions. Every healthy published Body is held to the global
+    // exactly-one-connected-solid invariant here, after the operation-local checks
+    // and before scratch state can become a successful candidate.
     const json params = op.contains("params") && op["params"].is_object()
                             ? op["params"]
                             : json::object();
     const bool legacy_aggregate =
-        op_type == "Hole" ||
+        (op_type == "Hole" && !params.contains("resultPolicyVersion")) ||
         ((op_type == "LinearPattern" || op_type == "CircularPattern") &&
          !params.contains("resultPolicyVersion"));
 
@@ -416,6 +445,7 @@ std::optional<ops::OpOutcome> validate_published_bodies(
             return ops::OpOutcome::fail(
                 "GEOMETRY_INVALID", "Published body is missing from scratch state: " + body_id);
         }
+        if (op_type == "ImportStep" && !body->modeling_eligible()) continue;
         kernel::validation::PublicationPolicy policy;
         policy.name = op_type + " body " + body_id;
         policy.allowed_top_level_shapes = legacy_aggregate
@@ -449,6 +479,10 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     result.ref_bindings = collect_ref_bindings(op, op_id);
     if (cancel.cancelled()) {
         result.status = CandidateResult::Status::Cancelled;
+        return result;
+    }
+    if (const auto failure = validate_operation_body_inputs(job, op)) {
+        merge_outcome(result, *failure);
         return result;
     }
 

@@ -155,6 +155,7 @@ interface WireHoleParams {
   cbDepth: WireScalar | null;
   csDiameter: WireScalar | null;
   csAngleDeg: WireScalar | null;
+  resultPolicyVersion?: 2;
 }
 
 /**
@@ -652,6 +653,7 @@ function holeParams(p: HoleParams): WireHoleParams {
     cbDepth: optional(cb, p.cbDepth),
     csDiameter: optional(cs, p.csDiameter),
     csAngleDeg: optional(cs, p.csAngleDeg),
+    ...(p.resultPolicyVersion === 2 ? { resultPolicyVersion: 2 as const } : {}),
   };
 }
 

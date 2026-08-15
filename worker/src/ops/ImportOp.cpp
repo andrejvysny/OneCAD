@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -91,17 +92,35 @@ bool scale_solids(std::vector<TopoDS_Shape>& solids,
     return true;
 }
 
-// BRepCheck over the solids about to be published. Advisory in both codecs — see
-// kInvalidShape. The step lane already reports its own copy via read diagnostics,
-// so this only runs for the brep lane to keep the two lanes' output identical.
-void check_solids(const std::vector<TopoDS_Shape>& solids, OpOutcome& out) {
+// Classify every imported solid after all transforms. Unhealthy geometry is still
+// visible/exportable, but is admitted as QUARANTINED and cannot enter modeling.
+// Analyzer exceptions are UNKNOWN and therefore quarantine rather than pass.
+std::vector<bool> classify_solids(const std::vector<TopoDS_Shape>& solids,
+                                  OpOutcome& out) {
+    std::vector<bool> quarantined(solids.size(), false);
     for (std::size_t k = 0; k < solids.size(); ++k) {
-        BRepCheck_Analyzer analyzer(solids[k]);
-        if (analyzer.IsValid() != Standard_True) {
-            out.diagnostics.push_back(
-                advisory(kInvalidShape, "solid " + std::to_string(k) + " fails BRepCheck"));
+        std::string reason;
+        try {
+            BRepCheck_Analyzer analyzer(solids[k]);
+            if (analyzer.IsValid() != Standard_True)
+                reason = "fails BRepCheck";
+        } catch (const Standard_Failure& failure) {
+            reason = std::string("validity is unknown: ") +
+                     (failure.GetMessageString() ? failure.GetMessageString()
+                                                 : "OCCT analyzer raised");
+        } catch (...) {
+            reason = "validity is unknown: analyzer raised";
         }
+        if (reason.empty()) continue;
+        quarantined[k] = true;
+        out.diagnostics.push_back(advisory(
+            kInvalidShape, "solid " + std::to_string(k) + " " + reason));
+        out.diagnostics.push_back(advisory(
+            "IMPORT_QUARANTINED",
+            "solid " + std::to_string(k) +
+                " is visible/exportable but unavailable to modeling until repaired"));
     }
+    return quarantined;
 }
 
 }  // namespace
@@ -193,7 +212,6 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
             return OpOutcome::fail("OP_FAILED", "ImportStep: " + read.error + " for source " + label);
         }
         solids = read.solids;  // STORED order — never re-sorted (see ImportOp.h)
-        check_solids(solids, out);
     } else {
         const std::string bad = check_format(io::kXcafFormatVersion);
         if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
@@ -204,7 +222,6 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
         solids = read.solids;  // STORED order — never re-sorted (see ImportOp.h)
         face_colors.reserve(read.attributes.size());
         for (const io::SolidAttributes& a : read.attributes) face_colors.push_back(a.face_colors);
-        check_solids(solids, out);
     }
 
     if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
@@ -222,6 +239,8 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
         }
     }
 
+    const std::vector<bool> quarantined = classify_solids(solids, out);
+
     // Minting (SCHEMA §2/§7.3, D1) — the same ordered-children rule
     // `ops::publish_boolean_result` applies to a split, minus the deleted parent:
     // an import creates ex nihilo, so there is nothing to delete and no partition
@@ -232,6 +251,12 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
                                     ? "body_" + op_id
                                     : "body_" + op_id + ":" + std::to_string(k);
         onecad::session::BodyRecord& rec = ctx.bodies.create(bid, op_id, solids[k]);
+        std::optional<std::string> health;
+        if (k < quarantined.size() && quarantined[k]) {
+            rec.health = session::BodyHealth::Quarantined;
+            rec.health_reason = "imported geometry failed strict B-Rep validation";
+            health = "quarantined";
+        }
         // Appearance rides the BODY, not the document (see BodyStore.h): the
         // tessellator copies it into the MESH1 FACE_COLORS section, and nothing
         // mints an ElementId or a TopoKey for it.
@@ -239,7 +264,7 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
             rec.face_colors = face_colors[k];
             ++colored_bodies;
         }
-        out.body_events.push_back({"created", bid});
+        out.body_events.push_back({"created", bid, {}, std::move(health)});
         out.body_ids.push_back(bid);
     }
     if (colored_bodies > 0) {

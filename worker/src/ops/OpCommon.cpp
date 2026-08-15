@@ -120,6 +120,27 @@ std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
     return failure;
 }
 
+std::optional<OpOutcome> validate_modeling_body(
+    const session::BodyRecord& body, const std::string& operation,
+    const std::string& role) {
+    if (!body.modeling_eligible()) {
+        const std::string message = operation + " cannot use quarantined " + role +
+                                    " body " + body.id +
+                                    (body.health_reason.empty()
+                                         ? std::string{}
+                                         : ": " + body.health_reason);
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", "QUARANTINED_MODELING_INPUT"},
+                                       {"message", message},
+                                       {"stage", "input-validation"},
+                                       {"role", role},
+                                       {"bodyId", body.id}});
+        return failure;
+    }
+    return validate_modeling_input(body.geom, operation, role);
+}
+
 namespace {
 
 json ownership_repair(const json& input, const std::string& ref_id,

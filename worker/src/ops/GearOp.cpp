@@ -307,6 +307,8 @@ OpOutcome execute_gear(OpContext& ctx, const json& op, const std::string& op_id)
             return OpOutcome::fail("REF_UNRESOLVED",
                                    "Gear placement body not found: " + host_id);
         }
+        if (auto invalid = validate_modeling_body(*host_rec, "Gear", "placement"))
+            return *invalid;
         const TopoDS_Shape host_shape = host_rec->geom;
 
         std::optional<em::LadderRef> ref = placement_face_ref(op, params, op_id);

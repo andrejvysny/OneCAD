@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::document::body::BodyLifecycleEvent;
+use crate::document::body::{BodyHealth, BodyLifecycleEvent};
 use crate::document::record::{DeterminismSettings, Operation, OperationInputs};
 use crate::document::refs::{AnchorIntent, ElementKind, ElementRef};
 use crate::document::repair::RepairItem;
@@ -368,6 +368,9 @@ pub struct PlanStepEvent {
     /// widening its variants would move every existing document's bytes for
     /// evidence that belongs to one transient wire event.
     pub body_rank_keys: BTreeMap<BodyId, crate::document::repair::RankKey>,
+    /// Derived body admission health from `bodyEvents[].health`. Missing means
+    /// Healthy for backward compatibility.
+    pub body_health: BTreeMap<BodyId, BodyHealth>,
     /// Element-map partition delta for the step.
     pub element_map_delta: ElementMapDelta,
     /// NeedsRepair items surfaced by the resolution ladder (STATE — SCHEMA §9).

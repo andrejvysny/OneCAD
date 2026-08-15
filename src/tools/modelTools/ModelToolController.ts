@@ -118,7 +118,11 @@ import {
   type GearFsm,
 } from "./gearMachine";
 import { groundPlanePoint } from "@/modules/library/placementSolver";
-import { getToolApplicability, resolveTargetSketchId } from "./toolApplicability";
+import {
+  getToolApplicability,
+  resolveTargetSketchId,
+  type ToolApplicabilityContext,
+} from "./toolApplicability";
 import type { HoleChipOpts, GearChipOpts } from "@/stores/toolChipStore";
 import {
   measureAdd,
@@ -1235,8 +1239,9 @@ export class ModelToolController {
   /** Sketch-existence slice `toolApplicability.ts` needs for its extrude/revolve
    *  document-level fallback — kept as a private helper so every applicability
    *  call site derives it identically. */
-  private applicabilityCtx(): { sketches: Record<string, { id: string; visible: boolean }> } {
-    return { sketches: documentStore.getState().sketches };
+  private applicabilityCtx(): ToolApplicabilityContext {
+    const document = documentStore.getState();
+    return { sketches: document.sketches, bodies: document.bodies };
   }
 
   /** Tool-first entry: fetch the sketch's regions and open the extrude region pick. */

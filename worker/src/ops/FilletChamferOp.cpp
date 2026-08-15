@@ -365,7 +365,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
         return OpOutcome::fail("REF_UNRESOLVED",
                                std::string(name) + " target body not found: " + target_id);
     }
-    if (auto invalid = validate_modeling_input(target->geom, name, "target")) return *invalid;
+    if (auto invalid = validate_modeling_body(*target, name, "target")) return *invalid;
     const EdgeValues values = read_values(op, mode);
     if (values.stop) return *values.stop;
     EdgeResolution resolved = resolve_edges(ctx, op, op_id, target_id, target->geom, name);

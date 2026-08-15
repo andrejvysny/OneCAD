@@ -62,6 +62,12 @@ std::optional<OpOutcome> validate_modeling_input(const TopoDS_Shape& shape,
                                                  const std::string& operation,
                                                  const std::string& role);
 
+// Body-aware trust boundary: quarantined imported geometry remains visible and
+// exportable, but cannot enter any modeling operation.
+std::optional<OpOutcome> validate_modeling_body(
+    const session::BodyRecord& body, const std::string& operation,
+    const std::string& role);
+
 // Operation-local semantic-ref ownership preflight. The generic ladder deliberately
 // accepts refs against their own named bodies; these operations instead require
 // their typed sub-element refs to belong to one operated body. Returns §9-shaped

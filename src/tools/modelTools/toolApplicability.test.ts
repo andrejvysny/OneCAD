@@ -12,6 +12,10 @@ const NO_SKETCHES: ToolApplicabilityContext = { sketches: {} };
 const ONE_VISIBLE: ToolApplicabilityContext = {
   sketches: { sketch1: { id: "sketch1", visible: true } },
 };
+const QUARANTINED: ToolApplicabilityContext = {
+  sketches: {},
+  bodies: { body1: { health: "quarantined" } },
+};
 const TWO_VISIBLE: ToolApplicabilityContext = {
   sketches: {
     sketch1: { id: "sketch1", visible: true },
@@ -232,6 +236,24 @@ describe("getToolApplicability — transform", () => {
     expect(getToolApplicability("transform", [face("f1", "body1")], NO_SKETCHES)).toEqual({
       enabled: false,
       reason: "Select a body to move",
+    });
+  });
+});
+
+describe("getToolApplicability — quarantined geometry", () => {
+  it("disables body-mutating tools for a quarantined body or sub-element", () => {
+    const expected = {
+      enabled: false,
+      reason: "Quarantined imported geometry is view/export-only until repaired",
+      severity: "error",
+    };
+    expect(getToolApplicability("fillet", [edge], QUARANTINED)).toEqual(expected);
+    expect(getToolApplicability("transform", [body("body1")], QUARANTINED)).toEqual(expected);
+  });
+
+  it("keeps selection available so quarantined geometry can be viewed/exported", () => {
+    expect(getToolApplicability("select", [body("body1")], QUARANTINED)).toEqual({
+      enabled: true,
     });
   });
 });

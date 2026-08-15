@@ -2685,6 +2685,7 @@ impl DocumentRuntime {
                     id: b.id.to_string(),
                     name: b.name.clone(),
                     visible: b.visible,
+                    health: b.health,
                     color: b.color,
                     face_colors: b
                         .face_colors

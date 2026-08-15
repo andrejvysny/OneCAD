@@ -665,6 +665,13 @@ diagnostics are consumed per carrier.
   worker mints and Rust adopts+fences, rather than Rust pre-minting (split/merge body
   counts are unknowable before OCCT executes, so pre-minting could never cover them
   anyway).
+- **`bodyEvents[].health` — OPTIONAL admission state.** Valid only on `created` or
+  `modified`; values are `healthy` and `quarantined`. Absence means `healthy` for
+  backward compatibility. A quarantined body remains in the body registry and is
+  tessellated/exportable, but every modeling operation that names it (as a whole
+  body or through a sub-element ref) returns top-level `OP_FAILED` with diagnostic
+  `QUARANTINED_MODELING_INPUT`. Rust persists the state in `BodyMeta.health` only
+  when quarantined, so existing healthy documents remain byte-identical.
 - **`bodyEvents[].rankKey` — OPTIONAL identity-tripwire evidence (VF-B6).** An op
   whose child ordinals are a **geometric rank** MAY attach, to each `created` (and
   the single-solid `modified` that op would otherwise have produced), the exact key
@@ -1239,7 +1246,8 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   "holeType": "counterbore",
   "diameter": 5.5, "depth": 20.0,
   "cbDiameter": 9.5, "cbDepth": 5.4,
-  "csDiameter": null, "csAngleDeg": null }
+  "csDiameter": null, "csAngleDeg": null,
+  "resultPolicyVersion": 2 }
 ```
 
 - `point` — world-space hole center, frozen at authoring; MUST lie on the
@@ -1251,6 +1259,12 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   countersink (csDiameter > diameter; csAngleDeg ∈ {82, 90, 100, 120}).
 - Tool solid = drill cylinder (+ cb cylinder / cs cone seated at the face) cut
   from the host: lineage = `modified` on `targetBodyId`, nothing minted.
+- `resultPolicyVersion` is absent on legacy records and literal `2` on all fresh
+  authoring. Absence preserves the frozen split-host residual. V2 requires the
+  modified host to remain exactly one connected solid; a severing cut returns
+  top-level `OP_FAILED` plus diagnostic `HOLE_DISJOINT_RESULT`, with no lifecycle
+  event. Any other present version similarly carries diagnostic
+  `UNSUPPORTED_HOLE_RESULT_POLICY_VERSION`; it is never read as legacy.
 - Failures recoverable `OP_FAILED`: non-planar resolved face, point off face,
   drill deeper than through-all extent is fine (clamped = through), cb/cs
   invariant violations, OCCT boolean failure — all name the reason.
@@ -1570,6 +1584,12 @@ advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
   one — with **no** `deleted` parent (creation ex nihilo). Bodies SHOULD be
   named from STEP product names where recoverable (delivered via the step's
   diagnostics/metadata, not the id).
+- **Post-heal quarantine is fail-closed.** Every final solid is re-checked after
+  unit scaling. A failed `BRepCheck_Analyzer`, or an analyzer exception (UNKNOWN),
+  still publishes the shape for view/export but marks its `created` event
+  `health:"quarantined"` and emits `IMPORT_QUARANTINED`. Quarantined bodies are
+  persisted as such and cannot be targets/tools/supports of normal modeling
+  operations; no validator exception is interpreted as healthy geometry.
 - **Failure is recoverable**: a malformed/unreadable file is `OP_FAILED` on the
   step (publish ≤ m−1, Invariant 6), NEVER `PROTOCOL_ERROR` — a user data
   problem must not tear down the worker. Diagnostics vocabulary: `STEP_SEWN`,
@@ -3113,6 +3133,16 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-15 — §7.2 body health + §7.3 Import quarantine.** Additive
+  `bodyEvents[].health` carries `quarantined` only when final imported geometry
+  remains invalid or unprovable after healing/scaling. Rust persists the state in
+  `BodyMeta`; healthy omission stays byte-identical. Quarantined bodies remain
+  view/export-capable but every modeling reference to them returns `OP_FAILED`
+  with diagnostic `QUARANTINED_MODELING_INPUT`.
+- **2026-08-15 — §7.3 Hole result policy V2.** Fresh authoring emits
+  `resultPolicyVersion:2` and requires exactly one connected output solid;
+  severing cuts refuse `HOLE_DISJOINT_RESULT`. Absent preserves the legacy
+  split-host residual for old files; unsupported present versions refuse by name.
 - **2026-08-14 — §7.3 `Extrude.ToNext` whole-profile termination.** The
   finite vertex-plus-centroid ray heuristic is replaced by a bounded boolean
   intersection of the target body with the complete forward profile sweep; the

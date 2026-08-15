@@ -270,6 +270,7 @@ impl GeometryEngine for FakeBackend {
                     step_index: step,
                     body_events,
                     body_rank_keys: Default::default(),
+                    body_health: Default::default(),
                     element_map_delta: ElementMapDelta::default(),
                     needs_repair: vec![],
                     signatures: sigs(step),
@@ -652,6 +653,7 @@ fn hole_record_at(seed: u128, body: BodyId, face: &str, anchor: Vec3) -> Operati
         cb_depth: None,
         cs_diameter: None,
         cs_angle_deg: None,
+        result_policy_version: Some(2),
         extra: Default::default(),
     }));
     OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Hole", op)

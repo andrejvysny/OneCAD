@@ -546,8 +546,8 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     const session::BodyRecord* target_rec =
         (*boolean_mode != app::BooleanMode::NewBody) ? ref_rec : nullptr;
     const TopoDS_Shape* ref_shape = ref_rec ? &ref_rec->geom : nullptr;
-    if (ref_shape) {
-        if (auto invalid = validate_modeling_input(*ref_shape, "Extrude", "target")) return *invalid;
+    if (ref_rec) {
+        if (auto invalid = validate_modeling_body(*ref_rec, "Extrude", "target")) return *invalid;
     }
 
     const double distance = read_scalar(params, "distance", 10.0);

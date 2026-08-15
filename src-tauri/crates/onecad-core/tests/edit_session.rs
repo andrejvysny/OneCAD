@@ -19,6 +19,7 @@ use onecad_core::document::record::{
     DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams, FrozenPlacement, HoleParams,
     HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord,
     PlaceComponentParams, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
+    HOLE_RESULT_POLICY_VERSION,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -2333,6 +2334,7 @@ fn hole_op(hole_type: HoleType, diameter: f64, cb: Option<(f64, f64)>) -> Operat
         cb_depth: cb.map(|(_, t)| Scalar::new(t)),
         cs_diameter: None,
         cs_angle_deg: None,
+        result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
         extra: Default::default(),
     }))
 }

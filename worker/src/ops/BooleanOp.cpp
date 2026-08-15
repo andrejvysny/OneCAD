@@ -48,8 +48,8 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
 
     const TopoDS_Shape old_target = target_rec->geom;
     const TopoDS_Shape tool_shape = tool_rec->geom;
-    if (auto invalid = validate_modeling_input(old_target, "Boolean", "target")) return *invalid;
-    if (auto invalid = validate_modeling_input(tool_shape, "Boolean", "tool")) return *invalid;
+    if (auto invalid = validate_modeling_body(*target_rec, "Boolean", "target")) return *invalid;
+    if (auto invalid = validate_modeling_body(*tool_rec, "Boolean", "tool")) return *invalid;
     std::shared_ptr<BRepBuilderAPI_MakeShape> builder;
     BooleanResult br = checked_boolean(old_target, tool_shape, *mode, ctx.parallel, ctx.occt_options,
                                        ctx.cancel, builder);

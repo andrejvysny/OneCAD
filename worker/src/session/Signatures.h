@@ -53,6 +53,9 @@ struct BodyEvent {
     std::string kind;
     std::string body_id;
     std::optional<RankKey> rank_key;
+    // Additive body admission state. Absent means healthy; `quarantined` is
+    // emitted only for imported geometry that remains unsafe for modeling.
+    std::optional<std::string> health;
 };
 
 // One resolved reference binding (refId → ElementId) produced by a step.

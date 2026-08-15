@@ -447,6 +447,10 @@ function holeOp(s: PreviewSessionState): OperationOp {
     throw new Error("Hole requires a [x, y, z] world point");
   }
   const diameter = positiveDim(s.latestParams.diameter, "Hole diameter");
+  const resultPolicyVersion = s.latestParams.resultPolicyVersion;
+  if (resultPolicyVersion !== undefined && resultPolicyVersion !== 2) {
+    throw new Error(`Unsupported Hole resultPolicyVersion ${String(resultPolicyVersion)}`);
+  }
   // `null`/absent depth is THROUGH-ALL — a real end condition, so it must not be
   // coerced through `positiveDim`.
   const rawDepth = s.latestParams.depth;
@@ -463,6 +467,7 @@ function holeOp(s: PreviewSessionState): OperationOp {
     cbDepth: null,
     csDiameter: null,
     csAngleDeg: null,
+    ...(resultPolicyVersion === 2 ? { resultPolicyVersion: 2 as const } : {}),
   };
 
   if (params.holeType === "counterbore") {

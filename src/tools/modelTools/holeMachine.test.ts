@@ -151,6 +151,7 @@ describe("holeStep — the conditional-block contract", () => {
       cbDepth: null,
       csDiameter: null,
       csAngleDeg: null,
+      resultPolicyVersion: 2,
     });
 
     const cb = holeParamsOf(holeStep(armed(), { kind: "setHoleType", holeType: "counterbore" }).state);
@@ -237,6 +238,8 @@ describe("holeFsmFromParams — re-edit seed", () => {
     expect(seeded!.depth).toBe(14);
     expect(seeded!.cbDiameter).toBe(15);
     expect(seeded!.cbDepth).toBe(9);
+    expect(seeded!.resultPolicyVersion).toBeUndefined();
+    expect(holeParamsOf(seeded!)).not.toHaveProperty("resultPolicyVersion");
     // The inactive block has nothing authored to restore, so it takes the default
     // rather than 0 — a later flip must start from a usable size.
     expect(seeded!.csDiameter).toBe(DEFAULT_HOLE_CS_DIAMETER);
@@ -254,6 +257,22 @@ describe("holeFsmFromParams — re-edit seed", () => {
     });
     expect(seeded!.depth).toBeNull();
     expect(seeded!.diameter).toBe(5.5); // a bare number is a legal wire Scalar
+  });
+
+  it("preserves V2 and refuses an unsupported present policy", () => {
+    const stored = {
+      targetBodyId: "b",
+      face: { primary: { bodyId: "b", elementId: "e", kind: "face" } },
+      point: [0, 0, 0],
+      holeType: "simple",
+      diameter: 5.5,
+      depth: null,
+      resultPolicyVersion: 2,
+    };
+    const seeded = holeFsmFromParams(stored);
+    expect(seeded!.resultPolicyVersion).toBe(2);
+    expect(holeParamsOf(seeded!)).toHaveProperty("resultPolicyVersion", 2);
+    expect(holeFsmFromParams({ ...stored, resultPolicyVersion: 3 })).toBeNull();
   });
 
   it("refuses a seed with no usable seat rather than arming somewhere arbitrary", () => {

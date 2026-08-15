@@ -28,6 +28,10 @@ pub enum DocStatus {
     Ready,
 }
 
+fn body_health_is_healthy(health: &onecad_core::document::body::BodyHealth) -> bool {
+    *health == onecad_core::document::body::BodyHealth::Healthy
+}
+
 /// One body in the tree (`documentStore.ts` `BodyMeta`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +39,8 @@ pub struct BodyDto {
     pub id: String,
     pub name: String,
     pub visible: bool,
+    #[serde(skip_serializing_if = "body_health_is_healthy")]
+    pub health: onecad_core::document::body::BodyHealth,
     /// User-authored body color as sRGB+A (`[r,g,b,a]`). `None` means "use the
     /// theme's neutral body fill".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1735,6 +1741,7 @@ mod tests {
                 id: "b1".into(),
                 name: "Body 1".into(),
                 visible: true,
+                health: onecad_core::document::body::BodyHealth::Healthy,
                 color: None,
                 face_colors: std::collections::BTreeMap::new(),
             },

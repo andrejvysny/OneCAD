@@ -36,6 +36,8 @@ export interface BodyMeta {
   id: string;
   name: string;
   visible: boolean;
+  /** `quarantined` bodies are view/export-only and cannot enter modeling tools. */
+  health?: "healthy" | "quarantined";
   /** User-authored body color as `[r, g, b, a]`. Absent = theme neutral body fill. */
   color?: Rgba;
   /** User-authored face colors keyed by persistent `ElementId`. */

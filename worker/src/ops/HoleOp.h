@@ -27,6 +27,9 @@
 //   7. publish MODIFIED host (id preserved, OCCT history folded into its
 //      partition) — SCHEMA §7.3: "lineage = modified on targetBodyId, nothing
 //      minted". A Hole never creates, never splits, never renames a body.
+//      Absent `resultPolicyVersion` preserves the legacy split-host residual;
+//      literal V2 requires exactly one connected solid and returns
+//      `HOLE_DISJOINT_RESULT` otherwise. Future/malformed versions refuse by name.
 //
 // The op is preview-capable for free: `PreviewOp` and `ExecutePlan` share
 // `PlanExecutor::execute_candidate_op`, so preview == commit by construction.

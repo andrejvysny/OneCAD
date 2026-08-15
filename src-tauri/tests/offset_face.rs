@@ -1191,7 +1191,7 @@ async fn prepare_offset_face_handshake_and_fence() {
                     &ElementId::new("el_placeholder"),
                     anchor_of(plain.faces[0].anchor.as_ref().expect("anchor")),
                 )],
-                distance: Scalar::new(0.0),
+                distance: Scalar::new(1.0),
                 distance_type: OffsetDistanceType::Offset,
                 chain_tangent_faces: true,
                 opposite_face_id: None,

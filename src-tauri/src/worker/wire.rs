@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use onecad_core::document::body::BodyLifecycleEvent;
+use onecad_core::document::body::{BodyHealth, BodyLifecycleEvent};
 use onecad_core::document::record::{
     ExtrudeMode, FrozenPlacement, KnownOperation, OffsetDistanceType, Operation,
 };
@@ -720,6 +720,7 @@ pub fn parse_plan_step(payload: &Value, envelope_step: usize) -> Result<PlanStep
         step_index,
         body_events: parse_body_events(payload.get("bodyEvents"))?,
         body_rank_keys: parse_body_rank_keys(payload.get("bodyEvents")),
+        body_health: parse_body_health(payload.get("bodyEvents"))?,
         element_map_delta: parse_element_delta(payload.get("elementMapDelta"))?,
         needs_repair: parse_needs_repair(payload.get("needsRepair"), step_index)?,
         signatures: parse_signatures(payload.get("signatures")),
@@ -760,6 +761,29 @@ fn parse_body_event(ev: &Value) -> Result<BodyLifecycleEvent, String> {
         }),
         other => Err(format!("unknown bodyEvent kind {other:?}")),
     }
+}
+
+fn parse_body_health(v: Option<&Value>) -> Result<BTreeMap<BodyId, BodyHealth>, String> {
+    let mut out = BTreeMap::new();
+    let Some(events) = v.and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for event in events {
+        let Some(raw) = event.get("health") else {
+            continue;
+        };
+        let health = match raw.as_str() {
+            Some("healthy") => BodyHealth::Healthy,
+            Some("quarantined") => BodyHealth::Quarantined,
+            _ => return Err("bodyEvent health must be healthy or quarantined".into()),
+        };
+        let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+        if kind != "created" && kind != "modified" {
+            return Err("bodyEvent health is valid only on created/modified events".into());
+        }
+        out.insert(body_field(event, "bodyId")?, health);
+    }
+    Ok(out)
 }
 
 /// Collects the OPTIONAL SCHEMA §7.2 `bodyEvents[].rankKey` evidence (VF-B6) into a
@@ -4247,7 +4271,7 @@ mod tests {
         let op = Uuid::from_u128(0x10);
         let payload = json!({
             "stepIndex": 3,
-            "bodyEvents": [ { "kind": "created", "bodyId": format!("body_{op}") } ],
+            "bodyEvents": [ { "kind": "created", "bodyId": format!("body_{op}"), "health": "quarantined" } ],
             "elementMapDelta": {
                 "added": [ { "elementId": "el_1", "topoKey": "f:2", "kind": "face", "bodyId": format!("body_{op}") } ],
                 "removed": ["el_9"], "relabeled": []
@@ -4260,6 +4284,10 @@ mod tests {
         assert_eq!(step.step_index, 3);
         assert!(
             matches!(step.body_events[0], BodyLifecycleEvent::Created { body } if body == BodyId(op))
+        );
+        assert_eq!(
+            step.body_health.get(&BodyId(op)),
+            Some(&BodyHealth::Quarantined)
         );
         assert_eq!(step.element_map_delta.added[0].body, BodyId(op));
         assert_eq!(step.element_map_delta.removed[0], ElementId::new("el_9"));

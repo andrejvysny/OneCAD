@@ -1093,7 +1093,7 @@ fn default_true() -> bool {
     true
 }
 
-fn de_pattern_result_policy_version<'de, D: Deserializer<'de>>(
+fn de_optional_result_policy_version<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u8>, D::Error> {
     Option::<u8>::deserialize(deserializer)
@@ -1429,7 +1429,7 @@ pub struct LinearPatternParams {
     /// explicitly and makes child/body lineage part of the persisted contract.
     #[serde(
         default,
-        deserialize_with = "de_pattern_result_policy_version",
+        deserialize_with = "de_optional_result_policy_version",
         skip_serializing_if = "Option::is_none"
     )]
     pub result_policy_version: Option<u8>,
@@ -1461,7 +1461,7 @@ pub struct CircularPatternParams {
     /// See [`LinearPatternParams::result_policy_version`].
     #[serde(
         default,
-        deserialize_with = "de_pattern_result_policy_version",
+        deserialize_with = "de_optional_result_policy_version",
         skip_serializing_if = "Option::is_none"
     )]
     pub result_policy_version: Option<u8>,
@@ -1794,6 +1794,8 @@ impl TransformBodyParams {
 ///
 /// Standard-size tables (M-series clearance, SHCS counterbores, DIN 74
 /// countersinks) are a **frontend** concern: these params always carry raw mm.
+pub const HOLE_RESULT_POLICY_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HoleParams {
@@ -1829,6 +1831,14 @@ pub struct HoleParams {
     /// REQUIRED iff `hole_type == Countersink`.
     #[serde(default)]
     pub cs_angle_deg: Option<Scalar>,
+    /// Absent preserves the legacy split-host residual. Fresh authoring writes V2,
+    /// which refuses any result that is not exactly one connected solid.
+    #[serde(
+        default,
+        deserialize_with = "de_optional_result_policy_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1864,6 +1874,13 @@ impl HoleParams {
         }
         if !self.point.is_finite() {
             return Err("Hole point has a non-finite component".into());
+        }
+        if let Some(version) = self.result_policy_version {
+            if version != HOLE_RESULT_POLICY_VERSION {
+                return Err(format!(
+                    "Hole resultPolicyVersion {version} is unsupported (expected {HOLE_RESULT_POLICY_VERSION})"
+                ));
+            }
         }
         positive("Hole diameter", self.diameter.value)?;
         if let Some(d) = &self.depth {
@@ -3435,6 +3452,7 @@ mod tests {
             cb_depth: None,
             cs_diameter: None,
             cs_angle_deg: None,
+            result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
             extra: Extra::new(),
         }
     }
@@ -3485,6 +3503,7 @@ mod tests {
         // The inapplicable block renders as explicit `null`, matching the SCHEMA
         // example — "not a countersink" is authored, not omitted.
         assert!(p["csDiameter"].is_null() && p["csAngleDeg"].is_null());
+        assert_eq!(p["resultPolicyVersion"], serde_json::json!(2));
         assert_eq!(p["face"]["primary"]["kind"], serde_json::json!("face"));
     }
 
@@ -3696,6 +3715,29 @@ mod tests {
             ..countersink_params()
         };
         assert!(p.validate().unwrap_err().contains("counterbore-only"));
+    }
+
+    #[test]
+    fn hole_result_policy_absence_and_future_values_round_trip() {
+        let mut legacy = hole_params();
+        legacy.result_policy_version = None;
+        assert!(legacy.validate().is_ok());
+        let legacy_json =
+            serde_json::to_value(Operation::Known(KnownOperation::Hole(legacy))).unwrap();
+        assert!(legacy_json["params"].get("resultPolicyVersion").is_none());
+
+        let mut future =
+            serde_json::to_value(Operation::Known(KnownOperation::Hole(hole_params()))).unwrap();
+        future["params"]["resultPolicyVersion"] = serde_json::json!(3);
+        let parsed: Operation = serde_json::from_value(future.clone()).unwrap();
+        let Operation::Known(KnownOperation::Hole(params)) = &parsed else {
+            panic!("expected Hole");
+        };
+        assert!(params.validate().unwrap_err().contains("unsupported"));
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["params"]["resultPolicyVersion"],
+            future["params"]["resultPolicyVersion"]
+        );
     }
 
     #[test]

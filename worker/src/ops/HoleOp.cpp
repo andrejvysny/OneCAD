@@ -41,6 +41,22 @@ constexpr double kMinValue = 1e-3;  // RegenerationEngine.cpp:61 kMinValue
 constexpr double kPointPlaneFence = 1e-3;
 // Face-boundary classification tolerance (BooleanOperation.cpp:116 precedent).
 constexpr double kClassifyTol = 1e-7;
+constexpr int kResultPolicyVersion2 = 2;
+
+enum class HoleResultPolicy { Legacy, V2 };
+
+bool read_result_policy(const json& params, HoleResultPolicy& policy,
+                        std::string& error) {
+    policy = HoleResultPolicy::Legacy;
+    if (!params.contains("resultPolicyVersion")) return true;
+    const json& value = params["resultPolicyVersion"];
+    if (!value.is_number_integer() || value.get<int>() != kResultPolicyVersion2) {
+        error = "UNSUPPORTED_HOLE_RESULT_POLICY_VERSION";
+        return false;
+    }
+    policy = HoleResultPolicy::V2;
+    return true;
+}
 
 // SCHEMA §7.3: `csAngleDeg ∈ {82, 90, 100, 120}`. Re-checked here because the
 // worker is an independent trust boundary — a hand-authored plan never passes
@@ -178,6 +194,18 @@ std::string read_dims(const json& params, const std::string& hole_type, HoleDims
 OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id) {
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
+    HoleResultPolicy result_policy;
+    std::string policy_error;
+    if (!read_result_policy(params, result_policy, policy_error)) {
+        const std::string message =
+            "Hole resultPolicyVersion is unsupported";
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", policy_error},
+                                       {"message", message},
+                                       {"stage", "preflight"}});
+        return failure;
+    }
 
     if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {
         OpOutcome out;
@@ -195,7 +223,7 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
         return OpOutcome::fail("REF_UNRESOLVED", "Hole target body not found: " + target_id);
     }
     const TopoDS_Shape target_shape = target_rec->geom;
-    if (auto invalid = validate_modeling_input(target_shape, "Hole", "target")) return *invalid;
+    if (auto invalid = validate_modeling_body(*target_rec, "Hole", "target")) return *invalid;
 
     // --- dimensional params (worker is an independent trust boundary) ---
     const std::string hole_type = read_str(params, "holeType", "simple");
@@ -288,18 +316,38 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     if (!br.error_code.empty()) {
         return OpOutcome::fail(br.error_code, "Hole cut failed: " + br.error_message);
     }
+    const kernel::validation::PublicationTier validation_tier =
+        result_validation_tier(ctx, kernel::validation::PublicationTier::TierB);
     kernel::validation::PublicationPolicy policy;
-    policy.name = "Hole";
-    policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
-    policy.max_solid_count = -1;  // Legacy Hole preserves its documented split-host residual.
-    policy.tier = result_validation_tier(
-        ctx, kernel::validation::PublicationTier::TierB);
-    policy.require_closed_manifold =
-        policy.tier == kernel::validation::PublicationTier::TierB;
-    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    if (result_policy == HoleResultPolicy::V2) {
+        policy = kernel::validation::single_solid_policy("Hole", validation_tier);
+    } else {
+        policy.name = "Hole legacy";
+        policy.allowed_top_level_shapes =
+            kernel::validation::TopLevelShapePolicy::SolidSet;
+        policy.max_solid_count = -1;
+        policy.tier = validation_tier;
+        policy.require_closed_manifold =
+            validation_tier == kernel::validation::PublicationTier::TierB;
+    }
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(br.shape, policy);
     if (!decision.publishable()) {
-        if (ordered_solids(br.shape).empty()) {
+        const std::size_t solid_count = ordered_solids(br.shape).size();
+        if (solid_count == 0) {
             return OpOutcome::fail("OP_FAILED", "Hole removed the entire host body");
+        }
+        if (result_policy == HoleResultPolicy::V2 && solid_count > 1) {
+            const std::string message =
+                "Hole V2 would disconnect the host into " +
+                std::to_string(solid_count) + " solids";
+            OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+            failure.diagnostics.push_back({{"severity", "error"},
+                                           {"code", "HOLE_DISJOINT_RESULT"},
+                                           {"message", message},
+                                           {"stage", "publication"},
+                                           {"evidence", {{"solidCount", solid_count}}}});
+            return failure;
         }
         return OpOutcome::fail(decision.code, decision.message);
     }

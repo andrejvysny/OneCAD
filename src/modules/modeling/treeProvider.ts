@@ -70,6 +70,9 @@ export function modelingTreeSections(): readonly TreeSection[] {
         label: b.name,
         icon: "cube",
         kind: "body",
+        ...(b.health === "quarantined"
+          ? { meta: "Quarantined", problem: true }
+          : {}),
         selected: isSelected("body", b.id),
         visible: b.visible,
         // Isolated AWAY → dim the row. The eye still reports the document's own

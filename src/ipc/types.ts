@@ -1180,6 +1180,8 @@ export interface HoleParams {
   cbDepth?: number | null;
   csDiameter?: number | null;
   csAngleDeg?: number | null;
+  /** Absent = legacy split-host replay; 2 = strict one-connected-solid result. */
+  resultPolicyVersion?: 2;
 }
 
 /**
