@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -27,10 +28,7 @@ import {
 async function armExtrude(page: import("@playwright/test").Page): Promise<void> {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   await enterSketchViaPlanePicker(page);
   // The plane-picker entry animates the camera (CadOrbitControls, 250ms) — settle
   // before any draw click races it (see helpers.ts waitForCameraSettled).

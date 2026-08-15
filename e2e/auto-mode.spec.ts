@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -53,10 +54,7 @@ test("L from model mode opens the plane picker with Line armed", async ({ page }
 test("E from sketch mode finishes AND arms Extrude on the sole region", async ({ page }) => {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
   await selectSketchTool(page, "Rectangle");
@@ -111,10 +109,7 @@ test("E from sketch mode finishes AND arms Extrude on the sole region", async ({
 test("double-clicking a finished sketch re-enters its edit session", async ({ page }) => {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideSeedSketches(page);
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
   await selectSketchTool(page, "Rectangle");

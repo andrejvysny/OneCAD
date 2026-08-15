@@ -162,6 +162,48 @@ export function sketchOptions(page: Page): Locator {
   return page.getByRole("listbox", { name: "Sketches" }).getByRole("option");
 }
 
+/** Seed-sketch eyes that still report "shown". */
+function shownSketchEyes(page: Page): Locator {
+  return page
+    .getByRole("listbox", { name: "Sketches" })
+    .locator('[role="switch"][aria-checked="true"]');
+}
+
+/**
+ * Hide every seed sketch through the tree's own eyes, so the static sketch layer
+ * cannot shadow a region pick or arbitrate against a face pick.
+ *
+ * Deliberately NOT `while ((await shown.count()) > 0) await shown.first().click()`,
+ * which is what ~24 specs used to do and what made `auto-mode.spec.ts` time out
+ * on WebKit in CI. Two facts collide there. `count()` is a one-shot snapshot, and
+ * the eye's `aria-checked` only flips a render AFTER the click promise resolves —
+ * `setSketchVisible` writes the store optimistically and React flushes later,
+ * behind `sketchStaticSync`'s viewport work (measured 3–130ms on WebKit locally,
+ * far worse on a loaded runner). So the loop routinely re-reads a STALE count of
+ * 1 for a switch it already clicked, re-enters, and calls `.first().click()` on a
+ * locator filtered by `aria-checked="true"` that by then matches NOTHING. Click
+ * has no element to wait for and burns the entire 45s test timeout. The same
+ * staleness can also land a second click on a switch that has already flipped,
+ * turning the sketch back ON — `EyeToggle` is a pure `onChange(!on)` toggle.
+ *
+ * The fix is to walk the STABLE row set (hiding a sketch never removes its row)
+ * and gate every click on the state it is supposed to produce, so Playwright's
+ * auto-waiting — not a re-click — is what absorbs the render lag.
+ */
+export async function hideSeedSketches(page: Page): Promise<void> {
+  const eyes = sketchOptions(page).getByRole("switch");
+  const total = await eyes.count();
+  for (let i = 0; i < total; i++) {
+    const eye = eyes.nth(i);
+    // Already hidden rows are skipped; nth() is a stable identity, so this can
+    // never resolve to a different row than the one it just read.
+    if ((await eye.getAttribute("aria-checked")) === "false") continue;
+    await eye.click();
+    await expect(eye).toHaveAttribute("aria-checked", "false");
+  }
+  await expect(shownSketchEyes(page)).toHaveCount(0);
+}
+
 /**
  * Click, then wait for the DOF pill to change — a settle gate for the line tool.
  * Each committed segment round-trips through the ASYNC mock sketchUpsert, and

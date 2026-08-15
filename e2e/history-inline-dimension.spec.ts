@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
+  hideSeedSketches,
   openEditorDebug,
   enterSketchViaPlanePicker,
   waitForCameraSettled,
@@ -85,10 +86,7 @@ async function drawAndExtrude(page: Page): Promise<string> {
   await openEditorDebug(page);
   // Hide the seeded demo body + sketches so the picks below can only hit ours.
   await bodyOptions(page).first().getByRole("switch").click();
-  const visibleSeeds = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeeds.count()) > 0) await visibleSeeds.first().click();
+  await hideSeedSketches(page);
 
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
