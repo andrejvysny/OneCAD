@@ -6,6 +6,7 @@
 #include <Standard_Failure.hxx>
 
 #include "kernel/fillet/FilletSemanticChecks.h"
+#include "kernel/validation/GeometryPrecision.h"
 
 namespace onecad::kernel::fillet {
 
@@ -135,8 +136,11 @@ FilletBuildResult FilletBuilder::accept_result() {
       validation::audit_shape(shape);
   validation::PublicationPolicy output_policy =
       validation::single_solid_policy("Fillet", validation::PublicationTier::TierB);
-  output_policy.maximum_tolerance =
-      std::max(1.0e-3, input_audit_.tolerances.maximum() * 2.0 + 1.0e-6);
+  // Grows from the INPUT body's tolerance. `input_audit_.tolerances.maximum()` and
+  // `precision_of(body_).input_tolerance` are the same three-way max over
+  // face/edge/vertex; the audit's is reused so the input is measured once.
+  output_policy.maximum_tolerance = validation::precision_of(body_).tolerance_ceiling(
+      input_audit_.tolerances.maximum(), 2.0, 1.0e-6);
   const validation::PublicationDecision decision =
       validation::evaluate_publication_policy(output_audit, output_policy);
   if (!decision.publishable()) {

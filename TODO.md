@@ -170,8 +170,29 @@ all CLOSED. Do not re-open them.
       extents, not resolutions), `kTangentAngleTol` + `kBuildToleranceFloor` +
       `kToNextContactEpsilon` (each documents a non-precision reason in its own comment), and the
       dimensionless direction-vector degeneracy guards.
-- [ ] G1 (renames) · G2 (`reason_code`) · G3 (micro/sliver redefinition + census) · G4 (TierB
-      enablement — the only gate allowed to move a digest).
+- [x] **G1 slice 1 — the tolerance ceilings, the minimum volume, and the authoring resolution.**
+      Migrated: Extrude's two ceilings (and `shape_max_tolerance` DELETED — `precision_of` computes
+      the identical three-way max), `FilletBuilder`'s ceiling, `OffsetFaceOp`'s ceiling,
+      `kMinVolume` → `minimum_volume()`, and `kMinimumFeatureChange` → `authoring_resolution()`.
+      `kMinVolume` and `kMinimumFeatureChange` are deleted; their comments now say where the value
+      comes from instead of restating it.
+      OffsetFace's ceiling keeps base = CONSTRUCTION tolerance and epsilon = **0**, against
+      Extrude/Fillet's input tolerance and 1e-6. Both differences are preserved deliberately —
+      unifying either loosens a live ceiling, and that is its own gate.
+      **Gate: `ctest` 134/134 · digests 136/136 UNCHANGED · `semantic-compare` OK.**
+      **The load-bearing proof needed a second pass, and the first pass is the finding.**
+      Perturbing `kAuthoringResolutionMm` 1.0e-3 → 1.1e-3 reds `geometry_precision` — but on the
+      first attempt **NO op test reddened**, i.e. the renames were wired and nothing PROVED it.
+      Every migrated threshold is a ceiling or floor that no fixture sat near: `test_identity_noop`
+      exercises the refusal at 0 and 5e-5, which ANY plausible threshold refuses.
+      Closed by `test_authoring_resolution_boundary` in `test_offsetface.cpp`, which STRADDLES the
+      boundary — 9.9e-4 refused, **1.05e-3 accepted** — so it flips the moment the context moves.
+      Now measured red under the same perturbation, with the observed message
+      `"effective change 0.001050 mm is below the supported minimum 0.001100 mm"`. It also pins the
+      RENDERED text (`0.001000`), because that threshold is printed into the wire message and a
+      rename that changed the digits would not be the pure rename it claims to be.
+- [ ] G1 remaining renames · G2 (`reason_code`) · G3 (micro/sliver redefinition + census) ·
+      G4 (TierB enablement — the only gate allowed to move a digest).
 
 Must land before WP3, which chains three OCCT algorithms and inherits every tolerance decision.
 

@@ -578,6 +578,46 @@ void test_identity_noop() {
     }
 }
 
+// The authoring-resolution boundary, straddled.
+//
+// WHY THIS EXISTS. `test_identity_noop` proves 0 and 5e-5 are refused, but both
+// are refused by ANY plausible threshold, so neither pins the value. When the
+// refusal moved to `GeometryPrecisionContext::authoring_resolution()` the whole
+// worker suite still passed with the context perturbed 1.0e-3 -> 1.1e-3: the
+// rename was wired but nothing PROVED it was, which by this repo's own rule
+// ("a guard no fixture can trip is not a guard") is not good enough.
+//
+// Straddling the boundary fixes that. 1.05e-3 mm sits between the real value and
+// the perturbed one, so it flips from accepted to refused the moment the context
+// moves — the sensitivity the old fixtures lacked.
+void test_authoring_resolution_boundary() {
+    const auto offset_by = [](double distance) {
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+        BodyStore bodies;
+        bodies.create("body_1", "op_seed", box);
+        em::ElementMapPartition part;
+        return run_offset(bodies, part,
+                          offset_params("body_1", {key_near(box, 5, 5, 10)}, distance));
+    };
+
+    // Just BELOW: refused by name, with the boundary echoed in the message.
+    const ops::OpOutcome below = offset_by(9.9e-4);
+    check(below.status == ops::OpOutcome::Status::Failed &&
+              below.error_message.find("below the supported minimum") != std::string::npos,
+          "authoring boundary: 9.9e-4 mm is refused");
+    // The threshold is rendered INTO the wire message, so a "pure rename" that
+    // changed the printed digits would not be pure. Pin the rendered text.
+    check(below.error_message.find("0.001000") != std::string::npos,
+          "authoring boundary: the refusal message still renders 0.001000 mm, got: " +
+              below.error_message);
+
+    // Just ABOVE: accepted. This is the assertion that has teeth — it is the one
+    // that reds when the context moves.
+    const ops::OpOutcome above = offset_by(1.05e-3);
+    check(above.status == ops::OpOutcome::Status::Ok,
+          "authoring boundary: 1.05e-3 mm is accepted, got: " + above.error_message);
+}
+
 void test_trimmed_face_sampling() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
     const TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(
@@ -1019,6 +1059,7 @@ int main() {
     test_total_on_box();
     test_traps();
     test_identity_noop();
+    test_authoring_resolution_boundary();
     test_trimmed_face_sampling();
     test_history_relabels_tracked_faces();
     test_ladder_rung_and_needs_repair();

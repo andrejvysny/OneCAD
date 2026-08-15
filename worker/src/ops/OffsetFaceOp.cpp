@@ -44,6 +44,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "ops/OpCommon.h"
 #include "util/Log.h"
 
@@ -936,11 +937,16 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     // An identity or sub-resolution request is a refusal, never a successful
     // `modified` event carrying unchanged geometry. Imported B-Rep uncertainty may
     // make an edit unbuildable; it may not silently redefine the requested intent.
-    if (!std::isfinite(minimum_abs_d) || minimum_abs_d < of::kMinimumFeatureChange) {
+    const double minimum_supported_change =
+        kernel::validation::precision_of(target_shape, minimum_abs_d).authoring_resolution();
+    if (!std::isfinite(minimum_abs_d) || minimum_abs_d < minimum_supported_change) {
+        // NOTE: this value is rendered INTO the wire message below, so a migration
+        // that changed the printed digits would not be the pure rename it claims to
+        // be. `test_offsetface` asserts the rendered string, not just the number.
         const std::string message =
             "OffsetFace: effective change " + std::to_string(minimum_abs_d) +
             " mm is below the supported minimum " +
-            std::to_string(of::kMinimumFeatureChange) + " mm";
+            std::to_string(minimum_supported_change) + " mm";
         OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
         failure.diagnostics.push_back({{"severity", "error"},
                                        {"code", "OFFSET_FACE_CHANGE_TOO_SMALL"},
@@ -949,7 +955,7 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
                                        {"evidence",
                                         {{"minimumEffectiveChangeMm", minimum_abs_d},
                                          {"minimumSupportedChangeMm",
-                                          of::kMinimumFeatureChange},
+                                          minimum_supported_change},
                                          {"constructionToleranceMm", construction_tol}}}});
         return failure;
     }
@@ -1044,7 +1050,8 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
         BRepGProp::VolumeProperties(result, props);
         volume = props.Mass();
     }
-    if (!std::isfinite(volume) || volume <= of::kMinVolume) {
+    if (!std::isfinite(volume) ||
+        volume <= kernel::validation::precision_of(result).minimum_volume()) {
         // Spike trap b: a collapsed body passes IsDone AND BRepCheck.
         return OpOutcome::fail("GEOMETRY_INVALID",
                                "OffsetFace produced a degenerate volume " +
@@ -1083,8 +1090,12 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
         kernel::validation::single_solid_policy(
             "OffsetFace", result_validation_tier(
                               ctx, kernel::validation::PublicationTier::TierB));
+    // Grows from the CONSTRUCTION tolerance, not the input shape's, and with NO
+    // slack term — both differences from Extrude/Fillet are deliberate, which is
+    // why `tolerance_ceiling` takes its base and epsilon explicitly instead of
+    // defaulting them. Unifying either would loosen this ceiling.
     publication_policy.maximum_tolerance =
-        std::max(1.0e-3, construction_tol * 2.0);
+        kernel::validation::precision_of(result).tolerance_ceiling(construction_tol, 2.0, 0.0);
     const kernel::validation::PublicationDecision decision =
         publication_decision(result, publication_policy);
     if (!decision.publishable()) {

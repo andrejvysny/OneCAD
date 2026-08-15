@@ -94,10 +94,11 @@ inline constexpr double kBuildToleranceFloor = 1.0e-4;
 inline constexpr double kSemanticLengthTol = 1.0e-6;
 inline constexpr double kSemanticAngularTol = 1.0e-7;
 
-// Minimum authored geometric change (mm). A smaller non-zero request is not an
-// identity: it is refused because the kernel cannot honestly prove it at the
-// supported feature resolution.
-inline constexpr double kMinimumFeatureChange = 1.0e-3;
+// Minimum authored geometric change now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. A smaller non-zero request
+// is not an identity: it is refused because the kernel cannot honestly prove it at
+// the supported feature resolution. The value is unchanged (1e-3 mm); it is now
+// the SAME number Extrude, Fillet, Hole and Shell refuse below, stated once.
 
 // `|n_out · r̂|` must reach this for a cylindrical σ to be derivable at all.
 inline constexpr double kRadialDotMin = 1.0 - 1.0e-6;
@@ -105,10 +106,12 @@ inline constexpr double kRadialDotMin = 1.0 - 1.0e-6;
 // Relative tolerance for the Total material-column / footprint-coverage volumes.
 inline constexpr double kColumnRelTol = 1.0e-6;
 
-// Minimum publishable volume, mm³ (a 1 µm cube). The build tolerance is a LENGTH,
-// so it is the wrong yardstick here; a face driven onto its opposite collapses to
-// ~0 and would otherwise pass IsDone + BRepCheck (spike trap b).
-inline constexpr double kMinVolume = 1.0e-9;
+// Minimum publishable volume now comes from the precision context —
+// `GeometryPrecisionContext::minimum_volume()`, which is the authoring resolution
+// CUBED. That derives the 1e-9 mm³ this constant used to assert, and makes its old
+// "a 1 µm cube" comment arithmetic rather than a claim. The build tolerance is a
+// LENGTH, so it is the wrong yardstick here; a face driven onto its opposite
+// collapses to ~0 and would otherwise pass IsDone + BRepCheck (spike trap b).
 
 enum class SurfaceKind { Plane, Cylinder, Other };
 SurfaceKind surface_kind(const TopoDS_Face& face);

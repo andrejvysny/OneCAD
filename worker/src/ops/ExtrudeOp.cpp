@@ -36,6 +36,7 @@
 #include <gp_Vec.hxx>
 
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
 
@@ -70,12 +71,6 @@ double face_area(const TopoDS_Shape& shape) {
     GProp_GProps props;
     BRepGProp::SurfaceProperties(shape, props);
     return std::abs(props.Mass());
-}
-
-double shape_max_tolerance(const TopoDS_Shape& shape) {
-    return std::max({BRep_Tool::MaxTolerance(shape, TopAbs_FACE),
-                     BRep_Tool::MaxTolerance(shape, TopAbs_EDGE),
-                     BRep_Tool::MaxTolerance(shape, TopAbs_VERTEX)});
 }
 
 std::string input_body(const json& op, std::size_t index) {
@@ -838,7 +833,10 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         kernel::validation::PublicationPolicy policy =
             kernel::validation::single_solid_policy(
                 "Extrude", kernel::validation::PublicationTier::TierA);
-        policy.maximum_tolerance = 1.0e-3;
+        // A fresh body has no input tolerance to grow FROM, so the ceiling is the
+        // authoring resolution outright.
+        policy.maximum_tolerance =
+            kernel::validation::precision_of(tool_shape).authoring_resolution();
         const kernel::validation::PublicationDecision decision =
             publication_decision(tool_shape, policy);
         if (!decision.publishable()) {
@@ -873,8 +871,12 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         ctx, kernel::validation::PublicationTier::TierB);
     policy.require_closed_manifold =
         policy.tier == kernel::validation::PublicationTier::TierB;
-    policy.maximum_tolerance =
-        std::max(1.0e-3, shape_max_tolerance(old_target) * 2.0 + 1.0e-6);
+    // Grows from the TARGET's tolerance: a boolean inherits whatever uncertainty
+    // the body it modifies arrived with, and may double it plus a slack term.
+    {
+        const auto prec = kernel::validation::precision_of(old_target);
+        policy.maximum_tolerance = prec.tolerance_ceiling(prec.input_tolerance, 2.0, 1.0e-6);
+    }
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {
