@@ -46,8 +46,9 @@ import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
 import { computePlaneScreenMetric, newPlaneMetricScratch } from "./planeMetric";
 import type { SketchConstraint, SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
-import type { PlaneScreenMetric, SnapDecision } from "@/tools/sketch/snapTypes";
+import type { FrontendPointRef, PlaneScreenMetric, SnapDecision } from "@/tools/sketch/snapTypes";
 import { latestSnapTrace } from "@/tools/sketch/snapTrace";
+import { currentDpr, MAX_DPR } from "./dpr";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle, type DragHandleMode } from "./DragHandle";
@@ -140,7 +141,6 @@ export interface PickHandlers {
   onPick: (hit: PickHit | null, mods: PickModifiers, clientX: number, clientY: number) => void;
 }
 
-const MAX_DPR = 2;
 /** Generous pick radius for always-visible sketch curves (easier than body edges). */
 const SKETCH_PICK_PX = 8;
 /** Trailing-edge delay for the initial-load auto-fit — see `requestAutoFit`. */
@@ -333,6 +333,8 @@ export class ViewportEngine {
   // Scratch for `planeScreenMetric` — it runs on every pointer frame, so it
   // allocates nothing after construction (SNAP P2 perf budget).
   private readonly _metricScratch = newPlaneMetricScratch();
+  /** The capped DPR the renderer buffer is currently sized for (see `syncDpr`). */
+  private appliedDpr = currentDpr();
 
   // Render-on-demand
   private dirty = true;
@@ -395,7 +397,8 @@ export class ViewportEngine {
       major: palette.gridMajor(),
       clear: palette.clear(),
     });
-    this.grid.setVisible(opts.gridVisible ?? false);
+    this.gridVisible = opts.gridVisible ?? false;
+    this.grid.setVisible(this.gridVisible);
     this.scene.add(this.grid.object3D);
 
     // Always visible — NOT gated by gridVisible, so the viewport never loses
@@ -656,6 +659,22 @@ export class ViewportEngine {
 
   // ---- Render-on-demand ----
 
+  /**
+   * Re-apply the renderer pixel ratio when the DISPLAY changed but the CSS box
+   * did not (SNAP §10.7).
+   *
+   * `ResizeObserver` never fires for a window dragged between a 1× and a 2×
+   * display: the element's CSS size is identical, only `devicePixelRatio`
+   * moved. Without this the drawing buffer stays at the old ratio and every
+   * fat line renders at half (or double) its intended width.
+   */
+  private syncDpr(): void {
+    const dpr = currentDpr();
+    if (dpr === this.appliedDpr) return;
+    this.appliedDpr = dpr;
+    this.resize();
+  }
+
   invalidate(): void {
     if (this.disposed) return;
     this.dirty = true;
@@ -681,6 +700,9 @@ export class ViewportEngine {
 
   private renderFrame(): void {
     if (!this.rendererHandle || !this.controls) return;
+    // A display change with no CSS resize never reaches `ResizeObserver`, so
+    // the ratio is checked on the frame that follows it instead.
+    this.syncDpr();
     const camera = this.rig.getCamera();
 
     // Camera-relative key + fill (see lightRig.ts). Both orbit with the view, so
@@ -720,7 +742,25 @@ export class ViewportEngine {
     // (engine/README.md § render order).
     this.contributions.runFrame(camera, height);
     if (this.sketch) {
-      this.sketch.update(width * dpr, height * dpr, this.controls.getTarget(), this.controls.getDistance());
+      // `pxPerUnit`: the LARGER projected axis of the plane→screen metric, which
+      // is the conservative choice for the tessellation budget (it can only
+      // over-tessellate). Null metric — an edge-on or degenerate view — passes 0,
+      // which keeps whatever tessellation is already built.
+      const m = this.sketchPlane ? this.planeScreenMetric({ x: 0, y: 0 }) : null;
+      const pxPerUnit = m
+        ? Math.max(Math.hypot(m.m00, m.m10), Math.hypot(m.m01, m.m11))
+        : 0;
+      this.sketch.update(
+        width * dpr,
+        height * dpr,
+        this.controls.getTarget(),
+        this.controls.getDistance(),
+        dpr,
+        pxPerUnit,
+      );
+      // The snap guides need the SAME scale: their dash cadence is authored in
+      // CSS px and has to survive every zoom (SNAP §10.1).
+      this.snapIndicator?.update(width * dpr, height * dpr, dpr, pxPerUnit);
     }
     // Keep the two grab overlays a constant screen size across zoom/orbit.
     //
@@ -882,9 +922,31 @@ export class ViewportEngine {
     this.handleCameraChanged();
   }
 
+  /**
+   * ONE effective grid at a time (SNAP §10.4).
+   *
+   * In sketch mode the sketch-plane grid IS the grid: the world XY grid hides
+   * (without touching the store — the preference is unchanged, only which
+   * surface renders it), and it is restored on exit. Two overlapping grids
+   * overdrew each other and left the control ambiguous about which one it meant.
+   *
+   * Snap-to-grid is `settingsStore.snapTo.grid` and is deliberately independent:
+   * hiding the drawing must never silently stop the snapping.
+   */
   setGridVisible(visible: boolean): void {
-    this.grid?.setVisible(visible);
+    this.gridVisible = visible;
+    this.applyGridVisibility();
     this.invalidate();
+  }
+
+  /** The stored preference, so entering/leaving sketch mode can re-apply it to
+   *  whichever grid is effective. */
+  private gridVisible = false;
+
+  private applyGridVisibility(): void {
+    const inSketch = this.sketch !== null;
+    this.grid?.setVisible(this.gridVisible && !inSketch);
+    this.sketch?.setGridVisible(this.gridVisible);
   }
 
   /**
@@ -1059,6 +1121,9 @@ export class ViewportEngine {
     this.sketchPlane = plane;
     this.sketch.setSession(plane, entities, status, constraints);
     this.snapIndicator?.setPlane(plane);
+    // The sketch grid inherits the STORED preference before the first frame,
+    // and the world grid steps aside for it (SNAP §10.4).
+    this.applyGridVisibility();
 
     // The sketch aims the camera along the plane normal; a queued auto-fit
     // landing mid-session would fight it (and be saved as the "restore" pose).
@@ -1111,6 +1176,12 @@ export class ViewportEngine {
    *  whole-entity recolor. */
   setSketchSelectedPoints(points: { x: number; y: number }[]): void {
     this.sketch?.setSelectedPoints(points);
+  }
+
+  /** Highlight glyph for selected sketch POINTS by ADDRESS — re-resolved on
+   *  every solve publication, so the ring follows the point (SNAP §10.6). */
+  setSketchSelectedPointRefs(refs: readonly FrontendPointRef[]): void {
+    this.sketch?.setSelectedPointRefs(refs);
   }
 
   /** Tint the chain segment a live angle chip is measured against, or clear it. */
@@ -1276,6 +1347,9 @@ export class ViewportEngine {
   exitSketch(): void {
     this.sketch?.dispose();
     this.sketch = null;
+    // Hand the grid back to the world plane at the preference the user left it
+    // at — sketch mode borrowed the surface, it did not change the setting.
+    this.applyGridVisibility();
     this.snapIndicator?.dispose();
     this.snapIndicator = null;
     this.sketchPlane = null;

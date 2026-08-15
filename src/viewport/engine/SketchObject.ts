@@ -34,41 +34,54 @@ import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 import { angleArcPoints } from "@/tools/sketch/angleArcPreview";
 import { buildRingTexture, buildDotTexture } from "./markerTextures";
+import { cssToDevice, currentDpr } from "./dpr";
+import { needsRetessellation, segmentsForEntity } from "./curveTessellation";
+import { pointCoordOf } from "@/tools/sketch/sketchTopology";
+import type { FrontendPointRef } from "@/tools/sketch/snapTypes";
 import { findClosedLoops, loopCentroid } from "@/tools/sketch/closedLoop";
 import { layoutDimensionLines } from "@/tools/sketch/dimensionLineLayout";
 import type { SketchConstraint } from "@/ipc/types";
 
+/** Fallback tessellation when no projected scale is known yet (first frame,
+ *  jsdom). Adaptive counts take over as soon as `update()` supplies one. */
 const ARC_SEGMENTS = 64;
 
-/**
- * Fat-line `linewidth` (LineMaterial) is measured in DEVICE px — the same
- * units `update()` feeds `resolution` (ViewportEngine calls it with
- * `width*dpr, height*dpr` every frame). A bare CSS-px number here would render
- * half as wide as intended on a 2x display. Widths below are authored in CSS
- * px and multiplied by this cap; the cap value (2) mirrors ViewportEngine's
- * own `MAX_DPR` (renderer.setPixelRatio cap) so a linewidth and the
- * `resolution` it's measured against stay in the same units even past 2x
- * displays. Not imported directly — SketchObject has no reason to depend on
- * ViewportEngine — so keep this value in step with it by hand.
+/*
+ * Fat-line `linewidth` (LineMaterial) is measured in DEVICE px — the same units
+ * `update()` feeds `resolution`. The cap and the conversion both live in
+ * `dpr.ts` now (SNAP P4): they used to be duplicated here and in the renderer
+ * "kept in step by hand", and — worse — the widths below were computed ONCE at
+ * module evaluation, so a window dragged to a different-DPR display kept the
+ * old stroke width forever. Widths are now authored in CSS px and converted per
+ * DPR change by `applyDpr()`.
  */
-export const MAX_DPR = 2;
+export { MAX_DPR } from "./dpr";
 
-/** CSS px → device px for a fat-line `linewidth`, using the shared DPR cap. */
+/** @deprecated Use `cssToDevice` from `./dpr`; kept for the non-sketch callers
+ *  that build a one-off width and never re-read it. */
 export function cssLineWidth(cssPx: number): number {
-  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-  return cssPx * Math.min(dpr, MAX_DPR);
+  return cssToDevice(cssPx);
 }
 
-const LINE_WIDTH = cssLineWidth(1.25);
-const PREVIEW_WIDTH = cssLineWidth(1);
-const TRIM_GHOST_WIDTH = cssLineWidth(2);
-/** Selection HALO width — drawn BEHIND the entity's own semantic-color line
- *  (P1 audit fix), wide enough to read as an outline rather than a
- *  slightly-fatter version of the same stroke. Hover has no halo. */
-const SELECTION_HALO_WIDTH = cssLineWidth(2.5);
-/** The angle-preview arc is a lightweight annotation glyph, not geometry —
- *  thinner than every real entity line so it never competes with them. */
-const ANGLE_ARC_WIDTH = cssLineWidth(0.75);
+/** Stroke widths in CSS px — the authored values, converted per DPR. */
+const CSS_WIDTHS = {
+  line: 1.25,
+  preview: 1,
+  trimGhost: 2,
+  /** Selection HALO — drawn BEHIND the entity's own semantic-color line (P1
+   *  audit fix), wide enough to read as an outline rather than a
+   *  slightly-fatter version of the same stroke. Hover has no halo. */
+  selectionHalo: 2.5,
+  /** The angle-preview arc is a lightweight annotation glyph, not geometry —
+   *  thinner than every real entity line so it never competes with them. */
+  angleArc: 0.75,
+} as const;
+
+const LINE_WIDTH = cssToDevice(CSS_WIDTHS.line);
+const PREVIEW_WIDTH = cssToDevice(CSS_WIDTHS.preview);
+const TRIM_GHOST_WIDTH = cssToDevice(CSS_WIDTHS.trimGhost);
+const SELECTION_HALO_WIDTH = cssToDevice(CSS_WIDTHS.selectionHalo);
+const ANGLE_ARC_WIDTH = cssToDevice(CSS_WIDTHS.angleArc);
 /**
  * Endpoint/midpoint/centroid AFFORDANCE opacity while idle — not permanent
  * document content (Sketcher UX cleanup, Track B1b). The three tiers are NOT
@@ -83,7 +96,13 @@ const ENDPOINT_IDLE_OPACITY = 0.3;
 const MIDPOINT_IDLE_OPACITY = 0;
 const CENTROID_IDLE_OPACITY = 0;
 
-/** Flat local xyz (z=0) polyline for an entity, in plane coords. */
+/**
+ * Flat local xyz (z=0) polyline for an entity, in plane coords.
+ *
+ * `segments` is the adaptive count from `curveTessellation.segmentsForEntity`
+ * (SNAP P4). Omitting it keeps the historical fixed counts, which is what the
+ * pure geometry tests and the static layer's first build use.
+ */
 export function entityPolyline(e: {
   type: SketchEntity["type"];
   p0?: [number, number];
@@ -95,14 +114,14 @@ export function entityPolyline(e: {
   majorR?: number;
   minorR?: number;
   rotation?: number;
-}): number[] {
+}, segments?: number): number[] {
   if (e.type === "Line" && e.p0 && e.p1) return [e.p0[0], e.p0[1], 0, e.p1[0], e.p1[1], 0];
   if (e.type === "Ellipse") {
     // Sampled parametric polyline, CLOSED (the first sample is repeated last) so the
     // Line2 strip meets itself — same shape as the Circle branch above.
     const params = ellipseParams(e);
     if (!params) return [];
-    const ring = sampleEllipse(params);
+    const ring = sampleEllipse(params, segments && segments > 2 ? segments : undefined);
     const out: number[] = [];
     for (let i = 0; i <= ring.length; i++) {
       const p = ring[i % ring.length];
@@ -112,8 +131,9 @@ export function entityPolyline(e: {
   }
   if (e.type === "Circle" && e.center && e.radius !== undefined) {
     const out: number[] = [];
-    for (let i = 0; i <= ARC_SEGMENTS; i++) {
-      const a = (i / ARC_SEGMENTS) * Math.PI * 2;
+    const n = segments && segments > 2 ? segments : ARC_SEGMENTS;
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
       out.push(e.center[0] + e.radius * Math.cos(a), e.center[1] + e.radius * Math.sin(a), 0);
     }
     return out;
@@ -123,8 +143,9 @@ export function entityPolyline(e: {
     let a1 = Math.atan2(e.end[1] - e.center[1], e.end[0] - e.center[0]);
     while (a1 <= a0) a1 += Math.PI * 2; // CCW sweep
     const out: number[] = [];
-    for (let i = 0; i <= ARC_SEGMENTS; i++) {
-      const a = a0 + ((a1 - a0) * i) / ARC_SEGMENTS;
+    const n = segments && segments > 2 ? segments : ARC_SEGMENTS;
+    for (let i = 0; i <= n; i++) {
+      const a = a0 + ((a1 - a0) * i) / n;
       out.push(e.center[0] + e.radius * Math.cos(a), e.center[1] + e.radius * Math.sin(a), 0);
     }
     return out;
@@ -225,6 +246,15 @@ export class SketchObject {
   private readonly matAngleArc: LineMaterial;
   private readonly matDimLine: LineMaterial;
   private readonly allMaterials: LineMaterial[];
+  /** CSS px per plane unit at the current camera — the adaptive tessellation
+   *  budget (SNAP P4). 0 until the first `update()`, where a curve falls back
+   *  to the fixed historical counts. */
+  private pxPerUnit = 0;
+  /** The segment count the committed curves were last BUILT with, so a zoom
+   *  only rebuilds when the count moved by a meaningful fraction. */
+  private builtSegments = 0;
+  /** The capped DPR the fat-line widths were last converted for. */
+  private appliedDpr = currentDpr();
 
   private readonly _basis = new THREE.Matrix4();
   private readonly _target = new THREE.Vector3();
@@ -436,6 +466,9 @@ export class SketchObject {
     this.rebuildMidpoints();
     this.rebuildCentroids();
     this.rebuildDimensionLines();
+    // Re-resolve the selected-point rings against the NEW geometry, so a solve
+    // that moved a point moves its ring with it (SNAP §10.6).
+    this.rebuildSelectedPoints();
     this.deps.invalidate();
   }
 
@@ -532,11 +565,64 @@ export class SketchObject {
   /** Highlight glyph for specifically-selected POINTS (an endpoint/center the
    *  Select tool picked, not just its owning entity), in plane (u,v) coords. */
   setSelectedPoints(points: Point2[]): void {
+    // COORDINATE form, kept for callers that genuinely have no ref (a preview
+    // point that belongs to no committed entity). Selection uses the REF form
+    // below, which survives a solve.
+    this.selectedPointRefs = [];
+    this.writeSelectedPoints(points);
+  }
+
+  /**
+   * Highlight the selected points by ADDRESS (SNAP §10.6).
+   *
+   * The coordinate form above froze the ring where the point was at selection
+   * time: a solve that moved the point left the ring behind on the old
+   * coordinate, which reads as "the selection is somewhere else now". Refs are
+   * re-resolved on every `setSession`, so the ring follows the geometry, and an
+   * unknown or deleted ref simply disappears.
+   */
+  setSelectedPointRefs(refs: readonly FrontendPointRef[]): void {
+    this.selectedPointRefs = [...refs];
+    this.rebuildSelectedPoints();
+  }
+
+  private selectedPointRefs: FrontendPointRef[] = [];
+
+  private rebuildSelectedPoints(): void {
+    if (this.selectedPointRefs.length === 0) {
+      this.writeSelectedPoints([]);
+      return;
+    }
+    const byId = new Map(this.entities.map((e) => [e.id, e]));
+    const out: Point2[] = [];
+    for (const r of this.selectedPointRefs) {
+      const e = byId.get(r.entityId);
+      const coord = e ? pointCoordOf(e, r.position) : null;
+      if (coord) out.push({ x: coord[0], y: coord[1] });
+    }
+    this.writeSelectedPoints(out);
+  }
+
+  private writeSelectedPoints(points: readonly Point2[]): void {
     const flat: number[] = [];
     for (const p of points) flat.push(p.x, p.y, 0);
     const geo = this.selectedPoints.geometry;
     geo.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
     geo.computeBoundingSphere();
+    this.deps.invalidate();
+  }
+
+  /**
+   * Show or hide the SKETCH-PLANE grid.
+   *
+   * In sketch mode this is the only effective grid — the world XY grid hides,
+   * so the two never overdraw each other or disagree about which one the
+   * `gridVisible` control means (SNAP §10.4). Snap-TO-grid is a separate
+   * preference (`settingsStore.snapTo.grid`) and is unaffected: turning the
+   * drawing off must not silently turn the snapping off.
+   */
+  setGridVisible(visible: boolean): void {
+    this.grid.setVisible(visible);
     this.deps.invalidate();
   }
 
@@ -594,7 +680,7 @@ export class SketchObject {
     }
     const statusMat = this.statusMaterial();
     for (const e of this.entities) {
-      const positions = entityPolyline(e);
+      const positions = entityPolyline(e, segmentsForEntity(e, this.pxPerUnit));
       if (positions.length < 6) continue;
       // SELECTION does not REPLACE the entity's own color (P1 audit fix): a
       // wider halo renders BEHIND it instead, so an under/full/conflict (or
@@ -689,13 +775,62 @@ export class SketchObject {
     // Materials are shared — never disposed here.
   }
 
-  /** Per-frame: Line2 resolution + adaptive grid re-center (plane-local). */
-  update(width: number, height: number, cameraTarget: THREE.Vector3, cameraDistance: number): void {
+  /**
+   * Per-frame: Line2 resolution, DPR-tracked stroke widths, adaptive curve
+   * tessellation, and the plane-local grid re-center.
+   *
+   * `width`/`height` are DEVICE pixels (the `resolution` uniform's units);
+   * `dpr` is the capped ratio they were multiplied by, and `pxPerUnit` is how
+   * many CSS pixels one plane unit currently projects to.
+   */
+  update(
+    width: number,
+    height: number,
+    cameraTarget: THREE.Vector3,
+    cameraDistance: number,
+    dpr: number = currentDpr(),
+    pxPerUnit = 0,
+  ): void {
     for (const m of this.allMaterials) m.resolution.set(width, height);
+    // A window dragged between displays changes the ratio with NO CSS resize,
+    // so this cannot ride on the resize path (SNAP §10.7).
+    if (dpr !== this.appliedDpr) {
+      this.appliedDpr = dpr;
+      this.applyDpr(dpr);
+    }
+    if (pxPerUnit > 0 && pxPerUnit !== this.pxPerUnit) {
+      this.pxPerUnit = pxPerUnit;
+      const wanted = this.wantedSegments();
+      if (needsRetessellation(this.builtSegments, wanted)) {
+        this.builtSegments = wanted;
+        this.rebuildEntities();
+      }
+    }
     if (this.plane) {
       const local = worldToPlanePoint(this.plane, this._target.copy(cameraTarget));
       this.grid.update(new THREE.Vector3(local.x, local.y, 0), cameraDistance);
     }
+  }
+
+  /** The largest segment count any committed curve currently wants — one
+   *  number for the whole session, so a zoom rebuilds once rather than per
+   *  entity with per-entity thresholds. */
+  private wantedSegments(): number {
+    let max = 0;
+    for (const e of this.entities) max = Math.max(max, segmentsForEntity(e, this.pxPerUnit));
+    return max;
+  }
+
+  /** Re-convert every authored CSS width into the new device-pixel ratio. */
+  private applyDpr(dpr: number): void {
+    this.matUnder.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
+    this.matFull.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
+    this.matConflict.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
+    this.matConstruction.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
+    this.matHover.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
+    this.matSelected.linewidth = cssToDevice(CSS_WIDTHS.selectionHalo, dpr);
+    this.matPreview.linewidth = cssToDevice(CSS_WIDTHS.preview, dpr);
+    this.deps.invalidate();
   }
 
   dispose(): void {

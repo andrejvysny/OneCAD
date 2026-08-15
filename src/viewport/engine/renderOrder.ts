@@ -72,10 +72,20 @@ export const RENDER_ORDER = {
   TRIM_GHOST: 5,
   /** Dashed angle-preview arc (live angle chip ↔ its reference segment). */
   ANGLE_ARC_PREVIEW: 5,
-  /** Snap guide lines / snap glyph marker. */
-  SNAP_GUIDES: 5,
-  SNAP_MARKER: 6,
-  /** L1/L2 model-tool previews. */
+  /**
+   * Snap guide lines, then the snap glyph marker (SNAP §10.9).
+   *
+   * Their OWN tiers, above every sketch curve and below the marker. They used
+   * to share tier 5 with the trim ghost, the region fills and the dimension
+   * lines; those DO co-render with a snap guide during an armed draw tool, and
+   * a tie there is resolved by draw order — i.e. by nothing the reader can see
+   * or predict. The guide must be legible ON TOP of the geometry it aligns to,
+   * and the marker on top of the guide.
+   */
+  SNAP_GUIDES: 6,
+  SNAP_MARKER: 7,
+  /** L1/L2 model-tool previews. Model-mode only — a snap guide belongs to an
+   *  armed SKETCH tool, so the shared numbers never co-render. */
   PREVIEW_MESH: 6,
   GHOST: 6,
   REVOLVE_SHELL: 6,

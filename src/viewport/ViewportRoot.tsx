@@ -43,7 +43,6 @@ import {
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
 import type { ConstraintPosition } from "@/ipc/types";
-import { entityPointCoord } from "@/features/sketch/badgeLayout";
 import { createClient } from "@/ipc/client";
 import { promoteOne } from "@/ipc/promote";
 import { SketchController } from "@/tools/sketch/SketchController";
@@ -466,16 +465,14 @@ export function ViewportRoot({ className }: { className?: string }) {
           // A pick can name a specific named point (endpoint/center), not just
           // its owning entity — highlight those individually so selecting one
           // corner of a shape doesn't read as "the whole line is selected."
-          const session = sketchStore.getState().session;
-          const entities = session?.entities ?? [];
-          const selectedPoints = s.selected
-            .filter((sel) => sel.point)
-            .map((sel) => {
-              const e = entities.find((x) => x.id === sel.entityId);
-              return e && sel.point ? entityPointCoord(e, sel.point) : null;
-            })
-            .filter((p): p is NonNullable<typeof p> => p !== null);
-          engine.setSketchSelectedPoints(selectedPoints);
+          // REFS, not coordinates (SNAP §10.6): the engine re-resolves them on
+          // every solve publication, so a selected point ring follows the point
+          // when the solver moves it instead of sitting where it used to be.
+          engine.setSketchSelectedPointRefs(
+            s.selected
+              .filter((sel) => sel.point)
+              .map((sel) => ({ entityId: sel.entityId, position: sel.point! })),
+          );
           if (s.hover) {
             engine.setSketchHover([s.hover.entityId]);
           } else if (s.constraintHover) {
@@ -506,17 +503,31 @@ export function ViewportRoot({ className }: { className?: string }) {
           const hoverPos = s.hover?.point;
           const selectedHasPos = (pos: ConstraintPosition) =>
             s.selected.some((sel) => sel.point === pos);
+          // `show.guidePoints` is a DISPLAY preference and nothing else (SNAP
+          // §10.3): with it off the persistent endpoint/midpoint/centroid
+          // markers disappear, while the SELECTED-point ring and the active
+          // snap indicator stay — those are click feedback, not persistent
+          // guide-point display — and snapping itself is untouched
+          // (`snapTo.sketchGuidePoints` is the separate control for that).
+          const showGuidePoints = settingsStore.getState().show.guidePoints;
           engine.setSketchPointAffordance({
-            endpoints: !idle,
+            endpoints: showGuidePoints && !idle,
             midpoints:
-              !idle && (toolIsPointRelevant || hoverPos === "Midpoint" || selectedHasPos("Midpoint")),
+              showGuidePoints &&
+              !idle &&
+              (toolIsPointRelevant || hoverPos === "Midpoint" || selectedHasPos("Midpoint")),
             centroids:
-              !idle && (toolIsPointRelevant || hoverPos === "Center" || selectedHasPos("Center")),
+              showGuidePoints &&
+              !idle &&
+              (toolIsPointRelevant || hoverPos === "Center" || selectedHasPos("Center")),
           });
         };
         applySketchSelection();
         cleanups.push(sketchSelectionStore.subscribe(applySketchSelection));
         cleanups.push(toolStore.subscribe(applySketchSelection));
+        // A `show.guidePoints` flip must repaint immediately, not at the next
+        // selection change.
+        cleanups.push(settingsStore.subscribe(applySketchSelection));
 
         // ?vpdemo / ?sketchdemo / ?toolsdemo — demo-only flags, handled by a
         // dynamically-imported dev module (devDemos.ts) so the mock-kernel

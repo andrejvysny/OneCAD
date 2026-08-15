@@ -174,6 +174,53 @@ coordinate re-derivation as the evidence a relation is persisted from.
   `bunx tsc --noEmit` clean · `bun run test` **290 files / 4862 passed / 78 skipped** ·
   `bun run build` clean.
 
+### P4 — harden sketch snap rendering — DONE (with one deferral, below)
+
+- [x] `dpr.ts` (NEW) — ONE `MAX_DPR` + `cssToDevice`. The cap was duplicated in `SketchObject` and
+      the renderer "kept in step by hand", and every fat-line width was computed ONCE at module
+      evaluation — so a window dragged to a different-DPR display kept the old stroke forever.
+      Widths are now authored in CSS px and re-converted by `SketchObject.applyDpr` whenever the
+      capped ratio changes; `ViewportEngine.syncDpr()` re-sizes the drawing buffer on a DPR change
+      with NO CSS resize, which `ResizeObserver` never reports.
+- [x] `curveTessellation.ts` (NEW) — adaptive segment counts from a 0.35 CSS px sagitta budget,
+      floors 8 (24 for an ellipse) and a 2048 cap, with a 25% rebuild band so a continuous zoom
+      rebuilds a handful of times rather than every frame. `entityPolyline` takes the count;
+      omitting it keeps the historical fixed 64/72 for the pure geometry tests. Explicitly a
+      RENDERING budget: snap, hit-test and solver all still work against the exact analytic curve.
+- [x] `SnapIndicator` rewritten. Guides are `Line2` with per-guide dash/gap recomputed from the
+      live plane→screen scale, so a 6px-on/4px-off cadence survives every zoom — the old
+      `LineDashedMaterial` measured its dashes in WORLD units against the constants 6 and 4, which
+      is a solid line at one zoom and a few enormous strokes at another. Marker glyphs are now one
+      per family (filled square / triangle / ring+dot / target / diamond / X / ring / plus / dot),
+      because the marker is the ONLY feedback when hints are off.
+- [x] `RENDER_ORDER.SNAP_GUIDES`/`SNAP_MARKER` moved to their own tiers (6/7). They shared tier 5
+      with the trim ghost, region fills and dimension lines, which DO co-render with a guide during
+      an armed draw tool — a tie there was resolved by draw order.
+- [x] `show.guidePoints` wired into `ViewportRoot.applySketchSelection` with a `settingsStore`
+      subscription, so a flip repaints at once. It hides the PERSISTENT markers only: the
+      selected-point ring and the live snap indicator stay (click feedback, not guide-point
+      display), and snapping is untouched (`snapTo.sketchGuidePoints` is the separate control).
+- [x] Selected points are held as REFS (`setSketchSelectedPointRefs`) and re-resolved on every
+      `setSession`, so the ring follows a point the solver moved instead of staying where the point
+      used to be.
+- [x] ONE effective grid: `ViewportEngine.applyGridVisibility()` hides the world XY grid in sketch
+      mode and shows the sketch-plane grid at the STORED preference, restoring the world grid on
+      exit — without touching the store. Snap-to-grid stays independent.
+- [x] Tests: `curveTessellation.test.ts` (17, geometric — the real chord error at the chosen count,
+      and that one segment fewer would miss the budget) and `SnapIndicator.test.ts` (10 — distinct
+      glyph per kind, CSS-constant dash cadence across a 40× zoom change, DPR width conversion,
+      guide release, degenerate-guide skip).
+- Gate: `bunx tsc --noEmit` clean · `bun run test` **292 files / 4889 passed / 78 skipped** ·
+  `bun run build` clean.
+
+**Deferred, and named rather than quietly skipped:** the `staticSketchRoot` / `activeSketchRoot`
+split (§10.5). Both static and edit-mode sketches currently share `sketchRoot`, so the Layers →
+Sketches filter cannot hide the static ones while an active sketch is being edited. It is the one
+P4 item that reshapes the scene graph rather than a leaf renderer, it touches picking
+(`sketchStaticHitTest`/`sketchStaticPickState`) and the model-mode selection path, and it is
+independent of everything above — so it is owed as its own change with its own integration tests,
+not folded into a rendering commit.
+
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
 Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`
