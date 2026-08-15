@@ -25,7 +25,6 @@ import {
   HistorySelectionSection,
   SketchDimensionsSection,
 } from "@/features/inspector/sections";
-import { VariablesSection } from "@/features/inspector/VariablesSection";
 
 const primary = (ctx: InspectorContext) => ctx.selection[0];
 const inScope = (ctx: InspectorContext, token: string) => ctx.scopes.includes(token);
@@ -98,18 +97,5 @@ export function contributeInspectorSections(scope: ModuleScope): void {
     priority: P.Dependencies,
     canRender: (ctx) => modelling(ctx) && isKind(ctx, "feature"),
     component: FeatureDependenciesSection,
-  });
-
-  // WP-VE.2. The ONLY document-level section: the variable table is not about
-  // the selection, so it renders throughout Model mode and sits last, below
-  // everything that IS about what the user picked. Sketch mode is deliberately
-  // excluded — a sketch dimension is a solver value with no `Scalar` behind it,
-  // so nothing in that mode can be bound to a variable yet.
-  scope.registerInspectorSection({
-    id: Ids.Variables,
-    title: "Variables",
-    priority: P.Variables,
-    canRender: modelling,
-    component: VariablesSection,
   });
 }

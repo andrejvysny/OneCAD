@@ -51,10 +51,12 @@ test("a body's context menu offers Save as Component, and the saved component ap
 
   await expect(dialog).toBeHidden();
 
-  // The library panel lists it: the catalog read is the same one the placement
+  // The Library modal lists it: the catalog read is the same one the placement
   // gesture arms from, so this is the whole round trip the UI can see.
-  await page.getByTestId("sidebar-tab-library").click();
-  await expect(page.getByTestId("library-card").filter({ hasText: "Bracket Plate" })).toBeVisible();
+  await page.getByRole("button", { name: "Library" }).click();
+  await expect(
+    page.getByTestId("library-modal-card").filter({ hasText: "Bracket Plate" }),
+  ).toBeVisible();
 });
 
 test("an invalid id blocks the save instead of failing at the backend", async ({ page }) => {

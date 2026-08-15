@@ -435,3 +435,32 @@ describe("ViewportEngine.captureThumbnail", () => {
     expect(engine.captureThumbnail()).toBeNull();
   });
 });
+
+/*
+ * The chip has to know where the arrow is on SCREEN to stay off it. Before U5
+ * nothing could ask that at all (`projectPoint` returns one point; the bounds
+ * helpers are world-space `Box3`s); U5 added the question for the transform
+ * gizmo, and the value arrow is the other overlay a chip is anchored beside.
+ */
+describe("ViewportEngine interaction-overlay bounds", () => {
+  it("reports the value handle's box only while it is shown", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+
+    expect(engine.getInteractionOverlayBounds("valueHandle")).toBeNull();
+
+    engine.showValueHandle([0, 0, 0], [0, 0, 1]);
+    const box = engine.getInteractionOverlayBounds("valueHandle");
+    expect(box).not.toBeNull();
+    // Square, because the billboarded arrow can reach that far in ANY screen
+    // direction, and centred on the anchor.
+    expect(box!.width).toBeCloseTo(box!.height, 6);
+    expect(box!.width).toBeGreaterThan(0);
+
+    engine.hideValueHandle();
+    expect(engine.getInteractionOverlayBounds("valueHandle")).toBeNull();
+
+    engine.dispose();
+  });
+});

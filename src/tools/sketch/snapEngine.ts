@@ -646,16 +646,20 @@ function guideSnap(
   let hGuide: number | null = null; // constant y
   let vBest = threshold;
   let hBest = threshold;
+  let vPt: Point2 | null = null; // the reference point that produced vGuide
+  let hPt: Point2 | null = null; // the reference point that produced hGuide
   for (const r of refs) {
     const dx = Math.abs(raw.x - r.x);
     if (dx <= vBest) {
       vBest = dx;
       vGuide = r.x;
+      vPt = r;
     }
     const dy = Math.abs(raw.y - r.y);
     if (dy <= hBest) {
       hBest = dy;
       hGuide = r.y;
+      hPt = r;
     }
   }
   if (vGuide === null && hGuide === null) return null;
@@ -663,10 +667,19 @@ function guideSnap(
   if (vGuide !== null) guides.push({ orientation: "vertical", value: vGuide });
   if (hGuide !== null) guides.push({ orientation: "horizontal", value: hGuide });
   const both = vGuide !== null && hGuide !== null;
+  // "Aligned" means the cursor sits on BOTH axes of the SAME reference point —
+  // a true 2D coincidence. When vGuide/hGuide instead come from two unrelated
+  // points that just happen to each land within threshold on one axis, calling
+  // that "Aligned" is misleading (the cursor isn't aligned to anything single);
+  // report only the axis this tier is surest about instead.
+  const samePoint =
+    both && vPt !== null && hPt !== null && Math.abs(vPt.x - hPt.x) < EPS && Math.abs(vPt.y - hPt.y) < EPS;
+  const kind: SnapKind = samePoint ? "alignHV" : vBest <= hBest ? "alignV" : "alignH";
+  const label = samePoint ? "Aligned" : vBest <= hBest ? "Vertical" : "Horizontal";
   return {
     point: { x: vGuide ?? raw.x, y: hGuide ?? raw.y },
-    kind: both ? "alignHV" : vGuide !== null ? "alignV" : "alignH",
-    label: both ? "Aligned" : vGuide !== null ? "Vertical" : "Horizontal",
+    kind,
+    label,
     guides,
     // Ranked by the SMALLER axis miss, not the combined displacement: it is the
     // axis this tier is surest about, and it keeps a polar ray that merely

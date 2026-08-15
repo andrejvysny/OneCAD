@@ -42,6 +42,7 @@ import {
 } from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
+import { entityPointCoord } from "@/features/sketch/badgeLayout";
 import { createClient } from "@/ipc/client";
 import { promoteOne } from "@/ipc/promote";
 import { SketchController } from "@/tools/sketch/SketchController";
@@ -461,6 +462,19 @@ export function ViewportRoot({ className }: { className?: string }) {
         const applySketchSelection = () => {
           const s = sketchSelectionStore.getState();
           engine.setSketchSelection(s.selected.map((sel) => sel.entityId));
+          // A pick can name a specific named point (endpoint/center), not just
+          // its owning entity — highlight those individually so selecting one
+          // corner of a shape doesn't read as "the whole line is selected."
+          const session = sketchStore.getState().session;
+          const entities = session?.entities ?? [];
+          const selectedPoints = s.selected
+            .filter((sel) => sel.point)
+            .map((sel) => {
+              const e = entities.find((x) => x.id === sel.entityId);
+              return e && sel.point ? entityPointCoord(e, sel.point) : null;
+            })
+            .filter((p): p is NonNullable<typeof p> => p !== null);
+          engine.setSketchSelectedPoints(selectedPoints);
           if (s.hover) {
             engine.setSketchHover([s.hover.entityId]);
           } else if (s.constraintHover) {

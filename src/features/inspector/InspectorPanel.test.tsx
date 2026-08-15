@@ -55,6 +55,29 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("Fully constrained · DOF 0")).toBeInTheDocument();
   });
 
+  /*
+   * LGU-1 WP-A / F1 red evidence. The audit caught "Fully constrained · DOF 0"
+   * on screen in MODEL mode with no sketch open. The `dof === 0` fallback in
+   * `constraintStatus.ts` is deliberate and stays (U7/D14: a real solve whose
+   * status label lags its own DOF count must not be contradicted) — the defect
+   * is one layer up, where `SelectionState` FABRICATES a solve state for a
+   * sketch the registry has never heard of (`solve?.status ?? "under"`,
+   * `solve?.dof ?? 0`) and so reports the strongest possible claim about a
+   * sketch it knows nothing about. Absent evidence must render no placard, not
+   * a confident one.
+   */
+  it("claims nothing about a sketch whose solve state is not loaded", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      documentStore.setState({ sketches: {} });
+      selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]);
+    });
+
+    expect(screen.getByText("Sketch")).toBeInTheDocument();
+    expect(screen.queryByText(/Fully constrained/)).toBeNull();
+    expect(screen.queryByText(/constrained · DOF/)).toBeNull();
+  });
+
   it("shows body status + full history when a body is selected", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));

@@ -163,7 +163,7 @@ describe("settingsStore displayUnit", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.displayUnit).toBe("in");
-    expect(JSON.parse(raw!).version).toBe(8);
+    expect(JSON.parse(raw!).version).toBe(9);
   });
 });
 

@@ -76,9 +76,13 @@ describe("layoutBadges", () => {
     expect(r.axisFrom).toEqual({ x: 15, y: 10 });
   });
 
-  it("a Coincident badge has no axisFrom — it sits at a shared point, not along an axis", () => {
+  it("a Coincident badge offsets along the entity's own axis, away from the shared point", () => {
     const c = badges.find((b) => b.id === "k2")!;
-    expect(c.axisFrom).toBeUndefined();
+    // k2 is anchored at e2's Start = [40,0] (the point e1 and e2 share). e2 is
+    // p0=[40,0], p1=[40,20] — the axis runs away from the shared point toward
+    // e2's OTHER endpoint, so the badge floats beside the vertex, not on it.
+    expect(c.at).toEqual({ x: 40, y: 0 });
+    expect(c.axisFrom).toEqual({ x: 40, y: 20 });
   });
 
   it("assigns offsetIndex 0/1 to k1+k3, which co-anchor at e1's midpoint", () => {

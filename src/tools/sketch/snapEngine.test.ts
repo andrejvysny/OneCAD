@@ -77,13 +77,30 @@ describe("computeSnap priority", () => {
     expect(r.guides).toEqual([{ orientation: "vertical", value: 10 }]);
   });
 
-  it("emits both guides (aligned) when x and y both line up", () => {
+  it("snaps both axes but does NOT label 'Aligned' when x and y match two unrelated points", () => {
+    // (10,0) supplies the x-match and (0,20) supplies the y-match — two
+    // disconnected points, not one coincidental hit. The cursor still snaps
+    // to their intersection (10,20) and both guide lines still draw, but the
+    // label must not claim a single-point alignment that doesn't exist.
     const r = computeSnap({ x: 10.1, y: 20.1 }, [], {
       ...base,
       enableGrid: false,
       recentPoints: [{ x: 10, y: 0 }, { x: 0, y: 20 }],
     });
+    expect(r.kind).not.toBe("alignHV");
+    expect(r.label).not.toBe("Aligned");
+    expect(r.point).toEqual({ x: 10, y: 20 });
+    expect(r.guides).toHaveLength(2);
+  });
+
+  it("emits both guides (aligned) when x and y both match the SAME point", () => {
+    const r = computeSnap({ x: 10.1, y: 20.1 }, [], {
+      ...base,
+      enableGrid: false,
+      recentPoints: [{ x: 10, y: 20 }],
+    });
     expect(r.kind).toBe("alignHV");
+    expect(r.label).toBe("Aligned");
     expect(r.point).toEqual({ x: 10, y: 20 });
     expect(r.guides).toHaveLength(2);
   });

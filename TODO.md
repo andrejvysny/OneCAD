@@ -1,6 +1,264 @@
 # OneCAD-Tauri Migration TODO
 
-## NEXT — post-merge plan (2026-08-14)
+## SKETCH UX — Shapr3D render-parity pass (2026-08-15) — SHIPPED (`601534c` + follow-ups)
+
+Vertex ring→filled-dot markers, persistent midpoint/centroid dots, permanent dimension
+lines (witness ticks + arrows) on constrained edges, live length label offset off the
+line, selected-endpoint highlight ring, Coincident badge off its vertex, Fixed badge as
+a lock icon + Disconnect action, "Constraint chips" visibility toggle, `snapEngine`
+"Aligned" false-positive fix (only a true single-point coincidence, not two unrelated
+axis matches). Follow-up: selecting ANY line now shows a read-only dimension line +
+length label even before it's constrained (`SelectionDimensionLabels`, new shell panel
+— `EDITOR_MOUNT_ORDER_CONTRACT` amended, right after `ConstraintBadgeLayer`).
+- [x] tsc 0 · full vitest suite green (one pre-existing flaky `ModelToolController.wave2` test, unrelated, passes standalone)
+- [ ] Manual Tauri gate (USER): draw + select an edge → read-only length line/label appears; add a Distance constraint → editable chip takes over, no duplicate; origin-pin lock icon + Disconnect chip; endpoint selection shows the highlight ring
+
+## MODELING CANVAS UX — V1: the value arrow becomes a screen overlay (2026-08-15) — FE GATE PASSED
+
+Plan: `~/.claude/plans/act-as-senior-ux-ui-robust-wozniak.md`. Five packages (V1 arrow ·
+V2 split HUD · V3 revolve angle handle + sweep path · V4 shell thickness handle · V5 body
+delete); **V1 only is landed.** Founder captures of extrude/revolve/fillet/shell drove it.
+
+The U0–U7 program (`0e58185`) never touched the value handle — U5 redesigned `TransformGizmo`
+alone — so the arrow every drag-a-distance tool shares (extrude · fillet/chamfer · offsetFace,
+one `DragHandle` instance) still had all three defects the captures show.
+
+- [x] **The arrow was invisible on the face it operates on, and that was structural.** Its fill
+      is `palette.hoverAccent()` and a selected face is `palette.selected3d()` — **the same
+      token**, `--color-accent`. Blue on blue by construction, in both themes. The fix is a new
+      `--color-overlay-halo` (near-white light / near-black dark, both blocks) drawn as an
+      outset silhouette BEHIND the fill, which is how the reference tools keep a blue handle on
+      a blue body. Near-white, not `#ffffff`: white is three.js's default material color and a
+      halo taking it would be indistinguishable from every un-themed material in the
+      theme-staleness probes. `refreshColors()` re-reads it — it is the one handle material that
+      inverts, so omitting it would strand a white outline on the dark canvas.
+- [x] **It read as geometry because it WAS geometry.** A cylinder + cone in the world: near
+      edge-on it collapsed to a hairline, and pointing at the camera — the commonest camera for
+      a depth drag — to a dot. It is now a flat `ShapeGeometry` silhouette (5 px shaft, 14 px
+      head, 44 px reach) that `orient(camera)` billboards every frame: facing the viewer, length
+      along the axis's own SCREEN direction. When the axis projects to nothing the last good
+      angle is HELD, so a full-length grabbable arrow stays on screen instead of the dot.
+      Nothing about the world axis, the anchor, or the drag math moved.
+- [x] **`getInteractionOverlayBounds("valueHandle")`** — the projected box, beside U5's
+      `"transformGizmo"` and through the same `projectPoint` path. V2 consumes it so the chip
+      can stay off the arrow; nothing reads it yet.
+
+**Correction to the plan's own claim, measured:** the pick corridor did NOT need widening — it
+was 21.6 px across (a 10.8 px-radius cylinder, ~2× the visible cone) and is now 14 px, matched
+to the visible head instead of an invisible envelope sitting over the model. Still above the
+12 px trackpad floor, and still rotationally symmetric about the axis so the billboard roll
+cannot change what is grabbable.
+
+Gates (measured): `bunx tsc --noEmit` clean · `bun run test` **277 files / 4512 tests, all
+green** · `bun run build` clean · hex gate empty. **The Playwright lanes were NOT run — the
+user authorized this commit explicitly without them.** They are owed: this changes rendered
+geometry and the grab corridor, and `e2e/helpers.ts:435` `findExtrudeHandle` scans for the
+handle at a 6 px step, which the narrower corridor still admits but only the lane can prove.
+No Rust/C++/protocol change, and none possible to gate here anyway — the staged sidecar is
+stale (`src-tauri/binaries/…` 12:02 against an 18:12 `worker/build/onecad-worker`).
+
+## LGU-1 — Library & Generators Unification (2026-08-14) — WP-A GATE PASSED
+
+Plan: `~/.claude/plans/act-as-senior-software-inherited-sprout.md`. A nine-package
+program unifying the two placement/generation doors — the Component Library
+(`PlaceComponent`) and the Gear Generator (`KnownOperation::Gear`) — behind one
+interaction model, plus the bridge that turns a designed gear into a library
+component. **WP-A only is landed.** Sequencing and the remaining packages are in
+the plan; the short version is below.
+
+**The program is FRONTEND-FIRST by necessity, not preference.** T0's stale staged
+sidecar (`src-tauri/binaries/onecad-worker-aarch64-apple-darwin`, 12:02, against
+an 18:12 `worker/build/onecad-worker`) makes every cargo command in this worktree
+untrustworthy, so WP-A/B/C/E — which need no Rust — go first, and WP-D/F/G/I wait
+behind the restage.
+
+### The specification was stale; these are the corrections it needed
+
+It is pinned to `b9bcaf7`, and the tree had already moved:
+
+- **`LibraryPanel.tsx` no longer exists.** The spec's WP-A/WP-C target a sidebar
+  Library tab and card-click-to-arm; the real surfaces are `LibraryModal` (opened
+  by a toolbar tool) and `StartLibraryPanel`, with a "Place in scene" button.
+  Retargeted.
+- **WP-H (Templates) is already shipped end to end** — `onecad-library/src/
+  template.rs`, `library_seed_templates.rs`, `TemplateGrid.tsx`,
+  `saveAsTemplate`/`newFromTemplate` (real Rust, not mock-only),
+  `e2e/library-template.spec.ts`. Only two gaps remained; one is closed below and
+  one is deferred (see "refused/deferred").
+- **F1's stated root cause was wrong.** It is not "mode not reset on sketch
+  exit" — see the WP-A notes below for what it actually was.
+- **§6.4's "the preview mesh's projected AABB" does not exist.** There is no AABB
+  or rectangle-intersection logic anywhere; `HtmlOverlayDriver.ts:221-249` is a
+  1-D downward push between items sharing a `clusterId`, and the gear chip
+  passes none. WP-B's `chipPlacement.ts` is new code, not a wiring job.
+
+### WP-A — truth & vocabulary (fixes F1–F5, F9, F10; canvas D1-A + D2-A)
+
+- **F1 — the sketch placard lied.** Two separate bugs, and NEITHER is the
+  `dof === 0` fallback in `constraintStatus.ts:22`, which is a deliberate U7/D14
+  decision (a real solve whose status label lags its own DOF count must not be
+  contradicted) and is untouched. (a) `InspectorPanel`'s `SelectionState`
+  FABRICATED a solve state for a sketch the registry has never heard of
+  (`solve?.status ?? "under"`, `solve?.dof ?? 0`), so an unknown sketch got the
+  strongest possible claim — "Fully constrained · DOF 0" — made on no evidence.
+  It now renders no placard at all. (b) `StatusBar`'s `showDof` was
+  `sketching || sel.kind !== "body"` over `dofBadge ?? 0`, and `dofBadge` is
+  written ONLY by the live sketch session: in model mode it was either null,
+  rendered as a confident `DOF: 0`, or a leftover from whichever sketch was
+  edited last, reported beside an unrelated selection. A face lit it up too. It
+  now reads the selected sketch's own number, or `—`.
+  A third, smaller one: `ConstraintsHintSection` showed "Select geometry to
+  constrain." in MODEL mode, where there is no sketch geometry to select. Now
+  "Open the sketch to add constraints." The section LABEL is unchanged, so
+  `inspectorContract.ts` is untouched.
+- **F3 — the orphaned tooltip** was `title={c.id}` on the cards: a native browser
+  tooltip, positioned by the platform outside the slot system. Dropped; the id
+  lives in the detail panel's provenance footer now.
+- **F4 — `SOURCE: generator`** leaked a wire enum into the UI. New
+  `modules/library/componentMeta.ts` owns the whole vocabulary
+  (`badgeKindOf`/`cardSubtitleOf`/`provenancePhraseOf`/`attachmentPhraseOf`) and
+  enforces the standing rule with a test: **the string "generator" never appears
+  as a source label.** Its one surviving user-facing home is the "Generators"
+  menu title, which names tools, not provenance. Attachments read as prose
+  ("Shank axis → holes & cylinders") instead of `shank_axis — cylinder:shank`.
+- **F5 — "2 components"** sat in a status bar full of statements about the open
+  document, so it read as an instance count. Now `Library: {n} items`.
+- **F9 — "Reindex"**, a developer verb, held the most prominent slot beside
+  Search on BOTH grids. Removed from both; the action survives unchanged (same
+  call, same `tasksStore` begin/end) behind the modal header's overflow as
+  "Rebuild index". No auto-reindex-on-open was added: the modal already re-reads
+  the catalog on every open, which covers the need without a filesystem stat on
+  the render path.
+- **F10 — the naming guard.** `SaveAsComponentDialog` opens on the body's own
+  name, which for most bodies is the tree's "Body 2", and `suggestedId` turns
+  that into a permanent `mine.body-2`. Warns; never refuses (the name is legal
+  and the backend's id rules stay authoritative). Autofocus + select-all already
+  existed.
+- **D1-A/D2-A.** New `SourceBadge` (`src/ui`, the first badge primitive — tag
+  chips were inlined in two places), new shared `ComponentCard` replacing markup
+  that was duplicated character-for-character between the two grids, and a new
+  configurator-first `ComponentDetailRail`. `ComponentConfigForm` is extracted
+  so WP-C's armed panel renders the same controls rather than a second copy;
+  `componentConfigStore` carries a configuration made before placing INTO the
+  placement, because picking M8 and then watching the ghost arm at M6 would make
+  the panel a lie. `formatDesignation` moved to `modules/library/designation.ts`
+  (re-exported from its old home) now that four surfaces render it.
+- One design rule got firmer than the spec asked: **which free param is "the
+  size"** is read off the designation template's FIRST HOLE, not off table
+  order. The seeded ISO 4762 package declares `thread_detail`
+  (cosmetic/simplified/modeled) as a free domain param alongside `thread`, and
+  table order would have put "cosmetic–modeled" on the card as a size range the
+  first time the table was reordered.
+
+#### Refused / deferred, by name
+
+- **The `NEMA 17 Mount` template seed is REFUSED.** CL-TRIM deliberately deleted
+  the `nema17` package, its worker generator, its dimension table and that
+  starter (`SEED_VERSION` 5). Re-adding the card would mean a template that
+  places a component the catalog no longer has.
+- **D9's `{n} placed components` subtitle is DEFERRED to P3.**
+  `ProjectTemplateDto` carries `{id, name, description, previewDataUrl}` and
+  nothing else, so the count needs a Rust DTO field — which needs cargo, which
+  needs T0. The "mm · Z-up" half of that subtitle is already satisfied by the
+  seeds' own descriptions. The self-teaching dashed card landed.
+- **F2** (preview overlapping the title) and the dialog's autofocus were already
+  fixed in the tree; verified, not re-fixed.
+- **F6/F7/F8** are WP-B. **F7 in particular cannot be done on the frontend**: it
+  needs a `mintedBy: RecordId` field on projection body entries, because
+  deriving the mapping in TS by splitting `body_<opId>` would bake the worker's
+  internal id format into the frontend.
+
+#### Gate evidence (measured 2026-08-14)
+
+Frontend lanes only. **`cargo` and `ctest` were NOT run and are NOT claimed** —
+T0's stale sidecar blocks them, and WP-A touches no Rust or C++.
+
+- `bunx tsc --noEmit` clean · `bun run build` clean
+- `bun run test` **4501/4501** (276 files), up from 4467/4467
+- `bun run e2e` **425 passed / 1 failed** at `retries: 0` — NOT a clean lane, see
+  below
+- hex gate empty
+
+**The e2e lane is not green, and this is recorded rather than re-run away.**
+`filletChamfer.spec.ts:198` ("a bisector-tier arm is direction-driven") failed:
+the edge-op armed as Fillet and the INTO-the-body drag never flipped it to
+Chamfer. What is known:
+
+- The same command passed **426/426** on the commit immediately before this one,
+  so the failure is new to this run.
+- The captured evidence is clean — `pageerror.log` is EMPTY, and the console
+  shows the FSM arming normally (`edgeOp: idle → armed`) and then simply not
+  flipping. No exception, no failed load.
+- WP-A touches nothing on that path: it changed the inspector's sketch placard,
+  the status bar's DOF read-out, library/start UI, tokens, `TemplateGrid` and
+  `SaveAsComponentDialog`. The edge-op drag gesture, its raycast and its chip
+  are untouched.
+- The whole spec passes **13/13 in isolation** (49s).
+
+That last point is explicitly NOT being treated as the answer — § T4's MC-R9
+says a browser-lane nondeterminism "closes only on a measured root cause, never
+on a clean re-run". **This is a second MC-R9 datapoint**, alongside
+`revolve-commit.spec.ts:111`: same signature — a drag/gesture spec failing once
+inside a loaded ~24-minute run and passing alone. Two independent specs now
+share it, which is worth more to whoever measures the root cause than either
+sighting alone.
+
+#### One note for whoever picks up WP-E
+
+Its §9.1 asks to flip the gear's `toolbarHidden` to `false`. That REVERSES the
+decision recorded in § GEAR GENERATOR G1 one day earlier, which moved Gear off
+the toolbar into the Generators menu on purpose. Decision taken: **Gear stays
+off the toolbar.** Entry points are the gallery popover, ⇧G, and the command
+palette (where it is already reachable). `toolbarContract.ts` is therefore not
+touched and no user-visible-change decision is owed.
+
+## UI/UX PASS — library modal, titlebar reorder, Variables sidebar tab (2026-08-14) — LANDED
+
+Plan: `~/.claude/plans/act-as-ui-ux-expert-sparkling-dahl.md`. Three reported
+UX defects, fixed together since the first shares a component with the third:
+
+1. Library component-detail 3D preview overflowed its box, clipping over the
+   title text (`ComponentPreview3D` host div had no `overflow-hidden`, and
+   camera framing never re-ran on resize).
+2. Titlebar element order was wrong and carried a redundant "OneCAD" wordmark
+   the window chrome already conveys.
+3. Editor-mode Library lived in the left sidebar as a cramped tab.
+
+### USER-VISIBLE CHANGE DECISION (required by `src/test/contracts/README.md`)
+
+**The Library browser moved from an inline sidebar card/tab to a full-size
+`LibraryModal`**, shared by the Start screen and a new editor toolbar tool —
+this is a product change, not a refactor being made to pass:
+
+- `inspectorContract.ts`'s `INSPECTOR_SECTIONS_CONTRACT` loses `"Variables"`
+  from every state array. The document-level Variables table moved out of the
+  right inspector into its own left-sidebar tab (`VariablesPanel`), which
+  replaced the old sidebar Library tab now that browsing is a modal.
+- `shellContract.ts`'s `EDITOR_MOUNT_ORDER_CONTRACT` loses `"LibraryPanel"`
+  (deleted), gains `"VariablesPanel"` in the same `Slots.ShellLeft` priority
+  110 slot, and gains `"LibraryModalHost"` at the end of `Slots.ShellOverlay`
+  (priority 150, after `SaveAsComponentHost`).
+- A new `"Library"` toolbar tool (`onecad.library.tool.openLibrary`) opens the
+  modal — its own group (`library.insert`, priority 10), sorting first with
+  its own separator ahead of Select/Sketch/Extrude, since inserting a
+  component is not a modelling edit. `toolbarContract.ts` is unaffected (its
+  golden probe only registers the modeling module; this tool is
+  library-owned).
+- Titlebar (`TitleBar.tsx`, not contract-frozen): reordered to
+  `[doc name] → [home] → [workspace switcher] → [File] → [Generators]`, and
+  the "OneCAD" wordmark was deleted outright.
+
+### Owed follow-up (flagged during the pass, not blocking)
+
+- `ComponentPreview3D` has no `webglcontextlost` handler on its live orbit
+  canvas (the offscreen thumbnail rasterizer does). It is now reachable from a
+  bigger, more prominent, longer-lived surface (the modal) than the old
+  sidebar card — worth hardening if GPU-context-loss reports show up.
+- The "Library" toolbar tool's icon reuses the existing `"cube"` glyph (same
+  as every other component-library affordance) rather than a new, more
+  specific icon — a design call, not a default.
+
+
 
 One trunk again. Everything below is ordered by what a **daily-driver** needs, in
 the product's own priority order (functional 3D-print + machined parts, light
@@ -91,6 +349,14 @@ fix. For a daily driver they outrank every feature below.
       once in a loaded 19-minute chromium run and passes in isolation. It closes
       only on a measured root cause — never on a clean re-run, which this merge's
       426/426 explicitly is NOT evidence against.
+      **Second datapoint (2026-08-14, LGU-1 WP-A gate):**
+      `filletChamfer.spec.ts:198` failed the same way — a DRAG-GESTURE assertion,
+      inside a loaded 24-minute run, empty `pageerror.log`, the FSM arming
+      normally and the drag simply not registering its direction, and 13/13 in
+      isolation. Two different specs, one signature: a pointer-drag gesture
+      losing an event under load. That narrows the search to the drag/pointer
+      plumbing shared by the edge-op and revolve chips rather than to either
+      spec.
 - [ ] **MC-R3 stays guard-only:** the corpus executes 9/9 and must not regain a
       silent skip or an untyped expectation.
 

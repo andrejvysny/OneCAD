@@ -11,16 +11,16 @@ import { PaletteButton } from "@/features/palette/PaletteButton";
  * native macOS traffic lights (Tauri titleBarStyle Overlay draws them over the
  * webview, so the app does not paint its own) and is a drag region.
  *
- * Left to right: OneCAD wordmark, home, File, Generators, workspace, document
- * name. ⌘K on the right. Every button is a `TitleBarButton` — one geometry,
- * one hover, one radius. There is deliberately NO mode toggle: the editor mode
- * follows the picked tool + context (AUTO-MODE, see tools/activateTool.ts) and
- * the StatusBar shows it.
+ * Left to right: document name, home, workspace, File, Generators. ⌘K on the
+ * right. Every button is a `TitleBarButton` — one geometry, one hover, one
+ * radius. There is deliberately NO mode toggle: the editor mode follows the
+ * picked tool + context (AUTO-MODE, see tools/activateTool.ts) and the
+ * StatusBar shows it.
  *
- * The wordmark and the document name are SEPARATE, at opposite ends of the
- * control group, rather than one "OneCAD — Bracket v2" string. They answer
- * different questions (which app / which file), only one of them ever changes,
- * and the name is the thing that has to stay findable as the bar fills up.
+ * No app wordmark: the window itself (macOS traffic lights, Dock icon) already
+ * says which app this is, so a second "OneCAD" label here would only repeat
+ * that. The document name leads instead — the thing that changes, and the
+ * thing most worth finding first as the bar fills up.
  *
  * The title is a LABEL, not a control: renaming lives in File ▸ Rename…, because
  * a click here already means "drag the window" and a rename you can start by
@@ -43,35 +43,10 @@ export function TitleBar() {
     >
       {/* Native traffic-light reservation (OS-drawn in overlay mode). */}
       <span data-tauri-drag-region aria-hidden="true" className="w-[54px] flex-none" />
-      {/* The WORDMARK leads the bar, ahead of the controls: it names the
-          application, which never changes, so it belongs with the window's own
-          identity rather than glued to the document name that does change. */}
-      <span
-        data-tauri-drag-region
-        data-testid="app-wordmark"
-        className="mr-1 flex-none text-[13px] font-bold tracking-[-0.01em] text-ink"
-      >
-        OneCAD
-      </span>
-      {/* Routes through closeProject(), which prompts save/discard/cancel when
-          the document is dirty and returns straight to the start screen when
-          it isn't. */}
-      <TitleBarButton
-        icon="home"
-        aria-label="Close project and return to start screen"
-        onClick={() => void closeProject()}
-      />
-      <FileMenu />
-      {/* Parametric shape generators (gears today, more later) — a body-mint
-          tool family that doesn't belong in the general modeling toolbar. */}
-      <GeneratorsMenu />
-      {/* Workspace is GLOBAL context, so it sits with the window's identity and
-          never becomes another toolbar layer (prototype 2a). */}
-      <WorkspaceSwitcher />
       <span
         data-tauri-drag-region
         data-testid="document-title"
-        className="ml-2 flex items-center gap-2 text-[13px] font-semibold text-titlebar-text"
+        className="mr-1 flex items-center gap-2 text-[13px] font-semibold text-titlebar-text"
       >
         {displayTitle ?? title}
         {dirty && (
@@ -81,6 +56,21 @@ export function TitleBar() {
           />
         )}
       </span>
+      {/* Routes through closeProject(), which prompts save/discard/cancel when
+          the document is dirty and returns straight to the start screen when
+          it isn't. */}
+      <TitleBarButton
+        icon="home"
+        aria-label="Close project and return to start screen"
+        onClick={() => void closeProject()}
+      />
+      {/* Workspace is GLOBAL context, so it sits with the window's identity and
+          never becomes another toolbar layer (prototype 2a). */}
+      <WorkspaceSwitcher />
+      <FileMenu />
+      {/* Parametric shape generators (gears today, more later) — a body-mint
+          tool family that doesn't belong in the general modeling toolbar. */}
+      <GeneratorsMenu />
       <span data-tauri-drag-region className="flex-1" />
       <PaletteButton />
     </div>

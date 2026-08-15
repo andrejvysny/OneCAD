@@ -64,6 +64,12 @@ export interface ShowSettings {
    * the chips off never silently changes where geometry lands.
    */
   liveDimensions: boolean;
+  /**
+   * Show the constraint badges (H/V/Coincident/dimensional chips) on
+   * committed sketch geometry. Default on. Purely a display toggle — turning
+   * it off never removes a constraint, only its on-canvas glyph.
+   */
+  constraintChips: boolean;
 }
 
 export interface NavigationSettings {
@@ -156,6 +162,7 @@ export const settingsStore = createStore<SettingsState>()(
         guidePoints: true,
         snappingHints: true,
         liveDimensions: true,
+        constraintChips: true,
       },
       experimentalWebGpu: false,
       navigation: { inputDevice: "auto" },
@@ -190,7 +197,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: STORAGE_KEY,
-      version: 8,
+      version: 9,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -209,6 +216,8 @@ export const settingsStore = createStore<SettingsState>()(
       // anchor, so it cannot surprise anyone on a first click), and snapRadius
       // coerce(undefined) → "m" = 8px, exactly the reach every pre-v8 build
       // hard-coded — so a migrated blob snaps identically until it is changed.
+      // v8 → v9 added the constraint-chip visibility toggle. A pre-v9 blob has
+      // no key; backfill ON (fresh-install parity — the badges were always on).
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -238,6 +247,9 @@ export const settingsStore = createStore<SettingsState>()(
         if (s && version < 8) {
           s.snapTo = { polarTracking: true, ...(s.snapTo as Partial<SnapSettings>) } as SnapSettings;
           s.snapRadius = coerceSnapRadius((s as Partial<SettingsState>).snapRadius);
+        }
+        if (s && version < 9) {
+          s.show = { constraintChips: true, ...(s.show as Partial<ShowSettings>) } as ShowSettings;
         }
         return s as unknown as SettingsState;
       },

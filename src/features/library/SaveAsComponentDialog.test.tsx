@@ -163,6 +163,30 @@ describe("SaveAsComponentDialog", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  /*
+   * LGU-1 WP-A, defect F10. The dialog opens on the body's own name, which for
+   * most bodies is the tree's auto-generated "Body 2" — and `suggestedId` turns
+   * that into the permanent `mine.body-2`. A WARNING, never a refusal: the name
+   * is legal, and the point is only that the user chose it rather than let it
+   * default through.
+   */
+  it("warns that an auto-generated body name is about to become permanent", async () => {
+    render(<SaveAsComponentDialog bodyId="body_1" bodyName="Body 2" onClose={() => {}} />);
+    expect(screen.getByTestId("save-as-component-name-warning")).toBeInTheDocument();
+    // Still committable — a warning does not disable the action.
+    expect(screen.getByTestId("save-as-component-commit")).toBeEnabled();
+
+    const user = userEvent.setup();
+    await user.clear(screen.getByTestId("save-as-component-name"));
+    await user.type(screen.getByTestId("save-as-component-name"), "Bracket Plate");
+    expect(screen.queryByTestId("save-as-component-name-warning")).toBeNull();
+  });
+
+  it("does not warn about a name that merely contains a placeholder word", () => {
+    render(<SaveAsComponentDialog bodyId="body_1" bodyName="Body Mount" onClose={() => {}} />);
+    expect(screen.queryByTestId("save-as-component-name-warning")).toBeNull();
+  });
+
   it("stops following the name once the id is edited by hand", async () => {
     render(<SaveAsComponentDialog bodyId="body_1" bodyName="Plate" onClose={() => {}} />);
     const user = userEvent.setup();

@@ -23,6 +23,7 @@ import { contributeModelingTree } from "./treeProvider";
 import { createDatumViewportContribution } from "./datumViewport";
 
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
+import { SelectionDimensionLabels } from "@/features/sketch/SelectionDimensionLabels";
 import { LiveDimChips } from "@/features/sketch/LiveDimChips";
 import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips";
 import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
@@ -33,6 +34,7 @@ import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
 import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolbar";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
+import { VariablesPanel } from "@/features/inspector/VariablesPanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { RepairBanner } from "@/features/repair/RepairBanner";
 import { TimelineStoppedBanner } from "@/features/repair/TimelineStoppedBanner";
@@ -43,6 +45,7 @@ export { ModelingPanels };
 export function contributeModelingUi(scope: ModuleScope): void {
   const overlays = [
     { id: ModelingPanels.ConstraintBadgeLayer, component: ConstraintBadgeLayer },
+    { id: ModelingPanels.SelectionDimensionLabels, component: SelectionDimensionLabels },
     { id: ModelingPanels.LiveDimChips, component: LiveDimChips },
     { id: ModelingPanels.ConstraintContextChips, component: ConstraintContextChips },
     { id: ModelingPanels.ModelToolChips, component: ModelToolChips },
@@ -80,6 +83,15 @@ export function contributeModelingUi(scope: ModuleScope): void {
     title: "Model",
     priority: 100,
     component: ModelTreePanel,
+  });
+  // Takes the sidebar-tab slot Library used to share (WP-1.4's original
+  // pattern) — mounts AFTER ModelTree, per `shellContract.ts`'s pinned order.
+  scope.registerPanel({
+    id: ModelingPanels.VariablesPanel,
+    slot: Slots.ShellLeft,
+    title: "Variables",
+    priority: 110,
+    component: VariablesPanel,
   });
   scope.registerPanel({
     id: ModelingPanels.Inspector,

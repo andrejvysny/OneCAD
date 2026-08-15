@@ -1,13 +1,14 @@
 # Current State
 
-Last verified: 2026-08-15 — kernel semantic-publication hardening close-out
+Last verified: 2026-08-15 — kernel semantic-publication hardening close-out, `master` merged in
 
 ## NOW — KERNEL HARDENING CLOSE-OUT (branch `kernel/semantic-publication-hardening`, PR #4)
 
 - **Where:** git worktree `../OneCAD-kernel-hardening` on
-  `kernel/semantic-publication-hardening`, continuing from `69be0c2`. 14 branch commits
-  plus this work package. The branch is 2 behind `master` (both frontend-only; no
-  rebase needed).
+  `kernel/semantic-publication-hardening`, continuing from `69be0c2`. 23 branch commits
+  plus the merge of `master` at `def327b` (5 commits, all frontend). The merge had
+  exactly ONE textual conflict — this header — and `TODO.md` / `e2e/variables.spec.ts`
+  auto-merged.
 - **What landed:** the four gaps an independent review left open — exact `Extrude.ToNext`
   directional extremum (edge/face interiors, plus explicit SEATED-profile semantics),
   the OffsetFace worker trust boundary (strict typed arrays, `inputs[]` arity, typed-ref↔id
@@ -17,10 +18,55 @@ Last verified: 2026-08-15 — kernel semantic-publication hardening close-out
   "GATE — kernel semantic-publication hardening close-out (2026-08-15)".
 - **Explicitly NOT done** (deferred, recorded in `TODO.md`): production OffsetFace reblend,
   a central precision/tolerance module, micro-edge/sliver-face publication enforcement.
+  All three are now planned as WP1–WP3 of the continuation program — see `TODO.md`
+  § "KERNEL CONTINUATION".
 - **Sidecar:** restaged from this worktree's build, so `src-tauri/binaries/` matches the
   worker under test.
 
-## PREVIOUS — GEAR GENERATOR (session 19)
+## PREVIOUS — LGU-1, LIBRARY & GENERATORS UNIFICATION (session 20, on `master`)
+
+- **Branch:** `master`. Two commits this session, both frontend-only.
+  1. The UI/UX pass that was sitting uncommitted in the tree (library browser
+     becomes a full-size modal, Variables takes the sidebar tab, titlebar
+     reorder). It was marked LANDED in `TODO.md` but had never been committed;
+     verified green first, then committed on its own so it stays bisectable.
+  2. **LGU-1 WP-A** — truth & vocabulary. See `TODO.md` § LGU-1 for the full
+     record, including the three corrections the specification needed and the
+     two items refused/deferred by name.
+- **Gate, measured:** `bunx tsc --noEmit` clean · `bun run build` clean ·
+  `bun run test` **4501/4501** (276 files) · hex gate empty ·
+  **`bun run e2e` 425 passed / 1 failed** at retries 0.
+- **The e2e lane is NOT green.** `filletChamfer.spec.ts:198` failed — a drag
+  gesture that did not flip the armed edge-op type. Empty `pageerror.log`, the
+  FSM arming normally, 13/13 in isolation, and WP-A touches nothing on that
+  path. Recorded as a SECOND MC-R9 datapoint (§ T4) rather than dismissed: the
+  ledger's own rule is that a browser-lane nondeterminism closes on a measured
+  root cause and never on a clean re-run. Two specs now share the signature —
+  `revolve-commit.spec.ts:111` and this one — and both are pointer-drag
+  gestures failing under load.
+- **NOT claimed: `cargo` and `ctest` did not run.** T0's staged sidecar
+  (`src-tauri/binaries/onecad-worker-aarch64-apple-darwin`, 12:02) predates
+  `worker/build/onecad-worker` (18:12), and `bundle.externalBin` plus
+  `manager.rs`'s SHA-256 manifest check make every cargo command in this
+  worktree untrustworthy until it is restaged. WP-A touches no Rust or C++, so
+  nothing was skipped that WP-A could have broken — but this BLOCKS LGU-1's
+  WP-D/F/G/I, which is why the program is sequenced frontend-first.
+- **Next:** WP-B (re-edit convention + single commit surface), WP-C (armed =
+  right panel), WP-E (generators gallery) — all frontend. Then restage the
+  worker and take the wire-level packages.
+- **Standing:** T1's data-integrity items (DI-1/2/3) still formally outrank this
+  program; they remain unstarted by explicit decision, not oversight.
+
+## SUPERSEDED — GEAR GENERATOR (session 19)
+
+> The section below described the gear work as uncommitted on `f5b686f`. It
+> LANDED as `b9bcaf7`, and `TODO.md` § GEAR GENERATOR records G1-h.1–h.4 as
+> done — including the chip UI this header once said was missing. `master`'s
+> copy of this note also listed `src-tauri/tests/gear_ops.rs` and
+> `e2e/gear.spec.ts` as owed; THIS BRANCH ADDED BOTH (they were required by the
+> `Gear` modeling-coverage row), and the four-suite re-run is recorded in the
+> 2026-08-15 gate. Still genuinely owed: `protocol/fixtures/gear_*.ndjson`.
+> Read the rest of this section as history.
 
 - **Branch:** `master` at `f5b686f` (the Component-Library merge landed DURING this
   session — the tree moved under the gear work; nothing conflicted, the gear files

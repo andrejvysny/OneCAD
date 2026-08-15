@@ -24,6 +24,11 @@ import {
 import type { DimFieldId } from "@/tools/sketch/liveDimension";
 import { LiveDimField } from "./LiveDimField";
 
+/** Perpendicular screen-space clearance for a chip with an `axisFrom` (the
+ *  length chip off its segment) — matches `ConstraintBadgeLayer`'s scale, a
+ *  bit larger since it also has to clear the line itself, not just a point. */
+const AXIS_OFFSET_PX = 18;
+
 /**
  * Where the chip sits relative to its anchor. The overlay driver owns
  * `transform` on the HOST, so the nudge lives on the inner span and composes
@@ -68,6 +73,7 @@ export function LiveDimChips() {
   useEffect(() => {
     if (!engine || fieldKey === "") return;
     const anchors = liveDimStore.getState().anchors;
+    const axisFroms = liveDimStore.getState().axisFroms;
     // `clusterId` is a per-frame, per-field constant (set by `dimFrame`) — it
     // never changes without the field SET also changing, so reading it here
     // via getState() (rather than subscribing) is safe, same as `anchors`.
@@ -83,7 +89,12 @@ export function LiveDimChips() {
       // into one shared stack with fields that were never meant to sit near
       // it (a box's W and H, say).
       const clusterId = clusterIds.get(field) ?? liveDimChipId(field);
-      engine.mountChip(liveDimChipId(field), host, at, { clusterId });
+      const axisFrom = axisFroms[field];
+      engine.mountChip(liveDimChipId(field), host, at, {
+        clusterId,
+        axisFrom,
+        offsetPx: axisFrom ? AXIS_OFFSET_PX : undefined,
+      });
       mounted.push([liveDimChipId(field), host]);
     }
     return () => {

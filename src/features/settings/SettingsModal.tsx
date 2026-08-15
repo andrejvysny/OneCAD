@@ -53,6 +53,7 @@ const SHOW_ROWS: { key: ShowKey; label: string }[] = [
   { key: "guidePoints", label: "Guide points" },
   { key: "snappingHints", label: "Snapping hints" },
   { key: "liveDimensions", label: "Live dimensions" },
+  { key: "constraintChips", label: "Constraint chips" },
 ];
 
 function SwitchRow({

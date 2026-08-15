@@ -3,7 +3,7 @@
  * platform debt (the slot existed with zero consumers since MODULAR-PLATFORM).
  * Deliberately minimal per the plan: a static indexed-component count, not a
  * feature. Fetches once on mount rather than sharing a store with
- * `LibraryPanel` — nothing here needs to live-track the panel's search/filter
+ * `LibraryModal` — nothing here needs to live-track the modal's search/filter
  * state, only the index size.
  */
 import { useEffect, useState } from "react";
@@ -21,9 +21,12 @@ export function LibraryStatusSection() {
 
   if (count === null) return null;
 
-  return (
-    <span className="text-ink-6">
-      {count} {count === 1 ? "component" : "components"}
-    </span>
-  );
+  /*
+   * "Library: 2 items", not "2 components" (LGU-1 WP-A, defect F5). The bare
+   * count sat in a status bar full of statements ABOUT THE OPEN DOCUMENT, so it
+   * read as "this document contains 2 components" — the one thing it is not.
+   * Naming the library makes the subject explicit, and "items" keeps it from
+   * being mistaken for a count of placed instances.
+   */
+  return <span className="text-ink-6">Library: {count} items</span>;
 }

@@ -23,8 +23,8 @@ test("every library card shows a picture or its fallback icon — never a hole",
   await page.goto("/?vpdebug&vpdemo&mocklibrary=1");
   await expect(page.locator('[data-testid="viewport-canvas"] canvas')).toBeVisible();
 
-  await page.getByTestId("sidebar-tab-library").click();
-  const card = page.getByTestId("library-card").first();
+  await page.getByRole("button", { name: "Library" }).click();
+  const card = page.getByTestId("library-modal-card").first();
   await expect(card).toBeVisible();
 
   const picture = card.getByTestId("component-thumbnail");

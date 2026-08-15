@@ -44,7 +44,7 @@ import type { EntityRef } from "@/stores/selectionStore";
 import { SketchObject } from "./SketchObject";
 import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
-import type { SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
+import type { SketchConstraint, SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
 import type { SnapResult } from "@/tools/sketch/snapEngine";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
@@ -187,6 +187,19 @@ const LIGHT_LEVELS: Record<"light" | "dark", Record<"webgl" | "webgpu", LightLev
     webgpu: { env: 0, key: 2.6, fill: 0.95, hemi: 0.45 },
   },
 };
+
+/** The CSS-pixel box a constant-screen-size overlay of radius `reachPx` covers. */
+function boxAround(
+  centre: { x: number; y: number },
+  reachPx: number,
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: centre.x - reachPx,
+    y: centre.y - reachPx,
+    width: reachPx * 2,
+    height: reachPx * 2,
+  };
+}
 
 function lightLevels(isWebGPU: boolean): LightLevels {
   const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -708,6 +721,9 @@ export class ViewportEngine {
     // has always used. One implementation, and the accurate one.
     if (this.dragHandle) {
       this.dragHandle.setScale(worldPerPixel(camera, this.dragHandle.worldAnchor(), height));
+      // …and billboard it, so the flat arrow always faces the viewer and runs
+      // along its axis's SCREEN direction rather than collapsing edge-on.
+      this.dragHandle.orient(camera);
     }
     if (this.transformGizmo?.visible) {
       this.transformGizmo.setScale(
@@ -1011,7 +1027,12 @@ export class ViewportEngine {
    * current camera view, and animate to look straight down the plane normal.
    * Projection (ortho) is owned by the store/controller.
    */
-  enterSketch(plane: SketchPlane, entities: SketchEntity[], status: SketchSolveStatus): void {
+  enterSketch(
+    plane: SketchPlane,
+    entities: SketchEntity[],
+    status: SketchSolveStatus,
+    constraints: SketchConstraint[] = [],
+  ): void {
     if (this.disposed) return;
     if (!this.sketch) {
       this.sketch = new SketchObject({ sketchRoot: this.sketchRoot, invalidate: () => this.invalidate() });
@@ -1025,7 +1046,7 @@ export class ViewportEngine {
       });
     }
     this.sketchPlane = plane;
-    this.sketch.setSession(plane, entities, status);
+    this.sketch.setSession(plane, entities, status, constraints);
     this.snapIndicator?.setPlane(plane);
 
     // The sketch aims the camera along the plane normal; a queued auto-fit
@@ -1040,10 +1061,17 @@ export class ViewportEngine {
     this.invalidate();
   }
 
-  /** Refresh the committed sketch geometry after a solve/commit. */
-  updateSketchSession(plane: SketchPlane, entities: SketchEntity[], status: SketchSolveStatus): void {
+  /** Refresh the committed sketch geometry after a solve/commit. `constraints`
+   *  omitted ⇒ dimension lines keep whatever they last had (drag-preview
+   *  refreshes, which never edit constraints). */
+  updateSketchSession(
+    plane: SketchPlane,
+    entities: SketchEntity[],
+    status: SketchSolveStatus,
+    constraints?: SketchConstraint[],
+  ): void {
     this.sketchPlane = plane;
-    this.sketch?.setSession(plane, entities, status);
+    this.sketch?.setSession(plane, entities, status, constraints);
     // A committed edit invalidates any hover-time doomed-piece ghost (it was drawn
     // against the pre-edit geometry) — clear it so it never lingers stale.
     this.sketch?.setTrimGhost(null);
@@ -1065,6 +1093,13 @@ export class ViewportEngine {
 
   setSketchHover(ids: Iterable<string>): void {
     this.sketch?.setHover(ids);
+  }
+
+  /** Highlight glyph for specifically-selected sketch POINTS (endpoints/
+   *  centers), plane (u,v) coords — distinct from `setSketchSelection`'s
+   *  whole-entity recolor. */
+  setSketchSelectedPoints(points: { x: number; y: number }[]): void {
+    this.sketch?.setSelectedPoints(points);
   }
 
   /** Tint the chain segment a live angle chip is measured against, or clear it. */
@@ -1445,9 +1480,19 @@ export class ViewportEngine {
    * same `planePixelWorld()` the scale itself uses, so the two cannot disagree.
    */
   getInteractionOverlayBounds(
-    id: "transformGizmo",
+    id: "transformGizmo" | "valueHandle",
   ): { x: number; y: number; width: number; height: number } | null {
-    if (id !== "transformGizmo") return null;
+    if (id === "valueHandle") {
+      const handle = this.dragHandle;
+      if (!handle?.visible) return null;
+      const anchor = handle.worldAnchor();
+      const projected = this.projectPoint([anchor.x, anchor.y, anchor.z]);
+      if (!projected) return null;
+      // The arrow is billboarded, so it reaches `reachPx` from its anchor in
+      // whatever screen direction its axis points — the box that holds every
+      // such direction is the square of that radius.
+      return boxAround(projected, handle.reachPx());
+    }
     const gizmo = this.transformGizmo;
     if (!gizmo || !gizmo.visible) return null;
     const centre = this.transformGizmoOrigin;
@@ -1455,13 +1500,7 @@ export class ViewportEngine {
     const projected = this.projectPoint(centre);
     if (!projected) return null;
     const worldPerPx = Math.max(this.planePixelWorld(), 1e-9);
-    const reachPx = gizmo.worldRadius() / worldPerPx;
-    return {
-      x: projected.x - reachPx,
-      y: projected.y - reachPx,
-      width: reachPx * 2,
-      height: reachPx * 2,
-    };
+    return boxAround(projected, gizmo.worldRadius() / worldPerPx);
   }
 
   /** Hover tint on one gizmo handle (null clears). */

@@ -33,6 +33,10 @@ import { planeBasisMatrix, worldToPlanePoint, type Point2 } from "./sketchBasis"
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 import { angleArcPoints } from "@/tools/sketch/angleArcPreview";
+import { buildRingTexture, buildDotTexture } from "./markerTextures";
+import { findClosedLoops, loopCentroid } from "@/tools/sketch/closedLoop";
+import { layoutDimensionLines } from "@/tools/sketch/dimensionLineLayout";
+import type { SketchConstraint } from "@/ipc/types";
 
 const ARC_SEGMENTS = 64;
 
@@ -131,6 +135,26 @@ function entityMarkers(e: SketchEntity): number[] {
   return out;
 }
 
+const mid2 = (a: [number, number], b: [number, number]): [number, number] => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+
+/** Midpoint marker of an entity, flat local xyz — Line: segment midpoint; Arc:
+ *  midpoint along the sweep (matches the CCW-sweep convention `entityPolyline`
+ *  tessellates with). Circle/Ellipse/Point have no single natural midpoint. */
+function entityMidpoints(e: SketchEntity): number[] {
+  if (e.type === "Line" && e.p0 && e.p1) {
+    const [x, y] = mid2(e.p0, e.p1);
+    return [x, y, 0];
+  }
+  if (e.type === "Arc" && e.center && e.radius !== undefined && e.start && e.end) {
+    const a0 = Math.atan2(e.start[1] - e.center[1], e.start[0] - e.center[0]);
+    let a1 = Math.atan2(e.end[1] - e.center[1], e.end[0] - e.center[0]);
+    while (a1 <= a0) a1 += Math.PI * 2;
+    const am = (a0 + a1) / 2;
+    return [e.center[0] + e.radius * Math.cos(am), e.center[1] + e.radius * Math.sin(am), 0];
+  }
+  return [];
+}
+
 interface SketchObjectDeps {
   sketchRoot: THREE.Object3D;
   invalidate: () => void;
@@ -144,14 +168,28 @@ export class SketchObject {
   private readonly trimGhostGroup = new THREE.Group();
   // Dashed angle-preview arc (live angle chip ↔ its reference segment).
   private readonly angleArcGroup = new THREE.Group();
+  // Permanent dimension-line witnesses (ticks + baseline + arrowheads) for
+  // constrained edges — its own group so a rebuild never touches committed
+  // entity lines.
+  private readonly dimLineGroup = new THREE.Group();
   private readonly grid: GridPlane;
   private readonly tint: THREE.Mesh;
   private readonly points: THREE.Points;
   private readonly pointsMat: THREE.PointsMaterial;
+  private readonly midpoints: THREE.Points;
+  private readonly midpointsMat: THREE.PointsMaterial;
+  private readonly centroids: THREE.Points;
+  private readonly centroidsMat: THREE.PointsMaterial;
+  // Highlight for a specifically SELECTED point (an endpoint/center picked by
+  // the Select tool, not just its owning entity) — separate from `points` so
+  // selecting one endpoint never recolors the shared vertex-ring pass.
+  private readonly selectedPoints: THREE.Points;
+  private readonly selectedPointsMat: THREE.PointsMaterial;
 
   private plane: SketchPlane | null = null;
   private entities: SketchEntity[] = [];
   private status: SketchSolveStatus = "UnderConstrained";
+  private constraints: SketchConstraint[] = [];
   private selected = new Set<string>();
   private hovered = new Set<string>();
   /** The chain segment a live angle chip is measured against, or null. */
@@ -169,6 +207,7 @@ export class SketchObject {
   private readonly matPreview: LineMaterial;
   private readonly matTrimGhost: LineMaterial;
   private readonly matAngleArc: LineMaterial;
+  private readonly matDimLine: LineMaterial;
   private readonly allMaterials: LineMaterial[];
 
   private readonly _basis = new THREE.Matrix4();
@@ -176,7 +215,13 @@ export class SketchObject {
 
   constructor(private readonly deps: SketchObjectDeps) {
     this.planeGroup.name = "sketchPlane";
-    this.planeGroup.add(this.entityGroup, this.previewGroup, this.trimGhostGroup, this.angleArcGroup);
+    this.planeGroup.add(
+      this.entityGroup,
+      this.previewGroup,
+      this.trimGhostGroup,
+      this.angleArcGroup,
+      this.dimLineGroup,
+    );
     deps.sketchRoot.add(this.planeGroup);
 
     // Plane tint quad (large, low alpha) + adaptive grid, both plane-local.
@@ -202,16 +247,62 @@ export class SketchObject {
     // depthWrite off, layered by RENDER_ORDER only (see renderOrder.ts). Depth
     // TEST stays on so solid bodies still occlude sketch content behind them.
     this.pointsMat = new THREE.PointsMaterial({
-      color: palette.sketchFull(),
-      size: 5,
+      color: palette.sketchVertex(),
+      map: buildDotTexture(0.7) ?? undefined,
+      size: 10,
       sizeAttenuation: false,
       transparent: true,
+      alphaTest: 0.05,
       depthWrite: false,
       toneMapped: false,
     });
     this.points = new THREE.Points(new THREE.BufferGeometry(), this.pointsMat);
     this.points.renderOrder = RENDER_ORDER.SKETCH_POINTS;
     this.entityGroup.add(this.points);
+
+    this.midpointsMat = new THREE.PointsMaterial({
+      color: palette.sketchMidpoint(),
+      map: buildDotTexture() ?? undefined,
+      size: 6,
+      sizeAttenuation: false,
+      transparent: true,
+      alphaTest: 0.05,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.midpoints = new THREE.Points(new THREE.BufferGeometry(), this.midpointsMat);
+    this.midpoints.renderOrder = RENDER_ORDER.SKETCH_POINTS;
+    this.entityGroup.add(this.midpoints);
+
+    this.centroidsMat = new THREE.PointsMaterial({
+      color: palette.sketchCentroid(),
+      map: buildDotTexture() ?? undefined,
+      size: 7,
+      sizeAttenuation: false,
+      transparent: true,
+      alphaTest: 0.05,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.centroids = new THREE.Points(new THREE.BufferGeometry(), this.centroidsMat);
+    this.centroids.renderOrder = RENDER_ORDER.SKETCH_POINTS;
+    this.entityGroup.add(this.centroids);
+
+    this.selectedPointsMat = new THREE.PointsMaterial({
+      color: palette.sketchSelected(),
+      map: buildRingTexture() ?? undefined,
+      size: 16,
+      sizeAttenuation: false,
+      transparent: true,
+      alphaTest: 0.05,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.selectedPoints = new THREE.Points(new THREE.BufferGeometry(), this.selectedPointsMat);
+    // Above every other marker tier — a selected point must never read as
+    // "hidden behind" the vertex ring/midpoint dot it highlights.
+    this.selectedPoints.renderOrder = RENDER_ORDER.SKETCH_POINTS + 1;
+    this.entityGroup.add(this.selectedPoints);
 
     const mk = (color: THREE.Color, opts: Partial<ConstructorParameters<typeof LineMaterial>[0]> = {}) =>
       new LineMaterial({
@@ -243,6 +334,9 @@ export class SketchObject {
       transparent: true,
       opacity: 0.9,
     });
+    // Neutral overlay tone (reused, not a new token) — a dimension line is
+    // annotation, not geometry, same rationale as `matAngleArc`'s violet.
+    this.matDimLine = mk(palette.referenceNeutral(), { linewidth: ANGLE_ARC_WIDTH, transparent: true, opacity: 0.85 });
     this.allMaterials = [
       this.matUnder,
       this.matFull,
@@ -255,6 +349,7 @@ export class SketchObject {
       this.matPreview,
       this.matTrimGhost,
       this.matAngleArc,
+      this.matDimLine,
     ];
   }
 
@@ -273,7 +368,10 @@ export class SketchObject {
       major: palette.gridMajor(),
       clear: palette.sketchPlane(),
     });
-    this.pointsMat.color.copy(palette.sketchFull());
+    this.pointsMat.color.copy(palette.sketchVertex());
+    this.midpointsMat.color.copy(palette.sketchMidpoint());
+    this.centroidsMat.color.copy(palette.sketchCentroid());
+    this.selectedPointsMat.color.copy(palette.sketchSelected());
     this.matUnder.color.copy(palette.sketchUnder());
     this.matFull.color.copy(palette.sketchFull());
     this.matConflict.color.copy(palette.sketchConflict());
@@ -285,6 +383,7 @@ export class SketchObject {
     this.matPreview.color.copy(palette.sketchUnder());
     this.matTrimGhost.color.copy(palette.destructive());
     this.matAngleArc.color.copy(palette.sketchAngleRef());
+    this.matDimLine.color.copy(palette.referenceNeutral());
   }
 
   setVisible(visible: boolean): void {
@@ -292,17 +391,28 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
-  /** Rebuild committed geometry from a session. */
-  setSession(plane: SketchPlane, entities: SketchEntity[], status: SketchSolveStatus): void {
+  /** Rebuild committed geometry from a session. `constraints` is optional —
+   *  omitted (drag-preview refreshes, which never edit constraints) keeps
+   *  whatever dimension lines are already drawn. */
+  setSession(
+    plane: SketchPlane,
+    entities: SketchEntity[],
+    status: SketchSolveStatus,
+    constraints?: SketchConstraint[],
+  ): void {
     this.plane = plane;
     this.entities = entities;
     this.status = status;
+    if (constraints) this.constraints = constraints;
     planeBasisMatrix(plane, this._basis);
     this.planeGroup.matrixAutoUpdate = false;
     this.planeGroup.matrix.copy(this._basis);
     this.planeGroup.matrixWorldNeedsUpdate = true;
     this.rebuildEntities();
     this.rebuildPoints();
+    this.rebuildMidpoints();
+    this.rebuildCentroids();
+    this.rebuildDimensionLines();
     this.deps.invalidate();
   }
 
@@ -379,10 +489,13 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
-  /** Recolor from the current selection (sketch entity ids). */
+  /** Recolor from the current selection (sketch entity ids). A newly
+   *  selected, unconstrained edge also grows a read-only dimension line
+   *  showing its live length (Shapr3D convention) — see `rebuildDimensionLines`. */
   setSelection(selectedIds: Iterable<string>): void {
     this.selected = new Set(selectedIds);
     this.rebuildEntities();
+    this.rebuildDimensionLines();
     this.deps.invalidate();
   }
 
@@ -390,6 +503,17 @@ export class SketchObject {
   setHover(hoveredIds: Iterable<string>): void {
     this.hovered = new Set(hoveredIds);
     this.rebuildEntities();
+    this.deps.invalidate();
+  }
+
+  /** Highlight glyph for specifically-selected POINTS (an endpoint/center the
+   *  Select tool picked, not just its owning entity), in plane (u,v) coords. */
+  setSelectedPoints(points: Point2[]): void {
+    const flat: number[] = [];
+    for (const p of points) flat.push(p.x, p.y, 0);
+    const geo = this.selectedPoints.geometry;
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+    geo.computeBoundingSphere();
     this.deps.invalidate();
   }
 
@@ -416,9 +540,9 @@ export class SketchObject {
   }
 
   private rebuildEntities(): void {
-    // Remove all lines (keep the Points object).
+    // Remove all lines (keep the Points objects — vertices/midpoints/centroids/selection).
     for (const c of [...this.entityGroup.children]) {
-      if (c === this.points) continue;
+      if (c === this.points || c === this.midpoints || c === this.centroids || c === this.selectedPoints) continue;
       this.disposeLine(c);
       this.entityGroup.remove(c);
     }
@@ -451,6 +575,45 @@ export class SketchObject {
     geo.computeBoundingSphere();
   }
 
+  private rebuildMidpoints(): void {
+    const flat: number[] = [];
+    for (const e of this.entities) flat.push(...entityMidpoints(e));
+    const geo = this.midpoints.geometry;
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+    geo.computeBoundingSphere();
+  }
+
+  private rebuildCentroids(): void {
+    const byId = new Map(this.entities.map((e) => [e.id, e]));
+    const flat: number[] = [];
+    for (const loop of findClosedLoops(this.entities)) {
+      const c = loopCentroid(loop, byId);
+      if (c) flat.push(c[0], c[1], 0);
+    }
+    const geo = this.centroids.geometry;
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+    geo.computeBoundingSphere();
+  }
+
+  /** Rebuild the dimension-line witnesses: permanent for a constrained edge,
+   *  read-only for a selected-but-unconstrained one (WP: sketch UX parity pass). */
+  private rebuildDimensionLines(): void {
+    for (const c of [...this.dimLineGroup.children]) this.disposeLine(c);
+    this.dimLineGroup.clear();
+    for (const dim of layoutDimensionLines(this.entities, this.constraints, this.selected)) {
+      const segments: [Point2, Point2][] = [dim.baseline, ...dim.ticks, ...dim.arrows];
+      for (const [a, b] of segments) {
+        const line = this.buildLine([a.x, a.y, 0, b.x, b.y, 0], this.matDimLine);
+        line.renderOrder = RENDER_ORDER.DIM_LINE;
+        // Tags a witness segment as NOT a committed entity — a scene-wide
+        // `Line2` traversal (e.g. a test counting entity lines) needs a way
+        // to tell the two apart without knowing this group exists.
+        line.userData.dimLineWitness = true;
+        this.dimLineGroup.add(line);
+      }
+    }
+  }
+
   private buildLine(positions: number[], mat: LineMaterial): Line2 {
     const geo = new LineGeometry();
     geo.setPositions(positions);
@@ -476,12 +639,26 @@ export class SketchObject {
   }
 
   dispose(): void {
-    for (const c of [...this.entityGroup.children]) if (c !== this.points) this.disposeLine(c);
+    for (const c of [...this.entityGroup.children]) {
+      if (c === this.points || c === this.midpoints || c === this.centroids || c === this.selectedPoints) continue;
+      this.disposeLine(c);
+    }
     for (const c of [...this.previewGroup.children]) this.disposeLine(c);
     for (const c of [...this.trimGhostGroup.children]) this.disposeLine(c);
     for (const c of [...this.angleArcGroup.children]) this.disposeLine(c);
+    for (const c of [...this.dimLineGroup.children]) this.disposeLine(c);
     this.points.geometry.dispose();
+    this.pointsMat.map?.dispose();
     this.pointsMat.dispose();
+    this.midpoints.geometry.dispose();
+    this.midpointsMat.map?.dispose();
+    this.midpointsMat.dispose();
+    this.centroids.geometry.dispose();
+    this.centroidsMat.map?.dispose();
+    this.centroidsMat.dispose();
+    this.selectedPoints.geometry.dispose();
+    this.selectedPointsMat.map?.dispose();
+    this.selectedPointsMat.dispose();
     (this.tint.geometry as THREE.BufferGeometry).dispose();
     (this.tint.material as THREE.Material).dispose();
     this.grid.dispose();

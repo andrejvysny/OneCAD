@@ -115,7 +115,7 @@ describe("LiveDimChips", () => {
   });
 
   const show = (fields: LiveDimChipField[]): void => {
-    act(() => liveDimStore.getState().show(fields, ANCHORS, handlers));
+    act(() => liveDimStore.getState().show(fields, ANCHORS, {}, handlers));
   };
 
   it("renders nothing while the chip set is closed", () => {
@@ -188,7 +188,7 @@ describe("LiveDimChips", () => {
     expect(screen.getByTestId("live-dim-length")).toHaveValue("5");
 
     // The value keeps moving underneath — the typed text must survive it.
-    act(() => liveDimStore.getState().update([chip({ value: 41.7 })], ANCHORS));
+    act(() => liveDimStore.getState().update([chip({ value: 41.7 })], ANCHORS, {}));
     expect(screen.getByTestId("live-dim-length")).toHaveValue("5");
   });
 
@@ -342,30 +342,30 @@ describe("liveDimStore", () => {
 
   it("update() no-ops a move below the float-noise floor", () => {
     const handlers = makeHandlers();
-    liveDimStore.getState().show([chip()], ANCHORS, handlers);
+    liveDimStore.getState().show([chip()], ANCHORS, {}, handlers);
     const before = liveDimStore.getState().fields;
 
-    liveDimStore.getState().update([chip({ value: 30 + 1e-12 })], ANCHORS);
+    liveDimStore.getState().update([chip({ value: 30 + 1e-12 })], ANCHORS, {});
     expect(liveDimStore.getState().fields).toBe(before); // same reference ⇒ no render
 
-    liveDimStore.getState().update([chip({ value: 31 })], ANCHORS);
+    liveDimStore.getState().update([chip({ value: 31 })], ANCHORS, {});
     expect(liveDimStore.getState().fields).not.toBe(before);
   });
 
   it("update() never overwrites the FOCUSED field's value", () => {
-    liveDimStore.getState().show([chip(), chip({ field: "angle", value: 10 })], ANCHORS, makeHandlers());
+    liveDimStore.getState().show([chip(), chip({ field: "angle", value: 10 })], ANCHORS, {}, makeHandlers());
     liveDimStore.getState().setFocus("length", "50");
 
-    liveDimStore.getState().update([chip({ value: 99 }), chip({ field: "angle", value: 20 })], ANCHORS);
+    liveDimStore.getState().update([chip({ value: 99 }), chip({ field: "angle", value: 20 })], ANCHORS, {});
     const s = liveDimStore.getState();
     expect(s.fields.find((f) => f.field === "length")!.value).toBe(30); // held
     expect(s.fields.find((f) => f.field === "angle")!.value).toBe(20); // live
   });
 
   it("update() cannot resurrect a closed set", () => {
-    liveDimStore.getState().show([chip()], ANCHORS, makeHandlers());
+    liveDimStore.getState().show([chip()], ANCHORS, {}, makeHandlers());
     liveDimStore.getState().clear();
-    liveDimStore.getState().update([chip()], ANCHORS);
+    liveDimStore.getState().update([chip()], ANCHORS, {});
     expect(liveDimStore.getState().open).toBe(false);
     expect(liveDimStore.getState().fields).toEqual([]);
   });

@@ -204,14 +204,18 @@ function placeComponentFeatureId(page: Page): Promise<string | null> {
   });
 }
 
-/** Arm the SHCS fixture from the library panel. */
+/**
+ * Arm the SHCS fixture from the Library modal: open it from the toolbar,
+ * select the card, and "Place in scene" arms the gesture and closes the
+ * modal (the click that actually commits happens later, in the viewport).
+ */
 async function armScrew(page: Page) {
-  await page.getByTestId("sidebar-tab-library").click();
-  const card = page.getByTestId("library-card").filter({ hasText: "Socket Head Cap Screw" });
+  await page.getByRole("button", { name: "Library" }).click();
+  const card = page.getByTestId("library-modal-card").filter({ hasText: "Socket Head Cap Screw" });
   await expect(card).toBeVisible();
   await card.click();
-  await expect(card).toHaveAttribute("data-armed", "true");
-  return card;
+  await page.getByRole("button", { name: "Place in scene" }).click();
+  await expect(page.getByRole("dialog", { name: "Library" })).not.toBeVisible();
 }
 
 test("hovering a real bore auto-sizes the screw, and the committed record keeps that size", async ({
@@ -258,7 +262,7 @@ test("a click in free space drops the component on the ground plane", async ({ p
   await page.goto("/?vpdebug&vpdemo&mocklibrary=1");
   await expect(page.locator('[data-testid="viewport-canvas"] canvas')).toBeVisible();
 
-  const card = await armScrew(page);
+  await armScrew(page);
   const before = await bodyIds(page);
   expect(before).toHaveLength(1); // the vpdemo box, nothing placed yet
 
@@ -272,7 +276,6 @@ test("a click in free space drops the component on the ground plane", async ({ p
   await page.mouse.up();
 
   await expect.poll(() => previewBodyCount(page)).toBe(0);
-  await expect(card).not.toHaveAttribute("data-armed", "true");
   await expect.poll(() => bodyIds(page)).toHaveLength(2);
 
   const placed = (await bodyIds(page)).find((id) => !before.includes(id))!;

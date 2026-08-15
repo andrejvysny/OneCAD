@@ -45,7 +45,6 @@
  * regen's re-seat lane (WP-3.1) resolves. Fails closed: an unpromotable target
  * refuses the placement rather than silently degrading to free-space.
  */
-import { useSyncExternalStore } from "react";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import type { PickHit } from "@/viewport/engine/Picker";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
@@ -122,28 +121,6 @@ export function isPlacementArmed(): boolean {
   return armedComponent !== null;
 }
 
-// Armed-state pub/sub, for `LibraryPanel`'s card highlight — mirrors
-// `engineBridge.ts`'s module-singleton-+-`useSyncExternalStore` shape (a
-// React context would not reach this file's non-React callers).
-const armedListeners = new Set<() => void>();
-function publishArmed(): void {
-  for (const l of [...armedListeners]) l();
-}
-/** `"<id>@<version>"` of the armed component, or `null`. */
-export function armedComponentKey(): string | null {
-  return armedComponent ? `${armedComponent.id}@${armedComponent.version}` : null;
-}
-export function useArmedComponentKey(): string | null {
-  return useSyncExternalStore(
-    (cb) => {
-      armedListeners.add(cb);
-      return () => armedListeners.delete(cb);
-    },
-    armedComponentKey,
-    () => null,
-  );
-}
-
 /** Arms the gesture for `component`. Cancels any prior armed placement first. */
 export function armPlacement(component: LibraryComponent): void {
   cancelPlacement();
@@ -157,7 +134,6 @@ export function armPlacement(component: LibraryComponent): void {
   lastCandidate = null;
   gestureParams = {};
   epoch = 0;
-  publishArmed();
 
   engine.setOrbitSuppressed(true);
   window.addEventListener("pointermove", onPointerMove, true);
@@ -170,7 +146,7 @@ export function armPlacement(component: LibraryComponent): void {
   // for the worker, so the ghost cannot lower an empty path; for a generator it
   // is a cheap lookup. Called on `createClient()` rather than through
   // `services` on purpose: resolving a LIBRARY identity is the library's own
-  // surface (the same call shape `LibraryPanel` uses for list/reindex), while
+  // surface (the same call shape `LibraryModal` uses for list/reindex), while
   // everything that touches the kernel below still routes through modeling's
   // published services per ADR-0002.
   void createClient()
@@ -238,7 +214,6 @@ export function cancelPlacement(): void {
   lastMatch = null;
   lastCandidate = null;
   gestureParams = {};
-  publishArmed();
 }
 
 function identityRotate(): { center: [number, number, number]; axis: [number, number, number]; angleDeg: number } {

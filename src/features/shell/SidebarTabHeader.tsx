@@ -1,16 +1,16 @@
 /*
- * The left-sidebar tab strip (Component Library WP-1.4) — "Model" / "Library".
- * Rendered by BOTH `ModelTreePanel` and `LibraryPanel` at their own top (each
- * panel owns its full `Slots.ShellLeft` footprint and decides whether to
- * render its body based on `sidebarTabStore`; see `modules/library/register.ts`
- * for why this lives beside the panels rather than as a third contribution).
+ * The left-sidebar tab strip — "Model" / "Variables". Rendered by BOTH
+ * `ModelTreePanel` and `VariablesPanel` at their own top (each panel owns its
+ * full `Slots.ShellLeft` footprint and decides whether to render its body
+ * based on `sidebarTabStore`; see `modules/modeling/ui.ts` for why this lives
+ * beside the panels rather than as a third contribution).
  */
 import { useSidebarTabStore, type SidebarTab } from "@/stores/sidebarTabStore";
 import { cn } from "@/ui/cn";
 
 const TABS: { id: SidebarTab; label: string }[] = [
   { id: "model", label: "Model" },
-  { id: "library", label: "Library" },
+  { id: "variables", label: "Variables" },
 ];
 
 export function SidebarTabHeader() {
