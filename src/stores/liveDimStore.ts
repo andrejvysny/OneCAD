@@ -42,6 +42,11 @@ export interface LiveDimChipField {
 /** World-space chip anchors, keyed by field. Read via `getState()` only. */
 export type LiveDimAnchors = Partial<Record<DimFieldId, Vec3>>;
 
+/** World-space `axisFrom` per field (see `DimFieldSpec.axisFrom`), keyed the
+ *  same way as `LiveDimAnchors`. A field absent here has no axis and mounts
+ *  centered on its anchor, as before. */
+export type LiveDimAxisFroms = Partial<Record<DimFieldId, Vec3>>;
+
 /**
  * Overlay id for a field's chip host. Lives HERE rather than beside the
  * component so the controller — which calls `moveChip` with it on every pointer
@@ -104,13 +109,20 @@ export interface LiveDimStoreState {
   /** Raw text of the FOCUSED field — the single source while editing. */
   text: string;
   anchors: LiveDimAnchors;
+  /** World-space `axisFrom` per field — read via `getState()` only, same as `anchors`. */
+  axisFroms: LiveDimAxisFroms;
   placement: LiveDimPlacement;
   handlers: LiveDimHandlers | null;
 
   /** Open the chip set for a fresh gesture phase (drops any prior focus). */
-  show(fields: LiveDimChipField[], anchors: LiveDimAnchors, handlers: LiveDimHandlers): void;
+  show(
+    fields: LiveDimChipField[],
+    anchors: LiveDimAnchors,
+    axisFroms: LiveDimAxisFroms,
+    handlers: LiveDimHandlers,
+  ): void;
   /** Per-pointer-move refresh. No-ops when nothing moved; keeps the focused field. */
-  update(fields: LiveDimChipField[], anchors: LiveDimAnchors): void;
+  update(fields: LiveDimChipField[], anchors: LiveDimAnchors, axisFroms: LiveDimAxisFroms): void;
   setFocus(field: DimFieldId | null, text: string): void;
   setText(text: string): void;
   setPlacement(placement: LiveDimPlacement): void;
@@ -123,6 +135,7 @@ const CLEARED = {
   focus: null as DimFieldId | null,
   text: "",
   anchors: {} as LiveDimAnchors,
+  axisFroms: {} as LiveDimAxisFroms,
   placement: "tr" as LiveDimPlacement,
   handlers: null as LiveDimHandlers | null,
 };
@@ -169,17 +182,22 @@ function sameAnchors(a: LiveDimAnchors, b: LiveDimAnchors, fields: LiveDimChipFi
 export const liveDimStore = createStore<LiveDimStoreState>()((set, get) => ({
   ...CLEARED,
 
-  show(fields, anchors, handlers) {
-    set({ ...CLEARED, open: true, fields, anchors, handlers, placement: get().placement });
+  show(fields, anchors, axisFroms, handlers) {
+    set({ ...CLEARED, open: true, fields, anchors, axisFroms, handlers, placement: get().placement });
   },
-  update(fields, anchors) {
+  update(fields, anchors, axisFroms) {
     const s = get();
     // A closed set is never resurrected here — only `show` opens one, so a late
     // move frame after `clear()` cannot bring the chips back.
     if (!s.open) return;
     const merged = mergeFocused(s.fields, fields, s.focus);
-    if (sameFields(s.fields, merged) && sameAnchors(s.anchors, anchors, merged)) return;
-    set({ fields: merged, anchors });
+    if (
+      sameFields(s.fields, merged) &&
+      sameAnchors(s.anchors, anchors, merged) &&
+      sameAnchors(s.axisFroms, axisFroms, merged)
+    )
+      return;
+    set({ fields: merged, anchors, axisFroms });
   },
   setFocus(focus, text) {
     set({ focus, text });

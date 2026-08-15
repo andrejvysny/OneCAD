@@ -72,7 +72,7 @@ export function resetStores(): void {
       guidePoints3d: true,
       distantEdges: false,
     },
-    show: { guidePoints: true, snappingHints: true, liveDimensions: true },
+    show: { guidePoints: true, snappingHints: true, liveDimensions: true, constraintChips: true },
     navigation: { inputDevice: "auto" },
     displayMode: DEFAULT_RENDER_MODE,
     theme: DEFAULT_THEME,

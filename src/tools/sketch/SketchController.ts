@@ -639,7 +639,7 @@ export class SketchController {
     // switch re-opens a session while already ortho, and overwriting here would make
     // the eventual exit "restore" ortho instead of the user's real projection.
     this.priorProjection ??= viewportStore.getState().projection;
-    this.deps.engine.enterSketch(session.plane, session.entities, session.status);
+    this.deps.engine.enterSketch(session.plane, session.entities, session.status, session.constraints);
     viewportStore.getState().setProjection("ortho");
 
     this.selectMachine(toolStore.getState().sketchTool);
@@ -1583,19 +1583,24 @@ export class SketchController {
       return;
     }
     const anchors: LiveDimAnchors = {};
+    const axisFroms: LiveDimAnchors = {};
     for (const d of dims) {
       const w = planePointToWorld(plane, d.anchor);
       anchors[d.field] = [w.x, w.y, w.z];
+      if (d.axisFrom) {
+        const aw = planePointToWorld(plane, d.axisFrom);
+        axisFroms[d.field] = [aw.x, aw.y, aw.z];
+      }
     }
-    const chips: LiveDimChipField[] = dims.map(({ anchor: _anchor, ...chip }) => chip);
+    const chips: LiveDimChipField[] = dims.map(({ anchor: _anchor, axisFrom: _axisFrom, ...chip }) => chip);
     const store = liveDimStore.getState();
-    if (this.liveDimsOpen) store.update(chips, anchors);
-    else store.show(chips, anchors, this.liveDimHandlers());
+    if (this.liveDimsOpen) store.update(chips, anchors, axisFroms);
+    else store.show(chips, anchors, axisFroms, this.liveDimHandlers());
     this.liveDimsOpen = true;
     this.liveDims = dims;
     for (const d of dims) {
       const at = anchors[d.field];
-      if (at) this.deps.engine.moveChip(liveDimChipId(d.field), at);
+      if (at) this.deps.engine.moveChip(liveDimChipId(d.field), at, axisFroms[d.field]);
     }
     this.syncAngleReference(dims, plane);
   }
@@ -1840,7 +1845,7 @@ export class SketchController {
     const next: SketchSession = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
     sketchStore.getState().setSession(next);
     sketchStore.getState().setConflicting(result.conflicting ?? []);
-    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
+    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
     this.pushSolve(session.sketchId, result.dof, result.status);
     // EXACTLY ONE undo entry either way — a rejected dimension still leaves the
     // entity the user drew, so undo has to land on the state before the click,
@@ -2206,7 +2211,7 @@ export class SketchController {
     };
     sketchStore.getState().setSession(next);
     sketchStore.getState().setConflicting(result.conflicting ?? []);
-    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
+    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
     this.pushSolve(session.sketchId, result.dof, result.status);
     sketchStore.getState().pushUndoSnapshot(before, { kind: "mirror" });
     // Selection switches to the mirrored copies (body picks) → back in Phase B, repeatable.
@@ -2778,7 +2783,7 @@ export class SketchController {
     // conflict set left over from fireSolve's live frames would tint constraints that
     // are not conflicting in the DISPLAYED state.
     sketchStore.getState().setConflicting(result?.conflicting ?? []);
-    this.deps.engine.updateSketchSession(next.plane, entities, next.status);
+    this.deps.engine.updateSketchSession(next.plane, entities, next.status, next.constraints);
     if (result) this.pushSolve(session.sketchId, result.dof, result.status);
     if (sel) sketchSelectionStore.getState().set([sel]);
     if (!restore && before) sketchStore.getState().pushUndoSnapshot(before, { kind: "drag" });

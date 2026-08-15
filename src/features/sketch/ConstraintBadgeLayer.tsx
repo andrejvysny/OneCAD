@@ -9,8 +9,10 @@
  * (0,0)…(w,h) matches the driver's projection space (canvas size).
  */
 import { useEffect, useMemo, useRef } from "react";
+import { Icon } from "@/icons/Icon";
 import { useToolStore } from "@/stores/toolStore";
 import { useSketchStore } from "@/stores/sketchStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { createClient } from "@/ipc/client";
@@ -25,6 +27,7 @@ const BADGE_OFFSET_PX = 10;
 
 export function ConstraintBadgeLayer() {
   const mode = useToolStore((s) => s.mode);
+  const showChips = useSettingsStore((s) => s.show.constraintChips);
   const session = useSketchStore((s) => s.session);
   const conflictingIds = useSketchStore((s) => s.conflictingIds);
   const engine = useViewportEngine();
@@ -45,7 +48,7 @@ export function ConstraintBadgeLayer() {
 
   // Register each badge wrapper with the overlay driver (it owns positioning).
   useEffect(() => {
-    if (!engine || !plane || mode !== "sketch") return;
+    if (!engine || !plane || mode !== "sketch" || !showChips) return;
     const overlay = engine.overlay;
     const ids: string[] = [];
     for (const b of badges) {
@@ -67,9 +70,9 @@ export function ConstraintBadgeLayer() {
     return () => {
       for (const id of ids) overlay.unregister(id);
     };
-  }, [engine, plane, badges, mode]);
+  }, [engine, plane, badges, mode, showChips]);
 
-  if (mode !== "sketch" || !session) return null;
+  if (mode !== "sketch" || !session || !showChips) return null;
 
   return (
     <div
@@ -120,7 +123,10 @@ export function ConstraintBadgeLayer() {
                   isConflicting ? "border-traffic-close text-traffic-close" : "border-border text-accent"
                 }`}
               >
-                {b.glyph}
+                {/* Fixed reads as a padlock on the canvas (Shapr3D convention) —
+                    the anchor glyph stays for the toolbar/inspector list, which
+                    don't have this space pressure and predate this badge. */}
+                {b.kind === "Fixed" ? <Icon name="lock" size={10} strokeWidth={2} /> : b.glyph}
               </span>
             )}
           </div>

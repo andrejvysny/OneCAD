@@ -55,6 +55,9 @@ export const RENDER_ORDER = {
   SKETCH_CURVES: 3,
   /** Edit-mode endpoint/center markers. */
   SKETCH_POINTS: 4,
+  /** Permanent dimension-line witness ticks + baseline + arrowheads, for a
+   *  constrained edge (WP: sketch UX parity pass). */
+  DIM_LINE: 5,
   /** Multi-region extrude/revolve pick fills. */
   REGION_FILL: 5,
   /** Trim doomed-piece ghost — above committed entities + markers. */

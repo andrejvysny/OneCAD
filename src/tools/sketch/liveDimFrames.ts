@@ -75,7 +75,8 @@ const field = (
   drives: boolean,
   anchor: (p: Point2) => Point2,
   clusterId?: string,
-): DimFieldSpec => ({ field: id, label, domain, drives, anchor, clusterId });
+  axisFrom?: (p: Point2) => Point2,
+): DimFieldSpec => ({ field: id, label, domain, drives, anchor, clusterId, axisFrom });
 
 /** Single-field value set. Written through a local rather than as a computed-key
  *  literal so the union-typed key stays a `DimFieldId`, not a `string` index. */
@@ -129,7 +130,10 @@ export function chainRefAngleDeg(anchors: Point2[]): number | undefined {
  */
 function segmentFrame(a: Point2, drives = true, refAngleDeg?: number): DimFrame {
   const fields: DimFieldSpec[] = [
-    field("length", "L", "length", drives, (p) => mid(a, p), SEGMENT_CLUSTER),
+    // axisFrom = the segment's own fixed start anchor — the length chip then
+    // floats to the side of the line instead of sitting directly on top of it
+    // (matches how a constraint badge sits beside its owning entity).
+    field("length", "L", "length", drives, (p) => mid(a, p), SEGMENT_CLUSTER, () => a),
   ];
   if (refAngleDeg !== undefined) {
     fields.push(

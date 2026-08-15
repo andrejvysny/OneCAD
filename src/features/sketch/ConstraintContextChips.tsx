@@ -14,7 +14,7 @@ import { useSketchStore } from "@/stores/sketchStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { createClient } from "@/ipc/client";
-import { applyConstraint } from "@/tools/sketch/sketchService";
+import { applyConstraint, deleteConstraints } from "@/tools/sketch/sketchService";
 import { useApplicableConstraints } from "./useApplicableConstraints";
 import { CONSTRAINT_PRESENTATION } from "./constraintCatalog";
 
@@ -24,7 +24,7 @@ export function ConstraintContextChips() {
   const mode = useToolStore((s) => s.mode);
   const session = useSketchStore((s) => s.session);
   const engine = useViewportEngine();
-  const { applicables, centroid } = useApplicableConstraints();
+  const { applicables, centroid, existingFixed } = useApplicableConstraints();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const clientRef = useRef<ReturnType<typeof createClient> | null>(null);
   if (!clientRef.current) {
@@ -36,7 +36,8 @@ export function ConstraintContextChips() {
   }
 
   const plane = session?.plane ?? null;
-  const active = mode === "sketch" && !!session && !!centroid && applicables.length > 0;
+  const active =
+    mode === "sketch" && !!session && !!centroid && (applicables.length > 0 || !!existingFixed);
 
   // Register the host with the overlay driver at the selection centroid.
   useEffect(() => {
@@ -57,23 +58,42 @@ export function ConstraintContextChips() {
     >
       <div ref={hostRef}>
         <div className="pointer-events-auto inline-flex -translate-x-1/2 -translate-y-9 items-center gap-0.5 rounded-md border border-border bg-surface p-0.5 shadow-panel">
-          {applicables.map((a, i) => {
-            const { icon, label } = CONSTRAINT_PRESENTATION[a.type];
-            return (
-              <button
-                key={`${a.type}-${i}`}
-                type="button"
-                aria-label={label}
-                title={label}
-                onClick={() => {
-                  if (clientRef.current) void applyConstraint(clientRef.current, a);
-                }}
-                className="flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-sm px-1 leading-none text-ink-4 hover:bg-hover-3 hover:text-accent focus-visible:shadow-focus-ring focus-visible:outline-none"
-              >
-                <Icon name={icon} size={15} strokeWidth={1.7} />
-              </button>
-            );
-          })}
+          {existingFixed ? (
+            // Already pinned (e.g. drawn onto the origin) — offer removal
+            // instead of a redundant second "Fixed", the anchor icon read as
+            // a lock the same way a Fixed badge does on the canvas.
+            <button
+              type="button"
+              aria-label="Disconnect"
+              title="Disconnect"
+              onClick={() => {
+                if (clientRef.current) void deleteConstraints(clientRef.current, [existingFixed.id]);
+              }}
+              className="flex h-6 items-center gap-1 rounded-sm px-1.5 leading-none text-ink-4 hover:bg-hover-3 hover:text-traffic-close focus-visible:shadow-focus-ring focus-visible:outline-none"
+            >
+              <Icon name="unlock" size={15} strokeWidth={1.7} />
+              <span className="text-[11px]">Disconnect</span>
+            </button>
+          ) : null}
+          {applicables
+            .filter((a) => !(existingFixed && a.type === "Fixed"))
+            .map((a, i) => {
+              const { icon, label } = CONSTRAINT_PRESENTATION[a.type];
+              return (
+                <button
+                  key={`${a.type}-${i}`}
+                  type="button"
+                  aria-label={label}
+                  title={label}
+                  onClick={() => {
+                    if (clientRef.current) void applyConstraint(clientRef.current, a);
+                  }}
+                  className="flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-sm px-1 leading-none text-ink-4 hover:bg-hover-3 hover:text-accent focus-visible:shadow-focus-ring focus-visible:outline-none"
+                >
+                  <Icon name={icon} size={15} strokeWidth={1.7} />
+                </button>
+              );
+            })}
         </div>
       </div>
     </div>

@@ -50,6 +50,9 @@ export type TokenName =
   | "--color-sketch-done"
   | "--color-sketch-sel"
   | "--color-sketch-angle-ref"
+  | "--color-sketch-vertex"
+  | "--color-sketch-midpoint"
+  | "--color-sketch-centroid"
   | "--color-viewport-hover"
   | "--color-overlay-halo";
 
@@ -84,6 +87,9 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-done": "rgb(31, 157, 85)",
     "--color-sketch-sel": "rgb(217, 119, 6)",
     "--color-sketch-angle-ref": "rgb(139, 92, 246)",
+    "--color-sketch-vertex": "rgb(45, 127, 249)",
+    "--color-sketch-midpoint": "rgb(168, 85, 247)",
+    "--color-sketch-centroid": "rgb(14, 165, 164)",
     "--color-viewport-hover": "rgb(0, 172, 193)",
     "--color-overlay-halo": "rgb(251, 252, 254)",
   },
@@ -114,6 +120,9 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-done": "rgb(67, 193, 122)",
     "--color-sketch-sel": "rgb(240, 162, 74)",
     "--color-sketch-angle-ref": "rgb(167, 139, 250)",
+    "--color-sketch-vertex": "rgb(90, 162, 255)",
+    "--color-sketch-midpoint": "rgb(192, 132, 252)",
+    "--color-sketch-centroid": "rgb(45, 212, 197)",
     "--color-viewport-hover": "rgb(38, 198, 218)",
     "--color-overlay-halo": "rgb(17, 20, 26)",
   },
@@ -223,6 +232,12 @@ export const palette = {
   sketchPlane: () => tokenColor("--color-canvas-sketch"),
   /** Destructive overlay (trim doomed-piece ghost). */
   destructive: () => tokenColor("--color-traffic-close"),
+  /** Vertex/corner marker ring — uniform across every entity, regardless of constraint state. */
+  sketchVertex: () => tokenColor("--color-sketch-vertex"),
+  /** Edge midpoint dot. */
+  sketchMidpoint: () => tokenColor("--color-sketch-midpoint"),
+  /** Closed-loop centroid dot. */
+  sketchCentroid: () => tokenColor("--color-sketch-centroid"),
 
   // ── Origin axis triad (always-visible XYZ at the origin) ──
   /** +X axis leg. */

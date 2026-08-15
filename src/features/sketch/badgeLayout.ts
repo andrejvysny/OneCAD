@@ -78,6 +78,22 @@ function axisFromFor(e: SketchEntity): Point2 | undefined {
   return undefined;
 }
 
+/**
+ * `axisFrom` for a badge anchored at ONE SPECIFIC named point of `e` (a
+ * Coincident badge, anchored at whichever endpoint the two entities share) —
+ * the entity's OTHER endpoint, so the perpendicular offset runs away from the
+ * shared point along the entity's own axis instead of degenerating to a
+ * zero-length axis when `axisFromFor`'s fixed endpoint happens to BE the
+ * anchor itself (a Line's Start position, coincident at its own p0).
+ */
+function axisFromAwayFrom(e: SketchEntity, position: ConstraintPosition): Point2 | undefined {
+  if (e.type === "Line" && e.p0 && e.p1) {
+    const [x, y] = position === "End" ? e.p0 : e.p1;
+    return { x, y };
+  }
+  return axisFromFor(e);
+}
+
 function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): ConstraintBadge | null {
   const first = byId.get(c.entities[0]);
   if (!first) return null;
@@ -86,11 +102,12 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "Horizontal":
     case "Vertical":
     case "Coincident": {
-      const at =
-        c.type === "Coincident" ? entityPointCoord(first, c.positions?.[0] ?? "Start") : entityAnchor(first);
-      // A Coincident badge sits at a shared POINT, not along an entity's own
-      // axis — no direction to tether a leader to, so it stays centred as before.
-      const axisFrom = c.type === "Coincident" ? undefined : axisFromFor(first);
+      const position = c.positions?.[0] ?? "Start";
+      const at = c.type === "Coincident" ? entityPointCoord(first, position) : entityAnchor(first);
+      // A Coincident badge sits AT the shared point, so it would otherwise sit
+      // directly on top of the vertex marker there — offset it along the
+      // entity's own axis, away from that point, same as every other badge.
+      const axisFrom = c.type === "Coincident" ? axisFromAwayFrom(first, position) : axisFromFor(first);
       return at
         ? {
             id: c.id,

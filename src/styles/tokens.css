@@ -192,6 +192,17 @@
   /* The chain segment a live angle chip is measured against — distinct from
      every other sketch state color so it never reads as under/done/selected. */
   --color-sketch-angle-ref: #8b5cf6;
+  /* Vertex/corner marker ring — same family as --color-sketch-under (the
+     marker isn't itself "under-constrained", it just reads as part of the
+     same blue geometry). */
+  --color-sketch-vertex: #2d7ff9;
+  /* Edge midpoint dot — violet, distinct from --color-sketch-angle-ref
+     (which marks the angle-chip reference segment, a different concept that
+     can appear alongside a midpoint mid-gesture). */
+  --color-sketch-midpoint: #a855f7;
+  /* Closed-loop centroid dot — distinct from --color-sketch-done so it never
+     reads as a "fully constrained" status color. */
+  --color-sketch-centroid: #0ea5a4;
 
   /* ---- Viewport interaction ---- */
   /* Cyan 3D hover highlight — distinct from --color-accent, which drives
@@ -386,6 +397,9 @@
   --color-sketch-done: #43c17a;
   --color-sketch-sel: #f0a24a;
   --color-sketch-angle-ref: #a78bfa;
+  --color-sketch-vertex: #5aa2ff;
+  --color-sketch-midpoint: #c084fc;
+  --color-sketch-centroid: #2dd4c5;
 
   /* ---- Viewport interaction ---- */
   --color-viewport-hover: #26c6da;

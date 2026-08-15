@@ -8,7 +8,7 @@
  * both UIs dismiss naturally on Esc / selection change (design item 5).
  */
 import { useMemo } from "react";
-import type { SketchEntity } from "@/ipc/types";
+import type { SketchConstraint, SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { useSketchSelectionStore, type SketchSel } from "@/stores/sketchSelectionStore";
 import { useSketchStore } from "@/stores/sketchStore";
@@ -23,6 +23,13 @@ export interface ApplicableConstraints {
   applicables: ApplicableConstraint[];
   /** Plane-coord centroid of the involved geometry (context-chip anchor), or null. */
   centroid: Point2 | null;
+  /**
+   * The Fixed constraint already pinning the selected point, when the
+   * selection is exactly one named point — lets the context chips offer
+   * "Disconnect" instead of (or alongside) "Fixed" for an already-pinned
+   * point. Null for any other selection shape.
+   */
+  existingFixed: SketchConstraint | null;
 }
 
 export function useApplicableConstraints(): ApplicableConstraints {
@@ -34,8 +41,23 @@ export function useApplicableConstraints(): ApplicableConstraints {
       .map((sel) => toConstraintTarget(sel, entities))
       .filter((t): t is NonNullable<typeof t> => t !== null);
     const applicables = evaluateApplicability(targets, entities);
-    return { applicables, centroid: selectionCentroid(selected, entities) };
+    return {
+      applicables,
+      centroid: selectionCentroid(selected, entities),
+      existingFixed: existingFixedOn(selected, session?.constraints ?? []),
+    };
   }, [selected, session]);
+}
+
+/** The Fixed constraint bound to the single selected point, if any. */
+function existingFixedOn(selected: SketchSel[], constraints: SketchConstraint[]): SketchConstraint | null {
+  if (selected.length !== 1 || !selected[0].point) return null;
+  const sel = selected[0];
+  return (
+    constraints.find(
+      (c) => c.type === "Fixed" && c.entities[0] === sel.entityId && c.positions?.[0] === sel.point,
+    ) ?? null
+  );
 }
 
 /** Average the representative anchor of each pick (named point / entity anchor). */

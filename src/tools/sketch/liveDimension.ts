@@ -55,6 +55,8 @@ export interface ToolDimension {
   drives: boolean;
   /** See `DimFieldSpec.clusterId`. */
   clusterId?: string;
+  /** See `DimFieldSpec.axisFrom`. */
+  axisFrom?: Point2;
 }
 
 /** Rounding granularity per domain (mm / degrees). */
@@ -89,6 +91,14 @@ export interface DimFieldSpec {
    * fields that were never meant to sit near each other.
    */
   clusterId?: string;
+  /**
+   * The other end of the axis this chip should sit BESIDE, in plane coords
+   * (`HtmlOverlayDriver`'s `axisFrom`) — a fixed point the chip is offset
+   * perpendicular from instead of centered on, so it floats off the geometry
+   * it measures instead of sitting on top of it. Undefined ⇒ centered on
+   * `anchor`, as before.
+   */
+  axisFrom?(pt: Point2): Point2;
 }
 
 /**
@@ -308,5 +318,6 @@ export function describeDims(
     locked: locks[spec.field] !== undefined,
     drives: spec.drives,
     clusterId: spec.clusterId,
+    axisFrom: spec.axisFrom?.(cursor),
   }));
 }
