@@ -296,8 +296,11 @@ isolation (512 samples per pair before refinement) affordable at all.
       zoom, adaptive tessellation growing with projected size, `show.guidePoints` not touching snap
       behaviour, and the grid moving to the sketch plane and back.
 
-**Full e2e lane: 434 passed, 14 failed (7 specs x 2 browsers). FIVE are pre-existing, TWO were
-mine and are fixed.** Every one was reproduced on an untouched `5106f80` worktree (carrying ONLY
+**Full e2e lane, FINAL: 438 passed, 10 failed — exactly the five pre-existing specs, in both
+browsers. Zero failures introduced by this program.** (The run before the origin-anchor fix was
+434 / 14; the four recovered are the two polygon specs x two browsers. Suite total 448 either way.)
+
+The triage below is from that earlier run. Every one was reproduced on an untouched `5106f80` worktree (carrying ONLY
 the helper fix below, so the lane is comparable) before being attributed:
 
 | spec | baseline | branch | verdict |
@@ -309,6 +312,10 @@ the helper fix below, so the lane is comparable) before being attributed:
 | `live-dim-mouse-rounding.spec.ts:62` | fail | fail | pre-existing — **byte-identical** received value (`0.0015151297763438265`), i.e. the behaviour it measures is unchanged |
 | `polygon.spec.ts:23` | pass | fail → **fixed** | mine |
 | `live-dim-polygon.spec.ts:31` | pass | fail → **fixed** | mine |
+
+All five pre-existing failures are on `master` and are NOT this program's to fix: two plane-picker
+specs (`auto-mode`, `datum-sketch`), two `filletChamfer` drag-direction specs, and
+`live-dim-mouse-rounding`. They are owed separately.
 
 **The two polygon failures found a real defect and then a real behaviour change.**
 
