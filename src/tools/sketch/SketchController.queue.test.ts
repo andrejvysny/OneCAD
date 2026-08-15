@@ -181,7 +181,7 @@ describe("SketchController click intent is atomic", () => {
 
   /** Drive the controller the way the pointer path does: snap → capture → step. */
   interface Probe {
-    noteSnap(snap: unknown, raw?: unknown): void;
+    noteDecision(decision: unknown): void;
     dimCommitContext(): unknown;
     buildCommitConstraints(
       session: SketchSession,
@@ -193,19 +193,46 @@ describe("SketchController click intent is atomic", () => {
     anchorIntents: unknown[];
   }
 
+  /** A minimal accepted-origin decision — the shape `decisionAt` returns. */
   const originSnap = {
+    raw: { x: 0, y: 0 },
     point: { x: 0, y: 0 },
-    kind: "origin" as const,
+    accepted: [
+      {
+        id: "origin:0:0",
+        source: "geometryPoint",
+        kind: "origin",
+        projection: { kind: "point", point: { x: 0, y: 0 } },
+        previewPoint: { x: 0, y: 0 },
+        claims: ["point"],
+        errorPx: 0,
+        semanticBiasPx: -2,
+        scorePx: -2,
+        label: "Origin",
+        guides: [],
+        refs: [],
+        relationIntents: [{ kind: "FixedOrigin", refs: [] }],
+      },
+    ],
+    rejected: [],
+    primaryId: "origin:0:0",
+    primaryKind: "origin",
     label: "Origin",
     guides: [],
     snapped: true,
+    traceId: 1,
   };
   const freeSnap = {
+    raw: { x: 40, y: 40 },
     point: { x: 40, y: 40 },
-    kind: "none" as const,
+    accepted: [],
+    rejected: [],
+    primaryId: null,
+    primaryKind: "none",
     label: null,
     guides: [],
     snapped: false,
+    traceId: 2,
   };
 
   beforeEach(async () => {
@@ -263,10 +290,10 @@ describe("SketchController click intent is atomic", () => {
   it("an origin snap belongs to the click that made it, not to a queued earlier one", async () => {
     const p = probe();
     // Click A: a FREE placement. Its context is captured now…
-    p.noteSnap(freeSnap);
+    p.noteDecision(freeSnap);
     const dimsA = p.dimCommitContext();
     // …then click B snaps to the origin BEFORE A's queued turn runs.
-    p.noteSnap(originSnap);
+    p.noteDecision(originSnap);
     const dimsB = p.dimCommitContext();
 
     const session = sketchStore.getState().session!;
@@ -284,7 +311,7 @@ describe("SketchController click intent is atomic", () => {
   it("Alt released AFTER the click still suppresses that click's inference", () => {
     const p = probe();
     p.altHeld = true;
-    p.noteSnap(freeSnap); // the click happens while Alt is down
+    p.noteDecision(freeSnap); // the click happens while Alt is down
     const dims = p.dimCommitContext();
     p.altHeld = false; // …and Alt comes up before the queued turn
 
@@ -298,7 +325,7 @@ describe("SketchController click intent is atomic", () => {
   it("Alt pressed AFTER the click leaves that click's normal inference intact", () => {
     const p = probe();
     p.altHeld = false;
-    p.noteSnap(freeSnap);
+    p.noteDecision(freeSnap);
     const dims = p.dimCommitContext();
     p.altHeld = true; // pressed only after the click was taken
 
@@ -311,7 +338,7 @@ describe("SketchController click intent is atomic", () => {
   it("an Alt-held click authors no origin anchor even when it snapped to the origin", () => {
     const p = probe();
     p.altHeld = true;
-    p.noteSnap(originSnap);
+    p.noteDecision(originSnap);
     const dims = p.dimCommitContext();
 
     const session = sketchStore.getState().session!;
@@ -356,7 +383,7 @@ describe("SketchController click intent is atomic", () => {
     toolStore.getState().setTool("line");
     await flush();
     const p = probe();
-    p.noteSnap(originSnap);
+    p.noteDecision(originSnap);
     p.anchorIntents = [{}];
     engineMock.setSketchSnap.mockClear();
     container.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false }));

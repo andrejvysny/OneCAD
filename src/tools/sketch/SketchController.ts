@@ -42,20 +42,15 @@ import { toolChipStore } from "@/stores/toolChipStore";
 import { applySketchSolveResult } from "./solveResult";
 import { promoteOne } from "@/ipc/promote";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
+import { buildSnapCache, computeSnapDecision, type SnapCandidateCache } from "./snapEngine";
 import {
-  buildSnapCache,
-  computeSnap,
-  legacySnapDecision,
-  type SnapCandidateCache,
-  type SnapResult,
-} from "./snapEngine";
-import { emptyLatch, type SnapDecision, type SnapLatch } from "./snapTypes";
-import {
-  latestSnapTrace,
-  legacyDecisionTrace,
-  projectionFailureTrace,
-  recordSnapTrace,
-} from "./snapTrace";
+  emptyLatch,
+  gridReachPx,
+  metricNorm,
+  type SnapDecision,
+  type SnapLatch,
+} from "./snapTypes";
+import { mintTraceId, projectionFailureTrace, recordSnapTrace, traceCandidates } from "./snapTrace";
 import { SNAP_RADIUS_PX } from "./snapRadius";
 import { inferConstraints, entityPoints } from "./autoConstrain";
 
@@ -120,11 +115,12 @@ import {
   type DimFieldId,
   type DimLocks,
   type DimQuantum,
+  type DimValues,
   type LiveDimEvent,
   type LiveDimState,
   type ToolDimension,
 } from "./liveDimension";
-import { chainRefAngleDeg } from "./liveDimFrames";
+import { chainRefAngleDeg, dimFrame } from "./liveDimFrames";
 import { arcPreviewSweep } from "./angleArcPreview";
 import {
   liveDimChipId,
@@ -266,6 +262,24 @@ const samplePointer = (e: PointerEvent): PendingPointerSample => ({
   altKey: e.altKey,
 });
 
+/**
+ * The numeric field values a decision accepted, as the tool machines take them.
+ *
+ * Typed locks ride here too: the machine applies `locks` on top anyway, so
+ * including them keeps one array as the single description of "what numbers
+ * this sample settled on".
+ */
+function acceptedDimValues(decision: SnapDecision): DimValues | null {
+  const out: DimValues = {};
+  let any = false;
+  for (const c of decision.accepted) {
+    if (c.projection.kind !== "numericField") continue;
+    out[c.projection.field] = c.projection.targetValue;
+    any = true;
+  }
+  return any ? out : null;
+}
+
 /** Every accepted intent a commit may reason about: the anchors already placed,
  *  then the click that committed. Order is placement order. */
 function commitIntents(dims: CommitIntentContext | undefined): readonly AcceptedSnapIntent[] {
@@ -289,7 +303,7 @@ interface DimCommitContext {
  * The snap decision a click ACCEPTED, frozen with everything that decided it
  * (SNAP §5.8).
  *
- * The queued commit turn must not re-read `this.altHeld`, `this.lastSnap` or the
+ * The queued commit turn must not re-read `this.altHeld`, `this.lastDecision` or the
  * live settings: a fast click burst settles each commit one turn later, by which
  * time those fields describe a LATER pointer state. Alt released between the
  * click and its queued turn used to give that click normal inference; an origin
@@ -322,7 +336,10 @@ export class SketchController {
   private disposed = false;
   private machine: ToolMachine | null = null;
   private machineState: ToolState | null = null;
-  private lastSnap: SnapResult | null = null;
+  /** The numeric field values the last decision accepted — handed to the tool
+   *  machines through `stepCtx` so `projectEvent` applies rather than decides.
+   *  (The decision itself is retained by `snapTrace` for the debug surface.) */
+  private lastDimValues: DimValues | null = null;
   /**
    * The accepted intents of the anchors this gesture has already PLACED
    * (SNAP P1) — the replacement for `originSnapPoints`.
@@ -1072,7 +1089,7 @@ export class SketchController {
     this.endPlanePick();
     this.machine = null;
     this.machineState = null;
-    this.lastSnap = null;
+    this.lastDimValues = null;
     this.bumpInteraction("sessionTeardown");
     this.arcDragging = false;
     this.clearLiveDimGesture();
@@ -1297,14 +1314,16 @@ export class SketchController {
   private stepCtx(): {
     minSize: number;
     locks: DimLocks;
-    quantum: DimQuantum | null;
+    dimValues: DimValues | null;
     tangent?: Point2;
   } {
     const tangent = this.chainSeedTangent();
     return {
       minSize: 4 * this.deps.engine.planePixelWorld(),
       locks: this.liveDim.locks,
-      quantum: this.dimQuantumNow(),
+      // The values the snap DECISION accepted for this sample — the decorator
+      // applies them, it no longer decides them (SNAP §8.3).
+      dimValues: this.lastDimValues,
       ...(tangent ? { tangent } : {}),
     };
   }
@@ -1347,54 +1366,25 @@ export class SketchController {
   }
 
   /**
-   * The rounding granularity a CURSOR-placed dimension lands on right now, or
-   * null for "do not round".
+   * Resolve ONE pointer sample into a full snap decision, and advance the latch.
    *
-   * Gets null whenever something more specific already decided where this
-   * point goes: the pref is off, Alt suppresses snapping wholesale, a GEOMETRY
-   * snap won (endpoint … onCurve, the alignment guides), or GRID won this
-   * frame (`kind === "grid"` — {@link dimensionRoundingActive} already made
-   * grid proximity-gated while armed, so a grid hit here means the cursor was
-   * genuinely close to an intersection and gets to keep it; rounding the
-   * length on top would just pull it back off). Only a genuinely free point
-   * (`none`) is ours to quantize.
+   * This is the single entry to the snap engine. It owns the three things the
+   * decision needs that the pure engine cannot know: the camera metric, the
+   * live-dimension frame for the phase the gesture is IN, and the retained
+   * target from the previous sample.
    *
-   * Locks are unaffected: a typed value pins whatever this returns.
+   * A null return means the cursor could not be projected onto the sketch plane
+   * at all. Callers must treat that as "nothing happened" — never as a reason to
+   * reuse the previous decision (SNAP §7.3).
    */
-  private dimQuantumNow(): DimQuantum | null {
-    if (!settingsStore.getState().snapTo.dimensionRound) return null;
-    if (this.altHeld) return null;
-    const kind = this.lastSnap?.kind;
-    if (kind !== undefined && kind !== "none") return null;
-    const minor = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
-    return dimQuantum(minor, settingsStore.getState().displayUnit);
-  }
-
-  /**
-   * Is the dimension quantum the fallback for grid this frame?
-   *
-   * Grid quantizes x and y independently; a draw gesture in progress means a
-   * LENGTH and an ANGLE, so the two tiers answer different questions for the
-   * SAME point. Rather than one replacing the other outright, grid gets first
-   * refusal — proximity-gated (see `gridRequireProximity` in snapEngine.ts) so
-   * it only claims the point when the cursor is actually near an intersection
-   * — and dimension-round only fires off the resulting `kind: "none"` miss
-   * (`dimQuantumNow` above). Only while a machine is armed (≥1 anchor) — with
-   * nothing placed there is no dimension to round, so grid stays unconditional
-   * (as always) for the first point.
-   */
-  private dimensionRoundingActive(): boolean {
-    if (!this.machineState || this.machineState.anchors.length === 0) return false;
-    return settingsStore.getState().snapTo.dimensionRound && !this.altHeld;
-  }
-
-  private snapAt(
+  private decisionAt(
     clientX: number,
     clientY: number,
     origin: "hover" | "click" = "hover",
-  ): SnapResult | null {
+  ): SnapDecision | null {
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
-    if (!raw) {
+    const metric = raw ? this.deps.engine.planeScreenMetric(raw) : null;
+    if (!raw || !metric) {
       // A click whose cursor cannot be projected is INERT — never silently
       // reused from the previous position. Traced once so the miss is visible.
       recordSnapTrace(
@@ -1411,7 +1401,7 @@ export class SketchController {
     }
     const session = sketchStore.getState().session;
     const sessionEntities = session?.entities ?? null;
-    // Reference-equality cache: a commit replaces the array (applySolvedPositions
+    // Reference-equality cache: a commit replaces the array (`applySketchSolveResult`
     // returns the SAME reference iff nothing moved), so this rebuilds only on an
     // actual sketch edit, not on every rAF move.
     if (sessionEntities !== this.snapCacheKey) {
@@ -1420,12 +1410,16 @@ export class SketchController {
     }
     const settings = settingsStore.getState();
     const gridStep = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
-    const result = computeSnap(raw, sessionEntities ?? [], {
+    const st = this.machineState;
+    const anchors = st?.anchors ?? [];
+    const arcMode = st?.arcMode ?? false;
+    const traceId = mintTraceId();
+    const { decision, latch } = computeSnapDecision(raw, sessionEntities ?? [], {
       gridStep,
       pixelWorld: this.deps.engine.planePixelWorld(),
+      metric,
       snapPx: this.snapPx(),
       enableGrid: settings.snapTo.grid,
-      gridRequireProximity: this.dimensionRoundingActive(),
       enableGuideLines: settings.snapTo.sketchGuideLines,
       enableGuidePoints: settings.snapTo.sketchGuidePoints,
       enableQuadrant: settings.snapTo.quadrant,
@@ -1434,22 +1428,45 @@ export class SketchController {
       enablePolar: settings.snapTo.polarTracking,
       polarAnchor: this.polarAnchor(),
       polarRefDir: this.polarRefDir(),
+      polarRefLineId: this.lastChainLineId,
       suppress: this.altHeld,
-      recentPoints: this.machineState?.anchors ?? [],
+      // Anchors carry a STABLE key (index + interaction epoch), never their
+      // decimal coordinates — a candidate id must survive a sub-pixel move.
+      anchors: anchors.map((point, i) => ({ point, key: `g${this.interactionEpoch}:${i}` })),
       cache: this.snapCache ?? undefined,
+      frame: this.machine
+        ? dimFrame(this.machine.id, anchors, st?.sides, {
+            arcMode,
+            tangent: st?.chainTangent ?? this.chainSeedTangent(),
+          })
+        : null,
+      toolId: this.machine?.id ?? "",
+      toolAnchors: anchors,
+      arcMode,
+      locks: this.liveDim.locks,
+      // Cursor rounding is a PREFERENCE, and Alt already short-circuits the
+      // whole engine above; passing null here is what turns it off.
+      quantum: this.cursorQuantum(),
+      latch: this.snapLatch,
+      traceId,
     });
+    const latchReset = latch.primaryId !== this.snapLatch.primaryId && this.snapLatch.primaryId !== null;
+    this.snapLatch = latch;
     recordSnapTrace(
-      legacyDecisionTrace({
-        result,
-        raw,
-        client: { x: clientX, y: clientY },
-        origin,
+      {
+        traceId,
         interactionEpoch: this.interactionEpoch,
         sessionGeneration: sketchStore.getState().sessionGeneration,
+        origin,
+        raw,
+        client: { x: clientX, y: clientY },
         projection: viewportStore.getState().projection === "persp" ? "perspective" : "orthographic",
-        metric: this.deps.engine.planeScreenMetric(raw),
+        metric: { ...metric },
         gridStep,
+        uCellPx: metricNorm(metric, gridStep, 0),
+        vCellPx: metricNorm(metric, 0, gridStep),
         pointRadiusPx: this.snapPx(),
+        gridRadiusPx: gridReachPx(metric, gridStep, this.snapPx()),
         sources: {
           grid: settings.snapTo.grid,
           guideLines: settings.snapTo.sketchGuideLines,
@@ -1460,11 +1477,32 @@ export class SketchController {
           polar: settings.snapTo.polarTracking,
           dimensionRound: settings.snapTo.dimensionRound,
         },
-        altHeld: this.altHeld,
+        candidates: traceCandidates(decision.accepted),
         priorLatch: this.snapLatch,
-      }),
+        acceptedIds: decision.accepted.map((c) => c.id),
+        rejected: decision.rejected,
+        point: decision.point,
+        altHeld: this.altHeld,
+      },
+      { latchReset },
     );
-    return result;
+    return decision;
+  }
+
+  /**
+   * The zoom-adaptive granularity a CURSOR-placed dimension rounds to, or null
+   * for "do not round".
+   *
+   * ONE reason to be null now: the preference is off. Everything the old
+   * `dimQuantumNow` also checked — Alt held, a geometry snap already won, grid
+   * won this frame — is decided INSIDE the arbitration, where a rounding
+   * candidate can lose on its merits (and say so) instead of being suppressed by
+   * a downstream rule that could not compose with anything.
+   */
+  private cursorQuantum(): DimQuantum | null {
+    if (!settingsStore.getState().snapTo.dimensionRound) return null;
+    const minor = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
+    return dimQuantum(minor, settingsStore.getState().displayUnit);
   }
 
   /**
@@ -1475,10 +1513,10 @@ export class SketchController {
    * synchronous stack — precisely so the queued commit turn cannot read a later
    * value (SNAP §5.8).
    */
-  private noteSnap(snap: SnapResult, raw?: Point2): void {
-    this.lastSnap = snap;
+  private noteDecision(decision: SnapDecision): void {
+    this.lastDimValues = acceptedDimValues(decision);
     this.lastIntent = {
-      decision: legacySnapDecision(snap, raw ?? snap.point, latestSnapTrace()?.traceId ?? 0),
+      decision,
       suppressInference: this.altHeld,
       settingsRevision: this.settingsRevision,
       interactionEpoch: this.interactionEpoch,
@@ -1510,7 +1548,7 @@ export class SketchController {
    * feedback that claims "your click will land HERE" goes away.
    */
   private clearTransientSnapFeedback(): void {
-    this.lastSnap = null;
+    this.lastDimValues = null;
     this.lastIntent = null;
     // No explicit `invalidate()`: `setSketchSnap(null, …)` hides the indicator,
     // which schedules a frame ITSELF and only when something was actually
@@ -1633,14 +1671,14 @@ export class SketchController {
       const ev = this.pendingMove;
       this.pendingMove = null;
       if (!ev) return;
-      const snap = this.snapAt(ev.clientX, ev.clientY);
+      const snap = this.decisionAt(ev.clientX, ev.clientY);
       if (!snap) {
         // The cursor left the plane (grazing / behind the camera): drop the
         // stale marker rather than leaving it advertising the last good point.
         this.clearTransientSnapFeedback();
         return;
       }
-      this.noteSnap(snap);
+      this.noteDecision(snap);
       // A live-dim chip set already says everything the hint label would —
       // showing both lets the snap hint visually collide with the chips it
       // has nothing new to add next to (SP-1 UX).
@@ -1680,9 +1718,9 @@ export class SketchController {
     this.bumpInteraction("arcDragCommit");
     // Same rule as an ordinary click: recomputed here, never inherited from the
     // last pointer sample (SNAP §7.3).
-    const snap = this.snapAt(e.clientX, e.clientY, "click");
+    const snap = this.decisionAt(e.clientX, e.clientY, "click");
     if (!snap) return;
-    this.noteSnap(snap);
+    this.noteDecision(snap);
     const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
     logSketchStep(this.machine.id, "arcDrag", stepped);
@@ -1769,14 +1807,14 @@ export class SketchController {
     // the decision is taken, so a rAF sampled at the previous position cannot
     // publish a preview over the phase this click is about to create.
     this.bumpInteraction("click");
-    // Recomputed for THIS click's own coordinates. NO `?? this.lastSnap`
+    // Recomputed for THIS click's own coordinates. NO `?? this.lastDecision`
     // fallback (SNAP §7.3): a projection failure makes the click inert, because
     // committing at the previous pointer position is a placement the user never
     // made — and the fallback also carried the previous point's snap KIND into
     // this point's rounding decision.
-    const snap = this.snapAt(e.clientX, e.clientY, "click");
+    const snap = this.decisionAt(e.clientX, e.clientY, "click");
     if (!snap) return;
-    this.noteSnap(snap);
+    this.noteDecision(snap);
     // Captured BEFORE the step consumes the anchors / the commit clears the locks.
     const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());

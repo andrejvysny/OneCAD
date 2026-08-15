@@ -15,7 +15,7 @@
 import * as THREE from "three";
 import type { SketchPlane } from "@/ipc/types";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
-import type { SnapResult } from "@/tools/sketch/snapEngine";
+import type { SnapDecision, SnapKind } from "@/tools/sketch/snapTypes";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import { planeBasisMatrix, planePointToWorld } from "./sketchBasis";
@@ -35,7 +35,7 @@ type MarkerGlyph = "dot" | "diamond" | "cross" | "ring";
 /** Map a snap kind to its marker glyph. New M6c types get distinct shapes so the
  *  marker (not just the hint chip) tells endpoint/quadrant/intersection/onCurve
  *  apart, matching the legacy per-type snap markers. */
-function glyphFor(kind: SnapResult["kind"]): MarkerGlyph {
+function glyphFor(kind: SnapKind): MarkerGlyph {
   switch (kind) {
     case "quadrant":
       return "diamond";
@@ -187,14 +187,18 @@ export class SnapIndicator {
     this.currentGlyph = glyph;
   }
 
-  /** Update from a snap result. `showHints` gates the hint chip only. */
-  show(snap: SnapResult, showHints: boolean): void {
+  /** Update from a snap DECISION. `showHints` gates the hint chip only.
+   *
+   *  The decision's `guides` is the union of EVERY accepted candidate's guides,
+   *  so a composed x+y alignment draws both arms — the single-winner shape this
+   *  replaced could only ever show one. */
+  show(snap: SnapDecision, showHints: boolean): void {
     if (!this.plane || !snap.snapped) {
       this.hide();
       return;
     }
     this.group.visible = true;
-    this.setGlyph(glyphFor(snap.kind));
+    this.setGlyph(glyphFor(snap.primaryKind));
 
     // Marker (plane-local).
     const pos = this.marker.geometry.getAttribute("position") as THREE.BufferAttribute;

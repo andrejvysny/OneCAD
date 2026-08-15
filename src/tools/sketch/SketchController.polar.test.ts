@@ -3,7 +3,7 @@
  *
  * The engine-side geometry is unit-tested in snapEngine.test.ts; what is pinned
  * HERE is the wiring the popover switches actually reach:
- *   - `snapAt` forwards the pref (`enablePolar`), the fan centre (the chain's
+ *   - `decisionAt` forwards the pref (`enablePolar`), the fan centre (the chain's
  *     LAST anchor) and the reference direction (chainTangent, else the chord),
  *   - the snap radius reaches BOTH the snap ladder and the pick tolerance,
  *   - a `polar` snap suppresses dimension rounding (the regression pin — the
@@ -14,9 +14,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SketchController } from "./SketchController";
 import * as snapEngine from "./snapEngine";
-import type { SnapOptions, SnapResult } from "./snapEngine";
+import type { SnapOptions } from "./snapEngine";
+import type { SnapDecision } from "./snapTypes";
 import { SNAP_RADIUS_PX } from "./snapRadius";
 import type { ToolState } from "./toolMachine";
+import { LIVE_TOOL_MACHINES } from "./liveToolMachines";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type { SketchEntity, SketchPlane, SketchSession } from "@/ipc/types";
@@ -77,11 +79,11 @@ function makeClientMock() {
 
 /** The private surface these assertions drive (all of it controller-internal). */
 type Internals = {
-  snapAt(clientX: number, clientY: number): SnapResult | null;
+  decisionAt(clientX: number, clientY: number): SnapDecision | null;
+  machine: unknown;
   pickTol(): number;
-  dimQuantumNow(): unknown;
+  cursorQuantum(): unknown;
   machineState: ToolState | null;
-  lastSnap: SnapResult | null;
 };
 
 describe("SketchController — polar tracking + snap radius wiring", () => {
@@ -96,7 +98,7 @@ describe("SketchController — polar tracking + snap radius wiring", () => {
     // The test lane resets polar OFF (see resetStores); this lane is the one
     // that opts back in, exactly as the app does.
     settingsStore.getState().setSnap("polarTracking", true);
-    snapSpy = vi.spyOn(snapEngine, "computeSnap");
+    snapSpy = vi.spyOn(snapEngine, "computeSnapDecision");
     engineMock = makeEngineMock();
     clientMock = makeClientMock();
     container = document.createElement("div");
@@ -118,16 +120,23 @@ describe("SketchController — polar tracking + snap radius wiring", () => {
   const internals = (): Internals => controller as unknown as Internals;
 
   /** Drive the machine state directly — the pointer ladder is covered elsewhere;
-   *  what matters here is which anchors/tangent `snapAt` reads. */
+   *  what matters here is which anchors/tangent `decisionAt` reads. */
   function arm(anchors: Point2[], chainTangent?: Point2): void {
     internals().machineState = { anchors, cursor: null, ...(chainTangent ? { chainTangent } : {}) };
+  }
+
+  /** Arm a REAL machine, so the phase has a live-dimension frame and the numeric
+   *  candidates the composition cases need actually exist. */
+  function armTool(id: string, anchors: Point2[]): void {
+    internals().machine = LIVE_TOOL_MACHINES[id];
+    arm(anchors);
   }
 
   const lastOpts = (): SnapOptions => snapSpy.mock.calls[snapSpy.mock.calls.length - 1][2] as SnapOptions;
 
   it("forwards the pref, the last anchor and the snap radius", () => {
     arm([{ x: 1, y: 2 }, { x: 10, y: 2 }]);
-    internals().snapAt(20, 20);
+    internals().decisionAt(20, 20);
 
     const opts = lastOpts();
     expect(opts.enablePolar).toBe(true);
@@ -138,28 +147,28 @@ describe("SketchController — polar tracking + snap radius wiring", () => {
   it("forwards enablePolar:false when the pref is off", () => {
     settingsStore.getState().setSnap("polarTracking", false);
     arm([{ x: 0, y: 0 }]);
-    internals().snapAt(5, 5);
+    internals().decisionAt(5, 5);
     expect(lastOpts().enablePolar).toBe(false);
   });
 
   it("passes a NULL anchor with no gesture in progress (the tier stays inert)", () => {
-    internals().snapAt(5, 5);
+    internals().decisionAt(5, 5);
     expect(lastOpts().polarAnchor).toBeNull();
 
     arm([]);
-    internals().snapAt(5, 5);
+    internals().decisionAt(5, 5);
     expect(lastOpts().polarAnchor).toBeNull();
   });
 
   it("derives the reference direction from the last two anchors", () => {
     arm([{ x: 0, y: 0 }, { x: 3, y: 4 }]);
-    internals().snapAt(9, 9);
+    internals().decisionAt(9, 9);
     expect(lastOpts().polarRefDir).toEqual({ x: 0.6, y: 0.8 });
   });
 
   it("has NO reference direction from a single anchor (nothing to be parallel to)", () => {
     arm([{ x: 0, y: 0 }]);
-    internals().snapAt(9, 9);
+    internals().decisionAt(9, 9);
     expect(lastOpts().polarRefDir).toBeNull();
   });
 
@@ -168,31 +177,47 @@ describe("SketchController — polar tracking + snap radius wiring", () => {
     // leaves along +y, so fanning off the chord would offer a line the chain
     // never travelled.
     arm([{ x: 0, y: 0 }, { x: 10, y: 0 }], { x: 0, y: 1 });
-    internals().snapAt(9, 9);
+    internals().decisionAt(9, 9);
     expect(lastOpts().polarRefDir).toEqual({ x: 0, y: 1 });
   });
 
   it("snaps a real cursor onto the 45° ray off the anchor", () => {
+    // Grid off: this asserts the polar tier, and a grid node 1px away is a
+    // full-point candidate that would legitimately outrank a 2.8px ray.
+    settingsStore.getState().setSnap("grid", false);
     arm([{ x: 0, y: 0 }]);
-    const snap = internals().snapAt(30, 26)!;
-    expect(snap.kind).toBe("polar");
+    const snap = internals().decisionAt(30, 26)!;
+    expect(snap.primaryKind).toBe("polar");
     expect(snap.point.x).toBeCloseTo(28, 9);
     expect(snap.point.y).toBeCloseTo(28, 9);
   });
 
-  // THE PIN. `dimQuantumNow`'s allow-list is {none, grid}: a polar snap already
-  // placed the point ON a deliberate ray, and rounding it afterwards would slide
-  // it off — silently, since the guide would still be drawn. If a future edit
-  // widens that allow-list, this fails.
-  it("suppresses dimension rounding while the last snap is polar", () => {
-    settingsStore.getState().setSnap("dimensionRound", true);
+  // THE PIN, restated for SNAP P2. Rounding is no longer suppressed by a
+  // downstream allow-list keyed on the last snap KIND — a polar ray and a
+  // rounded length COMPOSE now, and it is the arbitration that decides whether
+  // a rounding candidate survives. The controller's only remaining reason to
+  // withhold a quantum is the preference itself.
+  it("offers a quantum iff the preference is on", () => {
     const priv = internals();
+    settingsStore.getState().setSnap("dimensionRound", true);
+    expect(priv.cursorQuantum()).not.toBeNull();
+    settingsStore.getState().setSnap("dimensionRound", false);
+    expect(priv.cursorQuantum()).toBeNull();
+  });
 
-    priv.lastSnap = { point: { x: 0, y: 0 }, kind: "none", label: null, guides: [], snapped: false };
-    expect(priv.dimQuantumNow()).not.toBeNull(); // control: rounding IS live here
-
-    priv.lastSnap = { point: { x: 1, y: 1 }, kind: "polar", label: "45°", guides: [], snapped: true };
-    expect(priv.dimQuantumNow()).toBeNull();
+  it("a polar ray and a rounded LENGTH are accepted together (SNAP §5.7)", () => {
+    settingsStore.getState().setSnap("dimensionRound", true);
+    settingsStore.getState().setSnap("grid", false);
+    armTool("line", [{ x: 0, y: 0 }]);
+    // 45.06° out, 25.03 long: near the 45° ray AND near a round length.
+    const d = internals().decisionAt(17.7, 17.71)!;
+    const sources = d.accepted.map((c) => c.source).sort();
+    expect(sources).toEqual(["numeric", "polar"]);
+    // On the ray…
+    expect(d.point.x).toBeCloseTo(d.point.y, 6);
+    // …and at a quantized length.
+    const len = Math.hypot(d.point.x, d.point.y);
+    expect(len / 0.5).toBeCloseTo(Math.round(len / 0.5), 6);
   });
 
   it("pickTol tracks the snap-radius preference (and the zoom)", () => {
@@ -211,17 +236,18 @@ describe("SketchController — polar tracking + snap radius wiring", () => {
 
   it("the snap ladder gets the SAME radius the pick tolerance uses", () => {
     settingsStore.getState().setSnapRadius("l");
-    internals().snapAt(5, 5);
+    internals().decisionAt(5, 5);
     expect(lastOpts().snapPx).toBe(SNAP_RADIUS_PX.l);
     expect(internals().pickTol()).toBe(SNAP_RADIUS_PX.l);
   });
 
   it("a LARGER radius reaches an endpoint an M radius misses", () => {
     sketchStore.getState().setSession(makeSession([{ id: "l1", type: "Line", p0: [0, 0], p1: [40, 0] }]));
+    settingsStore.getState().setSnap("grid", false); // see the polar case above
     // 10 world units past the endpoint: outside 8px, inside 12px.
-    expect(internals().snapAt(50, 0)!.kind).not.toBe("endpoint");
+    expect(internals().decisionAt(50, 0)!.primaryKind).not.toBe("endpoint");
 
     settingsStore.getState().setSnapRadius("l");
-    expect(internals().snapAt(50, 0)!.kind).toBe("endpoint");
+    expect(internals().decisionAt(50, 0)!.primaryKind).toBe("endpoint");
   });
 });

@@ -46,8 +46,7 @@ import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
 import { computePlaneScreenMetric, newPlaneMetricScratch } from "./planeMetric";
 import type { SketchConstraint, SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
-import type { SnapResult } from "@/tools/sketch/snapEngine";
-import type { PlaneScreenMetric } from "@/tools/sketch/snapTypes";
+import type { PlaneScreenMetric, SnapDecision } from "@/tools/sketch/snapTypes";
 import { latestSnapTrace } from "@/tools/sketch/snapTrace";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
@@ -1132,7 +1131,7 @@ export class ViewportEngine {
     this.sketch?.setAnglePreview(arc);
   }
 
-  setSketchSnap(snap: SnapResult | null, showHints: boolean): void {
+  setSketchSnap(snap: SnapDecision | null, showHints: boolean): void {
     if (!this.snapIndicator) return;
     if (snap) this.snapIndicator.show(snap, showHints);
     else this.snapIndicator.hide();

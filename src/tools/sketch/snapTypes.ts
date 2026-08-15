@@ -317,9 +317,19 @@ export function gridReachPx(
   const uCellPx = metricNorm(metric, gridStep, 0);
   const vCellPx = metricNorm(metric, 0, gridStep);
   const cell = Math.min(uCellPx, vCellPx);
-  if (!Number.isFinite(cell) || cell <= 0) return 0;
+  if (!Number.isFinite(cell) || cell < GRID_MIN_CELL_PX) return 0;
   return Math.min(acquirePx, GRID_REACH_FACTOR * cell);
 }
+
+/**
+ * Below this projected cell size the grid is INERT.
+ *
+ * A sub-pixel grid is not a target the user can see or aim at, and capturing to
+ * it is nearly free — so without a floor it would win every arbitration by cost
+ * while contributing nothing, and (because grid claims the whole point) would
+ * suppress the cursor numeric rounding that is the useful answer at that zoom.
+ */
+export const GRID_MIN_CELL_PX = 4;
 
 /** Radius (px) inside which the origin gets its absolute-capture bias. */
 export const ORIGIN_CORE_PX = 2;

@@ -40,7 +40,7 @@ import type {
   SketchEntityType,
 } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
-import type { DimLocks, DimQuantum, ToolDimension } from "./liveDimension";
+import type { DimLocks, DimValues, ToolDimension } from "./liveDimension";
 import { normalizeEllipse } from "./ellipseMath";
 import { arcThroughPoints, perpDistanceTo, tangentArcTo, unitDir, type TangentArc } from "./arcMath";
 
@@ -85,9 +85,17 @@ export interface ToolContext {
    *  into the event before the raw machine ever sees it — every machine below
    *  ignores this field. */
   locks?: DimLocks;
-  /** Zoom-adaptive rounding granularity, or null when rounding is off (pref off,
-   *  Alt held, or a geometry snap already won). Same ownership as `locks`. */
-  quantum?: DimQuantum | null;
+  /**
+   * Numeric field values the SNAP DECISION accepted for this sample (SNAP P2) —
+   * cursor rounding included. Same ownership as `locks`: read only by the
+   * `withLiveDims` decorator, which applies them (locks on top) and rebuilds the
+   * point once. Absent ⇒ nothing was accepted and the event passes through.
+   *
+   * Replaces the old `quantum`, which made this decorator the OWNER of the
+   * rounding decision and therefore unable to compose it with a directional
+   * intent or to report why it was refused.
+   */
+  dimValues?: DimValues | null;
   /** CONTROLLER-RESOLVED chain tangent: the direction an EXISTING entity leaves
    *  the anchor the chain was seeded on (`entityEndTangent`). Only a seed — a
    *  machine that has recorded its own `ToolState.chainTangent` (it committed the

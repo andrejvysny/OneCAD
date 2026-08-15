@@ -156,9 +156,11 @@ export const SNAP_SCENARIOS: SnapScenario[] = [
     about: "The 90° quadrant lies INSIDE the sweep; the 180°/270° ones do not.",
   },
   {
+    // Deliberately OFF the sketch origin: inside its 2px capture core the
+    // origin outranks everything, which would mask what this case is about.
     name: "on-curve-loses-to-equally-close-named-point",
-    entities: [line("l1", [0, 0], [20, 0]), circle("c1", [0, 3], 3)],
-    raw: { x: 0.2, y: 0.2 },
+    entities: [line("l1", [5, 5], [25, 5]), circle("c1", [5, 8], 3)],
+    raw: { x: 5.2, y: 5.2 },
     about:
       "The on-curve point on c1 and l1's endpoint are both ~0.2 away; the " +
       "+0.75 on-curve penalty is what makes the named point win.",

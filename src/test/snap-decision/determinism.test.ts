@@ -68,7 +68,8 @@ describe("snap determinism", () => {
     const entities = [SCENARIO_BUILDERS.circle("c1", [0, 0], 10)];
     const raw = { x: 10.2, y: 0.4 };
     const base: SnapOptions = {
-      gridStep: 1,
+      // >= GRID_MIN_CELL_PX: a sub-pixel grid is deliberately inert.
+      gridStep: 5,
       pixelWorld: 1,
       snapPx: 8,
       enableGrid: true,
@@ -82,12 +83,12 @@ describe("snap determinism", () => {
     const at = (o: Partial<SnapOptions>): string =>
       computeSnap(raw, entities, { ...base, ...o }).kind;
 
+    // Costs at this cursor: quadrant 0.197 < grid 0.447 < onCurve 0.95 <
+    // alignH 8.4 (a one-axis guide pays for the axis it leaves unresolved).
     expect(at({})).toBe("quadrant");
-    expect(at({ enableQuadrant: false })).toBe("onCurve");
-    expect(at({ enableQuadrant: false, enableOnCurve: false })).toBe("alignH");
-    expect(
-      at({ enableQuadrant: false, enableOnCurve: false, enableGuideLines: false }),
-    ).toBe("grid");
+    expect(at({ enableQuadrant: false })).toBe("grid");
+    expect(at({ enableQuadrant: false, enableGrid: false })).toBe("onCurve");
+    expect(at({ enableQuadrant: false, enableGrid: false, enableOnCurve: false })).toBe("alignH");
     expect(
       computeSnap(raw, entities, {
         ...base,

@@ -5,13 +5,13 @@
  * pointer move. Session entity arrays are replaced immutably on every commit
  * (applySolvedPositions returns the SAME reference iff nothing moved), so
  * reference equality of `session.entities` is a valid, cheap invalidation key.
- * This asserts `snapAt` rebuilds the cache only when that reference changes.
+ * This asserts `decisionAt` rebuilds the cache only when that reference changes.
  * Engine + client are faked (no WebGL / no backend).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SketchController } from "./SketchController";
 import * as snapEngine from "./snapEngine";
-import type { SnapResult } from "./snapEngine";
+import type { SnapDecision } from "./snapTypes";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type { SketchEntity, SketchPlane, SketchSession } from "@/ipc/types";
@@ -70,7 +70,7 @@ function makeClientMock() {
   };
 }
 
-type Internals = { snapAt(clientX: number, clientY: number): SnapResult | null };
+type Internals = { decisionAt(clientX: number, clientY: number): SnapDecision | null };
 
 describe("SketchController — snap candidate cache invalidation", () => {
   let engineMock: ReturnType<typeof makeEngineMock>;
@@ -107,13 +107,13 @@ describe("SketchController — snap candidate cache invalidation", () => {
 
   const internals = (): Internals => controller as unknown as Internals;
 
-  it("rebuilds the cache only once for repeated snapAt calls against the SAME entities reference", () => {
+  it("rebuilds the cache only once for repeated decisionAt calls against the SAME entities reference", () => {
     sketchStore.getState().setSession(makeSession(ENTITIES_A));
     buildSpy.mockClear();
 
-    internals().snapAt(6, 6);
-    internals().snapAt(21, 1);
-    internals().snapAt(0, 0);
+    internals().decisionAt(6, 6);
+    internals().decisionAt(21, 1);
+    internals().decisionAt(0, 0);
 
     expect(buildSpy).toHaveBeenCalledTimes(1);
     expect(buildSpy).toHaveBeenCalledWith(ENTITIES_A);
@@ -123,18 +123,18 @@ describe("SketchController — snap candidate cache invalidation", () => {
     sketchStore.getState().setSession(makeSession(ENTITIES_A));
     buildSpy.mockClear();
 
-    internals().snapAt(6, 6);
+    internals().decisionAt(6, 6);
     expect(buildSpy).toHaveBeenCalledTimes(1);
 
     // A new array reference (as a real commit produces) invalidates the cache,
     // even though this second array is unchanged content-wise from the first call.
     sketchStore.getState().setSession(makeSession(ENTITIES_B));
-    internals().snapAt(21, 1);
+    internals().decisionAt(21, 1);
     expect(buildSpy).toHaveBeenCalledTimes(2);
     expect(buildSpy).toHaveBeenLastCalledWith(ENTITIES_B);
 
     // Same reference again ⇒ no further rebuild.
-    internals().snapAt(19, 2);
+    internals().decisionAt(19, 2);
     expect(buildSpy).toHaveBeenCalledTimes(2);
   });
 
@@ -144,9 +144,9 @@ describe("SketchController — snap candidate cache invalidation", () => {
     // strictly better than "rebuild once": there's nothing to cache.
     buildSpy.mockClear();
 
-    internals().snapAt(6, 6);
-    internals().snapAt(7, 7);
-    internals().snapAt(8, 8);
+    internals().decisionAt(6, 6);
+    internals().decisionAt(7, 7);
+    internals().decisionAt(8, 8);
 
     expect(buildSpy).not.toHaveBeenCalled();
   });

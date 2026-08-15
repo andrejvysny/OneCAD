@@ -209,50 +209,57 @@ describe("withLiveDims — lock projection", () => {
   });
 });
 
-describe("withLiveDims — quantum rounding", () => {
-  const quantum = { length: 0.1, angle: 1 };
-
-  it("rounds a cursor-placed length to the quantum", () => {
+describe("withLiveDims — ACCEPTED numeric values (SNAP P2)", () => {
+  /*
+   * The decorator no longer rounds. `snapArbitration` resolves cursor rounding
+   * as an explicit candidate and hands the accepted field values down; this
+   * module applies them, with typed locks on top. These cases therefore state
+   * the values a quantum of {length: 0.1, angle: 1} would have produced, which
+   * is what the arbitration tests assert it does produce.
+   */
+  it("applies an accepted length", () => {
     const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["click", P(22.3607, 0)]], {
-      quantum,
+      dimValues: { length: 22.4 },
     });
     expect(dist(P(0, 0), steps[1].committed?.[0].p1 as Point2)).toBeCloseTo(22.4, 9);
   });
 
-  it("rounds a cursor-placed angle to whole degrees (geometry, chip or not)", () => {
+  it("applies an accepted angle even when the phase HIDES its chip", () => {
     const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["click", P(10, 0.9)]], {
-      quantum,
+      dimValues: { angle: 5, length: 10 },
     });
-    // atan2 ⇒ 5.143° ⇒ 5°; the ∠ chip is hidden on a first leg, but the curve
-    // the cursor steers still commits the rounded direction.
+    // The ∠ chip is hidden on a first leg, but the curve the cursor steers
+    // still commits the accepted direction.
     const p1 = steps[1].committed?.[0].p1 as Point2;
     expect(p1.x).toBeCloseTo(10 * Math.cos((5 * Math.PI) / 180), 9);
     expect(p1.y).toBeCloseTo(10 * Math.sin((5 * Math.PI) / 180), 9);
   });
 
-  it("NEVER re-rounds a locked value — the typed number wins outright", () => {
-    const ctx: ToolContext = { locks: { length: 22.3607 }, quantum };
+  it("a LOCK outranks an accepted value for the same field", () => {
+    const ctx: ToolContext = { locks: { length: 22.3607 }, dimValues: { length: 22.4 } };
     const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["click", P(5, 0)]], ctx);
     expect(steps[1].committed?.[0].p1).toEqual(P(22.3607, 0));
   });
 
-  it("locks still apply with rounding OFF (Alt held ⇒ quantum null)", () => {
-    const ctx: ToolContext = { locks: { length: 22.3607 }, quantum: null };
+  it("locks still apply with NO accepted values (rounding off / Alt held)", () => {
+    const ctx: ToolContext = { locks: { length: 22.3607 }, dimValues: null };
     const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["click", P(5, 0)]], ctx);
     expect(steps[1].committed?.[0].p1).toEqual(P(22.3607, 0));
   });
 
-  it("rounds the RADIUS, not the diameter, so both chips stay whole", () => {
+  it("applies an accepted RADIUS (the arbitration never offers diameter beside it)", () => {
     const steps = run(LIVE_TOOL_MACHINES.circle, [["click", P(0, 0)], ["click", P(12.34, 0)]], {
-      quantum,
+      dimValues: { radius: 12.3 },
     });
     expect(steps[1].committed?.[0].radius).toBeCloseTo(12.3, 9);
   });
 
   it("leaves a side COUNT alone — it is a verb, not a measurement", () => {
-    const steps = run(LIVE_TOOL_MACHINES.polygon, [["click", P(0, 0)], ["sides", 7], ["move", P(30, 0)]], {
-      quantum,
-    });
+    const steps = run(
+      LIVE_TOOL_MACHINES.polygon,
+      [["click", P(0, 0)], ["sides", 7], ["move", P(30, 0)]],
+      { dimValues: { radius: 30 } },
+    );
     expect(steps[2].dims?.find((d) => d.field === "sides")?.value).toBe(7);
   });
 });

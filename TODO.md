@@ -87,6 +87,53 @@ provenance from hover through persisted constraints, and screen-stable rendering
       existing importers are untouched.
 - Gate: `bunx tsc --noEmit` clean · `bun run test` **287 files / 4792 passed / 78 skipped**.
 
+### P2 — composable snap decisions — DONE
+
+- [x] Module split: `snapCandidates.ts` (NEW, generation + geometry primitives + stable ids +
+      provenance + the entity cache), `snapArbitration.ts` (NEW, scoring/composition/hysteresis),
+      `snapEngine.ts` rewritten as the facade. Every geometry primitive is re-exported so
+      `trimMath` / `marqueeSelect` / `extendMath` / `sketchHitTest` are untouched.
+- [x] Distances are SCREEN pixels through `PlaneScreenMetric`, and every nearest-point projection
+      minimizes that metric (`nearestOnRayMetric`, `minimizeOnCurve` with safeguarded
+      Newton+bisection). The plane-Euclidean `nearestOnCurve` stays for the hit-test lane, which
+      has no camera in scope.
+- [x] `computeSnapDecision` is the primary API; `computeSnap`/`SnapResult` remain a DERIVED legacy
+      view. **Deletion owed** — see "Deferred" below.
+- [x] Cursor rounding is an explicit numeric CANDIDATE. `ToolContext.quantum` → `dimValues`;
+      `projectEvent` applies the accepted values (locks on top) and no longer owns the rounding
+      decision. `dimQuantumNow`, `dimensionRoundingActive` and `gridRequireProximity` are DELETED.
+- [x] Composition implemented per §5.7 as explicit set SHAPES (full point · one guide · guide pair ·
+      polar ray · nothing), each carrying the numeric fields it leaves free, plus the analytic
+      guide+radial intersection. `numericClaim` maps a rectangle's `width` to the claim `x`, which
+      is what makes "x guide conflicts with width, composes with height" fall out rather than be
+      special-cased.
+- [x] Hysteresis: acquire/release radii (S/M/L ⇒ 5/8/12 acquire, 8/12/17 release), a 2px challenger
+      advantage held for 2 consecutive frames, deterministic tie-breaks (cost → retained → the set
+      that NAMES more → lexicographic ids).
+- [x] `SnapIndicator.show` and `ViewportEngine.setSketchSnap` take `SnapDecision`; the indicator
+      draws the union of every accepted candidate's guides, so a composed x+y alignment shows both
+      arms.
+- [x] `src/test/snap-decision/arbitration.test.ts` (NEW, 27 cases): the ladder defects, composition,
+      grid cell-relativity, hysteresis sequences, order-permutation determinism, id hygiene.
+- Gate: `bunx tsc --noEmit` clean · `bun run test` **288 files / 4822 passed / 78 skipped** ·
+  `bun run build` clean.
+
+**Two policy decisions taken in P2 that the specification did not pre-decide** (both are recorded
+here because they change user-visible behaviour):
+
+1. **A set is charged the full acquire reach for each plane degree of freedom it leaves
+   unresolved.** Without it a one-axis guide with a zero axis miss beats every endpoint in the
+   sketch forever, because it constrains less and therefore moves the cursor less. A guide PAIR, or
+   a polar ray composed with a rounded length, resolves both axes and pays nothing — so this is a
+   cost, not a reinstated tier.
+2. **The grid is inert below a 4px projected cell** (`GRID_MIN_CELL_PX`). A sub-pixel grid is not a
+   target anyone can aim at, capture to it is nearly free, and because grid claims the whole point
+   it would suppress the cursor rounding that is the useful answer at that zoom.
+
+**Deferred (owed):** delete `SnapResult` / `computeSnap` once `snapEngine.test.ts` (76 cases, the
+C++ `SnapManager` parity record) is migrated to `SnapDecision`, and once the ~6 remaining
+`SnapResult` importers move. Tracked here; not a P3–P5 blocker.
+
 ## KERNEL CONTINUATION (2026-08-15, plan `~/.claude/plans/act-as-senior-software-buzzing-simon.md`)
 
 Continues the semantic-publication hardening program on `kernel/semantic-publication-hardening`

@@ -65,38 +65,37 @@ describe("computeSnap priority", () => {
   });
 
   it("falls to grid when no geometry is near", () => {
-    const r = computeSnap({ x: 12, y: 7 }, [circle], base);
+    // 1.41px from the node at (10,10) — inside the cell-relative 3.5px reach.
+    const r = computeSnap({ x: 11, y: 9 }, [circle], base);
     expect(r.kind).toBe("grid");
     expect(r.point).toEqual({ x: 10, y: 10 });
   });
 
-  it("gridRequireProximity: still snaps when the cursor is close to an intersection", () => {
-    // (12,7) is within the 8-unit threshold of grid point (10,10) — same case
-    // as the unconditional test above, just proximity-gated (2nd+ point of a
-    // draw gesture with dimension-round on).
-    const r = computeSnap({ x: 12, y: 7 }, [circle], { ...base, gridRequireProximity: true });
-    expect(r.kind).toBe("grid");
-    expect(r.point).toEqual({ x: 10, y: 10 });
-  });
-
-  it("gridRequireProximity: falls through to 'none' when the cursor is mid-cell", () => {
-    // gridStep=10's half-diagonal (7.07) is inside the default 8-unit
-    // threshold, so no point in that grid can ever miss it — shrink the
-    // threshold (snapPx=3) so a genuine cell-center miss is representable.
-    const r = computeSnap({ x: 25, y: 25 }, [circle], {
-      ...base,
-      snapPx: 3,
-      gridRequireProximity: true,
-    });
+  it("grid capture is CELL-RELATIVE: a mid-cell cursor is not captured (SNAP P2)", () => {
+    // With gridStep 10 at 1px/unit the cell is 10px across, so grid reaches
+    // 0.35 x 10 = 3.5px. (25,25) is the cell centre — 7.07 away — and is left
+    // for cursor numeric rounding to answer, which is the whole point of the
+    // cell-relative reach replacing `gridRequireProximity`.
+    const r = computeSnap({ x: 25, y: 25 }, [circle], base);
     expect(r.kind).toBe("none");
     expect(r.point).toEqual({ x: 25, y: 25 });
   });
 
+  it("grid still captures inside its own cell-relative reach", () => {
+    // 2.83px from the node at (30,30) — inside 3.5px.
+    const r = computeSnap({ x: 28, y: 28 }, [circle], base);
+    expect(r.kind).toBe("grid");
+    expect(r.point).toEqual({ x: 30, y: 30 });
+  });
+
   it("emits an H/V alignment guide from a recent point", () => {
-    const r = computeSnap({ x: 10.2, y: 60 }, [], { ...base, recentPoints: [{ x: 10, y: 0 }] });
+    // Deliberately OFF the grid: a reference at a multiple of `gridStep` would
+    // put a grid node on the same coordinate, and a grid node is a full-point
+    // candidate that legitimately outranks a one-axis guide (SNAP P2).
+    const r = computeSnap({ x: 12.2, y: 63 }, [], { ...base, recentPoints: [{ x: 12, y: 0 }] });
     expect(r.kind).toBe("alignV");
-    expect(r.point.x).toBe(10);
-    expect(r.guides).toEqual([{ orientation: "vertical", value: 10, ref: { x: 10, y: 0 } }]);
+    expect(r.point.x).toBe(12);
+    expect(r.guides).toEqual([{ orientation: "vertical", value: 12, ref: { x: 12, y: 0 } }]);
   });
 
   it("snaps both axes but does NOT label 'Aligned' when x and y match two unrelated points", () => {
@@ -300,11 +299,22 @@ describe("computeSnap — extended priority ladder", () => {
     expect(r.label).toBe("Quadrant");
   });
 
-  it("center beats a co-near quadrant (higher tier)", () => {
-    const small: SketchEntity = { id: "c", type: "Circle", center: [0, 0], radius: 3 };
-    // Cursor near the center; the quadrant at (3,0) is also within 8px.
-    const r = computeSnap({ x: 1, y: 0 }, [small], base);
+  it("center beats a co-near quadrant", () => {
+    const small: SketchEntity = { id: "c", type: "Circle", center: [4, 4], radius: 3 };
+    // Cursor near the center; the quadrant at (7,4) is also within 8px.
+    const r = computeSnap({ x: 5, y: 4 }, [small], { ...base, enableGrid: false });
     expect(r.kind).toBe("center");
+  });
+
+  it("the ORIGIN outranks a circle centre that sits on it (SNAP P2)", () => {
+    // Same point, two names. Inside the 2px capture core the origin's bias
+    // (-2.0) beats the centre's (-0.75), and the origin is the more useful
+    // answer: it is what lets the commit author the `Fixed` anchor that removes
+    // the sketch's two translation DOF.
+    const atOrigin: SketchEntity = { id: "c", type: "Circle", center: [0, 0], radius: 3 };
+    const r = computeSnap({ x: 1, y: 0 }, [atOrigin], { ...base, enableGrid: false });
+    expect(r.kind).toBe("origin");
+    expect(r.point).toEqual({ x: 0, y: 0 });
   });
 
   it("snaps to a line-line intersection", () => {
@@ -440,7 +450,9 @@ describe("Ellipse snap surface", () => {
       enableGuidePoints: true,
       suppress: false,
     });
-    expect(res.kind).toBe("center");
+    // The ellipse is centred ON the sketch origin, and inside the 2px capture
+    // core the origin outranks a coincident centre — same point, better name.
+    expect(res.kind).toBe("origin");
     expect(res.point).toEqual({ x: 0, y: 0 });
   });
 
@@ -454,18 +466,34 @@ describe("Ellipse snap surface", () => {
     expect(nearestOnCurve({ x: 0, y: 0 }, { id: "x", type: "Ellipse", center: [0, 0] })).toBeNull();
   });
 
-  it("contributes NO intersection snaps — no closed-form ellipse×line math (seam)", () => {
+  it("DOES contribute intersection snaps now (SNAP P5 closed the seam)", () => {
+    // The line through the centre meets the ellipse at both major-axis ends.
     const l: SketchEntity = { id: "l1", type: "Line", p0: [-50, 0], p1: [50, 0] };
-    expect(entityIntersections(ell, l)).toEqual([]);
-    expect(entityIntersections(l, ell)).toEqual([]);
+    const hits = entityIntersections(ell, l).map((h) => [round9(h.x), round9(h.y)]);
+    expect(hits).toHaveLength(2);
+    expect(hits).toContainEqual([-ell.majorR!, 0]);
+    expect(hits).toContainEqual([ell.majorR!, 0]);
+    // Order-independent: the same two points either way round.
+    expect(entityIntersections(l, ell)).toHaveLength(2);
   });
 
-  it("contributes no quadrant points to the snap cache (centre only)", () => {
+  it("contributes its four AXIS EXTREMA as quadrant candidates (SNAP P5)", () => {
     const cache = buildSnapCache([ell]);
-    expect(cache.points).toEqual([{ point: { x: 0, y: 0 }, kind: "center" }]);
+    const kinds = cache.points.map((c) => c.kind).sort();
+    expect(kinds).toEqual(["center", "quadrant", "quadrant", "quadrant", "quadrant"]);
+    const centre = cache.points.find((c) => c.kind === "center");
+    expect(centre?.point).toEqual({ x: 0, y: 0 });
+    expect(centre?.ref).toEqual({ entityId: ell.id, position: "Center" });
+    // Extrema are DERIVED — no point address, so they can author nothing.
+    for (const q of cache.points.filter((c) => c.kind === "quadrant")) {
+      expect(q.ref).toBeUndefined();
+      expect(q.ownerCurveId).toBe(ell.id);
+    }
     expect(cache.intersections).toEqual([]);
   });
 });
+
+const round9 = (v: number): number => Math.round(v * 1e9) / 1e9;
 
 // ── SP-5.5: polar tracking ────────────────────────────────────────────────────
 
@@ -602,16 +630,21 @@ describe("computeSnap polar tier", () => {
 describe("computeSnap snapPx", () => {
   it("defaults to SNAP_PX (8) when omitted", () => {
     // 7.5 away: inside 8px, outside 5px.
-    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], base).kind).toBe("endpoint");
-    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], { ...base, snapPx: SNAP_PX }).kind).toBe("endpoint");
-    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], { ...base, snapPx: 5 }).kind).not.toBe("endpoint");
+    // Grid off: at 7.5px the node at (50,0) is 2.5px away and would legitimately
+    // win, which says nothing about the point reach this case is measuring.
+    const noGrid = { ...base, enableGrid: false };
+    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], noGrid).kind).toBe("endpoint");
+    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], { ...noGrid, snapPx: SNAP_PX }).kind).toBe("endpoint");
+    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], { ...noGrid, snapPx: 5 }).kind).not.toBe("endpoint");
   });
 
   it("a LARGER radius extends the point ladder's reach", () => {
     // 10 away: outside 8px, inside 12px.
     const far = { x: 50, y: 0 };
     expect(computeSnap(far, [hLine], { ...base, enableGrid: false, enableGuideLines: false }).snapped).toBe(false);
-    expect(computeSnap(far, [hLine], { ...base, snapPx: 12 }).kind).toBe("endpoint");
+    expect(computeSnap(far, [hLine], { ...base, enableGrid: false, snapPx: 12 }).kind).toBe(
+      "endpoint",
+    );
   });
 
   it("scales the guide and polar tiers too (one reach governs all of them)", () => {

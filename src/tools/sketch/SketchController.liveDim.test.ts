@@ -268,7 +268,11 @@ describe("SketchController live dimensions (Wave 2 wiring)", () => {
     enable();
     settingsStore.getState().setSnap("grid", true);
     click(0, 0); // first anchor, trivially on-grid
-    click(52, 2); // 2.8 units from grid intersection (50,0) — well inside the 8px reach
+    // SNAP P2: grid and cursor rounding are now COMPETING candidates scored on
+    // screen distance, not a "grid gets first refusal" rule. At 0.71px from the
+    // node, grid is the cheaper answer; the (length, angle) rounding grid is
+    // much finer than a 50mm xy grid, so it wins whenever it is genuinely closer.
+    click(50.5, 0.5);
     await flushSketchMutations();
 
     expect(entities()[0].p1).toEqual([50, 0]);
