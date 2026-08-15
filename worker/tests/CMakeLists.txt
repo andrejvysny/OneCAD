@@ -198,6 +198,12 @@ add_executable(test_offsetface_spike test_offsetface_spike.cpp)
 target_link_libraries(test_offsetface_spike PRIVATE worker_core)
 add_test(NAME offsetface_spike COMMAND test_offsetface_spike)
 
+# Imported-blend direct-model reconstruction spike: recognize a history-free
+# constant-radius fillet, suppress it, and prove the sharp support body is restored.
+add_executable(test_offsetface_reblend_spike test_offsetface_reblend_spike.cpp)
+target_link_libraries(test_offsetface_reblend_spike PRIVATE worker_core)
+add_test(NAME offsetface_reblend_spike COMMAND test_offsetface_reblend_spike)
+
 # --- OFFSET-FACE W1: the `op.offsetFace` executor (SCHEMA §7.3) + the read-only
 #     `PrepareOffsetFace` authoring handshake (§7.6). Exact analytic volumes/radii,
 #     the σ-convention regression, the tangent-closure guard (incl. the 0.75° draft
