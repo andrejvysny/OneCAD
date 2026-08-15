@@ -252,6 +252,35 @@ describe("SketchStaticLayer tint", () => {
     layer.setHover({ kind: "sketch", sketchId: "s1" });
     expect(drawMat.color.getHex()).toBe(palette.hover3d().getHex());
   });
+
+  // ── Vertex dots are an AFFORDANCE, not permanent content (Track B1a) ──────
+
+  it("starts a freshly-built sketch's vertex dots hidden (opacity 0)", () => {
+    const { layer, sketchRoot } = makeLayer();
+    layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [] });
+    const g = groupFor(sketchRoot, "s1");
+    const points = childOfType<THREE.Points>(g, "Points")!;
+    expect((points.material as THREE.PointsMaterial).opacity).toBe(0);
+  });
+
+  it("lights vertex dots on hover or selection, dims them again once neither applies", () => {
+    const { layer, sketchRoot } = makeLayer();
+    layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [] });
+    const g = groupFor(sketchRoot, "s1");
+    const pointsMat = childOfType<THREE.Points>(g, "Points")!.material as THREE.PointsMaterial;
+
+    layer.setHover({ kind: "sketch", sketchId: "s1" });
+    expect(pointsMat.opacity).toBe(1);
+
+    layer.setHover(null);
+    expect(pointsMat.opacity).toBe(0);
+
+    layer.setSelected([{ kind: "sketch", sketchId: "s1" }]);
+    expect(pointsMat.opacity).toBe(1);
+
+    layer.setSelected([]);
+    expect(pointsMat.opacity).toBe(0);
+  });
 });
 
 describe("SketchStaticLayer visibility", () => {

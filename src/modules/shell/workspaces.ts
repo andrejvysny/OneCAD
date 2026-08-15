@@ -57,7 +57,6 @@ const COMMON: readonly PanelPlacement[] = [
 const MODELING_TOOL_SLOTS: readonly (readonly [PanelId, string])[] = [
   [ModelingPanels.FloatingToolbar, Slots.ToolbarPrimary],
   [ModelingPanels.SketchChromeBar, Slots.ToolbarContextual],
-  [ModelingPanels.SketchConstraintToolbar, Slots.ToolbarContextual],
 ];
 
 const modelingTools = (visible: boolean): PanelPlacement[] =>

@@ -14,6 +14,7 @@ import { toolbarScopeToken } from "@/modules/modeling/registryToolbar";
 import { useModelingToolContext } from "@/modules/modeling/selectionContext";
 import { ToolButton, toolbarIcon } from "./ToolButton";
 import { ToolFlyout } from "./ToolFlyout";
+import { TOOLBAR_TOP } from "./chromeLayout";
 
 const ALWAYS_ENABLED: ToolAvailability = { enabled: true };
 
@@ -115,9 +116,14 @@ export function FloatingToolbar() {
     <div
       role="toolbar"
       aria-label="Tools"
+      style={{ top: TOOLBAR_TOP }}
       className={cn(
-        "absolute left-1/2 top-3 z-30 flex -translate-x-1/2 items-center gap-0.5",
-        "rounded-lg border border-border p-1 shadow-card",
+        "absolute left-1/2 z-30 flex -translate-x-1/2 items-center gap-0.5",
+        "border border-border p-1 shadow-card",
+        // In sketch mode this row's bottom edge sits flush against
+        // SketchChromeBar's top edge (see chromeLayout.ts) — one visually
+        // fused two-row pill instead of two separately-bordered ones.
+        mode === "sketch" ? "rounded-t-lg rounded-b-none border-b-0" : "rounded-lg",
         mode === "sketch" ? "bg-toolbar-sketch" : "bg-surface",
       )}
     >

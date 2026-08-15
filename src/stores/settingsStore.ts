@@ -70,6 +70,14 @@ export interface ShowSettings {
    * it off never removes a constraint, only its on-canvas glyph.
    */
   constraintChips: boolean;
+  /**
+   * Show Coincident badges specifically, on top of `constraintChips`. Default
+   * OFF (Sketcher UX cleanup, Track B2) — a shared vertex already reads as
+   * "these meet here"; the badge added little and was the single biggest
+   * source of per-corner clutter on simple geometry. Every other kind still
+   * follows `constraintChips` alone.
+   */
+  coincidentBadges: boolean;
 }
 
 export interface NavigationSettings {
@@ -163,6 +171,7 @@ export const settingsStore = createStore<SettingsState>()(
         snappingHints: true,
         liveDimensions: true,
         constraintChips: true,
+        coincidentBadges: false,
       },
       experimentalWebGpu: false,
       navigation: { inputDevice: "auto" },
@@ -197,7 +206,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: STORAGE_KEY,
-      version: 9,
+      version: 10,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -218,6 +227,11 @@ export const settingsStore = createStore<SettingsState>()(
       // hard-coded — so a migrated blob snaps identically until it is changed.
       // v8 → v9 added the constraint-chip visibility toggle. A pre-v9 blob has
       // no key; backfill ON (fresh-install parity — the badges were always on).
+      // v9 → v10 added the Coincident-badge visibility toggle (Sketcher UX
+      // cleanup, Track B2). A pre-v10 blob has no key; backfill OFF — this is
+      // a behavior CHANGE for existing users too (Coincident badges used to
+      // always render), not a fresh-install-parity backfill, so the new
+      // default applies uniformly regardless of blob age.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -250,6 +264,9 @@ export const settingsStore = createStore<SettingsState>()(
         }
         if (s && version < 9) {
           s.show = { constraintChips: true, ...(s.show as Partial<ShowSettings>) } as ShowSettings;
+        }
+        if (s && version < 10) {
+          s.show = { coincidentBadges: false, ...(s.show as Partial<ShowSettings>) } as ShowSettings;
         }
         return s as unknown as SettingsState;
       },

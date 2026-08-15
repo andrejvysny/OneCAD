@@ -9,7 +9,7 @@
  * (0,0)…(w,h) matches the driver's projection space (canvas size).
  */
 import { useEffect, useMemo, useRef } from "react";
-import { Icon } from "@/icons/Icon";
+import { Icon, ICON_MONO } from "@/icons/Icon";
 import { useToolStore } from "@/stores/toolStore";
 import { useSketchStore } from "@/stores/sketchStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -19,6 +19,7 @@ import { createClient } from "@/ipc/client";
 import { editConstraintValue } from "@/tools/sketch/sketchService";
 import { LENGTH_SUFFIX } from "@/units/format";
 import { anchorKey, layoutBadges } from "./badgeLayout";
+import { CONSTRAINT_PRESENTATION } from "./constraintCatalog";
 import { DimensionInput } from "./DimensionInput";
 
 /** Screen-px clearance from the entity axis to a badge's near edge — the
@@ -28,6 +29,7 @@ const BADGE_OFFSET_PX = 10;
 export function ConstraintBadgeLayer() {
   const mode = useToolStore((s) => s.mode);
   const showChips = useSettingsStore((s) => s.show.constraintChips);
+  const showCoincident = useSettingsStore((s) => s.show.coincidentBadges);
   const session = useSketchStore((s) => s.session);
   const conflictingIds = useSketchStore((s) => s.conflictingIds);
   const engine = useViewportEngine();
@@ -40,7 +42,14 @@ export function ConstraintBadgeLayer() {
     }
   }
 
-  const badges = useMemo(() => layoutBadges(session), [session]);
+  // A shared vertex already communicates "these meet here" — a Coincident
+  // badge on top of it adds little and is the single biggest source of
+  // per-corner clutter (Sketcher UX cleanup, Track B2). Hidden by default,
+  // opt back in via the snap popover's "Coincident badges" row.
+  const badges = useMemo(() => {
+    const all = layoutBadges(session);
+    return showCoincident ? all : all.filter((b) => b.kind !== "Coincident");
+  }, [session, showCoincident]);
   // Constraint ids the solver reports in conflict (SCHEMA §7.4) — tint their badges.
   const conflicting = useMemo(() => new Set(conflictingIds), [conflictingIds]);
   const plane = session?.plane ?? null;
@@ -119,14 +128,21 @@ export function ConstraintBadgeLayer() {
               <span
                 title={b.kind}
                 style={staggerStyle}
-                className={`inline-flex h-4 min-w-4 items-center justify-center rounded-sm border bg-surface px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
-                  isConflicting ? "border-traffic-close text-traffic-close" : "border-border text-accent"
+                className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded-full leading-none ${
+                  isConflicting ? `bg-danger-surface text-traffic-close ${ICON_MONO}` : "bg-canvas/60 text-ink-4"
                 }`}
               >
-                {/* Fixed reads as a padlock on the canvas (Shapr3D convention) —
-                    the anchor glyph stays for the toolbar/inspector list, which
-                    don't have this space pressure and predate this badge. */}
-                {b.kind === "Fixed" ? <Icon name="lock" size={10} strokeWidth={2} /> : b.glyph}
+                {/* Same icon set as the toolbar/context-chips/Inspector (design
+                    item: one constraint icon system, not a canvas-only text
+                    glyph). Fixed still reads as a padlock on the canvas
+                    (Shapr3D convention) — the anchor icon stays for the
+                    toolbar/inspector list, which predate this badge and don't
+                    have this space pressure. */}
+                <Icon
+                  name={b.kind === "Fixed" ? "lock" : CONSTRAINT_PRESENTATION[b.kind].icon}
+                  size={10}
+                  strokeWidth={1.8}
+                />
               </span>
             )}
           </div>

@@ -48,6 +48,13 @@
  * the most-recently-requested overlay, and it renders `null` until the
  * "Library" tool activates it — same "nothing new is visible until opened"
  * reasoning as `SaveAsComponentHost` above.
+ *
+ * AMENDED 2026-08-15 (Sketcher UX cleanup, Track A3) — recorded in TODO.md.
+ * `SketchConstraintToolbar` LEFT the registry — its persistent floating pill
+ * (a third stacked sketch-mode toolbar row) is retired. Its button grid moved
+ * verbatim into `ConstraintMenu`, a trigger + popover mounted INSIDE
+ * `SketchChromeBar` (no new panel id, no new registry entry — it is a plain
+ * child component, not a contribution). Nothing else in this list moved.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",
@@ -64,7 +71,6 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "MeasurePanel",
   "FloatingToolbar",
   "SketchChromeBar",
-  "SketchConstraintToolbar",
   "ModelTreePanel",
   "VariablesPanel",
   "InspectorPanel",

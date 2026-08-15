@@ -22,6 +22,7 @@ import * as THREE from "three";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import { worldPerPixel } from "./screenScale";
 import { RENDER_ORDER } from "./renderOrder";
 
@@ -31,11 +32,30 @@ interface TriadColors {
   z: THREE.Color;
 }
 
+interface OriginTriadDeps {
+  overlay: HtmlOverlayDriver;
+  overlayEl: HTMLElement;
+}
+
 /** Leg width in CSS px. Same weight as sketch lines. */
 const TRIAD_WIDTH = 2;
 
 /** Leg length in CSS px, held constant across zoom. */
 const TRIAD_PX = 110;
+
+/**
+ * Recessive weight, relative to real geometry — without this the triad reads
+ * as ambiguous "two colored lines" rather than a coordinate frame (Sketcher
+ * UX cleanup, Track B5).
+ */
+const TRIAD_OPACITY = 0.65;
+
+/** How far past the leg's own tip an axis label sits, as a fraction of leg
+ *  length — clear of the line's end cap without floating detached from it. */
+const LABEL_REACH = 1.12;
+
+const AXES = ["x", "y", "z"] as const;
+type Axis = (typeof AXES)[number];
 
 /** Flat rgb pairs (both ends of each leg) in +X/+Y/+Z order. */
 function legColors(colors: TriadColors): number[] {
@@ -46,12 +66,34 @@ function legColors(colors: TriadColors): number[] {
   return col;
 }
 
+/** Small "X"/"Y"/"Z" DOM label, colored from the SAME live CSS var the leg's
+ *  baked-in-geometry color was read from at construction — a DOM element can
+ *  read a custom property live, so this needs no `refreshColors()`
+ *  bookkeeping on theme flip, unlike the geometry-side per-vertex colors. */
+function makeLabel(axis: Axis): HTMLElement {
+  const el = document.createElement("div");
+  el.textContent = axis.toUpperCase();
+  el.style.position = "absolute";
+  el.style.left = "0";
+  el.style.top = "0";
+  el.style.font = "600 10px var(--font-ui)";
+  el.style.color = `var(--color-axis-${axis})`;
+  el.style.pointerEvents = "none";
+  el.style.willChange = "transform";
+  return el;
+}
+
 export class OriginTriad {
   readonly object3D: THREE.Group;
   private readonly material: LineMaterial;
   private readonly seg: LineSegments2;
+  private readonly labels: Record<Axis, HTMLElement>;
+  private readonly labelIds: Record<Axis, string>;
 
-  constructor(colors: TriadColors) {
+  constructor(
+    colors: TriadColors,
+    private readonly deps: OriginTriadDeps,
+  ) {
     this.object3D = new THREE.Group();
     this.object3D.name = "originTriad";
     // Draw after the grid (renderOrder -1) but still behind solid geometry.
@@ -64,6 +106,14 @@ export class OriginTriad {
       polygonOffset: true,
       polygonOffsetFactor: -4,
       polygonOffsetUnits: -4,
+      transparent: true,
+      opacity: TRIAD_OPACITY,
+      // Coplanar transparent content convention (SketchObject precedent): the
+      // polygonOffset above already keeps this off the grid in depth-buffer
+      // space, so this content doesn't need to WRITE depth for anything to
+      // layer correctly against it — only against solid bodies, which
+      // `depthTest` (unset here, defaults true) still handles.
+      depthWrite: false,
       toneMapped: false,
     });
 
@@ -83,6 +133,17 @@ export class OriginTriad {
     // scale — culling it is never a win and can wrongly drop it.
     this.seg.frustumCulled = false;
     this.object3D.add(this.seg);
+
+    this.labels = { x: makeLabel("x"), y: makeLabel("y"), z: makeLabel("z") };
+    this.labelIds = { x: "__originTriad_x", y: "__originTriad_y", z: "__originTriad_z" };
+    for (const axis of AXES) {
+      this.deps.overlayEl.appendChild(this.labels[axis]);
+      // Registered once, at construction, for the object's whole lifetime —
+      // unlike a snap hint these are permanent, so there is no lazy-register
+      // branch to maintain. `update()` corrects the position every frame;
+      // this initial (0,0,0) placement is never actually rendered from.
+      this.deps.overlay.register(this.labelIds[axis], this.labels[axis], new THREE.Vector3(0, 0, 0));
+    }
   }
 
   /**
@@ -95,6 +156,13 @@ export class OriginTriad {
     // The group never moves, so its local position IS its world position.
     this.object3D.scale.setScalar(worldPerPixel(camera, this.object3D.position, h) * TRIAD_PX);
     this.material.resolution.set(Math.max(width, 1) * dpr, h * dpr);
+
+    // Label world positions ride the SAME constant-on-screen-size scale the
+    // legs just got — a fixed reach just past each tip, no separate sizing.
+    const reach = this.legLength * LABEL_REACH;
+    this.deps.overlay.setWorldPos(this.labelIds.x, new THREE.Vector3(reach, 0, 0));
+    this.deps.overlay.setWorldPos(this.labelIds.y, new THREE.Vector3(0, reach, 0));
+    this.deps.overlay.setWorldPos(this.labelIds.z, new THREE.Vector3(0, 0, reach));
   }
 
   /**
@@ -117,5 +185,9 @@ export class OriginTriad {
     this.object3D.remove(this.seg);
     this.seg.geometry.dispose();
     this.material.dispose();
+    for (const axis of AXES) {
+      this.deps.overlay.unregister(this.labelIds[axis]);
+      this.labels[axis].remove();
+    }
   }
 }

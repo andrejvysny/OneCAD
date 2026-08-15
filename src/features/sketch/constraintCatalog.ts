@@ -5,12 +5,13 @@
  * module defines its own table. The record covers all 18 kinds so any consumer
  * can label anything the applicability matrix emits (incl. H-/V-Distance).
  *
- * TWO representations, deliberately. `icon` is the drawn two-tone symbol from
- * the CAD icon family and is what the DOM surfaces render. `glyph` is the text
- * fallback, still used by the canvas badge layer: `badgeLayout.ts` places
- * badges from MEASURED TEXT WIDTH, so swapping those to icons means moving that
- * layer to fixed-size boxes and re-verifying collision/placement. Until that
- * happens both live here rather than in two competing tables.
+ * TWO representations. `icon` is the drawn two-tone symbol from the CAD icon
+ * family and is what every DOM surface renders, INCLUDING the canvas badge
+ * layer (`ConstraintBadgeLayer` unified onto it — Sketcher UX cleanup, Track
+ * B2; badges already sat in a fixed-size box with fixed offsetIndex staggering,
+ * not measured text, so the swap needed no layout change). `glyph` is a plain
+ * text fallback kept for cheap non-DOM contexts (tests, logs) — no renderer
+ * reads it anymore.
  */
 import type { IconName } from "@/icons/paths";
 import type { SketchConstraintType } from "@/ipc/types";

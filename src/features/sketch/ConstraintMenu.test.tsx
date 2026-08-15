@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SketchConstraintToolbar } from "./SketchConstraintToolbar";
+import { ConstraintMenu } from "./ConstraintMenu";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { sketchSelectionStore, type SketchSel } from "@/stores/sketchSelectionStore";
@@ -29,34 +29,40 @@ function enterSketch(entities: SketchEntity[], selected: SketchSel[]) {
   });
 }
 
-describe("SketchConstraintToolbar", () => {
+describe("ConstraintMenu", () => {
   beforeEach(() => resetStores());
 
   it("is hidden in model mode", () => {
-    render(<SketchConstraintToolbar />);
-    expect(screen.queryByRole("toolbar", { name: "Constraints" })).toBeNull();
+    render(<ConstraintMenu />);
+    expect(screen.queryByRole("button", { name: "Constraints" })).toBeNull();
   });
 
   it("is hidden in sketch mode with no active session", () => {
-    render(<SketchConstraintToolbar />);
+    render(<ConstraintMenu />);
     act(() => toolStore.getState().setMode("sketch"));
-    expect(screen.queryByRole("toolbar", { name: "Constraints" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Constraints" })).toBeNull();
   });
 
-  it("renders all 16 constraint buttons, all disabled with no selection", () => {
-    // 12 geometric (GEOMETRIC_TYPES — includes the Tangent/Equal/Midpoint
-    // frontend-extension additions) + 4 dimensional (DIMENSIONAL_TYPES).
-    render(<SketchConstraintToolbar />);
+  it("renders a closed trigger; opening it shows all 16 constraint buttons, all disabled with no selection", async () => {
+    const user = userEvent.setup();
+    render(<ConstraintMenu />);
     enterSketch(twoLines, []);
+
+    expect(screen.queryByRole("toolbar", { name: "Constraints" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Constraints" }));
+
     const bar = screen.getByRole("toolbar", { name: "Constraints" });
     const buttons = bar.querySelectorAll("button");
     expect(buttons).toHaveLength(16);
     buttons.forEach((b) => expect(b).toBeDisabled());
   });
 
-  it("enables exactly the applicable kinds for a two-line selection", () => {
-    render(<SketchConstraintToolbar />);
+  it("enables exactly the applicable kinds for a two-line selection", async () => {
+    const user = userEvent.setup();
+    render(<ConstraintMenu />);
     enterSketch(twoLines, [{ entityId: "e1" }, { entityId: "e2" }]);
+    await user.click(screen.getByRole("button", { name: "Constraints" }));
+
     // line & line ⇒ Distance, Parallel, Perpendicular, Angle.
     expect(screen.getByRole("button", { name: "Parallel" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Perpendicular" })).toBeEnabled();
@@ -70,8 +76,9 @@ describe("SketchConstraintToolbar", () => {
 
   it("clicking an enabled geometric button applies the constraint (lands in the session)", async () => {
     const user = userEvent.setup();
-    render(<SketchConstraintToolbar />);
+    render(<ConstraintMenu />);
     enterSketch(twoLines, [{ entityId: "e1" }, { entityId: "e2" }]);
+    await user.click(screen.getByRole("button", { name: "Constraints" }));
 
     await user.click(screen.getByRole("button", { name: "Parallel" }));
 

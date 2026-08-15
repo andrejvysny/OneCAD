@@ -64,8 +64,14 @@ test("a second Distance on the same points with a different value is rejected + 
     await page.keyboard.up("Shift");
   };
 
-  const toolbar = constraintToolbar(page);
-  const distanceBtn = toolbar.getByRole("button", { name: "Distance", exact: true });
+  // A plain selector chain, not a snapshot — the menu is a Popover that
+  // closes on any outside click (Sketcher UX cleanup, Track A3), so
+  // `constraintToolbar(page)` must be called again to re-open it right
+  // before EACH round below, not cached across the intervening
+  // deselect/reselect canvas clicks.
+  const distanceBtn = page
+    .getByRole("toolbar", { name: "Constraints" })
+    .getByRole("button", { name: "Distance", exact: true });
   const rows = () => page.locator('[data-testid^="constraint-row-"]');
   // Scoped to the toolChipStore-driven chip host (ModelToolChips.tsx — the
   // shared renderer for EVERY `toolChipStore` chip, model-tool AND sketch
@@ -75,6 +81,7 @@ test("a second Distance on the same points with a different value is rejected + 
 
   // ── First Distance: accepted, a new row lands, DOF drops by 1 ────────────────
   await selectBothEndpoints();
+  await constraintToolbar(page);
   await expect(distanceBtn).toBeEnabled();
   const rowsBefore = await rows().count();
   await distanceBtn.click();
@@ -95,6 +102,7 @@ test("a second Distance on the same points with a different value is rejected + 
   // ── Second Distance on the SAME two points, a different value: rejected ─────
   await deselect();
   await selectBothEndpoints();
+  await constraintToolbar(page);
   await expect(distanceBtn).toBeEnabled();
   await distanceBtn.click();
 

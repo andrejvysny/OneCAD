@@ -484,9 +484,20 @@ export function ViewportRoot({ className }: { className?: string }) {
           } else {
             engine.setSketchHover([]);
           }
+          // Endpoint/midpoint/centroid AFFORDANCE (Sketcher UX cleanup, Track
+          // B1b): dim only when truly idle — Select tool, nothing hovered,
+          // nothing selected. Any hover, selection, or other tool (dimension/
+          // trim/fillet/drawing tools all snap to these points) keeps them lit.
+          const idle =
+            toolStore.getState().sketchTool === "select" &&
+            !s.hover &&
+            !s.constraintHover &&
+            s.selected.length === 0;
+          engine.setSketchPointAffordance(!idle);
         };
         applySketchSelection();
         cleanups.push(sketchSelectionStore.subscribe(applySketchSelection));
+        cleanups.push(toolStore.subscribe(applySketchSelection));
 
         // ?vpdemo / ?sketchdemo / ?toolsdemo — demo-only flags, handled by a
         // dynamically-imported dev module (devDemos.ts) so the mock-kernel

@@ -4,7 +4,13 @@
  */
 import type { SketchStatus } from "@/stores/documentStore";
 
-export type StatusTone = "warn" | "ok";
+/**
+ * Four real tones, not two. "under" is the expected state for most of a
+ * sketch's life (normal, not a warning) — collapsing it into the same "warn"
+ * bucket as "over"/"error" is exactly what made a fresh rectangle look broken
+ * (UX audit). Reserve amber/red for states that actually need attention.
+ */
+export type StatusTone = "under" | "ok" | "over" | "error";
 
 /** Short pill: "Under-constrained · DOF 3" / "Fully constrained · DOF 0" / … */
 export function sketchStatusText(status: SketchStatus, dof: number): { label: string; tone: StatusTone } {
@@ -12,16 +18,38 @@ export function sketchStatusText(status: SketchStatus, dof: number): { label: st
     case "ok":
       return { label: `Fully constrained · DOF ${dof}`, tone: "ok" };
     case "over":
-      return { label: `Over-constrained · DOF ${dof}`, tone: "warn" };
+      return { label: `Over-constrained · DOF ${dof}`, tone: "over" };
     case "error":
-      return { label: `Conflicting · DOF ${dof}`, tone: "warn" };
+      return { label: `Conflicting · DOF ${dof}`, tone: "error" };
     default:
       // DOF 0 means no freedom remains, even while the solver status label lags
       // behind (a transient "under" between the last solve and the next status
       // flip) — never contradict the DOF count on the label.
       if (dof === 0) return { label: `Fully constrained · DOF 0`, tone: "ok" };
-      return { label: `Under-constrained · DOF ${dof}`, tone: "warn" };
+      return { label: `Under-constrained · DOF ${dof}`, tone: "under" };
   }
+}
+
+/** The one place tone maps to a text-color class — every display site (chrome
+ *  bar, Inspector, status bar) must go through this instead of hand-rolling
+ *  its own ternary, or the 4-state semantics drift back apart per-call-site. */
+export function sketchStatusToneClass(tone: StatusTone): string {
+  switch (tone) {
+    case "ok":
+      return "text-dof-ok";
+    case "over":
+      return "text-warn";
+    case "error":
+      return "text-traffic-close";
+    default:
+      return "text-dof-neutral";
+  }
+}
+
+/** Whether this tone needs a "pay attention" treatment (bordered/tinted card)
+ *  vs. the plain neutral one under/ok share. */
+export function sketchStatusIsAlert(tone: StatusTone): boolean {
+  return tone === "over" || tone === "error";
 }
 
 /** Inspector card body sentence. */
