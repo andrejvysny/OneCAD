@@ -11,6 +11,7 @@ import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { resetStores } from "@/test/resetStores";
 import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { settleUntil } from "@/test/settle";
 import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import { flushSketchMutations } from "@/tools/sketch/sketchService";
 import type { SketchConstraint, SketchSession } from "@/ipc/types";
@@ -420,16 +421,21 @@ describe("InspectorPanel", () => {
       // The commit is fire-and-forget from the row, so wait for it to LAND rather
       // than assume one microtask flush drained both round-trips.
       //
-      // The explicit timeouts are load insurance, not slow code: both round-trips
-      // are `mockResolvedValue` stubs, so the commit is pure microtasks and lands
-      // in well under a millisecond on an idle machine. But `vi.waitFor` budgets
+      // Settled by TURNS, not by a deadline. Both round-trips are
+      // `mockResolvedValue` stubs, so the commit is pure microtasks and lands in
+      // well under a millisecond on an idle machine — but `vi.waitFor` budgets
       // WALL-CLOCK, and vitest runs files in parallel workers, so a starved event
-      // loop can blow the 1 s default while the assertion itself is fine — this
-      // test went red in CI and green on rerun at the same sha. The assertion is
-      // unchanged ("it gets called"); only the arbitrary deadline moved.
-      const settle = { timeout: 4_000 };
-      await vi.waitFor(() => expect(apply).toHaveBeenCalled(), settle);
-      await vi.waitFor(
+      // loop blew the budget while the assertion itself was fine. This test went
+      // red in CI at a 1 s budget, was raised to 4 s, and went red AGAIN. Raising
+      // it further only makes the red rarer. `settleUntil` counts event-loop turns
+      // instead, which is a property of the code rather than of the machine.
+      // One REAL macrotask per turn, inside `act` so renders scheduled by the
+      // resolved promises are flushed rather than warned about.
+      const settle = {
+        turn: () => act(async () => void (await new Promise((r) => setTimeout(r, 0)))),
+      };
+      await settleUntil(() => expect(apply).toHaveBeenCalled(), settle);
+      await settleUntil(
         () =>
           expect(documentStore.getState().features.find((f) => f.id === "f-a")?.primaryValue).toBe(30),
         settle,

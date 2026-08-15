@@ -10,6 +10,7 @@ import {
   __setBodyLoadTimeoutForTests,
   __setExactPreviewTimeoutForTests,
 } from "./ModelToolController";
+import { settleUntil } from "@/test/settle";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
@@ -478,11 +479,13 @@ describe("ModelToolController Wave 2", () => {
     controller.editExtrudeFeature("ex-1"); // tool is ALREADY extrude → setTool is a no-op
     // The prior session was ended (finding 10 — no leak), and a fresh one armed.
     //
-    // Waited for, not flushed: `flush()` is a single setTimeout(0), i.e. ONE
-    // macrotask tick, while this path awaits endPreview and then beginPreview.
-    // On a loaded machine one tick does not drain both, which is how this went
-    // red in CI and passed 18/18 in isolation.
-    await vi.waitFor(() => {
+    // Settled by TURNS, not flushed and not timed: `flush()` is a single
+    // setTimeout(0), i.e. ONE macrotask tick, while this path awaits endPreview
+    // and then beginPreview. One tick does not drain both, which is how this went
+    // red under full-suite load and passed 18/18 in isolation. `vi.waitFor` would
+    // fix the tick count but reintroduce a wall-clock budget on a loaded worker —
+    // the defect `settleUntil` exists to remove.
+    await settleUntil(() => {
       expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), false);
       expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
     });
