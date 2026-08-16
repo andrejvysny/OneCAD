@@ -471,6 +471,24 @@ export async function constraintToolbar(page: Page): Promise<Locator> {
  */
 export async function waitForCameraSettled(page: Page): Promise<void> {
   const STABLE_WINDOW_MS = 350;
+  // `__vpEngine` exists only under `?vpdebug`, and without it the settle check
+  // below reads `!undefined && !undefined` — TRUE on the first poll, every time.
+  // So a spec booted with `openEditor` got a silent no-op exactly where it asked
+  // for the protection this helper exists to give, including inside
+  // `enterSketchViaPlanePicker`. Measured consequence: `sketch-multi-object`
+  // failed ~1-in-8 in webkit with an OBLIQUE snap metric (`m01 = -3.05` where a
+  // settled sketch view reads 0), i.e. the clicks were resolved against a camera
+  // still tweening into the plane, and the rectangle they described was refused
+  // as degenerate — 0 entities, no error. Fail loudly instead.
+  const hasEngine = await page.evaluate(
+    () => (window as unknown as { __vpEngine?: unknown }).__vpEngine !== undefined,
+  );
+  if (!hasEngine) {
+    throw new Error(
+      "waitForCameraSettled: window.__vpEngine missing — boot with openEditorDebug (?vpdebug), " +
+        "otherwise this helper cannot observe the camera and would return immediately",
+    );
+  }
   // "No tween in flight" is NOT enough: the initial-load auto-fit is debounced,
   // so a fit can be scheduled-but-not-started and would begin moving the camera
   // after this helper already returned — invalidating any client coordinate the

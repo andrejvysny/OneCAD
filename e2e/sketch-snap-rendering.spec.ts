@@ -78,11 +78,25 @@ test("guide dashes hold a CSS-constant cadence across a real zoom", async ({ pag
   const snap = await getSketchSnapshot(page);
   const ref = snap.lines[0].p1;
 
+  // Hover on the endpoint's own screen COLUMN, a fixed number of CSS pixels away.
+  //
+  // The plane-space version of this (`ref[1] + 90`) is zoom-dependent: 90 plane
+  // units is ~427 px at the default view, which puts the hover within ~30 px of
+  // the canvas edge here and OFF the canvas on the CI runner — where this spec's
+  // first CI execution failed with zero guide materials, while passing locally.
+  // A settled sketch view looks straight down the plane normal (the snap metric's
+  // off-diagonal terms are 0), so a screen-vertical move holds the plane x that
+  // the alignment guide is drawn from, at any zoom.
   const hoverAligned = async (): Promise<void> => {
     const s = await getSketchSnapshot(page);
-    const at = await planePointToClient(page, s.plane, { x: ref[0], y: ref[1] + 90 });
-    await page.mouse.move(at.x, at.y);
-    await page.mouse.move(at.x, at.y);
+    const at = await planePointToClient(page, s.plane, { x: ref[0], y: ref[1] });
+    const box = await page.locator('[data-testid="viewport-canvas"]').boundingBox();
+    if (!box) throw new Error("no canvas box");
+    const OFFSET_PX = 200;
+    const up = at.y - OFFSET_PX;
+    const y = up > box.y + 20 ? up : Math.min(at.y + OFFSET_PX, box.y + box.height - 20);
+    await page.mouse.move(at.x, y);
+    await page.mouse.move(at.x, y);
   };
 
   await hoverAligned();

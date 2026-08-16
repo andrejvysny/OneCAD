@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
-  openEditor,
+  openEditorDebug,
   enterSketchViaPlanePicker,
   clickAt,
   clickAtAwaitingDofChange,
@@ -18,7 +18,7 @@ import {
  * Assertions go through store-driven chrome: DOF pill + inspector Constraints.
  */
 test("line tool draws a 3-segment chain with autoconstraint feedback", async ({ page }) => {
-  await openEditor(page);
+  await openEditorDebug(page);
   await enterSketchViaPlanePicker(page);
 
   // Fresh empty sketch: fully constrained, DOF 0.

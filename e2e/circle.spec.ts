@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
-  openEditor,
+  openEditorDebug,
   enterSketchViaPlanePicker,
   selectSketchTool,
   clickAt,
@@ -17,7 +17,7 @@ import {
  * returns to model mode with the sketch persisted in the tree.
  */
 test("circle tool draws a circle and reports its degrees of freedom", async ({ page }) => {
-  await openEditor(page);
+  await openEditorDebug(page);
   await enterSketchViaPlanePicker(page);
   // The mock seeds three sketches; entering just added ours.
   const sketchCount = await sketchOptions(page).count();

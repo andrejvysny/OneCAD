@@ -105,6 +105,63 @@ otherwise leave the id unbound and say so. A colour that cannot be re-bound must
 go unpainted with a diagnostic; silently binding the nearest face is the H5-B mis-bind this
 migration exists to prevent. Sequenced into W2; the plan's one-line framing understated it.
 
+### W1b — the two remaining browser-lane rows, both closed on measured causes
+
+Neither was a product defect, and neither closed on a re-run. One was a spec that outlived the
+policy it asserted; the other was a test helper that had been silently doing nothing.
+
+- [x] **`live-dim-mouse-rounding.spec.ts` asserted the PRE-P2 snap ladder.** It expected a
+      mouse-drawn line's LENGTH to land on the zoom quantum while the grid was ON. Measured from the
+      engine's own trace at the commit click:
+      ```
+      accepted  grid:19:-10:1
+      rejected  numeric:length:0.1   reason "claim-conflict"
+                numeric:angle:1      reason "claim-conflict"
+      ```
+      `composePoint` (`snapArbitration.ts`) states the rule — "a full point claims everything;
+      nothing else may be in the set" — so a grid point out-claims the numeric fields, and the
+      resulting endpoints (-29, 12) → (19, -10) give hypot(48, 22) = 52.8015…, a multiple of no
+      quantum. That is correct: grid snap wins a click. The spec's own comment still cited
+      `dimensionRoundingActive()`, which **P2 deleted** along with the rule that rounding "replaces
+      the grid tier".
+      Reworked: the rounding half now turns the grid off (isolating what it claims to isolate), and
+      a THIRD case pins the other side of the policy — a click aimed at an exact grid intersection
+      via `planePointToClient` (necessary, because the grid candidate only exists within
+      `gridReachPx` ≈ 1.66 px of a 4.74 px cell, so a hand-picked offset usually misses it) must
+      accept a `grid:` id and reject every `numeric:` id **by name** with `claim-conflict`.
+      6/6 stable across both browsers.
+- [x] **`waitForCameraSettled` was a NO-OP for every spec booted with `openEditor`** — the real
+      cause of the webkit `sketch-multi-object` race. `__vpEngine` exists only under `?vpdebug`, and
+      the settle check reads `!engine?.controls?.tween && !engine?.autoFitPending`, which is `true`
+      on the first poll when `engine` is `undefined`. So the protection was absent exactly where it
+      was requested — including inside `enterSketchViaPlanePicker`, which calls it to make the
+      sketch camera deterministic.
+      **Evidence it was biting:** the failing run's FE ring carries an OBLIQUE snap metric
+      (`m00 3.62, m01 -3.05`) where a settled sketch view reads `m01 = 0`. The clicks were resolved
+      against a camera still tweening into the plane, so the rectangle they described was refused as
+      degenerate — 0 entities, no error, no `pageerror`.
+      The helper now THROWS when `__vpEngine` is missing, naming `openEditorDebug` as the fix; the
+      five specs that were relying on the vacuous version (`arc`, `circle`, `line`,
+      `sketch-multi-object`, `sketch-undo`) boot with `?vpdebug`, and `sketch-multi-object` gained
+      the post-entry settle it never had. **webkit 15/15** (was ~1-in-8 failing), and the other four
+      specs 8/8 across both browsers. A sweep confirms no spec is left combining a non-debug boot
+      with a settle.
+
+- [x] **A third row, found by CI rather than locally: `sketch-snap-rendering.spec.ts:66`.** The
+      sketch-snap specs had never reached CI (they were part of the unpushed backlog), and their
+      first run there failed with zero guide materials while both local full lanes passed. Cause:
+      the hover point was a fixed PLANE offset (`ref[1] + 90`), which is ~427 px at the default view
+      — about 30 px inside the canvas edge on this machine and OFF the canvas on the runner. It now
+      hovers on the endpoint's screen column at a fixed 200 CSS px, clamped inside the canvas box,
+      which is zoom- and viewport-independent; a settled sketch view looks down the plane normal
+      (off-diagonal metric terms 0), so a screen-vertical move holds the plane x the guide is drawn
+      from. 32/32 across both browsers ×2 repeats.
+
+#### Lane after W1b: **462 passed / 0 failed** (26.2 min, both projects, retries 0)
+
+A fully green browser lane. The progression this session, all measured on the same command:
+**451/11 → 458/4 → 462/0.**
+
 ### W1 — the chip stops covering the value arrow — **MC-R9 CLOSED**
 
 MC-R9 was carried for two sessions as "browser-lane nondeterminism", then re-filed by the kernel

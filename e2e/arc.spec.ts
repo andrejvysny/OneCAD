@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { openEditor, enterSketchViaPlanePicker, selectSketchTool, clickAt, dofPill } from "./helpers";
+import { openEditorDebug, enterSketchViaPlanePicker, selectSketchTool, clickAt, dofPill } from "./helpers";
 
 /*
  * Arc tool — center → start → end commits one Arc; plus a mid-gesture Esc that
@@ -11,7 +11,7 @@ import { openEditor, enterSketchViaPlanePicker, selectSketchTool, clickAt, dofPi
  * WITHOUT the global Esc ladder switching tools or leaving sketch mode.
  */
 test("arc tool draws a center-start-end arc and Esc cancels mid-gesture cleanly", async ({ page }) => {
-  await openEditor(page);
+  await openEditorDebug(page);
   await enterSketchViaPlanePicker(page);
   await selectSketchTool(page, "Arc");
 

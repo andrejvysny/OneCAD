@@ -1,8 +1,9 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import {
-  openEditor,
+  openEditorDebug,
   enterSketchViaPlanePicker,
+  waitForCameraSettled,
   selectSketchTool,
   clickAt,
   sketchOptions,
@@ -42,8 +43,13 @@ async function reenterSketch(page: Page): Promise<void> {
 }
 
 test("a rectangle, a separate line, and a post-re-entry line all survive Finish", async ({ page }) => {
-  await openEditor(page);
+  await openEditorDebug(page);
   await enterSketchViaPlanePicker(page);
+  // Settle the SKETCH view before drawing: `enterSketch` tweens the camera to
+  // look along the plane normal, and a click issued mid-tween resolves against a
+  // moving pose (see `waitForCameraSettled`'s own root-cause note, and
+  // `sketch-degenerate.spec.ts`, which documents the same hazard).
+  await waitForCameraSettled(page);
 
   // Gesture 1 — the rectangle tool: corner → opposite corner ⇒ 4 lines.
   await selectSketchTool(page, "Rectangle");

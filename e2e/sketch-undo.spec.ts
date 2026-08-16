@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import {
-  openEditor,
+  openEditorDebug,
   enterSketchViaPlanePicker,
   clickAt,
   clickAtAwaitingDofChange,
@@ -26,7 +26,7 @@ import {
  * happens while still mid-sketch, by construction.
  */
 test("sketch-scoped undo/redo walks a 2-segment line chain back and forward", async ({ page }) => {
-  await openEditor(page);
+  await openEditorDebug(page);
   await enterSketchViaPlanePicker(page); // default tool: Line
 
   const lineCount = async (): Promise<number> => (await getSketchSnapshot(page)).lines.length;
