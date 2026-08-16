@@ -5860,6 +5860,94 @@ unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
 
 Detail per completed wave is recorded below, newest first.
 
+## RENDER MATERIALS — OPENPBR P0+P1 (2026-08-16) — GATE PASSED
+
+The first functional slice of the Render module (spec: "Materials & OpenPBR
+Rendering Implementation Specification", plan approved 2026-08-14; ADR-0014
+governs). P0 (data model) + P1 (assignment UX + shaded per-material PBR
+preview) in full; P2 (Visualization workspace/HDRI) and P3 (curated library,
+interchange, textures) deliberately unstarted. Commits `af5b8c9`, `78ccb9b`,
+`6435b68`, `de767d6`, `b18389a` + this gate commit.
+
+- [x] **P0 — OpenPBR v1.1.1 data model** (`src/modules/render/model/`): layered
+      `MaterialDef` (base mandatory, 8 optional lobes), every default pinned to
+      the spec revision by one assertion each; two-map assignments (BodyId /
+      face ElementId); at-rest values verbatim, clamping only in
+      `resolveMaterial`; unknown-key preservation at root/material/layer via one
+      structuredClone+overlay mechanism; an unparseable `schemaVersion` puts the
+      store read-only so foreign bytes are never rewritten (ADR-0005).
+- [x] **P1 — module wiring**: `renderStore` persists through
+      `platform/documentState.ts` (the backend transaction path — assignments
+      are one undo step each), `MaterialQuery` published,
+      `GeometryQueryService` extended additively (`listBodies`/
+      `subscribeBodies`, identity-gated) so render never imports
+      `documentStore`; the mock client now carries module state in its undo
+      snapshots, mirroring core's `EditCommand::SetModuleState` inverse.
+- [x] **P1 — viewport**: `BodyMaterialPool` (one face material per distinct
+      material+params, key carries the resolved hash; `MeshStandardMaterial`
+      promoted to `MeshPhysicalMaterial` only when a Tier-2/3 lobe is in play;
+      dim saved-state + Cut-tint parity with `BodyMaterialLibrary`; sweep-based
+      lifetime), pure OpenPBR→three mapping (`openPbrToThree.ts` — linear-light
+      colors, `transmission_depth 0 → attenuationDistance ∞`, thin-film µm→nm,
+      ior clamped to three's 2.333 Fresnel ceiling), two-track color rule (a
+      functional color outranks the material in the modeling view, riding the
+      existing per-vertex bake), face-override bind/unbind evidence reported
+      back per body. Viewport stays import-clean of module code (structural
+      `PbrMaterialParams`/`BodyMaterialSource` seams + a module-side bridge).
+- [x] **P1 — assignment UX**: `MaterialLibraryPanel` (left-sidebar "materials"
+      tab, 8 starter templates, usage counts, rename/edit/delete with cascade),
+      Material inspector section for body + promoted face, viewport drag-drop
+      (Alt over a face = override; off-canvas drops inert via
+      `raycastFromClient`'s null), tree context-menu assign dialog, and ONE
+      shared override keep/replace policy path under all four surfaces.
+
+**Deliberate user-visible contract changes** (recorded here per the contract
+README): `inspectorContract.ts` body/face gained "Material" between Appearance
+and History (dated amendment in the file); the editor mount surface grew —
+`Slots.ShellLeft` MaterialLibraryPanel, `Slots.ShellOverlay` RenderDialogHost,
+sidebar "materials" tab. `shellContract`'s probe does not boot the render
+module, so it stays green without amendment; this line is the record.
+
+**Flagged seams:**
+- Real-lane undo of a module-state-only transaction emits no `document-changed`
+  (`CommandOutcome::metadata_only` → `RegenHint::None`); closed frontend-side
+  by an extra `projection-updated` re-hydrate in `modules/render/module.ts`.
+  The Rust emit path is unchanged.
+- `ipc/documentLifecycle.ts` imports render's store for the document-swap reset
+  — same legacy shape as its existing `@/stores` imports; migrates when a
+  platform document-lifecycle event exists.
+- `MaterialInspectorSection` reads selection via modeling's
+  `InspectorSectionHost` hook (platform currency, but a modeling-file import);
+  lands on a platform selection service when one exists. The panel's "Apply to
+  selection" is omitted for the same reason.
+- A face override on a body with NO body-level material is persisted and shown
+  in the inspector but not rendered in the modeling view (no pooled program to
+  host the bake); its bound/unbound report is cleared for such bodies.
+- Cut-tint parity exists on `BodyMaterialPool` but has no live call site (the
+  Cut tint only ever targets the engine's preview library).
+- `EMISSION_LUMINANCE_SCALE = 1000` (nits → `emissiveIntensity`) is provisional
+  pending the P5 render-backend ADR.
+- Pre-existing bug fixed in passing: the FACE_COLORS bake resolved ids with
+  `idAt(triangle index)` where `idOf(face ordinal)` was needed — authored
+  per-face colors could bind to the WRONG face on any multi-triangle-face mesh
+  (`f:3..f:5` unreachable on a box). Regression test pinned.
+- Starter materials are the P1 seed; P3's curated ~30 library supersedes them.
+  Textures/UVs, HDRI environments, per-face mesh-group splits, the
+  Visualization workspace: P2/P3, unstarted.
+- Deferred to real-lane verification: face-override survival across a real
+  parametric regen and save/reopen in the packaged app (proven at the vitest
+  level via serializer round-trip + ElementId keying; the mock lane cannot
+  prove the Rust container path end-to-end).
+
+**Gate:** `bunx tsc --noEmit` clean · `bun run test` 311 files / 5183 passed /
+78 skipped · Playwright chromium 236/236 across a 3-way shard run (157+79;
+the third shard held only webkit tests, which cannot run in this container —
+no webkit executable, the same environment limit the C6 note records) ·
+`e2e/materials-assign.spec.ts` 6/6 chromium, re-verified standalone (assign via
+inspector with viewport-level metalness assertion, one-program-per-two-bodies
+identity, both OverrideKeepDialog branches, undo revert, unassign restore) ·
+hex gate empty. No Rust/C++ touched — ctest/cargo out of scope for this wave.
+
 ## RENDER MODULE — STUB REGISTRATION + DESIGN DOCS (2026-08-13) — DOCS ONLY, NO GATE
 
 Not part of Track A/roadmap — a separate, product-requested design pass for a
