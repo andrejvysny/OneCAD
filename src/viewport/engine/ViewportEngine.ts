@@ -131,6 +131,16 @@ export interface ChipPlacement {
   /** Chips sharing a cluster id never overlap — the overlay driver keeps each
    *  neighbour `CLUSTER_GAP_PX` apart in screen space (see HtmlOverlayDriver). */
   clusterId?: string;
+  /**
+   * Keep this chip off the value arrow's screen box
+   * (`getInteractionOverlayBounds("valueHandle")`).
+   *
+   * Load-bearing, not cosmetic: the chip and the arrow share an anchor, so an
+   * un-avoided chip covers the arrow's grab area completely and the press that
+   * should start a drag lands on the chip instead — which the click-away
+   * exclusion is right to refuse, leaving the arrow ungrabbable.
+   */
+  avoidValueHandle?: boolean;
 }
 
 /** Store-wiring seam the viewport bridge supplies for picking (engine stays store-agnostic). */
@@ -782,7 +792,9 @@ export class ViewportEngine {
       );
     }
     this.rendererHandle.renderer.render(this.scene, camera);
-    this.overlayDriver.update(camera, width, height);
+    // The arrow is oriented and scaled just above, so its box is current for this
+    // frame — chips that opted in are pushed clear of it inside `update`.
+    this.overlayDriver.update(camera, width, height, this.getInteractionOverlayBounds("valueHandle"));
     // Double-buffer disposal: geometries swapped out earlier are freed now, one
     // frame later, so nothing that referenced them this frame reads freed data.
     flushDisposals();
@@ -1946,6 +1958,7 @@ export class ViewportEngine {
       axisFrom: placement?.axisFrom ? new THREE.Vector3().fromArray(placement.axisFrom) : undefined,
       offsetPx: placement?.offsetPx,
       clusterId: placement?.clusterId,
+      avoidKeepOut: placement?.avoidValueHandle,
     });
     this.invalidate();
   }

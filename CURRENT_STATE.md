@@ -1,8 +1,43 @@
 # Current State
 
-Last verified: 2026-08-15 — kernel semantic-publication hardening close-out, `master` merged in
+Last verified: 2026-08-16 — TRUST & DELIVERABLE W0, on `master`
 
-## NOW — KERNEL HARDENING CLOSE-OUT (branch `kernel/semantic-publication-hardening`, PR #4)
+## NOW — TRUST & DELIVERABLE (2026-08-16, plan `act-as-senior-software-tranquil-cloud.md`)
+
+- **Branch:** `master`, clean at `a287e19`. **12 commits unpushed** — the whole sketch-snap
+  program plus the autosave hardening. CI has never seen any of it.
+- **Local gate, measured this session, not inferred:** `bunx tsc --noEmit` clean ·
+  `bun run build` clean · `bun run test` **295 files / 4949 passed / 78 skipped** · `ctest`
+  **135/135** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1283 passed /
+  0 failed / 84 targets** · hex gate empty.
+- **Browser lane: 451/11 before this session's work, 458 passed / 4 failed after** (25.7 min, both
+  projects, retries 0). W1 recovered the four `filletChamfer` runs; the four plane-picker runs
+  recovered from a test-only locator fix. The 4 that remain are `live-dim-mouse-rounding` (both
+  browsers, pre-existing and unchanged), a webkit-only `sketch-multi-object` race measured at 1/6
+  in isolation, and one `construction` chromium LOAD failure (no `__vpEngine`, start screen still
+  on-screen) that is 9/9 in isolation. All three are recorded with their signatures in `TODO.md`,
+  none closed by a re-run.
+- **The packaged-app lane (MC-R4) has now RUN, and passes** — first execution on any machine, with
+  both dev worker paths hidden so the bundled sidecar is what answers. Its first run also found a
+  false assertion in its own spec (`documentRevision` is session-scoped; the spec expected it to
+  survive a reopen), corrected with the evidence recorded in place.
+- **W1 is done: MC-R9 is CLOSED as a product regression, not a flake.** The model-tool chip covered
+  the value arrow's grab area (measured: the arrow's own grab pixel resolved to `chip-cancel`), so
+  the arrow could not be grabbed wherever the chip sat on it. `HtmlOverlayDriver` now takes a
+  per-frame keep-out box — the consumer `ce3d6bf` said "V2 will" add.
+- **CI is red at `5106f80`** on three jobs: both e2e projects (the
+  `getByText('Select a sketch plane')` strict-mode violation, already fixed by the unpushed
+  `d73d469`) and `tauri-composition` (the `.app` spawn EACCES — root-caused and fixed in W0;
+  that lane had never executed anywhere).
+- **The staged sidecar is CURRENT.** `src-tauri/binaries/onecad-worker-aarch64-apple-darwin` and
+  `worker/build/onecad-worker` hash identically and match the manifest, so every "blocked on T0's
+  stale sidecar" note below — LGU-1's WP-D/F/G/I sequencing especially — is obsolete.
+- **Program:** W0 baseline truth + CI · W1 chip stops covering the value arrow (MC-R9 is a real
+  product regression, not a flake) · W2 DI-4 ElementId rebind at open · W3 DI-5 XCAF STEP export ·
+  W4 3MF export · W5 T2 result truth ("saved + loud failure banner") · W6 close-out.
+  Windows stays out of scope by decision. Full record: `TODO.md` § TRUST & DELIVERABLE.
+
+## PREVIOUS — KERNEL HARDENING CLOSE-OUT (branch `kernel/semantic-publication-hardening`, PR #4 — merged as `5106f80`)
 
 - **Where:** git worktree `../OneCAD-kernel-hardening` on
   `kernel/semantic-publication-hardening`, continuing from `69be0c2`. 23 branch commits

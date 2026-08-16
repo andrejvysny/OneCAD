@@ -1,5 +1,171 @@
 # OneCAD-Tauri Migration TODO
 
+## TRUST & DELIVERABLE (2026-08-16, plan `~/.claude/plans/act-as-senior-software-tranquil-cloud.md`)
+
+Six waves. W0 baseline truth + a CI that has seen this code · W1 the chip stops covering the value
+arrow (MC-R9) · W2 DI-4 ElementId rebind at open · W3 DI-5 XCAF STEP export · W4 3MF export ·
+W5 T2 result truth · W6 close-out.
+
+**Product decisions taken with the user before any code:**
+
+- Lane chosen: trust + deliverable faithfulness, over kernel continuation / product reach / LGU-1.
+- **3MF export is IN** — STL and OBJ are the only mesh formats out today and neither carries units,
+  colours or part names.
+- **Windows is NOT a target yet.** The autosave deferral "recovery is never offered on Windows"
+  (`pid_alive` returns `true` unconditionally off Unix) stays a recorded deferral by decision.
+- **T2's answer is "saved + loud failure banner."** A variable edit whose downstream regen fails
+  reports the save as real AND surfaces the failed step. Never auto-revert — the variable really
+  was saved.
+
+### Baseline measured before the program (HEAD `a287e19`, tree clean, 2026-08-16)
+
+`bunx tsc --noEmit` clean · `bun run test` **295 files / 4942 passed / 78 skipped** ·
+`ctest --test-dir worker/build` **135/135** (30.0 s) ·
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1283 passed / 0 failed / 84
+targets**.
+
+**The tree's own evidence was wrong in both directions, which is why W0 exists:**
+
+- **12 commits are unpushed.** CI's newest run is the `5106f80` merge (2026-08-15) — it has never
+  seen the sketch-snap program or the autosave hardening.
+- That run is **red on three jobs**: `e2e-chromium` + `e2e-webkit` on
+  `strict mode violation: getByText('Select a sketch plane') resolved to 2 elements` (already fixed
+  locally by `d73d469`, unpushed), and `tauri-composition` on the `.app` spawn EACCES recorded under
+  T0 above. Everything else — `frontend`, `linux-worker`, `linux-kernelbench`, `occt-fingerprint`,
+  `worker-8.0.1`, `rust-8.0.1`, both persistence jobs — was green.
+- T0's "stale staged sidecar blocks cargo" row was itself stale; corrected in place above with the
+  hash evidence.
+
+### W0 — baseline truth and a CI that has seen this code — IN PROGRESS
+
+- [x] **`tauri-composition` launch path fixed** — `e2e-tauri/wdio.conf.ts` resolves a macOS `.app`
+      bundle to `Contents/MacOS/<name>` before handing it to the service, which spawns the path
+      verbatim. Full root cause under T0 above. `bunx tsc -p e2e-tauri/tsconfig.json --noEmit` clean.
+- [x] **Full browser lane measured: 451 passed / 11 failed** (25.8 min, both projects, retries 0).
+      Attribution, per spec, with no failure left unexplained:
+      | spec | browsers | verdict |
+      |---|---|---|
+      | `auto-mode.spec.ts:26` | both | **fixed here** — see below |
+      | `datum-sketch.spec.ts:82` | both | **fixed here** — see below |
+      | `filletChamfer.spec.ts:181` + `:211` | both | W1's defect, **fixed in W1** |
+      | `live-dim-mouse-rounding.spec.ts:62` | both | pre-existing, still open, owed separately |
+      | `sketch-multi-object.spec.ts:44` | webkit only | **NEW row, measured below** |
+- [x] **`d73d469` fixed the plane-picker locator in the HELPER only; two specs carry their own
+      inline copy.** `auto-mode.spec.ts:31` and `datum-sketch.spec.ts:62,89` asserted
+      `getByText("Select a sketch plane")` without `exact`, which `c064e81`'s inspector empty state
+      ("Select a sketch plane to begin.") turns into a strict-mode violation. `datum-sketch:62` was
+      the worse one: a `toHaveCount(0)` that was counting the inspector's string as well, so it
+      asserted the picker was closed by reading an unrelated element. Test-only fix, no production
+      string touched; re-run **14/14 in both browsers**.
+- [ ] **`sketch-multi-object.spec.ts:44` — webkit-only, NOT contention.** Measured on an idle
+      machine, in isolation: **webkit 1/6 fail, chromium 0/6**. The failure is at the FIRST poll —
+      a rectangle drawn with two clicks yields `entityCount` **0**, expected 4. The captured
+      console shows the session live (`Editing …`, Rectangle armed) and BOTH clicks arriving with
+      real snap decisions (`snap click: no candidate`, then
+      `snap click: numeric:height:0.1 + numeric:width:0.1`), and `pageerror.log` is EMPTY — so the
+      gesture reached the tool and the commit produced nothing. Not triaged further here (W0 is
+      baseline + attribution, not repair), and NOT closed by a re-run per the ledger's own rule.
+      Product-relevant: WKWebView is the shipping macOS webview, so this is a real "the first shape
+      I drew did not appear" class, not only a test problem.
+- [x] **The packaged-app lane RAN — and PASSES. MC-R4 is satisfied on a real machine for the first
+      time.** `bun run tauri build --features tauri-e2e --config src-tauri/tauri.e2e.conf.json
+      --bundles app`, then `bun run e2e:tauri` against the bundle with **both dev worker paths
+      hidden** (`src-tauri/binaries/onecad-worker-<triple>` and `worker/build/onecad-worker` moved
+      aside, `ONECAD_WORKER_PATH=""`), exactly as `ci.yml` does — otherwise the run proves nothing
+      about the bundle. Result: **1 passing**, zero `"level":"ERROR"` in the app's own
+      `dev.jsonl`. The spec's own assertions are what make it meaningful: `workerPath` contains
+      `.app/Contents/MacOS/onecad-worker`, the bundled binary's SHA-256 equals the manifest's, the
+      worker's `hello` matches the manifest on all five version fields, and the flow is a real
+      extrude (volume **2400**, 1 solid / 6 faces) → fillet → undo → save → reopen. Both binaries
+      restored afterwards and re-verified by hash.
+- [x] **The lane's FIRST real run found a false assertion, and the product is right.**
+      `composition.e2e.ts:313` asserted `reopened.revision === saved.currentRevision`; measured
+      **0 against 3**. `documentRevision` is session-scoped by design — SCHEMA §3 calls it an
+      "ADVISORY stamp, NOT a fencing token (D4)", `container.rs` persists no revision (the document
+      model has no such field at all), and `DocumentRuntime` constructs `revision: AtomicU64::new(0)`
+      per runtime, with record replay at open deliberately not counting as an edit. The assertion is
+      now `toBe(0)` plus `dirty === false`, with the three pieces of evidence written into the spec
+      so it cannot be "corrected" back. Identity and geometry — `documentId`, the body id, and the
+      exact mass/topology evidence — are what the reopen is pinned on, and they all hold.
+- [x] Stale ledger rows corrected (T0 sidecar row, `CURRENT_STATE.md` header).
+- [ ] **Push `master`** — user-authorized step, not taken without an explicit go-ahead.
+
+#### Found during W0, and it changes W2's shape
+
+**The evidence `BindElementIds` needs is NOT persisted**, so DI-4 cannot be closed by "replay the
+binding at open". `ElementIndex` stores `ElementId -> ElementEntry { body, kind }` and nothing else
+(`onecad-core/src/document/element_index.rs:31-53`), while the promotion path builds each binding
+from `topo_key` + `anchor` + a descriptor it holds only in memory
+(`document_runtime.rs:3380-3420`, `promoted`/`PromotionEntry`). Authored colours are keyed the same
+bare way — `face_colors: BTreeMap<ElementId, [u8; 4]>` (`document/body.rs:138`).
+A TopoKey is snapshot-scoped evidence and must never be persisted as authority, so the fix is to
+persist the DURABLE evidence (anchor + descriptor, additive + `serde(default)`) and re-resolve it at
+open through the existing resolution ladder — auto-bind at score ≥0.85 **and** margin ≥0.10,
+otherwise leave the id unbound and say so. A colour that cannot be re-bound must stay in the file and
+go unpainted with a diagnostic; silently binding the nearest face is the H5-B mis-bind this
+migration exists to prevent. Sequenced into W2; the plan's one-line framing understated it.
+
+### W1 — the chip stops covering the value arrow — **MC-R9 CLOSED**
+
+MC-R9 was carried for two sessions as "browser-lane nondeterminism", then re-filed by the kernel
+branch as a product regression from `ce3d6bf` (the value arrow became a screen overlay; the chip now
+sits on it). W1 measured it and fixed it.
+
+- [x] **Measured first, from the live app** (`?vpdebug`, armed Fillet on the mock box, a throwaway
+      probe spec since deleted). At the arrow's own grab pixel:
+      ```
+      handle grab point (888, 398)
+      valueHandle box   x 778.76 … 898.76   y 329.69 … 449.69   (120 × 120)
+      chip rect         x 722.78 … 904.04   y 372.36 … 407.61   (181 × 35)
+      document.elementFromPoint(888, 398) ⇒ BUTTON data-testid="chip-cancel"
+      ```
+      The chip's centre sits within 26 px of the arrow's anchor, so it covers the whole grab area —
+      `isExcludedClickAwayTarget` is RIGHT to refuse that press, and the arrow is simply
+      ungrabbable. This is the number that turns an argument into evidence.
+- [x] **`getInteractionOverlayBounds("valueHandle")` finally has its consumer** — the thing
+      `ce3d6bf` added with "Nothing reads it yet; V2 will."
+      `HtmlOverlayDriver.update()` takes an optional per-frame `keepOut` box; `ViewportEngine`
+      passes the value-handle box at the one call site, immediately after the frame's
+      `dragHandle.orient()`, so the box is current for that frame. An item opts in with
+      `ChipPlacement.avoidValueHandle` → `OverlayPlacement.avoidKeepOut`, and `ModelToolChips`
+      passes it on EVERY arm.
+- [x] **`keepOutShiftY` is pure and separately tested.** Vertical-only displacement: the opted-in
+      items are wide, short chips, so a sideways push clearing a 120 px box would throw the chip
+      most of a viewport away while a vertical one moves it a little over its own height. The side
+      is **sticky** — chosen by the shorter push the first time, then held while the overlap lasts —
+      because a side chosen per frame flips as the chip drifts across the box's centre, i.e. the
+      chip teleporting over the arrow mid-drag.
+- [x] **The chip's size is read from a `ResizeObserver`, never per frame.** The driver writes
+      transforms every frame; reading a rect back would force a synchronous reflow on the drag path,
+      which this module's own comments already refuse to do. An item with no measured size is left
+      alone rather than displaced by a guess.
+- [x] **Not done, deliberately:** `isExcludedClickAwayTarget` was NOT narrowed and no spec's press
+      point was moved. Both would have hidden the defect rather than fixed it.
+- Gate: `bunx tsc --noEmit` clean · `bun run test` **295 files / 4949 passed / 78 skipped**
+      (baseline 4942; +7 driver tests) · **`e2e/filletChamfer.spec.ts` 26/26 in BOTH browsers** —
+      the two specs that reproduced **4/4** before this change · 70/70 across every other
+      value-handle tool (`extrude-*` ×5, `revolve-commit`, `revolve-preview`, `offset-face`,
+      `shell-preview`, `hole`), so the displacement regressed nothing.
+- **Mutation-proved:** commenting out the single `it.y += shift.dy` line reds exactly the two
+  driver keep-out tests (and nothing else); restored and re-verified green.
+- Two `ModelToolChips` assertions were updated rather than worked around — they pinned the exact
+  placement object, which now carries `avoidValueHandle`. Neither is a frozen contract.
+#### Full lane after W1: **458 passed / 4 failed** (25.7 min, both projects, retries 0)
+
+Up from 451/11 — the 8 recovered are exactly the four `filletChamfer` runs and the four
+plane-picker runs, in a LOADED lane, not in isolation. What remains:
+
+| spec | browsers | status |
+|---|---|---|
+| `live-dim-mouse-rounding.spec.ts:62` | both | pre-existing, unchanged since the sketch-snap program measured it byte-identical; owed separately |
+| `sketch-multi-object.spec.ts:44` | webkit | the measured webkit race recorded above (1/6 isolated) |
+| `construction.spec.ts:178` | chromium | **NEW row — a LOAD failure, not a geometry one.** `page.evaluate: Error: planePointToClient: window.__vpEngine missing (use openEditorDebug)`, and the captured page snapshot shows the **START SCREEN** ("OneCAD", Recent nav), i.e. the editor never opened. 9/9 green in isolation ×3, so it is not closed here — recorded with its signature, because "no `__vpEngine` + start screen still on-screen" is a DIFFERENT signature from the pointer-drag class and should not be filed under it |
+
+- [ ] **Still owed from W1's scope:** the latent `DragHandle.orient()` seam (orientation happens in
+      the render loop while `setAxis()` leaves the group on the world axis, so a pick between the two
+      tests an off-screen corridor). Harmless while the chip covered the arrow; now that it does not,
+      it is reachable. No failing test justifies a fix yet — recorded, not closed.
+
 ## SKETCH SNAP ENGINE HARDENING (2026-08-15, branch `fix/sketch-snap-decision-v3`)
 
 Implements the "OneCAD Sketch Snap Engine Hardening" specification: P0–P5, six dependency-ordered
@@ -1147,14 +1313,18 @@ package at a time.
 
 ### T0 — merge aftercare (do before anything else; hours, not days)
 
-- [ ] **Rebuild the worker in this worktree.** `worker/build/onecad-worker` and
-      `src-tauri/binaries/onecad-worker-{aarch64-apple-darwin,manifest.json}` here
-      date from 12:01, BEFORE the merge — no `ClassifyElement`/`ExportGeometry`,
-      no component ops, an uncapped `PreviewOp`, and a manifest bound to that old
-      binary's hash. `bundle.externalBin` makes every cargo command need the
-      staged file, and `manager.rs` refuses a worker whose SHA-256 disagrees with
-      the manifest, so this BLOCKS cargo and the app here:
-      `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1 scripts/build-worker.sh Release`.
+- [x] **Rebuild the worker in this worktree — DONE, and this row was stale for two
+      sessions.** Verified 2026-08-16 by hash, not by timestamp:
+      `src-tauri/binaries/onecad-worker-aarch64-apple-darwin` and
+      `worker/build/onecad-worker` both hash
+      `25f7c141b7ad18182b1a0bfa9b4da30948c9f8849b16f49827d0fefaccd41b2c`, which is
+      exactly `onecad-worker-manifest.json`'s `binarySha256`, and no file under
+      `worker/src` or `worker/tests` is newer than the binary. So `manager.rs`'s
+      SHA-256 check passes and cargo is trustworthy here — measured:
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1283 passed
+      / 0 failed / 84 targets**, `ctest` **135/135**.
+      **Consequence for the ledger:** every "blocked on T0's stale sidecar" note —
+      LGU-1's WP-D/F/G/I sequencing in particular — is no longer true.
 - [ ] **Manual Tauri smoke of the merged stack.** Never run for either program,
       and this is the first time they meet in the real app. Minimum path: place a
       component from the library onto a hole rim (mate seats), edit a free
@@ -1166,6 +1336,19 @@ package at a time.
       executed on any machine. It is the only gate that proves the PACKAGED app
       and its bundled worker compose — precisely the axis the merge disturbed
       (new verbs, new binary hash, a re-manifested sidecar).
+      **Root cause of "never executed" found 2026-08-16 and fixed** (W0 of the
+      Trust & Deliverable program): CI reported
+      `SevereServiceError: Failed to start embedded WebDriver for instance 0:
+      Failed to spawn Tauri app ".../relocated-onecad/onecad.app": spawn ... EACCES`.
+      `@wdio/tauri-service@1.3.0` DOCUMENTS a macOS `.app` bundle as a valid
+      `appBinaryPath` (`appBinaryResolver`'s `assertNotDirectory` lets `.app`
+      through on purpose) but its launcher `spawn()`s that path verbatim — and a
+      bundle is a directory, so it fails in `onPrepare` before a driver exists.
+      `e2e-tauri/wdio.conf.ts` now resolves a `.app` to
+      `Contents/MacOS/<name>` itself and throws a build hint when that is missing.
+      The CI env var (`ONECAD_TAURI_E2E_APP`, the relocated bundle) is deliberately
+      unchanged — the relocation, the manifest SHA-256 check and the `--selftest`
+      fingerprint grep around it are all correct.
 
 ### T1 — data integrity (HIGHEST; "can lose the user's work" class)
 

@@ -95,6 +95,15 @@ interface OverlayItem {
    * driver (not the caller) so `mountChip`/`unmountChip` stay one element.
    */
   leaderEl?: HTMLElement;
+  /** This item stays clear of the keep-out box `update()` is given. */
+  avoidKeepOut?: boolean;
+  /** Cached CSS-px size, kept current by a `ResizeObserver` rather than a
+   *  per-frame layout read (the driver writes transforms every frame; reading
+   *  a rect back would force a synchronous reflow on the drag path). */
+  size?: { w: number; h: number };
+  sizeObserver?: ResizeObserver;
+  /** The side this item was last pushed to — see {@link keepOutShiftY}. */
+  keepOutDir?: 1 | -1;
 }
 
 /** Below this screen-px length the leader is hidden — an offset chip that
@@ -119,6 +128,51 @@ export interface OverlayPlacement {
   axisFrom?: THREE.Vector3;
   offsetPx?: number;
   clusterId?: string;
+  /** Opt into the per-frame keep-out region `update()` is given (the value
+   *  arrow's screen box). See {@link keepOutShiftY}. */
+  avoidKeepOut?: boolean;
+}
+
+/** A screen-space box in CSS pixels. */
+export interface ScreenRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Clearance kept between a displaced item and the keep-out box, in CSS px. */
+export const KEEP_OUT_PAD_PX = 6;
+
+/**
+ * The VERTICAL displacement that clears `rect` of `keepOut`, or null when they
+ * do not overlap.
+ *
+ * Why vertical only: the items that opt in are wide, short chips, so a sideways
+ * push large enough to clear a 120px-wide arrow box would shove the chip most of
+ * a viewport away, while a vertical one moves it by a little over its own height.
+ *
+ * `sticky` is the direction this item was last pushed. Without it the side is
+ * chosen by whichever push is shorter, and an item drifting across the box's
+ * centre would flip sides mid-drag — the chip teleporting over the arrow while
+ * the user is dragging it. Once pushed, an item keeps its side until it stops
+ * overlapping at all.
+ */
+export function keepOutShiftY(
+  rect: ScreenRect,
+  keepOut: ScreenRect,
+  pad: number,
+  sticky?: 1 | -1,
+): { dy: number; dir: 1 | -1 } | null {
+  const overlapsX = rect.x < keepOut.x + keepOut.width && keepOut.x < rect.x + rect.width;
+  const overlapsY = rect.y < keepOut.y + keepOut.height && keepOut.y < rect.y + rect.height;
+  if (!overlapsX || !overlapsY) return null;
+  // Up: the item's BOTTOM edge lands `pad` above the box's top. Down: its TOP
+  // edge lands `pad` below the box's bottom. Both are exact, not iterative.
+  const up = keepOut.y - pad - (rect.y + rect.height);
+  const down = keepOut.y + keepOut.height + pad - rect.y;
+  const dir: 1 | -1 = sticky ?? (Math.abs(up) <= Math.abs(down) ? -1 : 1);
+  return { dy: dir === -1 ? up : down, dir };
 }
 
 /** Default screen gap between neighbours within an overlay cluster. Deliberately
@@ -139,14 +193,27 @@ export class HtmlOverlayDriver {
       leaderEl = createLeaderEl();
       el.parentElement.insertBefore(leaderEl, el);
     }
-    this.items.set(id, {
+    const item: OverlayItem = {
       el,
       worldPos: worldPos.clone(),
       axisFrom: placement?.axisFrom?.clone(),
       offsetPx: placement?.offsetPx,
       clusterId: placement?.clusterId,
       leaderEl,
-    });
+      avoidKeepOut: placement?.avoidKeepOut,
+    };
+    if (placement?.avoidKeepOut) {
+      const rect = el.getBoundingClientRect();
+      item.size = { w: rect.width, h: rect.height };
+      if (typeof ResizeObserver !== "undefined") {
+        item.sizeObserver = new ResizeObserver((entries) => {
+          const box = entries[0]?.contentRect;
+          if (box) item.size = { w: box.width, h: box.height };
+        });
+        item.sizeObserver.observe(el);
+      }
+    }
+    this.items.set(id, item);
   }
 
   setWorldPos(id: string, worldPos: THREE.Vector3): void {
@@ -163,6 +230,7 @@ export class HtmlOverlayDriver {
   unregister(id: string): void {
     const item = this.items.get(id);
     item?.leaderEl?.remove();
+    item?.sizeObserver?.disconnect();
     this.items.delete(id);
   }
 
@@ -170,8 +238,20 @@ export class HtmlOverlayDriver {
     return this.items.size;
   }
 
-  /** Project all items and write their transforms. Called once per render. */
-  update(camera: THREE.Camera, width: number, height: number): void {
+  /**
+   * Project all items and write their transforms. Called once per render.
+   *
+   * `keepOut` is a screen box no opted-in item may sit on — in practice the
+   * value arrow's projected box, which a chip centred on the same anchor would
+   * otherwise cover completely. It is passed per frame rather than registered
+   * because it moves with the camera and the armed tool.
+   */
+  update(
+    camera: THREE.Camera,
+    width: number,
+    height: number,
+    keepOut?: ScreenRect | null,
+  ): void {
     if (this.items.size === 0) return;
     this.viewProj.multiplyMatrices(
       camera.projectionMatrix,
@@ -188,9 +268,17 @@ export class HtmlOverlayDriver {
       /** Raw (pre-offset) anchor projection — the leader's other endpoint. */
       anchorX?: number;
       anchorY?: number;
+      /** Set for items that opted into the keep-out, so the pass below can find
+       *  them with their own size and sticky side. */
+      item?: OverlayItem;
+      /** Unit offset direction, needed to turn (x, y) into the element's real
+       *  centre — the `edge` translate shifts it by half its own size. */
+      ux?: number;
+      uy?: number;
     }
     const placed: Placed[] = [];
-    for (const { el, worldPos, axisFrom, offsetPx, clusterId, leaderEl } of this.items.values()) {
+    for (const item of this.items.values()) {
+      const { el, worldPos, axisFrom, offsetPx, clusterId, leaderEl } = item;
       const p = projectToScreen(worldPos, this.viewProj, width, height);
       if (!p.visible) {
         placed.push({ el, x: p.x, y: p.y, edge: "", visible: false, clusterId, leaderEl });
@@ -201,6 +289,8 @@ export class HtmlOverlayDriver {
       let edge = "";
       let anchorX: number | undefined;
       let anchorY: number | undefined;
+      let offsetUx = 0;
+      let offsetUy = 0;
       if (axisFrom && offsetPx) {
         // The tail only supplies a DIRECTION, so an off-screen tail is still
         // usable — but a tail BEHIND the camera projects through a negative w and
@@ -215,8 +305,23 @@ export class HtmlOverlayDriver {
         edge = ` translate(${ux * 50}%, ${uy * 50}%)`;
         anchorX = p.x;
         anchorY = p.y;
+        offsetUx = ux;
+        offsetUy = uy;
       }
-      placed.push({ el, x, y, edge, visible: true, clusterId, leaderEl, anchorX, anchorY });
+      placed.push({
+        el,
+        x,
+        y,
+        edge,
+        visible: true,
+        clusterId,
+        leaderEl,
+        anchorX,
+        anchorY,
+        item: item.avoidKeepOut ? item : undefined,
+        ux: offsetUx,
+        uy: offsetUy,
+      });
     }
     // Screen-space cluster resolution: keep cluster neighbours at least
     // `CLUSTER_GAP_PX` apart along screen +y (downward), propagating the push
@@ -247,6 +352,32 @@ export class HtmlOverlayDriver {
         if (prevY !== null) it.y = Math.max(it.y, prevY + CLUSTER_GAP_PX);
         prevY = it.y;
       }
+    }
+    // Keep-out: an opted-in item is pushed clear of `keepOut` LAST, so a cluster
+    // push cannot put it back on top of the arrow. An item with no measured size
+    // is left alone rather than displaced by a guess.
+    for (const it of placed) {
+      const item = it.item;
+      if (!item) continue;
+      if (!it.visible || !keepOut || !item.size || item.size.w <= 0 || item.size.h <= 0) {
+        item.keepOutDir = undefined;
+        continue;
+      }
+      const { w, h } = item.size;
+      const cx = it.x + (it.ux ?? 0) * (w / 2);
+      const cy = it.y + (it.uy ?? 0) * (h / 2);
+      const shift = keepOutShiftY(
+        { x: cx - w / 2, y: cy - h / 2, width: w, height: h },
+        keepOut,
+        KEEP_OUT_PAD_PX,
+        item.keepOutDir,
+      );
+      if (!shift) {
+        item.keepOutDir = undefined;
+        continue;
+      }
+      it.y += shift.dy;
+      item.keepOutDir = shift.dir;
     }
     for (const it of placed) {
       if (!it.visible) {

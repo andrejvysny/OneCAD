@@ -801,7 +801,14 @@ describe("ModelToolChips anchor lifecycle", () => {
       ),
     );
     expect(mountChip).toHaveBeenCalledTimes(1);
-    expect(mountChip.mock.calls[0][3]).toEqual({ axisFrom: [0, 0, 0], offsetPx: 56 });
+    // `avoidValueHandle` rides on EVERY arm (MC-R9): the chip and the value arrow
+    // share this anchor, so a chip that does not opt out of the arrow's box covers
+    // its grab area and the press meant for the arrow lands on the chip.
+    expect(mountChip.mock.calls[0][3]).toEqual({
+      axisFrom: [0, 0, 0],
+      offsetPx: 56,
+      avoidValueHandle: true,
+    });
     expect(unmountChip).not.toHaveBeenCalled();
   });
 
@@ -835,11 +842,17 @@ describe("ModelToolChips anchor lifecycle", () => {
     expect(document.activeElement).toBe(screen.getByLabelText("Dimension value"));
   });
 
-  it("a chip WITHOUT an axis placement passes no placement at all", () => {
+  it("a chip WITHOUT an axis placement passes no AXIS placement, but still avoids the arrow", () => {
     const { mountChip } = trackingEngine();
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
-    expect(mountChip.mock.calls[0][3]).toEqual({ axisFrom: undefined, offsetPx: undefined });
+    // A centred chip is the WORST case for the arrow: with no axis offset it sits
+    // exactly on the anchor the arrow reaches out from.
+    expect(mountChip.mock.calls[0][3]).toEqual({
+      axisFrom: undefined,
+      offsetPx: undefined,
+      avoidValueHandle: true,
+    });
   });
 });
 

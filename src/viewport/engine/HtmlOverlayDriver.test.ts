@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 import * as THREE from "three";
-import { projectToScreen, HtmlOverlayDriver, CLUSTER_GAP_PX } from "./HtmlOverlayDriver";
+import {
+  projectToScreen,
+  HtmlOverlayDriver,
+  CLUSTER_GAP_PX,
+  KEEP_OUT_PAD_PX,
+  keepOutShiftY,
+} from "./HtmlOverlayDriver";
 
 function viewProjFor(camera: THREE.Camera): THREE.Matrix4 {
   camera.updateMatrixWorld();
@@ -354,5 +360,137 @@ describe("HtmlOverlayDriver", () => {
     expect(leader.style.transform).not.toBe(transformBefore);
     // And the chip itself moved too, in lockstep — no desync between the two.
     expect(xyOf(chip)[1]).toBeLessThan(200); // world +Y projects UP the screen
+  });
+
+  /*
+   * Keep-out (MC-R9). `ce3d6bf` moved the value arrow into screen space and left
+   * the chip on the same anchor, so the chip covered the arrow's grab area and
+   * `isExcludedClickAwayTarget` refused every press meant for the arrow — the
+   * arrow could not be grabbed at all wherever the chip sat on it.
+   *
+   * The numbers below are MEASURED from the live app (armed Fillet on the mock
+   * box, `?vpdebug`): the arrow's box was {778.76, 329.69, 120, 120}, the chip's
+   * rect {722.78, 372.36, 181.27, 35.25}, and `document.elementFromPoint` at the
+   * arrow's own grab pixel (888, 398) resolved to `chip-cancel`.
+   */
+  const CHIP_SIZE = { w: 181.27, h: 35.25 };
+
+  function intersects(
+    a: { x: number; y: number; width: number; height: number },
+    b: { x: number; y: number; width: number; height: number },
+  ): boolean {
+    return (
+      a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    );
+  }
+
+  /** Register a chip whose measured size is fixed (jsdom reports 0×0 rects). */
+  function sizedChip(parent: HTMLElement): HTMLElement {
+    const chip = document.createElement("div");
+    chip.getBoundingClientRect = () =>
+      ({ width: CHIP_SIZE.w, height: CHIP_SIZE.h }) as DOMRect;
+    parent.appendChild(chip);
+    return chip;
+  }
+
+  it("pushes an opted-in chip clear of the keep-out box, and leaves it alone without one", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = sizedChip(parent);
+    driver.register("chip", chip, new THREE.Vector3(0, 0, 0), { avoidKeepOut: true });
+
+    // No keep-out: the chip stays exactly on its projected anchor.
+    driver.update(cam, 400, 400);
+    const [, restingY] = xyOf(chip);
+    expect(restingY).toBeCloseTo(200, 0);
+
+    // A box centred on that same anchor — the real overlap case.
+    const box = { x: 200 - 60, y: 200 - 60, width: 120, height: 120 };
+    driver.update(cam, 400, 400, box);
+    const [cx, cy] = xyOf(chip);
+    expect(cy).not.toBeCloseTo(restingY, 0);
+    expect(
+      intersects(
+        { x: cx - CHIP_SIZE.w / 2, y: cy - CHIP_SIZE.h / 2, ...{ width: CHIP_SIZE.w, height: CHIP_SIZE.h } },
+        box,
+      ),
+    ).toBe(false);
+
+    // …and it returns to the anchor once the arrow is gone (null keep-out).
+    driver.update(cam, 400, 400, null);
+    expect(xyOf(chip)[1]).toBeCloseTo(restingY, 0);
+  });
+
+  it("keeps its side while it still overlaps, so the chip cannot flip across the arrow mid-drag", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = sizedChip(parent);
+    driver.register("chip", chip, new THREE.Vector3(0, 0, 0), { avoidKeepOut: true });
+
+    // A box sitting slightly BELOW the anchor: the shorter push is upward.
+    driver.update(cam, 400, 400, { x: 140, y: 190, width: 120, height: 120 });
+    const upY = xyOf(chip)[1];
+    expect(upY).toBeLessThan(200);
+
+    // Now a box slightly ABOVE it — the shorter push is downward, but the item is
+    // already committed to the up side and must stay there.
+    driver.update(cam, 400, 400, { x: 140, y: 90, width: 120, height: 120 });
+    expect(xyOf(chip)[1]).toBeLessThan(200);
+  });
+
+  it("does not displace a chip that never opted in", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = sizedChip(parent);
+    driver.register("chip", chip, new THREE.Vector3(0, 0, 0));
+    driver.update(cam, 400, 400, { x: 140, y: 140, width: 120, height: 120 });
+    expect(xyOf(chip)[1]).toBeCloseTo(200, 0);
+  });
+});
+
+describe("keepOutShiftY (pure)", () => {
+  const box = { x: 100, y: 100, width: 120, height: 120 };
+
+  it("returns null when the rects do not overlap on either axis", () => {
+    expect(keepOutShiftY({ x: 300, y: 100, width: 50, height: 20 }, box, 6)).toBeNull();
+    expect(keepOutShiftY({ x: 100, y: 300, width: 50, height: 20 }, box, 6)).toBeNull();
+  });
+
+  it("clears the box with the pad, on the shorter side", () => {
+    // Rect centred well above the box's middle ⇒ up is shorter.
+    const rect = { x: 110, y: 110, width: 50, height: 20 };
+    const shift = keepOutShiftY(rect, box, 6);
+    expect(shift).not.toBeNull();
+    expect(shift?.dir).toBe(-1);
+    // Its bottom edge lands exactly `pad` above the box's top.
+    expect(rect.y + shift!.dy + rect.height).toBeCloseTo(box.y - 6, 5);
+  });
+
+  it("honours a sticky side even when the other one is shorter", () => {
+    const rect = { x: 110, y: 110, width: 50, height: 20 };
+    const shift = keepOutShiftY(rect, box, 6, 1);
+    expect(shift?.dir).toBe(1);
+    expect(rect.y + shift!.dy).toBeCloseTo(box.y + box.height + 6, 5);
+  });
+
+  it("clears the MEASURED production overlap (armed Fillet on the mock box)", () => {
+    const chip = { x: 722.78, y: 372.36, width: 181.27, height: 35.25 };
+    const arrow = { x: 778.76, y: 329.69, width: 120, height: 120 };
+    const shift = keepOutShiftY(chip, arrow, KEEP_OUT_PAD_PX);
+    expect(shift).not.toBeNull();
+    const moved = { ...chip, y: chip.y + shift!.dy };
+    expect(
+      moved.x < arrow.x + arrow.width &&
+        arrow.x < moved.x + moved.width &&
+        moved.y < arrow.y + arrow.height &&
+        arrow.y < moved.y + moved.height,
+    ).toBe(false);
+    // The arrow's own grab pixel (888, 398) is no longer inside the chip.
+    expect(
+      888 >= moved.x && 888 <= moved.x + moved.width && 398 >= moved.y && 398 <= moved.y + moved.height,
+    ).toBe(false);
   });
 });

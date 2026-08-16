@@ -167,6 +167,31 @@ scene
 └── interactionRoot     (hover/selected highlight meshes — F-WP5)
 ```
 
+## HTML chips must stay off the value arrow (MC-R9)
+
+`DragHandle` is a 3D object; the model-tool chip is a DOM element the
+`HtmlOverlayDriver` positions. They share one world anchor, so left alone the chip
+lands ON the arrow — measured, with an armed Fillet: the arrow's own grab pixel
+(888, 398) resolved to the chip's Cancel button, and `isExcludedClickAwayTarget`
+refused that press, which made the arrow ungrabbable rather than merely awkward.
+
+The contract, for any future overlay that shares an anchor with a grab handle:
+
+- `ViewportEngine.getInteractionOverlayBounds("valueHandle")` is the arrow's screen
+  box, and the render loop passes it to `HtmlOverlayDriver.update()` **per frame**,
+  right after `dragHandle.orient()` so it is current for that frame.
+- An overlay opts in with `ChipPlacement.avoidValueHandle`
+  (→ `OverlayPlacement.avoidKeepOut`). Opting in is the caller's choice; the driver
+  never displaces an item that did not ask.
+- Displacement is **vertical only** and its side is **sticky** while the overlap
+  lasts (`keepOutShiftY`, pure and separately tested). A side re-chosen per frame
+  flips as the chip drifts across the box's centre — the chip jumping over the arrow
+  mid-drag.
+- The item's size comes from a `ResizeObserver`, never a per-frame
+  `getBoundingClientRect()`: the driver writes transforms every frame, so reading a
+  rect back would force a synchronous reflow on the drag path. An item with no
+  measured size is left alone rather than displaced by a guess.
+
 ## Screen metrics, grid ownership, guides and DPR (SNAP P0/P4)
 
 **`planeScreenMetric(at)` is the snap distance authority.** It returns the local

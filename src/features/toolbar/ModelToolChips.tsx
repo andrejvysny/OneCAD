@@ -454,6 +454,10 @@ export function ModelToolChips() {
     engine.mountChip(CHIP_ID, host, worldPos, {
       axisFrom: anchorAxisFrom ?? undefined,
       offsetPx: anchorOffsetPx || undefined,
+      // The chip and the value arrow share this anchor, so without this the chip
+      // sits ON the arrow and every press meant for the arrow hits the chip
+      // instead (measured: the arrow's grab pixel resolved to `chip-cancel`).
+      avoidValueHandle: true,
     });
     return () => engine.unmountChip(CHIP_ID, host);
     // eslint-disable-next-line react-hooks/exhaustive-deps
