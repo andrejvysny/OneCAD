@@ -619,6 +619,7 @@ fn recents_thumbnails_come_from_the_container_preview() {
             path: p.to_string_lossy().into_owned(),
             modified_at: "2026-08-05T00:00:00Z".into(),
             thumbnail: None,
+            has_recovery: false,
         })
         .collect();
 

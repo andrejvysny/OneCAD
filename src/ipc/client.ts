@@ -50,6 +50,7 @@ import type {
   SketchPlane,
   PromotePick,
   RecentProject,
+  OnRecovery,
   RecoveryInfo,
   SaveOutcome,
   ResolveRefRequest,
@@ -91,8 +92,17 @@ export interface CadClient {
   revealInFileManager(path: string): Promise<void>;
   /** Create a blank document and open it. */
   newDocument(): Promise<DocumentSnapshot>;
-  /** Open an existing .onecad project at `path`. */
-  openDocument(path: string): Promise<DocumentSnapshot>;
+  /**
+   * Open an existing .onecad project at `path`.
+   *
+   * **Rejects with `recoveryPending` when an unresolved crash-recovery offer names
+   * `path`** and `onRecovery` is omitted. The file on disk is then older than work a
+   * previous session left behind, and opening it blind destroys that work: the
+   * reopened document carries the same id, so its first autosave overwrites the
+   * crash container. Pass `"openSaved"` to discard the autosave deliberately, or
+   * route the user to {@link CadClient.recoverDocument} instead.
+   */
+  openDocument(path: string, onRecovery?: OnRecovery): Promise<DocumentSnapshot>;
   /** Import a STEP file at `path` into a new document. */
   importStep(path: string): Promise<DocumentSnapshot>;
   /**
@@ -759,16 +769,23 @@ export interface CadClient {
   // exposes a test-seeded seam (`setMockRecovery`).
 
   /**
-   * Check whether a crashed session left an autosave to offer. Resolves the
-   * recovery info, or null when there is nothing to recover.
+   * Every autosave a crashed session left behind, newest first; empty when there is
+   * nothing to recover.
+   *
+   * A list, not one offer: several sessions can have crashed, and returning only the
+   * first left the rest invisible to the user AND unswept on disk.
    */
-  checkRecovery(): Promise<RecoveryInfo | null>;
+  checkRecovery(): Promise<RecoveryInfo[]>;
 
   /**
-   * Resolve a pending recovery. `accept:true` restores the autosave and opens the
-   * recovered document (returns a snapshot); `accept:false` discards it (returns null).
+   * Resolve one pending recovery by `documentId`. `accept:true` restores the
+   * autosave and opens the recovered document (returns a snapshot); `accept:false`
+   * discards it (returns null). Resolves null when nothing is pending under that id.
+   *
+   * A failed restore leaves the offer PENDING, so the caller can retry or discard —
+   * rejecting here does not consume it.
    */
-  recoverDocument(accept: boolean): Promise<DocumentSnapshot | null>;
+  recoverDocument(documentId: string, accept: boolean): Promise<DocumentSnapshot | null>;
 
   // ── Close/quit confirmation (unsaved-changes guard) ────────────────────────
   // Rust intercepts BOTH the native window-close button AND an app-level exit

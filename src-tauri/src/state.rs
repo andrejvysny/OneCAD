@@ -54,11 +54,14 @@
 //! time a user picked an unreadable file — and `importStep` explicitly keeps the
 //! user on their current document when the probe fails.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{watch, Mutex};
 
+use onecad_core::ids::DocumentId;
 use onecad_core::io::recovery::RecoveryOffer;
 use onecad_core::regen::{GeometryEngine, RegenRequest, SchedulerHandle};
 
@@ -71,6 +74,12 @@ use crate::worker::{
     PendingBackend, PreviewEngine, SolverEngine, StepImport, SupervisorConfig, WorkerLifecycle,
     WorkerManager, WorkerReadiness, WorkerState,
 };
+
+/// Minimum gap between two blur-triggered autosave flushes
+/// ([`AppState::claim_blur_flush`]). Short enough that leaving the app for a coffee
+/// is always covered, long enough that alt-tab churn cannot turn a 16 MiB import
+/// into a write storm.
+const BLUR_FLUSH_THROTTLE: Duration = Duration::from_secs(5);
 
 /// The geometry backend split into its three facets (the executor drives the
 /// [`GeometryEngine`]; the mesh cache pulls bytes from the [`MeshProvider`]; the
@@ -167,11 +176,30 @@ pub struct AppState {
     /// document-mutating command bumps it via [`note_mutation`](Self::note_mutation);
     /// the driver subscribes in `crate::run`'s setup (the autosave signal seam).
     pub autosave_tick: Arc<watch::Sender<u64>>,
-    /// The crash-recovery offer surfaced at startup by
-    /// [`check_recovery`](crate::api::check_recovery), consumed by
-    /// [`recover_document`](crate::api::recover_document). `None` until scanned / after
-    /// a decision (V1 single-document ⇒ at most one offer).
-    pub pending_recovery: StdMutex<Option<RecoveryOffer>>,
+    /// The crash-recovery offers surfaced by
+    /// [`check_recovery`](crate::api::check_recovery), keyed by document and consumed
+    /// one at a time by [`recover_document`](crate::api::recover_document).
+    ///
+    /// A map rather than a single slot because several sessions can have crashed:
+    /// surfacing only the first left the rest invisible AND unswept. It is also read
+    /// by [`open_document`](crate::api::open_document), which must refuse to open a
+    /// path an unresolved offer names.
+    ///
+    /// Reached only through [`AppState::pending_recovery`](Self::pending_recovery) —
+    /// a poisoned lock must degrade this, never panic the two commands that stand
+    /// between the user and their unsaved work.
+    pending_recovery: StdMutex<BTreeMap<DocumentId, RecoveryOffer>>,
+    /// When the last *blur-triggered* autosave flush ran, for
+    /// [`AppState::claim_blur_flush`].
+    ///
+    /// Only the blur path needs this. The driver loop is self-limiting — its
+    /// debounce and deadline already bound it to one write per quiet window — but a
+    /// focus-loss flush is driven by the window manager, and alt-tabbing across a
+    /// multi-monitor setup can fire it arbitrarily fast. An autosave never clears
+    /// `dirty` (only a real save does), so nothing else would stop those repeats
+    /// from re-serializing and re-deflating the whole document, import blobs
+    /// included.
+    blur_flush_at: StdMutex<Option<Instant>>,
     /// The current document's STEP exporter (the same `WorkerManager` Arc the
     /// backend uses, or [`PendingBackend`] when no worker). Swapped by
     /// [`make_backend`](AppState::make_backend) on every new/open.
@@ -235,7 +263,8 @@ impl AppState {
             scheduler: Arc::new(OnceLock::new()),
             app: Arc::new(OnceLock::new()),
             autosave_tick: Arc::new(watch::channel(0u64).0),
-            pending_recovery: StdMutex::new(None),
+            pending_recovery: StdMutex::new(BTreeMap::new()),
+            blur_flush_at: StdMutex::new(None),
             exporter: RwLock::new(Arc::new(PendingBackend)),
             element_query: RwLock::new(Arc::new(PendingBackend)),
             preview: RwLock::new(Arc::new(PendingBackend)),
@@ -251,6 +280,86 @@ impl AppState {
     /// document-mutating command calls this — the autosave debounce seam).
     pub fn note_mutation(&self) {
         self.autosave_tick.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Replaces the pending crash-recovery offers with a freshly-scanned set.
+    pub fn set_pending_recovery(&self, offers: impl IntoIterator<Item = RecoveryOffer>) {
+        let mut pending = self.pending_recovery();
+        *pending = offers.into_iter().map(|o| (o.document_id, o)).collect();
+    }
+
+    /// The pending offer for `document`, if any — a COPY, so the caller can act on
+    /// it without holding the lock. The offer stays pending: only
+    /// [`take_pending_recovery`](Self::take_pending_recovery) removes it, and a
+    /// restore must not remove it until the container has actually opened.
+    #[must_use]
+    pub fn peek_pending_recovery(&self, document: DocumentId) -> Option<RecoveryOffer> {
+        self.pending_recovery().get(&document).cloned()
+    }
+
+    /// Removes and returns the pending offer for `document` — the decision is final.
+    pub fn take_pending_recovery(&self, document: DocumentId) -> Option<RecoveryOffer> {
+        self.pending_recovery().remove(&document)
+    }
+
+    /// The pending offer whose recorded on-disk path is `path`, if any.
+    ///
+    /// The lookup behind `open_document`'s refusal. Paths are compared **as
+    /// recorded**, with no canonicalization: both sides originate from the same
+    /// value (the document's own save path, written into the marker by the autosave
+    /// and handed back by `recents`), so they agree byte-for-byte on every path the
+    /// UI can actually produce. A symlinked or otherwise aliased path would miss —
+    /// which is the safe direction, since the open then proceeds exactly as it did
+    /// before this guard existed.
+    #[must_use]
+    pub fn pending_recovery_for_path(&self, path: &std::path::Path) -> Option<RecoveryOffer> {
+        self.pending_recovery()
+            .values()
+            .find(|o| {
+                o.marker
+                    .as_ref()
+                    .and_then(|m| m.opened_path.as_deref())
+                    .is_some_and(|p| p == path)
+            })
+            .cloned()
+    }
+
+    /// Whether any pending offer names `path` — the `has_recovery` flag on a recent.
+    #[must_use]
+    pub fn has_pending_recovery_for_path(&self, path: &std::path::Path) -> bool {
+        self.pending_recovery_for_path(path).is_some()
+    }
+
+    /// The pending-offer map, poison-tolerant.
+    ///
+    /// A panic while another thread held this lock must not turn `check_recovery`
+    /// and `recover_document` into hard panics — that would put the user's only copy
+    /// of their work behind an unrecoverable error. Recovering the inner value is
+    /// safe here: the map is a plain scan result with no invariant a partial write
+    /// could break.
+    fn pending_recovery(&self) -> std::sync::MutexGuard<'_, BTreeMap<DocumentId, RecoveryOffer>> {
+        self.pending_recovery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Claims the right to run a blur-triggered autosave flush, at most once per
+    /// [`BLUR_FLUSH_THROTTLE`]. Returns `false` when a flush ran too recently.
+    ///
+    /// The lock is poison-tolerant on purpose: a panic elsewhere must degrade the
+    /// throttle (an extra autosave), never take the crash-protection path down with
+    /// it.
+    pub fn claim_blur_flush(&self) -> bool {
+        let now = Instant::now();
+        let mut last = self
+            .blur_flush_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.is_some_and(|t| now.duration_since(t) < BLUR_FLUSH_THROTTLE) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 
     /// A fresh backend pair for a new/open document. Also swaps in the matching
@@ -513,7 +622,8 @@ impl Default for AppState {
             scheduler,
             app,
             autosave_tick: Arc::new(watch::channel(0u64).0),
-            pending_recovery: StdMutex::new(None),
+            pending_recovery: StdMutex::new(BTreeMap::new()),
+            blur_flush_at: StdMutex::new(None),
             exporter: RwLock::new(Arc::new(PendingBackend)),
             element_query: RwLock::new(Arc::new(PendingBackend)),
             preview: RwLock::new(Arc::new(PendingBackend)),
@@ -927,5 +1037,117 @@ mod slot_tests {
     fn a_retired_worker_reports_as_failed_on_the_wire() {
         // `WorkerStatusDto.state` stays a four-value contract.
         assert_eq!(status_from_state(WorkerState::Retired, 7).state, "failed");
+    }
+}
+
+#[cfg(test)]
+mod recovery_state_tests {
+    //! The pending-offer map and the blur throttle. Both stand between the user and
+    //! their unsaved work, and both used to be a single `unwrap()` away from a panic.
+
+    use super::*;
+    use onecad_core::io::recovery::{RecoveryOffer, SessionMarker};
+    use std::path::{Path, PathBuf};
+
+    fn offer(seed: u128, path: Option<&str>, modified_ms: u64) -> RecoveryOffer {
+        let document_id = DocumentId(uuid::Uuid::from_u128(seed));
+        RecoveryOffer {
+            document_id,
+            autosave_path: PathBuf::from(format!("/autosave/{document_id}.onecad")),
+            marker: Some(SessionMarker {
+                document_id,
+                pid: 4321,
+                opened_path: path.map(PathBuf::from),
+                last_autosave: String::new(),
+                title: Some("Bracket".into()),
+            }),
+            modified_ms,
+        }
+    }
+
+    #[test]
+    fn offers_are_addressable_and_survive_a_peek() {
+        let state = AppState::default();
+        let a = offer(1, Some("/p/a.onecad"), 100);
+        let b = offer(2, None, 200);
+        state.set_pending_recovery([a.clone(), b.clone()]);
+
+        // A peek must NOT consume: a restore that fails has to leave the offer
+        // behind, or the banner outlives the only thing that could answer it.
+        assert_eq!(state.peek_pending_recovery(a.document_id), Some(a.clone()));
+        assert_eq!(state.peek_pending_recovery(a.document_id), Some(a.clone()));
+
+        assert_eq!(state.take_pending_recovery(a.document_id), Some(a.clone()));
+        assert_eq!(state.take_pending_recovery(a.document_id), None, "consumed");
+        assert_eq!(
+            state.peek_pending_recovery(b.document_id),
+            Some(b),
+            "the other offer is untouched"
+        );
+    }
+
+    #[test]
+    fn a_path_lookup_finds_only_the_offer_that_names_it() {
+        let state = AppState::default();
+        state.set_pending_recovery([
+            offer(1, Some("/p/Bracket.onecad"), 100),
+            offer(2, None, 200), // never-saved: names no path
+        ]);
+
+        assert!(state.has_pending_recovery_for_path(Path::new("/p/Bracket.onecad")));
+        assert!(!state.has_pending_recovery_for_path(Path::new("/p/Other.onecad")));
+        assert_eq!(
+            state
+                .pending_recovery_for_path(Path::new("/p/Bracket.onecad"))
+                .map(|o| o.document_id),
+            Some(DocumentId(uuid::Uuid::from_u128(1)))
+        );
+    }
+
+    /// A rescan replaces the set wholesale — an offer the user already resolved must
+    /// not come back because a stale entry lingered.
+    #[test]
+    fn a_rescan_replaces_the_previous_set() {
+        let state = AppState::default();
+        state.set_pending_recovery([offer(1, None, 100)]);
+        state.set_pending_recovery([offer(2, None, 200)]);
+        assert_eq!(
+            state.peek_pending_recovery(DocumentId(uuid::Uuid::from_u128(1))),
+            None
+        );
+        assert!(state
+            .peek_pending_recovery(DocumentId(uuid::Uuid::from_u128(2)))
+            .is_some());
+    }
+
+    #[test]
+    fn the_blur_flush_is_throttled() {
+        let state = AppState::default();
+        assert!(state.claim_blur_flush(), "the first blur flushes");
+        assert!(
+            !state.claim_blur_flush(),
+            "alt-tab churn must not re-serialize the document per focus change"
+        );
+    }
+
+    /// A panic elsewhere must not put crash recovery behind a poisoned lock — that
+    /// would make the user's only copy of their work unreachable.
+    #[test]
+    fn a_poisoned_pending_lock_still_serves() {
+        let state = Arc::new(AppState::default());
+        state.set_pending_recovery([offer(1, Some("/p/a.onecad"), 100)]);
+
+        let poisoner = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.pending_recovery.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(state.pending_recovery.is_poisoned(), "precondition");
+
+        assert!(state
+            .peek_pending_recovery(DocumentId(uuid::Uuid::from_u128(1)))
+            .is_some());
+        assert!(state.has_pending_recovery_for_path(Path::new("/p/a.onecad")));
     }
 }

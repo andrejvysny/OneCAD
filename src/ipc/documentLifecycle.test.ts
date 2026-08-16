@@ -76,7 +76,7 @@ describe("document lifecycle wiring", () => {
 
   beforeEach(() => {
     resetStores();
-    appStore.setState({ screen: "editor", document: openedDocument, recovery: null });
+    appStore.setState({ screen: "editor", document: openedDocument, recovery: [] });
   });
 
   it("resets BEFORE the new-document swap when replacing an open document", async () => {
@@ -103,14 +103,16 @@ describe("document lifecycle wiring", () => {
   });
 
   it("resets BEFORE the crash-recovery swap when replacing an open document", async () => {
+    const documentId = "33333333-3333-3333-3333-333333333333";
     setMockRecovery({
+      documentId,
       autosavePath: "/tmp/autosave.ocad",
       originalPath: "/tmp/thing.ocad",
       modifiedMs: Date.now(),
     });
     await appStore.getState().checkRecovery();
     dirtyDocumentScopedUi();
-    const pending = appStore.getState().recoverDocument();
+    const pending = appStore.getState().recoverDocument(documentId);
 
     expectDocumentScopedUiClean();
 

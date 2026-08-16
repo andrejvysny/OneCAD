@@ -7,6 +7,7 @@ import type { ProjectTemplate, RecentProject } from "@/ipc/types";
 import { RecentGrid } from "./RecentGrid";
 import { RecentGridSkeleton } from "./RecentGridSkeleton";
 import { RecoveryCard } from "./RecoveryCard";
+import { RecoveryConflictDialog } from "./RecoveryConflictDialog";
 import { SortMenu, type SortKey } from "./SortMenu";
 import { StartSidebar } from "./StartSidebar";
 import { StartLibraryPanel } from "./StartLibraryPanel";
@@ -71,6 +72,9 @@ export function StartScreen() {
   const importError = useAppStore((s) => s.importError);
   const recovery = useAppStore((s) => s.recovery);
   const recoveryStatus = useAppStore((s) => s.recoveryStatus);
+  const recoveryPendingId = useAppStore((s) => s.recoveryPendingId);
+  const recoveryConflict = useAppStore((s) => s.recoveryConflict);
+  const resolveRecoveryConflict = useAppStore((s) => s.resolveRecoveryConflict);
   const checkRecovery = useAppStore((s) => s.checkRecovery);
   const recoverDocument = useAppStore((s) => s.recoverDocument);
   const discardRecovery = useAppStore((s) => s.discardRecovery);
@@ -209,12 +213,20 @@ export function StartScreen() {
             </div>
           )}
 
-          {/* Crash-recovery offer (a crashed session left an autosave) */}
-          {recovery && (
-            <RecoveryCard
-              recovery={recovery}
-              onRestore={recoverDocument}
-              onDiscard={discardRecovery}
+          {/* Crash-recovery offers (crashed sessions left autosaves behind) */}
+          <RecoveryCard
+            recovery={recovery}
+            pendingId={recoveryPendingId}
+            onRestore={(id) => void recoverDocument(id)}
+            onDiscard={(id) => void discardRecovery(id)}
+          />
+
+          {/* A recent whose saved file is OLDER than an unresolved autosave. The
+              backend refused the open; this is where the user decides. */}
+          {recoveryConflict && (
+            <RecoveryConflictDialog
+              conflict={recoveryConflict}
+              onResolve={(choice) => void resolveRecoveryConflict(choice)}
             />
           )}
 

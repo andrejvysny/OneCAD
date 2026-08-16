@@ -11,18 +11,34 @@
 //! [`run`] is a debounced loop the app spawns once at startup. It subscribes to a
 //! `watch` "mutation tick" (bumped by every document-mutating command via
 //! [`AppState::note_mutation`](crate::state::AppState::note_mutation)): after the
-//! first change it waits [`AUTOSAVE_DEBOUNCE`] of quiet, then writes an autosave
-//! for the currently-open document and emits [`events::AUTOSAVE`](crate::events::AUTOSAVE).
-//! When **no document is open** the write is skipped (zero autosave activity).
+//! first change it waits [`AUTOSAVE_DEBOUNCE`] of quiet — but never longer than
+//! [`AUTOSAVE_MAX_AGE`] from that first change — then writes an autosave for the
+//! currently-open document and emits
+//! [`events::AUTOSAVE`](crate::events::AUTOSAVE).
+//!
+//! Two gates decide whether a wake produces a write, and they answer different
+//! questions:
+//!
+//! * **no document open** ⇒ skip (zero autosave activity on the start screen);
+//! * **document not dirty** ⇒ skip. A tick means "something ran", not "there is
+//!   unsaved work" — a published regen ticks the loop, and opening a project
+//!   schedules one. Writing on that armed a crash marker for documents the user had
+//!   only looked at, and the next launch offered them back as "unsaved changes".
+//!
+//! The window-blur flush in `crate::run` calls [`autosave_current`] directly, past
+//! the debounce but through both gates and the same lane.
 //!
 //! ## Recovery lifecycle
 //!
 //! * a clean [`save_document`](crate::api::save_document) /
 //!   [`close_document`](crate::api::close_document) calls [`clear_recovery_state`]
 //!   (remove the marker + delete the stale autosave);
-//! * the next launch scans for **stale** markers (a marker whose `pid` is no longer
-//!   alive, per [`pid_alive`]) with a surviving autosave, and offers recovery
-//!   ([`check_recovery`](crate::api::check_recovery)).
+//! * the next launch scans the autosave directory for CONTAINERS no live session
+//!   owns — a marker whose `pid` is no longer alive (per [`pid_alive`]), or no
+//!   marker at all — and offers them
+//!   ([`check_recovery`](crate::api::check_recovery)). Discovery is keyed to the
+//!   container, not the marker, so losing a marker costs a label rather than the
+//!   whole document.
 //!
 //! ## The persistence lane (VF-B7 / M2 / M3)
 //!
@@ -56,10 +72,25 @@ use onecad_core::io::IoError;
 use crate::document_runtime::{DocumentRuntime, SaveCaches, SavePayload};
 
 /// Quiet window after the last document mutation before an autosave fires
-/// (V1/V2 lifecycle). Constant by design — a debounce, not a fixed cadence: a busy
-/// editor never autosaves mid-burst, and an idle-but-dirty document autosaves once,
-/// ~30 s after the last edit.
+/// (V1/V2 lifecycle). A debounce, not a fixed cadence: a busy editor does not
+/// autosave mid-burst, and an idle-but-dirty document autosaves once, ~30 s after
+/// the last edit.
 pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(30);
+
+/// Ceiling on how long the debounce may defer a write once the first unsaved edit
+/// has landed.
+///
+/// A debounce ALONE starves: sustained modelling re-arms the quiet window on every
+/// edit, so a user who never pauses for [`AUTOSAVE_DEBOUNCE`] never gets an
+/// autosave at all, and a crash takes the whole session with it. The deadline turns
+/// "30 s after you stop" into "30 s after you stop, or 2 min after you started,
+/// whichever comes first" — the debounce still wins in the common case, and it can
+/// no longer be starved.
+///
+/// 120 s is the figure `io::recovery`'s layout docs always claimed
+/// (`AUTOSAVE_INTERVAL_SECS`), which until now no code read.
+pub const AUTOSAVE_MAX_AGE: Duration =
+    Duration::from_secs(onecad_core::io::recovery::AUTOSAVE_INTERVAL_SECS);
 
 /// One completed autosave — the payload of the [`events::AUTOSAVE`](crate::events::AUTOSAVE)
 /// event (`{path, atMs}`).
@@ -81,7 +112,7 @@ pub fn autosave_root(app: &AppHandle) -> Option<PathBuf> {
 }
 
 /// Whether `pid` names a live process — the liveness predicate
-/// [`scan_stale_markers`](onecad_core::io::recovery::scan_stale_markers) injects.
+/// [`scan_recoverable`](onecad_core::io::recovery::scan_recoverable) injects.
 ///
 /// On Unix, `kill(pid, 0)`: `0` ⇒ alive; `EPERM` ⇒ alive (exists, not ours);
 /// `ESRCH` ⇒ dead. Elsewhere the conservative answer is **alive** — it merely
@@ -108,7 +139,22 @@ pub fn pid_alive(pid: u32) -> bool {
 
 /// Writes an autosave container + refreshes the session crash marker for the
 /// currently-open document. Returns the [`AutosaveEvent`], or `None` when **no
-/// document is open** (the zero-activity guard) or the write failed (logged).
+/// document is open**, when the document is **not dirty**, or when the write
+/// failed (logged).
+///
+/// ## Why the dirty gate
+///
+/// The driver is woken by a mutation TICK, and a tick is not evidence of unsaved
+/// work: a published regen ticks it (`crate::make_regen_driver`), and
+/// `open_document` schedules an initial regen — so merely OPENING a project used
+/// to arm an autosave container plus a crash marker for a document with zero user
+/// edits. Kill the process and the next launch offered "unsaved changes" for work
+/// that was never touched. `dirty` is the authority on whether anything is at
+/// risk; the tick only says when to look.
+///
+/// This gate is only safe while every mutation that `build_save_payload` persists
+/// also sets `dirty` — see the classification table in
+/// `tests/recovery_hardening.rs`.
 ///
 /// The document's live save path and dirty flag are untouched (this is a recovery
 /// snapshot, not a real save — see [`DocumentRuntime::build_save_payload`]).
@@ -138,15 +184,20 @@ pub async fn autosave_current(
     //    a timer against a document the user is actively editing, and its container
     //    is only ever read by crash recovery — which regens from 0 regardless. The
     //    "paint at open" caches belong to an explicit save.
-    let (payload, doc_id, opened) = {
+    let (payload, doc_id, opened, title) = {
         let mut guard = runtime.lock().await;
         let rt = guard.as_mut()?; // no document open ⇒ zero autosave activity.
+        if !rt.is_dirty() {
+            return None; // nothing at risk ⇒ no container, no marker, no offer.
+        }
         let doc_id = rt.document_uuid();
         let opened = rt.path().map(Path::to_path_buf);
+        let title = rt.title().to_string();
         (
             rt.build_save_payload(meta, SaveCaches::none()),
             doc_id,
             opened,
+            title,
         )
     };
 
@@ -179,9 +230,18 @@ pub async fn autosave_current(
         pid: std::process::id(),
         opened_path: opened,
         last_autosave: now,
+        title: Some(title),
     };
+    // A container whose marker never landed is not a recovery snapshot — discovery
+    // treats a marker-less container as an unowned orphan, and reporting success
+    // here would tell the caller (and the UI) that the work is protected when it is
+    // not. Fail the whole write and take the half-state with it.
     if let Err(e) = write_marker(app_data, &marker) {
         tracing::warn!("autosave: write marker failed: {e}");
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("autosave: rollback of {path:?} failed: {e}");
+        }
+        return None;
     }
     Some(AutosaveEvent {
         path: path.to_string_lossy().into_owned(),
@@ -246,9 +306,16 @@ pub fn clear_recovery_state(app_data: &Path, document_id: DocumentId) {
 }
 
 /// The debounced autosave loop (spawned once at startup). Blocks on `tick` until a
-/// mutation lands, waits `debounce` of quiet (resetting on every further mutation),
-/// autosaves the open document, and hands the [`AutosaveEvent`] to `emit`. Returns
-/// when every `tick` sender is dropped (app shutdown).
+/// mutation lands, waits `debounce` of quiet — but no longer than `max_age` from the
+/// mutation that opened the cycle — autosaves the open document, and hands the
+/// [`AutosaveEvent`] to `emit`. Returns when every `tick` sender is dropped (app
+/// shutdown).
+///
+/// **The deadline is what makes this loop honest.** A pure debounce is starvable:
+/// sustained editing re-arms the quiet window forever, so the one user who most
+/// needs an autosave — the one who has been modelling without pause for ten minutes
+/// — is the one who never gets one. `max_age` bounds that at the cost of a write
+/// during a long burst.
 ///
 /// `lane` is the shared persistence lane (`AppState::persistence`) — see the module
 /// docs for the lock order.
@@ -258,6 +325,7 @@ pub async fn run<F>(
     lane: Arc<Mutex<()>>,
     mut tick: watch::Receiver<u64>,
     debounce: Duration,
+    max_age: Duration,
     emit: F,
 ) where
     F: Fn(AutosaveEvent),
@@ -268,10 +336,15 @@ pub async fn run<F>(
         if tick.changed().await.is_err() {
             return; // all senders dropped.
         }
-        // Debounce: fire only after `debounce` of quiet; a newer mutation restarts it.
+        // The oldest edit this cycle covers is from HERE, so the deadline is absolute:
+        // re-arming the debounce below cannot push it out.
+        let deadline = tokio::time::Instant::now() + max_age;
+        // Debounce: fire after `debounce` of quiet (a newer mutation restarts it), or
+        // at the deadline, whichever comes first.
         loop {
             tokio::select! {
                 () = tokio::time::sleep(debounce) => break,
+                () = tokio::time::sleep_until(deadline) => break,
                 r = tick.changed() => {
                     if r.is_err() {
                         return;

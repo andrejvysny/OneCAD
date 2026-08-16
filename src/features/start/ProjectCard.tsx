@@ -130,7 +130,21 @@ export function ProjectCard({ project, onOpen, onRename, onDelete, onReveal }: P
               onBlur={commitRename}
             />
           ) : (
-            <div className="truncate text-[13px] font-semibold text-ink">{project.name}</div>
+            <div className="flex items-center gap-1.5">
+              <div className="truncate text-[13px] font-semibold text-ink">{project.name}</div>
+              {/* This file is OLDER than an autosave a crashed session left behind.
+                  Opening it is how that work gets discarded, so the card says so
+                  BEFORE the click — the recovery banner sits above the list and does
+                  nothing to stop it. */}
+              {project.hasRecovery && (
+                <span
+                  title="A previous session left unsaved changes for this project"
+                  className="shrink-0 rounded-sm border border-warn-border bg-warn-surface px-1 py-px text-[10px] font-medium text-warn-strong"
+                >
+                  Unsaved
+                </span>
+              )}
+            </div>
           )}
           <div className="mt-[3px] flex gap-1.5 text-[11px] text-ink-5">
             <span className="flex-1 truncate">{project.path}</span>

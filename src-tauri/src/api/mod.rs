@@ -36,10 +36,11 @@ use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, Primary
 use onecad_core::document::variables::{Scalar, Unit, Variable};
 use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{
-    BodyId, ConstraintId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey, VariableId,
+    BodyId, ConstraintId, DocumentId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey,
+    VariableId,
 };
 use onecad_core::io::container::SaveMeta;
-use onecad_core::io::recovery::{scan_stale_markers, RecoveryOffer};
+use onecad_core::io::recovery::{scan_recoverable, RecoveryOffer, SessionMarker};
 use onecad_core::regen::{is_bare_name, RegenRequest, ResolveRef, ResolveRequest};
 
 use crate::autosave;
@@ -215,20 +216,60 @@ pub async fn new_document(
 
 /// Opens an existing `.onecad` project (`CadClient.openDocument`).
 ///
-/// **Recovery seam (V1 scope).** Crash recovery is startup-only: a crashed session
-/// is surfaced by [`check_recovery`] before any document is opened. The
-/// "open a path that has a *newer* autosave than the file on disk" case is **not**
-/// handled here yet — the autosave layout is keyed by `documentId`, not by the
-/// on-disk path, so matching a just-opened file to a stale autosave needs a
-/// path→documentId index. Deferred to a later WP; the startup scan covers the
-/// crash-then-relaunch flow that matters most.
+/// ## The recovery guard
+///
+/// If an unresolved crash-recovery offer names this path, the file on disk is OLDER
+/// than work a previous session left behind, and opening it blind is destructive:
+/// the autosave layout is keyed by `documentId`, so the reopened stale file gets a
+/// runtime with the SAME id, and its first autosave overwrites the crash container
+/// and re-stamps the marker under this process. The offer then vanishes with no
+/// prompt and no undo — the recovery banner is on the same screen as the recents
+/// list, so this was one click away at all times.
+///
+/// So `on_recovery` is REQUIRED in that case, and its absence is
+/// [`ApiError::RecoveryPending`], not a silent open:
+///
+/// * `"restore"` — the caller should route to [`recover_document`] instead; refused
+///   here so there is exactly one restore path.
+/// * `"openSaved"` — an explicit discard. The recovery state is cleared FIRST, so
+///   the destruction is something the user chose rather than a side effect.
+///
+/// `None` on a path with no pending offer is the ordinary case and opens normally.
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(path = %path), err(Display))]
 pub async fn open_document(
     state: State<'_, AppState>,
     app: AppHandle,
     path: String,
+    on_recovery: Option<String>,
 ) -> Result<DocumentSnapshotDto, ApiError> {
+    if let Some(offer) = state.pending_recovery_for_path(Path::new(&path)) {
+        match on_recovery.as_deref() {
+            None => {
+                return Err(ApiError::RecoveryPending(format!(
+                    "{path} has unsaved changes from a previous session \
+                     (autosaved {} ms) — restore them or open the saved version",
+                    offer.modified_ms
+                )))
+            }
+            Some("openSaved") => {
+                state.take_pending_recovery(offer.document_id);
+                if let Some(root) = autosave::autosave_root(&app) {
+                    autosave::clear_recovery_state(&root, offer.document_id);
+                }
+            }
+            Some("restore") => {
+                return Err(ApiError::InvalidCommand(
+                    "openDocument: use recoverDocument to restore an autosave".into(),
+                ))
+            }
+            Some(other) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "openDocument: unknown onRecovery {other:?}"
+                )))
+            }
+        }
+    }
     let rt = open_runtime_over_new_backend_blocking(&state, PathBuf::from(&path)).await?;
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
@@ -731,100 +772,147 @@ pub async fn cancel_exit(app: AppHandle) {
 // Crash recovery (autosave; `io::recovery`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Scans for a crash-recovery offer at startup (`CadClient.checkRecovery`): a stale
-/// session marker (its owning process is gone, per [`autosave::pid_alive`]) whose
-/// autosave container survives. Stashes the offer for a later
-/// [`recover_document`] decision and returns its display info; `None` when there is
-/// nothing to recover.
+/// Scans for crash-recovery offers at startup (`CadClient.checkRecovery`): autosave
+/// containers no live session owns (per [`autosave::pid_alive`]), newest first.
+/// Stashes them for later [`recover_document`] decisions and returns their display
+/// info; an empty list when there is nothing to recover.
+///
+/// Returns **every** offer, not just the first. Several sessions can have crashed,
+/// and surfacing one at a time left the rest both invisible to the user and — since
+/// nothing else enumerates them — unswept on disk.
 #[tauri::command]
 pub async fn check_recovery(
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<Option<RecoveryInfoDto>, ApiError> {
+) -> Result<Vec<RecoveryInfoDto>, ApiError> {
     let Some(root) = autosave::autosave_root(&app) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let offers =
-        scan_stale_markers(&root, autosave::pid_alive).map_err(|e| ApiError::Io(e.to_string()))?;
-    let Some(offer) = offers.into_iter().next() else {
-        *state.pending_recovery.lock().unwrap() = None;
-        return Ok(None);
-    };
-    let dto = recovery_info_dto(&offer);
-    *state.pending_recovery.lock().unwrap() = Some(offer);
-    Ok(Some(dto))
+    let offers = scan_recoverable(&root, autosave::pid_alive, SystemTime::now())
+        .map_err(|e| ApiError::Io(e.to_string()))?;
+    let dtos = offers.iter().map(recovery_info_dto).collect();
+    state.set_pending_recovery(offers);
+    Ok(dtos)
 }
 
-/// Acts on the pending crash-recovery offer (`CadClient.recoverDocument`).
+/// Acts on one pending crash-recovery offer (`CadClient.recoverDocument`).
 ///
 /// `accept == true`: opens the autosave as the current document, re-targets its
 /// **real** save path (so a later Save writes the original file, not the autosave),
-/// marks it dirty (unsaved recovered work), clears the stale marker, and returns the
-/// snapshot. `accept == false`: discards the autosave + marker. Either way the
-/// pending offer is consumed; `None` when nothing was pending.
+/// restores its title, marks it dirty (unsaved recovered work), re-stamps the crash
+/// marker under this process, and returns the snapshot. `accept == false`: discards
+/// the autosave + marker. `None` when `document_id` names nothing pending.
+///
+/// ## The offer is consumed on SUCCESS, not on entry
+///
+/// A restore can fail — a truncated container, a version this build will not read.
+/// Taking the offer first meant such a failure left the banner on screen with
+/// nothing behind it: every later Restore and Discard returned `None`, and the
+/// container became an unreachable orphan. The offer is now removed only once the
+/// runtime is installed, so a failed restore is retryable and the work is still
+/// discardable.
+///
+/// ## Why the marker is re-stamped rather than removed
+///
+/// This used to `remove_marker`, reasoning that keeping the container covered a
+/// re-crash. It did not: discovery was marker-keyed, so the kept container was
+/// unreachable and the second crash recovered nothing (DI-1). Discovery is now
+/// container-keyed, which fixes that on its own — and writing a live marker on top
+/// keeps the normal path from producing orphans at all, and stops another window
+/// from being offered a document this process now has open.
 #[tauri::command]
 pub async fn recover_document(
     state: State<'_, AppState>,
     app: AppHandle,
+    document_id: String,
     accept: bool,
 ) -> Result<Option<DocumentSnapshotDto>, ApiError> {
-    let offer = state.pending_recovery.lock().unwrap().take();
-    let Some(offer) = offer else {
+    let id = parse_document_id(&document_id)?;
+    let Some(offer) = state.peek_pending_recovery(id) else {
         return Ok(None);
     };
     let root = autosave::autosave_root(&app);
     if !accept {
+        state.take_pending_recovery(id);
         if let Some(root) = &root {
             autosave::clear_recovery_state(root, offer.document_id);
         }
         return Ok(None);
     }
-    // Restore: open the autosave container as the live document.
+    let opened_path = offer.marker.as_ref().and_then(|m| m.opened_path.clone());
+    let title = offer.marker.as_ref().and_then(|m| m.title.clone());
+    // Restore: open the autosave container as the live document. Anything below that
+    // fails leaves the offer pending, so the user can try again or discard.
     let mut rt =
         open_runtime_over_new_backend_blocking(&state, offer.autosave_path.clone()).await?;
-    rt.mark_recovered(offer.marker.opened_path.clone());
-    let (snapshot, projection) = {
+    rt.mark_recovered(opened_path, title);
+    let (snapshot, projection, opened_path_for_marker, title_for_marker) = {
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
-        (snapshot_of(rt), rt.projection())
+        (
+            snapshot_of(rt),
+            rt.projection(),
+            rt.path().map(Path::to_path_buf),
+            Some(rt.title().to_string()),
+        )
     };
     state.commit_backend();
-    // Consume the marker (the autosave is superseded on the next save/close). The
-    // autosave file itself is kept so a re-crash before the next tick still recovers.
+    state.take_pending_recovery(id);
+    // Re-stamp the marker under THIS process: the container is still unsaved work,
+    // and it is now ours. Synthesized when the offer was an orphan, so a restore
+    // always leaves owner evidence behind — otherwise a second window would be
+    // offered the document this one just opened.
     if let Some(root) = &root {
-        let _ = onecad_core::io::recovery::remove_marker(root, offer.document_id);
+        let marker = SessionMarker {
+            document_id: offer.document_id,
+            pid: std::process::id(),
+            opened_path: opened_path_for_marker,
+            last_autosave: offer
+                .marker
+                .as_ref()
+                .map(|m| m.last_autosave.clone())
+                .unwrap_or_default(),
+            title: title_for_marker,
+        };
+        let _ = onecad_core::io::recovery::write_marker(root, &marker);
     }
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    // DI-2: the recovered work is unsaved and must be protected from the NEXT crash
+    // on its own merits. `mark_recovered` sets `dirty`, but the autosave loop is
+    // edge-triggered on this tick and never polls the flag — so without it the only
+    // protection was incidental, from whatever tick a published regen happened to
+    // produce. A recovery replay that fails, no-ops or is cancelled produced none.
+    state.note_mutation();
     // Rebuild geometry from the recovered (all-Dirty) timeline, once the worker
     // can actually serve it (readiness-gated — see `schedule_initial_regen`).
     schedule_initial_regen(&state).await;
     Ok(Some(snapshot))
 }
 
-/// Maps a [`RecoveryOffer`] to the start-screen DTO (`modifiedMs` from the autosave
-/// file's mtime).
+/// Maps a [`RecoveryOffer`] to the start-screen DTO. An orphan (no surviving
+/// marker) contributes neither a title nor an original path — the offer is still
+/// real, only its labelling degrades.
 fn recovery_info_dto(offer: &RecoveryOffer) -> RecoveryInfoDto {
     RecoveryInfoDto {
+        document_id: offer.document_id.to_string(),
+        title: offer.marker.as_ref().and_then(|m| m.title.clone()),
         original_path: offer
             .marker
-            .opened_path
             .as_ref()
+            .and_then(|m| m.opened_path.as_ref())
             .map(|p| p.to_string_lossy().into_owned()),
         autosave_path: offer.autosave_path.to_string_lossy().into_owned(),
-        modified_ms: file_mtime_ms(&offer.autosave_path),
+        modified_ms: offer.modified_ms,
     }
 }
 
-/// A file's last-modified time in Unix-epoch milliseconds (`0` if unavailable).
-fn file_mtime_ms(p: &Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// Parses a `documentId` command argument, refusing anything that is not a UUID.
+fn parse_document_id(raw: &str) -> Result<DocumentId, ApiError> {
+    raw.parse::<uuid::Uuid>()
+        .map(DocumentId)
+        .map_err(|e| ApiError::InvalidCommand(format!("documentId {raw:?}: {e}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1534,6 +1622,11 @@ pub async fn promote_selection(
         (ids, rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    // A promotion writes `regen.elements`, which the save persists — so it owes the
+    // autosave loop a tick like any other mutating command.
+    if !ids.is_empty() {
+        state.note_mutation();
+    }
     Ok(ids)
 }
 
@@ -2423,6 +2516,9 @@ pub async fn prepare_edge_op(
     }
     let projection = promote_prepared_edges(state.inner(), &mut prepared).await?;
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    // Same reason as `promote_selection`: this promoted edges into the persisted
+    // element partition.
+    state.note_mutation();
     Ok(prepared)
 }
 
@@ -2553,16 +2649,30 @@ pub async fn clear_worker_circuit(state: State<'_, AppState>) -> Result<usize, A
 /// rather than on the async runtime — and if that task somehow fails, the listing
 /// still returns, just without pictures.
 #[tauri::command]
-pub async fn list_recents(app: AppHandle) -> Result<Vec<RecentProjectDto>, ApiError> {
+pub async fn list_recents(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<RecentProjectDto>, ApiError> {
     let entries = recents::list(&app);
     let with_previews = entries.clone();
-    match tokio::task::spawn_blocking(move || recents::with_thumbnails(with_previews)).await {
-        Ok(list) => Ok(list),
+    let mut list = match tokio::task::spawn_blocking(move || {
+        recents::with_thumbnails(with_previews)
+    })
+    .await
+    {
+        Ok(list) => list,
         Err(e) => {
             tracing::warn!(error = %e, "recents: thumbnail read task failed — listing without previews");
-            Ok(entries)
+            entries
         }
+    };
+    // A card whose file is older than an unresolved autosave has to say so: clicking
+    // it is exactly how that autosave gets destroyed, and the recovery banner above
+    // the list does not stop the click.
+    for entry in &mut list {
+        entry.has_recovery = state.has_pending_recovery_for_path(Path::new(&entry.path));
     }
+    Ok(list)
 }
 
 /// Renames a recent project's `.onecad` file on disk and its `recents.json` entry

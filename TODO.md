@@ -696,6 +696,186 @@ in the Inspector.
   dimension geometry appears; snap guides read as weak/dashed, hint chip sits near the
   cursor not floating; origin triad shows small X/Y/Z labels, slightly recessive vs geometry
 
+## AUTOSAVE HARDENING (2026-08-16) — SHIPPED
+
+Asked why "Unsaved changes recovered" does not always recover the changes. The
+write path was never the problem: the container write is atomic, the persistence
+lane is sound, the round-trip test was real. The defects were in **when** the
+autosave fires, **how** an offer is discovered, and **what** the restored document
+looks like. Three symptoms were reported, and each turned out to have a distinct
+root cause.
+
+Closes DI-1, DI-2 and DI-3 from the `8133bcd` audit, plus four defects that audit
+had not reached.
+
+### Symptom 1 — "recent work missing from the restored document"
+
+- [x] **The autosave often never fired at all.** `autosave::run` waited for
+      `AUTOSAVE_DEBOUNCE` of QUIET with **no ceiling**, so sustained modelling
+      re-armed the window on every edit: the user who works for ten minutes without
+      pausing was the one guaranteed to get no autosave. `AUTOSAVE_MAX_AGE` (built
+      from `io::recovery::AUTOSAVE_INTERVAL_SECS = 120`, which was declared,
+      documented as the cadence, and read by no code) is now an ABSOLUTE deadline
+      from the tick that opened the cycle, so a burst can defer a write by at most
+      2 min. Mutation-proved: without the deadline arm the pin lands at 1.80 s
+      instead of inside the 300 ms ceiling.
+- [x] **Nothing flushed when the user stepped away.** `WindowEvent::Focused(false)`
+      now runs one immediate `autosave_current`, throttled to once per 5 s by
+      `AppState::claim_blur_flush` — the driver loop is self-limiting, but a
+      window-manager-driven flush is not, and alt-tab churn would otherwise
+      re-deflate a 16 MiB import per focus change.
+
+### Symptom 2 — "the restored document looks wrong or empty"
+
+- [x] **The recovered document was titled with a raw UUID.** `open` derives the
+      title from the file it read, and recovery reads `<documentId>.onecad`;
+      `mark_recovered` restored the path and the dirty flag but not the name.
+      `SessionMarker` gains `title` (serde-default, so an old marker still parses),
+      and `mark_recovered(original, title)` walks title → path stem → leave. The
+      round-trip test asserted id/features/dirty/path and would never have caught
+      it; it does now.
+- [x] **Date-only timestamps.** `toLocaleDateString` rendered a crash ninety
+      seconds ago identically to one last Tuesday. Now `toLocaleString` with the
+      time, and `modifiedMs === 0` (an unreadable mtime) renders NO timestamp
+      rather than "Jan 1, 1970".
+
+### Symptom 3 — "an offer for a document that was empty when closed"
+
+- [x] **Autosave fired on a TICK, never on dirtiness.** `autosave_current` never
+      read `is_dirty`, and a published regen ticks the loop — which `open_document`
+      schedules. So merely OPENING a project armed a container plus a crash marker
+      for a document with zero user edits; kill the process (force-quit, `Ctrl-C`
+      on `tauri dev`) and the next launch offered it back. Gated on `is_dirty()`.
+
+### Found while there
+
+- [x] **DI-1 — a recovered document was unprotected against the next crash.**
+      Discovery iterated MARKERS, so consuming one (which `recover_document` did)
+      or losing one to a crash between the two writes orphaned the work
+      permanently. `scan_stale_markers` is replaced by `scan_recoverable`, which
+      iterates CONTAINERS and reads the marker only as evidence of who owns each:
+      live owner ⇒ skip, dead owner ⇒ offer, **no marker ⇒ offer as an unlabelled
+      orphan**. `recover_document` also re-stamps its marker under the live pid
+      instead of removing it. The audit's characterization test
+      (`an_autosave_whose_marker_was_consumed_is_not_offered`) is INVERTED into a
+      fix pin, as its own doc comment instructed.
+- [x] **DI-2** — `recover_document` now calls `note_mutation()`. It set `dirty` and
+      the loop never polls that flag, so protection was incidental, from whatever
+      tick a published regen happened to produce.
+- [x] **DI-3** — `promote_selection` sets `dirty` (at the RUNTIME method, so every
+      caller inherits it, not at the two commands) and both `promote_selection` and
+      `prepare_edge_op` tick. They wrote `regen.elements`, which the save persists,
+      while `dirty` stayed false — so close took the clean fast path and skipped the
+      prompt. This also had to land WITH the dirty gate above, or those promotions
+      would have stopped being autosaved. **Self-review caught a regression in the
+      first version of this fix**: it dirtied unconditionally, but `apply` refuses a
+      read-only document precisely so nothing can dirty one — so a face pick on a
+      read-only container (what a newer-schema file opens as) would have armed a
+      crash marker and offered a selection back as "unsaved changes", recreating
+      symptom 3. Now `&& !self.read_only`.
+- [x] **Opening from Recent silently destroyed the crash autosave.** `open_document`
+      admitted in its own doc comment that it did not check for a newer autosave,
+      and the recovery banner sits above a fully clickable recents list — so this
+      was one click away at all times. Same `documentId` ⇒ the reopened stale file's
+      first autosave overwrote the crash container and re-stamped its marker under
+      the live pid, and the offer was gone with no prompt and no undo.
+      `open_document` now takes `on_recovery` and returns `ApiError::RecoveryPending`
+      when an unresolved offer names the path; `"openSaved"` clears the recovery
+      state first, so the destruction is a choice. Server-enforced, not UI-enforced.
+      `list_recents` marks shadowed entries (`hasRecovery`) and `ProjectCard` badges
+      them, so the warning arrives BEFORE the click.
+- [x] **The offer was consumed before the open could fail.** `recover_document` took
+      the pending offer at entry, so a corrupt container left the banner on screen
+      with nothing behind it — every later Restore and Discard returned `None`
+      forever. It is now removed only once the runtime is installed. Frontend:
+      `recoverDocument`/`discardRecovery` gain try/catch (they were wired to
+      `() => void` handlers, so a rejection was an unhandled promise rejection with
+      zero feedback) and a pending/disabled state.
+- [x] **Only ONE offer, ordered by document UUID.** `offers.into_iter().next()` over
+      a uuid-sorted list meant N−1 crashed documents were invisible each launch and,
+      since nothing else enumerated them, never swept. `check_recovery` returns them
+      all, mtime-descending; `RecoveryCard` renders a list; `ORPHAN_TTL` (30 days)
+      sweeps the unclaimed. The sweep refuses to act on an mtime it cannot trust —
+      a future-dated container (clock jump, restored backup) is never deleted.
+- [x] **A failed marker write reported success.** `autosave_current` returned
+      `Some(event)` even when `write_marker` failed, so the UI would report work as
+      protected that discovery could not label. The container is now rolled back and
+      the autosave reports failure.
+
+### Seam changes
+
+`CadClient.checkRecovery` and `.recoverDocument` change shape rather than being
+added to, against the append-only guidance in CLAUDE.md — `mockClient`,
+`tauriClient`, `types.ts` and both test files move in the same change. New
+`src/ipc/apiError.ts` gives both lanes one way to read a backend `ApiError.kind`
+(tauri rejects with a bare object, the mock threw an `Error`). `?mockrecovery=1`
+opts a fixture in from a plain browser lane, the same pattern as
+`?mockimport=step` / `?mocklibrary=1`.
+
+### Gates (2026-08-16)
+
+- [x] `cargo fmt --all --check` · `cargo clippy --workspace --all-targets -D warnings` — clean
+- [x] Worker-backed `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` — **1283 passed / 0 failed**
+- [x] `npx tsc --noEmit` — clean · `bun run test` — **4941 passed / 0 failed**, 295 files
+- [x] `bunx playwright test e2e/recovery.spec.ts` — 14/14 (chromium + webkit), a lane that had ZERO recovery coverage before
+- [x] `bun run e2e` full lane — **451 passed / 11 failed**, and **none of the 11 is
+      from this work**. Ten (`auto-mode`, `datum-sketch`, `filletChamfer` ×2,
+      `live-dim-mouse-rounding`, both browsers) reproduce IDENTICALLY on a clean
+      `git worktree` at HEAD with none of these changes applied — they belong to the
+      concurrently-committed sketch-snap work (`'Select a sketch plane' resolved to
+      2 elements`, which `d73d469` was aimed at). The eleventh
+      (`theme.spec` System-follows-OS, webkit) passed on baseline AND passes solo
+      here (8/8) — the documented contention class. Verified rather than assumed:
+      the baseline worktree was run precisely because "my diff does not touch those
+      files" is an argument, not evidence.
+- [x] Hex gate — empty
+- [x] **Mutation-proved** (each fix reverted, each pin verified red): the debounce
+      deadline, the dirty gate, the marker rollback, and the `open_document` guard.
+      A fifth attempt — asserting DI-3's dirty flag inside `m2_gate` — was found
+      VACUOUS by its own mutation probe (the slice promotes against an
+      already-dirty document) and was removed rather than kept as a green
+      assertion that cannot fail. The gap is recorded in the test that replaced it.
+- [ ] **Manual Tauri gate (USER)** — the five steps in the plan file:
+      (1) open a saved project, touch nothing, `kill -9`, relaunch ⇒ NO offer;
+      (2) model continuously 3 min with no pause > 30 s, `kill -9` ⇒ offer exists
+      and holds the last edit; (3) Restore, then `kill -9` again unsaved ⇒ offer
+      still exists; (4) crash with an unsaved edit to a saved project, relaunch and
+      click the project in Recent ⇒ prompt, and "Open saved version" is the only way
+      the autosave is discarded; (5) restored document shows its real name, not a
+      UUID, and the card shows a time.
+
+### Deferred (found, costed, not in this package)
+
+- [ ] **Liveness by lock file, not pid.** `pid_alive` returns `true`
+      unconditionally off Unix, so recovery is **never offered on Windows**; pid
+      reuse on Unix suppresses an offer permanently. Fix: hold an exclusive advisory
+      lock on a per-session `<documentId>.lock` for the session's lifetime. Must be
+      a separate file — the marker is replaced by rename on every autosave, which
+      drops the lock.
+- [ ] **Frontend autosave visibility.** Rust emits `events::AUTOSAVE {path, atMs}`
+      and `tauriClient`'s `EVT` map has never listed it. A user whose app-data dir
+      is unwritable (`autosave_root` ⇒ `None`) gets no indication that autosave is
+      dead for the whole session.
+- [ ] **Durability of the small writes.** `write_marker` and `recents::store_at` do
+      tmp+rename with no `sync_all` and no parent-dir fsync, unlike the container
+      writer. `write_marker`'s temp is also misnamed
+      `<uuid>.session.session.json.tmp` (`Path::with_extension` on a two-dot name)
+      and never cleaned up.
+- [ ] **`recents.json` corruption is silent data loss.** `recents::load_at` does
+      `unwrap_or_default()`, and the next `record_at` overwrites the file with one
+      entry, destroying the other nine.
+- [ ] **No version stamp on the marker**, so a container from another build is
+      offered and fails only at open.
+- [ ] **The documented spurious-marker residual** (`autosave.rs`): an autosave that
+      snapshots before a save but reaches the lane after it re-arms a marker for a
+      cleanly-saved document. Fix shape: a lane-held sequence number the save
+      publishes, so a superseded autosave skips its marker. **This pass WIDENS it**:
+      the blur flush is a second trigger for the same window (blur while a ⌘S is
+      in flight). Still bounded and still harmless in the same way — the marker
+      names a real container holding a superset of the saved work — and the new
+      dirty gate narrows it further, since a save that has already cleared `dirty`
+      makes the racing flush a no-op. Not closed, and now reachable two ways.
+
 ## SKETCH UX — Shapr3D render-parity pass (2026-08-15) — SHIPPED (`601534c` + follow-ups)
 
 Vertex ring→filled-dot markers, persistent midpoint/centroid dots, permanent dimension
@@ -989,22 +1169,15 @@ package at a time.
 
 ### T1 — data integrity (HIGHEST; "can lose the user's work" class)
 
-The audit that landed in `8133bcd` found these and deliberately implemented no
-fix. For a daily driver they outrank every feature below.
+The audit that landed in `8133bcd` found DI-1…DI-5 and deliberately implemented no
+fix. DI-1, DI-2 and DI-3 are now **CLOSED** by the autosave-hardening pass below,
+which also found four further defects the audit had not reached. DI-4 and DI-5
+remain open under T3.
 
-- [ ] **DI-1 + DI-2 together (~½ day).** They share a lane and a test: recovery
-      consumes the crash marker while keeping an autosave that discovery can no
-      longer reach, AND never ticks the autosave loop, so a recovered document is
-      unprotected against the next crash from two directions at once. Pick one of
-      DI-1's three options (keep the marker until the next autosave supersedes it
-      · write a fresh marker at recovery · scan autosave files as a fallback) —
-      they differ only in stale-offer profile. DI-2 is one `note_mutation()` call;
-      the value is the test.
-- [ ] **DI-3 (~2 h).** `promote_selection` and `prepare_edge_op` write
-      `regen.elements`, which `build_save_payload` persists, with no tick and no
-      dirty flag — so close takes the clean fast path and skips the prompt. The
-      audit classified all 55 commands; these are the only mutating rows without
-      a tick, so this closes the class, not just two cases.
+- [x] **DI-1 + DI-2 + DI-3** — closed by AUTOSAVE HARDENING (see its own section
+      below). DI-1 went further than the audit's three options: discovery is now
+      keyed to the CONTAINER with the marker as owner evidence, so a lost or
+      consumed marker costs a label rather than the document.
 
 ### T2 — finish the result-truth doctrine
 

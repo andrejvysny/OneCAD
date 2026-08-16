@@ -32,6 +32,15 @@ pub enum ApiError {
     Worker(String),
     /// Filesystem / container IO failure (open/save).
     Io(String),
+    /// The requested path has unresolved crash-recovery work that is NEWER than the
+    /// file on disk, and the caller did not say what to do about it.
+    ///
+    /// Refusing here is the point. The autosave layout is keyed by `documentId`, so
+    /// opening the stale file produces a runtime with the SAME id — whose first
+    /// autosave overwrites the crash container and re-stamps its marker with the
+    /// live pid, destroying the offer with no prompt and no undo. The frontend must
+    /// come back with an explicit `restore` or `openSaved`.
+    RecoveryPending(String),
     /// A generic internal failure.
     Internal(String),
 }
@@ -45,6 +54,7 @@ impl std::fmt::Display for ApiError {
             Self::StalePreview(m) => write!(f, "stale preview: {m}"),
             Self::Worker(m) => write!(f, "worker error: {m}"),
             Self::Io(m) => write!(f, "io error: {m}"),
+            Self::RecoveryPending(m) => write!(f, "recovery pending: {m}"),
             Self::Internal(m) => write!(f, "internal error: {m}"),
         }
     }
@@ -67,6 +77,7 @@ impl Serialize for ApiError {
             Self::StalePreview(message) => ("stalePreview", message, None),
             Self::Worker(message) => ("worker", message, None),
             Self::Io(message) => ("io", message, None),
+            Self::RecoveryPending(message) => ("recoveryPending", message, None),
             Self::Internal(message) => ("internal", message, None),
         };
         let include_diagnostics = diagnostics.is_some_and(|items| !items.is_empty());

@@ -2151,12 +2151,24 @@ impl DocumentRuntime {
         self.session.document().id
     }
 
-    /// Adopts a recovered document's real on-disk path and marks it unsaved. Called
-    /// after opening an autosave container during crash recovery: a subsequent Save
-    /// then targets the ORIGINAL path (not the autosave copy), and the recovered
-    /// edits stay dirty until the user saves. `original` `None` ⇒ a never-saved
-    /// document (Save falls back to Save As).
-    pub fn mark_recovered(&mut self, original: Option<PathBuf>) {
+    /// Adopts a recovered document's real on-disk path and title, and marks it
+    /// unsaved. Called after opening an autosave container during crash recovery: a
+    /// subsequent Save then targets the ORIGINAL path (not the autosave copy), and
+    /// the recovered edits stay dirty until the user saves. `original` `None` ⇒ a
+    /// never-saved document (Save falls back to Save As).
+    ///
+    /// **The title has to be restored explicitly.** [`open`](Self::open) derives it
+    /// from the file it read, and here that file is `<documentId>.onecad` — so a
+    /// recovered document used to come up titled with a raw UUID, which reads as the
+    /// wrong document entirely. The fallbacks run title → original path's stem →
+    /// leave whatever `open` derived, so a marker written before the title field
+    /// existed still gets the saved document's real name.
+    pub fn mark_recovered(&mut self, original: Option<PathBuf>, title: Option<String>) {
+        if let Some(title) = title.filter(|t| !t.is_empty()) {
+            self.title = title;
+        } else if let Some(path) = original.as_deref() {
+            self.title = title_for_path(path);
+        }
         self.path = original;
         self.dirty = true;
     }
@@ -3430,6 +3442,21 @@ impl DocumentRuntime {
                 kind: kind_str(ev.kind).to_string(),
                 body_id: crate::worker::wire::body_id_wire(ev.body),
             });
+        }
+        // `regen.elements` is PERSISTED — `build_save_payload` writes it out as
+        // `doc.elements`. Marking dirty here (rather than at the two commands that
+        // reach this method) is what keeps the class closed: any future caller of
+        // `promote_selection` inherits it. Without this the promotion rode along in
+        // the next save while `dirty` stayed false, so the close prompt was skipped
+        // and — once the autosave learned to gate on dirtiness — the promotion was
+        // never autosaved at all.
+        //
+        // NOT on a read-only document. `apply` refuses those outright, so nothing
+        // else can dirty one, and a promotion is identity plumbing rather than user
+        // intent: claiming unsaved work on a document that cannot be saved would arm
+        // a crash marker and offer a face pick back as "unsaved changes".
+        if !out.is_empty() && !self.read_only {
+            self.dirty = true;
         }
         Ok(out)
     }

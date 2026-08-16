@@ -62,6 +62,7 @@ import type {
   WorkerStatus,
 } from "./types";
 import { IMPORT_STEP_OP_TYPE, VARIABLE_NAME_RE } from "./types";
+import { BackendError } from "./apiError";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
 import { holeValueText } from "@/tools/modelTools/holeMachine";
@@ -192,10 +193,32 @@ export function resetMockRecents(): void {
 
 // ── Crash recovery (start screen) — test-seeded seam ────────────────────────
 //
-// DEFAULT NONE so the start screen shows no recovery banner unless a test opts in
-// (existing StartScreen/App tests stay green). `setMockRecovery` seeds/clears it;
-// `checkRecovery` reports it; `recoverDocument` accepts (restore) or discards it.
-let mockRecovery: RecoveryInfo | null = null;
+// DEFAULT EMPTY so the start screen shows no recovery banner unless a test opts in
+// (existing StartScreen/App tests stay green). `setMockRecovery` seeds/clears them;
+// `checkRecovery` reports them newest-first, mirroring Rust; `recoverDocument`
+// accepts (restore) or discards ONE by documentId.
+//
+// `?mockrecovery=1` opts a fixture in from a plain browser lane — the same dev-only
+// URL-flag pattern `?mockimport=step` and `?mocklibrary=1` use. A browser has no
+// crashed session to discover, so without it the entire recovery flow is
+// unreachable from e2e. The fixture's `originalPath` is deliberately the FIRST
+// seeded recent, so the "open a file an autosave shadows" conflict is reachable
+// too.
+let mockRecovery: RecoveryInfo[] = [];
+
+/** The `?mockrecovery=1` fixture: one offer shadowing the first seeded recent. */
+function mockRecoveryFixture(): RecoveryInfo[] {
+  const shadowed = MOCK_BASE_RECENTS[0];
+  return [
+    {
+      documentId: "9f3b7c1e-0000-4000-8000-000000000001",
+      title: shadowed?.name ?? "Untitled document",
+      originalPath: shadowed?.path,
+      autosavePath: "/mock/autosave/9f3b7c1e-0000-4000-8000-000000000001.onecad",
+      modifiedMs: Date.now() - 90_000,
+    },
+  ];
+}
 
 /** In-memory module slices, keyed by module id (the mock's `document.modules`). */
 const mockModuleState = new Map<string, { schemaVersion: number; payload: unknown }>();
@@ -234,9 +257,14 @@ function mockRemoveVariable(name: string): DocumentVariable[] {
   return mockVariables.map((v) => ({ ...v }));
 }
 
-/** Test seam: seed (or clear) the crash-recovery offer the start screen checks. */
-export function setMockRecovery(r: RecoveryInfo | null): void {
-  mockRecovery = r ? { ...r } : null;
+/**
+ * Test seam: seed (or clear) the crash-recovery offers the start screen checks.
+ * Accepts a single offer for convenience; `null` clears.
+ */
+export function setMockRecovery(r: RecoveryInfo | RecoveryInfo[] | null): void {
+  const list = r === null ? [] : Array.isArray(r) ? r : [r];
+  // Newest first, as `scan_recoverable` orders them.
+  mockRecovery = list.map((o) => ({ ...o })).sort((a, b) => b.modifiedMs - a.modifiedMs);
 }
 
 // ── Mesh + document-changed emitter (mock backend surface) ──────────────────
@@ -2205,7 +2233,7 @@ export function resetMockDocument(): void {
   nextImportSeq = 1;
   undoStack.length = 0;
   redoStack.length = 0;
-  mockRecovery = null;
+  mockRecovery = [];
   mockAuthored = [];
   mockTemplates = [];
   mockSketchDatum.clear();
@@ -2219,7 +2247,12 @@ export function resetMockDocument(): void {
 export const mockClient: CadClient = {
   async listRecents() {
     await wait();
-    return RECENTS.map((p) => ({ ...p }));
+    // Mirrors `api::list_recents`: a card whose file is older than an unresolved
+    // autosave has to advertise it, because clicking it is what destroys the offer.
+    return RECENTS.map((p) => ({
+      ...p,
+      hasRecovery: mockRecovery.some((o) => o.originalPath === p.path),
+    }));
   },
   async renameRecentProject(path, newName) {
     await wait();
@@ -2250,8 +2283,21 @@ export const mockClient: CadClient = {
     await wait();
     return snapshot("Untitled");
   },
-  async openDocument(path) {
+  async openDocument(path, onRecovery) {
     await wait();
+    // Mirrors the Rust guard: a path an unresolved offer names cannot be opened
+    // blind, because doing so is what destroys that offer's autosave.
+    const pending = mockRecovery.find((o) => o.originalPath === path);
+    if (pending) {
+      if (onRecovery === "openSaved") {
+        mockRecovery = mockRecovery.filter((o) => o !== pending);
+      } else {
+        throw new BackendError(
+          "recoveryPending",
+          `${path} has unsaved changes from a previous session — restore them or open the saved version`,
+        );
+      }
+    }
     const known = RECENTS.find((p) => p.path === path);
     return snapshot(known?.name ?? basename(path));
   },
@@ -2323,17 +2369,24 @@ export const mockClient: CadClient = {
   },
   async checkRecovery() {
     await wait();
-    return mockRecovery ? { ...mockRecovery } : null;
-  },
-  async recoverDocument(accept: boolean) {
-    await wait();
-    if (!accept) {
-      mockRecovery = null;
-      return null;
+    if (
+      mockRecovery.length === 0 &&
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("mockrecovery") === "1"
+    ) {
+      mockRecovery = mockRecoveryFixture();
     }
-    const snap = snapshot(mockRecovery?.originalPath ? basename(mockRecovery.originalPath) : "Recovered");
-    mockRecovery = null;
-    return snap;
+    return mockRecovery.map((o) => ({ ...o }));
+  },
+  async recoverDocument(documentId: string, accept: boolean) {
+    await wait();
+    const offer = mockRecovery.find((o) => o.documentId === documentId);
+    if (!offer) return null; // nothing pending under that id
+    mockRecovery = mockRecovery.filter((o) => o.documentId !== documentId);
+    if (!accept) return null;
+    // Title first, then the saved file's stem — the same ladder `mark_recovered`
+    // walks, so the mock lane shows the name the real one would.
+    return snapshot(offer.title ?? (offer.originalPath ? basename(offer.originalPath) : "Recovered"));
   },
   // The unified start-screen import picker. `appStore.importFromDialog` routes on
   // the EXTENSION, so the mock has to be able to hand back either kind or the

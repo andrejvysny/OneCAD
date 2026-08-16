@@ -373,6 +373,14 @@ pub struct RecentProjectDto {
     pub modified_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<String>,
+    /// Whether an unresolved crash-recovery offer names this path — i.e. the file
+    /// on disk is OLDER than work a previous session left behind.
+    ///
+    /// The start screen must say so on the card, because opening the saved file is
+    /// how a user destroys that work without ever seeing the recovery banner.
+    /// `false` on the vast majority of entries, so it stays out of the payload.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_recovery: bool,
 }
 
 /// The placement gesture's recorded snap, as the frontend sends it with a
@@ -499,18 +507,28 @@ pub struct ProjectTemplateDto {
 }
 
 /// A crash-recovery offer surfaced at startup (`check_recovery`; `types.ts`
-/// `RecoveryInfo`). A previous session left an autosave whose owning process is
-/// gone — the start screen offers to Restore or Discard it.
+/// `RecoveryInfo`). A previous session left an autosave no live session owns — the
+/// start screen offers to Restore or Discard it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryInfoDto {
+    /// The document this offer restores. The key `recover_document` acts on: an
+    /// offer must be addressable, because several can be outstanding at once.
+    pub document_id: String,
+    /// The document's display title at the last autosave, when the marker recorded
+    /// one. Absent for an orphan (a container whose marker did not survive), where
+    /// the UI falls back to a generic label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The document's real on-disk path, if it had ever been saved (absent for a
-    /// never-saved autosave-only document).
+    /// never-saved autosave-only document, and for an orphan).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_path: Option<String>,
     /// The autosave container to recover from (absolute path).
     pub autosave_path: String,
-    /// The autosave's last-modified time, in Unix-epoch milliseconds.
+    /// The autosave's last-modified time, in Unix-epoch milliseconds (`0` when the
+    /// filesystem could not answer — the UI must then show no timestamp rather than
+    /// rendering the epoch).
     pub modified_ms: u64,
 }
 

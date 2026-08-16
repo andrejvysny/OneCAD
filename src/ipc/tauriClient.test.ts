@@ -184,7 +184,7 @@ describe("tauriClient crash recovery", () => {
     expect(await createTauriClient().checkRecovery()).toBeNull();
   });
 
-  it("recoverDocument invokes recover_document with { accept } and returns the snapshot / null", async () => {
+  it("recoverDocument invokes recover_document with { documentId, accept } and returns the snapshot / null", async () => {
     const args: Record<string, unknown> = {};
     mockIPC((cmd, payload) => {
       args[cmd] = payload;
@@ -194,10 +194,29 @@ describe("tauriClient crash recovery", () => {
       }
     });
     const client = createTauriClient();
-    const snap = await client.recoverDocument(true);
-    expect(args["recover_document"]).toEqual({ accept: true });
+    const snap = await client.recoverDocument("offer-1", true);
+    expect(args["recover_document"]).toEqual({ documentId: "offer-1", accept: true });
     expect(snap).toEqual({ documentId: "doc-r", title: "Bracket" });
-    expect(await client.recoverDocument(false)).toBeNull();
+    expect(await client.recoverDocument("offer-1", false)).toBeNull();
+  });
+
+  it("openDocument forwards onRecovery so Rust can enforce the guard", async () => {
+    const args: Record<string, unknown> = {};
+    mockIPC((cmd, payload) => {
+      args[cmd] = payload;
+      if (cmd === "open_document") return { documentId: "doc-o", title: "Bracket" };
+    });
+    const client = createTauriClient();
+    await client.openDocument("/docs/Bracket.onecad");
+    expect(args["open_document"]).toEqual({
+      path: "/docs/Bracket.onecad",
+      onRecovery: undefined,
+    });
+    await client.openDocument("/docs/Bracket.onecad", "openSaved");
+    expect(args["open_document"]).toEqual({
+      path: "/docs/Bracket.onecad",
+      onRecovery: "openSaved",
+    });
   });
 });
 

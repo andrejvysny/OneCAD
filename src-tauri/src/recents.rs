@@ -139,6 +139,9 @@ fn list_at(recents_path: &Path) -> Vec<RecentProjectDto> {
             path: e.path,
             modified_at: crate::api::rfc3339_from_secs(e.last_opened_ms / 1000),
             thumbnail: None,
+            // Filled by `api::list_recents`, which is where the pending offers live.
+            // This function reads `recents.json` and nothing else.
+            has_recovery: false,
         })
         .collect()
 }

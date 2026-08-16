@@ -10,6 +10,7 @@ import { createClient } from "@/ipc/client";
 import { resetDocumentScopedUi } from "@/ipc/documentLifecycle";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
 import { saveDocument } from "@/features/shell/fileActions";
+import { isRecoveryPending } from "@/ipc/apiError";
 import { logError } from "@/debug/log";
 import type { DocumentSnapshot, RecentProject, RecoveryInfo } from "@/ipc/types";
 
@@ -36,9 +37,27 @@ export interface AppState {
   recentsStatus: RecentsStatus;
   /** The document opened when transitioning to the editor. */
   document: DocumentSnapshot | null;
-  /** A crashed session's autosave offer (null once checked-and-empty or resolved). */
-  recovery: RecoveryInfo | null;
+  /**
+   * Every unresolved autosave a crashed session left behind, newest first.
+   *
+   * A list because several sessions can have crashed. Surfacing only the first left
+   * the rest invisible AND, since nothing else enumerates them, permanently on disk.
+   */
+  recovery: RecoveryInfo[];
   recoveryStatus: RecoveryStatus;
+  /**
+   * The `documentId` of an offer currently being restored or discarded, so the card
+   * can disable its buttons. A second click while the first call is in flight used
+   * to fire a second `recoverDocument`, which found nothing pending and silently
+   * did nothing.
+   */
+  recoveryPendingId: string | null;
+  /**
+   * A recent project the user clicked that turns out to have NEWER unsaved work
+   * (`openDocument` rejected with `recoveryPending`). Drives the prompt that asks
+   * whether to restore it or open the older saved file.
+   */
+  recoveryConflict: { path: string; offer: RecoveryInfo | null } | null;
   /** Set when a close/quit lands against a DIRTY document — drives the
    *  UnsavedChangesDialog. See `requestClose` / `confirmClose`. */
   pendingCloseIntent: PendingCloseIntent;
@@ -81,8 +100,16 @@ export interface AppState {
   importFromDialog(): Promise<void>;
   closeProject(): Promise<void>;
   checkRecovery(): Promise<void>;
-  recoverDocument(): Promise<void>;
-  discardRecovery(): Promise<void>;
+  /** Restore one offer by `documentId` and open the recovered document. */
+  recoverDocument(documentId: string): Promise<void>;
+  /** Discard one offer by `documentId`, deleting its autosave. */
+  discardRecovery(documentId: string): Promise<void>;
+  /**
+   * Resolve a pending {@link AppState.recoveryConflict}: `"restore"` recovers the
+   * newer autosave, `"openSaved"` discards it and opens the older file on disk,
+   * `"cancel"` leaves both alone.
+   */
+  resolveRecoveryConflict(choice: "restore" | "openSaved" | "cancel"): Promise<void>;
   /**
    * Entry point for EVERY close/quit path (TitleBar ×, ⌘W, the native
    * window-close button, ⌘Q). A clean document proceeds immediately (bypassing
@@ -132,6 +159,36 @@ export const appStore = createStore<AppState>()((set, get) => {
     return "project";
   }
 
+  /**
+   * Open `path`, or arm the recovery prompt if the backend refuses.
+   *
+   * Shared by BOTH open lanes (a recents card and the OS file dialog) because both
+   * reach the same files: a file whose saved bytes are older than an autosave a
+   * crashed session left behind. Opening it destroys that autosave — same document
+   * id, so the reopened document's first autosave overwrites the crash container —
+   * which is why the backend rejects with `recoveryPending` instead of doing it.
+   * That is a question for the user, not a failure to report.
+   */
+  const openOrPrompt = async (path: string): Promise<void> => {
+    let document: DocumentSnapshot;
+    try {
+      document = await client.openDocument(path);
+    } catch (e) {
+      if (!isRecoveryPending(e)) throw e;
+      set({
+        recoveryConflict: {
+          path,
+          offer: get().recovery.find((o) => o.originalPath === path) ?? null,
+        },
+      });
+      return;
+    }
+    enter(document);
+    // The backend recorded this open in the recents store; refresh so the
+    // start-screen list reflects it (newest first) next time it renders.
+    void get().loadRecents();
+  };
+
   /** The actual close/quit action once nothing (or nothing further) blocks it —
    *  a clean-document bypass, or a confirmed discard/save. */
   const proceed = (intent: "close" | "quit"): Promise<void> =>
@@ -142,8 +199,10 @@ export const appStore = createStore<AppState>()((set, get) => {
     recents: [],
     recentsStatus: "idle",
     document: null,
-    recovery: null,
+    recovery: [],
     recoveryStatus: "idle",
+    recoveryPendingId: null,
+    recoveryConflict: null,
     pendingCloseIntent: null,
     importError: null,
 
@@ -217,11 +276,7 @@ export const appStore = createStore<AppState>()((set, get) => {
     async openProject(path) {
       await get().requestReplacement(async () => {
         resetIfReplacing();
-        const document = await client.openDocument(path);
-        enter(document);
-        // The backend recorded this open in the recents store; refresh so the
-        // start-screen list reflects it (newest first) next time it renders.
-        void get().loadRecents();
+        await openOrPrompt(path);
       });
     },
 
@@ -230,9 +285,10 @@ export const appStore = createStore<AppState>()((set, get) => {
         const path = await client.openFileDialog();
         if (!path) return; // cancelled — nothing swapped, so nothing to invalidate
         resetIfReplacing();
-        const document = await client.openDocument(path);
-        enter(document);
-        void get().loadRecents();
+        // The dialog reaches the same files the recents list does, so it needs the
+        // same guard. Only the recents CARD can carry a warning badge; picking the
+        // file through the OS dialog arrives with no warning at all.
+        await openOrPrompt(path);
       });
     },
 
@@ -315,22 +371,72 @@ export const appStore = createStore<AppState>()((set, get) => {
       }
     },
 
-    async recoverDocument() {
-      await get().requestReplacement(async () => {
-        resetIfReplacing();
-        const document = await client.recoverDocument(true);
-        set({ recovery: null, recoveryStatus: "ready" });
-        if (document) {
-          enter(document);
-        }
-        // The recovered open counts as a recent; refresh the start-screen list.
-        void get().loadRecents();
-      });
+    /**
+     * Failures are captured, not thrown — same rule as `loadRecents`. Both actions
+     * are wired straight to `onClick` handlers typed `() => void`, so a rejection
+     * would surface as an unhandled promise rejection with no UI feedback at all,
+     * on the one screen standing between the user and their unsaved work.
+     *
+     * A failed restore leaves the offer PENDING backend-side, so the card stays and
+     * the user can retry or discard.
+     */
+    async recoverDocument(documentId) {
+      if (get().recoveryPendingId) return; // a decision is already in flight
+      set({ recoveryPendingId: documentId });
+      try {
+        await get().requestReplacement(async () => {
+          resetIfReplacing();
+          const document = await client.recoverDocument(documentId, true);
+          if (document) enter(document);
+          set({ recovery: get().recovery.filter((o) => o.documentId !== documentId) });
+        });
+      } catch (e) {
+        logError("app", "recoverDocument FAILED", { error: e });
+        set({ recoveryStatus: "error" });
+      } finally {
+        set({ recoveryPendingId: null });
+      }
     },
 
-    async discardRecovery() {
-      await client.recoverDocument(false);
-      set({ recovery: null, recoveryStatus: "ready" });
+    async discardRecovery(documentId) {
+      if (get().recoveryPendingId) return;
+      set({ recoveryPendingId: documentId });
+      try {
+        await client.recoverDocument(documentId, false);
+        set({ recovery: get().recovery.filter((o) => o.documentId !== documentId) });
+        // The discarded autosave no longer shadows its saved file: drop the badge.
+        void get().loadRecents();
+      } catch (e) {
+        logError("app", "discardRecovery FAILED", { error: e });
+        set({ recoveryStatus: "error" });
+      } finally {
+        set({ recoveryPendingId: null });
+      }
+    },
+
+    async resolveRecoveryConflict(choice) {
+      const conflict = get().recoveryConflict;
+      if (!conflict) return;
+      set({ recoveryConflict: null });
+      if (choice === "cancel") return;
+      if (choice === "restore") {
+        if (conflict.offer) await get().recoverDocument(conflict.offer.documentId);
+        return;
+      }
+      // "openSaved" — the destructive branch, and the reason this prompt exists at
+      // all. The backend clears the recovery state before it opens the older file.
+      await get().requestReplacement(async () => {
+        resetIfReplacing();
+        try {
+          const document = await client.openDocument(conflict.path, "openSaved");
+          set({ recovery: get().recovery.filter((o) => o.originalPath !== conflict.path) });
+          enter(document);
+        } catch (e) {
+          logError("app", "openProject (openSaved) FAILED", { error: e });
+          return;
+        }
+        void get().loadRecents();
+      });
     },
 
     async requestClose(intent) {

@@ -21,22 +21,45 @@ export interface RecentProject {
   modifiedAt: string;
   /** Optional data-URI / asset URL for the preview thumbnail. */
   thumbnail?: string;
+  /**
+   * An unresolved crash-recovery offer names this path — the file on disk is OLDER
+   * than work a previous session left behind. Opening it is how that work gets
+   * destroyed, so the card has to say so.
+   */
+  hasRecovery?: boolean;
 }
 
 /**
  * Crash-recovery offer surfaced on the start screen: a prior session left an
- * autosave behind. `check_recovery` returns one (or null when nothing to offer);
- * `recover_document` accepts (restore) or rejects (discard) it. Keep 1:1 with the
- * Rust `RecoveryInfoDto` (serde camelCase).
+ * autosave behind. `check_recovery` returns every outstanding offer, newest first;
+ * `recover_document` accepts (restore) or rejects (discard) one by `documentId`.
+ * Keep 1:1 with the Rust `RecoveryInfoDto` (serde camelCase).
  */
 export interface RecoveryInfo {
+  /** The document this offer restores — the key `recoverDocument` acts on. */
+  documentId: string;
+  /**
+   * The document's title at the last autosave. Absent for an ORPHAN: a container
+   * whose session marker did not survive, where nothing records the name.
+   */
+  title?: string;
   /** Absolute path of the document the autosave belongs to (absent if never saved). */
   originalPath?: string;
   /** Absolute path of the autosave sidecar the crashed session left behind. */
   autosavePath: string;
-  /** Epoch-millis mtime of the autosave (last time work was captured). */
+  /**
+   * Epoch-millis mtime of the autosave (last time work was captured), or `0` when
+   * the filesystem could not answer — render no timestamp rather than the epoch.
+   */
   modifiedMs: number;
 }
+
+/**
+ * What to do about a pending crash-recovery offer that names the path being opened.
+ * Required in that case: without it `openDocument` rejects with `recoveryPending`
+ * rather than opening the older file and destroying the autosave.
+ */
+export type OnRecovery = "openSaved";
 
 /**
  * Placeholder document handle returned by open/new/import.

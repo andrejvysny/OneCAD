@@ -9,12 +9,13 @@
 //! * **zero autosave activity when no document is open**;
 //! * a clean save/close clears the marker + stale autosave
 //!   ([`clear_recovery_state`]);
-//! * the recovery round-trip: a stale marker (crashed session) surfaces via
-//!   [`scan_stale_markers`], and reopening its autosave reconstructs the exact
-//!   document revision that was autosaved.
+//! * the recovery round-trip: a crashed session's container surfaces via
+//!   [`scan_recoverable`], and reopening it reconstructs the exact document
+//!   revision that was autosaved — including its NAME;
+//! * an ORPHAN (a container whose marker did not survive) still recovers.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
@@ -25,7 +26,7 @@ use onecad_core::document::record::{
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::EditCommand;
 use onecad_core::ids::{DocumentId, RecordId};
-use onecad_core::io::recovery::{autosave_path, marker_path, scan_stale_markers};
+use onecad_core::io::recovery::{autosave_path, marker_path, scan_recoverable};
 use onecad_core::regen::GeometryEngine;
 
 use onecad_lib::autosave::{self, AutosaveEvent};
@@ -95,6 +96,7 @@ async fn driver_writes_autosave_and_marker_after_debounce() {
         Arc::new(Mutex::new(())),
         rx,
         Duration::from_millis(80), // short debounce for the test
+        Duration::from_secs(60),   // ceiling well clear of this test's window
         move |ev| seen2.lock().unwrap().push(ev),
     ));
 
@@ -145,6 +147,7 @@ async fn driver_is_silent_with_no_document_open() {
         Arc::new(Mutex::new(())),
         rx,
         Duration::from_millis(60),
+        Duration::from_secs(60),
         move |ev| seen2.lock().unwrap().push(ev),
     ));
 
@@ -216,7 +219,7 @@ async fn recovery_round_trip_reconstructs_the_autosaved_document() {
     {
         let mut rt = runtime_with_op(42.0);
         // Pretend it had a real save path (so the marker records `opened_path`).
-        rt.mark_recovered(Some(original_path.clone())); // sets path + dirty (reused seam)
+        rt.mark_recovered(Some(original_path.clone()), None); // sets path/title + dirty
         doc_id = rt.document_uuid();
         let runtime = Mutex::new(Some(rt));
         let lane = Mutex::new(());
@@ -226,14 +229,20 @@ async fn recovery_round_trip_reconstructs_the_autosaved_document() {
     } // the "session" ends here without a clean close (simulated crash — marker stays)
 
     // Startup scan: the owning process is treated as dead (injected predicate), so
-    // the surviving marker + autosave become a recovery offer.
-    let offers = scan_stale_markers(&app_data, |_| false).expect("scan");
+    // the surviving container becomes a recovery offer.
+    let offers = scan_recoverable(&app_data, |_| false, SystemTime::now()).expect("scan");
     assert_eq!(offers.len(), 1, "one stale recovery offer");
     let offer = &offers[0];
     assert_eq!(offer.document_id, doc_id);
+    let marker = offer
+        .marker
+        .as_ref()
+        .expect("the marker survived the crash");
+    assert_eq!(marker.opened_path.as_deref(), Some(original_path.as_path()));
     assert_eq!(
-        offer.marker.opened_path.as_deref(),
-        Some(original_path.as_path())
+        marker.title.as_deref(),
+        Some("Bracket"),
+        "the marker records the live title, so recovery can restore it"
     );
     assert!(offer.autosave_path.exists(), "autosave container survives");
 
@@ -244,7 +253,7 @@ async fn recovery_round_trip_reconstructs_the_autosaved_document() {
     let solver: Arc<dyn SolverEngine> = backend;
     let mut recovered = DocumentRuntime::open(&offer.autosave_path, engine, meshes, solver)
         .expect("reopen autosave");
-    recovered.mark_recovered(offer.marker.opened_path.clone());
+    recovered.mark_recovered(marker.opened_path.clone(), marker.title.clone());
 
     // The recovered document IS the autosaved revision: same id, same timeline.
     assert_eq!(recovered.document_uuid(), doc_id, "same document id");
@@ -257,4 +266,60 @@ async fn recovery_round_trip_reconstructs_the_autosaved_document() {
     assert!(recovered.is_dirty(), "recovered work is unsaved (dirty)");
     // The real save path is restored so a later Save targets the original file.
     assert_eq!(recovered.path(), Some(original_path.as_path()));
+    // ...and so is the NAME. `open` derived it from `<documentId>.onecad`, so
+    // without `mark_recovered` restoring it the user is shown a raw UUID and has no
+    // way to tell which document they are being offered.
+    assert_eq!(
+        recovered.title(),
+        "Bracket",
+        "the recovered document keeps its name, not the autosave file's stem"
+    );
+    assert!(
+        !recovered.title().contains(&doc_id.to_string()),
+        "and specifically not the document UUID"
+    );
+}
+
+/// An autosave whose marker did not survive is still recoverable — only its
+/// labelling degrades. The title then falls back to the original path's stem.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_orphaned_container_still_recovers_with_a_usable_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().to_path_buf();
+    let original_path = dir.path().join("Housing.onecad");
+
+    let doc_id = {
+        let mut rt = runtime_with_op(7.0);
+        rt.mark_recovered(Some(original_path.clone()), None);
+        let id = rt.document_uuid();
+        let runtime = Mutex::new(Some(rt));
+        autosave::autosave_current(&runtime, &app_data, &Mutex::new(()))
+            .await
+            .expect("autosave");
+        id
+    };
+    // The marker is lost (a crash between the container write and the marker write,
+    // or a Restore under the old marker-consuming behaviour).
+    std::fs::remove_file(marker_path(&app_data, doc_id)).unwrap();
+
+    let offers = scan_recoverable(&app_data, |_| false, SystemTime::now()).expect("scan");
+    assert_eq!(offers.len(), 1, "the container is still discoverable");
+    assert!(offers[0].marker.is_none(), "but unlabelled");
+
+    let backend = Arc::new(PendingBackend);
+    let engine: Arc<dyn GeometryEngine> = backend.clone();
+    let meshes: Arc<dyn MeshProvider> = backend.clone();
+    let solver: Arc<dyn SolverEngine> = backend;
+    let mut recovered = DocumentRuntime::open(&offers[0].autosave_path, engine, meshes, solver)
+        .expect("reopen autosave");
+    // No marker ⇒ no recorded path or title. The app supplies what it knows, which
+    // here is nothing, and the document keeps the id-derived title rather than
+    // inventing one.
+    recovered.mark_recovered(None, None);
+    assert_eq!(recovered.projection().features.len(), 1, "work intact");
+    assert!(recovered.is_dirty());
+
+    // With the path known (e.g. the user picked it), the stem is the fallback title.
+    recovered.mark_recovered(Some(original_path.clone()), None);
+    assert_eq!(recovered.title(), "Housing");
 }

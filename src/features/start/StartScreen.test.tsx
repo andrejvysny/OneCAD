@@ -4,17 +4,20 @@ import userEvent from "@testing-library/user-event";
 import App from "@/App";
 import { StartScreen } from "./StartScreen";
 import { appStore } from "@/stores/appStore";
-import { mockClient, resetMockRecents } from "@/ipc/mockClient";
+import { mockClient, resetMockRecents, setMockRecovery } from "@/ipc/mockClient";
 
 beforeEach(() => {
   resetMockRecents();
+  setMockRecovery(null);
   appStore.setState({
     screen: "start",
     recents: [],
     recentsStatus: "idle",
     document: null,
-    recovery: null,
+    recovery: [],
     recoveryStatus: "ready",
+    recoveryPendingId: null,
+    recoveryConflict: null,
     importError: null,
   });
 });
@@ -30,6 +33,14 @@ function firstCard(): HTMLElement {
 function headerImportButton(): HTMLElement {
   return within(screen.getByRole("main")).getByRole("button", { name: /Import/ });
 }
+
+const RECOVERY_OFFER = {
+  documentId: "11111111-1111-1111-1111-111111111111",
+  title: "Bracket",
+  autosavePath: "/x/autosave/foo.onecad",
+  originalPath: "/docs/Bracket.onecad",
+  modifiedMs: 1_700_000_000_000,
+};
 
 describe("StartScreen", () => {
   it("loads and renders recent projects", async () => {
@@ -204,13 +215,10 @@ describe("StartScreen", () => {
       recents: [],
       recentsStatus: "ready",
       document: null,
-      recovery: {
-        autosavePath: "/x/autosave/foo.onecad",
-        originalPath: "/docs/Bracket.onecad",
-        modifiedMs: 1_700_000_000_000,
-      },
+      recovery: [RECOVERY_OFFER],
       recoveryStatus: "ready",
     });
+    setMockRecovery(RECOVERY_OFFER);
     render(<StartScreen />);
 
     expect(screen.getByText("Unsaved changes recovered")).toBeInTheDocument();
@@ -219,7 +227,7 @@ describe("StartScreen", () => {
     await user.click(screen.getByRole("button", { name: /Restore/ }));
 
     await waitFor(() => expect(appStore.getState().screen).toBe("editor"));
-    expect(appStore.getState().recovery).toBeNull();
+    expect(appStore.getState().recovery).toEqual([]);
   });
 
   it("Discard clears the recovery card without leaving the start screen", async () => {
@@ -229,19 +237,16 @@ describe("StartScreen", () => {
       recents: [],
       recentsStatus: "ready",
       document: null,
-      recovery: {
-        autosavePath: "/x/autosave/foo.onecad",
-        originalPath: "/docs/Bracket.onecad",
-        modifiedMs: 1_700_000_000_000,
-      },
+      recovery: [RECOVERY_OFFER],
       recoveryStatus: "ready",
     });
+    setMockRecovery(RECOVERY_OFFER);
     render(<StartScreen />);
     expect(screen.getByText("Unsaved changes recovered")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Discard/ }));
 
-    await waitFor(() => expect(appStore.getState().recovery).toBeNull());
+    await waitFor(() => expect(appStore.getState().recovery).toEqual([]));
     expect(appStore.getState().screen).toBe("start");
     expect(
       screen.queryByText("Unsaved changes recovered"),

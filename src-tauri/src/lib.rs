@@ -281,6 +281,30 @@ pub fn run() {
         // through `confirm_exit` (see below), never through the OS's own close. The
         // close is prevented ONLY while something can still resolve the guard.
         .on_window_event(|window, event| {
+            // Losing focus is the cheapest reliable "the user stepped away" signal
+            // there is, and stepping away is exactly when the machine gets closed,
+            // suspended or killed. Flush immediately rather than waiting out the
+            // debounce. Throttled by `claim_blur_flush`; a clean document writes
+            // nothing (the dirty gate in `autosave_current`).
+            if let WindowEvent::Focused(false) = event {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    if !state.claim_blur_flush() {
+                        return;
+                    }
+                    let Some(app_data) = autosave::autosave_root(&app) else {
+                        return;
+                    };
+                    if let Some(ev) =
+                        autosave::autosave_current(&state.runtime, &app_data, &state.persistence)
+                            .await
+                    {
+                        let _ = app.emit(events::AUTOSAVE, &ev);
+                    }
+                });
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let guard = window.state::<ExitGuard>();
                 if !guard.begin() {
@@ -364,6 +388,7 @@ pub fn run() {
                     lane,
                     tick,
                     autosave::AUTOSAVE_DEBOUNCE,
+                    autosave::AUTOSAVE_MAX_AGE,
                     move |ev| {
                         let _ = emitter.emit(events::AUTOSAVE, &ev);
                     },

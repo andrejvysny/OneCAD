@@ -60,31 +60,60 @@ describe("mockClient file seam", () => {
 });
 
 describe("mockClient crash recovery", () => {
-  it("checkRecovery is null by default (no banner unless a test opts in)", async () => {
+  it("checkRecovery is empty by default (no banner unless a test opts in)", async () => {
     setMockRecovery(null);
-    expect(await mockClient.checkRecovery()).toBeNull();
+    expect(await mockClient.checkRecovery()).toEqual([]);
   });
 
   it("checkRecovery reports the seeded info; recoverDocument(true) restores + clears", async () => {
     const info = {
+      documentId: "11111111-1111-1111-1111-111111111111",
       autosavePath: "/x/autosave/foo.onecad",
       originalPath: "/docs/Bracket.onecad",
       modifiedMs: 1_700_000_000_000,
     };
     setMockRecovery(info);
-    expect(await mockClient.checkRecovery()).toEqual(info);
+    expect(await mockClient.checkRecovery()).toEqual([info]);
 
-    const snap = await mockClient.recoverDocument(true);
+    const snap = await mockClient.recoverDocument(info.documentId, true);
     expect(snap).not.toBeNull();
     expect(snap?.title).toBe("Bracket"); // derived from originalPath basename
 
     // Consumed: a follow-up check sees nothing.
-    expect(await mockClient.checkRecovery()).toBeNull();
+    expect(await mockClient.checkRecovery()).toEqual([]);
   });
 
   it("recoverDocument(false) discards the offer and resolves null", async () => {
-    setMockRecovery({ autosavePath: "/x/autosave/foo.onecad", modifiedMs: 1 });
-    expect(await mockClient.recoverDocument(false)).toBeNull();
-    expect(await mockClient.checkRecovery()).toBeNull();
+    const id = "22222222-2222-2222-2222-222222222222";
+    setMockRecovery({ documentId: id, autosavePath: "/x/autosave/foo.onecad", modifiedMs: 1 });
+    expect(await mockClient.recoverDocument(id, false)).toBeNull();
+    expect(await mockClient.checkRecovery()).toEqual([]);
+  });
+
+  it("checkRecovery reports every offer, newest first", async () => {
+    setMockRecovery([
+      { documentId: "a", autosavePath: "/x/a.onecad", modifiedMs: 100 },
+      { documentId: "c", autosavePath: "/x/c.onecad", modifiedMs: 300 },
+      { documentId: "b", autosavePath: "/x/b.onecad", modifiedMs: 200 },
+    ]);
+    expect((await mockClient.checkRecovery()).map((o) => o.documentId)).toEqual(["c", "b", "a"]);
+  });
+
+  it("openDocument refuses a path an unresolved offer names, unless told what to do", async () => {
+    setMockRecovery({
+      documentId: "d",
+      autosavePath: "/x/d.onecad",
+      originalPath: "/docs/Bracket.onecad",
+      modifiedMs: 1,
+    });
+    await expect(mockClient.openDocument("/docs/Bracket.onecad")).rejects.toMatchObject({
+      kind: "recoveryPending",
+    });
+    // The refusal did NOT consume the offer — the user has not decided yet.
+    expect(await mockClient.checkRecovery()).toHaveLength(1);
+
+    // An explicit discard opens, and drops the offer with it.
+    await expect(mockClient.openDocument("/docs/Bracket.onecad", "openSaved")).resolves.toBeTruthy();
+    expect(await mockClient.checkRecovery()).toEqual([]);
   });
 });

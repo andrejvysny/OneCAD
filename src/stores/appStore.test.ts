@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { appStore } from "./appStore";
 import { documentStore } from "./documentStore";
-import { mockClient } from "@/ipc/mockClient";
+import { mockClient, setMockRecovery } from "@/ipc/mockClient";
 import { resetStores } from "@/test/resetStores";
 
 /** Seed an "open editor" state with a given dirty flag (appStore's own fields —
@@ -261,7 +261,7 @@ describe("appStore unsaved-changes guard", () => {
 describe("appStore start-screen loads — failure is captured, never re-thrown", () => {
   beforeEach(() => {
     resetStores();
-    appStore.setState({ recents: [], recentsStatus: "idle", recovery: null, recoveryStatus: "idle" });
+    appStore.setState({ recents: [], recentsStatus: "idle", recovery: [], recoveryStatus: "idle" });
   });
 
   afterEach(() => {
@@ -296,5 +296,159 @@ describe("appStore start-screen loads — failure is captured, never re-thrown",
     await appStore.getState().loadRecents();
 
     expect(appStore.getState().recentsStatus).toBe("ready");
+  });
+});
+
+describe("appStore crash recovery — the offer must survive a failure", () => {
+  const OFFER = {
+    documentId: "44444444-4444-4444-4444-444444444444",
+    title: "Bracket",
+    originalPath: "/docs/Bracket.onecad",
+    autosavePath: "/x/autosave/foo.onecad",
+    modifiedMs: 1_700_000_000_000,
+  };
+
+  beforeEach(() => {
+    resetStores();
+    setMockRecovery(null);
+    appStore.setState({
+      screen: "start",
+      document: null,
+      recovery: [],
+      recoveryStatus: "idle",
+      recoveryPendingId: null,
+      recoveryConflict: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setMockRecovery(null);
+  });
+
+  /**
+   * Both actions are wired straight to `onClick` handlers typed `() => void`, so a
+   * rejection would surface as an unhandled promise rejection with no UI feedback
+   * whatsoever — on the one screen standing between the user and their unsaved work.
+   */
+  it("a failed restore is captured, not thrown, and leaves the offer on screen", async () => {
+    setMockRecovery(OFFER);
+    await appStore.getState().checkRecovery();
+    vi.spyOn(mockClient, "recoverDocument").mockRejectedValueOnce(new Error("corrupt container"));
+
+    await expect(appStore.getState().recoverDocument(OFFER.documentId)).resolves.toBeUndefined();
+
+    expect(appStore.getState().recoveryStatus).toBe("error");
+    expect(appStore.getState().recovery).toHaveLength(1);
+    expect(appStore.getState().recoveryPendingId).toBeNull();
+    expect(appStore.getState().screen).toBe("start");
+  });
+
+  it("a failed discard is captured too", async () => {
+    setMockRecovery(OFFER);
+    await appStore.getState().checkRecovery();
+    vi.spyOn(mockClient, "recoverDocument").mockRejectedValueOnce(new Error("read-only fs"));
+
+    await expect(appStore.getState().discardRecovery(OFFER.documentId)).resolves.toBeUndefined();
+
+    expect(appStore.getState().recoveryStatus).toBe("error");
+    expect(appStore.getState().recovery).toHaveLength(1);
+  });
+
+  it("a second decision while one is in flight is ignored", async () => {
+    setMockRecovery(OFFER);
+    await appStore.getState().checkRecovery();
+    const spy = vi.spyOn(mockClient, "recoverDocument");
+
+    const first = appStore.getState().recoverDocument(OFFER.documentId);
+    await appStore.getState().recoverDocument(OFFER.documentId); // the double click
+    await first;
+
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("appStore — opening a file an autosave shadows", () => {
+  const OFFER = {
+    documentId: "55555555-5555-5555-5555-555555555555",
+    title: "Bracket",
+    originalPath: "/docs/Bracket.onecad",
+    autosavePath: "/x/autosave/foo.onecad",
+    modifiedMs: 1_700_000_000_000,
+  };
+
+  beforeEach(async () => {
+    resetStores();
+    appStore.setState({
+      screen: "start",
+      document: null,
+      recovery: [],
+      recoveryStatus: "idle",
+      recoveryPendingId: null,
+      recoveryConflict: null,
+    });
+    setMockRecovery(OFFER);
+    await appStore.getState().checkRecovery();
+  });
+
+  afterEach(() => setMockRecovery(null));
+
+  /**
+   * The destructive click. The recovery banner sits ABOVE a fully clickable recents
+   * list, so opening the stale file was always one click away — and it destroyed the
+   * autosave silently, because the reopened document carries the same id and its
+   * first autosave overwrites the crash container.
+   */
+  it("prompts instead of opening, and opens nothing", async () => {
+    await appStore.getState().openProject("/docs/Bracket.onecad");
+
+    expect(appStore.getState().recoveryConflict).toEqual({
+      path: "/docs/Bracket.onecad",
+      offer: OFFER,
+    });
+    expect(appStore.getState().screen).toBe("start");
+    expect(appStore.getState().recovery).toHaveLength(1);
+  });
+
+  it("Cancel leaves both the file and the autosave alone", async () => {
+    await appStore.getState().openProject("/docs/Bracket.onecad");
+    await appStore.getState().resolveRecoveryConflict("cancel");
+
+    expect(appStore.getState().recoveryConflict).toBeNull();
+    expect(appStore.getState().screen).toBe("start");
+    expect(appStore.getState().recovery).toHaveLength(1);
+  });
+
+  it("Restore recovers the newer work rather than the file", async () => {
+    await appStore.getState().openProject("/docs/Bracket.onecad");
+    await appStore.getState().resolveRecoveryConflict("restore");
+
+    expect(appStore.getState().screen).toBe("editor");
+    expect(appStore.getState().recovery).toEqual([]);
+  });
+
+  it("Open Saved Version discards the autosave — deliberately, and only then", async () => {
+    await appStore.getState().openProject("/docs/Bracket.onecad");
+    await appStore.getState().resolveRecoveryConflict("openSaved");
+
+    expect(appStore.getState().screen).toBe("editor");
+    expect(appStore.getState().recovery).toEqual([]);
+    expect(await mockClient.checkRecovery()).toEqual([]);
+  });
+
+  it("the OS file dialog gets the same guard — it reaches the same files", async () => {
+    vi.spyOn(mockClient, "openFileDialog").mockResolvedValueOnce("/docs/Bracket.onecad");
+
+    await appStore.getState().openDialogAndOpen();
+
+    expect(appStore.getState().recoveryConflict?.path).toBe("/docs/Bracket.onecad");
+    expect(appStore.getState().screen).toBe("start");
+  });
+
+  it("a path no offer names opens normally", async () => {
+    await appStore.getState().openProject("/docs/Other.onecad");
+
+    expect(appStore.getState().recoveryConflict).toBeNull();
+    expect(appStore.getState().screen).toBe("editor");
   });
 });

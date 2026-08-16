@@ -79,6 +79,7 @@ import type {
   PromotedElement,
   PromotePick,
   RecentProject,
+  OnRecovery,
   RecoveryInfo,
   RegenTerminal,
   ReindexReport,
@@ -255,6 +256,8 @@ interface DocumentSnapshotDto {
 }
 /** `RecoveryInfoDto` is field-identical to the frontend `RecoveryInfo`. */
 interface RecoveryInfoDto {
+  documentId: string;
+  title?: string;
   originalPath?: string;
   autosavePath: string;
   modifiedMs: number;
@@ -1840,9 +1843,11 @@ export function createTauriClient(): CadClient {
       resetCorrelation(); // drop the OLD document's buffered change + pending awaiters
       return snap;
     },
-    async openDocument(path: string): Promise<DocumentSnapshot> {
+    async openDocument(path: string, onRecovery?: OnRecovery): Promise<DocumentSnapshot> {
       await ensureEvents();
-      const snap = await call<DocumentSnapshotDto>(CMD.openDocument, { path });
+      // `onRecovery` is undefined on the ordinary open; Rust rejects with
+      // `recoveryPending` if this path turns out to have unresolved autosaved work.
+      const snap = await call<DocumentSnapshotDto>(CMD.openDocument, { path, onRecovery });
       resetCorrelation();
       return snap;
     },
@@ -1898,12 +1903,18 @@ export function createTauriClient(): CadClient {
       await call<void>(CMD.closeDocument);
       resetCorrelation();
     },
-    async checkRecovery(): Promise<RecoveryInfo | null> {
-      return call<RecoveryInfoDto | null>(CMD.checkRecovery);
+    async checkRecovery(): Promise<RecoveryInfo[]> {
+      return call<RecoveryInfoDto[]>(CMD.checkRecovery);
     },
-    async recoverDocument(accept: boolean): Promise<DocumentSnapshot | null> {
+    async recoverDocument(
+      documentId: string,
+      accept: boolean,
+    ): Promise<DocumentSnapshot | null> {
       if (accept) await ensureEvents(); // a recover-open emits like an open
-      const snap = await call<DocumentSnapshotDto | null>(CMD.recoverDocument, { accept });
+      const snap = await call<DocumentSnapshotDto | null>(CMD.recoverDocument, {
+        documentId,
+        accept,
+      });
       if (accept) resetCorrelation(); // a discard (accept:false) opens no new document
       return snap;
     },

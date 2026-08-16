@@ -652,9 +652,42 @@ Not started: WP-1.5 (snap solver + `PreviewOp` drag ghost — the largest remain
 Next action: WP-1.5. See `HANDOFF.md` new top entry for full resume detail.
 # Current State
 
-Last verified: 2026-08-14 16:20 — UX tranche committed (`0e58185`); data-integrity audit run, five findings recorded, no fix landed
+Last verified: 2026-08-16 — autosave/crash-recovery hardening landed (DI-1/DI-2/DI-3 closed + four further defects); manual Tauri gate owed
 
-## NOW — DATA-INTEGRITY AUDIT (session 9, uncommitted)
+## NOW — AUTOSAVE / CRASH-RECOVERY HARDENING (session 10)
+
+- **Question:** why does "Unsaved changes recovered" not always recover the changes?
+  Full findings + gate table in `TODO.md` § AUTOSAVE HARDENING.
+- **The write path was never the problem.** The container write is atomic, the persistence lane is
+  sound, the round-trip test was real. The defects were in WHEN the autosave fires, HOW an offer is
+  discovered, and WHAT the restored document looks like.
+- **Symptom 1, work missing:** the debounce had no ceiling, so sustained modelling starved the
+  writer indefinitely — the user who never pauses got no autosave at all.
+  `AUTOSAVE_MAX_AGE` (120 s, built from the previously-dead `AUTOSAVE_INTERVAL_SECS`) is now an
+  absolute deadline, plus a throttled flush on window blur.
+- **Symptom 2, restored document looks wrong:** `mark_recovered` restored the path but not the
+  TITLE, and recovery reads `<documentId>.onecad` — so the document came up named with a raw UUID.
+  `SessionMarker` gains `title`; the card now shows a time, not just a date.
+- **Symptom 3, offers for untouched documents:** the autosave fired on a mutation TICK and never
+  read `dirty`, and a published regen ticks — which `open_document` schedules. Merely opening a
+  project armed a crash marker. Now gated on `is_dirty()`.
+- **Biggest find, not in the audit:** opening a project from Recent silently destroyed its crash
+  autosave (same `documentId`, so the first autosave overwrote the container and re-stamped the
+  marker), and the banner sits above a fully clickable recents list. `open_document` now refuses
+  with `RecoveryPending` until the user chooses; the shadowed card is badged.
+- **DI-1 closed harder than scoped:** discovery is keyed to the CONTAINER with the marker as owner
+  evidence, so a lost or consumed marker costs a label rather than the document. The audit's
+  characterization test is inverted into a fix pin.
+- **Gates:** cargo 1283/0 vs real worker · vitest 4942/0 · new `e2e/recovery.spec.ts` 14/14 on both
+  browsers (a lane with zero prior coverage) · full `bun run e2e` 451/11, with all 11 failures
+  proved pre-existing against a clean worktree at HEAD (they belong to the concurrently-committed
+  sketch-snap work) · fmt/clippy/tsc/hex clean · four fixes mutation-proved.
+  **Owed:** the manual Tauri gate (five steps, listed in `TODO.md`).
+- **Deferred, documented:** pid-based liveness never offers recovery on Windows and breaks under
+  pid reuse (fix: per-session lock file) · the frontend still never subscribes to `events::AUTOSAVE`
+  · marker/recents writes are not fsynced · `recents.json` corruption is silent data loss.
+
+## Previous — DATA-INTEGRITY AUDIT (session 9)
 
 - **Question:** can OneCAD lose or corrupt a user's document? Eight probes over the persistence
   lane; full findings table in `TODO.md` § DATA-INTEGRITY AUDIT.
@@ -663,11 +696,11 @@ Last verified: 2026-08-14 16:20 — UX tranche committed (`0e58185`); data-integ
   crash-simulation test) · the import-blob carrier is insert-only and the undo stack is memory-only,
   so no unreplayable-record window · a save snapshots under the runtime lock · unknown module state
   round-trips verbatim · every `EditCommand` has a real inverse.
-- **Five findings, none fixed:** DI-1 a recovered document is unprotected against the next crash
-  (recovery consumes the marker, and discovery is marker-keyed) · DI-2 `recover_document` never
-  ticks the autosave loop · DI-3 `promote_selection` / `prepare_edge_op` persist state with no tick
-  and no dirty flag, so close skips the prompt · DI-4 authored face colours reopen as data but stop
-  being paintable · DI-5 STEP export drops XCAF names/colours.
+- **Five findings.** DI-1 (recovered document unprotected against the next crash), DI-2
+  (`recover_document` never ticks the autosave loop) and DI-3 (`promote_selection` /
+  `prepare_edge_op` persist state with no tick and no dirty flag) are **CLOSED** by the session-10
+  hardening pass above. Still open: DI-4 authored face colours reopen as data but stop being
+  paintable · DI-5 STEP export drops XCAF names/colours.
 - **Two probes committed as executable evidence:** `src-tauri/tests/face_color_reopen.rs` (real
   worker, save → fresh worker → reopen; mutation-proved) and
   `io::recovery::tests::an_autosave_whose_marker_was_consumed_is_not_offered`.
