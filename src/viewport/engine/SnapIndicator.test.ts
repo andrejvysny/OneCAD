@@ -127,6 +127,27 @@ describe("guide rendering", () => {
     ind.dispose();
   });
 
+  it("re-sizes LIVE guides when the scale changes, without a rebuild", () => {
+    // A zoom between two snap decisions must not leave the visible guide at
+    // its old world dash: update() alone carries the new metric onto existing
+    // materials. Before this, dash sizes were written only in setGuides(), so
+    // whatever scale the LAST rebuild saw stayed frozen on screen — the
+    // measured cause of the CI-only sketch-snap-rendering:118 failure, and a
+    // transient §10.1 cadence violation during any zoom.
+    const { ind } = makeIndicator();
+    const guides = [{ orientation: "vertical" as const, value: 5, ref: { x: 5, y: 40 } }];
+    ind.update(1000, 800, 1, 20);
+    ind.show(decision({ guides }), false);
+    expect(ind.guideDashSizes()[0].dash).toBeCloseTo(GUIDE_DASH_CSS / 20, 9);
+
+    // No show() here — only the per-frame update with a new metric.
+    ind.update(1000, 800, 1, 0.5);
+    const live = ind.guideDashSizes()[0];
+    expect(live.dash).toBeCloseTo(GUIDE_DASH_CSS / 0.5, 9);
+    expect(live.gap).toBeCloseTo(GUIDE_GAP_CSS / 0.5, 9);
+    ind.dispose();
+  });
+
   it("converts the guide width for the CURRENT device pixel ratio", () => {
     const { ind } = makeIndicator();
     const guides = [{ orientation: "vertical" as const, value: 5, ref: { x: 5, y: 40 } }];

@@ -267,7 +267,21 @@ export class SnapIndicator {
   ): void {
     this.resolution.set(deviceWidth, deviceHeight);
     for (const g of this.guideObjects) g.material.resolution.copy(this.resolution);
-    if (Number.isFinite(pxPerUnit) && pxPerUnit > 0) this.pxPerUnit = pxPerUnit;
+    if (Number.isFinite(pxPerUnit) && pxPerUnit > 0 && pxPerUnit !== this.pxPerUnit) {
+      this.pxPerUnit = pxPerUnit;
+      // LIVE guides must track the metric too, not only the next rebuild:
+      // the cadence is authored in CSS px and has to survive every zoom
+      // (SNAP §10.1). Without this, an existing guide keeps its old world
+      // dash until a new snap decision rebuilds it — a transient cadence
+      // violation during any zoom, and dash sizes frozen at whatever scale
+      // the LAST rebuild happened to see. Uniform-backed on LineMaterial,
+      // so no needsUpdate/recompile per frame.
+      const worldPerPx = 1 / Math.max(pxPerUnit, 1e-9);
+      for (const g of this.guideObjects) {
+        g.material.dashSize = GUIDE_DASH_CSS * worldPerPx;
+        g.material.gapSize = GUIDE_GAP_CSS * worldPerPx;
+      }
+    }
     if (dpr === this.dpr) return;
     this.dpr = dpr;
     for (const g of this.guideObjects) g.material.linewidth = cssToDevice(GUIDE_WIDTH_CSS, dpr);
