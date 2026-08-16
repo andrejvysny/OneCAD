@@ -22,31 +22,84 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::refs::ElementKind;
+use crate::document::refs::{AnchorIntent, ElementKind};
 use crate::ids::{BodyId, ElementId};
 
-/// The current partition membership of a minted element.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The current partition membership of a minted element, plus the durable
+/// evidence needed to find that element again in a FRESH session (DI-4).
+///
+/// ## Why the evidence is here at all
+///
+/// The worker's element-map partition is minted on demand and dies with the
+/// process, so on reopen nothing in a new session knows which face any persisted
+/// [`ElementId`] names — an authored face colour survives in the file and stops
+/// being paintable. Storing `{body, kind}` alone cannot fix that: a binding needs
+/// something the ladder can RESOLVE.
+///
+/// A [`TopoKey`](crate::ids::TopoKey) is deliberately **not** what gets stored.
+/// It is snapshot-scoped evidence (SCHEMA §9), and persisting it as authority is
+/// precisely the silent wrong-bind this migration exists to prevent. The anchor
+/// and the worker's opaque descriptor are the durable halves, and they are what
+/// [`ElementRef`](crate::document::refs::ElementRef) already carries for op
+/// inputs — so a reopened document re-binds through the same ladder, under the
+/// same confidence gate, as every other reference in the system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElementEntry {
     /// The body this element currently belongs to (moves on split/merge).
     pub body: BodyId,
     /// The topological kind (face/edge/vertex).
     pub kind: ElementKind,
+    /// Geometric selection intent captured when the id was minted. Optional:
+    /// entries written before this field existed simply cannot be re-bound, and
+    /// are left alone rather than guessed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<AnchorIntent>,
+    /// The worker's opaque descriptor for the element (SCHEMA §10), stored
+    /// verbatim and never interpreted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<serde_json::Value>,
 }
 
 impl ElementEntry {
-    /// A partition entry.
+    /// A partition entry with no re-bind evidence.
     #[must_use]
     pub fn new(body: BodyId, kind: ElementKind) -> Self {
-        Self { body, kind }
+        Self {
+            body,
+            kind,
+            anchor: None,
+            descriptor: None,
+        }
+    }
+
+    /// The same entry carrying the evidence a fresh session needs to find this
+    /// element again (DI-4).
+    #[must_use]
+    pub fn with_evidence(
+        mut self,
+        anchor: Option<AnchorIntent>,
+        descriptor: Option<serde_json::Value>,
+    ) -> Self {
+        self.anchor = anchor;
+        self.descriptor = descriptor;
+        self
+    }
+
+    /// Whether this entry can be re-bound in a fresh session at all.
+    #[must_use]
+    pub fn has_rebind_evidence(&self) -> bool {
+        self.anchor.is_some() || self.descriptor.is_some()
     }
 }
 
 /// The document's `ElementId -> {body, kind}` partition index. Serializes
 /// transparently as a JSON object keyed by element id (deterministic `BTreeMap`
 /// order, Invariant 5).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is deliberately absent: an entry's `descriptor` is an opaque
+// `serde_json::Value`, which is only `PartialEq` (floats). Same precedent as
+// `LibraryComponentDto`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ElementIndex {
     map: BTreeMap<ElementId, ElementEntry>,

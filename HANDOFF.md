@@ -1,3 +1,126 @@
+# Handoff — Trust & Deliverable (W0–W2)
+
+Session 20 · 2026-08-16
+
+> A six-wave program chosen with the user over three alternatives (kernel continuation,
+> product reach, LGU-1 UX). W0, W1, W1b and W2 are done; W2 is green but UNCOMMITTED.
+> `TODO.md` § TRUST & DELIVERABLE is the authoritative gate record.
+
+## Goal
+
+Make the project's evidence match reality, then make the artifact the user ships faithful.
+In order: a pushed, green CI whose packaged-app lane has actually run · the value-arrow
+regression closed · a document whose authored colours survive a reopen and whose STEP/3MF
+exports carry names and colours · the last three result-truth exemptions closed.
+
+## Original plan
+
+`~/.claude/plans/act-as-senior-software-tranquil-cloud.md` (approved). Waves:
+W0 baseline truth + CI · W1 chip stops covering the value arrow (MC-R9) · W2 DI-4 ElementId
+rebind at open · W3 DI-5 XCAF STEP export · W4 3MF export (Rust-side writer) · W5 T2 result
+truth · W6 close-out.
+
+**User decisions taken before any code:** trust-and-deliverable lane first · 3MF export is IN ·
+Windows is NOT a target yet (the `pid_alive` recovery gap stays a recorded deferral) · T2's
+answer is "saved + loud failure banner", never auto-revert.
+
+## Done so far (and why)
+
+### W0 — the tree's own evidence was wrong in both directions
+
+- **12 commits were unpushed**; CI had never seen the sketch-snap or autosave programs. Pushed
+  (with two new commits) after the local lanes were measured, not before.
+- **`tauri-composition` had never executed anywhere.** `@wdio/tauri-service@1.3.0` documents a
+  macOS `.app` as a valid `appBinaryPath` but `spawn()`s it verbatim — a bundle is a directory,
+  so it died in `onPrepare` with `EACCES`. `e2e-tauri/wdio.conf.ts` now resolves the bundle to
+  `Contents/MacOS/<name>`. The lane then RAN and PASSES, with both dev worker paths hidden so
+  the bundled sidecar is what answers.
+- Its first real run found a **false assertion in its own spec**: `reopened.revision` was
+  expected to equal the saved revision (measured 0 vs 3). `documentRevision` is session-scoped
+  by design — SCHEMA §3 calls it advisory, `container.rs` persists no revision, and
+  `DocumentRuntime` constructs the counter at 0. The assertion is now `toBe(0)` with the
+  evidence written into the spec.
+- **T0's "stale sidecar blocks cargo" row was itself stale.** Both binaries hash
+  `25f7c141…41b2c`, matching the manifest. Corrected in place — LGU-1's WP-D/F/G/I were being
+  sequenced behind a blocker that no longer exists.
+
+### W1 — MC-R9 was never a flake
+
+Measured on the live app before touching anything: the arrow's own grab pixel (888, 398) sits
+inside its 120×120 box AND inside the chip's rect, and `elementFromPoint` there returns
+`chip-cancel`. `HtmlOverlayDriver.update()` now takes a per-frame keep-out box, `ViewportEngine`
+passes `getInteractionOverlayBounds("valueHandle")` (the consumer `ce3d6bf` promised), and chips
+opt in via `ChipPlacement.avoidValueHandle`. Displacement is vertical-only with a **sticky** side
+(a per-frame choice flips the chip across the arrow mid-drag) and sizes come from a
+`ResizeObserver`, never a per-frame rect read.
+
+### W1b — the three remaining browser-lane rows, all closed on measured causes
+
+- `live-dim-mouse-rounding` asserted the **pre-P2 snap ladder**. The engine trace shows the grid
+  candidate accepted and `numeric:length` / `numeric:angle` rejected with `claim-conflict`;
+  `composePoint` states "a full point claims everything". Reworked, plus a NEW third case pinning
+  the opposite side of the policy by name.
+- `sketch-multi-object` webkit — the real cause was that **`waitForCameraSettled` was a no-op for
+  every `openEditor` boot** (`__vpEngine` only exists under `?vpdebug`, so the check returned true
+  on the first poll). The failing run's FE ring carries an oblique snap metric, i.e. clicks
+  resolved against a tweening camera and the rectangle was refused as degenerate. The helper now
+  throws; five specs moved to `openEditorDebug`.
+- `sketch-snap-rendering` hovered at a fixed PLANE offset that is off-canvas on the CI runner.
+
+### W2 — DI-4, and two findings
+
+- `ElementEntry` now persists **durable** evidence (`anchor` + worker `descriptor`), additively.
+  A TopoKey is deliberately not stored — snapshot-scoped evidence must never be authority.
+- `rebind_persisted_elements` runs it back through the §7.5 ladder after the first published
+  regen and installs the SAME id via the unchanged `BindElementIds`.
+- **The ladder refused the first attempt, correctly**: the box's two caps score 1.0 with margin 0
+  on descriptor evidence alone. The anchor is the discriminator, and a real pick carries one.
+- **Repair-lane defect found in passing**: a `needsRepair` whose anchor was `{}` failed
+  `AnchorIntent` deserialization and the whole resolution was dropped — a dialog with five real
+  candidates would have rendered as "nothing to resolve".
+
+## Dead ends / things already ruled out — do not redo these
+
+- **Do not narrow `isExcludedClickAwayTarget` or move a spec's press point** to make the
+  fillet drag pass. Both hide the real defect; the refusal is correct for a press on the chip.
+- **Do not "fix" `live-dim-mouse-rounding` by making the grid lose.** Grid-out-claims-numerics is
+  the shipped P2 policy (`composePoint`), and the third case in that spec now pins it.
+- **Do not re-add `reopened.revision === saved.currentRevision`** to the composition spec —
+  three independent pieces of evidence say the counter is session-scoped.
+- **Do not bind an ambiguous persisted element to its best candidate.** That is H5-B, and the
+  second test in `face_color_reopen.rs` exists to catch it.
+- A **CI-only** failure is not automatically a flake: the sketch-snap specs simply had never run
+  on CI hardware before this session, and both CI-only failures so far were real environment
+  dependence in the spec.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Env: `ONECAD_OCCT_ROOT=~/.onecad-occt/8.0.1`. The staged sidecar is current (hash-verified),
+   so cargo is trustworthy without a rebuild.
+3. **First task** is the CI-only `sketch-snap-rendering.spec.ts:118` failure — see `TODO.md`
+   § TRUST & DELIVERABLE → NOW for the measured detail. Then commit W2, then W3 (DI-5).
+4. Worker-backed Rust lane:
+   `cd src-tauri && ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`
+5. The packaged-app lane needs both dev worker paths hidden or it proves nothing — the exact
+   sequence CI uses is in `.github/workflows/ci.yml`'s `tauri-composition` job.
+
+## Open questions
+
+- **Per-face colour in 3MF (W4)** — ship it only if the MESH1 group tables carry what the format
+  needs; otherwise per-body, recorded by name. Decide from the data, not now.
+- **STEP schema (W3)** — stay on `AP214IS`, or move to AP242 while the writer is rebuilt?
+- **Two manual USER gates are owed and neither has run**: the five autosave steps
+  (`TODO.md` § AUTOSAVE HARDENING) and the merged-stack Tauri smoke (§ T0). W2's frontend paint
+  path is only proven at the Rust level until one of them runs.
+
+## Pointers
+
+- Tasks → `TODO.md` § TRUST & DELIVERABLE · Snapshot → `CURRENT_STATE.md`
+- Plan → `~/.claude/plans/act-as-senior-software-tranquil-cloud.md`
+
+---
+
 # Handoff — Gear Generator (G0 math core + G1 framework)
 
 Session 19 · 2026-08-14

@@ -161,7 +161,9 @@ pub struct DriftDetail {
 /// appends (never duplicates — the body.rs clear-before-replay contract). A
 /// `restored == false` or `drift_detected == true` means the checkpoint is
 /// unusable; the executor then falls back to replay-from-0 (review F12).
-#[derive(Debug, Clone, PartialEq, Eq)]
+// No `Eq`: `base_elements` carries the opaque `serde_json::Value` descriptor an
+// entry needs to be re-bound after a reopen (DI-4), and that is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RestoreResult {
     pub restored: bool,
     pub snapshot_id: SnapshotId,

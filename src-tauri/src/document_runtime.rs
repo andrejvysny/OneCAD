@@ -53,7 +53,7 @@ use onecad_core::document::record::{
     ExtrudeMode, ImportSourceCodec, KnownOperation, Operation, OperationRecord, PlaneKind,
     SketchOpParams, SketchPlaneRef,
 };
-use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::document::variables::Variable;
 use onecad_core::document::Document;
@@ -77,7 +77,8 @@ use onecad_core::regen::{
     CheckpointStore, ElementBinding, EngineError, GeometryEngine, InMemoryCheckpointStore, Lod,
     MeshKey, MeshSink, ModelSnapshot, Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest,
     PolicyVersions, RefResolution, RegenExecutor, RegenPlan, RegenPlanner, RegenRequest,
-    RegenSession, ResolveRequest, SnapshotPublisher, TessellateSpec, UnresolvedVariable,
+    RegenSession, ResolveOutcome, ResolveRef, ResolveRequest, SnapshotPublisher, TessellateSpec,
+    UnresolvedVariable,
 };
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
@@ -515,6 +516,12 @@ pub struct DocumentRuntime {
     /// renumbered the ordinals: one face got two ids, or worse, two faces shared
     /// one. Pruned to two generations by [`prune_promoted`](Self::prune_promoted).
     promoted: HashMap<(SnapshotId, BodyId, TopoKey), PromotionEntry>,
+    /// Whether the one-shot DI-4 re-bind of PERSISTED element ids has already run
+    /// this session (see [`rebind_persisted_elements`](Self::rebind_persisted_elements)).
+    /// Ids minted in THIS session are bound at promotion time, so the pass has
+    /// nothing to do after its first attempt — and retrying it on every published
+    /// regen would put a worker round trip on a path that is otherwise free.
+    rebind_attempted: bool,
     /// The regen checkpoint cache (SCHEMA §7.7). Populated by
     /// [`take_checkpoint_at_head`](Self::take_checkpoint_at_head) (policy: on explicit
     /// `save_document` only — the cheapest sound policy). [`begin_regen`](Self::begin_regen)
@@ -679,6 +686,7 @@ impl DocumentRuntime {
             sketch_session: None,
             gesture_seq: 0,
             promoted: HashMap::new(),
+            rebind_attempted: false,
             checkpoints: InMemoryCheckpointStore::new(),
             last_regen_used_checkpoint: false,
             imports: ImportBlobs::new(),
@@ -3432,10 +3440,17 @@ impl DocumentRuntime {
                     descriptor: ev.descriptor.clone(),
                 },
             );
-            // Record the partition binding into the (regen-mirror) element index.
-            self.regen
-                .elements
-                .insert(id.clone(), ElementEntry::new(ev.body, ev.kind));
+            // Record the partition binding into the (regen-mirror) element index,
+            // WITH the evidence a fresh session needs to find this element again
+            // (DI-4). The anchor and descriptor are already in hand here and were
+            // previously dropped on the floor, which is why an authored face colour
+            // survived a save and then had nothing to paint after a reopen — the
+            // worker's partition is minted on demand and dies with the process.
+            self.regen.elements.insert(
+                id.clone(),
+                ElementEntry::new(ev.body, ev.kind)
+                    .with_evidence(ev.anchor.clone(), ev.descriptor.clone()),
+            );
             out.push(PromotedElementDto {
                 topo_key: ev.topo_key.as_str().to_string(),
                 element_id: id.as_str().to_string(),
@@ -3562,6 +3577,165 @@ impl DocumentRuntime {
             }
         }
         self.engine.resolve_refs(req).await
+    }
+
+    /// Whether a DI-4 re-bind pass is still owed: this session has not attempted one
+    /// and the document carries persisted elements with re-bind evidence.
+    ///
+    /// Cheap by construction — a map scan, no worker traffic — because the caller is
+    /// every published regen.
+    #[must_use]
+    pub fn has_unbound_persisted_elements(&self) -> bool {
+        !self.rebind_attempted
+            && self
+                .regen
+                .elements
+                .iter()
+                .any(|(_, e)| e.has_rebind_evidence())
+    }
+
+    /// Re-bind persisted [`ElementId`]s into a FRESH session's partition (DI-4).
+    ///
+    /// The worker's element map is minted on demand and dies with the process, so
+    /// after a reopen nothing knows which face a persisted id names: an authored
+    /// face colour is still in the document, and both frontend paint paths come up
+    /// empty because `elementInfo` answers `None`. `BindElementIds` had exactly one
+    /// production caller — `promote_selection` — and nothing re-bound at open.
+    ///
+    /// Each entry that carries evidence is resolved through the SAME §7.5 ladder
+    /// every other reference uses, and only an `AutoBind` — the worker's own
+    /// confidence gate, score ≥ 0.85 and margin ≥ 0.10 — installs the stored id on
+    /// the resolved `TopoKey`. Anything else is left unbound and reported: the
+    /// colour stays in the file and goes unpainted, which is the honest outcome.
+    /// Binding a best guess here would be the silent wrong-bind (H5-B) this whole
+    /// migration exists to eliminate.
+    ///
+    /// Returns `(bound, unresolved)` counts. Never fails the open: a worker error
+    /// leaves every id unbound, exactly as before this existed.
+    pub async fn rebind_persisted_elements(&mut self) -> (usize, usize) {
+        self.rebind_attempted = true;
+        let Some(snapshot) = self.head_snapshot_id() else {
+            return (0, 0);
+        };
+        // Only entries with evidence, and only ones the CURRENT head still has a
+        // body for — a ref into a body that no longer exists has nothing to
+        // enumerate against, and the ladder would just report that back at the cost
+        // of a round trip.
+        let pending: Vec<(ElementId, ElementEntry)> = self
+            .regen
+            .elements
+            .iter()
+            .filter(|(_, e)| e.has_rebind_evidence() && self.regen.bodies.contains(e.body))
+            .map(|(id, e)| (id.clone(), e.clone()))
+            .collect();
+        if pending.is_empty() {
+            return (0, 0);
+        }
+
+        // The ref is authored exactly like a stored op input: last-known identity in
+        // `primary`, the frozen worker descriptor in `intent`, and the pick anchor.
+        // Passing the anchor alone would be an EMPTY ref for most entries — the
+        // worker's `AcquireElementIds` answers with a descriptor and no anchor for a
+        // programmatic pick — and the ladder would have nothing to work with.
+        let refs = pending
+            .iter()
+            .map(|(id, entry)| ResolveRef {
+                ref_id: id.as_str().to_string(),
+                element: ElementRef {
+                    primary: Some(PrimaryRef {
+                        body: entry.body,
+                        element: id.clone(),
+                        kind: entry.kind,
+                        extra: Default::default(),
+                    }),
+                    intent: entry.descriptor.clone().map(|descriptor| IntentQuery {
+                        // The same `descriptorVersion` every plan is compiled with,
+                        // so a future bump invalidates stored evidence through one
+                        // knob (SCHEMA §6/§13) — see `stamp_intents`.
+                        version: PolicyVersions::default().descriptor,
+                        kind: entry.kind,
+                        descriptor,
+                        extra: Default::default(),
+                    }),
+                    anchor: entry.anchor.clone(),
+                    extra: Default::default(),
+                },
+            })
+            .collect();
+        let resolutions = match self
+            .engine
+            .resolve_refs(ResolveRequest {
+                snapshot_id: snapshot,
+                refs,
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!(
+                    target: "onecad_lib::document_runtime",
+                    error = %err,
+                    pending = pending.len(),
+                    "rebind: ladder resolution failed; persisted element ids stay unbound"
+                );
+                return (0, pending.len());
+            }
+        };
+
+        let by_entry: std::collections::HashMap<&str, &ElementEntry> = pending
+            .iter()
+            .map(|(id, entry)| (id.as_str(), entry))
+            .collect();
+        let mut bindings = Vec::new();
+        let mut unresolved = 0usize;
+        for res in &resolutions {
+            let Some(entry) = by_entry.get(res.ref_id.as_str()) else {
+                continue;
+            };
+            match &res.outcome {
+                // The dry run leaves `element_id` EMPTY when the element is not in
+                // the partition yet — which is every element right after a reopen —
+                // so the TopoKey is what carries the answer here.
+                ResolveOutcome::AutoBind {
+                    topo_key: Some(key),
+                    ..
+                } => bindings.push(ElementBinding {
+                    element_id: ElementId::new(res.ref_id.clone()),
+                    topo_key: key.clone(),
+                    body: entry.body,
+                    kind: entry.kind,
+                    anchor: entry.anchor.clone(),
+                }),
+                _ => unresolved += 1,
+            }
+        }
+        let bound = bindings.len();
+        if !bindings.is_empty() {
+            if let Err(err) = self
+                .engine
+                .bind_element_ids(BindElementIdsRequest {
+                    snapshot_id: snapshot,
+                    bindings,
+                })
+                .await
+            {
+                tracing::warn!(
+                    target: "onecad_lib::document_runtime",
+                    error = %err,
+                    "rebind: BindElementIds failed; persisted element ids stay unbound"
+                );
+                return (0, pending.len());
+            }
+        }
+        if unresolved > 0 {
+            tracing::info!(
+                target: "onecad_lib::document_runtime",
+                bound,
+                unresolved,
+                "rebind: some persisted element ids did not resolve confidently and stay unbound"
+            );
+        }
+        (bound, unresolved)
     }
 
     /// The stored ref body's identity is the body used by repair candidate

@@ -36,7 +36,7 @@ use onecad_core::document::record::{
     BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord, PlaneKind,
     SketchOpParams, SketchPlaneRef,
 };
-use onecad_core::document::refs::SketchRegionRef;
+use onecad_core::document::refs::{AnchorIntent, SketchRegionRef};
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::EditCommand;
 use onecad_core::ids::{
@@ -348,8 +348,10 @@ fn face_ids_and_heights(view: &MeshHeaderView, blob: &[u8]) -> Vec<(String, f64)
     out
 }
 
-/// The extrude's far cap (greatest average world Z) — the face this probe colours.
-async fn top_face_id(rt: &mut DocumentRuntime, body: BodyId) -> (String, bool) {
+/// The same face, plus its world centroid — the point a real UI pick reports as
+/// its `anchor.worldPoint`, and the only evidence that tells the top cap apart
+/// from the bottom one (both are planar, same area, same descriptor).
+async fn top_face(rt: &mut DocumentRuntime, body: BodyId) -> (String, Vec3, bool) {
     let mesh = rt
         .get_mesh(body, Lod::Coarse, None)
         .await
@@ -360,7 +362,36 @@ async fn top_face_id(rt: &mut DocumentRuntime, body: BodyId) -> (String, bool) {
         .into_iter()
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .expect("at least one face");
-    (top.0, view.ids_have_element_ids())
+    let centroid = face_centroid(&view, &mesh, &top.0);
+    (top.0, centroid, view.ids_have_element_ids())
+}
+
+/// Average vertex position of the face whose id-table entry is `want`.
+fn face_centroid(view: &MeshHeaderView, blob: &[u8], want: &str) -> Vec3 {
+    let fr = view.section(SEC_FACE_RANGES).expect("FACE_RANGES");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let (frbase, ibase, pbase) = (fr.offset as usize, idx.offset as usize, pos.offset as usize);
+    let ids = id_table(view, blob, view.face_count as usize);
+    let f = ids
+        .iter()
+        .position(|id| id == want)
+        .expect("the chosen face is in the id table");
+    let first = u32_le(blob, frbase + f * 8) as usize;
+    let count = u32_le(blob, frbase + f * 8 + 4) as usize;
+    let (mut sum, mut n) = ([0.0f64; 3], 0.0f64);
+    for t in first..first + count {
+        let io = ibase + t * 12;
+        for k in 0..3 {
+            let v = vertex(blob, pbase, u32_le(blob, io + k * 4) as usize);
+            for (acc, coord) in sum.iter_mut().zip(v) {
+                *acc += coord;
+            }
+            n += 1.0;
+        }
+    }
+    assert!(n > 0.0, "the chosen face has triangles");
+    Vec3::new(sum[0] / n, sum[1] / n, sum[2] / n).expect("finite centroid")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,14 +418,30 @@ async fn an_authored_face_colour_reopens_as_data_but_its_element_no_longer_resol
     let snapshot = SnapshotId(published(&report, "stock box").id.0);
 
     // ── The user picks the top face and colours it. ───────────────────────────
-    let (top_key, ids_were_element_ids) = top_face_id(&mut rt, body).await;
+    let (top_key, top_centroid, ids_were_element_ids) = top_face(&mut rt, body).await;
     assert!(
         !ids_were_element_ids,
         "before any promotion the mesh id table carries TopoKeys, not ElementIds \
          (this is the fixture's own precondition)"
     );
+    // The pick carries an ANCHOR, because a user colouring a face clicked it — and
+    // that click point is the only thing that can tell this cap from the opposite
+    // one. Both are planar, both 400 mm², both score 1.0 on descriptor evidence
+    // alone, so an anchor-less pick is a genuine tie the ladder must refuse (the
+    // second test below pins exactly that).
+    let anchor = AnchorIntent {
+        world_point: top_centroid,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
     let promoted = rt
-        .promote_selection(snapshot, body, vec![(TopoKey::new(&top_key), None)])
+        .promote_selection(
+            snapshot,
+            body,
+            vec![(TopoKey::new(&top_key), Some(anchor.clone()))],
+        )
         .await
         .expect("AcquireElementIds promotes the face pick");
     let element = ElementId::new(&promoted[0].element_id);
@@ -452,21 +499,130 @@ async fn an_authored_face_colour_reopens_as_data_but_its_element_no_longer_resol
          same ElementId"
     );
 
-    // 2. Neither painting path can find the face that colour belongs to.
-    let (_key_after, ids_are_element_ids) = top_face_id(&mut reopened, body).await;
+    // 2. …and the face that colour belongs to is FOUND again (DI-4, W2).
+    //
+    // This assertion used to be the inverse — a committed characterization of the
+    // defect, whose own doc comment instructed whoever closed the seam to "delete
+    // the probe's failure expectation and pin the fix instead". This is that.
+    //
+    // `rebind_persisted_elements` runs the persisted evidence back through the §7.5
+    // ladder and installs the SAME ElementId on the resolved TopoKey, under the
+    // worker's own confidence gate (score ≥ 0.85, margin ≥ 0.10). In production the
+    // regen driver calls it after the first published regen; here the test drives
+    // regen directly, so it calls it in the same position.
+    assert!(
+        reopened.has_unbound_persisted_elements(),
+        "the reopened document should still owe a re-bind before the pass runs"
+    );
+    let (bound, unresolved) = reopened.rebind_persisted_elements().await;
+    assert_eq!(
+        (bound, unresolved),
+        (1, 0),
+        "the authored face's persisted id re-binds through the ladder"
+    );
+    assert!(
+        !reopened.has_unbound_persisted_elements(),
+        "the pass is one-shot per session — a published regen must not re-run it"
+    );
+
     let resolved = ElementQuery::query_element(&wm2, snapshot2, body, element.as_str())
         .await
         .expect("QueryElement must not error for an unknown id — it answers None");
-
     assert!(
-        !ids_are_element_ids && resolved.is_none(),
-        "CHARACTERIZATION: after a reopen the worker's element-map partition is empty \
-         for this element (BindElementIds has one production call site, inside \
-         promote_selection, and nothing re-binds a persisted id at open), so BOTH \
-         frontend paths in meshSync.resolveAuthoredFaceColors come up empty — the \
-         mesh id table carries TopoKeys (idsHaveElementIds={ids_are_element_ids}) and \
-         elementInfo answers {resolved:?}. If this assertion fails the seam has been \
-         closed: delete the probe's failure expectation and pin the fix instead."
+        resolved.is_some(),
+        "FIX PIN (DI-4): after a reopen the persisted ElementId resolves again, so \
+         `meshSync.resolveAuthoredFaceColors`'s elementInfo path can find the face \
+         the stored colour belongs to. Got {resolved:?}"
+    );
+
+    wm2.shutdown().await;
+}
+
+/// The other half of DI-4: a persisted id whose evidence CANNOT discriminate must
+/// stay unbound rather than be guessed onto a plausible face.
+///
+/// This is not a hypothetical. The two caps of this box are both planar, both
+/// 400 mm², and both score **1.0** on descriptor evidence alone — measured from the
+/// ladder's own refusal payload, whose candidate list gives `f:5` and `f:6` identical
+/// scores with margin 0 and `reason: "ambiguous"`. The anchor is what tells them
+/// apart, so a pick made without one (a programmatic promotion, or a legacy entry
+/// written before the anchor was persisted) is a real tie.
+///
+/// Binding either candidate would paint the user's colour onto the WRONG face and
+/// look entirely successful — the silent mis-bind (H5-B) this migration exists to
+/// eliminate. The contract is: no bind, the colour stays in the file, and the count
+/// says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ambiguous_persisted_element_refuses_to_bind_rather_than_guess() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xC10));
+    let body = body_of(EXTRUDE_REC);
+
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_REC, &rect_sketch(sid, 0x1000, 0.0, 0.0, 20.0, 20.0)),
+    );
+    add_op(&mut rt, extrude_record(EXTRUDE_REC, sid, 25.0));
+    let report = regen_all(&mut rt).await;
+    let snapshot = SnapshotId(published(&report, "stock box").id.0);
+
+    // The SAME pick as the test above, minus the anchor.
+    let (top_key, _centroid, _) = top_face(&mut rt, body).await;
+    let promoted = rt
+        .promote_selection(snapshot, body, vec![(TopoKey::new(&top_key), None)])
+        .await
+        .expect("AcquireElementIds promotes the face pick");
+    let element = ElementId::new(&promoted[0].element_id);
+    let colour = [10u8, 90, 200, 255];
+    rt.apply(EditCommand::SetFaceColor {
+        body,
+        element_id: element.clone(),
+        color: Some(colour),
+    })
+    .expect("SetFaceColor");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("Ambiguous.onecad");
+    rt.save(&path, save_meta()).expect("save");
+    drop(rt);
+    wm.shutdown().await;
+
+    let bin2 = real_worker().expect("worker binary");
+    let wm2 = spawn_worker(bin2).await;
+    let (engine, meshes, solver) = seams(&wm2);
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    let report2 = regen_all(&mut reopened).await;
+    let snapshot2 = SnapshotId(published(&report2, "reopened document").id.0);
+
+    let (bound, unresolved) = reopened.rebind_persisted_elements().await;
+    assert_eq!(
+        (bound, unresolved),
+        (0, 1),
+        "an ambiguous ref must be REFUSED, not bound to whichever candidate scored \
+         first — the ladder's own gate is score ≥ 0.85 AND margin ≥ 0.10, and this \
+         pair ties at 1.0 with margin 0"
+    );
+
+    // The colour is still in the document — refusing to bind never destroys data.
+    assert_eq!(
+        reopened.projection().bodies[&body.to_string()]
+            .face_colors
+            .get(element.as_str()),
+        Some(&colour),
+        "the refusal costs the PAINT, never the stored colour"
+    );
+    // …and nothing was bound behind our back.
+    let resolved = ElementQuery::query_element(&wm2, snapshot2, body, element.as_str())
+        .await
+        .expect("QueryElement must not error for an unknown id — it answers None");
+    assert!(
+        resolved.is_none(),
+        "no id may be installed for an ambiguous ref; got {resolved:?}"
     );
 
     wm2.shutdown().await;

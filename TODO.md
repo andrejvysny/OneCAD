@@ -2,6 +2,19 @@
 
 ## TRUST & DELIVERABLE (2026-08-16, plan `~/.claude/plans/act-as-senior-software-tranquil-cloud.md`)
 
+### NOW — the next three actions, in order
+
+- [ ] **`sketch-snap-rendering.spec.ts:118` still fails ON CI ONLY, at a DIFFERENT assertion than
+      before.** W1b's fix worked — the guide now draws (line 89 passes there) — but
+      `expect(far.dash).not.toBeCloseTo(near.dash, 6)` fails with both dashes at
+      `1.266172853215532`, while line 116 confirms the zoom DID happen (`farScale < nearScale`). So
+      the world dash size did not move across a zoom that was real but smaller than whatever
+      rebuild band the dash cadence uses. Local runs zoom further and pass. Fix the spec's zoom
+      magnitude (or read the band and assert against it) — do NOT loosen the cadence assertion on
+      lines 120-121, which is the actual §10.1 contract. Both browsers, 230 passed / 1 failed each.
+- [ ] **Commit W2** (7 files, uncommitted, all gates green — see the W2 block below).
+- [ ] **W3 — DI-5**, the XCAF STEP export, now unblocked by W2.
+
 Six waves. W0 baseline truth + a CI that has seen this code · W1 the chip stops covering the value
 arrow (MC-R9) · W2 DI-4 ElementId rebind at open · W3 DI-5 XCAF STEP export · W4 3MF export ·
 W5 T2 result truth · W6 close-out.
@@ -104,6 +117,71 @@ open through the existing resolution ladder — auto-bind at score ≥0.85 **and
 otherwise leave the id unbound and say so. A colour that cannot be re-bound must stay in the file and
 go unpainted with a diagnostic; silently binding the nearest face is the H5-B mis-bind this
 migration exists to prevent. Sequenced into W2; the plan's one-line framing understated it.
+
+### W2 — DI-4: persisted ElementIds re-bind at open — **LANDED (uncommitted)**
+
+- [x] **`ElementEntry` persists the durable evidence** — `anchor` + the worker's opaque
+      `descriptor`, both `serde(default, skip_serializing_if)`. Old containers parse unchanged and a
+      document with no promotions serializes byte-identically. `Eq` had to go from `ElementEntry`,
+      `ElementIndex` and `RestoreResult` (a `serde_json::Value` is `PartialEq` only — the
+      `LibraryComponentDto` precedent).
+- [x] **`DocumentRuntime::rebind_persisted_elements`** — resolves that evidence through the existing
+      §7.5 ladder and installs the SAME `ElementId` on the resolved TopoKey via the unchanged
+      `BindElementIds`. The ref is authored exactly like a stored op input (`primary` + `intent` +
+      `anchor`); an anchor-only ref is EMPTY for a programmatic promotion and the ladder can do
+      nothing with it. One-shot per session (`rebind_attempted`), driven from the published-regen
+      hook in `lib.rs` — off both locked phases, since it does worker round trips of its own.
+- [x] **The ladder refused the first attempt, and it was RIGHT.** Measured from its own refusal
+      payload: the box's two caps both score **1.0** with **margin 0**, `reason: "ambiguous"` —
+      planar, same area, same descriptor. Only the anchor separates them. A real face-colour pick
+      carries the click point (`PickInput.anchor`), so the fix works for the case DI-4 is about; the
+      anchor-less case is now its own test asserting **(0 bound, 1 unresolved)**, the colour still in
+      the document, and NOTHING installed. That is the H5-B contract holding under test.
+- [x] **A repair-lane defect found in passing, and fixed.** `parse_one_resolution` ended its
+      `needsRepair` arm with `serde_json::from_value::<RepairItem>(obj).ok()?`, and the worker emits
+      `"anchor": {}` for a ref that carried none — which fails `AnchorIntent`'s required
+      `worldPoint`. The whole resolution was silently DROPPED, so a response carrying one refusal
+      reached the caller as an EMPTY vec: a repair dialog with five real candidates would render as
+      "nothing to resolve", silent on both sides. An empty anchor object is now read as absent.
+- [x] `src-tauri/tests/face_color_reopen.rs`: the characterization assertion is INVERTED into a fix
+      pin, as its own doc comment instructed, and the ambiguity refusal is a second test.
+- Gate: `cargo fmt` + `clippy --workspace --all-targets -D warnings` clean ·
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1284 passed / 0 failed / 84
+      targets** (was 1283; +1 is the new refusal test).
+- **Mutation-proved twice:** dropping the persisted evidence reds BOTH tests; reverting the parser
+      fix reds the refusal test with `(0, 0)` instead of `(0, 1)` — the exact invisible-refusal
+      signature it was written to catch.
+- [ ] **Not yet committed.** Frontend paint path not re-verified end to end in the app (the Rust
+      lane proves the id resolves again; the manual Tauri gate is where the colour is actually seen).
+
+### W2 — DI-4 design (as planned, for reference)
+
+The plan's one-liner ("re-bind `doc.elements` at open") is not implementable as written, because the
+evidence a binding needs is not persisted (recorded under W0 above). The design that IS
+implementable reuses the machinery the ladder already has, and adds no new resolution policy:
+
+1. **Capture.** `ElementEntry` (`onecad-core/src/document/element_index.rs:31`) carries only
+   `{body, kind}`. It gains `anchor: Option<AnchorIntent>` and `descriptor: Option<Value>`, both
+   `serde(default, skip_serializing_if)` so every existing container still parses and a document
+   with no authored colours serializes byte-identically. `promote_selection` already holds both —
+   the anchor rides in the worker's evidence and the descriptor in `PromotionEntry` — so this is
+   writing down what Rust already knew and then threw away.
+   A **TopoKey is deliberately NOT persisted**: it is snapshot-scoped evidence (SCHEMA §9), and
+   storing it as authority is the mis-bind this migration exists to prevent.
+2. **Re-bind.** At open, once the first regen has published a head, each persisted entry with
+   evidence goes through `DocumentRuntime::resolve_refs` — the existing §7.5 dry run — as
+   `ElementRef { anchor, .. }`. The worker's ladder answers with `ResolveOutcome::AutoBind
+   { element_id, score, margin, topo_key }`, and its `topo_key` is populated **even when
+   `element_id` is empty**, which is exactly the reopen case (nothing is in the partition yet).
+   That TopoKey plus the persisted `{body, kind, anchor}` is a complete `ElementBinding`, so the
+   SAME `ElementId` is installed through the unchanged `BindElementIds` verb.
+3. **Refuse loudly.** `NeedsRepair` or a missing body leaves the id unbound and emits a diagnostic.
+   The colour stays in the file and simply goes unpainted. The confidence gate is the worker's own
+   (`kAutoBindMinScore` 0.85, `kAutoBindMinMargin` 0.10, `Scoring.h:58`) — this package adds no
+   second policy and never picks "the nearest face".
+
+Sequenced ahead of W3 because a STEP export is only worth writing colours into once a reopened
+document still knows which face each colour belongs to.
 
 ### W1b — the two remaining browser-lane rows, both closed on measured causes
 

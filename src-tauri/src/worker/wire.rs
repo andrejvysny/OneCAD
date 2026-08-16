@@ -3292,6 +3292,20 @@ fn parse_one_resolution(r: &Value) -> Option<RefResolution> {
             if let Some(map) = obj.as_object_mut() {
                 map.entry("stepIndex".to_string()).or_insert(json!(0));
                 map.entry("refId".to_string()).or_insert(json!(ref_id));
+                // The worker emits `"anchor": {}` for a ref that carried no anchor
+                // (`missing_body_resolution`, and any ladder refusal on such a ref).
+                // An empty object is NOT a valid `AnchorIntent` — `worldPoint` is
+                // required — so deserializing the whole `RepairItem` failed and the
+                // `.ok()?` below DROPPED the resolution entirely: the response came
+                // back with one refusal and the caller saw an empty vec. That is a
+                // repair-panel defect as much as a re-bind one (a dialog with real
+                // candidates rendering as "nothing to resolve"), and it is invisible
+                // because both halves are silent. An absent anchor is `None`.
+                if map.get("anchor").is_some_and(|a| {
+                    a.as_object().is_some_and(serde_json::Map::is_empty) || a.is_null()
+                }) {
+                    map.remove("anchor");
+                }
             }
             ResolveOutcome::NeedsRepair(serde_json::from_value::<RepairItem>(obj).ok()?)
         }

@@ -176,6 +176,25 @@ pub fn regen_driver_with_started(
             // (the debounce coalesces the edit-tick + this publish-tick).
             if report.published() {
                 autosave_tick.send_modify(|v| *v = v.wrapping_add(1));
+                // DI-4: a freshly opened document's persisted ElementIds are not in
+                // the worker's partition — it is minted on demand and died with the
+                // last process — so an authored face colour has nothing to paint.
+                // This is the first moment a head snapshot exists to resolve
+                // against. It is a no-op once the ids are bound, and deliberately
+                // off the LOCKED phases: it does worker round trips of its own and
+                // must never sit in the edit path.
+                let mut guard = runtime.lock().await;
+                if let Some(rt) = guard.as_mut() {
+                    if rt.has_unbound_persisted_elements() {
+                        let (bound, unresolved) = rt.rebind_persisted_elements().await;
+                        tracing::debug!(
+                            target: "onecad_lib::regen",
+                            bound,
+                            unresolved,
+                            "rebind: persisted element ids re-bound after publish"
+                        );
+                    }
+                }
             }
             // HISTORY-HARDEN H8: a published ROLLBACK is the one completion worth a
             // free checkpoint (see `mint_rollback_checkpoint`).
