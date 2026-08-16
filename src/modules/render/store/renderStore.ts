@@ -109,6 +109,14 @@ export interface RenderStoreState {
    * evidence that the assignment is stale.
    */
   unboundFaceOverrides: Record<string, string[]>;
+  /**
+   * The complement: overrides the viewport DID bind, keyed by body id. The
+   * persisted map is face-keyed and global, so which body an override belongs
+   * to is tessellation evidence only the viewport holds — the override count
+   * and the keep/replace prompt (WP3) read this, honestly reflecting what is
+   * actually drawn. Session feedback only, like `unboundFaceOverrides`.
+   */
+  boundFaceOverrides: Record<string, string[]>;
 
   /** Read the slice and replace in-memory state with it. Never throws. */
   hydrate(): Promise<void>;
@@ -124,6 +132,8 @@ export interface RenderStoreState {
   clearFaceOverrides(faceElementIds: readonly string[]): Promise<void>;
   /** Viewport feedback: overrides that bound to no face of `bodyId`. */
   reportUnboundFaceOverrides(bodyId: string, faceElementIds: readonly string[]): void;
+  /** Viewport feedback: overrides that DID bind to a face of `bodyId`. */
+  reportBoundFaceOverrides(bodyId: string, faceElementIds: readonly string[]): void;
   /** Re-derive {@link RenderStoreState.danglingBodies} from the live body set. */
   recomputeDangling(): void;
   /** Forget everything, IN MEMORY ONLY — see the note on the implementation. */
@@ -138,6 +148,7 @@ function initialState() {
     state: createEmptyRenderState(),
     danglingBodies: [] as string[],
     unboundFaceOverrides: {} as Record<string, string[]>,
+    boundFaceOverrides: {} as Record<string, string[]>,
   };
 }
 
@@ -281,6 +292,15 @@ export const renderStore = createStore<RenderStoreState>()((set, get) => {
         if (faceElementIds.length === 0) delete next[bodyId];
         else next[bodyId] = [...faceElementIds];
         return { unboundFaceOverrides: next };
+      });
+    },
+
+    reportBoundFaceOverrides(bodyId, faceElementIds) {
+      set((s) => {
+        const next = { ...s.boundFaceOverrides };
+        if (faceElementIds.length === 0) delete next[bodyId];
+        else next[bodyId] = [...faceElementIds];
+        return { boundFaceOverrides: next };
       });
     },
 
