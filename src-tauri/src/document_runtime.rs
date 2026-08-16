@@ -417,6 +417,13 @@ pub const MAX_LOADED_MESH_BYTES: usize = 256 * 1024 * 1024;
 /// published body or its persisted open-paint cache.
 const DISPLAY_LOD: Lod = Lod::Fine;
 
+/// How many TRANSPORT failures the DI-4 re-bind pass may retry across before it
+/// goes terminal for the session (see
+/// [`DocumentRuntime::note_rebind_transport_failure`]). A ladder ANSWER is
+/// terminal on the first pass regardless — this bounds only the worker-error
+/// path, where retrying is correct but must not become a per-publish tax.
+const MAX_REBIND_TRANSPORT_FAILURES: u8 = 3;
+
 /// One entry of the promotion cache (see [`DocumentRuntime::promoted`]).
 ///
 /// The `descriptor` is the worker's opaque evidence for the element as it stood in
@@ -522,6 +529,12 @@ pub struct DocumentRuntime {
     /// nothing to do after its first attempt — and retrying it on every published
     /// regen would put a worker round trip on a path that is otherwise free.
     rebind_attempted: bool,
+    /// TRANSPORT failures of the re-bind pass this session. A worker error is not
+    /// a ladder answer, so it re-arms the pass for the next published regen — but
+    /// only up to [`MAX_REBIND_TRANSPORT_FAILURES`], so a persistently failing
+    /// worker cannot put a doomed round trip on every publish. A pass the ladder
+    /// actually ANSWERED (even all-refusals) stays terminal regardless.
+    rebind_transport_failures: u8,
     /// The regen checkpoint cache (SCHEMA §7.7). Populated by
     /// [`take_checkpoint_at_head`](Self::take_checkpoint_at_head) (policy: on explicit
     /// `save_document` only — the cheapest sound policy). [`begin_regen`](Self::begin_regen)
@@ -687,6 +700,7 @@ impl DocumentRuntime {
             gesture_seq: 0,
             promoted: HashMap::new(),
             rebind_attempted: false,
+            rebind_transport_failures: 0,
             checkpoints: InMemoryCheckpointStore::new(),
             last_regen_used_checkpoint: false,
             imports: ImportBlobs::new(),
@@ -3611,7 +3625,8 @@ impl DocumentRuntime {
     /// migration exists to eliminate.
     ///
     /// Returns `(bound, unresolved)` counts. Never fails the open: a worker error
-    /// leaves every id unbound, exactly as before this existed.
+    /// leaves every id unbound, exactly as before this existed — but re-arms the
+    /// pass (bounded), since a transport failure is not a ladder answer.
     pub async fn rebind_persisted_elements(&mut self) -> (usize, usize) {
         self.rebind_attempted = true;
         let Some(snapshot) = self.head_snapshot_id() else {
@@ -3620,14 +3635,30 @@ impl DocumentRuntime {
         // Only entries with evidence, and only ones the CURRENT head still has a
         // body for — a ref into a body that no longer exists has nothing to
         // enumerate against, and the ladder would just report that back at the cost
-        // of a round trip.
+        // of a round trip. The skip is still worth a line in the log: a stale
+        // colour on a deleted body would otherwise vanish without a trace.
+        let mut skipped_missing_body = 0usize;
         let pending: Vec<(ElementId, ElementEntry)> = self
             .regen
             .elements
             .iter()
-            .filter(|(_, e)| e.has_rebind_evidence() && self.regen.bodies.contains(e.body))
+            .filter(|(_, e)| e.has_rebind_evidence())
+            .filter(|(_, e)| {
+                let present = self.regen.bodies.contains(e.body);
+                if !present {
+                    skipped_missing_body += 1;
+                }
+                present
+            })
             .map(|(id, e)| (id.clone(), e.clone()))
             .collect();
+        if skipped_missing_body > 0 {
+            tracing::debug!(
+                target: "onecad_lib::document_runtime",
+                skipped = skipped_missing_body,
+                "rebind: persisted elements skipped — their body is not in the current head"
+            );
+        }
         if pending.is_empty() {
             return (0, 0);
         }
@@ -3678,6 +3709,7 @@ impl DocumentRuntime {
                     pending = pending.len(),
                     "rebind: ladder resolution failed; persisted element ids stay unbound"
                 );
+                self.note_rebind_transport_failure();
                 return (0, pending.len());
             }
         };
@@ -3724,6 +3756,7 @@ impl DocumentRuntime {
                     error = %err,
                     "rebind: BindElementIds failed; persisted element ids stay unbound"
                 );
+                self.note_rebind_transport_failure();
                 return (0, pending.len());
             }
         }
@@ -3736,6 +3769,18 @@ impl DocumentRuntime {
             );
         }
         (bound, unresolved)
+    }
+
+    /// A transport failure re-arms [`rebind_persisted_elements`] for the next
+    /// published regen — the ladder never answered, so "attempted" would be a
+    /// false terminal — bounded by [`MAX_REBIND_TRANSPORT_FAILURES`] so a
+    /// persistently failing worker costs a fixed number of round trips, not one
+    /// per publish for the whole session.
+    fn note_rebind_transport_failure(&mut self) {
+        self.rebind_transport_failures = self.rebind_transport_failures.saturating_add(1);
+        if self.rebind_transport_failures < MAX_REBIND_TRANSPORT_FAILURES {
+            self.rebind_attempted = false;
+        }
     }
 
     /// The stored ref body's identity is the body used by repair candidate

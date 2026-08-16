@@ -4,16 +4,41 @@
 
 ### NOW — the next three actions, in order
 
-- [ ] **`sketch-snap-rendering.spec.ts:118` still fails ON CI ONLY, at a DIFFERENT assertion than
-      before.** W1b's fix worked — the guide now draws (line 89 passes there) — but
-      `expect(far.dash).not.toBeCloseTo(near.dash, 6)` fails with both dashes at
-      `1.266172853215532`, while line 116 confirms the zoom DID happen (`farScale < nearScale`). So
-      the world dash size did not move across a zoom that was real but smaller than whatever
-      rebuild band the dash cadence uses. Local runs zoom further and pass. Fix the spec's zoom
-      magnitude (or read the band and assert against it) — do NOT loosen the cadence assertion on
-      lines 120-121, which is the actual §10.1 contract. Both browsers, 230 passed / 1 failed each.
-- [ ] **Commit W2** (7 files, uncommitted, all gates green — see the W2 block below).
-- [ ] **W3 — DI-5**, the XCAF STEP export, now unblocked by W2.
+- [ ] **Confirm CI green at `6e71da1`** (W2 + the guide-cadence fix pushed 2026-08-16 late; both
+      e2e jobs were 230/1 on `sketch-snap-rendering.spec.ts:118` before it).
+- [ ] **Bounded WebKit triage** of `sketch-multi-object.spec.ts:44` (plan
+      `~/.claude/plans/act-as-senior-cad-nested-canyon.md` Phase 1) — time-boxed; two measured
+      hypotheses: the `toolMachine.ts:333-336` degenerate-size refusal under a bad camera metric,
+      and a commit error swallowed by `sketchService.ts:45-46` + the controller's voided promise.
+      Either way the product fix "a swallowed commit error must surface" lands.
+- [ ] **W3 — DI-5**, the XCAF STEP export, unblocked by W2. Schema decision taken: **AP242**.
+
+### Gate — 0a + W2 commit + W2.1 rebind hardening (2026-08-16, late session)
+
+- [x] **The `sketch-snap-rendering.spec.ts:118` CI failure was a PRODUCT gap, not a spec-zoom
+      problem — the row above it was wrong about the mechanism.** There is no "rebuild band":
+      `SnapIndicator.setGuides` sizes dashes continuously from `pxPerUnit` AT REBUILD TIME, and
+      `update()` never re-sized live guides, while `ViewportEngine.ts:771` already states the
+      §10.1 intent ("has to survive every zoom"). So an existing guide kept a stale world dash
+      across any zoom until the next snap rebuild; the :120 cadence assertion passed on CI only
+      because the small zoom kept the error under 1 CSS px. Fixed in `update()` — live guide
+      materials re-size when `pxPerUnit` changes (uniform-backed, no recompile). New vitest pin:
+      "re-sizes LIVE guides when the scale changes, without a rebuild". Committed `6e71da1`.
+      Gate: SnapIndicator vitest 11/11 · `sketch-snap-rendering` e2e 8/8 both projects · tsc clean.
+- [x] **W2 committed as gated, no edits mixed in** — `ff0e92e`, then pushed with `6e71da1`.
+- [x] **W2.1 — rebind hardening from the plan-session review of the W2 diff.** Two findings fixed,
+      one recorded: (1) a TRANSPORT failure during `rebind_persisted_elements` latched
+      `rebind_attempted` and permanently forfeited the pass — one worker hiccup at open cost every
+      authored colour for the session. Now a transport error RE-ARMS the pass, bounded by
+      `MAX_REBIND_TRANSPORT_FAILURES = 3` (a ladder ANSWER stays terminal on first pass);
+      (2) entries skipped because their body left the head are now counted into a debug diagnostic
+      instead of vanishing; (3) recorded, not changed: the pass holds the runtime lock across two
+      worker round trips — one-shot at open, acceptable.
+      Two new unit tests (`rebind_rearms_after_a_transport_failure_and_caps_the_retries`,
+      `rebind_recovers_after_a_transient_transport_failure`) drive both halves through
+      `FakeBackend`'s new flippable `resolve_fails`.
+      Gate: fmt/clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1286 passed /
+      0 failed** (was 1284; +2).
 
 Six waves. W0 baseline truth + a CI that has seen this code · W1 the chip stops covering the value
 arrow (MC-R9) · W2 DI-4 ElementId rebind at open · W3 DI-5 XCAF STEP export · W4 3MF export ·
@@ -151,8 +176,9 @@ migration exists to prevent. Sequenced into W2; the plan's one-line framing unde
 - **Mutation-proved twice:** dropping the persisted evidence reds BOTH tests; reverting the parser
       fix reds the refusal test with `(0, 0)` instead of `(0, 1)` — the exact invisible-refusal
       signature it was written to catch.
-- [ ] **Not yet committed.** Frontend paint path not re-verified end to end in the app (the Rust
-      lane proves the id resolves again; the manual Tauri gate is where the colour is actually seen).
+- [x] **Committed `ff0e92e`** (2026-08-16, late session). Frontend paint path still not re-verified
+      end to end in the app (the Rust lane proves the id resolves again; the manual Tauri gate is
+      where the colour is actually seen) — that residual rides the owed manual USER gates.
 
 ### W2 — DI-4 design (as planned, for reference)
 

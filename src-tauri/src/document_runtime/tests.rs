@@ -96,6 +96,10 @@ struct FakeBackend {
     partial_acquire: bool,
     /// Simulates the head changing between AcquireElementIds and BindElementIds.
     bind_fails: bool,
+    /// When set, `resolve_refs` fails with a TRANSPORT error — models a worker
+    /// crash during the DI-4 re-bind pass. A `Mutex` so a test can flip it back
+    /// mid-run and prove the pass retries after a transient failure.
+    resolve_fails: Mutex<bool>,
     /// CHANGED curve members every `solve_drag`/`end_gesture` echoes (SCHEMA §7.4
     /// `curves`). Set by a test to model a solver that reshaped a curve — the
     /// channel `positions` cannot carry.
@@ -115,6 +119,7 @@ impl Default for FakeBackend {
             existing: Mutex::new(None),
             partial_acquire: false,
             bind_fails: false,
+            resolve_fails: Mutex::new(false),
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(FakeState::default()),
         }
@@ -421,6 +426,11 @@ impl GeometryEngine for FakeBackend {
         Ok(())
     }
     async fn resolve_refs(&self, _r: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
+        if *self.resolve_fails.lock().unwrap() {
+            return Err(EngineError::Protocol {
+                message: "fake transport failure".into(),
+            });
+        }
         Ok(vec![])
     }
     async fn cancel(&self, _j: JobId) -> Result<(), EngineError> {
@@ -2600,6 +2610,74 @@ async fn promote_selection_skips_the_gate_before_the_first_publish() {
     rt.promote_selection(SnapshotId(9), body, vec![(TopoKey::new("f:1"), None)])
         .await
         .expect("still nothing to be stale against");
+}
+
+/// W2.1 hardening: a TRANSPORT failure during the DI-4 re-bind pass is not a
+/// ladder answer, so the pass RE-ARMS for the next published regen instead of
+/// going terminal — one worker hiccup at open must not cost every authored
+/// colour for the whole session. The retry budget is bounded
+/// (`MAX_REBIND_TRANSPORT_FAILURES`), so a persistently failing worker costs a
+/// fixed number of round trips, never one per publish.
+#[tokio::test]
+async fn rebind_rearms_after_a_transport_failure_and_caps_the_retries() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let head = SnapshotId(report.snapshot_id);
+    let body = BodyId(Uuid::from_u128(0x10));
+    rt.promote_selection(head, body, vec![(TopoKey::new("f:1"), None)])
+        .await
+        .expect("promotion records re-bind evidence");
+    assert!(rt.has_unbound_persisted_elements());
+
+    *backend.resolve_fails.lock().unwrap() = true;
+    assert_eq!(rt.rebind_persisted_elements().await, (0, 1));
+    assert!(
+        rt.has_unbound_persisted_elements(),
+        "a transport failure re-arms the pass — the ladder never answered"
+    );
+    assert_eq!(rt.rebind_persisted_elements().await, (0, 1));
+    assert!(
+        rt.has_unbound_persisted_elements(),
+        "second failure: still re-armed"
+    );
+    assert_eq!(rt.rebind_persisted_elements().await, (0, 1));
+    assert!(
+        !rt.has_unbound_persisted_elements(),
+        "the third transport failure exhausts the bounded retry budget"
+    );
+}
+
+/// The transient half of the same contract: after ONE transport failure, a pass
+/// the ladder actually answers goes terminal exactly as a first-try success does.
+#[tokio::test]
+async fn rebind_recovers_after_a_transient_transport_failure() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let head = SnapshotId(report.snapshot_id);
+    let body = BodyId(Uuid::from_u128(0x10));
+    rt.promote_selection(head, body, vec![(TopoKey::new("f:1"), None)])
+        .await
+        .expect("promotion records re-bind evidence");
+
+    *backend.resolve_fails.lock().unwrap() = true;
+    assert_eq!(rt.rebind_persisted_elements().await, (0, 1));
+    assert!(rt.has_unbound_persisted_elements());
+
+    // The worker came back; the next pass gets a real answer and is terminal.
+    *backend.resolve_fails.lock().unwrap() = false;
+    rt.rebind_persisted_elements().await;
+    assert!(
+        !rt.has_unbound_persisted_elements(),
+        "an answered pass is terminal — no retry tax on later publishes"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
