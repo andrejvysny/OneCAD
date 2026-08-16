@@ -310,7 +310,20 @@ describe("real Tauri composition", () => {
     const reopenedBody = Object.keys(reopened.bodies)[0];
     const reopenedEvidence = await exactBodyEvidence(reopenedBody);
     expect(reopened.documentId).toBe(opened.documentId);
-    expect(reopened.revision).toBe(saved.currentRevision);
+    // `documentRevision` is SESSION-SCOPED and does not survive a reopen. This
+    // assertion used to read `toBe(saved.currentRevision)` — the first real run of
+    // this lane (it had never executed on any machine) measured `0` against `3`,
+    // and the expectation, not the product, is what was wrong:
+    //   - SCHEMA §3 calls it a "Rust-owned document revision (an edit counter);
+    //     ADVISORY stamp, NOT a fencing token (D4)";
+    //   - the container persists no revision at all (nothing in `container.rs`
+    //     writes or reads one, and the document model has no such field);
+    //   - `DocumentRuntime` constructs `revision: AtomicU64::new(0)` per runtime,
+    //     and replaying records at open is not an edit, so it bumps nothing.
+    // What the reopen must actually preserve is IDENTITY and GEOMETRY, asserted
+    // below. A fresh counter on a clean document is the contract.
+    expect(reopened.revision).toBe(0);
+    expect(reopened.dirty).toBe(false);
     expect(reopenedBody).toBe(bodyId);
     expect(reopenedEvidence).toEqual(restored);
   });

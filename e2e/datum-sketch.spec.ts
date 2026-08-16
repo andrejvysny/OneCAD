@@ -59,7 +59,7 @@ test.describe("datum plane — sketch host", () => {
 
     // Sketch chrome is live and the session is a NEW sketch, NOT the plane picker.
     await expect(page.getByText(/^Editing /)).toBeVisible();
-    await expect(page.getByText("Select a sketch plane")).toHaveCount(0);
+    await expect(page.getByText("Select a sketch plane", { exact: true })).toHaveCount(0);
     // …and it opened on the DATUM's resolved frame (XY offset 10 ⇒ world +Z 10),
     // not on world XY. This is the whole point of the feature.
     expect(await sessionPlaneOrigin(page)).toEqual([0, 0, 10]);
@@ -86,7 +86,7 @@ test.describe("datum plane — sketch host", () => {
     await createDatum(page);
 
     await page.getByRole("button", { name: "New sketch", exact: true }).click();
-    await expect(page.getByText("Select a sketch plane")).toBeVisible();
+    await expect(page.getByText("Select a sketch plane", { exact: true })).toBeVisible();
     await waitForCameraSettled(page);
 
     const datum = await findDatumQuad(page);

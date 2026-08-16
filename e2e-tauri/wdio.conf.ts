@@ -1,9 +1,29 @@
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { basename, resolve } from "node:path";
 
 const resultsDir = resolve(process.env.ONECAD_TAURI_E2E_RESULTS ?? "e2e-tauri/results");
-const appPath = resolve(
-  process.env.ONECAD_TAURI_E2E_APP ?? "src-tauri/target/release/bundle/macos/onecad.app",
+
+/**
+ * The service documents a macOS `.app` bundle as a valid `appBinaryPath`, but its
+ * launcher `spawn()`s that path verbatim — and a bundle is a DIRECTORY, so the
+ * spawn fails with `EACCES` before any driver starts (`A service failed in the
+ * 'onPrepare' hook`). That is why this lane had never executed anywhere. Resolve
+ * the bundle to its executable ourselves; a plain binary path is passed through.
+ */
+function appExecutable(path: string): string {
+  if (!path.endsWith(".app")) return path;
+  const exe = resolve(path, "Contents/MacOS", basename(path, ".app"));
+  if (!existsSync(exe)) {
+    throw new Error(
+      `Tauri bundle ${path} has no executable at ${exe} — build it with ` +
+        `\`bun run tauri build --features tauri-e2e --config src-tauri/tauri.e2e.conf.json --bundles app\``,
+    );
+  }
+  return exe;
+}
+
+const appPath = appExecutable(
+  resolve(process.env.ONECAD_TAURI_E2E_APP ?? "src-tauri/target/release/bundle/macos/onecad.app"),
 );
 
 mkdirSync(resultsDir, { recursive: true });

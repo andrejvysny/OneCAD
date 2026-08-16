@@ -28,7 +28,7 @@ test("L from model mode opens the plane picker with Line armed", async ({ page }
 
   await page.keyboard.press("l");
   // New-sketch intent: plane-pick chrome, then the quad click opens the session.
-  await expect(page.getByText("Select a sketch plane")).toBeVisible();
+  await expect(page.getByText("Select a sketch plane", { exact: true })).toBeVisible();
 
   const box = await page.locator('[data-testid="viewport-canvas"]').boundingBox();
   if (!box) throw new Error("no canvas box");
