@@ -43,6 +43,23 @@ export interface GeometryQueryService {
     elementId: string,
     topoKey?: string,
   ): Promise<ClassifyResult | null>;
+  /**
+   * Which bodies the open document has, id + display name (Render WP1).
+   *
+   * SYNCHRONOUS, unlike `classifyElement`: this is a read of the projection
+   * modeling already holds, not a kernel question. It exists because modeling
+   * owns `documentStore` and another module must never import it — a render
+   * material assigned to a body that no longer exists has to be CLASSIFIED as
+   * dangling (never deleted, H5-B), and that classification needs the live id
+   * set from the module that owns it.
+   */
+  listBodies(): ReadonlyArray<{ id: string; name: string }>;
+  /**
+   * Fires when the body set changes (added, removed, renamed, recoloured).
+   * Returns the unsubscribe. Deliberately payload-free: a consumer re-reads
+   * `listBodies()`, so this can never hand out a stale snapshot.
+   */
+  subscribeBodies(cb: () => void): Unsubscribe;
 }
 
 /**

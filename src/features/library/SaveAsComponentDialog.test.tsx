@@ -24,6 +24,13 @@ import { cancelAttachmentPick } from "@/modules/library/attachmentPicker";
 const saveAsComponent = vi.fn();
 const listVariables = vi.fn();
 const classifyElement = vi.fn();
+/** Modeling's GeometryQuery as this dialog needs it: only `classifyElement` is
+ *  exercised here, the body-list half (Render WP1) is stubbed inert. */
+const geometryQuery = {
+  classifyElement,
+  listBodies: () => [],
+  subscribeBodies: () => () => {},
+};
 const engine = vi.hoisted(() => ({
   probePick: vi.fn(),
   setOrbitSuppressed: vi.fn(),
@@ -132,7 +139,7 @@ describe("SaveAsComponentDialog", () => {
     classifyElement.mockReset();
     engine.probePick.mockReset();
     engine.setOrbitSuppressed.mockReset();
-    configureAuthoringController({ geometryQuery: { classifyElement } });
+    configureAuthoringController({ geometryQuery });
   });
 
   afterEach(() => {
@@ -250,7 +257,7 @@ describe("SaveAsComponentDialog parameters", () => {
       { id: "var_2", name: "width", value: 20 },
     ]);
     classifyElement.mockReset();
-    configureAuthoringController({ geometryQuery: { classifyElement } });
+    configureAuthoringController({ geometryQuery });
   });
 
   afterEach(() => {
@@ -320,7 +327,7 @@ describe("SaveAsComponentDialog attachment picking", () => {
     classifyElement.mockReset();
     engine.probePick.mockReset();
     engine.setOrbitSuppressed.mockReset();
-    configureAuthoringController({ geometryQuery: { classifyElement } });
+    configureAuthoringController({ geometryQuery });
   });
 
   afterEach(() => {
@@ -494,7 +501,7 @@ describe("SaveAsComponentDialog attachment picking", () => {
 describe("SaveAsComponentDialog union-at-bake offer", () => {
   beforeEach(() => {
     saveAsComponent.mockReset();
-    configureAuthoringController({ geometryQuery: { classifyElement } });
+    configureAuthoringController({ geometryQuery });
   });
 
   afterEach(() => {

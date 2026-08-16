@@ -221,7 +221,22 @@ function mockRecoveryFixture(): RecoveryInfo[] {
 }
 
 /** In-memory module slices, keyed by module id (the mock's `document.modules`). */
-const mockModuleState = new Map<string, { schemaVersion: number; payload: unknown }>();
+let mockModuleState = new Map<string, { schemaVersion: number; payload: unknown }>();
+
+/** A detached copy, for the undo snapshots + the `getModuleState` read path. */
+function cloneModuleState(): Map<string, { schemaVersion: number; payload: unknown }> {
+  return new Map([...mockModuleState].map(([id, s]) => [id, structuredClone(s)]));
+}
+
+/**
+ * Module state is PER-DOCUMENT in the real backend (it lives in the container,
+ * `onecad-core/src/io/container.rs`), so every mock lane that swaps documents
+ * starts the incoming one with none — otherwise a "New project" would inherit
+ * the previous document's materials while claiming to be new.
+ */
+function clearMockModuleState(): void {
+  mockModuleState.clear();
+}
 
 /*
  * WP-VE.2 — the mock's document variable table. ORDERED (declaration order is
@@ -610,6 +625,11 @@ interface DocSnap {
    *  cursor move restores the same document the user was looking at (M8). */
   cursor: number;
   masked: Map<string, ArrayBuffer>;
+  /** Module-owned slices (ADR-0004). A module's write goes through the real
+   *  backend's transaction path and is therefore undoable, so the mock lane has
+   *  to carry it too or an addon's persistence would look undoable in the app
+   *  and be un-undoable in every test that proves it. */
+  modules: Map<string, { schemaVersion: number; payload: unknown }>;
 }
 const undoStack: DocSnap[] = [];
 const redoStack: DocSnap[] = [];
@@ -627,6 +647,7 @@ function snap(label: string): DocSnap {
     datums: { ...documentStore.getState().datums },
     cursor: mockAppliedOps,
     masked: new Map(maskedBodies),
+    modules: cloneModuleState(),
   };
 }
 
@@ -650,6 +671,7 @@ function restoreSnap(s: DocSnap): { changed: string[]; removed: string[] } {
   for (const [k, v] of s.bodies) syntheticBodies.set(k, v);
   maskedBodies.clear();
   for (const [k, v] of s.masked) maskedBodies.set(k, v);
+  mockModuleState = new Map([...s.modules].map(([id, m]) => [id, structuredClone(m)]));
   mockAppliedOps = s.cursor;
   documentStore.getState().applyChange({ datums: { ...s.datums } });
   mockRevision += 1;
@@ -2233,6 +2255,7 @@ export function resetMockDocument(): void {
   nextImportSeq = 1;
   undoStack.length = 0;
   redoStack.length = 0;
+  clearMockModuleState();
   mockRecovery = [];
   mockAuthored = [];
   mockTemplates = [];
@@ -2281,6 +2304,7 @@ export const mockClient: CadClient = {
   },
   async newDocument() {
     await wait();
+    clearMockModuleState();
     return snapshot("Untitled");
   },
   async openDocument(path, onRecovery) {
@@ -2299,12 +2323,18 @@ export const mockClient: CadClient = {
       }
     }
     const known = RECENTS.find((p) => p.path === path);
+    clearMockModuleState();
     return snapshot(known?.name ?? basename(path));
   },
   // START-SCREEN lane: a new document FROM a STEP file. The mock has no document
   // model to swap (newDocument/openDocument likewise just hand back a snapshot and
   // leave the seeded projection in place), so this runs the same fabrication the
   // in-editor lane does — the editor then opens with the imported body + its row.
+  //
+  // Deliberately does NOT clear module state, unlike new/open/close: this lane
+  // APPENDS to the seeded projection instead of replacing it, so the bodies a
+  // module's slice refers to are all still here. Dropping their materials while
+  // keeping the bodies would be the inconsistent choice, not the safe one.
   async importStep(path) {
     await wait();
     importStepAndEmit();
@@ -2328,8 +2358,19 @@ export const mockClient: CadClient = {
     state: { schemaVersion: number; payload: unknown } | null,
   ) {
     await wait();
+    // UNDOABLE, exactly as `api::set_module_state` is: it goes through the core
+    // `EditCommand::SetModuleState` transaction, which records an inverse
+    // (`edit/session.rs`). Snapshot BEFORE mutating, and drop the redo stack, so
+    // the ordinary undo/redo pair below restores the prior slice.
+    undoStack.push(snap("Edit materials"));
+    redoStack.length = 0;
     if (state === null) mockModuleState.delete(moduleId);
     else mockModuleState.set(moduleId, structuredClone(state));
+    // The revision bump mirrors the real backend's `after_mutation`. No event is
+    // emitted, also mirroring it: module state is not part of the projection and
+    // no body moved, so there is nothing for a `document-changed` to report. The
+    // UNDO path emits (see `undo`), which is what a module's re-hydrate hangs on.
+    mockRevision += 1;
   },
   async listDocumentModules() {
     await wait();
@@ -2364,7 +2405,7 @@ export const mockClient: CadClient = {
   },
   async closeDocument() {
     await wait();
-    mockModuleState.clear();
+    clearMockModuleState();
     documentStore.getState().applySnapshot(emptyDocument());
   },
   async checkRecovery() {

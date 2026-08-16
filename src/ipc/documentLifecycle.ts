@@ -1,3 +1,4 @@
+import { renderStore } from "@/modules/render/store/renderStore";
 import { documentStore } from "@/stores/documentStore";
 import { extensionsStore } from "@/stores/extensionsStore";
 import { repairStore } from "@/stores/repairStore";
@@ -35,4 +36,11 @@ export function resetDocumentScopedUi(): void {
   // The rename override names ONE document. `applySnapshot` already drops it on
   // a documentId change; this covers the mock lane, which carries no id.
   documentStore.getState().setDisplayTitle(null);
+  // Module-owned document state is per-DOCUMENT (ADR-0004), so a module's live
+  // copy of it is document-scoped UI state like everything above. `onecad.render`
+  // is the first module with any, and its reset is IN-MEMORY ONLY — this runs
+  // BEFORE the swap, and persisting here would clear the OUTGOING document's
+  // materials. The incoming document's slice arrives on the next re-hydrate
+  // (`modules/render/module.ts`).
+  renderStore.getState().reset();
 }

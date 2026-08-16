@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createPlatform, type Platform } from "@/platform";
+import { documentStore } from "@/stores/documentStore";
 import { MODEL_TOOLS_CONTRACT, SKETCH_TOOLS_CONTRACT } from "@/test/contracts/toolbarContract";
 import { MODEL_KEYS_CONTRACT, SKETCH_KEYS_CONTRACT } from "@/test/contracts/keymapContract";
 import { registerModelingModule } from "./register";
@@ -97,6 +98,53 @@ describe("modeling module registration", () => {
     // never-registered id, which is exactly the gap this WP closes.
     const svc = platform.services.require<GeometryQueryService>(ModelingServices.GeometryQuery);
     expect(typeof svc.classifyElement).toBe("function");
+  });
+
+  it("publishes the live body list, so another module never imports documentStore", () => {
+    // Render WP1. `onecad.render` classifies its material assignments against
+    // these ids; modeling owns `documentStore`, and this is the only door.
+    const svc = platform.services.require<GeometryQueryService>(ModelingServices.GeometryQuery);
+    documentStore.getState().applyChange({
+      bodies: {
+        b1: { id: "b1", name: "Body 1", visible: true },
+        b2: { id: "b2", name: "Body 2", visible: false },
+      },
+    });
+
+    expect(svc.listBodies()).toEqual([
+      { id: "b1", name: "Body 1" },
+      { id: "b2", name: "Body 2" },
+    ]);
+  });
+
+  it("ticks subscribeBodies when the body set changes, and not otherwise", () => {
+    const svc = platform.services.require<GeometryQueryService>(ModelingServices.GeometryQuery);
+    let ticks = 0;
+    const stop = svc.subscribeBodies(() => {
+      ticks += 1;
+    });
+
+    try {
+      documentStore
+        .getState()
+        .applyChange({ bodies: { b1: { id: "b1", name: "Body 1", visible: true } } });
+      expect(ticks).toBe(1);
+
+      documentStore.getState().setVisibility("b1", false);
+      expect(ticks).toBe(2);
+
+      // A revision bump alone is not a body change — a consumer that recomputed
+      // a body-keyed classification on every projection tick would do it
+      // hundreds of times per session for nothing.
+      documentStore.getState().applyChange({ revision: 999 });
+      expect(ticks).toBe(2);
+
+      stop();
+      documentStore.getState().applyChange({ bodies: {} });
+      expect(ticks).toBe(2);
+    } finally {
+      stop();
+    }
   });
 
   it("registers a real CommandApi service (Component Library WP-1.3)", () => {

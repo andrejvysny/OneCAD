@@ -14,6 +14,9 @@ import { viewportStore } from "@/stores/viewportStore";
 import { repairStore } from "@/stores/repairStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { renderStore } from "@/modules/render/store/renderStore";
+import { createMaterial } from "@/modules/render/model/material";
+import { createEmptyRenderState } from "@/modules/render/model/state";
 import { setMockRecovery } from "./mockClient";
 import { resetStores } from "@/test/resetStores";
 
@@ -41,6 +44,17 @@ function dirtyDocumentScopedUi(): void {
   // Isolation names bodies of the OUTGOING document (W3) — a carried-over set
   // would hide every body of the incoming one, since no id can match.
   viewportStore.setState({ isolatedBodyIds: ["body1"] });
+  // Module-owned document state is document-scoped too (ADR-0004). Materials of
+  // the outgoing file must not be shown against the incoming one.
+  const material = createMaterial("Steel");
+  renderStore.setState({
+    hydrated: true,
+    state: {
+      ...createEmptyRenderState(),
+      library: { [material.id]: material },
+      assignments: { bodies: { body1: material.id }, faces: {} },
+    },
+  });
 }
 
 function expectDocumentScopedUiClean(): void {
@@ -54,6 +68,8 @@ function expectDocumentScopedUiClean(): void {
   expect(sketchStore.getState().conflictingIds).toEqual([]);
   expect(toolChipStore.getState().kind).toBe("none");
   expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+  expect(renderStore.getState().hydrated).toBe(false);
+  expect(renderStore.getState().state).toEqual(createEmptyRenderState());
 }
 
 describe("resetDocumentScopedUi", () => {

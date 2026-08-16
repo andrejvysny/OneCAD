@@ -228,6 +228,23 @@ function bridgeActiveTool(scope: ModuleScope): void {
 const geometryQueryService: GeometryQueryService = {
   classifyElement: (bodyId, elementId, topoKey) =>
     createClient().classifyElement(bodyId, elementId, topoKey),
+  // Render WP1: modeling owns `documentStore`, so this is the ONLY way another
+  // module learns which bodies exist. A plain projection read — no kernel call.
+  listBodies: () =>
+    Object.values(documentStore.getState().bodies).map((b) => ({ id: b.id, name: b.name })),
+  // Gated on the `bodies` record's identity rather than forwarded raw: the store
+  // ticks on every revision bump, regen counter and title edit, and a consumer
+  // that recomputes a body-keyed classification on each of those would do that
+  // work hundreds of times per session for nothing. `applySnapshot`/`applyChange`
+  // always replace the record, so identity is a sound change signal here.
+  subscribeBodies: (cb) => {
+    let previous = documentStore.getState().bodies;
+    return documentStore.subscribe((s) => {
+      if (s.bodies === previous) return;
+      previous = s.bodies;
+      cb();
+    });
+  },
 };
 
 /**
