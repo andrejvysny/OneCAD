@@ -165,4 +165,31 @@ describe("bakeFaceColors", () => {
     expect(vertexColor(baked, 1)).toEqual(linear(RED));
     expect(vertexColor(baked, 2)).toEqual(linear(RED));
   });
+
+  /*
+   * REGRESSION. The face loop must resolve ids with `TopoIndex.idOf` (ordinal →
+   * id), not `idAt` (TRIANGLE INDEX → id). With `idAt`, the box's six faces
+   * resolved as f:0,f:0,f:1,f:1,f:2,f:2 — half the authored colors bound to the
+   * wrong face and f:3..f:5 were unreachable entirely.
+   *
+   * It hid because the fixture above is one face of ONE triangle, where the two
+   * lookups coincide. Any real body has several triangles per face, so this case
+   * uses the box, and it targets f:5 — the last face, which the buggy mapping
+   * could never reach.
+   */
+  it("keys authored colors by FACE ORDINAL, not by triangle index", () => {
+    const v = parseMeshPayload(makeBoxMesh());
+    const authored = new Map<string, Rgba>([
+      ["f:1", RED],
+      ["f:5", BLUE],
+    ]);
+    const baked = bakeFaceColors(v, undefined, authored);
+
+    // Box faces are two triangles each: face f owns vertices 6f … 6f+5.
+    expect(vertexColor(baked, 6)).toEqual(linear(RED)); // f:1
+    expect(vertexColor(baked, 30)).toEqual(linear(BLUE)); // f:5
+    // …and the faces nobody authored are untouched.
+    expect(vertexColor(baked, 0)).toEqual(neutralTriple()); // f:0
+    expect(vertexColor(baked, 12)).toEqual(neutralTriple()); // f:2
+  });
 });

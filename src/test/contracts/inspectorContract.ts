@@ -18,14 +18,27 @@
  * relative order.
  */
 
+/*
+ * AMENDED 2026-08-16 (Render P1, material assignment UX) — an explicit
+ * user-visible change, to be recorded in `TODO.md`'s Render P1 gate record, not
+ * a refactor going green: `onecad.render` contributes a "Material" section for
+ * a body and for a promoted face (`modules/render/ui/register.ts`, priority 120).
+ * It sits between modeling's Appearance (100) and its History (200) — "what
+ * colour is this?" and "what is this made of?" are the same question asked
+ * twice, so they belong adjacent, and History stays below both. NOTHING already
+ * in these lists moved relative to anything else, and no other selection state
+ * gained a section: an edge, a sketch, a region and a feature wear no material,
+ * exactly as they carry no Appearance block.
+ */
+
 /** Ordered `SectionLabel` texts per inspector state. */
 export const INSPECTOR_SECTIONS_CONTRACT: Readonly<Record<string, readonly string[]>> = {
   /** Model mode, nothing selected — no selection-driven section applies. */
   empty: [],
   /** A solid body. */
-  body: ["Appearance", "History"],
+  body: ["Appearance", "Material", "History"],
   /** A promoted face (body + elementId known). */
-  face: ["Appearance", "History"],
+  face: ["Appearance", "Material", "History"],
   /** An edge — no appearance section, faces only. */
   edge: ["History"],
   /** A sketch, which additionally carries the DOF-driven Constraints block. */

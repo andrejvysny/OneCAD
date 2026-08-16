@@ -78,6 +78,9 @@ awaited construction resolves after disposal).
 | `palette.ts`         | Reads design tokens (tokens.css) via getComputedStyle; cached.  |
 | `lightRig.ts`        | Pure camera-relative key/fill positions (floored key elevation).|
 | `BodyObject.ts`      | Per-body face Mesh + fat edge `LineSegments2`; shared materials.|
+| `pbrParams.ts`       | Viewport-owned PBR param set + the `BodyMaterialSource` seam.   |
+| `openPbrToThree.ts`  | Pure OpenPBR→three mapping + the standard/physical tier rule.   |
+| `bodyMaterialPool.ts`| One shared material per ASSIGNED document material (data-colored).|
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
 | `HighlightLayer.ts`  | Hover/selected highlight: shared-attribute faces, sliced edges. |
 | `DragHandle.ts`      | Extrude depth handle: screen-scaled arrow + fat pick cylinder.  |
@@ -240,6 +243,72 @@ changing the segment count must never move a snap point.
 coordinate form froze the ring where the point was at selection time, so a solve
 that moved the point left the ring behind.
 
+## Per-material PBR (assigned materials)
+
+A body can wear a document **material** as well as the shared token look. Two
+material owners therefore coexist, and which one a body draws with is decided
+per body, never per mode:
+
+| owner                | colors come from | follows the theme | who owns it |
+| -------------------- | ---------------- | ----------------- | ----------- |
+| `BodyMaterialLibrary`| design tokens    | yes               | `MeshIngest` (committed), engine (previews) |
+| `BodyMaterialPool`   | document data    | no                | `MeshIngest` |
+
+Both obey the same shared-material discipline: `pool.acquire(key, …)` returns the
+SAME instance for a key, so N bodies wearing one material cost one program. **The
+key is the caller's and must already encode the resolved parameter hash**, plus a
+`:vc` suffix for the vertex-colored twin — the pool never derives one, because
+that would re-implement a hash the material's owner already computed. Lifetime is
+a **sweep**, not a refcount (`sweep(liveKeys)` after each sync): a refcount would
+need every caller to pair acquire/release across async mesh loads.
+
+**`src/viewport/**` must not import `src/modules/**`.** So the viewport declares
+what it consumes (`PbrMaterialParams` / `BodyMaterialSource`, `pbrParams.ts`) and
+the owning module *registers* an implementation through `materialSourceBridge.ts`
+— a module singleton, like `engineBridge.ts`, because the two lifetimes do not
+nest (a module activates once at bootstrap; `MeshIngest` attaches with the
+engine, twice under StrictMode). `ResolvedMaterial` satisfies `PbrMaterialParams`
+**structurally**; the check lives in `modules/render/viewportBridge.test.ts`,
+which is the only side allowed to see both types.
+
+**Two tiers.** `materialTier` promotes to `MeshPhysicalMaterial` only when a lobe
+a standard material cannot express is actually in play (coat, transmission, fuzz,
+thin film, anisotropy, or non-default specular). Parameters that are *stored but
+not rendered* — subsurface, `base_diffuse_roughness`, the coat's ior/color/
+darkening, `geometry_thin_walled` — never force a promotion, because paying for
+the physical shader to render nothing would be a pure loss. Transmission stays
+LIVE in the modeling view; its scene-render-target cost is only paid once a
+transmissive material is actually assigned.
+
+**THE TWO-TRACK RULE.** A body can carry FUNCTIONAL color (a user-painted body/
+face color, or an imported STEP file's `FACE_COLORS`) *and* a material. In the
+modeling view functional color WINS, per face:
+
+```
+face     = authored face color ?? mesh FACE_COLORS ?? material override ?? fallback
+fallback = body color ?? material base_color ?? the body-fill TOKEN
+```
+
+That ladder has exactly ONE implementation, `bakeFaceColors` — a per-face
+material override extends the existing bake rather than adding a second one. Only
+the last rung moves with the theme, which is what keeps `rebakeFaceColors` a
+theme concern. A body-level material needs no bake at all (its base color is
+uniform, so it lives on the pooled material and the geometry stays indexed and
+zero-copy); a per-face override does, and adding or removing the *first* one is a
+de-index/re-index — a layout change, not an attribute rewrite. `MeshEntry.
+setMaterialColors` returns `false` there and `MeshIngest` goes back through the
+normal load path, because live highlight clones share those BufferAttributes by
+reference.
+
+**Face overrides report their binding.** The persisted override map is
+face-keyed and global, so *which body a face belongs to* is tessellation evidence
+only `MeshIngest` holds. It reports `bound` (override ids the current mesh has a
+face for) and `unbound` (ids it previously bound to that body and no longer can)
+back through the source. That second set is the H5-B failure mode in the
+appearance lane: a regen renumbers the topology and an override stops naming a
+real face. Reporting it beats deleting the assignment or silently binding it to
+whatever now carries that id.
+
 ## Environment & shading
 
 Bodies are lit as a **studio setup**, not by a headlight: `NeutralToneMapping`
@@ -360,6 +429,13 @@ committed bodies', the engine lazily makes its own for previews — and neither
 owner can reach the other. That is why `ViewportRoot` drives the pair instead of
 each subscribing independently; independent subscribers would also race the
 "drop the cache before anything re-reads it" ordering above.
+
+`BodyMaterialPool.refreshColors()` is the **one deliberate no-op** in the
+invariant: its materials are colored from document data, never from a token, so
+there is nothing to re-read. The method exists anyway, because an absent method
+is indistinguishable from a forgotten one. The only token-colored part of a
+pooled body — the fallback baked into a vertex-colored twin's unset faces — is
+reached by `refreshFaceColors()` like any other baked attribute.
 
 Light levels are a theme × backend table (`LIGHT_LEVELS`), not just a backend
 split: the hemisphere light's ground half IS the canvas token, so in dark it

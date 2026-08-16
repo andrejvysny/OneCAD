@@ -38,9 +38,14 @@ import { settingsStore } from "@/stores/settingsStore";
 import type { ViewportEngine } from "../engine/ViewportEngine";
 import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
 import { BodyMaterialLibrary } from "../engine/bodyMaterials";
+import { BodyMaterialPool } from "../engine/bodyMaterialPool";
+import type { BodyMaterialSource, PbrMaterialParams } from "../engine/pbrParams";
+import { getBodyMaterialSource, subscribeBodyMaterialSource } from "../materialSourceBridge";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { parseMeshPayload } from "./parseMeshPayload";
 import type { BodyMeshView } from "./parseMeshPayload";
+import { TopoIndex } from "./faceRangeIndex";
+import type { MaterialFaceColors } from "./faceColors";
 import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, swap } from "./meshRegistry";
 import { rebindSelectionForBody } from "./rebindPick";
 
@@ -75,10 +80,40 @@ function faceColorsEqual(
   return true;
 }
 
+/** Every face id of a mesh, in FACE_RANGES order. Decoded lazily by TopoIndex + memoised there. */
+function faceIdsOf(topo: TopoIndex): string[] {
+  const out: string[] = new Array<string>(topo.count);
+  for (let f = 0; f < topo.count; f++) out[f] = topo.idOf(f);
+  return out;
+}
+
 export class MeshIngest {
   private engine: ViewportEngine | null = null;
   private client: CadClient | null = null;
   private materials: BodyMaterialLibrary | null = null;
+  /**
+   * The pooled (assigned-material) counterpart of {@link materials}: one three
+   * material per distinct document material, shared across every body wearing
+   * it. Parallel to the library rather than folded into it — the library's
+   * materials are TOKEN-colored and follow the theme, these are DATA-colored and
+   * do not.
+   */
+  private materialPool: BodyMaterialPool | null = null;
+  private materialSource: BodyMaterialSource | null = null;
+  private materialSourceUnsub: (() => void) | null = null;
+  /**
+   * Per-body face-override ids this session has attributed to that body, bound
+   * or not.
+   *
+   * The persisted override map is face-keyed and GLOBAL — which body a face
+   * belongs to is tessellation evidence only this controller holds. Without this
+   * memory an override whose face vanished in a regen would simply stop being
+   * mentioned, and the "this override no longer binds" signal (the H5-B failure
+   * mode the whole migration exists to surface) could never be reported at all.
+   */
+  private readonly knownFaceOverrides = new Map<string, Set<string>>();
+  /** bodyId → the pool key its faces currently draw with. The sweep's live set. */
+  private readonly poolKeys = new Map<string, string>();
   private readonly bodyObjects = new Map<string, BodyObjectHandle>();
   private readonly unsubs: Array<() => void> = [];
   private meshRev = 0;
@@ -100,9 +135,19 @@ export class MeshIngest {
     this.engine = engine;
     this.client = client;
     this.materials = new BodyMaterialLibrary();
+    this.materialPool = new BodyMaterialPool();
     this.detached = false;
 
     this.unsubs.push(client.onDocumentChanged((c) => this.onDocumentChanged(c)));
+
+    // Appearance source (`onecad.render`, via the viewport-owned bridge). Read
+    // AND subscribed, because the two lifetimes do not nest: the module
+    // activates once at bootstrap while this controller attaches with the
+    // engine, so either can be first. The guard keeps a source injected
+    // DIRECTLY before attach (tests, embedders) from being silently replaced by
+    // an empty bridge — an explicit set outranks the ambient registry.
+    if (!this.materialSource) this.setMaterialSource(getBodyMaterialSource());
+    this.unsubs.push(subscribeBodyMaterialSource((s) => this.setMaterialSource(s)));
 
     // Visibility flips come through the document store (tree eye toggle) — and
     // EVERY applied projection reconciles scene ↔ store, so a body whose mesh
@@ -285,9 +330,16 @@ export class MeshIngest {
    * A colored (imported) body needs MORE than a material re-read: its unset
    * faces have the body-fill token BAKED into a vertex attribute, so the
    * registry re-bakes those in place. Authored colors are data and stay put.
+   *
+   * The POOL's contribution is a documented no-op — its materials are colored
+   * from document data, never from a token — and the re-bake it does not do is
+   * covered by `refreshFaceColors()` above: that runs each entry's full
+   * effective-color ladder, so an assigned material's colors are rewritten
+   * identically while the token fallback underneath them follows the theme.
    */
   refreshColors(): void {
     this.materials?.refreshColors();
+    this.materialPool?.refreshColors();
     refreshFaceColors();
     this.engine?.invalidate();
   }
@@ -312,6 +364,156 @@ export class MeshIngest {
       }
     }
     this.engine?.invalidate();
+  }
+
+  // ── Assigned materials (PBR) ───────────────────────────────────────────────
+
+  /**
+   * Point this controller at an appearance source, or `null` to go back to the
+   * shared library look for every body. Idempotent; swapping sources unsubscribes
+   * the old one first.
+   */
+  setMaterialSource(source: BodyMaterialSource | null): void {
+    if (this.materialSource === source) return;
+    this.materialSourceUnsub?.();
+    this.materialSourceUnsub = null;
+    this.materialSource = source;
+    if (source) this.materialSourceUnsub = source.subscribe(() => this.syncMaterials());
+    this.syncMaterials();
+  }
+
+  /**
+   * Re-resolve every live body's material, then sweep the pool. One pass over
+   * the scene per source notification — a material edit changes the pool key of
+   * every body wearing it, and there is no index from material back to body on
+   * this side of the seam.
+   */
+  private syncMaterials(): void {
+    if (!this.materialPool) return;
+    for (const [bodyId, handle] of [...this.bodyObjects]) this.syncBodyMaterial(bodyId, handle);
+    this.sweepPool();
+    this.engine?.invalidate();
+  }
+
+  /**
+   * Bring one body's face material in line with the source.
+   *
+   * A layout change (the body's FIRST face override, or its last one leaving)
+   * cannot be done in place — it is a de-index/re-index of geometry that live
+   * highlight clones share by reference — so it goes back through the normal
+   * load path, exactly as a body-color edit does.
+   */
+  private syncBodyMaterial(bodyId: string, handle: BodyObjectHandle): void {
+    const entry = getEntry(bodyId);
+    if (!this.materialPool || !entry) return;
+
+    const resolved = this.resolveBodyMaterial(bodyId, entry.faceIndex);
+    if (!entry.setMaterialColors(resolved?.colors)) {
+      // Deliberately gated on "no fetch already in flight", like reconcile():
+      // the entry that fetch produces is built with the current colors, so
+      // queueing a second rebuild behind it would be pure churn.
+      if (!this.pending.has(bodyId)) void this.loadBody(bodyId, DEFAULT_LOD);
+      return;
+    }
+    this.applyPooledMaterial(bodyId, handle, entry, resolved);
+  }
+
+  /**
+   * Point a body's faces at its pooled material (or back at the library) and
+   * record which key it is holding, so {@link sweepPool} knows what is live.
+   *
+   * `entry.hasVertexColors` is the geometry's own answer and the callers above
+   * have already reconciled it with the colors being baked, so the `:vc` twin
+   * choice can never disagree with what the attribute actually holds.
+   */
+  private applyPooledMaterial(
+    bodyId: string,
+    handle: BodyObjectHandle,
+    entry: { hasVertexColors: boolean },
+    resolved: { key: string; params: PbrMaterialParams } | null,
+  ): void {
+    const pool = this.materialPool;
+    if (!pool || !resolved) {
+      handle.setMaterialOverride(null);
+      this.poolKeys.delete(bodyId);
+      return;
+    }
+    const vertexColored = entry.hasVertexColors;
+    const key = vertexColored ? `${resolved.key}:vc` : resolved.key;
+    handle.setMaterialOverride(pool.acquire(key, resolved.params, vertexColored));
+    this.poolKeys.set(bodyId, key);
+  }
+
+  /** Drop pooled materials nothing on screen is holding any more. */
+  private sweepPool(): void {
+    this.materialPool?.sweep(new Set(this.poolKeys.values()));
+  }
+
+  /**
+   * The body's assigned-material inputs, or `null` when it has none (in which
+   * case every path above falls back to today's library behaviour, unchanged).
+   *
+   * SIDE EFFECT, and the only place it happens: this reports which of the body's
+   * face overrides the current tessellation can bind. `bound` are the ones whose
+   * face id is in this mesh; `unbound` are the rest — ids the source still says
+   * are overridden, which this session has previously attributed to this body,
+   * and which this tessellation no longer has a face for.
+   */
+  private resolveBodyMaterial(
+    bodyId: string,
+    faces: TopoIndex,
+  ): { key: string; params: PbrMaterialParams; colors: MaterialFaceColors } | null {
+    const source = this.materialSource;
+    if (!source) {
+      this.knownFaceOverrides.delete(bodyId);
+      return null;
+    }
+    const key = source.poolKeyForBody(bodyId);
+    const params = key === null ? null : source.paramsForBody(bodyId);
+    if (key === null || params === null) {
+      // A per-face override on a body with no BODY material is not rendered in
+      // V1 — there is no program to hang it off — so nothing is queried here,
+      // and the whole-face-table id decode below is skipped with it.
+      this.clearFaceOverrideReport(bodyId, source);
+      return null;
+    }
+
+    const faceIds = faceIdsOf(faces);
+    const remembered = this.knownFaceOverrides.get(bodyId);
+    const asked =
+      remembered && remembered.size > 0 ? [...new Set([...faceIds, ...remembered])] : faceIds;
+    const overridden = source.faceOverrideBaseColors(bodyId, asked);
+
+    const inMesh = new Set(faceIds);
+    const bound: string[] = [];
+    const unbound: string[] = [];
+    const overrides = new Map<string, readonly [number, number, number]>();
+    for (const [faceId, color] of Object.entries(overridden)) {
+      if (inMesh.has(faceId)) {
+        bound.push(faceId);
+        // Reported as BOUND even where a functional face color will outrank it
+        // in the bake: binding is about the face EXISTING, not about who wins
+        // the modeling view's two-track precedence.
+        overrides.set(faceId, color);
+      } else {
+        unbound.push(faceId);
+      }
+    }
+    source.reportFaceOverrideBindings(bodyId, bound, unbound);
+    if (bound.length > 0 || unbound.length > 0) {
+      this.knownFaceOverrides.set(bodyId, new Set([...bound, ...unbound]));
+    } else {
+      this.knownFaceOverrides.delete(bodyId);
+    }
+
+    return { key, params, colors: { overrides, bodyBase: params.base_color } };
+  }
+
+  /** Retract every binding claim for a body (it lost its material, or left). */
+  private clearFaceOverrideReport(bodyId: string, source: BodyMaterialSource | null): void {
+    if (this.knownFaceOverrides.delete(bodyId)) {
+      source?.reportFaceOverrideBindings(bodyId, [], []);
+    }
   }
 
   private async resolveAuthoredFaceColors(
@@ -369,12 +571,20 @@ export class MeshIngest {
 
       const view = parseMeshPayload(buffer);
       const authoredFaceColors = await this.resolveAuthoredFaceColors(bodyId, view, faceColorsMeta);
+      // Resolved BEFORE the build, not patched on after: whether the geometry is
+      // de-indexed with a color attribute at all depends on the answer, and that
+      // is a construction-time decision (see meshRegistry.setMaterialColors).
+      const material = this.resolveBodyMaterial(
+        bodyId,
+        new TopoIndex(view.faceRanges, view.faceCount, view.faceIdOffsets, view.faceIdChars),
+      );
       const entry = buildBodyObjects(
         view,
         bodyId,
         ++this.meshRev,
         bodyColor,
         authoredFaceColors,
+        material?.colors,
       );
       const prevEntry = getEntry(bodyId); // read BEFORE the swap — the rebind's evidence
       swap(bodyId, entry);
@@ -389,8 +599,11 @@ export class MeshIngest {
       const handle = buildBodyObject(entry, this.materials);
       handle.setVisible(this.effectiveVisible(bodyId));
       handle.applyMode(this.currentModeDef());
+      this.applyPooledMaterial(bodyId, handle, entry, material);
       this.engine.bodiesRoot.add(handle.group);
       this.bodyObjects.set(bodyId, handle);
+      // The mesh this replaced may have been the last holder of its pool key.
+      this.sweepPool();
       this.updateGeometryPending();
 
       this.engine.refreshHighlights();
@@ -416,10 +629,15 @@ export class MeshIngest {
    * cue so the body isn't visually competing with the sketch on top of it. The
    * library owns the save/restore discipline (and applies the dim to material
    * sets it creates later); this only decides WHEN, and repaints.
+   *
+   * The POOL is dimmed in lockstep, or a body with an assigned material would
+   * stay at full strength while every unassigned body faded — the focus cue is
+   * a property of the mode, not of who owns the material.
    */
   private setDimmed(dimmed: boolean): void {
     if (!this.materials) return;
     this.materials.setDimmed(dimmed);
+    this.materialPool?.setDimmed(dimmed);
     this.engine?.invalidate();
   }
 
@@ -431,6 +649,11 @@ export class MeshIngest {
     }
     this.loadSeq.delete(bodyId);
     this.pending.delete(bodyId);
+    // The body is gone, so its override bindings are no longer evidence of
+    // anything — retract them rather than leave a stale claim in the store.
+    this.clearFaceOverrideReport(bodyId, this.materialSource);
+    this.poolKeys.delete(bodyId);
+    this.sweepPool();
     remove(bodyId);
     this.updateGeometryPending();
     this.engine?.refreshHighlights();
@@ -444,6 +667,15 @@ export class MeshIngest {
     viewportStore.getState().setGeometryPending(false);
     this.bodyLoadedListeners.clear();
     for (const u of this.unsubs.splice(0)) u();
+    // Unsubscribed, but the REPORTS are left standing: the source outlives this
+    // controller (the module owns it), and a StrictMode remount re-reports the
+    // same bindings a moment later. Retracting them here would flicker the
+    // override count to zero on every viewport remount.
+    this.materialSourceUnsub?.();
+    this.materialSourceUnsub = null;
+    this.materialSource = null;
+    this.knownFaceOverrides.clear();
+    this.poolKeys.clear();
     // Clear highlights BEFORE disposing geometry so no clone references freed buffers.
     this.engine?.setHighlightState(null, []);
     for (const handle of this.bodyObjects.values()) {
@@ -455,6 +687,8 @@ export class MeshIngest {
     disposeAll(); // registry empty + leak tripwire
     this.materials?.dispose();
     this.materials = null;
+    this.materialPool?.dispose();
+    this.materialPool = null;
     this.engine = null;
     this.client = null;
   }

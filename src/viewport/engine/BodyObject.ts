@@ -56,6 +56,25 @@ export interface BodyObjectHandle {
    * Independent of {@link setVisible}, which owns the GROUP's flag.
    */
   applyMode(def: RenderModeDef): void;
+  /**
+   * Draw the faces with `mat` (a `BodyMaterialPool` material for the body's
+   * assigned document material) instead of the library's shared set, or `null`
+   * to go back to it.
+   *
+   * CONTRACT: this re-applies the CURRENT mode itself, so a caller never has to
+   * follow it with `applyMode`. The alternative — "set the override, then call
+   * applyMode" — makes an easily-forgotten second call load-bearing for whether
+   * anything changes on screen, and the handle already knows which def is live.
+   *
+   * Only modes whose `materialKind` is `standard` honour it. `wireframe` hides
+   * the face mesh anyway, and `assemblyColors` deliberately keeps its per-body
+   * hues: those are a FUNCTIONAL cue (which body is which) that a material
+   * assignment must not be able to erase.
+   *
+   * Edges are never overridden — they stay the library set the mode's
+   * `edgeStyle` names, in both themes, for pooled and unpooled bodies alike.
+   */
+  setMaterialOverride(mat: THREE.MeshStandardMaterial | null): void;
 }
 
 /**
@@ -101,20 +120,32 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
     group.add(edges);
   }
 
+  // The live mode + override, so either can be changed alone and the other is
+  // re-applied from what the handle already knows.
+  let currentDef = defaultDef;
+  let override: THREE.MeshStandardMaterial | null = null;
+
+  const apply = (def: RenderModeDef): void => {
+    currentDef = def;
+    faceMesh.visible = def.faceVisible;
+    const set = setFor(def);
+    faceMesh.material = override && def.materialKind === "standard" ? override : set.face;
+    if (edges) {
+      edges.visible = def.edgeVisible;
+      edges.material = edgeMaterial(set, def);
+    }
+  };
+
   return {
     bodyId: entry.bodyId,
     group,
     setVisible(visible: boolean) {
       group.visible = visible;
     },
-    applyMode(def: RenderModeDef) {
-      faceMesh.visible = def.faceVisible;
-      const set = setFor(def);
-      faceMesh.material = set.face;
-      if (edges) {
-        edges.visible = def.edgeVisible;
-        edges.material = edgeMaterial(set, def);
-      }
+    applyMode: apply,
+    setMaterialOverride(mat: THREE.MeshStandardMaterial | null) {
+      override = mat;
+      apply(currentDef);
     },
   };
 }

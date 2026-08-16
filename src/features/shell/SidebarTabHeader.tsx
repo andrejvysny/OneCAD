@@ -8,9 +8,18 @@
 import { useSidebarTabStore, type SidebarTab } from "@/stores/sidebarTabStore";
 import { cn } from "@/ui/cn";
 
+/*
+ * The strip is a STATIC list, not a registry read, and stays one: it is shared
+ * chrome rendered by each occupant panel at its own top, so a tab that appeared
+ * only while its panel happened to be registered would make the strip's width
+ * jump as modules load. "Materials" is `onecad.render`'s panel
+ * (`modules/render/ui/register.ts`); the panel is still a real, separately
+ * registered contribution — only its NAME is listed here.
+ */
 const TABS: { id: SidebarTab; label: string }[] = [
   { id: "model", label: "Model" },
   { id: "variables", label: "Variables" },
+  { id: "materials", label: "Materials" },
 ];
 
 export function SidebarTabHeader() {

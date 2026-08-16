@@ -1,15 +1,16 @@
 /*
  * What `onecad.render` actually contributes, and the ordering it depends on.
  *
- * The module registers ONE service and no UI (its workspace home is still the
- * shell's `Visualization` placeholder), so the interesting assertions are about
- * the seams: modeling activates first because render reads its GeometryQuery at
+ * The module registers ONE service plus the material-assignment UI (Render P1);
+ * its workspace home is still the shell's `Visualization` placeholder, so it
+ * registers no workspace of its own. The interesting assertions are about the
+ * seams: modeling activates first because render reads its GeometryQuery at
  * activation, the store hydrates from the document-state lane, and a backend
  * document-changed re-hydrates it — which is how an undone material write gets
  * back on screen.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createPlatform, type Platform } from "@/platform";
+import { createPlatform, Slots, type Platform } from "@/platform";
 import {
   emitMockDocumentChanged,
   getMockLatency,
@@ -65,17 +66,63 @@ describe("render module registration", () => {
     expect(platform.services.ownerOf(RenderServices.MaterialQuery)).toBe(RENDER_MODULE_ID);
   });
 
-  it("contributes no UI — its workspace home is still the shell placeholder", () => {
+  it("contributes its UI under its OWN ownership, and no tool/command/workspace", () => {
     const platform = bootPlatform();
     // Owner-scoped: modeling is booted alongside (render depends on it), so a
     // bare `size` would only be asserting that modeling registered nothing.
-    const ownedBy = (registry: { registrations(): readonly { owner: string }[] }) =>
-      registry.registrations().filter((r) => r.owner === RENDER_MODULE_ID);
+    const ownedBy = (registry: { registrations(): readonly { owner: string; entry: { id: string } }[] }) =>
+      registry
+        .registrations()
+        .filter((r) => r.owner === RENDER_MODULE_ID)
+        .map((r) => r.entry.id);
+
+    // The sidebar tab + the dialog overlay, an inspector section per selection
+    // kind, and one tree-menu item. Every id is namespaced to this module — the
+    // registry REFUSES a foreign namespace, so ownership here is not a
+    // convention, it is enforced.
+    expect(ownedBy(platform.panels)).toEqual([
+      "onecad.render.panel.materialLibrary",
+      "onecad.render.panel.dialogHost",
+    ]);
+    expect(ownedBy(platform.inspector)).toEqual([
+      "onecad.render.inspector.material.body",
+      "onecad.render.inspector.material.face",
+    ]);
+    expect(ownedBy(platform.menus)).toEqual(["onecad.render.menu.assignMaterial"]);
+
+    // Assignment is a direct manipulation, not a mode: nothing here belongs on
+    // the toolbar, and the module still registers no workspace of its own.
     expect(ownedBy(platform.commands)).toEqual([]);
     expect(ownedBy(platform.tools)).toEqual([]);
-    expect(ownedBy(platform.panels)).toEqual([]);
     expect(ownedBy(platform.workspaces)).toEqual([]);
-    expect(ownedBy(platform.inspector)).toEqual([]);
+  });
+
+  it("offers “Assign material…” on a body row and nowhere else", () => {
+    const platform = bootPlatform();
+    const item = platform.menus.get("onecad.render.menu.assignMaterial");
+
+    expect(item?.slot).toBe(Slots.TreeContext);
+    expect(item?.title).toBe("Assign material…");
+    // Gated on the same `TreeNode.kind` vocabulary modeling's provider
+    // publishes — a sketch or a datum row must not grow a material action.
+    expect(item?.appliesTo?.({ kind: "body", id: "body1", label: "Body 1" })).toBe(true);
+    expect(item?.appliesTo?.({ kind: "sketch", id: "sketch1" })).toBe(false);
+    expect(item?.appliesTo?.({ kind: "datum", id: "datum1" })).toBe(false);
+  });
+
+  it("opening the assign dialog carries the row it was opened on", async () => {
+    const platform = bootPlatform();
+    const { renderDialogStore } = await import("./ui/dialogStore");
+    renderDialogStore.getState().reset();
+
+    await platform.menus.get("onecad.render.menu.assignMaterial")?.run({
+      kind: "body",
+      id: "body7",
+      label: "Bracket",
+    });
+
+    expect(renderDialogStore.getState().assign).toEqual({ bodyId: "body7", bodyLabel: "Bracket" });
+    renderDialogStore.getState().reset();
   });
 
   it("activates AFTER modeling, whose GeometryQuery it reads at activation", () => {
@@ -96,10 +143,15 @@ describe("render module registration", () => {
     expect(() => platform.initializeSync()).toThrow(/depends on "onecad.modeling"/);
   });
 
-  it("disposing the module unregisters its service", () => {
+  it("disposing the module unregisters its service AND its UI", () => {
     const platform = bootPlatform();
     platform.scopeFor(RENDER_MODULE_ID).dispose();
     expect(platform.services.has(RenderServices.MaterialQuery)).toBe(false);
+    expect(platform.panels.registrations().filter((r) => r.owner === RENDER_MODULE_ID)).toEqual([]);
+    expect(platform.menus.registrations().filter((r) => r.owner === RENDER_MODULE_ID)).toEqual([]);
+    expect(
+      platform.inspector.registrations().filter((r) => r.owner === RENDER_MODULE_ID),
+    ).toEqual([]);
   });
 });
 

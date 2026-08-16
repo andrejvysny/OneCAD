@@ -16,7 +16,13 @@ import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeome
 import { logError } from "@/debug/log";
 import type { BodyMeshView } from "./parseMeshPayload";
 import { TopoIndex } from "./faceRangeIndex";
-import { bakeFaceColors, deIndexTriangles, needsVertexColors } from "./faceColors";
+import {
+  bakeFaceColors,
+  deIndexTriangles,
+  materialFaceColorsEqual,
+  needsVertexColors,
+  type MaterialFaceColors,
+} from "./faceColors";
 import type { Rgba } from "@/ipc/types";
 
 export interface MeshEntry {
@@ -55,6 +61,8 @@ export interface MeshEntry {
   readonly bodyColor?: Rgba;
   /** User-authored face colors this entry was baked with, keyed by the mesh id (ElementId or TopoKey). */
   readonly authoredFaceColors?: ReadonlyMap<string, Rgba>;
+  /** Assigned-material colors this entry is currently baked with (see {@link setMaterialColors}). */
+  readonly materialColors?: MaterialFaceColors;
   /**
    * Theme change: re-bake the color attribute against the CURRENT body-fill
    * token. Only unset faces move — authored colors are data, not a token — so
@@ -62,6 +70,18 @@ export interface MeshEntry {
    * No-op for a body with no colors (and after dispose).
    */
   rebakeFaceColors(): void;
+  /**
+   * Re-bake against a new set of assigned-material colors (a material edit, an
+   * override added/removed, a body reassigned).
+   *
+   * Returns `false` when the change would flip the geometry's LAYOUT — an
+   * override appearing on a body that had no vertex colors at all, or the last
+   * one leaving — because that is a de-index/re-index, not an attribute rewrite.
+   * The caller then rebuilds the entry through the normal load path instead of
+   * this class silently swapping attributes underneath live highlight clones,
+   * which share this geometry's BufferAttributes by reference.
+   */
+  setMaterialColors(next: MaterialFaceColors | undefined): boolean;
   dispose(): void;
 }
 
@@ -82,12 +102,13 @@ export function buildBodyObjects(
   meshRev: number,
   bodyColor?: Rgba,
   authoredFaceColors?: ReadonlyMap<string, Rgba>,
+  materialColors?: MaterialFaceColors,
 ): MeshEntry {
   const geometry = new THREE.BufferGeometry();
   // `drawRange` counts INDICES when the geometry is indexed and VERTICES when it
   // is not — and de-indexing produces exactly `indices.length` vertices, so the
   // same count is right in both arms (and so are HighlightLayer's face ranges).
-  const colorAttr = buildFaceGeometry(geometry, view, bodyColor, authoredFaceColors);
+  const colorAttr = buildFaceGeometry(geometry, view, bodyColor, authoredFaceColors, materialColors);
   geometry.setDrawRange(0, view.indices.length);
   const bmin = view.bboxMin;
   const bmax = view.bboxMax;
@@ -122,6 +143,20 @@ export function buildBodyObjects(
 
   liveGeometryCount += edgeGeometry ? 2 : 1;
   let disposed = false;
+  // Mutable ONLY through setMaterialColors — every other bake input is fixed for
+  // the entry's lifetime (a new mesh means a new entry).
+  let liveMaterialColors = materialColors;
+  const rebake = (): void => {
+    if (!colorAttr || disposed) return;
+    bakeFaceColors(
+      view,
+      bodyColor,
+      authoredFaceColors,
+      colorAttr.array as Float32Array,
+      liveMaterialColors,
+    );
+    colorAttr.needsUpdate = true;
+  };
   return {
     bodyId,
     meshRev,
@@ -135,10 +170,22 @@ export function buildBodyObjects(
     hasVertexColors: colorAttr !== null,
     bodyColor,
     authoredFaceColors,
-    rebakeFaceColors() {
-      if (!colorAttr || disposed) return;
-      bakeFaceColors(view, bodyColor, authoredFaceColors, colorAttr.array as Float32Array);
-      colorAttr.needsUpdate = true;
+    get materialColors() {
+      return liveMaterialColors;
+    },
+    rebakeFaceColors: rebake,
+    setMaterialColors(next) {
+      if (disposed) return true;
+      // The layout question, asked BEFORE anything is written: an entry built
+      // without a color attribute has no place to put a per-face override, and
+      // one built with it cannot give the attribute back.
+      if (needsVertexColors(view, bodyColor, authoredFaceColors, next) !== (colorAttr !== null)) {
+        return false;
+      }
+      if (materialFaceColorsEqual(liveMaterialColors, next)) return true;
+      liveMaterialColors = next;
+      rebake();
+      return true;
     },
     dispose() {
       if (disposed) return;
@@ -160,8 +207,9 @@ function buildFaceGeometry(
   view: BodyMeshView,
   bodyColor?: Rgba,
   authoredFaceColors?: ReadonlyMap<string, Rgba>,
+  materialColors?: MaterialFaceColors,
 ): THREE.BufferAttribute | null {
-  if (!needsVertexColors(view, bodyColor, authoredFaceColors)) {
+  if (!needsVertexColors(view, bodyColor, authoredFaceColors, materialColors)) {
     geometry.setAttribute("position", new THREE.BufferAttribute(view.positions, 3));
     if (view.normals) {
       geometry.setAttribute("normal", new THREE.BufferAttribute(view.normals, 3));
@@ -175,7 +223,10 @@ function buildFaceGeometry(
   const { positions, normals } = deIndexTriangles(view);
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   if (normals) geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
-  const colorAttr = new THREE.BufferAttribute(bakeFaceColors(view, bodyColor, authoredFaceColors), 3);
+  const colorAttr = new THREE.BufferAttribute(
+    bakeFaceColors(view, bodyColor, authoredFaceColors, undefined, materialColors),
+    3,
+  );
   geometry.setAttribute("color", colorAttr);
   return colorAttr;
 }

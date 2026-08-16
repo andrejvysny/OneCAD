@@ -113,6 +113,111 @@ describe("BodyObjectHandle.applyMode", () => {
   });
 });
 
+/*
+ * A body with an assigned document material draws its FACES with a pooled
+ * material instead of the library's shared one. Two rules bound that:
+ * `assemblyColors` keeps its functional per-body hues (a material must not be
+ * able to erase "which body is which"), and EDGES are never overridden — the
+ * outline/wireframe token pair is a theme concern, not a material one.
+ */
+describe("BodyObjectHandle.setMaterialOverride", () => {
+  // Stand-in for a BodyMaterialPool material. Colour is computed, never a hex
+  // literal — the repo greps `src` for those (CLAUDE.md § Styling).
+  const pooled = () => new THREE.MeshStandardMaterial({ color: new THREE.Color(0, 1, 0) });
+
+  it("draws faces with the override in shaded and shadedEdges", () => {
+    const { handle, face, entry, library } = handleFor();
+    const mat = pooled();
+    handle.setMaterialOverride(mat);
+
+    for (const def of [RENDER_MODES.shaded, RENDER_MODES.shadedEdges]) {
+      handle.applyMode(def);
+      expect(face.material).toBe(mat);
+    }
+    entry.dispose();
+    library.dispose();
+    mat.dispose();
+  });
+
+  it("keeps assemblyColors on its own per-body hue, and wireframe hides faces anyway", () => {
+    const { handle, face, edges, entry, library } = handleFor();
+    const mat = pooled();
+    handle.setMaterialOverride(mat);
+
+    handle.applyMode(RENDER_MODES.assemblyColors);
+    expect(face.material).toBe(library.getAssemblyColor("body1").face);
+    expect(face.material).not.toBe(mat);
+
+    handle.applyMode(RENDER_MODES.wireframe);
+    expect(edges.visible).toBe(true);
+    expect(face.visible).toBe(false);
+    entry.dispose();
+    library.dispose();
+    mat.dispose();
+  });
+
+  it("never touches the edges — they stay the library set the edgeStyle names", () => {
+    const { handle, edges, entry, library } = handleFor();
+    const set = library.get(RENDER_MODES.shadedEdges.materialKind);
+    handle.setMaterialOverride(pooled());
+
+    handle.applyMode(RENDER_MODES.shadedEdges);
+    expect(edges.material).toBe(set.edge);
+    handle.applyMode(RENDER_MODES.wireframe);
+    expect(edges.material).toBe(set.edgeWire);
+    entry.dispose();
+    library.dispose();
+  });
+
+  /*
+   * The handle re-applies the CURRENT mode itself, so setting an override is a
+   * complete operation. Requiring a follow-up applyMode would make an
+   * easily-forgotten second call load-bearing for whether anything changes.
+   */
+  it("re-applies the live mode itself — no follow-up applyMode required", () => {
+    const { handle, face, entry, library } = handleFor();
+    handle.applyMode(RENDER_MODES.shaded);
+    const mat = pooled();
+
+    handle.setMaterialOverride(mat);
+    expect(face.material).toBe(mat);
+    expect(face.visible).toBe(true); // the mode it re-applied is still `shaded`
+
+    handle.setMaterialOverride(null);
+    expect(face.material).toBe(library.get(RENDER_MODES.shaded.materialKind).face);
+    entry.dispose();
+    library.dispose();
+    mat.dispose();
+  });
+
+  it("survives a mode change — applyMode re-reads the override rather than clearing it", () => {
+    const { handle, face, entry, library } = handleFor();
+    const mat = pooled();
+    handle.setMaterialOverride(mat);
+
+    handle.applyMode(RENDER_MODES.wireframe);
+    handle.applyMode(RENDER_MODES.shadedEdges);
+
+    expect(face.material).toBe(mat);
+    entry.dispose();
+    library.dispose();
+    mat.dispose();
+  });
+
+  it("overrides a vertex-colored body too (its twin is the pooled :vc material)", () => {
+    const { handle, face, entry, library } = handleFor(coloredBoxMesh());
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true });
+    handle.setMaterialOverride(mat);
+
+    handle.applyMode(RENDER_MODES.shadedEdges);
+    expect(face.material).toBe(mat);
+    expect(face.material).not.toBe(library.get(vertexColorKind("standard")).face);
+    entry.dispose();
+    library.dispose();
+    mat.dispose();
+  });
+});
+
 describe("buildBodyObject", () => {
   it("materials the children at BUILD time — previews never get an applyMode call", () => {
     const { face, edges, entry, library } = handleFor();

@@ -34,6 +34,8 @@ import {
 import { RENDER_MODULE_ID, RenderServices } from "./manifest";
 import { createMaterialQueryService } from "./materialQuery";
 import { renderStore, setRenderBodyLister } from "./store/renderStore";
+import { attachRenderViewportBridge } from "./viewportBridge";
+import { registerRenderUi } from "./ui/register";
 
 /** Registers every render contribution into `scope`. Exported for tests. */
 export function contributeRender(scope: ModuleScope): void {
@@ -67,6 +69,10 @@ export function contributeRender(scope: ModuleScope): void {
   scope.own({ dispose: unsubscribeProjection });
 
   scope.registerService(RenderServices.MaterialQuery, createMaterialQueryService());
+
+  attachRenderViewportBridge(scope);
+
+  registerRenderUi(scope);
 
   // Fire-and-forget: `activate` is synchronous (the React root needs a Platform
   // on its first render, see `Platform.initializeSync`), and nothing registered

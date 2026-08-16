@@ -17,8 +17,11 @@ import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { resetStores } from "@/test/resetStores";
 import { setMockLatency } from "@/ipc/mockClient";
-import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { renderWithPlatform, bootTestPlatform } from "@/test/renderWithPlatform";
 import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
+import { registerRenderUi } from "@/modules/render/ui/register";
+import { RENDER_MODULE_ID } from "@/modules/render/manifest";
+import type { Platform } from "@/platform";
 import type { SketchSession } from "@/ipc/types";
 import {
   INSPECTOR_SECTIONS_CONTRACT,
@@ -27,6 +30,22 @@ import {
 
 /** `SectionLabel` renders a div carrying this tracking class — its only marker. */
 const SECTION_CLASS = "tracking-[0.07em]";
+
+/**
+ * Modeling's sections AND render's, each under its OWN owner.
+ *
+ * The contract freezes the order the user sees, which is now produced by two
+ * modules: a section id is namespaced to its owner, so registering render's
+ * "Material" through a modeling scope would be rejected outright — and a probe
+ * that registered only modeling's half would assert an inspector nobody runs.
+ * The mechanism changed, so the probe did (see `src/test/contracts/README.md`);
+ * the contract's amendment is its own, separately recorded decision.
+ */
+function bootSections(): Platform {
+  const platform = bootTestPlatform(contributeInspectorSections);
+  registerRenderUi(platform.createScope(RENDER_MODULE_ID));
+  return platform;
+}
 
 /**
  * Reads the rendered section labels AFTER letting the async sections settle.
@@ -68,19 +87,19 @@ describe("inspector section order", () => {
   afterEach(() => setMockLatency(120));
 
   it("EMPTY state renders no sections", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() => selectionStore.getState().clear());
     expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.empty]);
   });
 
-  it("a body renders Appearance before History", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+  it("a body renders Appearance, then Material, then History", async () => {
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
     expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.body]);
   });
 
-  it("a promoted face renders Appearance before History", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+  it("a promoted face renders Appearance, then Material, then History", async () => {
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() =>
       selectionStore.getState().set([
         { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0", elementId: "el_top" },
@@ -89,8 +108,8 @@ describe("inspector section order", () => {
     expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.face]);
   });
 
-  it("an edge renders History only — Appearance is faces and bodies", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+  it("an edge renders History only — Appearance and Material are faces and bodies", async () => {
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() =>
       selectionStore
         .getState()
@@ -100,13 +119,13 @@ describe("inspector section order", () => {
   });
 
   it("a sketch renders History before Constraints", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() => selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]));
     expect(await sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketch]);
   });
 
   it("a sketch region renders the same sections as its owning sketch", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() =>
       selectionStore.getState().set([
         {
@@ -121,7 +140,7 @@ describe("inspector section order", () => {
   });
 
   it("sketch mode renders Constraints whether or not the session has any", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
       sketchStore.getState().setSession(emptySession());
@@ -140,7 +159,7 @@ describe("inspector section order", () => {
   });
 
   it("a selected feature leads with History", async () => {
-    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const { container } = renderWithPlatform(<InspectorPanel />, { platform: bootSections() });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "op1" }]));
     // Dependency sections are data-driven and arrive async, so only the frozen
     // prefix is asserted — what matters is that History stays first.

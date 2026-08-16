@@ -12,7 +12,9 @@
  */
 import { createStore, useStore } from "zustand";
 
-export type SidebarTab = "model" | "variables";
+/** `"materials"` is `onecad.render`'s `MaterialLibraryPanel` — a third occupant
+ *  of the same region, registered by that module (`modules/render/ui/register.ts`). */
+export type SidebarTab = "model" | "variables" | "materials";
 
 interface SidebarTabState {
   activeTab: SidebarTab;
