@@ -487,7 +487,10 @@ export async function waitForCameraSettled(page: Page): Promise<void> {
   const hasEngine = (): Promise<boolean> =>
     page.evaluate(() => (window as unknown as { __vpEngine?: unknown }).__vpEngine !== undefined);
   try {
-    await expect.poll(hasEngine, { timeout: 10_000, intervals: [50, 100, 200] }).toBe(true);
+    // 30s, not 10s: measured on CI (webkit, offset-face at test 117/231 of a
+    // loaded run) — the editor was booted with ?vpdebug and the engine still
+    // took longer than 10s to appear. Locally this resolves in milliseconds.
+    await expect.poll(hasEngine, { timeout: 30_000, intervals: [50, 100, 200] }).toBe(true);
   } catch {
     throw new Error(
       "waitForCameraSettled: window.__vpEngine missing — boot with openEditorDebug (?vpdebug), " +
@@ -517,7 +520,7 @@ export async function waitForCameraSettled(page: Page): Promise<void> {
     while (Date.now() - stableSince < STABLE_WINDOW_MS) {
       expect(await isSettled()).toBe(true);
     }
-  }).toPass({ timeout: 10_000, intervals: [50, 100, 200] });
+  }).toPass({ timeout: 30_000, intervals: [50, 100, 200] });
 }
 
 /**
