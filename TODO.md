@@ -37,8 +37,28 @@
 - [x] **W4 — 3MF export — LANDED (2026-08-17), per-face colour IN.** Gate record below.
 - [x] **W5 — result truth for `upsertVariable`/`removeVariable`/`replaceComponent` — LANDED
       (2026-08-17).** § MERGE option **(a)** taken: `variables` rides `DocumentProjection`.
-      Gate record below. Next: **W6 close-out** (CURRENT_STATE rewrite + the two owed manual
-      USER gates).
+      Gate record below.
+- [x] **W6 close-out — DONE except the manual USER gates**, which only the user can run:
+      (1) five autosave steps (§ AUTOSAVE HARDENING) · (2) merged-stack Tauri smoke (§ T0) ·
+      (3) export spot checks — STEP opens coloured+named in another CAD, 3MF opens in a slicer.
+
+### Gate — W6 close-out (2026-08-17)
+
+- [x] `CURRENT_STATE.md` § NOW rewritten to post-program truth; `HANDOFF.md` gained the
+      program-complete entry (session 21).
+- [x] **Full browser sweep, idle machine, retries 0: 463 passed / 1 failed** (50 min, both
+      projects; suite grew 462→464 with W5's variables pair test). The 1 is
+      `acceptance.spec.ts:60` (chromium) — **MC-R9 DATAPOINT 3**: it also failed (webkit) in an
+      earlier loaded sweep, passes 10/10 in isolation and in the 4-spec re-run, and both sweep
+      failures are full-suite-only. Same class as datapoints 1–2 (a long drag-heavy spec under
+      sustained suite load). NOT closed — the ledger rule stands; also cross-recorded under
+      § T4 MC-R9.
+      **Separate defect found while triaging:** the failing sweep test left NO artifacts —
+      `test-results/` held only `.last-run.json`, no `console.log`/`fe-logs.json` — which
+      contradicts `e2e/fixtures.ts`'s documented on-failure capture. Until that gap is fixed, a
+      full-sweep-only failure cannot carry evidence, which is exactly what MC-R9 needs. Owed.
+- [x] An earlier sweep run concurrent with cargo/vitest load (448/4, all 4 green isolated) is
+      recorded as INVALID per the attribution rule — counted as evidence in neither direction.
 
 ### Gate — W5: the last three result-truth exemptions (2026-08-17) — LANDED
 

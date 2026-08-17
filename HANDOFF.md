@@ -1,3 +1,52 @@
+# Handoff — Trust & Deliverable COMPLETE (W0–W6)
+
+Session 21 · 2026-08-17
+
+> The six-wave program finished this session: W3 (XCAF STEP export, AP242DIS), W4 (3MF with
+> per-face colours), W5 (result truth for the last three exempt commands), plus the W2 commit,
+> a W2.1 rebind hardening, a bounded WebKit triage, and four CI-only failure modes closed on
+> artifact evidence. Ten commits, `ff0e92e`..`eba2614`, all pushed. `CURRENT_STATE.md` § NOW has
+> the gate numbers; `TODO.md` §§ TRUST & DELIVERABLE (2026-08-17 gate entries) is the full record.
+
+## What a future reader most needs
+
+- **W3's schema fact:** OCCT 8.0.1's `write.step.schema` enum has NO `AP242IS` — the value is
+  **`AP242DIS`**, and an unknown value is now a loud `OP_FAILED` with the knob guarded/restored
+  (the old raw `SetCVal` leaked process-wide). Face colours cross the wire keyed by TopoKey,
+  resolved Rust-side from persisted ElementIds; unresolved = omitted + counted, never guessed.
+- **W4's architecture fact:** STL/OBJ are worker-side writers; 3MF is the first Rust-side one
+  (pure writer in `onecad-core/src/io/threemf.rs`, MESH1 parsing only in
+  `src-tauri/src/export_threemf.rs`). It reuses W3's `resolve_face_colors` — one resolution path.
+- **W5's mechanism:** result truth is composed in the FE correlation lane (`tauriClient.ts`
+  `applyEditRaw`); variable edits use a new `documentScope` awaiter class (sound because a
+  variable edit dirties the whole timeline) + `noRegenWhen` for the empty-timeline case. Failure
+  rides the existing sticky error status hint. Two Rust defects fixed en route: `noop_report`
+  claimed silence while a broken binding gated the plan at step 0, and the empty-timeline edit
+  would have reported a bogus timeout.
+- **Refuted claim (do not re-fix):** "rebind does not seed the promotion cache so a re-pick after
+  reopen mints a fresh id" — FALSE; the worker answers `AcquireElementIds.existing` for rebound
+  elements. Pinned in `face_color_reopen.rs::a_repick_after_rebind_reuses_the_persisted_id`.
+- **WebKit `sketch-multi-object` failure:** not reproduced in 35 runs; measured discriminator says
+  the failing run drew into an unsettled camera. Permanent diagnostics landed (rectTool refusal
+  report + mutation-queue error surfacing); residual candidates recorded in TODO § NOW gate entry.
+- **CI noise vs signal:** 2026-08-17 saw waves of GitHub `codeload` 429/503 job-setup failures —
+  check the job log's "Set up job" step BEFORE triaging a red as real.
+
+## Owed (user-run manual gates, none delegable)
+
+1. Five autosave steps — `TODO.md` § AUTOSAVE HARDENING.
+2. Merged-stack Tauri smoke — `TODO.md` § T0.
+3. Export spot checks: STEP opens coloured+named in another CAD; 3MF opens in a slicer.
+
+## Next program
+
+Kernel continuation (user decision): WP1 G1-remaining→G4 (`GeometryPrecisionContext`,
+micro/sliver redefinition, TierB enablement), WP2 ToNext adversarial campaign, WP3 OffsetFace
+DirectModeler V1 (`resultPolicyVersion: 3`). Plan file `act-as-senior-software-buzzing-simon.md` +
+`TODO.md` § KERNEL CONTINUATION; re-plan at start — WP0 rows there predate this session.
+
+---
+
 # Handoff — Trust & Deliverable (W0–W2)
 
 Session 20 · 2026-08-16
