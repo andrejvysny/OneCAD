@@ -88,8 +88,8 @@ use crate::dto::{
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDependenciesDto, FeatureDto, FinishSketchDto,
     NeedsRepairItemDto, PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto,
-    SketchSolveStatus, SketchStatus, SketchUpsertDto, GEOMETRY_SOURCE_CACHED, GEOMETRY_SOURCE_LIVE,
-    GEOMETRY_SOURCE_NONE,
+    SketchSolveStatus, SketchStatus, SketchUpsertDto, VariableDto, GEOMETRY_SOURCE_CACHED,
+    GEOMETRY_SOURCE_LIVE, GEOMETRY_SOURCE_NONE,
 };
 use crate::error::ApiError;
 use crate::imports::{ImportWorkspace, PreparedImport};
@@ -1179,6 +1179,18 @@ impl DocumentRuntime {
     /// one completion and the frontend awaiter's `regen-finished{noop}` anti-hang
     /// terminal fires in production (MODEL-HARDEN finding 4). No plan was compiled, so
     /// `source_revision` is the current revision — nothing older to correlate against.
+    ///
+    /// **`failed_steps` is NOT empty here** (W5 result truth). A broken `Scalar`
+    /// binding gates the plan strictly below the offending step
+    /// ([`begin_regen`](Self::begin_regen)), and a gate at step 0 leaves nothing
+    /// legal to execute at all — which is exactly the single-feature document a
+    /// user meets when they delete a variable an extrude is still bound to. That
+    /// noop is a no-op only in the sense that no OP ran: a step really is in
+    /// `StepState::Error`, and reporting silence made the frontend's correlation
+    /// call the edit a success. The steps come from
+    /// [`unresolved_variables`](Self::sync_regen_timeline), which is a pure
+    /// function of (records, variables) and needs no worker round-trip — so a
+    /// document with no broken binding still reports exactly nothing.
     #[must_use]
     pub fn noop_report(&self) -> RegenReport {
         let rev = self.fencing.revision().0;
@@ -1190,7 +1202,15 @@ impl DocumentRuntime {
             changed: Vec::new(),
             removed: Vec::new(),
             needs_repair: Vec::new(),
-            failed_steps: Vec::new(),
+            failed_steps: self
+                .unresolved_variables
+                .values()
+                .map(|u| FailedStep {
+                    record_id: u.record_id.to_string(),
+                    message: u.message.clone(),
+                    diagnostics: Vec::new(),
+                })
+                .collect(),
             diagnostics: Vec::new(),
             affected_bodies: BTreeMap::new(),
         }
@@ -2803,6 +2823,11 @@ impl DocumentRuntime {
             sketches,
             datums,
             features,
+            // Variables: straight off the authoritative document, in declaration
+            // order — the same table `list_variables` serves. It rides here (W5)
+            // so a variable edit returns the SAME projection every other mutating
+            // command does and can be correlated against its regen.
+            variables: doc.variables.iter().map(VariableDto::from).collect(),
             // Timeline cursor + length drive the legacy-draft recovery hint
             // (`appliedOps < totalOps` ⇒ ops sit beyond the rollback bar).
             applied_ops: doc.timeline.cursor(),

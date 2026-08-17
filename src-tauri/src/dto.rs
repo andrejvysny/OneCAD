@@ -266,6 +266,14 @@ pub struct DocumentProjection {
     /// `custom` sketch plane), so this projection is their only route to the UI.
     pub datums: std::collections::BTreeMap<String, DatumDto>,
     pub features: Vec<FeatureDto>,
+    /// The document variable table, in declaration order (W5 result truth).
+    ///
+    /// Rides the projection so `upsert_variable`/`remove_variable` can return the
+    /// SAME shape every other mutating command returns and go through the
+    /// frontend's one regen-correlation lane. Before this they returned a bare
+    /// `Vec<VariableDto>`, which is why they were the last commands exempt from
+    /// the `regenOutcome` doctrine: there was no revision to correlate against.
+    pub variables: Vec<VariableDto>,
     /// Applied op count (timeline cursor): `features[0, appliedOps)` are applied,
     /// `[appliedOps, totalOps)` are drafts beyond the rollback bar. Drives the
     /// legacy-draft recovery hint (`appliedOps < totalOps` ⇒ "N ops not applied").
@@ -299,6 +307,7 @@ impl DocumentProjection {
             sketches: std::collections::BTreeMap::new(),
             datums: std::collections::BTreeMap::new(),
             features: Vec::new(),
+            variables: Vec::new(),
             applied_ops: 0,
             total_ops: 0,
             geometry_source: GEOMETRY_SOURCE_NONE.to_string(),
@@ -490,6 +499,21 @@ pub struct ComponentUpgradeDto {
 pub struct ReplaceComponentReportDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_mate_attachment: Option<String>,
+}
+
+/// What `replace_component` actually returns (`types.ts` `ReplaceComponentResult`).
+///
+/// The report ALONE could not carry result truth: a replace is an edit that
+/// schedules a regen, and the frontend correlates that regen against the
+/// post-apply projection revision — exactly as `apply_edit_command` does. So the
+/// report now rides ALONGSIDE the projection rather than replacing it (W5). The
+/// smallest additive shape: `report` is the pre-existing payload, unchanged and
+/// still the only place a dropped mate is named.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceComponentResultDto {
+    pub projection: DocumentProjection,
+    pub report: ReplaceComponentReportDto,
 }
 
 /// One project template (`list_templates`; `types.ts` `ProjectTemplate`) —
@@ -1800,6 +1824,16 @@ mod tests {
                 diagnostics: Vec::new(),
                 suppressed: false,
             }],
+            // W5 (result truth): `variables` is an ADDITIVE projection field, so
+            // `upsert_variable`/`remove_variable` can return the same
+            // `DocumentProjection` every other mutating command does instead of a
+            // bare table with no revision to correlate a regen against.
+            variables: vec![VariableDto {
+                id: "v1".into(),
+                name: "height".into(),
+                value: 25.0,
+                expr: None,
+            }],
             applied_ops: 1,
             total_ops: 1,
             geometry_source: GEOMETRY_SOURCE_LIVE.to_string(),
@@ -1814,6 +1848,11 @@ mod tests {
         assert_eq!(v["appliedOps"], 1);
         assert_eq!(v["totalOps"], 1);
         assert_eq!(v["geometrySource"], "live");
+        // The variable table rides the projection (W5) — declaration order, the
+        // same camelCase `VariableDto` `list_variables` already served.
+        assert_eq!(v["variables"][0]["name"], "height");
+        assert_eq!(v["variables"][0]["value"], 25.0);
+        assert!(v["variables"][0].get("expr").is_none());
         // Datums project camelCase, keyed by id, carrying the resolved basis
         // VERBATIM (the non-standard XY basis — see sketch/plane.rs).
         assert_eq!(v["datums"]["d1"]["kind"], "OffsetFromPlane");

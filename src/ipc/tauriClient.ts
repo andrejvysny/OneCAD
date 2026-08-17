@@ -51,6 +51,8 @@ import type {
   PlaceComponentMate,
   ProjectTemplate,
   ReplaceComponentReport,
+  ReplaceComponentResult,
+  VariableEditResult,
   CurveParams,
   DocumentChange,
   DocumentModule,
@@ -472,6 +474,14 @@ export function createTauriClient(): CadClient {
   //    to `affectedBodies[recordId]` (finding 1 + 2). Exactly-once: a recordId-awaiter
   //    settles only in resolveRegenFinished; document-changed only buffers it.
   //
+  //  • documentScope (W5 — the variable commands): the edit names no single record
+  //    because it dirties the WHOLE timeline (`variable_outcome` ⇒ `DirtyRange(0,
+  //    len)`), so every step really is rebuilt by it and ANY failed step is this
+  //    edit's own failure — there is nothing to misattribute. Same mechanics as the
+  //    recordId class (buffer the change, settle on the covering regen-finished),
+  //    only the failure predicate widens from "my record" to "any step". Scoping is
+  //    likewise skipped: the change stays the full list.
+  //
   // Under rapid commits a stale earlier report can never resolve a LATER commit: its
   // `sourceRevision` is below that commit's R (or it is superseded and ignored).
   interface Resolved {
@@ -484,9 +494,29 @@ export function createTauriClient(): CadClient {
   interface Awaiter {
     targetRev: number | null; // R; null until the command returns its projection
     recordId?: string; // set for a fresh AddOperation commit (finding 1/2 scoping)
+    documentScope?: boolean; // W5: any failed step is this edit's failure
     pendingChange: DocumentChange | null; // buffered covering change (recordId path)
     resolve(r: Resolved | null): void;
     timer: ReturnType<typeof setTimeout>;
+  }
+  /** True for the two classes that settle on regen-finished, not on the change. */
+  const settlesOnFinish = (a: Awaiter): boolean =>
+    a.recordId !== undefined || a.documentScope === true;
+  /** Which correlation class an edit opts into. Empty ⇒ the first-covering-signal
+   *  default (undo/redo and the raw commands that name no record). */
+  interface ApplyEditScope extends Pick<Awaiter, "recordId" | "documentScope"> {
+    /**
+     * "This command fired NO regen" — read off its own returned projection, after
+     * the fact, for a command whose `RegenHint` is CONDITIONAL.
+     *
+     * `METADATA_ONLY_CMDS` handles the static case; this handles the dynamic one.
+     * A variable edit is `RegenHint::ToEnd` over a real timeline but
+     * `metadata_only` when the timeline is EMPTY (`variable_outcome`), so nothing
+     * is enqueued and no `regen-finished` will ever arrive — the awaiter would sit
+     * out the full safety timeout and then report a `timeout` FAILURE for the most
+     * ordinary act there is: adding the first variable to a fresh document.
+     */
+    noRegenWhen?: (projection: DocumentProjectionDto) => boolean;
   }
   const awaiters = new Set<Awaiter>();
   // The newest published change — buffered so a covering publish landing in the
@@ -522,7 +552,7 @@ export function createTauriClient(): CadClient {
   function resolvePublished(change: DocumentChange): void {
     for (const a of [...awaiters]) {
       if (a.targetRev === null || change.revision < a.targetRev) continue;
-      if (a.recordId !== undefined) {
+      if (settlesOnFinish(a)) {
         a.pendingChange = change; // authoritative outcome comes with regen-finished
       } else {
         settle(a, { change, revision: change.revision, terminal: "published" });
@@ -532,15 +562,22 @@ export function createTauriClient(): CadClient {
 
   /** A regen-finished terminal. superseded/cancelled are ignored for every awaiter
    *  (a newer regen covers R). For a NON-recordId awaiter, published is ignored too
-   *  (its document-changed sibling carries the bodies). A recordId awaiter settles
-   *  here on ANY covering completion: failedSteps ⇒ failure, else scoped success. */
+   *  (its document-changed sibling carries the bodies). A recordId — or W5
+   *  documentScope — awaiter settles here on ANY covering completion: failedSteps ⇒
+   *  failure, else scoped success. */
   function resolveRegenFinished(rf: RegenFinished): void {
     if (rf.outcome === "superseded" || rf.outcome === "cancelled") return;
     const source = rf.sourceRevision ?? rf.revision;
     for (const a of [...awaiters]) {
       if (a.targetRev === null || source < a.targetRev) continue;
-      if (a.recordId !== undefined) {
-        const failed = rf.failedSteps?.find((s) => s.recordId === a.recordId);
+      if (settlesOnFinish(a)) {
+        // Which failure counts: THIS record's step for a recordId awaiter, ANY step
+        // for a documentScope one (its edit dirtied every step, so every step's
+        // failure is its own).
+        const failed =
+          a.recordId !== undefined
+            ? rf.failedSteps?.find((s) => s.recordId === a.recordId)
+            : rf.failedSteps?.[0];
         if (failed || rf.outcome === "failed") {
           // This op's step errored (even if the regen published other bodies), or the
           // whole regen failed ⇒ FAILURE: empty bodies + the reason.
@@ -556,10 +593,17 @@ export function createTauriClient(): CadClient {
           // A record left in NeedsRepair published no geometry of its own, but it
           // did not fail either: it settles as `needsRepair` so the consumer shows
           // the repair affordance instead of a success hint. Never an error.
+          // A documentScope awaiter names no record, so there is nothing to scope
+          // to and nothing to look up in `repairSteps` — it takes the full change.
           const change = a.pendingChange ?? lastPublishedChange;
-          const needsRepair = rf.repairSteps?.includes(a.recordId) ?? false;
+          const record = a.recordId;
+          const needsRepair =
+            record !== undefined && (rf.repairSteps?.includes(record) ?? false);
           settle(a, {
-            change: scopeChange(change, rf.affectedBodies?.[a.recordId], rf.revision),
+            change:
+              record === undefined
+                ? change
+                : scopeChange(change, rf.affectedBodies?.[record], rf.revision),
             revision: rf.revision,
             terminal: needsRepair
               ? "needsRepair"
@@ -684,8 +728,9 @@ export function createTauriClient(): CadClient {
   /** Await the correlated regen completion for a commit. Register BEFORE invoking
    *  (so no event is missed), then `setTarget(R)` once the projection revision is
    *  known. `recordId` (a fresh AddOperation) opts into the failedSteps / affectedBodies
-   *  scoping path. Resolves to null on the safety timeout. */
-  function awaitNextChange(recordId?: string): {
+   *  scoping path; `documentScope` (W5) opts into the any-failed-step one. Resolves to
+   *  null on the safety timeout. */
+  function awaitNextChange(opts: ApplyEditScope = {}): {
     promise: Promise<Resolved | null>;
     setTarget(rev: number): void;
     cancel(): void;
@@ -696,7 +741,14 @@ export function createTauriClient(): CadClient {
         awaiters.delete(awaiter);
         resolve(null);
       }, regenTimeoutMs);
-      awaiter = { targetRev: null, recordId, pendingChange: null, resolve, timer };
+      awaiter = {
+        targetRev: null,
+        recordId: opts.recordId,
+        documentScope: opts.documentScope,
+        pendingChange: null,
+        resolve,
+        timer,
+      };
       awaiters.add(awaiter);
     });
     return {
@@ -706,8 +758,8 @@ export function createTauriClient(): CadClient {
         // Missed-event race: a covering publish may already have arrived between the
         // command returning and this call — reconcile against the buffer.
         if (lastPublishedChange && lastPublishedChange.revision >= rev) {
-          if (awaiter.recordId !== undefined) {
-            // recordId path settles on the regen-finished sibling — buffer only.
+          if (settlesOnFinish(awaiter)) {
+            // recordId / documentScope settle on the regen-finished sibling — buffer only.
             awaiter.pendingChange = lastPublishedChange;
           } else {
             settle(awaiter, {
@@ -766,25 +818,60 @@ export function createTauriClient(): CadClient {
   // command can possibly be invoked on this client.
   void ensureEvents();
 
-  /** Run an edit command and correlate its regen into an ApplyOperationResult.
-   *  `recordId` (a fresh AddOperation's minted id) opts the awaiter into the
-   *  failedSteps / affectedBodies scoping path (findings 1/2). */
-  async function applyEdit(
+  /**
+   * Run an edit command and correlate its regen into an ApplyOperationResult.
+   *
+   * `recordId` (a fresh AddOperation's minted id, or an existing record a re-edit
+   * targets) opts the awaiter into the failedSteps / affectedBodies scoping path
+   * (findings 1/2); `documentScope` (W5) opts into the any-failed-step path used
+   * by edits that dirty the whole timeline.
+   *
+   * `unwrap` exists for the ONE command whose payload is not a bare projection
+   * (`replace_component` returns `{ projection, report }`): the correlation is
+   * identical, only the envelope differs, so it is a parameter rather than a
+   * second copy of this function. `applyEdit` below is the identity case.
+   */
+  async function applyEditRaw<T>(
     cmd: string,
     args: Record<string, unknown>,
     opLabel: string | undefined,
-    recordId?: string,
-  ): Promise<ApplyOperationResult> {
+    scope: ApplyEditScope,
+    unwrap: (raw: T) => DocumentProjectionDto,
+  ): Promise<{ raw: T; result: ApplyOperationResult }> {
+    const { recordId } = scope;
     await ensureEvents();
     trace("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} label=${opLabel ?? "?"}`);
-    const awaiter = awaitNextChange(recordId);
+    const awaiter = awaitNextChange(scope);
+    let raw: T;
     let projection: DocumentProjectionDto;
     try {
-      projection = await call<DocumentProjectionDto>(cmd, args);
+      raw = await call<T>(cmd, args);
+      projection = unwrap(raw);
     } catch (e) {
       awaiter.cancel();
       traceWarn("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} invoke THREW`, e);
       throw e;
+    }
+    // Conditionally regen-less (see `ApplyEditScope.noRegenWhen`): the command
+    // succeeded and enqueued nothing, so the pre-regen projection IS the whole
+    // answer. `noop`, never `timeout` — nothing failed, there was simply nothing
+    // to rebuild.
+    if (scope.noRegenWhen?.(projection) === true) {
+      awaiter.cancel();
+      trace("ipc", `applyEdit: cmd=${cmd} fired no regen — settling noop off the projection`);
+      return {
+        raw,
+        result: {
+          revision: projection.revision,
+          changedBodies: [],
+          removedBodies: [],
+          features: projection.features,
+          opLabel,
+          appliedOps: projection.appliedOps,
+          totalOps: projection.totalOps,
+          terminal: "noop",
+        },
+      };
     }
     // Finding 4 / H7a: a fresh op joins the timeline AT the rollback cursor
     // (`atCursor: true`, unconditional — see `operationToEditCommand`), so under
@@ -812,15 +899,18 @@ export function createTauriClient(): CadClient {
             `(index=${idx}, appliedOps=${appliedOps}) — no regen fires`,
         );
         return {
-          revision: projection.revision,
-          changedBodies: [],
-          removedBodies: [],
-          features: projection.features,
-          opLabel,
-          appliedOps: projection.appliedOps,
-          totalOps: projection.totalOps,
-          errorMessage: "Operation added while history is rolled back — roll forward to apply",
-          terminal: "noop",
+          raw,
+          result: {
+            revision: projection.revision,
+            changedBodies: [],
+            removedBodies: [],
+            features: projection.features,
+            opLabel,
+            appliedOps: projection.appliedOps,
+            totalOps: projection.totalOps,
+            errorMessage: "Operation added while history is rolled back — roll forward to apply",
+            terminal: "noop",
+          },
         };
       }
       // A commit that landed INSIDE the applied prefix but with drafts still
@@ -877,7 +967,58 @@ export function createTauriClient(): CadClient {
     };
     if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
     if (resolved?.diagnostics) result.diagnostics = resolved.diagnostics;
+    return { raw, result };
+  }
+
+  /** The identity case of {@link applyEditRaw} — the command's payload IS the
+   *  projection, which is every edit command but `replace_component`. */
+  async function applyEdit(
+    cmd: string,
+    args: Record<string, unknown>,
+    opLabel: string | undefined,
+    scope: ApplyEditScope = {},
+  ): Promise<ApplyOperationResult> {
+    const { result } = await applyEditRaw<DocumentProjectionDto>(
+      cmd,
+      args,
+      opLabel,
+      scope,
+      (p) => p,
+    );
     return result;
+  }
+
+  /**
+   * The two variable WRITES (W5 result truth) — `upsert_variable` /
+   * `remove_variable`, which were the last kernel-touching commands exempt from
+   * the `regenOutcome` doctrine.
+   *
+   * Ordinary `applyEdit`, plus the one thing that makes the result honest: the
+   * saved table is lifted off the projection the command returned, so a
+   * `terminal: "failed"` carries the variable the document REALLY holds. The
+   * write is never rolled back and never rethrown — the variable was saved; only
+   * the rebuild that followed failed, and the caller reports both.
+   */
+  async function variableEdit(
+    cmd: string,
+    args: Record<string, unknown>,
+    opLabel: string,
+  ): Promise<VariableEditResult> {
+    const { raw, result } = await applyEditRaw<DocumentProjectionDto>(
+      cmd,
+      args,
+      opLabel,
+      {
+        documentScope: true,
+        // `variable_outcome` is `metadata_only` on an EMPTY timeline and
+        // `dirty_to_end` otherwise, so `totalOps === 0` is the exact mirror of
+        // "no regen was enqueued" — the same fact the backend decided on, read
+        // off the projection it returned rather than guessed at.
+        noRegenWhen: (p) => p.totalOps === 0,
+      },
+      (p) => p,
+    );
+    return { ...result, variables: raw.variables ?? [] };
   }
 
   /**
@@ -938,7 +1079,7 @@ export function createTauriClient(): CadClient {
         : command.cmd === "updateOperationParams"
           ? command.record
           : undefined;
-    return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op), recordId);
+    return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op), { recordId });
   }
 
   // ── Sketch solver lane state (frontend id ↔ backend UUID via sketchWireMap) ──
@@ -1500,7 +1641,7 @@ export function createTauriClient(): CadClient {
     // `setRollback` (their effect is on DOWNSTREAM steps, so scoping the change to
     // the named record's own bodies would drop exactly the bodies that moved).
     const recordId = command.cmd === "updateOperationParams" ? command.record : undefined;
-    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command), recordId);
+    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command), { recordId });
   }
 
   /** H2 escape hatch: forget the worker's poison keys (returns how many). */
@@ -1718,18 +1859,32 @@ export function createTauriClient(): CadClient {
     });
   }
 
+  /**
+   * A replace is an `UpdateOperationParams` on an EXISTING record that re-bakes
+   * the component's geometry, so it correlates on that `recordId` exactly like
+   * `setComponentParams` — the bare `call` it used meant a swap whose re-bake
+   * failed reported the same silent success as one that seated (W5 result truth).
+   *
+   * Its payload is the one edit envelope that is NOT a bare projection
+   * (`{ projection, report }`), which is what `applyEditRaw`'s `unwrap` is for.
+   */
   async function replaceComponent(
     recordId: string,
     componentId: string,
     componentVersion: string,
     params?: Record<string, ComponentParamValue>,
-  ): Promise<ReplaceComponentReport> {
-    return call<ReplaceComponentReport>(CMD.replaceComponent, {
-      recordId,
-      componentId,
-      componentVersion,
-      params,
-    });
+  ): Promise<ReplaceComponentResult> {
+    const { raw, result } = await applyEditRaw<{
+      projection: DocumentProjectionDto;
+      report: ReplaceComponentReport;
+    }>(
+      CMD.replaceComponent,
+      { recordId, componentId, componentVersion, params },
+      "ReplaceComponent",
+      { recordId },
+      (r) => r.projection,
+    );
+    return { ...result, report: raw.report ?? {} };
   }
 
   async function componentUpgradeAvailable(recordId: string): Promise<ComponentUpgrade | null> {
@@ -1742,16 +1897,13 @@ export function createTauriClient(): CadClient {
     recordId: string,
     params: Record<string, ComponentParamValue>,
   ): Promise<ApplyOperationResult> {
-    return applyEdit(
-      CMD.setComponentParams,
-      { recordId, params },
-      "SetComponentParams",
+    return applyEdit(CMD.setComponentParams, { recordId, params }, "SetComponentParams", {
       recordId,
-    );
+    });
   }
 
   async function detachComponent(recordId: string): Promise<ApplyOperationResult> {
-    return applyEdit(CMD.detachComponent, { recordId }, "DetachComponent", recordId);
+    return applyEdit(CMD.detachComponent, { recordId }, "DetachComponent", { recordId });
   }
 
   /**
@@ -1886,20 +2038,24 @@ export function createTauriClient(): CadClient {
     listDocumentModules(): Promise<DocumentModule[]> {
       return call<DocumentModule[]>(CMD.listDocumentModules);
     },
-    // WP-VE.2. All three return the table AFTER the edit, so the section never
-    // has to guess at the result of its own write; the backend owns validation
-    // (name grammar, duplicates, unknown-remove) and the client adds none of its
-    // own — a second, drifting copy of the rule is how a UI starts accepting
-    // names the document refuses.
+    // WP-VE.2. All three answer with the table AFTER the edit, so the section
+    // never has to guess at the result of its own write; the backend owns
+    // validation (name grammar, duplicates, unknown-remove) and the client adds
+    // none of its own — a second, drifting copy of the rule is how a UI starts
+    // accepting names the document refuses.
+    //
+    // W5: the two WRITES go through `applyEdit`, not a bare `call`. They return a
+    // `DocumentProjection` and schedule a regen, so they are edits by every
+    // definition the rest of the app uses, and the table now rides that
+    // projection. `documentScope` because a variable edit dirties `[0, len)` —
+    // it names no single record, and every step it rebuilt is its own to report.
     listVariables(): Promise<DocumentVariable[]> {
       return call<DocumentVariable[]>(CMD.listVariables);
     },
-    upsertVariable(name: string, value: number): Promise<DocumentVariable[]> {
-      return call<DocumentVariable[]>(CMD.upsertVariable, { name, value });
-    },
-    removeVariable(name: string): Promise<DocumentVariable[]> {
-      return call<DocumentVariable[]>(CMD.removeVariable, { name });
-    },
+    upsertVariable: (name: string, value: number) =>
+      variableEdit(CMD.upsertVariable, { name, value }, "SetVariable"),
+    removeVariable: (name: string) =>
+      variableEdit(CMD.removeVariable, { name }, "RemoveVariable"),
     async closeDocument(): Promise<void> {
       await call<void>(CMD.closeDocument);
       resetCorrelation();

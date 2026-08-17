@@ -3766,3 +3766,113 @@ async fn opening_a_legacy_document_does_not_backfill_intent() {
         "…and so is its golden prefix hash"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W5 — result truth for the variable commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An extrude whose `distance` is BOUND to a variable name (WP-VE.2 `=name`).
+fn bound_extrude(seed: u128, cached: f64, expr: &str) -> EditCommand {
+    let mut record = extrude_record(seed, cached);
+    if let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op {
+        p.distance = Scalar::with_expr(cached, expr);
+    }
+    EditCommand::AddOperation {
+        record,
+        at_cursor: true,
+    }
+}
+
+fn upsert(rt: &DocumentRuntime, name: &str, value: f64) -> EditCommand {
+    match rt.variables().iter().find(|v| v.name == name) {
+        Some(v) => EditCommand::SetVariable {
+            variable: v.id,
+            value: Scalar::new(value),
+        },
+        None => EditCommand::AddVariable {
+            variable: onecad_core::document::variables::Variable {
+                id: onecad_core::ids::VariableId::new(),
+                name: name.to_string(),
+                value: Scalar::new(value),
+                unit: Default::default(),
+            },
+        },
+    }
+}
+
+/// The projection carries the variable table (W5): it is what makes
+/// `upsert_variable`/`remove_variable` able to return the same `DocumentProjection`
+/// every other mutating command returns instead of a bare, uncorrelatable table.
+#[test]
+fn projection_carries_the_variable_table_in_declaration_order() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    assert!(
+        rt.projection().variables.is_empty(),
+        "a blank document projects no variables"
+    );
+
+    let width = upsert(&rt, "width", 10.0);
+    rt.apply(width).unwrap();
+    let height = upsert(&rt, "height", 20.0);
+    rt.apply(height).unwrap();
+    // A re-value must not reorder the table (the id + declaration slot survive).
+    let revalue = upsert(&rt, "width", 25.0);
+    rt.apply(revalue).unwrap();
+
+    let proj = rt.projection();
+    assert_eq!(
+        proj.variables
+            .iter()
+            .map(|v| (v.name.clone(), v.value))
+            .collect::<Vec<_>>(),
+        vec![("width".to_string(), 25.0), ("height".to_string(), 20.0)],
+    );
+    assert_eq!(
+        proj.variables[0].id,
+        rt.variables()[0].id.to_string(),
+        "the projected id is the document's own VariableId"
+    );
+    assert!(proj.variables[0].expr.is_none());
+}
+
+/// Removing a variable a record is still bound to leaves the removal STANDING and
+/// reports the broken step (W5 "saved + loud failure").
+///
+/// The gate lands on step 0 here — the single-feature document a user actually
+/// meets — so `begin_regen` compiles nothing at all and the completion is a NoOp.
+/// Before W5 that NoOp carried an empty `failed_steps`, so the frontend read the
+/// edit as a silent success; the reason is a pure function of (records, variables)
+/// and needs no worker round-trip to be true.
+#[tokio::test]
+async fn removing_a_bound_variable_stands_and_the_noop_report_names_the_broken_step() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(upsert(&rt, "height", 25.0)).unwrap();
+    rt.apply(bound_extrude(0x11, 25.0, "height")).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(rt.noop_report().failed_steps.is_empty(), "healthy baseline");
+
+    let height = rt.variables()[0].id;
+    rt.apply(EditCommand::RemoveVariable { variable: height })
+        .unwrap();
+
+    // The variable really is gone — nothing put it back.
+    assert!(rt.projection().variables.is_empty());
+    // …and the regen the removal scheduled compiles nothing (gate at step 0), yet
+    // still names the record whose binding broke, with the resolver's own reason.
+    assert!(
+        rt.begin_regen(RegenRequest::ToEnd { from: 0 }).is_none(),
+        "a gate at step 0 leaves nothing legal to execute"
+    );
+    let report = rt.noop_report();
+    assert_eq!(report.failed_steps.len(), 1, "{:?}", report.failed_steps);
+    assert_eq!(
+        report.failed_steps[0].record_id,
+        RecordId(Uuid::from_u128(0x11)).to_string()
+    );
+    assert!(
+        report.failed_steps[0].message.contains("height"),
+        "the reason names the missing variable: {}",
+        report.failed_steps[0].message
+    );
+}

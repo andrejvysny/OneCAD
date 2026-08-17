@@ -27,8 +27,8 @@ describe("mock document variables", () => {
     await mockClient.upsertVariable("width", 10);
     await mockClient.upsertVariable("height", 20);
     const after = await mockClient.upsertVariable("width", 15);
-    expect(after.map((v) => v.name)).toEqual(["width", "height"]);
-    expect(after[0].value).toBe(15);
+    expect(after.variables.map((v) => v.name)).toEqual(["width", "height"]);
+    expect(after.variables[0].value).toBe(15);
   });
 
   it("refuses a name no expression could ever resolve", async () => {
@@ -43,7 +43,7 @@ describe("mock document variables", () => {
       await expect(mockClient.upsertVariable(good, 1)).resolves.toBeDefined();
     }
     const table = await mockClient.upsertVariable("  padded  ", 2);
-    expect(table.map((v) => v.name)).toContain("padded");
+    expect(table.variables.map((v) => v.name)).toContain("padded");
   });
 
   it("refuses a non-finite value", async () => {
@@ -56,7 +56,7 @@ describe("mock document variables", () => {
     await mockClient.upsertVariable("w", 1);
     // Case-sensitive, matching `VariableTable::get`.
     await expect(mockClient.removeVariable("W")).rejects.toThrow(/unknown variable/);
-    expect(await mockClient.removeVariable("w")).toEqual([]);
+    expect((await mockClient.removeVariable("w")).variables).toEqual([]);
   });
 
   it("emits document-changed so a listening panel refreshes", async () => {
@@ -104,5 +104,87 @@ describe("mock lane — a bound scalar survives the params round trip", () => {
       bind() as unknown as Parameters<typeof mockClient.applyEditCommand>[0],
     );
     expect(cleared.features.find((f) => f.id === "f2")?.primaryExpr).toBeUndefined();
+  });
+});
+
+/*
+ * W5 — result truth for the variable commands.
+ *
+ * "Saved + loud failure": a variable edit whose downstream regen fails reports the
+ * SAVE as real and the FAILURE as real, in one result. It never reverts the write
+ * and never turns a failed rebuild into a rejection — the variable really was
+ * saved, and a rejection would say it was not.
+ */
+describe("mock lane — a variable edit reports BOTH truths (W5)", () => {
+  beforeEach(() => {
+    resetMockDocument();
+    setMockLatency(0);
+  });
+
+  /** Bind the seeded f2 extrude's distance to `=name` (the `=name` gesture's wire form). */
+  async function bindF2To(expr: string, cached = 30) {
+    const command = {
+      cmd: "updateOperationParams" as const,
+      record: "f2",
+      op: {
+        opType: "Extrude",
+        params: {
+          profile: { sketchId: "sketch1", regionId: "r0" },
+          draftAngleDeg: { value: 0 },
+          distance: { value: cached, expr },
+        },
+      },
+    };
+    await mockClient.applyEditCommand(
+      command as unknown as Parameters<typeof mockClient.applyEditCommand>[0],
+    );
+  }
+
+  it("reports a healthy edit as a success terminal, with the saved table", async () => {
+    await mockClient.upsertVariable("height", 25);
+    await bindF2To("height");
+    const res = await mockClient.upsertVariable("height", 40);
+    expect(res.terminal).toBe("noop"); // nothing rebuilt on this lane — not a failure
+    expect(res.errorMessage).toBeUndefined();
+    expect(res.variables).toEqual([{ id: expect.any(String), name: "height", value: 40 }]);
+  });
+
+  it("a value that drives a bound extrude below the kernel floor FAILS — and the variable is still saved", async () => {
+    await mockClient.upsertVariable("height", 25);
+    await bindF2To("height");
+
+    const res = await mockClient.upsertVariable("height", 0);
+
+    // Truth 1: the write landed. Not reverted, not rethrown.
+    expect(res.variables).toEqual([{ id: expect.any(String), name: "height", value: 0 }]);
+    expect(await mockClient.listVariables()).toEqual([
+      { id: expect.any(String), name: "height", value: 0 },
+    ]);
+    // Truth 2: the rebuild it scheduled failed, with the kernel's own reason
+    // (`ExtrudeOp.cpp` kMinValue).
+    expect(res.terminal).toBe("failed");
+    expect(res.errorMessage).toMatch(/Extrude distance too small/);
+  });
+
+  it("removing a variable a record still binds STANDS, and reports the resolver's reason", async () => {
+    await mockClient.upsertVariable("height", 25);
+    await bindF2To("height");
+
+    const res = await mockClient.removeVariable("height");
+
+    expect(res.variables).toEqual([]);
+    expect(await mockClient.listVariables()).toEqual([]);
+    expect(res.terminal).toBe("failed");
+    // Mirrors `regen::variables::substitute_variables`'s `${field}: ${reason}`.
+    expect(res.errorMessage).toMatch(/Extrude\.distance: variable `height` is not defined/);
+  });
+
+  it("an UNBOUND record is never blamed for a variable edit", async () => {
+    await mockClient.upsertVariable("height", 25);
+    // f2 stays a literal distance — no `expr`, so no substitution and no failure.
+    await bindF2To("", 30).catch(() => undefined);
+    const res = await mockClient.upsertVariable("height", 0);
+    expect(res.terminal).toBe("noop");
+    expect(res.errorMessage).toBeUndefined();
   });
 });

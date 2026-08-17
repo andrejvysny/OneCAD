@@ -1245,6 +1245,13 @@ pub async fn list_variables(state: State<'_, AppState>) -> Result<Vec<VariableDt
 /// app cannot mint a variable that no binding can ever name. Existing name ⇒
 /// `SetVariable` (the id and declaration position are preserved); new ⇒
 /// `AddVariable`. Comparison is CASE-SENSITIVE, matching `VariableTable::get`.
+///
+/// Returns the (pre-regen) [`DocumentProjection`] — the SAME shape and the same
+/// emit + schedule + `note_mutation` tail [`apply_edit_command`] has, because a
+/// variable edit dirties `[0, len)` and IS an edit by every definition the rest
+/// of the app uses (W5). The variable table rides the projection's `variables`.
+/// A downstream regen that FAILS does not undo the save: the variable really was
+/// written, and the frontend reports both truths off the correlated terminal.
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(name = %name), err(Display))]
 pub async fn upsert_variable(
@@ -1252,8 +1259,8 @@ pub async fn upsert_variable(
     app: AppHandle,
     name: String,
     value: f64,
-) -> Result<Vec<VariableDto>, ApiError> {
-    let (outcome, variables, projection) = {
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -1262,18 +1269,14 @@ pub async fn upsert_variable(
         // a concurrent edit could invalidate is how a "set" turns into a duplicate.
         let command = upsert_variable_command(&rt.variables(), &name, value)?;
         let outcome = rt.apply(command)?;
-        (
-            outcome,
-            rt.variables().iter().map(VariableDto::from).collect(),
-            rt.projection(),
-        )
+        (outcome, rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     if let Some(sched) = state.scheduler.get() {
         sched.handle(&outcome);
     }
     state.note_mutation();
-    Ok(variables)
+    Ok(projection)
 }
 
 /// Removes a variable by name (`CadClient.removeVariable`).
@@ -1282,32 +1285,33 @@ pub async fn upsert_variable(
 /// it deleted something, and a silent success would leave a variable on screen the
 /// user just asked to be rid of. Records still bound to it are not rewritten —
 /// they fail loudly at regen (`resolve_expr`), which is the WP-VE.1 contract.
+///
+/// Returns the (pre-regen) [`DocumentProjection`], like [`upsert_variable`]: the
+/// removal STANDS even when the regen it schedules then fails on a record still
+/// bound to the gone name. That failure is reported, never healed by silently
+/// putting the variable back (W5).
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(name = %name), err(Display))]
 pub async fn remove_variable(
     state: State<'_, AppState>,
     app: AppHandle,
     name: String,
-) -> Result<Vec<VariableDto>, ApiError> {
-    let (outcome, variables, projection) = {
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("remove_variable".into()))?;
         let command = remove_variable_command(&rt.variables(), &name)?;
         let outcome = rt.apply(command)?;
-        (
-            outcome,
-            rt.variables().iter().map(VariableDto::from).collect(),
-            rt.projection(),
-        )
+        (outcome, rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     if let Some(sched) = state.scheduler.get() {
         sched.handle(&outcome);
     }
     state.note_mutation();
-    Ok(variables)
+    Ok(projection)
 }
 
 /// Undoes the last committed edit (`CadClient.undo`).

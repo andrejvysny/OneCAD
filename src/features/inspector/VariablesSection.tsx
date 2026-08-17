@@ -19,7 +19,9 @@ import { SectionLabel } from "@/ui/SectionLabel";
 import { Icon } from "@/icons/Icon";
 import { cn } from "@/ui/cn";
 import { createClient } from "@/ipc/client";
-import { VARIABLE_NAME_RE, type DocumentVariable } from "@/ipc/types";
+import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
+import { viewportStore } from "@/stores/viewportStore";
+import { VARIABLE_NAME_RE, type DocumentVariable, type VariableEditResult } from "@/ipc/types";
 
 const NAME_HINT = "A name must start with a letter or _ and contain only letters, digits and _.";
 
@@ -33,6 +35,33 @@ const EMPTY_DRAFT: DraftRow = { name: "", value: "" };
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Adopt a variable write's TWO truths (W5).
+ *
+ * The saved table is returned for the list — a variable edit is never rolled
+ * back, so the row keeps the value the document really holds — while a failed
+ * downstream regen is raised on the SAME sticky status-bar hint every other
+ * commit family reports through (`featureValueEdit` / `treeActions` /
+ * `ComponentParametersSection`). Deliberately not the section's own
+ * `variables-error` alert: that one means "the write was REFUSED", and this
+ * means "the write landed and the rebuild after it failed". Collapsing the two
+ * would lose exactly the distinction the user needs.
+ *
+ * `needsRepair` / `noop` keep the record (`keepsRecord`) and are successes here.
+ */
+function adopt(res: VariableEditResult): DocumentVariable[] {
+  const reason = failureReason(classifyRegen(res));
+  if (reason !== null) {
+    viewportStore
+      .getState()
+      .setStatusHint(`Variable saved, but the rebuild failed: ${reason}`, {
+        severity: "error",
+        sticky: true,
+      });
+  }
+  return res.variables;
 }
 
 export function VariablesSection() {
@@ -71,7 +100,7 @@ export function VariablesSection() {
     async (name: string, value: number) => {
       setPending(true);
       try {
-        setVars(await createClient().upsertVariable(name, value));
+        setVars(adopt(await createClient().upsertVariable(name, value)));
         setError(null);
         return true;
       } catch (e) {
@@ -87,7 +116,7 @@ export function VariablesSection() {
   const remove = useCallback(async (name: string) => {
     setPending(true);
     try {
-      setVars(await createClient().removeVariable(name));
+      setVars(adopt(await createClient().removeVariable(name)));
       setError(null);
     } catch (e) {
       setError(errorText(e));

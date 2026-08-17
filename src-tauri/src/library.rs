@@ -54,7 +54,7 @@ use onecad_library::Library;
 use crate::document_runtime::DocumentRuntime;
 use crate::dto::{
     ComponentUpgradeDto, DocumentProjection, LibraryComponentDto, PlaceComponentMateInput,
-    ProjectTemplateDto, ReindexReportDto, ReplaceComponentReportDto,
+    ProjectTemplateDto, ReindexReportDto, ReplaceComponentReportDto, ReplaceComponentResultDto,
 };
 use crate::error::ApiError;
 use crate::export::GeometryExporter;
@@ -1901,6 +1901,14 @@ fn component_upgrade_available_at(
     }))
 }
 
+/// Swaps a placed instance to a different component in place (spec §3.3).
+///
+/// Returns `{ projection, report }` (W5 result truth), not the bare report. A
+/// replace is an `UpdateOperationParams` that re-bakes geometry and schedules a
+/// regen, so resolving is NOT the same as succeeding — and the frontend can only
+/// correlate that regen against the post-apply projection revision, exactly as
+/// `apply_edit_command` does. The report keeps its own shape and stays the only
+/// place a dropped mate attachment is named.
 #[tauri::command]
 pub async fn replace_component(
     app: AppHandle,
@@ -1909,7 +1917,7 @@ pub async fn replace_component(
     component_id: String,
     component_version: String,
     params: Option<BTreeMap<String, ComponentParamValue>>,
-) -> Result<ReplaceComponentReportDto, ApiError> {
+) -> Result<ReplaceComponentResultDto, ApiError> {
     let root = library_root(&app)
         .ok_or_else(|| ApiError::Internal("replaceComponent: no app data dir".into()))?;
     let (outcome, projection, dropped_mate_attachment) = replace_component_at(
@@ -1922,8 +1930,11 @@ pub async fn replace_component(
     )
     .await?;
     finish(&app, &state, &outcome, &projection);
-    Ok(ReplaceComponentReportDto {
-        dropped_mate_attachment,
+    Ok(ReplaceComponentResultDto {
+        projection,
+        report: ReplaceComponentReportDto {
+            dropped_mate_attachment,
+        },
     })
 }
 

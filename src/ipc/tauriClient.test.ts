@@ -2648,3 +2648,248 @@ describe("tauriClient gesture targets + curves channel", () => {
     expect((await client.endGesture())?.solvedCurves).toEqual({});
   });
 });
+
+/*
+ * W5 — the last three commands to leave the bare-`call` lane.
+ *
+ * `upsertVariable`/`removeVariable` correlate with `documentScope`: their edit
+ * dirties `[0, len)` (`variable_outcome` ⇒ `DirtyRange(0, len)`), so they name no
+ * single record and ANY failed step is their own failure — there is nothing to
+ * misattribute. `replaceComponent` is an `UpdateOperationParams` on ONE record and
+ * correlates on it, like `setComponentParams`.
+ */
+describe("tauriClient variable commands (W5 result truth)", () => {
+  /** A projection as the backend really sends one: `variables` rides it (W5) and
+   *  the op counts are always present — `totalOps` is what tells the client
+   *  whether a regen was enqueued at all. */
+  function projectionWithVariables(
+    revision: number,
+    variables: { id: string; name: string; value: number }[],
+    totalOps = 1,
+  ): unknown {
+    return { ...(readyProjection(revision) as object), variables, appliedOps: totalOps, totalOps };
+  }
+
+  it("upsertVariable goes through apply-edit correlation and lifts the SAVED table off the projection", async () => {
+    let sent: unknown;
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "upsert_variable") {
+          sent = args;
+          setTimeout(() => {
+            void emit("document-changed", {
+              revision: 21,
+              changedBodies: [{ bodyId: "b1", meshKey: "b1:coarse:21" }],
+              removedBodies: [],
+            });
+            void emit("regen-finished", { revision: 21, sourceRevision: 21, outcome: "published" });
+          }, 0);
+          return projectionWithVariables(20, [{ id: "v1", name: "height", value: 40 }]);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().upsertVariable("height", 40);
+    expect(sent).toEqual({ name: "height", value: 40 });
+    expect(res.variables).toEqual([{ id: "v1", name: "height", value: 40 }]);
+    expect(res.terminal).toBe("published");
+    expect(res.revision).toBe(21);
+  });
+
+  it("a published regen carrying ANY failedStep makes the variable edit FAILED — the table still rides", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "upsert_variable") {
+          setTimeout(() => {
+            // The regen published other steps and left the BOUND one in Error —
+            // the shape a `=name` binding driven to an illegal value produces.
+            void emit("document-changed", {
+              revision: 31,
+              changedBodies: [{ bodyId: "b9", meshKey: "b9:coarse:31" }],
+              removedBodies: [],
+            });
+            void emit("regen-finished", {
+              revision: 31,
+              sourceRevision: 31,
+              outcome: "published",
+              failedSteps: [{ recordId: "f2", message: "Extrude distance too small" }],
+            });
+          }, 0);
+          return projectionWithVariables(30, [{ id: "v1", name: "height", value: 0 }]);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().upsertVariable("height", 0);
+    // Saved — never reverted, never rethrown.
+    expect(res.variables).toEqual([{ id: "v1", name: "height", value: 0 }]);
+    // …and loud.
+    expect(res.terminal).toBe("failed");
+    expect(res.errorMessage).toBe("Extrude distance too small");
+    expect(res.changedBodies).toEqual([]);
+  });
+
+  it("removeVariable reports the NOOP regen's failed step (the gate-at-step-0 document)", async () => {
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "remove_variable") {
+          expect(args).toEqual({ name: "height" });
+          setTimeout(
+            () =>
+              void emit("regen-finished", {
+                revision: 41,
+                sourceRevision: 41,
+                outcome: "noop",
+                failedSteps: [
+                  {
+                    recordId: "f2",
+                    message: "Extrude.distance: variable `height` is not defined in this document",
+                  },
+                ],
+              }),
+            0,
+          );
+          return projectionWithVariables(41, []);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().removeVariable("height");
+    expect(res.variables).toEqual([]);
+    expect(res.terminal).toBe("failed");
+    expect(res.errorMessage).toMatch(/`height` is not defined/);
+  });
+
+  it("a clean noop is a SUCCESS terminal — an empty rebuild is not a failure", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "upsert_variable") {
+          setTimeout(
+            () => void emit("regen-finished", { revision: 51, sourceRevision: 51, outcome: "noop" }),
+            0,
+          );
+          return projectionWithVariables(51, [{ id: "v1", name: "w", value: 3 }]);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().upsertVariable("w", 3);
+    expect(res.terminal).toBe("noop");
+    expect(res.errorMessage).toBeUndefined();
+  });
+
+  /*
+   * The trap this guard exists for: `variable_outcome` is `metadata_only` on an
+   * EMPTY timeline, so the FIRST variable in a fresh document enqueues no regen at
+   * all. Without reading `totalOps` the awaiter would sit out the full safety
+   * timeout and then report a `timeout` FAILURE for the most ordinary act there is.
+   */
+  it("settles a variable edit on an EMPTY timeline immediately — noop, never a timeout", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "upsert_variable") {
+          // Deliberately NO regen event: the backend enqueued nothing.
+          return projectionWithVariables(2, [{ id: "v1", name: "first", value: 1 }], 0);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    // The TERMINAL is the assertion, not a stopwatch: with the guard the awaiter
+    // is cancelled and this settles `noop`; without it the (short) safety timeout
+    // fires and settles `timeout` — a distinction no wall-clock read is needed for.
+    __setRegenTimeoutForTests(2000);
+    const res = await createTauriClient().upsertVariable("first", 1);
+    expect(res.terminal).toBe("noop");
+    expect(res.errorMessage).toBeUndefined();
+    expect(res.variables).toEqual([{ id: "v1", name: "first", value: 1 }]);
+  });
+
+  it("a projection with no `variables` key degrades to an empty table, never undefined", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "remove_variable") {
+          setTimeout(
+            () => void emit("regen-finished", { revision: 61, sourceRevision: 61, outcome: "noop" }),
+            0,
+          );
+          return readyProjection(61);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    expect((await createTauriClient().removeVariable("gone")).variables).toEqual([]);
+  });
+});
+
+describe("tauriClient replaceComponent (W5 result truth)", () => {
+  it("correlates on the record and returns the report ALONGSIDE the terminal", async () => {
+    let sent: unknown;
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "replace_component") {
+          sent = args;
+          setTimeout(() => {
+            void emit("document-changed", {
+              revision: 71,
+              changedBodies: [{ bodyId: "b7", meshKey: "b7:coarse:71" }],
+              removedBodies: [],
+            });
+            void emit("regen-finished", {
+              revision: 71,
+              sourceRevision: 71,
+              outcome: "published",
+              affectedBodies: { comp1: ["b7"] },
+            });
+          }, 0);
+          return {
+            projection: readyProjection(70),
+            report: { droppedMateAttachment: "shank_axis" },
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().replaceComponent("comp1", "std.shcs", "1.1.0");
+    expect(sent).toEqual({
+      recordId: "comp1",
+      componentId: "std.shcs",
+      componentVersion: "1.1.0",
+      params: undefined,
+    });
+    expect(res.report.droppedMateAttachment).toBe("shank_axis");
+    expect(res.terminal).toBe("published");
+    expect(res.changedBodies).toEqual([{ bodyId: "b7", meshKey: "b7:coarse:71" }]);
+  });
+
+  it("a re-bake that fails THIS record reports `failed`, not a silent success", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "replace_component") {
+          setTimeout(
+            () =>
+              void emit("regen-finished", {
+                revision: 81,
+                sourceRevision: 81,
+                outcome: "published",
+                failedSteps: [{ recordId: "comp1", message: "component bake failed" }],
+              }),
+            0,
+          );
+          return { projection: readyProjection(80), report: {} };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().replaceComponent("comp1", "std.shcs", "1.1.0");
+    expect(res.terminal).toBe("failed");
+    expect(res.errorMessage).toBe("component bake failed");
+    expect(res.report).toEqual({});
+  });
+});

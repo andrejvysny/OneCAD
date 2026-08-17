@@ -163,16 +163,26 @@ export function ComponentParametersSection() {
    * the backend never re-binds it to a different attachment, and a silent drop
    * would leave the user to discover later that their part stopped following
    * its target.
+   *
+   * VERDICT FIRST, report second (W5): a replace re-bakes the component's
+   * geometry, so resolving is not succeeding — a swap whose re-bake failed comes
+   * back as `terminal: "failed"` with no thrown error, exactly as
+   * `setComponentParams` above.
    */
   const replaceWith = async (id: string, version: string, what: string) => {
     setPending(what);
     try {
-      const report = await createClient().replaceComponent(featureId as string, id, version);
+      const res = await createClient().replaceComponent(featureId as string, id, version);
+      const reason = failureReason(classifyRegen(res));
+      if (reason !== null) {
+        errorHint(`Replace failed: ${reason}`);
+        return;
+      }
       viewportStore
         .getState()
         .setStatusHint(
-          report.droppedMateAttachment
-            ? `Replaced — the “${report.droppedMateAttachment}” mate was dropped (the new component has no such attachment).`
+          res.report.droppedMateAttachment
+            ? `Replaced — the “${res.report.droppedMateAttachment}” mate was dropped (the new component has no such attachment).`
             : "Component replaced",
         );
       await load();

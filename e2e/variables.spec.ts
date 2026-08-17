@@ -220,3 +220,63 @@ test("typing =name into a past extrude's value binds it to a variable", async ({
     .toBeUndefined();
   await expect(chip).toHaveText("60 mm");
 });
+
+/*
+ * W5 — "saved + loud failure banner", end to end.
+ *
+ * A variable edit whose downstream regen fails has TWO truths, and until this
+ * work package the UI stated only the first. Both are asserted here on the real
+ * DOM: the table keeps the value the document actually holds (nothing is ever
+ * reverted, and nothing is turned into a rejection), and the failure lands on the
+ * SAME status-bar affordance every other commit family reports through.
+ *
+ * The mock lane can decide both failures with no kernel: the delete case is pure
+ * `resolve_expr`, and the value case mirrors `ExtrudeOp.cpp`'s `kMinValue` blind
+ * -extrude floor by citation.
+ */
+test("a variable edit that breaks its bound extrude saves the value AND says the rebuild failed", async ({
+  page,
+}) => {
+  await openEditorDebug(page);
+  await page.getByTestId("sidebar-tab-variables").click();
+  await addVariable(page, "height", "25");
+  await expect(page.getByTestId("variable-row-height")).toBeVisible();
+
+  await page.getByTestId("sidebar-tab-model").click();
+  const featureId = await drawAndExtrude(page);
+  await openTimelineOn(page, featureId);
+
+  // Bind the extrude's distance to the variable, as the binding spec above does.
+  await page.getByTestId(`history-value-${featureId}`).click();
+  const input = page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+  await expect(input).toBeFocused();
+  await input.fill("=height");
+  await input.press("Enter");
+  await expect
+    .poll(async () => (await features(page)).find((f) => f.id === featureId)?.primaryExpr)
+    .toBe("height");
+
+  // Now drive it below the kernel's blind-extrude distance floor.
+  await page.getByTestId("sidebar-tab-variables").click();
+  await page.getByTestId("variable-value-height").fill("0");
+  await page.getByTestId("variable-value-height").press("Enter");
+
+  // Truth 1 — the SAVE is real: the row shows what the document holds, at 0.
+  await expect(page.getByTestId("variable-value-height")).toHaveValue("0");
+  // Truth 2 — the failure is on screen, naming the kernel's own reason.
+  await expect(
+    page.getByText(/Variable saved, but the rebuild failed: .*distance too small/),
+  ).toBeVisible();
+  // …and it is NOT reported as a refusal: nothing was rejected, and collapsing
+  // the two would lose exactly the distinction the user needs.
+  await expect(page.getByTestId("variables-error")).toHaveCount(0);
+
+  // Deleting a variable a record still binds is the same contract: the removal
+  // STANDS, and the resolver's own reason is what the user is told.
+  await page.getByTestId("variable-delete-height").click();
+  await expect(page.getByTestId("variable-row-height")).toHaveCount(0);
+  await expect(page.getByTestId("variables-empty")).toBeVisible();
+  await expect(
+    page.getByText(/Variable saved, but the rebuild failed: .*`height` is not defined/),
+  ).toBeVisible();
+});

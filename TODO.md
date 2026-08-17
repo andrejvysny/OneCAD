@@ -35,9 +35,69 @@
       only AP242 value OCCT 8.0.1 accepts). See `### W3 — DI-5` below. Gates re-run on the main
       thread before commit: ctest 136/136 · cargo 1289/0 · fmt/clippy clean.
 - [x] **W4 — 3MF export — LANDED (2026-08-17), per-face colour IN.** Gate record below.
-- [ ] **W5 — result truth for `upsertVariable`/`removeVariable`/`replaceComponent`**
-      ("saved + loud failure banner", § MERGE options (a)/(b) — decide from golden-test blast
-      radius), then **W6 close-out** (CURRENT_STATE rewrite + the two owed manual USER gates).
+- [x] **W5 — result truth for `upsertVariable`/`removeVariable`/`replaceComponent` — LANDED
+      (2026-08-17).** § MERGE option **(a)** taken: `variables` rides `DocumentProjection`.
+      Gate record below. Next: **W6 close-out** (CURRENT_STATE rewrite + the two owed manual
+      USER gates).
+
+### Gate — W5: the last three result-truth exemptions (2026-08-17) — LANDED
+
+Product decision (user): **"saved + loud failure banner"** — a variable edit whose downstream
+regen fails reports the SAVE as real and the FAILURE as real. Never auto-revert, never turn a
+failed regen into a rejection. § MERGE option (a), because (b) leaves the same two commands
+answering in a shape nothing else in the app speaks.
+
+- [x] **`DocumentProjection.variables: Vec<VariableDto>`** (`dto.rs`) — additive, declaration
+      order, populated in `DocumentRuntime::projection()` straight off `doc.variables`. The
+      serde lock test was extended DELIBERATELY (additive field, noted in the test).
+      `upsert_variable`/`remove_variable` now return `DocumentProjection` with exactly
+      `apply_edit_command`'s emit + `sched.handle` + `note_mutation` tail; `replace_component`
+      returns `ReplaceComponentResultDto { projection, report }` — the report keeps its shape
+      and stays the only place a dropped mate is named.
+- [x] **`noop_report()` no longer claims silence.** A broken `Scalar` binding gates the plan
+      strictly below the offending step, and a gate at **step 0** — the single-feature document
+      a user actually meets when deleting a variable an extrude binds — leaves nothing legal to
+      execute, so the completion was a `NoOp` with an EMPTY `failed_steps` and the frontend read
+      the edit as a silent success. It now carries `self.unresolved_variables`, which is a pure
+      function of (records, variables) and needs no worker round-trip. Side effect, deliberate:
+      an UNCORRELATED regen in that state now raises the existing sticky "Geometry rebuild
+      failed — …" hint instead of only tinting a history row.
+- [x] **Frontend — one correlation lane, three new callers.** `applyEdit` was generalized into
+      `applyEditRaw<T>(…, scope, unwrap)`; `applyEdit` is its identity case. Two additions:
+      a third awaiter class **`documentScope`** (any failed step is this edit's failure —
+      sound precisely because `variable_outcome` dirties `[0, len)`, so every step really is
+      rebuilt by it), and **`noRegenWhen`** for a command whose `RegenHint` is CONDITIONAL.
+      `replaceComponent` joins the ordinary `recordId` class.
+- [x] **The `noRegenWhen` trap, found by reading `variable_outcome` rather than by a test:**
+      a variable edit on an EMPTY timeline is `metadata_only`, so nothing is enqueued and no
+      `regen-finished` ever arrives — the new awaiter would have sat out the full 8 s safety
+      timeout and then reported a `timeout` FAILURE for *adding the first variable to a fresh
+      document*. `totalOps === 0` off the command's own projection is the exact mirror of the
+      fact the backend decided on. Same class as `METADATA_ONLY_CMDS`, dynamic instead of static.
+- [x] **The banner is not new.** `VariablesSection` raises the SAME sticky status-bar hint
+      `featureValueEdit` / `treeActions` / `ComponentParametersSection` report through
+      (`viewportStore.setStatusHint(…, {severity:"error", sticky:true})`), reading the verdict
+      via `classifyRegen`/`failureReason`. Deliberately NOT the section's own `variables-error`
+      alert: that one means "the write was REFUSED", this means "the write landed and the
+      rebuild after it failed", and collapsing them loses the distinction the decision is about.
+      The row keeps the saved value — both truths on screen at once.
+- [x] **Mock lane composes the same terminal from rules it can actually decide**, each mirrored
+      with a citation rather than invented: `resolve_expr` (pure, no kernel) and `ExtrudeOp.cpp`
+      `kMinValue` (the one kernel refusal a variable can trip BY VALUE). `distance2` is
+      deliberately unchecked — not bindable from the UI, so mirroring its guard would be
+      speculative.
+- [x] Gate: `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` clean ·
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1305 passed / 0 failed**
+      (+2) · `bunx tsc --noEmit` clean · `bun run test` **295 files / 4971 passed** (+16; one
+      earlier full run flaked a single test under load and was green on three re-runs — the
+      ledger's unattributable-under-load rule) · `bunx playwright test e2e/variables.spec.ts`
+      both projects, `--retries=0` — **6/6**, twice · hex gate empty · no frozen contract touched.
+- **Separate defects seen, NOT fixed (report only):** (1) a re-valued variable does not move the
+  bound feature's displayed number — substitution rewrites the regen MIRROR, never the stored
+  record, and `feature_dto` reads `feature_value(&rec.op)` off the stored record, so the history
+  row and its `name = <n>` tooltip keep the last cached value until the record itself is edited;
+  (2) the mock lane does not stamp a variable-broken step's `status` to `error`, so a mock-lane
+  history row stays untinted where the real one would tint.
 
 ### Gate — W4: 3MF export, Rust-side writer (2026-08-17) — LANDED
 
@@ -1663,13 +1723,12 @@ remain open under T3.
 
 ### T2 — finish the result-truth doctrine
 
-- [ ] **`upsertVariable` / `removeVariable` / `replaceComponent`.** The last three
-      kernel-touching commands exempt from `regenOutcome` (see § MERGE for the
-      two implementation options). **A product decision is owed first**, and it is
-      small but real: a variable edit that SAVES while its downstream regen FAILS
-      has two truths, and the UI currently states one. Decide what the user is
-      told, then the code is mechanical. Do not "fix" it by throwing — the
-      variable really was saved.
+- [x] **`upsertVariable` / `removeVariable` / `replaceComponent` — CLOSED
+      2026-08-17** by W5 of the Trust & Deliverable program (see `### Gate — W5`
+      above). Product decision was made first, as this entry demanded: **"saved +
+      loud failure banner"**. Nothing throws on a failed regen and nothing is
+      reverted — the variable really was saved, and the failure rides the existing
+      sticky status-bar affordance beside the saved value.
 
 ### T3 — make the machined-parts deliverable faithful
 
@@ -2157,7 +2216,8 @@ other program's code for the first time.
 
 ### Open, deliberately not in this merge
 
-- [ ] **Result truth for `upsertVariable` / `removeVariable` / `replaceComponent`.**
+- [x] **Result truth for `upsertVariable` / `removeVariable` / `replaceComponent`
+  — CLOSED 2026-08-17 (W5, option (a); see `### Gate — W5` at the head).**
   The last three kernel-touching commands still exempt from the `regenOutcome`
   doctrine. They differ from the component lanes in KIND, not degree: they return
   `Vec<VariableDto>` / `ReplaceComponentReportDto` rather than a projection, and

@@ -605,6 +605,19 @@ export interface ReplaceComponentReport {
 }
 
 /**
+ * What `replaceComponent` resolves with (Rust `ReplaceComponentResultDto`).
+ *
+ * A replace is an `UpdateOperationParams` that re-bakes geometry and schedules a
+ * regen, so resolving is NOT succeeding: read the `terminal` (via
+ * `classifyRegen`), exactly as `setComponentParams`/`detachComponent` require.
+ * The {@link ReplaceComponentReport} keeps its own shape and stays the only
+ * place a dropped mate attachment is named (W5 result truth).
+ */
+export interface ReplaceComponentResult extends ApplyOperationResult {
+  report: ReplaceComponentReport;
+}
+
+/**
  * One indexed library component (Component Library WP-1.3; mirrors Rust
  * `LibraryComponentDto` — `onecad-library`'s `IndexEntry` plus the identity
  * fields the index keys on).
@@ -959,6 +972,17 @@ export interface DocumentProjectionWire {
   /** Datum planes keyed by id. Always sent by the backend (possibly empty). */
   datums: Record<string, DatumProjection>;
   features: FeatureRecord[];
+  /**
+   * The document variable table, in declaration order (W5).
+   *
+   * Optional because only the real backend sends it — the mock lane keeps its
+   * table beside the projection, as `geometrySource` is likewise omitted there.
+   * It rides here so `upsertVariable`/`removeVariable` can return the same
+   * projection every other mutating command does and be regen-correlated; the
+   * documentStore does NOT hydrate from it (the Variables section owns the
+   * table, and a projection is about the timeline).
+   */
+  variables?: DocumentVariable[];
   /**
    * Applied op count (timeline cursor): `features[0, appliedOps)` are applied,
    * `[appliedOps, totalOps)` are drafts beyond the rollback bar. Optional — the
@@ -1960,3 +1984,16 @@ export interface DocumentVariable {
 
 /** The V1 variable-name grammar, shared with `regen::variables::is_bare_name`. */
 export const VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * What `upsertVariable`/`removeVariable` resolve with (W5 result truth).
+ *
+ * BOTH truths, deliberately: `variables` is the table the document actually
+ * holds after the write — the write is never rolled back — and the inherited
+ * `terminal` is the verdict of the regen that write scheduled. A variable edit
+ * dirties `[0, len)`, so a failing step anywhere IS this edit's failure; the
+ * caller reports it and leaves the saved value on screen.
+ */
+export interface VariableEditResult extends ApplyOperationResult {
+  variables: DocumentVariable[];
+}

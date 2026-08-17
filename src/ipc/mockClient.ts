@@ -19,7 +19,8 @@ import type {
   ComponentUpgrade,
   NewComponentSpec,
   ProjectTemplate,
-  ReplaceComponentReport,
+  ReplaceComponentResult,
+  VariableEditResult,
   DocumentChange,
   DocumentProjectionWire,
   DocumentVariable,
@@ -255,6 +256,35 @@ function mockRemoveVariable(name: string): DocumentVariable[] {
   if (at < 0) throw new Error(`unknown variable "${name}"`);
   mockVariables.splice(at, 1);
   return mockVariables.map((v) => ({ ...v }));
+}
+
+/**
+ * Compose a variable write's result the way the tauri client composes its own
+ * (W5): the SAVED table, plus the terminal of the regen the write scheduled.
+ *
+ * Both truths, always. A downstream step that can no longer resolve — or an
+ * extrude the new value drives below the kernel's floor — reports
+ * `terminal: "failed"` while `variables` still holds what the document holds. The
+ * write is never rolled back and never turned into a rejection: a rejection would
+ * say the variable was not saved, and it was.
+ */
+function variableEditResult(
+  variables: DocumentVariable[],
+  opLabel: string,
+): VariableEditResult {
+  const failed = mockVariableRegenFailures()[0];
+  const res: ApplyOperationResult = {
+    revision: mockRevision,
+    changedBodies: [],
+    removedBodies: [],
+    features: mockFeatures.map(cloneFeature),
+    opLabel,
+    // No mock regen ⇒ nothing was rebuilt. `noop` is the honest success terminal
+    // here (and `keepsRecord` treats it as one); a failure overrides it below.
+    terminal: failed ? "failed" : "noop",
+  };
+  if (failed) res.errorMessage = failed.message;
+  return { ...withCursor(res), variables };
 }
 
 /**
@@ -1746,6 +1776,85 @@ function scalarExpr(v: unknown): string | undefined {
 }
 
 /**
+ * MIRRORS `regen::variables::resolve_expr`. A V1 expression is a BARE variable
+ * name: anything else, an undefined name, or a name whose own value is itself
+ * expression-driven fails LOUDLY — never a silent fall back to the scalar's
+ * cached number, which is the whole point of WP-VE.1.
+ */
+function mockResolveExpr(expr: string): { value: number } | { reason: string } {
+  const name = expr.trim();
+  if (!VARIABLE_NAME_RE.test(name)) {
+    return {
+      reason:
+        `expression \`${expr}\` is not a bare variable name — V1 supports a bare ` +
+        `variable name only (no arithmetic)`,
+    };
+  }
+  const v = mockVariables.find((x) => x.name === name);
+  if (!v) return { reason: `variable \`${name}\` is not defined in this document` };
+  if (v.expr !== undefined) {
+    return {
+      reason:
+        `variable \`${name}\` is itself expression-driven — chained variable ` +
+        `expressions are not supported in V1`,
+    };
+  }
+  return { value: v.value };
+}
+
+/** Blind/symmetric extrude distance floor. MIRRORS `worker/src/ops/ExtrudeOp.cpp`
+ *  `kMinValue` (1e-3, itself the legacy `RegenerationEngine.cpp:61` guard): the
+ *  kernel REFUSES a distance-driven extrude below it rather than building a
+ *  degenerate solid. It is the one kernel rule a variable can trip by VALUE. */
+const MOCK_EXTRUDE_MIN_DISTANCE = 1e-3;
+
+/**
+ * The steps a variable edit's regen would leave in Error, as `(recordId, message)`
+ * — the mock's stand-in for `failedSteps` on the `regen-finished` the real backend
+ * emits (W5 result truth).
+ *
+ * Recomputed from (features, variables) on every variable write, because that is
+ * exactly what makes it knowable with no kernel: `substitute_variables` is a pure
+ * function of those two, and `resolve_expr` decides the first rule below without a
+ * worker round-trip at all. The second rule is the ONE kernel refusal a variable
+ * can trigger by value, mirrored from its source with a citation rather than
+ * invented — a second, drifting CSG validator in the mock is the divergence the
+ * mock exists to avoid.
+ *
+ * `distance2` is deliberately not checked: a two-direction second distance is not
+ * bindable from the UI, so mirroring its guard would be speculative.
+ */
+function mockVariableRegenFailures(): { recordId: string; message: string }[] {
+  const out: { recordId: string; message: string }[] = [];
+  for (const f of mockFeatures) {
+    const params = featureParams.get(f.id);
+    if (!params || f.suppressed) continue;
+    let failure: string | undefined;
+    for (const [key, raw] of Object.entries(params)) {
+      if (failure !== undefined) break; // one reason per step, as Rust reports
+      const expr = scalarExpr(raw);
+      if (expr === undefined) continue;
+      const resolved = mockResolveExpr(expr);
+      if ("reason" in resolved) {
+        // `${opType}.${field}: ${reason}` — the shape `UnresolvedVariable.message`
+        // carries (`regen::variables::substitute_variables`).
+        failure = `${f.opType ?? f.kind}.${key}: ${resolved.reason}`;
+        continue;
+      }
+      if (f.opType !== "Extrude" || key !== "distance") continue;
+      const twoDirs = params.twoDirections === true;
+      const mode = typeof params.mode === "string" ? params.mode : "Blind";
+      const driven = twoDirs ? mode === "Blind" : mode === "Blind" || mode === "Symmetric";
+      if (driven && Math.abs(resolved.value) < MOCK_EXTRUDE_MIN_DISTANCE) {
+        failure = twoDirs ? "Extrude first distance too small" : "Extrude distance too small";
+      }
+    }
+    if (failure !== undefined) out.push({ recordId: f.id, message: failure });
+  }
+  return out;
+}
+
+/**
  * The history-row value text of an edge op — MIRRORS Rust `dto.rs
  * feature_value_text` (pinned there by
  * `chamfer_value_text_shows_the_second_distance_only_when_set`). A two-distance
@@ -2346,21 +2455,21 @@ export const mockClient: CadClient = {
   },
   async upsertVariable(name: string, value: number) {
     await wait();
-    const table = mockUpsertVariable(name, value);
+    const variables = mockUpsertVariable(name, value);
     // A variable edit dirties the timeline in the real backend, so it emits the
     // same document-changed the UI refreshes off. The mock has no regen, so no
     // body moves — but the EVENT must fire, or a consumer that repaints on it
     // would look correct here and stale in the app.
     mockRevision += 1;
     emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
-    return table;
+    return variableEditResult(variables, "SetVariable");
   },
   async removeVariable(name: string) {
     await wait();
-    const table = mockRemoveVariable(name);
+    const variables = mockRemoveVariable(name);
     mockRevision += 1;
     emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
-    return table;
+    return variableEditResult(variables, "RemoveVariable");
   },
   async closeDocument() {
     await wait();
@@ -2929,13 +3038,15 @@ export const mockClient: CadClient = {
     return authored;
   },
 
-  /** The mock lane has one fixture component and nothing to replace it with. */
+  /** The mock lane has one fixture component and nothing to replace it with.
+   *  Still typed to the W5 result shape so both impls stay in lockstep — the
+   *  seam is what has to agree, not the (absent) behaviour. */
   async replaceComponent(
     recordId: string,
     componentId: string,
     _componentVersion: string,
     _params?: Record<string, ComponentParamValue>,
-  ): Promise<ReplaceComponentReport> {
+  ): Promise<ReplaceComponentResult> {
     await wait();
     throw new Error(
       `replaceComponent: not available on the mock lane (record ${recordId} → ${componentId})`,

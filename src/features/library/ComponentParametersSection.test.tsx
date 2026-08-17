@@ -8,13 +8,40 @@ import { ComponentParametersSection, formatDesignation } from "./ComponentParame
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
-import type { ComponentUpgrade, LibraryComponent, ReplaceComponentReport } from "@/ipc/types";
+import type {
+  ComponentUpgrade,
+  LibraryComponent,
+  ReplaceComponentReport,
+  ReplaceComponentResult,
+} from "@/ipc/types";
 
 const getOperationParams = vi.fn();
 const listLibraryComponents = vi.fn<() => Promise<LibraryComponent[]>>();
 const setComponentParams = vi.fn(() => Promise.resolve());
 const componentUpgradeAvailable = vi.fn<() => Promise<ComponentUpgrade | null>>();
-const replaceComponent = vi.fn<() => Promise<ReplaceComponentReport>>();
+const replaceComponent = vi.fn<() => Promise<ReplaceComponentResult>>();
+
+/*
+ * A `replaceComponent` result as the BACKEND produces it (W5): the report rides
+ * ALONGSIDE a correlated regen result. A fixture without a `terminal` describes a
+ * result no production client can return — `types.ts` says so — and the section
+ * now reads that field, so it would be testing a shape that cannot occur.
+ */
+function replaceResult(
+  report: ReplaceComponentReport = {},
+  over: Partial<ReplaceComponentResult> = {},
+): ReplaceComponentResult {
+  return {
+    revision: 2,
+    changedBodies: [],
+    removedBodies: [],
+    features: [],
+    opLabel: "ReplaceComponent",
+    terminal: "published",
+    report,
+    ...over,
+  };
+}
 vi.mock("@/ipc/client", () => ({
   createClient: () => ({
     getOperationParams,
@@ -69,7 +96,7 @@ function selectPlaceComponentFeature(overrideParams: Record<string, unknown> = {
   });
   listLibraryComponents.mockResolvedValue([SHCS]);
   componentUpgradeAvailable.mockResolvedValue(null);
-  replaceComponent.mockResolvedValue({});
+  replaceComponent.mockResolvedValue(replaceResult());
 }
 
 beforeEach(() => {
@@ -195,7 +222,7 @@ describe("upgrade and replace", () => {
   it("replaces with the picked component and reports a dropped mate", async () => {
     selectPlaceComponentFeature();
     listLibraryComponents.mockResolvedValue([SHCS, OTHER_SCREW]);
-    replaceComponent.mockResolvedValue({ droppedMateAttachment: "shank_axis" });
+    replaceComponent.mockResolvedValue(replaceResult({ droppedMateAttachment: "shank_axis" }));
     render(<ComponentParametersSection />);
 
     const pick = await screen.findByTestId("component-replace-pick");
@@ -209,6 +236,31 @@ describe("upgrade and replace", () => {
     await waitFor(() =>
       expect(viewportStore.getState().statusHint?.message ?? "").toContain("shank_axis"),
     );
+  });
+
+  /*
+   * W5 result truth: a replace re-bakes geometry, so resolving is not succeeding.
+   * Before this it went through a bare `call()` and a swap whose re-bake failed
+   * reported the same silent "Component replaced" as one that seated.
+   */
+  it("reports a re-bake that FAILED instead of claiming the component was replaced", async () => {
+    selectPlaceComponentFeature();
+    listLibraryComponents.mockResolvedValue([SHCS, OTHER_SCREW]);
+    replaceComponent.mockResolvedValue(
+      replaceResult({}, { terminal: "failed", errorMessage: "component bake failed" }),
+    );
+    render(<ComponentParametersSection />);
+
+    const pick = await screen.findByTestId("component-replace-pick");
+    fireEvent.change(pick, { target: { value: `${OTHER_SCREW.id}@${OTHER_SCREW.version}` } });
+    fireEvent.click(screen.getByTestId("component-replace-apply"));
+
+    await waitFor(() =>
+      expect(viewportStore.getState().statusHint?.message ?? "").toBe(
+        "Replace failed: component bake failed",
+      ),
+    );
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
   });
 
   it("offers no replace target when the library holds only this component", async () => {

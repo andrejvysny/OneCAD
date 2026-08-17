@@ -19,9 +19,11 @@ import type {
   PlaceComponentMate,
   ProjectTemplate,
   ReplaceComponentReport,
+  ReplaceComponentResult,
   DocumentChange,
   DocumentModule,
   DocumentVariable,
+  VariableEditResult,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
@@ -131,27 +133,36 @@ export interface CadClient {
   /**
    * The open document's variables, in declaration order (WP-VE.2).
    *
-   * Not part of the projection: the timeline is what the projection is for, and
-   * a variable table changes far more rarely than it does. The Variables section
-   * re-lists on `document-changed`.
+   * A pure read. The table also rides every `DocumentProjection` (W5), which is
+   * what lets a variable EDIT be correlated like any other; this stays the way
+   * to (re-)read it without writing. The Variables section re-lists on
+   * `document-changed`.
    */
   listVariables(): Promise<DocumentVariable[]>;
   /**
-   * Create (new name) or re-value (existing name) a variable, returning the whole
-   * table afterwards. Undoable — it goes through the same transaction path a user
-   * edit does, and schedules the same regen.
+   * Create (new name) or re-value (existing name) a variable. Undoable — it goes
+   * through the same transaction path a user edit does, and schedules the same
+   * regen.
    *
    * Keyed by NAME because a name is what an `expr` binds to. Rejects a name
    * outside {@link VARIABLE_NAME_RE} — the app must not be able to mint a
    * variable that no binding could ever name. Case-SENSITIVE.
+   *
+   * Resolves with BOTH truths (W5): `variables` is the table the document really
+   * holds afterwards, and the inherited `terminal` is the verdict of the regen
+   * this edit scheduled. A `terminal: "failed"` does NOT mean the write was
+   * rolled back — the variable was saved and the rebuild that followed failed.
+   * Report it; never revert, and never turn it into a rejection.
    */
-  upsertVariable(name: string, value: number): Promise<DocumentVariable[]>;
+  upsertVariable(name: string, value: number): Promise<VariableEditResult>;
   /**
-   * Delete a variable by name, returning the table afterwards. An unknown name is
-   * REJECTED, never a silent no-op. Records still bound to it are not rewritten:
-   * they fail loudly at regen, which is the WP-VE.1 contract.
+   * Delete a variable by name. An unknown name is REJECTED, never a silent no-op.
+   * Records still bound to it are not rewritten: they fail loudly at regen, which
+   * is the WP-VE.1 contract — and that failure now arrives as this call's
+   * `terminal`, with the deletion standing. Same two-truths contract as
+   * {@link upsertVariable}.
    */
-  removeVariable(name: string): Promise<DocumentVariable[]>;
+  removeVariable(name: string): Promise<VariableEditResult>;
   /**
    * Close the open document, dropping the runtime + caches and returning to the
    * start screen. The backend emits an empty projection so the editor clears.
@@ -580,15 +591,19 @@ export interface CadClient {
    *
    * A recorded mate rides across only when the new component declares an
    * attachment of the same name; otherwise it is dropped, reported in the
-   * returned {@link ReplaceComponentReport}, and the instance holds its frozen
+   * result's {@link ReplaceComponentReport}, and the instance holds its frozen
    * placement. Never silently re-bound to a different attachment.
+   *
+   * Resolves with the correlated regen result, same as
+   * `setComponentParams`/`detachComponent` — read its `terminal`, do not treat
+   * resolution as success (W5).
    */
   replaceComponent(
     recordId: string,
     componentId: string,
     componentVersion: string,
     params?: Record<string, ComponentParamValue>,
-  ): Promise<ReplaceComponentReport>;
+  ): Promise<ReplaceComponentResult>;
 
   /**
    * Whether a newer version of the component behind `recordId` is indexed
