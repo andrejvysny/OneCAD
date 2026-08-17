@@ -6,11 +6,29 @@
 
 - [ ] **Confirm CI green at `6e71da1`** (W2 + the guide-cadence fix pushed 2026-08-16 late; both
       e2e jobs were 230/1 on `sketch-snap-rendering.spec.ts:118` before it).
-- [ ] **Bounded WebKit triage** of `sketch-multi-object.spec.ts:44` (plan
-      `~/.claude/plans/act-as-senior-cad-nested-canyon.md` Phase 1) — time-boxed; two measured
-      hypotheses: the `toolMachine.ts:333-336` degenerate-size refusal under a bad camera metric,
-      and a commit error swallowed by `sketchService.ts:45-46` + the controller's voided promise.
-      Either way the product fix "a swallowed commit error must surface" lands.
+- [x] **Bounded WebKit triage — RAN, not reproduced (35/35 green across warm, 8× cold, and
+      12× CPU-saturated strategies), narrowed on a MEASURED discriminator, diagnostics landed.**
+      The failing run's console signature (`no candidate` → `numeric:height:0.1+width:0.1`) matches
+      the UNSETTLED-camera profile 3/4 (settled: 0/4 — click 1 is deterministically `grid:-36:19:1`
+      with metric off-diagonals exactly 0). So the camera was not in the settled sketch pose when
+      the rectangle was drawn — H1's precondition holds; the swallowed-commit-error hypothesis is
+      disfavoured (a throwing `sketchUpsert` already raises a sticky hint via `solveUpsert`).
+      NOT proven: the mechanism from "unsettled camera" to "0 entities" — oblique metrics at
+      reachable magnitudes still committed 4/4. The next occurrence answers it from artifacts:
+      rectTool's degenerate refusal now reports `{a, b, du, dv, minSize}` (`ToolStep.refused`,
+      logged `fsm` + user hint), and the mutation queue's tail surfaces a swallowed rejection
+      (`logError` + sticky error hint) instead of `.catch(() => undefined)`. The spec's
+      `reenterSketch` now settles the camera — measured: re-entry starts a fresh 250 ms tween the
+      entry-time settle cannot cover (`m01` up to −0.19 vs 0 settled).
+      Residual candidates recorded for a recurrence: `waitForCameraSettled` reads settled when
+      `engine.controls` is still null (mid-init); three silent early-returns in
+      `SketchController.commitNow` (:2179 disposed, :2184 no session, stale-gen null) also
+      produce "0 entities, no error". Only rectTool reports refusals so far — circle/line
+      degenerate branches are still silent, extend if a recurrence points there.
+      Gate: tsc clean · touched-file vitest 79/79 (agent's wider run: sketch+test dirs 1394
+      passed) · `sketch-multi-object` ×15 both projects 30/30 (and ×5 re-verified 10/10) ·
+      adjacency `filletChamfer`+`line` 28/28, `sketch-degenerate` 2/2 · one full-vitest flake
+      (`InspectorPanel.test.tsx`, 3/3 in isolation) — pre-existing, load-dependent, unrelated.
 - [ ] **W3 — DI-5**, the XCAF STEP export, unblocked by W2. Schema decision taken: **AP242**.
 
 ### Gate — 0a + W2 commit + W2.1 rebind hardening (2026-08-16, late session)

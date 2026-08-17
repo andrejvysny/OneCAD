@@ -323,6 +323,25 @@ describe("degeneracy guards — minSize context (C4)", () => {
     expect(ok.committed).toHaveLength(4);
   });
 
+  it("rectTool REPORTS the degenerate refusal with the numbers it refused on", () => {
+    const armed = rectTool.step(rectTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
+    const thin = rectTool.step(armed.state, { kind: "click", pt: { x: 2, y: 50 } }, ctx);
+    // Both plane points and both extents: enough to tell "the user drew a sliver"
+    // from "the click was resolved against the wrong camera" after the fact.
+    expect(thin.refused).toEqual({
+      reason: "degenerate",
+      a: { x: 0, y: 0 },
+      b: { x: 2, y: 50 },
+      du: 2,
+      dv: 50,
+      minSize: 4,
+    });
+    // An accepted corner carries nothing to report.
+    expect(rectTool.step(armed.state, { kind: "click", pt: { x: 40, y: 20 } }, ctx).refused).toBeUndefined();
+    // A move never reports — it is the drag-frequency path.
+    expect(rectTool.step(armed.state, { kind: "move", pt: { x: 2, y: 50 } }, ctx).refused).toBeUndefined();
+  });
+
   it("circleTool ignores a radius below minSize", () => {
     const armed = circleTool.step(circleTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
     const tiny = circleTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx); // r = 2 < 4

@@ -36,10 +36,22 @@ function entityCount(page: Page): Promise<number> {
   });
 }
 
-/** Re-open the sketch the way a user does: double-click its model-tree row. */
+/**
+ * Re-open the sketch the way a user does: double-click its model-tree row.
+ *
+ * Settling afterwards is NOT belt-and-braces: re-entry runs the same
+ * `openSession` → `engine.enterSketch` → `controls.viewAlongNormal(…, animate)`
+ * as the first entry, so it starts a FRESH 250ms tween that the entry-time
+ * settle cannot cover. Measured on this spec (webkit, `?vpdebug` snap traces):
+ * without this wait the post-re-entry gesture's clicks read a plane→screen
+ * metric with `m01` up to -0.19 where a settled sketch view reads exactly 0 —
+ * i.e. the spec was already drawing into a moving camera there, which is the
+ * documented root cause `waitForCameraSettled` exists to remove.
+ */
 async function reenterSketch(page: Page): Promise<void> {
   await sketchOptions(page).last().dblclick();
   await expect(page.getByText(/^Editing /)).toBeVisible();
+  await waitForCameraSettled(page);
 }
 
 test("a rectangle, a separate line, and a post-re-entry line all survive Finish", async ({ page }) => {

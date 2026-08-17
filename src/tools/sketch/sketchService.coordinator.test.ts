@@ -4,9 +4,10 @@
  * flushSketchMutations resolves only once the in-flight upsert settles.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { editConstraintValue, flushSketchMutations } from "./sketchService";
+import { editConstraintValue, enqueueSketchMutation, flushSketchMutations } from "./sketchService";
 import { planeFor } from "@/ipc/mockSketch";
 import { sketchStore } from "@/stores/sketchStore";
+import { viewportStore } from "@/stores/viewportStore";
 import type { CadClient } from "@/ipc/client";
 import type { SketchSession, SketchUpsertResult } from "@/ipc/types";
 
@@ -83,5 +84,31 @@ describe("flushSketchMutations", () => {
     await editP;
     await flushP;
     expect(flushed).toBe(true);
+  });
+});
+
+/*
+ * Every caller `void`s the promise the queue hands back, and the chain's own
+ * `.catch` marks the rejection handled — so a throw that escaped a verb's
+ * try/catch used to leave no trace anywhere: no hint, no console, no
+ * `pageerror`. Identical on screen to "the click did nothing".
+ */
+describe("a rejected mutation surfaces", () => {
+  beforeEach(() => {
+    sketchStore.getState().reset();
+    viewportStore.getState().setStatusHint(null);
+  });
+
+  it("publishes an error hint and leaves the queue usable", async () => {
+    const boom = enqueueSketchMutation(() => Promise.reject(new Error("kaboom")));
+    await expect(boom).rejects.toThrow("kaboom");
+    await flushSketchMutations();
+
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.message).toBe("Sketch edit failed: kaboom");
+    expect(hint?.severity).toBe("error");
+
+    // The next mutation still runs — one failure must not wedge the chain.
+    await expect(enqueueSketchMutation(() => Promise.resolve("next"))).resolves.toBe("next");
   });
 });

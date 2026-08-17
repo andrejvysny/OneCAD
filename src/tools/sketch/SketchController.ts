@@ -140,6 +140,7 @@ import {
   type ToolConstraintSpec,
   type ToolEvent,
   type ToolMachine,
+  type ToolRefusal,
   type ToolState,
   type ToolStep,
 } from "./toolMachine";
@@ -1920,6 +1921,36 @@ export class SketchController {
     this.syncLiveDims(stepped.dims ?? []);
     if (this.machine?.id === "polygon") this.updatePolygonHint();
     else if (this.machine?.id === "line") this.updateLineHint();
+    // LAST: the per-tool hints above are the idle prompt for the phase the click
+    // landed in, so a refusal reported before them would be immediately painted over.
+    if (stepped.refused) this.reportRefusal(stepped.refused);
+  }
+
+  /**
+   * Say WHY a click the machine refused produced nothing (`ToolRefusal`).
+   *
+   * A degenerate-extent refusal keeps the anchor armed and commits nothing, which
+   * on screen is indistinguishable from a click that never arrived — the user
+   * reads it as a broken tool, and a failing e2e run sees only a zero count. Both
+   * halves matter: the hint is the user's answer, the log carries the measured
+   * extents + plane points that separate "the user really did click a zero-width
+   * box" from "the click was resolved against the wrong camera".
+   *
+   * On the click path only (`applySteppedClick`), never the pointer-move path.
+   */
+  private reportRefusal(refused: ToolRefusal): void {
+    logDebug("fsm", `sketch/${this.machine?.id ?? "?"}: refused ${refused.reason}`, {
+      tool: this.machine?.id,
+      reason: refused.reason,
+      du: refused.du,
+      dv: refused.dv,
+      minSize: refused.minSize,
+      a: [refused.a.x, refused.a.y],
+      b: [refused.b.x, refused.b.y],
+    });
+    viewportStore
+      .getState()
+      .setStatusHint("Too small to draw — click further from the first corner");
   }
 
   // ── live dimension chips (SP-1 Wave 3) ────────────────────────────────────

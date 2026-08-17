@@ -12,6 +12,7 @@ import type {
   SketchSession,
   SketchUpsertResult,
 } from "@/ipc/types";
+import { logError } from "@/debug/log";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { documentStore, docSketchStatus } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -43,8 +44,27 @@ import { constraintMarshalBlocker } from "./sketchTopology";
 let sketchMutationChain: Promise<unknown> = Promise.resolve();
 export function enqueueSketchMutation<T>(fn: () => Promise<T>): Promise<T> {
   const run = sketchMutationChain.then(fn, fn);
-  sketchMutationChain = run.catch(() => undefined);
+  sketchMutationChain = run.catch(reportMutationFailure);
   return run;
+}
+
+/**
+ * The queue tail is the ONLY observer of a rejected mutation: every caller
+ * `void`s the promise it gets back, and the `.catch()` that keeps the chain
+ * alive already marks the rejection handled. So a throw escaping a verb's own
+ * try/catch (`commitNow`'s store/engine write-back, `draftToEntityFields`, the
+ * constraint inference…) used to leave NOTHING — no console line, no
+ * `pageerror`, no visible change — which reads to the user as "the click did
+ * nothing" and to a failing e2e run as an unexplained zero count. Report it the
+ * way every other sketch refusal is reported, and keep the structured log so the
+ * `fe` lane carries the stack.
+ */
+function reportMutationFailure(e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e);
+  logError("sketch", `mutation failed: ${msg}`, { err: e });
+  viewportStore
+    .getState()
+    .setStatusHint(`Sketch edit failed: ${msg}`, { severity: "error", sticky: true });
 }
 
 /**

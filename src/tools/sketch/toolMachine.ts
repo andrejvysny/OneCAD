@@ -147,12 +147,33 @@ export interface ToolConstraintSpec {
   positions?: (ConstraintPosition | undefined)[];
 }
 
+/**
+ * A click the machine deliberately REFUSED, with the numbers it refused it on.
+ *
+ * Set only where a refusal is indistinguishable from a dropped click — the
+ * degenerate-extent branches, which keep the anchor armed and commit nothing.
+ * The controller both logs it and tells the user; a machine stays pure and
+ * neither logs nor touches a store. Never set on a `move` (drag-frequency).
+ */
+export interface ToolRefusal {
+  reason: "degenerate";
+  /** The armed anchor and the refused click, in plane (u,v). */
+  a: Point2;
+  b: Point2;
+  /** The extents measured between them, and the floor they failed. */
+  du: number;
+  dv: number;
+  minSize: number;
+}
+
 export interface ToolStep {
   state: ToolState;
   preview: DraftEntity[];
   committed?: DraftEntity[];
   /** Tool-authored constraints over `committed` (see `ToolConstraintSpec`). */
   committedConstraints?: ToolConstraintSpec[];
+  /** Why this step produced nothing, when the machine refused it on purpose. */
+  refused?: ToolRefusal;
   /** True when the current gesture ended (chain closed / entity committed). */
   done?: boolean;
   /** Live dimension chips for the gesture's CURRENT phase. Emitted only by the
@@ -330,10 +351,17 @@ export const rectTool: ToolMachine = {
     const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const corner = state.anchors[0] ?? null;
     if (!corner) return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
-    if (Math.abs(event.pt.x - corner.x) < minSize || Math.abs(event.pt.y - corner.y) < minSize) {
+    const du = Math.abs(event.pt.x - corner.x);
+    const dv = Math.abs(event.pt.y - corner.y);
+    if (du < minSize || dv < minSize) {
       // Degenerate rectangle (zero-extent on either axis) — ignore this click, keep
-      // waiting for a real corner.
-      return { state: { anchors: [corner], cursor: event.pt }, preview: [] };
+      // waiting for a real corner. REPORTED, not silent: an unexplained refusal here
+      // is the exact signature of a click resolved against a moving camera.
+      return {
+        state: { anchors: [corner], cursor: event.pt },
+        preview: [],
+        refused: { reason: "degenerate", a: corner, b: event.pt, du, dv, minSize },
+      };
     }
     return { state: emptyState(), preview: [], committed: rectLines(corner, event.pt), done: true };
   },
