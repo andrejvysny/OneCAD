@@ -65,7 +65,15 @@ export const config: WebdriverIO.Config = {
   outputDir: resultsDir,
   afterTest: async (_test, _context, result) => {
     if (!result.passed) {
-      await browser.saveScreenshot(resolve(resultsDir, "failure.png"));
+      // Guarded: the 2026-08-16 CI failure showed a wedged in-app driver channel
+      // makes this screenshot HANG (2 further minutes of noise after the real
+      // failure). A diagnostic must never extend the outage it is documenting.
+      await Promise.race([
+        browser.saveScreenshot(resolve(resultsDir, "failure.png")),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("failure screenshot timed out (driver wedged?)")), 15_000),
+        ),
+      ]).catch((err) => console.error(`afterTest screenshot skipped: ${err}`));
     }
   },
 };

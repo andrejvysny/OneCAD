@@ -480,10 +480,15 @@ export async function waitForCameraSettled(page: Page): Promise<void> {
   // settled sketch view reads 0), i.e. the clicks were resolved against a camera
   // still tweening into the plane, and the rectangle they described was refused
   // as degenerate — 0 entities, no error. Fail loudly instead.
-  const hasEngine = await page.evaluate(
-    () => (window as unknown as { __vpEngine?: unknown }).__vpEngine !== undefined,
-  );
-  if (!hasEngine) {
+  // …but the handle appears ASYNCHRONOUSLY after the editor mounts, so a
+  // one-shot check races engine init: measured on CI (webkit, slow runner),
+  // line.spec booted with `openEditorDebug` and still hit the throw here.
+  // Poll for it; only a PERSISTENT absence means the spec forgot `?vpdebug`.
+  const hasEngine = (): Promise<boolean> =>
+    page.evaluate(() => (window as unknown as { __vpEngine?: unknown }).__vpEngine !== undefined);
+  try {
+    await expect.poll(hasEngine, { timeout: 10_000, intervals: [50, 100, 200] }).toBe(true);
+  } catch {
     throw new Error(
       "waitForCameraSettled: window.__vpEngine missing — boot with openEditorDebug (?vpdebug), " +
         "otherwise this helper cannot observe the camera and would return immediately",
@@ -493,6 +498,9 @@ export async function waitForCameraSettled(page: Page): Promise<void> {
   // so a fit can be scheduled-but-not-started and would begin moving the camera
   // after this helper already returned — invalidating any client coordinate the
   // caller computed from a probe. `autoFitPending` covers that window.
+  // `controls` still null means the engine is MID-INIT — the camera is about to
+  // move, which is the opposite of settled. `!engine?.controls?.tween` read that
+  // state as true (same class of hole as the vpdebug one above).
   const isSettled = (): Promise<boolean> =>
     page.evaluate(() => {
       const engine = (
@@ -500,7 +508,8 @@ export async function waitForCameraSettled(page: Page): Promise<void> {
           __vpEngine?: { controls?: { tween: unknown } | null; autoFitPending?: boolean };
         }
       ).__vpEngine;
-      return !engine?.controls?.tween && !engine?.autoFitPending;
+      if (!engine?.controls) return false;
+      return !engine.controls.tween && !engine.autoFitPending;
     });
 
   await expect(async () => {

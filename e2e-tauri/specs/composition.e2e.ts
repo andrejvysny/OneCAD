@@ -86,13 +86,74 @@ const artifact = resolve(
   process.env.ONECAD_TAURI_E2E_DOCUMENT ?? "e2e-tauri/results/composition.onecad",
 );
 
-async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+/**
+ * Commands with no app-side state change: safe to re-send once when the bridge
+ * loses a response. Anything mutating retries NEVER — a re-sent `undo` is a
+ * second undo.
+ */
+const READ_ONLY_COMMANDS = new Set([
+  "get_projection",
+  "composition_status",
+  "query_mass_properties",
+  "query_body_topology",
+  "get_sketch_regions",
+]);
+
+/** Named fast-fail budget per bridged invoke — see the timeout note below. */
+const INVOKE_TIMEOUT_MS = 30_000;
+
+async function invokeOnce<T>(command: string, args: Record<string, unknown>): Promise<T> {
   const result = await browser.tauri.execute(
     (tauri, cmd, callArgs) => tauri.core.invoke(cmd, callArgs),
     command,
     args,
   );
   return result as T;
+}
+
+/**
+ * `browser.tauri.execute` rides the app's embedded wdio-webdriver channel, and
+ * that channel can WEDGE: the 2026-08-16 CI failure shows the whole flow healthy
+ * through the undo publish (app `dev.jsonl` idle-heartbeating for 5 further
+ * minutes, zero errors) while the NEXT bridged invoke never reached the app —
+ * no custom-protocol hit, the `waitUntil` burned its full 60s, and the run died
+ * as an anonymous 180s mocha timeout plus a hung screenshot. An un-budgeted
+ * await on this bridge turns one lost response into an unattributable failure.
+ * So: every invoke gets a NAMED timeout, and read-only commands get one retry —
+ * a lost read response is recoverable, a lost mutation response is not (the
+ * mutation may have applied, so re-sending it would double-apply).
+ */
+async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  const attempts = READ_ONLY_COMMANDS.has(command) ? 2 : 1;
+  let lastTimeout: Error | undefined;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        invokeOnce<T>(command, args),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `invoke ${command} did not return within ${INVOKE_TIMEOUT_MS}ms ` +
+                    `(attempt ${attempt}/${attempts}) — wedged wdio bridge?`,
+                ),
+              ),
+            INVOKE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch (err) {
+      if (!(err instanceof Error) || !err.message.startsWith(`invoke ${command} did not return`)) {
+        throw err; // a real command failure, not the bridge budget
+      }
+      lastTimeout = err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastTimeout ?? new Error(`invoke ${command}: unreachable`);
 }
 
 async function waitProjection(

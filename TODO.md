@@ -4,8 +4,10 @@
 
 ### NOW — the next three actions, in order
 
-- [ ] **Confirm CI green at `6e71da1`** (W2 + the guide-cadence fix pushed 2026-08-16 late; both
-      e2e jobs were 230/1 on `sketch-snap-rendering.spec.ts:118` before it).
+- [ ] **Confirm CI green at the 2026-08-17 push** (helper poll fix + composition-lane bridge
+      budgets). The `6e71da1` run answered the previous NOW item and found two NEW reds, both
+      triaged on artifact evidence (entry below): `sketch-snap-rendering` itself now PASSES on CI —
+      the cadence fix held.
 - [x] **Bounded WebKit triage — RAN, not reproduced (35/35 green across warm, 8× cold, and
       12× CPU-saturated strategies), narrowed on a MEASURED discriminator, diagnostics landed.**
       The failing run's console signature (`no candidate` → `numeric:height:0.1+width:0.1`) matches
@@ -30,6 +32,31 @@
       adjacency `filletChamfer`+`line` 28/28, `sketch-degenerate` 2/2 · one full-vitest flake
       (`InspectorPanel.test.tsx`, 3/3 in isolation) — pre-existing, load-dependent, unrelated.
 - [ ] **W3 — DI-5**, the XCAF STEP export, unblocked by W2. Schema decision taken: **AP242**.
+
+### Gate — CI triage at `6e71da1` (2026-08-17): two reds, both measured, neither the cadence fix
+
+- [x] **`e2e-webkit` 230/1 — `line.spec.ts`, `waitForCameraSettled: __vpEngine missing` — an INIT
+      race in the helper's own W1b hardening, not a missing `?vpdebug`.** The spec boots
+      `openEditorDebug` (line.spec.ts:21); the handle appears asynchronously after the editor
+      mounts, and the helper's one-shot presence check threw on a slow runner. Fixed: the helper
+      now POLLS for `__vpEngine` (10s, then the same instructive throw), and `controls == null`
+      (engine mid-init) now reads NOT settled — closing the hole the WebKit-triage agent reported
+      (`!engine?.controls?.tween` was true with `controls` null). Verified: `line` +
+      `sketch-multi-object` 4/4 both projects locally.
+- [x] **`tauri-composition` — 180s mocha timeout. Measured from the run's own artifacts
+      (`dev.jsonl` + driver logs), not guessed: the app was HEALTHY and idle.** The whole flow
+      through the undo published at 21:17:12.637 (epoch 1, zero `"level":"ERROR"`, worker
+      heartbeats continuing to 21:22); the NEXT bridged invoke never produced a custom-protocol
+      hit — the app-embedded wdio-webdriver channel WEDGED. The undo-`waitUntil` burned its 60s
+      (screenshot attempt at exactly +60s), and the afterTest screenshot then hung on the same
+      wedged channel for two more minutes. Third-party plugin wedge
+      (`tauri-plugin-wdio-webdriver`), once-observed, CI-only. Proportionate response, not a wry
+      debug: every bridged `invoke` now carries a NAMED 30s budget (`invoke <cmd> did not return…
+      wedged wdio bridge?`), read-only commands retry ONCE (a re-sent mutation could double-apply,
+      so mutations never retry), and the failure screenshot is raced against 15s so a diagnostic
+      cannot extend the outage. A recurrence now reports the exact command instead of an anonymous
+      180s. `bunx tsc -p e2e-tauri/tsconfig.json --noEmit` clean; the packaged lane itself is
+      CI-validated (no local bundle rebuilt for a test-only change).
 
 ### Gate — 0a + W2 commit + W2.1 rebind hardening (2026-08-16, late session)
 
