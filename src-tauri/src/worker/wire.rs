@@ -1440,13 +1440,33 @@ pub fn tessellate_args(req: &TessellateRequest) -> Value {
 }
 
 /// `ExportStep.args` (SCHEMA §7.8).
+///
+/// `bodyNames` / `bodyColors` / `faceColors` are ADDITIVE (DI-5) and each is omitted
+/// when empty, so an attribute-less export is byte-identical to the pre-DI-5 request
+/// the worker's older behaviour is pinned against.
 #[must_use]
-pub fn export_step_args(path: &str, bodies: &[BodyId], schema: &str) -> Value {
-    json!({
+pub fn export_step_args(
+    path: &str,
+    bodies: &[BodyId],
+    schema: &str,
+    attributes: &crate::export::StepExportAttributes,
+) -> Value {
+    let mut args = json!({
         "path": path,
         "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
         "schema": schema,
-    })
+    });
+    let obj = args.as_object_mut().expect("json! built an object");
+    if !attributes.body_names.is_empty() {
+        obj.insert("bodyNames".into(), json!(attributes.body_names));
+    }
+    if !attributes.body_colors.is_empty() {
+        obj.insert("bodyColors".into(), json!(attributes.body_colors));
+    }
+    if !attributes.face_colors.is_empty() {
+        obj.insert("faceColors".into(), json!(attributes.face_colors));
+    }
+    args
 }
 
 /// `ExportStl.args` (SCHEMA §7.8): `{path, bodyIds, binary, lod}`.

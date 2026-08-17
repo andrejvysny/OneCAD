@@ -31,7 +31,12 @@
       passed) · `sketch-multi-object` ×15 both projects 30/30 (and ×5 re-verified 10/10) ·
       adjacency `filletChamfer`+`line` 28/28, `sketch-degenerate` 2/2 · one full-vitest flake
       (`InspectorPanel.test.tsx`, 3/3 in isolation) — pre-existing, load-dependent, unrelated.
-- [ ] **W3 — DI-5**, the XCAF STEP export, unblocked by W2. Schema decision taken: **AP242**.
+- [x] **W3 — DI-5**, the XCAF STEP export, unblocked by W2. Schema resolved to **AP242DIS** (the
+      only AP242 value OCCT 8.0.1 accepts). See `### W3 — DI-5` below. Gates re-run on the main
+      thread before commit: ctest 136/136 · cargo 1289/0 · fmt/clippy clean.
+- [ ] **W4 — 3MF export** (Rust-side writer; per-face colour IN — MESH1's `FACE_COLORS` section +
+      id tables carry everything needed; mechanism in plan
+      `~/.claude/plans/act-as-senior-cad-nested-canyon.md` Phase 3).
 
 ### Gate — CI triage at `6e71da1` (2026-08-17): two reds, both measured, neither the cadence fix
 
@@ -253,6 +258,58 @@ implementable reuses the machinery the ladder already has, and adds no new resol
 
 Sequenced ahead of W3 because a STEP export is only worth writing colours into once a reopened
 document still knows which face each colour belongs to.
+
+### W3 — DI-5: the XCAF STEP export — **LANDED (uncommitted)**
+
+- [x] **`worker/src/io/ExportStep.cpp` builds a real XCAF document** (`XCAFDoc_ShapeTool` +
+      `XCAFDoc_ColorTool`) and writes it with `STEPCAFControl_Writer`. The bare `STEPControl_Writer`
+      it replaces can express geometry and nothing else, so every export silently dropped the body
+      names and every face colour — including the ones an `ImportStep` had just brought in.
+      Colours go out through `io::unpack_srgb`, extracted from `XcafCodec` as the ONE inverse of the
+      import lane's `pack_srgb`, so `import(export(x))` is identity on the colour bytes.
+- [x] **Colour precedence, lowest first:** the worker's own import-derived `BodyRecord::face_colors`
+      → the wire `bodyColors` (on the body's own label, which is what `XcafRead`'s inherited pass
+      reads back as a part colour) → the wire `faceColors` per TopoKey. A file that came in coloured
+      leaves coloured even when the user authored nothing; anything authored wins.
+- [x] **Face colours are keyed by TopoKey and resolved RUST-SIDE.** `export.rs` gains
+      `pending_step_attributes` (sync, under the runtime lock) + `resolve_face_colors` (async,
+      outside it — `QueryElement` per authored colour), and `api::export_step_file` composes the
+      two. An `ElementId` that does not resolve is OMITTED with a `tracing::warn!`, never nudged
+      onto a neighbouring ordinal; a `topoKey` the worker cannot address is dropped and counted in
+      the new `unresolvedFaceColors`. H5-B posture on both sides of the wire.
+- [x] **AP242 decision resolved against the pinned OCCT.** `write.step.schema` is an ENUM;
+      8.0.1 knows `AP214CD` / `AP214DIS` / `AP203` / `AP214IS` / `AP242DIS` and there is **no
+      `AP242IS`** (verified from the enum help string in `libTKDESTEP`, and against
+      `DESTEP_Parameters.hxx:114`). `export_step_file` sends **`"AP242DIS"`**. The knob now runs
+      under `InterfaceStaticGuard` (the raw `SetCVal` leaked process-wide) and `set_cstr` returns
+      whether OCCT accepted the value, so an unknown schema is a loud `OP_FAILED` instead of a
+      silent fallback to AP214IS.
+- [x] `protocol/SCHEMA.md` §7.8 payload doc rewritten + §14 entry dated 2026-08-17. Additive only;
+      `protocol/fixtures/` carries no `ExportStep` flow, so nothing to bump.
+- [x] **Tests assert VALUES, not "a file was written".** `worker/tests/test_exportstep_xcaf.cpp`
+      (ctest `exportstep_xcaf`, 4 scenarios) exports and reads back through the real
+      `read_step_attributes` lane: authored name + body colour + per-face overrides; a stale TopoKey
+      dropped not guessed; import-derived colours surviving with an authored override on top; and an
+      unknown schema refused with the knob restored. Stdout hygiene is gated across export AND
+      read-back. `src-tauri/tests/step_export_attributes.rs` (3 tests) drives the production pair
+      through save → reopen in a FRESH worker → DI-4 rebind → export → re-import in a THIRD worker,
+      and identifies the painted face geometrically (highest centroid) so "the user's colour on the
+      user's face" is what is asserted, not "one face is red".
+- Gate: `scripts/build-worker.sh Release` clean · **ctest 136/136** (was 135, +1 new target) ·
+      `cargo fmt --check` + `clippy --workspace --all-targets -D warnings` clean ·
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **1289 passed / 0 failed**
+      (was 1286, +3) · `--test step_import` 7/7 · `--test step_import_gate` 1/1 ·
+      `--test face_color_reopen` 2/2 · `--test mesh_face_colors` 1/1 · `ctest -R exportstep` 2/2.
+- Frontend untouched (the FE command surface does not change). The manual Tauri gate — actually
+      seeing an exported file open coloured in another CAD — rides the owed manual USER gates.
+- **Found while there, recorded not fixed:** (1) **`rebind_persisted_elements` does not seed the
+      promotion cache** — after a reopen, re-picking the SAME face mints a FRESH ElementId and
+      orphans the colour stored under the old one; Invariant 1 holds in-session but not across a
+      reopen. Candidate **W3.1** (small: seed `promoted` from the rebound bindings).
+      (2) Two bodies sharing one TShape would collapse onto one XCAF label — guarded
+      (attributes skipped + `label_shared` warn), believed unreachable today. (3)
+      `step_fixture_util.h:150,266` still call raw `Interface_Static::SetCVal` — test-only,
+      same leak class production just closed.
 
 ### W1b — the two remaining browser-lane rows, both closed on measured causes
 
@@ -1580,11 +1637,12 @@ remain open under T3.
 
 ### T3 — make the machined-parts deliverable faithful
 
-- [ ] **DI-5 — STEP export is lossy.** Import replays XCAF names and colours;
+- [x] **DI-5 — STEP export is lossy.** ~~Import replays XCAF names and colours;
       export is a bare `STEPControl_Writer` with no XCAF document, so a file that
-      came in coloured leaves grey. For the machined-parts priority the exported
-      STEP *is* the deliverable, which makes this the highest-value non-integrity
-      item on the list.
+      came in coloured leaves grey.~~ **CLOSED 2026-08-17** by W3 of the Trust &
+      Deliverable program (see `### W3 — DI-5` above): `STEPCAFControl_Writer` over
+      a real XCAF document, names + body colour + per-face colours, AP242DIS,
+      round-trip-proved on values in both ctest and a worker-backed Rust suite.
 - [ ] **DI-4 — an authored face colour stops being paintable after a reopen.**
       Nothing re-binds a persisted `ElementId` at open, so both frontend paint
       paths come up empty. Same root as the retired W5 seam: **one fix closes
@@ -2182,11 +2240,13 @@ another package does not tick anyone else's box.
       `None`. In-session controls sit beside both measurements, and the assertion was
       **mutation-proved** (inverting it reds the test). Same root as the W5 seam, so one fix —
       re-binding persisted ElementIds at open — closes both.
-- [ ] **DI-5 (LOW-MEDIUM) — the STEP round-trip is lossy on the way out.** Import keeps XCAF names
-      and colours (BinXCAF replay, `SCHEMA.md:2373`), but export is a bare `STEPControl_Writer`
-      (`worker/src/io/ExportStep.cpp:12,52,59`) with no XCAF document, so names and colours are
-      dropped. A file that came in coloured leaves grey. Relevant to the machined-parts priority,
-      where the exported STEP is the deliverable.
+- [x] **DI-5 (LOW-MEDIUM) — the STEP round-trip is lossy on the way out.** Import keeps XCAF names
+      and colours (BinXCAF replay, `SCHEMA.md:2373`), but export was a bare `STEPControl_Writer`
+      (`worker/src/io/ExportStep.cpp:12,52,59`) with no XCAF document, so names and colours were
+      dropped. A file that came in coloured left grey. **CLOSED 2026-08-17** (W3) —
+      `STEPCAFControl_Writer` over a real XCAF document, three additive §7.8 args, schema AP242DIS,
+      values proved by round trip in `worker/tests/test_exportstep_xcaf.cpp` and
+      `src-tauri/tests/step_export_attributes.rs`.
 
 Gates for the audit itself (measured 2026-08-14): `cargo fmt --all --check` clean · `cargo clippy
 --workspace --all-targets -D warnings` clean · worker-backed

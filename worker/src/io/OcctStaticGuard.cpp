@@ -47,8 +47,9 @@ void InterfaceStaticGuard::set_real(const char* name, double value) {
     if (remember(name, Kind::Real)) Interface_Static::SetRVal(name, value);
 }
 
-void InterfaceStaticGuard::set_cstr(const char* name, const std::string& value) {
-    if (remember(name, Kind::Str)) Interface_Static::SetCVal(name, value.c_str());
+bool InterfaceStaticGuard::set_cstr(const char* name, const std::string& value) {
+    if (!remember(name, Kind::Str)) return false;
+    return Interface_Static::SetCVal(name, value.c_str()) == Standard_True;
 }
 
 void InterfaceStaticGuard::watch_int(const char* name) { remember(name, Kind::Int); }

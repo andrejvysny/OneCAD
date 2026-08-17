@@ -54,28 +54,6 @@ constexpr TDocStd_FormatVersion kWriteVersion = TDocStd_FormatVersion_VERSION_12
 static_assert(static_cast<int>(kWriteVersion) == kXcafFormatVersion,
               "kXcafFormatVersion must equal the OCAF storage version actually written");
 
-// RAII close: an OCAF document left open stays in the application's session and
-// keeps its whole shape tree alive for the life of the process.
-class DocGuard {
-public:
-    explicit DocGuard(const Handle(TDocStd_Document) & doc) : doc_(doc) {}
-    ~DocGuard() {
-        if (!doc_.IsNull()) {
-            try {
-                ocaf_application()->Close(doc_);
-            } catch (const Standard_Failure&) {
-                // Closing must never throw out of a destructor; a failure here
-                // leaks one document, which is strictly better than terminating.
-            }
-        }
-    }
-    DocGuard(const DocGuard&) = delete;
-    DocGuard& operator=(const DocGuard&) = delete;
-
-private:
-    Handle(TDocStd_Document) doc_;
-};
-
 std::string magic_error(const std::string& path, std::string& bytes_out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return "xbf file is not readable: " + path;
@@ -160,6 +138,17 @@ PackedColor pack_srgb(const Quantity_ColorRGBA& color) {
            (to_u8(static_cast<float>(rgb.Blue())) << 8) | a;
 }
 
+Quantity_ColorRGBA unpack_srgb(PackedColor color) {
+    // Round-trip in the SAME space: the packed bytes are sRGB, and
+    // `Quantity_Color(…, Quantity_TOC_sRGB)` converts back to OCCT's internal linear
+    // form, so `pack_srgb` on the read side returns exactly these bytes again.
+    const Quantity_Color rgb(static_cast<double>((color >> 24) & 0xff) / 255.0,
+                             static_cast<double>((color >> 16) & 0xff) / 255.0,
+                             static_cast<double>((color >> 8) & 0xff) / 255.0,
+                             Quantity_TOC_sRGB);
+    return Quantity_ColorRGBA(rgb, static_cast<float>(color & 0xff) / 255.0f);
+}
+
 std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
                                 const std::vector<SolidAttributes>& attrs,
                                 std::vector<std::uint8_t>& bytes_out) {
@@ -168,7 +157,7 @@ std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
         Handle(TDocStd_Document) doc;
         ocaf_application()->NewDocument(kStorageFormat, doc);
         if (doc.IsNull()) return "XcafCodec: could not create a BinXCAF document";
-        DocGuard guard(doc);
+        OcafDocGuard guard(doc);
         doc->ChangeStorageFormatVersion(kWriteVersion);
 
         Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
@@ -197,17 +186,7 @@ std::string write_xcaf_document(const std::vector<TopoDS_Shape>& solids,
                 const PackedColor c = a.face_colors[idx];
                 const TDF_Label sub = shapes->AddSubShape(label, faces(i));
                 if (sub.IsNull()) continue;  // face not addressable — color dropped
-                // Round-trip in the SAME space: the packed bytes are sRGB, and
-                // `Quantity_Color(…, Quantity_TOC_sRGB)` converts back to OCCT's
-                // internal linear form, so `pack_srgb` on the read side returns
-                // exactly these bytes again.
-                const Quantity_Color rgb(static_cast<double>((c >> 24) & 0xff) / 255.0,
-                                         static_cast<double>((c >> 16) & 0xff) / 255.0,
-                                         static_cast<double>((c >> 8) & 0xff) / 255.0,
-                                         Quantity_TOC_sRGB);
-                colors->SetColor(sub,
-                                 Quantity_ColorRGBA(rgb, static_cast<float>(c & 0xff) / 255.0f),
-                                 XCAFDoc_ColorSurf);
+                colors->SetColor(sub, unpack_srgb(c), XCAFDoc_ColorSurf);
             }
         }
 
@@ -258,7 +237,7 @@ XcafReadResult read_xcaf_solids(const std::string& path) {
                         std::to_string(static_cast<int>(status)) + "): " + path;
             return out;
         }
-        DocGuard guard(doc);
+        OcafDocGuard guard(doc);
 
         Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
         Handle(XCAFDoc_ColorTool) colors = XCAFDoc_DocumentTool::ColorTool(doc->Main());

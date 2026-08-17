@@ -2876,12 +2876,63 @@ Bakes live bodies into one of the **§7.3 replay codecs** — the byte forms
 
 ```json
 // req.args
-{ "path": "/tmp/onecad/export_cd34.step", "bodyIds": ["body_3"], "schema": "AP214IS" }
+{
+  "path": "/tmp/onecad/export_cd34.step",
+  "bodyIds": ["body_3"],
+  "schema": "AP242DIS",
+  "bodyNames":  { "body_3": "Bracket" },
+  "bodyColors": { "body_3": [20, 40, 60, 255] },
+  "faceColors": { "body_3": { "f:5": [200, 30, 30, 255] } }
+}
 // result
-{ "written": true, "bytes": 40211 }
+{ "written": true, "bytes": 40211,
+  "namedBodies": 1, "coloredFaces": 1, "unresolvedFaceColors": 0 }
 ```
 
-`schema` currently `"AP214IS"`.
+`path`, `bodyIds` (omitted ⇒ every live body) and `schema` are the original
+arguments; `bodyNames` / `bodyColors` / `faceColors` are **optional and additive**
+(2026-08-17). All three absent is byte-identical to the pre-DI-5 request and the
+worker writes geometry only.
+
+`schema` is forwarded to OCCT's process-global `write.step.schema` knob, under an
+`InterfaceStaticGuard` that restores the previous value — a leaked value would
+re-schema every later export in the same worker. The knob is an ENUM: OCCT 8.0.1
+accepts `AP214CD` / `AP214DIS` / `AP203` / `AP214IS` / `AP242DIS` and **nothing
+else** (there is no `AP242IS`). A value it refuses is a loud recoverable
+`OP_FAILED`, never a silent fallback to the AP214IS default. The app sends
+`"AP242DIS"`.
+
+Attributes are written through `STEPCAFControl_Writer` over a real XCAF document,
+which is the only writer that can emit product names and `surface_style_usage`:
+
+- **`bodyNames`** — `bodyId → string`, written as the body label's `TDataStd_Name`
+  and read back by an importer as the STEP product name. An empty/absent name
+  leaves the body unnamed.
+- **`bodyColors`** — `bodyId → [r,g,b,a]`, u8 **sRGB**, written on the body's own
+  label with `XCAFDoc_ColorSurf`. XCAF does not resolve a label colour downward, so
+  a reader recovers it exactly the way `InspectStep` does: as the colour of every
+  face that took no colour of its own.
+- **`faceColors`** — `bodyId → { topoKey → [r,g,b,a] }`, written per face with
+  `XCAFDoc_ColorSurf`.
+
+Colour precedence per face, lowest first: the worker's own **import-derived**
+colours (`BodyRecord::face_colors`, from an `ImportStep`), then `bodyColors`, then
+`faceColors`. A file that came in coloured therefore leaves coloured even when the
+user authored nothing, and anything the user did author wins.
+
+**Face colours are keyed by `TopoKey`, and Rust resolves them.** The document
+stores a face colour against a persistent `ElementId`; Rust maps each one to the
+`TopoKey` it currently names (`QueryElement`) against the snapshot the export runs
+on, and simply **omits** an id that does not resolve — a face an edit consumed, or
+a re-bind the §7.5 ladder refused. Neither side may nudge a colour onto a
+neighbouring ordinal: a wrong colour on a real face looks entirely successful,
+which is the mis-bind class §7.5 exists to prevent. A `topoKey` that addresses no
+face of that body is likewise dropped and counted in `unresolvedFaceColors`. This
+is the one approved transient use of a `TopoKey` in a request — it is never
+persisted.
+
+`namedBodies` / `coloredFaces` / `unresolvedFaceColors` are advisory counts of what
+the file actually carries.
 
 #### ExportStl
 
@@ -3224,6 +3275,31 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-17 — §7.8 `ExportStep` carries body NAMES and per-face COLOURS
+  (DI-5 W3); the app switches to AP242.** Three ADDITIVE optional args —
+  `bodyNames` (`bodyId → string`), `bodyColors` (`bodyId → [r,g,b,a]`) and
+  `faceColors` (`bodyId → { topoKey → [r,g,b,a] }`, u8 sRGB throughout) — plus
+  three advisory result counts (`namedBodies`, `coloredFaces`,
+  `unresolvedFaceColors`). All three args absent is byte-identical to the previous
+  request, so no fixture moves (`protocol/fixtures/` carries no `ExportStep` flow).
+  The worker now builds a real XCAF document and writes it with
+  `STEPCAFControl_Writer` instead of the bare `STEPControl_Writer`, which could
+  express geometry and nothing else — so every export silently dropped the body
+  names and every face colour, including the ones an `ImportStep` had just brought
+  in. Colours convert through the exact inverse of the import lane's `pack_srgb`,
+  making `import(export(x))` identity on the colour bytes. Precedence per face,
+  lowest first: worker-held import-derived colour, then `bodyColors`, then
+  `faceColors`. **Face colours are keyed by `TopoKey` and RESOLVED RUST-SIDE** from
+  the persistent `ElementId` the document stores, against the snapshot the export
+  runs on; an id that does not resolve (a consumed face, or a §7.5 re-bind the
+  ladder refused) is OMITTED and counted, never nudged onto a neighbouring
+  ordinal. This is the one approved transient `TopoKey` in a request — it is never
+  persisted. `schema` is now set under an `InterfaceStaticGuard` (the raw
+  `SetCVal` leaked process-wide) and a value OCCT refuses is a loud recoverable
+  `OP_FAILED` instead of a silent fallback to the default: OCCT 8.0.1's
+  `write.step.schema` enum knows `AP214CD` / `AP214DIS` / `AP203` / `AP214IS` /
+  `AP242DIS` and no `AP242IS`, so the app's `export_step_file` sends
+  **`"AP242DIS"`** (was `"AP214IS"`).
 - **2026-08-15 — §7.3 two ADDITIVE sketch constraint kinds: `HorizontalPoints`
   and `VerticalPoints`.** The kind count goes 18 → 20. Both take two POINT slots
   (owner+role `positions` accepted on either side) and carry no value;

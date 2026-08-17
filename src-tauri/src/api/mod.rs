@@ -611,8 +611,28 @@ pub(crate) fn decode_preview_png(encoded: Option<String>) -> Option<Vec<u8>> {
 
 /// Exports every body at head to a STEP file (`CadClient.exportStep`). `path`
 /// `None` shows a native save dialog (`.step` filter); a cancel resolves to `None`.
-/// Schema is AP214 (`"AP214IS"`); returns the written path. Rust owns the dialog
-/// and the worker `ExportStep` verb (the webview has zero fs capability).
+/// Returns the written path. Rust owns the dialog and the worker `ExportStep` verb
+/// (the webview has zero fs capability).
+///
+/// Schema is **AP242** (`"AP242DIS"`, the only AP242 value OCCT 8.0.1's
+/// `write.step.schema` enum knows — `"AP242IS"` is not one and the worker refuses
+/// it loudly). AP242 rather than the previous AP214IS because that is the schema
+/// modern consumers expect and the one the colour/name carriers below are at home
+/// in.
+///
+/// # What travels with the geometry (DI-5)
+///
+/// Body display names, the authored whole-body colour and the authored per-face
+/// colours, all from [`BodyMeta`](onecad_core::document::body::BodyMeta). Face
+/// colours are stored against a persistent `ElementId`, but the worker addresses
+/// faces by snapshot-scoped `TopoKey`, so each id is resolved through `QueryElement`
+/// against the CURRENT head first. An id that does not resolve — a face an edit
+/// consumed, or a re-bind the ladder honestly refused (DI-4) — is **omitted with a
+/// warning**, never mapped onto a plausible ordinal: a wrong colour on a real face
+/// looks entirely successful, which is the H5-B failure this stack refuses to make.
+///
+/// The runtime lock is taken only to snapshot the metadata; every worker round-trip
+/// below runs outside it (the R-WP11 rule).
 #[tauri::command]
 pub async fn export_step_file(
     state: State<'_, AppState>,
@@ -626,15 +646,31 @@ pub async fn export_step_file(
             None => return Ok(None), // dialog cancelled
         },
     };
-    let bodies: Vec<BodyId> = {
+    let (bodies, snapshot, mut attributes, pending) = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("exportStep".into()))?;
-        rt.head_body_ids()
+        let (attributes, pending) = crate::export::pending_step_attributes(rt);
+        (
+            rt.head_body_ids(),
+            rt.head_snapshot_id(),
+            attributes,
+            pending,
+        )
     };
+    crate::export::resolve_face_colors(
+        &mut attributes,
+        pending,
+        snapshot,
+        state.element_query().as_ref(),
+    )
+    .await;
+
     let exporter = state.exporter();
-    exporter.export_step(&target, &bodies, "AP214IS").await?;
+    exporter
+        .export_step(&target, &bodies, "AP242DIS", &attributes)
+        .await?;
     Ok(Some(target))
 }
 

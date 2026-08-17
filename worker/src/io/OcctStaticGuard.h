@@ -58,7 +58,11 @@ public:
     // Snapshot `name` (if not already snapshotted) and assign `value`.
     void set_int(const char* name, int value);
     void set_real(const char* name, double value);
-    void set_cstr(const char* name, const std::string& value);
+    // Returns whether the knob is registered AND accepted `value`. An enumerated
+    // knob (`write.step.schema`) silently keeps its previous value when handed a
+    // name it does not know, so a caller whose whole request hinges on the value
+    // landing — "export as AP242" — must be able to see the refusal.
+    bool set_cstr(const char* name, const std::string& value);
 
     // Snapshot `name` WITHOUT changing it — for a knob a callee may write.
     void watch_int(const char* name);

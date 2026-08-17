@@ -740,7 +740,12 @@ async fn m2_gate_full_slice() {
     // ── Step 7: STEP export → file exists, non-empty, ISO-10303-21 magic ────────
     let step_path = dir.path().join("m2.step");
     let bytes_written = wm
-        .export_step(&step_path.to_string_lossy(), &[body], "AP214IS")
+        .export_step(
+            &step_path.to_string_lossy(),
+            &[body],
+            "AP214IS",
+            &Default::default(),
+        )
         .await
         .expect("STEP 7: ExportStep");
     assert!(bytes_written > 0, "STEP 7: worker reports bytes written");

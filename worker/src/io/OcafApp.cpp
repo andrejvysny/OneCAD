@@ -4,6 +4,7 @@
 #include <BinXCAFDrivers.hxx>
 #include <Message_Messenger.hxx>
 #include <Message_PrinterOStream.hxx>
+#include <Standard_Failure.hxx>
 #include <Standard_Type.hxx>
 
 namespace onecad::io {
@@ -29,6 +30,16 @@ Handle(TDocStd_Application) ocaf_application() {
         }
     }
     return app;
+}
+
+OcafDocGuard::~OcafDocGuard() {
+    if (doc_.IsNull()) return;
+    try {
+        ocaf_application()->Close(doc_);
+    } catch (const Standard_Failure&) {
+        // Closing must never throw out of a destructor; a failure here leaks one
+        // document, which is strictly better than terminating.
+    }
 }
 
 }  // namespace onecad::io

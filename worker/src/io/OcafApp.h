@@ -27,6 +27,7 @@
 #include <mutex>
 
 #include <TDocStd_Application.hxx>
+#include <TDocStd_Document.hxx>
 
 namespace onecad::io {
 
@@ -35,5 +36,24 @@ Handle(TDocStd_Application) ocaf_application();
 
 // Guards every use of the application's document session.
 std::mutex& ocaf_mutex();
+
+// RAII close for a document opened on `ocaf_application()`. A document left open
+// stays registered in the application's SESSION and keeps its whole shape tree
+// alive for the life of the process, so every exit path — early return,
+// `Standard_Failure`, a C++ exception thrown past the scope — must close it.
+//
+// Lives here rather than in one .cpp because both the xbf codec and the STEP
+// exporter open documents on the same application.
+class OcafDocGuard {
+public:
+    explicit OcafDocGuard(const Handle(TDocStd_Document) & doc) : doc_(doc) {}
+    ~OcafDocGuard();
+
+    OcafDocGuard(const OcafDocGuard&) = delete;
+    OcafDocGuard& operator=(const OcafDocGuard&) = delete;
+
+private:
+    Handle(TDocStd_Document) doc_;
+};
 
 }  // namespace onecad::io

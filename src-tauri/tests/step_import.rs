@@ -390,7 +390,12 @@ async fn export_fixture(bin: &std::path::Path, path: &std::path::Path, dist_a: f
     assert!((vb - VOL_B).abs() < 1.0, "source box B = {VOL_B}, got {vb}");
 
     let written = wm
-        .export_step(&path.to_string_lossy(), &[a, b], "AP214IS")
+        .export_step(
+            &path.to_string_lossy(),
+            &[a, b],
+            "AP214IS",
+            &Default::default(),
+        )
         .await
         .expect("ExportStep the fixture");
     assert!(written > 0, "ExportStep wrote bytes");

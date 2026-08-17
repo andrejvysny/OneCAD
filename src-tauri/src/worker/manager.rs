@@ -566,6 +566,10 @@ impl WorkerManager {
     /// `ExportStep` verb passthrough (SCHEMA §7.8) — surfaced here so an app
     /// command can drive STEP export later. Returns bytes written.
     ///
+    /// `attributes` carries the document-owned body names + colours through XCAF
+    /// (DI-5); [`StepExportAttributes::default`](crate::export::StepExportAttributes)
+    /// is the geometry-only export.
+    ///
     /// # Errors
     /// [`EngineError`] on a disconnected worker or a worker-side failure.
     pub async fn export_step(
@@ -573,9 +577,10 @@ impl WorkerManager {
         path: &str,
         bodies: &[BodyId],
         schema: &str,
+        attributes: &crate::export::StepExportAttributes,
     ) -> Result<u64, EngineError> {
         let client = self.client_or_err()?;
-        let args = wire::export_step_args(path, bodies, schema);
+        let args = wire::export_step_args(path, bodies, schema, attributes);
         let resp = client
             .request("ExportStep", args)
             .await

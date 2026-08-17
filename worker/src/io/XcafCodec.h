@@ -36,9 +36,8 @@
 #include <string>
 #include <vector>
 
+#include <Quantity_ColorRGBA.hxx>
 #include <TopoDS_Shape.hxx>
-
-class Quantity_ColorRGBA;
 
 namespace onecad::io {
 
@@ -63,6 +62,12 @@ inline constexpr PackedColor kUnsetColor = 0;
 // OCCT's own `Convert_LinearRGB_To_sRGB` — the same transform `Quantity_Color::
 // ColorToHex` applies, so a color reports here as OCCT's own viewer would show it.
 PackedColor pack_srgb(const Quantity_ColorRGBA& color);
+
+// The exact inverse: packed u8 sRGB → the linear `Quantity_ColorRGBA` OCCT stores,
+// so `pack_srgb(unpack_srgb(c)) == c`. ONE definition, shared by the xbf writer and
+// the STEP export writer (io/ExportStep.cpp) — a second, drifting conversion on the
+// export side is exactly what would make `import(export(x))` lose a byte per channel.
+Quantity_ColorRGBA unpack_srgb(PackedColor color);
 
 // The authored appearance of ONE solid.
 struct SolidAttributes {

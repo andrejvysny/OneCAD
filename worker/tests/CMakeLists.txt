@@ -364,6 +364,15 @@ add_executable(test_xcaf_import test_xcaf_import.cpp)
 target_link_libraries(test_xcaf_import PRIVATE worker_core)
 add_test(NAME xcaf_import COMMAND test_xcaf_import)
 
+# --- DI-5 W3: the EXPORT half of the same fidelity claim — body names + per-face
+#     colours out through STEPCAFControl_Writer, asserted by reading the written
+#     file back through the XCAF read lane and comparing values (test_wp6_exportstep
+#     covers the structural claim only). Generates its fixtures into the system
+#     temp dir. ---
+add_executable(test_exportstep_xcaf test_exportstep_xcaf.cpp)
+target_link_libraries(test_exportstep_xcaf PRIVATE worker_core)
+add_test(NAME exportstep_xcaf COMMAND test_exportstep_xcaf)
+
 # Cross-version producer/consumer binary. CI writes under 7.9.3 and reads the
 # exact artifact under 8.0.1; it is not a same-build CTest. Keep this target
 # independent of worker_core so comparison-worker compile drift cannot block

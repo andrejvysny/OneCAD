@@ -8,12 +8,157 @@
 //! [`PendingBackend`] when no worker resolved). Keeping the trait + impls here means
 //! `worker/manager.rs` and `worker/mod.rs` stay untouched.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 
-use onecad_core::ids::BodyId;
+use onecad_core::ids::{BodyId, ElementId, SnapshotId};
 use onecad_core::regen::EngineError;
 
-use crate::worker::{BakedGeometry, PendingBackend, WorkerManager};
+use crate::document_runtime::DocumentRuntime;
+use crate::worker::{BakedGeometry, ElementQuery, PendingBackend, WorkerManager};
+
+/// The document-owned appearance a STEP export carries alongside the geometry
+/// (SCHEMA §7.8 `ExportStep`, DI-5).
+///
+/// Every map is keyed by the **wire** body id (`body_<uuid>`), because that is what
+/// the worker addresses its `BodyStore` with. Face colours are keyed by the body's
+/// **current `TopoKey`**, resolved here rather than in the worker: a `TopoKey` is
+/// snapshot-scoped ordinal evidence, and Rust is the identity authority, so the
+/// persistent `ElementId` → `TopoKey` step belongs on this side of the wire and is
+/// valid only for the snapshot this export runs against. An `ElementId` that does
+/// not resolve is OMITTED — never approximated onto a plausible ordinal.
+///
+/// `BTreeMap` throughout so the emitted JSON is byte-stable for a given document
+/// state (a HashMap would reorder the object between runs for no reason).
+///
+/// Empty is the pre-DI-5 request: the worker then writes geometry only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepExportAttributes {
+    /// Wire body id → the tree's display name, written as the STEP product name.
+    pub body_names: BTreeMap<String, String>,
+    /// Wire body id → the authored whole-body colour (sRGB `[r,g,b,a]`), written on
+    /// the body's own XCAF label.
+    pub body_colors: BTreeMap<String, [u8; 4]>,
+    /// Wire body id → (`TopoKey` → authored face colour). Overrides both the
+    /// whole-body colour and any import-derived colour the worker already holds.
+    pub face_colors: BTreeMap<String, BTreeMap<String, [u8; 4]>>,
+}
+
+/// One authored face colour still waiting for its `ElementId` → `TopoKey` step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFaceColor {
+    /// The body the coloured face belongs to.
+    pub body: BodyId,
+    /// That body's wire id — carried along so the resolution pass need not re-derive it.
+    pub wire_body_id: String,
+    /// The persistent id the colour is stored against in the document.
+    pub element: ElementId,
+    /// The authored sRGB colour.
+    pub color: [u8; 4],
+}
+
+/// Snapshot the head's export attributes out of the runtime.
+///
+/// **Synchronous by design.** The caller holds the single-writer lock across this
+/// call, so nothing here may await — the `ElementId` → `TopoKey` resolution that
+/// needs the worker is deferred to [`resolve_face_colors`], which the caller runs
+/// after dropping the lock (the R-WP11 rule).
+#[must_use]
+pub fn pending_step_attributes(
+    rt: &DocumentRuntime,
+) -> (StepExportAttributes, Vec<PendingFaceColor>) {
+    let mut attributes = StepExportAttributes::default();
+    let mut pending = Vec::new();
+    for body in rt.head_body_ids() {
+        let Some(meta) = rt.body_meta(body) else {
+            continue;
+        };
+        let wire_body_id = crate::worker::wire::body_id_wire(body);
+        if !meta.name.is_empty() {
+            attributes
+                .body_names
+                .insert(wire_body_id.clone(), meta.name);
+        }
+        if let Some(color) = meta.color {
+            attributes.body_colors.insert(wire_body_id.clone(), color);
+        }
+        for (element, color) in meta.face_colors {
+            pending.push(PendingFaceColor {
+                body,
+                wire_body_id: wire_body_id.clone(),
+                element,
+                color,
+            });
+        }
+    }
+    (attributes, pending)
+}
+
+/// Fold `pending` into `attributes` by resolving each `ElementId` to the `TopoKey`
+/// it names in `snapshot` (`QueryElement`, one round-trip each).
+///
+/// Runs OUTSIDE the runtime lock. An id that does not resolve — a face an edit
+/// consumed, or a re-bind the DI-4 ladder honestly refused — is **omitted** and
+/// logged; it is never mapped onto a plausible ordinal, because a colour on the
+/// wrong face looks entirely successful (the H5-B failure mode). Returns how many
+/// were omitted.
+pub async fn resolve_face_colors(
+    attributes: &mut StepExportAttributes,
+    pending: Vec<PendingFaceColor>,
+    snapshot: Option<SnapshotId>,
+    query: &dyn ElementQuery,
+) -> usize {
+    if pending.is_empty() {
+        return 0;
+    }
+    let Some(snapshot) = snapshot else {
+        tracing::warn!(
+            pending = pending.len(),
+            "exportStep: no published snapshot to resolve authored face colours against — \
+             they are omitted"
+        );
+        return pending.len();
+    };
+    let mut omitted = 0usize;
+    for item in pending {
+        let resolved = query
+            .query_element(snapshot, item.body, item.element.as_str())
+            .await;
+        let topo_key = match resolved {
+            Ok(Some(info)) if !info.topo_key.is_empty() => info.topo_key,
+            Ok(_) => {
+                omitted += 1;
+                continue;
+            }
+            Err(err) => {
+                // A transport failure is not a ladder answer, but the export call
+                // right after this reports it properly if the worker is really gone.
+                // Dropping the colour is the safe direction either way.
+                tracing::warn!(
+                    error = %err,
+                    element = item.element.as_str(),
+                    "exportStep: QueryElement failed for an authored face colour"
+                );
+                omitted += 1;
+                continue;
+            }
+        };
+        attributes
+            .face_colors
+            .entry(item.wire_body_id)
+            .or_default()
+            .insert(topo_key, item.color);
+    }
+    if omitted > 0 {
+        tracing::warn!(
+            omitted,
+            "exportStep: authored face colours whose element does not resolve in the current \
+             head are omitted from the STEP file rather than guessed"
+        );
+    }
+    omitted
+}
 
 /// Exports bodies to a mesh/BREP file on disk. `path` is the target file, `bodies`
 /// the body ids to write. Object-safe so the app can store it as a trait object.
@@ -23,7 +168,8 @@ use crate::worker::{BakedGeometry, PendingBackend, WorkerManager};
 /// export to it.
 #[async_trait]
 pub trait GeometryExporter: Send + Sync {
-    /// Writes `bodies` to `path` as STEP using the `schema` (e.g. `"AP214IS"`).
+    /// Writes `bodies` to `path` as STEP using the `schema` (e.g. `"AP242DIS"`),
+    /// carrying `attributes` (names + colours) through XCAF.
     ///
     /// # Errors
     /// [`EngineError`] on a disconnected worker or a worker-side export failure.
@@ -32,6 +178,7 @@ pub trait GeometryExporter: Send + Sync {
         path: &str,
         bodies: &[BodyId],
         schema: &str,
+        attributes: &StepExportAttributes,
     ) -> Result<(), EngineError>;
 
     /// Writes `bodies` to `path` as STL (binary when `binary`, else ASCII), meshed
@@ -82,11 +229,12 @@ impl GeometryExporter for WorkerManager {
         path: &str,
         bodies: &[BodyId],
         schema: &str,
+        attributes: &StepExportAttributes,
     ) -> Result<(), EngineError> {
         // Inherent `WorkerManager::export_step` (SCHEMA §7.8 passthrough) wins path
         // resolution over this trait method; it returns the bytes written, which the
         // app command does not surface.
-        WorkerManager::export_step(self, path, bodies, schema)
+        WorkerManager::export_step(self, path, bodies, schema, attributes)
             .await
             .map(|_bytes_written| ())
     }
@@ -132,6 +280,7 @@ impl GeometryExporter for PendingBackend {
         _path: &str,
         _bodies: &[BodyId],
         _schema: &str,
+        _attributes: &StepExportAttributes,
     ) -> Result<(), EngineError> {
         Err(not_ready("STEP"))
     }
