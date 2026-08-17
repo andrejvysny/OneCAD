@@ -11,6 +11,7 @@ vi.mock("./fileActions", () => ({
   exportStep: vi.fn(),
   exportStl: vi.fn(),
   exportObj: vi.fn(),
+  export3mf: vi.fn(),
   insertStep: vi.fn(),
 }));
 
@@ -36,6 +37,7 @@ describe("FileMenu", () => {
     expect(screen.getByRole("menuitem", { name: /Export STEP/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Export STL/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Export OBJ/ })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Export 3MF/ })).toBeInTheDocument();
   });
 
   it("dispatches each menu item to its file action", async () => {
@@ -67,6 +69,10 @@ describe("FileMenu", () => {
     await user.click(screen.getByRole("button", { name: /File/ }));
     await user.click(screen.getByRole("menuitem", { name: /Export OBJ/ }));
     expect(fileActions.exportObj).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: /File/ }));
+    await user.click(screen.getByRole("menuitem", { name: /Export 3MF/ }));
+    expect(fileActions.export3mf).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole("button", { name: /File/ }));
     await user.click(screen.getByRole("menuitem", { name: /Open/ }));

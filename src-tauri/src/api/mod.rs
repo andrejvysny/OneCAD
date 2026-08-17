@@ -724,6 +724,86 @@ pub async fn export_obj_file(
     Ok(Some(target))
 }
 
+/// Exports every body at head to a 3MF file (`CadClient.export3mf`). `path`
+/// `None` shows a native save dialog (`.3mf` filter); a cancel resolves to
+/// `None`. Returns the written path.
+///
+/// Unlike STL/OBJ/STEP, this exporter is written **entirely on the Rust
+/// side** — OCCT has no 3MF writer, and the mesh bytes + colour data it needs
+/// are already on this side of the wire, so no worker verb or SCHEMA change
+/// is involved. Rust pulls each body's fine-LOD MESH1 blob via
+/// [`MeshProvider`](crate::worker::MeshProvider) (`export_threemf::build_bodies`),
+/// merges the two colour lanes — import-derived mesh `FACE_COLORS` and
+/// authored `BodyMeta.face_colors`/`color`, the same precedence
+/// [`export_step_file`] resolves for STEP's XCAF colours — and hands the
+/// result to the pure [`onecad_core::io::threemf`] writer.
+///
+/// The runtime lock is held only to snapshot metadata; every mesh fetch and
+/// the zip encode below run outside it (the same R-WP11 rule
+/// [`export_step_file`] documents).
+#[tauri::command]
+pub async fn export_3mf_file(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let target = match path {
+        Some(p) => p,
+        None => match pick_mesh_save(app, "3MF", &["3mf"]).await {
+            Some(p) => p,
+            None => return Ok(None), // dialog cancelled
+        },
+    };
+    let (bodies, snapshot, meshes, mut attributes, pending) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("export3mf".into()))?;
+        let (attributes, pending) = crate::export::pending_step_attributes(rt);
+        (
+            rt.head_body_ids(),
+            rt.head_snapshot_id(),
+            rt.meshes_arc(),
+            attributes,
+            pending,
+        )
+    };
+    // Captured BEFORE resolution — the ElementId-keyed lane
+    // (`ids_have_element_ids()` bodies) needs the raw map, not the
+    // TopoKey-keyed one `resolve_face_colors` produces below.
+    let raw_face_colors = crate::export_threemf::raw_face_colors_by_body(&pending);
+    crate::export::resolve_face_colors(
+        &mut attributes,
+        pending,
+        snapshot,
+        state.element_query().as_ref(),
+    )
+    .await;
+
+    let threemf_bodies = crate::export_threemf::build_bodies(
+        &bodies,
+        meshes.as_ref(),
+        snapshot,
+        &attributes,
+        &raw_face_colors,
+    )
+    .await?;
+
+    let bytes = onecad_core::io::threemf::write_3mf(&threemf_bodies)?;
+    let write_target = target.clone();
+    match tokio::task::spawn_blocking(move || std::fs::write(&write_target, &bytes)).await {
+        Ok(result) => {
+            result.map_err(|e| ApiError::Io(format!("export3mf: write {target}: {e}")))?
+        }
+        Err(e) => {
+            return Err(ApiError::Io(format!(
+                "export3mf: write task did not complete: {e}"
+            )))
+        }
+    }
+    Ok(Some(target))
+}
+
 /// The body ids at head for an export command (locks the runtime briefly).
 async fn head_bodies(state: &State<'_, AppState>) -> Result<Vec<BodyId>, ApiError> {
     let guard = state.runtime.lock().await;

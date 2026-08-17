@@ -5,6 +5,7 @@ import { RenameDocumentDialog } from "./RenameDocumentDialog";
 import { MenuItem } from "@/ui/MenuItem";
 import {
   closeProject,
+  export3mf,
   exportObj,
   exportStep,
   exportStl,
@@ -17,7 +18,7 @@ import {
 
 /**
  * Compact File menu in the title bar: Open… / Save / Save As… / Import STEP… /
- * Export STEP… / Export STL… / Export OBJ…, each routed through `fileActions`
+ * Export STEP… / Export STL… / Export OBJ… / Export 3MF…, each routed through `fileActions`
  * (same path the ⌘O/⌘S/⇧⌘S shortcuts use). Mirrors the start-screen SortMenu pattern
  * (a hairline trigger + anchored Popover) so it reuses the existing primitives +
  * design tokens.
@@ -79,6 +80,7 @@ export function FileMenu() {
         <MenuItem label="Export STEP…" onClick={() => run(exportStep)} />
         <MenuItem label="Export STL…" onClick={() => run(exportStl)} />
         <MenuItem label="Export OBJ…" onClick={() => run(exportObj)} />
+        <MenuItem label="Export 3MF…" onClick={() => run(export3mf)} />
       </Popover>
 
       <RenameDocumentDialog open={renaming} onClose={() => setRenaming(false)} />

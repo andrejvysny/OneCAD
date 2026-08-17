@@ -48,6 +48,11 @@ describe("mockClient file seam", () => {
     expect(path).toMatch(/\.obj$/);
   });
 
+  it("export3mf returns a fake .3mf path", async () => {
+    const path = await mockClient.export3mf();
+    expect(path).toMatch(/\.3mf$/);
+  });
+
   it("onWorkerStatus never fires and returns a no-op unsubscribe", () => {
     let fired = false;
     const unsub = mockClient.onWorkerStatus(() => {

@@ -21,6 +21,7 @@ pub mod dto;
 pub mod error;
 pub mod events;
 pub mod export;
+pub mod export_threemf;
 pub mod imports;
 pub mod library;
 pub mod library_seed;
@@ -425,6 +426,7 @@ pub fn run() {
             api::export_step_file,
             api::export_stl_file,
             api::export_obj_file,
+            api::export_3mf_file,
             api::close_document,
             api::check_recovery,
             api::recover_document,

@@ -2445,6 +2445,10 @@ export const mockClient: CadClient = {
     await wait(40);
     return "/Users/andrej/CAD/Projects/Untitled.obj";
   },
+  async export3mf() {
+    await wait(40);
+    return "/Users/andrej/CAD/Projects/Untitled.3mf";
+  },
 
   // The mock has no worker, so it never emits worker-status (no-op unsubscribe).
   onWorkerStatus(_cb: (status: WorkerStatus) => void): Unsubscribe {

@@ -34,9 +34,42 @@
 - [x] **W3 — DI-5**, the XCAF STEP export, unblocked by W2. Schema resolved to **AP242DIS** (the
       only AP242 value OCCT 8.0.1 accepts). See `### W3 — DI-5` below. Gates re-run on the main
       thread before commit: ctest 136/136 · cargo 1289/0 · fmt/clippy clean.
-- [ ] **W4 — 3MF export** (Rust-side writer; per-face colour IN — MESH1's `FACE_COLORS` section +
-      id tables carry everything needed; mechanism in plan
-      `~/.claude/plans/act-as-senior-cad-nested-canyon.md` Phase 3).
+- [x] **W4 — 3MF export — LANDED (2026-08-17), per-face colour IN.** Gate record below.
+- [ ] **W5 — result truth for `upsertVariable`/`removeVariable`/`replaceComponent`**
+      ("saved + loud failure banner", § MERGE options (a)/(b) — decide from golden-test blast
+      radius), then **W6 close-out** (CURRENT_STATE rewrite + the two owed manual USER gates).
+
+### Gate — W4: 3MF export, Rust-side writer (2026-08-17) — LANDED
+
+- [x] **`onecad-core/src/io/threemf.rs`** — pure core-spec-2015/02 writer (ZIP +
+      `[Content_Types].xml` + `_rels/.rels` + `3D/3dmodel.model`), plain-array input, no MESH1
+      knowledge, deterministic bytes (fixed zip timestamp, stable ordering). One `<object>` per
+      body, `unit="millimeter"`, vertices VERBATIM (Z-up invariant — no axis swap). Per-face
+      colour = per-triangle `pid`+`p1` into a dedup'd per-body `<basematerials>`; the object-level
+      default is emitted only when a genuine whole-body colour exists, so a partially-coloured
+      body never leaks a colour onto unrelated faces. 12 unit tests incl. unzip-own-output +
+      determinism.
+- [x] **`src-tauri/src/export_threemf.rs`** — the one MESH1-parsing adapter: POSITIONS/INDICES/
+      FACE_RANGES/id-table/FACE_COLORS via `onecad_protocol::mesh`. Colour precedence per face,
+      lowest first: mesh `FACE_COLORS` (import-derived, alpha 0 = unset) → authored
+      `BodyMeta.face_colors`, joined by TopoKey through W3's `resolve_face_colors` REUSED verbatim
+      — or joined directly by ElementId when `ids_have_element_ids()` (different key space, no
+      resolution needed). Unresolved = uncoloured, never guessed (H5-B).
+- [x] **`export_3mf_file`** beside its siblings (`api/mod.rs`): lock only to snapshot
+      metadata + `meshes_arc()` (new accessor, `engine_arc` precedent); mesh fetches, zip encode
+      and the `spawn_blocking` file write all run outside it. No worker verb, no SCHEMA change —
+      OCCT has no 3MF writer and the bytes are already Rust-side.
+- [x] **Frontend**: `CadClient.export3mf` append-only on both impls, `fileActions.export3mf`,
+      File-menu "Export 3MF…" beside STL/OBJ. No e2e spec — no export has one (checked: zero
+      export coverage in 83 e2e specs); menu wiring pinned in `FileMenu.test.tsx` instead.
+- [x] Gate (agent-measured, re-run on the main thread): `cargo fmt`/`clippy -D warnings` clean ·
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1303 passed / 0 failed** (+13: 12 writer
+      units + `threemf_export.rs` integration authoring name+body colour+face colour and
+      asserting them inside the unzipped output) · tsc clean · `bun run test` **295 files / 4955
+      passed** on a clean run (one earlier run red only while the cargo suite saturated the
+      machine — the ledger's own unattributable-under-load rule) · FE seam tests 118/118.
+- **Owed (recorded):** the manual USER gate "the written file opens in a slicer" — rides the
+      owed manual-gates list with W3's coloured-STEP check.
 
 ### Gate — CI triage at `6e71da1` (2026-08-17): two reds, both measured, neither the cadence fix
 

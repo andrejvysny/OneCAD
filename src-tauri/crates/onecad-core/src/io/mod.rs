@@ -59,6 +59,7 @@ pub mod migrate;
 pub mod project_import;
 pub mod recovery;
 pub mod sketch_io;
+pub mod threemf;
 
 use thiserror::Error;
 

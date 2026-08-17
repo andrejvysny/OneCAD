@@ -2608,6 +2608,18 @@ impl DocumentRuntime {
         self.engine.clone()
     }
 
+    /// The mesh provider behind this document, cloned out so a caller can pull
+    /// MESH1 bytes for several bodies **without holding the runtime lock**
+    /// across the worker round trips (the same R-WP11 rule
+    /// [`engine_arc`](Self::engine_arc) exists for). The 3MF exporter is the
+    /// first caller: it snapshots this alongside `head_body_ids` /
+    /// `head_snapshot_id` under one short lock, then fetches every body's mesh
+    /// after releasing it.
+    #[must_use]
+    pub fn meshes_arc(&self) -> Arc<dyn MeshProvider> {
+        self.meshes.clone()
+    }
+
     /// Admits (or refuses) a checkpoint mint at the current head, capturing the
     /// fencing tokens the artifacts must still be current against. `None` ⇒ skip.
     #[must_use]

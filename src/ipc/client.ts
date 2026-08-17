@@ -204,6 +204,13 @@ export interface CadClient {
    * cancel.
    */
   exportObj(): Promise<string | null>;
+  /**
+   * Export every body at head to a 3MF file, per-face colours included. Rust
+   * owns the `.3mf` save dialog; unlike STEP/STL/OBJ this exporter is written
+   * entirely on the Rust side (OCCT has no 3MF writer) — no worker verb is
+   * involved. Resolves to the written path, or null on cancel.
+   */
+  export3mf(): Promise<string | null>;
 
   /**
    * Subscribe to worker-lifecycle `worker-status` events (starting / ready /

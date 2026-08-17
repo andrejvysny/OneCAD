@@ -349,6 +349,23 @@ describe("tauriClient file commands", () => {
     mockIPC((cmd) => (cmd === "export_obj_file" ? null : undefined));
     expect(await createTauriClient().exportObj()).toBeNull();
   });
+
+  it("export3mf invokes export_3mf_file and returns the written path", async () => {
+    let payload: unknown;
+    mockIPC((cmd, p) => {
+      if (cmd === "export_3mf_file") {
+        payload = p;
+        return "/out.3mf";
+      }
+    });
+    expect(await createTauriClient().export3mf()).toBe("/out.3mf");
+    expect(payload).toEqual({ path: null });
+  });
+
+  it("export3mf returns null on a cancelled export dialog", async () => {
+    mockIPC((cmd) => (cmd === "export_3mf_file" ? null : undefined));
+    expect(await createTauriClient().export3mf()).toBeNull();
+  });
 });
 
 // ── worker-status event ───────────────────────────────────────────────────────

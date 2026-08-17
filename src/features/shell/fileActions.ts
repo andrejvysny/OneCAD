@@ -144,6 +144,17 @@ export async function exportObj(): Promise<void> {
   }
 }
 
+/** Export 3MF…: dialog (Rust) + the Rust-side 3MF writer. A cancelled dialog is a no-op. */
+export async function export3mf(): Promise<void> {
+  try {
+    const path = await client.export3mf();
+    if (!path) return; // cancelled
+    transientHint(`Exported ${baseName(path)}`);
+  } catch (e) {
+    errorHint(`Export failed: ${message(e)}`);
+  }
+}
+
 /**
  * Import STEP…: append a STEP import to the OPEN document (STEP-IMPORT WP-A).
  *

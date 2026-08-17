@@ -156,6 +156,7 @@ const CMD = {
   exportStepFile: "export_step_file",
   exportStlFile: "export_stl_file",
   exportObjFile: "export_obj_file",
+  export3mfFile: "export_3mf_file",
   importFileDialog: "import_file_dialog",
   openFileDialog: "open_file_dialog",
   stepFileDialog: "step_file_dialog",
@@ -1956,6 +1957,11 @@ export function createTauriClient(): CadClient {
       // Rust owns the `.obj` save dialog + the worker ExportObj verb; a cancel
       // resolves to null (no path written).
       return call<string | null>(CMD.exportObjFile, { path: null });
+    },
+    async export3mf(): Promise<string | null> {
+      // Rust owns the `.3mf` save dialog + the Rust-side 3MF writer (no worker
+      // verb); a cancel resolves to null (no path written).
+      return call<string | null>(CMD.export3mfFile, { path: null });
     },
 
     onWorkerStatus(cb: (s: WorkerStatus) => void): () => void {
