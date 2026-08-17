@@ -302,10 +302,13 @@ document still knows which face each colour belongs to.
       `--test face_color_reopen` 2/2 · `--test mesh_face_colors` 1/1 · `ctest -R exportstep` 2/2.
 - Frontend untouched (the FE command surface does not change). The manual Tauri gate — actually
       seeing an exported file open coloured in another CAD — rides the owed manual USER gates.
-- **Found while there, recorded not fixed:** (1) **`rebind_persisted_elements` does not seed the
-      promotion cache** — after a reopen, re-picking the SAME face mints a FRESH ElementId and
-      orphans the colour stored under the old one; Invariant 1 holds in-session but not across a
-      reopen. Candidate **W3.1** (small: seed `promoted` from the rebound bindings).
+- **Found while there:** (1) the review claim "`rebind_persisted_elements` does not seed the
+      promotion cache, so a re-pick after a reopen mints a FRESH id and orphans the colour" was
+      **REFUTED BY EXPERIMENT** (2026-08-17): the worker's own `AcquireElementIds` answers
+      `existing` (SCHEMA §7.5) for an element its partition already holds — which it does after
+      the DI-4 rebind — so a re-pick REUSES the persisted id and Invariant 1 holds across a
+      reopen with no cache seeding. Pinned by
+      `face_color_reopen.rs::a_repick_after_rebind_reuses_the_persisted_id`. No W3.1 needed.
       (2) Two bodies sharing one TShape would collapse onto one XCAF label — guarded
       (attributes skipped + `label_shared` warn), believed unreachable today. (3)
       `step_fixture_util.h:150,266` still call raw `Interface_Static::SetCVal` — test-only,

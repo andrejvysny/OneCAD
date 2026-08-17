@@ -627,3 +627,89 @@ async fn an_ambiguous_persisted_element_refuses_to_bind_rather_than_guess() {
 
     wm2.shutdown().await;
 }
+
+/// Invariant 1 ACROSS a reopen: once the DI-4 pass has re-bound a persisted id,
+/// re-picking the same face must REUSE that id, not mint a fresh one — a fresh id
+/// would orphan everything stored under the old one (the face colour, first of
+/// all). Written as a probe: the W3 review flagged "rebind does not seed the
+/// promotion cache" as a candidate defect, and whether the worker's own
+/// `AcquireElementIds` `existing` answer (SCHEMA §7.5) already covers the re-pick
+/// is exactly the kind of claim that gets decided by running it, not arguing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repick_after_rebind_reuses_the_persisted_id() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xC20));
+    let body = body_of(EXTRUDE_REC);
+
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_REC, &rect_sketch(sid, 0x2000, 0.0, 0.0, 20.0, 20.0)),
+    );
+    add_op(&mut rt, extrude_record(EXTRUDE_REC, sid, 25.0));
+    let report = regen_all(&mut rt).await;
+    let snapshot = SnapshotId(published(&report, "stock box").id.0);
+
+    let (top_key, top_centroid, _) = top_face(&mut rt, body).await;
+    let anchor = AnchorIntent {
+        world_point: top_centroid,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let promoted = rt
+        .promote_selection(
+            snapshot,
+            body,
+            vec![(TopoKey::new(&top_key), Some(anchor.clone()))],
+        )
+        .await
+        .expect("AcquireElementIds promotes the face pick");
+    let element = ElementId::new(&promoted[0].element_id);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("Repick.onecad");
+    rt.save(&path, save_meta()).expect("save");
+    drop(rt);
+    wm.shutdown().await;
+
+    let wm2 = spawn_worker(bin).await;
+    let (engine, meshes, solver) = seams(&wm2);
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    let report2 = regen_all(&mut reopened).await;
+    let snapshot2 = SnapshotId(published(&report2, "reopened document").id.0);
+    assert_eq!(
+        reopened.rebind_persisted_elements().await,
+        (1, 0),
+        "the pick carried an anchor, so the re-bind must succeed"
+    );
+
+    // The face's CURRENT TopoKey, from the worker's own answer for the re-bound id
+    // (the mesh id table may already carry ElementIds after the re-bind, so it is
+    // not a reliable TopoKey source here).
+    let info = ElementQuery::query_element(&wm2, snapshot2, body, element.as_str())
+        .await
+        .expect("QueryElement")
+        .expect("the re-bound id resolves");
+    let repicked = reopened
+        .promote_selection(
+            snapshot2,
+            body,
+            vec![(TopoKey::new(&info.topo_key), Some(anchor))],
+        )
+        .await
+        .expect("re-picking the same face after a reopen");
+    assert_eq!(
+        repicked[0].element_id,
+        element.as_str(),
+        "Invariant 1 across a reopen: the re-pick must REUSE the persisted id — a \
+         fresh id here orphans the colour stored under the old one"
+    );
+
+    wm2.shutdown().await;
+}
