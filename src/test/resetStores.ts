@@ -33,6 +33,7 @@ export function resetStores(): void {
   viewportStore.setState({
     projection: "persp",
     gridVisible: true,
+    gridStep: 10,
     activeSketchId: null,
     cameraViewLabel: "TOP",
     fov: 76,

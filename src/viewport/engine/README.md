@@ -73,7 +73,7 @@ awaited construction resolves after disposal).
 | `ViewportEngine.ts`  | Orchestrator: scene graph, render loop, resize, actions.        |
 | `CameraRig.ts`       | Persp+ortho pair; switch preserves apparent size at the pivot.  |
 | `CadOrbitControls.ts`| Turntable orbit / pan / zoom-to-cursor; Home/Fit/snap tweens.   |
-| `GridPlane.ts`       | Adaptive XY grid (1/5/10 decade step), re-centered on target.   |
+| `GridPlane.ts`       | Adaptive XY grid (1/2/5/10 decade step), re-centered on target. |
 | `HtmlOverlayDriver.ts`| Projects world→screen and writes DOM transforms per frame.     |
 | `palette.ts`         | Reads design tokens (tokens.css) via getComputedStyle; cached.  |
 | `lightRig.ts`        | Pure camera-relative key/fill positions (floored key elevation).|

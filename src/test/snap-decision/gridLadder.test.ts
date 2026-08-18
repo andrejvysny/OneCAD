@@ -1,7 +1,7 @@
 /*
  * Grid capture ladder table (SNAP §5.4, P0 gate).
  *
- * `chooseGridStep` picks the grid step off the camera distance on a 1/5/10
+ * `chooseGridStep` picks the grid step off the camera distance on a 1/2/5/10
  * decade ladder, so the projected cell size JUMPS at every rung. The invariant
  * that must survive every jump, at every offered snap radius and every tested
  * viewport height, is:
@@ -81,21 +81,32 @@ describe("grid capture ladder", () => {
   }
 
   it("caps at the point reach on the ladder rungs with the widest cells", () => {
-    // The step ladder rounds UP on 1/5/10, so the projected cell is widest just
-    // AFTER a rung — that is where 0.35·cell can exceed the user's reach and
-    // the cap has to bind. Sweep the ladder and prove both regimes occur.
+    // `reach = min(userReach, 0.35·cell)` — both terms must actually bind
+    // somewhere, or one of them is dead code the ladder never exercises.
+    //
+    // WHICH one binds is a function of cell size, and the grid deliberately
+    // draws BIG cells now (GridPlane's CELLS_ACROSS), so the cell term no
+    // longer binds at every rung of a 1024x768 viewport the way it did when the
+    // grid was dense. It still binds where cells get small in pixels: a short
+    // viewport combined with the widest offered reach. Sweep both axes.
     let capped = 0;
     let cellBound = 0;
-    for (const distance of DISTANCES) {
-      const step = chooseGridStep(distance).minor;
-      const cam = orthoAt(distance, 768);
-      const m = computePlaneScreenMetric(XY_PLANE, cam, { width: 1024, height: 768 }, { x: 0, y: 0 });
-      if (!m) continue;
-      const cell = Math.min(metricNorm(m, step, 0), metricNorm(m, 0, step));
-      const reach = gridReachPx(m, step, SNAP_RADIUS_PX.s);
-      expect(reach).toBeCloseTo(Math.min(SNAP_RADIUS_PX.s, GRID_REACH_FACTOR * cell), 9);
-      if (GRID_REACH_FACTOR * cell >= SNAP_RADIUS_PX.s) capped++;
-      else cellBound++;
+    for (const height of VIEWPORT_HEIGHTS) {
+      const width = Math.round(height * (4 / 3));
+      for (const radiusId of SNAP_RADIUS_ORDER) {
+        const acquirePx = SNAP_RADIUS_PX[radiusId];
+        for (const distance of DISTANCES) {
+          const step = chooseGridStep(distance).minor;
+          const cam = orthoAt(distance, height);
+          const m = computePlaneScreenMetric(XY_PLANE, cam, { width, height }, { x: 0, y: 0 });
+          if (!m) continue;
+          const cell = Math.min(metricNorm(m, step, 0), metricNorm(m, 0, step));
+          const reach = gridReachPx(m, step, acquirePx);
+          expect(reach).toBeCloseTo(Math.min(acquirePx, GRID_REACH_FACTOR * cell), 9);
+          if (GRID_REACH_FACTOR * cell >= acquirePx) capped++;
+          else cellBound++;
+        }
+      }
     }
     expect(capped, "some rung must be capped by the user's reach").toBeGreaterThan(0);
     expect(cellBound, "some rung must be bound by the cell size").toBeGreaterThan(0);

@@ -125,16 +125,21 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
   // typed value equals the current one (`n !== value` gate), silently skipping
   // the author call. Derive a value guaranteed to differ instead.
   const seeded = Number.parseFloat(await dimInput.inputValue());
-  const typedValue = seeded + 50;
-  await dimInput.fill(typedValue.toFixed(1));
+  // What we TYPE is the truth to assert against, not `seeded + 50`: the seed
+  // carries the raycast's own decimals, so the two agree only when the seed
+  // happens to be round (it is, whenever grid snap claims both corners — which
+  // depends on the zoom-adaptive grid step, and silently stopped being true when
+  // that step changed).
+  const typed = (seeded + 50).toFixed(1);
+  await dimInput.fill(typed);
   await dimInput.press("Enter");
 
   await expect(rows()).toHaveCount(rowsBeforeDistance + 1);
   const distanceRow = rows().last();
   await expect(distanceRow).toContainText("Distance");
   // Row values render via formatDimensionValue (≤3 decimals, trailing zeros
-  // trimmed) — mirror that formatting rather than toFixed(1).
-  const shownValue = typedValue
+  // trimmed) — mirror that formatting rather than the typed string.
+  const shownValue = Number.parseFloat(typed)
     .toFixed(3)
     .replace(/(\.\d*?)0+$/, "$1")
     .replace(/\.$/, "");

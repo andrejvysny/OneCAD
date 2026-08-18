@@ -61,6 +61,15 @@ function cancelDismiss(): void {
 export interface ViewportState {
   projection: Projection;
   gridVisible: boolean;
+  /**
+   * Side of ONE minor grid cell, in MILLIMETRES (the document unit — the
+   * readout converts for display).
+   *
+   * Engine → store, pushed from the camera-change listener in `ViewportRoot`
+   * and NOT per frame: `chooseGridStep` is a step function of camera distance,
+   * so it changes a handful of times across a whole zoom.
+   */
+  gridStep: number;
   activeSketchId: string | null;
   cameraViewLabel: string;
   /**
@@ -98,6 +107,8 @@ export interface ViewportState {
   setPendingExtrude(sketchId: string | null): void;
   setProjection(p: Projection): void;
   toggleGrid(): void;
+  /** Engine → store: side of one minor grid cell (mm). No-op when unchanged. */
+  setGridStep(mm: number): void;
   setActiveSketch(id: string | null): void;
   /** Engine → store: live pointer read-out (raycast onto Z=0). */
   setCursor(c: CursorCoords): void;
@@ -142,6 +153,11 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
   // On by default: the grid renders (GridPlane) so the viewport never looks
   // empty; the grid button shows the pressed (accent) treatment to match.
   gridVisible: true,
+  // Placeholder only. The engine pushes the real step as soon as it mounts, and
+  // the readout is gated on the engine being ready, so this is never displayed.
+  // NOT seeded via `chooseGridStep`: that would drag three.js into every module
+  // that touches this store, including the startup chrome.
+  gridStep: 10,
   activeSketchId: null,
   cameraViewLabel: "TOP",
   detectedInputDevice: "mouse",
@@ -163,6 +179,11 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
 
   toggleGrid() {
     set((s) => ({ gridVisible: !s.gridVisible }));
+  },
+
+  setGridStep(mm) {
+    if (!(mm > 0) || get().gridStep === mm) return;
+    set({ gridStep: mm });
   },
 
   setActiveSketch(id) {

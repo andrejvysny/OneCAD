@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/ui/cn";
 import { logWarn } from "@/debug/log";
 import { ViewportEngine } from "./engine/ViewportEngine";
+import { chooseGridStep } from "./engine/GridPlane";
 import { resetPaletteCache } from "./engine/palette";
 import { getResolvedTheme, subscribeResolvedTheme } from "@/theme/themeController";
 import {
@@ -28,6 +29,7 @@ import { SketchStaticSync } from "./sketchStaticSync";
 import { DatumSync } from "./datumSync";
 import { setViewportEngine } from "./engineBridge";
 import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
+import { GridScaleChip } from "@/features/shell/GridScaleChip";
 import { useViewportStore, viewportStore } from "@/stores/viewportStore";
 import { layersStore } from "@/stores/layersStore";
 import { selectGeometryCached, useDocumentStore } from "@/stores/documentStore";
@@ -599,14 +601,17 @@ export function ViewportRoot({ className }: { className?: string }) {
           }),
         );
 
-        // engine → store (camera view label)
-        const syncLabel = () => {
+        // engine → store (camera view label + grid cell size)
+        const syncCamera = () => {
           const next = viewLabelForDirection(engine.getViewDirection());
           const st = viewportStore.getState();
           if (st.cameraViewLabel !== next) st.setCameraViewLabel(next);
+          // Same call the engine and the snap ladder make, so the number the
+          // user reads is the step that is actually drawn and snapped to.
+          st.setGridStep(chooseGridStep(engine.getCameraDistance()).minor);
         };
-        syncLabel();
-        cleanups.push(engine.onCameraChanged(syncLabel));
+        syncCamera();
+        cleanups.push(engine.onCameraChanged(syncCamera));
 
         // engine → store (cursor on Z=0), rAF-coalesced
         let pendingEvent: PointerEvent | null = null;
@@ -713,6 +718,7 @@ export function ViewportRoot({ className }: { className?: string }) {
           </span>
         </div>
       )}
+      {ready && <GridScaleChip />}
       {revolveEmpty && (
         <div
           data-testid="revolve-empty-hint"

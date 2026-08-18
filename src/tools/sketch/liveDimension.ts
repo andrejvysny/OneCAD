@@ -134,7 +134,7 @@ export function aliasOf(field: DimFieldId): DimFieldId | null {
 
 // ── quantum ───────────────────────────────────────────────────────────────────
 
-/** Ladder mantissas. 1/2/5 (not GridPlane's 1/5/10) so the step never jumps 5×. */
+/** Ladder mantissas. 1/2/5, and rounded DOWN — see `decadeFloor`. */
 const DECADE_LADDER = [1, 2, 5] as const;
 /** `0.5 / 0.1` is 4.999999999999999 in binary floating point — without this, a
  *  value sitting EXACTLY on a rung falls to the rung below. */
@@ -143,7 +143,7 @@ const LADDER_EPS = 1e-9;
 /**
  * Round DOWN to the nearest 1/2/5 decade step.
  *
- * NOT `GridPlane.snapToDecade`, which rounds UP on a 1/5/10 ladder: applied to a
+ * NOT `GridPlane.snapToDecade`, which rounds UP: applied to a
  * quantum that would coarsen the granularity by as much as 2× (0.5 → 1), so a
  * user zoomed in far enough to see tenths would still be rounded to halves.
  * Non-positive / non-finite input yields 0 — a quantum of 0 means "do not round"

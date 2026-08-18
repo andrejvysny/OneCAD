@@ -4,7 +4,7 @@
  * v1: a finite grid re-centered on the camera target. Minor + major lines are
  * separate LineSegments; the minor lines fade toward the clear color at the
  * grid edge (a cheap distance fade with no transparency sorting). The step is
- * chosen adaptively from the camera distance on a 1/5/10 decade progression.
+ * chosen adaptively from the camera distance on a 1/2/5/10 decade progression.
  */
 import * as THREE from "three";
 import { RENDER_ORDER } from "./renderOrder";
@@ -16,23 +16,42 @@ export interface GridStep {
   major: number;
 }
 
-const DECADE = [1, 5, 10] as const;
+/*
+ * 1/2/5/10, not 1/5/10.
+ *
+ * The ladder decides how much the projected cell can swing BETWEEN rungs: the
+ * step is rounded UP, so a 1/5/10 ladder lets one rung be 5× the next and the
+ * on-screen cell size swings by that factor as you zoom. That is why the grid
+ * had to be authored dense — the fine end of the swing was what set the target,
+ * and the whole ladder paid for it. A 1/2/5/10 ladder caps the swing at 2.5×,
+ * which is what makes {@link CELLS_ACROSS} affordable.
+ */
+const DECADE = [1, 2, 5, 10] as const;
 
-/** Snap a positive value up to the nearest 1/5/10 decade step. */
+/** Snap a positive value up to the nearest 1/2/5/10 decade step. */
 export function snapToDecade(value: number): number {
   const v = Math.max(value, 1e-6);
   const pow = Math.pow(10, Math.floor(Math.log10(v)));
   const n = v / pow; // 1..<10
-  const m = n < 2 ? DECADE[0] : n < 5 ? DECADE[1] : DECADE[2];
+  const m = n <= 1 ? DECADE[0] : n <= 2 ? DECADE[1] : n <= 5 ? DECADE[2] : DECADE[3];
   return m * pow;
 }
 
 /**
- * Pure adaptive step selection. Targets ~one minor line per `distance/50` world
- * units, snapped to a 1/5/10 step; major lines are every 10 minors.
+ * Roughly how many minor cells span the camera distance (≈ the viewport's
+ * shorter world extent). The step is rounded UP the ladder, so the real count
+ * lands in `CELLS_ACROSS/2.5 … CELLS_ACROSS` — 10…25 cells, i.e. cells that
+ * read as squares you can count rather than as texture.
+ */
+const CELLS_ACROSS = 25;
+
+/**
+ * Pure adaptive step selection. Targets ~one minor line per
+ * `distance/CELLS_ACROSS` world units, snapped to a 1/2/5/10 step; major lines
+ * are every 10 minors.
  */
 export function chooseGridStep(cameraDistance: number): GridStep {
-  const minor = snapToDecade(Math.max(cameraDistance, 1) / 50);
+  const minor = snapToDecade(Math.max(cameraDistance, 1) / CELLS_ACROSS);
   return { minor, major: minor * 10 };
 }
 

@@ -26,13 +26,18 @@ import {
  * whatever the default view actually is rather than a hardcoded guess.
  */
 
-/** Mirrors `GridPlane.ts` `snapToDecade` — 1/5/10 ladder, rounds UP. */
+/** Mirrors `GridPlane.ts` `snapToDecade` — 1/2/5/10 ladder, rounds UP. */
 function snapToDecade(v: number): number {
   const value = Math.max(v, 1e-6);
   const pow = Math.pow(10, Math.floor(Math.log10(value)));
   const n = value / pow;
-  const m = n < 2 ? 1 : n < 5 ? 5 : 10;
+  const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
   return m * pow;
+}
+
+/** Mirrors `GridPlane.ts` `chooseGridStep().minor` (CELLS_ACROSS = 25). */
+function gridStepMm(camDist: number): number {
+  return snapToDecade(Math.max(camDist, 1) / 25);
 }
 
 /** Mirrors `liveDimension.ts` `decadeFloor` — 1/2/5 ladder, rounds DOWN. */
@@ -48,8 +53,7 @@ function decadeFloor(v: number): number {
 /** Mirrors `liveDimension.ts` `dimQuantum` for the "mm" display unit (decimals=3,
  *  finest = 1e-3 — `src/units/lengthUnits.ts`). */
 function lengthQuantumMm(camDist: number): number {
-  const minor = snapToDecade(Math.max(camDist, 1) / 50);
-  return Math.max(decadeFloor(minor / 10), 0.001);
+  return Math.max(decadeFloor(gridStepMm(camDist) / 10), 0.001);
 }
 
 async function getCameraDistance(page: import("@playwright/test").Page): Promise<number> {
@@ -89,8 +93,9 @@ test("a mouse-drawn line rounds to the zoom-adaptive quantum; off it does not", 
   //   rejected  numeric:length:0.1  reason "claim-conflict"
   //             numeric:angle:1     reason "claim-conflict"
   //
-  // …which lands p0 (-29, 12) → p1 (19, -10): both endpoints exactly on the 1 mm
-  // grid, and a length of hypot(48, 22) = 52.8015… that is a multiple of no
+  // …which lands p0 (-29, 12) → p1 (19, -10): both endpoints exactly on the grid
+  // (1 mm at the zoom this trace was captured, coarser since `CELLS_ACROSS`
+  // widened the cells), and a length of hypot(48, 22) = 52.8015… that is a multiple of no
   // quantum at all. That is correct behaviour — grid snap wins a click, as it
   // does in every CAD — and the third assertion at the bottom now pins it, so it
   // is covered rather than silently traded away. What this spec's own comment
@@ -131,19 +136,23 @@ test("a mouse-drawn line rounds to the zoom-adaptive quantum; off it does not", 
   // The other side of the policy quoted above, asserted rather than assumed.
   //
   // The click has to land ON a grid intersection for this to be deterministic:
-  // the grid candidate only exists within `gridReachPx` (0.35 × the projected
-  // cell — here ~1.66 px of a 4.74 px cell), so a pixel offset picked by hand is
-  // usually OUT of its reach and the numeric fields win instead. That is not a
-  // second policy, it is the same one seen from the other side, and it is why
-  // this case aims at an exact plane coordinate rather than at a screen offset.
+  // the grid candidate only exists within `gridReachPx` (min of the user's point
+  // reach and 0.35 × the projected cell), so a coordinate that is not a multiple
+  // of the CURRENT step is usually out of its reach and the numeric fields win
+  // instead. That is not a second policy, it is the same one seen from the other
+  // side, and it is why this case aims at exact grid nodes — derived from the
+  // live camera distance, since the step is zoom-adaptive — rather than at a
+  // screen offset or a hardcoded plane coordinate.
   await setSnapPref(page, "dimensionRound", true);
   await setSnapPref(page, "grid", true);
 
+  const step = gridStepMm(camDist);
+  const node = (mm: number): number => step * Math.round(mm / step);
   const plane = (await getSketchSnapshot(page)).plane;
   // Well clear of both earlier lines: a click inside the endpoint snap radius of
   // an existing point welds to it (Coincident) and the DOF would not move.
-  const a = await planePointToClient(page, plane, { x: -46, y: 27 });
-  const b = await planePointToClient(page, plane, { x: -18, y: 33 });
+  const a = await planePointToClient(page, plane, { x: node(-46), y: node(27) });
+  const b = await planePointToClient(page, plane, { x: node(-18), y: node(33) });
   // move → down → up, as `clickAt` does: the tools steer off pointermove, and a
   // bare `mouse.click()` pair also reads as a double-click at these distances.
   await page.mouse.move(a.x, a.y);
