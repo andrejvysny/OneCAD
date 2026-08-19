@@ -27,7 +27,7 @@ relevant `logs/dev.jsonl` excerpt.
 
 ---
 
-## 1. Visual — theming and shading (4)
+## 1. Visual — theming and shading (6)
 
 - [ ] **Wireframe in dark mode.** All three render modes in dark; wireframe is
       the known failure case — the edge token must invert, not stay light-on-light.
@@ -37,6 +37,13 @@ relevant `logs/dev.jsonl` excerpt.
       return to full on exit.
 - [ ] **Repair-candidate crosshair.** Hovering a candidate in the repair panel
       draws a crosshair at the right place in the viewport.
+- [ ] **Idle sketch chrome is ONE fused two-row pill**, not two stacked bars with
+      a seam between them.
+- [ ] **Sketch render parity.** A selected edge shows a read-only length label;
+      adding a Distance constraint REPLACES it rather than drawing a second one
+      (the state half of this is GAP-F9, still unautomated); the origin pin shows
+      its lock icon with a Disconnect chip; an endpoint selection draws the
+      highlight ring.
 
 ## 2. Native — window, menus, shortcuts (4)
 
@@ -63,11 +70,33 @@ relevant `logs/dev.jsonl` excerpt.
 - [ ] **GPU context restore.** Sleep/wake or a GPU switch keeps shading and the
       camera pose intact.
 
+## 4. Native — autosave and crash recovery (5)
+
+A machine cannot kill its own host and relaunch it, so this block stays manual in
+full. It is the one section here with real data-loss risk — run it every release.
+
+- [ ] **Untouched document.** Open a saved project, touch nothing, `kill -9`,
+      relaunch ⇒ **NO** recovery offer.
+- [ ] **Continuous work.** Model for 3 minutes with no pause longer than 30 s,
+      `kill -9` ⇒ an offer exists and holds the last edit.
+- [ ] **Restore, then crash again.** Restore from the offer, then `kill -9` again
+      while unsaved ⇒ the offer still exists.
+- [ ] **Recent-card path.** Crash with an unsaved edit to a saved project;
+      relaunch and click the project in Recent ⇒ prompt appears, and
+      "Open saved version" is the only way the autosave is discarded.
+- [ ] **Identity.** The restored document shows its real name, never a UUID, and
+      the card shows a time.
+
 ---
 
 ## Not gated here
 
-- **Mac packaging / notarization** (`docs/PACKAGING.md` §5) — release-time, needs
-  Developer ID credentials and a physical Mac.
+- **Mac notarization** (`docs/PACKAGING.md` §4) — needs Developer ID credentials,
+  which this project does not have; the shipped path today is an ad-hoc-signed
+  local bundle, and notarization is a named follow-up rather than a gate.
+- **The packaged-app composition flow** (open → extrude → fillet → undo → save →
+  reopen) — automated against a real `.app` in `e2e-tauri/specs/composition.e2e.ts`
+  and CI job `tauri-composition`. It was a manual box seven times over in
+  `TODO.md`; see `MANUAL_GATES_TRIAGE.md` § Round 2.
 - **The hex gate** — `grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'`
   must be empty. Mechanical, run it at every gate; it is not wired into `ci.yml`.

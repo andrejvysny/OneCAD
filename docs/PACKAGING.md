@@ -118,23 +118,65 @@ The worker's rpath (`/opt/homebrew/lib` + `@executable_path/../Frameworks`) is
 already baked in by `worker/CMakeLists.txt`, so the in-tree dev binary finds
 Homebrew OCCT while the bundled binary finds `Contents/Frameworks/`.
 
-## 4. Sign + notarize (placeholder)
+## 4. Signing — what this project actually does
 
-After `bundle-dylibs.sh`, sign the whole bundle with a real Developer ID and
-notarize:
+**The shipped path today is an AD-HOC signed bundle, and that is a decision, not
+an omission.** There is no Apple Developer ID for this project, so there is
+nothing to notarize with; recording a Developer ID recipe as if it were the
+procedure made the doc read as done when no bundle had ever been installed.
+
+### 4.1 Ad-hoc (the current path)
+
+`bundle-dylibs.sh` already ad-hoc-signs every Mach-O it rewrites. Sign the outer
+bundle the same way so the app launches as one coherent signature:
 
 ```bash
-# Placeholder — fill in the real Developer ID + credentials at release time.
-codesign --force --deep --options runtime \
-  --sign "Developer ID Application: <TEAM>" path/to/OneCAD.app
-xcrun notarytool submit path/to/OneCAD.dmg \
-  --apple-id <APPLE_ID> --team-id <TEAM_ID> --password <APP_PASSWORD> --wait
-xcrun stapler staple path/to/OneCAD.app
+codesign --force --deep --sign - src-tauri/target/release/bundle/macos/onecad.app
+codesign --verify --deep --strict --verbose=2 \
+  src-tauri/target/release/bundle/macos/onecad.app     # → "satisfies its Designated Requirement"
 ```
 
-Tauri can perform signing during `tauri build` when `APPLE_CERTIFICATE` /
-`APPLE_SIGNING_IDENTITY` env vars are set; the `bundle-dylibs.sh` re-sign of the
-sidecar must happen **before** the outer bundle is signed.
+An ad-hoc signature satisfies `codesign --verify` but **not** Gatekeeper:
+
+```bash
+spctl --assess --type execute --verbose src-tauri/target/release/bundle/macos/onecad.app
+# → "rejected (the code is valid but does not seem to be an app)"  — EXPECTED
+```
+
+So first launch needs one explicit approval, on the machine that built it:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/onecad.app   # only if the bundle was zipped/copied
+open /Applications/onecad.app                              # or right-click → Open, once
+```
+
+This is enough to install the app locally and use it daily. It is **not** enough
+to hand the `.app` to anyone else — a bundle copied to another Mac carries the
+quarantine bit and will be refused until that machine's owner overrides it.
+
+### 4.2 Developer ID + notarization (follow-up, NOT done)
+
+Prerequisites this project does not currently have: an Apple Developer Program
+membership, a "Developer ID Application" certificate in the login keychain, and
+an app-specific password (or an API key) for `notarytool`. With those, the
+release path becomes:
+
+```bash
+codesign --force --deep --options runtime \
+  --sign "Developer ID Application: <TEAM>" path/to/onecad.app
+xcrun notarytool submit path/to/onecad.dmg \
+  --apple-id <APPLE_ID> --team-id <TEAM_ID> --password <APP_PASSWORD> --wait
+xcrun stapler staple path/to/onecad.app
+```
+
+Tauri can sign during `tauri build` when `APPLE_CERTIFICATE` /
+`APPLE_SIGNING_IDENTITY` are set; either way the `bundle-dylibs.sh` re-sign of
+the sidecar must happen **before** the outer bundle is signed, because
+`install_name_tool` invalidates whatever signature it finds.
+
+Until that membership exists, §5's clean-Mac checklist is unreachable by
+construction: its first assertion is that Gatekeeper accepts the bundle, and an
+ad-hoc signature never will.
 
 ## 5. Clean-Mac verification checklist (deferred, run on a Mac)
 

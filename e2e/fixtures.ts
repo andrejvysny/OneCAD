@@ -25,7 +25,13 @@
  * `body` attachment to a file, so a `body`-based attach here would leave
  * nothing in `test-results/` to open. Writing the file ourselves and pushing
  * it onto `testInfo.attachments` directly (the pattern from Playwright's own
- * "Automatic Fixture" doc) lands it at `test-results/<test>/<name>` exactly.
+ * "Automatic Fixture" doc) lands it at `<outputDir>/<test>/<name>` exactly —
+ * `test-results/run-<stamp>/<test>/<name>`, since every run gets its own
+ * directory so a later run cannot wipe this one's evidence (`e2e/outputDir.ts`).
+ *
+ * Both failure modes are covered, verified by running them: an assertion diff
+ * and a hard test timeout each leave `console.log`, `pageerror.log` and
+ * `fe-logs.json` on disk — the teardown below still runs after a timeout.
  */
 import { promises as fs } from "node:fs";
 import { test as base, expect } from "@playwright/test";

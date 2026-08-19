@@ -1,5 +1,95 @@
 # OneCAD-Tauri Migration TODO
 
+## DAILY DRIVER v1 (2026-08-19, plan `~/.claude/plans/act-as-senior-cad-floofy-locket.md`)
+
+Capability + ship, chosen over kernel continuation. The artifact is faithful after TRUST &
+DELIVERABLE, but nobody — including its author — has it installed, and two modeling gaps block
+ordinary machined/printed-part work. Waves: **W0** baseline + gate triage + the evidence hole ·
+**W1** ship lane (unsigned) · **W2** section view (capped) · **W3** project edges into the active
+sketch · **W4** UX trust polish · **W5** close-out.
+
+**Product decisions taken with the user before any code:**
+
+- Lane: capability + ship. **Kernel continuation waits** (§ KERNEL CONTINUATION stays unstarted).
+- Scope: project-edges-into-sketch · section view · UX trust polish. **Tapped/threaded holes are
+  OUT** — offered and declined; recorded as the top remaining machined-part gap for a later
+  program (`HoleParams` has no thread field, `holeStandards.ts` is ISO 273 clearance only).
+- Signing: **unsigned / ad-hoc local bundle.** Notarization is a named follow-up, not this program.
+- Manual gates: **triage to a short must-run list**, not run all 30 as written.
+- Projected geometry: **frozen + loud staleness.** Project once, persist the source binding,
+  re-resolve each regen only to DETECT that the source moved. Never silently re-shape.
+- Section view: **capped** (stencil caps — the cut reads solid).
+
+### NOW — the next three actions, in order
+
+- [ ] **W1 — build, ad-hoc-sign and INSTALL the bundle**, then run the 19-row release checklist
+      (`docs/qa/MANUAL_RELEASE_GATES.md`), autosave § 4 included. USER-run; nothing else in this
+      program is worth doing before the app is in `/Applications`.
+- [ ] **W2 — section view.** Frontend-only, no wire change; goes before W3 for that reason.
+- [ ] **W3 — project edges into the active sketch.** Needs a SCHEMA §7.6 change, §14 changelog
+      entry and a fixture bump.
+
+### Gate — W0: baseline truth, gate triage, the evidence hole (2026-08-19) — LANDED
+
+**Baseline measured on a clean tree at `33dd36c`, each suite run alone, none inferred:**
+`ctest` **136/136** (36.1 s) · `cargo fmt --all --check` + `clippy --workspace --all-targets
+-D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **86 targets
+/ 1319 passed / 0 failed** · `bunx tsc --noEmit` clean · `bun run test` **296 files / 4977 passed /
+78 skipped** · `bun run e2e` **464 passed / 0 failed** (31.9 min, both projects, retries 0) ·
+hex gate empty.
+
+- [x] **The e2e evidence hole is NOT a fixture bug — it is Playwright's own output-dir wipe, and
+      both directions are now measured.** `createRemoveOutputDirsTask`
+      (`playwright/lib/runner`) removes the WHOLE `outputDir` in the `clear output` setup task of
+      every run, and the specs a sweep just failed are exactly the specs a human re-runs next. So
+      the triage run deletes the evidence of the failure being triaged — which is why the
+      2026-08-17 close-out sweep's single failure left only `.last-run.json` behind (§ W6
+      close-out): that is precisely what a later clean run leaves.
+      **Falsified in both directions, not argued:** with a flat `outputDir`, a failing run left 1
+      `console.log` and a subsequent passing run left **0**. With the fix, the failing run's
+      artifacts survive the re-run.
+      Fix: `e2e/outputDir.ts` — every run writes to `test-results/run-<stamp>`, newest 10 kept,
+      `.last-run.json` pinned back to the stable root via `PLAYWRIGHT_LAST_RUN_OUTPUT_FILE` so
+      `--last-failed` still filters. `E2E_OUTPUT_DIR` overrides the layout; `E2E_RUN_ID` names a run.
+- [x] **Two facts the probe found that reasoning would not have.** (1) The fixture DOES capture on
+      a hard test timeout, not only on an assertion diff — a temporary two-test probe drove both
+      and each left `console.log` + `pageerror.log` + `fe-logs.json`. So the capture path was never
+      the defect. (2) **The first version of the fix was wrong**: Playwright loads the config again
+      in EVERY worker process (and spawns a fresh worker after a test dies), so a per-load stamp
+      produced a directory per worker and scattered one run's evidence. The run id is now memoized
+      through `process.env`, which workers inherit; `resolveRunId().fresh` is the discriminator that
+      keeps pruning in the runner alone. Proven at scale: the 464-test sweep above wrote ONE dir.
+      Pinned by `src/test/e2eOutputDir.test.ts` (8 tests) — it lives under `src/` because a file in
+      `e2e/` would be collected by BOTH vitest and Playwright.
+- [x] **Manual-gate triage — 30 unchecked boxes → 7 new checklist rows.**
+      `docs/qa/MANUAL_GATES_TRIAGE.md` § Round 2 has the per-item table. Two structural findings do
+      most of the reduction: (1) everything dated **2026-08-08 or earlier** was already retired by
+      round 1 and simply never ticked (19 of the 30); (2) **"manual Tauri smoke: open → extrude →
+      fillet → undo → save → reopen" appears SEVEN times** (`:1707, 2265, 2394, 5495, 5918, 5996,
+      7651`) and is ONE check, COVERED by `e2e-tauri/specs/composition.e2e.ts:226` against a real
+      packaged `.app` in CI job `tauri-composition`.
+      `docs/qa/MANUAL_RELEASE_GATES.md` goes 12 → 19 rows: the five autosave crash steps as a new
+      § 4 (a machine cannot kill its own host and relaunch it) and two sketch visuals folded into
+      § 1. One new automated gap opened rather than parked as a manual box — **GAP-F9**: adding a
+      Distance constraint must REPLACE the read-only length label, not draw a second one.
+- [x] **Stale ledger boxes reconciled with citations.** DI-1/DI-2/DI-3 ticked (closed by AUTOSAVE
+      HARDENING `a287e19`; DI-1's fix went beyond the audit's three options — discovery is keyed to
+      the CONTAINER with the marker as owner evidence only). DI-4 ticked at both sites (closed by
+      `ff0e92e` + `57290bc`, pinned by `src-tauri/tests/face_color_reopen.rs`). The 26 historical
+      manual boxes are NOT rewritten in place — this section's triage is their disposition, which
+      keeps the append-log convention and avoids conflicting with a parallel session.
+- [x] **Two doc lies fixed while there.** `docs/DEBUGGING.md` claimed `trace: "on-first-retry"`
+      when the config is `retain-on-failure` with `retries: 0` — the documented artifact would
+      never have existed. `docs/PACKAGING.md` § 4 was a Developer-ID placeholder presented as the
+      procedure; it now states ad-hoc signing as the actual shipped path, with `spctl`'s expected
+      REJECTION recorded (an ad-hoc signature never satisfies Gatekeeper) and notarization moved to
+      § 4.2 with its unmet prerequisites named.
+- **MC-R9 datapoint 4, recorded not claimed:** this sweep was **464/0 on an idle machine**. That is
+  consistent with datapoints 1–3 (all full-suite-only, all green in isolation) and does NOT close
+  MC-R9 — the ledger's rule is a measured root cause, never a clean run. What changed is that the
+  next occurrence will finally carry artifacts.
+
+
 ## TRUST & DELIVERABLE (2026-08-16, plan `~/.claude/plans/act-as-senior-software-tranquil-cloud.md`)
 
 ### NOW — the next three actions, in order
@@ -1758,7 +1848,7 @@ remain open under T3.
       Deliverable program (see `### W3 — DI-5` above): `STEPCAFControl_Writer` over
       a real XCAF document, names + body colour + per-face colours, AP242DIS,
       round-trip-proved on values in both ctest and a worker-backed Rust suite.
-- [ ] **DI-4 — an authored face colour stops being paintable after a reopen.**
+- [x] **DI-4 — an authored face colour stops being paintable after a reopen.** CLOSED by `ff0e92e` (W2) + `57290bc` (W2.1 bounded retry); pinned by `src-tauri/tests/face_color_reopen.rs`. Box ticked 2026-08-19.
       Nothing re-binds a persisted `ElementId` at open, so both frontend paint
       paths come up empty. Same root as the retired W5 seam: **one fix closes
       both**, and it also makes DI-5's export worth doing on a reopened document
@@ -2320,7 +2410,7 @@ another package does not tick anyone else's box.
 
 ### FINDINGS — recorded, not fixed
 
-- [ ] **DI-1 (HIGH) — a recovered document is unprotected against the NEXT crash.**
+- [x] **DI-1 (HIGH) — a recovered document is unprotected against the NEXT crash.** CLOSED by AUTOSAVE HARDENING (`a287e19`): discovery is keyed to the CONTAINER, with the marker only as owner evidence (`scan_recoverable` replaced `scan_stale_markers`) — a stronger fix than any of the three options below. Box ticked 2026-08-19.
       `api::recover_document` consumes the crash marker (`api/mod.rs:796`) while deliberately
       keeping the autosave file, on the stated reasoning that "the autosave file itself is kept so a
       re-crash before the next tick still recovers". That reasoning is false: discovery iterates
@@ -2330,13 +2420,13 @@ another package does not tick anyone else's box.
       marker-present control right above it. Fix options differ in their stale-offer profile: keep
       the marker until the next autosave supersedes it · write a fresh marker at recovery · scan
       autosave files as a fallback. ~½ day including the lane test.
-- [ ] **DI-2 (MEDIUM-HIGH) — `recover_document` never ticks the autosave loop.** It sets
+- [x] **DI-2 (MEDIUM-HIGH) — `recover_document` never ticks the autosave loop.** CLOSED by AUTOSAVE HARDENING (`a287e19`). Box ticked 2026-08-19.
       `dirty = true` (`document_runtime.rs:2073-2076`) but does not call `state.note_mutation()`,
       and the autosave loop is driven ONLY by that tick — it never reads `is_dirty`
       (`autosave.rs:255-282`). Protection is incidental, from the tick a *published* regen bumps
       (`lib.rs:174-176`). If the recovery replay fails, no-ops or is cancelled, nothing is
       autosaved — and by DI-1 there is no marker either. One line to fix; the value is in the test.
-- [ ] **DI-3 (MEDIUM) — two commands mutate persisted state with no tick and no dirty flag.**
+- [x] **DI-3 (MEDIUM) — two commands mutate persisted state with no tick and no dirty flag.** CLOSED by AUTOSAVE HARDENING (`a287e19`). Box ticked 2026-08-19.
       `promote_selection` (`api/mod.rs:1378`) and `prepare_edge_op` (`api/mod.rs:2207`) both write
       `regen.elements` (`document_runtime.rs:3260`), which `build_save_payload` persists as
       `doc.elements` (`:1914`). Neither calls `note_mutation`, and Rust reports `dirty:false`, so
@@ -2345,7 +2435,7 @@ another package does not tick anyone else's box.
       save, invisible to both the autosave tick and the unsaved guard" is a state no other mutation
       is in. Audit rows: all 55 Tauri commands were classified; these two plus DI-2 are the only
       mutating rows without a tick, and no non-mutating row has a spurious one.
-- [ ] **DI-4 (MEDIUM) — an authored FACE COLOUR survives as data but stops being paintable after a
+- [x] **DI-4 (MEDIUM) — an authored FACE COLOUR survives as data but stops being paintable after a
       reopen.** `SetFaceColor` keys on the Rust-minted `ElementId`; the frontend paints it through
       exactly two paths (`meshSync.resolveAuthoredFaceColors`) and both bottom out in the worker's
       element-map partition, which is minted on demand and dies with the process. `BindElementIds`

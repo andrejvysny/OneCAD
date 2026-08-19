@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { lastRunFile, pruneRunDirs, resolveRunId, runOutputDir } from "./e2e/outputDir";
 
 /*
  * Playwright e2e config for OneCAD (mock-backend lane).
@@ -22,8 +23,22 @@ import { defineConfig } from "@playwright/test";
 const PORT = Number(process.env.E2E_PORT ?? 4177);
 const BASE_URL = `http://localhost:${PORT}`;
 
+// Every run writes into its own `test-results/run-<stamp>` directory, because
+// Playwright's `clear output` task wipes the WHOLE outputDir at the start of a
+// run — so with one flat directory the triage re-run deletes the evidence of the
+// failure being triaged. Full reasoning and the measured case: e2e/outputDir.ts.
+// This config is loaded again by every worker process; `fresh` is true only in
+// the runner, which is the one process allowed to prune.
+const RUN = resolveRunId();
+const OUTPUT_DIR = runOutputDir();
+if (RUN.fresh) pruneRunDirs();
+// `.last-run.json` lives in outputDir by default; pin it back to the stable root
+// or `--last-failed` would read a fresh empty directory on every run.
+process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE ??= lastRunFile();
+
 export default defineConfig({
   testDir: "./e2e",
+  outputDir: OUTPUT_DIR,
   // One Vite dev server + WebGL contention → keep it serial and predictable.
   fullyParallel: false,
   workers: 1,

@@ -255,7 +255,9 @@ Every spec imports `test`/`expect` from `./fixtures` instead of
 `page.on("console")` and `page.on("pageerror")` for the whole test; after the
 test body runs, if the test FAILED or ANY pageerror fired (even on an
 otherwise-passing test), it writes three files under
-`test-results/<test-title-slug>/`:
+`test-results/run-<stamp>/<test-title-slug>/`. Both ways a spec can die are
+covered — an assertion diff and a hard test timeout — because the fixture's
+teardown still runs after a timeout (verified by running both):
 
 - `console.log` — `[type] text` per line, chronological.
 - `pageerror.log` — one stack (or `String(err)`) per line; empty file if none fired.
@@ -275,9 +277,18 @@ own "Automatic Fixture" doc uses. A `body`-only version of this fixture would
 report attachments correctly in the terminal but leave nothing on disk to open
 after the run — verified empirically while building this fixture.
 
-Plus Playwright's own `trace: "on-first-retry"` (`playwright.config.ts`) on a
-retried test, and the auto-generated `error-context.md` (Playwright core, not
-this fixture) on every failure.
+Plus Playwright's own `trace: "retain-on-failure"` and
+`screenshot: "only-on-failure"` (`playwright.config.ts` — `retries` is 0 in CI
+and locally, so "on-first-retry" would capture nothing), and the auto-generated
+`error-context.md` (Playwright core, not this fixture) on every failure.
+
+**Why the run-`<stamp>` directory.** Playwright's `clear output` setup task wipes
+the whole `outputDir` at the start of every run, so a flat `test-results/` meant
+the first triage re-run deleted the evidence of the failure being triaged — the
+measured cause of the 2026-08-17 sweep leaving only `.last-run.json` behind.
+`e2e/outputDir.ts` gives each run its own directory, keeps the newest 10, and
+pins `.last-run.json` to `test-results/` so `--last-failed` still works.
+`E2E_OUTPUT_DIR` overrides the layout; `E2E_RUN_ID` names a run.
 
 ## 12. Extension policy
 

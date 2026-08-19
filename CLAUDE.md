@@ -123,7 +123,7 @@ Knobs: `RUST_LOG` (default `info,onecad_lib=debug,onecad=debug,fe=debug,worker=d
 
 First-look greps: `grep '"level":"ERROR"' logs/dev.jsonl`, `grep '"target":"worker"'`, `grep 'regen:'` (outcome + failed-step lines), `grep '"tag":"hint"'` (what the user actually saw on screen).
 
-e2e (`e2e/fixtures.ts`): every spec auto-captures browser console + `pageerror`; on a failing test, or any pageerror at all, `test-results/<test>/` gets `console.log`, `pageerror.log`, `fe-logs.json` (the FE ring via `__logsDump()`), plus Playwright's own trace on retry.
+e2e (`e2e/fixtures.ts`): every spec auto-captures browser console + `pageerror`; on a failing test, or any pageerror at all, `test-results/run-<stamp>/<test>/` gets `console.log`, `pageerror.log`, `fe-logs.json` (the FE ring via `__logsDump()`), plus Playwright's own trace and screenshot (both retain-on-failure; `retries` is 0). Each run gets its OWN directory — Playwright wipes `outputDir` at the start of every run, so a flat one let a triage re-run delete the evidence it was triaging (`e2e/outputDir.ts`, newest 10 kept).
 
 White-box surfaces (dev builds only): `window.__logs`/`__logsDump()`/`__logsClear()`, `window.__stores` (12 keys — document/sketch/viewport/tool/settings/selection/measure/app/toolChip/worker/repair/sketchSelection), `window.__vpEngine` (`?vpdebug`), `window.__extrudePreview`.
 

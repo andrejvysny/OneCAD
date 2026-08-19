@@ -370,3 +370,61 @@ like the auto-fit regression above.
 - M3 Mac packaging (needs Developer ID credentials) — `docs/PACKAGING.md` §5
 - `?inputprobe` calibration + deleting `src/viewport/debug/inputProbe.ts` — a code
   task, not a gate (it is also the last hex-gate hit)
+
+---
+
+# Round 2 (2026-08-19) — the manual gates that re-grew after round 1
+
+Round 1 (above) cut ~112 boxes to 12 and stated the rule that keeps it cut: a new
+manual permutation is a signal that an automated lane is missing, not that the
+checklist should get longer. Between 2026-08-08 and 2026-08-17 the ledger grew
+manual boxes again — 30 unchecked `- [ ]` items in `TODO.md` mention a manual or
+USER gate. This round classifies them with the same K/H/F/M codes.
+
+**Two structural findings first, because they do most of the reduction:**
+
+- **Everything dated 2026-08-08 or earlier is already retired by round 1.** The
+  archived `MANUAL_GATES_RUN.md` those boxes belong to IS what round 1 triaged
+  (`TODO.md`'s own Step-0 row says so: "SUPERSEDED 2026-08-08 by the P1 triage").
+  Their boxes were simply never ticked. That is 19 of the 30 — VIEWPORT-VISUAL,
+  OFFSET-FACE, STARTUP-PERF, ICONS-TWOTONE, SKETCH-PRO, DARK-MODE, RENDER-MODE,
+  SKETCH-ON-FACE, AC-USABILITY, TRACKPAD-NAV, SKETCH-HARDEN, MODEL-HARDEN,
+  MODEL-OPS, EXTRUDE-REGION-PARITY, AUTO-MODE, TRUST+PREVIEW, FILLET-CHAMFER-UNIFY,
+  FILLET-KERNEL-HARDENING, and the pre-merge SAVE/OPEN gates.
+- **"Manual Tauri smoke: open → extrude → fillet → undo → save → reopen" appears
+  SEVEN times** (`TODO.md:1707, 2265, 2394, 5495, 5918, 5996, 7651`, plus the
+  `:6562/:6985/:7063` duplicate copies of the same log). It is one check, and it is
+  **COVERED**: `e2e-tauri/specs/composition.e2e.ts:226` — "opens fixture,
+  Extrudes, Fillets, Undoes, saves, and reopens" — runs that exact flow against a
+  **real packaged `.app`** in CI job `tauri-composition`, and the lane has since
+  executed and passed (`CURRENT_STATE.md`, MC-R4). Seven boxes, one citation.
+
+## Round 2 table
+
+| Check | `TODO.md` | Dest | Status |
+| --- | --- | --- | --- |
+| Manual Tauri smoke — open → extrude → fillet → undo → save → reopen (×7) | 1707, 2265, 2394, 5495, 5918, 5996, 7651 | F | COVERED `e2e-tauri/specs/composition.e2e.ts:226` (real packaged `.app`, CI `tauri-composition`) |
+| Autosave crash recovery — 5 steps (`kill -9`, relaunch, Restore, Recent-card prompt, real name) | 1383 | **M** | STAYS MANUAL — native process death plus a relaunch; no lane can kill its own host. Moved verbatim into `MANUAL_RELEASE_GATES.md` § 4 |
+| Idle sketch chrome reads as ONE fused two-row pill | 1234 | **M** | STAYS MANUAL — visual composition of two chrome rows. Folded into `MANUAL_RELEASE_GATES.md` § 1 |
+| Sketch render parity — read-only length label, Distance chip takes over with no duplicate, origin-pin lock icon + Disconnect chip, endpoint highlight ring | 1435 | **M** + F | SPLIT. "A Distance constraint replaces the read-only label rather than duplicating it" is state, and belongs in vitest/Playwright — recorded as **GAP-F9**. The rest is "does it look right", folded into `MANUAL_RELEASE_GATES.md` § 1 |
+| Real-worker face-colour smoke (element ids minted through `promoteSelection`) | 7309 | H | COVERED `src-tauri/tests/face_color_reopen.rs` — the DI-4 rebind work asserts an authored colour survives a reopen against the real worker, including that a re-pick reuses the persisted id |
+| GitHub Settings → require approval for fork-PR workflows | 5589 | — | NOT A PRODUCT GATE. Repo administration, not a release check; stays a one-line USER action in `TODO.md` |
+| Fillet drag into an OCCT refusal — preview stays last-valid, commit blocked, diagnostic visible | 7340 | K + H | COVERED for the refusal + named reason (`worker/tests/test_fillet_diagnostics.cpp:37`); the "selected edges are kept" half is round 1's **GAP-H1**, still open. No new manual box |
+
+## New gap opened by this round
+
+- **GAP-F9** — adding a Distance constraint to a selected sketch edge must
+  REPLACE the read-only length label, not render a second one beside it. Lane:
+  vitest on the sketch overlay, or `e2e/sketch-*.spec.ts`. Until it exists the
+  visual half carries it in `MANUAL_RELEASE_GATES.md` § 1.
+
+## Net effect
+
+30 unchecked manual boxes in `TODO.md` → **7 new checklist rows**: the five
+autosave steps (§ 4, new) and two visual folds into § 1. Everything else is
+retired against a citation, already retired by round 1, or was never a product
+gate. `MANUAL_RELEASE_GATES.md` goes 12 → 19 rows; both additions qualify under
+the file's own native/visual rule, and the file did not grow by carrying a single
+duplicate of the seven-times-repeated Tauri smoke.
+
+One new automated gap is opened (GAP-F9) rather than parked as a manual box.
