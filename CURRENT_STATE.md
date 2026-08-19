@@ -1,40 +1,45 @@
 # Current State
 
-Last verified: 2026-08-17 — TRUST & DELIVERABLE **W0–W5 COMPLETE**, W6 close-out, on `master`
+Last verified: 2026-08-19 — DAILY DRIVER v1 **W0 + W1 COMPLETE**, on `master`
 
-## NOW — TRUST & DELIVERABLE COMPLETE (2026-08-17, plans `act-as-senior-software-tranquil-cloud.md` + `act-as-senior-cad-nested-canyon.md`)
+## NOW — DAILY DRIVER v1 (2026-08-19, plan `act-as-senior-cad-floofy-locket.md`)
 
-The six-wave program is code-complete and pushed. Ten commits landed 2026-08-16/17:
-`ff0e92e` (W2 DI-4 rebind) · `6e71da1` (guide dash cadence — the CI-only spec failure was a real
-product gap: live guides never re-sized on zoom) · `57290bc` (W2.1 bounded rebind retry) ·
-`0d115a7` (refused-click + swallowed-commit-error surfacing, from the WebKit triage) · `ec18de8`
-(two CI-only failure modes closed on artifact evidence: helper init race + wedged wdio bridge in
-the composition lane) · `86df98e` (**W3 — STEP export carries names + colours via XCAF, AP242DIS**)
-· `1fdc88e` (Invariant-1-across-reopen pin — the review's "rebind orphans a re-pick" claim
-REFUTED by experiment) · `8753b74` (**W4 — 3MF export, per-face colours**) · `ce149c6` (e2e
-budgets widened for loaded CI runners) · `eba2614` (**W5 — result truth for
-upsertVariable/removeVariable/replaceComponent: saved + loud failure banner**).
+Capability + ship, chosen with the user over kernel continuation. Waves: W0 baseline + gate
+triage + the evidence hole · W1 ship lane (unsigned) · W2 section view (capped) · W3 project
+edges into the active sketch · W4 UX trust polish · W5 close-out. **W0 and W1 are committed
+(`0d4e11c`, `8e121b5`); W2 has not started.** Full record: `TODO.md` § DAILY DRIVER v1.
 
-- **Gates at `eba2614`, each re-run on the main thread after the delegated work, none inferred:**
-  ctest **136/136** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1305 passed / 0 failed**
-  · `cargo fmt`/`clippy -D warnings` clean · `bunx tsc --noEmit` clean · `bun run test`
-  **295 files / 4971 passed / 78 skipped** · `e2e/variables.spec.ts` 6/6 both projects · hex gate
-  empty · frozen contracts untouched.
-- **Full browser sweep:** a loaded run (concurrent cargo/vitest — invalid per the ledger's own
-  attribution rule) went 448/4 with all 4 green in isolation afterwards; the clean idle sweep's
-  number is in `TODO.md` § W6 close-out.
-- **CI:** most 2026-08-17 reds are GitHub-side `codeload` 429/503 rate limiting at job setup
-  (verified in three runs' logs), not repo failures. The decisive run is `eba2614`'s.
-- **What the deliverable now does:** an authored face colour survives save/reopen (DI-4; ambiguity
-  refused, pinned), the exported STEP carries names + per-face colours in AP242 and round-trips
-  them across three worker processes (DI-5), 3MF export ships with per-face colours from the MESH1
-  lane, and a variable edit whose downstream regen fails reports BOTH truths — saved + failed
-  step — instead of a silent success.
-- **Owed, user-run (cannot be delegated):** the five autosave manual steps (`TODO.md` § AUTOSAVE
-  HARDENING) · the merged-stack Tauri smoke (§ T0) · "exported STEP opens coloured in another
-  CAD" + "exported 3MF opens in a slicer" spot checks.
-- **Next program (user decision this session): kernel continuation** — WP1 G1-rest→G4, WP2 ToNext
-  adversarial campaign, WP3 OffsetFace DirectModeler V1. Re-plan at start.
+- **The app is INSTALLED and healthy for the first time.** `/Applications/onecad.app`, ad-hoc
+  signed, built by the new `scripts/package-macos.sh --install`. Second launch: 89 log lines,
+  zero WARN/ERROR, `geometry worker pre-warmed`, OCCT 8.0.1 fingerprint `0a6a1dce34181289`.
+- **W1's finding is the one to carry forward: a bundle built by following `docs/PACKAGING.md`
+  could never start its worker.** The embedded manifest pins the STAGED sidecar's SHA-256, and
+  `bundle-dylibs.sh` rewrites that sidecar — so the bytes can never match, and the app refused its
+  own worker four times then gave up. `ci.yml`'s two-pass seed/lockstep dance was always correct;
+  it lived ONLY in the workflow file. A procedure that exists only in CI is not a procedure the
+  project has. No Rust changed — the check was right, the pipeline was wrong.
+- **W0's finding: the e2e lane was deleting its own evidence.** Playwright wipes the whole
+  `outputDir` at the start of every run, so the triage re-run destroyed the failure being
+  triaged — the measured reason the 2026-08-17 sweep left only `.last-run.json`. Every run now
+  gets `test-results/run-<stamp>`. Two things running it found: the fixture already captured on a
+  hard timeout (so capture was never the defect), and the first fix was wrong because Playwright
+  re-loads the config in every worker process.
+- **Manual gates triaged 30 → 7 new rows.** 19 were already retired by the 2026-08-08 round and
+  never ticked; "manual Tauri smoke" appeared SEVEN times and is one check, covered by
+  `e2e-tauri/specs/composition.e2e.ts:226`. `docs/qa/MANUAL_RELEASE_GATES.md` is 19 rows.
+- **Baseline at `33dd36c`, each suite run alone:** ctest **136/136** · cargo **86 targets / 1319
+  passed / 0 failed** · fmt/clippy clean · tsc clean · vitest **297 files / 4985 passed / 78
+  skipped** · `bun run e2e` **464 passed / 0 failed** (31.9 min, both projects, retries 0) · hex
+  gate empty.
+- **OWED, USER-RUN:** the 19-row checklist in `docs/qa/MANUAL_RELEASE_GATES.md` against the
+  installed app — § 4 autosave crash recovery above all, the only block with data-loss risk.
+- **Next:** W2 section view (frontend-only, no wire change). Seam already located —
+  `BodyMaterialLibrary` (`src/viewport/engine/bodyMaterials.ts:56`) owns every body face/edge
+  material and has a `refreshColors()`, so clipping planes attach per-material there rather than
+  globally on the renderer (global would clip sketches and gizmos too). Note `CadRenderer`
+  (`renderer.ts`) exposes no clipping surface at all and has a WebGPU path behind it.
+
+## PREVIOUS — TRUST & DELIVERABLE COMPLETE (2026-08-17)
 
 ## PREVIOUS — TRUST & DELIVERABLE W0–W2 (2026-08-16, superseded by the section above)
 
