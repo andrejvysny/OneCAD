@@ -138,6 +138,28 @@ describe("StatusBar", () => {
     expect(screen.queryByText(/^DOF:/)).toBeNull();
   });
 
+  /*
+   * Design item 11 / audit A8 — the sketch plane's own u,v, not world X/Y/Z
+   * (on the XY plane world +Y is the sketch's own u, unmatchable to a typed
+   * dimension). `cursorPlaneUV` is written by the same engine writer as
+   * `cursor` (ViewportRoot's rAF-coalesced pointermove); a mocked write here
+   * stands in for that.
+   */
+  it("shows the sketch-plane U/V read-out while a sketch session is active, X/Y/Z otherwise", () => {
+    renderStatusBar();
+    expect(screen.getByText(/X\s+273\.00\s+Y\s+210\.00\s+Z\s+0\.00\s+mm/)).toBeInTheDocument();
+
+    act(() => {
+      toolStore.getState().setMode("sketch", "sketch2");
+      viewportStore.getState().setCursor({ x: 12, y: 34, z: 0 }, { u: 5.5, v: -2.25 });
+    });
+    expect(screen.getByText(/U\s+5\.50\s+V\s+-2\.25\s+mm/)).toBeInTheDocument();
+    expect(screen.queryByText(/^X\s/)).toBeNull();
+
+    act(() => toolStore.getState().setMode("model"));
+    expect(screen.getByText(/X\s+12\.00\s+Y\s+34\.00\s+Z\s+0\.00\s+mm/)).toBeInTheDocument();
+  });
+
   it("colors DOF neutrally, never as a warning, in model mode", () => {
     renderStatusBar();
     expect(screen.getByText("DOF: 3")).toHaveClass("text-dof-neutral");

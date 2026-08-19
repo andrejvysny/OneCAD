@@ -6,7 +6,8 @@
  * (StrictMode-safe) and wires stores both directions:
  *   store → engine : projection, gridVisible
  *   engine → store : cameraViewLabel (on camera change), cursor (pointer raycast
- *                    onto Z=0)
+ *                    onto Z=0) + cursorPlaneUV (the same hit on the active
+ *                    sketch plane, design item 11)
  * A hatched placeholder is shown until the engine is ready (and stays if WebGL
  * is unavailable, e.g. jsdom), so the shell degrades gracefully.
  */
@@ -613,7 +614,11 @@ export function ViewportRoot({ className }: { className?: string }) {
         syncCamera();
         cleanups.push(engine.onCameraChanged(syncCamera));
 
-        // engine → store (cursor on Z=0), rAF-coalesced
+        // engine → store (cursor on Z=0, PLUS the same hit's sketch-plane u,v —
+        // design item 11), rAF-coalesced. One writer for both: `screenToPlane`
+        // is the identical projection `SketchController`'s own gestures use
+        // (null outside a sketch session, since the engine's `sketchPlane` is
+        // unset there), so the status bar never disagrees with the geometry.
         let pendingEvent: PointerEvent | null = null;
         let scheduled = false;
         const onMove = (e: PointerEvent) => {
@@ -627,8 +632,16 @@ export function ViewportRoot({ className }: { className?: string }) {
               pendingEvent.clientX,
               pendingEvent.clientY,
             );
-            if (hit) {
-              viewportStore.getState().setCursor({ x: hit.x, y: hit.y, z: 0 });
+            // Plane u,v is computed independently of the ground hit: on a
+            // vertical sketch plane viewed down its normal the Z=0 ray is
+            // near-parallel and misses, which is exactly when the sketch
+            // read-out matters most (A8). A missing half keeps its last value.
+            const planePt = engine.screenToPlane(pendingEvent.clientX, pendingEvent.clientY);
+            if (hit || planePt) {
+              viewportStore.getState().setCursor(
+                hit ? { x: hit.x, y: hit.y, z: 0 } : viewportStore.getState().cursor,
+                planePt ? { u: planePt.x, v: planePt.y } : null,
+              );
             }
           });
         };

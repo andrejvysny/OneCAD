@@ -16,12 +16,17 @@ import { contributeInspectorSections } from "@/modules/modeling/inspectorSection
 import { flushSketchMutations } from "@/tools/sketch/sketchService";
 import type { SketchConstraint, SketchSession } from "@/ipc/types";
 
-/** A live sketch session carrying the constraints the inspector summarizes. */
+/**
+ * A live sketch session carrying the constraints the inspector summarizes.
+ * `entities` carries one placeholder line — a session with any constraint
+ * necessarily has geometry (constraints reference points on entities); a
+ * genuinely EMPTY session (design item 12) is its own dedicated fixture below.
+ */
 function sessionWithConstraints(constraints: SketchConstraint[]): SketchSession {
   return {
     sketchId: "sketch2",
     plane: { kind: "XY", origin: [0, 0, 0], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
-    entities: [],
+    entities: [{ id: "e0", type: "Line", p0: [0, 0], p1: [10, 0] }],
     constraints,
     dof: 3,
     status: "UnderConstrained",
@@ -209,6 +214,33 @@ describe("InspectorPanel", () => {
     });
     expect(screen.getByText("No constraints yet.")).toBeInTheDocument();
     expect(screen.queryByText("Coincident")).toBeNull();
+  });
+
+  /*
+   * Design item 12 / audit A11a — a BLANK sketch (zero entities) must not
+   * read as "Fully constrained · DOF 0 — Sketch is fully defined.", the false
+   * completeness claim `sketches['sketch2']`'s registry dof/status (0/"ok")
+   * would otherwise produce through the ordinary status path.
+   */
+  it("shows 'Empty sketch' / 'Draw geometry to begin.' for a session with zero entities", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      documentStore.getState().setSketchSolve("sketch2", 0, "ok");
+      toolStore.getState().setMode("sketch", "sketch2");
+      sketchStore.getState().setSession({
+        sketchId: "sketch2",
+        plane: { kind: "XY", origin: [0, 0, 0], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
+        entities: [],
+        constraints: [],
+        dof: 0,
+        status: "FullyConstrained",
+      });
+    });
+
+    expect(screen.getByText("Empty sketch")).toBeInTheDocument();
+    expect(screen.getByText("Draw geometry to begin.")).toBeInTheDocument();
+    expect(screen.queryByText(/Fully constrained/)).toBeNull();
+    expect(screen.queryByText(/Sketch is fully defined/)).toBeNull();
   });
 
   /**

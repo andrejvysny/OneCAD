@@ -52,6 +52,22 @@ export function sketchStatusIsAlert(tone: StatusTone): boolean {
   return tone === "over" || tone === "error";
 }
 
+/**
+ * Empty-sketch card copy (design item 12 / audit A11a). A sketch with zero
+ * entities has nothing to be "fully defined" about — the solver's own
+ * status/dof for a blank sketch (typically "ok"/0) reads through
+ * `sketchStatusText`/`sketchStatusSentence` as "Fully constrained · DOF 0 —
+ * Sketch is fully defined.", the exact false claim of completeness the audit
+ * caught. A distinct function rather than an extra `sketchStatusText`
+ * parameter: entity count is a different axis than solver status/dof, not a
+ * variant reading of it, and callers decide which axis wins BEFORE calling
+ * either — this module stays a pure string lookup, with no notion of
+ * "session" or "entity" of its own.
+ */
+export function emptySketchCard(): { label: string; tone: StatusTone; sentence: string } {
+  return { label: "Empty sketch", tone: "under", sentence: "Draw geometry to begin." };
+}
+
 /** Inspector card body sentence. */
 export function sketchStatusSentence(status: SketchStatus, dof: number): string {
   if (status === "ok" || dof === 0) return "Sketch is fully defined.";

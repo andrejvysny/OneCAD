@@ -52,6 +52,25 @@ describe("FloatingToolbar", () => {
     expect(screen.queryByRole("button", { name: "Chamfer" })).toBeNull();
   });
 
+  /*
+   * A11f — model-toolbar buttons must carry the same "Label (Shortcut)"
+   * tooltip the sketch toolbar already shows. Both toolbars render through the
+   * identical `ToolEntry`/`ToolButton` pair off `MODELING_TOOL_DESCRIPTORS`
+   * (`tools.ts`), so a model tool's `shortcut` reaches the same `Tooltip` —
+   * this pins that wiring rather than re-implementing it.
+   */
+  it("model-toolbar buttons show a shortcut-hint tooltip, same as sketch tools", async () => {
+    const user = userEvent.setup();
+    renderWithPlatform(<FloatingToolbar />);
+
+    await user.hover(screen.getByRole("button", { name: "Extrude" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Extrude (E)");
+
+    await user.unhover(screen.getByRole("button", { name: "Extrude" }));
+    await user.hover(screen.getByRole("button", { name: "New sketch" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("New sketch (S)");
+  });
+
   it("toggles the active tool on click", async () => {
     const user = userEvent.setup();
     renderWithPlatform(<FloatingToolbar />);

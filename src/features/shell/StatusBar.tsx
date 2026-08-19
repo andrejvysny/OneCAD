@@ -14,6 +14,7 @@ import { useWorkerStore, type WorkerLifecycleState } from "@/stores/workerStore"
 import {
   useViewportStore,
   formatCursor,
+  formatCursorPlane,
   type Projection,
 } from "@/stores/viewportStore";
 
@@ -29,6 +30,7 @@ export function StatusBar() {
   const setProjection = useViewportStore((s) => s.setProjection);
   const fov = useViewportStore((s) => s.fov);
   const cursor = useViewportStore((s) => s.cursor);
+  const cursorPlaneUV = useViewportStore((s) => s.cursorPlaneUV);
   const statusHint = useViewportStore((s) => s.statusHint);
   const workerState = useWorkerStore((s) => s.state);
   // H7b: > 0 while a regen job is out (real lane: regen-started/finished; mock:
@@ -131,7 +133,11 @@ export function StatusBar() {
         </>
       )}
       <MonoValue className="whitespace-pre text-[11.5px]">
-        {formatCursor(cursor, displayUnit)}
+        {/* Design item 11 / audit A8: on the sketch plane world XYZ is not
+            the sketch's own axes (XY plane's u is world +Y) — while sketching
+            the read-out switches to the plane-local U/V the controller itself
+            draws against, same unit formatting as the world X/Y/Z it replaces. */}
+        {sketching ? formatCursorPlane(cursorPlaneUV, displayUnit) : formatCursor(cursor, displayUnit)}
       </MonoValue>
       {/* APPLICATION settings, so shell chrome — it was mounted from
           `ModelTreePanel`, which made "which application-wide preferences exist"

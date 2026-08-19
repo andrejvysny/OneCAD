@@ -234,6 +234,18 @@ const DRAW_TOOL_HINT: Record<string, string> = {
   arc3p: "3-point arc — click the start · type a number for the chord",
   ellipse: "Ellipse — click the centre · type a number for the major axis",
   slot: "Slot — click to place · type a number for length",
+  point: "Point — click to place",
+};
+
+/**
+ * Rect / centerRect's ARMED (a corner/centre already placed) idle hint — the
+ * phase-1 entry above named the FIRST click, this names the second. Was
+ * previously missing entirely, so the phase-1 text stayed on screen through
+ * both clicks (audit A11b).
+ */
+const DRAW_TOOL_HINT_ARMED: Partial<Record<string, string>> = {
+  rect: "Rectangle — click the opposite corner · type a number for width · Tab for height",
+  centerRect: "Center rectangle — click a corner · type a number for width · Tab for height",
 };
 
 /** Seed parameters for the WP-C T2b sketch edit tools, in document mm. Sticky
@@ -1237,7 +1249,11 @@ export class SketchController {
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchGhost(null, null);
     this.deps.engine.setSketchTrimGhost(null); // drop any lingering trim doomed-piece ghost
-    if (!m && !this.dimensionActive) this.deps.engine.setSketchSnap(null, false);
+    // A tool switch always drops the PREVIOUS tool's marker/hint chip — even
+    // between two draw tools with no `move` in between, which used to leave it
+    // stuck on screen until the next pointermove (audit A3). `bumpInteraction`
+    // above already reset the latch/epoch; this is the observable half.
+    this.clearTransientSnapFeedback();
     // Set AFTER the planePicking early-return above, so the pick phase keeps the
     // default arrow; set before the per-tool hint branches below so every tool
     // (including their early returns) gets a cursor.
@@ -1292,6 +1308,10 @@ export class SketchController {
       this.updateLineHint();
       return;
     }
+    if (m?.id === "rect" || m?.id === "centerRect") {
+      this.updateRectHint();
+      return;
+    }
     const hint = m && this.liveDimsEnabled() ? (DRAW_TOOL_HINT[m.id] ?? null) : null;
     viewportStore.getState().setStatusHint(hint, hint ? { sticky: true } : undefined);
   }
@@ -1328,6 +1348,19 @@ export class SketchController {
     const armed = (this.machineState?.anchors.length ?? 0) > 0 && this.liveDimsEnabled();
     const how = armed ? "type to set radius · Tab for sides" : "3–9 to change";
     viewportStore.getState().setStatusHint(`Polygon — ${n} sides · ${how}`, { sticky: true });
+  }
+
+  /**
+   * Rect / centerRect status hint — TWO phases like line/polygon: idle names
+   * the first click, armed (a corner/centre already placed) names the second
+   * (audit A11b — previously identical in both phases).
+   */
+  private updateRectHint(): void {
+    const id = this.machine?.id;
+    if (id !== "rect" && id !== "centerRect") return;
+    const armed = (this.machineState?.anchors.length ?? 0) > 0;
+    const hint = this.liveDimsEnabled() ? (armed ? DRAW_TOOL_HINT_ARMED[id] : DRAW_TOOL_HINT[id]) ?? null : null;
+    viewportStore.getState().setStatusHint(hint, hint ? { sticky: true } : undefined);
   }
 
   // ── pointer handling ────────────────────────────────────────────────────
@@ -1915,12 +1948,22 @@ export class SketchController {
     // A step that produced geometry (or ended the gesture) CONSUMES its locks —
     // the typed number described that entity, not the next one. A non-committing
     // click keeps them, which is what carries an arc's radius phase 1 → 2.
-    if (committed.length > 0 || stepped.done) this.liveDim = liveDimInit();
+    if (committed.length > 0 || stepped.done) {
+      this.liveDim = liveDimInit();
+      // The click that just committed (or ended the gesture) describes a snap
+      // decision that no longer applies — leaving the marker/hint chip on
+      // screen reads as still-live feedback for a point already placed (audit
+      // A3). A non-committing click (an anchor placement) deliberately does
+      // NOT clear here: its rubber band keeps live feedback via the next move.
+      this.bumpInteraction("commit");
+      this.clearTransientSnapFeedback();
+    }
     // Republish for the phase the click landed IN — an empty set closes the chips
     // (the gesture finished), a non-empty one re-opens them for the next leg.
     this.syncLiveDims(stepped.dims ?? []);
     if (this.machine?.id === "polygon") this.updatePolygonHint();
     else if (this.machine?.id === "line") this.updateLineHint();
+    else if (this.machine?.id === "rect" || this.machine?.id === "centerRect") this.updateRectHint();
     // LAST: the per-tool hints above are the idle prompt for the phase the click
     // landed in, so a refusal reported before them would be immediately painted over.
     if (stepped.refused) this.reportRefusal(stepped.refused);
@@ -2455,6 +2498,12 @@ export class SketchController {
 
   /** A click in dimension mode: resolve the pick, step the FSM, (re)open the chip. */
   private handleDimensionClick(clientX: number, clientY: number): void {
+    // The pick just consumed whatever cursor position the last hover marker
+    // described — Dimension is the one non-drawing tool that runs the ordinary
+    // `decisionAt` hover path (it aids aiming), so a stale marker can outlive
+    // the point it named (audit A3).
+    this.bumpInteraction("dimensionPick");
+    this.clearTransientSnapFeedback();
     const session = sketchStore.getState().session;
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
@@ -2527,6 +2576,10 @@ export class SketchController {
   // doomed-piece ghost (see `renderTrimGhost`).
 
   private handleTrimClick(clientX: number, clientY: number): void {
+    // Trim never populates the marker itself, but a switch INTO this tool
+    // could in principle race one still on screen from the outgoing tool
+    // (audit A3) — clear defensively, same as every other click-tool below.
+    this.clearTransientSnapFeedback();
     const session = sketchStore.getState().session;
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
@@ -2582,6 +2635,7 @@ export class SketchController {
   }
 
   private handleExtendClick(clientX: number, clientY: number): void {
+    this.clearTransientSnapFeedback(); // see handleTrimClick
     const session = sketchStore.getState().session;
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
@@ -2627,6 +2681,7 @@ export class SketchController {
   // via the global ladder (→ select), which clears the set on the tool change.
 
   private handleMirrorClick(clientX: number, clientY: number, additive: boolean): void {
+    this.clearTransientSnapFeedback(); // see handleTrimClick
     const session = sketchStore.getState().session;
     if (!session) return;
     const hit = this.hitAt(clientX, clientY);
@@ -2811,6 +2866,7 @@ export class SketchController {
   }
 
   private handleFilletClick(clientX: number, clientY: number): void {
+    this.clearTransientSnapFeedback(); // see handleTrimClick
     const session = sketchStore.getState().session;
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
@@ -2906,6 +2962,7 @@ export class SketchController {
   }
 
   private handleOffsetClick(clientX: number, clientY: number): void {
+    this.clearTransientSnapFeedback(); // see handleTrimClick
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return;
     const pick = this.resolveOffsetPick(raw);
@@ -3579,6 +3636,8 @@ export class SketchController {
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchGhost(null, null);
     this.clearLiveDimGesture();
+    this.bumpInteraction("chainEnd");
+    this.clearTransientSnapFeedback();
     if (this.machine.id === "line") this.updateLineHint();
   }
 

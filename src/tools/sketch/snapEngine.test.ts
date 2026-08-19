@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeSnap,
+  computeSnapDecision,
   entitySnapPoints,
   arcContainsAngle,
   circleQuadrantPoints,
@@ -358,6 +359,32 @@ describe("computeSnap — extended priority ladder", () => {
   it("respects the onCurve toggle", () => {
     const r = computeSnap({ x: 15, y: 6 }, [hLine], { ...base, enableOnCurve: false, enableGrid: false });
     expect(r.kind).not.toBe("onCurve");
+  });
+});
+
+// ── A7: a quadrant candidate carries an OnCurve relation intent ───────────────
+//
+// A quadrant has no independent point address (`relationForCachedPoint` in
+// snapCandidates.ts), so it cannot author `Coincident`, but it IS on the curve
+// it is an extremum of — without `OnCurve` the endpoint silently floats free
+// of a later edit to the circle, looking attached while not being.
+describe("quadrant candidate — relation intent (A7)", () => {
+  it("carries OnCurve against the owning circle", () => {
+    const c: SketchEntity = { id: "c1", type: "Circle", center: [0, 0], radius: 20 };
+    const { decision } = computeSnapDecision({ x: 21, y: 1 }, [c], base);
+    expect(decision.primaryKind).toBe("quadrant");
+    const quadrant = decision.accepted.find((a) => a.kind === "quadrant")!;
+    expect(quadrant.relationIntents).toEqual([{ kind: "OnCurve", refs: [], curveIds: ["c1"] }]);
+  });
+
+  it("carries OnCurve against the owning arc", () => {
+    // Half-circle 0°→180°: the 90° quadrant (0,10) is NOT one of its own
+    // endpoints (unlike a quarter arc, where every in-extent quadrant IS an
+    // endpoint and would win the point instead) — an unambiguous quadrant-only probe.
+    const a: SketchEntity = { id: "a1", type: "Arc", center: [0, 0], radius: 10, start: [10, 0], end: [-10, 0] };
+    const { decision } = computeSnapDecision({ x: 0.5, y: 9.5 }, [a], { ...base, enableGrid: false });
+    const quadrant = decision.accepted.find((c) => c.kind === "quadrant")!;
+    expect(quadrant.relationIntents).toEqual([{ kind: "OnCurve", refs: [], curveIds: ["a1"] }]);
   });
 });
 

@@ -1,5 +1,41 @@
 # OneCAD-Tauri Migration TODO
 
+## SKETCH UX HARDENING (2026-08-19/20, branch `OneCAD-sketch-mode-hardening-UI-UX`)
+
+Audit → research → ranked plan → frontend implementation. The plan of record is
+`docs/design/SKETCH_UX_AUDIT.md` (Part C item numbers referenced below); research with
+citations: `docs/design/SKETCH_UX_RESEARCH.md`. Cut line (user): everything frontend-scope;
+wire-needing items recorded as deferred-wire in the doc, NOT built here.
+
+- [x] WP0 hands-on audit (mock lane, playwright-cli) — 12 findings A1–A12; two S1 trust
+      defects: sketch invisible on face-coincident plane (z-order) and mock-lane constraints
+      decorative (identity solve accepts H+V+Parallel, dim edit 25→30 moves nothing).
+- [x] WP1 standards research (Shapr3D gold + SW/Onshape/Fusion), convergence table.
+- [x] WP2 synthesis: ranked P0/P1/P2 + deferred-wire; engine meets/beats standard, gaps are
+      feedback surfaces (region fill, badge interactivity, refusal visibility) + the two S1s.
+- [x] **Wave 1 GATE (2026-08-20)** — #3 snap-indicator clear on commit/chain-end/tool-switch
+      (+ six click-tool handlers) · #4 constraint menu icon+label rows, Geometric/Dimensional
+      sections, why-disabled titles (`CONSTRAINT_REQUIREMENT`), H/V-Distance added to
+      `DIMENSIONAL_TYPES` · #7 quadrant→OnCurve intent (circle/arc/ellipse; deliberately
+      reverses SNAP §9.5 placement-only — silent detachment is the worse failure; axis-align
+      follow-up named in the doc) · #11 U/V readout (same rAF writer; orchestrator fixed the
+      vertical-plane gap — Z=0 miss no longer freezes U/V) · #12 empty-sketch card · #13/#15
+      rect/centerRect phase-2 + point hints · #17 RETRACTED (tooltips already existed —
+      regression test added; audit doc corrected) · #14 root-caused to `LiveDimField` fixed
+      `w-9`, moved to Wave 3. Gate (orchestrator-run, suites alone): tsc clean · vitest
+      **298 files / 5008 passed / 78 skipped** · targeted e2e chromium **24/24** (snap trio,
+      constraint-apply, line, rect, point, live-dim-rect, datum-sketch, auto-mode) · hex gate
+      empty.
+- [ ] Wave 2 (viewport, adversarial-reviewed): #1 active-sketch draw priority over coplanar
+      faces · #2 live closed-region fill · #9 staticSketchRoot split (§10.5 deferral) ·
+      #16 origin pill.
+- [ ] Wave 3 (interaction, adversarial-reviewed): #5 interactive badges · #6 constraint
+      shortcuts (keymap contract updated as feature) · #10 refusal/success feedback.
+- [ ] Wave 4: #8 mock-lane dimension honesty (bounded, no solver).
+- [ ] Gate R2 per wave (tsc + full vitest + targeted sketch e2e + hex), R3 final (full e2e).
+- [ ] OWED USER-RUN at close: Tauri-app smoke of sketch flows (draw on face of real body,
+      dim edit drives geometry via real solver, conflict reject shows named loser).
+
 ## DAILY DRIVER v1 (2026-08-19, plan `~/.claude/plans/act-as-senior-cad-floofy-locket.md`)
 
 Capability + ship, chosen over kernel continuation. The artifact is faithful after TRUST &

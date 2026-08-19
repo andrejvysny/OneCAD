@@ -2,7 +2,8 @@
  * Viewport chrome store.
  *
  * Holds the camera / display state the status bar + corner cluster render. The
- * viewport engine (F-WP4) writes `cursor` (pointer raycast onto Z=0) and
+ * viewport engine (F-WP4) writes `cursor` (pointer raycast onto Z=0) plus its
+ * plane-projected sibling `cursorPlaneUV` (design item 11) and
  * `cameraViewLabel` (on camera change) through ViewportRoot; `zoomFit`/`homeView`
  * dispatch to the live engine via the bridge. DOF is still a solver mock.
  */
@@ -35,6 +36,20 @@ export interface CursorCoords {
   x: number;
   y: number;
   z: number;
+}
+
+/**
+ * The SAME pointer hit as `cursor`, projected onto the active sketch plane
+ * (design item 11 / audit A8): on a non-Z-up-XY plane `cursor`'s world Y is
+ * not the sketch's own +U, so a typed dimension can't be checked against it.
+ * Written by the identical engine/writer that sets `cursor` — never a second
+ * per-frame path — via `ViewportEngine.screenToPlane`, the same projection
+ * `SketchController`'s own gestures use. `{u:0,v:0}` outside a sketch session
+ * (no `sketchPlane` on the engine ⇒ `screenToPlane` returns null there).
+ */
+export interface CursorPlaneCoords {
+  u: number;
+  v: number;
 }
 
 /** Sticky status hint shown for the whole time isolation is on. */
@@ -81,6 +96,8 @@ export interface ViewportState {
   detectedInputDevice: InputDevice;
   fov: number;
   cursor: CursorCoords;
+  /** `cursor`'s plane-local (u, v) counterpart — see {@link CursorPlaneCoords}. */
+  cursorPlaneUV: CursorPlaneCoords;
   /** Current DOF count the shell displays (mirrors the active sketch solver). */
   dofBadge: number | null;
   /** Status-bar hint (tool prompt, error, or transient confirmation). */
@@ -110,8 +127,12 @@ export interface ViewportState {
   /** Engine → store: side of one minor grid cell (mm). No-op when unchanged. */
   setGridStep(mm: number): void;
   setActiveSketch(id: string | null): void;
-  /** Engine → store: live pointer read-out (raycast onto Z=0). */
-  setCursor(c: CursorCoords): void;
+  /**
+   * Engine → store: live pointer read-out — `c` is the raycast onto Z=0
+   * (world XYZ, unchanged behavior), `planeUV` is the SAME hit projected onto
+   * the active sketch plane (null when no sketch plane is live).
+   */
+  setCursor(c: CursorCoords, planeUV: CursorPlaneCoords | null): void;
   /** Engine → store: canonical view name (TOP/FRONT/…/ISO/—). */
   setCameraViewLabel(label: string): void;
   setDetectedInputDevice(device: InputDevice): void;
@@ -163,6 +184,7 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
   detectedInputDevice: "mouse",
   fov: 76,
   cursor: { x: 273, y: 210, z: 0 },
+  cursorPlaneUV: { u: 0, v: 0 },
   dofBadge: null,
   statusHint: null,
   pendingExtrudeSketch: null,
@@ -190,8 +212,8 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
     set({ activeSketchId: id });
   },
 
-  setCursor(c) {
-    set({ cursor: c });
+  setCursor(c, planeUV) {
+    set({ cursor: c, cursorPlaneUV: planeUV ?? { u: 0, v: 0 } });
   },
 
   setDetectedInputDevice(device) {
@@ -270,23 +292,46 @@ export function useViewportStore<T>(selector: (s: ViewportState) => T): T {
 }
 
 /**
- * Format the mono X/Y/Z read-out like prototype 1c (white-space:pre):
+ * Shared column formatter for both the X/Y/Z and U/V read-outs (white-space:pre):
  *   "X  273.00   Y  210.00   Z    0.00  mm"
  * (axis + 2 spaces + value right-padded to width 6, columns joined by 3 spaces),
  * with the display unit named once at the end rather than on every column.
  *
- * `c` is millimetres, like everything else the store holds; `unit` is display
- * only. Passing it explicitly (rather than reading the setting inside
+ * Values are millimetres, like everything else the store holds; `unit` is
+ * display only. Passing it explicitly (rather than reading the setting inside
  * `formatCursorAxis`) is what makes StatusBar's subscription the thing that
  * drives the re-render — a hidden read would leave the row stale until some
  * unrelated state changed.
  */
-export function formatCursor(c: CursorCoords, unit?: LengthUnitId): string {
-  const cols: [string, number][] = [
-    ["X", c.x],
-    ["Y", c.y],
-    ["Z", c.z],
-  ];
+function formatAxes(cols: [string, number][], unit?: LengthUnitId): string {
   const row = cols.map(([ax, v]) => `${ax}  ${formatCursorAxis(v, unit)}`).join("   ");
   return `${row}  ${lengthSuffix(unit)}`;
+}
+
+/** World X/Y/Z cursor read-out (model mode). */
+export function formatCursor(c: CursorCoords, unit?: LengthUnitId): string {
+  return formatAxes(
+    [
+      ["X", c.x],
+      ["Y", c.y],
+      ["Z", c.z],
+    ],
+    unit,
+  );
+}
+
+/**
+ * Sketch-plane U/V cursor read-out (design item 11 / audit A8) — same column
+ * shape as {@link formatCursor}, shown instead of world X/Y/Z while a sketch
+ * session is active, so the numbers on screen match the plane a typed
+ * dimension is measured against.
+ */
+export function formatCursorPlane(c: CursorPlaneCoords, unit?: LengthUnitId): string {
+  return formatAxes(
+    [
+      ["U", c.u],
+      ["V", c.v],
+    ],
+    unit,
+  );
 }
