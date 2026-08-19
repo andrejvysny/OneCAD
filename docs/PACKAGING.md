@@ -10,22 +10,60 @@ macOS (Apple Silicon) is the target platform. Linux `deb` bundling is wired and
 smoke-tested (see below), but a packaged Linux build would additionally need
 OCCT shipped inside the bundle — out of M3 scope.
 
-## Pipeline overview
+## Just build it
+
+```bash
+scripts/package-macos.sh --install
+```
+
+That is the whole procedure. The sections below explain each step, and § 0
+explains why the naive one-pass version of them produces an app that refuses its
+own worker.
+
+## 0. The two-pass build, and the trap it avoids
+
+**A single-pass build is always broken.** `build-worker.sh` writes a manifest
+binding the STAGED sidecar to its SHA-256, and a release build embeds that
+manifest and refuses any sidecar whose bytes disagree (`worker/manifest.rs`
+`verify_binary`). But `bundle-dylibs.sh`'s entire job is to REWRITE the sidecar —
+`install_name_tool` over every dependency, then a re-sign — so after bundling the
+bytes cannot still match.
+
+Measured, not theorised. A bundle built by following the old version of this
+document launched, retried four times and gave up:
 
 ```
-scripts/build-worker.sh        # build + stage sidecar for the rust-host triple
+worker restarting  reason="start failed: bundled worker SHA-256 mismatch:
+                   expected e1c6e1a3…, got 045fe7bd…"
+worker failed (no worker)  reason="backoff exhausted after 4 tries: …"
+```
+
+The window opens, and there is no geometry backend behind it at all.
+
+The order that works — the one `ci.yml`'s `tauri-composition` job has always
+used, and which lived nowhere else until `scripts/package-macos.sh`:
+
+```
+scripts/build-worker.sh                  # 1. build + stage sidecar, write manifest
         │
         ▼
-src-tauri/binaries/onecad-worker-<triple>   # what bundle.externalBin consumes
+bun run tauri build --bundles app        # 2. SEED app
         │
         ▼
-bun run tauri build            # bundles the sidecar next to the main executable
+scripts/bundle-dylibs.sh <app>           # 3. fold the dylib closure in
+        │                                #    ← this rewrites + re-signs the sidecar
+        ▼
+re-stage the BUNDLED sidecar,            # 4. recompute binarySha256 from the bytes
+recompute the manifest hash              #    that will actually ship
         │
         ▼
-scripts/bundle-dylibs.sh <app> # macOS: fold worker's dylib closure into the .app
+bun run tauri build --bundles app        # 5. LOCKSTEP app — manifest now matches
         │
         ▼
-codesign / notarize            # sign the whole bundle (placeholder below)
+restore Frameworks/ + codesign --force --sign -   # 6. NOT --deep (see § 4.1)
+        │
+        ▼
+verify: hash equality + worker --selftest
 ```
 
 ## 1. Build + stage the worker
@@ -101,7 +139,10 @@ It:
 
 1. locates the worker in `Contents/MacOS/` (`onecad-worker` or `onecad-worker-*`);
 2. computes the transitive non-system dylib closure via `otool -L`
-   (deps under `/opt/homebrew` or `/usr/local`; `/usr/lib` + `/System` skipped);
+   (`/usr/lib` + `/System` skipped). An `@rpath/…` install name — which is what
+   the pinned source-built OCCT uses — is resolved through the owning binary's
+   own `LC_RPATH` entries, so a prefix like `~/.onecad-occt/8.0.1/lib` is
+   followed just as a Homebrew path would be;
 3. copies each dylib into `Contents/Frameworks/`;
 4. rewrites install names to `@rpath/<name>` (`install_name_tool -change` on the
    worker + every copied dylib; `-id @rpath/<name>` on each copied dylib);
@@ -131,10 +172,15 @@ procedure made the doc read as done when no bundle had ever been installed.
 bundle the same way so the app launches as one coherent signature:
 
 ```bash
-codesign --force --deep --sign - src-tauri/target/release/bundle/macos/onecad.app
-codesign --verify --deep --strict --verbose=2 \
+codesign --force --sign - src-tauri/target/release/bundle/macos/onecad.app
+codesign --verify --strict --verbose=2 \
   src-tauri/target/release/bundle/macos/onecad.app     # → "satisfies its Designated Requirement"
 ```
+
+**Never `--deep` here.** `--deep` re-signs nested Mach-Os, which changes the
+sidecar's bytes and re-breaks the embedded manifest exactly as § 0 describes —
+that is how the trap was first hit. `bundle-dylibs.sh` has already signed every
+binary it touched; the outer signature is the only one still missing.
 
 An ad-hoc signature satisfies `codesign --verify` but **not** Gatekeeper:
 

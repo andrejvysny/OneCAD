@@ -503,6 +503,11 @@ jobs:
           --config src-tauri/tauri.e2e.conf.json
           --bundles app
       - name: Pre-stage self-contained bundled worker
+        # This seed/lockstep dance is the ONLY order that produces a bundle whose
+        # embedded manifest matches the sidecar that ships — bundle-dylibs.sh
+        # rewrites the sidecar, so a one-pass build always fails `verify_binary`.
+        # `scripts/package-macos.sh` is the same procedure for a real (non-e2e)
+        # bundle; the two must not drift. Rationale: docs/PACKAGING.md § 0.
         run: |
           set -euo pipefail
           seed="src-tauri/target/release/bundle/macos/onecad.app"

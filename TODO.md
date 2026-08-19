@@ -22,12 +22,66 @@ sketch · **W4** UX trust polish · **W5** close-out.
 
 ### NOW — the next three actions, in order
 
-- [ ] **W1 — build, ad-hoc-sign and INSTALL the bundle**, then run the 19-row release checklist
-      (`docs/qa/MANUAL_RELEASE_GATES.md`), autosave § 4 included. USER-run; nothing else in this
-      program is worth doing before the app is in `/Applications`.
+- [ ] **USER: run the 19-row release checklist** (`docs/qa/MANUAL_RELEASE_GATES.md`) against
+      `/Applications/onecad.app`, § 4 autosave crash recovery especially. The bundle itself is
+      built, installed and verified healthy — see the W1 gate below.
 - [ ] **W2 — section view.** Frontend-only, no wire change; goes before W3 for that reason.
 - [ ] **W3 — project edges into the active sketch.** Needs a SCHEMA §7.6 change, §14 changelog
       entry and a fixture bump.
+
+### Gate — W1: the ship lane (2026-08-19) — BUNDLE LANDED, CHECKLIST OWED
+
+**The headline finding: a bundle built by following `docs/PACKAGING.md` could not start its
+worker, and never could have.** `build-worker.sh` pins the STAGED sidecar's SHA-256 into a
+manifest that release builds embed and enforce (`worker/manifest.rs::verify_binary`), while
+`bundle-dylibs.sh`'s whole job is to REWRITE that sidecar — `install_name_tool` over every
+dependency, then a re-sign. The bytes cannot still match afterwards. Measured from the installed
+app's own log, not argued:
+
+```
+worker restarting  reason="start failed: bundled worker SHA-256 mismatch:
+                   expected e1c6e1a3…, got 045fe7bd…"
+worker failed (no worker)  reason="backoff exhausted after 4 tries: …"
+```
+
+The window opens with no geometry backend behind it. The doc's prescribed
+`codesign --force --deep` made it strictly worse: `--deep` re-signs nested Mach-Os, changing the
+sidecar a second time.
+
+- [x] **The check was right; the pipeline was wrong. No Rust changed.** `ci.yml`'s
+      `tauri-composition` job has always done it correctly — seed build → `bundle-dylibs.sh` →
+      re-stage the BUNDLED sidecar with a recomputed manifest hash → lockstep rebuild →
+      `codesign --force --sign -` **without `--deep`**. That knowledge lived ONLY inside the
+      workflow file, which is exactly why the packaged CI lane was green while the documented
+      procedure produced a dead app. **This is the general lesson: a procedure that exists only in
+      CI is not a procedure the project has.**
+- [x] **`scripts/package-macos.sh`** does the whole dance in one command (`--install` copies to
+      `/Applications`), with two HARD gates: bundled-worker SHA-256 must equal the embedded
+      manifest (exit 3, "do not ship this bundle"), and the bundled worker must pass `--selftest`
+      — which also proves the OCCT closure resolves from `Contents/Frameworks`, since
+      `bundle-dylibs.sh` strips the build machine's own OCCT rpath first.
+- [x] **`docs/PACKAGING.md` § 0** is new and leads with the trap, the measured failure and the
+      only order that works. Two further doc lies fixed while there: § 3 claimed the bundler only
+      follows `/opt/homebrew` and `/usr/local` deps (it resolves `@rpath` through the owner's own
+      `LC_RPATH`, which is how the pinned `~/.onecad-occt/8.0.1` prefix is followed), and § 4 now
+      states `--force --sign -` with an explicit "never `--deep`" and why.
+- [x] **`ci.yml` carries a comment** pointing at the script so the two copies of the dance cannot
+      drift silently. **Flagged seam:** they ARE two copies. CI's build takes e2e-only flags
+      (`--features tauri-e2e --config src-tauri/tauri.e2e.conf.json`), so unifying them means
+      parameterising the script; not done, recorded.
+- [x] **Installed and verified healthy.** `/Applications/onecad.app`, ad-hoc signed
+      (`codesign --verify --strict` → "satisfies its Designated Requirement"; `spctl` rejects, as
+      an unnotarized ad-hoc signature always will — recorded as expected in § 4.1). Second launch
+      log: **89 lines, zero WARN, zero ERROR**, `geometry worker pre-warmed`, worker process alive,
+      45 webview asset loads. OCCT 8.0.1, fingerprint `0a6a1dce34181289` — the value CI gates.
+- [ ] **OWED, USER-RUN: the 19-row release checklist** (`docs/qa/MANUAL_RELEASE_GATES.md`),
+      § 4 autosave crash recovery especially — it is the only block with real data-loss risk, and
+      the app has never been exercised as an installed artifact before today.
+- **Residual, recorded:** after packaging, `src-tauri/binaries/` holds the BUNDLED sidecar and a
+  manifest hash to match, not the dev-staged one. Harmless — debug builds skip the manifest
+  entirely (`cfg!(debug_assertions)`) and the worker-backed test lanes address
+  `worker/build/onecad-worker` through `ONECAD_WORKER_PATH` — and the next `build-worker.sh` run
+  restores it.
 
 ### Gate — W0: baseline truth, gate triage, the evidence hole (2026-08-19) — LANDED
 
