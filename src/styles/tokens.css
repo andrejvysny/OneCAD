@@ -229,6 +229,10 @@
   /* Closed-loop centroid dot — distinct from --color-sketch-done so it never
      reads as a "fully constrained" status color. */
   --color-sketch-centroid: #0ea5a4;
+  /* Transient snap-indicator ring (SnapIndicator halo + guide lines) — same
+     violet family as --color-sketch-midpoint, but its own token: a permanent
+     entity marker and a transient interaction cue are different concepts. */
+  --color-sketch-snap: #a855f7;
 
   /* ---- Viewport interaction ---- */
   /* Cyan 3D hover highlight — distinct from --color-accent, which drives
@@ -442,6 +446,7 @@
   --color-sketch-vertex: #5aa2ff;
   --color-sketch-midpoint: #c084fc;
   --color-sketch-centroid: #2dd4c5;
+  --color-sketch-snap: #c084fc;
 
   /* ---- Viewport interaction ---- */
   --color-viewport-hover: #26c6da;

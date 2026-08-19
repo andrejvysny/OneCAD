@@ -27,6 +27,7 @@ import type { SketchPlane } from "@/ipc/types";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import type { SnapDecision, SnapKind } from "@/tools/sketch/snapTypes";
 import { cssToDevice, currentDpr } from "./dpr";
+import { buildDotTexture, buildRingTexture } from "./markerTextures";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import { planeBasisMatrix, planePointToWorld } from "./sketchBasis";
@@ -40,6 +41,10 @@ export const GUIDE_DASH_CSS = 6;
 export const GUIDE_GAP_CSS = 4;
 /** Marker glyph size, in CSS px. */
 const MARKER_SIZE_CSS = 11;
+/** Halo ring size, in CSS px — larger than the marker so the glyph sits inside it. */
+const HALO_SIZE_CSS = 20;
+/** Guide reference-point dot size, in CSS px. */
+const REF_DOT_SIZE_CSS = 6;
 
 interface SnapIndicatorDeps {
   interactionRoot: THREE.Object3D;
@@ -188,8 +193,12 @@ interface GuideLineObject {
 
 export class SnapIndicator {
   private readonly group = new THREE.Group();
+  private readonly halo: THREE.Points;
+  private readonly haloMat: THREE.PointsMaterial;
   private readonly marker: THREE.Points;
   private readonly markerMat: THREE.PointsMaterial;
+  private readonly refDots: THREE.Points;
+  private readonly refDotsMat: THREE.PointsMaterial;
   private readonly guideGroup = new THREE.Group();
   private readonly guideObjects: GuideLineObject[] = [];
   private readonly hintEl: HTMLElement;
@@ -210,6 +219,27 @@ export class SnapIndicator {
     this.group.matrixAutoUpdate = false;
     deps.interactionRoot.add(this.group);
 
+    // Halo ring — added BEFORE the marker so it paints behind it. Universal
+    // "you are snapped" cue, independent of glyphFor()'s per-kind shape: every
+    // accepted decision gets one, regardless of kind.
+    this.haloMat = new THREE.PointsMaterial({
+      color: palette.sketchSnap(),
+      map: buildRingTexture(),
+      size: HALO_SIZE_CSS,
+      sizeAttenuation: false,
+      depthTest: false,
+      transparent: true,
+      alphaTest: 0.4,
+      toneMapped: false,
+    });
+    this.halo = new THREE.Points(
+      new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3)),
+      this.haloMat,
+    );
+    this.halo.name = "snapHalo";
+    this.halo.renderOrder = RENDER_ORDER.SNAP_MARKER;
+    this.group.add(this.halo);
+
     this.markerMat = new THREE.PointsMaterial({
       color: palette.sketchUnder(),
       size: MARKER_SIZE_CSS,
@@ -229,6 +259,24 @@ export class SnapIndicator {
 
     this.guideGroup.name = "snapGuides";
     this.group.add(this.guideGroup);
+
+    // Reference-point dots — one per active guide, at its source point
+    // (segments[i][0..1], see show()/setRefDots()).
+    this.refDotsMat = new THREE.PointsMaterial({
+      color: palette.sketchSnap(),
+      map: buildDotTexture(0.35),
+      size: REF_DOT_SIZE_CSS,
+      sizeAttenuation: false,
+      depthTest: false,
+      transparent: true,
+      alphaTest: 0.4,
+      toneMapped: false,
+    });
+    this.refDots = new THREE.Points(new THREE.BufferGeometry(), this.refDotsMat);
+    this.refDots.name = "snapRefDots";
+    this.refDots.renderOrder = RENDER_ORDER.SNAP_MARKER;
+    this.refDots.visible = false;
+    this.group.add(this.refDots);
 
     this.hintEl = document.createElement("div");
     this.hintEl.dataset.sketchSnapHint = "1";
@@ -290,7 +338,9 @@ export class SnapIndicator {
   /** Theme change: re-read the palette into the marker + guide materials. */
   refreshColors(): void {
     this.markerMat.color.copy(palette.sketchUnder());
-    for (const g of this.guideObjects) g.material.color.copy(palette.sketchUnder());
+    this.haloMat.color.copy(palette.sketchSnap());
+    this.refDotsMat.color.copy(palette.sketchSnap());
+    for (const g of this.guideObjects) g.material.color.copy(palette.sketchSnap());
   }
 
   private setGlyph(glyph: MarkerGlyph): void {
@@ -321,6 +371,11 @@ export class SnapIndicator {
     pos.setXYZ(0, snap.point.x, snap.point.y, 0);
     pos.needsUpdate = true;
 
+    // Halo ring — same position as the marker, universal across every kind.
+    const haloPos = this.halo.geometry.getAttribute("position") as THREE.BufferAttribute;
+    haloPos.setXYZ(0, snap.point.x, snap.point.y, 0);
+    haloPos.needsUpdate = true;
+
     // Guides — REFERENCE point to snapped point only, not a fixed span across
     // the whole plane (P2 hardening): a full-viewport cross read as excessive
     // even faded, and a local segment is what actually shows WHICH relationship
@@ -341,6 +396,7 @@ export class SnapIndicator {
       }
     }
     this.setGuides(segments);
+    this.setRefDots(segments);
 
     // Hint chip.
     if (showHints && snap.label) {
@@ -397,6 +453,27 @@ export class SnapIndicator {
     });
   }
 
+  /**
+   * Rebuild the reference-point dots, one per active guide, at each guide's
+   * SOURCE end (`segments[i]` is `[refX, refY, snappedX, snappedY]`, see
+   * `show()`). Full attribute replace each call — guide counts are always
+   * small (a handful at most), same tradeoff as SketchObject's idle markers.
+   */
+  private setRefDots(segments: ReadonlyArray<[number, number, number, number]>): void {
+    if (segments.length === 0) {
+      this.refDots.visible = false;
+      return;
+    }
+    const flat = new Float32Array(segments.length * 3);
+    segments.forEach(([x0, y0], i) => {
+      flat[i * 3] = x0;
+      flat[i * 3 + 1] = y0;
+      flat[i * 3 + 2] = 0;
+    });
+    this.refDots.geometry.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+    this.refDots.visible = true;
+  }
+
   /** The plane→screen scale the dash cadence is measured in (CSS px per plane
    *  unit). Set by the engine; also settable directly for tests. */
   setScreenScale(pxPerUnit: number): void {
@@ -414,17 +491,18 @@ export class SnapIndicator {
 
   private makeGuide(): GuideLineObject {
     const material = new LineMaterial({
-      color: palette.sketchUnder().getHex(),
+      color: palette.sketchSnap().getHex(),
       linewidth: cssToDevice(GUIDE_WIDTH_CSS, this.dpr),
       dashed: true,
       dashSize: GUIDE_DASH_CSS,
       gapSize: GUIDE_GAP_CSS,
       depthTest: false,
       transparent: true,
-      // Weak by design (Sketcher UX cleanup, Track B4) — a TRANSIENT alignment
+      // Weak-but-visible by design (Sketcher UX cleanup, Track B4; opacity
+      // bumped from 0.3 for the purple snap-ring pass) — a TRANSIENT alignment
       // guide, not geometry; it must never compete visually with real sketch
       // entities, which is what 0.75 read as.
-      opacity: 0.3,
+      opacity: 0.5,
       toneMapped: false,
     });
     material.resolution.copy(this.resolution);
@@ -448,6 +526,12 @@ export class SnapIndicator {
     this.marker.geometry.dispose();
     for (const tex of Object.values(this.glyphTextures)) tex?.dispose();
     this.markerMat.dispose();
+    this.halo.geometry.dispose();
+    this.haloMat.map?.dispose();
+    this.haloMat.dispose();
+    this.refDots.geometry.dispose();
+    this.refDotsMat.map?.dispose();
+    this.refDotsMat.dispose();
     for (const g of this.guideObjects) {
       this.guideGroup.remove(g.line);
       g.geometry.dispose();

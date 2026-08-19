@@ -55,6 +55,7 @@ export type TokenName =
   | "--color-sketch-vertex"
   | "--color-sketch-midpoint"
   | "--color-sketch-centroid"
+  | "--color-sketch-snap"
   | "--color-viewport-hover"
   | "--color-overlay-halo";
 
@@ -94,6 +95,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-vertex": "rgb(45, 127, 249)",
     "--color-sketch-midpoint": "rgb(168, 85, 247)",
     "--color-sketch-centroid": "rgb(14, 165, 164)",
+    "--color-sketch-snap": "rgb(168, 85, 247)",
     "--color-viewport-hover": "rgb(0, 172, 193)",
     "--color-overlay-halo": "rgb(251, 252, 254)",
   },
@@ -129,6 +131,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-vertex": "rgb(90, 162, 255)",
     "--color-sketch-midpoint": "rgb(192, 132, 252)",
     "--color-sketch-centroid": "rgb(45, 212, 197)",
+    "--color-sketch-snap": "rgb(192, 132, 252)",
     "--color-viewport-hover": "rgb(38, 198, 218)",
     "--color-overlay-halo": "rgb(17, 20, 26)",
   },
@@ -244,6 +247,8 @@ export const palette = {
   sketchMidpoint: () => tokenColor("--color-sketch-midpoint"),
   /** Closed-loop centroid dot. */
   sketchCentroid: () => tokenColor("--color-sketch-centroid"),
+  /** Transient snap-indicator ring + guide lines (SnapIndicator) — violet. */
+  sketchSnap: () => tokenColor("--color-sketch-snap"),
 
   // ── Origin axis triad (always-visible XYZ at the origin) ──
   /** +X axis leg. */

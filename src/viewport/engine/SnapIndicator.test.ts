@@ -195,6 +195,82 @@ describe("guide rendering", () => {
   });
 });
 
+describe("halo ring", () => {
+  it("positions the halo at the snapped point, for every kind", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(decision({ primaryKind: "grid", point: { x: 7, y: -3 } }), false);
+    const halo = interactionRoot.getObjectByName("snapIndicator")?.getObjectByName("snapHalo") as THREE.Points;
+    const pos = halo.geometry.getAttribute("position") as THREE.BufferAttribute;
+    expect(pos.getX(0)).toBeCloseTo(7, 9);
+    expect(pos.getY(0)).toBeCloseTo(-3, 9);
+    ind.dispose();
+  });
+
+  it("hides with the rest of the indicator on an unsnapped decision", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(decision(), false);
+    ind.show(decision({ snapped: false }), false);
+    const halo = interactionRoot.getObjectByName("snapIndicator")?.getObjectByName("snapHalo");
+    // Hidden via the parent group's visibility, not its own flag (matches
+    // marker/guides — see the "hides everything" test below).
+    expect(interactionRoot.getObjectByName("snapIndicator")?.visible).toBe(false);
+    expect(halo).toBeDefined();
+    ind.dispose();
+  });
+});
+
+describe("guide reference-point dots", () => {
+  it("draws one dot per guide, at its REFERENCE end (not the snapped end)", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(
+      decision({
+        primaryKind: "alignHV",
+        point: { x: 5, y: 5 },
+        guides: [
+          { orientation: "vertical", value: 5, ref: { x: 5, y: 40 } },
+          { orientation: "horizontal", value: 5, ref: { x: 40, y: 5 } },
+        ],
+      }),
+      false,
+    );
+    const refDots = interactionRoot.getObjectByName("snapIndicator")?.getObjectByName("snapRefDots") as THREE.Points;
+    expect(refDots.visible).toBe(true);
+    const pos = refDots.geometry.getAttribute("position") as THREE.BufferAttribute;
+    expect(pos.count).toBe(2);
+    expect(pos.getX(0)).toBeCloseTo(5, 9);
+    expect(pos.getY(0)).toBeCloseTo(40, 9);
+    expect(pos.getX(1)).toBeCloseTo(40, 9);
+    expect(pos.getY(1)).toBeCloseTo(5, 9);
+    ind.dispose();
+  });
+
+  it("marks a polar guide's dot at its ORIGIN", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(
+      decision({
+        primaryKind: "polar",
+        point: { x: 10, y: 10 },
+        guides: [{ orientation: "polar", origin: { x: 2, y: 2 }, dir: { x: 1, y: 0 } }],
+      }),
+      false,
+    );
+    const refDots = interactionRoot.getObjectByName("snapIndicator")?.getObjectByName("snapRefDots") as THREE.Points;
+    const pos = refDots.geometry.getAttribute("position") as THREE.BufferAttribute;
+    expect(pos.count).toBe(1);
+    expect(pos.getX(0)).toBeCloseTo(2, 9);
+    expect(pos.getY(0)).toBeCloseTo(2, 9);
+    ind.dispose();
+  });
+
+  it("hides when the decision has no guides", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(decision({ guides: [] }), false);
+    const refDots = interactionRoot.getObjectByName("snapIndicator")?.getObjectByName("snapRefDots") as THREE.Points;
+    expect(refDots.visible).toBe(false);
+    ind.dispose();
+  });
+});
+
 describe("hint chip", () => {
   it("shows the composed label when hints are on", () => {
     const { ind, overlayEl } = makeIndicator();
