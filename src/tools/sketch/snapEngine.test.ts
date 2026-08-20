@@ -92,8 +92,11 @@ describe("computeSnap priority", () => {
   it("emits an H/V alignment guide from a recent point", () => {
     // Deliberately OFF the grid: a reference at a multiple of `gridStep` would
     // put a grid node on the same coordinate, and a grid node is a full-point
-    // candidate that legitimately outranks a one-axis guide (SNAP P2).
-    const r = computeSnap({ x: 12.2, y: 63 }, [], { ...base, recentPoints: [{ x: 12, y: 0 }] });
+    // candidate that legitimately outranks a one-axis guide (SNAP P2). The
+    // cursor sits MID-CELL in y (65 = between 60 and 70): the wider grid reach
+    // (GRID_REACH_ACQUIRE_FACTOR) put the old (12.2, 63) inside the (10, 60)
+    // crossing's capture, where grid rightly wins.
+    const r = computeSnap({ x: 12.2, y: 65 }, [], { ...base, recentPoints: [{ x: 12, y: 0 }] });
     expect(r.kind).toBe("alignV");
     expect(r.point.x).toBe(12);
     expect(r.guides).toEqual([{ orientation: "vertical", value: 12, ref: { x: 12, y: 0 } }]);

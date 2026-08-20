@@ -52,6 +52,18 @@ wire-needing items recorded as deferred-wire in the doc, NOT built here.
       session owns those. Branch is 2 commits on `OneCAD-sketch-mode-hardening-UI-UX`;
       merge to master = USER step (expect a trivial TODO.md both-added conflict; master
       advanced with WP1-G2/WP2/WP3 kernel commits meanwhile).
+- [x] **Grid-crossing priority + reach (2026-08-20, user request).** Near a crossing, an
+      alignment guide whose row IS a grid line composed with cursor rounding into an
+      on-line point that out-scored the crossing (bias cap ±2px cannot express the
+      priority) — new targeted `grid-crossing-shadow` arbitration rule: aid-only sets
+      landing on exactly ONE of a reachable crossing's lines yield to the crossing;
+      geometry points and exact-crossing guide pairs exempt. Grid reach: factor 0.35→0.42,
+      cap acquire→acquire×1.25 (M: 8→10px; mid-cell rounding corridor preserved, 0.84<1).
+      4 new arbitration pins + gridLadder pins updated as the deliberate change. Gate:
+      tsc clean · vitest 300 files / 5123 passed / 78 skipped · e2e chromium 13/13 (snap
+      trio, line, rect, live-dim-mouse-rounding). Also: fresh-worktree Tauri build fixed
+      by staging the sidecar (`build-worker.sh Release`, OCCT 8.0.1, selftest 0); `tauri
+      dev` ran healthy (worker heartbeats, clean exit).
 - [ ] OWED USER-RUN at close: Tauri-app smoke of sketch flows against the REAL solver —
       draw on a face of a real body (x-ray + live fill visible over the body), edit a
       committed dimension (worker drives geometry), author a conflicting constraint

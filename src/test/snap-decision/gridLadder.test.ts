@@ -11,13 +11,13 @@
  *      grid — is the answer.
  *
  * (2) is the property the legacy `gridRequireProximity` hack existed to fake
- * and the reason the factor is 0.35 rather than the 0.707 that would cover a
+ * and the reason the factor is 0.42 rather than the 0.707 that would cover a
  * square cell completely.
  */
 import { describe, expect, it } from "vitest";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import { computePlaneScreenMetric } from "@/viewport/engine/planeMetric";
-import { gridReachPx, metricNorm, GRID_REACH_FACTOR } from "@/tools/sketch/snapTypes";
+import { gridReachPx, metricNorm, GRID_REACH_FACTOR, GRID_REACH_ACQUIRE_FACTOR } from "@/tools/sketch/snapTypes";
 import { SNAP_RADIUS_ORDER, SNAP_RADIUS_PX } from "@/tools/sketch/snapRadius";
 import { VIEWPORT_HEIGHTS, XY_PLANE } from "./cameras";
 import * as THREE from "three";
@@ -64,14 +64,18 @@ describe("grid capture ladder", () => {
           const vCellPx = metricNorm(m, 0, step);
           const cell = Math.min(uCellPx, vCellPx);
 
-          // (1) never wider than the user's own point reach.
-          expect(reach, `d=${distance}`).toBeLessThanOrEqual(acquirePx + 1e-9);
+          // (1) never wider than the user's point reach times the grid's own
+          // small allowance (crossings are re-acquirable without aiming, so
+          // they get GRID_REACH_ACQUIRE_FACTOR; geometry stays at acquirePx).
+          expect(reach, `d=${distance}`).toBeLessThanOrEqual(
+            acquirePx * GRID_REACH_ACQUIRE_FACTOR + 1e-9,
+          );
 
           // (2) a point at the CELL CENTRE is outside grid capture whenever the
           // cell is big enough for the cell term to bind. The centre is at
           // (cell/2, cell/2) from the nearest node in the tightest direction,
           // i.e. at least cell/2 away in screen px.
-          if (reach < acquirePx - 1e-9) {
+          if (reach < acquirePx * GRID_REACH_ACQUIRE_FACTOR - 1e-9) {
             expect(reach).toBeCloseTo(GRID_REACH_FACTOR * cell, 9);
             expect(reach).toBeLessThan(cell / 2);
           }
@@ -81,7 +85,7 @@ describe("grid capture ladder", () => {
   }
 
   it("caps at the point reach on the ladder rungs with the widest cells", () => {
-    // `reach = min(userReach, 0.35·cell)` — both terms must actually bind
+    // `reach = min(userReach·1.25, 0.42·cell)` — both terms must actually bind
     // somewhere, or one of them is dead code the ladder never exercises.
     //
     // WHICH one binds is a function of cell size, and the grid deliberately
@@ -102,8 +106,11 @@ describe("grid capture ladder", () => {
           if (!m) continue;
           const cell = Math.min(metricNorm(m, step, 0), metricNorm(m, 0, step));
           const reach = gridReachPx(m, step, acquirePx);
-          expect(reach).toBeCloseTo(Math.min(acquirePx, GRID_REACH_FACTOR * cell), 9);
-          if (GRID_REACH_FACTOR * cell >= acquirePx) capped++;
+          expect(reach).toBeCloseTo(
+            Math.min(acquirePx * GRID_REACH_ACQUIRE_FACTOR, GRID_REACH_FACTOR * cell),
+            9,
+          );
+          if (GRID_REACH_FACTOR * cell >= acquirePx * GRID_REACH_ACQUIRE_FACTOR) capped++;
           else cellBound++;
         }
       }
@@ -120,7 +127,7 @@ describe("grid capture ladder", () => {
     if (!m) return;
     const cell = Math.min(metricNorm(m, step, 0), metricNorm(m, 0, step));
     expect(gridReachPx(m, step, SNAP_RADIUS_PX.s)).toBeCloseTo(
-      Math.min(SNAP_RADIUS_PX.s, GRID_REACH_FACTOR * cell),
+      Math.min(SNAP_RADIUS_PX.s * GRID_REACH_ACQUIRE_FACTOR, GRID_REACH_FACTOR * cell),
       9,
     );
   });

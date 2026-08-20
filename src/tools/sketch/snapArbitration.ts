@@ -377,8 +377,22 @@ export function resolveSnap(input: ArbitrationInput): ArbitrationOutput {
     return { decision: noSnap(input.raw, input.traceId, rejected), latch: emptyLatch() };
   }
 
+  // 4b. CROSSING SHADOW. Near a crossing, an alignment guide whose row/column
+  // IS one of that crossing's own grid lines composes with cursor numeric
+  // rounding (or a polar ray) into an on-line point at near-zero cost — and by
+  // pure score it beats the crossing sitting a few px away, so the cursor
+  // lands ON the line NEXT TO the crossing the user aimed at. Score alone
+  // cannot express "the crossing outranks its own line" (bias is capped ±2px),
+  // so this is a targeted rule: an AID-ONLY set (guides/polar/grid/numeric —
+  // never geometry, which always keeps its priority) whose point lies on
+  // exactly ONE of the reachable crossing's lines, inside the crossing's own
+  // reach, yields to the crossing. A set landing on BOTH lines (i.e. exactly
+  // at the crossing, e.g. a guide pair from grid-aligned anchors) is kept: it
+  // places identically AND carries alignment relations the raw grid cannot.
+  const shadowed = shadowByGridCrossing(valid, input, rejected);
+
   // 5. Hysteresis + deterministic choice.
-  const chosen = chooseSet(valid, input);
+  const chosen = chooseSet(shadowed, input);
   const set = chosen.set;
 
   for (const c of [...spatial, ...input.numeric]) {
@@ -708,6 +722,59 @@ function dropAliasedSiblings(values: DimValues, members: readonly SnapCandidate[
 /**
  * Pick the winning set, applying hysteresis.
  *
+/** A set point counts as ON a crossing's grid line below this px distance. */
+const GRID_SHADOW_ON_LINE_EPS_PX = 0.75;
+
+/**
+ * The crossing-shadow rule (see the call site's comment for the WHY). Returns
+ * the surviving sets; shadowed sets' spatial members are recorded as rejected
+ * with `grid-crossing-shadow` (the existing post-choose dedupe keeps a
+ * candidate that also survives in another set from being double-reported).
+ */
+function shadowByGridCrossing(
+  sets: readonly CandidateSet[],
+  input: ArbitrationInput,
+  rejected: RejectedSnapCandidate[],
+): CandidateSet[] {
+  const gridSet = sets.find((s) => s.members.some((c) => c.kind === "grid"));
+  if (!gridSet || !(input.gridReachPx > 0)) return [...sets];
+  // The grid candidate claims the full point, so the SET's resolved point IS
+  // the crossing.
+  const crossing = gridSet.point;
+  const survivors: CandidateSet[] = [];
+  const shadowedSets: CandidateSet[] = [];
+  for (const s of sets) {
+    if (s === gridSet || s.members.some((c) => c.source === "geometryPoint" || c.source === "curve")) {
+      survivors.push(s);
+      continue;
+    }
+    const dxPx = metricNorm(input.metric, s.point.x - crossing.x, 0);
+    const dyPx = metricNorm(input.metric, 0, s.point.y - crossing.y);
+    const onX = dxPx < GRID_SHADOW_ON_LINE_EPS_PX;
+    const onY = dyPx < GRID_SHADOW_ON_LINE_EPS_PX;
+    // Exactly ONE axis aligned + inside the crossing's reach = the shadow.
+    if (onX !== onY && Math.max(dxPx, dyPx) <= input.gridReachPx) {
+      shadowedSets.push(s);
+      continue;
+    }
+    survivors.push(s);
+  }
+  // Trace only candidates that survive in NO other set — a guide shadowed in
+  // its guide+numeric set may still be ACCEPTED via the guide-pair set, and a
+  // rejection row for an accepted candidate would be a lie.
+  const surviving = new Set(survivors.flatMap((s) => s.members.map((c) => c.id)));
+  for (const s of shadowedSets) {
+    for (const c of s.optional) {
+      if (surviving.has(c.id)) continue;
+      if (!rejected.some((r) => r.candidateId === c.id)) {
+        rejected.push({ candidateId: c.id, reason: "grid-crossing-shadow" });
+      }
+    }
+  }
+  return survivors;
+}
+
+/**
  * The retained target holds unless a challenger is at least
  * {@link HYSTERESIS_ADVANTAGE_PX} cheaper AND has been for
  * {@link CHALLENGER_FRAMES} consecutive samples. A click uses the SAME rule: a
