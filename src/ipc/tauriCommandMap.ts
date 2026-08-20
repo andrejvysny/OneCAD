@@ -178,7 +178,7 @@ interface WireHoleParams {
 interface WireOffsetFaceParams {
   faceIds: string[];
   primaryFaceIds?: string[];
-  resultPolicyVersion?: 2;
+  resultPolicyVersion?: 2 | 3;
   faces: WireElementRef[];
   distance: WireScalar;
   distanceType: OffsetDistanceType;
@@ -686,15 +686,18 @@ function offsetFaceParams(p: OffsetFaceParams): WireOffsetFaceParams {
     chainTangentFaces: p.chainTangentFaces,
     targetBodyId: bareBodyId(p.targetBodyId),
   };
-  if (p.resultPolicyVersion === 2) {
+  // 2 and 3 marshal IDENTICALLY — V3 is a different geometric READING of the
+  // same stored pair, not a different payload — so the gate accepts both under
+  // one rule and forwards the version verbatim.
+  if (p.resultPolicyVersion === 2 || p.resultPolicyVersion === 3) {
     const primary = p.primaryFaceIds ?? [];
     if (primary.length === 0 || primary.some((id) => !faceIds.includes(id))) {
       throw new Error("OffsetFace V2 primaryFaceIds must be a non-empty subset of faceIds");
     }
     wire.primaryFaceIds = [...new Set(primary)];
-    wire.resultPolicyVersion = 2;
+    wire.resultPolicyVersion = p.resultPolicyVersion;
   } else if (p.primaryFaceIds && p.primaryFaceIds.length > 0) {
-    throw new Error("OffsetFace primaryFaceIds requires resultPolicyVersion 2");
+    throw new Error("OffsetFace primaryFaceIds requires resultPolicyVersion 2 or 3");
   }
   if (p.distanceType === "Total" && p.oppositeFace) {
     const opposite = faceElementRef(p.oppositeFace);

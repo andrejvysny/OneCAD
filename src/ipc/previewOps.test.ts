@@ -489,6 +489,56 @@ describe("previewOps offsetFaceOp mirrors commitOffsetFace", () => {
     });
   });
 
+  /*
+   * PREVIEW/COMMIT PARITY, the whole point of this builder. `resultPolicyVersion`
+   * SELECTS THE KERNEL PATH: at 3 the worker suppresses a blend in the closure,
+   * offsets, and rebuilds it, which lands the operative face somewhere a V2 sweep
+   * of the same body does not. Dropping the field (or its primary set, without
+   * which the version is refused) would render one geometry and commit another.
+   */
+  it.each([2, 3] as const)(
+    "forwards resultPolicyVersion %i AND primaryFaceIds into the previewed op",
+    (version) => {
+      const faces = [OFFSET_FACE("body1", "el-a"), OFFSET_FACE("body1", "el-blend")];
+      const op = buildPreviewOp(
+        session({
+          opType: "OffsetFace",
+          inputs: faces,
+          latestParams: {
+            faces,
+            primaryFaceIds: ["el-a"],
+            resultPolicyVersion: version,
+            distance: 2.5,
+            distanceType: "Offset",
+            chainTangentFaces: true,
+            targetBodyId: "body1",
+          },
+        }),
+      );
+      expect(op.params).toMatchObject({
+        resultPolicyVersion: version,
+        primaryFaceIds: ["el-a"],
+      });
+    },
+  );
+
+  it("refuses an unknown resultPolicyVersion instead of previewing the wrong path", () => {
+    expect(() =>
+      buildPreviewOp(
+        session({
+          opType: "OffsetFace",
+          latestParams: {
+            faces: [OFFSET_FACE()],
+            primaryFaceIds: ["el-f2"],
+            resultPolicyVersion: 4 as never,
+            distance: 2.5,
+            targetBodyId: "body1",
+          },
+        }),
+      ),
+    ).toThrow(/Unsupported OffsetFace resultPolicyVersion 4/);
+  });
+
   it("carries the Total opposite face and nothing else does", () => {
     const face = OFFSET_FACE("body1", "el-top");
     const opposite = OFFSET_FACE("body1", "el-bottom");

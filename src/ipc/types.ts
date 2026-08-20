@@ -1357,7 +1357,12 @@ export interface OffsetFaceParams {
   faces: SemanticRef[];
   /** V2 user-picked design-face ids; a non-empty subset of the full closure. */
   primaryFaceIds?: string[];
-  resultPolicyVersion?: 2;
+  /**
+   * `2` is the plain sweep, `3` the blend-aware reading of the SAME pair (a
+   * fillet inside the closure is suppressed and rebuilt rather than swept).
+   * Fresh authoring emits `3`; a stored `2` executes verbatim forever.
+   */
+  resultPolicyVersion?: 2 | 3;
   /** The USER's value, read per {@link OffsetFaceParams.distanceType}. Never clamped. */
   distance: number;
   distanceType: OffsetDistanceType;
@@ -1862,13 +1867,19 @@ export interface ApplyOperationResult {
  * Params a preview update carries (opType-specific; loosely typed for the wire).
  * One union per previewable opType — the `ipc/previewOps.ts` builders narrow it
  * back down and reject anything that does not belong to the op being previewed.
+ *
+ * This is an INTERSECTION, so a key two ops both declare gets the INTERSECTION of
+ * their types, not the union: `resultPolicyVersion` is `2` on Hole and `2 | 3` on
+ * OffsetFace, which would collapse to `2` and make a legal V3 offset draft
+ * unassignable. Hole's declaration is omitted so the widest reading survives; both
+ * builders re-narrow the value themselves, which is where the real check belongs.
  */
 export type PreviewParams = Partial<ExtrudeParams> &
   Partial<RevolveParams> &
   Partial<FilletParams> &
   Partial<ShellParams> &
   Partial<BooleanParams> &
-  Partial<HoleParams> &
+  Partial<Omit<HoleParams, "resultPolicyVersion">> &
   Partial<OffsetFaceParams> &
   Partial<PlaceComponentParams> & { [k: string]: unknown };
 

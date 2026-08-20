@@ -522,6 +522,12 @@ const OFFSET_DISTANCE_TYPES = ["Offset", "Total", "Radius", "Diameter"] as const
  *    strictly-safer superset.
  *
  * NOTHING IS CLAMPED. A value outside the domain is refused, never corrected.
+ *
+ * `resultPolicyVersion` + `primaryFaceIds` are FORWARDED, not dropped. They are
+ * not decoration: at V3 the version selects the blend-aware kernel path, so a
+ * preview built without them would render the V2 sweep of a body the commit
+ * rebuilds through suppress→offset→reblend. That is a preview the user approves
+ * and does not get — the one failure this whole lane exists to prevent.
  */
 function offsetFaceOp(s: PreviewSessionState): OperationOp {
   const distance = Number(s.latestParams.distance);
@@ -562,6 +568,15 @@ function offsetFaceOp(s: PreviewSessionState): OperationOp {
   if (distanceType !== "Offset" && distance <= 0) {
     throw new Error(`Offset face distanceType ${distanceType} needs a positive distance`);
   }
+  const resultPolicyVersion = s.latestParams.resultPolicyVersion;
+  if (
+    resultPolicyVersion !== undefined &&
+    resultPolicyVersion !== 2 &&
+    resultPolicyVersion !== 3
+  ) {
+    throw new Error(`Unsupported OffsetFace resultPolicyVersion ${String(resultPolicyVersion)}`);
+  }
+  const primaryFaceIds = s.latestParams.primaryFaceIds;
   const params: OffsetFaceParams = {
     faces: refs,
     distance,
@@ -569,6 +584,8 @@ function offsetFaceOp(s: PreviewSessionState): OperationOp {
     chainTangentFaces,
     targetBodyId,
   };
+  if (resultPolicyVersion !== undefined) params.resultPolicyVersion = resultPolicyVersion;
+  if (primaryFaceIds !== undefined) params.primaryFaceIds = [...primaryFaceIds];
   if (distanceType === "Total" && opposite) params.oppositeFace = opposite;
   return {
     opType: "OffsetFace",

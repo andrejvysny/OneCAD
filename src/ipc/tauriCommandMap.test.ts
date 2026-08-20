@@ -500,6 +500,73 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     expect(params.distanceType).toBe("Radius");
   });
 
+  /*
+   * The result-policy gate. 2 and 3 are two READINGS of one payload (SCHEMA §7.3,
+   * WP3-C5), so both marshal identically and the version rides through verbatim —
+   * clamping a 3 down to a 2 here would send the kernel the plain sweep for a
+   * record the user authored as blend-aware.
+   */
+  it.each([2, 3] as const)(
+    "OffsetFace forwards resultPolicyVersion %i with its primary subset",
+    (version) => {
+      const params = addedParams({
+        opType: "OffsetFace",
+        params: {
+          faces: [
+            { primary: { bodyId: "b0d1", elementId: "el_f1", kind: "face" } },
+            { primary: { bodyId: "b0d1", elementId: "el_blend", kind: "face" } },
+          ],
+          primaryFaceIds: ["el_f1"],
+          resultPolicyVersion: version,
+          distance: 2.5,
+          distanceType: "Offset",
+          chainTangentFaces: true,
+          targetBodyId: "b0d1",
+        },
+      });
+      expect(params.resultPolicyVersion).toBe(version);
+      expect(params.primaryFaceIds).toEqual(["el_f1"]);
+      expect(params.faceIds).toEqual(["el_f1", "el_blend"]);
+    },
+  );
+
+  it.each([2, 3] as const)(
+    "OffsetFace v%i refuses a primary set that is not a non-empty subset",
+    (version) => {
+      const build = (primaryFaceIds: string[]): Record<string, unknown> =>
+        addedParams({
+          opType: "OffsetFace",
+          params: {
+            faces: [{ primary: { bodyId: "b0d1", elementId: "el_f1", kind: "face" } }],
+            primaryFaceIds,
+            resultPolicyVersion: version,
+            distance: 2.5,
+            distanceType: "Offset",
+            chainTangentFaces: true,
+            targetBodyId: "b0d1",
+          },
+        });
+      expect(() => build([])).toThrow(/non-empty subset of faceIds/);
+      expect(() => build(["el_not_in_closure"])).toThrow(/non-empty subset of faceIds/);
+    },
+  );
+
+  it("OffsetFace refuses primaryFaceIds with NO version — the pair is inseparable", () => {
+    expect(() =>
+      addedParams({
+        opType: "OffsetFace",
+        params: {
+          faces: [{ primary: { bodyId: "b0d1", elementId: "el_f1", kind: "face" } }],
+          primaryFaceIds: ["el_f1"],
+          distance: 2.5,
+          distanceType: "Offset",
+          chainTangentFaces: true,
+          targetBodyId: "b0d1",
+        },
+      }),
+    ).toThrow("OffsetFace primaryFaceIds requires resultPolicyVersion 2 or 3");
+  });
+
   it("OffsetFace labels as `Offset face` (matching dto.rs default_label)", () => {
     expect(
       opLabelFor({

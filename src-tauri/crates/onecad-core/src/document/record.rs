@@ -2278,7 +2278,18 @@ impl InvoluteExternalParams {
 /// (SCHEMA §7.6) and persisted. The worker never re-expands at regen, so an
 /// upstream edit cannot silently widen or narrow what the op operates on;
 /// `chain_tangent_faces` survives only as authoring metadata for re-edit UX.
-pub const OFFSET_FACE_RESULT_POLICY_VERSION: u8 = 2;
+///
+/// Fresh authoring emits [`OFFSET_FACE_RESULT_POLICY_VERSION`] (3, the
+/// blend-aware reinterpretation of the SAME stored pair). V2 stays executable
+/// verbatim forever — it is a different geometric reading of an identical
+/// payload, not a superseded encoding — so both values are accepted here under
+/// one identical structural rule.
+pub const OFFSET_FACE_RESULT_POLICY_VERSION: u8 = 3;
+
+/// The V2 reading, still accepted: a stored record executes at the version it
+/// was authored under and is NEVER auto-migrated (an in-place bump would change
+/// the geometry an existing document rebuilds to).
+pub const OFFSET_FACE_RESULT_POLICY_VERSION_V2: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2374,9 +2385,13 @@ impl OffsetFaceParams {
         }
         match self.result_policy_version {
             None if !self.primary_face_ids.is_empty() => {
-                return Err("OffsetFace primaryFaceIds requires resultPolicyVersion 2".into())
+                return Err("OffsetFace primaryFaceIds requires resultPolicyVersion 2 or 3".into())
             }
-            Some(OFFSET_FACE_RESULT_POLICY_VERSION) => {
+            // ONE arm, deliberately: V3 reinterprets the SAME payload (see the
+            // constant's docs), so a structural rule that held for V2 must hold
+            // identically for V3 or the two readings would not be interchangeable
+            // inputs to the same record.
+            Some(OFFSET_FACE_RESULT_POLICY_VERSION_V2 | OFFSET_FACE_RESULT_POLICY_VERSION) => {
                 if self.primary_face_ids.is_empty() {
                     return Err("OffsetFace V2 requires at least one primary face".into());
                 }
@@ -2395,7 +2410,7 @@ impl OffsetFaceParams {
             }
             Some(version) => {
                 return Err(format!(
-                    "OffsetFace resultPolicyVersion {version} is unsupported (expected {OFFSET_FACE_RESULT_POLICY_VERSION})"
+                    "OffsetFace resultPolicyVersion {version} is unsupported (expected {OFFSET_FACE_RESULT_POLICY_VERSION_V2} or {OFFSET_FACE_RESULT_POLICY_VERSION})"
                 ))
             }
             None => {}
@@ -4072,6 +4087,76 @@ mod tests {
             ..offset_params()
         };
         assert!(p.validate().is_ok());
+    }
+
+    /// V2 and V3 are two READINGS of one payload (SCHEMA §7.3, WP3-C5), so the
+    /// record-level rules must be indistinguishable between them: whatever a V2
+    /// record may say, a V3 record may say, and vice versa. Anything else would
+    /// make a re-authoring bump a structural migration instead of the pure
+    /// reinterpretation it is.
+    #[test]
+    fn offset_face_accepts_both_result_policy_versions_under_identical_rules() {
+        for version in [
+            OFFSET_FACE_RESULT_POLICY_VERSION_V2,
+            OFFSET_FACE_RESULT_POLICY_VERSION,
+        ] {
+            let base = OffsetFaceParams {
+                result_policy_version: Some(version),
+                ..offset_params()
+            };
+            assert!(base.validate().is_ok(), "v{version} canonical record");
+
+            let empty = OffsetFaceParams {
+                primary_face_ids: vec![],
+                ..base.clone()
+            };
+            assert!(empty
+                .validate()
+                .unwrap_err()
+                .contains("at least one primary face"));
+
+            let foreign = OffsetFaceParams {
+                primary_face_ids: vec![ElementId::new("el_not_in_closure")],
+                ..base.clone()
+            };
+            assert!(foreign
+                .validate()
+                .unwrap_err()
+                .contains("is not in the frozen faceIds closure"));
+
+            let duplicated = OffsetFaceParams {
+                face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+                faces: vec![offset_ref("el_f1"), offset_ref("el_f2")],
+                primary_face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f1")],
+                ..base.clone()
+            };
+            assert!(duplicated
+                .validate()
+                .unwrap_err()
+                .contains("contains duplicate"));
+        }
+
+        // Absent version + present primaries names BOTH accepted values, so the
+        // message tells an author what it would take to make the record legal.
+        let orphan = OffsetFaceParams {
+            result_policy_version: None,
+            ..offset_params()
+        };
+        assert_eq!(
+            orphan.validate().unwrap_err(),
+            "OffsetFace primaryFaceIds requires resultPolicyVersion 2 or 3"
+        );
+
+        // 4 is neither reading. It is refused by name, never executed as the
+        // nearest known version.
+        let future = OffsetFaceParams {
+            result_policy_version: Some(4),
+            ..offset_params()
+        };
+        assert_eq!(
+            future.validate().unwrap_err(),
+            "OffsetFace resultPolicyVersion 4 is unsupported (expected 2 or 3)"
+        );
     }
 
     /// The NORMATIVE slot order (SCHEMA §7.3): operative faces in stored order,

@@ -10,6 +10,82 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### Gate — WP3-C5: OffsetFace resultPolicyVersion 3, wired end to end (2026-08-20) — LANDED
+
+The live defect is fixed: pushing a side wall of a filleted box no longer inflates the fillet.
+Canonical 10³ box, one vertical edge R2 (V₀ = 991.4159265358979): V3 side push +2 →
+**1191.4159265358979**, corner radius **2.0** (re-proved on the result via recognize_blend_at);
+the SAME record at V2 → **1405.6637061435916**, corner **4.0** — pinned as the zero-drift guard.
+`3` is a new READING of an unchanged payload; V2/legacy records execute byte-identically forever
+(no auto-migration — a load-time bump would change what a document rebuilds to). The wire fixture
+corroborates through `bodyEvents[].rankKey`: 1191415927 at version 3, 1405663706 at version 2.
+
+- **Adversarial review (fresh context) returned DO-NOT-SHIP first, with worked score
+  arithmetic; every finding closed before landing.** The BLOCKER: the rebuilt blend face stayed
+  a `Generated` candidate under BOTH supports' ids (`ComposedHistory`'s injection dedupe was
+  per-key), nothing forbids two ElementIds binding one final face, and in the anchored (i.e.
+  production) minting regime a CYLINDRICAL support could asymmetrically lose to the blend — a
+  wrong auto-bind putting two ids on one topoKey, then last-writer-wins in Tessellate. Planar
+  supports were proved structurally safe (the 0.20 type weight is unrecoverable). Fix at the
+  root: `add_modified`'s claim is now CROSS-KEY (an injected successor leaves every other key's
+  `Generated` channel), red-first exit 4→0, measured surgical. Post-fix the supports never
+  enter `apply_history`'s split branch at all (`Generated` empty for every input face —
+  measured); the D-prism cylindrical-support case also passed PRE-fix by margin, so the fix
+  removed the mechanism, not an observed mis-bind.
+- **Identity tests now catch what they must:** anchored minting throughout (production
+  total_weight 1.00, not 0.75), asserted topoKey landings (pushed wall, rebuilt blend, fixed
+  wall each to their exact result ordinal; boss case moves three ordinals so nothing is
+  vacuous), all topoKeys pairwise distinct.
+- **The Ambiguous fallthrough is explicit and pinned:** a face the sampled recognizer reports
+  Ambiguous (>2 G1 supports — fully-rounded vertex regions; thin evidence) is TRAVERSED, i.e.
+  V3 deliberately behaves as V2 there; forked on the recognition-status enum, header corrected,
+  fully-rounded-box test pins byte-identical V3==V2 (both refuse at V1 planar/cylindrical
+  scope). Revisiting the fallthrough is C6's item.
+- **Design-contact findings, measured not improvised:** face-count bijection lives on the
+  Modified channel (the Generated union refused the canonical case for a real-lineage reason);
+  the post-suppression closure re-check exists but its triggering fixture is UNCONSTRUCTIBLE
+  (OCCT MakeFillet throws at 179.25–179.999° corners — declared in the test header); seed
+  extent is the POST-OFFSET seed edge length (layer-3's guarantee narrows to "the fillet did
+  not run past its seed" — deliberate, recorded); per-stage tolerance-contribution caps, not
+  summed; `BRepOffset_MakeOffset` can return IsDone with a NULL shape (caught,
+  `OFFSET_FACE_STAGE_NULL_SHAPE`); defeaturing a half-buried boss's junction fillet takes the
+  whole boss (refused at face count).
+- **Both latent V2 defects the protocol audit found are fixed:** the exact-preview lane dropped
+  `resultPolicyVersion` + `primaryFaceIds` (at V3 that was a silent preview≠commit geometry
+  divergence on the destructive lane — now forwarded, tested); re-edit only patched distance so
+  re-author-at-V3 didn't exist (now: a V2 record WITH primaries re-authors to V3 in the edit's
+  own patch and announces it — hint "Offset face re-authored: fillets are now preserved (V3)",
+  sticky info via the existing status lane; LEGACY records without primaries stay legacy, since
+  forcing a version without primaries refuses on both tracks).
+- **Wire:** SCHEMA §7.3 rewritten for V3 (+ refusal table: 58 codes findable, grouped;
+  `UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION` documented for the first time; stated
+  exception — publication-tier suppression refusals ride `GEOMETRY_INVALID` +
+  `diagnostics[].reasonCode`), §14 entry with cross-track sign-off + lockstep note. Three new
+  canonical fixtures (v3_reblend / v2_unchanged / v3_refusal), authored against the real worker
+  and each proven non-vacuous — including the load-bearing one: flipping ONLY the version
+  integer in v2_unchanged changes the element delta. record.rs accepts `Some(2)|Some(3)` under
+  identical structural rules (frozen V2 serde snapshots deliberately untouched).
+- **HARNESS TRAP found while proving fixtures:** `json_subset` matches an expected array as a
+  POSITIONAL PREFIX, so `"removed": []`-style assertions assert NOTHING. Both new success
+  fixtures use positive `QueryElement` probes instead and document the trap;
+  `circular_pattern_lineage.ndjson:23` and `publication_refusal.ndjson:19` carry ineffective
+  `[]` assertions today — auditing older fixtures is a recorded follow-up.
+- **New Rust round-trip gate:** `offset_face_v3_record_survives_save_and_reopen` — a V3 record
+  through container save → fresh worker → regen FROM ZERO: accepted, volume reproduced to
+  1e-9, zero NeedsRepair. The blend-ENGAGED document round-trip + BrepCodec drill are C6's.
+- **Flagged seams:** (1) `SuppressionResult` folds its `PublicationDecision` into a string, so
+  that one refusal path carries empty structured evidence — carrying the decision needs the
+  struct widened (C6-adjacent). (2) One shared message still says "V2 requires at least one
+  primary face" on both tracks for a rule that now spans versions — cosmetic, aligned across
+  tracks. (3) `PreviewParams`' type intersection pinned `resultPolicyVersion` at 2 via Hole's
+  literal — fixed by omitting Hole's key from the intersection, documented at the type.
+- **Gate (tip, measured on the main thread; rung: FULL L3):** ctest **147/147** (44.4 s) ·
+  fmt/clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **86 targets / 1307
+  passed / 0 failed** (teed, 0 FAILED lines) · `bunx tsc` clean · `bun run test` **297 files /
+  5001 passed / 78 skipped** · kernelbench `compare` **136 rows unchanged** + `semantic-compare`
+  OK · stdout hygiene clean · coverage 29/9/16/19 · contracts 37/18 · hex 0 · `bun run e2e`
+  (both projects, retries 0): **464 passed / 0 failed** (33.3 min).
+
 ### Gate — WP1-G3 + G4(sliver) + WP3-C4 (2026-08-20) — LANDED
 
 Adversarial review on a fresh context (SHIP-WITH-FIXES + "G4 NOT safe as evidenced") drove a fix

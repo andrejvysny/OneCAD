@@ -1538,7 +1538,7 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 // params
 { "faceIds": ["el_…a1", "el_…b2"],
   "primaryFaceIds": ["el_…a1"],
-  "resultPolicyVersion": 2,
+  "resultPolicyVersion": 3,
   "distance": 2.5,
   "distanceType": "Offset",       // Offset | Total | Radius | Diameter (default Offset)
   "chainTangentFaces": true,      // default true — authoring metadata (see below)
@@ -1555,12 +1555,44 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   Total opposite face (when present) LAST — the Rust repair paths
   (`InputPath::OffsetFaceFace{index}` / `OffsetFaceOpposite`) and the frontend
   `inputPathFor` table mirror it.
-- Fresh authoring emits `resultPolicyVersion:2` and a non-empty
-  `primaryFaceIds` subset of `faceIds`. It is the user-picked DESIGN-face intent;
-  `faceIds` remains the full frozen closure. Imported-blend suppression/rebuild
+- `resultPolicyVersion` + `primaryFaceIds` carry the user-picked DESIGN-face
+  intent; `faceIds` remains the full frozen closure. Blend suppression/rebuild
   uses this distinction and must never infer a primary from closure geometry.
-  Absent version + absent primary ids is the legacy contract. Other present
-  versions, an empty V2 primary set, duplicates, or non-subset ids are refused.
+  The two fields are inseparable: absent version + absent primary ids is the
+  legacy contract, a version outside `{2, 3}`, an empty primary set, duplicates,
+  or non-subset ids are refused, and `primaryFaceIds` without a version is
+  refused too. The version is the ONLY thing that differs between the two
+  readings — the payload is otherwise identical, which is why the marshalling
+  path treats 2 and 3 the same and only the kernel reads them apart.
+- **`resultPolicyVersion:2`** — the plain sweep. `BRepOffset_MakeOffset` moves
+  the whole operative set; a blend that happens to sit inside the closure is
+  offset like any other face, which INFLATES it and drags its other support
+  along.
+- **`resultPolicyVersion:3` (2026-08-20)** — the BLEND-AWARE reinterpretation of
+  the same stored pair. The blend-aware closure of `primaryFaceIds` partitions
+  into `C_op ⊎ B ⊎ F` — the moving design faces, the recognized blends that
+  depend on them, and the blend supports held fixed — and that partition MUST
+  equal `set(faceIds)` **in both directions**. Stored-but-uncovered or
+  covered-but-unstored ⇒ `OFFSET_FACE_CLOSURE_MISMATCH`. This is strictly
+  tighter than V2's one-sided guard (which only checked that the tangent closure
+  did not EXCEED the stored set): a stored operative set that no longer describes
+  the body is a stale record, and a stale set must never quietly select a
+  different set of faces. Each recognized cylindrical blend is then SUPPRESSED,
+  the offset runs on the reduced body, and the blend is REBUILT at its measured
+  radius, under a reproduction proof. **With no recognized blend in the closure
+  the V2 path runs byte-identically** — V3 is not a different operation, it is a
+  different reading that degenerates to V2 wherever there is nothing to preserve.
+- **Fresh authoring emits `3`. A stored `2` executes as `2` forever.** There is
+  no load-time migration and no in-place bump: the two versions produce different
+  geometry from identical bytes, so silently re-reading an existing record would
+  change what a document rebuilds to. Re-authoring 2 → 3 happens only when the
+  user deliberately re-edits that feature, and the frontend announces it.
+- **An AMBIGUOUS blend is TRAVERSED as a design face, not refused.** Where the
+  sampled recognizer cannot certify a candidate — more than two G1 supports (a
+  fully-filleted vertex region), or insufficient sample evidence — V3
+  deliberately falls through to the V2 treatment for that face rather than
+  refusing the whole operation. This is a recorded, deliberate fallthrough, not
+  an oversight; revisiting it is queued for the adversarial corpus.
 - **Malformed typed arrays are refused, never filtered.** A present `faceIds` /
   `primaryFaceIds` that is not an array, or that carries a non-string or
   empty-string element, fails `OP_FAILED` with diagnostic
@@ -1599,6 +1631,15 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   - `Total` (single planar face, chain OFF, `oppositeFaceId` present):
     thickness `t = n·(p_sel − p_opp)` against the PERSISTED opposite face
     (re-resolved verbatim each regen, never re-discovered); `d = distance − t`.
+  - **The V3 blend path is `Offset`-ONLY.** `Radius`, `Diameter` and `Total` are
+    ABSOLUTE — each is a statement about the operative SURFACE (a radius, a
+    total thickness) — and with a blend in the closure the surface the user
+    measured is not the surface that ends up moving. At `resultPolicyVersion:3`
+    a non-`Offset` type over a blend-bearing closure is therefore refused
+    `OFFSET_FACE_BLEND_WITH_ABSOLUTE_DISTANCE` rather than reinterpreted. The
+    check runs at `classify`, BEFORE distance planning: plan first and the
+    request dies on the generic "an absolute type operates on exactly one face"
+    rule, and the record is never told the real reason.
 - Construction tolerance and semantic operation resolution are separate. Every
   effective `|d|` must be at least `0.001 mm`; an identity or sub-resolution
   request is a recoverable `OP_FAILED` with no lifecycle event. Existing B-Rep
@@ -1616,6 +1657,58 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
   the offset image (`OffsetFacesFromShapes`/`OffsetEdgesFromShapes` — the public
   `Generated`/`Modified` lists are empty for faces, spike-characterized) through
   the partition; image gaps fall to the descriptor ladder.
+- **V3 identity across the suppress → offset → reblend chain.** The three stages
+  compose into ONE history, so the element map sees a single transition. The
+  suppressed-then-recreated **blend face KEEPS its `ElementId`** and arrives as
+  `elementMapDelta.relabeled`: that mapping has no kernel lineage and is
+  ASSERTED, but only at the point where the reblend's reproduction proof has
+  already passed on that exact pair. Dropping it would not mean "refuse to bind"
+  — it would mean the descriptor+anchor ladder rebinds a cylinder of the same
+  radius `d` away on generic evidence with no blend-specific proof at all. The
+  blend's **two boundary edges are genuinely consumed** and land in
+  `elementMapDelta.removed`; they are NOT synthesized onto a successor, because
+  an edge the offset splits has no unique correspondence, so they fall to the
+  confidence-gated ladder (§10) like any other lost element. A face-count change
+  across the chain, or any input face without exactly one modified image, is
+  `OFFSET_FACE_TOPOLOGY_CHANGED` / `OFFSET_FACE_REBLEND_NOT_REPRODUCED` — never a
+  published result with a guessed map. Pinned by
+  `protocol/fixtures/offset_face_v3_reblend.ndjson`, against its V2 twin
+  `offset_face_v2_unchanged.ndjson`.
+
+**OffsetFace refusal codes.** Every entry below is a `diagnostics[].code` on a
+recoverable failure; the §8 top-level code stays `OP_FAILED`. Codes marked V3
+are reachable only at `resultPolicyVersion:3`.
+
+| code | refused because |
+|---|---|
+| `OFFSET_FACE_MALFORMED_FACE_IDS` | a present `faceIds`/`primaryFaceIds` is not an array of non-empty strings (refused, never filtered) |
+| `OFFSET_FACE_REF_MISMATCH` | a present `inputs[]` has the wrong slot count, or a typed slot's `primary.elementId` does not equal its paired id |
+| `UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION` | `resultPolicyVersion` is present and outside `{2, 3}` (`stage: "preflight"`) |
+| `OFFSET_FACE_CHANGE_TOO_SMALL` | the effective `|d|` is below the shape's authoring resolution — an identity edit is refused, never republished as success |
+| `OFFSET_FACE_CLOSURE_MISMATCH` | **V3** the blend-aware closure of `primaryFaceIds` is not exactly `set(faceIds)` (evidence names `storedOnly` / `closureOnly`) |
+| `OFFSET_FACE_BLEND_WITH_ABSOLUTE_DISTANCE` | **V3** `Radius`/`Diameter`/`Total` requested over a closure containing a blend |
+| `OFFSET_FACE_DEPENDENT_NOT_A_BLEND` | **V3** a closure face that depends on the picks is not a recognizable blend |
+| `OFFSET_FACE_BLEND_SURFACE_UNSUPPORTED` · `_BLEND_SUPPORT_UNSUPPORTED` | **V3** the candidate blend surface, or one of its supports, is outside the supported (cylinder / plane+cylinder) family |
+| `OFFSET_FACE_BLEND_BOUNDARY_NOT_SIMPLE` · `_BLEND_EVIDENCE_INSUFFICIENT` | **V3** the blend/support boundary is not a single shared edge, or the sampled recognition evidence is too thin to certify |
+| `OFFSET_FACE_MIXED_BLEND_RADII` · `_MIXED_BLEND_CONVEXITY` | **V3** the blend set to rebuild has more than one radius or mixed convexity — one rebuild pass cannot honour both |
+| `OFFSET_FACE_UNSUPPORTED_VERTEX_BLEND` | **V3** a vertex blend (a corner patch joining three or more blends) is in the closure |
+| `OFFSET_FACE_STAGE_*` | **V3** a stage's shape battery: `_STAGE_NULL_SHAPE`, `_STAGE_INVALID_SHAPE`, `_STAGE_NOT_SINGLE_SOLID`, `_STAGE_DEGENERATE_VOLUME`, `_STAGE_SELF_INTERFERENCE`, `_STAGE_KERNEL_REFUSED`, `_STAGE_SEMANTICS`. `stage` names WHICH of suppress / offset / reblend produced it |
+| `OFFSET_FACE_OFFSET_*` | **V3** the offset stage's postconditions: `_OFFSET_ANCESTRY_NOT_UNIQUE`, `_OFFSET_SUPPORT_NOT_UNIQUE`, `_OFFSET_SEED_NOT_UNIQUE`, `_OFFSET_SEED_NOT_SHARED`, `_OFFSET_TOLERANCE_CAP` — the reblend seed edge or its supports could not be identified uniquely on the offset result, or the stage spent more than its tolerance budget |
+| `OFFSET_FACE_SUPPRESSION_*` | **V3** the suppression stage's postcondition battery, each naming its own condition: `_SUPPRESSION_NOT_SINGLE_SOLID`, `_SUPPRESSION_INPUT_INVALID`, `_SUPPRESSION_NOT_DONE`, `_SUPPRESSION_FACE_COUNT`, `_SUPPRESSION_ANCESTRY_NOT_UNIQUE`, `_SUPPRESSION_BLEND_SURVIVED`, `_SUPPRESSION_SUPPORT_SURFACE_DRIFT`, `_SUPPRESSION_SEED_EDGE_NOT_FOUND`, `_SUPPRESSION_SEED_EDGE_AMBIGUOUS`, `_SUPPRESSION_VOLUME_DIRECTION`, `_SUPPRESSION_TOLERANCE_CAP` |
+| `OFFSET_FACE_BLEND_*` (recognition) | **V3** the pre-suppression recognition battery: `_BLEND_NOT_RECOGNIZED`, `_BLEND_NOT_PROVED`, `_BLEND_CONVEXITY_UNKNOWN`, `_BLEND_BOUNDARY_NOT_LINEAR`, `_BLEND_BOUNDARY_LENGTH_MISMATCH` |
+| `OFFSET_FACE_REBLEND_*` | **V3** the rebuild's reproduction proof: `_REBLEND_FAILED`, `_REBLEND_INPUT_INVALID`, `_REBLEND_NOT_GENERATED`, `_REBLEND_FACE_NOT_UNIQUE`, `_REBLEND_NOT_CYLINDER`, `_REBLEND_RADIUS`, `_REBLEND_NOT_RECOGNIZED`, `_REBLEND_SUPPORTS_MISMATCH`, `_REBLEND_NOT_PROVED`, `_REBLEND_CONVEXITY`, `_REBLEND_BOUNDARY_NOT_SIMPLE`, `_REBLEND_BOUNDARY_LENGTH`, `_REBLEND_EVIDENCE`, `_REBLEND_TOLERANCE_CAP` |
+| `OFFSET_FACE_REBLEND_NOT_REPRODUCED` · `OFFSET_FACE_TOPOLOGY_CHANGED` | **V3** the identity gate: the composed history does not carry every input face to exactly one distinct image, or the chain changed the face count |
+
+These are diagnostic codes only; the §8 top-level code stays `OP_FAILED`. The
+preview lane reports the same code as the commit for the same candidate.
+
+ONE EXCEPTION, deliberately: a suppression refusal that is really a
+PUBLICATION-tier decision (`SUPPRESSION_NOT_PUBLISHABLE`) is NOT re-prefixed into
+this vocabulary. It is unfolded back into the form every other publication
+refusal in the worker uses — top-level `GEOMETRY_INVALID` plus
+`diagnostics[].reasonCode` per [§7.2](#72-regen--executeplan) — so a reader routes
+on it with the machinery it already has, instead of meeting the same refusal
+twice under two taxonomies.
 
 **LinearPattern** (`op.linearPattern`) — `count` copies of a source body translated
 `spacing` along `direction`. Field names from OneCAD-CPP `LinearPatternParams`
@@ -3355,6 +3448,58 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-20 — §7.3 OffsetFace `resultPolicyVersion: 3`, the blend-aware
+  reading (WP3-C5).** V2's sweep offsets every face in the frozen G1 closure,
+  and a fillet inside that closure is just another face to it: push a wall of a
+  filleted box and the fillet INFLATES (R2 → R4) while the fillet's other support
+  is dragged along. V2's semantic checker accepts that — the cylinder did reach
+  `R + d` — so the operation succeeds and quietly destroys design intent. On the
+  canonical 10³ box with one vertical edge filleted R2, pushing one support wall
+  +2 gives 1405.6637061435916 mm³ at V2 and 1191.4159265358979 mm³ at V3, where
+  only the picked wall moved. **`3` is a new READING of an unchanged payload, not
+  a new payload**: `faceIds` is still the frozen closure and `primaryFaceIds`
+  still the user's picks, and every byte a V2 record carries a V3 record carries
+  identically. The worker now accepts `{2, 3}`; the blend-aware closure of
+  `primaryFaceIds` must partition into moving ⊎ blends ⊎ fixed supports and equal
+  `set(faceIds)` **in both directions** (V2 only checked one, so a stale stored
+  set could silently select different faces — now `OFFSET_FACE_CLOSURE_MISMATCH`);
+  each recognized cylindrical blend is suppressed, the offset runs on the reduced
+  body, and the blend is rebuilt at its measured radius under a reproduction
+  proof. With no recognized blend in the closure the V2 path runs
+  byte-identically, and a blend the sampled recognizer reports AMBIGUOUS (>2 G1
+  supports, or thin evidence) is TRAVERSED as a design face — a deliberate,
+  recorded fallthrough to V2 behaviour, pinned by a fully-rounded-box test.
+  Absolute distances are refused over a blend-bearing closure
+  (`OFFSET_FACE_BLEND_WITH_ABSOLUTE_DISTANCE`, at `classify`, before distance
+  planning) rather than reinterpreted. **Identity:** the three stages compose into
+  one history; the suppressed-then-recreated blend face keeps its `ElementId` and
+  arrives as `elementMapDelta.relabeled` (asserted only where the reproduction
+  proof passed), and its two boundary edges are genuinely consumed and land in
+  `.removed`, falling to the confidence-gated ladder rather than being
+  synthesized onto a guessed successor. The `OFFSET_FACE_*` refusal family the
+  V3 path emits is now TABLED in §7.3 — it was previously undocumented, including
+  the pre-existing `UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION` — with one
+  stated exception: a publication-tier suppression refusal keeps the
+  `GEOMETRY_INVALID` + `diagnostics[].reasonCode` form of §7.2 instead of being
+  re-prefixed. **Migration: NONE, by design.** A stored `2` executes as `2`
+  forever — the two versions build different geometry from identical bytes, so a
+  load-time bump would change what an existing document rebuilds to. Fresh
+  authoring emits `3`, and a deliberate user re-edit of an existing V2 feature
+  re-authors it to `3` with a visible hint. **Fixture bump:** three new files,
+  `protocol/fixtures/offset_face_v3_reblend.ndjson`,
+  `offset_face_v2_unchanged.ndjson` and `offset_face_v3_refusal.ndjson`,
+  registered as `canonical_offset_face_v3_reblend` /
+  `_v2_unchanged` / `_v3_refusal`, all three verified non-vacuous. The V3/V2 pair
+  is the same model and the same push under both readings and pins the IDENTITY
+  difference only — no geometry number is asserted on the wire, because
+  `json_subset` compares numbers exactly and NDJSON is the wrong instrument for a
+  measured volume; those stay in `worker/tests/test_offsetface_reblend.cpp`. No
+  existing fixture moves and no existing record's bytes change. Cross-track
+  sign-off recorded as orchestrator-approved 2026-08-20 (single repo, both tracks
+  land together). Worker and app deploy lockstep (§13), so "restage the sidecar
+  before the frontend emits 3" is build discipline, not a compatibility concern —
+  a stale dev worker refuses loudly with
+  `UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION`.
 - **2026-08-20 — §7.2 the three RESERVED micro-topology `reasonCode` values are
   now implemented, behind bounds that default to DISABLED (kernel continuation
   WP1-G3).** Text clarification only; the names were already tabled by the WP1-G2

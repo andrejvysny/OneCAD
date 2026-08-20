@@ -1325,3 +1325,102 @@ async fn offset_face_deterministic_across_processes() {
     assert!((vol1 - 12_000.0).abs() < 1e-6, "and exact: {vol1}");
     eprintln!("Determinism PASS: signature {sig1} stable across two worker processes");
 }
+
+/// WP3-C5: a `resultPolicyVersion: 3` record survives save → reopen → regen
+/// FROM ZERO in a fresh worker process (SCHEMA §7.3 V3; decision D5).
+///
+/// The closure here contains no blend, so V3 degenerates to the V2 build — that
+/// degeneration is itself part of the §7.3 contract, and what this test pins is
+/// the RECORD lane: the version serializes, the container round-trips it, and a
+/// fresh worker ACCEPTS it on a from-0 replay (a stale/wrong version refuses
+/// loudly as `UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION`, so a green replay
+/// is positive acceptance evidence, not a vacuous pass). The blend-ENGAGED
+/// document round-trip is owed to the WP3-C6 corpus alongside its BrepCodec
+/// drill.
+#[tokio::test(flavor = "multi_thread")]
+async fn offset_face_v3_record_survives_save_and_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xA));
+    let (body, snap) = build_box(&mut rt, sid, 25.0).await;
+    let (picks, _) = head_faces(&mut rt, body).await;
+    let top = top_face(&picks);
+    let (face_ids, refs, _, _) = author_offset(
+        &wm,
+        &mut rt,
+        snap,
+        body,
+        &[&top.topo_key],
+        true,
+        OffsetDistanceType::Offset,
+    )
+    .await;
+    add_op(
+        &mut rt,
+        offset_record(
+            OFFSET_REC,
+            OffsetFaceParams {
+                primary_face_ids: face_ids.clone(),
+                face_ids,
+                faces: refs,
+                distance: Scalar::new(5.0),
+                distance_type: OffsetDistanceType::Offset,
+                chain_tangent_faces: true,
+                opposite_face_id: None,
+                opposite_face: None,
+                target_body: body,
+                result_policy_version: Some(3),
+                extra: Default::default(),
+            },
+        ),
+    );
+    let report = regen_all(&mut rt).await;
+    assert_eq!(
+        published(&report, "V3 offset").stopped_reason,
+        StoppedReason::Completed
+    );
+    let before = exact_volume(&wm, body).await;
+    assert!(
+        (before - 12_000.0).abs() < 1e-6,
+        "V3 with no blend in the closure builds the V2 result: {before}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("OffsetV3.onecad");
+    rt.save(
+        &path,
+        onecad_core::io::container::SaveMeta {
+            app_version: "test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-20T00:00:00Z".into(),
+            modified: "2026-08-20T00:00:00Z".into(),
+        },
+    )
+    .expect("save");
+    drop(rt);
+    wm.shutdown().await;
+
+    let bin2 = real_worker().expect("worker binary");
+    let wm2 = spawn_worker(bin2).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm2.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm2.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm2.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    let report2 = regen_all(&mut reopened).await;
+    let snapshot2 = published(&report2, "reopened V3 document");
+    assert_eq!(snapshot2.stopped_reason, StoppedReason::Completed);
+    assert_eq!(
+        snapshot2.repair_summary.needs_repair_count, 0,
+        "the persisted refs rebind on a from-0 replay"
+    );
+    let after = exact_volume(&wm2, body).await;
+    assert!(
+        (after - before).abs() < 1e-9,
+        "from-0 replay of the V3 record reproduces the saved geometry: {before} vs {after}"
+    );
+    wm2.shutdown().await;
+}

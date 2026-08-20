@@ -156,15 +156,18 @@ function makeClientMock(
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     undo: vi.fn(() => Promise.resolve(okResult())),
-    getOperationParams: vi.fn(() =>
-      Promise.resolve({
-        faceIds: ["el-f2"],
-        faces: [{ primary: { bodyId: "body1", elementId: "el-f2", kind: "face" } }],
-        distance: { value: 2.5 },
-        distanceType: "Offset",
-        chainTangentFaces: true,
-        targetBodyId: "body1",
-      }),
+    // Annotated to the CadClient signature, not to the seed literal: the re-edit
+    // specs swap in stored params of other shapes (a V2 record, a legacy one).
+    getOperationParams: vi.fn(
+      (): Promise<Record<string, unknown>> =>
+        Promise.resolve({
+          faceIds: ["el-f2"],
+          faces: [{ primary: { bodyId: "body1", elementId: "el-f2", kind: "face" } }],
+          distance: { value: 2.5 },
+          distanceType: "Offset",
+          chainTangentFaces: true,
+          targetBodyId: "body1",
+        }),
     ),
   };
 }
@@ -618,5 +621,80 @@ describe("ModelToolController OffsetFace", () => {
     // The frozen closure + target survive the scalar patch verbatim.
     expect(cmd.op.params.faceIds).toEqual(["el-f2"]);
     expect(cmd.op.params.targetBodyId).toBe("body1");
+    // A LEGACY record (no primaries) has nothing to re-author against, so the
+    // version key must not appear and the ordinary hint stands.
+    expect(cmd.op.params).not.toHaveProperty("resultPolicyVersion");
+    expect(viewportStore.getState().statusHint?.message).toBe("Offset distance updated");
+  });
+
+  // ── re-edit re-authoring: V2 → V3 (WP3-C5) ───────────────────────────────
+
+  /** Seed the stored-params mock, then run one distance re-edit to completion. */
+  async function reeditStored(
+    stored: Record<string, unknown>,
+  ): Promise<{ opType: string; params: Record<string, unknown> }> {
+    build();
+    clientMock.getOperationParams.mockImplementation(() => Promise.resolve(stored));
+    documentStore.setState({
+      features: [
+        {
+          id: "feat-1",
+          kind: "fillet",
+          opType: "OffsetFace",
+          label: "Offset face",
+          valueText: "2.5 mm",
+          primaryValue: 2.5,
+          status: "ok",
+        },
+      ],
+    });
+    await controller.editOffsetFaceFeature("feat-1");
+    await flush();
+    chipValue(6);
+    chipConfirm();
+    await flush();
+    await flush();
+    const calls = clientMock.applyEditCommand.mock.calls as unknown[][];
+    return (calls[calls.length - 1][0] as { op: { opType: string; params: Record<string, unknown> } })
+      .op;
+  }
+
+  const V2_STORED = {
+    faceIds: ["el-f2", "el-blend"],
+    primaryFaceIds: ["el-f2"],
+    resultPolicyVersion: 2,
+    faces: [
+      { primary: { bodyId: "body1", elementId: "el-f2", kind: "face" } },
+      { primary: { bodyId: "body1", elementId: "el-blend", kind: "face" } },
+    ],
+    distance: { value: 2.5 },
+    distanceType: "Offset",
+    chainTangentFaces: true,
+    targetBodyId: "body1",
+  };
+
+  it("re-authors a stored V2 record to V3 and SAYS SO in visible chrome", async () => {
+    const op = await reeditStored({ ...V2_STORED });
+    expect(op.params.resultPolicyVersion).toBe(3);
+    expect(op.params.distance).toEqual({ value: 6 });
+    // The frozen pair the new reading depends on is untouched.
+    expect(op.params.faceIds).toEqual(["el-f2", "el-blend"]);
+    expect(op.params.primaryFaceIds).toEqual(["el-f2"]);
+    // The geometry this record rebuilds to CHANGES, so the user is told.
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Offset face re-authored: fillets are now preserved (V3)",
+    );
+  });
+
+  it("does NOT announce anything when the record is already V3", async () => {
+    const op = await reeditStored({ ...V2_STORED, resultPolicyVersion: 3 });
+    expect(op.params.resultPolicyVersion).toBe(3);
+    expect(viewportStore.getState().statusHint?.message).toBe("Offset distance updated");
+  });
+
+  it("leaves a V2 record with NO primaries alone — a version without them is refused", async () => {
+    const op = await reeditStored({ ...V2_STORED, primaryFaceIds: [] });
+    expect(op.params.resultPolicyVersion).toBe(2);
+    expect(viewportStore.getState().statusHint?.message).toBe("Offset distance updated");
   });
 });

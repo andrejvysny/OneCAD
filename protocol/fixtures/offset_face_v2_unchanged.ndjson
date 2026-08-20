@@ -1,0 +1,54 @@
+# CANONICAL §7.3 fixture — OffsetFace `resultPolicyVersion: 2` is UNCHANGED by
+# WP3-C5. Byte-for-byte `offset_face_v3_reblend.ndjson` except for the version
+# integer and the delta it produces.
+#
+# V3 does not supersede V2, it reinterprets the SAME payload. A record authored
+# at 2 executes at 2 forever — there is no load-time migration and no in-place
+# bump — so the two readings must stay independently reachable, and this file is
+# the half that proves the old one did not move.
+#
+# THE DELTA IS THE WHOLE POINT. On the identical model and the identical push:
+#   * V3 removes the blend's two boundary edges (suppression genuinely consumes
+#     them) and relabels three faces;
+#   * V2 sweeps the whole G1 closure through one `BRepOffset_MakeOffset`, so
+#     every tracked element folds through the offset image and NOTHING is
+#     removed — the two boundary edges survive as `relabeled`, and the fillet
+#     survives as an inflated cylinder rather than a rebuilt one.
+# Reading the two files side by side is how a reader sees what the version
+# selects. Neither pins a geometry number (see the V3 file's header for why);
+# the volumes are pinned in worker/tests/test_offsetface_reblend.cpp.
+#
+# "Nothing was removed" is asserted POSITIVELY — both boundary edge ids appear in
+# `relabeled` and both still resolve afterwards. Writing `"removed":[]` would
+# assert nothing at all: the harness matches an expected array as a positional
+# prefix, so an empty one matches anything.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_offset_face_v2","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":31,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"e2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"e3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Fillet","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}}],"params":{"mode":"Fillet","radius":2.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":31,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":31,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":31,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":31,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_push","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_face_blend","kind":"face"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_face_support","kind":"face"},{"bodyId":"body_op1","topoKey":"e:2","elementId":"el_blend_edge_a","kind":"edge"},{"bodyId":"body_op1","topoKey":"e:9","elementId":"el_blend_edge_b","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_push","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_face_blend","kind":"face"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_face_support","kind":"face"},{"bodyId":"body_op1","topoKey":"e:2","elementId":"el_blend_edge_a","kind":"edge"},{"bodyId":"body_op1","topoKey":"e:9","elementId":"el_blend_edge_b","kind":"edge"}]}}}
+# The SAME push, at version 2.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":32,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"OffsetFace","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_face_push","kind":"face"},"anchor":{"worldPoint":[0,6,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_blend","kind":"face"},"anchor":{"worldPoint":[-1,1,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_support","kind":"face"},"anchor":{"worldPoint":[-6,0,5]}}],"params":{"faceIds":["el_face_push","el_face_blend","el_face_support"],"primaryFaceIds":["el_face_push"],"resultPolicyVersion":2,"distance":2.0,"distanceType":"Offset","chainTangentFaces":true,"targetBodyId":"body_op1"}}]}}}
+# The V2-SHAPED delta: no blend suppression, so both blend boundary edges are
+# still here — RELABELED through the offset image, not consumed. An element that
+# landed in `removed` is erased from the partition and could not also relabel, so
+# these five entries are themselves the proof that nothing was removed.
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":3,"jobId":32,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"relabeled":[{"elementId":"el_blend_edge_a","kind":"edge","bodyId":"body_op1","topoKey":"$any"},{"elementId":"el_blend_edge_b","kind":"edge","bodyId":"body_op1","topoKey":"$any"},{"elementId":"el_face_blend","kind":"face","bodyId":"body_op1","topoKey":"$any"},{"elementId":"el_face_push","kind":"face","bodyId":"body_op1","topoKey":"$any"},{"elementId":"el_face_support","kind":"face","bodyId":"body_op1","topoKey":"$any"}]},"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":32,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed","perStepResults":[{"stepIndex":3,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":32,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":32,"result":{"accepted":true,"snapshotId":2,"documentRevision":2}}}
+# Still addressable — the V2 sweep consumed nothing. This is the exact pair the
+# V3 file finds ABSENT at the same point in the same model.
+{"send":{"v":1,"t":"req","id":7,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_blend_edge_a"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"present":true,"elementId":"el_blend_edge_a","bodyId":"body_op1","kind":"edge"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_blend_edge_b"}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"present":true,"elementId":"el_blend_edge_b","bodyId":"body_op1","kind":"edge"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"goodbye":true}}}

@@ -588,6 +588,33 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/circular_pattern_lineage.ndjson
 )
+# SCHEMA §7.3 OffsetFace `resultPolicyVersion` 2 vs 3 (WP3-C5). The PAIR is the
+# contract: the same model and the same push under both readings, differing only
+# in the elementMapDelta each produces. Geometry numbers (V3 1191.4159265358979 /
+# V2 1405.6637061435916) are NOT pinned here — `json_subset` compares numbers
+# exactly and NDJSON is the wrong instrument for a measured volume; they stay in
+# test_offsetface_reblend.cpp. See each fixture header.
+add_test(
+    NAME canonical_offset_face_v3_reblend
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/offset_face_v3_reblend.ndjson
+)
+add_test(
+    NAME canonical_offset_face_v2_unchanged
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/offset_face_v2_unchanged.ndjson
+)
+# An absolute distance against a blend-bearing closure is refused BY NAME, at
+# `classify`, and the head survives it.
+add_test(
+    NAME canonical_offset_face_v3_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/offset_face_v3_refusal.ndjson
+)
+
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script
 # header for the boundary rationale.

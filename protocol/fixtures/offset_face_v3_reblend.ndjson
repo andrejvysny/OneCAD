@@ -1,0 +1,83 @@
+# CANONICAL §7.3 fixture — OffsetFace `resultPolicyVersion: 3`, the BLEND-AWARE
+# reading (WP3-C5). What it pins is IDENTITY across a suppress → offset → reblend
+# chain, which is the part of V3 that is a cross-track contract rather than a
+# kernel result.
+#
+# Model: 10 x 10 rect extruded 10, then ONE vertical edge filleted R2. Pushing a
+# SUPPORT wall of that fillet is the case V2 gets wrong — V2 sweeps the whole G1
+# closure, so the fillet inflates and the second wall is dragged along. V3 reads
+# the SAME stored pair (`faceIds` = the frozen closure, `primaryFaceIds` = the
+# user's pick) as "move the pick, suppress the blend, rebuild it at its measured
+# radius", so only the picked wall moves.
+#
+# The stored operative set here is exactly the blend-aware closure of the pick:
+# the pushed wall, the blend, and the blend's other support. A stored set that no
+# longer closes over the picks is refused `OFFSET_FACE_CLOSURE_MISMATCH` — V3
+# checks that in BOTH directions, where V2 only checked one.
+#
+# WHAT THIS FIXTURE PINS
+#   * a single `modified` event on the target — an offset never fans a body out;
+#   * the suppressed-then-recreated BLEND FACE KEEPS ITS ElementId, arriving as
+#     `elementMapDelta.relabeled`. The lineage is asserted in the worker exactly
+#     where the reblend reproduction proof passed; without it the face would fall
+#     to the generic descriptor+anchor ladder with no blend-specific evidence at
+#     all, which is a rebind on weaker grounds, not a refusal;
+#   * the blend's two boundary edges are genuinely consumed and land in
+#     `elementMapDelta.removed`. They are NOT synthesized onto a successor — an
+#     edge the offset splits has no unique correspondence and V1 refuses to guess,
+#     so they fall to the confidence-gated ladder like any other lost element.
+#
+# WHAT THIS FIXTURE DELIBERATELY DOES NOT PIN: any geometry number. The whole
+# point of V3 is a different VOLUME for the same request (V3 1191.4159265358979
+# vs V2 1405.6637061435916 on this exact body), and `json_subset` compares numbers
+# EXACTLY — an NDJSON exchange is the wrong instrument for a measured quantity.
+# Those live where they are measurable: worker/tests/test_offsetface_reblend.cpp.
+# `offset_face_v2_unchanged.ndjson` is the same model and the same push at
+# version 2, so the two files pin the IDENTITY difference between the readings.
+# Same boundary as circular_pattern_lineage.ndjson's step angle.
+#
+# HARNESS SEMANTICS worth knowing before adding an assertion here: `json_subset`
+# matches an expected array as a POSITIONAL PREFIX of the actual one, so an
+# expected `[]` matches ANY array and asserts nothing. Emptiness is therefore
+# never claimed by writing `[]`; it is proved positively, with a `QueryElement`
+# whose `present` is the fact in question.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_offset_face_v3","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The seed model. The fillet's edge is addressed by ANCHOR evidence (the ladder's
+# lowest rung) because nothing is bound yet — ElementIds are Rust's to mint.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":31,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"e2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"e3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Fillet","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}}],"params":{"mode":"Fillet","radius":2.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":31,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":31,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":31,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":31,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# Rust-owned persistent ids on the published head: the blend face, its two
+# supports, and the blend's two boundary edges. Only a TRACKED element can appear
+# in an elementMapDelta, so this is what makes the identity claims below legible.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_push","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_face_blend","kind":"face"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_face_support","kind":"face"},{"bodyId":"body_op1","topoKey":"e:2","elementId":"el_blend_edge_a","kind":"edge"},{"bodyId":"body_op1","topoKey":"e:9","elementId":"el_blend_edge_b","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_push","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_face_blend","kind":"face"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_face_support","kind":"face"},{"bodyId":"body_op1","topoKey":"e:2","elementId":"el_blend_edge_a","kind":"edge"},{"bodyId":"body_op1","topoKey":"e:9","elementId":"el_blend_edge_b","kind":"edge"}]}}}
+# The V3 push: +2 mm on ONE wall of the frozen three-face closure.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":32,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"OffsetFace","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_face_push","kind":"face"},"anchor":{"worldPoint":[0,6,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_blend","kind":"face"},"anchor":{"worldPoint":[-1,1,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_support","kind":"face"},"anchor":{"worldPoint":[-6,0,5]}}],"params":{"faceIds":["el_face_push","el_face_blend","el_face_support"],"primaryFaceIds":["el_face_push"],"resultPolicyVersion":3,"distance":2.0,"distanceType":"Offset","chainTangentFaces":true,"targetBodyId":"body_op1"}}]}}}
+# modified IN PLACE (never NewBody, never a fan-out); the blend face id survives as
+# `relabeled`; both boundary edge ids are `removed`.
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":3,"jobId":32,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"relabeled":[{"elementId":"el_face_blend","kind":"face","bodyId":"body_op1","topoKey":"$any"},{"elementId":"el_face_push","kind":"face","bodyId":"body_op1","topoKey":"$any"},{"elementId":"el_face_support","kind":"face","bodyId":"body_op1","topoKey":"$any"}],"removed":["el_blend_edge_a","el_blend_edge_b"]},"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":32,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed","perStepResults":[{"stepIndex":3,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":32,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":32,"result":{"accepted":true,"snapshotId":2,"documentRevision":2}}}
+# The rebuilt blend is addressable by the id it had before the chain ran.
+{"send":{"v":1,"t":"req","id":7,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_face_blend"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"present":true,"elementId":"el_face_blend","bodyId":"body_op1","kind":"face"}}}
+# BOTH consumed boundary edges are GONE, not silently rebound to a neighbour.
+{"send":{"v":1,"t":"req","id":8,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_blend_edge_a"}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"present":false,"elementId":"el_blend_edge_a"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_blend_edge_b"}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"present":false,"elementId":"el_blend_edge_b"}}}
+# The pushed wall and the wall V3 held still both survive as themselves.
+{"send":{"v":1,"t":"req","id":10,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_face_push"}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"present":true,"elementId":"el_face_push","bodyId":"body_op1","kind":"face"}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_face_support"}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"present":true,"elementId":"el_face_support","bodyId":"body_op1","kind":"face"}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"goodbye":true}}}

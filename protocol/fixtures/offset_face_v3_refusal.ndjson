@@ -1,0 +1,46 @@
+# CANONICAL §7.3 fixture — an OffsetFace V3 refusal is RECOVERABLE and NAMED.
+# Same model as `offset_face_v3_reblend.ndjson`; the only change is the request:
+# an ABSOLUTE distance (`Radius`) against a closure that contains a blend.
+#
+# Why this is refused rather than reinterpreted: an absolute distance is a
+# statement about the operative SURFACE — "make this cylinder R6", "make this
+# wall 12 thick". With a blend in the closure the surface the user measured is
+# not the surface that ends up moving, so V3 refuses instead of silently
+# choosing a meaning for the number. Nothing is clamped and nothing is guessed.
+#
+# THE REFUSAL SHAPE, which is the cross-track contract here:
+#   * the frame is `ok:true` — an op refusal is a RESULT, not a transport error;
+#   * `perStepResults[].status` is `opFailed` and the fine-grained reason rides
+#     `diagnostics[].code`, while the §8 top-level taxonomy is untouched (see
+#     `boolean_empty_refusal` / `publication_refusal` for the same discipline);
+#   * `stage` is `classify` — the refusal happens in V3's blend-aware
+#     classification, BEFORE distance planning. That order is load-bearing: plan
+#     the distances first and the request dies on the generic "an absolute type
+#     operates on exactly one face" rule, and the record is never told the real
+#     reason it cannot be honoured;
+#   * the failed step emits NO `planStep` event and `lastValidStep` is null, so
+#     the head is left exactly where it was. The model is still there afterwards.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_offset_face_refusal","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":31,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"e2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"e3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Fillet","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}}],"params":{"mode":"Fillet","radius":2.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":31,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":31,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":31,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":31,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_push","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_face_blend","kind":"face"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_face_support","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_push","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_face_blend","kind":"face"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_face_support","kind":"face"}]}}}
+# `Radius` against a closure that contains a blend.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":32,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"OffsetFace","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_face_push","kind":"face"},"anchor":{"worldPoint":[0,6,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_blend","kind":"face"},"anchor":{"worldPoint":[-1,1,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_support","kind":"face"},"anchor":{"worldPoint":[-6,0,5]}}],"params":{"faceIds":["el_face_push","el_face_blend","el_face_support"],"primaryFaceIds":["el_face_push"],"resultPolicyVersion":3,"distance":6.0,"distanceType":"Radius","chainTangentFaces":true,"targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":32,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":3,"status":"opFailed","diagnostics":[{"severity":"error","code":"OFFSET_FACE_BLEND_WITH_ABSOLUTE_DISTANCE","stage":"classify","message":"OffsetFace: distanceType Radius is not supported when the closure contains a blend"}]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+# Recoverable: accepting the base-only prepare leaves the filleted body intact.
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":32,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":32,"result":{"accepted":true,"documentRevision":2}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"documentRevision":2,"workerEpoch":4,"hasScratch":false,"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"QueryElement","args":{"snapshotId":2,"elementId":"el_face_blend"}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"present":true,"elementId":"el_face_blend","bodyId":"body_op1","kind":"face"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"goodbye":true}}}

@@ -4104,7 +4104,8 @@ export class ModelToolController {
     const params: OffsetFaceParams = {
       faces: [...this.offsetFaces],
       primaryFaceIds: [...this.offsetPrimaryFaceIds],
-      resultPolicyVersion: 2,
+      // Fresh authoring is V3 — the blend-aware reading (SCHEMA §7.3, WP3-C5).
+      resultPolicyVersion: 3,
       distance,
       distanceType: s.distanceType,
       chainTangentFaces: s.chainTangentFaces,
@@ -4250,7 +4251,22 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  /** Distance-only parametric re-edit — deep-merges into the stored params. */
+  /**
+   * Distance-only parametric re-edit — deep-merges into the stored params, and
+   * RE-AUTHORS a V2 record to V3 in the same patch.
+   *
+   * Without the bump a record authored before WP3-C5 would keep sweeping its
+   * fillets away on every future edit, and nothing in the UI would ever move it
+   * forward: there is no other write path to that field. The bump is confined to
+   * a record the user is deliberately editing (never a load-time migration), it
+   * changes the resulting geometry, and so it is ANNOUNCED — a silent change to
+   * what a re-edit produces is exactly the class of surprise this project treats
+   * as a defect.
+   *
+   * Gated on a non-empty stored `primaryFaceIds`: a legacy record has none, and
+   * both core's validator and the worker refuse a version without them. Such a
+   * record stays legacy and re-edits its distance as before.
+   */
   private async commitOffsetFaceEdit(editFeatureId: string): Promise<void> {
     const distance = this.offsetFace.distance;
     if (!offsetCanConfirm(this.offsetFace)) {
@@ -4269,6 +4285,7 @@ export class ModelToolController {
     toolChipStore.getState().clear();
     let failure: string | null = null;
     let repaired = false;
+    let reauthored = false;
     try {
       // A re-edit changes ONLY the distance: deep-merge into the stored params so
       // the frozen closure, the opposite face and the target survive verbatim (a
@@ -4276,9 +4293,17 @@ export class ModelToolController {
       if (!this.offsetStoredParams) {
         throw new Error("Stored Offset face parameters are unavailable");
       }
+      const storedPrimary = this.offsetStoredParams.primaryFaceIds;
+      reauthored =
+        this.offsetStoredParams.resultPolicyVersion === 2 &&
+        Array.isArray(storedPrimary) &&
+        storedPrimary.length > 0;
       const res = await this.client.applyEditCommand(
         updateScalarParamsCommand(editFeatureId, "OffsetFace", this.offsetStoredParams, {
           distance: { value: distance },
+          // Shallow-spread onto the stored params by `updateScalarParamsCommand`,
+          // so this override reaches the wire; every other stored key survives.
+          ...(reauthored ? { resultPolicyVersion: 3 } : {}),
         }),
       );
       ({ failure, repaired } = this.settleScalarEdit(res));
@@ -4290,6 +4315,11 @@ export class ModelToolController {
       this.resetToSelect(`Offset face failed: ${failure}`, { severity: "error", sticky: true });
     } else if (repaired) {
       this.resetToSelect("Offset face needs repair", { severity: "info", sticky: true });
+    } else if (reauthored) {
+      this.resetToSelect("Offset face re-authored: fillets are now preserved (V3)", {
+        severity: "info",
+        sticky: true,
+      });
     } else {
       this.resetToSelect("Offset distance updated");
     }
