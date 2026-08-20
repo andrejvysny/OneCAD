@@ -222,6 +222,12 @@ add_executable(test_blend_analytic test_blend_analytic.cpp)
 target_link_libraries(test_blend_analytic PRIVATE worker_core)
 add_test(NAME blend_analytic COMMAND test_blend_analytic)
 
+# WP3 C2: `BlendSamplingBudget` zero-drift proof. The default budget reproduces
+# the exact sample/boundary counts Fillet and kernelbench measure today.
+add_executable(test_blend_budget test_blend_budget.cpp)
+target_link_libraries(test_blend_budget PRIVATE worker_core)
+add_test(NAME blend_budget COMMAND test_blend_budget)
+
 # --- OFFSET-FACE Phase 0: OCCT selective-offset go/no-go spike (pure OCCT,
 #     characterizes BRepOffset_MakeOffset per-face behavior before the op is
 #     built; see the plan's Phase-0 gate). ---

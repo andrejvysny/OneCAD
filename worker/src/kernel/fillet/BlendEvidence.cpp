@@ -30,8 +30,6 @@ namespace {
 using EdgeFaces = NCollection_IndexedDataMap<
     TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>;
 
-constexpr int kEdgeSamples = 9;
-constexpr int kFaceSamplesPerAxis = 5;
 constexpr double kNormalTolerance = 1.0e-9;
 constexpr double kTangencyRadians = 1.0e-9;
 constexpr double kSectionRelative = 1.0e-9;
@@ -76,15 +74,16 @@ bool outward_normal(const TopoDS_Face &face, const gp_Pnt &point, gp_Dir &out) {
 }
 
 void sample_boundary(const TopoDS_Edge &edge, const TopoDS_Face &blend,
-                     const TopoDS_Face &support, BlendEvidence &out) {
+                     const TopoDS_Face &support, int edge_samples,
+                     BlendEvidence &out) {
   double first = 0.0;
   double last = 0.0;
   const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
   if (curve.IsNull())
     return;
   int measured = 0;
-  for (int i = 0; i < kEdgeSamples; ++i) {
-    const double t = first + (last - first) * (i + 0.5) / kEdgeSamples;
+  for (int i = 0; i < edge_samples; ++i) {
+    const double t = first + (last - first) * (i + 0.5) / edge_samples;
     const gp_Pnt point = curve->Value(t);
     gp_Dir blend_normal;
     gp_Dir support_normal;
@@ -102,7 +101,8 @@ void sample_boundary(const TopoDS_Edge &edge, const TopoDS_Face &blend,
     ++out.boundaries;
 }
 
-void sample_face(const TopoDS_Face &face, double radius, BlendEvidence &out) {
+void sample_face(const TopoDS_Face &face, double radius, int uv_grid,
+                 BlendEvidence &out) {
   BRepAdaptor_Surface surface(face);
   BRepTopAdaptor_FClass2d classifier(face, Precision::PConfusion());
   const double u0 = surface.FirstUParameter();
@@ -112,10 +112,10 @@ void sample_face(const TopoDS_Face &face, double radius, BlendEvidence &out) {
   if (!std::isfinite(u0) || !std::isfinite(u1) ||
       !std::isfinite(v0) || !std::isfinite(v1))
     return;
-  for (int i = 0; i < kFaceSamplesPerAxis; ++i) {
-    for (int j = 0; j < kFaceSamplesPerAxis; ++j) {
-      const double u = u0 + (u1 - u0) * (i + 0.5) / kFaceSamplesPerAxis;
-      const double v = v0 + (v1 - v0) * (j + 0.5) / kFaceSamplesPerAxis;
+  for (int i = 0; i < uv_grid; ++i) {
+    for (int j = 0; j < uv_grid; ++j) {
+      const double u = u0 + (u1 - u0) * (i + 0.5) / uv_grid;
+      const double v = v0 + (v1 - v0) * (j + 0.5) / uv_grid;
       if (classifier.Perform(gp_Pnt2d(u, v), Standard_False) != TopAbs_IN)
         continue;
       BRepLProp_SLProps properties(surface, u, v, 2, kNormalTolerance);
@@ -155,7 +155,8 @@ double fillet_tangency_limit(double radius, double coordinate_magnitude) {
 BlendEvidence measure_blend_evidence(
     const TopoDS_Shape &output,
     const std::vector<TopoDS_Face> &blend_faces,
-    const std::vector<TopoDS_Face> &support_faces, double radius) {
+    const std::vector<TopoDS_Face> &support_faces, double radius,
+    const BlendSamplingBudget &budget) {
   BlendEvidence out;
   if (output.IsNull() || blend_faces.empty())
     return out;
@@ -177,10 +178,10 @@ BlendEvidence measure_blend_evidence(
       continue;
     sample_boundary(edge,
                     TopoDS::Face(first_is_blend ? faces.First() : faces.Last()),
-                    TopoDS::Face(support), out);
+                    TopoDS::Face(support), budget.edge_samples, out);
   }
   for (const TopoDS_Face &face : blend_faces)
-    sample_face(face, radius, out);
+    sample_face(face, radius, budget.uv_grid, out);
   return out;
 }
 
