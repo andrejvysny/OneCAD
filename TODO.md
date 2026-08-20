@@ -45,9 +45,24 @@ wire-needing items recorded as deferred-wire in the doc, NOT built here.
       Gate (orchestrator-run, suites alone): tsc clean · vitest **300 files / 5119 passed /
       78 skipped** · targeted e2e chromium **33/33** (incl. acceptance, dimension-edit,
       dimension-conflict) · hex gate empty. R3 full e2e both projects: next row.
-- [ ] Gate R2 per wave (tsc + full vitest + targeted sketch e2e + hex), R3 final (full e2e).
-- [ ] OWED USER-RUN at close: Tauri-app smoke of sketch flows (draw on face of real body,
-      dim edit drives geometry via real solver, conflict reject shows named loser).
+- [x] **R3 FINAL (2026-08-20, orchestrator-run, alone):** `bun run e2e` **468 passed /
+      0 failed** both projects, 38.3 min, retries 0 (baseline 464 + 2 dimension-edit + 2
+      net new). Rust/C++/wire untouched this program (`git diff e5572d2..HEAD` is entirely
+      src/ + docs/ + e2e/ + TODO.md), so cargo/ctest not re-run — master's parallel kernel
+      session owns those. Branch is 2 commits on `OneCAD-sketch-mode-hardening-UI-UX`;
+      merge to master = USER step (expect a trivial TODO.md both-added conflict; master
+      advanced with WP1-G2/WP2/WP3 kernel commits meanwhile).
+- [ ] OWED USER-RUN at close: Tauri-app smoke of sketch flows against the REAL solver —
+      draw on a face of a real body (x-ray + live fill visible over the body), edit a
+      committed dimension (worker drives geometry), author a conflicting constraint
+      (reject names the loser), ⇧H/⇧V chords, badge select+Delete in the select tool.
+- [ ] Deferred-wire queue (specified in docs/design/SKETCH_UX_AUDIT.md): per-entity
+      constrained coloring (needs per-entity DOF in §7.4 solve result — top item) ·
+      quadrant axis-alignment intent · slot endpoint-tangency kind · slot stray-point
+      wire shape · centerRect symmetric linkage. Frontend residuals: near-action error
+      pulse · cancel-vs-finish seam for the silent Esc exit (A12) · screen-constant badge
+      standoff (HtmlOverlayDriver) · donut-hole fill correctness (v1 fills loops
+      independently).
 
 ## DAILY DRIVER v1 (2026-08-19, plan `~/.claude/plans/act-as-senior-cad-floofy-locket.md`)
 
