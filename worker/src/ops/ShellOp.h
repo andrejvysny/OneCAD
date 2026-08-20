@@ -3,7 +3,8 @@
 // Ports OneCAD-CPP RegenerationEngine.cpp buildShell (:1431-1497):
 //   * target body from the op's semantic refs (a BodyRef in the C++ engine; here
 //     params.targetBodyId, else the open-face refs' shared primary.bodyId);
-//   * thickness guard `< kMinValue (1e-3)` → "Shell thickness too small" (OP_FAILED);
+//   * thickness guard `< authoring_resolution() (1e-3)` → "Shell thickness too small"
+//     (OP_FAILED);
 //   * open faces resolved to real sub-faces of the target body, then removed by
 //     `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin(target, removed, -thickness,
 //     1e-3, BRepOffset_Skin, false, false, GeomAbs_Arc, false)` — the NEGATIVE offset

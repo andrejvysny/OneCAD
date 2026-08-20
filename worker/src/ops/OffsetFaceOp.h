@@ -89,10 +89,11 @@ inline constexpr double kTangentAngleTol = 1.0e-4;
 // every kernel behaviour at, so lowering it silently re-opens un-spiked territory.
 inline constexpr double kBuildToleranceFloor = 1.0e-4;
 
-// Semantic measurement tolerances are independent of OCCT's construction
-// tolerance. They answer whether the requested model change was achieved.
-inline constexpr double kSemanticLengthTol = 1.0e-6;
-inline constexpr double kSemanticAngularTol = 1.0e-7;
+// The semantic measurement tolerances — independent of OCCT's construction
+// tolerance, because they answer whether the requested model change was achieved —
+// now come from the precision context: `GeometryPrecisionContext::semantic_length()`
+// and `::semantic_angular()`. The values are unchanged (1e-6 mm / 1e-7 rad); they
+// are no longer restated here.
 
 // Minimum authored geometric change now comes from the precision context —
 // `GeometryPrecisionContext::authoring_resolution()`. A smaller non-zero request

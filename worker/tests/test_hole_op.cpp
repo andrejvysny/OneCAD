@@ -325,6 +325,32 @@ void test_conditional_invariants() {
     }
 }
 
+// ── The authoring-resolution boundary ─────────────────────────────────────────
+// Hole's dimension floor is `GeometryPrecisionContext::authoring_resolution()`. The
+// `zero depth` invariant above is refused by ANY plausible threshold, so it cannot
+// prove the guard is still wired to the context. This one STRADDLES the boundary and
+// flips the moment the context moves.
+void test_authoring_resolution_boundary() {
+    const std::string needle = "Hole depth too small";
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome below = run_hole(bodies, part, json{{"depth", 9.9e-4}});
+        check(below.status == ops::OpOutcome::Status::Failed &&
+                  below.error_message.find(needle) != std::string::npos,
+              "authoring boundary: depth 9.9e-4 mm is refused by name, got: " +
+                  below.error_message);
+    }
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome above = run_hole(bodies, part, json{{"depth", 1.05e-3}});
+        check(above.error_message.find(needle) == std::string::npos,
+              "authoring boundary: depth 1.05e-3 mm clears the guard, got: " +
+                  above.error_message);
+    }
+}
+
 TopoDS_Shape bridge_host() {
     const TopoDS_Shape left =
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 8.0, 20.0, 25.0).Shape();
@@ -438,6 +464,7 @@ int main() {
     test_point_fences();
     test_non_planar_face();
     test_conditional_invariants();
+    test_authoring_resolution_boundary();
     test_result_policy_versions();
     test_quarantined_host_is_not_modelable();
     test_determinism();

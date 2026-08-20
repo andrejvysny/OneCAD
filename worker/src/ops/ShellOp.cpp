@@ -17,6 +17,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "ops/OpCommon.h"
 
 namespace onecad::ops {
@@ -26,7 +27,9 @@ namespace em = onecad::elementmap;
 
 namespace {
 
-constexpr double kMinValue = 1e-3;  // RegenerationEngine.cpp:61 kMinValue
+// The thickness floor now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. The value is unchanged
+// (1e-3 mm, RegenerationEngine.cpp:61 kMinValue); it is no longer restated here.
 
 // The shared target body id of the op: params.targetBodyId, else the first primary
 // bodyId carried by any open-face ref (all open faces live on one body).
@@ -74,7 +77,8 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
     if (!read_scalar_strict(params, "thickness", 0.0, thickness, thickness_error)) {
         return OpOutcome::fail("OP_FAILED", thickness_error);
     }
-    if (thickness < kMinValue) {
+    if (thickness <
+        kernel::validation::precision_of(target_shape, thickness).authoring_resolution()) {
         return OpOutcome::fail("OP_FAILED", "Shell thickness too small");
     }
 

@@ -309,6 +309,41 @@ void test_fillet_radius_too_small() {
           "fillet: radius too small → OP_FAILED (recoverable)");
 }
 
+// --- The authoring-resolution boundary. ---
+// The radius floor is `GeometryPrecisionContext::authoring_resolution()`. The r=0
+// case above is refused by ANY plausible threshold, so it cannot prove the guard is
+// still wired to the context. These STRADDLE the boundary and flip the moment the
+// context moves. The upper case asserts the GUARD, not the build: OCCT is entitled
+// to refuse a 1.05 µm blend for its own reasons, but not with this message.
+void test_fillet_authoring_resolution_boundary() {
+    const std::string needle = "radius too small";
+    const auto fillet_by = [&](double radius) {
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+        BodyStore bodies;
+        bodies.create("body_1", "op0", box);
+        em::ElementMapPartition part;
+        const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
+        json op = {{"opType", "Fillet"}, {"opId", "opfb"},
+                   {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
+                   {"params", {{"mode", "Fillet"}, {"radius", radius},
+                               {"edgeIds", json::array({"e:x"})}}}};
+        Ctx c;
+        ops::OpContext ctx = c.make(bodies, part);
+        return ops::execute_fillet(ctx, op, "opfb");
+    };
+
+    const ops::OpOutcome below = fillet_by(9.9e-4);
+    check(below.status == ops::OpOutcome::Status::Failed &&
+              below.error_message.find(needle) != std::string::npos,
+          "fillet authoring boundary: r=9.9e-4 mm is refused by name, got: " +
+              below.error_message);
+
+    const ops::OpOutcome above = fillet_by(1.05e-3);
+    check(above.error_message.find(needle) == std::string::npos,
+          "fillet authoring boundary: r=1.05e-3 mm clears the guard, got: " +
+              above.error_message);
+}
+
 // --- Edge ref that does NOT resolve (symmetric tie) ⇒ NeedsRepair, body untouched. ---
 void test_fillet_ambiguous_edge_needs_repair() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
@@ -548,6 +583,7 @@ int main() {
     test_chamfer_distance2_too_small();
     test_fillet_ignores_distance2();
     test_fillet_radius_too_small();
+    test_fillet_authoring_resolution_boundary();
     test_fillet_ambiguous_edge_needs_repair();
     test_revolve_pappus();
     test_revolve_typed_edge_axis_wins();

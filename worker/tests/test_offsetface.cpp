@@ -455,6 +455,36 @@ void test_traps() {
         check(std::abs(volume_of(bodies.get("body_1")->geom) - volume_of(cyl)) < 1e-9,
               "trap R→0: body untouched");
     }
+    {  // (a′) The SEMANTIC-LENGTH boundary of that same preflight.
+        // The preflight floor is `GeometryPrecisionContext::semantic_length()`. R→0
+        // above is refused by ANY plausible floor, so it cannot prove the guard is
+        // still wired to the context. These two STRADDLE it and flip the moment the
+        // context moves. The upper case asserts the GUARD, not the build: OCCT is
+        // entitled to refuse shrinking r=10 to 1.05 nm for its own reasons, but not
+        // with this message.
+        const auto radius_to = [](double target) {
+            const TopoDS_Shape cyl = BRepPrimAPI_MakeCylinder(10.0, 20.0).Shape();
+            const std::vector<int> lats = cylindrical_ordinals(cyl);
+            BodyStore bodies;
+            bodies.create("body_1", "op_seed", cyl);
+            em::ElementMapPartition part;
+            return run_offset(bodies, part,
+                              offset_params("body_1", {of::face_topokey(lats.at(0))}, target,
+                                            "Radius"));
+        };
+        const ops::OpOutcome below = radius_to(9.9e-7);
+        check(failed_with(below, "would drive the cylinder radius"),
+              "semantic boundary: R→9.9e-7 is refused by name (" + below.error_message + ")");
+        // The floor is rendered INTO the wire message, so a "pure rename" that changed
+        // the printed digits would not be pure. Pin the rendered text.
+        check(below.error_message.find("must exceed 0.000001") != std::string::npos,
+              "semantic boundary: the refusal still renders 0.000001 mm, got: " +
+                  below.error_message);
+
+        const ops::OpOutcome above = radius_to(1.05e-6);
+        check(above.error_message.find("would drive the cylinder radius") == std::string::npos,
+              "semantic boundary: R→1.05e-6 clears the preflight, got: " + above.error_message);
+    }
     {  // (b) collapse: the top driven onto the bottom passes IsDone AND BRepCheck.
         const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
         BodyStore bodies;

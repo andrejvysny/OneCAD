@@ -24,6 +24,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/HoleTool.h"
 #include "ops/OpCommon.h"
@@ -35,7 +36,9 @@ namespace em = onecad::elementmap;
 
 namespace {
 
-constexpr double kMinValue = 1e-3;  // RegenerationEngine.cpp:61 kMinValue
+// The dimension floor now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. The value is unchanged
+// (1e-3 mm, RegenerationEngine.cpp:61 kMinValue); it is no longer restated here.
 // SCHEMA §7.3: the frozen `point` is re-projected onto the resolved face and the
 // op "fails loudly past 1e-3 mm".
 constexpr double kPointPlaneFence = 1e-3;
@@ -144,13 +147,18 @@ TopoDS_Face resolve_host_face(OpContext& ctx, const TopoDS_Shape& target_shape,
 // on violation (SCHEMA §7.3 conditional blocks); `dims.depth` is left 0 for
 // THROUGH-ALL so the caller can substitute the ray extent.
 std::string read_dims(const json& params, const std::string& hole_type, HoleDims& dims) {
+    // Dimension validation runs before the target body is resolved, and
+    // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h), so
+    // the floor-only context answers exactly what a measured one would.
+    const double min_value =
+        kernel::validation::GeometryPrecisionContext{}.authoring_resolution();
     dims.diameter = read_scalar(params, "diameter", 0.0);
-    if (dims.diameter < kMinValue) return "Hole diameter too small";
+    if (dims.diameter < min_value) return "Hole diameter too small";
 
     // `depth` absent OR json null ⇒ through-all (SCHEMA §7.3).
     if (has_scalar(params, "depth")) {
         dims.depth = read_scalar(params, "depth", 0.0);
-        if (dims.depth < kMinValue) return "Hole depth too small";
+        if (dims.depth < min_value) return "Hole depth too small";
     }
 
     if (hole_type == "counterbore") {
@@ -159,7 +167,7 @@ std::string read_dims(const json& params, const std::string& hole_type, HoleDims
         }
         dims.cb_diameter = read_scalar(params, "cbDiameter", 0.0);
         dims.cb_depth = read_scalar(params, "cbDepth", 0.0);
-        if (dims.cb_depth < kMinValue) return "Hole cbDepth too small";
+        if (dims.cb_depth < min_value) return "Hole cbDepth too small";
         if (dims.cb_diameter <= dims.diameter) {
             return "Hole cbDiameter must exceed diameter";
         }

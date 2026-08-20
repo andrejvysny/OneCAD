@@ -316,6 +316,33 @@ int main() {
         refuses(s, "zero height");
     }
     {
+        // --- The authoring-resolution boundary --------------------------------
+        // The height floor is `GeometryPrecisionContext::authoring_resolution()`.
+        // "zero height" above is refused by ANY plausible threshold, so it cannot
+        // prove the guard is still wired to the context. These two STRADDLE the
+        // boundary and flip the moment the context moves. The upper case asserts
+        // the GUARD, not the build: OCCT is entitled to refuse a 1.05 µm prism for
+        // its own reasons, but not with this message.
+        const char* needle = "height must be greater";
+        auto s = spur(15, 1.0, 5.0);
+        s.height = 9.9e-4;
+        const auto below = gear::build_gear_solid(s, kOrigin);
+        if (below.ok || below.error.find(needle) == std::string::npos) {
+            std::fprintf(stderr,
+                         "FAIL: authoring boundary: height 9.9e-4 mm is refused by name, got: %s\n",
+                         below.error.c_str());
+            ++g_failures;
+        }
+        s.height = 1.05e-3;
+        const auto above = gear::build_gear_solid(s, kOrigin);
+        if (above.error.find(needle) != std::string::npos) {
+            std::fprintf(stderr,
+                         "FAIL: authoring boundary: height 1.05e-3 mm clears the guard, got: %s\n",
+                         above.error.c_str());
+            ++g_failures;
+        }
+    }
+    {
         auto s = spur(15, 1.0, 5.0);
         s.sampleCount = 1;
         refuses(s, "sampleCount 1");

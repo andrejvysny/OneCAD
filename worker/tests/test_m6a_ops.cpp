@@ -182,6 +182,39 @@ void test_shell_thickness_too_small() {
           "shell: thickness too small → OP_FAILED (recoverable)");
 }
 
+// ── The authoring-resolution boundary ─────────────────────────────────────────
+// Shell's thickness floor is `GeometryPrecisionContext::authoring_resolution()`. The
+// thickness-0 case above is refused by ANY plausible threshold, so it cannot prove
+// the guard is still wired to the context. This one STRADDLES the boundary and flips
+// the moment the context moves. It asserts the GUARD, not the build: a 1.05 µm shell
+// is a legitimate thing for OCCT to refuse afterwards, but not for this guard to.
+void test_shell_authoring_resolution_boundary() {
+    const std::string needle = "Shell thickness too small";
+    const auto shell_by = [&](double thickness) {
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
+        BodyStore bodies;
+        bodies.create("body_1", "op0", box);
+        em::ElementMapPartition part;
+        const TopoDS_Shape top = face_by_center(box, 10, 10, 25);
+        json op = {{"opType", "Shell"}, {"opId", "opshb"},
+                   {"inputs", json::array({face_input("body_1", "el_top", top, 10, 10, 25)})},
+                   {"params", {{"thickness", thickness}, {"targetBodyId", "body_1"},
+                               {"openFaces", json::array({"el_top"})}}}};
+        Ctx c;
+        ops::OpContext ctx = c.make(bodies, part);
+        return ops::execute_shell(ctx, op, "opshb");
+    };
+
+    const ops::OpOutcome below = shell_by(9.9e-4);
+    check(below.status == ops::OpOutcome::Status::Failed &&
+              below.error_message.find(needle) != std::string::npos,
+          "shell authoring boundary: 9.9e-4 mm is refused by name, got: " + below.error_message);
+
+    const ops::OpOutcome above = shell_by(1.05e-3);
+    check(above.error_message.find(needle) == std::string::npos,
+          "shell authoring boundary: 1.05e-3 mm clears the guard, got: " + above.error_message);
+}
+
 // ── LinearPattern: touching copies fuse into one 60×20×25 solid. ───────
 void test_linear_pattern() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();  // vol 10000
@@ -464,6 +497,7 @@ int main() {
     test_shell_partition_tracked();
     test_shell_ambiguous_needs_repair();
     test_shell_thickness_too_small();
+    test_shell_authoring_resolution_boundary();
     test_linear_pattern();
     test_linear_pattern_compound();
     test_linear_pattern_v2_preserves_source();

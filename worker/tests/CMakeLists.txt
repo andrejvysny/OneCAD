@@ -174,6 +174,14 @@ add_executable(test_extrude_draft test_extrude_draft.cpp)
 target_link_libraries(test_extrude_draft PRIVATE worker_core)
 add_test(NAME extrude_draft COMMAND test_extrude_draft)
 
+# WP1 G1: Extrude's Blind-distance and ToFace-coincidence guards, asserted AT the
+# authoring-resolution boundary. Every other extrude refusal case sits at 0, which
+# any threshold refuses, so none of them can prove the guards still read the
+# precision context.
+add_executable(test_extrude_precision_boundary test_extrude_precision_boundary.cpp)
+target_link_libraries(test_extrude_precision_boundary PRIVATE worker_core)
+add_test(NAME extrude_precision_boundary COMMAND test_extrude_precision_boundary)
+
 # F0: oversized Fillet/Chamfer must refuse without fallback geometry or state
 # mutation. Also emits deterministic NDJSON for the 7.9.3 comparison artifact.
 add_executable(test_edge_op_failure test_edge_op_failure.cpp)

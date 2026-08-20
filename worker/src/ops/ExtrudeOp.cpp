@@ -47,8 +47,10 @@ namespace em = onecad::elementmap;
 
 namespace {
 
-constexpr double kMinValue = 1e-3;   // RegenerationEngine.cpp:61 kMinValue (blind/two-sided distance guard)
-constexpr double kToFaceMin = 1e-3;  // RegenerationEngine.cpp:61 kMinValue (ToFace coincidence)
+// The blind/two-sided distance guard and the ToFace coincidence guard both now
+// come from the precision context — `GeometryPrecisionContext::authoring_resolution()`.
+// The value is unchanged (1e-3 mm, RegenerationEngine.cpp:61 kMinValue); it is no
+// longer restated here, and the two guards no longer state it independently.
 constexpr double kThroughAllFallback = 1.0e5;    // RegenerationEngine.cpp:856
 constexpr double kDraftAngleEpsilon = 1e-4;      // RegenerationEngine.cpp:59
 constexpr double kSideFaceDotThreshold = 0.9;    // RegenerationEngine.cpp:60
@@ -144,7 +146,9 @@ double through_all_distance(double blind_sign_source, const gp_Pnt& origin, cons
                 max_proj = std::max(max_proj, gp_Vec(origin, p).Dot(gp_Vec(ray_dir)));
             }
             const double diag = gp_Pnt(xmin, ymin, zmin).Distance(gp_Pnt(xmax, ymax, zmax));
-            return sign * (std::max(max_proj, kMinValue) + 0.01 * diag + 1.0);
+            const double min_value =
+                kernel::validation::precision_of(*target).authoring_resolution();
+            return sign * (std::max(max_proj, min_value) + 0.01 * diag + 1.0);
         }
     }
     return sign * kThroughAllFallback;
@@ -250,9 +254,11 @@ constexpr double kToNextSeatThreshold = 2.0 * kToNextContactEpsilon;
 //   * the profile is SEATED on the body (a sketch drawn on one of its faces, which is
 //     how a through-pocket is normally authored) — the intersection begins at the
 //     sketch plane, so its minimum is the seat itself. The next face is then where the
-//     sweep LEAVES that material: the maximum of the seated run. A void inside the body
-//     splits the intersection into separate solids, so the seated run ends at the
-//     void's near wall, which is the correct "next" there too.
+//     sweep LEAVES that material: the maximum of the seated run. A void that spans the
+//     profile footprint splits the intersection into separate solids, so the seated run
+//     ends at the void's near wall; a void the material wraps laterally leaves the run
+//     CONNECTED, so the feature passes through it (pinned by
+//     test_to_next_seated_over_a_closed_internal_void).
 // The old vertex scan reproduced the seated case only by accident — the seat's vertices
 // sit exactly at the sketch plane and were dropped by its epsilon filter, leaving the
 // exit vertices as the smallest survivor.
@@ -262,7 +268,8 @@ ToNextResult to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir,
     BRepGProp::SurfaceProperties(profile, props);
     const gp_Pnt origin = props.CentreOfMass();
     const double sweep_distance = through_all_distance(1.0, origin, dir, &body);
-    if (!std::isfinite(sweep_distance) || sweep_distance <= kMinValue)
+    if (!std::isfinite(sweep_distance) ||
+        sweep_distance <= kernel::validation::precision_of(body).authoring_resolution())
         return {ToNextStatus::NoContact, -1.0};
 
     try {
@@ -405,7 +412,8 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
         return out;
     }
     const double distance = numerator / denominator;
-    if (std::abs(distance) < kToFaceMin) {
+    if (std::abs(distance) <
+        kernel::validation::precision_of(target_face, distance).authoring_resolution()) {
         out.error = "ToFace target coincides with the sketch plane";
         return out;
     }
@@ -694,14 +702,20 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         !std::isfinite(draft_angle)) {
         return OpOutcome::fail("OP_FAILED", "Extrude parameters must be finite");
     }
+    // Distance validation runs before the profile is built and the reference body
+    // may be absent (NewBody), and `authoring_resolution()` is scale-independent in
+    // v1 (GeometryPrecision.h), so the floor-only context answers exactly what a
+    // measured one would.
+    const double min_value =
+        kernel::validation::GeometryPrecisionContext{}.authoring_resolution();
     const bool distance_driven = !two_dirs && (mode_str == "Blind" || mode_str == "Symmetric");
-    if (distance_driven && std::abs(distance) < kMinValue) {
+    if (distance_driven && std::abs(distance) < min_value) {
         return OpOutcome::fail("OP_FAILED", "Extrude distance too small");
     }
-    if (two_dirs && mode_str == "Blind" && std::abs(distance) < kMinValue) {
+    if (two_dirs && mode_str == "Blind" && std::abs(distance) < min_value) {
         return OpOutcome::fail("OP_FAILED", "Extrude first distance too small");
     }
-    if (two_dirs && mode2_str == "Blind" && std::abs(distance2) < kMinValue) {
+    if (two_dirs && mode2_str == "Blind" && std::abs(distance2) < min_value) {
         return OpOutcome::fail("OP_FAILED", "Extrude second distance too small");
     }
 

@@ -14,13 +14,15 @@
 #include <gp_Ax2.hxx>
 #include <gp_Vec.hxx>
 
+#include "kernel/validation/GeometryPrecision.h"
+
 namespace onecad::ops {
 
 namespace {
 
-// Same floor the other ops use for "a dimension the kernel can act on"
-// (RegenerationEngine.cpp:61 kMinValue).
-constexpr double kMinValue = 1e-3;
+// "A dimension the kernel can act on" now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. The value is unchanged
+// (1e-3 mm); it is no longer restated here.
 // ExtrudeOp.cpp:49 kThroughAllFallback — used only when the host has no bbox.
 constexpr double kThroughAllFallback = 1.0e5;
 
@@ -63,7 +65,9 @@ double through_all_length(const gp_Pnt& origin, const gp_Dir& axis, const TopoDS
                 max_proj = std::max(max_proj, gp_Vec(origin, p).Dot(gp_Vec(axis)));
             }
             const double diag = gp_Pnt(xmin, ymin, zmin).Distance(gp_Pnt(xmax, ymax, zmax));
-            return std::max(max_proj, kMinValue) + 0.01 * diag + 1.0;
+            const double min_value =
+                kernel::validation::precision_of(target).authoring_resolution();
+            return std::max(max_proj, min_value) + 0.01 * diag + 1.0;
         }
     }
     return kThroughAllFallback;
@@ -72,7 +76,12 @@ double through_all_length(const gp_Pnt& origin, const gp_Dir& axis, const TopoDS
 TopoDS_Shape build_hole_tool(const gp_Pnt& origin, const gp_Dir& axis, const HoleDims& dims,
                              std::string& err) {
     const double drill_r = dims.diameter * 0.5;
-    if (drill_r < kMinValue || dims.depth < kMinValue) {
+    // Dimension validation runs before any shape is measured, and
+    // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h),
+    // so the floor-only context answers exactly what a measured one would.
+    const double min_value =
+        kernel::validation::GeometryPrecisionContext{}.authoring_resolution();
+    if (drill_r < min_value || dims.depth < min_value) {
         err = "Hole tool has a degenerate drill (diameter/depth below 1e-3)";
         return {};
     }

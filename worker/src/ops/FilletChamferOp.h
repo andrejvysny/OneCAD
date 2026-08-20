@@ -4,7 +4,8 @@
 // (:1351-1429):
 //   * target body from the op's semantic refs (a BodyRef in the C++ engine; here
 //     the edge refs' shared primary.bodyId);
-//   * radius guard `< kMinValue (1e-3)` → "…radius/distance too small" (OP_FAILED);
+//   * radius guard `< authoring_resolution() (1e-3)` → "…radius/distance too small"
+//     (OP_FAILED);
 //   * per-edge: fillet `Add(radius, edge)`; chamfer `Add(radius, radius, edge,
 //     refFace)` (equal-leg, refFace = first ancestor face via MapShapesAndAncestors);
 //   * Build + IsDone; a radius-too-large / OCCT failure → recoverable OP_FAILED /

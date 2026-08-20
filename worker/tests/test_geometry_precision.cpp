@@ -82,6 +82,35 @@ void authoring_resolution_reproduces_the_min_value_family() {
     }
 }
 
+// ── The FLOOR-ONLY context, which several migrated guards now use ────────────
+//
+// Parameter validation runs before any shape exists (Hole's `read_dims`,
+// Fillet/Chamfer's `read_values`, Extrude's distance guards, Gear's spec guards,
+// OffsetFace's anti-parallel tests), so those sites read a default-constructed
+// context rather than a measured one. That is only sound if the default context
+// answers the same floors the deleted literals did.
+void floor_only_context_answers_the_inlined_floors() {
+    const validation::GeometryPrecisionContext floor_only;
+
+    // Inlined from the deleted `kMinValue` family (ExtrudeOp `kMinValue`/`kToFaceMin`,
+    // FilletChamferOp, HoleOp, HoleTool, ShellOp, GearTool).
+    check_exact(floor_only.authoring_resolution(), 1e-3,
+                "the floor-only context answers the kMinValue literal");
+    // Inlined from the deleted OffsetFaceOp.h `kSemanticAngularTol`. The angular
+    // budget carries no conditioning term, so floor-only is EXACT, not merely
+    // conservative — that is what lets the anti-parallel guards use it.
+    check_exact(floor_only.semantic_angular(), 1.0e-7,
+                "the floor-only context answers the kSemanticAngularTol literal");
+    // Inlined from the deleted OffsetFaceOp.h `kSemanticLengthTol`.
+    check_exact(floor_only.semantic_length(), 1.0e-6,
+                "the floor-only context answers the kSemanticLengthTol literal");
+
+    // Gear's degenerate-chord guard is a thousandth of the authoring resolution and
+    // is computed at the site; pin the arithmetic so the site cannot drift.
+    check_exact(floor_only.authoring_resolution() * 1e-3, 1e-6,
+                "the gear degenerate-chord guard is 1e-6 mm");
+}
+
 // ── minimum_volume: OffsetFace's `kMinVolume` ───────────────────────────────
 void minimum_volume_reproduces_the_offset_face_literal() {
     // Inlined from OffsetFaceOp.h `kMinVolume`. Its comment calls it "a 1 µm
@@ -244,6 +273,7 @@ void json_carries_the_derived_budgets() {
 int main() {
     occt_confusion_is_what_the_thresholds_assume();
     authoring_resolution_reproduces_the_min_value_family();
+    floor_only_context_answers_the_inlined_floors();
     minimum_volume_reproduces_the_offset_face_literal();
     tolerance_ceiling_reproduces_extrude_and_fillet();
     tolerance_ceiling_reproduces_offset_face();

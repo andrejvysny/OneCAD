@@ -21,6 +21,7 @@
 #include <gp_Vec.hxx>
 
 #include "kernel/geometry/BSpline.h"
+#include "kernel/validation/GeometryPrecision.h"
 
 namespace onecad::ops::gear {
 
@@ -29,9 +30,9 @@ namespace {
 namespace kg = onecad::kernel::gear;
 namespace geom = onecad::kernel::geometry;
 
-// Same floor the other ops use for "a dimension the kernel can act on"
-// (RegenerationEngine.cpp:61 kMinValue, mirrored in HoleTool.cpp).
-constexpr double kMinValue = 1e-3;
+// "A dimension the kernel can act on" now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. The value is unchanged
+// (1e-3 mm); it is no longer restated here.
 constexpr double kPi = 3.14159265358979323846;
 
 std::string occt_reason(const Standard_Failure& f) {
@@ -51,11 +52,19 @@ gp_Pnt local_point(const kg::Point2d& p, double angle) {
 GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame) {
   GearBuildResult out;
 
+  // The gear is built from a spec, not measured from an existing shape, and
+  // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h), so
+  // the floor-only context answers exactly what a measured one would.
+  const double min_value =
+      onecad::kernel::validation::GeometryPrecisionContext{}.authoring_resolution();
+  // A chord a thousandth of that is a duplicated point, not a segment.
+  const double degenerate_chord = min_value * 1e-3;
+
   if (spec.sampleCount < 2) {
     out.error = "sampleCount must be at least 2 (got " + std::to_string(spec.sampleCount) + ")";
     return out;
   }
-  if (!(spec.height > kMinValue)) {
+  if (!(spec.height > min_value)) {
     out.error = "height must be greater than 1e-3 mm";
     return out;
   }
@@ -127,7 +136,7 @@ GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame)
         if (seg.size() == 2) {
           const gp_Pnt a = local_point(seg.front(), angle);
           const gp_Pnt b = local_point(seg.back(), angle);
-          if (a.Distance(b) <= kMinValue * 1e-3) continue;  // degenerate, skip rather than raise
+          if (a.Distance(b) <= degenerate_chord) continue;  // degenerate, skip rather than raise
           BRepBuilderAPI_MakeEdge mk(a, b);
           if (!mk.IsDone()) {
             out.error = "gear profile straight segment could not be built";
@@ -152,7 +161,7 @@ GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame)
       // first. Matches the reference's 2-point run (GearTool.h).
       const gp_Pnt landStart = local_point(toothLast, angle);
       const gp_Pnt landEnd = local_point(toothFirst, nextAngle);
-      if (landStart.Distance(landEnd) > kMinValue * 1e-3) {
+      if (landStart.Distance(landEnd) > degenerate_chord) {
         BRepBuilderAPI_MakeEdge mk(landStart, landEnd);
         if (!mk.IsDone()) {
           out.error = "gear root land segment could not be built";
@@ -202,7 +211,7 @@ GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame)
     // worst (the same reasoning as HoleTool's kFaceOvershoot).
     const double overshoot = std::max(1e-2, spec.height * 1e-3);
     auto cut_cylinder = [&](double radius, double offset, const char* what) -> bool {
-      if (radius < kMinValue) {
+      if (radius < min_value) {
         out.error = std::string(what) + " diameter must be greater than 2e-3 mm";
         return false;
       }

@@ -25,6 +25,7 @@
 #include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "ops/OffsetFaceOp.h"
 #include "util/Log.h"
 
@@ -157,8 +158,11 @@ std::vector<OppositeCandidate> find_opposites(const TopoDS_Shape& body, int sele
         const TopoDS_Face cand = TopoDS::Face(faces(ord));
         const of::PlaneInfo c = of::plane_info(cand);
         if (!c.ok || !of::sample_face(cand).ok) continue;
+        // `semantic_angular()` carries no conditioning term by design (a length-derived
+        // quantity added to an angle is a dimensional error), so the floor-only context
+        // returns exactly the angular floor.
         if (gp_Vec(sel.normal).Dot(gp_Vec(c.normal)) >
-            -std::cos(of::kSemanticAngularTol)) {
+            -std::cos(kernel::validation::GeometryPrecisionContext{}.semantic_angular())) {
             continue;
         }
         const double t = gp_Vec(c.location, sel.location).Dot(gp_Vec(sel.normal));
@@ -348,14 +352,19 @@ Envelope handle_prepare_offset_face(Session& session, const Envelope& req) {
     json current_dims = json::object();
     bool cylindrical_set = true;
     of::CylinderInfo first;
+    // Measured on the BODY the faces are read off. Its conditioning term cannot reach
+    // the semantic floor anywhere in the supported coordinate range — that is asserted
+    // in `test_geometry_precision`.
+    const double semantic_length =
+        kernel::validation::precision_of(body).semantic_length();
     for (const int ord : closure.ordinals) {
         const of::CylinderInfo info = of::cylinder_info(TopoDS::Face(body_faces(ord)));
         if (!info.ok) { cylindrical_set = false; break; }
         if (first.ok) {
             const bool same_axis =
                 first.axis.Direction().IsParallel(info.axis.Direction(), Precision::Angular()) &&
-                gp_Lin(first.axis).Distance(info.axis.Location()) <= of::kSemanticLengthTol;
-            if (!same_axis || std::abs(first.radius - info.radius) > of::kSemanticLengthTol ||
+                gp_Lin(first.axis).Distance(info.axis.Location()) <= semantic_length;
+            if (!same_axis || std::abs(first.radius - info.radius) > semantic_length ||
                 first.sigma != info.sigma) {
                 cylindrical_set = false;
                 break;

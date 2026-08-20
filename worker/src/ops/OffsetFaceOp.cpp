@@ -584,7 +584,10 @@ DistancePlan plan_distances(DistanceType type, double distance, bool chain_flag,
         return out;
     }
     const double anti = gp_Vec(sel.normal).Dot(gp_Vec(opp.normal));
-    if (anti > -std::cos(of::kSemanticAngularTol)) {
+    // `semantic_angular()` carries no conditioning term by design — adding a
+    // length-derived quantity to an angle is a dimensional error (GeometryPrecision.cpp)
+    // — so the floor-only context returns exactly the angular floor.
+    if (anti > -std::cos(kernel::validation::GeometryPrecisionContext{}.semantic_angular())) {
         out.error = "Total distance requires ANTI-PARALLEL selected/opposite planes";
         return out;
     }
@@ -635,6 +638,10 @@ std::string check_semantics(const BRepOffset_MakeOffset& mo, const TopoDS_Shape&
     TopTools_IndexedMapOfShape result_faces;
     TopExp::MapShapes(result, TopAbs_FACE, result_faces);
     const BRepAlgo_Image& image = mo.OffsetFacesFromShapes();
+    // Measured on the RESULT, which is the shape every assertion below is taken
+    // against. Its conditioning term cannot reach the semantic floor anywhere in the
+    // supported coordinate range — that is asserted in `test_geometry_precision`.
+    const auto precision = kernel::validation::precision_of(result);
 
     for (std::size_t i = 0; i < faces.size(); ++i) {
         const std::vector<TopoDS_Face> succ = offset_successors(image, faces[i], result_faces);
@@ -658,12 +665,12 @@ std::string check_semantics(const BRepOffset_MakeOffset& mo, const TopoDS_Shape&
                 }
                 const double alignment =
                     gp_Vec(before.normal).Dot(gp_Vec(after.normal));
-                if (alignment < std::cos(of::kSemanticAngularTol)) {
+                if (alignment < std::cos(precision.semantic_angular())) {
                     return "operated plane " + keys[i] + " changed orientation";
                 }
                 const double moved = gp_Vec(before.location, after.location)
                                          .Dot(gp_Vec(before.normal));
-                if (std::abs(moved - d[i]) > of::kSemanticLengthTol) {
+                if (std::abs(moved - d[i]) > precision.semantic_length()) {
                     return "operated plane " + keys[i] + " moved " + std::to_string(moved) +
                            " but " + std::to_string(d[i]) + " was requested";
                 }
@@ -679,10 +686,10 @@ std::string check_semantics(const BRepOffset_MakeOffset& mo, const TopoDS_Shape&
                 }
                 BRepAdaptor_Surface surf(sf);
                 const gp_Cylinder cyl = surf.Cylinder();
-                if (!coaxial(before.axis, cyl.Axis(), of::kSemanticLengthTol)) {
+                if (!coaxial(before.axis, cyl.Axis(), precision.semantic_length())) {
                     return "operated cylinder " + keys[i] + " lost its axis";
                 }
-                if (std::abs(cyl.Radius() - predicted) > of::kSemanticLengthTol) {
+                if (std::abs(cyl.Radius() - predicted) > precision.semantic_length()) {
                     return "operated cylinder " + keys[i] + " reached radius " +
                            std::to_string(cyl.Radius()) + " but " + std::to_string(predicted) +
                            " was predicted";
@@ -920,9 +927,11 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     // --- per-face signed d ----------------------------------------------------
     // Construction uncertainty must never decide what the user asked for. Absolute
     // Radius/Total planning and semantic equality use the owned semantic tolerance;
-    // only BRepOffset_MakeOffset receives the construction tolerance below.
-    const DistancePlan plan = plan_distances(type, distance, chain_flag, operative, opposite,
-                                             of::kSemanticLengthTol);
+    // only BRepOffset_MakeOffset receives the construction tolerance below. Measured
+    // on the TARGET, the shape the planning distances are read off.
+    const DistancePlan plan = plan_distances(
+        type, distance, chain_flag, operative, opposite,
+        kernel::validation::precision_of(target_shape).semantic_length());
     if (!plan.ok) {
         return OpOutcome::fail("OP_FAILED", "OffsetFace: " + plan.error);
     }

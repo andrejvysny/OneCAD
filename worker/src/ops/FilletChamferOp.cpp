@@ -25,6 +25,7 @@
 #include "kernel/fillet/FilletBuilder.h"
 #include "kernel/fillet/EdgeContour.h"
 #include "kernel/fillet/FilletSemanticChecks.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "ops/OpCommon.h"
 #include "session/ShapeMetrics.h"
 
@@ -35,7 +36,9 @@ namespace em = onecad::elementmap;
 
 namespace {
 
-constexpr double kMinValue = 1e-3;  // RegenerationEngine.cpp:61 kMinValue
+// The radius/distance floor now comes from the precision context —
+// `GeometryPrecisionContext::authoring_resolution()`. The value is unchanged
+// (1e-3 mm, RegenerationEngine.cpp:61 kMinValue); it is no longer restated here.
 
 enum class Mode { Fillet, Chamfer };
 
@@ -246,8 +249,13 @@ EdgeValues read_values(const json& op, Mode mode) {
     EdgeValues values;
     const json params =
         op.contains("params") && op["params"].is_object() ? op["params"] : json::object();
+    // Parameter validation runs before the target body is resolved, and
+    // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h),
+    // so the floor-only context answers exactly what a measured one would.
+    const double min_value =
+        kernel::validation::GeometryPrecisionContext{}.authoring_resolution();
     values.radius = read_scalar(params, "radius", 0.0);
-    if (!std::isfinite(values.radius) || values.radius < kMinValue) {
+    if (!std::isfinite(values.radius) || values.radius < min_value) {
         values.stop = OpOutcome::fail(
             "OP_FAILED",
             mode == Mode::Fillet ? "Fillet radius too small" : "Chamfer distance too small");
@@ -257,7 +265,7 @@ EdgeValues read_values(const json& op, Mode mode) {
     values.distance2 =
         values.two_distance ? read_scalar(params, "distance2", 0.0) : 0.0;
     if (values.two_distance &&
-        (!std::isfinite(values.distance2) || values.distance2 < kMinValue)) {
+        (!std::isfinite(values.distance2) || values.distance2 < min_value)) {
         values.stop = OpOutcome::fail("OP_FAILED", "Chamfer distance2 too small");
     }
     if (params.contains("tangentClosureVersion")) {
