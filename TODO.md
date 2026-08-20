@@ -1,5 +1,82 @@
 # OneCAD-Tauri Migration TODO
 
+## KERNEL CONTINUATION — RESUMED (2026-08-20, plan `~/.claude/plans/use-the-fable-orchestrator-skill-kind-dawn.md`)
+
+Resumes § KERNEL CONTINUATION (below, 2026-08-15) by user decision, superseding DAILY DRIVER's
+"kernel continuation waits". Program: WP1 completion (G1-remaining → G2 → G3 → G4) → WP2 ToNext
+adversarial campaign → WP3 OffsetFace DirectModeler V1 → WP5 exact tilted ToFace → WP4 fillet
+feasible-radius verb → small-caliber batch (chamfer angle-distance, MirrorBody-fuse UI, Shell
+multi-face/countersink/partial-sweep evidence). Decisions taken with the user: Loft/Sweep NOT
+chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
+the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
+
+### Gate — WP1-G1r: remaining precision renames (2026-08-20) — LANDED
+
+Every `kMinValue`-family literal (ExtrudeOp `kMinValue`+`kToFaceMin`, FilletChamferOp, HoleOp,
+HoleTool, ShellOp, GearTool) and OffsetFace's `kSemanticLengthTol`/`kSemanticAngularTol` now read
+from `GeometryPrecisionContext`; the deleted constants' comments say where the value lives.
+Sites validating parameters before any shape exists use a floor-only (default-constructed)
+context — sound because `authoring_resolution()`/`semantic_angular()` are context-independent in
+v1, and pinned by the new `floor_only_context_answers_the_inlined_floors` harness case. Sites
+with a shape in hand use `precision_of(shape)` (FilletSemanticChecks precedent).
+
+- **Load-bearing proof, observed:** perturbing `kAuthoringResolutionMm` 1.0e-3→1.1e-3 reds
+  **7/137** ctest targets — every newly migrated family, e.g. `fillet authoring boundary:
+  r=1.05e-3 mm clears the guard`, `blind boundary: 1.05e-3 mm clears the guard`, `shell
+  authoring boundary`, `hole authoring boundary`, gear `height must be greater than 1e-3 mm`.
+  New straddling tests: test_hole_op, test_m6a_ops (shell), test_gear_tool, test_wp6_ops
+  (fillet), test_offsetface (a′), test_extrude_precision_boundary.cpp (new target).
+- **The G1 slice-1 finding repeated for the semantic floor:** perturbing `kSemanticLengthFloorMm`
+  1e-6→1.1e-6 first reddened ONLY the identity harness; closed with an OffsetFace inside-out-
+  cylinder straddle that also pins the rendered digits `must exceed 0.000001` (the floor prints
+  into the wire message). `kSemanticAngularFloorRad` deliberately NOT perturb-proven: its
+  consumers compare `cos(tol)` and `cos(1e-7)` vs `cos(1.1e-7)` differ below double resolution —
+  the identity harness pins the value directly instead.
+- **Gate, measured on the main thread (rung: worker L2 + full Rust integration + digest guard;
+  e2e/vitest not run — zero FE/Rust source touched):** ctest **137/137** (40.0 s; +1 =
+  `extrude_precision_boundary`) · `cargo fmt --all --check` + `clippy --workspace --all-targets
+  -D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`
+  **86 targets / 1305 passed / 0 failed / 0 ignored**, worker-backed gates all ran (wire_contract
+  19, topology_rebind 15, worker_chaos 14, m2_gate 2, breadth_ops 10, checkpoints 6, sketch_* all
+  nonzero) · kernelbench `compare` **136 rows unchanged** · `semantic-compare` **OK** · stdout
+  hygiene clean · coverage 29 rows/9 corpus/16 CI jobs/19 registry ops · contracts 37 rows/18 ops
+  · hex gate 0.
+- **LEDGER SEAM:** W0's baseline row records cargo **1319** passed at `33dd36c`; this session
+  measures **1305** twice, stably, with **zero src-tauri diff** between `33dd36c` and `e5572d2`
+  and zero Rust changes in this work. The 1319 is not reproducible from the tree it cites —
+  treat 1305 as the true baseline; the W0 number was mis-aggregated.
+- **Flagged seams, recorded not fixed:** (1) three refusal messages hardcode thresholds in prose
+  (`GearTool.cpp` "greater than 1e-3 mm"/"greater than 2e-3 mm", `HoleTool.cpp` "below 1e-3") —
+  they would lie after a real v2 constant change; render the value in whichever gate moves it.
+  (2) BUZZING-SIMON's verify block runs `semantic-compare` without first generating
+  `summary.json` — the working sequence inserts `onecad-kernelbench report results.jsonl --json
+  summary.json` between run and compare (done here and in this row's numbers).
+
+### Gate — WP2: ToNext adversarial campaign (2026-08-20) — LANDED, NO DEFECT FOUND
+
+Nine new cases in `test_wp6_extrude.cpp` (+346/−10), each asserting an exact analytically-derived
+distance (with a fixture-volume sanity check proving the fixture's own shape first) or a named
+outcome; zero production changes. The rule "one connected intersection solid = one contiguous
+material run" held everywhere: fully-enclosed void → run stays connected, exits at 20 not the
+void wall 6 (fixture volume 3144 = 3360−6³ verified); partial cavity → entry is the global
+minimum 10, not the pocket roof 16; U-slot → legs+bridge are ONE run, exit 20; annular profile
+ignores a boss inside its hole (span 12, ring volume 300·12=3600 proves the hole swept); two
+separated plates → free-space answers first entry 10, seated answers FIRST run's exit 6, never
+the second plate; 1e-7 near-seat gap under the 1e-4 seat epsilon → seated semantics; scales
+0.01 mm/10 m and +1e6 mm origin exact; tolerances inflated to 1e-3 via ShapeFix (verified ≥1e-3
+on the fixture) move nothing. The annular case derives its region id through the public region
+table rather than trusting detector order. ExtrudeOp's seated-case comment was narrower than the
+code (claimed every void splits the run) — corrected, citing the new test.
+
+- **Flagged seam, recorded not fixed:** `build_profile_face` (`OpCommon.cpp`) emits a
+  self-contradictory diagnostic when a caller omits `regionIdentityVersion` after deriving an id
+  from the default (exact) config — the message lists the requested id as available while
+  refusing it, because `available` is rebuilt from the exact alias table after matching ran
+  against the non-exact one. Unreachable in production (the planner always sends the version —
+  `worker/wire.rs:362`); fix belongs to whoever next touches region aliasing.
+- **Gate:** covered by the WP1-G1r row above — both packages are worker-only and the measured
+  numbers are from the merged tree at this row's commits.
+
 ## DAILY DRIVER v1 (2026-08-19, plan `~/.claude/plans/act-as-senior-cad-floofy-locket.md`)
 
 Capability + ship, chosen over kernel continuation. The artifact is faithful after TRUST &
