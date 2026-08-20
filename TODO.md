@@ -10,6 +10,60 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### Gate — WP1-G3 + G4(sliver) + WP3-C4 (2026-08-20) — LANDED
+
+Adversarial review on a fresh context (SHIP-WITH-FIXES + "G4 NOT safe as evidenced") drove a fix
+round on both packages before landing; every fix re-proven red-first.
+
+- **G3 — the detector redefinition** (commit `feat(kernel): redefine micro-edge/sliver…`):
+  degenerate edges counted separately (sphere 2 / cone 1 / filleted-box 8 corner apices — the
+  population the old detector called micro); micro edge = `length ≤ 2·max(tol(edge), 1e-7)`;
+  sliver = width `2·area/perimeter ≤ 2e-7` (the old area-ratio test measured the constructed
+  1000×1e-7 sliver at 1e-10 against a 1e-12 cut — blind by two orders); collection runs at
+  EVERY tier after the review found the bounds live on the policy while collection was
+  tier-gated — a Tier A policy with any bound would have refused everything, including every
+  `validate_modeling_input` and every downgraded preview (Tier A cost measured: 21 ms vs Tier B
+  516 ms on the 74-face gear). 120-row census clean; the tolerance-relative clause is
+  load-bearing both ways (1.5e-3 mm edge: micro at tol 1e-3, clean at default; deleting the tol
+  term reds it — before the fix round that deletion left the whole suite green).
+  **Characterization pinned:** OCCT's STEP reader does NOT propagate declared uncertainty into
+  B-Rep tolerance (`stepLooseBox` imports at 1e-7 despite a written 1e-3 uncertainty).
+- **G4 — SLIVER HALF ONLY, by decision from the evidence.** `single_solid_policy(TierB)` now
+  carries `max_sliver_face_count = 0`; one sliver face refuses `PUBLICATION_SLIVER_FACE` out of
+  the box. The width metric is absolute and tolerance-independent, and the computed worst case
+  (10×10 filter plate, 10k holes → width 0.0254 mm) sits five orders above the bar.
+  **`max_micro_edge_count` stays −1**: the micro rule's tolerance half means a healed dirty
+  import (edge tolerance legally up to 1.0 mm, `StepReadPolicy::max_precision_val`) could carry
+  a 2.0 mm micro bar, and that band is UNMEASURED — `step_fixture_util`'s writer emits
+  exactly-representable geometry and cannot produce a heal-requiring file offline.
+  - [ ] **OWED before the micro bound can flip (USER can help): a real dirty vendor STEP** —
+        one that forces `ShapeFix` healing — measured through the census. Alternative: exclude
+        the import path from the bound; both need the measured table first.
+  - **Digest rule honored:** G4 was the only gate permitted to move a digest; it moved ZERO
+    (census predicted no slivers in the t0 corpus; `compare` 136 rows unchanged, measured).
+    §14 now names the second digest route for any future enablement (`deep_audit`'s
+    `productionAudit` bool evaluates the default policy).
+- **C4 — BlendReconstruction** (identity round trips exact in both signs: box 991.4159265…,
+  L-prism 648.5840734…, 1e-9 relative, identical face counts; per-stage tolerance CONTRIBUTION
+  cap enforced at 1e-6, worst observed 5e-8 — the absolute form was rejected on measurement, it
+  false-refused a boolean-inherited 2.8e-14 hair). Review fixes, each red-first: the
+  mixed-radius hole (an R2+R3 set measurably rebuilt the R3 round as R2 with ok=true — now
+  refused at BOTH layers: `SUPPRESSION_INPUT_INVALID` mixed radii, `REBLEND_INPUT_INVALID`
+  seed-vs-requested), the convexity gate (`REBLEND_CONVEXITY`, dead code for the identity trip,
+  load-bearing for C5's offset stage), generic kernel-alert wording. Two OCCT behaviors pinned:
+  `BOPAlgo_RemoveFeatures` no-ops with `IsDone()`+warning, and HEALS a fused boss 14→8 faces
+  (first fixture to reach the face-count postcondition — five ElementId-bearing faces with no
+  unique ancestor, correctly refused). Refusal-code coverage is a stated ledger: **13 codes
+  with permanent failing paths, 2 proven by neutralization, 17 DECLARED untested** (list in
+  `test_blend_reconstruction.cpp`'s header; the cylinder-support identity round trip and the
+  seed-length collision are owed to C6).
+- **Gate (tip-verified after all fixes, measured on the main thread; rung: worker L2 + Rust
+  full + digest guard — no FE change this round):** ctest **143/143** (45.1 s) ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **86 targets / 1305 passed / 0 failed**
+  (teed) · kernelbench `compare` **136 rows unchanged** · `semantic-compare` OK · fmt/clippy ·
+  stdout hygiene clean. Same-file commits (ShapeAudit, test_fillet_builder, tests/CMakeLists
+  split across G3/C4/G4) staged per-commit so each builds standalone; full suite ran at tip.
+
 ### Gate — WP3 C1–C3: blend proof, sampling budget, ComposedHistory (2026-08-20) — LANDED
 
 Groundwork for OffsetFace DirectModeler V1, nothing wired into any op. Adversarial review on a

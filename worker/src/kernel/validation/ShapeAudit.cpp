@@ -289,6 +289,16 @@ PublicationPolicy single_solid_policy(std::string name, PublicationTier tier) {
   policy.name = std::move(name);
   policy.allowed_top_level_shapes = TopLevelShapePolicy::SingleBody;
   policy.require_closed_manifold = tier == PublicationTier::TierB;
+  // WP1-G4, sliver half only. The width metric is absolute (2·area/perimeter vs
+  // a 2e-7 mm floor) and tolerance-independent, and the 120-row census plus a
+  // computed worst case (a 10×10 filter plate with 10k holes reports 0.0254 mm,
+  // five orders above the bar) show no realistic face can trip it by accident.
+  // `max_micro_edge_count` stays DISABLED: the micro rule's tolerance-relative
+  // half means a healed dirty import (edge tolerance legally up to 1.0 mm,
+  // StepReadPolicy::max_precision_val) could carry a 2.0 mm micro bar, and that
+  // band is unmeasured — enabling it needs a characterized dirty-import fixture
+  // first (recorded in TODO.md § KERNEL CONTINUATION — RESUMED).
+  if (tier == PublicationTier::TierB) policy.max_sliver_face_count = 0;
   policy.tier = tier;
   return policy;
 }

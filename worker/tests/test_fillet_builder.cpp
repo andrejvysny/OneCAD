@@ -395,14 +395,32 @@ void test_publication_reason_codes() {
        },
        "PUBLICATION_SELF_INTERFERENCE", validation::PublicationDisposition::Refused},
       // The disabled default is the load-bearing half: the SAME defective
-      // evidence must publish when no bound is set, because `PublicationPolicy`
-      // is default-constructed at ungated sites.
-      {"micro topology bounds disabled by default",
-       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+      // evidence must publish under a DEFAULT-CONSTRUCTED policy, because that
+      // is what the ungated sites (ExtrudeOp tool check, PlanExecutor global
+      // invariant) build. Not single_solid_policy — G4 enables the sliver bound
+      // there, deliberately.
+      {"micro topology bounds disabled on a default-constructed policy",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
          e.micro_edge_count = 99;
          e.sliver_face_count = 99;
          e.minimum_edge_length = 0.0;
          e.minimum_face_width = 0.0;
+         const std::string name = p.name;
+         p = validation::PublicationPolicy{};
+         p.name = name;
+       },
+       "", validation::PublicationDisposition::Publishable},
+      // WP1-G4: the TierB single-solid policy carries the sliver bound OUT OF
+      // THE BOX — one sliver face refuses with no per-case policy mutation.
+      // The micro bound stays disabled pending a characterized dirty import.
+      {"G4: one sliver face refuses under the stock TierB policy",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.sliver_face_count = 1;
+       },
+       "PUBLICATION_SLIVER_FACE", validation::PublicationDisposition::Refused},
+      {"G4: micro edges still publish under the stock TierB policy",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.micro_edge_count = 99;
        },
        "", validation::PublicationDisposition::Publishable},
       {"publishable",
