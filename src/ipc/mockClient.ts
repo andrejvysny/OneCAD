@@ -39,6 +39,8 @@ import type {
   PrepareOffsetFaceResult,
   PrepareEdgeOpRequest,
   PrepareEdgeOpResult,
+  AnalyzeEdgeOpRangeRequest,
+  AnalyzeEdgeOpRangeResult,
   PromotedElement,
   SketchAttachTarget,
   SketchPlane,
@@ -3220,6 +3222,62 @@ export const mockClient: CadClient = {
         bodyId: bodies[0] ?? "",
         kind: "edge" as const,
       })),
+      refusal: null,
+    };
+  },
+
+  /**
+   * MOCK LIMIT, stated rather than papered over: there is no kernel here, and
+   * the ONLY honest source of a feasible range is a build that ran. So this
+   * reports that nothing was measured — `confidence:"none"`, every bound null,
+   * no intervals — which the clamp helper reads as "do not clamp", exactly the
+   * behaviour the frontend had before this verb existed.
+   *
+   * Fabricating a plausible range here would be worse than useless: it would
+   * make the mock lane pass tests about a guard the real lane implements
+   * differently, and it would forbid values on the e2e model that the kernel
+   * accepts. `stoppedReason:"budgetExhausted"` with `probesUsed:0` says it out
+   * loud — the budget for a search that cannot run is zero.
+   *
+   * The cross-body REFUSAL is real, because it is a fact about the PICKS and the
+   * mock can see those. That branch mirrors `prepareEdgeOp` exactly.
+   */
+  async analyzeEdgeOpRange(req: AnalyzeEdgeOpRangeRequest): Promise<AnalyzeEdgeOpRangeResult> {
+    await wait(MESH_LATENCY_MS);
+    const snapshotId = req.snapshotId ?? mockRevision;
+    const bodies = [...new Set(req.pickedEdges.map((p) => p.bodyId ?? ""))];
+    const unmeasured = {
+      snapshotId,
+      mode: req.mode,
+      searchedRange: { min: 0, max: 0 },
+      lowerBound: null,
+      bestKnownMax: null,
+      provenUpperBound: null,
+      feasibleIntervals: [],
+      intervalsTruncated: false,
+      limitingEntities: [],
+      confidence: "none" as const,
+      monotonicObserved: true,
+      probesUsed: 0,
+      budgetExhausted: true,
+      stoppedReason: "budgetExhausted" as const,
+    };
+    if (bodies.length > 1) {
+      return {
+        ...unmeasured,
+        targetBodyId: "",
+        edges: [],
+        refusal: {
+          code: "crossBody",
+          message: `${req.mode}: every selected edge must belong to the same body`,
+          edges: req.pickedEdges.map((p) => p.topoKey ?? p.elementId ?? ""),
+        },
+      };
+    }
+    return {
+      ...unmeasured,
+      targetBodyId: bodies[0] ?? "",
+      edges: req.pickedEdges.map((p) => p.topoKey ?? p.elementId ?? ""),
       refusal: null,
     };
   },

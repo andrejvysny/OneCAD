@@ -2893,3 +2893,110 @@ describe("tauriClient replaceComponent (W5 result truth)", () => {
     expect(res.report).toEqual({});
   });
 });
+
+describe("tauriClient analyzeEdgeOpRange", () => {
+  const answer = (snapshotId: number) => ({
+    snapshotId,
+    mode: "Fillet",
+    targetBodyId: "body_uuid-1",
+    edges: ["e:4"],
+    searchedRange: { min: 0.001, max: 17.32 },
+    lowerBound: 0.001,
+    bestKnownMax: 9.99925,
+    provenUpperBound: 10,
+    feasibleIntervals: [{ lower: 0.001, upper: 9.99925 }],
+    intervalsTruncated: false,
+    limitingEntities: [{ topoKey: "e:4", kind: "edge" }],
+    confidence: "bracketed",
+    monotonicObserved: true,
+    probesUsed: 71,
+    budgetExhausted: false,
+    stoppedReason: "converged",
+    refusal: null,
+  });
+
+  it("marshals the picks, the optional range and the published snapshot", async () => {
+    let args: Record<string, unknown> | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "analyze_edge_op_range") {
+          args = payload as Record<string, unknown>;
+          return answer(5012);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    const unsub = client.onDocumentChanged(() => {});
+    await tick();
+    await emit("document-changed", {
+      revision: 3,
+      snapshotId: 5012,
+      changedBodies: [],
+      removedBodies: [],
+    });
+    await tick();
+
+    const result = await client.analyzeEdgeOpRange({
+      mode: "Fillet",
+      chainTangentEdges: true,
+      pickedEdges: [
+        { bodyId: "uuid-1", topoKey: "e:4" },
+        { elementId: "el_9" },
+      ],
+    });
+
+    expect(result.confidence).toBe("bracketed");
+    expect(result.bestKnownMax).toBe(9.99925);
+    expect(args?.snapshotId).toBe(5012);
+    expect(args?.mode).toBe("Fillet");
+    expect(args?.chainTangentEdges).toBe(true);
+    // The same mutually-exclusive addressing prepareEdgeOp uses — the two verbs
+    // must resolve one gesture to one closure.
+    expect(args?.pickedEdges).toEqual([
+      { bodyId: "body_uuid-1", topoKey: "e:4", elementId: null },
+      { bodyId: null, topoKey: null, elementId: "el_9" },
+    ]);
+    // Absent means "the kernel's own bracket", and null is how that crosses the
+    // Tauri boundary — never a fabricated {min:0,max:0}, which searches nothing.
+    expect(args?.range).toBeNull();
+    unsub();
+  });
+
+  it("forwards an explicit window and probe budget", async () => {
+    let args: Record<string, unknown> | undefined;
+    mockIPC((cmd, payload) => {
+      if (cmd === "analyze_edge_op_range") {
+        args = payload as Record<string, unknown>;
+        return answer(0);
+      }
+    });
+    const client = createTauriClient();
+    await client.analyzeEdgeOpRange({
+      mode: "Chamfer",
+      chainTangentEdges: false,
+      pickedEdges: [{ bodyId: "uuid-1", topoKey: "e:4" }],
+      range: { min: 1, max: 6, probeBudget: 32 },
+    });
+    expect(args?.range).toEqual({ min: 1, max: 6, probeBudget: 32 });
+    expect(args?.mode).toBe("Chamfer");
+  });
+
+  it("rejects an answer whose echoed snapshot is stale", async () => {
+    // Stronger reason than prepareEdgeOp's: this answer CLAMPS what the user may
+    // type, so a range measured on a head they are not looking at would silently
+    // forbid a value that now fits.
+    mockIPC((cmd) => (cmd === "analyze_edge_op_range" ? answer(8) : undefined), {
+      shouldMockEvents: true,
+    });
+    const client = createTauriClient();
+    await expect(
+      client.analyzeEdgeOpRange({
+        snapshotId: 7,
+        mode: "Fillet",
+        chainTangentEdges: true,
+        pickedEdges: [{ bodyId: "uuid-1", topoKey: "e:4" }],
+      }),
+    ).rejects.toThrow("stale");
+  });
+});

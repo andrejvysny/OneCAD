@@ -749,6 +749,13 @@ enum Death {
 /// force-killed. Bounded so a wedged sidecar can never outlive its manager.
 const RETIRE_GRACE: Duration = Duration::from_millis(500);
 
+/// Liveness backstop for `AnalyzeEdgeOpRange` (SCHEMA §7.6). Deliberately far
+/// above the worker's own 1500 ms probe deadline: the worker is supposed to end
+/// its own search, and this fires only when it did not. On expiry Rust MUST
+/// `cancel` the id rather than drop the slot — an abandoned request leaves the
+/// worker building an answer nobody will read.
+const ANALYZE_EDGE_OP_RANGE_LIVENESS: Duration = Duration::from_secs(10);
+
 /// Reaps `child`: waits up to `grace` for the self-exit the graceful `Shutdown`
 /// should produce, then `SIGKILL`s. Always returns with the child reaped, so
 /// `kill_on_drop` stays a backstop rather than the mechanism.
@@ -2103,6 +2110,51 @@ impl crate::worker::FaceBoundaryProjection for WorkerManager {
             .map_err(protocol_err)?;
         wire::parse_prepare_edge_op(&ok_result(resp)?)
             .map_err(|message| EngineError::Protocol { message })
+    }
+
+    async fn analyze_edge_op_range(
+        &self,
+        snapshot: SnapshotId,
+        mode: wire::EdgeOpMode,
+        picks: &[wire::EdgeOpPick<'_>],
+        chain_tangent_edges: bool,
+        request: wire::EdgeOpRangeRequest,
+    ) -> Result<crate::dto::EdgeOpRangeDto, EngineError> {
+        let client = self.client_or_err()?;
+        // `start_request` rather than `request`, for the id: this is the one
+        // read-only verb that runs dozens of OCCT builds, so it is the one that
+        // can outlive its usefulness, and cancelling it needs the correlation id.
+        let inflight = client
+            .start_request(
+                "AnalyzeEdgeOpRange",
+                wire::analyze_edge_op_range_args(
+                    snapshot,
+                    mode,
+                    picks,
+                    chain_tangent_edges,
+                    request,
+                ),
+                Lane::Control,
+            )
+            .await
+            .map_err(protocol_err)?;
+        let id = inflight.id;
+        match tokio::time::timeout(ANALYZE_EDGE_OP_RANGE_LIVENESS, inflight.response()).await {
+            Ok(resp) => wire::parse_analyze_edge_op_range(&ok_result(resp.map_err(protocol_err)?)?)
+                .map_err(|message| EngineError::Protocol { message }),
+            Err(_) => {
+                // A LIVENESS backstop, not a policy timeout: the worker's own
+                // deadline should have ended the search long before this. Reaching
+                // here means the worker is wedged or the machine is pathological —
+                // and the pending slot must be told, or the worker keeps building
+                // for an answer nobody will read (SCHEMA §3.5: a cancel still gets
+                // a terminal resp, so the slot resolves).
+                let _ = client.cancel(id).await;
+                Err(EngineError::Protocol {
+                    message: "AnalyzeEdgeOpRange: worker exceeded its liveness backstop".into(),
+                })
+            }
+        }
     }
 }
 

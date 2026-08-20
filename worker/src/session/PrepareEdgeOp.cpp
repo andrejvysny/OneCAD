@@ -9,14 +9,13 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 
-#include "elementmap/ElementMapPartition.h"
 #include "kernel/fillet/EdgeContour.h"
+#include "session/EdgePicks.h"
 
 namespace onecad::session {
 
 using nlohmann::json;
 using protocol::Envelope;
-namespace em = onecad::elementmap;
 namespace kf = onecad::kernel::fillet;
 
 namespace {
@@ -48,82 +47,6 @@ json response(std::uint64_t snapshot, const std::string &body, json edges,
           {"refusal", std::move(refusal_value)}};
 }
 
-struct Pick {
-  std::string body_id;
-  int ordinal = 0;
-};
-
-Pick resolve_pick(const BodyStore &bodies, const em::ElementMapPartition &part,
-                  const json &value) {
-  std::string body = get_str(value, "bodyId");
-  std::string topo = get_str(value, "topoKey");
-  const std::string element = get_str(value, "elementId");
-  if (!element.empty()) {
-    const em::PartitionEntry *entry = part.find(element);
-    if (!entry)
-      return {};
-    body = entry->body_id;
-    topo = entry->topo_key;
-  }
-  const BodyRecord *record = bodies.get(body);
-  if (!record || topo.empty())
-    return {};
-  const TopoDS_Shape shape =
-      em::ElementMapPartition::shape_for_topokey(record->geom, topo);
-  if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE)
-    return {};
-  TopTools_IndexedMapOfShape edges;
-  TopExp::MapShapes(record->geom, TopAbs_EDGE, edges);
-  return {body, edges.FindIndex(shape)};
-}
-
-json edge_entry(const TopoDS_Shape &body, int ordinal, bool picked) {
-  TopTools_IndexedMapOfShape edges;
-  TopExp::MapShapes(body, TopAbs_EDGE, edges);
-  const TopoDS_Edge edge = TopoDS::Edge(edges(ordinal));
-  const em::km::ElementDescriptor descriptor =
-      em::ElementMapPartition::describe(edge);
-  return {{"topoKey", "e:" + std::to_string(ordinal)},
-          {"picked", picked},
-          {"anchor",
-           {{"worldPoint", {descriptor.center.X(), descriptor.center.Y(),
-                             descriptor.center.Z()}}}},
-          {"descriptor",
-           em::ElementMapPartition::descriptor_to_json(descriptor)}};
-}
-
-struct ResolvedPicks {
-  std::string body_id;
-  std::vector<int> ordinals;
-  bool unresolved = false;
-  bool cross_body = false;
-};
-
-ResolvedPicks resolve_picks(const BodyStore &bodies,
-                            const em::ElementMapPartition &part,
-                            const json &values) {
-  ResolvedPicks result;
-  for (const json &value : values) {
-    const Pick pick = resolve_pick(bodies, part, value);
-    if (pick.body_id.empty() || pick.ordinal <= 0) {
-      result.unresolved = true;
-      return result;
-    }
-    if (result.body_id.empty())
-      result.body_id = pick.body_id;
-    if (result.body_id != pick.body_id) {
-      result.cross_body = true;
-      return result;
-    }
-    result.ordinals.push_back(pick.ordinal);
-  }
-  std::sort(result.ordinals.begin(), result.ordinals.end());
-  result.ordinals.erase(
-      std::unique(result.ordinals.begin(), result.ordinals.end()),
-      result.ordinals.end());
-  return result;
-}
-
 json prepared_result(std::uint64_t snapshot, const std::string &target,
                      const TopoDS_Shape &body, const std::vector<int> &picked,
                      kf::EdgeOpMode mode, bool chain) {
@@ -143,7 +66,7 @@ json prepared_result(std::uint64_t snapshot, const std::string &target,
                       std::back_inserter(extra));
   json edges = json::array();
   for (const int ordinal : contours.closure_ordinals)
-    edges.push_back(edge_entry(
+    edges.push_back(edge_evidence_entry(
         body, ordinal, std::binary_search(picked.begin(), picked.end(), ordinal)));
   if (!chain && !extra.empty())
     return response(snapshot, target, json::array(),
@@ -172,8 +95,8 @@ Envelope handle_prepare_edge_op(Session &session, const Envelope &req) {
       args["pickedEdges"].empty())
     return fail(req, "PROTOCOL_ERROR", "PrepareEdgeOp: pickedEdges is required");
 
-  const ResolvedPicks picks =
-      resolve_picks(published->bodies, published->partition, args["pickedEdges"]);
+  const ResolvedEdgePicks picks =
+      resolve_edge_picks(published->bodies, published->partition, args["pickedEdges"]);
   if (picks.unresolved)
     return fail(req, "REF_UNRESOLVED", "PrepareEdgeOp: edge did not resolve");
   if (picks.cross_body)

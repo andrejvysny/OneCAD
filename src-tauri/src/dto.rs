@@ -983,6 +983,71 @@ pub struct PrepareEdgeOpDto {
     pub refusal: Option<EdgeOpRefusalDto>,
 }
 
+/// The effective mm window an `AnalyzeEdgeOpRange` answer covers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpRangeWindowDto {
+    pub min: f64,
+    pub max: f64,
+}
+
+/// One run of adjacent feasible probes. Both endpoints were actually built.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpRangeIntervalDto {
+    pub lower: f64,
+    pub upper: f64,
+}
+
+/// One entity the bounding refusal was attributed to. Snapshot-scoped evidence,
+/// not identity — this verb mints nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpLimitingEntityDto {
+    pub topo_key: String,
+    pub kind: String,
+}
+
+/// `analyze_edge_op_range` result (SCHEMA §7.6) — the measured feasible range
+/// for a prepared edge closure.
+///
+/// The three bounds are deliberately `Option<f64>` with **no
+/// `skip_serializing_if`**: they must reach the frontend as an explicit `null`.
+/// An absent key and a `null` are the same thing to TypeScript, but only one of
+/// them is a statement — "this was searched and nothing was proven" — and this
+/// DTO is the only place that distinction can be preserved on the way out.
+/// Defaulting any of them to `0.0` would hand the UI a radius a user could act on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpRangeDto {
+    /// ECHO of the fenced head the answer is about.
+    pub snapshot_id: u64,
+    /// `"Fillet"` | `"Chamfer"`.
+    pub mode: String,
+    pub target_body_id: String,
+    /// Ordinal-ordered TopoKeys of the analysed closure.
+    pub edges: Vec<String>,
+    pub searched_range: EdgeOpRangeWindowDto,
+    pub lower_bound: Option<f64>,
+    pub best_known_max: Option<f64>,
+    pub proven_upper_bound: Option<f64>,
+    pub feasible_intervals: Vec<EdgeOpRangeIntervalDto>,
+    pub intervals_truncated: bool,
+    /// EMPTY when the kernel did not attribute the bounding refusal. Never inferred.
+    pub limiting_entities: Vec<EdgeOpLimitingEntityDto>,
+    /// `"none"` | `"nonMonotonic"` | `"lowerOnly"` | `"bracketed"` | `"coarse"`.
+    /// Validated against that set at the wire boundary.
+    pub confidence: String,
+    pub monotonic_observed: bool,
+    /// DIAGNOSTIC, non-contractual.
+    pub probes_used: u32,
+    pub budget_exhausted: bool,
+    /// `"converged"` | `"budgetExhausted"` | `"deadline"`.
+    pub stopped_reason: String,
+    /// `Some` ⇒ the closure refused; zero probes ran and every bound is `None`.
+    pub refusal: Option<EdgeOpRefusalDto>,
+}
+
 /// One previewed body's mesh (`PreviewOp` result → `types.ts PreviewResult`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -36,6 +36,7 @@
 #include "session/MassProperties.h"
 #include "session/BodyTopology.h"
 #include "session/PrepareOffsetFace.h"
+#include "session/AnalyzeEdgeOpRange.h"
 #include "session/PrepareEdgeOp.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewOp.h"
@@ -346,6 +347,16 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "PrepareEdgeOp",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_prepare_edge_op(session, r);
+        });
+    // --- WP4: the feasible radius/distance range for a prepared edge closure
+    //     (SCHEMA §7.6). Read-only and snapshot-fenced like PrepareEdgeOp, but
+    //     it RUNS BUILDS — so unlike its neighbours it forwards `ctx.cancel`,
+    //     which is what lets a §3.5 cancel and the wall deadline reach the
+    //     search between (and, for fillet, inside) probes. ---
+    dispatcher.register_verb(
+        "AnalyzeEdgeOpRange",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext& ctx) {
+            return onecad::session::handle_analyze_edge_op_range(session, r, ctx.cancel);
         });
     // --- W-WP6: STEP export (SCHEMA §7.8, D2) ---
     dispatcher.register_verb(

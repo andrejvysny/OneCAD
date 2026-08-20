@@ -2846,6 +2846,132 @@ head change between preparation and promotion rejects the whole command.
 - Missing/stale `snapshotId` refuses; identical head + request gives a
   byte-identical ordinal-ordered response.
 
+#### AnalyzeEdgeOpRange
+
+What radii (or chamfer distances) will this edge selection ACTUALLY take?
+Read-only, snapshot-fenced, and — unlike every other verb in §7.5/§7.6 — it runs
+real geometry: one probe is one `FilletBuilder` (or one equal-leg
+`BRepFilletAPI_MakeChamfer`) at one value, classified by the same **authoritative
+publication tier** a commit uses, never the TierA preview downgrade. Nothing is
+extrapolated and no formula is applied; every number below is backed by a build
+that ran. Added 2026-08-20.
+
+It mints nothing, creates no scratch, publishes no snapshot, emits no
+`bodyEvents` and carries no bin tail. `GetWorkerHead` is identical before and
+after (fixture-asserted). The closure it analyses is the SAME closure
+[`PrepareEdgeOp`](#prepareedgeop) freezes, computed by the same call — a bound
+measured on a different edge set than the one the commit uses would be worse than
+no bound at all.
+
+```json
+// req.args
+{ "snapshotId": 5012,               // REQUIRED, FENCED — stale ⇒ STALE_PREVIEW
+  "mode": "Fillet",                 // Fillet | Chamfer (equal-leg)
+  "pickedEdges": [ { "bodyId": "body_3", "topoKey": "e:4" } ],  // or { "elementId": … }
+  "chainTangentEdges": true,
+  "range": { "min": 0.001, "max": 12.0 },   // optional mm window; clamped
+  "probeBudget": 96 }                       // optional; clamped to [8, 128]
+// result
+{ "snapshotId": 5012,               // ECHO of the head it answered against
+  "mode": "Fillet",
+  "targetBodyId": "body_3",
+  "edges": [ "e:4" ],               // ordinal-ordered TopoKeys of the analysed closure
+  "searchedRange": { "min": 0.001, "max": 17.32 },
+  "lowerBound": 0.001,              // SMALLEST proven-feasible value, or null
+  "bestKnownMax": 9.99925,          // LARGEST proven-feasible value, or null
+  "provenUpperBound": 10.0,         // smallest proven-INfeasible value ABOVE bestKnownMax, or null
+  "feasibleIntervals": [ { "lower": 0.001, "upper": 9.99925 } ],
+  "intervalsTruncated": false,
+  "limitingEntities": [ { "topoKey": "e:4", "kind": "edge" } ],
+  "confidence": "bracketed",
+  "monotonicObserved": true,
+  "probesUsed": 71,
+  "budgetExhausted": false,
+  "stoppedReason": "converged",     // converged | budgetExhausted | deadline
+  "refusal": null }
+```
+
+**The normative invariant.** `lowerBound ≤ bestKnownMax < provenUpperBound`
+whenever all three are non-null.
+
+- `provenUpperBound` is the smallest infeasible probe **above `bestKnownMax`**,
+  NOT the smallest refusal overall. With an island present those are different
+  values, and the smaller one bounds nothing — the kernel built something above
+  it. `null` means no probe above `bestKnownMax` refused.
+- `feasibleIntervals` are ascending, disjoint, at most 8, and **both endpoints of
+  every interval were actually probed and actually built**. An interval is never
+  widened to the neighbouring refusal: the frontier between them was never
+  observed. `intervalsTruncated:true` means the list overflowed; the FIRST and
+  LAST intervals are then always kept — they carry `lowerBound` and
+  `bestKnownMax`, and dropping either would hand a consumer a ceiling above a
+  value the kernel proved — and the remaining ≤6 slots take the widest of the
+  interior intervals. So `feasibleIntervals[0].lower == lowerBound` and
+  `feasibleIntervals[last].upper == bestKnownMax` hold in every non-empty case,
+  truncated or not.
+- `limitingEntities` (≤8, snapshot-scoped) are taken from the diagnostics of the
+  bounding refusal at `provenUpperBound`. **EMPTY when the kernel did not
+  attribute the failure** — OCCT does not always name a contour, and inventing
+  an attribution would be worse than none. Inferring one is forbidden.
+- `searchedRange` echoes the effective window the answer covers: the request's
+  `range` clamped into the kernel's own body-derived bracket, whose default is
+  `[authoring_resolution() = 1e-3 mm, bounding-box diagonal]`. Nothing outside
+  the window is reported. The upper seed is a deliberate OVER-estimate and is
+  **not** a claim about feasibility — a near-flat dihedral can take a blend
+  larger than the part.
+- `probeBudget` caps the number of BUILDS. It is clamped into `[8, 128]`,
+  defaulting to `96`: one probe measures 2.25 ms over the real success/refusal
+  mix on a 10 mm box (Release, OCCT 8.0.1) and a complete search of that fixture
+  takes 71 probes, so 96 is the smallest round cap above a full search and 128
+  bounds a worst case near half a second. Below 8 the staged search cannot finish
+  its growth ladder, so a smaller number buys a useless answer, not a cheaper one.
+- `probesUsed` is DIAGNOSTIC and non-contractual — never assert it in a fixture
+  except as zero on a refusal.
+
+**`confidence` — a TOTAL decision tree, evaluated in this order.** Each rung
+states what a consumer may do with the numbers.
+
+| Rung | When | What a consumer may enforce |
+|---|---|---|
+| `none` | `lowerBound` is null (nothing built, or a refusal) | nothing — no clamp at all |
+| `nonMonotonic` | `monotonicObserved:false` | the INTERVALS, not a single ceiling. Outranks truncation: an island is a fact about the geometry, a truncated search is a fact about the budget |
+| `lowerOnly` | `provenUpperBound` is null | the FLOOR only — the ceiling is unproven |
+| `coarse` | `budgetExhausted` or `stoppedReason:"deadline"` | a ceiling at `bestKnownMax`, **never** `provenUpperBound`: the search stopped early, so the real frontier may sit well below it |
+| `bracketed` | otherwise | a hard ceiling — a complete monotonic search probed both sides of the frontier |
+
+**Two stops, both normal.** A `probeBudget` exhaustion and the worker's wall
+deadline (**1500 ms**, checked between probes) both end the search and return
+`ok:true`; the answer is still true, just looser, and `stoppedReason` says which
+ended it. Only a §3.5 `cancel` is an error (`CANCELLED`), and it carries **no
+partial result**.
+
+**Cancellation is not instant for Chamfer.** A fillet probe hands the cancel
+token to `FilletBuilder`, so a long OCCT blend aborts mid-build.
+`BRepFilletAPI_MakeChamfer` has no `UserBreak` hook, so a chamfer probe can only
+be stopped BETWEEN builds — cancellation and the deadline both take effect there.
+The residual exposure is exactly one uninterruptible chamfer build, which is the
+same exposure the existing chamfer commit and preview paths already carry.
+
+**Refusals are answers** (`ok:true`), never errors, and they run ZERO probes:
+`crossBody`, `unsupportedEdge`, `chainMismatch`, carrying the same
+`{code,message,edges}` shape as `PrepareEdgeOp`. A refusal reports every bound as
+`null` — never `0.0`, which is a value a caller could act on — with
+`confidence:"none"`, `probesUsed:0` and `searchedRange:{min:0,max:0}`, because
+nothing was searched. `PROTOCOL_ERROR` (missing/unknown `mode`, absent
+`pickedEdges`), `STALE_PREVIEW` (stale `snapshotId`) and `REF_UNRESOLVED` (a pick
+that does not resolve) stay errors, exactly as in `PrepareEdgeOp`.
+
+**A `Standard_Failure` escaping ONE probe classifies THAT VALUE infeasible and
+the search continues.** It must never reach the Dispatcher's blanket
+`OP_FAILED` catch — one bad value is a fact about that value, not a failure of
+the analysis.
+
+**Determinism.** Identical head + identical request ⇒ byte-identical response
+for a `converged` or `budgetExhausted` stop: there is no randomness, the probe
+SEQUENCE is fixed, and every probe value is produced by IEEE-754 `+ - * /` and
+`sqrt` alone (no libm transcendental), so it is identical on macOS and Linux. A
+`deadline` stop is **explicitly exempt** — it depends on machine load by
+construction, which is the price of bounding an interactive call by wall time.
+
 #### PrepareOffsetFace
 
 Read-only OffsetFace authoring handshake — the first half of the
@@ -3188,7 +3314,7 @@ where an unknown value is ignorable.
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
 | Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
-| Stale preview base (`PreviewOp` only) | `STALE_PREVIEW` | none — head untouched | caller re-previews against the fresh head snapshot ([§7.6](#76-meshes--previews)) |
+| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`) | `STALE_PREVIEW` | none — head untouched | caller re-picks / re-previews against the fresh head snapshot ([§7.6](#76-geometry)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
 | Worker crash / abnormal exit | *(no frame)* | fatal | **restart + replay** from last checkpoint/head; crash **circuit breaker** on repeated `(historyPrefixHash, opId, occtFingerprint)` |
@@ -3491,6 +3617,44 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-20 — §7.6 new read-only verb `AnalyzeEdgeOpRange` (WP4).** Nothing in
+  the stack could answer "what radius will this edge take?". The frontend clamped
+  a fillet radius at a 0.1 mm floor with **no upper bound at all**, so the only
+  way a user learned that 6 mm does not fit on a 10 mm box was to arm the op and
+  watch it refuse. The textbook answer ("half the smallest adjacent face width")
+  is not a bound this kernel is willing to publish — it is an estimate about an
+  idealized corner, and it is measurably WRONG on the canonical case: one
+  vertical edge of a 10 mm box blends until the radius consumes a whole adjacent
+  face at 10 mm, not 5 mm. So the oracle is a REAL BUILD at the authoritative
+  publication tier, and every reported number is backed by one that ran.
+  **Purely additive**: a new verb, no change to any existing payload, and a
+  caller that never sends it sees no difference. It mints nothing, creates no
+  scratch and leaves `GetWorkerHead` byte-identical across dozens of OCCT builds
+  (asserted in `protocol/fixtures/analyze_edge_op_range.ndjson`).
+  Three things are worth reading twice. **`provenUpperBound` is the smallest
+  infeasible probe ABOVE `bestKnownMax`, not the smallest refusal overall** —
+  feasibility is not known to be monotonic (the kernelbench suite carries a
+  `HiddenIsland` executor precisely because "everything below the max works" is
+  an assumption), and with an island present the smaller refusal bounds nothing.
+  **`confidence` is a total decision tree**, not advice: `nonMonotonic` obliges a
+  consumer to honour the intervals, and `coarse` forbids clamping to
+  `provenUpperBound` because a truncated search's frontier may sit far below it.
+  **`limitingEntities` is EMPTY when OCCT did not attribute the failure** —
+  inferring an attribution is forbidden, on the same principle that makes a
+  deterministic `NeedsRepair` beat a silent wrong bind.
+  Both cost stops (the `[8,128]`-clamped probe budget, default 96, derived from a
+  measured 2.25 ms per probe and a 71-probe complete search; and the 1500 ms wall
+  deadline checked between probes) end the search NORMALLY with `ok:true` — a
+  truncated answer is still true, just looser. Only a §3.5 `cancel` errors, and
+  it carries no partial result. Determinism is byte-identical for `converged` and
+  `budgetExhausted` stops and **explicitly exempt for a `deadline` stop**, which
+  depends on machine load by construction. `Chamfer` is supported through an
+  equal-leg oracle with one stated caveat: `BRepFilletAPI_MakeChamfer` has no
+  `UserBreak` hook, so a chamfer probe is only cancellable BETWEEN builds and the
+  residual exposure is one uninterruptible build — identical to what the existing
+  chamfer commit and preview paths already carry. The §8 `STALE_PREVIEW` row,
+  which still said "(`PreviewOp` only)" after `PrepareEdgeOp` and
+  `PrepareOffsetFace` had both adopted the code, now names all four fenced reads.
 - **2026-08-20 — §7.3 `Extrude.ToFace` exact termination on a TILTED planar
   target (WP5).** A tilted target used to be refused by name, because the only
   thing the executor could build was a constant-distance flat cap — geometry the

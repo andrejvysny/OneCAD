@@ -1,0 +1,74 @@
+# CANONICAL §7.6 fixture — `AnalyzeEdgeOpRange`, the verb behind "what radius
+# will this edge actually take?" (WP4).
+#
+# WHAT IS PINNED HERE, AND WHAT DELIBERATELY IS NOT.
+#
+# The measured numbers (`lowerBound`, `bestKnownMax`, `provenUpperBound`,
+# `probesUsed`, `searchedRange.max`) are `$any`. They are OCCT's frontier, not a
+# protocol fact, and `json_subset` compares numbers EXACTLY — NDJSON is the wrong
+# instrument for a value that is allowed to move by less than a nanometre. Their
+# pins live in `worker/tests/test_fillet_range.cpp` (9.99925 / 10.0, measured,
+# with the derivation), exactly as the OffsetFace pair splits contract from
+# corpus.
+#
+# What IS pinned is everything a Rust or frontend reader parses and BRANCHES on:
+# the echo fields, the closure, the classification (`confidence`,
+# `monotonicObserved`, `stoppedReason`, `budgetExhausted`, `intervalsTruncated`),
+# the authoring floor `searchedRange.min`, and the refusal shape. Those are the
+# contract; the millimetres are the measurement.
+#
+# THE READ-ONLY GUARANTEE is asserted structurally: `GetWorkerHead` is taken
+# immediately before and immediately after the analysis and must be IDENTICAL,
+# field for field. This verb runs real OCCT builds — dozens of them — and the
+# whole reason it may do so from an interactive gesture is that not one of them
+# can touch the head. No scratch, no snapshot, no minting, no `bodyEvents`, no
+# bin tail.
+#
+# ARRAY LENGTHS. The harness matcher is a SUBSET match, so listing one entry
+# asserts "at least one", not "exactly one". `edges` and `feasibleIntervals` are
+# both single-entry here by construction (a box edge has no tangent neighbour,
+# and a monotonic frontier yields one run); the exact-count assertions live in
+# `test_analyze_edge_op_range.cpp`, which can see the parsed result.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_analyze_edge_op_range","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# Two bodies: a plain 10 mm box (`body_op1`, the analysis subject) and a prism
+# whose profile carries a collinear split (`body_op3`), which is the only way to
+# get a TANGENT edge pair — and therefore the only way to exercise the
+# `chainMismatch` refusal — out of a straight-line sketch.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":31,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"e2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"e3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk2","plane":{"kind":"XY"},"entities":[{"id":"f1","type":"Line","p0":[20,0],"p1":[25,0]},{"id":"f2","type":"Line","p0":[25,0],"p1":[30,0]},{"id":"f3","type":"Line","p0":[30,0],"p1":[30,10]},{"id":"f4","type":"Line","p0":[30,10],"p1":[20,10]},{"id":"f5","type":"Line","p0":[20,10],"p1":[20,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"","elementId":"sk2.region.r0","kind":"face"}}],"params":{"sketchId":"sk2","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":3,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":31,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":31,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":31,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# One vertical box edge, given a Rust-minted durable identity. The analysis is
+# then addressed by that `elementId`, which is the rung the frontend uses once an
+# edge has been promoted.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"e:1","elementId":"el_edge_v","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"e:1","elementId":"el_edge_v","kind":"edge"}]}}}
+# HEAD BEFORE.
+{"send":{"v":1,"t":"req","id":5,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AnalyzeEdgeOpRange","args":{"snapshotId":1,"mode":"Fillet","pickedEdges":[{"elementId":"el_edge_v"}],"chainTangentEdges":true}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"snapshotId":1,"mode":"Fillet","targetBodyId":"body_op1","edges":["e:1"],"refusal":null,"searchedRange":{"min":0.001,"max":"$any"},"lowerBound":"$any","bestKnownMax":"$any","provenUpperBound":"$any","feasibleIntervals":[{"lower":"$any","upper":"$any"}],"intervalsTruncated":false,"limitingEntities":"$any","confidence":"bracketed","monotonicObserved":true,"probesUsed":"$any","budgetExhausted":false,"stoppedReason":"converged"}}}
+# HEAD AFTER — identical to id 5, field for field. Dozens of OCCT builds ran
+# between the two and not one of them was allowed to leave a trace.
+{"send":{"v":1,"t":"req","id":7,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+# A stale snapshot is an ERROR, not an answer: this number is about to gate what
+# the user commits, so answering it against a head they are not looking at is
+# exactly the silent wrong bind the fence exists to prevent.
+{"send":{"v":1,"t":"req","id":8,"verb":"AnalyzeEdgeOpRange","args":{"snapshotId":99,"mode":"Fillet","pickedEdges":[{"elementId":"el_edge_v"}],"chainTangentEdges":true}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":false,"error":{"code":"STALE_PREVIEW"}}}
+# A CLOSURE refusal is an `ok:true` answer, and it ran ZERO builds. `e:3` on the
+# split prism is tangent to `e:6`; with `chainTangentEdges:false` the kernel
+# cannot hold that neighbour fixed, so there is no closure to measure and nothing
+# is measured. Every bound is null — never 0.0, which is a radius a caller could
+# act on.
+{"send":{"v":1,"t":"req","id":9,"verb":"AnalyzeEdgeOpRange","args":{"snapshotId":1,"mode":"Fillet","pickedEdges":[{"bodyId":"body_op3","topoKey":"e:3"}],"chainTangentEdges":false}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"snapshotId":1,"mode":"Fillet","targetBodyId":"body_op3","edges":[],"refusal":{"code":"chainMismatch","edges":["e:6"]},"lowerBound":null,"bestKnownMax":null,"provenUpperBound":null,"feasibleIntervals":[],"limitingEntities":[],"confidence":"none","probesUsed":0,"budgetExhausted":false,"searchedRange":{"min":0.0,"max":0.0}}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"goodbye":true}}}

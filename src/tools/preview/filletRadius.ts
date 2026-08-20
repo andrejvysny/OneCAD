@@ -145,3 +145,101 @@ export function signedValueFromDrag(
   const proj = dxPx * axis.x + dyPx * axis.y;
   return startValue + proj * opts.worldPerPx * gain;
 }
+
+/*
+ * WP4 — clamping a value to what the KERNEL said it will accept.
+ *
+ * Until this existed the only bound on a fillet radius was `EDGE_OP_MIN_VALUE`,
+ * a fixed 0.1 mm floor with NO ceiling at all, so a user learned that 6 mm does
+ * not fit on a 10 mm box by arming the op and watching it refuse. The
+ * `AnalyzeEdgeOpRange` answer (SCHEMA §7.6) replaces the guess with a
+ * measurement, and this function is the only place that measurement becomes a
+ * clamp.
+ *
+ * The whole design rests on ONE rule: `confidence` decides what may be enforced,
+ * and it is read BEFORE any bound. Reaching past it to `bestKnownMax` because it
+ * happens to be non-null is how a coarse or non-monotonic answer turns into a
+ * ceiling the kernel never claimed.
+ */
+
+/** The measured half of an `AnalyzeEdgeOpRange` answer this module needs. */
+export interface EdgeOpRangeGuard {
+  confidence: "none" | "nonMonotonic" | "lowerOnly" | "bracketed" | "coarse";
+  lowerBound: number | null;
+  bestKnownMax: number | null;
+  provenUpperBound: number | null;
+  feasibleIntervals: { lower: number; upper: number }[];
+}
+
+/** What {@link clampToEdgeOpRange} did, so the caller can say so on screen. */
+export interface EdgeOpClampResult {
+  /** The value to use. Equal to the input when nothing was enforced. */
+  value: number;
+  /** True when the guard moved the value. */
+  clamped: boolean;
+  /** `"floor"` / `"ceiling"` / `"interval"` — which obligation moved it. */
+  reason: "none" | "floor" | "ceiling" | "interval";
+}
+
+function keep(value: number): EdgeOpClampResult {
+  return { value, clamped: false, reason: "none" };
+}
+
+/**
+ * Clamp `value` to what the analysis PROVED, honouring the confidence ladder.
+ *
+ * - `none` — nothing was proven, so nothing is enforced. This is also what the
+ *   mock lane and a refusal produce, which is why "no answer" and "an answer
+ *   that proved nothing" behave identically: neither is evidence.
+ * - `nonMonotonic` — an island was observed. A single ceiling would licence a
+ *   value inside the gap that was MEASURED to fail, so the intervals are the
+ *   answer: a value already inside one is kept, and one outside is pulled to the
+ *   nearest interval endpoint.
+ * - `lowerOnly` — a floor was proven and no ceiling was. Raise, never cap.
+ * - `bracketed` — a complete monotonic bracket. `bestKnownMax` is a hard
+ *   ceiling and the largest value actually built.
+ * - `coarse` — the search stopped early, so the real frontier may sit far below
+ *   `provenUpperBound`. Cap at `bestKnownMax` and NEVER at `provenUpperBound`:
+ *   the first is a value the kernel built, the second is only a value it
+ *   refused, and everything between them is unmeasured.
+ *
+ * `provenUpperBound` is therefore never used as a ceiling on any rung. It is
+ * carried in the guard because it is what makes `bracketed` meaningful — the
+ * frontier is bracketed BETWEEN the two — not because a UI may offer it.
+ */
+export function clampToEdgeOpRange(value: number, guard?: EdgeOpRangeGuard | null): EdgeOpClampResult {
+  if (!guard || guard.confidence === "none") return keep(value);
+
+  if (guard.confidence === "nonMonotonic") {
+    const intervals = guard.feasibleIntervals;
+    if (intervals.length === 0) return keep(value);
+    if (intervals.some((i) => value >= i.lower && value <= i.upper)) return keep(value);
+    // Nearest PROBED endpoint. Never an interior point of the gap and never a
+    // midpoint: only the endpoints were built.
+    let best = intervals[0].lower;
+    let bestDistance = Infinity;
+    for (const interval of intervals) {
+      for (const endpoint of [interval.lower, interval.upper]) {
+        const distance = Math.abs(endpoint - value);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = endpoint;
+        }
+      }
+    }
+    return { value: best, clamped: true, reason: "interval" };
+  }
+
+  // The floor applies on every remaining rung: a proven `lowerBound` is the
+  // smallest value the kernel built, so anything under it is known to fail.
+  if (guard.lowerBound !== null && value < guard.lowerBound) {
+    return { value: guard.lowerBound, clamped: true, reason: "floor" };
+  }
+  if (guard.confidence === "lowerOnly") return keep(value);
+
+  const ceiling = guard.bestKnownMax;
+  if (ceiling !== null && value > ceiling) {
+    return { value: ceiling, clamped: true, reason: "ceiling" };
+  }
+  return keep(value);
+}

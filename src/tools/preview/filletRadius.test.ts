@@ -7,6 +7,8 @@ import {
   screenDragAxis,
   signedValueFromDrag,
   SCREEN_UP_AXIS,
+  clampToEdgeOpRange,
+  type EdgeOpRangeGuard,
   type ScreenAxis,
   type RadiusDragOpts,
 } from "./filletRadius";
@@ -140,5 +142,99 @@ describe("signedValueFromDrag + SCREEN_UP_AXIS — golden-pins radiusFromDrag", 
     const signed = signedValueFromDrag(2, 0, dy, SCREEN_UP_AXIS, opts);
     expect(signed).toBeCloseTo(-48, 9);
     expect(radiusFromDrag(2, -dy, opts)).toBe(0.1); // same unclamped value, but floored
+  });
+});
+
+/*
+ * WP4 — the measured range guard. Five confidence rungs, five obligations. The
+ * one that matters most is `coarse`: capping at `provenUpperBound` there would
+ * offer a value the kernel only ever REFUSED, which is the exact class of silent
+ * wrong answer the whole verb exists to remove.
+ */
+describe("clampToEdgeOpRange", () => {
+  const guard = (over: Partial<EdgeOpRangeGuard>): EdgeOpRangeGuard => ({
+    confidence: "bracketed",
+    lowerBound: 0.001,
+    bestKnownMax: 9.99925,
+    provenUpperBound: 10,
+    feasibleIntervals: [{ lower: 0.001, upper: 9.99925 }],
+    ...over,
+  });
+
+  it("enforces nothing without an answer, and nothing on `none`", () => {
+    expect(clampToEdgeOpRange(1000, null)).toEqual({ value: 1000, clamped: false, reason: "none" });
+    expect(clampToEdgeOpRange(1000, undefined).value).toBe(1000);
+    // A refusal and the mock lane both produce `none`; neither is evidence, so
+    // both must behave exactly like "no answer at all".
+    const none = guard({
+      confidence: "none",
+      lowerBound: null,
+      bestKnownMax: null,
+      provenUpperBound: null,
+      feasibleIntervals: [],
+    });
+    expect(clampToEdgeOpRange(1000, none)).toEqual({ value: 1000, clamped: false, reason: "none" });
+  });
+
+  it("caps at bestKnownMax and floors at lowerBound on `bracketed`", () => {
+    expect(clampToEdgeOpRange(12, guard({}))).toEqual({
+      value: 9.99925,
+      clamped: true,
+      reason: "ceiling",
+    });
+    expect(clampToEdgeOpRange(2, guard({})).clamped).toBe(false);
+    expect(clampToEdgeOpRange(0.0001, guard({}))).toEqual({
+      value: 0.001,
+      clamped: true,
+      reason: "floor",
+    });
+    // NEVER the proven upper bound: 10 is a value the kernel refused.
+    expect(clampToEdgeOpRange(12, guard({})).value).not.toBe(10);
+  });
+
+  it("raises to the floor but never caps on `lowerOnly`", () => {
+    const g = guard({ confidence: "lowerOnly", provenUpperBound: null, bestKnownMax: 2.944 });
+    expect(clampToEdgeOpRange(0.0001, g)).toEqual({ value: 0.001, clamped: true, reason: "floor" });
+    // The ceiling is UNPROVEN — the search simply never saw a refusal — so a
+    // value above the largest success is allowed through rather than forbidden.
+    expect(clampToEdgeOpRange(50, g)).toEqual({ value: 50, clamped: false, reason: "none" });
+  });
+
+  it("caps at bestKnownMax, not provenUpperBound, on `coarse`", () => {
+    // A truncated search: the real frontier may sit anywhere between the largest
+    // success and the first refusal, so only the success may be offered.
+    const g = guard({ confidence: "coarse", bestKnownMax: 4.096, provenUpperBound: 16.384 });
+    const out = clampToEdgeOpRange(12, g);
+    expect(out).toEqual({ value: 4.096, clamped: true, reason: "ceiling" });
+    expect(out.value).not.toBe(16.384);
+    expect(clampToEdgeOpRange(3, g).clamped).toBe(false);
+  });
+
+  it("honours the intervals on `nonMonotonic`", () => {
+    // Feasible [1,2] and [8,9]; 4..6 was MEASURED to fail. A single ceiling at
+    // bestKnownMax (9) would happily offer 5.
+    const g = guard({
+      confidence: "nonMonotonic",
+      lowerBound: 1,
+      bestKnownMax: 9,
+      provenUpperBound: 10,
+      feasibleIntervals: [
+        { lower: 1, upper: 2 },
+        { lower: 8, upper: 9 },
+      ],
+    });
+    expect(clampToEdgeOpRange(1.5, g).clamped).toBe(false);
+    expect(clampToEdgeOpRange(8.5, g).clamped).toBe(false);
+    // 5 sits in the gap: pulled to the nearest PROBED endpoint, never to a
+    // midpoint or an interior point of the gap — only endpoints were built.
+    expect(clampToEdgeOpRange(5, g)).toEqual({ value: 2, clamped: true, reason: "interval" });
+    expect(clampToEdgeOpRange(7, g)).toEqual({ value: 8, clamped: true, reason: "interval" });
+    expect(clampToEdgeOpRange(20, g)).toEqual({ value: 9, clamped: true, reason: "interval" });
+    expect(clampToEdgeOpRange(0.5, g)).toEqual({ value: 1, clamped: true, reason: "interval" });
+  });
+
+  it("enforces nothing when nonMonotonic carries no intervals", () => {
+    const g = guard({ confidence: "nonMonotonic", feasibleIntervals: [] });
+    expect(clampToEdgeOpRange(1000, g).clamped).toBe(false);
   });
 });

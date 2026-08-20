@@ -2929,6 +2929,197 @@ fn parse_edge_op_refusal(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Edge-op feasible range (SCHEMA §7.6 `AnalyzeEdgeOpRange`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The optional mm window and build budget a caller may put on the search.
+/// Both are HINTS the worker clamps; neither is echoed back unchanged, which is
+/// why the response carries its own `searchedRange`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EdgeOpRangeRequest {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub probe_budget: Option<u32>,
+}
+
+#[must_use]
+pub fn analyze_edge_op_range_args(
+    snapshot: SnapshotId,
+    mode: EdgeOpMode,
+    picks: &[EdgeOpPick<'_>],
+    chain_tangent_edges: bool,
+    request: EdgeOpRangeRequest,
+) -> Value {
+    let picked: Vec<Value> = picks
+        .iter()
+        .map(|pick| {
+            let mut entry = json!({});
+            if let Some(body) = pick.body {
+                entry["bodyId"] = Value::String(body_id_wire(body));
+            }
+            pick.address.write_into(&mut entry);
+            entry
+        })
+        .collect();
+    let mut args = json!({
+        "snapshotId": snapshot.0,
+        "mode": match mode { EdgeOpMode::Fillet => "Fillet", EdgeOpMode::Chamfer => "Chamfer" },
+        "pickedEdges": picked,
+        "chainTangentEdges": chain_tangent_edges,
+    });
+    // Omitted, not defaulted: an absent `range` means "the kernel's own
+    // body-derived bracket", and there is no number Rust could put here that
+    // says that.
+    let mut range = json!({});
+    if let Some(min) = request.min {
+        range["min"] = json!(min);
+    }
+    if let Some(max) = request.max {
+        range["max"] = json!(max);
+    }
+    if !range.as_object().is_some_and(serde_json::Map::is_empty) {
+        args["range"] = range;
+    }
+    if let Some(budget) = request.probe_budget {
+        args["probeBudget"] = json!(budget);
+    }
+    args
+}
+
+/// The two vocabularies a consumer BRANCHES on. Both are validated fail-closed:
+/// an unrecognised rung means the frontend cannot know what it is allowed to
+/// enforce, and guessing a clamp from an unknown confidence is exactly the
+/// silent-wrong-answer failure this verb exists to remove. A loud protocol error
+/// is the safe direction.
+const EDGE_OP_RANGE_CONFIDENCE: [&str; 5] =
+    ["none", "nonMonotonic", "lowerOnly", "bracketed", "coarse"];
+const EDGE_OP_RANGE_STOPPED: [&str; 3] = ["converged", "budgetExhausted", "deadline"];
+
+pub fn parse_analyze_edge_op_range(result: &Value) -> Result<crate::dto::EdgeOpRangeDto, String> {
+    let snapshot_id = result
+        .get("snapshotId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "AnalyzeEdgeOpRange: result is missing `snapshotId`".to_string())?;
+    let mode = result
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|m| *m == "Fillet" || *m == "Chamfer")
+        .ok_or_else(|| "AnalyzeEdgeOpRange: result is missing a known `mode`".to_string())?;
+    let confidence = result
+        .get("confidence")
+        .and_then(Value::as_str)
+        .filter(|value| EDGE_OP_RANGE_CONFIDENCE.contains(value))
+        .ok_or_else(|| "AnalyzeEdgeOpRange: unknown `confidence`".to_string())?;
+    let stopped_reason = result
+        .get("stoppedReason")
+        .and_then(Value::as_str)
+        .filter(|value| EDGE_OP_RANGE_STOPPED.contains(value))
+        .ok_or_else(|| "AnalyzeEdgeOpRange: unknown `stoppedReason`".to_string())?;
+    let lower_bound = optional_f64(result.get("lowerBound"));
+    let best_known_max = optional_f64(result.get("bestKnownMax"));
+    let proven_upper_bound = optional_f64(result.get("provenUpperBound"));
+    // The §7.6 normative invariant, checked at the boundary rather than trusted.
+    // Every consumer downstream clamps with these three; a violation here would
+    // author a ceiling below its own floor.
+    if let (Some(lower), Some(best)) = (lower_bound, best_known_max) {
+        if lower > best {
+            return Err("AnalyzeEdgeOpRange: lowerBound exceeds bestKnownMax".into());
+        }
+    }
+    if let (Some(best), Some(upper)) = (best_known_max, proven_upper_bound) {
+        if best >= upper {
+            return Err("AnalyzeEdgeOpRange: bestKnownMax is not below provenUpperBound".into());
+        }
+    }
+    let feasible_intervals = match result.get("feasibleIntervals") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(parse_edge_op_range_interval)
+            .collect::<Result<Vec<_>, _>>()?,
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => return Err("AnalyzeEdgeOpRange: `feasibleIntervals` must be an array".into()),
+    };
+    Ok(crate::dto::EdgeOpRangeDto {
+        snapshot_id,
+        mode: mode.to_string(),
+        target_body_id: result
+            .get("targetBodyId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        edges: str_array(result.get("edges")),
+        searched_range: crate::dto::EdgeOpRangeWindowDto {
+            min: optional_f64(result.get("searchedRange").and_then(|w| w.get("min")))
+                .unwrap_or(0.0),
+            max: optional_f64(result.get("searchedRange").and_then(|w| w.get("max")))
+                .unwrap_or(0.0),
+        },
+        lower_bound,
+        best_known_max,
+        proven_upper_bound,
+        feasible_intervals,
+        intervals_truncated: result
+            .get("intervalsTruncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        limiting_entities: result
+            .get("limitingEntities")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(parse_edge_op_limiting).collect())
+            .unwrap_or_default(),
+        confidence: confidence.to_string(),
+        monotonic_observed: result
+            .get("monotonicObserved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        probes_used: result
+            .get("probesUsed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(u32::MAX),
+        budget_exhausted: result
+            .get("budgetExhausted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        stopped_reason: stopped_reason.to_string(),
+        refusal: parse_edge_op_refusal(result.get("refusal"))?,
+    })
+}
+
+/// `null` and "absent" both mean UNPROVEN, and neither may become a number: 0.0
+/// is a radius a caller could act on.
+fn optional_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(Value::as_f64).filter(|v| v.is_finite())
+}
+
+fn parse_edge_op_range_interval(v: &Value) -> Result<crate::dto::EdgeOpRangeIntervalDto, String> {
+    let lower = optional_f64(v.get("lower"))
+        .ok_or_else(|| "AnalyzeEdgeOpRange: interval is missing `lower`".to_string())?;
+    let upper = optional_f64(v.get("upper"))
+        .ok_or_else(|| "AnalyzeEdgeOpRange: interval is missing `upper`".to_string())?;
+    if lower > upper {
+        return Err("AnalyzeEdgeOpRange: interval is inverted".into());
+    }
+    Ok(crate::dto::EdgeOpRangeIntervalDto { lower, upper })
+}
+
+fn parse_edge_op_limiting(v: &Value) -> Option<crate::dto::EdgeOpLimitingEntityDto> {
+    let topo_key = v
+        .get("topoKey")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())?;
+    Some(crate::dto::EdgeOpLimitingEntityDto {
+        topo_key: topo_key.to_string(),
+        kind: v
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("edge")
+            .to_string(),
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OffsetFace authoring handshake (SCHEMA §7.6 `PrepareOffsetFace`)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -7051,6 +7242,177 @@ mod prepare_edge_op_tests {
             "snapshotId": 1, "targetBodyId": "body_1", "edges": [{ "picked": true }]
         }))
         .is_err());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalyzeEdgeOpRange codec (SCHEMA §7.6, 2026-08-20)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod analyze_edge_op_range_tests {
+    use super::*;
+
+    fn body() -> BodyId {
+        BodyId(Uuid::from_u128(0x51))
+    }
+
+    fn picks() -> Vec<EdgeOpPick<'static>> {
+        vec![EdgeOpPick {
+            body: Some(body()),
+            address: FaceAddress::TopoKey("e:4"),
+        }]
+    }
+
+    fn answer() -> Value {
+        json!({
+            "snapshotId": 5012,
+            "mode": "Fillet",
+            "targetBodyId": "body_1",
+            "edges": ["e:4", "e:5"],
+            "searchedRange": { "min": 0.001, "max": 17.32 },
+            "lowerBound": 0.001,
+            "bestKnownMax": 9.99925,
+            "provenUpperBound": 10.0,
+            "feasibleIntervals": [{ "lower": 0.001, "upper": 9.99925 }],
+            "intervalsTruncated": false,
+            "limitingEntities": [{ "topoKey": "e:4", "kind": "edge" }],
+            "confidence": "bracketed",
+            "monotonicObserved": true,
+            "probesUsed": 71,
+            "budgetExhausted": false,
+            "stoppedReason": "converged",
+            "refusal": null
+        })
+    }
+
+    #[test]
+    fn optional_request_fields_are_omitted_not_defaulted() {
+        let bare = analyze_edge_op_range_args(
+            SnapshotId(5012),
+            EdgeOpMode::Fillet,
+            &picks(),
+            true,
+            EdgeOpRangeRequest::default(),
+        );
+        assert_eq!(bare["snapshotId"], json!(5012));
+        assert_eq!(bare["mode"], json!("Fillet"));
+        assert_eq!(bare["pickedEdges"][0]["topoKey"], json!("e:4"));
+        // An absent `range` means "the kernel's own body-derived bracket". A
+        // `{min:0,max:0}` here would search nothing.
+        assert!(bare.get("range").is_none());
+        assert!(bare.get("probeBudget").is_none());
+
+        let full = analyze_edge_op_range_args(
+            SnapshotId(7),
+            EdgeOpMode::Chamfer,
+            &picks(),
+            false,
+            EdgeOpRangeRequest {
+                min: Some(1.0),
+                max: Some(6.0),
+                probe_budget: Some(32),
+            },
+        );
+        assert_eq!(full["mode"], json!("Chamfer"));
+        assert_eq!(full["chainTangentEdges"], json!(false));
+        assert_eq!(full["range"], json!({ "min": 1.0, "max": 6.0 }));
+        assert_eq!(full["probeBudget"], json!(32));
+
+        let floor_only = analyze_edge_op_range_args(
+            SnapshotId(7),
+            EdgeOpMode::Fillet,
+            &picks(),
+            true,
+            EdgeOpRangeRequest {
+                min: Some(1.0),
+                ..EdgeOpRangeRequest::default()
+            },
+        );
+        assert_eq!(floor_only["range"], json!({ "min": 1.0 }));
+    }
+
+    #[test]
+    fn parses_a_measured_answer() {
+        let dto = parse_analyze_edge_op_range(&answer()).expect("measured answer");
+        assert_eq!(dto.snapshot_id, 5012);
+        assert_eq!(dto.mode, "Fillet");
+        assert_eq!(dto.edges, vec!["e:4".to_string(), "e:5".to_string()]);
+        assert_eq!(dto.lower_bound, Some(0.001));
+        assert_eq!(dto.best_known_max, Some(9.99925));
+        assert_eq!(dto.proven_upper_bound, Some(10.0));
+        assert_eq!(dto.feasible_intervals.len(), 1);
+        assert_eq!(dto.limiting_entities[0].topo_key, "e:4");
+        assert_eq!(dto.confidence, "bracketed");
+        assert_eq!(dto.stopped_reason, "converged");
+        assert_eq!(dto.probes_used, 71);
+        assert!(dto.refusal.is_none());
+    }
+
+    #[test]
+    fn unproven_bounds_stay_none_and_serialize_as_null() {
+        let mut result = answer();
+        result["lowerBound"] = Value::Null;
+        result["bestKnownMax"] = Value::Null;
+        result["provenUpperBound"] = Value::Null;
+        result["feasibleIntervals"] = json!([]);
+        result["confidence"] = json!("none");
+        let dto = parse_analyze_edge_op_range(&result).expect("an unproven answer is an answer");
+        assert_eq!(dto.lower_bound, None);
+        assert_eq!(dto.best_known_max, None);
+        assert_eq!(dto.proven_upper_bound, None);
+        // The FRONTEND must see the key. An absent key and a `null` read the same
+        // in TypeScript, but only one of them survives a `skip_serializing_if`,
+        // and the DTO must not be allowed to grow one.
+        let wire = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(wire["lowerBound"], Value::Null);
+        assert_eq!(wire["bestKnownMax"], Value::Null);
+        assert_eq!(wire["provenUpperBound"], Value::Null);
+    }
+
+    #[test]
+    fn a_refusal_is_an_answer() {
+        let mut result = answer();
+        result["refusal"] = json!({
+            "code": "crossBody", "message": "picks span bodies", "edges": ["e:4"]
+        });
+        let dto = parse_analyze_edge_op_range(&result).expect("refusal parses");
+        assert_eq!(dto.refusal.expect("refusal").code, "crossBody");
+    }
+
+    #[test]
+    fn rejects_an_unknown_vocabulary_rather_than_guessing() {
+        // A confidence rung the frontend cannot interpret means it cannot know
+        // what it is allowed to clamp. Failing loudly beats picking a clamp.
+        let mut unknown_confidence = answer();
+        unknown_confidence["confidence"] = json!("probably");
+        assert!(parse_analyze_edge_op_range(&unknown_confidence).is_err());
+
+        let mut unknown_stop = answer();
+        unknown_stop["stoppedReason"] = json!("gaveUp");
+        assert!(parse_analyze_edge_op_range(&unknown_stop).is_err());
+
+        let mut unknown_mode = answer();
+        unknown_mode["mode"] = json!("Draft");
+        assert!(parse_analyze_edge_op_range(&unknown_mode).is_err());
+
+        assert!(parse_analyze_edge_op_range(&json!({ "mode": "Fillet" })).is_err());
+    }
+
+    #[test]
+    fn rejects_a_violated_ordering_invariant() {
+        // SCHEMA §7.6: `lowerBound <= bestKnownMax < provenUpperBound`. Every
+        // consumer clamps with these three, so a violation must not reach one.
+        let mut inverted = answer();
+        inverted["lowerBound"] = json!(20.0);
+        assert!(parse_analyze_edge_op_range(&inverted).is_err());
+
+        let mut ceiling_at_the_max = answer();
+        ceiling_at_the_max["provenUpperBound"] = json!(9.99925);
+        assert!(parse_analyze_edge_op_range(&ceiling_at_the_max).is_err());
+
+        let mut inverted_interval = answer();
+        inverted_interval["feasibleIntervals"] = json!([{ "lower": 5.0, "upper": 1.0 }]);
+        assert!(parse_analyze_edge_op_range(&inverted_interval).is_err());
     }
 }
 

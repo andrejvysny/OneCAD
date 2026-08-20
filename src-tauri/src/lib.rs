@@ -475,6 +475,7 @@ pub fn run() {
             library::detach_component,
             api::prepare_offset_face,
             api::prepare_edge_op,
+            api::analyze_edge_op_range,
             api::preview_op,
             api::resolve_refs,
             api::clear_worker_circuit,

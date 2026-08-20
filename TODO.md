@@ -10,6 +10,59 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### Gate — WP4: AnalyzeEdgeOpRange, the measured fillet/chamfer range (2026-08-20) — LANDED
+
+The FE fillet radius had a 0.1 mm floor and NO upper bound; the only way to learn 6 mm doesn't
+fit was to commit and watch the refusal. Now: a new read-only, snapshot-fenced SCHEMA §7.6 verb
+runs REAL builds as the oracle and returns what it PROVED.
+
+- **The engine** (`kernel/fillet/FilletRangeAnalyzer`) is kernelbench's `explore()` ported —
+  staging kept verbatim; growth factor 4.0 (exactly representable, so the probe sequence is
+  IEEE-identical cross-platform); refinement floors at `authoring_resolution()` (refining below
+  the smallest change the product can perform buys nothing). **The substantive finding: a single
+  box edge fillets to the FULL 10 mm adjacent-face width, not the textbook half-span** — the
+  formula is wrong by 2×, which is the case for builds-not-formulas. Measured frontiers pinned:
+  one edge 9.99925/10.0 · four edges 4.99975/5.0005 (interaction shrink asserted) · 1 mm rib
+  0.99925/1.0 · chamfer 9.99925/10.0. Probe cost measured 2.25 ms average (success 3.94 /
+  refusal 1.30); default budget 96 = smallest round cap above the 71 a complete search needs,
+  re-derived by the test on every run (reds if any probe exceeds 40 ms).
+- **The verb spec survived two corrections of its own sources:** the plan's "smallest probed
+  refusal" definition for `provenUpperBound` is incoherent under non-monotonic feasibility
+  (kernelbench's HiddenIsland) — defined as the smallest refusal ABOVE `bestKnownMax`, with
+  `lowerBound ≤ bestKnownMax < provenUpperBound` normative and re-checked at the Rust boundary;
+  and a summary triple provably clamps a slider to a range whose interior fails, so
+  `feasibleIntervals[]` (≤8; endpoints actually-probed-feasible; truncation keeps first+last
+  unconditionally then the widest interior — adversarially tested) carries the honest shape.
+  `confidence` is a five-rung proof ladder with per-rung caller obligations (coarse clamps at
+  `bestKnownMax`, NEVER `provenUpperBound` — the load-bearing FE test). Orchestrator rulings
+  over the auditor's draft, recorded: budget constants follow the measurement (8/96/128, not the
+  pre-measurement 24/48); Chamfer ships (the veto assumed an uncancellable probe LOOP — the loop
+  polls between probes; the residual one-uninterruptible-build exposure equals today's chamfer
+  commit path, caveat in SCHEMA). CPU bounded twice: worker-owned cap + 1500 ms worker deadline
+  (a Rust timeout abandons the slot while the worker burns the kernel lane — Rust cancels
+  instead; watchdog thread ORs ctx.cancel + deadline onto one token, remembering which fired).
+- **Read-only proven executable:** `published_state_at`, no minting, no note_mutation (the
+  audit's #7 copy-paste hazard — a slider question must not dirty the document), GetWorkerHead
+  identical before/after — fixture-asserted. `EdgePicks` extracted (not copied) from
+  PrepareEdgeOp so the two verbs cannot drift onto different closures. §8's STALE_PREVIEW row
+  corrected (said "PreviewOp only" — three fenced verbs since). Fixture
+  `analyze_edge_op_range.ndjson` proven non-vacuous on four distinct pins. Mock returns
+  `confidence:"none"` with NO fabricated numbers — the clamp is inert in the mock lane by
+  construction (a mock ceiling would make e2e assert a UI the real stack never produces).
+  FE arms ONE analysis after prepareEdgeOp, snapshot-guarded, never re-measures on mid-drag
+  type flips (per-frame kernel load is forbidden).
+- **Flake ledger:** `ModelToolController.wave2.test.ts` "editExtrudeFeature while already
+  armed…(finding 10)" dropped once in a full vitest run (5011/1), passed 18/18 in isolation and
+  5012/0 on re-run — the named `settleUntil` timing sensitivity, third full-suite-only
+  occurrence pattern this session (two earlier unnamed single-test cargo drops). Recorded, not
+  chased; next occurrence has a name to grep.
+- **Gate (tip, measured on the main thread; rung: FULL L3):** ctest **153/153** (48.4 s) ·
+  fmt/clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **86 targets / 1313
+  passed / 0 failed** (teed, 0 FAILED) · tsc clean · `bun run test` **297 files / 5012 passed /
+  78 skipped** · kernelbench `compare` **136 rows unchanged** + `semantic-compare` OK ·
+  hygiene clean · coverage 29/9/16/19 · contracts 37/18 · hex 0 · `bun run e2e` (both projects,
+  retries 0): **464 passed / 0 failed** (33.0 min).
+
 ### Gate — WP3-C6 corpus + WP5 exact tilted ToFace (2026-08-20) — LANDED
 
 **C6 — the adversarial corpus (170 checks), test-only, no defect found.** The rib decoy is the

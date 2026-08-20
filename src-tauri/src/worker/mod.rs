@@ -398,6 +398,30 @@ pub trait FaceBoundaryProjection: Send + Sync {
         picks: &[wire::EdgeOpPick<'_>],
         chain_tangent_edges: bool,
     ) -> Result<crate::dto::PrepareEdgeOpDto, EngineError>;
+
+    /// `AnalyzeEdgeOpRange` (SCHEMA §7.6) — the measured feasible radius/distance
+    /// range for an edge closure.
+    ///
+    /// On this trait beside [`prepare_edge_op`](Self::prepare_edge_op) because it
+    /// is the same KIND of call over the same argument: a read-only,
+    /// snapshot-FENCED, non-minting query about a picked edge selection, served
+    /// off a copy of the head.
+    ///
+    /// It differs from every other verb here in one way that matters: it runs
+    /// dozens of real OCCT builds. The worker bounds that with its own probe
+    /// budget and wall deadline; the Rust side adds a longer liveness backstop
+    /// and MUST send a `cancel` when it fires, never abandon the slot.
+    ///
+    /// No `Option`: a closure REFUSAL is a successful answer carried in
+    /// [`EdgeOpRangeDto::refusal`](crate::dto::EdgeOpRangeDto::refusal).
+    async fn analyze_edge_op_range(
+        &self,
+        snapshot: SnapshotId,
+        mode: wire::EdgeOpMode,
+        picks: &[wire::EdgeOpPick<'_>],
+        chain_tangent_edges: bool,
+        request: wire::EdgeOpRangeRequest,
+    ) -> Result<crate::dto::EdgeOpRangeDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -987,6 +1011,17 @@ impl FaceBoundaryProjection for PendingBackend {
         _picks: &[wire::EdgeOpPick<'_>],
         _chain_tangent_edges: bool,
     ) -> Result<crate::dto::PrepareEdgeOpDto, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn analyze_edge_op_range(
+        &self,
+        _snapshot: SnapshotId,
+        _mode: wire::EdgeOpMode,
+        _picks: &[wire::EdgeOpPick<'_>],
+        _chain_tangent_edges: bool,
+        _request: wire::EdgeOpRangeRequest,
+    ) -> Result<crate::dto::EdgeOpRangeDto, EngineError> {
         Err(Self::not_ready())
     }
 }

@@ -2392,6 +2392,21 @@ pub struct EdgeOpPickInput {
     pub element_id: Option<String>,
 }
 
+/// The optional half of an `analyze_edge_op_range` request: the mm window and
+/// the build budget. One struct rather than three loose parameters because they
+/// are one decision — "how much of the range, and how hard may you look" — and
+/// every field is a HINT the worker clamps.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpRangeInput {
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub probe_budget: Option<u32>,
+}
+
 fn edge_op_mode(value: &str) -> Result<wire::EdgeOpMode, ApiError> {
     match value {
         "Fillet" => Ok(wire::EdgeOpMode::Fillet),
@@ -2640,6 +2655,58 @@ pub async fn prepare_edge_op(
     // element partition.
     state.note_mutation();
     Ok(prepared)
+}
+
+/// The measured feasible radius/distance range for an edge closure
+/// (`AnalyzeEdgeOpRange`; SCHEMA §7.6).
+///
+/// A pure READ, and unlike [`prepare_edge_op`] it is read all the way down: it
+/// promotes nothing, mints nothing, emits no `projection-updated`, and
+/// deliberately does **not** call `note_mutation()`. Marking the document dirty
+/// because the user hovered an edge and the UI asked what radius it takes would
+/// invent an unsaved change out of a question.
+///
+/// Worker IO runs OUTSIDE the runtime lock (the R-WP11 rule); the lock is taken
+/// only for the document-presence check.
+#[tauri::command]
+pub async fn analyze_edge_op_range(
+    state: State<'_, AppState>,
+    snapshot_id: u64,
+    mode: String,
+    picked_edges: Vec<EdgeOpPickInput>,
+    chain_tangent_edges: bool,
+    range: Option<EdgeOpRangeInput>,
+) -> Result<crate::dto::EdgeOpRangeDto, ApiError> {
+    if picked_edges.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "analyzeEdgeOpRange: at least one picked edge is required".into(),
+        ));
+    }
+    let mode = edge_op_mode(&mode)?;
+    let bodies = edge_op_bodies(&picked_edges)?;
+    let picks = wire_edge_op_picks(&picked_edges, &bodies);
+    let range = range.unwrap_or_default();
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("analyzeEdgeOpRange".into()))?;
+    }
+    state
+        .face_projection()
+        .analyze_edge_op_range(
+            SnapshotId(snapshot_id),
+            mode,
+            &picks,
+            chain_tangent_edges,
+            wire::EdgeOpRangeRequest {
+                min: range.min,
+                max: range.max,
+                probe_budget: range.probe_budget,
+            },
+        )
+        .await
+        .map_err(Into::into)
 }
 
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —

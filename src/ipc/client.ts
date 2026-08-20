@@ -46,6 +46,8 @@ import type {
   PreviewSession,
   PrepareEdgeOpRequest,
   PrepareEdgeOpResult,
+  AnalyzeEdgeOpRangeRequest,
+  AnalyzeEdgeOpRangeResult,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
   PromotedElement,
@@ -655,6 +657,27 @@ export interface CadClient {
 
   /** Read-only, snapshot-fenced Fillet/Chamfer tangent-closure preparation. */
   prepareEdgeOp(req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult>;
+
+  /**
+   * The MEASURED feasible radius/distance range for an edge closure
+   * (SCHEMA §7.6 `AnalyzeEdgeOpRange`). Read-only, snapshot-fenced, mints
+   * nothing — and, uniquely among the read verbs, it runs dozens of real OCCT
+   * builds, so it is the one call here that costs geometry rather than a lookup.
+   * Arm it once per prepared closure, never per drag frame.
+   *
+   * Nothing it reports is extrapolated: every bound is backed by a build that
+   * ran. Read `confidence` BEFORE any bound — it is a total decision tree that
+   * says what the caller may enforce, and `coarse` in particular forbids
+   * clamping to `provenUpperBound`.
+   *
+   * A REFUSAL (`crossBody`, `unsupportedEdge`, `chainMismatch`) resolves
+   * SUCCESSFULLY carrying `refusal`, with zero probes and every bound null.
+   *
+   * MOCK LIMIT: the mock has no kernel, so it reports `confidence:"none"` with
+   * every bound null — an honest "nothing was measured", never a fabricated
+   * range.
+   */
+  analyzeEdgeOpRange(req: AnalyzeEdgeOpRangeRequest): Promise<AnalyzeEdgeOpRangeResult>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

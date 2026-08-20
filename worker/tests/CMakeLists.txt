@@ -206,6 +206,14 @@ add_executable(test_prepare_edge_op test_prepare_edge_op.cpp)
 target_link_libraries(test_prepare_edge_op PRIVATE worker_core)
 add_test(NAME prepare_edge_op COMMAND test_prepare_edge_op)
 
+# WP4 verb half: the §7.6 feasible-range query. `test_fillet_range` proves the
+# kernel MEASURES the frontier; this proves the verb reports the measurement in
+# the promised shape, and drives `derive_edge_op_range` directly for the island
+# and overflow cases no fixture geometry produces.
+add_executable(test_analyze_edge_op_range test_analyze_edge_op_range.cpp)
+target_link_libraries(test_analyze_edge_op_range PRIVATE worker_core)
+add_test(NAME analyze_edge_op_range COMMAND test_analyze_edge_op_range)
+
 # The identity harness for GeometryPrecisionContext. Asserts every accessor
 # against the INLINED literal it is going to replace, so a later call-site move
 # that reds a suite is provably the move and not the number. Must stay green
@@ -654,6 +662,16 @@ add_test(
             --fixture ${PROTOCOL_FIXTURES}/extrude_to_face_tilted.ndjson
 )
 # SCHEMA §7.6 `AnalyzeEdgeOpRange` (WP4). Pins the ECHO, the closure, the
+# classification vocabulary and the refusal shape, plus the read-only guarantee
+# as an identical GetWorkerHead either side of dozens of real OCCT builds. The
+# measured frontier is `$any` here and pinned in test_fillet_range.cpp — the same
+# contract/corpus split the OffsetFace pair uses. See the fixture header.
+add_test(
+    NAME canonical_analyze_edge_op_range
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/analyze_edge_op_range.ndjson
+)
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script

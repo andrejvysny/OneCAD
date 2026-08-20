@@ -28,6 +28,7 @@ import type {
   OffsetFaceEvidence,
   OffsetFaceParams,
   OperationOp,
+  AnalyzeEdgeOpRangeResult,
   PrepareEdgeOpResult,
   PrepareOffsetFaceResult,
   PreviewDraft,
@@ -79,11 +80,13 @@ import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/pre
 import { regionAtPoint } from "@/tools/preview/regionPick";
 import { axisDepthFromRay, normalize, type Vec3 } from "@/tools/preview/depthProjection";
 import {
+  clampToEdgeOpRange,
   radiusFromDrag,
   radiusFromValueText,
   screenDragAxis,
   signedValueFromDrag,
   SCREEN_UP_AXIS,
+  type EdgeOpRangeGuard,
   type ScreenAxis,
 } from "@/tools/preview/filletRadius";
 import { averageOutward, edgeOutward } from "@/tools/preview/edgeDirection";
@@ -679,6 +682,23 @@ export class ModelToolController {
   private filletStoredParams: Record<string, unknown> | undefined;
   /** Document revision whose prepared tangent closure `filletEdges` represents. */
   private filletPreparedRevision: number | null = null;
+  /**
+   * The MEASURED feasible range for the armed closure (SCHEMA §7.6), or null
+   * while the analysis is in flight, refused, or never armed. Null and a
+   * `confidence:"none"` answer behave identically — neither is evidence — so a
+   * slow or absent analysis simply leaves the value unclamped, exactly as before
+   * this guard existed.
+   */
+  private filletRange: EdgeOpRangeGuard | null = null;
+  /**
+   * The `armGen` the in-flight analysis belongs to. ONE analysis per arm: it
+   * costs dozens of real OCCT builds, so re-issuing it per drag frame — or even
+   * per type flip — would be a per-gesture kernel load for an answer that cannot
+   * change, since the closure and the head are both frozen for the arm's life.
+   */
+  private filletRangeGen: number | null = null;
+  /** The fenced head `prepareEdgeOp` answered against — what the range is measured on. */
+  private filletPreparedSnapshot: number | null = null;
 
   // Shell context (mirrors fillet: face selection + vertical thickness drag).
   private shellFaces: EntityRef[] = [];
@@ -3117,11 +3137,82 @@ export class ModelToolController {
         };
       });
       this.filletPreparedRevision = documentStore.getState().revision;
+      this.filletPreparedSnapshot = res.snapshotId;
+      // Fire-and-forget, deliberately NOT awaited: the analysis runs real OCCT
+      // builds and the arm must appear on the same frame the user asked for it.
+      // The guard simply does not exist until the answer lands, which is the
+      // pre-WP4 behaviour and therefore a safe intermediate state.
+      void this.armEdgeOpRange(gen, kind, res.snapshotId);
       return true;
     } catch (error) {
       if (gen === this.armGen) this.publishEdgePrepareFailure(kind, errMessage(error));
       return false;
     }
+  }
+
+  /**
+   * Measure what the armed closure will actually take (SCHEMA §7.6).
+   *
+   * ONE per arm, and every await is `armGen`-guarded exactly as the extrude and
+   * offset-face loops are: a superseded arm's answer describes edges the user is
+   * no longer holding, and clamping to it would forbid a value that fits the
+   * ones they are. The snapshot is pinned to the head `prepareEdgeOp` answered
+   * against, so an answer that outlives its head is dropped rather than applied.
+   *
+   * A FAILURE is not an error the user needs: the range is an enhancement over
+   * "no ceiling at all", so a refusal, a stale head or a wedged worker leaves the
+   * value unclamped and says nothing on screen.
+   */
+  private async armEdgeOpRange(gen: number, kind: EdgeOpKind, snapshotId: number): Promise<void> {
+    this.filletRange = null;
+    this.filletRangeGen = gen;
+    let res: AnalyzeEdgeOpRangeResult;
+    try {
+      res = await this.client.analyzeEdgeOpRange({
+        snapshotId,
+        mode: kind,
+        pickedEdges: this.filletEdges.map((edge) => ({
+          bodyId: edge.bodyId,
+          topoKey: edge.topoKey,
+          elementId: edge.topoKey ? undefined : edge.elementId,
+        })),
+        chainTangentEdges: true,
+      });
+    } catch (error) {
+      traceWarn(kind.toLowerCase(), `${kind} range analysis failed: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen || this.filletRangeGen !== gen) return;
+    if (res.refusal || res.snapshotId !== snapshotId) return;
+    this.filletRange = {
+      confidence: res.confidence,
+      lowerBound: res.lowerBound,
+      bestKnownMax: res.bestKnownMax,
+      provenUpperBound: res.provenUpperBound,
+      feasibleIntervals: res.feasibleIntervals,
+    };
+    // The value already on screen may sit outside what was just proven — the arm
+    // seeded a fixed 2 mm default before anything had been measured. Re-apply the
+    // guard once, so the chip agrees with the op the moment the answer lands.
+    const guarded = this.guardEdgeOpValue(this.fillet.radius);
+    if (guarded !== this.fillet.radius) {
+      this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: guarded }).state;
+      toolChipStore.getState().setValue(this.fillet.radius);
+      this.sendPreview();
+    }
+    this.updateDebug();
+  }
+
+  /**
+   * The ONE seam where a radius/distance meets the measured range. Both value
+   * sources — the chip and the drag — go through it, so the number the chip shows
+   * and the number the op carries can never disagree about the clamp.
+   *
+   * With no answer yet (or an answer that proved nothing) this is the identity,
+   * which is why arming is safe before the analysis lands.
+   */
+  private guardEdgeOpValue(value: number): number {
+    return clampToEdgeOpRange(value, this.filletRange).value;
   }
 
   private publishEdgePrepareFailure(kind: EdgeOpKind, reason: string): void {
@@ -3256,6 +3347,15 @@ export class ModelToolController {
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     const gen = ++this.armGen;
     const wasDragging = this.dragging === "fillet";
+    // A measured range is MODE-SPECIFIC — a fillet and a chamfer roll onto the
+    // adjacent faces differently, so a Fillet ceiling is not a Chamfer ceiling.
+    // Dropping it is mandatory; re-measuring is not, and is deliberately skipped
+    // MID-DRAG: an auto type flip is a drag-frequency event and re-issuing dozens
+    // of OCCT builds per flip is exactly the per-frame kernel load this codebase
+    // forbids. The guard is simply absent until the next deliberate arm, which is
+    // the honest state — nothing has been measured for this type.
+    this.filletRange = null;
+    this.filletRangeGen = null;
     this.closePreviewSessions();
     // A RE-EDIT never opens a preview: PreviewOp runs against the CURRENT head, so
     // previewing an existing feature double-applies it (the rule `armShell` states
@@ -3268,6 +3368,11 @@ export class ModelToolController {
           this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS);
         }
       });
+      // A DELIBERATE flip (a chip segment) is worth re-measuring; a mid-drag auto
+      // flip is not, per the note above.
+      if (!wasDragging && this.filletPreparedSnapshot !== null) {
+        void this.armEdgeOpRange(gen, this.fillet.edgeOp, this.filletPreparedSnapshot);
+      }
     }
     this.updateDebug();
   }
@@ -3364,8 +3469,14 @@ export class ModelToolController {
   }
 
   private onFilletChip(v: number): void {
-    this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: v }).state;
-    toolChipStore.getState().setValue(v);
+    // Read the value BACK off the FSM rather than echoing the input: the range
+    // guard may have moved it, and the chip must show the number the op will
+    // carry, not the one that was typed at it.
+    this.fillet = filletStep(this.fillet, {
+      kind: "setRadius",
+      radius: this.guardEdgeOpValue(v),
+    }).state;
+    toolChipStore.getState().setValue(this.fillet.radius);
     this.sendPreview();
   }
 
@@ -6725,7 +6836,17 @@ export class ModelToolController {
         { worldPerPx: this.engine.planePixelWorld() },
       );
       const before = this.fillet.edgeOp;
-      this.fillet = filletStep(this.fillet, { kind: "drag", signed }).state;
+      // TYPE first, off the RAW drag, then SIZE. The guard is about how big the
+      // value may be and has nothing to say about which op the gesture authors,
+      // so clamping `signed` before the reducer saw it could suppress a type flip
+      // on a closure whose feasible maximum happens to be under the hysteresis
+      // band — a size measurement silently deciding a type.
+      let next = filletStep(this.fillet, { kind: "drag", signed }).state;
+      const guarded = this.guardEdgeOpValue(next.radius);
+      if (guarded !== next.radius) {
+        next = filletStep(next, { kind: "setRadius", radius: guarded }).state;
+      }
+      this.fillet = next;
       toolChipStore.getState().setValue(this.fillet.radius);
       // The flip has to be VISIBLE on the frame its params change, and it swaps the
       // whole preview session (opType is frozen per session) — so it replaces the
@@ -8944,6 +9065,9 @@ export class ModelToolController {
     this.fillet = filletInit(); // carries edgeOp back to "Fillet"
     this.filletEdges = [];
     this.filletPreparedRevision = null;
+    this.filletPreparedSnapshot = null;
+    this.filletRange = null;
+    this.filletRangeGen = null;
     this.filletOutward = null;
     this.filletTangent = null;
     this.filletAxis = SCREEN_UP_AXIS;

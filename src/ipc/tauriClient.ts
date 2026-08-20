@@ -78,6 +78,8 @@ import type {
   PrepareOffsetFaceResult,
   PrepareEdgeOpRequest,
   PrepareEdgeOpResult,
+  AnalyzeEdgeOpRangeRequest,
+  AnalyzeEdgeOpRangeResult,
   PromotedElement,
   PromotePick,
   RecentProject,
@@ -201,6 +203,7 @@ const CMD = {
   detachComponent: "detach_component",
   prepareOffsetFace: "prepare_offset_face",
   prepareEdgeOp: "prepare_edge_op",
+  analyzeEdgeOpRange: "analyze_edge_op_range",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
   clearWorkerCircuit: "clear_worker_circuit",
@@ -1959,6 +1962,30 @@ export function createTauriClient(): CadClient {
     return result;
   }
 
+  async function analyzeEdgeOpRange(
+    req: AnalyzeEdgeOpRangeRequest,
+  ): Promise<AnalyzeEdgeOpRangeResult> {
+    const snapshotId = req.snapshotId ?? currentSnapshotId;
+    const result = await call<AnalyzeEdgeOpRangeResult>(CMD.analyzeEdgeOpRange, {
+      snapshotId,
+      mode: req.mode,
+      pickedEdges: req.pickedEdges.map((p) => ({
+        bodyId: p.bodyId ? (p.bodyId.startsWith("body_") ? p.bodyId : `body_${p.bodyId}`) : null,
+        topoKey: p.elementId ? null : (p.topoKey ?? null),
+        elementId: p.elementId ?? null,
+      })),
+      chainTangentEdges: req.chainTangentEdges,
+      range: req.range ?? null,
+    });
+    // Same fence as prepareEdgeOp, and for a stronger reason: this answer is
+    // about to CLAMP what the user may type. A range measured on a head they are
+    // no longer looking at would silently forbid a value that now fits.
+    if (result.snapshotId !== snapshotId || currentSnapshotId !== snapshotId) {
+      throw new Error("edge range answer is stale — re-pick");
+    }
+    return result;
+  }
+
   async function promoteSelection(
     bodyId: string,
     picks: PromotePick[],
@@ -2213,6 +2240,7 @@ export function createTauriClient(): CadClient {
     detachComponent,
     prepareOffsetFace,
     prepareEdgeOp,
+    analyzeEdgeOpRange,
     resolveRefs,
     applyEditCommand,
     clearWorkerCircuit,

@@ -1489,6 +1489,81 @@ export interface PrepareEdgeOpResult {
   refusal?: EdgeOpRefusal | null;
 }
 
+// ── AnalyzeEdgeOpRange — what radius will this edge ACTUALLY take? ───────────
+
+/**
+ * What a consumer may enforce, per SCHEMA §7.6. A TOTAL decision tree, not
+ * advice: every answer lands on exactly one rung, and the rung says what the
+ * clamp is allowed to do.
+ *
+ * - `none` — nothing was proven. Do not clamp.
+ * - `nonMonotonic` — an ISLAND was observed. Honour `feasibleIntervals`; a
+ *   single ceiling would licence a value measured to fail.
+ * - `lowerOnly` — a floor, no proven ceiling. Enforce the floor only.
+ * - `bracketed` — a complete monotonic bracket. A hard ceiling is safe.
+ * - `coarse` — the search stopped early. Cap at `bestKnownMax`, NEVER at
+ *   `provenUpperBound`, which may sit far above the real frontier.
+ */
+export type EdgeOpRangeConfidence =
+  | "none"
+  | "nonMonotonic"
+  | "lowerOnly"
+  | "bracketed"
+  | "coarse";
+
+/** Why the search ended. All three are normal; only a cancel is an error. */
+export type EdgeOpRangeStop = "converged" | "budgetExhausted" | "deadline";
+
+/** A run of adjacent feasible probes. BOTH endpoints were actually built. */
+export interface EdgeOpRangeInterval {
+  lower: number;
+  upper: number;
+}
+
+/** What the bounding refusal named. EMPTY when the kernel did not attribute it. */
+export interface EdgeOpLimitingEntity {
+  topoKey: string;
+  kind: string;
+}
+
+export interface AnalyzeEdgeOpRangeRequest {
+  snapshotId?: number;
+  mode: "Fillet" | "Chamfer";
+  pickedEdges: EdgeOpPick[];
+  chainTangentEdges: boolean;
+  /** Optional mm window and build budget. Every field is a hint the worker clamps. */
+  range?: { min?: number; max?: number; probeBudget?: number };
+}
+
+export interface AnalyzeEdgeOpRangeResult {
+  snapshotId: number;
+  mode: "Fillet" | "Chamfer";
+  targetBodyId: string;
+  /** Ordinal-ordered TopoKeys of the analysed closure. */
+  edges: string[];
+  /** The effective mm window this answer covers. */
+  searchedRange: { min: number; max: number };
+  /**
+   * `null` means UNPROVEN, and is never a number — 0 is a radius a user could
+   * act on, and none of these were measured unless they are non-null.
+   */
+  lowerBound: number | null;
+  bestKnownMax: number | null;
+  /** Smallest infeasible probe ABOVE `bestKnownMax` — not the smallest refusal. */
+  provenUpperBound: number | null;
+  feasibleIntervals: EdgeOpRangeInterval[];
+  intervalsTruncated: boolean;
+  limitingEntities: EdgeOpLimitingEntity[];
+  confidence: EdgeOpRangeConfidence;
+  monotonicObserved: boolean;
+  /** DIAGNOSTIC, non-contractual. */
+  probesUsed: number;
+  budgetExhausted: boolean;
+  stoppedReason: EdgeOpRangeStop;
+  /** Present ⇒ the closure refused; zero probes ran and every bound is null. */
+  refusal?: EdgeOpRefusal | null;
+}
+
 /**
  * Linear-pattern op params (Rust `LinearPatternParams`). `direction` is a WORLD
  * unit vector (the Rust port uses a single `direction: Vec3`, NOT an axis enum —

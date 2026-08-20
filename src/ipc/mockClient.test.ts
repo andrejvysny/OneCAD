@@ -122,3 +122,62 @@ describe("mockClient crash recovery", () => {
     expect(await mockClient.checkRecovery()).toEqual([]);
   });
 });
+
+/*
+ * WP4 — the mock's `analyzeEdgeOpRange`. The contract this pins is that the mock
+ * does NOT invent a range. There is no kernel here, and the only honest source of
+ * a feasible bound is a build that ran, so it reports that nothing was measured
+ * and the clamp helper reads that as "do not clamp" — the pre-WP4 behaviour.
+ *
+ * A plausible fabricated range would be worse than useless: the mock lane drives
+ * the whole UI and every Playwright spec, so a made-up ceiling would forbid
+ * values on the e2e model that the real kernel accepts.
+ */
+describe("mockClient analyzeEdgeOpRange", () => {
+  it("reports that nothing was measured, rather than a fabricated range", async () => {
+    const res = await mockClient.analyzeEdgeOpRange({
+      mode: "Fillet",
+      chainTangentEdges: true,
+      pickedEdges: [{ bodyId: "b1", topoKey: "e:4" }],
+    });
+    expect(res.confidence).toBe("none");
+    expect(res.lowerBound).toBeNull();
+    expect(res.bestKnownMax).toBeNull();
+    expect(res.provenUpperBound).toBeNull();
+    expect(res.feasibleIntervals).toEqual([]);
+    expect(res.limitingEntities).toEqual([]);
+    // Zero probes for a budget that cannot buy one — said out loud, not implied.
+    expect(res.probesUsed).toBe(0);
+    expect(res.budgetExhausted).toBe(true);
+    expect(res.stoppedReason).toBe("budgetExhausted");
+    expect(res.refusal).toBeNull();
+    expect(res.mode).toBe("Fillet");
+    expect(res.targetBodyId).toBe("b1");
+    expect(res.edges).toEqual(["e:4"]);
+  });
+
+  it("refuses a cross-body pick exactly as prepareEdgeOp does", async () => {
+    // This one IS a real answer: it is a fact about the PICKS, and the mock can
+    // see those without a kernel. Both verbs must refuse one gesture identically.
+    const picks = [
+      { bodyId: "b1", topoKey: "e:4" },
+      { bodyId: "b2", topoKey: "e:7" },
+    ];
+    const prepared = await mockClient.prepareEdgeOp({
+      mode: "Chamfer",
+      chainTangentEdges: true,
+      pickedEdges: picks,
+    });
+    const range = await mockClient.analyzeEdgeOpRange({
+      mode: "Chamfer",
+      chainTangentEdges: true,
+      pickedEdges: picks,
+    });
+    expect(prepared.refusal?.code).toBe("crossBody");
+    expect(range.refusal?.code).toBe("crossBody");
+    expect(range.refusal?.edges).toEqual(prepared.refusal?.edges);
+    expect(range.targetBodyId).toBe("");
+    expect(range.edges).toEqual([]);
+    expect(range.probesUsed).toBe(0);
+  });
+});
