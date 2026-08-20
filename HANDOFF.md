@@ -1,3 +1,92 @@
+# Handoff — Kernel Continuation RESUMED and (nearly) completed
+
+Session 22 · 2026-08-20
+
+> Seventeen commits on `master` this session (`3afbdf9` → `9f03b72`), tip gated at full L3.
+> The entire KERNEL CONTINUATION spine landed — WP1 completed (G1r/G2/G3/G4-sliver), WP2,
+> WP3 C1–C6 (OffsetFace DirectModeler V1, `resultPolicyVersion: 3`), WP5 (exact tilted
+> ToFace), WP4 (`AnalyzeEdgeOpRange` measured fillet range) — each work package through an
+> implementer → adversarial-review/protocol-audit → fix-round → orchestrator-gate cycle.
+> Only the WP6 small-caliber batch remains; the user paused the session before it.
+
+## Goal
+
+Resume § KERNEL CONTINUATION (parked by DAILY DRIVER v1): harden modeling operations for
+long-term parametric correctness and add missing mature-CAD capabilities. Quality bar:
+preview == commit proven per op; a silent wrong bind or silent geometry change is a defect
+even untested; deterministic NeedsRepair beats silent wrong binds everywhere.
+
+## Original plan
+
+`~/.claude/plans/use-the-fable-orchestrator-skill-kind-dawn.md` (this session's approved
+plan; execution log inside). The WP designs come from
+`~/.claude/plans/act-as-senior-software-buzzing-simon.md` (BUZZING-SIMON). User decisions:
+WP5+WP4+small-batch chosen (Loft/Sweep declined, not even plan-only); V3 re-edit gets a
+visible hint; linux-kernelbench `clean_build` dispatch skipped (still open, TODO.md § KERNEL
+CONTINUATION → WP0).
+
+## Done so far (and why) — headlines only; full evidence in TODO.md gate rows
+
+- **WP1 complete.** G1r renames (perturbation-proven per family) · G2 `reasonCode`
+  (the `bounded_diagnostic` allowlist was the hidden blocker) · G3 micro/sliver redefinition
+  (the old detector counted sphere poles as defects; 120-row census; collection now runs at
+  every tier after review showed a Tier A policy with a bound would refuse everything) ·
+  G4 **sliver half only** — the micro bound stays −1 until a dirty vendor STEP is
+  characterized (owed, user can supply one).
+- **WP3 complete, C1–C6.** The live defect is fixed: a side push on a filleted box now
+  preserves the fillet (1191.4159265358979 vs V2's 1405.6637061435916); V2 replays
+  byte-identically forever. The adversarial reviews earned their cost: a numerically wrong
+  `gp_Lin::Distance` branch, a co-surface false-Proved, OCCT `Merge` dropping
+  removal-mediated lineage (manual walk mandatory), a cross-key identity leak that could
+  auto-bind a support id onto the rebuilt blend face (fixed at the ComposedHistory root),
+  and a mixed-radius silent rebuild — every one measured red-first before landing. C6's rib
+  decoy proved V2 was actively destructive (shrank a user rib R2→R1); the four-rounds box
+  multi-blend engagement works exactly.
+- **WP5.** Tilted planar ToFace: refusal → exact variable-height termination
+  (Common-not-Cut, and the section identity `capArea·|d·n| == profileArea` is the SOLE
+  guard against its own trim — drill-proven). The protocol audit caught a false §14 history
+  claim (pre-`232ed23` a tilted target silently committed a WRONG flat cap) and authored
+  the canonical fixture itself.
+- **WP4.** `AnalyzeEdgeOpRange` (SCHEMA §7.6): real builds as the oracle. Finding: a single
+  box edge fillets to the FULL adjacent-face width — the textbook half-span formula is wrong
+  by 2×. Non-monotonic feasibility is honestly representable (`feasibleIntervals`, the
+  five-rung `confidence` ladder); FE clamps only what was proven; mock fabricates nothing.
+- **Dead-ends / rulings recorded so nobody re-litigates:** Loft/Sweep declined by user;
+  chamfer ships at the verb despite the audit's V1 veto (the loop polls between probes;
+  residual exposure equals today's commit path); `authoring_resolution()` is flat 1e-3 in v1
+  BY DESIGN; the fully-rounded-box Ambiguous fallthrough is deliberate V2-equivalence
+  (revisit is a recorded C6-successor item); the harness treats expected `[]` as
+  assert-nothing (positional prefix) — older fixtures carry ineffective `[]` pins.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Read `TODO.md` § "KERNEL CONTINUATION — RESUMED" (top of file) — every gate row with
+   measured numbers, flagged seams, and the NOW list. `CURRENT_STATE.md` head has the
+   snapshot. Worker staged and current (`scripts/build-worker.sh` was the last stage).
+3. Gate commands are in project `CLAUDE.md`; heavy suites one at a time; tee every cargo
+   run (two unnamed single-test drops this session; the named vitest flake is
+   `ModelToolController.wave2.test.ts` "finding 10").
+
+## Open questions
+
+- WP6 small-caliber batch (next work): chamfer angle-distance mode · MirrorBody-fuse UI
+  exposure · evidence gaps (Shell multi-face, committed countersink, circular-pattern
+  partial-sweep Rust lane). All scoped in the plan file.
+- G4 micro half needs a characterized dirty vendor STEP (user-suppliable).
+- USER-RUN gates still owed: the 19-row `docs/qa/MANUAL_RELEASE_GATES.md` checklist against
+  `/Applications/onecad.app` (§ 4 autosave above all) — predates this session.
+- Linux kernelbench `clean_build` dispatch — skipped by decision, box open.
+- `docs/qa/modeling-operation-coverage.json:61` ToFace prose is stale ("no browser flow"
+  — the toolbar ships `chip-end-toface`); owed to the next coverage pass.
+
+## Pointers
+
+- Tasks → TODO.md (§ KERNEL CONTINUATION — RESUMED) · Snapshot → CURRENT_STATE.md ·
+  Plans → `~/.claude/plans/use-the-fable-orchestrator-skill-kind-dawn.md`
+
+---
+
 # Handoff — Trust & Deliverable COMPLETE (W0–W6)
 
 Session 21 · 2026-08-17

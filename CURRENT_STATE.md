@@ -1,8 +1,35 @@
 # Current State
 
-Last verified: 2026-08-19 — DAILY DRIVER v1 **W0 + W1 COMPLETE**, on `master`
+Last verified: 2026-08-20 21:53 — KERNEL CONTINUATION **WP1+WP2+WP3+WP5+WP4 COMPLETE**, on `master`
 
-## NOW — DAILY DRIVER v1 (2026-08-19, plan `act-as-senior-cad-floofy-locket.md`)
+## NOW — KERNEL CONTINUATION RESUMED (2026-08-20, plan `use-the-fable-orchestrator-skill-kind-dawn.md`)
+
+- **Branch `master`, clean (only untracked `.claude/`), 17 commits this session
+  (`3afbdf9` → tip `9f03b72`), tip gated at FULL L3, measured on the main thread:**
+  ctest **153/153** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **86 targets / 1313
+  passed / 0 failed** (teed) · `bunx tsc` clean · `bun run test` **297 files / 5012 passed /
+  78 skipped** · `bun run e2e` **464 passed / 0 failed** (33.0 min, both projects, retries 0) ·
+  kernelbench `compare` **136 rows unchanged** + `semantic-compare` OK at every gate ·
+  fmt/clippy/hygiene/hex clean. Sidecar staged and current.
+- **Landed:** WP1 complete (G1r renames · G2 `diagnostics[].reasonCode` · G3 micro/sliver
+  redefinition + 120-row census · G4 SLIVER bound only — micro bound held for a characterized
+  dirty-import fixture) · WP2 ToNext adversarial campaign (9 exact cases, no defect) ·
+  **WP3 C1–C6 complete: OffsetFace `resultPolicyVersion: 3`** — side push preserves the fillet
+  (1191.4159265358979 vs V2's 1405.6637061435916; V2 replays byte-identically forever;
+  multi-blend works; the rib decoy proved V2 destructive) · WP5 exact tilted ToFace ·
+  WP4 `AnalyzeEdgeOpRange` (measured fillet/chamfer range → FE slider clamp).
+- **The reviews were load-bearing:** adversarial passes found and red-first-fixed a wrong
+  `gp_Lin::Distance` branch, a co-surface false-Proved, a cross-key identity leak that could
+  auto-bind a support id onto the rebuilt blend face, and a mixed-radius silent rebuild;
+  protocol audits found the `bounded_diagnostic` allowlist blocker, two latent V2 preview/
+  re-edit defects, and a false §14 history claim. Full evidence: TODO.md § KERNEL
+  CONTINUATION — RESUMED (gate rows, seams, flake ledger).
+- **Next:** WP6 small-caliber batch (chamfer angle-distance · MirrorBody-fuse UI · evidence
+  gaps) — scoped in the plan file, NOT started (user paused). Owed: user-run 19-row release
+  checklist (predates this session) · dirty vendor STEP for the G4 micro half · linux
+  `clean_build` dispatch. `HANDOFF.md` (session 22) is the entry point.
+
+## PREVIOUS — DAILY DRIVER v1 (2026-08-19, plan `act-as-senior-cad-floofy-locket.md`)
 
 Capability + ship, chosen with the user over kernel continuation. Waves: W0 baseline + gate
 triage + the evidence hole · W1 ship lane (unsigned) · W2 section view (capped) · W3 project

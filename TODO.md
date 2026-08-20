@@ -10,6 +10,32 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### NOW — program status after session 22 (2026-08-20) and the next actions
+
+**COMPLETE this session, tip `9f03b72` at full L3:** WP1 (G1r · G2 · G3 · G4-sliver) · WP2 ·
+WP3 C1–C6 (`resultPolicyVersion: 3` end to end) · WP5 (exact tilted ToFace) · WP4
+(`AnalyzeEdgeOpRange`). Gate rows below, newest first. `HANDOFF.md` session 22 is the entry.
+
+- [ ] **WP6 small-caliber batch (NOT started — user paused the session before it):**
+      chamfer angle-distance mode (worker + SCHEMA §7.3 + FE chip; protocol-auditor first) ·
+      MirrorBody fuse UI exposure (drop the hard-coded `fuseWithOriginal:false`; manifest row +
+      browser lane) · evidence gaps (Shell multi-face proof, committed countersink browser
+      proof, circular-pattern partial-sweep in the Rust lane).
+- [ ] **G4 micro half:** needs a characterized dirty vendor STEP (one that forces ShapeFix
+      healing) through the census — USER can supply one; alternative is excluding the import
+      path from the bound. Until then `max_micro_edge_count` stays −1.
+- [ ] **Stale prose:** `docs/qa/modeling-operation-coverage.json:61` claims no browser flow
+      commits ToFace/ToNext — the toolbar ships `chip-end-toface` with a full commit path.
+      Correct the row at the next coverage pass.
+- [ ] **USER-RUN (predates this session):** the 19-row `docs/qa/MANUAL_RELEASE_GATES.md`
+      checklist against `/Applications/onecad.app`, § 4 autosave crash recovery above all.
+- [ ] **Linux `clean_build` dispatch** (§ WP0 below) — skipped by decision, still open.
+- **Flake ledger this session:** two unnamed single-test cargo drops (1304/1 then 1306/1,
+  full-suite-only, never reproduced, later runs teed); the named vitest drop is
+  `ModelToolController.wave2.test.ts` "editExtrudeFeature while already armed … (finding 10)"
+  (5011/1 once, 18/18 isolated, 5012/0 re-run). Tee every heavy run; the next occurrence has
+  a name to grep.
+
 ### Gate — WP4: AnalyzeEdgeOpRange, the measured fillet/chamfer range (2026-08-20) — LANDED
 
 The FE fillet radius had a 0.1 mm floor and NO upper bound; the only way to learn 6 mm doesn't
