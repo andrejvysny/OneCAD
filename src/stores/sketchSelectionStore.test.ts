@@ -4,7 +4,12 @@ import { sketchSelectionStore, sameSketchSel, type SketchSel } from "./sketchSel
 const S = sketchSelectionStore.getState;
 
 beforeEach(() => {
-  sketchSelectionStore.setState({ selected: [], hover: null, constraintHover: null });
+  sketchSelectionStore.setState({
+    selected: [],
+    hover: null,
+    constraintHover: null,
+    selectedConstraintId: null,
+  });
 });
 
 describe("sketchSelectionStore.set", () => {
@@ -63,15 +68,42 @@ describe("sketchSelectionStore.setHover / setConstraintHover", () => {
   });
 });
 
+describe("sketchSelectionStore.setSelectedConstraint (plan item 5b)", () => {
+  it("selects a constraint and CLEARS the entity selection in one write", () => {
+    S().set([{ entityId: "e1" }, { entityId: "e2" }]);
+    S().setSelectedConstraint("c1");
+    expect(S().selectedConstraintId).toBe("c1");
+    expect(S().selected).toEqual([]);
+  });
+
+  it("clearing the constraint leaves the entity selection alone", () => {
+    S().setSelectedConstraint("c1");
+    S().setSelectedConstraint(null);
+    expect(S().selectedConstraintId).toBeNull();
+  });
+
+  it("selecting an entity clears the constraint pick (set AND toggle)", () => {
+    S().setSelectedConstraint("c1");
+    S().set([{ entityId: "e1" }]);
+    expect(S().selectedConstraintId).toBeNull();
+
+    S().setSelectedConstraint("c2");
+    S().toggle({ entityId: "e9" });
+    expect(S().selectedConstraintId).toBeNull();
+  });
+});
+
 describe("sketchSelectionStore.clear", () => {
-  it("resets selected, hover, and constraintHover", () => {
+  it("resets selected, hover, constraintHover and selectedConstraintId", () => {
     S().set([{ entityId: "e1" }]);
     S().setHover({ entityId: "e2" });
     S().setConstraintHover("k1");
+    S().setSelectedConstraint("k2");
     S().clear();
     expect(S().selected).toEqual([]);
     expect(S().hover).toBeNull();
     expect(S().constraintHover).toBeNull();
+    expect(S().selectedConstraintId).toBeNull();
   });
 });
 

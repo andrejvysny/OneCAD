@@ -222,6 +222,47 @@ specified but not built here.
 - **W3 project-edges** — already its own wave; adopt Fusion's distinct-color convention
   for projected geometry when it lands.
 
+### Landed record (2026-08-20, waves 2–4 + adversarial round)
+
+Items #1 #2 #5 #6 #8 #9 #10(partial) #14 #16 LANDED, after an adversarial review
+(2 blockers + 6 majors) forced a redesign of #8 and #2's source and a gating pass on #5.
+Deviations from the spec above, now the record of what shipped:
+
+- **#2** — loop source is `closedLoop.findClosedLoops` + an explicit Circle/Ellipse pass
+  (NOT `mockRegions`; its one-loop limit made two disjoint profiles report "no region",
+  and it defeated the prod-build eviction of the mock kernel). Fills share the stroke's
+  tessellation, rebuild on zoom retess, are hidden during a drag and rebuilt at gesture
+  end. Nested loops fill independently (a donut's hole paints) — v1 limitation, noted.
+- **#5** — glyph badges are interactive ONLY in the select tool (mid-draw they stole the
+  pointer from the gesture); machine `Fixed` pins are always inert; dimensional chips are
+  always editable in every tool. Glyph badges stand off the entity by 10mm plane-space so
+  they stop covering the curve's own click corridor. RESIDUAL: the standoff scales with
+  zoom (plane-space); a screen-constant standoff needs `HtmlOverlayDriver` support.
+- **#8** — enforcement is DELTA-driven: only a constraint whose value changed in THIS
+  upsert is driven or refused. Drive: Radius/Diameter on CIRCLES only (arcs would detach
+  their stored start/end), Distance/H-/V-Distance on one weld-free line's own endpoints,
+  newly-created H/V exact projection. Refuse: an EDIT that can't be driven (revert + error
+  hint via `editConstraintValueNow`'s new reject branch). Accept-without-driving: a NEW
+  constraint that can't be driven — deliberately restores the pre-program accept behavior
+  there, because refusing creation broke the most common action (dimensioning a welded
+  rect edge; caught by `acceptance.spec.ts` on both engines). Unchanged constraints are
+  never re-litigated — drag staleness is tolerated (this kills the review's wedge and
+  drift blockers). RESIDUAL: a reject-path restore of an already-stale dimension paints
+  it red for one upsert (transient, self-clears). New R5 conflict rule: signed union-find
+  direction transitivity (H+V through Parallel/Perpendicular chains at any depth).
+- **#10** — landed: finish confirmation hint ("Finished <name> — N entities"), new-badge
+  mount flash, StatusBar error pulse (re-pulses on repeated identical errors via a hint
+  sequence). RESIDUAL: no near-action error pulse yet, and the Esc-ladder's 3rd-press
+  exit is still silent (cancel-vs-finish is indistinguishable at the mode-flip seam —
+  needs its own seam; A12 stays open).
+- **#16** — the origin pill is `?vpdebug`-only chrome (A11e overstated — correction), and
+  it now hides for the whole active session, not just armed gestures.
+- **#6** — keymap contract amended (documented in-file as a product change): ⇧H/⇧V/⇧C/⇧E/
+  ⇧P/⇧M. Perpendicular/Tangent excluded (no free mnemonic; ⇧T is Extend).
+- **A2 e2e proof**: `e2e/dimension-edit.spec.ts` — editing a committed chip drives real
+  geometry in the mock lane; `dimension-conflict.spec.ts` re-snapshots after the first
+  (now-driving) Distance, since its old pass depended on the identity-solve defect.
+
 ### Implementation waves (this session)
 
 - **Wave 1 (S items, parallel×2 sonnet):** #3, #4, #7, #11, #12–#17.

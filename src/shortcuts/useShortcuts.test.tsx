@@ -7,8 +7,9 @@ import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
+import { documentStore } from "@/stores/documentStore";
 import { planeFor } from "@/ipc/mockSketch";
-import type { SketchEntity } from "@/ipc/types";
+import type { SketchConstraint, SketchEntity } from "@/ipc/types";
 import { resetStores } from "@/test/resetStores";
 import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform";
 import {
@@ -20,7 +21,12 @@ import {
   type ToolId,
 } from "@/platform";
 import { ModelingScopes } from "@/modules/modeling/manifest";
-import { flushSketchMutations, redoSketch, undoSketch } from "@/tools/sketch/sketchService";
+import {
+  enqueueSketchMutation,
+  flushSketchMutations,
+  redoSketch,
+  undoSketch,
+} from "@/tools/sketch/sketchService";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 
@@ -161,6 +167,37 @@ describe("keymap resolveBinding", () => {
     expect(resolveBinding("f", true, "model")).toEqual({ type: "zoomFit" });
     expect(resolveBinding("r", true, "sketch")).toEqual({ type: "tool", tool: "centerRect" });
     expect(resolveBinding("?", true, "model")).toEqual({ type: "tool", tool: "measure" });
+  });
+
+  it("plan item 6: the six Shift+letter constraint chords resolve in sketch mode only", () => {
+    const bound = {
+      h: "Horizontal",
+      v: "Vertical",
+      c: "Coincident",
+      e: "Equal",
+      p: "Parallel",
+      m: "Midpoint",
+    } as const;
+    for (const [key, constraint] of Object.entries(bound)) {
+      expect(resolveBinding(key, true, "sketch")).toEqual({ type: "applyConstraint", constraint });
+    }
+    // Not `tool` actions, so the cross-mode fallback cannot leak one into model
+    // mode. ⇧H there still means Hole; the other five stay unbound.
+    expect(resolveBinding("h", true, "model")).toEqual({ type: "tool", tool: "hole" });
+    for (const key of ["v", "c", "e", "p", "m"]) {
+      expect(resolveBinding(key, true, "model")).toBeNull();
+    }
+  });
+
+  it("plan item 6: the chords are exact-shift — the plain letters keep their tools", () => {
+    expect(resolveBinding("v", false, "sketch")).toEqual({ type: "tool", tool: "select" });
+    expect(resolveBinding("c", false, "sketch")).toEqual({ type: "tool", tool: "circle" });
+    expect(resolveBinding("p", false, "sketch")).toEqual({ type: "tool", tool: "point" });
+    expect(resolveBinding("m", false, "sketch")).toEqual({ type: "tool", tool: "mirror" });
+    // ⇧T stays Extend and ⇧R stays centerRect — Perpendicular/Tangent are
+    // deliberately unbound rather than displacing an existing tool chord.
+    expect(resolveBinding("t", true, "sketch")).toEqual({ type: "tool", tool: "extend" });
+    expect(resolveBinding("r", true, "sketch")).toEqual({ type: "tool", tool: "centerRect" });
   });
 });
 
@@ -425,6 +462,230 @@ describe("X — construction geometry", () => {
     });
     expect(flags()).toEqual([false]);
     expect(sketchStore.getState().constructionMode).toBe(false); // never fell back to the mode
+  });
+});
+
+// ── Plan item 6: Shift+letter constraint chords ───────────────────────────────
+
+describe("⇧-letter constraint chords", () => {
+  const twoLines: SketchEntity[] = [
+    { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] },
+    { id: "e2", type: "Line", p0: [0, 10], p1: [40, 12] },
+  ];
+
+  beforeEach(() => {
+    resetStores();
+    sketchSelectionStore.getState().clear();
+  });
+
+  function seed(): void {
+    act(() => {
+      toolStore.getState().setMode("sketch");
+      sketchStore.getState().setSession({
+        sketchId: "sk-c",
+        plane: planeFor("XY"),
+        entities: twoLines,
+        constraints: [],
+        dof: 8,
+        status: "UnderConstrained",
+      });
+    });
+  }
+
+  it("⇧P applies Parallel to a two-line selection", async () => {
+    render(<Harness />);
+    seed();
+    sketchSelectionStore.getState().set([{ entityId: "e1" }, { entityId: "e2" }]);
+
+    let ev!: KeyboardEvent;
+    await act(async () => {
+      ev = press("P", { shift: true });
+      await flushSketchMutations();
+    });
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sketchStore.getState().session!.constraints.map((c) => c.type)).toEqual(["Parallel"]);
+  });
+
+  it("⇧H applies Horizontal to a single selected line", async () => {
+    render(<Harness />);
+    seed();
+    sketchSelectionStore.getState().set([{ entityId: "e2" }]);
+
+    await act(async () => {
+      press("H", { shift: true });
+      await flushSketchMutations();
+    });
+
+    expect(sketchStore.getState().session!.constraints.map((c) => c.type)).toEqual(["Horizontal"]);
+  });
+
+  it("an INAPPLICABLE chord authors nothing and says what to select", async () => {
+    render(<Harness />);
+    seed();
+    // Coincident wants two POINTS; two line bodies are the wrong shape.
+    sketchSelectionStore.getState().set([{ entityId: "e1" }, { entityId: "e2" }]);
+
+    await act(async () => {
+      press("C", { shift: true });
+      await flushSketchMutations();
+    });
+
+    expect(sketchStore.getState().session!.constraints).toEqual([]);
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.message).toBe("Select two points");
+    expect(hint?.severity).toBe("info");
+    expect(hint?.sticky).toBe(false);
+  });
+
+  it("does nothing at all with no live session", () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    press("P", { shift: true });
+    expect(viewportStore.getState().statusHint).toBeNull();
+  });
+});
+
+// ── Plan item 5d: Delete removes the SELECTED CONSTRAINT ──────────────────────
+
+describe("Delete — constraint selection", () => {
+  const line = (id: string): SketchEntity => ({ id, type: "Line", p0: [0, 0], p1: [40, 0] });
+
+  beforeEach(() => {
+    resetStores();
+    sketchSelectionStore.getState().clear();
+  });
+
+  function seed(entities: SketchEntity[], constraints: SketchConstraint[]): void {
+    act(() => {
+      toolStore.getState().setMode("sketch");
+      sketchStore.getState().setSession({
+        sketchId: "sk-del",
+        plane: planeFor("XY"),
+        entities,
+        constraints,
+        dof: 4,
+        status: "UnderConstrained",
+      });
+    });
+  }
+
+  it("deletes the selected constraint and leaves the geometry alone", async () => {
+    render(<Harness />);
+    seed(
+      [line("e1"), line("e2")],
+      [
+        { id: "c1", type: "Horizontal", entities: ["e1"] },
+        { id: "c2", type: "Horizontal", entities: ["e2"] },
+      ],
+    );
+    sketchSelectionStore.getState().setSelectedConstraint("c1");
+
+    let ev!: KeyboardEvent;
+    await act(async () => {
+      ev = press("Delete");
+      await flushSketchMutations();
+    });
+
+    expect(ev.defaultPrevented).toBe(true); // swallowed — a constraint IS selected
+    const s = sketchStore.getState().session!;
+    expect(s.constraints.map((c) => c.id)).toEqual(["c2"]);
+    expect(s.entities.map((e) => e.id)).toEqual(["e1", "e2"]); // geometry untouched
+    expect(sketchSelectionStore.getState().selectedConstraintId).toBeNull();
+  });
+
+  it("REFUSES the machine Fixed pins on locked reference geometry", async () => {
+    render(<Harness />);
+    const locked: SketchEntity = { ...line("ref1"), referenceLocked: true };
+    seed([locked], [{ id: "pin", type: "Fixed", entities: ["ref1"] }]);
+    sketchSelectionStore.getState().setSelectedConstraint("pin");
+
+    await act(async () => {
+      press("Delete");
+      await flushSketchMutations();
+    });
+
+    // Same protection the inspector list gives it — the projection pins survive.
+    expect(sketchStore.getState().session!.constraints.map((c) => c.id)).toEqual(["pin"]);
+  });
+
+  it("Delete still falls through with neither an entity nor a constraint selected", () => {
+    render(<Harness />);
+    seed([line("e1")], []);
+    const ev = press("Delete");
+    expect(ev.defaultPrevented).toBe(false);
+  });
+});
+
+// ── Plan item 10a: finishing a sketch says so ─────────────────────────────────
+
+describe("finishSketch confirmation", () => {
+  beforeEach(() => resetStores());
+
+  function enterAndSeed(entityCount: number): void {
+    act(() => {
+      toolStore.getState().setMode("sketch");
+      viewportStore.setState({ activeSketchId: "sketch2" });
+      sketchStore.getState().setSession({
+        sketchId: "sketch2",
+        plane: planeFor("XY"),
+        entities: Array.from({ length: entityCount }, (_, i) => ({
+          id: `e${i}`,
+          type: "Line" as const,
+          p0: [0, 0] as [number, number],
+          p1: [40, 0] as [number, number],
+        })),
+        constraints: [],
+        dof: 4,
+        status: "UnderConstrained",
+      });
+    });
+  }
+
+  it("Enter names the sketch and how many entities it holds", async () => {
+    render(<Harness />);
+    enterAndSeed(3);
+    const name = documentStore.getState().sketches.sketch2.name;
+
+    await act(async () => {
+      press("Enter");
+      await flush();
+    });
+
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.message).toBe(`Finished ${name} — 3 entities`);
+    expect(hint?.severity).toBe("info");
+    expect(hint?.sticky).toBe(false); // auto-dismisses; not a tool prompt
+  });
+
+  it("singularizes a one-entity sketch", async () => {
+    render(<Harness />);
+    enterAndSeed(1);
+    await act(async () => {
+      press("Enter");
+      await flush();
+    });
+    expect(viewportStore.getState().statusHint?.message).toMatch(/— 1 entity$/);
+  });
+
+  it("never overwrites an error the finish itself raised", async () => {
+    render(<Harness />);
+    enterAndSeed(2);
+    // A mutation that fails while the queue drains leaves its own error hint;
+    // a cheerful confirmation on top of it would claim the edit landed.
+    void enqueueSketchMutation(async () => {
+      viewportStore.getState().setStatusHint("Sketch delete failed: boom", {
+        severity: "error",
+        sticky: true,
+      });
+    });
+
+    await act(async () => {
+      press("Enter");
+      await flush();
+    });
+
+    expect(viewportStore.getState().statusHint?.message).toBe("Sketch delete failed: boom");
   });
 });
 

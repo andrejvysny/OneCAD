@@ -11,6 +11,10 @@
  * The store is cleared on sketch enter/exit; a later WP wires pointer events to
  * populate it. ViewportRoot subscribes it into the engine (selected → recolor,
  * hover → hover material).
+ *
+ * It also carries the CONSTRAINT pick (`selectedConstraintId`, set by clicking a
+ * canvas badge) — same edit-session lifetime, and mutually exclusive with the
+ * entity selection so `Delete` always has exactly one referent.
  */
 import { createStore, useStore } from "zustand";
 import type { ConstraintPosition } from "@/ipc/types";
@@ -31,20 +35,29 @@ export interface SketchSelectionState {
   selected: SketchSel[];
   hover: SketchSel | null;
   constraintHover: string | null;
+  /**
+   * The constraint picked on canvas (its badge), or null. MUTUALLY EXCLUSIVE
+   * with `selected`: a constraint and an entity are two different things to
+   * act on, and `Delete` has to know which one the user means without guessing
+   * — so writing either side clears the other, in the SAME store write.
+   */
+  selectedConstraintId: string | null;
   set(sel: SketchSel[]): void;
   toggle(sel: SketchSel): void;
   clear(): void;
   setHover(sel: SketchSel | null): void;
   setConstraintHover(id: string | null): void;
+  setSelectedConstraint(id: string | null): void;
 }
 
 export const sketchSelectionStore = createStore<SketchSelectionState>()((set) => ({
   selected: [],
   hover: null,
   constraintHover: null,
+  selectedConstraintId: null,
 
   set(sel) {
-    set({ selected: sel });
+    set({ selected: sel, selectedConstraintId: null });
   },
 
   toggle(sel) {
@@ -54,13 +67,14 @@ export const sketchSelectionStore = createStore<SketchSelectionState>()((set) =>
         selected: has
           ? s.selected.filter((r) => !sameSketchSel(r, sel))
           : [...s.selected, sel],
+        selectedConstraintId: null,
       };
     });
   },
 
   // Full reset — used on sketch enter/exit to drop stale edit-session state.
   clear() {
-    set({ selected: [], hover: null, constraintHover: null });
+    set({ selected: [], hover: null, constraintHover: null, selectedConstraintId: null });
   },
 
   setHover(sel) {
@@ -69,6 +83,12 @@ export const sketchSelectionStore = createStore<SketchSelectionState>()((set) =>
 
   setConstraintHover(id) {
     set({ constraintHover: id });
+  },
+
+  setSelectedConstraint(id) {
+    // One write, so a badge click cannot be observed mid-way with both an
+    // entity selection and a constraint selection live.
+    set(id === null ? { selectedConstraintId: null } : { selectedConstraintId: id, selected: [] });
   },
 }));
 

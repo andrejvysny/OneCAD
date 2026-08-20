@@ -32,6 +32,7 @@ export function StatusBar() {
   const cursor = useViewportStore((s) => s.cursor);
   const cursorPlaneUV = useViewportStore((s) => s.cursorPlaneUV);
   const statusHint = useViewportStore((s) => s.statusHint);
+  const statusHintSeq = useViewportStore((s) => s.statusHintSeq);
   const workerState = useWorkerStore((s) => s.state);
   // H7b: > 0 while a regen job is out (real lane: regen-started/finished; mock:
   // the same transitions around its synchronous apply).
@@ -79,7 +80,21 @@ export function StatusBar() {
       {statusHint && (
         <>
           <span aria-hidden="true" className="h-[14px] w-px bg-border" />
-          <span className={statusHint.severity === "error" ? "text-traffic-close" : "text-ink-5"}>
+          {/* Keyed by MESSAGE + SEQ, so a new error remounts this node and its
+              one-shot CSS pulse plays again (audit A10: an error used only to
+              recolor text in the far corner, which is easy to miss) — the seq
+              half is what makes a REPEATED identical error re-pulse too, since
+              a same-message remount would otherwise reuse the node and stay
+              still. The pulse is inert under prefers-reduced-motion. */}
+          <span
+            key={`${statusHint.message}:${statusHintSeq}`}
+            data-testid="status-hint"
+            className={cn(
+              statusHint.severity === "error"
+                ? "hint-error-pulse text-traffic-close"
+                : "text-ink-5",
+            )}
+          >
             {statusHint.message}
           </span>
         </>

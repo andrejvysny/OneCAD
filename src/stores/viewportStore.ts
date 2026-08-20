@@ -102,6 +102,8 @@ export interface ViewportState {
   dofBadge: number | null;
   /** Status-bar hint (tool prompt, error, or transient confirmation). */
   statusHint: StatusHint | null;
+  /** Bumped every `setStatusHint` — lets a REPEATED message re-key its consumer. */
+  statusHintSeq: number;
   /** Finish-sketch → auto-arm extrude handoff: the sketch just finished (F-WP7). */
   pendingExtrudeSketch: string | null;
   /**
@@ -187,6 +189,7 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
   cursorPlaneUV: { u: 0, v: 0 },
   dofBadge: null,
   statusHint: null,
+  statusHintSeq: 0,
   pendingExtrudeSketch: null,
   isolatedBodyIds: null,
   geometryPending: false,
@@ -227,7 +230,7 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
     const token = ++hintToken;
     cancelDismiss();
     if (message === null) {
-      set({ statusHint: null });
+      set({ statusHint: null, statusHintSeq: token });
       return;
     }
     const severity = opts?.severity ?? "info";
@@ -236,7 +239,7 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
     // through — grep tag `hint` to reconstruct what the UI told them, and when.
     // A CLEAR (message === null) is silent: it carries no information.
     log(severity === "error" ? "warn" : "debug", "hint", message, { severity, sticky });
-    set({ statusHint: { message, severity, sticky } });
+    set({ statusHint: { message, severity, sticky }, statusHintSeq: token });
     if (!sticky) {
       dismissTimer = setTimeout(() => {
         dismissTimer = null;

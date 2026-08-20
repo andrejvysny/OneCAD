@@ -14,7 +14,9 @@
  *   ├── HemisphereLight + key/fill DirectionalLights (camera-relative rig)
  *   ├── GridPlane            (world XY, Z=0)
  *   ├── bodiesRoot           (mesh ingestion — F-WP5)
- *   ├── sketchRoot           (sketch entities — later WP)
+ *   ├── sketchRoot           (sketch entities)
+ *   │   ├── staticSketchRoot   (SketchStaticLayer — every document sketch)
+ *   │   └── activeSketchRoot   (the live SketchObject of the open session)
  *   └── interactionRoot      (previews / gizmos — later WP)
  */
 import * as THREE from "three";
@@ -265,7 +267,21 @@ export class ViewportEngine {
   private triad: OriginTriad | null = null;
   private readonly overlayDriver = new HtmlOverlayDriver();
   readonly bodiesRoot = new THREE.Group();
+  /**
+   * All sketch presence, split in two (audit item #9 — the §10.5 deferral):
+   *
+   * - `staticSketchRoot` — `SketchStaticLayer`, i.e. every sketch the document
+   *   has. This is what the Layers → Sketches filter targets, so hiding sketches
+   *   mid-edit hides the OTHERS and never the one being drawn.
+   * - `activeSketchRoot` — the live `SketchObject` of the open session.
+   *
+   * `sketchRoot` stays as their common parent: it is the scene child, it keeps
+   * "all sketch content" addressable in one place, and the two sub-roots let the
+   * static half be filtered/de-emphasised independently of the active half.
+   */
   readonly sketchRoot = new THREE.Group();
+  readonly staticSketchRoot = new THREE.Group();
+  readonly activeSketchRoot = new THREE.Group();
   readonly interactionRoot = new THREE.Group();
   readonly previewRoot = new THREE.Group(); // L2 preview body (lit like a real body)
   // Camera-relative studio rig (see lightRig.ts) + the IBL it sits on top of.
@@ -605,6 +621,9 @@ export class ViewportEngine {
 
     this.bodiesRoot.name = "bodiesRoot";
     this.sketchRoot.name = "sketchRoot";
+    this.staticSketchRoot.name = "staticSketchRoot";
+    this.activeSketchRoot.name = "activeSketchRoot";
+    this.sketchRoot.add(this.staticSketchRoot, this.activeSketchRoot);
     this.interactionRoot.name = "interactionRoot";
     this.previewRoot.name = "previewRoot";
     this.scene.add(this.bodiesRoot, this.sketchRoot, this.interactionRoot, this.previewRoot);
@@ -664,7 +683,36 @@ export class ViewportEngine {
     label.style.color = "var(--color-tooltip-text)";
     label.style.pointerEvents = "none";
     overlayEl.appendChild(label);
+    this.debugOriginEl = label;
+    this.debugOriginShown = true;
     this.overlayDriver.register("__debug_origin", label, new THREE.Vector3(0, 0, 0));
+  }
+
+  /** The `?vpdebug` "origin" pill, and whether it is currently registered. */
+  private debugOriginEl: HTMLElement | null = null;
+  private debugOriginShown = false;
+
+  /**
+   * Show/hide the debug origin pill (audit item #16). It is anchored at the
+   * world origin, which in sketch mode is exactly where the user draws — the
+   * black chip sat permanently on the sketch origin area.
+   *
+   * UNREGISTERING is the mechanism, not a style flag: `HtmlOverlayDriver.update`
+   * writes `display = ""` to every registered visible item on every frame, so a
+   * `display: none` alone would be undone by the next frame.
+   */
+  private setDebugOriginVisible(visible: boolean): void {
+    const el = this.debugOriginEl;
+    if (!el || visible === this.debugOriginShown) return;
+    this.debugOriginShown = visible;
+    if (visible) {
+      el.style.display = "";
+      this.overlayDriver.register("__debug_origin", el, new THREE.Vector3(0, 0, 0));
+    } else {
+      this.overlayDriver.unregister("__debug_origin");
+      el.style.display = "none";
+    }
+    this.invalidate();
   }
 
   // ---- Render-on-demand ----
@@ -973,13 +1021,18 @@ export class ViewportEngine {
    * the way.
    *
    * `contributions` covers in-scene contributions as a group (datums today).
+   *
+   * "sketches" targets `staticSketchRoot`, NOT the whole `sketchRoot` (audit
+   * item #9): the filter exists to get OTHER sketches out of the way, and
+   * hiding the one the user is currently drawing in would be a filter that
+   * deletes the work in progress from the screen.
    */
   setLayerVisible(layer: "bodies" | "sketches" | "contributions", visible: boolean): void {
     const root =
       layer === "bodies"
         ? this.bodiesRoot
         : layer === "sketches"
-          ? this.sketchRoot
+          ? this.staticSketchRoot
           : this.contributionsRoot;
     if (root.visible === visible) return;
     root.visible = visible;
@@ -1120,7 +1173,7 @@ export class ViewportEngine {
   ): void {
     if (this.disposed) return;
     if (!this.sketch) {
-      this.sketch = new SketchObject({ sketchRoot: this.sketchRoot, invalidate: () => this.invalidate() });
+      this.sketch = new SketchObject({ sketchRoot: this.activeSketchRoot, invalidate: () => this.invalidate() });
     }
     if (!this.snapIndicator && this.overlayEl) {
       this.snapIndicator = new SnapIndicator({
@@ -1133,6 +1186,10 @@ export class ViewportEngine {
     this.sketchPlane = plane;
     this.sketch.setSession(plane, entities, status, constraints);
     this.snapIndicator?.setPlane(plane);
+    // Every OTHER sketch steps back while this one is edited (audit item #9),
+    // and the debug origin pill stops sitting on the sketch origin (item #16).
+    this.sketchStatic?.setSessionActive(true);
+    this.setDebugOriginVisible(false);
     // The sketch grid inherits the STORED preference before the first frame,
     // and the world grid steps aside for it (SNAP §10.4).
     this.applyGridVisibility();
@@ -1149,17 +1206,25 @@ export class ViewportEngine {
     this.invalidate();
   }
 
-  /** Refresh the committed sketch geometry after a solve/commit. `constraints`
-   *  omitted ⇒ dimension lines keep whatever they last had (drag-preview
-   *  refreshes, which never edit constraints). */
+  /**
+   * Refresh the committed sketch geometry after a solve/commit. `constraints`
+   * omitted ⇒ dimension lines keep whatever they last had (drag-preview
+   * refreshes, which never edit constraints).
+   *
+   * `transient: true` marks a DRAG-FREQUENCY refresh (one per rAF) — the live
+   * closure fills hide instead of being re-triangulated per frame, and the
+   * gesture-end update (which must be non-transient) brings them back. See
+   * `SketchObject.setSession`.
+   */
   updateSketchSession(
     plane: SketchPlane,
     entities: SketchEntity[],
     status: SketchSolveStatus,
     constraints?: SketchConstraint[],
+    opts?: { transient?: boolean },
   ): void {
     this.sketchPlane = plane;
-    this.sketch?.setSession(plane, entities, status, constraints);
+    this.sketch?.setSession(plane, entities, status, constraints, opts);
     // A committed edit invalidates any hover-time doomed-piece ghost (it was drawn
     // against the pre-edit geometry) — clear it so it never lingers stale.
     this.sketch?.setTrimGhost(null);
@@ -1359,6 +1424,8 @@ export class ViewportEngine {
   exitSketch(): void {
     this.sketch?.dispose();
     this.sketch = null;
+    this.sketchStatic?.setSessionActive(false);
+    this.setDebugOriginVisible(true);
     // Hand the grid back to the world plane at the preference the user left it
     // at — sketch mode borrowed the surface, it did not change the setting.
     this.applyGridVisibility();
@@ -1981,9 +2048,12 @@ export class ViewportEngine {
   getSketchStaticLayer(): SketchStaticLayer {
     if (!this.sketchStatic) {
       this.sketchStatic = new SketchStaticLayer({
-        sketchRoot: this.sketchRoot,
+        sketchRoot: this.staticSketchRoot,
         invalidate: () => this.invalidate(),
       });
+      // The layer is lazy, so it can be born mid-session (a document loaded
+      // while a sketch is open) and would otherwise start at full emphasis.
+      this.sketchStatic.setSessionActive(this.sketch !== null);
     }
     return this.sketchStatic;
   }
@@ -2143,6 +2213,9 @@ export class ViewportEngine {
     this.snapIndicator = null;
     this.ghostEl?.remove();
     this.ghostEl = null;
+    this.debugOriginEl?.remove();
+    this.debugOriginEl = null;
+    this.debugOriginShown = false;
     this.chipLayerEl?.remove();
     this.chipLayerEl = null;
     this.overlayEl = null;

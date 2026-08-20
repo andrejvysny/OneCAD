@@ -20,6 +20,7 @@ import { createClient } from "@/ipc/client";
 import { applyConstraint } from "@/tools/sketch/sketchService";
 import type { SketchConstraintType } from "@/ipc/types";
 import type { ApplicableConstraint } from "@/tools/sketch/constraintApplicability";
+import { constraintShortcutLabel } from "@/modules/modeling/bindings";
 import { useApplicableConstraints } from "./useApplicableConstraints";
 import {
   CONSTRAINT_PRESENTATION,
@@ -60,6 +61,10 @@ export function ConstraintMenu() {
     const applicable = byType.get(type);
     const enabled = applicable !== undefined;
     const { icon, label } = CONSTRAINT_PRESENTATION[type];
+    // Right-aligned chord hint for the six kinds that have one (plan item 6),
+    // read from the binding table so the menu can never advertise a key that
+    // is not bound.
+    const chord = constraintShortcutLabel(type);
     return (
       <button
         key={type}
@@ -79,6 +84,11 @@ export function ConstraintMenu() {
       >
         <Icon name={icon} size={15} strokeWidth={1.7} className="shrink-0" />
         <span className="truncate text-[11.5px]">{label}</span>
+        {chord && (
+          <kbd aria-hidden="true" className="ml-auto shrink-0 font-sans text-[10px] text-ink-6">
+            {chord}
+          </kbd>
+        )}
       </button>
     );
   };

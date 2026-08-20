@@ -3259,7 +3259,10 @@ export class SketchController {
         solvedPositions: this.dragAccum,
         solvedCurves: this.dragCurves,
       });
-      this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus);
+      // TRANSIENT: this runs once per rAF for the whole drag, so the engine must
+      // not re-triangulate the live closure fills here. `finishDrag`'s
+      // non-transient update rebuilds them once, at the committed geometry.
+      this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus, undefined, { transient: true });
     }
   }
 

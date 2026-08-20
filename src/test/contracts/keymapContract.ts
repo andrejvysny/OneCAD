@@ -2,6 +2,14 @@
  * FROZEN keyboard contract — a literal copy of the three binding tables and the
  * cross-mode opt-out set as shipped before the Platform refactor.
  * See ./README.md before editing.
+ *
+ * AMENDED 2026-08-20 (Sketch UX plan item 6, a deliberate PRODUCT change, not a
+ * probe fix): the sketch table gains six `applyConstraint` chords —
+ * ⇧H/⇧V/⇧C/⇧E/⇧P/⇧M — following Shapr3D's Shift+letter constraint convention.
+ * Perpendicular and Tangent are deliberately excluded (⇧T is already Extend and
+ * neither has a free mnemonic). Nothing existing moved: the only overlap is ⇧H,
+ * which sketch mode previously reached only through the cross-mode fallback to
+ * the model Hole tool; model ⇧H = Hole is unchanged.
  */
 import type { KeyBinding } from "@/shortcuts/keymap";
 import type { Tool } from "@/stores/toolStore";
@@ -47,6 +55,12 @@ export const SKETCH_KEYS_CONTRACT: readonly KeyBinding[] = [
   { key: "x", action: { type: "toggleConstruction" } },
   { key: "Delete", action: { type: "deleteSketchSelection" } },
   { key: "Backspace", action: { type: "deleteSketchSelection" } },
+  { key: "h", shift: true, action: { type: "applyConstraint", constraint: "Horizontal" } },
+  { key: "v", shift: true, action: { type: "applyConstraint", constraint: "Vertical" } },
+  { key: "c", shift: true, action: { type: "applyConstraint", constraint: "Coincident" } },
+  { key: "e", shift: true, action: { type: "applyConstraint", constraint: "Equal" } },
+  { key: "p", shift: true, action: { type: "applyConstraint", constraint: "Parallel" } },
+  { key: "m", shift: true, action: { type: "applyConstraint", constraint: "Midpoint" } },
 ];
 
 export const GLOBAL_KEYS_CONTRACT: readonly KeyBinding[] = [

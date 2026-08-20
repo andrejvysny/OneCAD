@@ -26,12 +26,25 @@ wire-needing items recorded as deferred-wire in the doc, NOT built here.
       **298 files / 5008 passed / 78 skipped** · targeted e2e chromium **24/24** (snap trio,
       constraint-apply, line, rect, point, live-dim-rect, datum-sketch, auto-mode) · hex gate
       empty.
-- [ ] Wave 2 (viewport, adversarial-reviewed): #1 active-sketch draw priority over coplanar
-      faces · #2 live closed-region fill · #9 staticSketchRoot split (§10.5 deferral) ·
-      #16 origin pill.
-- [ ] Wave 3 (interaction, adversarial-reviewed): #5 interactive badges · #6 constraint
-      shortcuts (keymap contract updated as feature) · #10 refusal/success feedback.
-- [ ] Wave 4: #8 mock-lane dimension honesty (bounded, no solver).
+- [x] **Waves 2–4 GATE (2026-08-20)** — #1 x-ray active sketch (depthTest:false on all 12
+      line channels + points + fills; ladder rule 3 documents the deliberate reversal;
+      negative-checked) · #2 live closed-region fill (closedLoop + circle/ellipse pass,
+      drag-transient hide, prod eviction of mock kernel restored) · #9 static/active root
+      split + 0.35 de-emphasis (§10.5 deferral closed) · #16 vpdebug origin pill · #5
+      interactive badges (select-tool-gated glyphs, inert machine pins, 10mm standoff,
+      Delete routes constraint-first) · #6 ⇧H/⇧V/⇧C/⇧E/⇧P/⇧M (keymap contract amended
+      in-file — deliberate product change per contract README policy; this row is the
+      TODO.md record it requires) · #10 partial (finish hint, badge mount flash, StatusBar
+      error pulse w/ re-pulse; near-action pulse + silent-Esc-exit stay open, doc §Landed
+      record) · #14 ch-width chips · #8 mock-lane honesty REDESIGNED delta-driven after
+      adversarial review (2 BLOCKER + 6 MAJOR, all closed or recorded as residuals in the
+      doc): drive circles/weld-free lines, refuse only undrivable EDITS, accept undrivable
+      creations, R5 signed-union-find direction conflicts; orchestrator closed the
+      `editConstraintValueNow` ignore-status gap (revert + error hint). Adversarial full
+      e2e mid-review: 466 passed / 2 failed (acceptance ×2 = the B1 blocker, since fixed).
+      Gate (orchestrator-run, suites alone): tsc clean · vitest **300 files / 5119 passed /
+      78 skipped** · targeted e2e chromium **33/33** (incl. acceptance, dimension-edit,
+      dimension-conflict) · hex gate empty. R3 full e2e both projects: next row.
 - [ ] Gate R2 per wave (tsc + full vitest + targeted sketch e2e + hex), R3 final (full e2e).
 - [ ] OWED USER-RUN at close: Tauri-app smoke of sketch flows (draw on face of real body,
       dim edit drives geometry via real solver, conflict reject shows named loser).

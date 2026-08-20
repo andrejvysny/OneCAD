@@ -15,6 +15,7 @@ import { useViewportEngine } from "@/viewport/engineBridge";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { createClient } from "@/ipc/client";
 import { applyConstraint, deleteConstraints } from "@/tools/sketch/sketchService";
+import { constraintShortcutLabel } from "@/modules/modeling/bindings";
 import { useApplicableConstraints } from "./useApplicableConstraints";
 import { CONSTRAINT_PRESENTATION } from "./constraintCatalog";
 
@@ -79,12 +80,15 @@ export function ConstraintContextChips() {
             .filter((a) => !(existingFixed && a.type === "Fixed"))
             .map((a, i) => {
               const { icon, label } = CONSTRAINT_PRESENTATION[a.type];
+              // The chip is icon-only, so its tooltip is the only place the
+              // chord can be discovered from the canvas (plan item 6).
+              const chord = constraintShortcutLabel(a.type);
               return (
                 <button
                   key={`${a.type}-${i}`}
                   type="button"
                   aria-label={label}
-                  title={label}
+                  title={chord ? `${label} (${chord})` : label}
                   onClick={() => {
                     if (clientRef.current) void applyConstraint(clientRef.current, a);
                   }}

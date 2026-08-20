@@ -5,9 +5,10 @@
  * The real solver lane is LIVE: `tauriClient` dispatches sketch verbs
  * (enter/upsert/finish/BeginGesture/SolveDrag/EndGesture, SCHEMA §7.4) as real
  * Tauri commands through Rust → the worker's PlaneGCS actor, and does NOT route
- * them through this module. The sketch functions here (identity-echo solve, DOF
- * heuristic + deterministic conflict detection via mockSketch.solveSketch) serve
- * ONLY the mock client — browser demos, vitest, and the Playwright mock lane.
+ * them through this module. The sketch functions here (DOF heuristic +
+ * deterministic conflict detection via mockSketch.solveSketch, PLUS bounded
+ * dimensional driving via mockEnforce.ts — see `sketchUpsert` below) serve ONLY
+ * the mock client — browser demos, vitest, and the Playwright mock lane.
  *
  * What IS still shared by both clients:
  *   - the op PREVIEW lane (beginPreview/updatePreview/endPreview — shared
@@ -51,12 +52,15 @@ import type {
   SketchPlane,
   SketchRegion,
   SketchSession,
+  SketchSolveStatus,
   SketchUpsertResult,
   Unsubscribe,
 } from "./types";
 import { makeExtrudeBodyMesh, placeComponentGhostMesh } from "./mockMeshes";
 import { lookupMockFace, mockProjectedContent } from "./mockFaceGeometry";
-import { planeFor, solveSketch } from "./mockSketch";
+import { planeFor, solveDof, solveSketch } from "./mockSketch";
+import { detectConflicts } from "./mockConflicts";
+import { enforceDriving } from "./mockEnforce";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
 import { buildPreviewOp, supportsPreview, type PreviewSessionState } from "./previewOps";
 import { mintRecordId } from "./tauriCommandMap";
@@ -555,11 +559,41 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       // Near-synchronous: drawing must feel instant; the DOF badge refreshes live.
       await wait(0);
       const prev = sketchSessions.get(sketchId);
-      const { dof, status, conflicting } = solveSketch(entities, constraints);
+
+      // R1–R5 (mockConflicts.ts) first: a genuinely contradictory constraint set
+      // is reported as-is, geometry untouched — enforcement never runs on top of
+      // a sketch already known to be unsolvable (mockEnforce.ts module header).
+      const ruleConflicting = detectConflicts(entities, constraints);
+      let finalEntities = entities;
+      let solvedPositions: Record<string, [number, number]> = {};
+      let solvedCurves: Record<string, CurveParams> = {};
+      let conflicting = ruleConflicting;
+      if (ruleConflicting.length === 0) {
+        // Bounded dimensional DRIVING (mockEnforce.ts), scoped to the DELTA
+        // against the session's previous constraint list: Radius/Diameter on a
+        // circle, Distance/H-/V-Distance on one line's own endpoints, plus an
+        // exact projection for a newly created H/V. A constraint nobody just
+        // created or edited is never re-evaluated — enforcing the whole set on
+        // every upsert refused untouched constraints and drifted geometry (see
+        // that module's header). An EDITED value that could NOT be driven is
+        // reported the way R1–R5 report a clash (`status: "Conflicting"` + the
+        // constraint's own id in `conflicting`), so a caller that implements the
+        // reject/restore round-trip (`editConstraintValueNow`) reverts it
+        // instead of silently lying; a CREATED one is accepted, geometry
+        // unmoved, for the real solver lane to reconcile.
+        const enforced = enforceDriving(entities, constraints, prev?.constraints ?? []);
+        finalEntities = enforced.entities;
+        solvedPositions = enforced.solvedPositions;
+        solvedCurves = enforced.solvedCurves;
+        if (enforced.refusedIds.length > 0) conflicting = enforced.refusedIds;
+      }
+
+      const { dof, status: dofStatus } = solveDof(finalEntities, constraints);
+      const status: SketchSolveStatus = conflicting.length > 0 ? "Conflicting" : dofStatus;
       const session: SketchSession = {
         sketchId,
         plane: prev?.plane ?? planeFor("XY"),
-        entities,
+        entities: finalEntities,
         constraints,
         dof,
         status,
@@ -569,16 +603,14 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       sketchPlanes.set(sketchId, session.plane);
       const rev = (sketchRevisions.get(sketchId) ?? 0) + 1;
       sketchRevisions.set(sketchId, rev);
-      // The local solver is an identity solve (echoes positions) — nothing moved,
-      // and with no propagation nothing reshapes a curve either.
       return {
         sketchId,
         sketchRevision: rev,
         dof,
         status,
         conflicting,
-        solvedPositions: {},
-        solvedCurves: {},
+        solvedPositions,
+        solvedCurves,
       };
     },
 

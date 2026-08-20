@@ -214,6 +214,73 @@ describe("ViewportEngine lifecycle", () => {
 });
 
 /*
+ * Sketch-root split (audit item #9 — the recorded §10.5 deferral) and the debug
+ * origin pill (item #16). Both hang off the one thing the engine already knows:
+ * whether a sketch session is open.
+ */
+describe("ViewportEngine sketch roots", () => {
+  const PLANE = {
+    kind: "custom" as const,
+    origin: [0, 0, 0] as [number, number, number],
+    xAxis: [1, 0, 0] as [number, number, number],
+    yAxis: [0, 1, 0] as [number, number, number],
+    normal: [0, 0, 1] as [number, number, number],
+  };
+
+  it("parents the static layer and the live session under SEPARATE sub-roots", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+
+    expect(engine.sketchRoot.children).toEqual([engine.staticSketchRoot, engine.activeSketchRoot]);
+    engine.getSketchStaticLayer().setSketch("s1", { plane: PLANE, entities: [], regions: [] });
+    expect(engine.staticSketchRoot.children.length).toBe(1);
+    expect(engine.activeSketchRoot.children.length).toBe(0);
+
+    engine.enterSketch(PLANE, [], "UnderConstrained");
+    expect(engine.activeSketchRoot.children.length).toBe(1);
+    engine.exitSketch();
+    expect(engine.activeSketchRoot.children.length).toBe(0);
+    engine.dispose();
+  });
+
+  it("Layers → Sketches hides the STATIC half only, never the sketch being drawn", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    engine.enterSketch(PLANE, [], "UnderConstrained");
+
+    engine.setLayerVisible("sketches", false);
+    expect(engine.staticSketchRoot.visible).toBe(false);
+    expect(engine.activeSketchRoot.visible).toBe(true);
+    expect(engine.sketchRoot.visible).toBe(true);
+
+    engine.setLayerVisible("sketches", true);
+    expect(engine.staticSketchRoot.visible).toBe(true);
+    engine.dispose();
+  });
+
+  it("hides the ?vpdebug origin pill while a session is open, restores it after", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, { debug: true });
+    const pill = overlay.querySelector("[data-vp-debug-label]") as HTMLElement;
+    expect(pill.textContent).toBe("origin");
+    const registered = engine.overlay.size;
+
+    engine.enterSketch(PLANE, [], "UnderConstrained");
+    expect(pill.style.display).toBe("none");
+    // Unregistered too — the driver rewrites `display` on every frame.
+    expect(engine.overlay.size).toBe(registered - 1);
+
+    engine.exitSketch();
+    expect(pill.style.display).toBe("");
+    expect(engine.overlay.size).toBe(registered);
+    engine.dispose();
+  });
+});
+
+/*
  * Zoom-to-selection bounds (W3). The invisible-body filter is the load-bearing
  * part: `Box3.setFromObject` recurses through `children` WITHOUT consulting
  * `visible`, so a hidden body would silently widen the frame.

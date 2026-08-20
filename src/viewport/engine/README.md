@@ -49,9 +49,20 @@ uses; no raw `renderOrder` numbers appear anywhere else. Two hard rules:
    the depth buffer cannot layer them; only the ladder can. Fully-opaque-looking
    curves/points still set `transparent: true` (alpha 1) so they live in the
    same render list as the fills below them — an opaque curve would be painted
-   BEFORE every translucent fill and get tinted/stippled by it. Depth TEST stays
-   on everywhere, so solid bodies (opaque pass, depth-written, `polygonOffset`
-   pushes faces back) still occlude sketch content behind them.
+   BEFORE every translucent fill and get tinted/stippled by it.
+3. **Depth TEST is on for STATIC sketch content and OFF for the ACTIVE session**
+   (audit item #1). Static sketches keep the old rule: solid bodies (opaque
+   pass, depth-written, `polygonOffset` pushes faces back) occlude them. The
+   live `SketchObject` reverses it — in sketch mode the camera looks down the
+   plane normal, so a body between the eye and a coplanar plane hid the user's
+   very first stroke entirely. `depthTest: false` plus the transparent pass
+   (which runs after ALL opaque objects) paints it over bodies unconditionally.
+   **Accepted consequence: orbiting mid-session x-rays the active sketch through
+   solids** — standard CAD behaviour, and the price of the stroke existing on
+   screen at all. Picking is untouched: sketch hit-testing is plane math
+   (`sketchHitTest.ts`), not a raycast, and body picking reads neither
+   `renderOrder` nor `depthTest`. The plane TINT and the plane grid are
+   deliberately excluded — they are the surface, not the sketch.
 
 Consequences to preserve when adding a layer: pick a slot in `renderOrder.ts`,
 never write depth from coplanar-plane content, and never mix a `depthTest:
@@ -163,9 +174,19 @@ scene
 ├── HemisphereLight + key/fill DirectionalLights (camera-relative rig)
 ├── GridPlane           (world XY, Z=0)
 ├── bodiesRoot          (body face Mesh + fat edge LineSegments2 — F-WP5)
-├── sketchRoot          (sketch entities — later WP)
+├── sketchRoot          (all sketch presence)
+│   ├── staticSketchRoot  (SketchStaticLayer — every document sketch)
+│   └── activeSketchRoot  (the live SketchObject of the open session)
 └── interactionRoot     (hover/selected highlight meshes — F-WP5)
 ```
+
+**The sketch split is load-bearing** (audit item #9, the recorded §10.5
+deferral). `setLayerVisible("sketches")` targets `staticSketchRoot`, so the
+Layers filter hides the OTHER sketches and never the one being drawn, and
+`SketchStaticLayer.setSessionActive()` drops static region fills (hidden AND
+removed from its pick set — `intersectObjects` does not consult `visible`) and
+dims static ink while a session is open. `sketchRoot` survives as their common
+parent so "all sketch content" stays addressable in one place.
 
 ## HTML chips must stay off the value arrow (MC-R9)
 

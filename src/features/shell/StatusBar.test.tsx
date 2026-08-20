@@ -89,6 +89,30 @@ describe("StatusBar", () => {
     expect(info).not.toHaveClass("text-traffic-close");
   });
 
+  /*
+   * `key={statusHint.message}` alone never remounts a REPEATED identical error
+   * (React reuses the node when the key doesn't change), so the one-shot pulse
+   * only ever played once no matter how many times the same failure fired.
+   * `statusHintSeq` (viewportStore) bumps on every `setStatusHint` call, so the
+   * composite key remounts the node even when the message text is unchanged.
+   */
+  it("re-triggers the error pulse for the SAME message fired twice", () => {
+    renderStatusBar();
+
+    act(() =>
+      viewportStore.getState().setStatusHint("Extrude failed: boom", { severity: "error", sticky: true }),
+    );
+    const first = screen.getByTestId("status-hint");
+    expect(first).toHaveClass("hint-error-pulse");
+
+    act(() =>
+      viewportStore.getState().setStatusHint("Extrude failed: boom", { severity: "error", sticky: true }),
+    );
+    const second = screen.getByTestId("status-hint");
+    expect(second).toHaveClass("hint-error-pulse");
+    expect(second).not.toBe(first); // remounted, not reused — the animation replays
+  });
+
   it("toggles projection and dims FOV in ortho", async () => {
     const user = userEvent.setup();
     renderStatusBar();
