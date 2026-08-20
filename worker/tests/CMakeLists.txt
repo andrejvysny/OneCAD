@@ -214,6 +214,14 @@ foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterizat
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# WP3 C1: the ANALYTIC blend proof. A real fillet is Proved, a cylinder at the
+# wrong axis distance is Failed, and a B-spline that the production sampler
+# measures as a perfect constant-radius blend is Unknown — the refusal the
+# direct-modelling path needs before it may destroy a face.
+add_executable(test_blend_analytic test_blend_analytic.cpp)
+target_link_libraries(test_blend_analytic PRIVATE worker_core)
+add_test(NAME blend_analytic COMMAND test_blend_analytic)
+
 # --- OFFSET-FACE Phase 0: OCCT selective-offset go/no-go spike (pure OCCT,
 #     characterizes BRepOffset_MakeOffset per-face behavior before the op is
 #     built; see the plan's Phase-0 gate). ---
