@@ -52,6 +52,15 @@
 // the only `SetRunParallel` calls in the tree are the explicit `Standard_False`s
 // here, in `PrepareOffsetFace.cpp`, and the `determinism.parallel`-driven one in
 // `OpCommon::checked_boolean`).
+//
+// ── V3 (`resultPolicyVersion: 3`) — DirectModeler blend awareness (WP3-C5) ───
+// V2's closure is blind to blends, so pushing a SIDE face of a filleted box drags
+// the fillet and the opposite wall along and inflates R2 into R4 (see
+// `blend_aware_closure` below). V3 replaces the closure walk with a blend-aware one
+// and runs SUPPRESS → OFFSET → REBLEND, so the picked face moves and the corner
+// comes back at its original radius. The two versions are separate code paths on
+// purpose: V3 is a GEOMETRY CHANGE for the same stored record, so a V2 record keeps
+// executing V2 forever and re-authoring at V3 is an attributable user action.
 #pragma once
 
 #include <string>
@@ -68,6 +77,7 @@
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 
+#include "kernel/fillet/BlendReconstruction.h"
 #include "nlohmann/json.hpp"
 #include "ops/OpTypes.h"
 
@@ -165,6 +175,48 @@ ClosureResult tangent_closure(const TopoDS_Shape& body, const std::vector<int>& 
 // `max(Precision::Confusion(), BRep_Tool::MaxTolerance(shape, FACE|EDGE|VERTEX),
 // kBuildToleranceFloor)` — the named construction tolerance (never a bare literal).
 double build_tolerance(const TopoDS_Shape& shape);
+
+// --- V3 blend-aware classification (ops/OffsetFaceBlend.cpp) ----------------
+
+// One CERTIFIED blend the walk stopped at: `blend` has passed
+// `kernel::fillet::certify_blend`'s layers 1-3, so it is an exact `GeomAbs_Cylinder`
+// with two plane-or-cylinder supports, an analytic tangency proof, a known convexity
+// and two equal-length straight boundary edges.
+struct ClosureBlend {
+    int ordinal = 0;  // 1-based face ordinal in the CLASSIFIED body
+    kernel::fillet::RecognizedBlend blend;
+};
+
+// `tangent_closure`'s BFS, except a certified blend whose two supports include the
+// face the walk entered from is recorded in `blends` and NOT TRAVERSED THROUGH.
+// The three sets are disjoint and, together, are exactly the full G1 closure of
+// `seed_ordinals`:
+//
+//   moving  C_op — the design faces the offset moves (always includes the seeds)
+//   blends  B    — suppressed before the offset and rebuilt after it
+//   fixed   F    — reachable only THROUGH a blend; held still, which is the whole
+//                  point of V3 and the thing V2 cannot express
+//
+// FAIL-CLOSED BY NAME. A G1 neighbour the sampled recognizer calls a blend but the
+// proof stack refuses is never quietly treated as a design face — the walk stops
+// with the condition's own code, because "offset it anyway" is precisely V2's
+// destructive behaviour. `code` is empty only for the two structural walk failures
+// (non-manifold / unusable seed), which the executor reports in V2's wording.
+struct BlendAwareClosure {
+    bool ok = false;
+    std::string code;     // OFFSET_FACE_* refusal code; empty ⇒ plain OP_FAILED
+    std::string message;  // measured detail, always populated on a refusal
+    std::vector<int> moving;
+    std::vector<ClosureBlend> blends;
+    std::vector<int> fixed;
+
+    // moving ⊎ blends ⊎ fixed, ascending. The executor requires this to equal the
+    // stored operative set EXACTLY, in both directions.
+    std::vector<int> ordinals() const;
+};
+
+BlendAwareClosure blend_aware_closure(const TopoDS_Shape& body,
+                                      const std::vector<int>& seed_ordinals);
 
 // "f:N" for a 1-based face ordinal.
 std::string face_topokey(int ordinal);

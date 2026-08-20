@@ -58,6 +58,7 @@
 
 #include "kernel/fillet/AnalyticBlend.h"
 #include "kernel/fillet/BlendEvidence.h"
+#include "kernel/fillet/BlendRecognizer.h"
 
 namespace onecad::kernel::fillet {
 
@@ -95,6 +96,21 @@ struct BlendCertification {
   // The raised-budget measurement taken on the ORIGINAL face, kept so a caller
   // can report what the refusal measured.
   BlendEvidence evidence;
+  // The SAMPLED recognizer's verdict, published as the enum rather than left to be
+  // inferred from `reason`'s `BLEND_NOT_RECOGNIZED` prefix. The three values are NOT
+  // interchangeable to a caller that must decide what to do with the face:
+  //
+  //   Recognized  the sampled layer agrees it is a blend (later layers may still
+  //               refuse it, in which case `ok` is false with a later code)
+  //   NotBlend    MEASURED not a blend — non-constant section radius, or not G1
+  //               tangent to its supports
+  //   Ambiguous   CANNOT TELL — more than two G1 supports (every vertex-patch
+  //               region of a fully-rounded body), an unmeasurable junction, or
+  //               too little trimmed-domain evidence
+  //
+  // Collapsing `Ambiguous` into `NotBlend` would let a caller claim a face was
+  // proven ordinary when the recognizer only declined to answer.
+  BlendRecognitionStatus recognition_status = BlendRecognitionStatus::NotBlend;
 };
 
 // Layers 1-3 for ONE face of `body`. Runs `recognize_blend_at` (sampled

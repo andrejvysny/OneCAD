@@ -42,6 +42,7 @@
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 
+#include "elementmap/ComposedHistory.h"
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
 #include "kernel/validation/GeometryPrecision.h"
@@ -334,6 +335,9 @@ namespace of = offsetface;
 
 enum class DistanceType { Offset, Total, Radius, Diameter };
 constexpr int kResultPolicyVersion2 = 2;
+// WP3-C5. A SEPARATE EXECUTION PATH, never a migration: V3 answers the same stored
+// record with different geometry, so a V2 record must keep executing V2 forever.
+constexpr int kResultPolicyVersion3 = 3;
 
 bool parse_distance_type(const std::string& s, DistanceType& out) {
     if (s.empty() || s == "Offset") { out = DistanceType::Offset; return true; }
@@ -711,6 +715,492 @@ std::string join_keys(const std::vector<std::string>& keys) {
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// V3 (`resultPolicyVersion: 3`) — suppress → offset → reblend
+//
+// EVERYTHING BELOW IS V3-ONLY. The V2 build sequence above is spike-frozen and is
+// deliberately not refactored into a shared helper: a V2 record's geometry is
+// frozen, so the safest possible diff for it is NO diff. The duplication here is
+// therefore intentional, and it is bounded — the semantic postconditions
+// (`check_semantics`), the closure walk, the distance planning and the publication
+// gate are all shared, because those are the parts that must never drift.
+// ---------------------------------------------------------------------------
+namespace kf = onecad::kernel::fillet;
+
+// A refusal from one of the three kernel stages, in the taxonomy §7.3 uses:
+// OP_FAILED at the top level with the fine-grained code on `diagnostics[]`. The one
+// exception is a refusal that ORIGINATES in a `PublicationDecision`, which keeps its
+// own GEOMETRY_INVALID + `reasonCode` shape instead of being re-wrapped.
+struct StageRefusal {
+    std::string code;
+    std::string message;
+    std::string stage;
+    json evidence = json::object();
+    bool publication = false;
+    std::string reason_code;
+};
+
+// `BlendReconstruction`'s reasons are "CODE: measured detail". Split them so the code
+// rides `diagnostics[].code` under the op's own prefix and the module's measurement
+// survives verbatim in the message — the refusal has to say what it measured, not
+// just that it refused.
+std::pair<std::string, std::string> split_reason(const std::string& reason) {
+    const std::size_t colon = reason.find(':');
+    if (colon == std::string::npos) return {reason, std::string()};
+    std::string detail = reason.substr(colon + 1);
+    if (!detail.empty() && detail.front() == ' ') detail.erase(0, 1);
+    return {reason.substr(0, colon), std::move(detail)};
+}
+
+StageRefusal reconstruction_refusal(const std::string& reason, const char* stage) {
+    const auto [token, detail] = split_reason(reason);
+    StageRefusal out;
+    out.stage = stage;
+    if (token == "SUPPRESSION_NOT_PUBLISHABLE") {
+        // The module folded a `PublicationDecision` into a string; unfold it so this
+        // refusal leaves through the same door every other publication refusal in the
+        // worker uses, rather than appearing twice in two taxonomies. The structured
+        // evidence is not recoverable from the string and is deliberately left empty.
+        const auto [reason_code, message] = split_reason(detail);
+        out.publication = true;
+        out.reason_code = reason_code;
+        out.message = message.empty() ? detail : message;
+        return out;
+    }
+    out.code = "OFFSET_FACE_" + token;
+    out.message = detail.empty() ? reason : detail;
+    return out;
+}
+
+StageRefusal stage_refusal(const char* code, const std::string& message, const char* stage,
+                           json evidence = json::object()) {
+    StageRefusal out;
+    out.code = code;
+    out.message = message;
+    out.stage = stage;
+    out.evidence = std::move(evidence);
+    return out;
+}
+
+// The three kernel stages, plus everything the element map and the publication gate
+// need from them. Nothing is published from here — a failed pipeline carries no shape.
+struct BlendPipeline {
+    bool ok = false;
+    StageRefusal refusal;
+    TopoDS_Shape shape;
+    // Execution order: defeature, offset, re-fillet. Each is already ingested into a
+    // `BRepTools_History`, so the algorithms that produced them may die.
+    std::vector<occ::handle<BRepTools_History>> stages;
+    // input blend face ⇒ its reconstruction, asserted onto the composed history ONLY
+    // because `reblend`'s reproduction proof passed on that pair.
+    std::vector<std::pair<TopoDS_Face, TopoDS_Face>> lineage;
+    double suppress_contribution = 0.0;
+    double offset_contribution = 0.0;
+    double reblend_contribution = 0.0;
+};
+
+double maximum_tolerance_of(const TopoDS_Shape& shape) {
+    return kernel::validation::audit_shape(shape).tolerances.maximum();
+}
+
+// The single solid of `shape`, or a null shape when it does not carry exactly one.
+TopoDS_Shape single_solid(const TopoDS_Shape& shape) {
+    if (shape.IsNull()) return TopoDS_Shape();
+    if (shape.ShapeType() == TopAbs_SOLID) return shape;
+    const std::vector<TopoDS_Shape> solids = ordered_solids(shape);
+    return solids.size() == 1 ? solids[0] : TopoDS_Shape();
+}
+
+// Images of `face` in `after` through a `BRepTools_History` stage, filtered to the
+// result and deduplicated by result ordinal. A face the stage never touched is its
+// own image — the stage-crossing convention `ComposedHistory` documents.
+std::vector<TopoDS_Face> history_face_images(const BRepTools_History& history,
+                                             const TopoDS_Face& face,
+                                             const TopTools_IndexedMapOfShape& after) {
+    std::vector<int> ordinals;
+    for (TopTools_ListIteratorOfListOfShape it(history.Modified(face)); it.More(); it.Next()) {
+        const int ord = after.FindIndex(it.Value());
+        if (ord != 0 && std::find(ordinals.begin(), ordinals.end(), ord) == ordinals.end())
+            ordinals.push_back(ord);
+    }
+    if (ordinals.empty() && !history.IsRemoved(face)) {
+        const int ord = after.FindIndex(face);
+        if (ord != 0) ordinals.push_back(ord);
+    }
+    std::sort(ordinals.begin(), ordinals.end());
+    std::vector<TopoDS_Face> out;
+    out.reserve(ordinals.size());
+    for (const int ord : ordinals) out.push_back(TopoDS::Face(after(ord)));
+    return out;
+}
+
+// The offset image of ONE shape, by the same `LastImage`/`Image` walk
+// `offset_successors` uses for faces, with the "survived verbatim" fallback the
+// image map does not record.
+std::vector<TopoDS_Shape> offset_image(const BRepAlgo_Image& image, const TopoDS_Shape& shape,
+                                       const TopTools_IndexedMapOfShape& result_map) {
+    std::vector<int> ordinals;
+    if (image.HasImage(shape)) {
+        auto gather = [&](const TopTools_ListOfShape& src) {
+            for (TopTools_ListIteratorOfListOfShape it(src); it.More(); it.Next()) {
+                if (it.Value().ShapeType() != shape.ShapeType()) continue;
+                const int ord = result_map.FindIndex(it.Value());
+                if (ord == 0) continue;
+                if (std::find(ordinals.begin(), ordinals.end(), ord) == ordinals.end())
+                    ordinals.push_back(ord);
+            }
+        };
+        TopTools_ListOfShape deep;
+        image.LastImage(shape, deep);
+        gather(deep);
+        if (ordinals.empty()) gather(image.Image(shape));
+    }
+    if (ordinals.empty()) {
+        const int ord = result_map.FindIndex(shape);
+        if (ord != 0) ordinals.push_back(ord);
+    }
+    std::sort(ordinals.begin(), ordinals.end());
+    std::vector<TopoDS_Shape> out;
+    out.reserve(ordinals.size());
+    for (const int ord : ordinals) out.push_back(result_map(ord));
+    return out;
+}
+
+std::vector<TopoDS_Edge> shared_edges_of(const TopoDS_Face& a, const TopoDS_Face& b) {
+    TopTools_IndexedMapOfShape b_edges;
+    TopExp::MapShapes(b, TopAbs_EDGE, b_edges);
+    std::vector<TopoDS_Edge> out;
+    for (TopExp_Explorer ex(a, TopAbs_EDGE); ex.More(); ex.Next()) {
+        if (b_edges.Contains(ex.Current())) out.push_back(TopoDS::Edge(ex.Current()));
+    }
+    return out;
+}
+
+double edge_length_of(const TopoDS_Edge& edge) {
+    GProp_GProps props;
+    BRepGProp::LinearProperties(edge, props);
+    return props.Mass();
+}
+
+// Every gate the V2 path runs on its result, in the same order and with the same
+// wording. V3 runs it ONCE, on the INTERMEDIATE offset body, so nothing is rebuilt on
+// a body the kernel already broke. The FINAL body is not checked here: `reblend` runs
+// `FilletBuilder`, whose own TierB publication decision covers the same ground
+// (structure, BRep validity, single solid, positive volume, tolerances), and the
+// executor then evaluates the shared `single_solid_policy` on the published shape.
+std::optional<StageRefusal> check_result_shape(const TopoDS_Shape& shape, const char* stage) {
+    if (shape.IsNull())
+        return stage_refusal("OFFSET_FACE_STAGE_NULL_SHAPE", "produced a null shape", stage);
+    if (!BRepCheck_Analyzer(shape).IsValid())
+        return stage_refusal("OFFSET_FACE_STAGE_INVALID_SHAPE", "produced an invalid shape",
+                             stage);
+    const std::vector<RankedSolid> solids = ranked_solids(shape);
+    if (solids.size() != 1) {
+        return stage_refusal("OFFSET_FACE_STAGE_NOT_SINGLE_SOLID",
+                             "produced " + std::to_string(solids.size()) +
+                                 " solids; exactly one is required",
+                             stage);
+    }
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    const double volume = props.Mass();
+    if (!std::isfinite(volume) ||
+        volume <= kernel::validation::precision_of(shape).minimum_volume()) {
+        return stage_refusal("OFFSET_FACE_STAGE_DEGENERATE_VOLUME",
+                             "produced a degenerate volume " + std::to_string(volume), stage);
+    }
+    BRepAlgoAPI_Check checker;
+    checker.SetData(shape, /*bTestSE*/ Standard_False, /*bTestSI*/ Standard_True);
+    checker.SetRunParallel(Standard_False);
+    try {
+        checker.Perform();
+        if (!checker.IsValid())
+            return stage_refusal("OFFSET_FACE_STAGE_SELF_INTERFERENCE",
+                                 "produced a self-interfering shape", stage);
+    } catch (const Standard_Failure&) {
+        return stage_refusal("OFFSET_FACE_STAGE_SELF_INTERFERENCE",
+                             "self-interference check raised", stage);
+    }
+    return std::nullopt;
+}
+
+// SUPPRESS → OFFSET → REBLEND on `build_input`. `moving` and `moving_keys` are C_op
+// addressed in the INPUT body; `blends` is B, already certified by the closure walk.
+//
+// TOLERANCE. Each stage's CONTRIBUTION is capped at `kRoundTripToleranceCapMm`, the
+// number `BlendReconstruction` characterized for the two stages it owns; this adds
+// the offset stage under the same per-stage ceiling. The caps are deliberately NOT
+// summed. A summed cap would bound the chain at 3x a number no single stage was ever
+// measured against, and would refuse a body whose three stages each behaved exactly
+// as characterized; the absolute backstop stays where it already is, on the shared
+// publication policy the caller evaluates on the published shape.
+BlendPipeline run_blend_pipeline(const TopoDS_Shape& build_input,
+                                 const std::vector<TopoDS_Face>& moving,
+                                 const std::vector<std::string>& moving_keys,
+                                 const std::vector<of::ClosureBlend>& blends, double distance,
+                                 const onecad::CancelToken* cancel) {
+    BlendPipeline out;
+
+    // --- stage 1: suppress ----------------------------------------------------
+    std::vector<kf::RecognizedBlend> recognized;
+    recognized.reserve(blends.size());
+    for (const of::ClosureBlend& entry : blends) recognized.push_back(entry.blend);
+    const kf::SuppressionResult suppressed = kf::suppress_blends(build_input, recognized);
+    if (!suppressed.ok) {
+        out.refusal = reconstruction_refusal(suppressed.reason, "suppress");
+        return out;
+    }
+    out.suppress_contribution = suppressed.maximum_tolerance - suppressed.input_tolerance;
+    const TopoDS_Shape suppressed_solid = single_solid(suppressed.suppressed_shape);
+    if (suppressed_solid.IsNull()) {
+        out.refusal = stage_refusal("OFFSET_FACE_SUPPRESSION_NOT_SINGLE_SOLID",
+                                    "the suppressed body is not one solid", "suppress");
+        return out;
+    }
+    if (cancel != nullptr && cancel->cancelled()) return out;  // caller re-checks
+
+    // --- re-address C_op through the defeaturing ------------------------------
+    TopTools_IndexedMapOfShape suppressed_faces;
+    TopExp::MapShapes(suppressed_solid, TopAbs_FACE, suppressed_faces);
+    std::vector<TopoDS_Face> moving_suppressed;
+    std::vector<int> moving_suppressed_ordinals;
+    for (std::size_t i = 0; i < moving.size(); ++i) {
+        const std::vector<TopoDS_Face> images =
+            history_face_images(*suppressed.history, moving[i], suppressed_faces);
+        if (images.size() != 1) {
+            // DISTINCT from `BlendReconstruction`'s own `SUPPRESSION_ANCESTRY_NOT_UNIQUE`,
+            // which `reconstruction_refusal` maps to `OFFSET_FACE_SUPPRESSION_ANCESTRY_
+            // NOT_UNIQUE`: that one is about a SURVIVING face having other than one
+            // ancestor, this one is about an OPERATIVE face having other than one image.
+            // Two conditions must never share one machine-readable code.
+            out.refusal = stage_refusal(
+                "OFFSET_FACE_OFFSET_ANCESTRY_NOT_UNIQUE",
+                "operative face " + moving_keys[i] + " has " + std::to_string(images.size()) +
+                    " images in the suppressed body, so the offset has no unique face to move",
+                "offset");
+            return out;
+        }
+        moving_suppressed.push_back(images.front());
+        moving_suppressed_ordinals.push_back(suppressed_faces.FindIndex(images.front()));
+    }
+
+    // THE CHECK THAT SUPPRESSION ISOLATED THE DESIGN FACES. If a G1 chain still runs
+    // out of the moving set on the suppressed body, something tangent to it was not
+    // recognized as a blend — and `BRepOffset_MakeOffset` would silently propagate
+    // across it (Phase-0 spike fact 1), which is the exact V2 defect V3 exists to fix.
+    {
+        std::vector<int> seeds = moving_suppressed_ordinals;
+        std::sort(seeds.begin(), seeds.end());
+        seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+        const of::ClosureResult residual = of::tangent_closure(suppressed_solid, seeds);
+        if (!residual.ok) {
+            out.refusal = stage_refusal("OFFSET_FACE_DEPENDENT_NOT_A_BLEND",
+                                        residual.non_manifold
+                                            ? "the suppressed body is non-manifold at the "
+                                              "operative set"
+                                            : "the suppressed tangent-closure walk failed",
+                                        "suppress");
+            return out;
+        }
+        std::vector<int> extra;
+        std::set_difference(residual.ordinals.begin(), residual.ordinals.end(), seeds.begin(),
+                            seeds.end(), std::back_inserter(extra));
+        if (!extra.empty()) {
+            std::vector<std::string> keys;
+            for (const int ord : extra) keys.push_back(of::face_topokey(ord));
+            out.refusal = stage_refusal(
+                "OFFSET_FACE_DEPENDENT_NOT_A_BLEND",
+                "the operative set is still G1-chained to " + join_keys(keys) +
+                    " on the suppressed body (unrecognized dependent geometry)",
+                "suppress");
+            return out;
+        }
+    }
+
+    // --- stage 2: offset the isolated design faces ----------------------------
+    // Deliberately a second copy of the spike-frozen call sequence rather than a
+    // helper shared with the V2 path above; see the section note.
+    const double construction_tol = of::build_tolerance(suppressed_solid);
+    BRepOffset_MakeOffset mo;
+    TopoDS_Shape offset_shape;
+    const std::vector<double> distances(moving_suppressed.size(), distance);
+    try {
+        mo.Initialize(suppressed_solid, /*Offset*/ 0.0, construction_tol, BRepOffset_Skin,
+                      /*Intersection*/ Standard_False, /*SelfInter*/ Standard_False,
+                      GeomAbs_Intersection, /*Thickening*/ Standard_False,
+                      /*RemoveIntEdges*/ Standard_False);
+        mo.AllowLinearization(Standard_False);
+        for (std::size_t i = 0; i < moving_suppressed.size(); ++i) {
+            mo.SetOffsetOnFace(moving_suppressed[i], distances[i]);
+        }
+        mo.MakeOffsetShape();
+        if (!mo.IsDone() || mo.Error() != BRepOffset_NoError) {
+            out.refusal = stage_refusal(
+                "OFFSET_FACE_STAGE_KERNEL_REFUSED",
+                "the kernel refused the offset (BRepOffset_Error " +
+                    std::to_string(static_cast<int>(mo.Error())) + ")",
+                "offset");
+            return out;
+        }
+        offset_shape = mo.Shape();
+    } catch (const Standard_Failure& f) {
+        out.refusal = stage_refusal("OFFSET_FACE_STAGE_KERNEL_REFUSED",
+                                    std::string("kernel exception: ") +
+                                        (f.GetMessageString() ? f.GetMessageString() : "OCCT"),
+                                    "offset");
+        return out;
+    } catch (...) {
+        out.refusal =
+            stage_refusal("OFFSET_FACE_STAGE_KERNEL_REFUSED", "unknown kernel exception", "offset");
+        return out;
+    }
+    if (std::optional<StageRefusal> bad = check_result_shape(offset_shape, "offset")) {
+        out.refusal = std::move(*bad);
+        return out;
+    }
+    {
+        const std::string semantic =
+            check_semantics(mo, offset_shape, moving_suppressed, distances, moving_keys);
+        if (!semantic.empty()) {
+            out.refusal = stage_refusal("OFFSET_FACE_STAGE_SEMANTICS", semantic, "offset");
+            return out;
+        }
+    }
+    const TopoDS_Shape offset_solid = single_solid(offset_shape);
+    if (offset_solid.IsNull()) {
+        out.refusal = stage_refusal("OFFSET_FACE_STAGE_NOT_SINGLE_SOLID",
+                                    "the offset body is not one solid", "offset");
+        return out;
+    }
+    out.offset_contribution = maximum_tolerance_of(offset_shape) - suppressed.maximum_tolerance;
+    if (out.offset_contribution > kf::kRoundTripToleranceCapMm) {
+        out.refusal = stage_refusal(
+            "OFFSET_FACE_OFFSET_TOLERANCE_CAP",
+            "the offset stage added " + std::to_string(out.offset_contribution) +
+                " mm of B-Rep tolerance, over the characterized per-stage cap " +
+                std::to_string(kf::kRoundTripToleranceCapMm) + " mm",
+            "offset",
+            json{{"stageContributionMm", out.offset_contribution},
+                 {"perStageCapMm", kf::kRoundTripToleranceCapMm}});
+        return out;
+    }
+    if (cancel != nullptr && cancel->cancelled()) return out;
+
+    // --- carry the seeds across the offset ------------------------------------
+    TopTools_IndexedMapOfShape offset_faces;
+    TopTools_IndexedMapOfShape offset_edges;
+    TopExp::MapShapes(offset_solid, TopAbs_FACE, offset_faces);
+    TopExp::MapShapes(offset_solid, TopAbs_EDGE, offset_edges);
+    const BRepAlgo_Image& face_image = mo.OffsetFacesFromShapes();
+    const BRepAlgo_Image& edge_image = mo.OffsetEdgesFromShapes();
+    std::vector<kf::SuppressedBlendSeed> seeds;
+    for (std::size_t i = 0; i < suppressed.seed_edges.size(); ++i) {
+        const kf::SuppressedBlendSeed& seed = suppressed.seed_edges[i];
+        const std::string at = " (blend " + std::to_string(i) + ")";
+        TopoDS_Face support_image[2];
+        const TopoDS_Face* supports[2] = {&seed.support_a, &seed.support_b};
+        for (int s = 0; s < 2; ++s) {
+            const std::vector<TopoDS_Shape> images =
+                offset_image(face_image, *supports[s], offset_faces);
+            if (images.size() != 1) {
+                out.refusal = stage_refusal(
+                    "OFFSET_FACE_OFFSET_SUPPORT_NOT_UNIQUE",
+                    "blend support " + std::to_string(s) + " has " +
+                        std::to_string(images.size()) + " images after the offset" + at,
+                    "offset");
+                return out;
+            }
+            support_image[s] = TopoDS::Face(images.front());
+        }
+        const std::vector<TopoDS_Shape> edge_images =
+            offset_image(edge_image, seed.edge, offset_edges);
+        if (edge_images.size() != 1) {
+            out.refusal = stage_refusal("OFFSET_FACE_OFFSET_SEED_NOT_UNIQUE",
+                                        "the suppressed seed edge has " +
+                                            std::to_string(edge_images.size()) +
+                                            " images after the offset" + at,
+                                        "offset");
+            return out;
+        }
+        const TopoDS_Edge offset_seed = TopoDS::Edge(edge_images.front());
+        const std::vector<TopoDS_Edge> shared =
+            shared_edges_of(support_image[0], support_image[1]);
+        if (std::none_of(shared.begin(), shared.end(), [&offset_seed](const TopoDS_Edge& e) {
+                return e.IsSame(offset_seed);
+            })) {
+            out.refusal = stage_refusal(
+                "OFFSET_FACE_OFFSET_SEED_NOT_SHARED",
+                "the offset seed edge is no longer shared by both blend supports" + at,
+                "offset");
+            return out;
+        }
+        // The extent the REBUILD is held to is the seed's extent AFTER the offset,
+        // measured. The pre-offset length is the wrong yardstick: the offset stage is
+        // allowed to change the corner run, and holding the rebuild to a length the
+        // geometry legitimately no longer has would refuse a correct result. What the
+        // check still buys is layer 3's guarantee — a fillet that ran past the seed
+        // edge is refused, which is what kills the partially-trimmed round.
+        seeds.push_back({offset_seed, support_image[0], support_image[1],
+                         edge_length_of(offset_seed), seed.radius, seed.convexity});
+    }
+
+    // --- stage 3: reblend -----------------------------------------------------
+    const kf::ReblendResult rebuilt =
+        kf::reblend(offset_solid, seeds, recognized.front().radius);
+    if (!rebuilt.ok) {
+        out.refusal = reconstruction_refusal(rebuilt.reason, "reblend");
+        return out;
+    }
+    out.reblend_contribution = rebuilt.maximum_tolerance - rebuilt.input_tolerance;
+    if (rebuilt.blend_faces.size() != recognized.size()) {
+        out.refusal = stage_refusal("OFFSET_FACE_REBLEND_NOT_REPRODUCED",
+                                    "rebuilt " + std::to_string(rebuilt.blend_faces.size()) +
+                                        " blend faces for " + std::to_string(recognized.size()) +
+                                        " suppressed blends",
+                                    "reblend");
+        return out;
+    }
+
+    out.stages.push_back(suppressed.history);
+    {
+        of::OffsetImageHistory offset_history(face_image, edge_image, offset_shape);
+        TopTools_ListOfShape arguments;
+        arguments.Append(suppressed_solid);
+        out.stages.push_back(
+            occ::handle<BRepTools_History>(new BRepTools_History(arguments, offset_history)));
+    }
+    out.stages.push_back(rebuilt.history);
+    for (std::size_t i = 0; i < recognized.size(); ++i) {
+        out.lineage.emplace_back(recognized[i].face, rebuilt.blend_faces[i]);
+    }
+    out.ok = true;
+    out.shape = rebuilt.shape;
+    return out;
+}
+
+// The §7.3 refusal shape: OP_FAILED at the top level, the fine-grained code on
+// `diagnostics[]` — except a `PublicationDecision` refusal, which keeps the
+// GEOMETRY_INVALID + `reasonCode` form every other publication refusal uses.
+OpOutcome blend_refusal(const StageRefusal& refusal) {
+    if (refusal.publication) {
+        kernel::validation::PublicationDecision decision;
+        decision.disposition = kernel::validation::PublicationDisposition::Refused;
+        decision.code = "GEOMETRY_INVALID";
+        decision.reason_code = refusal.reason_code;
+        decision.message = "OffsetFace: " + refusal.message;
+        return publication_refusal(decision, refusal.stage.c_str());
+    }
+    const std::string message = "OffsetFace: " + refusal.message;
+    OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+    json diagnostic = {{"severity", "error"},
+                       {"code", refusal.code},
+                       {"message", message},
+                       {"stage", refusal.stage}};
+    if (!refusal.evidence.empty()) diagnostic["evidence"] = refusal.evidence;
+    failure.diagnostics.push_back(std::move(diagnostic));
+    return failure;
+}
+
 }  // namespace
 
 OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string& op_id) {
@@ -753,11 +1243,15 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
         return OpOutcome::fail("OP_FAILED", "OffsetFace requires a non-empty faceIds");
     }
     std::vector<std::string> primary_face_ids;
+    // 0 == ABSENT, which stays the legacy contract (no `primaryFaceIds`, V2 geometry).
+    int policy_version = 0;
     if (params.contains("resultPolicyVersion")) {
         if (!params["resultPolicyVersion"].is_number_integer() ||
-            params["resultPolicyVersion"].get<int>() != kResultPolicyVersion2) {
+            (params["resultPolicyVersion"].get<int>() != kResultPolicyVersion2 &&
+             params["resultPolicyVersion"].get<int>() != kResultPolicyVersion3)) {
             OpOutcome failure = OpOutcome::fail(
-                "OP_FAILED", "OffsetFace resultPolicyVersion is unsupported");
+                "OP_FAILED",
+                "OffsetFace resultPolicyVersion is unsupported (supported: 2, 3)");
             failure.diagnostics.push_back(
                 {{"severity", "error"},
                  {"code", "UNSUPPORTED_OFFSET_FACE_RESULT_POLICY_VERSION"},
@@ -765,13 +1259,16 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
                  {"stage", "preflight"}});
             return failure;
         }
+        policy_version = params["resultPolicyVersion"].get<int>();
         if (!read_string_array_strict(params, "primaryFaceIds", primary_face_ids,
                                       ids_error)) {
             return malformed_face_ids(ids_error);
         }
         if (primary_face_ids.empty()) {
             return OpOutcome::fail("OP_FAILED",
-                                   "OffsetFace V2 requires primaryFaceIds");
+                                   "OffsetFace resultPolicyVersion " +
+                                       std::to_string(policy_version) +
+                                       " requires primaryFaceIds");
         }
         std::set<std::string> seen_primary;
         for (const std::string& id : primary_face_ids) {
@@ -788,7 +1285,7 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     } else if (params.contains("primaryFaceIds")) {
         return OpOutcome::fail(
             "OP_FAILED",
-            "OffsetFace primaryFaceIds requires resultPolicyVersion 2");
+            "OffsetFace primaryFaceIds requires resultPolicyVersion 2 or 3");
     }
     // Presence is asked separately from the value: `read_scalar`'s default cannot
     // distinguish an ABSENT `distance` (a malformed record) from a legitimate 0, and
@@ -922,6 +1419,80 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
         }
     }
 
+    // ══ V3 stage 0: blend-aware classification (WP3-C5) ══════════════════════
+    // Runs BEFORE distance planning so `_BLEND_WITH_ABSOLUTE_DISTANCE` is reachable:
+    // `plan_distances` would otherwise refuse a `Total`/`Radius` request against the
+    // FULL stored operative set first, and the record would never be told the real
+    // reason it cannot be honoured. Set only when a certified blend is present, so a
+    // blend-free V3 record executes the V2 path untouched.
+    std::optional<of::BlendAwareClosure> v3_closure;
+    if (policy_version == kResultPolicyVersion3) {
+        std::vector<int> primary_ordinals;
+        for (const std::string& id : primary_face_ids) {
+            const auto slot = std::find(face_ids.begin(), face_ids.end(), id);
+            // `primaryFaceIds ⊆ faceIds` was enforced during parsing.
+            primary_ordinals.push_back(
+                operative_ordinals[static_cast<std::size_t>(slot - face_ids.begin())]);
+        }
+        const of::BlendAwareClosure classified =
+            of::blend_aware_closure(target_shape, primary_ordinals);
+        if (!classified.ok) {
+            if (classified.code.empty()) {
+                return OpOutcome::fail("OP_FAILED", "OffsetFace: " + classified.message);
+            }
+            WLOG_WARN("offsetFace: %s V3 closure refused: %s", op_id.c_str(),
+                      classified.code.c_str());
+            return blend_refusal(
+                stage_refusal(classified.code.c_str(), classified.message, "classify"));
+        }
+
+        // TIGHTER THAN V2's ONE-SIDED GUARD, in both directions. V2 only checks that
+        // the closure does not EXCEED the stored set; V3 reinterprets the same stored
+        // pair — `faceIds` is the frozen closure and `primaryFaceIds` is what the user
+        // actually picked — so the stored set must be exactly what the picks close
+        // over. A stored set that no longer describes the body is a stale record, and
+        // a stale operative set must never quietly select a different set of faces.
+        {
+            const std::vector<int> covered = classified.ordinals();
+            if (covered != ordered) {
+                std::vector<int> missing;
+                std::vector<int> extra;
+                std::set_difference(ordered.begin(), ordered.end(), covered.begin(),
+                                    covered.end(), std::back_inserter(missing));
+                std::set_difference(covered.begin(), covered.end(), ordered.begin(),
+                                    ordered.end(), std::back_inserter(extra));
+                std::vector<std::string> missing_keys;
+                std::vector<std::string> extra_keys;
+                for (const int ord : missing) missing_keys.push_back(of::face_topokey(ord));
+                for (const int ord : extra) extra_keys.push_back(of::face_topokey(ord));
+                return blend_refusal(stage_refusal(
+                    "OFFSET_FACE_CLOSURE_MISMATCH",
+                    "the blend-aware closure of primaryFaceIds is not the stored operative "
+                    "set (stored-only: " +
+                        (missing_keys.empty() ? std::string("none") : join_keys(missing_keys)) +
+                        "; closure-only: " +
+                        (extra_keys.empty() ? std::string("none") : join_keys(extra_keys)) + ")",
+                    "classify",
+                    json{{"storedOnly", missing_keys}, {"closureOnly", extra_keys}}));
+            }
+        }
+
+        if (!classified.blends.empty()) {
+            if (type != DistanceType::Offset) {
+                // An absolute distance is a statement about the operative SURFACE
+                // (a radius, a total thickness). With a blend in the closure the
+                // surface the user measured is not the surface that ends up moving,
+                // so V1 refuses rather than reinterpreting the number.
+                return blend_refusal(stage_refusal(
+                    "OFFSET_FACE_BLEND_WITH_ABSOLUTE_DISTANCE",
+                    std::string("distanceType ") + distance_type_name(type) +
+                        " is not supported when the closure contains a blend",
+                    "classify"));
+            }
+            v3_closure = classified;
+        }
+    }
+
     const double construction_tol = of::build_tolerance(target_shape);
 
     // --- per-face signed d ----------------------------------------------------
@@ -1005,6 +1576,158 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
             }
             build_operative.push_back(TopoDS::Face(build_faces(idx)));
         }
+    }
+
+    // ══ V3 stage 0 continued: run the pipeline ═══════════════════════════════
+    // A V3 record with no blend in its closure never enters here and falls through to
+    // the V2 build below, which is what makes "same record, no blend ⇒ same geometry"
+    // true by construction rather than by assertion.
+    if (v3_closure.has_value()) {
+        const of::BlendAwareClosure& classified = *v3_closure;
+        std::vector<TopoDS_Face> moving;
+        std::vector<std::string> moving_keys;
+        TopTools_IndexedMapOfShape build_faces;
+        TopExp::MapShapes(build_input, TopAbs_FACE, build_faces);
+        for (const int ord : classified.moving) {
+            const int idx = build_faces.FindIndex(body_faces(ord));
+            if (idx == 0) {
+                return OpOutcome::fail("OP_FAILED",
+                                       "OffsetFace face " + of::face_topokey(ord) +
+                                           " is not addressable on the target solid");
+            }
+            moving.push_back(TopoDS::Face(build_faces(idx)));
+            moving_keys.push_back(of::face_topokey(ord));
+        }
+        std::vector<of::ClosureBlend> blends = classified.blends;
+        for (of::ClosureBlend& entry : blends) {
+            for (TopoDS_Face* face :
+                 {&entry.blend.face, &entry.blend.support_a, &entry.blend.support_b}) {
+                const int idx = build_faces.FindIndex(*face);
+                if (idx == 0) {
+                    return OpOutcome::fail(
+                        "OP_FAILED", "OffsetFace blend face " + of::face_topokey(entry.ordinal) +
+                                         " is not addressable on the target solid");
+                }
+                *face = TopoDS::Face(build_faces(idx));
+            }
+        }
+        WLOG_DEBUG("offsetFace: %s V3 moving=%zu blends=%zu fixed=%zu d=%.6f", op_id.c_str(),
+                   classified.moving.size(), classified.blends.size(),
+                   classified.fixed.size(), plan.d[0]);
+
+        const BlendPipeline pipeline =
+            run_blend_pipeline(build_input, moving, moving_keys, blends, plan.d[0], ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+        if (!pipeline.ok) {
+            WLOG_WARN("offsetFace: %s V3 %s stage refused: %s", op_id.c_str(),
+                      pipeline.refusal.stage.c_str(),
+                      pipeline.refusal.publication ? pipeline.refusal.reason_code.c_str()
+                                                   : pipeline.refusal.code.c_str());
+            return blend_refusal(pipeline.refusal);
+        }
+
+        // --- identity: ONE history over the whole three-stage chain -------
+        // The suppressed blend face has no kernel lineage to its reconstruction,
+        // so the mapping is ASSERTED here — and only here, because this is where
+        // `reblend`'s reproduction proof has already passed on that exact pair.
+        // The blend's two boundary edges are genuinely consumed; they are left to
+        // `ComposedHistory`'s positive-evidence removal rather than synthesized,
+        // because an edge the offset split has no unique correspondence and V1
+        // refuses to guess.
+        em::ComposedHistory composed(target_shape, pipeline.shape);
+        for (const occ::handle<BRepTools_History>& stage : pipeline.stages)
+            composed.add_stage(stage);
+        for (const auto& pair : pipeline.lineage)
+            composed.add_modified(pair.first, pair.second);
+
+        // FACE-COUNT BIJECTION, over the MODIFIED channel only. `Modified` is the
+        // channel that answers the question this gate asks — did THIS face survive
+        // AS ITSELF, exactly once, onto a face nothing else also claims? `Generated`
+        // answers a different one: it carries cross-kind lineage (an edge that
+        // generates a face) which is real, is what the reproduction proof walks, and
+        // is not a claim that any face survived.
+        //
+        // MEASURED on this chain, OCCT 8.0.1, after `ComposedHistory`'s injected-
+        // successor claim: every input face answers exactly one `Modified` image and
+        // ZERO faces on `Generated`. Before that claim landed, a blend support also
+        // answered the rebuilt blend face on `Generated` (defeaturing generates the
+        // seed edge from the support, the offset carries it across, the re-fillet
+        // generates the blend from it), which would make every support look split
+        // here. Reading `Modified` is correct in both worlds, which is why this gate
+        // does not depend on that fix to be right.
+        TopTools_IndexedMapOfShape final_faces;
+        TopExp::MapShapes(pipeline.shape, TopAbs_FACE, final_faces);
+        const json face_counts = {{"inputFaceCount", body_faces.Extent()},
+                                  {"finalFaceCount", final_faces.Extent()}};
+        if (final_faces.Extent() != body_faces.Extent()) {
+            // A DECLARED V1 SCOPE LIMIT, not a reblend failure. An offset may
+            // legitimately merge two coplanar faces or split one that the moved wall
+            // now cuts in two, and V2 publishes those results — `apply_history`'s
+            // confidence-gated split branch exists for exactly that. V1 of the blend
+            // path refuses instead, because the reproduction argument is
+            // face-for-face: every input face has one image and the blend comes back
+            // as the same blend. A merge or a split breaks that correspondence, and a
+            // destructive path may not publish a result whose identity story it
+            // cannot state. Its own code so the refusal is not mistaken for the
+            // rebuild having gone wrong; widening the scope is C6's call, with a
+            // corpus behind it.
+            return blend_refusal(stage_refusal(
+                "OFFSET_FACE_TOPOLOGY_CHANGED",
+                "the chain ended with " + std::to_string(final_faces.Extent()) +
+                    " faces for " + std::to_string(body_faces.Extent()) +
+                    " input faces; V1 of the blend path requires a face-for-face result",
+                "identity", face_counts));
+        }
+        std::map<int, int> claimed_by;  // final ordinal ⇒ input ordinal
+        for (int i = 1; i <= body_faces.Extent(); ++i) {
+            std::set<int> images;
+            for (const TopoDS_Shape& s : composed.modified(body_faces(i))) {
+                const int ord = final_faces.FindIndex(s);
+                if (ord != 0) images.insert(ord);
+            }
+            if (images.size() != 1) {
+                return blend_refusal(stage_refusal(
+                    "OFFSET_FACE_REBLEND_NOT_REPRODUCED",
+                    "input face " + of::face_topokey(i) + " has " +
+                        std::to_string(images.size()) +
+                        " modified images through the composed history; exactly one is "
+                        "required",
+                    "identity", face_counts));
+            }
+            const auto [seen, fresh] = claimed_by.emplace(*images.begin(), i);
+            if (!fresh) {
+                return blend_refusal(stage_refusal(
+                    "OFFSET_FACE_REBLEND_NOT_REPRODUCED",
+                    "input faces " + of::face_topokey(seen->second) + " and " +
+                        of::face_topokey(i) + " both claim the same final face",
+                    "identity", face_counts));
+            }
+        }
+
+        kernel::validation::PublicationPolicy v3_policy =
+            kernel::validation::single_solid_policy(
+                "OffsetFace",
+                result_validation_tier(ctx, kernel::validation::PublicationTier::TierB));
+        v3_policy.maximum_tolerance =
+            kernel::validation::precision_of(pipeline.shape)
+                .tolerance_ceiling(construction_tol, 2.0, 0.0);
+        const kernel::validation::PublicationDecision v3_decision =
+            publication_decision(pipeline.shape, v3_policy);
+        if (!v3_decision.publishable()) {
+            return publication_refusal(v3_decision, "publication");
+        }
+
+        WLOG_DEBUG("offsetFace: %s V3 tolerance contributions suppress=%.3e offset=%.3e "
+                   "reblend=%.3e",
+                   op_id.c_str(), pipeline.suppress_contribution,
+                   pipeline.offset_contribution, pipeline.reblend_contribution);
+        const std::vector<RankedSolid> v3_solids = ranked_solids(pipeline.shape);
+        ctx.bodies.create(target_id, op_id, pipeline.shape);
+        ctx.partition.apply_history(target_id, pipeline.shape, composed, out.delta,
+                                    &out.needs_repair);
+        out.body_events.push_back({"modified", target_id, v3_solids[0].key});
+        out.body_ids.push_back(target_id);
+        return out;
     }
 
     // --- build (spike-frozen call sequence) -----------------------------------

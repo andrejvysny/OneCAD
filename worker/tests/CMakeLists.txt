@@ -282,6 +282,16 @@ add_executable(test_offsetface test_offsetface.cpp)
 target_link_libraries(test_offsetface PRIVATE worker_core)
 add_test(NAME offsetface COMMAND test_offsetface)
 
+# --- WP3 C5: `op.offsetFace` at `resultPolicyVersion: 3` — the blend-aware closure
+#     and the suppress -> offset -> reblend pipeline. Asserts the canonical side-face
+#     push (V3 1191.4159265 with the corner still R2), the SAME record at V2 still
+#     producing 1405.6637 (zero legacy drift), V3 == V2 wherever no blend is in the
+#     closure, the wire-observable identity outcomes, the named refusals and
+#     determinism. In-process, real OCCT. ---
+add_executable(test_offsetface_reblend test_offsetface_reblend.cpp)
+target_link_libraries(test_offsetface_reblend PRIVATE worker_core)
+add_test(NAME offsetface_reblend COMMAND test_offsetface_reblend)
+
 # --- MODEL-HARDEN W3: Revolve boolean-mode multi-solid split-children parity
 #     (`body_<opId>:<k>`, SCHEMA §7.2) — in-process, real OCCT. ---
 add_executable(test_revolve_split test_revolve_split.cpp)
@@ -578,7 +588,6 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/circular_pattern_lineage.ndjson
 )
-
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script
 # header for the boundary rationale.

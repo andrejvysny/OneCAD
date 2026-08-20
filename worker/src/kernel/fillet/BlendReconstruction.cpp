@@ -226,6 +226,7 @@ BlendCertification certify_blend(const TopoDS_Face &face, const TopoDS_Shape &bo
 
   // ── Layer 1: sampled recognition + the exact tangency certificate ──────────
   const TargetedBlendRecognition targeted = recognize_blend_at(face, body);
+  out.recognition_status = targeted.recognition.status;
   if (!targeted.recognized) {
     out.reason = "BLEND_NOT_RECOGNIZED: " + targeted.recognition.reason;
     return out;

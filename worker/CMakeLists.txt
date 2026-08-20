@@ -141,6 +141,8 @@ add_library(worker_core STATIC
     # --- OFFSET-FACE W1: direct-modeling per-face offset (`op.offsetFace`, §7.3)
     #     + its read-only authoring handshake (`PrepareOffsetFace`, §7.6). ---
     src/ops/OffsetFaceOp.cpp
+    # --- WP3-C5: the `resultPolicyVersion: 3` blend-aware closure walk. ---
+    src/ops/OffsetFaceBlend.cpp
     src/session/PrepareOffsetFace.cpp
     src/session/PrepareEdgeOp.cpp
     src/ops/PatternOp.cpp
