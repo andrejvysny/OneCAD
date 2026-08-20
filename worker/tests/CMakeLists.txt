@@ -249,6 +249,16 @@ add_executable(test_composed_history test_composed_history.cpp)
 target_link_libraries(test_composed_history PRIVATE worker_core)
 add_test(NAME composed_history COMMAND test_composed_history)
 
+# WP3 C4: `BlendReconstruction` — the suppress -> reblend engine, not wired to any
+# op. The IDENTITY ROUND TRIP (suppress then rebuild at the same radius with no
+# offset between) must reproduce the body to 1e-9 relative volume with an identical
+# face count, in both signs of convexity; if that is red nothing downstream is
+# trustworthy. Also pins the characterized two-stage tolerance cap and asserts each
+# refusal path BY REASON CODE.
+add_executable(test_blend_reconstruction test_blend_reconstruction.cpp)
+target_link_libraries(test_blend_reconstruction PRIVATE worker_core)
+add_test(NAME blend_reconstruction COMMAND test_blend_reconstruction)
+
 # --- OFFSET-FACE Phase 0: OCCT selective-offset go/no-go spike (pure OCCT,
 #     characterizes BRepOffset_MakeOffset per-face behavior before the op is
 #     built; see the plan's Phase-0 gate). ---

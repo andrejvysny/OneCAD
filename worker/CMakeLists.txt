@@ -128,6 +128,8 @@ add_library(worker_core STATIC
     src/kernel/fillet/BlendEvidence.cpp
     src/kernel/fillet/BlendRecognizer.cpp
     src/kernel/fillet/AnalyticBlend.cpp
+    # --- WP3 C4: the suppress -> reblend engine (not wired to any op) ---
+    src/kernel/fillet/BlendReconstruction.cpp
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
     src/ops/BooleanOp.cpp
