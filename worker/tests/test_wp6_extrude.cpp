@@ -202,7 +202,14 @@ void test_to_face_refuses_a_laterally_disjoint_bounded_face() {
     check(!bodies.contains("body_ope"), "toFace disjoint bounded face: no body published");
 }
 
-void test_to_face_refuses_tilted_surface_until_exact_termination_exists() {
+// A tilted planar target now terminates EXACTLY (WP5, and see
+// test_extrude_toface_tilted.cpp for the analytic-volume battery), so what this
+// rotated box still proves is the OTHER half of the contract: rotating the
+// 10×10 face by 0.2 rad shortens its footprint along X to 10·cos(0.2) = 9.8007,
+// so the profile overhangs it and the oblique cap (area 100/cos(0.2) = 102.034,
+// covered 100.000) is not contained. "Up to the selected face" still means the
+// bounded face, whatever the tilt.
+void test_to_face_tilted_target_shorter_than_the_profile_is_not_covered() {
     const TopoDS_Shape base =
         BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 0), 10.0, 10.0, 10.0).Shape();
     gp_Trsf rotation;
@@ -241,9 +248,11 @@ void test_to_face_refuses_tilted_surface_until_exact_termination_exists() {
                  {"targetFace", semantic_face_ref("body_target", "el_tf", tilted)}}}};
     const ops::OpOutcome outcome = ops::execute_extrude(ctx, op, "ope");
     check(outcome.status == ops::OpOutcome::Status::Failed,
-          "toFace tilted: refused instead of flat-cap success");
-    check(outcome.error_message.find("tilted target faces are refused") != std::string::npos,
-          "toFace tilted: refusal names unsupported exact termination");
+          "toFace tilted: refused instead of an uncovered cap");
+    check(outcome.diagnostics.size() == 1 &&
+              outcome.diagnostics[0].value("code", std::string{}) ==
+                  "EXTRUDE_TO_FACE_NOT_COVERED",
+          "toFace tilted: refusal names bounded coverage by code");
     check(!bodies.contains("body_ope"), "toFace tilted: no body published");
 }
 
@@ -832,7 +841,7 @@ void test_boolean_ignores_face_ref_at_input0() {
 int main() {
     test_to_face();
     test_to_face_refuses_a_laterally_disjoint_bounded_face();
-    test_to_face_refuses_tilted_surface_until_exact_termination_exists();
+    test_to_face_tilted_target_shorter_than_the_profile_is_not_covered();
     test_to_face_unresolved_needs_repair();
     test_to_next();
     test_to_next_miss_fails();

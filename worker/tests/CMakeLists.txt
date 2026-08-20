@@ -174,6 +174,14 @@ add_executable(test_extrude_draft test_extrude_draft.cpp)
 target_link_libraries(test_extrude_draft PRIVATE worker_core)
 add_test(NAME extrude_draft COMMAND test_extrude_draft)
 
+# WP5: exact `ToFace` termination on a TILTED planar target — analytic volumes
+# across the tilt range and both ends of the model scale, the named refusals for
+# curved / uncovered / degenerate targets, and preview==commit. The parallel
+# ToFace path is pinned separately by test_wp6_extrude and is untouched here.
+add_executable(test_extrude_toface_tilted test_extrude_toface_tilted.cpp)
+target_link_libraries(test_extrude_toface_tilted PRIVATE worker_core)
+add_test(NAME extrude_toface_tilted COMMAND test_extrude_toface_tilted)
+
 # WP1 G1: Extrude's Blind-distance and ToFace-coincidence guards, asserted AT the
 # authoring-resolution boundary. Every other extrude refusal case sits at 0, which
 # any threshold refuses, so none of them can prove the guards still read the
@@ -625,6 +633,17 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/offset_face_v3_refusal.ndjson
+)
+# WP5: a TILTED planar `ToFace` target crosses the wire and terminates instead of
+# refusing, and the curved/uncovered/degenerate cases carry their named codes.
+# This pins the TRANSITION and the diagnostic VOCABULARY, not exactness — the
+# analytic volumes live in test_extrude_toface_tilted, for the same reason the
+# OffsetFace pair splits contract from corpus.
+add_test(
+    NAME canonical_extrude_to_face_tilted
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/extrude_to_face_tilted.ndjson
 )
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no

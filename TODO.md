@@ -10,6 +10,56 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### Gate — WP3-C6 corpus + WP5 exact tilted ToFace (2026-08-20) — LANDED
+
+**C6 — the adversarial corpus (170 checks), test-only, no defect found.** The rib decoy is the
+product argument in one test: V2 measurably SHRANK a user-authored quarter-round R2 rib to R1 on
+an ordinary +1 push (752.1460183660255); V3 reproduces it (708.5840734641021, R2 back) — pinned
+from both sides so the numbers provably come from the V3 path. First MULTI-BLEND engagement
+succeeds exactly (four-rounds box, two certified blends in one push: 1165.6637061435915 vs V2's
+1822.6548245743670, full identity set, byte-identical delta across runs). Chamfer and
+variable-radius decoys byte-identical to V2 (the evolving surface is not G1 within
+kTangentAngleTol, so the SHARED closure excludes it before the fork); torus refuses
+`_BLEND_SURFACE_UNSUPPORTED`; partially-trimmed round refuses one rung earlier than planned
+(`_SUPPRESSION_NOT_DONE`). Conditioning exact at 0.01 mm / 10 m / +1e6 mm (worst conditioning
+cost 9.9e-12 mm³); BrepCodec round trip re-certifies. Four expectation mismatches measured and
+pinned, none a defect — including that `authoring_resolution()` is a flat 1e-3 in v1 by design.
+
+**WP5 — tilted planar ToFace: refusal → exact success.** ThroughAll prism ∩ target half-space
+via `BRepAlgoAPI_Common` (a subset-of-the-prism by construction — one provable failure mode
+instead of Cut's two), proven by cap-on-plane + bounded-face containment + the
+`capArea·|d·n| == profileArea` section identity. Volumes exact to ~2e-16 relative across
+45°/75°/5°, 0.01 mm and 10 m scales, boolean Cut, the backward branch (sole exerciser of
+sign=−1 — a backward-only half-space defect fails ONLY its three assertions) and two-direction
+both-tilted (5000 exact, centroid z 7.3e-16 against an absolute budget). Preview == commit
+bit-identical through the shared executor. Curved/uncovered/degenerate refuse by stable codes
+(`EXTRUDE_TO_FACE_TARGET_NOT_PLANAR` / `_NOT_COVERED` / `_DEGENERATE`), evidence enumerated per
+variant in §7.3. Neutralization drills: without containment the bored/partial targets silently
+succeed at full volume; without the section identity a laterally halved trim ships 650.1
+(85% of material silently gone) with BOTH other proofs passing — the identity is the sole guard
+against its own construction.
+
+- **Protocol audit findings, all closed before landing:** the §14 draft FALSELY claimed tilted
+  targets were "refused at every attempt" — the refusal only dates to `232ed23` (2026-08-15);
+  before that a tilted target committed a WRONG constant-distance flat cap, and the adjacent §14
+  entry said so. Rewritten on the grounds that hold (nothing shipped; no fixture/corpus/document
+  carries a tilted result). The auditor itself authored the required canonical fixture
+  (`protocol/fixtures/extrude_to_face_tilted.ndjson`, 16 expectations, both lanes verified) —
+  pins the transition + vocabulary; volumes live in the C++ battery, same split as the
+  OffsetFace pair. The old wp6 tilted case was honestly re-derived, not deleted: the rotated
+  target (9.8007 wide under a 10-wide profile) is genuinely `_NOT_COVERED`, with the section
+  identity confirming 102.03388449411929 = 100/cos 0.2 exactly. Cross-track sign-off:
+  orchestrator-approved 2026-08-20, single repo, both tracks land together.
+- **Flagged seam:** `docs/qa/modeling-operation-coverage.json:61` says "no browser flow commits
+  these end conditions" for ToFace/ToNext — STALE prose: the toolbar ships `chip-end-toface`
+  with the full facePick→commit path, which is exactly why the fixture was required. The
+  verifiers don't catch prose staleness; correcting the row is owed to the next coverage pass.
+- **Gate (tip, measured on the main thread; rung: worker L2 + Rust full + digest guard; vitest/
+  e2e not run — zero FE/Rust source changed since the C5 L3):** ctest **150/150** (44.4 s) ·
+  fmt clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **86 targets / 1307 passed / 0
+  failed** (teed, 0 FAILED) · kernelbench `compare` **136 rows unchanged** + `semantic-compare`
+  OK · stdout hygiene clean · coverage 29/9/16/19 · contracts 37/18.
+
 ### Gate — WP3-C5: OffsetFace resultPolicyVersion 3, wired end to end (2026-08-20) — LANDED
 
 The live defect is fixed: pushing a side wall of a filleted box no longer inflates the fillet.

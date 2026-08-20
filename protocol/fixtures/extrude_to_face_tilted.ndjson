@@ -1,0 +1,71 @@
+# CANONICAL §7.3 fixture — Extrude `ToFace` onto a TILTED planar target (WP5).
+#
+# Before WP5 a tilted target was refused BY NAME ("refused until exact
+# variable-height termination is available"), because the only thing the executor
+# could build was a constant-distance flat cap. It now terminates EXACTLY: the
+# prism is built past the target plane's furthest reach and trimmed by that
+# plane's half-space, so the cap IS the target plane's surface and the height
+# varies linearly across the profile.
+#
+# THE MODEL. A 60x60 plate sketched on a `custom` plane through (0,0,20) tilted
+# 45 deg about Y, extruded 40 along its own normal. Its SEATED face (topoKey
+# `f:5`, centre (0,0,20), normal (1,0,1)/sqrt2) is the tilted target, promoted to
+# `el_face_tilt` by BindElementIds. A `custom` sketch plane is the only way to
+# author a tilted planar face over the wire; the in-process battery builds the
+# same plate with gp_Trsf (worker/tests/test_extrude_toface_tilted.cpp).
+#
+# THE CONTRACT THIS FIXTURE PINS, and nothing else:
+#   * a tilted target SUCCEEDS -- `bodyEvents` carries `created body_op4` and
+#     `stoppedReason` is `completed`. This is the refusal->success transition;
+#   * an OVERSIZED profile whose oblique cap runs off the bounded plate is still
+#     refused, by the new `diagnostics[].code` `EXTRUDE_TO_FACE_NOT_COVERED` at
+#     `stage:"build"` -- the tilted lane's own proof, distinct from the
+#     perpendicular lane's `classify`-stage coverage check. Same defect, one code;
+#   * the refusal is RECOVERABLE: `ok:true`, the failed step emits no `planStep`,
+#     `lastValidStep` stops at the sketch, and the head is untouched.
+#
+# GEOMETRY IS DELIBERATELY NOT PINNED HERE. `json_subset` compares numbers
+# exactly, so a measured volume is the wrong thing to put in NDJSON (same ruling
+# as the offset_face_v3 pair). The exact analytic volumes -- 2500 mm3 for this
+# very profile, plus the 5/45/75 deg sweep and the 0.01 mm / 10 m scalings --
+# live in test_extrude_toface_tilted.cpp. Nor does the evidence object's numeric
+# payload get pinned: `capArea`/`coveredArea` are measured.
+#
+# Both sketches are re-sent with the plan that consumes them: a sketch lives in
+# its PLAN, not in the session, so a later plan that references an earlier plan's
+# sketchId fails "profile sketch not found in plan".
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_extrude_to_face_tilted","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The tilted plate. `custom` plane through (0,0,20), normal (1,0,1)/sqrt2.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":10,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk_plate","plane":{"kind":"custom","origin":[0,0,20],"xAxis":[0.7071067811865476,0,-0.7071067811865476],"yAxis":[0,1,0],"normal":[0.7071067811865476,0,0.7071067811865476]},"entities":[{"id":"e1","type":"Line","p0":[-30,-30],"p1":[30,-30]},{"id":"e2","type":"Line","p0":[30,-30],"p1":[30,30]},{"id":"e3","type":"Line","p0":[30,30],"p1":[-30,30]},{"id":"e4","type":"Line","p0":[-30,30],"p1":[-30,-30]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk_plate.region.r0","kind":"face"}}],"params":{"sketchId":"sk_plate","distance":40.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":10,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":10,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":10,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":10,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":10,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# Promote the SEATED face. `f:5` is the plate's base, the face on the target plane.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:5","elementId":"el_face_tilt","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:5","elementId":"el_face_tilt","kind":"face"}]}}}
+# SUCCESS. A 10x10 profile on XY: h(p) = 20 - x, so the cap is the full oblique
+# section, on the target plane, inside the bounded plate. Previously refused.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":11,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk_prof","plane":{"kind":"XY","origin":[0,0,0],"xAxis":[0,1,0],"yAxis":[-1,0,0],"normal":[0,0,1]},"entities":[{"id":"p1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"p2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"p3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"p4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_face_tilt","kind":"face"},"anchor":{"worldPoint":[0,0,20]}}],"params":{"sketchId":"sk_prof","extrudeMode":"ToFace","booleanMode":"NewBody","targetFace":{"primary":{"bodyId":"body_op1","elementId":"el_face_tilt","kind":"face"},"anchor":{"worldPoint":[0,0,20]}}}}]}}}
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":2,"jobId":11,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":3,"jobId":11,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}],"needsRepair":[],"diagnostics":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":11,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":11,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":11,"result":{"accepted":true,"documentRevision":2}}}
+# REFUSAL. Same target, same plane, a 40x40 profile: the oblique cap runs off
+# the bounded plate. `build` stage -- the tilted lane proves coverage on the
+# section it constructed, not on a projection it assumed.
+{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":12,"documentRevision":3,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","1111111111111111111111111111111111111111111111111111111111111111"],"targetStep":5,"ops":[{"opType":"Sketch","opId":"op4","stepIndex":4,"params":{"sketchId":"sk_big","plane":{"kind":"XY","origin":[0,0,0],"xAxis":[0,1,0],"yAxis":[-1,0,0],"normal":[0,0,1]},"entities":[{"id":"g1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"g2","type":"Line","p0":[40,0],"p1":[40,40]},{"id":"g3","type":"Line","p0":[40,40],"p1":[0,40]},{"id":"g4","type":"Line","p0":[0,40],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op5","stepIndex":5,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_face_tilt","kind":"face"},"anchor":{"worldPoint":[0,0,20]}}],"params":{"sketchId":"sk_big","extrudeMode":"ToFace","booleanMode":"NewBody","targetFace":{"primary":{"bodyId":"body_op1","elementId":"el_face_tilt","kind":"face"},"anchor":{"worldPoint":[0,0,20]}}}}]}}}
+{"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":4,"jobId":12,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":12,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":4,"status":"ok"},{"stepIndex":5,"status":"opFailed","diagnostics":[{"severity":"error","code":"EXTRUDE_TO_FACE_NOT_COVERED","stage":"build","message":"ToFace selected face does not cover the entire terminating cap","evidence":{"toFace":{"refId":"op5.targetFace","capArea":"$any","coveredArea":"$any","areaTolerance":"$any","capFaces":"$any"}}}]}],"historyPrefixHash":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}}}
+# Recoverable: accepting the prefix-only prepare leaves the plate and the first
+# tilted body intact, and the head is where the successful plan left it.
+{"send":{"v":1,"t":"req","id":8,"verb":"AcceptPrepared","args":{"jobId":12,"documentRevision":3,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":12,"result":{"accepted":true}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"QueryElement","args":{"snapshotId":3,"elementId":"el_face_tilt"}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"present":true,"elementId":"el_face_tilt","bodyId":"body_op1","kind":"face"}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"goodbye":true}}}

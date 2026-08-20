@@ -19,6 +19,7 @@
 #include <BRepGProp.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
@@ -27,6 +28,7 @@
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Dir.hxx>
@@ -55,8 +57,18 @@ constexpr double kThroughAllFallback = 1.0e5;    // RegenerationEngine.cpp:856
 constexpr double kDraftAngleEpsilon = 1e-4;      // RegenerationEngine.cpp:59
 constexpr double kSideFaceDotThreshold = 0.9;    // RegenerationEngine.cpp:60
 constexpr double kDraftSemanticAngleTolerance = 1.0e-6;  // radians
+// The parallel/tilted SPLIT, not a precision budget: at or under this the target
+// plane is perpendicular to the extrude direction and the constant-distance V1
+// path applies verbatim; above it the height varies across the profile and the
+// half-space trim below is the only exact answer.
 constexpr double kToFaceAngularTolerance = 1.0e-7;        // radians
 constexpr double kToFaceCoverageRelativeTolerance = 1.0e-8;
+// How far the ThroughAll prism is built PAST the furthest point of the target
+// plane before the trim cuts it back. Relative so a 0.01 mm feature is not swept
+// a metre, with the authoring resolution as the floor so the overshoot is always
+// a length the kernel can distinguish. A synthetic tool EXTENT, not a resolution
+// (GeometryPrecision.h names `kThroughAllFallback` in the same exclusion).
+constexpr double kToFaceTrimOvershootFactor = 0.05;
 // Contact within this of the sketch plane is the profile's OWN SEAT (a sketch drawn
 // on a face of the target body), not the "next" face. Absolute mm: this is a
 // start-exclusion threshold, not a feature-resolution one, so it does not carry the
@@ -347,12 +359,58 @@ std::string invalid_shape_reason(const TopoDS_Shape& shape, const char* label) {
     return std::string(label) + " produced no solid";
 }
 
+// Why a ToFace refusal carries its own code and evidence: the top-level failure
+// is the §8 `OP_FAILED` taxonomy value for every one of them, so a caller that
+// needs to tell "you picked a cylinder" from "your profile hangs off the edge of
+// the face you picked" would otherwise have to match on message TEXT. Same shape
+// as `DraftFailure` below, same reason.
+struct ToFaceFailure {
+    std::string code;
+    std::string message;
+    nlohmann::json evidence;
+    std::string stage = "classify";
+};
+
+// A TILTED planar target terminates the prism on a plane that is not
+// perpendicular to the extrude direction, so there is no single distance to
+// extrude: the height varies linearly across the profile. The construction is
+// build-long-then-trim — a ThroughAll-length prism cut back by the target
+// plane's half-space — and this is the half-space, carried from resolution to
+// the point the prism exists.
+//
+// WHY `BRepAlgoAPI_Common` WITH THE KEPT SIDE, NOT `Cut` WITH THE DISCARDED ONE.
+// Both put an exact planar cap on the target plane (the trim solid's base face
+// IS the target plane's `Geom_Plane`, so the cap OCCT reports is that surface,
+// not a fitted one). They differ in what an UNDER-SIZED trim solid does. With
+// `Common` the result is a subset of the prism by construction, so no fragment
+// of the ThroughAll far cap can survive; the only residual failure is losing
+// material, which the cap-area identity below detects exactly. With `Cut` the
+// failure is the other way — the far cap 10^5 mm away survives while the
+// on-plane cap still measures full size — and that needs a separate, weaker
+// "no other cap exists" proof. One provable failure mode beats two.
+struct ToFaceTrim {
+    gp_Pln plane;                // the target face's support plane
+    gp_Dir normal;               // its outward normal
+    gp_Dir keep;                 // half-space normal pointing at the PROFILE side
+    TopoDS_Face face;            // the BOUNDED target face — the containment proof
+    double obliquity = 1.0;      // |extrudeDir · normal|: the exact section factor
+    double profile_area = 0.0;   // area of the profile face, mm²
+    std::string ref_id;          // evidence only
+};
+
 // ToFace target-distance resolution via the ladder (SCHEMA §7.3 typed targetFace).
 struct ToFaceResolve {
-    std::optional<double> distance;    // signed extrude distance to the target face
+    std::optional<double> distance;    // signed extrude distance / prism length
+    std::optional<ToFaceTrim> trim;    // set ⇒ tilted: trim the prism to this plane
     std::optional<json> needs_repair;  // §9 STATE when the ref does not resolve
-    std::string error;                 // hard error (e.g. non-planar / coincident)
+    std::string error;                 // hard error with no stable code
+    std::optional<ToFaceFailure> failure;  // named refusal (code + evidence)
 };
+
+nlohmann::json to_face_evidence(const std::string& ref_id, nlohmann::json fields) {
+    fields["refId"] = ref_id;
+    return nlohmann::json{{"toFace", std::move(fields)}};
+}
 
 ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
                               const TopoDS_Face& profile, const gp_Pnt& origin,
@@ -395,20 +453,82 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
     }
     const TopoDS_Face target_face = TopoDS::Face(res[0].bound_shape);
     if (!planar_face_plane_normal(target_face, target_pln, target_n)) {
-        out.error = "ToFace target face is not planar";
+        const std::string message = "ToFace target face is not planar";
+        out.failure = ToFaceFailure{"EXTRUDE_TO_FACE_TARGET_NOT_PLANAR", message,
+                                    to_face_evidence(ref_id, {{"targetPlanar", false}}),
+                                    "classify"};
+        out.error = message;
         return out;
     }
     const double numerator =
         gp_Vec(origin, target_pln.Location()).Dot(gp_Vec(target_n));
     const double denominator = ref_dir.Dot(target_n);
     if (std::abs(denominator) < 1e-9) {
-        out.error = "ToFace target plane is parallel to the extrude direction";
+        const std::string message =
+            "ToFace target plane is parallel to the extrude direction";
+        out.failure = ToFaceFailure{
+            "EXTRUDE_TO_FACE_DEGENERATE", message,
+            to_face_evidence(ref_id, {{"directionDotNormal", denominator}}), "classify"};
+        out.error = message;
         return out;
     }
     const double target_angle = std::acos(std::clamp(std::abs(denominator), 0.0, 1.0));
     if (target_angle > kToFaceAngularTolerance) {
-        out.error =
-            "ToFace tilted target faces are refused until exact variable-height termination is available";
+        // ── TILTED PLANAR TARGET: exact variable-height termination ──────────
+        //
+        // The terminating height at a profile point p is
+        //     h(p) = ((T0 − p)·n) / (d·n),
+        // affine in p, so its extrema over the profile are the extrema of the
+        // linear functional (p−origin)·n — which `minimum/maximum_directional_
+        // projection` answer EXACTLY, edge and face interiors included. A curved
+        // profile edge therefore cannot hide a point whose height sits outside
+        // the range measured here, which is what the prism length depends on.
+        const std::optional<double> proj_min =
+            minimum_directional_projection(profile, origin, target_n);
+        const std::optional<double> proj_max =
+            maximum_directional_projection(profile, origin, target_n);
+        if (!proj_min || !proj_max) {
+            out.error = "ToFace could not measure the profile against the target plane";
+            return out;
+        }
+        const double h_a = (numerator - *proj_min) / denominator;
+        const double h_b = (numerator - *proj_max) / denominator;
+        const double h_min = std::min(h_a, h_b);
+        const double h_max = std::max(h_a, h_b);
+        const double resolution =
+            kernel::validation::precision_of(target_face, h_max - h_min)
+                .authoring_resolution();
+        // The whole profile must terminate on ONE side of the plane. A plane the
+        // profile straddles, sits on, or has already passed has no variable-height
+        // solid to build — going "backwards" over part of the footprint is not a
+        // termination, it is an ambiguity, and the only honest answer is a refusal.
+        const bool forward = h_min >= resolution;
+        const bool backward = h_max <= -resolution;
+        if (!forward && !backward) {
+            const std::string message =
+                "ToFace target plane does not lie wholly ahead of or behind the profile";
+            out.failure = ToFaceFailure{
+                "EXTRUDE_TO_FACE_DEGENERATE", message,
+                to_face_evidence(ref_id, {{"minHeight", h_min},
+                                          {"maxHeight", h_max},
+                                          {"authoringResolution", resolution}}),
+                "classify"};
+            out.error = message;
+            return out;
+        }
+        const double sign = forward ? 1.0 : -1.0;
+        const double reach = std::max(std::abs(h_min), std::abs(h_max));
+        // s(p) = (p−T0)·n = −h(p)·(d·n), so with the sign of h fixed above the
+        // profile lies wholly on this side of the plane. The trim keeps it.
+        const bool keep_along_normal = (-sign * denominator) > 0.0;
+        out.distance = sign * (reach + kToFaceTrimOvershootFactor * reach + resolution);
+        out.trim = ToFaceTrim{target_pln,
+                              target_n,
+                              keep_along_normal ? target_n : target_n.Reversed(),
+                              target_face,
+                              std::abs(denominator),
+                              face_area(profile),
+                              ref_id};
         return out;
     }
     const double distance = numerator / denominator;
@@ -441,8 +561,17 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
             std::max(1.0e-8, expected_area * kToFaceCoverageRelativeTolerance);
         if (!(expected_area > 0.0) ||
             std::abs(covered_area - expected_area) > area_tolerance) {
-            out.error =
+            // Message frozen (the V1 refusal text); the CODE is what a caller
+            // routes on, and it is the same defect the tilted cap proof reports.
+            const std::string message =
                 "ToFace selected face does not cover the entire projected profile";
+            out.failure = ToFaceFailure{
+                "EXTRUDE_TO_FACE_NOT_COVERED", message,
+                to_face_evidence(ref_id, {{"capArea", expected_area},
+                                          {"coveredArea", covered_area},
+                                          {"areaTolerance", area_tolerance}}),
+                "classify"};
+            out.error = message;
             return out;
         }
     } catch (const Standard_Failure& failure) {
@@ -452,6 +581,171 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
     }
     out.distance = distance;
     return out;
+}
+
+/// Wraps a named ToFace refusal in the `OP_FAILED` outcome plus its diagnostic.
+OpOutcome to_face_refusal(const ToFaceFailure& failure) {
+    OpOutcome out = OpOutcome::fail("OP_FAILED", failure.message);
+    out.diagnostics.push_back({{"severity", "error"},
+                               {"code", failure.code},
+                               {"message", failure.message},
+                               {"stage", failure.stage},
+                               {"evidence", failure.evidence}});
+    return out;
+}
+
+// The half-space solid that trims a ThroughAll prism back to the target plane.
+// Sized from the prism's BOUNDING BOX, whose eight corners bound every affine
+// functional over the prism — so "the trim solid contains the whole kept side"
+// is proven arithmetic, not a generous constant.
+TopoDS_Shape make_trim_half_space(const TopoDS_Shape& prism, const ToFaceTrim& trim) {
+    Bnd_Box box;
+    BRepBndLib::Add(prism, box);
+    if (box.IsVoid()) return {};
+    Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    const double diag = gp_Pnt(xmin, ymin, zmin).Distance(gp_Pnt(xmax, ymax, zmax));
+    if (!std::isfinite(diag)) return {};
+
+    const gp_Pnt anchor = trim.plane.Location();
+    const gp_Vec keep(trim.keep);
+    double depth_extent = 0.0;
+    double lateral_extent = 0.0;
+    for (int corner = 0; corner < 8; ++corner) {
+        const gp_Pnt p((corner & 1) ? xmax : xmin, (corner & 2) ? ymax : ymin,
+                       (corner & 4) ? zmax : zmin);
+        const gp_Vec offset(anchor, p);
+        const double along = offset.Dot(keep);
+        depth_extent = std::max(depth_extent, along);
+        lateral_extent = std::max(lateral_extent, (offset - keep * along).Magnitude());
+    }
+    const double margin =
+        0.01 * diag + kernel::validation::precision_of(prism).authoring_resolution();
+    const double half = lateral_extent + margin;
+    const double depth = depth_extent + margin;
+    if (!std::isfinite(half) || !std::isfinite(depth)) return {};
+
+    BRepBuilderAPI_MakeFace base(gp_Pln(anchor, trim.keep), -half, half, -half, half);
+    if (!base.IsDone()) return {};
+    BRepPrimAPI_MakePrism slab(base.Face(), keep * depth, Standard_True);
+    return slab.Shape();
+}
+
+// The terminating cap: every face of the trimmed solid whose support plane IS the
+// target plane, within the SEMANTIC budgets (an angular and a length one — the
+// question "did the requested modelling change happen?", not "what did OCCT
+// manage to build"). Returned as one compound so the containment proof runs once.
+struct CapEvidence {
+    TopoDS_Shape shape;
+    double area = 0.0;
+    std::size_t face_count = 0;
+};
+
+CapEvidence collect_cap(const TopoDS_Shape& solid, const ToFaceTrim& trim,
+                        const kernel::validation::GeometryPrecisionContext& precision) {
+    CapEvidence out;
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    for (TopExp_Explorer exp(solid, TopAbs_FACE); exp.More(); exp.Next()) {
+        const TopoDS_Face face = TopoDS::Face(exp.Current());
+        gp_Pln candidate_plane;
+        gp_Dir candidate_normal;
+        if (!planar_face_plane_normal(face, candidate_plane, candidate_normal)) continue;
+        if (!candidate_normal.IsParallel(trim.normal, precision.semantic_angular())) continue;
+        if (std::abs(trim.plane.Distance(candidate_plane.Location())) >
+            precision.semantic_length()) {
+            continue;
+        }
+        builder.Add(compound, face);
+        out.area += face_area(face);
+        ++out.face_count;
+    }
+    out.shape = compound;
+    return out;
+}
+
+// Build the exact variable-height solid for a tilted planar target and PROVE it.
+//
+// Three claims, in the order a failure is cheapest to explain:
+//   1. material exists at all — an empty trim is the degenerate case;
+//   2. the terminating cap lies ON the target plane and is the FULL oblique
+//      section of the profile. `capArea · |d·n| == profileArea` is exact for a
+//      planar section of a prism (the section projects onto the profile with
+//      factor |d·n|), so it simultaneously proves the cap is on-plane, complete,
+//      and that the trim solid was large enough;
+//   3. the cap is contained by the BOUNDED target face — "up to the face you
+//      picked", not "up to the infinite surface behind it". Same area-coverage
+//      proof the parallel path runs, moved onto the oblique section.
+std::optional<TopoDS_Shape> trim_prism_to_target(const TopoDS_Shape& prism,
+                                                 const ToFaceTrim& trim,
+                                                 std::optional<ToFaceFailure>& failure,
+                                                 std::string& error) {
+    try {
+        const TopoDS_Shape half_space = make_trim_half_space(prism, trim);
+        if (half_space.IsNull()) {
+            error = "ToFace could not build the target half-space";
+            return std::nullopt;
+        }
+        BRepAlgoAPI_Common trimmed(prism, half_space);
+        trimmed.SetRunParallel(Standard_False);
+        trimmed.Build();
+        if (!trimmed.IsDone() || trimmed.HasErrors() || trimmed.Shape().IsNull()) {
+            error = "ToFace could not trim the prism to the target plane";
+            return std::nullopt;
+        }
+        const TopoDS_Shape result = trimmed.Shape();
+        if (ordered_solids(result).empty()) {
+            const std::string message = "ToFace termination leaves no material";
+            failure = ToFaceFailure{"EXTRUDE_TO_FACE_DEGENERATE", message,
+                                    to_face_evidence(trim.ref_id, {{"solids", 0}}), "build"};
+            error = message;
+            return std::nullopt;
+        }
+
+        const kernel::validation::GeometryPrecisionContext precision =
+            kernel::validation::precision_of(result);
+        const CapEvidence cap = collect_cap(result, trim, precision);
+        const double expected_cap = trim.profile_area / trim.obliquity;
+        const double cap_tolerance =
+            std::max(1.0e-8, expected_cap * kToFaceCoverageRelativeTolerance);
+        if (!(trim.profile_area > 0.0) ||
+            std::abs(cap.area - expected_cap) > cap_tolerance) {
+            // Not a user error and not a named refusal: the construction did not
+            // produce the section it is defined to produce, so there is nothing
+            // to advise the user to change.
+            error = "ToFace could not prove the terminating cap is the full section "
+                    "of the profile on the target plane";
+            return std::nullopt;
+        }
+
+        BRepAlgoAPI_Common coverage(cap.shape, trim.face);
+        coverage.SetRunParallel(Standard_False);
+        coverage.Build();
+        if (!coverage.IsDone() || coverage.HasErrors()) {
+            error = "ToFace could not prove bounded-face coverage";
+            return std::nullopt;
+        }
+        const double covered_area = face_area(coverage.Shape());
+        if (std::abs(covered_area - cap.area) > cap_tolerance) {
+            const std::string message =
+                "ToFace selected face does not cover the entire terminating cap";
+            failure = ToFaceFailure{
+                "EXTRUDE_TO_FACE_NOT_COVERED", message,
+                to_face_evidence(trim.ref_id, {{"capArea", cap.area},
+                                               {"coveredArea", covered_area},
+                                               {"areaTolerance", cap_tolerance},
+                                               {"capFaces", cap.face_count}}),
+                "build"};
+            error = message;
+            return std::nullopt;
+        }
+        return result;
+    } catch (const Standard_Failure& f) {
+        error = std::string("ToFace tilted termination failed: ") +
+                (f.GetMessageString() ? f.GetMessageString() : "OCCT");
+        return std::nullopt;
+    }
 }
 
 // Why a draft refusal carries its own code and evidence: the top-level failure is
@@ -720,17 +1014,28 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     }
 
     // Resolve a signed extrude distance for one end condition + direction. ToFace
-    // resolution can raise NeedsRepair (surfaced via `nr`) or a hard error (`err`).
+    // resolution can raise NeedsRepair (surfaced via `nr`), a named refusal
+    // (`tf_fail`) or a hard error (`err`); a TILTED planar target additionally
+    // yields the half-space `trim` the prism must be cut back by.
+    std::optional<ToFaceTrim> trim1;
+    std::optional<ToFaceTrim> trim2;
+    std::optional<ToFaceFailure> tf_fail;
     auto effective_distance = [&](const std::string& m, double blind, const gp_Dir& ref_dir,
                                   const json& face_ref, const std::string& ref_id,
-                                  std::optional<json>& nr, std::string& err) -> std::optional<double> {
+                                  std::optional<ToFaceTrim>& trim, std::optional<json>& nr,
+                                  std::string& err) -> std::optional<double> {
         if (m == "Blind" || m == "Symmetric") return blind;
         if (m == "ThroughAll") return through_all_distance(blind, origin, ref_dir, ref_shape);
         if (m == "ToFace") {
             ToFaceResolve tf =
                 resolve_to_face(ctx, face_ref, *profile, origin, ref_dir, ref_id);
             if (tf.needs_repair) { nr = tf.needs_repair; return std::nullopt; }
-            if (!tf.distance) { err = tf.error; return std::nullopt; }
+            if (!tf.distance) {
+                tf_fail = tf.failure;
+                err = tf.error;
+                return std::nullopt;
+            }
+            trim = tf.trim;
             return tf.distance;
         }
         if (m == "ToNext") {
@@ -779,17 +1084,40 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
             }
             const gp_Dir dir2 = direction.Reversed();
             auto d1 = effective_distance(mode_str, distance, direction, params.value("targetFace", json()),
-                                         op_id + ".targetFace", nr, err);
+                                         op_id + ".targetFace", trim1, nr, err);
             if (nr) { OpOutcome o; o.needs_repair.push_back(std::move(*nr)); return o; }
-            if (!d1) return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            if (!d1) {
+                if (tf_fail) return to_face_refusal(*tf_fail);
+                return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            }
             auto d2 = effective_distance(mode2_str, distance2, dir2,
-                                         params.value("targetFace2", json()), op_id + ".targetFace2", nr, err);
+                                         params.value("targetFace2", json()), op_id + ".targetFace2",
+                                         trim2, nr, err);
             if (nr) { OpOutcome o; o.needs_repair.push_back(std::move(*nr)); return o; }
-            if (!d2) return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            if (!d2) {
+                if (tf_fail) return to_face_refusal(*tf_fail);
+                return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            }
             TopoDS_Shape p1 = make_prism(*profile, direction, *d1, err);
             if (p1.IsNull()) return OpOutcome::fail("OP_FAILED", err);
             TopoDS_Shape p2 = make_prism(*profile, dir2, *d2, err);
             if (p2.IsNull()) return OpOutcome::fail("OP_FAILED", err);
+            if (trim1) {
+                std::optional<TopoDS_Shape> cut = trim_prism_to_target(p1, *trim1, tf_fail, err);
+                if (!cut) {
+                    if (tf_fail) return to_face_refusal(*tf_fail);
+                    return OpOutcome::fail("OP_FAILED", err);
+                }
+                p1 = std::move(*cut);
+            }
+            if (trim2) {
+                std::optional<TopoDS_Shape> cut = trim_prism_to_target(p2, *trim2, tf_fail, err);
+                if (!cut) {
+                    if (tf_fail) return to_face_refusal(*tf_fail);
+                    return OpOutcome::fail("OP_FAILED", err);
+                }
+                p2 = std::move(*cut);
+            }
             BRepAlgoAPI_Fuse fuse(p1, p2);
             fuse.Build();
             if (!fuse.IsDone()) return OpOutcome::fail("OP_FAILED", "Two-direction extrude fuse failed");
@@ -809,11 +1137,23 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
             tool_shape = fuse.Shape();
         } else {
             auto d1 = effective_distance(mode_str, distance, direction, params.value("targetFace", json()),
-                                         op_id + ".targetFace", nr, err);
+                                         op_id + ".targetFace", trim1, nr, err);
             if (nr) { OpOutcome o; o.needs_repair.push_back(std::move(*nr)); return o; }
-            if (!d1) return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            if (!d1) {
+                if (tf_fail) return to_face_refusal(*tf_fail);
+                return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
+            }
             tool_shape = make_prism(*profile, direction, *d1, err);
             if (tool_shape.IsNull()) return OpOutcome::fail("OP_FAILED", err);
+            if (trim1) {
+                std::optional<TopoDS_Shape> cut =
+                    trim_prism_to_target(tool_shape, *trim1, tf_fail, err);
+                if (!cut) {
+                    if (tf_fail) return to_face_refusal(*tf_fail);
+                    return OpOutcome::fail("OP_FAILED", err);
+                }
+                tool_shape = std::move(*cut);
+            }
         }
 
         const std::string shape_error =

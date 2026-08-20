@@ -1190,11 +1190,54 @@ OneCAD-CPP `ExtrudeParams`.
   **un-repairable** across parametric edits, violating Invariants 2/3; the typed
   ref lets the resolution ladder rebind it. Absent for non-`ToFace` extrudes.
 - `ToFace` means the SELECTED BOUNDED FACE, not merely its underlying support
-  surface. V1 accepts only a planar target parallel to the profile plane and
-  proves that the projected profile is fully covered by the selected trimmed
-  face. A laterally disjoint, smaller, or holed target is refused. Tilted and
-  curved targets are refused until exact variable-height termination is
-  implemented; a constant-distance flat cap is never substituted.
+  surface. The target MUST be PLANAR; a curved one is refused by name. Two
+  construction lanes, split by the angle between the extrude direction `d` and
+  the target normal `n`:
+  - **Perpendicular** (angle ≤ `1e-7 rad`) — the constant-distance lane. A
+    single signed distance terminates the whole profile, and the translated
+    profile must be fully covered by the selected trimmed face.
+  - **Tilted** (angle > `1e-7 rad`) — the EXACT variable-height lane
+    (amended 2026-08-20 — see [Changelog](#14-changelog); previously refused
+    outright). The terminating height `h(p) = ((T0 − p)·n)/(d·n)` is AFFINE over
+    the profile, so the prism is built past that height's furthest reach and
+    trimmed by the target plane's HALF-SPACE on the profile's side. The cap is
+    then the target plane's own surface rather than a fitted one, and the height
+    varies linearly across the profile. A constant-distance flat cap is never
+    substituted, in either lane.
+
+  Whichever lane runs, the result is PROVEN before publication:
+  - the whole profile must terminate on ONE side of the plane. A plane the
+    profile straddles, sits on, or has already passed is degenerate — extruding
+    part of the footprint backwards is an ambiguity, not a termination — and so
+    is a plane that CONTAINS the extrude direction, which no distance reaches;
+  - the terminating cap must lie ON the target plane within the SEMANTIC angular
+    and length budgets, and must be the FULL oblique section of the profile:
+    `capArea · |d·n| == profileArea` exactly, since a planar section of a prism
+    projects onto the profile with factor `|d·n|`. That identity is also what
+    makes the trim solid's own sizing provable rather than merely generous;
+  - the cap must be CONTAINED by the bounded target face. A laterally disjoint,
+    smaller, holed, or partially overlapping target is refused in BOTH lanes.
+
+  The §8 top-level code stays `OP_FAILED`; the following are
+  `diagnostics[].code` values carrying evidence under `{toFace:{refId, …}}`,
+  mirroring the draft family above:
+
+  | code | stage | meaning | evidence beyond `refId` |
+  |---|---|---|---|
+  | `EXTRUDE_TO_FACE_TARGET_NOT_PLANAR` | `classify` | the selected target face is not planar (a cylinder, a spline surface) | `{targetPlanar: false}` |
+  | `EXTRUDE_TO_FACE_DEGENERATE` | `classify` | the target plane CONTAINS the extrude direction, so no distance reaches it | `{directionDotNormal}` |
+  | `EXTRUDE_TO_FACE_DEGENERATE` | `classify` | the profile straddles or sits on the target plane, so part of it would extrude backwards | `{minHeight, maxHeight, authoringResolution}` |
+  | `EXTRUDE_TO_FACE_DEGENERATE` | `build` | the trim left no material at all | `{solids: 0}` |
+  | `EXTRUDE_TO_FACE_NOT_COVERED` | `classify` (perpendicular) | the selected bounded face does not cover the translated profile | `{capArea, coveredArea, areaTolerance}` |
+  | `EXTRUDE_TO_FACE_NOT_COVERED` | `build` (tilted) | the selected bounded face does not cover the whole terminating cap | `{capArea, coveredArea, areaTolerance, capFaces}` |
+
+  Every other ToFace failure — a target coincident with the sketch plane, an
+  unmeasurable profile, a cap the construction cannot prove complete, an OCCT
+  build or boolean that did not complete — stays an untyped `OP_FAILED` message.
+  The rule is that a code exists where it tells the author which selection to
+  change; an error that names no author-fixable selection does not get one, and
+  MUST NOT be routed on by text. An unresolvable `targetFace` ref remains
+  NeedsRepair STATE, never an error (Invariants 2/3).
 - `ToNext` intersects the target body with the entire forward profile sweep and
   terminates at the EXACT directional minimum of that bounded intersection —
   extrema in EDGE and FACE interiors included, not only its topological vertices.
@@ -3448,6 +3491,40 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-20 — §7.3 `Extrude.ToFace` exact termination on a TILTED planar
+  target (WP5).** A tilted target used to be refused by name, because the only
+  thing the executor could build was a constant-distance flat cap — geometry the
+  author did not ask for. It is now EXACT: the prism is built past the target
+  plane's furthest reach and trimmed by that plane's half-space on the profile's
+  side, so the terminating cap IS the target plane's surface and the height
+  varies linearly across the profile. `BRepAlgoAPI_Common` with the KEPT side is
+  the construction, not `Cut` with the discarded one: `Common` makes the result a
+  subset of the prism, so no fragment of the ThroughAll far cap can survive an
+  under-sized trim solid, and the only residual failure — losing material — is
+  caught exactly by the cap-area identity `capArea · |d·n| == profileArea`.
+  Measured on a 10×10 mm profile terminating on a plane through `(0,0,20)`: 45°
+  gives 2500 mm³, 75° gives 3000 + 500·√3 = 3866.0254037844388 mm³, 5° gives
+  2043.7443317629618 mm³, each `A · h(centroid)` to within 2.4e-16 relative, and
+  the 0.01 mm and 10 m scalings of the 45° case hold to the same relative error.
+  **This is a semantic change for a payload class**: a tilted `targetFace` has
+  been refused since the 2026-08-15 bounded-face hardening (the entry below), and
+  before THAT it fell through to the constant-distance division and committed a
+  wrong flat cap — so the payload class has had two prior behaviours, and this is
+  the third. What makes the change safe is not that it was always refused, but
+  the §14 preamble: no worker has shipped against the prior text, and nothing in
+  the tree carries a tilted-ToFace result to migrate. No fixture authored one
+  (`protocol/fixtures/extrude_to_face_tilted.ndjson` is the first), the sole
+  corpus expectation `toFace_sibling` is a perpendicular 5×5-to-top-face case at
+  250 mm³, and no persisted document format records a computed cap. Payload
+  shape, the `targetFace` semantic-ref contract and the NeedsRepair behaviour are
+  all untouched. Curved, uncovered and degenerate targets STILL refuse, now with
+  additive `diagnostics[].code` values (`EXTRUDE_TO_FACE_TARGET_NOT_PLANAR` /
+  `EXTRUDE_TO_FACE_NOT_COVERED` / `EXTRUDE_TO_FACE_DEGENERATE`, TABLED in §7.3)
+  where the refusals were previously message-only; the §8 top-level code stays
+  `OP_FAILED` and every existing message is unchanged, so a caller matching on
+  text sees no difference. The perpendicular lane is GEOMETRICALLY identical —
+  same distance, same proof, same text — and its coverage refusal frame gains the
+  `EXTRUDE_TO_FACE_NOT_COVERED` code, so one defect has one code in both lanes.
 - **2026-08-20 — §7.3 OffsetFace `resultPolicyVersion: 3`, the blend-aware
   reading (WP3-C5).** V2's sweep offsets every face in the frozen G1 closure,
   and a fillet inside that closure is just another face to it: push a wall of a
