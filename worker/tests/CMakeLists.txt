@@ -292,6 +292,18 @@ add_executable(test_offsetface_reblend test_offsetface_reblend.cpp)
 target_link_libraries(test_offsetface_reblend PRIVATE worker_core)
 add_test(NAME offsetface_reblend COMMAND test_offsetface_reblend)
 
+# --- WP3 C6: the ADVERSARIAL CORPUS for `op.offsetFace` at
+#     `resultPolicyVersion: 3`. Split from test_offsetface_reblend.cpp (which is the
+#     CONTRACT — the exact volumes that must never move) because the combined file
+#     would run past 1900 lines. This one is the corpus: the decoys (chamfer,
+#     user-authored quarter-round rib, partially-trimmed round, variable-radius and
+#     torus blends), the conditioning cases (0.01 mm and 10 m scale, +1e6 mm from
+#     origin, imported-STEP-style inflated tolerances), the BrepCodec persistence
+#     round trip, and the first MULTI-BLEND engagement. In-process, real OCCT. ---
+add_executable(test_offsetface_corpus test_offsetface_corpus.cpp)
+target_link_libraries(test_offsetface_corpus PRIVATE worker_core)
+add_test(NAME offsetface_corpus COMMAND test_offsetface_corpus)
+
 # --- MODEL-HARDEN W3: Revolve boolean-mode multi-solid split-children parity
 #     (`body_<opId>:<k>`, SCHEMA §7.2) — in-process, real OCCT. ---
 add_executable(test_revolve_split test_revolve_split.cpp)
