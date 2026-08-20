@@ -162,8 +162,18 @@ void test_shape_audit_policy() {
             decision_json["evidence"]["solidCount"] == 1 &&
             decision_json["evidence"]["brepValid"] == true,
         "publication decision serializes verdict and core evidence");
-  check(decision_json["evidence"]["microTopologyChecked"] == false,
-        "Tier A omits scale-normalized micro topology");
+  // WP1-G3 moved this pin from `== false`. Micro-topology collection used to be
+  // inside the Tier B branch, but the BOUNDS that consume it live on the policy,
+  // not on the tier — so a Tier A policy carrying one would have refused
+  // everything as PUBLICATION_MICRO_TOPOLOGY_UNKNOWN, including every
+  // `validate_modeling_input` call and every downgraded interactive preview.
+  // Collection is GProp-only (no BOP), so it now runs at both tiers; what Tier A
+  // still skips is manifold and self-interference.
+  check(decision_json["evidence"]["microTopologyChecked"] == true,
+        "Tier A carries micro topology (GProp-only, so not part of the Tier B cost)");
+  check(decision_json["evidence"]["manifoldChecked"] == false &&
+            decision_json["evidence"]["selfInterferenceChecked"] == false,
+        "Tier A still omits the BOP-backed manifold and self-interference evidence");
   check(decision_json["timings"]["buildMs"] == 0.0 &&
             decision_json["timings"]["validatorMs"].get<double>() >= 0.0,
         "publication decision serializes build and validator timings");
@@ -252,11 +262,13 @@ void test_shape_audit_policy() {
         "policy separates explicit empty lifecycle from refusal");
 }
 
-// WP1-G2: every `refuse()` branch of `evaluate_publication_policy` carries its
-// own `reason_code`, and the two non-refusal dispositions carry none. The table
-// is the branch list in ORDER — a case that stops reaching its branch (because
-// an earlier one started firing) surfaces as the earlier branch's code, not as
-// a silent pass.
+// WP1-G2/G3: every `refuse()` branch of `evaluate_publication_policy` carries
+// its own `reason_code`, and the two non-refusal dispositions carry none. The
+// table is the branch list in ORDER — a case that stops reaching its branch
+// (because an earlier one started firing) surfaces as the earlier branch's code,
+// not as a silent pass. G3 adds the four micro-topology bounds plus the
+// missing-evidence refusal, and the negative case proving the bounds are inert
+// at their disabled default.
 void test_publication_reason_codes() {
   namespace validation = onecad::kernel::validation;
 
@@ -273,6 +285,9 @@ void test_publication_reason_codes() {
     evidence.tolerances_checked = true;
     evidence.manifold_checked = true;
     evidence.self_interference_checked = true;
+    evidence.micro_topology_checked = true;
+    evidence.minimum_edge_length = 1.0;
+    evidence.minimum_face_width = 1.0;
     return evidence;
   };
 
@@ -341,11 +356,55 @@ void test_publication_reason_codes() {
       {"open manifold",
        [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.open_edge_count = 1; },
        "PUBLICATION_OPEN_MANIFOLD", validation::PublicationDisposition::Refused},
+      // WP1-G3. The micro-topology bounds default to -1 (disabled), so each of
+      // these must ENABLE its bound before the branch is reachable at all — a
+      // case that forgets to would land on "publishable" and red here.
+      {"micro topology unknown",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.micro_topology_checked = false;
+         p.max_micro_edge_count = 0;
+       },
+       "PUBLICATION_MICRO_TOPOLOGY_UNKNOWN", validation::PublicationDisposition::Refused},
+      {"micro edge count",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.micro_edge_count = 1;
+         p.max_micro_edge_count = 0;
+       },
+       "PUBLICATION_MICRO_EDGE", validation::PublicationDisposition::Refused},
+      {"minimum edge length",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.minimum_edge_length = 1.0e-4;
+         p.minimum_edge_length = 1.0e-3;
+       },
+       "PUBLICATION_MICRO_EDGE", validation::PublicationDisposition::Refused},
+      {"sliver face count",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.sliver_face_count = 1;
+         p.max_sliver_face_count = 0;
+       },
+       "PUBLICATION_SLIVER_FACE", validation::PublicationDisposition::Refused},
+      {"minimum face width",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.minimum_face_width = 1.0e-4;
+         p.minimum_face_width = 1.0e-3;
+       },
+       "PUBLICATION_SLIVER_FACE", validation::PublicationDisposition::Refused},
       {"self interference",
        [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
          e.self_interference_count = 1;
        },
        "PUBLICATION_SELF_INTERFERENCE", validation::PublicationDisposition::Refused},
+      // The disabled default is the load-bearing half: the SAME defective
+      // evidence must publish when no bound is set, because `PublicationPolicy`
+      // is default-constructed at ungated sites.
+      {"micro topology bounds disabled by default",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.micro_edge_count = 99;
+         e.sliver_face_count = 99;
+         e.minimum_edge_length = 0.0;
+         e.minimum_face_width = 0.0;
+       },
+       "", validation::PublicationDisposition::Publishable},
       {"publishable",
        [](validation::ShapeEvidence &, validation::PublicationPolicy &) {}, "",
        validation::PublicationDisposition::Publishable},
@@ -382,8 +441,8 @@ void test_publication_reason_codes() {
   }
   std::sort(seen.begin(), seen.end());
   seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
-  check(seen.size() == 14,
-        "reason codes: all fourteen refusal branches are distinct and reachable, saw " +
+  check(seen.size() == 17,
+        "reason codes: all seventeen refusal reasons are distinct and reachable, saw " +
             std::to_string(seen.size()));
 }
 

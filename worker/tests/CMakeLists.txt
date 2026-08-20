@@ -206,6 +206,17 @@ add_executable(test_geometry_precision test_geometry_precision.cpp)
 target_link_libraries(test_geometry_precision PRIVATE worker_core)
 add_test(NAME geometry_precision COMMAND test_geometry_precision)
 
+# WP1-G3: the micro-edge / sliver-face census. Walks a fixed catalog x 4 scales
+# x 2 placements, PRINTS the table (the table is the gate deliverable) and
+# asserts the detector stays silent on all of it, plus two constructed defects it
+# must catch. `deep_audit` is deliberately not the measurement lane — its output
+# is inside kernelbench's normalized digest. A dirty census blocks WP1-G4 from
+# enabling any `PublicationPolicy` micro-topology bound. Generates a STEP fixture
+# into the system temp dir (tests/step_fixture_util.h), so no WORKING_DIRECTORY.
+add_executable(test_micro_topology_census test_micro_topology_census.cpp)
+target_link_libraries(test_micro_topology_census PRIVATE worker_core)
+add_test(NAME micro_topology_census COMMAND test_micro_topology_census)
+
 # F1: constant-radius fillet construction, structured failure evidence, OCCT
 # history, and non-gating simulation/vertex characterization.
 foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization blend_recognizer)

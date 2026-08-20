@@ -50,6 +50,20 @@ struct ShapeEvidence {
   bool manifold_checked = false;
   int micro_edge_count = 0;
   int sliver_face_count = 0;
+  // Degenerate edges (sphere poles, cone apices) counted SEPARATELY from the
+  // micro count. They carry zero length by construction and are legal topology,
+  // so folding them into `micro_edge_count` would refuse every sphere and every
+  // cone-apex revolve.
+  int degenerate_edge_count = 0;
+  // Absolute, actionable measurements in mm — the yardstick `micro_edge_count`
+  // and `sliver_face_count` are now taken with. `minimum_face_width` is the
+  // face's minimum width `2*area/perimeter`, not its area: the pathology is a
+  // THIN face, and a 1000 mm x 1e-7 mm sliver has a perfectly ordinary area.
+  double minimum_edge_length = 0.0;
+  double minimum_face_width = 0.0;
+  // Legacy evidence, gated on by nothing. A ratio to the GLOBAL bounding-box
+  // diagonal judges a 0.01 mm feature by the size of the 10 m part it sits on;
+  // see the note over `collect_micro_topology`.
   double minimum_edge_ratio = 0.0;
   double minimum_face_ratio = 0.0;
   double scale_diagonal = 0.0;
@@ -76,6 +90,19 @@ struct PublicationPolicy {
   // Disabled when negative. Operations may set an absolute ceiling after their
   // construction/input tolerance budget has been characterized.
   double maximum_tolerance = -1.0;
+  // Micro-topology bounds. ALL disabled when negative, and that default is
+  // load-bearing: `PublicationPolicy` is default-constructed at sites that must
+  // stay ungated (`ExtrudeOp`'s boolean policy, `PlanExecutor`'s global
+  // publication invariant, `HoleOp`, `RevolveOp`, `BooleanOp`), so an enabled
+  // default would silently gate every imported body. Enabling one requires the
+  // census in `test_micro_topology_census.cpp` to be clean for that operation.
+  //
+  // Deliberately absent: a ratio-to-global-diagonal bound. The ratio is the
+  // broken mechanism, not the fix.
+  int max_micro_edge_count = -1;
+  int max_sliver_face_count = -1;
+  double minimum_edge_length = -1.0;
+  double minimum_face_width = -1.0;
   PublicationTier tier = PublicationTier::TierA;
   bool require_closed_manifold = false;
   bool allow_empty_lifecycle = false;

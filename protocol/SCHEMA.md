@@ -661,12 +661,18 @@ the field missing. The values below are 1:1 with the branches of the worker's
 | `PUBLICATION_OPEN_MANIFOLD` | closed-manifold validation failed (open or non-manifold edge use) |
 | `PUBLICATION_SELF_INTERFERENCE` | Tier B self-interference validation failed or was not run |
 
-RESERVED, **not emitted today**: `PUBLICATION_MICRO_EDGE`,
-`PUBLICATION_SLIVER_FACE`, `PUBLICATION_MICRO_TOPOLOGY_UNKNOWN`. The evidence for
-all three (`microEdgeCount`, `sliverFaceCount`, `microTopologyChecked`) is already
-collected at Tier B but no policy branch refuses on it, so no producer may emit
-these values until micro-topology enforcement lands. They are listed here so the
-name is claimed, not so a reader can expect them.
+IMPLEMENTED BEHIND A DISABLED BOUND, and therefore **not emitted today**:
+`PUBLICATION_MICRO_EDGE`, `PUBLICATION_SLIVER_FACE`,
+`PUBLICATION_MICRO_TOPOLOGY_UNKNOWN`. The evidence for all three
+(`microEdgeCount`, `sliverFaceCount`, `degenerateEdgeCount`, `minimumEdgeLength`,
+`minimumFaceWidth`, `microTopologyChecked`) is collected at Tier B, and the
+refusal branches exist — but every micro-topology bound in the worker's
+publication policy defaults to DISABLED, and no operation enables one, so no
+branch is reachable. `PUBLICATION_MICRO_TOPOLOGY_UNKNOWN` is the missing-evidence
+refusal: with a bound enabled, unmeasured micro topology REFUSES rather than
+passes. Emission begins when an operation's policy first enables a bound; a
+reader may see these values from that point on and MUST already treat them like
+any other `reasonCode`.
 
 - `elementMapDelta.added` / `.relabeled` entries carry a **REQUIRED `bodyId`**:
   `{ elementId, topoKey, kind, bodyId }`. A single step can create/modify several
@@ -3349,6 +3355,35 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-20 — §7.2 the three RESERVED micro-topology `reasonCode` values are
+  now implemented, behind bounds that default to DISABLED (kernel continuation
+  WP1-G3).** Text clarification only; the names were already tabled by the WP1-G2
+  entry below and this entry claims no new one. `PUBLICATION_MICRO_EDGE`,
+  `_SLIVER_FACE` and `_MICRO_TOPOLOGY_UNKNOWN` now have real `refuse()` branches
+  in `evaluate_publication_policy`, gated on four new publication-policy bounds
+  (micro-edge count, sliver-face count, minimum edge length, minimum face width)
+  that are ALL disabled at their default and that no operation enables, so the
+  branches stay unreachable and nothing is emitted yet — the §7.2 paragraph moves
+  from "reserved" to "implemented, not emitted" and names the gate that flips
+  them. The detector behind the evidence was redefined in the same change
+  (degenerate edges — sphere poles, cone apices — are counted separately instead
+  of as micro edges, and the thresholds are absolute mm derived from the shape's
+  own precision context instead of ratios to its bounding-box diagonal), which
+  adds three ADDITIVE keys to the diagnostic `evidence` object:
+  `degenerateEdgeCount`, `minimumEdgeLength`, `minimumFaceWidth`. No wire shape
+  is removed or renamed and no fixture changes: `evidence` is an opaque bounded
+  object to every reader, and the refusal branches remain unreachable. Kernelbench
+  `digests.json` and `semantics.json` are unmoved — the `microTopology` block in a
+  kernelbench result comes from `benchmark/DeepAudit.cpp`'s own collector, which is
+  untouched, and `normalized_digest` excludes `diagnostics` entirely.
+  **At enablement (G4) that second point stops holding, by a route that is easy to
+  miss.** `deep_audit` records `productionAudit` as the boolean
+  `ShapeEvidence::publishable()`, and that block *is* inside `normalized_digest`.
+  `publishable()` evaluates the default `single_solid_policy`, so the moment a
+  micro-topology bound is enabled by default anywhere that policy reaches, a row
+  whose result trips the bound flips `productionAudit` from `pass` to `fail` and
+  its digest moves — without one byte of the `microTopology` block changing.
+  Whoever runs G4 must therefore diff BOTH, and name the affected rows explicitly.
 - **2026-08-20 — §7.2/§7.6/§8 `diagnostics[].reasonCode`, a fine-grained
   publication-refusal reason (kernel continuation WP1-G2).** Every publication
   refusal today collapses to top-level `GEOMETRY_INVALID` plus prose, so nothing

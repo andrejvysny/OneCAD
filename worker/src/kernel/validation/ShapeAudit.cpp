@@ -22,8 +22,10 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Iterator.hxx>
 
+#include "kernel/validation/GeometryPrecision.h"
 #include "session/ShapeMetrics.h"
 
 namespace onecad::kernel::validation {
@@ -111,6 +113,36 @@ double face_area(const TopoDS_Shape &face) {
   return properties.Mass();
 }
 
+// Boundary length of one face, mm. Explored rather than mapped on purpose: a
+// seam edge appears TWICE in a periodic face's wire and is traversed twice, so
+// `TopExp::MapShapes` (which de-duplicates) would understate a cylinder's or a
+// sphere's perimeter and overstate its width.
+double face_perimeter(const TopoDS_Shape &face) {
+  double total = 0.0;
+  for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+    if (BRep_Tool::Degenerated(TopoDS::Edge(it.Current())))
+      continue;
+    total += edge_length(it.Current());
+  }
+  return total;
+}
+
+// What counts as a micro edge or a sliver face.
+//
+// Both thresholds are ABSOLUTE (mm) and LOCAL — derived from the shape's own
+// precision context and, for an edge, from that edge's own B-Rep tolerance.
+// They are deliberately NOT ratios to the global bounding-box diagonal, which
+// is the yardstick this function used to use and which is wrong twice over: it
+// judges a 0.01 mm feature by the size of the 10 m part it sits on, and inside
+// the supported 0.01-10000 mm range it lands below OCCT's own `Confusion`, so
+// no real defect could ever trip it.
+//
+// Degenerate edges are counted SEPARATELY and never as micro edges. A sphere
+// pole and a cone apex are degenerate edges of zero length; counting them would
+// make `max_micro_edge_count = 0` refuse every sphere. `collect_manifold_evidence`
+// above has always skipped them — this now agrees with it.
+//
+// Edges and faces are MAPPED, not explored, so a shared edge is judged once.
 void collect_micro_topology(const TopoDS_Shape &shape, ShapeEvidence &out) {
   Bnd_Box bounds;
   BRepBndLib::Add(shape, bounds);
@@ -121,23 +153,59 @@ void collect_micro_topology(const TopoDS_Shape &shape, ShapeEvidence &out) {
   out.scale_diagonal = std::hypot(xmax - xmin, std::hypot(ymax - ymin, zmax - zmin));
   if (!std::isfinite(out.scale_diagonal) || out.scale_diagonal <= 1.0e-300)
     return;
+
+  const GeometryPrecisionContext context = precision_of(shape);
+  // `micro_edge_length()` is already `kMicroFactor * floor`; dividing it back
+  // out recovers the floor the per-edge tolerance competes with, so an edge with
+  // an ordinary tolerance is judged by exactly `micro_edge_length()`.
+  const double micro_floor = context.micro_edge_length() / kMicroFactor;
+  const double sliver_width = context.sliver_face_width();
+
   out.minimum_edge_ratio = std::numeric_limits<double>::infinity();
   out.minimum_face_ratio = std::numeric_limits<double>::infinity();
-  for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
-    const double ratio = edge_length(it.Current()) / out.scale_diagonal;
-    out.minimum_edge_ratio = std::min(out.minimum_edge_ratio, ratio);
-    out.micro_edge_count += ratio < 1.0e-9 ? 1 : 0;
+  out.minimum_edge_length = std::numeric_limits<double>::infinity();
+  out.minimum_face_width = std::numeric_limits<double>::infinity();
+
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  for (int i = 1; i <= edges.Extent(); ++i) {
+    const TopoDS_Edge &edge = TopoDS::Edge(edges(i));
+    if (BRep_Tool::Degenerated(edge)) {
+      ++out.degenerate_edge_count;
+      continue;
+    }
+    const double length = edge_length(edge);
+    out.minimum_edge_length = std::min(out.minimum_edge_length, length);
+    out.minimum_edge_ratio = std::min(out.minimum_edge_ratio, length / out.scale_diagonal);
+    const double limit =
+        kMicroFactor * std::max(static_cast<double>(BRep_Tool::Tolerance(edge)), micro_floor);
+    out.micro_edge_count += length <= limit ? 1 : 0;
   }
-  for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
-    const double ratio = face_area(it.Current()) /
-                         (out.scale_diagonal * out.scale_diagonal);
-    out.minimum_face_ratio = std::min(out.minimum_face_ratio, ratio);
-    out.sliver_face_count += ratio < 1.0e-12 ? 1 : 0;
+
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  for (int i = 1; i <= faces.Extent(); ++i) {
+    const double area = face_area(faces(i));
+    out.minimum_face_ratio =
+        std::min(out.minimum_face_ratio, area / (out.scale_diagonal * out.scale_diagonal));
+    const double perimeter = face_perimeter(faces(i));
+    // A face with no measurable boundary yields width 0, i.e. it classifies as a
+    // sliver. Fail-CLOSED on purpose: a face we cannot measure is not a face we
+    // may vouch for, and the alternative (width = +inf) would let the one shape
+    // the metric cannot read be the one shape it always passes.
+    const double width = perimeter > 0.0 ? 2.0 * area / perimeter : 0.0;
+    out.minimum_face_width = std::min(out.minimum_face_width, width);
+    out.sliver_face_count += width <= sliver_width ? 1 : 0;
   }
+
   if (!std::isfinite(out.minimum_edge_ratio))
     out.minimum_edge_ratio = 0.0;
   if (!std::isfinite(out.minimum_face_ratio))
     out.minimum_face_ratio = 0.0;
+  if (!std::isfinite(out.minimum_edge_length))
+    out.minimum_edge_length = 0.0;
+  if (!std::isfinite(out.minimum_face_width))
+    out.minimum_face_width = 0.0;
   out.micro_topology_checked = true;
 }
 
@@ -189,6 +257,9 @@ nlohmann::json ShapeEvidence::to_json() const {
                         {"manifoldChecked", manifold_checked},
                         {"microEdgeCount", micro_edge_count},
                         {"sliverFaceCount", sliver_face_count},
+                        {"degenerateEdgeCount", degenerate_edge_count},
+                        {"minimumEdgeLength", minimum_edge_length},
+                        {"minimumFaceWidth", minimum_face_width},
                         {"minimumEdgeRatio", minimum_edge_ratio},
                         {"minimumFaceRatio", minimum_face_ratio},
                         {"scaleDiagonal", scale_diagonal},
@@ -276,6 +347,34 @@ PublicationDecision evaluate_publication_policy(const ShapeEvidence &evidence,
     return refuse(evidence, "PUBLICATION_OPEN_MANIFOLD",
                   policy.name + " failed closed-manifold validation");
   }
+  // Micro topology. Inert unless a policy enables a bound; when one IS enabled,
+  // missing evidence is a REFUSAL, not a pass — an unmeasured shape has not been
+  // shown to be free of the defect the bound exists to catch.
+  const bool micro_bounded =
+      policy.max_micro_edge_count >= 0 || policy.minimum_edge_length >= 0.0;
+  const bool sliver_bounded =
+      policy.max_sliver_face_count >= 0 || policy.minimum_face_width >= 0.0;
+  if (micro_bounded || sliver_bounded) {
+    if (!evidence.micro_topology_checked)
+      return refuse(evidence, "PUBLICATION_MICRO_TOPOLOGY_UNKNOWN",
+                    policy.name + " has no micro-topology evidence");
+    if (policy.max_micro_edge_count >= 0 &&
+        evidence.micro_edge_count > policy.max_micro_edge_count)
+      return refuse(evidence, "PUBLICATION_MICRO_EDGE",
+                    policy.name + " produced more micro edges than its budget allows");
+    if (policy.minimum_edge_length >= 0.0 &&
+        evidence.minimum_edge_length < policy.minimum_edge_length)
+      return refuse(evidence, "PUBLICATION_MICRO_EDGE",
+                    policy.name + " produced an edge below its minimum length");
+    if (policy.max_sliver_face_count >= 0 &&
+        evidence.sliver_face_count > policy.max_sliver_face_count)
+      return refuse(evidence, "PUBLICATION_SLIVER_FACE",
+                    policy.name + " produced more sliver faces than its budget allows");
+    if (policy.minimum_face_width >= 0.0 &&
+        evidence.minimum_face_width < policy.minimum_face_width)
+      return refuse(evidence, "PUBLICATION_SLIVER_FACE",
+                    policy.name + " produced a face below its minimum width");
+  }
   if (policy.tier == PublicationTier::TierB &&
       (!evidence.self_interference_checked || evidence.self_interference_count != 0)) {
     return refuse(evidence, "PUBLICATION_SELF_INTERFERENCE",
@@ -307,9 +406,18 @@ ShapeEvidence collect_shape_evidence(const TopoDS_Shape &shape, PublicationTier 
     out.tolerances.vertex = BRep_Tool::MaxTolerance(shape, TopAbs_VERTEX);
     out.tolerances_checked = true;
 
+    // EVERY tier, deliberately. The micro-topology bounds live on the POLICY,
+    // not on the tier, so a Tier A policy may carry one — and if collection were
+    // tier-gated, that policy would refuse everything it saw as
+    // `PUBLICATION_MICRO_TOPOLOGY_UNKNOWN`. The Tier A callers are not marginal:
+    // `validate_modeling_input` runs Tier A on every operation's INPUT, and
+    // `result_validation_tier` downgrades every interactive preview to Tier A.
+    // Affordable because this is GProp and tolerance queries only — no BOP work,
+    // which is the one thing Tier A exists to skip.
+    collect_micro_topology(shape, out);
+
     if (tier == PublicationTier::TierB) {
       collect_manifold_evidence(shape, out);
-      collect_micro_topology(shape, out);
       BRepAlgoAPI_Check checker;
       checker.SetData(shape, /*bTestSE=*/false, /*bTestSI=*/true);
       checker.SetRunParallel(false);
