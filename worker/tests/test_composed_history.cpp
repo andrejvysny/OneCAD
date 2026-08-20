@@ -658,6 +658,67 @@ void injected_lineage_is_answered(const Chain& c) {
           "injection: a non-predecessor key stays unanswerable");
 }
 
+// An injected claim is CROSS-KEY. The re-blended face is natively reachable as
+// GENERATED lineage from BOTH supports (defeature generates the seed edge from each
+// support, the offset modifies it, the re-fillet generates the face from it). Once
+// the blend face claims it, it must vanish from every other id's candidate list —
+// otherwise `apply_history`'s split branch scores it under the supports' ids, an
+// asymmetric score can bind a support to it, and two ElementIds end up on one final
+// TopoKey with no check anywhere to catch it.
+void an_injected_claim_is_cross_key(const Chain& c) {
+    const auto has = [](const std::vector<TopoDS_Shape>& shapes, const TopoDS_Shape& wanted) {
+        return std::any_of(shapes.begin(), shapes.end(),
+                           [&wanted](const TopoDS_Shape& s) { return s.IsSame(wanted); });
+    };
+
+    // BASELINE — with nothing claiming it, the face IS live under both supports.
+    // This is what makes the assertions below load-bearing rather than vacuous.
+    const em::ComposedHistory unclaimed = compose(c);
+    check(has(unclaimed.generated(c.support_a), c.reblended),
+          "baseline: unclaimed, the re-blended face is GENERATED lineage of support_a");
+    check(has(unclaimed.generated(c.support_b), c.reblended),
+          "baseline: unclaimed, the re-blended face is GENERATED lineage of support_b");
+
+    em::ComposedHistory claimed = compose(c);
+    claimed.add_modified(c.blend, c.reblended);
+
+    check(!has(claimed.generated(c.support_a), c.reblended),
+          "cross-key claim: the claimed face leaves generated(support_a)");
+    check(!has(claimed.generated(c.support_b), c.reblended),
+          "cross-key claim: the claimed face leaves generated(support_b)");
+    check(!has(claimed.modified(c.support_a), c.reblended) &&
+              !has(claimed.modified(c.support_b), c.reblended),
+          "cross-key claim: the claimed face is on no other key's modified channel");
+
+    // It arrives under the claiming key, and ONLY there.
+    const std::vector<TopoDS_Shape> claimed_images = claimed.modified(c.blend);
+    check(claimed_images.size() == 1 && claimed_images.front().IsSame(c.reblended),
+          "cross-key claim: the claimed face still arrives in modified(blend)");
+
+    // The claim is surgical: every OTHER successor of both supports survives.
+    TopTools_IndexedMapOfShape final_subs;
+    TopExp::MapShapes(c.final_shape, final_subs);
+    for (const auto& named : {std::make_pair("support_a", c.support_a),
+                              std::make_pair("support_b", c.support_b)}) {
+        std::vector<int> before_ordinals = ordinals(unclaimed.generated(named.second), final_subs);
+        const std::vector<int> after_ordinals =
+            ordinals(claimed.generated(named.second), final_subs);
+        const int claimed_ordinal = final_subs.FindIndex(c.reblended);
+        before_ordinals.erase(
+            std::remove(before_ordinals.begin(), before_ordinals.end(), claimed_ordinal),
+            before_ordinals.end());
+        check(before_ordinals == after_ordinals,
+              std::string("cross-key claim: ") + named.first +
+                  " loses the claimed face and nothing else");
+        check(ordinals(unclaimed.modified(named.second), final_subs) ==
+                  ordinals(claimed.modified(named.second), final_subs),
+              std::string("cross-key claim: ") + named.first + " keeps its MODIFIED image");
+        std::fprintf(stderr, "cross-key claim: generated(%s) [%s] -> [%s]\n", named.first,
+                     join(ordinals(unclaimed.generated(named.second), final_subs)).c_str(),
+                     join(after_ordinals).c_str());
+    }
+}
+
 // A ONE-stage chain whose lineage runs through a pure GENERATED hop: the fillet
 // consumes the seed edge and generates the blend face from it. Without this the
 // `generated()` channel has no load-bearing coverage — every other assertion in
@@ -820,6 +881,7 @@ int main() {
     every_query_stays_inside_the_final_body(chain);
     deletion_needs_positive_evidence(chain);
     injected_lineage_is_answered(chain);
+    an_injected_claim_is_cross_key(chain);
     generated_lineage_and_template_stage(chain);
     apply_history_consumes_the_composed_chain(chain);
 

@@ -80,6 +80,7 @@
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
 
 namespace onecad::elementmap {
@@ -109,11 +110,22 @@ public:
     // reproduction proof lives. This class is a dumb primitive — it stores and
     // answers the mapping and proves nothing.
     //
-    // Injection REPLACES the walk's classification for that (predecessor_sub,
-    // successor) pair rather than adding to it: if the walk already reached
-    // `successor` through a `Generated` chain, the pair is published on the
-    // `Modified` channel ONLY. One shape may never appear on both channels
-    // (`BRepTools_History`: G(Si) ^ M(Si) == 0).
+    // Injection CLAIMS `successor` outright. It is published as `Modified` under
+    // `predecessor_sub`, and it is removed from the `Generated` channel of EVERY
+    // key — not merely of `predecessor_sub`.
+    //
+    // The per-key half is the obvious one: one shape may never appear on both
+    // channels (`BRepTools_History`: G(Si) ^ M(Si) == 0). The cross-key half is the
+    // one that bites. On the OffsetFace chain the walk also reaches the re-blended
+    // face as GENERATED lineage from the blend's two SUPPORTS, because the defeature
+    // generates the seed edge from each support, the offset modifies it, and the
+    // re-fillet generates the face from it. Left live under those ids it becomes a
+    // scored candidate in `apply_history`'s split branch, where an asymmetric score
+    // can bind a support to it instead — and nothing in `apply_history` forbids two
+    // ElementIds resolving onto the same final TopoKey, after which Tessellate's
+    // last-writer-wins quietly drops one of them from the wire map. So the per-key
+    // G ^ M == 0 argument is necessary but NOT sufficient: an identity asserted where
+    // its proof lives must not have to out-score generic Generated lineage elsewhere.
     //
     // Contracts (a) and (b) still apply: an injected pair is answerable only if
     // `predecessor_sub` is a keyable predecessor sub-shape, and the successor is
@@ -150,6 +162,9 @@ private:
     TopTools_IndexedMapOfShape final_subs_;
     std::vector<occ::handle<BRepTools_History>> stages_;
     TopTools_DataMapOfShapeListOfShape injected_;
+    // Every shape claimed by an `add_modified`, across all keys. A claimed successor
+    // is removed from EVERY key's `Generated` channel, not just the injecting key's.
+    TopTools_MapOfShape injected_successors_;
     TopTools_ListOfShape modified_cache_;
     TopTools_ListOfShape generated_cache_;
 };

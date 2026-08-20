@@ -6,17 +6,6 @@
 
 namespace onecad::elementmap {
 
-namespace {
-
-bool list_contains(const TopTools_ListOfShape& list, const TopoDS_Shape& shape) {
-    for (TopTools_ListIteratorOfListOfShape it(list); it.More(); it.Next()) {
-        if (it.Value().IsSame(shape)) return true;
-    }
-    return false;
-}
-
-}  // namespace
-
 ComposedHistory::ComposedHistory(const TopoDS_Shape& predecessor,
                                  const TopoDS_Shape& final_shape) {
     if (!predecessor.IsNull()) TopExp::MapShapes(predecessor, predecessor_subs_);
@@ -32,6 +21,8 @@ void ComposedHistory::add_stage(const occ::handle<BRepTools_History>& stage) {
 void ComposedHistory::add_modified(const TopoDS_Shape& predecessor_sub,
                                    const TopoDS_Shape& successor) {
     if (predecessor_sub.IsNull() || successor.IsNull()) return;
+    // The successor's identity is now CLAIMED, whoever asks. See `publish`.
+    injected_successors_.Add(successor);
     if (!injected_.IsBound(predecessor_sub)) {
         injected_.Bind(predecessor_sub, TopTools_ListOfShape());
     }
@@ -132,14 +123,22 @@ std::vector<TopoDS_Shape> ComposedHistory::publish(const TopoDS_Shape& shape,
     std::vector<std::pair<int, TopoDS_Shape>> keyed;
     for (const Successor& candidate : candidates) {
         if (candidate.modified != want_modified) continue;
-        // Injection REPLACES the walk's classification for its pair. Promoting a
-        // successor to `Modified` on one channel while the walk still publishes it
-        // as `Generated` on the other would put one shape on both, which
-        // `BRepTools_History` documents as impossible (G(Si) ^ M(Si) == 0) and which
-        // would double-count the same candidate in `apply_history`'s split gate.
-        if (!want_modified && injected != nullptr && list_contains(*injected, candidate.shape)) {
-            continue;
-        }
+        // Injection CLAIMS the successor's identity outright, for EVERY key — not
+        // just for the injecting one. Two reasons, and the second is the load-bearing
+        // one:
+        //   * per-key: promoting a successor to `Modified` while the walk still
+        //     publishes it as `Generated` would put one shape on both channels, which
+        //     `BRepTools_History` documents as impossible (G(Si) ^ M(Si) == 0).
+        //   * cross-key: the walk reaches a re-blended face as GENERATED lineage from
+        //     the blend's SUPPORTS too (defeature generates the seed edge from the
+        //     support, the offset modifies it, the re-fillet generates the face from
+        //     it). Leaving it live under those ids makes it a scored candidate in
+        //     `apply_history`'s split branch, where a support can lose to it — and
+        //     nothing there forbids two ElementIds landing on one final TopoKey, after
+        //     which Tessellate's last-writer-wins drops one id off the wire map
+        //     silently. Generic Generated lineage must not compete with an identity
+        //     asserted where its proof lives.
+        if (!want_modified && injected_successors_.Contains(candidate.shape)) continue;
         const int ordinal = final_subs_.FindIndex(candidate.shape);
         if (ordinal == 0) continue;
         const bool duplicate = std::any_of(keyed.begin(), keyed.end(),
