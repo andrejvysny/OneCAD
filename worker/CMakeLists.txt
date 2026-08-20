@@ -130,6 +130,9 @@ add_library(worker_core STATIC
     src/kernel/fillet/AnalyticBlend.cpp
     # --- WP3 C4: the suppress -> reblend engine (not wired to any op) ---
     src/kernel/fillet/BlendReconstruction.cpp
+    # --- WP4 kernel half: feasible radius/distance range, bracketed by REAL
+    #     builds. Verb-independent; no op and no protocol consume it yet. ---
+    src/kernel/fillet/FilletRangeAnalyzer.cpp
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
     src/ops/BooleanOp.cpp

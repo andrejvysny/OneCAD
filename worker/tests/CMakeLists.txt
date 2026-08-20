@@ -233,6 +233,14 @@ foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterizat
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# WP4 kernel half: `FilletRangeAnalyzer`. Brackets the feasible radius/distance
+# range by running REAL builds as the oracle, ports kernelbench's staged search,
+# and pins the measured bounds per fixture. Also carries the probe-cost
+# measurement `kDefaultProbeBudget` is derived from — the `COST` line.
+add_executable(test_fillet_range test_fillet_range.cpp)
+target_link_libraries(test_fillet_range PRIVATE worker_core)
+add_test(NAME fillet_range COMMAND test_fillet_range)
+
 # WP3 C1: the ANALYTIC blend proof. A real fillet is Proved, a cylinder at the
 # wrong axis distance is Failed, and a B-spline that the production sampler
 # measures as a perfect constant-radius blend is Unknown — the refusal the
@@ -645,6 +653,7 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/extrude_to_face_tilted.ndjson
 )
+# SCHEMA §7.6 `AnalyzeEdgeOpRange` (WP4). Pins the ECHO, the closure, the
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script
