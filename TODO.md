@@ -10,6 +10,46 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### Gate — WP1-G2: machine-readable publication-refusal reasons (2026-08-20) — LANDED
+
+`PublicationDecision` gains a sibling `reason_code`, surfaced as `diagnostics[].reasonCode`
+end-to-end (worker → `wire.rs` → `regen::Diagnostic` → `types.ts`), 1:1 with the fourteen
+`evaluate_publication_policy` refusal branches. `code` stays the closed §8 taxonomy
+(`GEOMETRY_INVALID`) — Rust's `ErrorCode` enum has no `serde(other)`, so widening it would fail
+whole frames; that is why the reason rides its own field. Pre-change protocol audit found THE
+blocker by reading: `PlanExecutor.cpp::bounded_diagnostic` REBUILDS diagnostics from an
+allowlist, so without widening it the field would never reach a frame (also learned: `role`,
+`bodyId`, `timings` have never reached the wire). New `publication_refusal()` helper in
+OpCommon routes 16 op sites and additionally attaches bounded `evidence` those diagnostics
+never carried — declared in §14, additive under both lanes' subset matchers. Micro-topology
+codes (`_MICRO_EDGE`, `_SLIVER_FACE`, `_MICRO_TOPOLOGY_UNKNOWN`) are RESERVED in SCHEMA text
+and NOT emitted — emitting before the G3 redefinition would refuse every sphere. §7.6 now
+states preview/commit equivalence includes the validation tier (TierA preview can miss a
+TierB-only refusal; expected, now machine-readable). Stage values truthful: `"publication"`
+(15 sites) / `"input-validation"` (Pattern V2 source check), was synthesized `"build"`.
+
+- **Fixture, proven non-vacuous:** `protocol/fixtures/publication_refusal.ndjson` (mirror+fuse
+  1000 mm apart → compound of two solids → `PUBLICATION_TOO_MANY_SOLIDS`; structural, no
+  tolerance luck; refusal recoverable — prefix accepts). Wrong emitted code reds it:
+  `MISMATCH at result.perStepResults.[2].diagnostics.[0].reasonCode.value: expected
+  "PUBLICATION_TOO_MANY_SOLIDS", got "PUBLICATION_WRONG_ON_PURPOSE"`. Registered
+  `canonical_publication_refusal`.
+- **Table test:** `test_publication_reason_codes` (16 cases: 14 refusals + Publishable +
+  LifecycleOnly, all reasons distinct, `code` pinned `GEOMETRY_INVALID`).
+- **Gate, measured on the main thread (rung: worker L2 + Rust full + FE L0 + digest guard;
+  Playwright not run — no behavioral FE change, `reasonCode` is an optional type field):**
+  ctest **141/141** · fmt/clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace`
+  **86 targets / 1305 passed / 0 failed** (teed; an earlier middle run dropped ONE unnamed
+  test 1304/1 — not reproduced in two logged runs, output not captured, recorded here so the
+  next occurrence gets teed evidence) · `bunx tsc --noEmit` clean · kernelbench `compare`
+  **136 rows unchanged** + `semantic-compare` OK · stdout hygiene clean · hex 0.
+- **Flagged seams:** (1) `FilletBuilder.cpp` evaluates publication policy and DISCARDS the
+  decision's reason, substituting `FILLET_INVALID_RESULT`/`FILLET_INPUT_INVALID` through the
+  fixed-field `kernel::diagnostics::OperationDiagnostic` — carrying reasons there needs that
+  struct widened; deferred. (2) An implementer read the documented XY-plane basis
+  (u,v)→(−v,u,0) as a "profile-placement bug" (centroid (−10,20,12.5) for a (0,0)-(40,20)
+  rect is exactly correct) — recorded as resolved, no defect.
+
 ### Gate — WP1-G1r: remaining precision renames (2026-08-20) — LANDED
 
 Every `kMinValue`-family literal (ExtrudeOp `kMinValue`+`kToFaceMin`, FilletChamferOp, HoleOp,

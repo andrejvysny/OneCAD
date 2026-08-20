@@ -332,7 +332,7 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
             tool_shape, kernel::validation::single_solid_policy(
                             "Revolve", kernel::validation::PublicationTier::TierA));
         if (!decision.publishable()) {
-            return OpOutcome::fail(decision.code, decision.message);
+            return publication_refusal(decision, "publication");
         }
         const std::string bid = "body_" + op_id;  // D1 worker-minted NewBody id
         ctx.bodies.create(bid, op_id, tool_shape);
@@ -366,7 +366,7 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     // Publish the successor: a single-solid result modifies the target in place; a

@@ -1922,6 +1922,12 @@ export interface OperationDiagnostic {
   code: string;
   message: string;
   stage?: string;
+  /**
+   * Fine-grained machine-readable publication-refusal reason (SCHEMA §7.2
+   * `diagnostics[].reasonCode`, SCREAMING_SNAKE). A sibling of `code`, which
+   * stays the §8 taxonomy value — route on this, never on `message`.
+   */
+  reasonCode?: string;
   evidence?: Record<string, unknown>;
 }
 

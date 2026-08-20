@@ -252,6 +252,141 @@ void test_shape_audit_policy() {
         "policy separates explicit empty lifecycle from refusal");
 }
 
+// WP1-G2: every `refuse()` branch of `evaluate_publication_policy` carries its
+// own `reason_code`, and the two non-refusal dispositions carry none. The table
+// is the branch list in ORDER — a case that stops reaching its branch (because
+// an earlier one started firing) surfaces as the earlier branch's code, not as
+// a silent pass.
+void test_publication_reason_codes() {
+  namespace validation = onecad::kernel::validation;
+
+  const auto valid_solid = [] {
+    validation::ShapeEvidence evidence;
+    evidence.null_shape = false;
+    evidence.brep_valid = true;
+    evidence.top_level_shape = TopAbs_SOLID;
+    evidence.solid_count = 1;
+    evidence.structure_checked = true;
+    evidence.volume = 1000.0;
+    evidence.volume_checked = true;
+    evidence.tolerances = {1.0e-7, 1.0e-7, 1.0e-7};
+    evidence.tolerances_checked = true;
+    evidence.manifold_checked = true;
+    evidence.self_interference_checked = true;
+    return evidence;
+  };
+
+  struct Case {
+    const char *label;
+    void (*mutate)(validation::ShapeEvidence &, validation::PublicationPolicy &);
+    const char *reason_code;
+    validation::PublicationDisposition disposition;
+  };
+
+  static const Case cases[] = {
+      {"null shape",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.null_shape = true; },
+       "PUBLICATION_NULL_SHAPE", validation::PublicationDisposition::Refused},
+      {"audit error",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.error = "OCCT threw"; },
+       "PUBLICATION_AUDIT_ERROR", validation::PublicationDisposition::Refused},
+      {"invalid brep",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.brep_valid = false; },
+       "PUBLICATION_BREP_INVALID", validation::PublicationDisposition::Refused},
+      {"no structure evidence",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.structure_checked = false;
+       },
+       "PUBLICATION_NO_STRUCTURE_EVIDENCE", validation::PublicationDisposition::Refused},
+      {"unsupported top level",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.top_level_shape = TopAbs_FACE;
+       },
+       "PUBLICATION_UNSUPPORTED_TOP_LEVEL", validation::PublicationDisposition::Refused},
+      {"stray topology",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.top_level_shape = TopAbs_COMPOUND;
+         e.stray_topology_count = 1;
+       },
+       "PUBLICATION_STRAY_TOPOLOGY", validation::PublicationDisposition::Refused},
+      {"too few solids",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.solid_count = 0; },
+       "PUBLICATION_TOO_FEW_SOLIDS", validation::PublicationDisposition::Refused},
+      {"too many solids",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.top_level_shape = TopAbs_COMPOUND;
+         e.solid_count = 2;
+       },
+       "PUBLICATION_TOO_MANY_SOLIDS", validation::PublicationDisposition::Refused},
+      {"not a single connected solid",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.top_level_shape = TopAbs_COMPOUND;
+         e.solid_count = 2;
+         p.max_solid_count = -1;  // the count gate is off; the SingleBody gate is not
+       },
+       "PUBLICATION_NOT_SINGLE_SOLID", validation::PublicationDisposition::Refused},
+      {"non-positive volume",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.volume = 0.0; },
+       "PUBLICATION_NON_POSITIVE_VOLUME", validation::PublicationDisposition::Refused},
+      {"unknown tolerances",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.tolerances_checked = false;
+       },
+       "PUBLICATION_TOLERANCE_UNKNOWN", validation::PublicationDisposition::Refused},
+      {"tolerance budget",
+       [](validation::ShapeEvidence &, validation::PublicationPolicy &p) {
+         p.maximum_tolerance = 1.0e-9;
+       },
+       "PUBLICATION_TOLERANCE_BUDGET", validation::PublicationDisposition::Refused},
+      {"open manifold",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) { e.open_edge_count = 1; },
+       "PUBLICATION_OPEN_MANIFOLD", validation::PublicationDisposition::Refused},
+      {"self interference",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &) {
+         e.self_interference_count = 1;
+       },
+       "PUBLICATION_SELF_INTERFERENCE", validation::PublicationDisposition::Refused},
+      {"publishable",
+       [](validation::ShapeEvidence &, validation::PublicationPolicy &) {}, "",
+       validation::PublicationDisposition::Publishable},
+      {"lifecycle only",
+       [](validation::ShapeEvidence &e, validation::PublicationPolicy &p) {
+         e.top_level_shape = TopAbs_COMPOUND;
+         e.solid_count = 0;
+         p.allow_empty_lifecycle = true;
+       },
+       "", validation::PublicationDisposition::LifecycleOnly},
+  };
+
+  std::vector<std::string> seen;
+  for (const Case &c : cases) {
+    validation::ShapeEvidence evidence = valid_solid();
+    validation::PublicationPolicy policy =
+        validation::single_solid_policy("Probe", validation::PublicationTier::TierB);
+    c.mutate(evidence, policy);
+    const validation::PublicationDecision decision =
+        validation::evaluate_publication_policy(evidence, policy);
+    check(decision.disposition == c.disposition,
+          std::string("reason codes: ") + c.label + " reaches its disposition");
+    check(decision.reason_code == c.reason_code,
+          std::string("reason codes: ") + c.label + " maps to '" + c.reason_code + "', got '" +
+              decision.reason_code + "'");
+    check(decision.to_json().value("reasonCode", std::string("<missing>")) == c.reason_code,
+          std::string("reason codes: ") + c.label + " serializes reasonCode");
+    if (c.disposition == validation::PublicationDisposition::Refused) {
+      check(decision.code == "GEOMETRY_INVALID",
+            std::string("reason codes: ") + c.label +
+                " keeps the §8 taxonomy code, got '" + decision.code + "'");
+      seen.push_back(decision.reason_code);
+    }
+  }
+  std::sort(seen.begin(), seen.end());
+  seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+  check(seen.size() == 14,
+        "reason codes: all fourteen refusal branches are distinct and reachable, saw " +
+            std::to_string(seen.size()));
+}
+
 void test_executor_radius_contract() {
   const TopoDS_Shape body = ft::box();
   const TopoDS_Edge edge = ft::vertical_edges(body).front();
@@ -279,6 +414,7 @@ int main() {
   test_disconnected_multi_edge();
   test_supported_scales();
   test_shape_audit_policy();
+  test_publication_reason_codes();
   test_executor_radius_contract();
   return failures;
 }

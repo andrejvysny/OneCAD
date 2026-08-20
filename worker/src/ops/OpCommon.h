@@ -59,6 +59,18 @@ bool read_string_array_strict(const nlohmann::json& params, const char* key,
 kernel::validation::PublicationDecision publication_decision(
     const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy);
 
+// Turn a refused `PublicationDecision` into the operation's failure outcome.
+// Sets the §8 top-level code/message from the decision AND attaches the full
+// §7.2 diagnostic — `{severity, code, message, stage, reasonCode, evidence}` —
+// so `candidate_diagnostics` forwards it verbatim instead of synthesizing a
+// bare one that drops the reason. `message_override` (empty ⇒ use the
+// decision's) exists for the one caller that qualifies the text with its body
+// id. Only call this on a decision that is neither Publishable nor
+// LifecycleOnly.
+OpOutcome publication_refusal(const kernel::validation::PublicationDecision& decision,
+                              const char* stage,
+                              const std::string& message_override = {});
+
 // Preview may use Tier A evidence for responsiveness, while commit/gate execution
 // must retain the authoritative tier requested by the operation. Structural Body,
 // BRep, volume and tolerance checks remain mandatory at every tier.

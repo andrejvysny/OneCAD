@@ -955,6 +955,15 @@ fn parse_diagnostics(v: Option<&Value>) -> Vec<Diagnostic> {
             if object.contains_key("stage") && stage.is_none() {
                 tracing::warn!("worker diagnostic stage ignored: malformed or oversized");
             }
+            // SCHEMA §7.2 `diagnostics[].reasonCode` — optional, ≤64 bytes.
+            let reason_code = object
+                .get("reasonCode")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty() && reason.len() <= 64)
+                .map(str::to_owned);
+            if object.contains_key("reasonCode") && reason_code.is_none() {
+                tracing::warn!("worker diagnostic reasonCode ignored: malformed or oversized");
+            }
             let evidence = object.get("evidence").and_then(|evidence| {
                 if evidence.is_object() && evidence.to_string().len() <= 65_536 {
                     Some(evidence.clone())
@@ -968,6 +977,7 @@ fn parse_diagnostics(v: Option<&Value>) -> Vec<Diagnostic> {
                 code: code.to_owned(),
                 message: message.to_owned(),
                 stage,
+                reason_code,
                 evidence,
             })
         })

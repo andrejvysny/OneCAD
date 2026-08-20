@@ -1,0 +1,27 @@
+# CANONICAL P0 fixture — a publication refusal carries a machine-readable
+# `diagnostics[].reasonCode` (SCHEMA §7.2, WP1-G2).
+#
+# Recipe: extrude a rectangle into one solid, then MirrorBody it about a plane
+# 1000 mm away with `fuseWithOriginal`. The fuse of two far-apart solids is a
+# COMPOUND of two, which the single-solid publication policy refuses. The mirror
+# distance is deliberately far larger than the profile so the two solids can
+# never touch — the refusal is a structural fact, not a tolerance coin-flip.
+#
+# What this pins: the §8 top-level code stays `GEOMETRY_INVALID` (a closed enum
+# on the Rust side) while the *reason* rides its own `reasonCode` field, and the
+# refusal now carries the bounded shape evidence that names the two solids.
+# Like `boolean_empty_refusal`, the refusal is recoverable: the prefix through
+# step 1 still prepares, AcceptPrepared publishes it, and the source body lives.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_publication_refusal","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":92,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk1","distance":25.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"MirrorBody","opId":"op2","stepIndex":2,"params":{"sourceBodyId":"body_op1","planePoint":[1000,0,0],"planeNormal":[1,0,0],"fuseWithOriginal":true}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":92,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":92,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":92,"result":{"planPrepared":true,"preparedSnapshotId":1,"lastValidStep":1,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]},{"stepIndex":2,"status":"opFailed","message":"MirrorBody fused result produced too many solids","diagnostics":[{"severity":"error","code":"GEOMETRY_INVALID","reasonCode":"PUBLICATION_TOO_MANY_SOLIDS","message":"MirrorBody fused result produced too many solids","stage":"publication","evidence":{"topLevelShape":"compound","solidCount":2,"strayTopologyCount":0,"brepValid":true}}]}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":92,"documentRevision":1,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":92,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"documentRevision":1,"workerEpoch":3,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"goodbye":true}}}

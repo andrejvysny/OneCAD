@@ -83,7 +83,14 @@ struct PublicationPolicy {
 
 struct PublicationDecision {
   PublicationDisposition disposition = PublicationDisposition::Refused;
+  // The SCHEMA §8 taxonomy code (`GEOMETRY_INVALID` on every refusal today).
   std::string code;
+  // SIBLING of `code`, never a replacement: the fine-grained machine-readable
+  // reason (SCHEMA §7.2 `diagnostics[].reasonCode`), SCREAMING_SNAKE and 1:1
+  // with the `refuse()` branches below. Empty on Publishable/LifecycleOnly.
+  // `code` stays the closed §8 enum Rust parses; an unknown value there would
+  // fail the whole frame, which is why the reason rides its own field.
+  std::string reason_code;
   std::string message;
   ShapeEvidence evidence;
 

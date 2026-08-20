@@ -117,6 +117,20 @@ kernel::validation::PublicationDecision publication_decision(
     return kernel::validation::evaluate_publication_policy(evidence, policy);
 }
 
+OpOutcome publication_refusal(const kernel::validation::PublicationDecision& decision,
+                              const char* stage, const std::string& message_override) {
+    const std::string message =
+        message_override.empty() ? decision.message : message_override;
+    OpOutcome failure = OpOutcome::fail(decision.code, message);
+    failure.diagnostics.push_back({{"severity", "error"},
+                                   {"code", decision.code},
+                                   {"message", message},
+                                   {"stage", stage},
+                                   {"reasonCode", decision.reason_code},
+                                   {"evidence", decision.evidence.to_json()}});
+    return failure;
+}
+
 kernel::validation::PublicationTier result_validation_tier(
     const OpContext& ctx, kernel::validation::PublicationTier authoritative) {
     if (ctx.validation_mode == ValidationMode::PreviewInteractive)

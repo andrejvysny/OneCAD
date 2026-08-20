@@ -2315,6 +2315,7 @@ mod tests {
                 code: "FILLET_WALKING_FAILED".into(),
                 message: "fillet failed".into(),
                 stage: Some("build".into()),
+                reason_code: None,
                 evidence: Some(serde_json::json!({"contour": {"index": 1}})),
             }],
             failed_steps: vec![FailedStep {
@@ -2325,6 +2326,7 @@ mod tests {
                     code: "AXIS_FAILED".into(),
                     message: "axis not found".into(),
                     stage: None,
+                    reason_code: None,
                     evidence: None,
                 }],
             }],

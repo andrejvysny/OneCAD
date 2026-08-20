@@ -507,6 +507,15 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/boolean_empty_refusal.ndjson
 )
+# SCHEMA §7.2 `diagnostics[].reasonCode` (WP1-G2) — a publication refusal names
+# WHICH policy branch refused it, machine-readably, while the top-level §8 code
+# stays `GEOMETRY_INVALID`. See the fixture header for the recipe.
+add_test(
+    NAME canonical_publication_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/publication_refusal.ndjson
+)
 # SCHEMA §7.5 — every ResolveRefs resolution echoes {snapshotId, revision, refId,
 # bodyId}. Rust validates that echo fail-closed; this is the worker-side half.
 add_test(

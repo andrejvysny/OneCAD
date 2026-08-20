@@ -854,7 +854,7 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         const kernel::validation::PublicationDecision decision =
             publication_decision(tool_shape, policy);
         if (!decision.publishable()) {
-            return OpOutcome::fail(decision.code, decision.message);
+            return publication_refusal(decision, "publication");
         }
         const std::string bid = "body_" + op_id;
         ctx.bodies.create(bid, op_id, tool_shape);
@@ -894,7 +894,7 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     // A complete Cut/Intersect removes the target. Publishing an empty compound as

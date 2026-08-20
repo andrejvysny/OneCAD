@@ -208,6 +208,7 @@ mod tests {
                 code: "FILLET_WALKING_FAILED".into(),
                 message: "fillet failed".into(),
                 stage: Some("build".into()),
+                reason_code: None,
                 evidence: Some(serde_json::json!({"metrics": {"requestedRadius": 11.0}})),
             }],
         });

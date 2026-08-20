@@ -90,7 +90,7 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
                         std::string(op_name) + " v2 source",
                         kernel::validation::PublicationTier::TierA));
         if (!source_decision.publishable()) {
-            return OpOutcome::fail(source_decision.code, source_decision.message);
+            return publication_refusal(source_decision, "input-validation");
         }
     }
 
@@ -110,7 +110,7 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
                 xf.Shape(), kernel::validation::single_solid_policy(
                                 std::string(op_name) + " v2 child",
                                 kernel::validation::PublicationTier::TierA));
-            if (!decision.publishable()) return OpOutcome::fail(decision.code, decision.message);
+            if (!decision.publishable()) return publication_refusal(decision, "publication");
             const std::string bid = "body_" + op_id + ":" + std::to_string(i - 1);
             ctx.bodies.create(bid, op_id, xf.Shape());
             out.body_events.push_back({"created", bid});
@@ -176,7 +176,7 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
                 return OpOutcome::fail("PATTERN_DISJOINT_RESULT",
                                        std::string(op_name) + " fused result is disconnected");
             }
-            return OpOutcome::fail(decision.code, decision.message);
+            return publication_refusal(decision, "publication");
         }
     }
 

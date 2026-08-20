@@ -142,19 +142,22 @@ void collect_micro_topology(const TopoDS_Shape &shape, ShapeEvidence &out) {
 }
 
 PublicationDecision make_decision(PublicationDisposition disposition, std::string code,
-                                  std::string message, const ShapeEvidence &evidence) {
+                                  std::string reason_code, std::string message,
+                                  const ShapeEvidence &evidence) {
   PublicationDecision out;
   out.disposition = disposition;
   out.code = std::move(code);
+  out.reason_code = std::move(reason_code);
   out.message = std::move(message);
   out.evidence = evidence;
   out.timings.validator_ms = evidence.validator_duration_ms;
   return out;
 }
 
-PublicationDecision refuse(const ShapeEvidence &evidence, std::string message) {
+PublicationDecision refuse(const ShapeEvidence &evidence, std::string reason_code,
+                           std::string message) {
   return make_decision(PublicationDisposition::Refused, "GEOMETRY_INVALID",
-                       std::move(message), evidence);
+                       std::move(reason_code), std::move(message), evidence);
 }
 
 } // namespace
@@ -204,6 +207,7 @@ nlohmann::json PublicationDecision::Timings::to_json() const {
 nlohmann::json PublicationDecision::to_json() const {
   return {{"disposition", disposition_name(disposition)},
           {"code", code},
+          {"reasonCode", reason_code},
           {"message", message},
           {"evidence", evidence.to_json()},
           {"timings", timings.to_json()}};
@@ -221,49 +225,63 @@ PublicationPolicy single_solid_policy(std::string name, PublicationTier tier) {
 PublicationDecision evaluate_publication_policy(const ShapeEvidence &evidence,
                                                  const PublicationPolicy &policy) {
   if (evidence.null_shape)
-    return refuse(evidence, policy.name + " produced null geometry");
+    return refuse(evidence, "PUBLICATION_NULL_SHAPE",
+                  policy.name + " produced null geometry");
   if (!evidence.error.empty())
-    return refuse(evidence, policy.name + " shape audit failed: " + evidence.error);
+    return refuse(evidence, "PUBLICATION_AUDIT_ERROR",
+                  policy.name + " shape audit failed: " + evidence.error);
   if (policy.require_brep_valid && !evidence.brep_valid)
-    return refuse(evidence, policy.name + " produced invalid geometry");
+    return refuse(evidence, "PUBLICATION_BREP_INVALID",
+                  policy.name + " produced invalid geometry");
   if (policy.allowed_top_level_shapes != TopLevelShapePolicy::Any) {
     if (!evidence.structure_checked)
-      return refuse(evidence, policy.name + " has no structural validation evidence");
+      return refuse(evidence, "PUBLICATION_NO_STRUCTURE_EVIDENCE",
+                    policy.name + " has no structural validation evidence");
     if (!solid_container(evidence.top_level_shape))
-      return refuse(evidence, policy.name + " produced unsupported top-level shape");
+      return refuse(evidence, "PUBLICATION_UNSUPPORTED_TOP_LEVEL",
+                    policy.name + " produced unsupported top-level shape");
     if (evidence.stray_topology_count != 0)
-      return refuse(evidence, policy.name + " produced topology outside its solid payload");
+      return refuse(evidence, "PUBLICATION_STRAY_TOPOLOGY",
+                    policy.name + " produced topology outside its solid payload");
   }
   if (evidence.solid_count == 0 && policy.allow_empty_lifecycle)
-    return make_decision(PublicationDisposition::LifecycleOnly, "", "", evidence);
+    return make_decision(PublicationDisposition::LifecycleOnly, "", "", "", evidence);
   if (evidence.solid_count < policy.min_solid_count)
-    return refuse(evidence, policy.name + " produced too few solids");
+    return refuse(evidence, "PUBLICATION_TOO_FEW_SOLIDS",
+                  policy.name + " produced too few solids");
   if (policy.max_solid_count >= 0 && evidence.solid_count > policy.max_solid_count)
-    return refuse(evidence, policy.name + " produced too many solids");
+    return refuse(evidence, "PUBLICATION_TOO_MANY_SOLIDS",
+                  policy.name + " produced too many solids");
   if (policy.allowed_top_level_shapes == TopLevelShapePolicy::SingleBody &&
       evidence.solid_count != 1)
-    return refuse(evidence, policy.name + " does not contain exactly one connected solid");
+    return refuse(evidence, "PUBLICATION_NOT_SINGLE_SOLID",
+                  policy.name + " does not contain exactly one connected solid");
   if (policy.require_positive_volume &&
       (!evidence.volume_checked || !std::isfinite(evidence.volume) || evidence.volume <= 0.0)) {
-    return refuse(evidence, policy.name + " produced non-positive or unmeasured volume");
+    return refuse(evidence, "PUBLICATION_NON_POSITIVE_VOLUME",
+                  policy.name + " produced non-positive or unmeasured volume");
   }
   if (policy.require_finite_tolerances) {
     const double maximum = evidence.tolerances.maximum();
     if (!evidence.tolerances_checked || !std::isfinite(maximum) || maximum < 0.0)
-      return refuse(evidence, policy.name + " has unknown or invalid B-Rep tolerances");
+      return refuse(evidence, "PUBLICATION_TOLERANCE_UNKNOWN",
+                    policy.name + " has unknown or invalid B-Rep tolerances");
     if (policy.maximum_tolerance >= 0.0 && maximum > policy.maximum_tolerance)
-      return refuse(evidence, policy.name + " exceeded its B-Rep tolerance budget");
+      return refuse(evidence, "PUBLICATION_TOLERANCE_BUDGET",
+                    policy.name + " exceeded its B-Rep tolerance budget");
   }
   if (policy.require_closed_manifold &&
       (!evidence.manifold_checked || evidence.open_edge_count != 0 ||
        evidence.non_manifold_edge_count != 0)) {
-    return refuse(evidence, policy.name + " failed closed-manifold validation");
+    return refuse(evidence, "PUBLICATION_OPEN_MANIFOLD",
+                  policy.name + " failed closed-manifold validation");
   }
   if (policy.tier == PublicationTier::TierB &&
       (!evidence.self_interference_checked || evidence.self_interference_count != 0)) {
-    return refuse(evidence, policy.name + " failed self-interference validation");
+    return refuse(evidence, "PUBLICATION_SELF_INTERFERENCE",
+                  policy.name + " failed self-interference validation");
   }
-  return make_decision(PublicationDisposition::Publishable, "", "", evidence);
+  return make_decision(PublicationDisposition::Publishable, "", "", "", evidence);
 }
 
 ShapeEvidence collect_shape_evidence(const TopoDS_Shape &shape, PublicationTier tier) {

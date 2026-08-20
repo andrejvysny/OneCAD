@@ -341,6 +341,12 @@ pub struct Diagnostic {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Fine-grained machine-readable refusal reason (SCHEMA §7.2
+    /// `diagnostics[].reasonCode`). A SIBLING of `code`, never a replacement:
+    /// `code` stays the §8 taxonomy value, so routing on the reason does not
+    /// widen the closed error enum.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<serde_json::Value>,
 }

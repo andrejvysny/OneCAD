@@ -208,7 +208,8 @@ OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::stri
             kernel::validation::single_solid_policy(
                 "TransformBody", kernel::validation::PublicationTier::TierA));
         if (!decision.publishable()) {
-            return OpOutcome::fail(decision.code, decision.message + " on body " + target_id);
+            return publication_refusal(decision, "publication",
+                                       decision.message + " on body " + target_id);
         }
 
         if (placement.copy) {

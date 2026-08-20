@@ -66,7 +66,7 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     policy.allow_empty_lifecycle = true;
     const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
     if (!decision.publishable() && !decision.lifecycle_only()) {
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     OpOutcome out;

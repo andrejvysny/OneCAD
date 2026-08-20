@@ -601,7 +601,9 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
                        "relabeled": [ /* {elementId, topoKey, kind, bodyId} */ ] },
   "needsRepair": [ /* NeedsRepair payloads — §9 — STATE, not error */ ],
   "signatures": { "geometry": "aa11…", "bodyLifecycle": "bb22…", "referencedBinding": "cc33…" },
-  "diagnostics": [ { "severity": "warning", "code": "…", "message": "…" } ],
+  "diagnostics": [ { "severity": "warning", "code": "…", "message": "…" },
+                   { "severity": "error", "code": "GEOMETRY_INVALID", "message": "…",
+                     "stage": "publication", "reasonCode": "PUBLICATION_TOO_MANY_SOLIDS" } ],
   "matePlacement": { "translate": [0, 0, 5], "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0 } }
 }
 ```
@@ -622,11 +624,49 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
 
 `diagnostics[]` is additive structured evidence. Required fields are
 `severity` (`"info" | "warning" | "error"`), `code` (≤128 bytes), and
-`message` (≤4096 bytes). Optional `stage` is ≤64 bytes. Optional `evidence` is a
+`message` (≤4096 bytes). Optional `stage` is ≤64 bytes. Optional `reasonCode` is
+≤64 bytes and SCREAMING_SNAKE (see the table below). Optional `evidence` is a
 JSON object whose encoded size is ≤64 KiB; producers also bound every contained
 array. Readers ignore and log malformed diagnostic entries or optional fields;
 malformed diagnostics never invalidate an otherwise valid frame. At most 64
 diagnostics are consumed per carrier.
+
+**`diagnostics[].reasonCode` — the machine-readable publication-refusal reason.**
+`code` answers *which taxonomy bucket*; `reasonCode` answers *which policy branch
+refused*. It is a SIBLING of `code`, never a replacement: `code` stays the closed
+§8 value (`GEOMETRY_INVALID` on every publication refusal), so a reader may route
+on the reason without the top-level error enum ever growing a member it cannot
+parse. Absent means "this producer made no claim", never "no reason exists" — a
+reader MUST NOT infer anything from the absence and MUST NOT parse `message` as a
+substitute. Unknown values are forward compatibility, not errors: a reader that
+does not recognise a `reasonCode` treats the diagnostic exactly as it would with
+the field missing. The values below are 1:1 with the branches of the worker's
+`evaluate_publication_policy`; every one of them ships with top-level
+`GEOMETRY_INVALID`.
+
+| `reasonCode` | Refused because |
+|---|---|
+| `PUBLICATION_NULL_SHAPE` | the operation produced a null shape |
+| `PUBLICATION_AUDIT_ERROR` | the shape audit itself failed (the kernel raised while measuring) |
+| `PUBLICATION_BREP_INVALID` | B-Rep validity is required and the result is not valid |
+| `PUBLICATION_NO_STRUCTURE_EVIDENCE` | a structural policy applies but no structural evidence was collected |
+| `PUBLICATION_UNSUPPORTED_TOP_LEVEL` | the top-level shape is not a solid / compsolid / compound |
+| `PUBLICATION_STRAY_TOPOLOGY` | topology sits outside the solid payload (a shell/face/wire/edge/vertex beside the solids) |
+| `PUBLICATION_TOO_FEW_SOLIDS` | fewer solids than the policy's minimum |
+| `PUBLICATION_TOO_MANY_SOLIDS` | more solids than the policy's maximum |
+| `PUBLICATION_NOT_SINGLE_SOLID` | a single-Body policy but not exactly one connected solid |
+| `PUBLICATION_NON_POSITIVE_VOLUME` | volume is unmeasured, non-finite, or ≤ 0 |
+| `PUBLICATION_TOLERANCE_UNKNOWN` | B-Rep tolerances are unmeasured or not finite |
+| `PUBLICATION_TOLERANCE_BUDGET` | measured tolerance exceeded the operation's tolerance ceiling |
+| `PUBLICATION_OPEN_MANIFOLD` | closed-manifold validation failed (open or non-manifold edge use) |
+| `PUBLICATION_SELF_INTERFERENCE` | Tier B self-interference validation failed or was not run |
+
+RESERVED, **not emitted today**: `PUBLICATION_MICRO_EDGE`,
+`PUBLICATION_SLIVER_FACE`, `PUBLICATION_MICRO_TOPOLOGY_UNKNOWN`. The evidence for
+all three (`microEdgeCount`, `sliverFaceCount`, `microTopologyChecked`) is already
+collected at Tier B but no policy branch refuses on it, so no producer may emit
+these values until micro-topology enforcement lands. They are listed here so the
+name is claimed, not so a reader can expect them.
 
 - `elementMapDelta.added` / `.relabeled` entries carry a **REQUIRED `bodyId`**:
   `{ elementId, topoKey, kind, bodyId }`. A single step can create/modify several
@@ -728,6 +768,12 @@ Terminal resp — `PlanPrepared`:
         { "severity": "error", "code": "FILLET_WALKING_FAILED",
           "message": "Fillet failed", "stage": "build", "evidence": {} }
       ] }
+    // A publication refusal takes the same row shape, with the reason attached:
+    // { "stepIndex": 7, "status": "opFailed", "message": "Chamfer produced too many solids",
+    //   "diagnostics": [ { "severity": "error", "code": "GEOMETRY_INVALID",
+    //                      "reasonCode": "PUBLICATION_TOO_MANY_SOLIDS",
+    //                      "message": "Chamfer produced too many solids",
+    //                      "stage": "publication", "evidence": { "solidCount": 2 } } ] }
   ],
   "historyPrefixHash": "9c4d…",
 
@@ -2453,6 +2499,15 @@ session head and returns the resulting bodies' MESH1. Nothing is committed.
   `ExecutePlan` step under `error.detail.diagnostics`. The arrays MUST be
   byte-equivalent for the same candidate. `error.code` remains the §8 taxonomy
   code; operation-specific `FILLET_*` values are diagnostic codes only.
+- **Byte-equivalence includes `reasonCode`, and "the same candidate" includes its
+  validation tier.** A preview runs the Tier A evidence set for responsiveness
+  while commit runs the operation's authoritative tier, so a Tier B-only branch —
+  `PUBLICATION_SELF_INTERFERENCE`, and `PUBLICATION_OPEN_MANIFOLD` on an operation
+  whose closed-manifold requirement is tier-derived — can refuse at commit after
+  the preview published. That divergence is expected and is NOT an equivalence
+  violation: the two runs are different candidates. Making the reason
+  machine-readable is what lets a caller tell "the preview lied" from "the deeper
+  tier found something the shallow one never looked for".
 - **Lane.** This is kernel-lane work; it shares the OCCT single-writer thread
   with `ExecutePlan`. It deliberately does NOT ride the solver lane, whose
   latest-wins coalescing is specific to `SolveDrag`. Callers are expected to bound
@@ -2966,6 +3021,25 @@ For recoverable kernel failures, `detail.diagnostics` MAY carry the bounded
 structured array defined in §7.2. It is optional for compatibility. Readers
 ignore malformed optional detail while retaining the valid top-level error.
 
+Those entries carry the same optional `reasonCode` as a `planStep` diagnostic
+(§7.2), with the same meaning and the same ≤64-byte bound:
+
+```json
+{ "code": "GEOMETRY_INVALID", "message": "Chamfer produced too many solids",
+  "retriable": false,
+  "detail": { "diagnostics": [
+    { "severity": "error", "code": "GEOMETRY_INVALID",
+      "reasonCode": "PUBLICATION_TOO_MANY_SOLIDS",
+      "message": "Chamfer produced too many solids", "stage": "publication",
+      "evidence": { "solidCount": 2 } } ] } }
+```
+
+The top-level `error.code` is **unchanged and remains this closed taxonomy** —
+adding a refusal reason never adds a `code` value. A reader parses `error.code`
+into a fixed enum, so an unrecognised value there would fail the whole frame;
+that is precisely why the fine-grained reason rides `detail.diagnostics[].reasonCode`,
+where an unknown value is ignorable.
+
 | Class | `code` | Session effect | Recovery |
 |-------|--------|----------------|----------|
 | Recoverable op failure | `OP_FAILED` | scratch only — **session intact** | Rust discards scratch; user edits and retries |
@@ -3275,6 +3349,46 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-20 — §7.2/§7.6/§8 `diagnostics[].reasonCode`, a fine-grained
+  publication-refusal reason (kernel continuation WP1-G2).** Every publication
+  refusal today collapses to top-level `GEOMETRY_INVALID` plus prose, so nothing
+  downstream can tell "your Boolean split the body in two" from "your fillet grew
+  the tolerance past its budget" without parsing English. `reasonCode` is a new
+  OPTIONAL ≤64-byte SCREAMING_SNAKE sibling of `code` on every `diagnostics[]`
+  carrier (`planStep`, `perStepResults[]`, and §8 `error.detail.diagnostics`).
+  Fourteen values ship, **1:1 with the `refuse()` branches of the worker's
+  `evaluate_publication_policy`**, in branch order: `PUBLICATION_NULL_SHAPE`,
+  `_AUDIT_ERROR`, `_BREP_INVALID`, `_NO_STRUCTURE_EVIDENCE`,
+  `_UNSUPPORTED_TOP_LEVEL`, `_STRAY_TOPOLOGY`, `_TOO_FEW_SOLIDS`,
+  `_TOO_MANY_SOLIDS`, `_NOT_SINGLE_SOLID`, `_NON_POSITIVE_VOLUME`,
+  `_TOLERANCE_UNKNOWN`, `_TOLERANCE_BUDGET`, `_OPEN_MANIFOLD`,
+  `_SELF_INTERFERENCE`. Three more — `PUBLICATION_MICRO_EDGE`,
+  `_SLIVER_FACE`, `_MICRO_TOPOLOGY_UNKNOWN` — are RESERVED and deliberately
+  **not emitted**: the Tier B evidence exists but no policy branch refuses on it
+  yet. The ~16 op sites that previously returned a bare
+  `fail(decision.code, decision.message)` now route through one
+  `publication_refusal()` helper, so they additionally attach the **bounded
+  `evidence`** they never carried (the same `ShapeEvidence` shape
+  `INVALID_MODELING_INPUT` has always shipped) and their synthesized `stage` moves
+  from `build` to `publication`. **§8 is unchanged**: `error.code` remains the
+  closed taxonomy Rust parses into a fixed enum — an unknown value there fails the
+  whole frame, which is exactly why the reason rides its own ignorable field. The
+  worker's `bounded_diagnostic` allowlist (which REBUILDS every diagnostic before
+  framing, dropping anything unnamed) is widened to admit `reasonCode`; the
+  preview lane shares that same allowlist, so §7.6 preview/commit byte-equivalence
+  now explicitly includes `reasonCode` **for the same candidate**, where the
+  candidate includes its validation tier — a preview runs Tier A, so a Tier B-only
+  reason legitimately differs between preview and commit, and that divergence is
+  now machine-readable instead of invisible. Every existing fixture stays
+  byte-valid under both subset matchers (a new KEY is additive; no pinned
+  `diagnostics` array changes length). **Fixture bump:** one new file
+  `protocol/fixtures/publication_refusal.ndjson`, registered as
+  `canonical_publication_refusal`, verified non-vacuous — emitting a wrong
+  `reasonCode` reds it at
+  `result.perStepResults.[2].diagnostics.[0].reasonCode`. Kernelbench
+  `digests.json` and `semantics.json` are unmoved: `normalized_digest` hashes a
+  key-filtered result document and the fillet suites' diagnostics come from the
+  `FILLET_*` vocabulary, not the publication decision.
 - **2026-08-17 — §7.8 `ExportStep` carries body NAMES and per-face COLOURS
   (DI-5 W3); the app switches to AP242.** Three ADDITIVE optional args —
   `bodyNames` (`bodyId → string`), `bodyColors` (`bodyId → [r,g,b,a]`) and

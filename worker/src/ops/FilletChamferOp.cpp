@@ -200,7 +200,7 @@ std::optional<OpOutcome> validate_chamfer(
     const TopoDS_Shape& result, kernel::validation::PublicationTier tier) {
     const kernel::validation::PublicationDecision decision = publication_decision(
         result, kernel::validation::single_solid_policy("Chamfer", tier));
-    if (!decision.publishable()) return OpOutcome::fail(decision.code, decision.message);
+    if (!decision.publishable()) return publication_refusal(decision, "publication");
     return std::nullopt;
 }
 

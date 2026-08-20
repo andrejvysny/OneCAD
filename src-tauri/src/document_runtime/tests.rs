@@ -217,6 +217,7 @@ fn kernel_diagnostic() -> Diagnostic {
         code: "FILLET_WALKING_FAILED".into(),
         message: "fake plan failure".into(),
         stage: Some("build".into()),
+        reason_code: None,
         evidence: Some(serde_json::json!({"contour": {"index": 1}})),
     }
 }

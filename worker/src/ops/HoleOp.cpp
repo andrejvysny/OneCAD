@@ -357,7 +357,7 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
                                            {"evidence", {{"solidCount", solid_count}}}});
             return failure;
         }
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     // --- publish the MODIFIED host (id preserved) + rebind partition via history ---

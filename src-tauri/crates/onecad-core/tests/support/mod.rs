@@ -375,6 +375,7 @@ impl GeometryEngine for FakeEngine {
                             code: format!("{code:?}"),
                             message: format!("scripted op failure at step {step}"),
                             stage: None,
+                            reason_code: None,
                             evidence: None,
                         };
                         per_step.push(StepResult {

@@ -102,7 +102,7 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
     const kernel::validation::PublicationDecision decision = publication_decision(
         result, kernel::validation::single_solid_policy(
                     fuse_with_original ? "MirrorBody fused result" : "MirrorBody result", tier));
-    if (!decision.publishable()) return OpOutcome::fail(decision.code, decision.message);
+    if (!decision.publishable()) return publication_refusal(decision, "publication");
 
     // NewBody lineage: fresh body `body_<opId>` (D1); the source body is preserved.
     OpOutcome out;

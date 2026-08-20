@@ -1108,7 +1108,7 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     const kernel::validation::PublicationDecision decision =
         publication_decision(result, publication_policy);
     if (!decision.publishable()) {
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     // --- publish: modified in place + history through the offset image --------

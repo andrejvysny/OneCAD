@@ -567,7 +567,7 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
         solid,
         kernel::validation::single_solid_policy(op_label, kernel::validation::PublicationTier::TierA));
     if (!decision.publishable()) {
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     OpOutcome out;

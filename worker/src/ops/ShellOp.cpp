@@ -169,7 +169,7 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
                     "Shell", result_validation_tier(
                                  ctx, kernel::validation::PublicationTier::TierB)));
     if (!decision.publishable()) {
-        return OpOutcome::fail(decision.code, decision.message);
+        return publication_refusal(decision, "publication");
     }
 
     // --- publish the modified body (id preserved) + rebind partition via history ---

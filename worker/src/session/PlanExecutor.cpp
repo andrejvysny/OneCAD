@@ -233,6 +233,15 @@ std::optional<json> bounded_diagnostic(const json& value) {
         const std::string stage = value["stage"].get<std::string>();
         if (stage.size() <= 64) bounded["stage"] = stage;
     }
+    // SCHEMA §7.2 `diagnostics[].reasonCode` — the fine-grained publication
+    // refusal reason. This allowlist REBUILDS the diagnostic, so anything not
+    // named here is dropped before framing; a malformed or oversized value is
+    // dropped alone and never invalidates the diagnostic.
+    if (value.contains("reasonCode") && value["reasonCode"].is_string()) {
+        const std::string reason_code = value["reasonCode"].get<std::string>();
+        if (!reason_code.empty() && reason_code.size() <= 64)
+            bounded["reasonCode"] = reason_code;
+    }
     if (value.contains("evidence") && value["evidence"].is_object() &&
         value["evidence"].dump().size() <= 65'536) {
         bounded["evidence"] = value["evidence"];
@@ -461,6 +470,7 @@ std::optional<ops::OpOutcome> validate_published_bodies(
                                            {"code", decision.code},
                                            {"message", decision.message},
                                            {"stage", "publication-invariant"},
+                                           {"reasonCode", decision.reason_code},
                                            {"bodyId", body_id},
                                            {"evidence", decision.evidence.to_json()}});
             return failure;
