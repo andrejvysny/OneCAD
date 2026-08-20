@@ -228,6 +228,16 @@ add_executable(test_blend_budget test_blend_budget.cpp)
 target_link_libraries(test_blend_budget PRIVATE worker_core)
 add_test(NAME blend_budget COMMAND test_blend_budget)
 
+# WP3 C3: `ComposedHistory`. Drives the real defeature -> offset -> re-fillet
+# chain, CHARACTERIZES the three `BRepTools_History` facts the composition
+# depends on (removal propagation, intermediate-key retention, Modified-vs-
+# Generated survival), and asserts the composed contract: transients are
+# unanswerable, successor lists are deterministic and final-ordinal sorted,
+# and `is_deleted` fires on positive evidence only.
+add_executable(test_composed_history test_composed_history.cpp)
+target_link_libraries(test_composed_history PRIVATE worker_core)
+add_test(NAME composed_history COMMAND test_composed_history)
+
 # --- OFFSET-FACE Phase 0: OCCT selective-offset go/no-go spike (pure OCCT,
 #     characterizes BRepOffset_MakeOffset per-face behavior before the op is
 #     built; see the plan's Phase-0 gate). ---

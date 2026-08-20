@@ -112,6 +112,8 @@ add_library(worker_core STATIC
     src/session/PreviewOp.cpp
     # --- W-WP5: REAL OCCT ops + ElementMap V2 + tessellation ---
     src/elementmap/ElementMapPartition.cpp
+    # --- WP3 C3: one history over a multi-stage chain (OffsetFace DirectModeler) ---
+    src/elementmap/ComposedHistory.cpp
     # --- W-WP6: resolution ladder (scoring / min-cost assignment / orchestration) ---
     src/elementmap/Scoring.cpp
     src/elementmap/Assignment.cpp

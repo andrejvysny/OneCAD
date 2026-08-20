@@ -10,6 +10,59 @@ multi-face/countersink/partial-sweep evidence). Decisions taken with the user: L
 chosen (not even plan-only); WP3 V3 re-edit gets a VISIBLE one-line hint, not silent re-author;
 the linux-kernelbench `clean_build` dispatch (§ WP0 below) stays SKIPPED and open.
 
+### Gate — WP3 C1–C3: blend proof, sampling budget, ComposedHistory (2026-08-20) — LANDED
+
+Groundwork for OffsetFace DirectModeler V1, nothing wired into any op. Adversarial review on a
+fresh context returned SHIP-WITH-FIXES; every required fix applied and re-proven before landing.
+
+- **C1 — the analytic gate, with two review-found defects fixed before first wiring.**
+  (1) BLOCKER: the line-to-line `gp_Lin::Distance(gp_Lin)` form is numerically wrong for any
+  non-bit-identical axis pair — OCCT's parallel branch triggers only at `gp::Resolution()`
+  (~DBL_MIN), so a pair accepted as parallel at 1e-7 rad falls into the skew branch where the
+  answer is |offset|·|cos φ| for a noise φ. Measured on real geometry (box-cut groove rotated
+  0.6 rad about (1,2,3)): line-line **4.279528191108** where the true separation is
+  **7.000000000000** (= R_s+R = 5+2). Fixed to point-to-line after parallelism is established;
+  the regression fixture shares no axis literals (the pre-fix tests all did, which is why they
+  could not see it). (2) BLOCKER: co-surface acceptance — `analytic_cylinder_blend(F,F,F)` was
+  Proved for any cylindrical face; the reachable form is a split tangent hole whose halves are
+  ≥G1 "supports" of each other, and suppressing that "blend" destroys the hole. Now Failed,
+  pinned by three decoys including a real `BRepAlgoAPI_Cut`-drilled hole. (3) The header now
+  claims what the function delivers — an exact TANGENCY certificate, not blend-ness (blend-ness
+  = the five-layer stack); Proved is necessary-never-sufficient, Failed ≡ Unknown for any
+  destructive decision. Decoy strengthened via `ShapeCustom::BSplineRestriction` substitution:
+  the production recognizer says Recognized at R=1.999999998570 on the B-spline face, the
+  analytic gate says Unknown — the load-bearing refusal, in vivo.
+- **C2 — BlendSamplingBudget** defaulted {9,5} (the exact deleted literals; identical midpoint
+  expressions). Zero drift pinned: 25 samples / 2 boundaries on the fixture; {33,17} → 289.
+  Degenerate budgets sample nothing and fail closed, pinned. All production callers use the
+  default (grep-verified by the reviewer).
+- **C3 — ComposedHistory, and the characterization IS the deliverable.** Measured on OCCT
+  8.0.1, real defeature → offset → re-fillet chain (volumes reproduce the plan's targets:
+  991.4159265 → 1000 → 1200 → 1191.4159265): `BRepTools_History::Merge` DROPS removal-mediated
+  lineage (the re-blended face never reaches `Generated(support_a)` through the merged handle,
+  contradicting its own documented rule 1) and LEAKS last-stage argument keys, while supports
+  do stay `Modified` (the 0.09 confidence boost survives composition). So the composition walk
+  is MANUAL; per-stage `BRepTools_History` is ingestion only. Both sides are now ASSERTED —
+  a future OCCT that fixes `Merge` reds the suite loudly. Contracts pinned: transients
+  unanswerable by construction; injection (`add_modified`) replaces the walk's classification
+  and keeps G∧M==0 (review fix — it double-published before); `is_deleted` on positive evidence
+  only; a 33-sub-shape sweep asserts no query ever answers with a shape outside the final body
+  (dropping the presence filter hands `apply_history` SEVEN stale binds — measured, restored);
+  determinism across two independent OCCT rebuilds; `ElementMapPartition::apply_history`
+  consumed end-to-end (support rebinds `el_support_a → f:1` with no repair item; an
+  unanswerable entry lands NeedsRepair, never `delta.removed`). Test harness hardened: 92
+  checks with a run-counter so a silently skipped check reads as a dropped count.
+- **Recorded decisions:** convexity coupling into the proof deferred to C5's wiring (where
+  `_MIXED_BLEND_CONVEXITY` refusals live); tolerance-adaptive semantic budgets (imported
+  geometry with 1e-4 B-Rep tolerance measures `Failed` against the fixed 1e-6 floor) is a
+  B-disposition change and stays a named seam, not a silent tweak — same disposition as the
+  three prose-threshold messages in the G1r row.
+- **Gate (tip-verified after all fixes, measured on the main thread):** ctest **141/141**
+  (45.9 s) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **86 targets / 1305 passed /
+  0 failed** (teed, 0 FAILED lines) · kernelbench `compare` **136 rows unchanged** ·
+  `semantic-compare` OK · fmt/clippy/tsc/hygiene/hex clean. The three C-commits are staged
+  with per-commit CMake registration so each builds standalone; the full suite ran at tip.
+
 ### Gate — WP1-G2: machine-readable publication-refusal reasons (2026-08-20) — LANDED
 
 `PublicationDecision` gains a sibling `reason_code`, surfaced as `diagnostics[].reasonCode`
