@@ -3000,3 +3000,175 @@ describe("tauriClient analyzeEdgeOpRange", () => {
     ).rejects.toThrow("stale");
   });
 });
+
+/*
+ * Per-entity constrained state across the REAL tauriClient (SCHEMA §7.4
+ * `entityStates`).
+ *
+ * The wire keys this map by backend ENTITY UUID — the same keyspace `curves`
+ * uses — while the store, the engine and every sketch entity are keyed by
+ * FRONTEND id. Without the reverse map the real lane would hand the viewport a
+ * map whose every key misses, which reads as "the solver said nothing" and
+ * silently costs the whole feature. These drive `mockIPC`, so the client under
+ * test is the production one, uuids and all.
+ */
+describe("tauriClient entityStates reverse map (SCHEMA §7.4)", () => {
+  type UpsertOp = { op: string; entity?: { kind: string; id: string } };
+
+  /** Enter a sketch holding a Line and a Circle, exposing the minted backend
+   *  uuids (read off the upsert ops — the id-map is private). `upsert`/`begin`/
+   *  `end` supply each verb's `entityStates`, keyed however the test wants. */
+  async function sketchWithStates(fixtures: {
+    upsert?: (minted: Map<string, string>) => Record<string, string>;
+    begin?: (minted: Map<string, string>) => Record<string, string> | undefined;
+    end?: (minted: Map<string, string>) => Record<string, string> | undefined;
+  }) {
+    const minted = new Map<string, string>();
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch")
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            plane: XZ_PLANE,
+            entities: [],
+            constraints: [],
+            dof: 4,
+            status: "UnderConstrained",
+          };
+        if (cmd === "sketch_upsert") {
+          for (const o of (payload as { ops: UpsertOp[] }).ops ?? []) {
+            if (o.op === "addEntity" && o.entity) minted.set(o.entity.kind, o.entity.id);
+          }
+          return {
+            sketchId: "u",
+            sketchRevision: 1,
+            dof: 3,
+            status: "UnderConstrained",
+            solvedPositions: {},
+            solvedCurves: {},
+            ...(fixtures.upsert ? { entityStates: fixtures.upsert(minted) } : {}),
+          };
+        }
+        if (cmd === "begin_gesture")
+          return {
+            gestureId: 7,
+            ready: true,
+            ...(fixtures.begin ? { entityStates: fixtures.begin(minted) } : {}),
+          };
+        if (cmd === "end_gesture")
+          return {
+            sketchId: "u",
+            sketchRevision: 2,
+            dof: 0,
+            status: "FullyConstrained",
+            solvedPositions: {},
+            ...(fixtures.end ? { entityStates: fixtures.end(minted) } : {}),
+          };
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    const upserted = await client.sketchUpsert(
+      "sk",
+      [
+        { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] },
+        { id: "c1", type: "Circle", center: [0, 20], radius: 5 },
+      ],
+      [],
+    );
+    return { client, minted, upserted };
+  }
+
+  it("sketchUpsert re-keys a WIRE-keyed map to frontend ids, tokens verbatim", async () => {
+    const { minted, upserted } = await sketchWithStates({
+      upsert: (m) => ({
+        [m.get("line")!]: "fullyConstrained",
+        [m.get("circle")!]: "conflicting",
+      }),
+    });
+    // Guard the guard: the wire really used uuids, so this is not an identity map.
+    expect(minted.get("line")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(upserted.entityStates).toEqual({ e1: "fullyConstrained", c1: "conflicting" });
+  });
+
+  it("DROPS an unmapped wire id rather than guessing a frontend id", async () => {
+    const { upserted } = await sketchWithStates({
+      upsert: (m) => ({
+        [m.get("line")!]: "underConstrained",
+        "00000000-0000-4000-8000-0000000ghost": "conflicting",
+      }),
+    });
+    expect(upserted.entityStates).toEqual({ e1: "underConstrained" });
+  });
+
+  it("an ABSENT field is {} — unknown for all, not an error and not a default state", async () => {
+    const { upserted, client } = await sketchWithStates({});
+    expect(upserted.entityStates).toEqual({});
+    await client.beginGesture("sk", "e1.Start");
+    // BeginGesture and EndGesture take the same absent-field path.
+    expect((await client.endGesture())?.entityStates).toEqual({});
+  });
+
+  it("beginGesture answers the gesture-fixed map, endGesture echoes it — both re-keyed", async () => {
+    const states = (m: Map<string, string>) => ({ [m.get("circle")!]: "conflicting" });
+    const { client } = await sketchWithStates({ begin: states, end: states });
+    const begun = await client.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1" });
+    expect(begun.entityStates).toEqual({ c1: "conflicting" });
+    const done = await client.endGesture([9, 9]);
+    expect(done.entityStates).toEqual(begun.entityStates);
+  });
+
+  it("solveDrag carries none, and asking for one does not invent it (§7.4 normative)", async () => {
+    const { client } = await sketchWithStates({
+      begin: (m) => ({ [m.get("circle")!]: "conflicting" }),
+    });
+    mockIPC(
+      () => ({
+        gestureId: 7,
+        seq: 1,
+        status: "success",
+        dof: 1,
+        conflicting: [],
+        positions: {},
+        curves: {},
+        solveMicros: 1,
+        superseded: false,
+      }),
+      { shouldMockEvents: true },
+    );
+    const step = await client.solveDrag([9, 9]);
+    expect(step).not.toBeNull();
+    expect(step && "entityStates" in step).toBe(false);
+  });
+
+  it("enterSketch re-keys the entering solve's map and drops a backing POINT id", async () => {
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "enter_sketch")
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            plane: XZ_PLANE,
+            // A line and its two backing points — the points are NOT curve
+            // entities, and §7.4 forbids an inline-minted point in the map.
+            entities: [
+              { id: "p1", type: "Point", at: [0, 0] },
+              { id: "p2", type: "Point", at: [40, 0] },
+              { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+            ],
+            constraints: [],
+            dof: 2,
+            status: "UnderConstrained",
+            entityStates: { l1: "fullyConstrained", p1: "underConstrained", ghost: "conflicting" },
+          };
+      },
+      { shouldMockEvents: true },
+    );
+    const session = await createTauriClient().enterSketch("sketch2");
+    expect(session.entities.map((e) => e.id)).toEqual(["l1"]);
+    // Only the hydrated ENTITY survives: the backing point and the stale id both
+    // fall out, because neither names anything the viewport can color.
+    expect(session.entityStates).toEqual({ l1: "fullyConstrained" });
+  });
+});

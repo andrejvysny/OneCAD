@@ -224,6 +224,31 @@ export type SketchSolveStatus =
   | "OverConstrained"
   | "Conflicting";
 
+/**
+ * PER-ENTITY constrained state (SCHEMA §7.4 `entityStates`). `SketchSolveStatus`
+ * answers for the whole sketch; this answers for one entity, so a pinned-down
+ * line can read differently from the free circle beside it in the SAME
+ * under-constrained sketch.
+ *
+ * Exactly three tokens, and there is deliberately no `partiallyConstrained` and
+ * no per-entity DOF count: PlaneGCS reports null-space MEMBERSHIP per parameter
+ * ("this parameter is still free"), never how much freedom an entity has, so a
+ * count would be fabricated. `conflicting` outranks the other two.
+ */
+export type EntityConstrainedState = "underConstrained" | "fullyConstrained" | "conflicting";
+
+/**
+ * Per-entity constrained states keyed by FRONTEND entity id (SCHEMA §7.4
+ * `entityStates`).
+ *
+ * An entity ABSENT from the map is **unknown** — a reader MUST NOT default it to
+ * `underConstrained`; it falls back to the whole-sketch tint. An EMPTY map is
+ * therefore "nothing to say about any entity", which is what an ellipse-bearing
+ * sketch (never diagnosed by the solver) and every hand-written client double
+ * report.
+ */
+export type SketchEntityStates = Record<string, EntityConstrainedState>;
+
 /** Full authoritative sketch, returned by `enterSketch`. */
 export interface SketchSession {
   sketchId: string;
@@ -235,6 +260,11 @@ export interface SketchSession {
   /** Constraint ids in conflict (SCHEMA §7.4; FRONTEND ids, unknown dropped by the
    *  client). Seeds the sketch store's `conflictingIds` on session enter. Absent ⇒ []. */
   conflicting?: string[];
+  /** Per-entity constrained state of the entering solve (SCHEMA §7.4). Seeds the
+   *  sketch store's `entityStates`. Optional for the same reason `solvedCurves`
+   *  is — hand-written `CadClient` doubles predate it; absent ⇒ `{}` (unknown
+   *  for every entity), never "everything is under-constrained". */
+  entityStates?: SketchEntityStates;
 }
 
 /** `enterSketch` target: an existing sketch id, or a fresh sketch on a plane. */
@@ -298,6 +328,9 @@ export interface SketchUpsertResult {
    * `solvedCurves ?? {}`.
    */
   solvedCurves?: Record<string, CurveParams>;
+  /** Per-entity constrained state after this solve (SCHEMA §7.4). Every solve
+   *  write-back REPLACES the store's `entityStates` from it. Absent ⇒ `{}`. */
+  entityStates?: SketchEntityStates;
 }
 
 /** One closed profile region (SCHEMA §7.4 SketchRegions). */
@@ -336,6 +369,13 @@ export interface FinishSketchResult {
 export interface BeginGestureResult {
   gestureId: number;
   ready: boolean;
+  /**
+   * Per-entity constrained state of the COMMITTED sketch this gesture opened
+   * against (SCHEMA §7.4). GESTURE-FIXED: `solveDrag` never carries it and
+   * `endGesture` echoes this exact map, so a consumer HOLDS this one for the
+   * whole gesture. Absent ⇒ `{}`.
+   */
+  entityStates?: SketchEntityStates;
 }
 
 /**

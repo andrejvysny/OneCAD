@@ -26,7 +26,12 @@
  * Cleared on enter / exit / dispose so a stale session's history never leaks.
  */
 import { createStore, useStore } from "zustand";
-import type { SketchConstraint, SketchEntity, SketchSession } from "@/ipc/types";
+import type {
+  SketchConstraint,
+  SketchEntity,
+  SketchEntityStates,
+  SketchSession,
+} from "@/ipc/types";
 
 /** A restorable snapshot of the authoritative sketch arrays. */
 export interface SketchSnapshot {
@@ -53,6 +58,13 @@ export interface SketchState {
    *  enter SEEDS it from `session.conflicting`; exit/dispose/session-swap CLEAR it
    *  (setSession(null)). The inspector + badge layer tint these ids red. */
   conflictingIds: string[];
+  /** PER-ENTITY constrained state (SCHEMA §7.4 `entityStates`), keyed by FRONTEND
+   *  entity id. Same single-owner rule as `conflictingIds`: every successful solve
+   *  write-back REPLACES it (`setEntityStates`), session enter SEEDS it from
+   *  `session.entityStates`, exit/dispose/session-swap CLEAR it. An entity ABSENT
+   *  from the map is UNKNOWN — the viewport falls back to the whole-sketch tint for
+   *  it, never to under-constrained. */
+  entityStates: SketchEntityStates;
   /** STICKY draw modifier (W1-B): while on, every entity the draw tools commit is
    *  authored as CONSTRUCTION geometry (dashed, excluded from regions, still
    *  solved). Toggled by X with an empty sketch selection / the chrome-bar button.
@@ -69,6 +81,10 @@ export interface SketchState {
   /** REPLACE the conflicting-id set (every solve write-back / session-enter seed).
    *  Short-circuits when unchanged so live drag solves don't churn subscribers. */
   setConflicting(ids: string[]): void;
+  /** REPLACE the per-entity state map (every solve write-back / session-enter seed).
+   *  Short-circuits when unchanged so a gesture echoing its fixed map — and every
+   *  identity solve — keeps the SAME object reference and churns no subscriber. */
+  setEntityStates(states: SketchEntityStates): void;
   /** Flip the sticky construction draw modifier. */
   toggleConstructionMode(): void;
   /** Mint the next entity id (`e1`, `e2`, …) and advance the counter. */
@@ -90,6 +106,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
   session: null,
   sessionGeneration: 0,
   conflictingIds: [],
+  entityStates: {},
   constructionMode: false,
   entitySeq: 0,
   constraintSeq: 0,
@@ -99,11 +116,12 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
 
   setSession(session) {
     // Tearing down (session === null: exit / dispose / session-swap) clears the
-    // conflicting-id set; a live session leaves it to the write-back's setConflicting.
+    // conflicting-id set and the per-entity states; a live session leaves both to
+    // the write-back's setConflicting / setEntityStates.
     set((s) => ({
       session,
       sessionGeneration: s.sessionGeneration + 1,
-      ...(session === null ? { conflictingIds: [] } : {}),
+      ...(session === null ? { conflictingIds: [], entityStates: {} } : {}),
     }));
   },
 
@@ -114,6 +132,17 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
       // on repeated live drag solves that report the same (usually empty) set.
       if (cur.length === ids.length && cur.every((v, i) => v === ids[i])) return {};
       return { conflictingIds: ids };
+    });
+  },
+
+  setEntityStates(states) {
+    set((s) => {
+      const cur = s.entityStates;
+      const keys = Object.keys(states);
+      if (Object.keys(cur).length === keys.length && keys.every((k) => cur[k] === states[k])) {
+        return {}; // unchanged ⇒ keep the object ref (no subscriber churn)
+      }
+      return { entityStates: states };
     });
   },
 
@@ -174,6 +203,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
       session: null,
       sessionGeneration: 0,
       conflictingIds: [],
+      entityStates: {},
       constructionMode: false,
       entitySeq: 0,
       constraintSeq: 0,

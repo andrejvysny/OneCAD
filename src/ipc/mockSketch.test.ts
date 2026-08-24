@@ -8,6 +8,7 @@ import {
   orderedClosedLoop,
   mockRegionId,
   constraintFreedom,
+  mockEntityStates,
 } from "./mockSketch";
 import { detectRegions } from "./mockRegions";
 import type { SketchConstraint, SketchEntity } from "./types";
@@ -366,5 +367,92 @@ describe("Ellipse — mock solver + region parity", () => {
     const regions = detectRegions([...rect, { id: "c", type: "Circle", center: [20, 10], radius: 4 }]);
     expect(regions).toHaveLength(2);
     expect(regions[1].holes).toEqual([["c"]]);
+  });
+});
+
+/*
+ * `mockEntityStates` — the MOCK lane's per-entity map (SCHEMA §7.4).
+ *
+ * The point of these tests is what the map does NOT say. This lane has no
+ * Jacobian, so almost every entity's per-entity state is genuinely unknown, and
+ * the honest encoding of unknown is ABSENCE from the map. Anything richer would
+ * be the mock diagnosing itself and every consumer believing it.
+ */
+describe("mockEntityStates — the honest mock map (SCHEMA §7.4)", () => {
+  const line = (id: string, p0: [number, number], p1: [number, number]): SketchEntity => ({
+    id,
+    type: "Line",
+    p0,
+    p1,
+  });
+
+  it("says NOTHING about ordinary user geometry", () => {
+    expect(mockEntityStates([line("e1", [0, 0], [10, 0])], [])).toEqual({});
+  });
+
+  it("NEVER derives fullyConstrained from dof === 0", () => {
+    // A rectangle with enough coarse constraint arity to zero the heuristic:
+    // the whole-sketch count says "defined", which says nothing about any one
+    // entity, and a map built from it would be a fabricated diagnosis.
+    const constraints: SketchConstraint[] = [
+      { id: "c1", type: "Fixed", entities: ["e1"], positions: ["Start"] },
+      { id: "c2", type: "Fixed", entities: ["e1"], positions: ["End"] },
+      { id: "c3", type: "Fixed", entities: ["e2"], positions: ["Start"] },
+      { id: "c4", type: "Fixed", entities: ["e2"], positions: ["End"] },
+      { id: "c5", type: "Fixed", entities: ["e3"], positions: ["Start"] },
+      { id: "c6", type: "Fixed", entities: ["e3"], positions: ["End"] },
+      { id: "c7", type: "Fixed", entities: ["e4"], positions: ["Start"] },
+      { id: "c8", type: "Fixed", entities: ["e4"], positions: ["End"] },
+    ];
+    expect(solveDof(rect, constraints).dof).toBe(0); // guard: the premise holds
+    expect(mockEntityStates(rect, constraints)).toEqual({});
+  });
+
+  it("reports fullyConstrained for referenceLocked geometry only", () => {
+    const entities: SketchEntity[] = [
+      { ...line("locked", [0, 0], [10, 0]), referenceLocked: true },
+      line("mine", [0, 5], [10, 5]),
+    ];
+    expect(mockEntityStates(entities, [])).toEqual({ locked: "fullyConstrained" });
+  });
+
+  it("projects a PROVABLE conflict onto every entity the clashing constraints name", () => {
+    const entities = [line("e1", [0, 0], [40, 0])];
+    // R1: two Distances on the same target with different values.
+    const constraints: SketchConstraint[] = [
+      { id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+      { id: "d2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 120 },
+    ];
+    expect(mockEntityStates(entities, constraints)).toEqual({ e1: "conflicting" });
+  });
+
+  it("OVER-attributes across both operands, exactly as §7.4 specifies", () => {
+    const entities = [line("a", [0, 0], [10, 0]), line("b", [0, 5], [10, 5])];
+    // R3: Parallel + Perpendicular on the same pair names both lines.
+    const constraints: SketchConstraint[] = [
+      { id: "p", type: "Parallel", entities: ["a", "b"] },
+      { id: "q", type: "Perpendicular", entities: ["a", "b"] },
+    ];
+    expect(mockEntityStates(entities, constraints)).toEqual({ a: "conflicting", b: "conflicting" });
+  });
+
+  it("conflicting OUTRANKS fullyConstrained on the same entity", () => {
+    const entities: SketchEntity[] = [
+      { ...line("locked", [0, 0], [10, 0]), referenceLocked: true },
+      line("b", [0, 5], [10, 5]),
+    ];
+    const constraints: SketchConstraint[] = [
+      { id: "p", type: "Parallel", entities: ["locked", "b"] },
+      { id: "q", type: "Perpendicular", entities: ["locked", "b"] },
+    ];
+    expect(mockEntityStates(entities, constraints)).toEqual({ locked: "conflicting", b: "conflicting" });
+  });
+
+  it("names no entity that is not in the sketch", () => {
+    const constraints: SketchConstraint[] = [
+      { id: "p", type: "Parallel", entities: ["a", "ghost"] },
+      { id: "q", type: "Perpendicular", entities: ["a", "ghost"] },
+    ];
+    expect(mockEntityStates([line("a", [0, 0], [10, 0])], constraints)).toEqual({ a: "conflicting" });
   });
 });

@@ -825,13 +825,20 @@ export class SketchController {
     sketchStore.getState().setSession(session);
     sketchStore.getState().clearSketchUndo(); // fresh session ⇒ no carried-over history
     sketchStore.getState().setConflicting(session.conflicting ?? []); // seed from the enter solve
+    sketchStore.getState().setEntityStates(session.entityStates ?? {}); // ditto, per-entity
     this.pushSolve(session.sketchId, session.dof, session.status);
 
     // Capture the pre-sketch projection ONCE per sketch-mode visit: a sketch→sketch
     // switch re-opens a session while already ortho, and overwriting here would make
     // the eventual exit "restore" ortho instead of the user's real projection.
     this.priorProjection ??= viewportStore.getState().projection;
-    this.deps.engine.enterSketch(session.plane, session.entities, session.status, session.constraints);
+    this.deps.engine.enterSketch(
+      session.plane,
+      session.entities,
+      session.status,
+      session.constraints,
+      session.entityStates ?? {},
+    );
     viewportStore.getState().setProjection("ortho");
 
     this.selectMachine(toolStore.getState().sketchTool);
@@ -2279,7 +2286,10 @@ export class SketchController {
     const next: SketchSession = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
     sketchStore.getState().setSession(next);
     sketchStore.getState().setConflicting(result.conflicting ?? []);
-    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+    sketchStore.getState().setEntityStates(result.entityStates ?? {});
+    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+      entityStates: result.entityStates ?? {},
+    });
     this.pushSolve(session.sketchId, result.dof, result.status);
     // EXACTLY ONE undo entry either way — a rejected dimension still leaves the
     // entity the user drew, so undo has to land on the state before the click,
@@ -2772,7 +2782,10 @@ export class SketchController {
     };
     sketchStore.getState().setSession(next);
     sketchStore.getState().setConflicting(result.conflicting ?? []);
-    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+    sketchStore.getState().setEntityStates(result.entityStates ?? {});
+    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+      entityStates: result.entityStates ?? {},
+    });
     this.pushSolve(session.sketchId, result.dof, result.status);
     sketchStore.getState().pushUndoSnapshot(before, { kind: "mirror" });
     // Selection switches to the mirrored copies (body picks) → back in Phase B, repeatable.
@@ -3207,7 +3220,19 @@ export class SketchController {
     this.dragAccum = {};
     this.dragCurves = {};
     try {
-      await this.deps.client.beginGesture(session.sketchId, armed.pointRef, gestureTarget(armed));
+      const begun = await this.deps.client.beginGesture(
+        session.sketchId,
+        armed.pointRef,
+        gestureTarget(armed),
+      );
+      // §7.4: the per-entity map is GESTURE-FIXED — diagnosed here, echoed by
+      // endGesture, absent from every solveDrag. Publishing it once at Begin is
+      // what lets the drag frames carry none without the tint going stale. The
+      // NARROW engine setter, not `updateSketchSession`: the geometry has not
+      // moved yet, so republishing the whole session here would re-triangulate
+      // every closure fill at pointer-down.
+      sketchStore.getState().setEntityStates(begun.entityStates ?? {});
+      this.deps.engine.setSketchEntityStates(begun.entityStates ?? {});
     } catch (err) {
       viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
       this.resetDrag();
@@ -3349,7 +3374,15 @@ export class SketchController {
     // conflict set left over from fireSolve's live frames would tint constraints that
     // are not conflicting in the DISPLAYED state.
     sketchStore.getState().setConflicting(result?.conflicting ?? []);
-    this.deps.engine.updateSketchSession(next.plane, entities, next.status, next.constraints);
+    // EndGesture echoes the BeginGesture map verbatim (§7.4), so this is a no-op
+    // by identity on the happy path; it matters when the gesture FAILED, where
+    // `{}` is the honest answer — the geometry reverted to the pre-drag base and
+    // no solve stands behind any per-entity claim.
+    const endStates = result?.entityStates ?? {};
+    sketchStore.getState().setEntityStates(endStates);
+    this.deps.engine.updateSketchSession(next.plane, entities, next.status, next.constraints, {
+      entityStates: endStates,
+    });
     if (result) this.pushSolve(session.sketchId, result.dof, result.status);
     if (sel) sketchSelectionStore.getState().set([sel]);
     if (!restore && before) sketchStore.getState().pushUndoSnapshot(before, { kind: "drag" });

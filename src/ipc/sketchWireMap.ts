@@ -41,6 +41,7 @@ import type {
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
+  SketchEntityStates,
   SketchPlaneKind,
 } from "./types";
 import { planeFor } from "./mockSketch";
@@ -1305,6 +1306,38 @@ export function frontendSolvedCurves(
     logWarn("sketch", `curves: ${unknown.length} unmapped curve key(s) skipped`, {
       unknown: unknown.slice(0, 8),
     });
+  }
+  return out;
+}
+
+/**
+ * Re-key backend-UUID-keyed `entityStates` (SCHEMA §7.4) to the FRONTEND entity
+ * ids the sketch entities carry, by reversing `map.entity` — the same keyspace
+ * and the same reversal `frontendSolvedCurves` performs just above.
+ *
+ * An unmapped wire id is DROPPED, never guessed: absence from the map is the
+ * protocol's own encoding of "unknown", so dropping degrades that entity to the
+ * whole-sketch tint, which is exactly what "we have nothing to say about it"
+ * should look like. Inventing a frontend id, or defaulting the entry to
+ * `underConstrained`, would assert a diagnosis the solver never made.
+ *
+ * Unlike the curves channel this does NOT warn: a dropped state key costs a
+ * shade of colour, not a solved radius that silently never lands, and this map
+ * is republished on every solve — a transient id-map lag would otherwise warn on
+ * an ordinary frame. An absent/null field is `{}` (older backend, or a worker
+ * that omitted the map for an ellipse-bearing sketch).
+ */
+export function frontendEntityStates(
+  map: SketchIdMap,
+  dtoStates: SketchEntityStates | undefined | null,
+): SketchEntityStates {
+  const out: SketchEntityStates = {};
+  if (!dtoStates) return out;
+  const byUuid = new Map<string, string>();
+  for (const [frontendId, uuid] of map.entity) if (!byUuid.has(uuid)) byUuid.set(uuid, frontendId);
+  for (const [uuid, state] of Object.entries(dtoStates)) {
+    const id = byUuid.get(uuid);
+    if (id) out[id] = state;
   }
   return out;
 }

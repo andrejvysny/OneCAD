@@ -94,6 +94,7 @@ import type {
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
+  SketchEntityStates,
   SketchAttachTarget,
   SketchPlane,
   SketchPlaneKind,
@@ -123,6 +124,7 @@ import {
   frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
+  frontendEntityStates,
   frontendSolvedCurves,
   frontendSolvedPositions,
   marshalUpsert,
@@ -281,6 +283,10 @@ interface SketchSessionDto {
   status: SketchSolveStatus;
   /** Backend constraint uuids in conflict (SCHEMA §7.4); mapped to frontend ids. */
   conflicting?: string[];
+  /** Per-entity constrained state keyed by backend ENTITY uuid (SCHEMA §7.4;
+   *  Rust always serializes it, older payloads simply lack the key). Re-keyed to
+   *  frontend ids here — unknown keys dropped. */
+  entityStates?: SketchEntityStates;
 }
 /** `add_sketch_on_face` result (Rust `SketchOnFaceDto`; SKETCH-ON-FACE W1b).
  *  Deliberately lean — the sketch's geometry arrives through the normal
@@ -306,10 +312,16 @@ interface SketchUpsertDto {
   /** CHANGED curve members, keyed by backend entity uuid (SCHEMA §7.4 `curves`;
    *  Rust always serializes it, older payloads simply lack the key). */
   solvedCurves?: Record<string, CurveParams>;
+  /** Per-entity constrained state keyed by backend ENTITY uuid (SCHEMA §7.4). */
+  entityStates?: SketchEntityStates;
 }
 interface BeginGestureDto {
   gestureId: number;
   ready: boolean;
+  /** The GESTURE-FIXED per-entity map, keyed by backend ENTITY uuid (SCHEMA
+   *  §7.4). `SolveDrag` carries none — `DragSolveDto` has no counterpart, and
+   *  that omission is normative, not an oversight. */
+  entityStates?: SketchEntityStates;
 }
 /** `BeginGesture.drag` as the Rust command deserializes it (`GestureTargetArgs`,
  *  camelCase): `entity` is a BACKEND uuid, `role` one of the §7.4 tokens. */
@@ -1297,6 +1309,10 @@ export function createTauriClient(): CadClient {
       // Map the entering solve's conflicting uuids → frontend ids (after seeding the
       // id-map so map.constraint is populated). Seeds the store's conflictingIds.
       conflicting: frontendConflictingIds(map, dto.conflicting),
+      // Same seeding order dependency, on `map.entity` instead: the per-entity
+      // map is keyed by wire ENTITY uuid, so re-keying it before
+      // `seedIdMapFromWire` above would drop every entry of a re-entered sketch.
+      entityStates: frontendEntityStates(map, dto.entityStates),
     };
   }
 
@@ -1329,6 +1345,10 @@ export function createTauriClient(): CadClient {
       // SP-2 `curves` — a solve can move a curve PARAMETER (a Tangent propagating
       // into a radius) with no point moving at all.
       solvedCurves: frontendSolvedCurves(draft, dto.solvedCurves),
+      // §7.4 `entityStates`, same entity keyspace as `curves` and read off the
+      // same COMMITTED clone — an entity this upsert just minted is in `draft`,
+      // not in the pre-call `map`.
+      entityStates: frontendEntityStates(draft, dto.entityStates),
     };
   }
 
@@ -1547,7 +1567,13 @@ export function createTauriClient(): CadClient {
       // defaults to the plain point drag and the request stays pre-SP-2 identical.
       ...(args ? { target: args } : {}),
     });
-    return { gestureId: dto.gestureId, ready: dto.ready };
+    // The gesture-fixed §7.4 map, re-keyed to frontend ids. Read off the LIVE
+    // map: BeginGesture mints nothing, so there is no clone to commit here.
+    return {
+      gestureId: dto.gestureId,
+      ready: dto.ready,
+      entityStates: frontendEntityStates(map, dto.entityStates),
+    };
   }
 
   async function solveDrag(target: [number, number]): Promise<DragSolveResult | null> {
@@ -1597,6 +1623,10 @@ export function createTauriClient(): CadClient {
       // a radius drag's whole result ride ONLY here — `solvedPositions` cannot carry
       // them (the Rust Arc owns no endpoint entities, a radius moves no point).
       solvedCurves: map ? frontendSolvedCurves(map, dto.solvedCurves) : {},
+      // §7.4: the ECHO of the BeginGesture map, so the consumer's held copy is
+      // replaced by an identical one. `{}` without an id-map, matching every
+      // other channel here — an unmappable end is unknown, not a guess.
+      entityStates: map ? frontendEntityStates(map, dto.entityStates) : {},
     };
   }
 

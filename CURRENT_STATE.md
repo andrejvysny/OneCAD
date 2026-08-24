@@ -1,6 +1,6 @@
 # Current State
 
-Last verified: 2026-08-24 — WP6 COMPLETE (kernel continuation CLOSED) + sketch-UX merge landed, on `master`
+Last verified: 2026-08-24 (late) — ALL THREE PHASES COMPLETE: WP6 (kernel closed) · sketch residuals · entityStates per-entity coloring, on `master`
 
 ## NOW — WP6 CLOSE-OUT + NEXT PROGRAM (2026-08-24, plan `act-as-senior-software-purrfect-moler.md`)
 
@@ -21,10 +21,22 @@ Last verified: 2026-08-24 — WP6 COMPLETE (kernel continuation CLOSED) + sketch
   with no defect (Shell multi-face, countersink browser, circular partial-sweep) · both QA
   manifests corrected · FE clamp no longer applies the equal-leg range bound to asymmetric
   chamfers (live `distance2` hole closed) · `previewOps.ts` mode-drop found and fixed.
-- **Next:** Phase 2 sketch FE residuals (near-action error pulse · A12 silent-Esc seam ·
-  screen-constant badge standoff · donut-hole fill) → Phase 3 per-entity constrained-state
-  coloring (§7.4 additive wire field, protocol-auditor first). Owed user-run items unchanged
-  (19-row checklist · Tauri sketch smoke · dirty vendor STEP for G4 micro).
+- **Phase 2 LANDED (`bb70e1f`):** near-action error pulse (+ six refusal sites raised to
+  error severity) · Esc-exit finished-hint via `exitSketch(reason)` · screen-constant badge
+  standoff (signed `offsetPx` in `HtmlOverlayDriver`) · donut-hole fill (even-odd,
+  boundary-vote containment). Final e2e 491/1 (the drop named, 6/6 isolated).
+- **Phase 3 LANDED:** `entityStates` per-entity constrained state end to end — worker
+  (`d572d66`, PlaneGCS dependent-set derivation, SCHEMA §7.4, first canonical sketch
+  fixture) + Rust typed pass-through + tauriClient uuid→frontend re-key + honest mock
+  subset + per-entity viewport materials. Adversarial review SOUND (four conditions
+  discharged; circle can't earn green on the real lane — the recorded dup-centre gap,
+  under-report direction, disclosure-pinned). Full L3: ctest 156/156 · cargo 88/1336/0 ·
+  vitest 5261/0 · kernelbench 136 unchanged · e2e **494/0** both projects.
+- **Next (queue, not started):** dup-centre fix (worker honours `centerRef`) unlocks circle
+  green + kills the +2 dof inflation · remaining deferred-wire sketch items (slot tangency,
+  centerRect symmetric, quadrant axis-align, W3 project-edges) · Daily Driver W2 section
+  view (seam located). Owed user-run items unchanged (19-row checklist · Tauri sketch smoke
+  incl. the new per-entity tint · dirty vendor STEP for G4 micro).
 
 ## PREVIOUS — KERNEL CONTINUATION RESUMED (2026-08-20, plan `use-the-fable-orchestrator-skill-kind-dawn.md`)
 

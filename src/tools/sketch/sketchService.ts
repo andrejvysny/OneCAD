@@ -183,11 +183,13 @@ async function editConstraintValueNow(
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);
+    sketchStore.getState().setEntityStates(restore.entityStates ?? {});
     getViewportEngine()?.updateSketchSession(
       reverted.plane,
       reverted.entities,
       reverted.status,
       reverted.constraints,
+      { entityStates: restore.entityStates ?? {} },
     );
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
@@ -202,9 +204,12 @@ async function editConstraintValueNow(
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
+  sketchStore.getState().setEntityStates(result.entityStates ?? {});
   // `constraints` passed through: this call CHANGED a constraint value, so the
   // witness/dimension geometry the viewport draws would otherwise stay stale.
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+    entityStates: result.entityStates ?? {},
+  });
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
 
@@ -283,11 +288,13 @@ async function commitDimensionConstraintNow(
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);
+    sketchStore.getState().setEntityStates(restore.entityStates ?? {});
     getViewportEngine()?.updateSketchSession(
       reverted.plane,
       reverted.entities,
       reverted.status,
       reverted.constraints,
+      { entityStates: restore.entityStates ?? {} },
     );
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
@@ -298,7 +305,10 @@ async function commitDimensionConstraintNow(
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+  sketchStore.getState().setEntityStates(result.entityStates ?? {});
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+    entityStates: result.entityStates ?? {},
+  });
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
   sketchStore.getState().pushUndoSnapshot(before, { kind: "commitDimension" });
@@ -882,7 +892,10 @@ async function commitReducedSketch(
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+  sketchStore.getState().setEntityStates(result.entityStates ?? {});
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+    entityStates: result.entityStates ?? {},
+  });
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
   return true;
@@ -960,11 +973,13 @@ async function applyConstraintNow(
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     sketchStore.getState().setConflicting(restore.conflicting ?? []);
+    sketchStore.getState().setEntityStates(restore.entityStates ?? {});
     getViewportEngine()?.updateSketchSession(
       reverted.plane,
       reverted.entities,
       reverted.status,
       reverted.constraints,
+      { entityStates: restore.entityStates ?? {} },
     );
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
@@ -979,7 +994,10 @@ async function applyConstraintNow(
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+  sketchStore.getState().setEntityStates(result.entityStates ?? {});
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+    entityStates: result.entityStates ?? {},
+  });
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
   sketchStore.getState().pushUndoSnapshot(before, { kind: "applyConstraint" });
@@ -1075,7 +1093,10 @@ async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<voi
   };
   sketchStore.getState().setSession(next);
   sketchStore.getState().setConflicting(result.conflicting ?? []);
-  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints);
+  sketchStore.getState().setEntityStates(result.entityStates ?? {});
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status, next.constraints, {
+    entityStates: result.entityStates ?? {},
+  });
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
 }

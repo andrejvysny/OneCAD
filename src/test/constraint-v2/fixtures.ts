@@ -32,13 +32,25 @@ export type Phase =
   | "P7" // solver-native endpoint dragging (drag outcomes)
   | "P10"; // solver-derived per-entity definition state (colors)
 
-/** Per-entity definition state (spec §30). */
-export type EntityDefinitionState =
-  | "Unconstrained"
-  | "PartiallyConstrained"
-  | "FullyConstrained"
-  | "Redundant"
-  | "Conflicting";
+/**
+ * Per-entity definition state (spec §30).
+ *
+ * NARROWED from five states to three — a DELIBERATE amendment of this frozen
+ * corpus, recorded in `TODO.md` § "Phase 3 per-entity constrained-state
+ * coloring" ruling (b), 2026-08-24. The dropped two encoded distinctions the
+ * solver provably CANNOT make:
+ *   - `PartiallyConstrained` vs `Unconstrained` — PlaneGCS reports null-space
+ *     MEMBERSHIP per parameter ("this one is still free"), not how many degrees
+ *     of freedom an entity has left, so "some but not all" is not derivable.
+ *     Both collapse into `Unconstrained` (wire `underConstrained`).
+ *   - `Redundant` — redundancy is a property of a CONSTRAINT, not of an entity;
+ *     nothing attributes a benign redundant constraint to one geometry.
+ * The three that remain map 1:1 onto SCHEMA §7.4's wire tokens
+ * (`underConstrained` | `fullyConstrained` | `conflicting`); an entity ABSENT
+ * from an `entityStates` map is UNKNOWN, which is the fourth honest answer and
+ * needs no token.
+ */
+export type EntityDefinitionState = "Unconstrained" | "FullyConstrained" | "Conflicting";
 
 /** Intrinsic DOF by geometry kind (spec §31). */
 export const INTRINSIC_DOF: Record<string, number> = {
@@ -156,12 +168,12 @@ export const CONSTRAINT_V2_CORPUS: ConstraintCase[] = [
   },
   {
     name: "horizontal line",
-    why: "Adding H removes exactly one DOF and flips the entity Orange. Dragging the free end diagonally must move ONLY along the free direction, with no frontend special-casing (spec §13).",
+    why: "Adding H removes exactly one DOF but the line is still not pinned down, so it stays Blue — the narrowing (ruling b) is what makes this case read the same as the free line. Dragging the free end diagonally must move ONLY along the free direction, with no frontend special-casing (spec §13).",
     entities: [line("l1", [0, 0], [100, 0])],
     constraints: [c("c1", "Horizontal", ["l1"])],
     targetDof: 3,
     currentMockDof: 3,
-    entityStates: { l1: "PartiallyConstrained" },
+    entityStates: { l1: "Unconstrained" },
     drags: [{ grab: "l1.End", pointerDelta: [20, 15], resultDelta: [20, 0] }],
     edits: [
       {
@@ -183,7 +195,7 @@ export const CONSTRAINT_V2_CORPUS: ConstraintCase[] = [
     constraints: [c("c1", "Vertical", ["l1"])],
     targetDof: 3,
     currentMockDof: 3,
-    entityStates: { l1: "PartiallyConstrained" },
+    entityStates: { l1: "Unconstrained" },
     drags: [{ grab: "l1.End", pointerDelta: [20, 15], resultDelta: [0, 15] }],
   },
   {
@@ -220,7 +232,7 @@ export const CONSTRAINT_V2_CORPUS: ConstraintCase[] = [
       v_c: { members: ["bc.End"], degree: 1, localDof: 2 },
     },
     connectedComponent: { seed: "ab", entityIds: ["ab", "bc"] },
-    entityStates: { ab: "PartiallyConstrained", bc: "PartiallyConstrained" },
+    entityStates: { ab: "Unconstrained", bc: "Unconstrained" },
   },
   {
     name: "connected L shape, anchored",
@@ -283,7 +295,7 @@ export const CONSTRAINT_V2_CORPUS: ConstraintCase[] = [
   },
   {
     name: "origin anchored endpoint",
-    why: "Snapping an endpoint to the origin anchors it: that vertex reaches localDof 0, but the LINE keeps orientation and length DOF, so it must read Orange, not Green (spec golden test).",
+    why: "Snapping an endpoint to the origin anchors it: that vertex reaches localDof 0, but the LINE keeps orientation and length DOF, so it must NOT read Green (spec golden test). One owned point still free is the whole test — §7.4 takes the union over owned points.",
     entities: [line("l1", [0, 0], [100, 0])],
     constraints: [c("anchor", "Fixed", ["l1"], ["Start"])],
     targetDof: 2,
@@ -292,7 +304,7 @@ export const CONSTRAINT_V2_CORPUS: ConstraintCase[] = [
       v_origin: { members: ["l1.Start"], degree: 1, localDof: 0 },
       v_free: { members: ["l1.End"], degree: 1, localDof: 2 },
     },
-    entityStates: { l1: "PartiallyConstrained" },
+    entityStates: { l1: "Unconstrained" },
   },
   {
     name: "circle",
@@ -301,7 +313,7 @@ export const CONSTRAINT_V2_CORPUS: ConstraintCase[] = [
     constraints: [c("r", "Radius", ["c1"], undefined, 25)],
     targetDof: 2,
     currentMockDof: 2,
-    entityStates: { c1: "PartiallyConstrained" },
+    entityStates: { c1: "Unconstrained" },
   },
   {
     name: "arc",

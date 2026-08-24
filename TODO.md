@@ -119,8 +119,12 @@ SCHEMA: §7.3 bullet · §7.6 `AnalyzeEdgeOpRange` is now NORMATIVELY an equal-l
       `status-hint` (the pulse's own spec asserts the pulse); the remaining two
       (`constraint-badge-standoff:63` chromium, `library-place-freespace:221` webkit) do
       not reproduce isolated (parallel-run interference). After the fix, ALL previously
-      failing specs isolated: 14/14 both projects + 2/2 webkit. Full-suite re-run owed for
-      the final attributable number (user directed commit first); kicked after commit.** Also landed via approved follow-up: six refusal sites raised info→error
+      failing specs isolated: 14/14 both projects + 2/2 webkit. **Full-suite re-run after
+      the commits: 491 passed / 1 failed (33.0 min) — the one drop is
+      `sketch-hole-extrude.spec.ts:265` chromium, failing in its `drawNestedSketch` setup
+      helper (:73) under full-suite load; isolated 6/6 both projects. Named in the flake
+      ledger; suite grew 482 → 492 specs this program.** Committed: `bb70e1f` (Phase 2,
+      26 files) · `d572d66` (Phase 3 worker half, 10 files). Also landed via approved follow-up: six refusal sites raised info→error
       (7-pin `refusalSeverity.test.ts`; `dimension-conflict`/`acceptance` unregressed);
       badge standoff now signed screen-px in `HtmlOverlayDriver` (−16 glyph / +10 chip,
       sign is load-bearing — opposite sides, no overlap, U9 stagger restored); audit doc
@@ -178,6 +182,45 @@ SCHEMA: §7.3 bullet · §7.6 `AnalyzeEdgeOpRange` is now NORMATIVELY an equal-l
       shared points make all owning entities under-constrained (correct, matches
       FreeCAD). First canonical SKETCH fixture (`sketch_entity_states.ndjson`) required;
       Rust replay lane needs a hand-added stub test (the auto-enumeration only parses).
+### Gate — Phase 3: entityStates end to end (2026-08-24) — LANDED
+
+Per-entity constrained-state coloring is live on both lanes: worker derives the three-token
+map from PlaneGCS's dependent-parameter set (zero marginal cost — the diagnosis already runs),
+Rust passes it through as a typed always-serialized projection DTO, the tauri client re-keys
+wire uuids to frontend entity ids (`frontendEntityStates`), the mock lane emits only its
+honest subset, and `SketchObject` picks per-entity materials under the unchanged precedence
+head. Gesture-fixed: BeginGesture carries, EndGesture echoes byte-identically, SolveDrag
+never carries and the FE holds the map. The frozen constraint-v2 corpus vocabulary was
+narrowed per the recorded decision (b). Real-worker proof: a fully-constrained line and a
+free circle differ inside one UnderConstrained sketch.
+
+- **Gate (measured on the main thread, suites alone; rung: FULL L3):** ctest **156/156**
+  (47.2 s) · stdout hygiene clean · fmt/clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test
+  --workspace --no-fail-fast` **88 targets / 1336 passed / 0 failed / 0 ignored** (teed) ·
+  tsc clean · vitest **305 files / 5261 passed / 78 skipped / 0 failed** (teed) ·
+  kernelbench `fillet/foundation:t0` both backends **136 rows unchanged** +
+  `semantic-compare` OK · coverage 29/9/16/19 · contracts 37/18 · hex 0 ·
+  `bun run e2e` (both projects, retries 0): **494 passed / 0 failed** (28.0 min).
+
+- [x] **Phase 3 adversarial review (fresh context) — SOUND, four conditions, all
+      discharged or recorded:** F1 MEDIUM — a circle can never earn `fullyConstrained`
+      through the shipping app (the worker mints its own inline centre and treats
+      `centerRef` as informational — the recorded dup-centre FINDING 3), safe direction
+      (under-report); now PINNED by
+      `a_frontend_authorable_circle_pin_still_reads_under_constrained` (4/4) instead of
+      hidden by the both-pins test shape. F2 LOW — the `SKETCH_SOLVED` event carries the
+      BACKEND-uuid-keyed map while the command return is re-keyed; inert today (debug seam
+      only), marked with KEYSPACE TRAP comments at both emit sites. F3 LOW (latent,
+      pre-existing shape) — the ellipse omission gate is type-specific
+      (`EntityType::Ellipse`) where §7.4 asks capability-based; Spline exists in the enum
+      unreachable from the wire; convert to `isRegistered()`-based when a second
+      unsupported type lands. F4 — decision (h) was discharged STRONGER than written:
+      a real-worker integration test instead of a stub replay (the stub omits the field;
+      replaying the fixture against it would be a knowingly false green — fixture header
+      says so); this row is the re-record. F5 info — mid-drag `conflictingIds` updates
+      live while `entityStates` stays gesture-fixed (badges red before strokes; exactly
+      what §7.4 buys). F6 info — `sketchStore.entityStates` has no production reader yet
+      (colors flow through the engine; the store slice serves the e2e probe).
 
 ## KERNEL CONTINUATION — RESUMED (2026-08-20, plan `~/.claude/plans/use-the-fable-orchestrator-skill-kind-dawn.md`)
 

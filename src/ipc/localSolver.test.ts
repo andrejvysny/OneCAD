@@ -367,6 +367,112 @@ describe("localSolver sketchUpsert — deterministic conflict detection (mock la
   });
 });
 
+/*
+ * Per-entity states through the lane (SCHEMA §7.4 `entityStates`).
+ *
+ * The map's CONTENT is `mockEntityStates`' contract (mockSketch.test.ts); what
+ * these pin is that the lane carries it on the three verbs that have one, holds
+ * it fixed for a gesture, and never lets the mock's own limitations leak into it.
+ */
+describe("localSolver — per-entity constrained states (SCHEMA §7.4)", () => {
+  const LINE: SketchEntity = { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] };
+  const ARC: SketchEntity = { id: "a1", type: "Arc", center: [0, 0], radius: 4, start: [4, 0], end: [0, 4] };
+
+  it("sketchUpsert carries the map, and says nothing about plain user geometry", async () => {
+    const { lane } = makeLane();
+    const result = await lane.sketchUpsert("sk-states", [LINE], []);
+    expect(result.entityStates).toEqual({});
+  });
+
+  it("sketchUpsert projects a PROVABLE conflict onto the entity it names", async () => {
+    const { lane } = makeLane();
+    const constraints: SketchConstraint[] = [
+      { id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+      { id: "d2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 120 },
+    ];
+    const result = await lane.sketchUpsert("sk-states-clash", [LINE], constraints);
+    expect(result.status).toBe("Conflicting");
+    expect(result.entityStates).toEqual({ e1: "conflicting" });
+  });
+
+  it("NEVER projects a mockEnforce REFUSAL — a driver limit is not a contradiction", async () => {
+    const { lane } = makeLane();
+    // A Radius on an ARC: creating it is accepted (nothing to drive), EDITING it
+    // is refused, because this lane's bounded driver only rewrites circles.
+    await lane.sketchUpsert("sk-refused", [ARC], [
+      { id: "r1", type: "Radius", entities: ["a1"], value: 4 },
+    ]);
+    const result = await lane.sketchUpsert("sk-refused", [ARC], [
+      { id: "r1", type: "Radius", entities: ["a1"], value: 9 },
+    ]);
+    // The refusal DOES ride the `conflicting` channel — that is how the caller
+    // reverts the edit — but it must not paint the arc red: nothing about this
+    // sketch is geometrically contradictory.
+    expect(result.status).toBe("Conflicting");
+    expect(result.conflicting).toEqual(["r1"]);
+    expect(result.entityStates).toEqual({});
+  });
+
+  it("enterSketch seeds the map (a face-hosted seed's locked boundary)", async () => {
+    const { lane } = makeLane();
+    const session = await lane.enterSketch({
+      newOnFace: { bodyId: "body1", elementId: "el", topoKey: "f:1" },
+      plane: { kind: "custom", origin: [0, 0, 0], xAxis: [1, 0, 0], yAxis: [0, 1, 0], normal: [0, 0, 1] },
+      sketchId: "sk-face",
+    });
+    const locked = session.entities.filter((e) => e.referenceLocked).map((e) => e.id);
+    expect(locked.length).toBeGreaterThan(0); // guard: the seed really is locked
+    for (const id of locked) expect(session.entityStates?.[id]).toBe("fullyConstrained");
+    // …and NOTHING else is claimed.
+    expect(Object.keys(session.entityStates ?? {}).sort()).toEqual(locked.slice().sort());
+  });
+
+  it("beginGesture answers the map and endGesture ECHOES it (gesture-fixed)", async () => {
+    const { lane } = makeLane();
+    await lane.enterSketch("sk-g");
+    await lane.sketchUpsert("sk-g", [LINE], [
+      { id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+      { id: "d2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 120 },
+    ]);
+    const begun = await lane.beginGesture("sk-g", "e1.Start");
+    expect(begun.entityStates).toEqual({ e1: "conflicting" });
+
+    // A drag step carries NO map at all (§7.4 normative) — the consumer holds
+    // the one from Begin.
+    const step = await lane.solveDrag([5, 5]);
+    expect(step).not.toBeNull();
+    expect(step && "entityStates" in step).toBe(false);
+
+    const done = await lane.endGesture([5, 5]);
+    expect(done.entityStates).toEqual(begun.entityStates);
+  });
+
+  it("endGesture carries the COMMITTED sketch's conflict set, not a hardcoded []", async () => {
+    const { lane } = makeLane();
+    await lane.enterSketch("sk-ge");
+    const upsert = await lane.sketchUpsert("sk-ge", [LINE], [
+      { id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+      { id: "d2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 120 },
+    ]);
+    await lane.beginGesture("sk-ge", "e1.Start");
+    const done = await lane.endGesture([5, 5]);
+    // The lane used to answer [] here while its OWN upsert reported a clash on
+    // the same sketch, so a pointer-up silently cleared a tint the sketch earns.
+    expect(done.conflicting?.slice().sort()).toEqual(upsert.conflicting?.slice().sort());
+    expect(done.conflicting).toEqual(["d1", "d2"]);
+  });
+
+  it("a gesture on a clean sketch still ends with an empty conflict set", async () => {
+    const { lane } = makeLane();
+    await lane.enterSketch("sk-clean-g");
+    await lane.sketchUpsert("sk-clean-g", [LINE], []);
+    await lane.beginGesture("sk-clean-g", "e1.Start");
+    const done = await lane.endGesture([5, 5]);
+    expect(done.conflicting).toEqual([]);
+    expect(done.entityStates).toEqual({});
+  });
+});
+
 // ── SP-2 W4: the mock drag gesture honours the §7.4 target KINDS ─────────────
 //
 // Shapes only. This lane is a kinematic echo (see the module header): no

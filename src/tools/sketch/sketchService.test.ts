@@ -378,6 +378,111 @@ describe("conflictingIds — solve write-back REPLACES, exit CLEARS, reject-hint
   });
 });
 
+/*
+ * `entityStates` follows `conflictingIds`' single-owner rule (SCHEMA §7.4):
+ * every write-back the service performs REPLACES it, including the RESTORE
+ * write-back on the reject-on-conflict path — which is exactly where a missed
+ * site would leave the rejected candidate's tint on screen after the sketch
+ * reverted underneath it.
+ */
+describe("entityStates — solve write-back REPLACES, restore write-back REPLACES", () => {
+  beforeEach(() => {
+    resetMockSketches();
+    sketchStore.getState().reset();
+  });
+
+  it("a solve write-back REPLACES the store's entityStates from the result", async () => {
+    seedSession([{ id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] }]);
+    sketchStore.getState().setEntityStates({ stale: "conflicting" });
+    const client = {
+      sketchUpsert: () =>
+        Promise.resolve({
+          sketchId: "sk-dim",
+          sketchRevision: 2,
+          dof: 1,
+          status: "UnderConstrained" as const,
+          conflicting: [],
+          solvedPositions: {},
+          entityStates: { e1: "fullyConstrained" as const },
+        }),
+    } as unknown as CadClient;
+    await editConstraintValue(client, "c1", 5);
+    expect(sketchStore.getState().entityStates).toEqual({ e1: "fullyConstrained" });
+  });
+
+  it("a result with NO map clears to {} — unknown for all, not the previous answer", async () => {
+    seedSession([{ id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] }]);
+    sketchStore.getState().setEntityStates({ e1: "conflicting" });
+    await editConstraintValue(mockClient, "c1", 5); // mock lane: plain user geometry ⇒ {}
+    expect(sketchStore.getState().entityStates).toEqual({});
+  });
+
+  it("the RESTORE write-back after a rejected edit replaces it too", async () => {
+    seedSession([
+      { id: "c1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+    ]);
+    const client = {
+      sketchUpsert: (() => {
+        let n = 0;
+        return () => {
+          n += 1;
+          return Promise.resolve(
+            n === 1
+              ? {
+                  sketchId: "sk-dim",
+                  sketchRevision: 2,
+                  dof: 0,
+                  status: "Conflicting" as const,
+                  conflicting: ["c1"],
+                  solvedPositions: {},
+                  entityStates: { e1: "conflicting" as const },
+                }
+              : {
+                  sketchId: "sk-dim",
+                  sketchRevision: 3,
+                  dof: 2,
+                  status: "UnderConstrained" as const,
+                  conflicting: [],
+                  solvedPositions: {},
+                  entityStates: {},
+                },
+          );
+        };
+      })(),
+    } as unknown as CadClient;
+    await editConstraintValue(client, "c1", 99);
+    // The rejected candidate's red must not outlive the geometry it described.
+    expect(sketchStore.getState().entityStates).toEqual({});
+  });
+
+  it("setSession(null) (exit / dispose) CLEARS entityStates", () => {
+    seedSession([]);
+    sketchStore.getState().setEntityStates({ e1: "conflicting" });
+    sketchStore.getState().setSession(null);
+    expect(sketchStore.getState().entityStates).toEqual({});
+  });
+
+  it("an undo write-back replaces it from the restored solve", async () => {
+    seedSession([]);
+    sketchStore.getState().pushUndoSnapshot({ entities: [line], constraints: [] });
+    sketchStore.getState().setEntityStates({ e1: "conflicting" });
+    const client = {
+      sketchUpsert: () =>
+        Promise.resolve({
+          sketchId: "sk-dim",
+          sketchRevision: 4,
+          dof: 4,
+          status: "UnderConstrained" as const,
+          conflicting: [],
+          solvedPositions: {},
+          entityStates: {},
+        }),
+    } as unknown as CadClient;
+    await undoSketch(client);
+    expect(sketchStore.getState().entityStates).toEqual({});
+  });
+});
+
 describe("deleteConstraints — constraints only, entities untouched", () => {
   beforeEach(() => {
     resetMockSketches();

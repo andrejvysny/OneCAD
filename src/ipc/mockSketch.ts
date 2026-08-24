@@ -12,6 +12,7 @@
 import type {
   SketchConstraint,
   SketchEntity,
+  SketchEntityStates,
   SketchPlane,
   SketchPlaneKind,
   SketchSolveStatus,
@@ -132,6 +133,51 @@ export function solveSketch(
   const conflicting = detectConflicts(entities, constraints);
   const { dof, status } = solveDof(entities, constraints);
   return { dof, status: conflicting.length > 0 ? "Conflicting" : status, conflicting };
+}
+
+/**
+ * Per-entity constrained state for the MOCK lane (SCHEMA §7.4 `entityStates`).
+ *
+ * The map is deliberately SPARSE, because "absent" means UNKNOWN and unknown is
+ * the honest answer for almost everything this lane can see. It reports exactly
+ * two things and nothing else:
+ *
+ *   - `conflicting` for every entity a PROVABLY clashing constraint NAMES —
+ *     `detectConflicts` output only, projected over `c.entities`. That is the
+ *     same deliberate over-attribution §7.4 specifies for the real worker (a
+ *     dimension between two entities reds both); `conflicting[]` stays
+ *     authoritative for WHICH constraints are at fault. `detectConflicts` is
+ *     called HERE rather than passed in so `mockEnforce`'s `refusedIds` — a
+ *     limitation of the mock's bounded driver, not a geometric contradiction —
+ *     can never reach this projection.
+ *   - `fullyConstrained` for `referenceLocked` entities: projected host-face
+ *     geometry is pinned by machine `Fixed` constraints and provably cannot
+ *     move (the same rule `solveDof` counts it under).
+ *
+ * Everything else is OMITTED. In particular `fullyConstrained` is NEVER derived
+ * from `dof === 0`: this lane's DOF is a coarse Σ-heuristic with no Jacobian
+ * behind it, so a zero total says nothing about any individual entity, and a
+ * map built from it would be a fabricated diagnosis wearing the real one's
+ * clothes. Per-entity truth for user geometry is the PlaneGCS lane's.
+ */
+export function mockEntityStates(
+  entities: SketchEntity[],
+  constraints: SketchConstraint[],
+): SketchEntityStates {
+  const states: SketchEntityStates = {};
+  for (const e of entities) {
+    if (e.referenceLocked) states[e.id] = "fullyConstrained";
+  }
+  const clashing = new Set(detectConflicts(entities, constraints));
+  if (clashing.size > 0) {
+    const live = new Set(entities.map((e) => e.id));
+    for (const c of constraints) {
+      if (!clashing.has(c.id)) continue;
+      // `conflicting` outranks `fullyConstrained` (§7.4), so this overwrites.
+      for (const id of c.entities) if (live.has(id)) states[id] = "conflicting";
+    }
+  }
+  return states;
 }
 
 // ── Region-detection helpers ──────────────────────────────────────────────────

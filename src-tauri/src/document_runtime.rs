@@ -2948,6 +2948,9 @@ impl DocumentRuntime {
             // Surface the entering solve's conflicting constraints (SCHEMA §7.4) so
             // re-entering a conflicting sketch tints the offending constraints.
             conflicting: solved.conflicting,
+            // Same projection for the per-entity state: entering a sketch colours
+            // its pinned-down entities without waiting for the next upsert.
+            entity_states: solved.entity_states,
         })
     }
 
@@ -2979,6 +2982,9 @@ impl DocumentRuntime {
             // A static read carries no live solve — the sketch_solve cache stores only
             // (dof, status), so there is no conflicting-id evidence to surface here.
             conflicting: Vec::new(),
+            // Likewise no per-entity evidence: empty means "nothing to say"
+            // (SCHEMA §7.4), which is exactly true of a cache-backed read.
+            entity_states: crate::dto::EntityStates::new(),
         })
     }
 

@@ -9,6 +9,7 @@ import { SketchController } from "./SketchController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
+  BeginGestureResult,
   DragSolveResult,
   SketchEntity,
   SketchPlane,
@@ -53,6 +54,7 @@ function makeEngineMock() {
     setSketchAnglePreview: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
+    setSketchEntityStates: vi.fn(),
     // 1:1 mapping so client coords equal plane coords.
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
     planePixelWorld: vi.fn(() => 1),
@@ -78,7 +80,12 @@ function makeClientMock() {
     ),
     cancelSketch: vi.fn(() => Promise.resolve()),
     deleteSketch: vi.fn(() => Promise.resolve()),
-    beginGesture: vi.fn(() => Promise.resolve({ gestureId: 1, ready: true })),
+    // Return type STATED, not inferred — same reason `solveDrag`/`endGesture`
+    // state theirs: §7.4 added the optional `entityStates` map, and a
+    // literal-inferred shape would refuse any per-test override that carries one.
+    beginGesture: vi.fn(
+      (): Promise<BeginGestureResult> => Promise.resolve({ gestureId: 1, ready: true }),
+    ),
     // Return types are stated rather than inferred: SP-2 added the optional
     // `curves`/`solvedCurves` channels, and a literal-inferred shape would refuse
     // any per-test override that reports a radius instead of a position.
@@ -168,6 +175,58 @@ describe("SketchController select tool", () => {
     mouse("pointerdown", 200, 200, 0, 1);
     mouse("pointerup", 200, 200, 0, 0);
     expect(selected()).toEqual([]);
+  });
+
+  /*
+   * SCHEMA §7.4: the per-entity map is GESTURE-FIXED. `BeginGesture` diagnoses
+   * it, `SolveDrag` never carries it (a drag adds no constraint, and the drag's
+   * temporary drives are excluded from the diagnosis anyway), and `EndGesture`
+   * echoes it. So the controller must publish it at Begin, leave it alone for
+   * every drag frame, and take End's echo at pointer-up.
+   */
+  it("holds the BeginGesture entityStates for the whole gesture", async () => {
+    clientMock.beginGesture.mockResolvedValueOnce({
+      gestureId: 1,
+      ready: true,
+      entityStates: { e1: "conflicting" },
+    });
+
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 30, 0, 0, 1);
+    await flush();
+
+    expect(sketchStore.getState().entityStates).toEqual({ e1: "conflicting" });
+    expect(engineMock.setSketchEntityStates).toHaveBeenCalledWith({ e1: "conflicting" });
+
+    // Drag frames publish geometry and NOTHING about the map: the transient
+    // update must not carry `entityStates`, or the held map would be clobbered
+    // with `{}` on the first frame.
+    mouse("pointermove", 35, 0, 0, 1);
+    await flush();
+    const frames = engineMock.updateSketchSession.mock.calls.filter(
+      (c) => (c[4] as { transient?: boolean } | undefined)?.transient,
+    );
+    expect(frames.length).toBeGreaterThan(0);
+    for (const call of frames) {
+      expect((call[4] as { entityStates?: unknown }).entityStates).toBeUndefined();
+    }
+    expect(sketchStore.getState().entityStates).toEqual({ e1: "conflicting" });
+
+    // Pointer-up: EndGesture's echo replaces it — same content, so this is a
+    // no-op by identity on the happy path.
+    clientMock.endGesture.mockResolvedValueOnce({
+      sketchId: "sketch1",
+      sketchRevision: 2,
+      dof: 2,
+      status: "UnderConstrained",
+      entityStates: { e1: "conflicting" },
+    });
+    mouse("pointerup", 35, 0, 0, 0);
+    await flush();
+    expect(sketchStore.getState().entityStates).toEqual({ e1: "conflicting" });
+    const all = engineMock.updateSketchSession.mock.calls;
+    const last = all[all.length - 1];
+    expect((last[4] as { entityStates?: unknown }).entityStates).toEqual({ e1: "conflicting" });
   });
 
   it("Shift-click toggles the second handle into the selection", () => {

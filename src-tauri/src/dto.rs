@@ -634,6 +634,45 @@ impl SketchSolveStatus {
     }
 }
 
+/// One entity's constrained state (SCHEMA §7.4 `entityStates` value). Serializes
+/// as the exact camelCase token the worker emits.
+///
+/// `SketchSolveStatus` answers for the WHOLE sketch; this answers per entity, so a
+/// pinned-down line and a free circle in the same `UnderConstrained` sketch read
+/// differently. There is deliberately no per-entity DOF count and no
+/// `partiallyConstrained`: PlaneGCS reports null-space MEMBERSHIP per parameter,
+/// not entity-local freedom, so a count would be fabricated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EntityConstrainedState {
+    UnderConstrained,
+    FullyConstrained,
+    Conflicting,
+}
+
+impl EntityConstrainedState {
+    /// Parses one `entityStates` value. An UNRECOGNIZED token is `None` —
+    /// SCHEMA §7.4 requires a reader to treat it as unknown, and the caller drops
+    /// that entry rather than defaulting it (defaulting would assert a state the
+    /// worker never claimed).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "underConstrained" => Some(Self::UnderConstrained),
+            "fullyConstrained" => Some(Self::FullyConstrained),
+            "conflicting" => Some(Self::Conflicting),
+            _ => None,
+        }
+    }
+}
+
+/// The `entityStates` map (SCHEMA §7.4), keyed by WIRE entity id.
+///
+/// EMPTY means the worker had nothing to say (absent map, or an ellipse-bearing
+/// sketch that took the naive-DOF fallback) — it never means "everything is
+/// unconstrained". An entity missing from a NON-empty map is likewise unknown.
+pub type EntityStates = std::collections::BTreeMap<String, EntityConstrainedState>;
+
 /// A live sketch session (`enterSketch` result; `types.ts SketchSession`). The
 /// `plane`/`entities`/`constraints` carry the SCHEMA §7.3/§7.4 wire JSON verbatim
 /// (identical to the frontend wire form) so the seam is a drop-in.
@@ -651,6 +690,11 @@ pub struct SketchSessionDto {
     /// sketch surfaces the offending constraints. Always serialized (no skip), so
     /// the frontend sees an explicit `conflicting: []` on a clean sketch.
     pub conflicting: Vec<String>,
+    /// Per-entity constrained state from the entering solve (SCHEMA §7.4).
+    /// Always serialized (no skip), same `conflicting: []` precedent. Empty on the
+    /// static [`DocumentRuntime::get_sketch`](crate::document_runtime::DocumentRuntime::get_sketch)
+    /// read, which carries no live solve.
+    pub entity_states: EntityStates,
 }
 
 /// A re-solve result (`sketchUpsert`/`endGesture`; `types.ts SketchUpsertResult`).
@@ -672,6 +716,11 @@ pub struct SketchUpsertDto {
     /// the curve entity id. Always serialized (no skip), same `conflicting: []`
     /// precedent — the frontend always sees the key, empty when nothing moved.
     pub solved_curves: std::collections::BTreeMap<String, CurveParamsDto>,
+    /// Per-entity constrained state (SCHEMA §7.4 `entityStates`), keyed by wire
+    /// entity id. On `EndGesture` this is the `BeginGesture` map echoed, not a
+    /// re-derivation. Always serialized (no skip), same `conflicting: []`
+    /// precedent; empty when the worker said nothing.
+    pub entity_states: EntityStates,
 }
 
 /// The CHANGED members of one curve in a solve result (SCHEMA §7.4 `curves`).
@@ -698,16 +747,25 @@ pub struct CurveParamsDto {
 }
 
 /// A `BeginGesture` acknowledgement (SCHEMA §7.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BeginGestureDto {
     pub gesture_id: u64,
     pub ready: bool,
+    /// Per-entity constrained state for the COMMITTED sketch this gesture opened
+    /// against (SCHEMA §7.4 `entityStates`). **Gesture-fixed**: `SolveDrag` never
+    /// carries it and `EndGesture` echoes this exact map, so a consumer holds this
+    /// one for the whole gesture. Always serialized (no skip).
+    pub entity_states: EntityStates,
 }
 
 /// One incremental drag solve (SCHEMA §7.4 `SolveDrag` result). `status` is the
 /// worker token (`success`|`partial`|`conflicting`|`redundant`), plus the
 /// client-side `superseded` terminal a stale `seq` may receive (latest-wins).
+///
+/// There is deliberately **no `entity_states`** here: SCHEMA §7.4 forbids
+/// `SolveDrag` from carrying the map, and the consumer holds
+/// [`BeginGestureDto::entity_states`] for the whole gesture.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DragSolveDto {
@@ -2225,6 +2283,7 @@ mod tests {
             conflicting: vec!["c-a".into(), "c-b".into()],
             solved_positions: std::collections::BTreeMap::new(),
             solved_curves: std::collections::BTreeMap::new(),
+            entity_states: EntityStates::new(),
         };
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["conflicting"], serde_json::json!(["c-a", "c-b"]));
@@ -2246,11 +2305,103 @@ mod tests {
             dof: 0,
             status: SketchSolveStatus::Conflicting,
             conflicting: vec!["c-a".into()],
+            entity_states: EntityStates::new(),
         };
         assert_eq!(
             serde_json::to_value(&session).unwrap()["conflicting"],
             serde_json::json!(["c-a"])
         );
+    }
+
+    #[test]
+    fn entity_states_serialize_as_the_three_camel_case_tokens_and_never_skip() {
+        let states = EntityStates::from([
+            ("e1".to_string(), EntityConstrainedState::FullyConstrained),
+            ("e2".to_string(), EntityConstrainedState::UnderConstrained),
+            ("e7".to_string(), EntityConstrainedState::Conflicting),
+        ]);
+        let dto = SketchUpsertDto {
+            sketch_id: "sk_1".into(),
+            sketch_revision: 3,
+            dof: 2,
+            status: SketchSolveStatus::UnderConstrained,
+            conflicting: vec![],
+            solved_positions: std::collections::BTreeMap::new(),
+            solved_curves: std::collections::BTreeMap::new(),
+            entity_states: states.clone(),
+        };
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap()["entityStates"],
+            serde_json::json!({
+                "e1": "fullyConstrained", "e2": "underConstrained", "e7": "conflicting"
+            }),
+            "the three SCHEMA §7.4 tokens, verbatim"
+        );
+        // Empty is still emitted (the `conflicting: []` precedent) — the frontend
+        // always sees the key. Absent ⇒ empty means "nothing to say", NOT
+        // "everything unconstrained", so an empty object is the honest wire form.
+        let quiet = SketchUpsertDto {
+            entity_states: EntityStates::new(),
+            ..dto
+        };
+        assert_eq!(
+            serde_json::to_value(&quiet).unwrap()["entityStates"],
+            serde_json::json!({})
+        );
+
+        // The gesture surfaces carry the same map; `SolveDrag` structurally cannot.
+        let begin = BeginGestureDto {
+            gesture_id: 51,
+            ready: true,
+            entity_states: states,
+        };
+        assert_eq!(
+            serde_json::to_value(&begin).unwrap()["entityStates"]["e7"],
+            serde_json::json!("conflicting")
+        );
+        let session = SketchSessionDto {
+            sketch_id: "sk_1".into(),
+            plane: serde_json::json!({}),
+            entities: serde_json::json!([]),
+            constraints: serde_json::json!([]),
+            dof: 2,
+            status: SketchSolveStatus::UnderConstrained,
+            conflicting: vec![],
+            entity_states: EntityStates::from([(
+                "e1".to_string(),
+                EntityConstrainedState::FullyConstrained,
+            )]),
+        };
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["entityStates"],
+            serde_json::json!({ "e1": "fullyConstrained" })
+        );
+    }
+
+    #[test]
+    fn entity_constrained_state_parses_only_the_three_tokens() {
+        assert_eq!(
+            EntityConstrainedState::parse("underConstrained"),
+            Some(EntityConstrainedState::UnderConstrained)
+        );
+        assert_eq!(
+            EntityConstrainedState::parse("fullyConstrained"),
+            Some(EntityConstrainedState::FullyConstrained)
+        );
+        assert_eq!(
+            EntityConstrainedState::parse("conflicting"),
+            Some(EntityConstrainedState::Conflicting)
+        );
+        // Unknown ⇒ None (the caller DROPS the entry). Notably neither the
+        // PascalCase whole-sketch spelling nor a future token defaults to anything.
+        for unknown in [
+            "FullyConstrained",
+            "partiallyConstrained",
+            "overConstrained",
+            "",
+        ] {
+            assert_eq!(EntityConstrainedState::parse(unknown), None, "{unknown:?}");
+        }
     }
 
     #[test]
@@ -2288,6 +2439,7 @@ mod tests {
             conflicting: vec![],
             solved_positions: std::collections::BTreeMap::new(),
             solved_curves: std::collections::BTreeMap::new(),
+            entity_states: EntityStates::new(),
         };
         assert_eq!(
             serde_json::to_value(&dto).unwrap()["solvedCurves"],

@@ -33,7 +33,7 @@ import * as THREE from "three";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
-import type { SketchEntity, SketchPlane, SketchSolveStatus } from "@/ipc/types";
+import type { SketchEntity, SketchEntityStates, SketchPlane, SketchSolveStatus } from "@/ipc/types";
 import { GridPlane } from "./GridPlane";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
@@ -295,6 +295,9 @@ export class SketchObject {
   private plane: SketchPlane | null = null;
   private entities: SketchEntity[] = [];
   private status: SketchSolveStatus = "UnderConstrained";
+  /** PER-ENTITY constrained state (SCHEMA §7.4). An entity ABSENT here is
+   *  UNKNOWN and falls back to the whole-sketch `status` material. */
+  private entityStates: SketchEntityStates = {};
   private constraints: SketchConstraint[] = [];
   private selected = new Set<string>();
   private hovered = new Set<string>();
@@ -766,6 +769,23 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
+  /**
+   * Replace the per-entity constrained states (SCHEMA §7.4 `entityStates`).
+   *
+   * Rebuilds ONLY when the map actually changed. A map is republished on every
+   * solve write-back and echoed unchanged for a whole drag gesture, so without
+   * the check this would tear down and rebuild every `Line2` in the sketch for
+   * an answer that did not move.
+   */
+  setEntityStates(states: SketchEntityStates): void {
+    const cur = this.entityStates;
+    const keys = Object.keys(states);
+    if (Object.keys(cur).length === keys.length && keys.every((k) => cur[k] === states[k])) return;
+    this.entityStates = states;
+    this.rebuildEntities();
+    this.deps.invalidate();
+  }
+
   private statusMaterial(): LineMaterial {
     switch (this.status) {
       case "FullyConstrained":
@@ -778,6 +798,28 @@ export class SketchObject {
     }
   }
 
+  /**
+   * The constraint-state material for ONE entity: its own §7.4 state when the
+   * solver reported one, else the whole-sketch status color.
+   *
+   * The fallback is the honest reading of an ABSENT key — "this worker has
+   * nothing to say about this entity" — and must never resolve to `matUnder`
+   * directly: an ellipse-bearing sketch reports no map at all, and painting it
+   * all blue would claim a diagnosis that was never made.
+   */
+  private stateMaterial(id: string): LineMaterial {
+    switch (this.entityStates[id]) {
+      case "fullyConstrained":
+        return this.matFull;
+      case "conflicting":
+        return this.matConflict;
+      case "underConstrained":
+        return this.matUnder;
+      default:
+        return this.statusMaterial();
+    }
+  }
+
   private rebuildEntities(): void {
     // Remove all lines (keep the Points objects — vertices/midpoints/centroids/selection).
     for (const c of [...this.entityGroup.children]) {
@@ -785,7 +827,6 @@ export class SketchObject {
       this.disposeLine(c);
       this.entityGroup.remove(c);
     }
-    const statusMat = this.statusMaterial();
     for (const e of this.entities) {
       const positions = entityPolyline(e, segmentsForEntity(e, this.pxPerUnit));
       if (positions.length < 6) continue;
@@ -806,6 +847,10 @@ export class SketchObject {
         halo.userData.selectionHalo = true;
         this.entityGroup.add(halo);
       }
+      // The HEAD of this chain is unchanged: hover, the angle reference, locked
+      // reference geometry and construction all still outrank the solver's
+      // answer, because each says something about the entity's ROLE that a
+      // constraint state does not replace. Only the TAIL is per-entity now.
       const mat = isHovered
         ? this.matHover
         : this.angleRefId === e.id
@@ -814,7 +859,7 @@ export class SketchObject {
             ? this.matReference
             : e.construction
               ? this.matConstruction
-              : statusMat;
+              : this.stateMaterial(e.id);
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }

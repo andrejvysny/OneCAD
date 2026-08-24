@@ -136,6 +136,117 @@ describe("SketchObject — referenceLocked material", () => {
   });
 });
 
+/*
+ * PER-ENTITY constrained state (SCHEMA §7.4 `entityStates`). The whole-sketch
+ * `status` used to color every entity identically; now each entity the solver
+ * diagnosed gets its own color, and an entity the solver said NOTHING about
+ * falls back to the whole-sketch tint. The fallback is the load-bearing half:
+ * an ellipse-bearing sketch reports no map at all, and defaulting an absent key
+ * to under-constrained would paint a diagnosis nobody made.
+ */
+describe("SketchObject — per-entity constrained state (SCHEMA §7.4)", () => {
+  it("colors each entity from ITS OWN state, inside one under-constrained sketch", () => {
+    const { obj, root } = build([seg("a"), seg("b"), seg("c")]);
+    obj.setEntityStates({ a: "fullyConstrained", b: "conflicting", c: "underConstrained" });
+    const colors = colorsOf(root, ["a", "b", "c"]);
+    expect(colors.get("a")).toBe(palette.sketchFull().getHex());
+    expect(colors.get("b")).toBe(palette.sketchConflict().getHex());
+    expect(colors.get("c")).toBe(palette.sketchUnder().getHex());
+    obj.dispose();
+  });
+
+  it("an entity ABSENT from the map falls back to the whole-sketch status color", () => {
+    const { obj, root } = build([seg("known"), seg("unknown")]);
+    obj.setEntityStates({ known: "fullyConstrained" }); // `unknown` is not a key
+    expect(colorsOf(root, ["known", "unknown"]).get("unknown")).toBe(palette.sketchUnder().getHex());
+
+    // …and it TRACKS the whole-sketch status, which is what "fallback" means.
+    obj.setSession(IDENTITY_PLANE, [seg("known"), seg("unknown")], "Conflicting");
+    expect(colorsOf(root, ["known", "unknown"]).get("unknown")).toBe(palette.sketchConflict().getHex());
+    // The diagnosed one is unmoved by the sketch-wide status.
+    expect(colorsOf(root, ["known", "unknown"]).get("known")).toBe(palette.sketchFull().getHex());
+    obj.dispose();
+  });
+
+  it("an EMPTY map is unknown-for-all — every entity keeps the whole-sketch tint", () => {
+    const { obj, root } = build([seg("a"), seg("b")]);
+    obj.setEntityStates({});
+    const colors = colorsOf(root, ["a", "b"]);
+    expect(colors.get("a")).toBe(palette.sketchUnder().getHex());
+    expect(colors.get("b")).toBe(palette.sketchUnder().getHex());
+    obj.dispose();
+  });
+
+  it("REPLACES rather than merges — a key the newest map dropped goes back to unknown", () => {
+    const { obj, root } = build([seg("a")]);
+    obj.setEntityStates({ a: "fullyConstrained" });
+    expect(colorsOf(root, ["a"]).get("a")).toBe(palette.sketchFull().getHex());
+    obj.setEntityStates({});
+    expect(colorsOf(root, ["a"]).get("a")).toBe(palette.sketchUnder().getHex());
+    obj.dispose();
+  });
+
+  it("keeps the precedence HEAD: hover > angleRef > referenceLocked > construction > state", () => {
+    const { obj, root } = build([seg("hov"), seg("ang"), seg("lock", true), seg("con", false, true)]);
+    // Every one of them claims fullyConstrained — none may show that color.
+    obj.setEntityStates({
+      hov: "fullyConstrained",
+      ang: "fullyConstrained",
+      lock: "fullyConstrained",
+      con: "fullyConstrained",
+    });
+    obj.setHover(["hov"]);
+    obj.setAngleReference("ang");
+    const colors = colorsOf(root, ["hov", "ang", "lock", "con"]);
+    expect(colors.get("hov")).toBe(palette.hover3d().getHex());
+    expect(colors.get("ang")).toBe(palette.sketchAngleRef().getHex());
+    expect(colors.get("lock")).toBe(palette.sketchReference().getHex());
+    expect(colors.get("con")).toBe(palette.sketchConstruction().getHex());
+    for (const [, hex] of colors) expect(hex).not.toBe(palette.sketchFull().getHex());
+    obj.dispose();
+  });
+
+  it("selection still HALOS rather than replacing a per-entity color", () => {
+    const { obj, root } = build([seg("a")]);
+    obj.setEntityStates({ a: "conflicting" });
+    obj.setSelection(["a"]);
+    expect(colorsOf(root, ["a"]).get("a")).toBe(palette.sketchConflict().getHex());
+    expect(haloColor(root)).toBe(palette.sketchSelected().getHex());
+    obj.dispose();
+  });
+
+  it("rebuilds ONLY when the map actually changed", () => {
+    const root = new THREE.Object3D();
+    const invalidate = vi.fn();
+    const obj = new SketchObject({ sketchRoot: root, invalidate });
+    obj.setSession(IDENTITY_PLANE, [seg("a")], "UnderConstrained");
+
+    obj.setEntityStates({ a: "conflicting" });
+    const built = entityLines(root)[0];
+    invalidate.mockClear();
+
+    // A DIFFERENT object with equal content — an echoed gesture map, or an
+    // identity solve. Rebuilding here would tear down every Line2 in the sketch
+    // once per write-back for an answer that did not move.
+    obj.setEntityStates({ a: "conflicting" });
+    expect(entityLines(root)[0]).toBe(built);
+    expect(invalidate).not.toHaveBeenCalled();
+
+    obj.setEntityStates({ a: "underConstrained" });
+    expect(entityLines(root)[0]).not.toBe(built);
+    expect(invalidate).toHaveBeenCalled();
+    obj.dispose();
+  });
+
+  it("an unrecognized token is treated as UNKNOWN, not as an error (§7.4 reader rule)", () => {
+    const { obj, root } = build([seg("a")]);
+    // A worker one version ahead may emit a token this build has never seen.
+    obj.setEntityStates({ a: "somethingNewer" } as unknown as Record<string, "conflicting">);
+    expect(colorsOf(root, ["a"]).get("a")).toBe(palette.sketchUnder().getHex());
+    obj.dispose();
+  });
+});
+
 describe("SketchObject — angle reference highlight + arc preview", () => {
   it("tints the referenced entity in its own color, distinct from every other state", () => {
     const { obj, root } = build([seg("a"), seg("ref", true)]); // "ref" is also referenceLocked

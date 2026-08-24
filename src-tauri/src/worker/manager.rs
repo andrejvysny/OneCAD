@@ -1361,13 +1361,7 @@ impl SolverEngine for WorkerManager {
             .request("BeginGesture", args)
             .await
             .map_err(protocol_err)?;
-        ok_result(resp).map(|r| BeginGestureDto {
-            gesture_id: r
-                .get("gestureId")
-                .and_then(Value::as_u64)
-                .unwrap_or(gesture_id),
-            ready: r.get("ready").and_then(Value::as_bool).unwrap_or(false),
-        })
+        ok_result(resp).map(|r| wire::parse_begin_gesture(gesture_id, &r))
     }
 
     async fn solve_drag(

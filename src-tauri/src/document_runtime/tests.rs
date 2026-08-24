@@ -474,6 +474,7 @@ impl SolverEngine for FakeBackend {
             conflicting: vec![],
             solved_positions: std::collections::BTreeMap::new(),
             solved_curves: std::collections::BTreeMap::new(),
+            entity_states: Default::default(),
         })
     }
     async fn begin_gesture(
@@ -493,6 +494,7 @@ impl SolverEngine for FakeBackend {
         Ok(BeginGestureDto {
             gesture_id,
             ready: true,
+            entity_states: Default::default(),
         })
     }
     async fn solve_drag(
@@ -545,6 +547,7 @@ impl SolverEngine for FakeBackend {
             conflicting: vec![],
             solved_positions: solved,
             solved_curves: self.echo_curves.lock().unwrap().clone(),
+            entity_states: Default::default(),
         })
     }
     async fn sketch_regions(&self, _sketch_id: &str) -> Result<FinishSketchDto, EngineError> {

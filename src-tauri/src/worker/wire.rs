@@ -50,8 +50,8 @@ use onecad_core::sketch::{
 use onecad_protocol::messages::{BinSection, ErrorCode, ErrorObject};
 
 use crate::dto::{
-    CurveParamsDto, DragSolveDto, PreviewTrianglesDto, SketchRegionDto, SketchSolveStatus,
-    SketchUpsertDto,
+    BeginGestureDto, CurveParamsDto, DragSolveDto, EntityConstrainedState, EntityStates,
+    PreviewTrianglesDto, SketchRegionDto, SketchSolveStatus, SketchUpsertDto,
 };
 
 use super::{lod_from_str, lod_str, StepInspection};
@@ -2019,6 +2019,24 @@ pub fn parse_sketch_upsert(sketch_id: &str, result: &Value) -> SketchUpsertDto {
         solved_positions: parse_positions(result.get("positions")),
         // Additive since SP-2 (§7.4): a pre-SP-2 worker omits it ⇒ empty.
         solved_curves: parse_curves(result.get("curves")),
+        entity_states: parse_entity_states(result.get("entityStates")),
+    }
+}
+
+/// Parses a `BeginGesture` result into a [`BeginGestureDto`]. `requested_gesture_id`
+/// is the id this client asked for, used only when the worker echoes none.
+#[must_use]
+pub fn parse_begin_gesture(requested_gesture_id: u64, result: &Value) -> BeginGestureDto {
+    BeginGestureDto {
+        gesture_id: result
+            .get("gestureId")
+            .and_then(Value::as_u64)
+            .unwrap_or(requested_gesture_id),
+        ready: result
+            .get("ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        entity_states: parse_entity_states(result.get("entityStates")),
     }
 }
 
@@ -3969,6 +3987,24 @@ fn parse_curves(v: Option<&Value>) -> BTreeMap<String, CurveParamsDto> {
         .collect()
 }
 
+/// Parses a solver `entityStates` map (`{entityId: token}`) — SCHEMA §7.4's
+/// per-entity constrained state, keyed by WIRE entity id (the `curves` keyspace).
+///
+/// Absent ⇒ empty map: the worker had **nothing to say** (a pre-field worker, or an
+/// ellipse-bearing sketch whose naive-DOF fallback produced no diagnosis), never
+/// "everything is unconstrained". An UNRECOGNIZED token drops that ENTRY only —
+/// §7.4 says a reader treats it as unknown, so it is neither an error frame nor a
+/// default (defaulting would assert a state the worker never claimed). `SolveDrag`
+/// never carries the field, so [`parse_solve_drag`] does not call this.
+fn parse_entity_states(v: Option<&Value>) -> EntityStates {
+    let Some(obj) = v.and_then(Value::as_object) else {
+        return EntityStates::new();
+    };
+    obj.iter()
+        .filter_map(|(k, token)| Some((k.clone(), EntityConstrainedState::parse(token.as_str()?)?)))
+        .collect()
+}
+
 /// Validates the frame-level binary section table shared by region and mesh
 /// parsers. Alignment gaps are permitted; duplicate names, overlap, overflow,
 /// and out-of-tail sections are not.
@@ -5698,6 +5734,80 @@ mod solver_wire_tests {
         assert_eq!(
             parse_sketch_upsert("sk_1", &end).conflicting,
             vec!["c-x".to_string()]
+        );
+    }
+
+    #[test]
+    fn entity_states_parse_on_upsert_begin_and_end_but_never_on_solve_drag() {
+        use crate::dto::EntityConstrainedState as S;
+
+        // SketchUpsert — the §7.4 round-1 shape: a pinned line and a free circle in
+        // ONE UnderConstrained sketch. The point of the field is that these differ.
+        let up = json!({ "sketchId": "es", "sketchRevision": 1, "dof": 3,
+            "state": "UnderConstrained", "conflicting": [],
+            "entityStates": { "p1": "fullyConstrained", "p2": "fullyConstrained",
+                              "L": "fullyConstrained", "C": "underConstrained" } });
+        let d = parse_sketch_upsert("es", &up);
+        assert_eq!(d.entity_states.len(), 4);
+        assert_eq!(d.entity_states["L"], S::FullyConstrained);
+        assert_eq!(d.entity_states["C"], S::UnderConstrained);
+
+        // `conflicting` outranks both and rides the same map.
+        let cf = json!({ "sketchId": "cf", "sketchRevision": 1, "dof": 0,
+            "state": "Conflicting", "conflicting": ["hd"],
+            "entityStates": { "p1": "conflicting", "C": "underConstrained" } });
+        assert_eq!(
+            parse_sketch_upsert("cf", &cf).entity_states["p1"],
+            S::Conflicting
+        );
+
+        // ABSENT ⇒ empty: the worker had nothing to say (pre-field worker, or an
+        // ellipse-bearing sketch that omits the WHOLE map).
+        let quiet =
+            json!({ "sketchId": "el", "sketchRevision": 1, "dof": 5, "state": "UnderConstrained" });
+        assert!(parse_sketch_upsert("el", &quiet).entity_states.is_empty());
+
+        // An UNRECOGNIZED token drops that ENTRY only — never an error, and never a
+        // default (§7.4: a reader treats it as unknown). The siblings survive.
+        let odd = json!({ "sketchId": "es", "sketchRevision": 2, "dof": 1,
+            "state": "UnderConstrained",
+            "entityStates": { "p1": "fullyConstrained", "p2": "partiallyConstrained",
+                              "L": "FullyConstrained", "C": 7 } });
+        let d = parse_sketch_upsert("es", &odd);
+        assert_eq!(
+            d.entity_states.keys().collect::<Vec<_>>(),
+            vec!["p1"],
+            "only the recognized entry survives, got {:?}",
+            d.entity_states
+        );
+
+        // EndGesture echoes the BeginGesture map through the SAME parser.
+        let end = json!({ "gestureId": 71, "status": "success", "dof": 3, "sketchRevision": 2,
+            "entityStates": { "L": "fullyConstrained", "C": "underConstrained" } });
+        assert_eq!(
+            parse_sketch_upsert("gs", &end).entity_states["C"],
+            S::UnderConstrained
+        );
+
+        // BeginGesture carries it on its own DTO.
+        let begin = json!({ "gestureId": 71, "ready": true,
+            "entityStates": { "L": "fullyConstrained" } });
+        let b = parse_begin_gesture(71, &begin);
+        assert!(b.ready && b.gesture_id == 71);
+        assert_eq!(b.entity_states["L"], S::FullyConstrained);
+        // ... and tolerates its absence (a pre-field worker still opens gestures).
+        let bare = json!({ "gestureId": 71, "ready": true });
+        assert!(parse_begin_gesture(71, &bare).entity_states.is_empty());
+
+        // SolveDrag MUST NOT carry it (§7.4 normative). The DTO has no field, so a
+        // worker that emitted one anyway is ignored rather than mis-parsed.
+        let drag = json!({ "gestureId": 71, "seq": 1, "status": "success", "dof": 3,
+            "conflicting": [], "positions": {},
+            "entityStates": { "L": "fullyConstrained" } });
+        let parsed = serde_json::to_value(parse_solve_drag(&drag)).unwrap();
+        assert!(
+            parsed.get("entityStates").is_none(),
+            "the drag DTO carries no entityStates, got {parsed}"
         );
     }
 

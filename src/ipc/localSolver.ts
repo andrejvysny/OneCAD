@@ -49,6 +49,7 @@ import type {
   PreviewSession,
   SketchConstraint,
   SketchEntity,
+  SketchEntityStates,
   SketchPlane,
   SketchRegion,
   SketchSession,
@@ -58,7 +59,7 @@ import type {
 } from "./types";
 import { makeExtrudeBodyMesh, placeComponentGhostMesh } from "./mockMeshes";
 import { lookupMockFace, mockProjectedContent } from "./mockFaceGeometry";
-import { planeFor, solveDof, solveSketch } from "./mockSketch";
+import { mockEntityStates, planeFor, solveDof, solveSketch } from "./mockSketch";
 import { detectConflicts } from "./mockConflicts";
 import { enforceDriving } from "./mockEnforce";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
@@ -233,6 +234,10 @@ interface MockGesture {
   grab: [number, number] | null;
   /** `radius`: `|grab − center| − radius`, captured at Begin (0 when `grab` absent). */
   radiusOffset: number;
+  /** The GESTURE-FIXED per-entity state map (§7.4): diagnosed once at Begin and
+   *  echoed verbatim by `endGesture`. A drag adds no constraint, so it cannot
+   *  have changed; `solveDrag` never carries it. */
+  entityStates: SketchEntityStates;
 }
 
 /** Every point handle an entity OWNS, keyed `"<entityId>.<Position>"`, in §7.4
@@ -269,6 +274,7 @@ function openGesture(
   sketchId: string,
   dragPointId: string,
   entities: SketchEntity[],
+  constraints: SketchConstraint[],
   target?: GestureTarget,
 ): MockGesture {
   const kind = target?.kind ?? "point";
@@ -292,6 +298,7 @@ function openGesture(
     baseline,
     grab,
     radiusOffset,
+    entityStates: mockEntityStates(entities, constraints),
   };
 }
 
@@ -543,6 +550,9 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
           dof,
           status,
           conflicting,
+          // A face-hosted seed opens with its projected boundary already pinned,
+          // which is the one thing this lane can honestly call fullyConstrained.
+          entityStates: mockEntityStates(entities, constraints),
         };
         sketchSessions.set(id, session);
         sketchPlanes.set(id, session.plane);
@@ -590,6 +600,10 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
 
       const { dof, status: dofStatus } = solveDof(finalEntities, constraints);
       const status: SketchSolveStatus = conflicting.length > 0 ? "Conflicting" : dofStatus;
+      // Diagnosed from the SOLVED entities + the authored constraints, never from
+      // `conflicting` above — that variable may hold `enforced.refusedIds`, and a
+      // limit of the mock driver is not a geometric contradiction to paint red.
+      const entityStates = mockEntityStates(finalEntities, constraints);
       const session: SketchSession = {
         sketchId,
         plane: prev?.plane ?? planeFor("XY"),
@@ -598,6 +612,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         dof,
         status,
         conflicting,
+        entityStates,
       };
       sketchSessions.set(sketchId, session);
       sketchPlanes.set(sketchId, session.plane);
@@ -611,6 +626,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         conflicting,
         solvedPositions,
         solvedCurves,
+        entityStates,
       };
     },
 
@@ -646,9 +662,10 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       target?: GestureTarget,
     ): Promise<BeginGestureResult> {
       await wait(0);
-      const entities = sketchSessions.get(sketchId)?.entities ?? [];
-      activeGesture = openGesture(sketchId, dragPointId, entities, target);
-      return { gestureId: ++gestureSeq, ready: true };
+      const session = sketchSessions.get(sketchId);
+      const entities = session?.entities ?? [];
+      activeGesture = openGesture(sketchId, dragPointId, entities, session?.constraints ?? [], target);
+      return { gestureId: ++gestureSeq, ready: true, entityStates: activeGesture.entityStates };
     },
 
     async solveDrag(target: [number, number]): Promise<DragSolveResult | null> {
@@ -685,9 +702,17 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         sketchRevision: rev,
         dof: session?.dof ?? 0,
         status: session?.status ?? "FullyConstrained",
-        conflicting: [], // mock lane never conflicts (deterministic)
+        // The COMMITTED sketch's conflict set, not a hardcoded []. This lane's own
+        // `sketchUpsert` reports conflicts (mockConflicts R1–R5), so answering
+        // "never conflicts" here contradicted the very session being dragged, and
+        // a pointer-up silently cleared a tint the sketch still earns. §7.4's
+        // precedence is "the final exact solve's conflicts, else the gesture-fixed
+        // set"; a kinematic echo runs no solve, so the committed set IS the answer.
+        conflicting: session?.conflicting ?? [],
         solvedPositions: echo.positions,
         solvedCurves: echo.curves,
+        // ECHOED from BeginGesture, never re-derived (§7.4): gesture-fixed.
+        entityStates: g?.entityStates ?? {},
       };
     },
 

@@ -451,3 +451,92 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(entities()).toHaveLength(1); // unchanged
   });
 });
+
+/*
+ * Per-entity constrained states (SCHEMA §7.4) reach BOTH consumers: the store
+ * (chrome, and the e2e probe) and the engine (the colors). The two are written
+ * from the same solve result, so a site that threads one and not the other would
+ * paint the viewport from a map the rest of the app disagrees with.
+ */
+describe("SketchController — entityStates threading (SCHEMA §7.4)", () => {
+  let engineMock: ReturnType<typeof makeEngineMock>;
+  let clientMock: ReturnType<typeof makeClientMock>;
+  let container: HTMLDivElement;
+  let controller: SketchController;
+
+  beforeEach(() => {
+    resetStores();
+    disableSnapping();
+    engineMock = makeEngineMock();
+    clientMock = makeClientMock();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    controller.dispose();
+    container.remove();
+  });
+
+  function start(): Promise<void> {
+    controller = new SketchController({
+      engine: engineMock as unknown as ViewportEngine,
+      client: clientMock as unknown as CadClient,
+      container,
+    });
+    toolStore.getState().setMode("sketch", "sketch1");
+    return flush();
+  }
+
+  it("SEEDS store + engine from the entering session", async () => {
+    clientMock.enterSketch.mockResolvedValueOnce({
+      sketchId: "sketch1",
+      plane: PLANE,
+      entities: [],
+      constraints: [],
+      dof: 0,
+      status: "UnderConstrained",
+      entityStates: { e1: "fullyConstrained" },
+    });
+    await start();
+    expect(sketchStore.getState().entityStates).toEqual({ e1: "fullyConstrained" });
+    expect(engineMock.enterSketch.mock.calls[0][4]).toEqual({ e1: "fullyConstrained" });
+  });
+
+  it("a session with NO map seeds {} — unknown for all, never under-constrained", async () => {
+    await start();
+    expect(sketchStore.getState().entityStates).toEqual({});
+    expect(engineMock.enterSketch.mock.calls[0][4]).toEqual({});
+  });
+
+  it("a draw commit REPLACES both from the solve result", async () => {
+    await start();
+    clientMock.sketchUpsert.mockResolvedValueOnce({
+      sketchId: "sketch1",
+      sketchRevision: 1,
+      dof: 0,
+      status: "UnderConstrained",
+      conflicting: [],
+      solvedPositions: {},
+      entityStates: { e1: "conflicting" },
+    });
+    container.dispatchEvent(
+      new MouseEvent("pointerdown", { clientX: 0, clientY: 0, button: 0, buttons: 1, bubbles: true }),
+    );
+    container.dispatchEvent(
+      new MouseEvent("pointerup", { clientX: 0, clientY: 0, button: 0, buttons: 0, bubbles: true }),
+    );
+    container.dispatchEvent(
+      new MouseEvent("pointerdown", { clientX: 40, clientY: 0, button: 0, buttons: 1, bubbles: true }),
+    );
+    container.dispatchEvent(
+      new MouseEvent("pointerup", { clientX: 40, clientY: 0, button: 0, buttons: 0, bubbles: true }),
+    );
+    await flushSketchMutations();
+
+    expect(sketchStore.getState().entityStates).toEqual({ e1: "conflicting" });
+    const calls = engineMock.updateSketchSession.mock.calls;
+    const last = calls[calls.length - 1];
+    expect((last[4] as { entityStates?: unknown }).entityStates).toEqual({ e1: "conflicting" });
+  });
+});

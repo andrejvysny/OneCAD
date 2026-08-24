@@ -1500,6 +1500,10 @@ pub async fn sketch_upsert(
         let (result, outcome) = rt.sketch_upsert_with_outcome(id, ops).await?;
         (result, outcome, rt.projection())
     };
+    // KEYSPACE TRAP: `result.entity_states` here is keyed by BACKEND uuid. The
+    // command RETURN is re-keyed to frontend entity ids by the client
+    // (`frontendEntityStates`); this event is not. Today the frontend only parks
+    // the payload in a debug seam — a future subscriber must re-key it first.
     let _ = app.emit(events::SKETCH_SOLVED, &result);
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     if let Some(outcome) = outcome {
@@ -1636,6 +1640,7 @@ pub async fn end_gesture(
         let (result, outcome) = rt.end_gesture_with_outcome(final_target).await?;
         (result, outcome, rt.projection())
     };
+    // KEYSPACE TRAP: `entity_states` is backend-uuid-keyed here — see sketch_upsert.
     let _ = app.emit(events::SKETCH_SOLVED, &result);
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     if let Some(sched) = state.scheduler.get() {

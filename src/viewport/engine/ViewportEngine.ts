@@ -47,7 +47,14 @@ import { SketchObject } from "./SketchObject";
 import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
 import { computePlaneScreenMetric, newPlaneMetricScratch } from "./planeMetric";
-import type { SketchConstraint, SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
+import type {
+  SketchConstraint,
+  SketchEntity,
+  SketchEntityStates,
+  SketchPlane,
+  SketchRegion,
+  SketchSolveStatus,
+} from "@/ipc/types";
 import type { FrontendPointRef, PlaneScreenMetric, SnapDecision } from "@/tools/sketch/snapTypes";
 import { latestSnapTrace } from "@/tools/sketch/snapTrace";
 import { currentDpr, MAX_DPR } from "./dpr";
@@ -1170,6 +1177,7 @@ export class ViewportEngine {
     entities: SketchEntity[],
     status: SketchSolveStatus,
     constraints: SketchConstraint[] = [],
+    entityStates: SketchEntityStates = {},
   ): void {
     if (this.disposed) return;
     if (!this.sketch) {
@@ -1184,6 +1192,10 @@ export class ViewportEngine {
       });
     }
     this.sketchPlane = plane;
+    // Before the session, so the first build already colors per entity. A REUSED
+    // SketchObject (sketch→sketch switch) is reset by the `{}` default, which
+    // reads as unknown-for-all — the previous sketch's map must not leak in.
+    this.sketch.setEntityStates(entityStates);
     this.sketch.setSession(plane, entities, status, constraints);
     this.snapIndicator?.setPlane(plane);
     // Every OTHER sketch steps back while this one is edited (audit item #9),
@@ -1215,15 +1227,21 @@ export class ViewportEngine {
    * closure fills hide instead of being re-triangulated per frame, and the
    * gesture-end update (which must be non-transient) brings them back. See
    * `SketchObject.setSession`.
+   *
+   * `opts.entityStates` REPLACES the per-entity constrained states (SCHEMA §7.4).
+   * OMITTING it HOLDS whatever map is already drawn — which is exactly what a
+   * drag frame must do: `SolveDrag` carries no map, and the gesture-fixed one
+   * from `BeginGesture` stays correct for the whole gesture.
    */
   updateSketchSession(
     plane: SketchPlane,
     entities: SketchEntity[],
     status: SketchSolveStatus,
     constraints?: SketchConstraint[],
-    opts?: { transient?: boolean },
+    opts?: { transient?: boolean; entityStates?: SketchEntityStates },
   ): void {
     this.sketchPlane = plane;
+    if (opts?.entityStates) this.sketch?.setEntityStates(opts.entityStates);
     this.sketch?.setSession(plane, entities, status, constraints, opts);
     // A committed edit invalidates any hover-time doomed-piece ghost (it was drawn
     // against the pre-edit geometry) — clear it so it never lingers stale.
@@ -1264,6 +1282,13 @@ export class ViewportEngine {
   /** Tint the chain segment a live angle chip is measured against, or clear it. */
   setSketchAngleReference(id: string | null): void {
     this.sketch?.setAngleReference(id);
+  }
+
+  /** Replace the per-entity constrained states WITHOUT republishing the session
+   *  (SCHEMA §7.4) — the gesture-fixed map `BeginGesture` diagnoses, which
+   *  arrives while the geometry is unchanged. Rebuilds only if the map moved. */
+  setSketchEntityStates(states: SketchEntityStates): void {
+    this.sketch?.setEntityStates(states);
   }
 
   /** Endpoint/midpoint/centroid AFFORDANCE — full opacity per tier while that
