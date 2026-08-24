@@ -526,6 +526,98 @@ describe("fillet FSM", () => {
     // `settle`/`cancel` go through filletInit, so the next arm starts equal-leg.
     expect(filletStep(chamferArm(2.5), { kind: "cancel" }).state.distance2).toBeNull();
   });
+
+  // ── distance-angle chamfer (SCHEMA §7.3) ──────────────────────────────────
+
+  const angleArm = (angleDeg: number | null = null) =>
+    filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius: 1,
+      edgeOp: "Chamfer",
+      touched: true,
+      angleDeg,
+    }).state;
+
+  it("a fresh arm carries no angle; setAngleDeg authors one and null clears it", () => {
+    expect(filletInit().angleDeg).toBeNull();
+    expect(angleArm().angleDeg).toBeNull();
+
+    const angled = filletStep(angleArm(), { kind: "setAngleDeg", angleDeg: 30 });
+    expect(angled.effect).toBe("update");
+    expect(angled.state.angleDeg).toBe(30);
+    expect(filletStep(angled.state, { kind: "setAngleDeg", angleDeg: null }).state.angleDeg)
+      .toBeNull();
+  });
+
+  it("setAngleDeg refuses anything outside (0, 180) — core rejects both endpoints", () => {
+    for (const bad of [0, 180, 181, -30, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(filletStep(angleArm(30), { kind: "setAngleDeg", angleDeg: bad }).state.angleDeg)
+        .toBeNull();
+    }
+    // No magnitude clamp: EDGE_OP_MIN_VALUE is a LENGTH floor, and a 0.05° chamfer
+    // is a legal (if silly) angle the backend accepts.
+    expect(filletStep(angleArm(), { kind: "setAngleDeg", angleDeg: 0.05 }).state.angleDeg)
+      .toBe(0.05);
+  });
+
+  it("the two chamfer modes are MUTUALLY EXCLUSIVE — last authored wins", () => {
+    // Core refuses a Chamfer carrying both by name, so the FSM can never hold both.
+    const withD2 = filletStep(angleArm(), { kind: "setDistance2", distance2: 2.5 }).state;
+    const nowAngled = filletStep(withD2, { kind: "setAngleDeg", angleDeg: 30 }).state;
+    expect(nowAngled.angleDeg).toBe(30);
+    expect(nowAngled.distance2).toBeNull();
+
+    const backToD2 = filletStep(nowAngled, { kind: "setDistance2", distance2: 4 }).state;
+    expect(backToD2.distance2).toBe(4);
+    expect(backToD2.angleDeg).toBeNull();
+
+    // CLEARING one leaves the other alone — nothing was authored.
+    const clearedD2 = filletStep(backToD2, { kind: "setDistance2", distance2: null }).state;
+    expect(clearedD2.distance2).toBeNull();
+    expect(clearedD2.angleDeg).toBeNull();
+    // …and the arm seed makes the exclusion true too (angle wins, the wire's order).
+    const both = filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius: 1,
+      edgeOp: "Chamfer",
+      distance2: 2.5,
+      angleDeg: 30,
+    }).state;
+    expect(both.angleDeg).toBe(30);
+    expect(both.distance2).toBeNull();
+  });
+
+  it("angleDeg is CHAMFER-only, parked across a flip, and untouched by the drag", () => {
+    const filletSeeded = filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius: 2,
+      edgeOp: "Fillet",
+      angleDeg: 30,
+    }).state;
+    const evented = filletStep(filletSeeded, { kind: "setAngleDeg", angleDeg: 45 });
+    expect(evented.effect).toBe("none");
+    expect(evented.state.angleDeg).toBe(filletSeeded.angleDeg);
+
+    // A flip PARKS the value (a Fillet simply never emits it), so flipping back
+    // hands it straight back — same rule the second leg follows.
+    const angled = angleArm(30);
+    const toFillet = filletStep(angled, { kind: "setEdgeOp", edgeOp: "Fillet" }).state;
+    expect(toFillet.angleDeg).toBe(30);
+    expect(filletStep(toFillet, { kind: "setEdgeOp", edgeOp: "Chamfer" }).state.angleDeg).toBe(30);
+
+    // The drag sizes d1 alone.
+    const dragged = filletStep(grabbed(angleArm(30)), { kind: "drag", signed: -4 });
+    expect(dragged.state.radius).toBe(4);
+    expect(dragged.state.angleDeg).toBe(30);
+  });
+
+  it("setAngleDeg is inert outside armed/dragging, and a re-arm drops the angle", () => {
+    expect(filletStep(filletInit(), { kind: "setAngleDeg", angleDeg: 30 }).effect).toBe("none");
+    expect(filletStep(angleArm(30), { kind: "cancel" }).state.angleDeg).toBeNull();
+  });
 });
 
 describe("revolve FSM", () => {

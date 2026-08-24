@@ -1,5 +1,115 @@
 # OneCAD-Tauri Migration TODO
 
+## WP6 + SKETCH RESIDUALS + PER-ENTITY DOF (2026-08-24, plan `~/.claude/plans/act-as-senior-software-purrfect-moler.md`)
+
+Three phases chosen with the user: Phase 1 kernel WP6 small-caliber batch (closes § KERNEL
+CONTINUATION) → Phase 2 sketch FE residuals (near-action pulse, A12 Esc seam, screen-constant
+badge standoff, donut-hole fill) → Phase 3 per-entity constrained-state coloring (§7.4 additive
+wire field, protocol-auditor first). Manual user-run gates stay deferred/owed.
+
+- [x] **Post-merge sanity (2026-08-24).** User committed the sketch-UX merge (`c731a76`);
+      merged combination had never been gated together (branch R3 ran against pre-WP4 master).
+      Measured on the main thread: `bunx tsc --noEmit` clean · `bun run test` **300 files /
+      5145 passed / 78 skipped / 0 failed** (25.3 s).
+### Gate — Phase 1: WP6 small-caliber batch (2026-08-24) — gate row
+
+**Chamfer distance-angle mode (`angleDeg`) is live end to end.** Third chamfer variant
+(equal-leg · two-distance `distance2` · distance-angle `angleDeg`), DEGREES on the wire
+(op-param convention, `Revolve.angleDeg` precedent — NOT the sketch `angleUnits.ts` radians
+seam), discriminated by field PRESENCE, `angleDeg`+`distance2` refused BY NAME at all four
+boundaries (FSM → marshaller → `edit/session.rs` → worker), never resolved by precedence.
+`radius` is measured on the SAME smaller-ordinal reference face `distance2` uses
+(`reference_face` reused, not forked); angle measured off that face in the material, so
+angleDeg 45 on a 90° edge is exactly equal-leg (proved: 995 == 995 in the Rust lane; C++
+identity test) and the far leg is `radius·tan(angle)` (10-box, r=1, 60°: worker
+**991.3397**, Rust real-worker **991.3397455215454** vs analytic 991.3397459621556, f32
+MESH1 rounding; preview == commit bit-identical; mutation-checked: expectation ×2 → FAIL
+982.6795). Static bound `0 < angleDeg < 180` exclusive, deliberately LOOSE (obtuse dihedrals
+legitimately exceed 90°) — feasibility stays a recoverable `OP_FAILED`. Fillet⇄Chamfer flip
+rejected while set (`CHAMFER_ANGLE_FLIP_REASON`, mirrored verbatim in the mock, pinned).
+Absent ⇒ byte-identical: pinned as a literal JSON string in Rust AND measured against the
+PRE-change worker binary (equal-leg + two-distance probe frames identical byte-for-byte,
+`signatures.geometry` included). First canonical chamfer fixture
+(`chamfer_angle_distance.ndjson`, 30 expectations, all three modes + three refusals +
+committed angle-60) — none existed before (2026-08-03 `distance2` shipped without one).
+SCHEMA: §7.3 bullet · §7.6 `AnalyzeEdgeOpRange` is now NORMATIVELY an equal-leg oracle ·
+§14 entry. Cross-track sign-off: orchestrator-approved 2026-08-24, single repo.
+
+- **Audit-found, fixed in the same WP:** (1) the FE applied the equal-leg range clamp to
+  asymmetric chamfers (`distance2` — live since 2026-08-03) — `guardEdgeOpValue` now drops
+  to unclamped while either asymmetric field is set, no re-measure (chip-frequency lane);
+  (2) `rewriteFilletEdgeParams` dropped `distance2` on rewrite — LATENT not live (no
+  production caller; repair goes through `rebindInputCommand`), fixed and tested anyway;
+  (3) found by the FE implementer, NOT in the audit: `previewOps.ts` would have dropped the
+  mode from the COMMITTED record, because a fresh-author edge-op commit materializes the
+  preview session — now carries `angleDeg` under the `distance2` guards + both-fields
+  refusal. UI mutual exclusion: last-authored wins, the other field visibly empties
+  (FSM reducer is the single source; controller pushes both back to the chip).
+- **Decisions recorded:** worker enforcement asymmetry — `distance2` on a Fillet is silently
+  IGNORED (pre-existing, pinned by `test_fillet_ignores_distance2`) while `angleDeg` on a
+  Fillet is REFUSED by name (this contract). Both defensible (Rust rejects both upstream);
+  left asymmetric to avoid fixture churn. `lastValidStep` is `null` (not the base step) on
+  a single-op incremental plan whose only op fails — Rust tolerates it (`wire.rs:1024`),
+  first fixture to pin it.
+- **MirrorBody fuse UI** (`chip-mirror-fuse`, default non-fused unchanged, re-edit seeds the
+  stored value) · **evidence gaps closed, no defect** (details in the in-flight row below)
+  · coverage/contracts manifests corrected (MirrorBody exposed · Extrude ToFace/ToNext
+  stale prose · Shell multi-face · Chamfer three modes + `test_wp6_ops.cpp` citation).
+- **Flake ledger:** `bun run test` run 1 **5179 passed / 1 failed** — name NOT captured
+  (orchestrator ran it un-teed through a grep filter; the tee rule exists for exactly
+  this). Runs 2 and 3, teed: **302 files / 5180 passed / 78 skipped / 0 failed**.
+  Fourth full-suite-only single-drop this program; still unnamed. Tee EVERY heavy run.
+- **Gate (measured on the main thread, suites run alone; rung: FULL L3):** sidecar
+  restaged (`build-worker.sh Release`, OCCT 8.0.1, selftest exit 0) · ctest **154/154**
+  (39.6 s) · fmt clean · clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+  --no-fail-fast` **87 targets / 1329 passed / 0 failed / 0 ignored** (teed, 0 FAILED) ·
+  tsc clean · vitest **302 / 5180 / 78 skipped** (see ledger) · kernelbench
+  `fillet/foundation:t0` both backends **136 rows unchanged** + `semantic-compare` OK ·
+  hygiene clean · coverage 29/9/16/19 · contracts 37/18 · negative controls OK · hex 0 ·
+  `bun run e2e` (both projects, retries 0): **479 passed / 3 failed, 51.8 min — NOT
+  attributable, triaged below**; chromium **241/241**; webkit project re-run alone: see the
+  next bullet.
+- **e2e triage (webkit stalls under load, named).** The 3 failures were all webkit
+  (`revolve-region:33`, `transform-body:564`, `tree-rename:101`), none in a spec this
+  phase touched; each ran 3.1 m / 17.6 m / 4.5 m against a 45 s test timeout — the
+  browser process stalled, the app did not: `pageerror.log` empty, console stops
+  mid-flow with no error, the failure screenshot shows a healthy rendered page. The run
+  took 51.8 min against the 33 min baseline with the 15-min load average at 3.79 (a
+  second Claude session, BambuStudio and Chrome alive) — invalid for attribution by the
+  loaded-run rule. Isolated webkit re-runs: the three original tests **pass**, while
+  `transform-body:376` stalled the same way once (2.4 m) and then the whole spec passed
+  **17/17 in 30.2 s** at load 1.6. WebKit XPC processes left alive are BambuStudio's
+  WKWebView (start time matches), NOT Playwright orphans — not killed. Source named:
+  WebKit content-process stall under machine load; not a product defect. **Webkit project
+  re-run ALONE at load ~2.2–2.8: 241 passed / 0 failed, 10.5 min, retries 0.** Attributable
+  e2e: chromium **241/241** + webkit **241/241** (482 specs, both green).
+
+- [x] Phase 1 WP6 (orchestrator-verified numbers in the gate row above): **evidence gaps closed, no defect** — Shell two-face (worker 3376.0000
+      mutation-checked · Rust preview+commit 1792 · e2e armed-count proof; committed
+      `openFaces` has NO browser-observable surface, stated in the spec header) · countersink
+      browser commit proof (null-`cbDiameter` readback) · circular partial-sweep Rust
+      (steps 60.0° = angleDeg/count, fills the hole `circular_pattern_lineage.ndjson`
+      declines to pin) · **MirrorBody fuse UI** (chip toggle `chip-mirror-fuse`, controller +
+      chip + e2e both browsers; P4 "no fuse toggle" mode-closure test at TODO.md:6169
+      deliberately flipped — this row is the record) · coverage+contracts manifests corrected
+      (MirrorBody exposed · Extrude ToFace/ToNext stale prose · Shell multi-face note).
+      Chamfer angle-distance: protocol design APPROVED (`angleDeg`, degrees, presence-
+      discriminated, mutually exclusive with `distance2`, smaller-ordinal reference face);
+      Rust-core + worker/SCHEMA/fixture packages in flight; FE package queued.
+- [ ] **Flagged seams from MirrorBody review (not fixed, this row is the record):**
+      (1) `armMirror`/`armLinear`/`armCircular` call `rebuildMirrorGhost` BEFORE `show*`
+      spreads `CLEARED`, so the arm-time result summary is discarded; (2) `commitPattern`
+      clears the chip before the backend round trip but `resetToSelect` after it — a re-edit
+      in that window is silently dropped by the `armGen` bump (measured: requestGen 5 vs
+      armGen 6), no hint, no log; (3) after a mirror re-edit commit, selection stays on the
+      feature (mock-lane observation, `classifyRegen` noop branch — unverified vs real worker).
+- [ ] **Audit-found live defects folded into the chamfer FE package:** `rewriteFilletEdgeParams`
+      (`tauriCommandMap.ts:1034-1058`) silently drops `distance2` on repair rebind (no non-test
+      caller yet; repair lane is the intended consumer) · the AnalyzeEdgeOpRange equal-leg
+      clamp is applied to asymmetric chamfers today (`ModelToolController.ts:3197`) — FE must
+      drop to unclamped for `distance2`/`angleDeg`, §7.6 restriction becoming normative.
+- [ ] Phase 2 sketch FE residuals. Phase 3 per-entity DOF coloring.
+
 ## KERNEL CONTINUATION — RESUMED (2026-08-20, plan `~/.claude/plans/use-the-fable-orchestrator-skill-kind-dawn.md`)
 
 Resumes § KERNEL CONTINUATION (below, 2026-08-15) by user decision, superseding DAILY DRIVER's

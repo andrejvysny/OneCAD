@@ -270,7 +270,7 @@
       "toleranceEvidence": "max tolerance recorded; ceiling diagnostic",
       "cancellationPolicy": "single OCCT call",
       "previewFidelity": "exact kernel BRep",
-      "persistenceBehavior": "typed edge refs persist; equal-leg and two-distance modes round-trip",
+      "persistenceBehavior": "typed edge refs persist; equal-leg, two-distance (distance2) and distance-angle (angleDeg, degrees) modes round-trip; angleDeg and distance2 are mutually exclusive and refused by name at every boundary",
       "userRecoveryBehavior": "short/curved edges and missing edges report diagnostics",
       "notes": "P3 routes Chamfer through the same Tier B validator as Fillet.",
       "uiExposure": "exposed"
@@ -293,7 +293,7 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "typed face refs persist alongside legacy bare ids; upstream edit rebinds",
       "userRecoveryBehavior": "cross-body selection refused before arming; invalid result refuses",
-      "notes": "Positive thickness only; multi-face and inward/outward policy deferred to P4.",
+      "notes": "Positive thickness only; inward/outward policy deferred to P4. Multi-face is proven in all three lanes (worker test_shell_two_open_faces, Rust shell_removes_two_open_faces_in_one_op, e2e/shell-preview.spec.ts).",
       "uiExposure": "exposed"
     },
     {
@@ -510,7 +510,7 @@
       "persistenceBehavior": "source BodyId and plane params persist",
       "userRecoveryBehavior": "non-planar/infinite plane refuses with code",
       "uiExposure": "exposed",
-      "notes": "UI hard-codes no-fuse today; this is the supported v1 mode."
+      "notes": "The DEFAULT mode: a fresh mirror arms with the fuse toggle off, so this is what the tool commits unless the user says otherwise."
     },
     {
       "operation": "MirrorBody",
@@ -530,8 +530,8 @@
       "previewFidelity": "exact kernel BRep",
       "persistenceBehavior": "fuse mode stored on record; reopen preserves mode",
       "userRecoveryBehavior": "disjoint fused result refuses with named code",
-      "uiExposure": "hidden",
-      "notes": "fuseWithOriginal exists in core/worker but UI hard-codes false. Exposing it is a UI decision."
+      "uiExposure": "exposed",
+      "notes": "WP6 exposed fuseWithOriginal on the armed mirror chip (chip-mirror-fuse). OFF for a fresh mirror — the record's own serde default — and seeded from the stored value on re-edit, so the no-fuse row above remains the default mode."
     },
     {
       "operation": "TransformBody",

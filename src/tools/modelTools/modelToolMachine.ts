@@ -440,6 +440,16 @@ export interface FilletFsm {
    * The drag lane never touches it either — a drag sizes `radius` only.
    */
   distance2: number | null;
+  /**
+   * The CHAMFER-ONLY chamfer angle in DEGREES (SCHEMA §7.3). `null` ⇒ this mode is
+   * off. MUTUALLY EXCLUSIVE with {@link FilletFsm.distance2}: authoring either one
+   * clears the other here, because core refuses a Chamfer carrying both and the
+   * user must be able to see which mode they are in.
+   *
+   * Parked across a type flip for the same reason `distance2` is: the value is the
+   * user's, and a Fillet simply never EMITS it.
+   */
+  angleDeg: number | null;
 }
 
 export type FilletEvent =
@@ -455,6 +465,8 @@ export type FilletEvent =
       touched?: boolean;
       /** Seed the second chamfer leg (a re-edit of a two-distance chamfer). */
       distance2?: number | null;
+      /** Seed the chamfer angle in DEGREES (a re-edit of a distance-angle chamfer). */
+      angleDeg?: number | null;
     }
   | { kind: "grabEdge" }
   /** `signed` is the raw drag projection: positive = away from the body. */
@@ -463,6 +475,8 @@ export type FilletEvent =
   | { kind: "setEdgeOp"; edgeOp: EdgeOpKind }
   /** `null` clears back to equal-leg (the chip's `=` state). */
   | { kind: "setDistance2"; distance2: number | null }
+  /** `null` clears the angle mode (the chip's `∠` empty state). DEGREES. */
+  | { kind: "setAngleDeg"; angleDeg: number | null }
   | { kind: "release" }
   | { kind: "confirm" }
   | { kind: "commitFailed" }
@@ -483,6 +497,7 @@ export function filletInit(): FilletFsm {
     auto: false,
     touched: false,
     distance2: null,
+    angleDeg: null,
   };
 }
 
@@ -509,6 +524,18 @@ function normalizeDistance2(v: number | null): number | null {
   return Math.max(EDGE_OP_MIN_VALUE, v);
 }
 
+/**
+ * Coerce a chamfer-angle candidate to the FSM's domain: `null` (mode off), or an
+ * angle STRICTLY between 0 and 180 degrees. Core rejects either endpoint — a
+ * degenerate chamfer face, coplanar with the reference face or folded onto it —
+ * so an out-of-domain entry reads as "no angle", never as a value to author.
+ * No magnitude clamp: `EDGE_OP_MIN_VALUE` is a length floor, not an angular one.
+ */
+function normalizeAngleDeg(v: number | null): number | null {
+  if (v === null || !Number.isFinite(v) || v <= 0 || v >= 180) return null;
+  return v;
+}
+
 function autoEdgeOp(s: FilletFsm, signed: number): EdgeOpKind {
   if (!s.auto) return s.edgeOp;
   if (!Number.isFinite(signed)) return s.edgeOp;
@@ -518,8 +545,12 @@ function autoEdgeOp(s: FilletFsm, signed: number): EdgeOpKind {
 
 export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
   switch (e.kind) {
-    case "arm":
+    case "arm": {
       if (e.edgeCount <= 0) return { state: filletInit(), effect: "none" };
+      // The two chamfer modes are seeded from independent fields, so the reducer
+      // MAKES the exclusion true instead of trusting the caller. Angle wins, which
+      // is the presence order the wire and `dto.rs` already read the mode in.
+      const angleDeg = normalizeAngleDeg(e.angleDeg ?? null);
       return {
         state: {
           ...filletInit(),
@@ -529,10 +560,12 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
           edgeOp: e.edgeOp ?? "Fillet",
           auto: e.auto === true,
           touched: e.touched === true,
-          distance2: normalizeDistance2(e.distance2 ?? null),
+          distance2: angleDeg === null ? normalizeDistance2(e.distance2 ?? null) : null,
+          angleDeg,
         },
         effect: "begin",
       };
+    }
     case "grabEdge":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "dragging" }, effect: "none" };
@@ -580,15 +613,29 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
           : DEFAULT_FILLET_RADIUS;
       return { state: { ...s, edgeOp: e.edgeOp, auto: false, radius }, effect: "update" };
     }
-    case "setDistance2":
+    case "setDistance2": {
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       // Chamfer-only: the segment that authors it is not rendered for a Fillet,
       // so a Fillet reaching here is a caller bug, not a value to store.
       if (s.edgeOp !== "Chamfer") return { state: s, effect: "none" };
+      // LAST AUTHORED WINS: the two chamfer modes are exclusive (core refuses a
+      // record carrying both), so authoring a second leg turns the angle mode off.
+      // Clearing back to equal-leg leaves the angle alone — nothing was authored.
+      const distance2 = normalizeDistance2(e.distance2);
       return {
-        state: { ...s, distance2: normalizeDistance2(e.distance2) },
+        state: { ...s, distance2, angleDeg: distance2 === null ? s.angleDeg : null },
         effect: "update",
       };
+    }
+    case "setAngleDeg": {
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      if (s.edgeOp !== "Chamfer") return { state: s, effect: "none" };
+      const angleDeg = normalizeAngleDeg(e.angleDeg);
+      return {
+        state: { ...s, angleDeg, distance2: angleDeg === null ? s.distance2 : null },
+        effect: "update",
+      };
+    }
     case "release":
       // Release does NOT commit — it keeps the tool armed at the dragged size so
       // the kernel preview stays live and the user confirms explicitly.

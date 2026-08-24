@@ -159,6 +159,44 @@ describe("filletParams — R-WP2.1 dual edge rule (AddOperation from UI selectio
     });
     expect("distance2" in p).toBe(false);
   });
+
+  // ── distance-angle chamfer (SCHEMA §7.3) ──────────────────────────────────
+
+  it("emits `angleDeg` (DEGREES) for a Chamfer that has one, never for one that has not", () => {
+    const plain = addedParams({
+      opType: "Chamfer",
+      params: { mode: "Chamfer", radius: 1, edgeIds: ["e:3"] },
+    });
+    expect("angleDeg" in plain).toBe(false);
+
+    const angled = addedParams({
+      opType: "Chamfer",
+      params: { mode: "Chamfer", radius: 1, angleDeg: 30, edgeIds: ["e:3"] },
+    });
+    // Degrees ride through UNCONVERTED — the op-param convention (`angleUnits` is
+    // the sketch radians seam and has no business on this lane).
+    expect(angled.angleDeg).toEqual({ value: 30 });
+    expect(angled.radius).toEqual({ value: 1 });
+  });
+
+  it("DROPS `angleDeg` from a Fillet — Chamfer-only, exactly like `distance2`", () => {
+    const p = addedParams({
+      opType: "Fillet",
+      params: { mode: "Fillet", radius: 1, angleDeg: 30, edgeIds: ["e:3"] },
+    });
+    expect("angleDeg" in p).toBe(false);
+  });
+
+  it("NEVER emits both chamfer modes — angle wins, the wire's own presence order", () => {
+    // Core refuses a Chamfer carrying both by name, so no marshalling seam may
+    // author one. The FSM already keeps at most one; this is the wire-side half.
+    const both = addedParams({
+      opType: "Chamfer",
+      params: { mode: "Chamfer", radius: 1, distance2: 2.5, angleDeg: 30, edgeIds: ["e:3"] },
+    });
+    expect(both.angleDeg).toEqual({ value: 30 });
+    expect("distance2" in both).toBe(false);
+  });
 });
 
 describe("updateScalarParamsCommand — re-edit deep-merge (Findings 3+4)", () => {
@@ -246,6 +284,33 @@ describe("rewriteFilletEdgeParams — the dual edge_ids/edges lockstep rule", ()
     expect(params.edges).toHaveLength(2);
     expect(params.edges?.[1].primary?.elementId).toBe("el_b");
     expect("tangentClosureVersion" in params).toBe(false);
+  });
+
+  it("PRESERVES the chamfer mode a rebind is not touching (both modes)", () => {
+    // The rewrite returns the COMPLETE params object, so a mode field missing from
+    // `CurrentFilletParams` was silently dropped: a two-distance chamfer came back
+    // equal-leg and a distance-angle one came back plain, from a rebind that was
+    // only ever asked to move ONE edge.
+    const asym = rewriteFilletEdgeParams(
+      { ...current, distance2: 2.5 },
+      1,
+      edgeElementRef("b1", "el_NEW"),
+    );
+    expect(asym.distance2).toEqual({ value: 2.5 });
+    expect("angleDeg" in asym).toBe(false);
+
+    const angled = rewriteFilletEdgeParams(
+      { ...current, angleDeg: 30 },
+      1,
+      edgeElementRef("b1", "el_NEW"),
+    );
+    expect(angled.angleDeg).toEqual({ value: 30 });
+    expect("distance2" in angled).toBe(false);
+
+    // An equal-leg fillet/chamfer still marshals with NEITHER key (skip-none).
+    const plain = rewriteFilletEdgeParams(current, 1, edgeElementRef("b1", "el_NEW"));
+    expect("distance2" in plain).toBe(false);
+    expect("angleDeg" in plain).toBe(false);
   });
 
   it("wraps into an UpdateOperationParams command (opType Fillet)", () => {

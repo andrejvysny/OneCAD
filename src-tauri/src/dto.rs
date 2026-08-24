@@ -1626,10 +1626,16 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
         // sides); the second leg is seeded from the stored params, not from here.
         // The inline editor targets d1 (`radius`) only — a second leg is a
         // two-field edit that belongs in the Chamfer tool, not a one-number row.
+        // A distance-angle chamfer (SCHEMA §7.3) reads as `d1 ∠a°` for the same
+        // reason: the angle is what makes the feature what it is. Mode is chosen by
+        // PRESENCE, matching the wire discriminator — `angleDeg` first, then
+        // `distance2`, then equal-leg (both set at once never reaches here; the
+        // session refuses it by name).
         KnownOperation::Chamfer(p) => FeatureValue::dimensioned(
-            match &p.distance2 {
-                Some(d2) => format!("{:.1}×{:.1} mm", p.radius.value, d2.value),
-                None => format!("{:.1} mm", p.radius.value),
+            match (&p.angle_deg, &p.distance2) {
+                (Some(a), _) => format!("{:.1} mm ∠{:.1}°", p.radius.value, a.value),
+                (None, Some(d2)) => format!("{:.1}×{:.1} mm", p.radius.value, d2.value),
+                (None, None) => format!("{:.1} mm", p.radius.value),
             },
             p.radius.value,
             "length",
@@ -1989,6 +1995,7 @@ mod tests {
         let chamfer = Operation::Known(KnownOperation::Chamfer(ChamferParams {
             radius: Scalar::new(1.0),
             distance2: Some(Scalar::new(2.5)),
+            angle_deg: None,
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
             chain_tangent_edges: true,
@@ -2118,16 +2125,18 @@ mod tests {
         assert_eq!(v["primaryValueKind"], "diameter");
     }
 
-    /// A two-distance chamfer's row shows BOTH legs (SCHEMA §7.3, 2026-08-03);
-    /// an equal-leg one is byte-identical to what it always showed.
+    /// A two-distance chamfer's row shows BOTH legs (SCHEMA §7.3, 2026-08-03) and a
+    /// distance-angle one shows the angle; an equal-leg one is byte-identical to
+    /// what it always showed.
     #[test]
     fn chamfer_value_text_shows_the_second_distance_only_when_set() {
         use onecad_core::document::record::ChamferParams;
         use onecad_core::ids::ElementId;
-        let chamfer = |d2: Option<f64>| {
+        let chamfer = |d2: Option<f64>, angle: Option<f64>| {
             Operation::Known(KnownOperation::Chamfer(ChamferParams {
                 radius: Scalar::new(1.0),
                 distance2: d2.map(Scalar::new),
+                angle_deg: angle.map(Scalar::new),
                 edge_ids: vec![ElementId::new("e:14")],
                 edges: vec![],
                 chain_tangent_edges: true,
@@ -2135,10 +2144,23 @@ mod tests {
                 extra: Default::default(),
             }))
         };
-        assert_eq!(feature_value_text(&chamfer(None)), "1.0 mm");
-        assert_eq!(feature_value_text(&chamfer(Some(2.5))), "1.0×2.5 mm");
-        // The re-edit seed parses the LEADING number (`radiusFromValueText`).
-        assert!(feature_value_text(&chamfer(Some(2.5))).starts_with("1.0"));
+        assert_eq!(feature_value_text(&chamfer(None, None)), "1.0 mm");
+        assert_eq!(feature_value_text(&chamfer(Some(2.5), None)), "1.0×2.5 mm");
+        assert_eq!(
+            feature_value_text(&chamfer(None, Some(30.0))),
+            "1.0 mm ∠30.0°"
+        );
+        // The re-edit seed parses the LEADING number (`radiusFromValueText`), so d1
+        // stays first in EVERY mode — an angle-first row would seed the radius with
+        // the angle.
+        for op in [chamfer(Some(2.5), None), chamfer(None, Some(30.0))] {
+            assert!(
+                feature_value_text(&op).starts_with("1.0"),
+                "d1 leads: {}",
+                feature_value_text(&op)
+            );
+            assert_eq!(feature_value(&op).primary, Some(1.0), "the row edits d1");
+        }
     }
 
     /// PIN (frontend contract): the projection folds the pattern/mirror ops into

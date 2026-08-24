@@ -174,6 +174,10 @@ export interface EdgeOpChipOpts extends ChipAnchorOpts {
   distance2?: number | null;
   /** The second leg was typed or cleared back to `=` (equal-leg). */
   onDistance2?: (distance2: number | null) => void;
+  /** Seed the CHAMFER angle in DEGREES (`null` = the mode is off — SCHEMA §7.3). */
+  chamferAngleDeg?: number | null;
+  /** The chamfer angle was typed or cleared. */
+  onChamferAngle?: (angleDeg: number | null) => void;
 }
 
 /**
@@ -418,6 +422,13 @@ export interface ToolChipState {
    * even when the value is still parked here from an earlier flip.
    */
   distance2: number | null;
+  /**
+   * The CHAMFER-ONLY angle in DEGREES (SCHEMA §7.3). `null` ⇒ the distance-angle
+   * mode is off. MUTUALLY EXCLUSIVE with {@link ToolChipState.distance2}: the
+   * controller authors one at a time and pushes both back, so the field the user
+   * did not type visibly empties. Rendered only while `edgeOp === "Chamfer"`.
+   */
+  chamferAngleDeg: number | null;
   /** How the armed offset reads its distance (SCHEMA §7.3 `distanceType`). */
   distanceType: OffsetDistanceType;
   /** Which distance types the armed offset's segment group offers. */
@@ -493,6 +504,13 @@ export interface ToolChipState {
   copy: boolean;
   /** Copy toggled (armed placement cluster — W2). */
   onCopy: ((copy: boolean) => void) | null;
+  /**
+   * Whether the armed MIRROR folds its copy back into the source
+   * (`MirrorBodyParams.fuseWithOriginal`). False is a separate mirrored body.
+   */
+  fuse: boolean;
+  /** Fuse toggled (armed mirror cluster — WP6). */
+  onFuse: ((fuse: boolean) => void) | null;
   /** Which align pick is outstanding, or null when the flow is off (W2.5). */
   alignPhase: AlignPhase | null;
   /** [Align] pressed (armed placement cluster — W2.5). */
@@ -530,6 +548,8 @@ export interface ToolChipState {
   onEdgeOp: ((edgeOp: EdgeOpKind) => void) | null;
   /** Second chamfer distance typed / cleared (armed edge-op cluster). */
   onDistance2: ((distance2: number | null) => void) | null;
+  /** Chamfer angle typed / cleared (armed edge-op cluster). */
+  onChamferAngle: ((angleDeg: number | null) => void) | null;
   /** Axis-reset pressed (revolve chip). */
   onResetAxis: (() => void) | null;
   /** Swap the boolean operands (U6). */
@@ -661,7 +681,14 @@ export interface ToolChipState {
   showMirror(
     plane: MirrorPlane,
     worldPos: [number, number, number],
-    handlers: { onPlane: (plane: MirrorPlane) => void; onConfirm: () => void; onCancel?: () => void },
+    handlers: {
+      onPlane: (plane: MirrorPlane) => void;
+      onConfirm: () => void;
+      onCancel?: () => void;
+      /** Fuse toggled — the visible surface for `MirrorBodyParams.fuseWithOriginal`. */
+      onFuse?: (fuse: boolean) => void;
+    },
+    opts?: { fuse?: boolean },
   ): void;
   /** Show the armed placement cluster `[Move|Rotate][X|Y|Z][value ▸][Copy][✓][✕]`. */
   showTransform(
@@ -720,10 +747,14 @@ export interface ToolChipState {
   setTransformMode(mode: TransformMode): void;
   /** Update just the armed placement's copy flag (Alt-drag / the Copy segment). */
   setCopy(copy: boolean): void;
+  /** Update just the armed mirror's fuse flag (the Fuse segment read-back). */
+  setFuse(fuse: boolean): void;
   /** Update just the align sub-flow's outstanding pick (W2.5). */
   setAlignPhase(alignPhase: AlignPhase | null): void;
   /** Update just the chamfer second leg (`null` = equal-leg). */
   setDistance2(distance2: number | null): void;
+  /** Update just the chamfer angle in DEGREES (`null` = the mode is off). */
+  setChamferAngle(chamferAngleDeg: number | null): void;
   /** Route a typed character to the primary numeric field (see `primaryEntry`). */
   beginPrimaryEntry(seed: string): void;
   /** Restate what the armed operation will produce (see `resultSummary`). */
@@ -767,6 +798,8 @@ const CLEARED = {
   edgeOp: "Fillet" as EdgeOpKind,
   distance2: null as number | null,
   onDistance2: null as ((distance2: number | null) => void) | null,
+  chamferAngleDeg: null as number | null,
+  onChamferAngle: null as ((angleDeg: number | null) => void) | null,
   showEdgeOpSegments: false,
   onEdgeOp: null,
   distanceType: "Offset" as OffsetDistanceType,
@@ -825,6 +858,8 @@ const CLEARED = {
   onTransformMode: null,
   copy: false,
   onCopy: null,
+  fuse: false,
+  onFuse: null,
   alignPhase: null as AlignPhase | null,
   onAlign: null,
   suffix: "",
@@ -893,6 +928,8 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       onEdgeOp: opts?.onEdgeOp ?? null,
       distance2: opts?.distance2 ?? null,
       onDistance2: opts?.onDistance2 ?? null,
+      chamferAngleDeg: opts?.chamferAngleDeg ?? null,
+      onChamferAngle: opts?.onChamferAngle ?? null,
       ...resolveChipAnchor(opts),
     });
   },
@@ -1078,15 +1115,17 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       onCancel: handlers.onCancel ?? null,
     });
   },
-  showMirror(plane, worldPos, handlers) {
+  showMirror(plane, worldPos, handlers, opts) {
     set({
       ...CLEARED,
       kind: "mirror",
       plane,
       worldPos,
+      fuse: opts?.fuse ?? false,
       onPlane: handlers.onPlane,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel ?? null,
+      onFuse: handlers.onFuse ?? null,
     });
   },
   showTransform(mode, axis, value, worldPos, handlers, opts) {
@@ -1144,6 +1183,9 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
   setDistance2(distance2) {
     set({ distance2 });
   },
+  setChamferAngle(chamferAngleDeg) {
+    set({ chamferAngleDeg });
+  },
   setDistanceType(distanceType) {
     set({ distanceType });
   },
@@ -1158,6 +1200,9 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
   },
   setCopy(copy) {
     set({ copy });
+  },
+  setFuse(fuse) {
+    set({ fuse });
   },
   setAlignPhase(alignPhase) {
     set({ alignPhase });

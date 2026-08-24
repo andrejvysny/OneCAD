@@ -142,26 +142,35 @@ struct ChamferRun {
     gp_Pnt centre;
     std::size_t faces = 0;
     bool ok = false;
+    std::string error_code;
+    std::string error_message;
 };
 
-ChamferRun run_two_distance_chamfer(double d1, double d2) {
+// Run one chamfer on the (0,0) vertical edge of a 10 mm box. `mode_params` carries
+// `radius` plus whichever mode field is under test (none / `distance2` / `angleDeg`),
+// so a case reads as "which SHAPE of params did I hand it". The measurements are
+// taken unconditionally: on a refusal they are the UNTOUCHED box, which is what
+// "recoverable, session intact" means.
+ChamferRun run_chamfer(const json& mode_params, const std::string& op_id) {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();  // [0,10]^3
     BodyStore bodies;
     bodies.create("body_1", "op0", box);
     em::ElementMapPartition part;
 
     const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
-    json op = {{"opType", "Chamfer"}, {"opId", "opc2"},
+    json params = json{{"mode", "Chamfer"}, {"edgeIds", json::array({"e:x"})}};
+    params.update(mode_params);
+    json op = {{"opType", "Chamfer"}, {"opId", op_id},
                {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
-               {"params", {{"mode", "Chamfer"}, {"radius", d1}, {"distance2", d2},
-                           {"edgeIds", json::array({"e:x"})}}}};
+               {"params", params}};
 
     Ctx c;
     ops::OpContext ctx = c.make(bodies, part);
-    const ops::OpOutcome oc = ops::execute_chamfer(ctx, op, "opc2");
+    const ops::OpOutcome oc = ops::execute_chamfer(ctx, op, op_id);
     ChamferRun r;
     r.ok = oc.status == ops::OpOutcome::Status::Ok && oc.needs_repair.empty();
-    if (!r.ok) return r;
+    r.error_code = oc.error_code;
+    r.error_message = oc.error_message;
     const TopoDS_Shape& out = bodies.get("body_1")->geom;
     GProp_GProps props;
     BRepGProp::VolumeProperties(out, props);
@@ -169,6 +178,10 @@ ChamferRun run_two_distance_chamfer(double d1, double d2) {
     r.centre = props.CentreOfMass();
     r.faces = face_count(out);
     return r;
+}
+
+ChamferRun run_two_distance_chamfer(double d1, double d2) {
+    return run_chamfer(json{{"radius", d1}, {"distance2", d2}}, "opc2");
 }
 
 // Whether the SCHEMA §7.3 reference face (the adjacent face with the SMALLER
@@ -251,6 +264,130 @@ void test_chamfer_two_distance_reference_face_is_deterministic() {
     check_near(swapped.volume, a.volume, 1e-6, "chamfer2 swapped: same removed volume");
     check(std::abs(swapped.centre.X() - a.centre.X()) > 1e-6,
           "chamfer2 swapped: the legs are ORIENTED (centroid moves)");
+}
+
+// ── distance-angle chamfer (SCHEMA §7.3, 2026-08-24 — WP6 item 1) ────────────
+
+// --- `radius` is the leg ON the reference face and `angleDeg` is the angle
+//     between the chamfer face and THAT face, so the far leg is radius·tan(A)
+//     and the removed prism is exactly d·(d·tanA)/2 swept the edge length. ---
+void test_chamfer_angle_distance() {
+    const double d1 = 1.0, angle_deg = 60.0, len = 10.0;
+    const double far_leg = d1 * std::tan(angle_deg * M_PI / 180.0);  // 1.7320508…
+    const ChamferRun r = run_chamfer(json{{"radius", d1}, {"angleDeg", angle_deg}}, "opca");
+    check(r.ok, "chamfer-angle: Ok, no NeedsRepair (got '" + r.error_message + "')");
+    if (!r.ok) return;
+
+    const double removed = 0.5 * d1 * far_leg * len;
+    check_near(r.volume, 1000.0 - removed, 1e-6,
+               "chamfer-angle: volume == 1000 - d*(d*tanA)/2*L");
+    check(r.faces == 7, "chamfer-angle: 6 + 1 flat face = 7");
+    // …and not the equal-leg reading of `radius` (995) — the angle reached OCCT.
+    check(std::abs(r.volume - 995.0) > 1.0,
+          "chamfer-angle: angleDeg actually reached the kernel (not an equal-leg cut)");
+
+    // ORIENTATION: the DISTANCE leg lies on the recomputed smaller-ordinal face and
+    // the tan-derived leg on the other one, so the removed prism's cross-section is
+    // the triangle (0,0)-(0,d1)-(far,0) when the reference face is x==0, and its
+    // mirror when it is y==0. Measuring the distance on the OTHER face swaps these.
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    const bool ref_x0 = reference_face_is_x0(box, edge_by_center(box, 0, 0, 5));
+    const double rem_cx = (ref_x0 ? far_leg : d1) / 3.0;
+    const double rem_cy = (ref_x0 ? d1 : far_leg) / 3.0;
+    const double kept = 1000.0 - removed;
+    check_near(r.centre.X(), (1000.0 * 5.0 - removed * rem_cx) / kept, 1e-6,
+               "chamfer-angle: centroid X matches `radius` on the smaller face ordinal");
+    check_near(r.centre.Y(), (1000.0 * 5.0 - removed * rem_cy) / kept, 1e-6,
+               "chamfer-angle: centroid Y matches the tan-derived leg on the other face");
+    std::fprintf(stderr, "chamfer-angle: reference face is %s, centroid (%.6f, %.6f)\n",
+                 ref_x0 ? "x==0" : "y==0", r.centre.X(), r.centre.Y());
+}
+
+// --- On a 90° dihedral, `angleDeg: 45` IS the equal-leg chamfer of the same
+//     distance. That identity is what makes the reference-face rule checkable
+//     from a document: it pins the angle's zero without a second convention. ---
+void test_chamfer_angle_45_is_equal_leg() {
+    const ChamferRun equal_leg = run_chamfer(json{{"radius", 1.5}}, "opce");
+    const ChamferRun at45 = run_chamfer(json{{"radius", 1.5}, {"angleDeg", 45.0}}, "opc45");
+    check(equal_leg.ok && at45.ok, "chamfer-angle 45: both runs Ok");
+    if (!(equal_leg.ok && at45.ok)) return;
+    check_near(at45.volume, equal_leg.volume, 1e-9,
+               "chamfer-angle 45: volume equal to the plain equal-leg chamfer of the same d");
+    check_near(at45.centre.X(), equal_leg.centre.X(), 1e-9,
+               "chamfer-angle 45: identical centroid X");
+    check_near(at45.centre.Y(), equal_leg.centre.Y(), 1e-9,
+               "chamfer-angle 45: identical centroid Y");
+    check(at45.faces == equal_leg.faces, "chamfer-angle 45: identical face count");
+
+    // …and 30° is a DIFFERENT solid, which is what makes the equality above an
+    // assertion about the angle rather than about the code path being dead.
+    const ChamferRun at30 = run_chamfer(json{{"radius", 1.5}, {"angleDeg", 30.0}}, "opc30");
+    check(at30.ok && std::abs(at30.volume - equal_leg.volume) > 1e-3,
+          "chamfer-angle 45: a different angle is a different solid");
+}
+
+// --- The refusals. Each names the offending field, each is a recoverable
+//     OP_FAILED, and none of them touches the body. ---
+void test_chamfer_angle_refusals() {
+    const ChamferRun both =
+        run_chamfer(json{{"radius", 1.0}, {"distance2", 2.5}, {"angleDeg", 45.0}}, "opcx1");
+    check(!both.ok && both.error_code == "OP_FAILED" &&
+              both.error_message.find("mutually exclusive") != std::string::npos,
+          "chamfer-angle: distance2 + angleDeg refused BY NAME (got '" + both.error_message + "')");
+    check_near(both.volume, 1000.0, 1e-9, "chamfer-angle: both-fields refusal left the box intact");
+
+    const ChamferRun zero = run_chamfer(json{{"radius", 1.0}, {"angleDeg", 0.0}}, "opcx2");
+    check(!zero.ok && zero.error_code == "OP_FAILED" &&
+              zero.error_message.find("angleDeg") != std::string::npos,
+          "chamfer-angle: 0° refused by name (got '" + zero.error_message + "')");
+    check_near(zero.volume, 1000.0, 1e-9, "chamfer-angle: 0° refusal left the box intact");
+
+    const ChamferRun flat = run_chamfer(json{{"radius", 1.0}, {"angleDeg", 180.0}}, "opcx3");
+    check(!flat.ok && flat.error_code == "OP_FAILED" &&
+              flat.error_message.find("angleDeg") != std::string::npos,
+          "chamfer-angle: 180° refused by name (got '" + flat.error_message + "')");
+    check_near(flat.volume, 1000.0, 1e-9, "chamfer-angle: 180° refusal left the box intact");
+
+    // The static bound is DELIBERATELY loose — an obtuse dihedral legitimately
+    // takes more than 90°, so the validator must not own that ceiling. 80° is far
+    // past equal-leg and clears the guard; whether OCCT can build a given angle on
+    // a given edge is the Build/IsDone net's business, not the validator's.
+    const ChamferRun obtuse = run_chamfer(json{{"radius", 1.0}, {"angleDeg", 80.0}}, "opcx4");
+    check(obtuse.error_message.find("angleDeg must be within") == std::string::npos,
+          "chamfer-angle: 80° clears the static bound (got '" + obtuse.error_message + "')");
+
+    // A PRESENT but malformed angle is an error, never a default. `read_scalar`
+    // would have silently substituted 0.0 and refused for the wrong reason.
+    const ChamferRun malformed =
+        run_chamfer(json{{"radius", 1.0}, {"angleDeg", "45"}}, "opcx5");
+    check(!malformed.ok && malformed.error_code == "OP_FAILED" &&
+              malformed.error_message.find("angleDeg must be a finite scalar") != std::string::npos,
+          "chamfer-angle: malformed angleDeg refused by name (got '" + malformed.error_message +
+              "')");
+}
+
+// --- A Fillet carrying angleDeg is refused BY NAME. Unlike `distance2` (which
+//     predates the field-identity rule and is ignored), a Chamfer-only ANGLE on a
+//     Fillet record can only come from a core defect, and answering it with a
+//     plain fillet would hide that. ---
+void test_fillet_rejects_angle_deg() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_1", "op0", box);
+    em::ElementMapPartition part;
+    const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
+    json op = {{"opType", "Fillet"}, {"opId", "opfa"},
+               {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
+               {"params", {{"mode", "Fillet"}, {"radius", 1.0}, {"angleDeg", 45.0},
+                           {"edgeIds", json::array({"e:x"})}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_fillet(ctx, op, "opfa");
+    check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED" &&
+              oc.error_message.find("angleDeg") != std::string::npos,
+          "fillet+angleDeg: refused by name (got '" + oc.error_message + "')");
+    check_near(onecad::session::shape_volume(bodies.get("body_1")->geom), 1000.0, 1e-6,
+               "fillet+angleDeg: body untouched");
 }
 
 // --- distance2 below kMinValue ⇒ recoverable OP_FAILED (never a silent cut). ---
@@ -580,6 +717,10 @@ int main() {
     test_chamfer_edge();
     test_chamfer_two_distance();
     test_chamfer_two_distance_reference_face_is_deterministic();
+    test_chamfer_angle_distance();
+    test_chamfer_angle_45_is_equal_leg();
+    test_chamfer_angle_refusals();
+    test_fillet_rejects_angle_deg();
     test_chamfer_distance2_too_small();
     test_fillet_ignores_distance2();
     test_fillet_radius_too_small();

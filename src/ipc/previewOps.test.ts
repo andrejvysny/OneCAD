@@ -178,6 +178,31 @@ describe("previewOps OP_BUILDERS mirror their commit call sites", () => {
     }
   });
 
+  it("a Chamfer draft carries `angleDeg` through (DEGREES); a plain one emits no key", () => {
+    // The FRESH-author commit materializes the preview SESSION (`endPreview(…, true)`),
+    // so a mode this lane drops is a mode the committed record never had.
+    const angled = buildPreviewOp(edgeSession("Chamfer", { angleDeg: 30 }));
+    if (angled.opType !== "Chamfer") throw new Error("expected Chamfer");
+    expect(angled.params.angleDeg).toBe(30);
+
+    const plain = buildPreviewOp(edgeSession("Chamfer", {}));
+    if (plain.opType !== "Chamfer") throw new Error("expected Chamfer");
+    expect("angleDeg" in plain.params).toBe(false);
+  });
+
+  it("REFUSES angleDeg on a Fillet, out of (0,180), or alongside distance2", () => {
+    expect(() => buildPreviewOp(edgeSession("Fillet", { angleDeg: 30 }))).toThrow(/Chamfer-only/);
+    for (const bad of [0, 180, 181, -1, Number.NaN]) {
+      expect(() => buildPreviewOp(edgeSession("Chamfer", { angleDeg: bad }))).toThrow(
+        /between 0 and 180/,
+      );
+    }
+    // The two modes are exclusive — core refuses a record carrying both by name.
+    expect(() =>
+      buildPreviewOp(edgeSession("Chamfer", { distance2: 2.5, angleDeg: 30 })),
+    ).toThrow(/not both/);
+  });
+
   it("Shell matches commitShell's op", () => {
     // commitShell:
     //   const bodyId = faces[0]?.bodyId;

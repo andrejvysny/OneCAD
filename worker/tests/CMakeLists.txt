@@ -672,6 +672,17 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/analyze_edge_op_range.ndjson
 )
+# SCHEMA §7.3 Chamfer `angleDeg` (WP6 item 1) — and the first canonical fixture to
+# drive a Chamfer at all, so it covers equal-leg and two-distance too. Pins the
+# delta/bodyEvents SHAPE (a distance-angle chamfer is indistinguishable from an
+# equal-leg one at the identity layer), the three named refusals, and the head
+# surviving all of them. The analytic volumes live in test_wp6_ops.cpp.
+add_test(
+    NAME canonical_chamfer_angle_distance
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/chamfer_angle_distance.ndjson
+)
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script

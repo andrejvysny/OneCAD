@@ -54,11 +54,11 @@
       "cppTest": "",
       "rustRealWorkerTest": "src-tauri/tests/corpus_executor.rs",
       "frontendTest": "",
-      "playwrightTest": "",
+      "playwrightTest": "e2e/extrude-end-conditions.spec.ts",
       "corpusCase": "b_extrude_throughall_symmetric_twodir",
       "kernelbenchSuite": "",
-      "ciJob": "rust-8-0-1",
-      "notes": "ThroughAll and Symmetric now COMMIT against the real worker through the corpus executor (case b), which asserts the frozen C++ volumes 3750 and 800 and the body-lifecycle events. Still deferred because the mode closure the UI needs is unproven: no browser flow commits these end conditions, and ToFace/ToNext remain corpus expectations without ops. Plan item C4.",
+      "ciJob": "rust-8-0-1; e2e-chromium; e2e-webkit",
+      "notes": "ThroughAll and Symmetric now COMMIT against the real worker through the corpus executor (case b), which asserts the frozen C++ volumes 3750 and 800 and the body-lifecycle events. The earlier UI claim here was stale: the armed extrude chip ships all four end-condition segments (src/features/toolbar/ExtrudeChipControls.tsx — chip-end-blind / -throughall / -tonext / -toface), and ToFace runs a full facePick-to-commit path (ModelToolController.tryPickExtrudeFace promotes the picked face to a minted ElementId, and extrudeParams sends it as params.targetFace). e2e/extrude-end-conditions.spec.ts authors ThroughAll and enters/escapes the ToFace pick. Still deferred for one reason only: no browser flow COMMITS a non-Blind end condition and asserts the resulting body. Plan item C4.",
       "uiExposure": "exposed"
     },
     {
@@ -191,14 +191,14 @@
       "operation": "Chamfer",
       "mode": "edge",
       "supportStatus": "supported",
-      "cppTest": "worker/tests/test_fillet_builder.cpp",
-      "rustRealWorkerTest": "src-tauri/tests/preview_edge_shell.rs",
-      "frontendTest": "src/tools/modelTools/ModelToolController.edgeShellPreview.test.ts",
-      "playwrightTest": "e2e/filletChamfer.spec.ts",
+      "cppTest": "worker/tests/test_fillet_builder.cpp; worker/tests/test_wp6_ops.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/preview_edge_shell.rs; src-tauri/tests/chamfer_angle.rs",
+      "frontendTest": "src/tools/modelTools/ModelToolController.edgeShellPreview.test.ts; src/tools/modelTools/ModelToolController.chamferAngle.test.ts; src/tools/modelTools/modelToolMachine.test.ts; src/ipc/tauriCommandMap.test.ts; src/ipc/previewOps.test.ts; src/ipc/mockClient.operations.test.ts; src/features/toolbar/ModelToolChips.test.tsx",
+      "playwrightTest": "e2e/filletChamfer.spec.ts; e2e/chamfer-angle.spec.ts",
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "Curved-edge and short-edge atomicity remain unproven (plan item C4).",
+      "notes": "Three modes, picked by PRESENCE (SCHEMA §7.3): equal-leg, two-distance (distance2), distance-angle (angleDeg, DEGREES) — the last two mutually exclusive, and a Chamfer carrying either refuses the flip to Fillet by name. FRONTEND LANE MEASURED (this row's frontendTest/playwrightTest lists): the FSM exclusion and (0,180) domain, the marshalling seam that emits at most one mode, the preview-op builder the fresh-author commit materializes, the mock's mirror of the Rust flip reason and value text, the chip fields, and e2e/chamfer-angle.spec.ts (author → commit → re-open → refused flip). MOCK LIMIT, stated: the browser lane builds no chamfer geometry at all, so it proves the params round-trip and the UI semantics, never the solid. RUST LANE MEASURED: chamfer_angle.rs drives the distance-angle mode through DocumentRuntime against the real worker on a 10 mm cube — angleDeg 60 commits to 991.3397455 (analytic 1000 − d·(d·tan A)/2·L = 991.3397460, not the 995 an equal-leg reading would give), angleDeg 45 equals the equal-leg solid at 995 exactly, PreviewOp equals the commit bit-for-bit, distance2 + angleDeg is refused by name with no regen issued, and angleDeg 180 is refused by the session on the authoring path and by the worker as a recoverable OP_FAILED on the preview path. Curved-edge and short-edge atomicity remain unproven (plan item C4).",
       "uiExposure": "exposed"
     },
     {
@@ -212,7 +212,7 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: every lane shells exactly ONE open face (test_m6a_ops.cpp openFaces has a single entry, preview_edge_shell.rs passes one promoted ref, the spec picks one face). Multi-open-face and the cross-body refusal are unproven — plan item C4.",
+      "notes": "Multi-open-face is measured in all three lanes: test_m6a_ops.cpp test_shell_two_open_faces (cap + wall at t=2, exactly 3376), preview_edge_shell.rs shell_removes_two_open_faces_in_one_op (two promoted refs at t=1, exactly 1792, preview == commit), shell-preview.spec.ts arms a two-face selection and commits one row. MEASURED LIMIT: the browser lane sees only the armed face COUNT (the committed openFaces array has no browser surface — no client handle on window, and a shell re-edit is thickness-only). The cross-body refusal is still unproven — plan item C4.",
       "uiExposure": "exposed"
     },
     {
@@ -240,7 +240,7 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: all three seat types remove their analytic volumes in C++ and Rust, but the browser flow CONFIGURES countersink and never commits it (e2e/hole.spec.ts selects the chip, then asserts only holeType). A committed countersink has no browser evidence — plan item C4.",
+      "notes": "All three seat types remove their analytic volumes in C++ and Rust. The browser lane now COMMITS a countersink and re-opens the row (e2e/hole.spec.ts): the cs pair comes back restored, and the counterbore authored before the flip does not — cbDiameter falls back to its default, which is only possible if the committed record carried cbDiameter: null.",
       "uiExposure": "exposed"
     },
     {
@@ -268,7 +268,7 @@
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "MEASURED LIMIT: the PARTIAL sweep (angleDeg < 360, the angleDeg/count step rule) is proven only in C++ (test_circular_pattern_partial_sweep) and in the frontend patternPreview unit test; the Rust lane runs 360 degrees only. V2 lineage is additionally pinned cross-track by protocol/fixtures/circular_pattern_lineage.ndjson.",
+      "notes": "The PARTIAL sweep (angleDeg < 360) and the angleDeg/count step rule are measured in C++ (test_circular_pattern_partial_sweep), in the frontend patternPreview unit test, and in the Rust lane (breadth_ops.rs circular_pattern_partial_sweep_steps_angle_over_count — 180 deg over 3 V2 instances, measured polar deltas 60.0000007 and 59.9999967). V2 lineage is additionally pinned cross-track by protocol/fixtures/circular_pattern_lineage.ndjson.",
       "uiExposure": "mixed"
     },
     {
@@ -277,13 +277,13 @@
       "supportStatus": "supported",
       "cppTest": "worker/tests/test_m6a_ops.cpp",
       "rustRealWorkerTest": "src-tauri/tests/breadth_ops.rs; src-tauri/tests/ordinal_tripwire.rs",
-      "frontendTest": "src/tools/modelTools/ModelToolController.patternReedit.test.ts",
+      "frontendTest": "src/tools/modelTools/ModelToolController.patternReedit.test.ts; src/tools/modelTools/ModelToolController.mirrorFuse.test.ts; src/features/toolbar/ModelToolChips.test.tsx",
       "playwrightTest": "e2e/mirror-body.spec.ts",
       "corpusCase": "",
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
-      "notes": "BOTH modes are covered, contrary to an earlier review note: the C++ lane runs fuseWithOriginal true and false, breadth_ops.rs is the fused case and ordinal_tripwire.rs authors the non-fused one. The UI hard-codes false (contract row: uiExposure hidden for fuse).",
-      "uiExposure": "mixed"
+      "notes": "BOTH modes are covered, contrary to an earlier review note: the C++ lane runs fuseWithOriginal true and false, breadth_ops.rs is the fused case and ordinal_tripwire.rs authors the non-fused one. WP6 gave fuse an authoring surface — the armed mirror chip's `chip-mirror-fuse` toggle, OFF for a fresh mirror and seeded from the stored value on re-edit. mirrorFuse.test.ts pins the committed `fuseWithOriginal` for both directions on both the fresh and re-edit paths; mirror-body.spec.ts drives the toggle in the browser and reads the committed value back through the re-edit's getOperationParams seed.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "TransformBody",

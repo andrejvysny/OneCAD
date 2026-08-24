@@ -197,6 +197,36 @@ describe("ModelToolChips (M6b)", () => {
     expect(onConfirm).toHaveBeenCalled();
   });
 
+  it("mirror chip dispatches the fuse toggle and reflects the seeded value", () => {
+    const onFuse = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore
+        .getState()
+        .showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn(), onFuse }),
+    );
+    const toggle = screen.getByTestId("chip-mirror-fuse");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+    expect(onFuse).toHaveBeenCalledWith(true);
+
+    // The controller owns the value: the button follows the store write-back.
+    act(() => toolChipStore.getState().setFuse(true));
+    expect(screen.getByTestId("chip-mirror-fuse")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByTestId("chip-mirror-fuse"));
+    expect(onFuse).toHaveBeenLastCalledWith(false);
+  });
+
+  it("mirror chip seeded fused (a re-edit) opens with the toggle pressed", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore
+        .getState()
+        .showMirror("YZ", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn(), onFuse: vi.fn() }, { fuse: true }),
+    );
+    expect(screen.getByTestId("chip-mirror-fuse")).toHaveAttribute("aria-pressed", "true");
+  });
+
   // ── WP0 red test — every armed model tool has a visible cancel control ───────
 
   it.each([
@@ -468,6 +498,102 @@ describe("ModelToolChips (M6b)", () => {
     fireEvent.change(d2Field(), { target: { value: "3" } });
     fireEvent.keyDown(d2Field(), { key: "Enter" });
     expect(onDistance2).toHaveBeenCalledWith(3);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  // ── chamfer angle (SCHEMA §7.3 distance-angle mode) ───────────────────────
+
+  const angleField = () => screen.getByLabelText("Chamfer angle") as HTMLInputElement;
+
+  it("the angle field appears ONLY while the armed op is a Chamfer, beside the second leg", () => {
+    render(<ModelToolChips />);
+    edgeOpCluster({ edgeOp: "Fillet" });
+    openFilletOverflow();
+    expect(screen.queryByTestId("chip-chamfer-angle")).toBeNull();
+
+    act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
+    expect(screen.getByTestId("chip-chamfer-angle")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-chamfer-d2")).toBeInTheDocument();
+    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument(); // d1 unshadowed
+
+    act(() => toolChipStore.getState().setEdgeOp("Fillet"));
+    expect(screen.queryByTestId("chip-chamfer-angle")).toBeNull();
+  });
+
+  it("an angle-less chamfer shows an empty field, and typing a number authors the angle", () => {
+    render(<ModelToolChips />);
+    const onChamferAngle = vi.fn();
+    edgeOpCluster({ edgeOp: "Chamfer", onChamferAngle });
+    openFilletOverflow();
+    expect(angleField().value).toBe("");
+
+    fireEvent.change(angleField(), { target: { value: "30" } });
+    fireEvent.blur(angleField());
+    expect(onChamferAngle).toHaveBeenCalledWith(30);
+
+    // Clearing it back to empty clears the mode.
+    act(() => toolChipStore.getState().setChamferAngle(30));
+    onChamferAngle.mockClear();
+    fireEvent.change(angleField(), { target: { value: "" } });
+    fireEvent.blur(angleField());
+    expect(onChamferAngle).toHaveBeenCalledWith(null);
+  });
+
+  it("an angle outside (0, 180) is REVERTED, never authored", () => {
+    render(<ModelToolChips />);
+    const onChamferAngle = vi.fn();
+    edgeOpCluster({ edgeOp: "Chamfer", chamferAngleDeg: 30, onChamferAngle });
+    openFilletOverflow();
+    for (const bad of ["0", "180", "181", "-5", "30abc"]) {
+      fireEvent.change(angleField(), { target: { value: bad } });
+      fireEvent.blur(angleField());
+      expect(onChamferAngle).not.toHaveBeenCalled();
+      expect(angleField().value).toBe("30");
+    }
+  });
+
+  it("the two chamfer modes clear each other VISIBLY (last authored wins)", () => {
+    // The controller owns the exclusion (the FSM refuses to hold both) and pushes
+    // BOTH values back; what this pins is that the chip actually re-renders the
+    // cleared one, so the user sees which mode they are in.
+    render(<ModelToolChips />);
+    edgeOpCluster({ edgeOp: "Chamfer", distance2: 2.5 });
+    openFilletOverflow();
+    expect(d2Field().value).toBe("2.5");
+    expect(angleField().value).toBe("");
+
+    act(() => {
+      toolChipStore.getState().setChamferAngle(30);
+      toolChipStore.getState().setDistance2(null); // what the FSM read-back does
+    });
+    expect(angleField().value).toBe("30");
+    expect(d2Field().value).toBe("="); // the second leg emptied in front of the user
+
+    act(() => {
+      toolChipStore.getState().setDistance2(4);
+      toolChipStore.getState().setChamferAngle(null);
+    });
+    expect(d2Field().value).toBe("4");
+    expect(angleField().value).toBe("");
+  });
+
+  it("Enter in the angle field applies the value THEN confirms (single fire)", () => {
+    render(<ModelToolChips />);
+    const onChamferAngle = vi.fn();
+    const onConfirm = vi.fn();
+    act(() =>
+      toolChipStore.getState().showFillet(
+        1,
+        WORLD,
+        vi.fn(),
+        { onConfirm, onCancel: vi.fn() },
+        { showEdgeOpSegments: true, edgeOp: "Chamfer", onChamferAngle },
+      ),
+    );
+    openFilletOverflow();
+    fireEvent.change(angleField(), { target: { value: "45" } });
+    fireEvent.keyDown(angleField(), { key: "Enter" });
+    expect(onChamferAngle).toHaveBeenCalledWith(45);
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
@@ -1034,14 +1160,21 @@ describe("critical mode closure", () => {
     expect(screen.queryByTestId("chip-bool-intersect")).toBeNull();
   });
 
-  it("mirror chip has no fuse/union toggle", () => {
+  /*
+   * WP6 reopened this closure for MIRROR ONLY, as a recorded user-visible change:
+   * `MirrorBodyParams.fuseWithOriginal` now has an authoring surface, so the
+   * assertion here flips from "absent" to "present and OFF by default". The two
+   * pattern rows below are untouched — their `fuseResult` is still hard-coded.
+   */
+  it("mirror chip exposes the fuse toggle, OFF by default", () => {
     render(<ModelToolChips />);
     act(() =>
       toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onConfirm: vi.fn() }),
     );
     expect(screen.getByRole("button", { name: "XY" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
+    expect(screen.getByTestId("chip-mirror-fuse")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("button", { name: /Union/i })).toBeNull();
   });
 
   it("linear-pattern chip has no fuse/union toggle", () => {

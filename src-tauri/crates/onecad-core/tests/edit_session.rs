@@ -1035,6 +1035,7 @@ fn chamfer_op(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64) -> Operati
     Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: s(radius),
         distance2: None,
+        angle_deg: None,
         edge_ids: edge_ids.iter().map(|e| ElementId::new(*e)).collect(),
         edges,
         chain_tangent_edges: true,
@@ -1692,6 +1693,216 @@ fn a_two_distance_chamfer_may_not_flip_to_fillet_until_distance2_is_cleared() {
         stored_d2(&sess, rid(1)),
         Some(2.5),
         "undo restores the cleared second leg"
+    );
+}
+
+// ── distance-angle chamfer: `angleDeg` ───────────────────────────────────────
+
+/// A Chamfer op in the distance-angle mode (SCHEMA §7.3): `radius` on the
+/// reference face, `angleDeg` off it, in DEGREES.
+fn chamfer_op_angle(
+    edge_ids: &[&str],
+    edges: Vec<ElementRef>,
+    radius: f64,
+    angle: f64,
+) -> Operation {
+    let Operation::Known(KnownOperation::Chamfer(mut p)) = chamfer_op(edge_ids, edges, radius)
+    else {
+        unreachable!("chamfer_op builds a Chamfer")
+    };
+    p.angle_deg = Some(s(angle));
+    Operation::Known(KnownOperation::Chamfer(p))
+}
+
+/// The stored `angleDeg` of a record's op (`None` unless it is distance-angle).
+fn stored_angle(sess: &DocumentSession, r: RecordId) -> Option<f64> {
+    match &sess.document().timeline.record_by_id(r).unwrap().op {
+        Operation::Known(KnownOperation::Chamfer(p)) => p.angle_deg.as_ref().map(|s| s.value),
+        _ => None,
+    }
+}
+
+/// The bound is EXCLUSIVE at both ends and enforced on every entry path — a
+/// rejected edit writes nothing. Geometric feasibility against the local dihedral
+/// stays the worker's recoverable failure, not a rejected edit.
+#[test]
+fn chamfer_rejects_an_out_of_range_angle_deg_on_every_entry_path() {
+    for bad in [0.0, 180.0, -30.0, 200.0] {
+        // AddOperation.
+        let mut doc = Document::new(DocumentId(u(0x5A)));
+        doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+        let mut sess = DocumentSession::new(doc);
+        let err = sess
+            .apply(EditCommand::AddOperation {
+                record: record(
+                    rid(1),
+                    "Chamfer",
+                    chamfer_op_angle(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, bad),
+                    vec![BX()],
+                ),
+                at_cursor: false,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("angleDeg"), "add {bad}: {err}");
+
+        // UpdateOperationParams.
+        let mut sess = fillet_doc("e1");
+        let err = sess
+            .apply(EditCommand::UpdateOperationParams {
+                record: rid(1),
+                op: chamfer_op_angle(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, bad),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("angleDeg"), "update {bad}: {err}");
+        let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+        assert_eq!(rec.op.op_type(), "Fillet", "a rejected edit writes nothing");
+    }
+
+    // 45° on a 90° dihedral is the equal-leg chamfer — squarely in range.
+    let mut sess = fillet_doc("e1");
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op_angle(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, 45.0),
+    })
+    .expect("45° is a valid distance-angle chamfer");
+    assert_eq!(stored_angle(&sess, rid(1)), Some(45.0));
+}
+
+/// The two second-leg spellings name the same thing twice. Refusing BY NAME (both
+/// fields) is the point: a precedence rule would silently discard one of the two
+/// numbers the user typed.
+#[test]
+fn a_chamfer_may_not_carry_distance2_and_angle_deg_together() {
+    let both = {
+        let Operation::Known(KnownOperation::Chamfer(mut p)) =
+            chamfer_op_d2(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, 2.5)
+        else {
+            unreachable!()
+        };
+        p.angle_deg = Some(s(30.0));
+        Operation::Known(KnownOperation::Chamfer(p))
+    };
+
+    let mut doc = Document::new(DocumentId(u(0x5B)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    let mut sess = DocumentSession::new(doc);
+    let err = sess
+        .apply(EditCommand::AddOperation {
+            record: record(rid(1), "Chamfer", both.clone(), vec![BX()]),
+            at_cursor: false,
+        })
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("distance2") && msg.contains("angleDeg"),
+        "add names BOTH fields: {msg}"
+    );
+
+    let mut sess = fillet_doc("e1");
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: both,
+        })
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("distance2") && msg.contains("angleDeg"),
+        "update names BOTH fields: {msg}"
+    );
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(rec.op.op_type(), "Fillet", "a rejected edit writes nothing");
+}
+
+/// `FilletParams` has no typed `angleDeg`, so an unguarded payload naming one would
+/// land in the `extra` flatten and round-trip VERBATIM — an angle persisted on an op
+/// that never reads it, and resurrected by a later flip.
+#[test]
+fn a_fillet_may_not_carry_angle_deg() {
+    let mut fillet = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+    if let Operation::Known(KnownOperation::Fillet(p)) = &mut fillet {
+        p.extra.insert("angleDeg".into(), serde_json::json!(30.0));
+    }
+    let mut sess = fillet_doc("e1");
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: fillet,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("angleDeg") && err.to_string().contains("Chamfer-only"),
+        "Fillet carrying angleDeg: {err}"
+    );
+}
+
+/// Same FIELD-IDENTITY precondition `distance2` carries: a Chamfer with `angleDeg`
+/// set is not flippable to Fillet — the flip would silently drop the angle — so the
+/// edit is refused with the standard allow-list reason, NAMING the field.
+#[test]
+fn a_distance_angle_chamfer_may_not_flip_to_fillet_until_angle_deg_is_cleared() {
+    let mut sess = fillet_doc("e1");
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op_angle(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, 30.0),
+    })
+    .expect("Fillet → distance-angle Chamfer invents nothing the target cannot hold");
+    assert_eq!(stored_angle(&sess, rid(1)), Some(30.0));
+
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]),
+        })
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("opType"), "standard allow-list reason: {msg}");
+    assert!(
+        msg.contains("angleDeg"),
+        "the reason NAMES the field: {msg}"
+    );
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(
+        rec.op.op_type(),
+        "Chamfer",
+        "a rejected flip writes nothing"
+    );
+    assert_eq!(
+        stored_angle(&sess, rid(1)),
+        Some(30.0),
+        "…and keeps the angle"
+    );
+
+    // Clearing `angleDeg` is an ordinary (visible, undoable) params edit; the flip
+    // is then the plain W3 swap again.
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 1.0),
+    })
+    .expect("clearing angleDeg is a plain params edit");
+    assert_eq!(stored_angle(&sess, rid(1)), None);
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]),
+    })
+    .expect("an equal-leg Chamfer still flips to Fillet");
+    assert_eq!(
+        sess.document()
+            .timeline
+            .record_by_id(rid(1))
+            .unwrap()
+            .op
+            .op_type(),
+        "Fillet"
+    );
+
+    // …and undo walks the whole sequence back, angle included.
+    assert!(sess.undo().is_some(), "flip undone");
+    assert!(sess.undo().is_some(), "clear undone");
+    assert_eq!(
+        stored_angle(&sess, rid(1)),
+        Some(30.0),
+        "undo restores the cleared angle"
     );
 }
 

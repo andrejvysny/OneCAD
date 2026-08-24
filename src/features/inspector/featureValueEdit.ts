@@ -31,7 +31,8 @@ const WIRE_FIELD: Record<string, string> = {
   // dimension, so `ipc/angleUnits` (the deg↔rad seam) has no business here.
   Revolve: "angleDeg",
   Fillet: "radius",
-  // A chamfer's row edits d1 only; `distance2` (when set) rides the stored params.
+  // A chamfer's row edits d1 only; whichever mode field is set (`distance2` or
+  // `angleDeg` — SCHEMA §7.3) rides along on the stored params.
   Chamfer: "radius",
   Shell: "thickness",
   Hole: "diameter",

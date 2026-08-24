@@ -108,6 +108,12 @@ interface WireFilletParams {
    * byte-identical to every document authored before the field existed.
    */
   distance2?: WireScalar;
+  /**
+   * Rust `ChamferParams::angle_deg` (SCHEMA §7.3) — DEGREES, no conversion. Same
+   * skip-none rule as `distance2`, and MUTUALLY EXCLUSIVE with it: core rejects a
+   * Chamfer carrying both, so this seam emits at most one of the two.
+   */
+  angleDeg?: WireScalar;
   edgeIds: string[];
   /**
    * Typed per-edge semantic refs (Rust `FilletParams::edges` — one `ElementRef`
@@ -481,7 +487,13 @@ function filletParams(p: FilletParams, inputs?: SemanticRef[]): WireFilletParams
   // the other): a caller that leaves a stale `distance2` on a params object it
   // has just re-typed to Fillet marshals a plain fillet, never a record core has
   // to reject.
-  if (p.mode === "Chamfer" && p.distance2 !== undefined && p.distance2 > 0) {
+  // `angleDeg` is the OTHER chamfer mode (SCHEMA §7.3) and is exclusive with the
+  // second leg: core refuses a Chamfer carrying both by name, so at most one key
+  // leaves here. Presence order matches the discriminator Rust reads (`dto.rs`
+  // feature_value_text / `wire.rs`): angle first, then the second distance.
+  if (p.mode === "Chamfer" && p.angleDeg !== undefined && p.angleDeg > 0) {
+    wire.angleDeg = scalar(p.angleDeg);
+  } else if (p.mode === "Chamfer" && p.distance2 !== undefined && p.distance2 > 0) {
     wire.distance2 = scalar(p.distance2);
   }
   if (p.tangentClosureVersion !== undefined) {
@@ -970,9 +982,20 @@ export function opLabelFor(op: OperationOp): string {
 // are the projection feature ids (a feature's `id` IS its `RecordId` UUID) and
 // the timeline cursor (= applied op count; history/timeline.rs).
 
-/** The current fillet params a rebind rewrites (the SUBSET M4b touches). */
+/**
+ * The current fillet params a rebind rewrites (the SUBSET M4b touches).
+ *
+ * The CHAMFER mode fields ride along because {@link rewriteFilletEdgeParams}
+ * returns the COMPLETE new params object: without them here a rebind of a
+ * two-distance or distance-angle chamfer silently downgraded it to equal-leg,
+ * which is the same class of silent data loss the flip gate refuses.
+ */
 export interface CurrentFilletParams {
   radius: number;
+  /** Chamfer second leg, if the stored op has one (SCHEMA §7.3). */
+  distance2?: number;
+  /** Chamfer angle in DEGREES, if the stored op has one — exclusive with `distance2`. */
+  angleDeg?: number;
   edgeIds: string[];
   /** Typed refs, parallel to `edgeIds` (may be shorter for a legacy fillet). */
   edges?: WireElementRef[];
@@ -1051,6 +1074,13 @@ export function rewriteFilletEdgeParams(
     edges,
     chainTangentEdges: current.chainTangentEdges ?? true,
   };
+  // A rebind changes ONE edge slot and nothing else — the chamfer mode the record
+  // holds must survive it. Same exclusive presence order as `filletParams`.
+  if (current.angleDeg !== undefined && current.angleDeg > 0) {
+    wire.angleDeg = scalar(current.angleDeg);
+  } else if (current.distance2 !== undefined && current.distance2 > 0) {
+    wire.distance2 = scalar(current.distance2);
+  }
   if (current.tangentClosureVersion !== undefined) {
     wire.tangentClosureVersion = current.tangentClosureVersion;
   }

@@ -298,6 +298,21 @@ function edgeOpBuilder(kind: "Fillet" | "Chamfer"): PreviewOpBuilder {
       }
       params.distance2 = n;
     }
+    // The distance-angle mode (SCHEMA §7.3). Same structural guards, plus the
+    // EXCLUSION core enforces by name: a draft carrying both modes is refused here
+    // rather than sent as an op the backend will reject.
+    const angle = s.latestParams.angleDeg;
+    if (angle !== undefined && angle !== null) {
+      if (kind !== "Chamfer") throw new Error("angleDeg is Chamfer-only (SCHEMA §7.3)");
+      if (params.distance2 !== undefined) {
+        throw new Error("Chamfer may carry distance2 or angleDeg, not both (SCHEMA §7.3)");
+      }
+      const a = Number(angle);
+      if (!Number.isFinite(a) || a <= 0 || a >= 180) {
+        throw new Error("Chamfer angleDeg must be strictly between 0 and 180 degrees");
+      }
+      params.angleDeg = a;
+    }
     return { opType: kind, opId: s.opId, featureId: s.editFeatureId, inputs, params };
   };
 }

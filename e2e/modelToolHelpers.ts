@@ -43,6 +43,9 @@ interface ToolDebugSurface {
   edgeOpAxisSource?: string;
   /** The CHAMFER second leg (`null` = equal-leg — SCHEMA §7.3, 2026-08-03). */
   edgeOpDistance2?: number | null;
+  /** The CHAMFER angle in DEGREES (`null` = the distance-angle mode is off —
+   *  SCHEMA §7.3). Exclusive with `edgeOpDistance2`. */
+  edgeOpAngleDeg?: number | null;
   // ── OffsetFace (SCHEMA §7.3 + §7.6) ────────────────────────────────────────
   offsetFacePhase?: string;
   offsetDistance?: number;

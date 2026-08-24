@@ -420,6 +420,23 @@ fn circular_pattern_record(
     )
 }
 
+fn circular_pattern_v2_record(
+    rec: u128,
+    source: BodyId,
+    origin: Vec3,
+    axis: Vec3,
+    angle_deg: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    let mut record = circular_pattern_record(rec, source, origin, axis, angle_deg, count, fuse);
+    let Operation::Known(KnownOperation::CircularPattern(params)) = &mut record.op else {
+        unreachable!("circular_pattern_record constructs CircularPattern");
+    };
+    params.result_policy_version = Some(2);
+    record
+}
+
 fn mirror_record(
     rec: u128,
     source: BodyId,
@@ -505,6 +522,23 @@ fn mesh_volume(view: &MeshHeaderView, blob: &[u8]) -> f64 {
             + a[2] * (b[0] * c[1] - b[1] * c[0]);
     }
     (vol6 / 6.0).abs()
+}
+
+/// The polar angle in degrees, in `[0, 360)`, of a body's centre about a Z-axis
+/// through `(axis_x, axis_y)`.
+///
+/// The centre is read off the MESH1 bbox, which is EXACT here: every instance is a
+/// rigid rotation of a box, a box is centrally symmetric, and the axis-aligned
+/// bounding box of a centrally symmetric set is centred on that same centre.
+fn polar_angle_deg(view: &MeshHeaderView, axis_x: f64, axis_y: f64) -> f64 {
+    let cx = f64::from(view.bbox_min[0] + view.bbox_max[0]) / 2.0;
+    let cy = f64::from(view.bbox_min[1] + view.bbox_max[1]) / 2.0;
+    let angle = (cy - axis_y).atan2(cx - axis_x).to_degrees();
+    if angle < 0.0 {
+        angle + 360.0
+    } else {
+        angle
+    }
 }
 
 fn bbox_dims(view: &MeshHeaderView) -> [f64; 3] {
@@ -1064,6 +1098,94 @@ async fn circular_pattern_three() {
     );
     wm.shutdown().await;
     eprintln!("CircularPattern PASS: legacy compound volume {vol} == 30000");
+}
+
+/// The PARTIAL sweep (`angleDeg < 360`) through the Rust lane, measured.
+///
+/// SCHEMA §7.3 divides the sweep by `count`, NOT by `count - 1`: 180° over 3
+/// instances steps 60° and stops at 120°, it does not put the last copy at 180°.
+/// That rule was measurable only in C++ (`test_circular_pattern_partial_sweep`) and
+/// in the frontend preview unit test — the Rust lane ran 360° only, and
+/// `protocol/fixtures/circular_pattern_lineage.ndjson` says in as many words that
+/// an NDJSON exchange carries no geometry to pin it with. This closes that gap on
+/// the Rust side by measuring the copies the real worker actually produced.
+///
+/// V2 is what makes the measurement possible: a non-fused V2 pattern mints
+/// `count - 1` ordinal CHILD bodies, so each instance has its own mesh. The V1
+/// compound would hand back one blob with all three solids inside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn circular_pattern_partial_sweep_steps_angle_over_count() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+
+    // The axis is 100 units away on −Y, so a 60° step moves a copy ~115 units —
+    // far more than the box's ~28-unit plan diagonal, so the instances stay
+    // disjoint and each child's bbox is its own.
+    const AXIS_X: f64 = 0.0;
+    const AXIS_Y: f64 = -100.0;
+    add_op(
+        &mut rt,
+        circular_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(AXIS_X, AXIS_Y, 0.0),
+            Vec3::new_unchecked(0.0, 0.0, 1.0),
+            180.0,
+            3,
+            false,
+        ),
+    );
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "partial-sweep circular pattern");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+
+    // V2 non-fused: the source is instance 0 and survives; children are instances 1..
+    let children: Vec<BodyId> = (0..2)
+        .map(|k| BodyId(split_child_uuid(Uuid::from_u128(OP_PATTERN), k)))
+        .collect();
+    assert_eq!(
+        rt.head_body_ids().len(),
+        3,
+        "source plus count - 1 children ({:?})",
+        rt.head_body_ids()
+    );
+    assert!(rt.head_body_ids().contains(&source), "source survives V2");
+
+    let mut angles = Vec::with_capacity(3);
+    for body in std::iter::once(source).chain(children.iter().copied()) {
+        assert!(rt.head_body_ids().contains(&body), "{body} is at the head");
+        let mesh = body_mesh(&mut rt, body).await;
+        let view = validate_mesh_blob(&mesh).expect("instance MESH1 validates");
+        let vol = mesh_volume(&view, &mesh);
+        assert!(
+            (vol - 10_000.0).abs() < 1.0,
+            "every instance is the whole 20×20×25 source, got {vol}"
+        );
+        angles.push(polar_angle_deg(&view, AXIS_X, AXIS_Y));
+    }
+    angles.sort_by(f64::total_cmp);
+
+    // 180 / 3 = 60. The two wrong rules this separates from: 180/(count−1) = 90,
+    // and the full-circle 360/3 = 120 the rest of the Rust lane runs.
+    let steps = [angles[1] - angles[0], angles[2] - angles[1]];
+    for (k, step) in steps.iter().enumerate() {
+        assert!(
+            (step - 60.0).abs() < 0.05,
+            "instance step {k} is 180 / 3 = 60°, not 90° or 120° — got {steps:?} from {angles:?}"
+        );
+    }
+    // …and the sweep genuinely STOPS short of 180: the terminal copy sits at 120.
+    assert!(
+        (angles[2] - angles[0] - 120.0).abs() < 0.05,
+        "the last instance is 120° from the source, not the terminal 180°, got {angles:?}"
+    );
+    eprintln!("CircularPattern partial-sweep PASS: polar angles {angles:?}, steps {steps:?}");
+    wm.shutdown().await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -370,6 +370,34 @@ function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolea
 }
 
 /**
+ * The [Fuse] toggle on the armed MIRROR cluster (WP6): the visible surface for
+ * `MirrorBodyParams.fuseWithOriginal`, which decides whether the mirrored copy
+ * lands as its own body or is folded back into the source.
+ *
+ * OFF for a fresh mirror, matching the record's own `#[serde(default)] bool` —
+ * the flag was previously hard-coded there with no way to author it, so a fused
+ * mirror could only be reached by re-editing a record some other lane wrote.
+ */
+function FuseToggle({ fuse, onToggle }: { fuse: boolean; onToggle: (fuse: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="chip-mirror-fuse"
+      aria-label="Fuse with original"
+      aria-pressed={fuse}
+      title="Fold the mirrored copy back into the source body"
+      onClick={() => onToggle(!fuse)}
+      className={cn(
+        "rounded-full px-2 py-1 text-[11.5px] font-medium",
+        fuse ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+      )}
+    >
+      Fuse
+    </button>
+  );
+}
+
+/**
  * The [Align] segment on the armed placement cluster (WP-B W2.5). Unlike every
  * other segment here it does not set a value — it hands the pointer a two-pick
  * face flow, so it reads as PRESSED for as long as that flow owns the pointer
@@ -411,6 +439,7 @@ export function ModelToolChips() {
   const edgeOp = useToolChipStore((s) => s.edgeOp);
   const transformMode = useToolChipStore((s) => s.transformMode);
   const copy = useToolChipStore((s) => s.copy);
+  const fuse = useToolChipStore((s) => s.fuse);
   const alignPhase = useToolChipStore((s) => s.alignPhase);
   const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
   const distanceType = useToolChipStore((s) => s.distanceType);
@@ -418,6 +447,7 @@ export function ModelToolChips() {
   const chainTangentFaces = useToolChipStore((s) => s.chainTangentFaces);
   const valueError = useToolChipStore((s) => s.valueError);
   const distance2 = useToolChipStore((s) => s.distance2);
+  const chamferAngleDeg = useToolChipStore((s) => s.chamferAngleDeg);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
@@ -562,6 +592,8 @@ export function ModelToolChips() {
       onEdgeOp={(k) => toolChipStore.getState().onEdgeOp?.(k)}
       distance2={distance2}
       onDistance2={(v) => toolChipStore.getState().onDistance2?.(v)}
+      chamferAngleDeg={chamferAngleDeg}
+      onChamferAngle={(v) => toolChipStore.getState().onChamferAngle?.(v)}
       onConfirm={() => toolChipStore.getState().onConfirm?.()}
     />
   ) : null;
@@ -826,6 +858,7 @@ export function ModelToolChips() {
           testid={(p) => `chip-mirror-plane-${p.toLowerCase()}`}
           onPick={(p) => toolChipStore.getState().onPlane?.(p)}
         />
+        <FuseToggle fuse={fuse} onToggle={(f) => toolChipStore.getState().onFuse?.(f)} />
         {confirmButtons}
       </>,
     );

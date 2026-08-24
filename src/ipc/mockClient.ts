@@ -1062,7 +1062,7 @@ function mutateOp(op: OperationOp): {
     const label = op.opType;
     const bodyId = op.inputs?.[0]?.primary.bodyId ?? "body1";
     const featureId = op.featureId ?? nextFeatureId();
-    const valueText = edgeOpValueText(op.params.radius, op.params.distance2);
+    const valueText = edgeOpValueText(op.params.radius, op.params.distance2, op.params.angleDeg);
     const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(op.params.radius) } : f));
@@ -1296,6 +1296,15 @@ const CHAMFER_D2_FLIP_REASON =
   "UpdateOperationParams may not change opType: a Chamfer carrying distance2 is not flippable to Fillet (clear distance2 first)";
 
 /**
+ * Mirrors core `session::CHAMFER_ANGLE_FLIP_REASON` VERBATIM (SCHEMA §7.3). Same
+ * field-identity precondition as {@link CHAMFER_D2_FLIP_REASON}: a distance-angle
+ * chamfer carries a field `FilletParams` has no home for, so the flip would drop
+ * the user's angle silently.
+ */
+const CHAMFER_ANGLE_FLIP_REASON =
+  "UpdateOperationParams may not change opType: a Chamfer carrying angleDeg is not flippable to Fillet (clear angleDeg first)";
+
+/**
  * The reason a `updateOperationParams` opType change is refused, or `null` when
  * it is allowed. The precondition is read off the PRIOR (stored) params, exactly
  * as core reads it off the prior RECORD: what the caller sends cannot buy its way
@@ -1308,7 +1317,10 @@ function opTypeSwapRejection(
 ): string | null {
   if (prior === next) return null;
   if (!isSanctionedOpTypeSwap(prior, next)) return OP_TYPE_EDIT_REASON;
+  // Same precedence as core (`op_type_edit_allowed`): distance2 is read first,
+  // then angleDeg. The two are mutually exclusive, so at most one can fire.
   if (prior === "Chamfer" && priorParams?.distance2 !== undefined) return CHAMFER_D2_FLIP_REASON;
+  if (prior === "Chamfer" && priorParams?.angleDeg !== undefined) return CHAMFER_ANGLE_FLIP_REASON;
   return null;
 }
 
@@ -1860,10 +1872,13 @@ function mockVariableRegenFailures(): { recordId: string; message: string }[] {
  * The history-row value text of an edge op — MIRRORS Rust `dto.rs
  * feature_value_text` (pinned there by
  * `chamfer_value_text_shows_the_second_distance_only_when_set`). A two-distance
- * chamfer reads `d1×d2`; anything else keeps the single-number form.
- * `radiusFromValueText` parses the LEADING number back, so d1 stays first.
+ * chamfer reads `d1×d2`, a distance-angle one `d1 mm ∠a°`; anything else keeps
+ * the single-number form. Mode is chosen by PRESENCE in the same order Rust reads
+ * it (angle first), and `radiusFromValueText` parses the LEADING number back, so
+ * d1 stays first in every mode.
  */
-function edgeOpValueText(radius: number, distance2?: number): string {
+function edgeOpValueText(radius: number, distance2?: number, angleDeg?: number): string {
+  if (angleDeg !== undefined) return `${radius.toFixed(1)} mm ∠${angleDeg.toFixed(1)}°`;
   return distance2 === undefined
     ? `${radius.toFixed(1)} mm`
     : `${radius.toFixed(1)}×${distance2.toFixed(1)} mm`;
@@ -1920,10 +1935,16 @@ function featureValueForParams(
     case "Chamfer":
     case "fillet": {
       const r = scalarValue(params.radius);
-      // `distance2` is Chamfer-only and skip-none on both sides, so its mere
-      // presence is what makes the row asymmetric. The inline editor still targets
-      // d1 (`radius`) alone, exactly as `dto.rs` does.
-      return r === undefined ? none : dimensioned(params.radius, edgeOpValueText(r, scalarValue(params.distance2)), r);
+      // `distance2` / `angleDeg` are Chamfer-only and skip-none on both sides, so
+      // their mere presence is what picks the row's mode. The inline editor still
+      // targets d1 (`radius`) alone, exactly as `dto.rs` does.
+      return r === undefined
+        ? none
+        : dimensioned(
+            params.radius,
+            edgeOpValueText(r, scalarValue(params.distance2), scalarValue(params.angleDeg)),
+            r,
+          );
     }
     case "Shell":
     case "shell": {

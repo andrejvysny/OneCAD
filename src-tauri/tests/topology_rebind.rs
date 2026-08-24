@@ -1205,6 +1205,7 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
     let swap = Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: Scalar::new(2.0),
         distance2: None,
+        angle_deg: None,
         edge_ids: vec![setup.edge_el.clone()],
         edges: vec![ElementRef {
             primary: Some(PrimaryRef {
@@ -1301,6 +1302,7 @@ fn chamfer_op_on(setup: &FilletedBox, radius: f64, distance2: Option<f64>) -> Op
     Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: Scalar::new(radius),
         distance2: distance2.map(Scalar::new),
+        angle_deg: None,
         edge_ids: vec![setup.edge_el.clone()],
         edges: vec![ElementRef {
             primary: Some(PrimaryRef {

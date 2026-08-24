@@ -678,7 +678,8 @@ impl DocumentSession {
         validate_fillet_lockstep(&record.op)?;
         // Shell typed refs preserve evidence and must mirror `openFaces`.
         validate_shell_lockstep(&record.op)?;
-        // SCHEMA §7.3: `distance2` is Chamfer-only and positive (all entry paths).
+        // SCHEMA §7.3: `distance2`/`angleDeg` are Chamfer-only, in range, and
+        // mutually exclusive (all entry paths).
         validate_edge_op_distances(&record.op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&record.op)?;
@@ -781,7 +782,8 @@ impl DocumentSession {
         validate_fillet_lockstep(&op)?;
         // Shell typed refs preserve evidence and must mirror `openFaces`.
         validate_shell_lockstep(&op)?;
-        // SCHEMA §7.3: `distance2` is Chamfer-only and positive (all entry paths).
+        // SCHEMA §7.3: `distance2`/`angleDeg` are Chamfer-only, in range, and
+        // mutually exclusive (all entry paths).
         validate_edge_op_distances(&op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&op)?;
@@ -1826,16 +1828,17 @@ fn validate_shell_lockstep(op: &Operation) -> Result<(), DomainError> {
     p.validate().map_err(DomainError::Validation)
 }
 
-/// Validates the SCHEMA §7.3 (2026-08-03) two-distance chamfer rules on both
-/// edge ops:
+/// Validates the SCHEMA §7.3 (2026-08-03) two-distance and distance-angle chamfer
+/// rules on both edge ops:
 ///
-/// * a **Chamfer**'s `distance2`, when present, must be a positive finite length
-///   ([`ChamferParams::validate`]);
-/// * a **Fillet** must not carry `distance2` at all. `FilletParams` has no typed
-///   field for it, so a payload that names one would otherwise land in the `extra`
-///   flatten and round-trip VERBATIM — a second leg silently persisted on an op
-///   the worker will never read it for, and (worse) resurrected by a later
-///   Fillet→Chamfer flip as if the user had authored it.
+/// * a **Chamfer**'s `distance2`, when present, must be a positive finite length,
+///   its `angleDeg` must be strictly between 0 and 180 degrees, and the two may not
+///   both be present ([`ChamferParams::validate`]);
+/// * a **Fillet** must not carry `distance2` or `angleDeg` at all. `FilletParams`
+///   has no typed field for either, so a payload that names one would otherwise land
+///   in the `extra` flatten and round-trip VERBATIM — a second leg silently
+///   persisted on an op the worker will never read it for, and (worse) resurrected
+///   by a later Fillet→Chamfer flip as if the user had authored it.
 ///
 /// Non-edge and opaque ops are trivially valid. Enforced here rather than at
 /// deserialize time for the same single-writer reason as [`validate_import_step`]:
@@ -1858,6 +1861,11 @@ fn validate_edge_op_distances(op: &Operation) -> Result<(), DomainError> {
         Operation::Known(KnownOperation::Fillet(p)) if p.extra.contains_key("distance2") => {
             Err(DomainError::Validation(
                 "distance2 is Chamfer-only (SCHEMA §7.3); a Fillet may not carry it".into(),
+            ))
+        }
+        Operation::Known(KnownOperation::Fillet(p)) if p.extra.contains_key("angleDeg") => {
+            Err(DomainError::Validation(
+                "angleDeg is Chamfer-only (SCHEMA §7.3); a Fillet may not carry it".into(),
             ))
         }
         _ => Ok(()),
@@ -2149,6 +2157,12 @@ const OP_TYPE_EDIT_REASON: &str = "UpdateOperationParams may not change opType";
 /// the real backend rejects.
 const CHAMFER_D2_FLIP_REASON: &str = "UpdateOperationParams may not change opType: a Chamfer carrying distance2 is not flippable to Fillet (clear distance2 first)";
 
+/// The `angleDeg` refinement of [`OP_TYPE_EDIT_REASON`] (SCHEMA §7.3). Same
+/// field-identity precondition as [`CHAMFER_D2_FLIP_REASON`]: a distance-angle
+/// chamfer carries a field `FilletParams` has no home for, so the flip would drop
+/// the user's angle silently.
+const CHAMFER_ANGLE_FLIP_REASON: &str = "UpdateOperationParams may not change opType: a Chamfer carrying angleDeg is not flippable to Fillet (clear angleDeg first)";
+
 /// Whether `UpdateOperationParams` may rewrite `prior` into `next` — `Ok(())`, or
 /// the reason it may not.
 ///
@@ -2181,7 +2195,8 @@ const CHAMFER_D2_FLIP_REASON: &str = "UpdateOperationParams may not change opTyp
 /// enforced on the PRIOR record: a stored Chamfer with `distance2` set is not
 /// flippable until that field is cleared by an ordinary (visible, undoable) params
 /// edit. The other direction stays open — a Fillet becoming a two-distance Chamfer
-/// invents nothing the target type cannot hold.
+/// invents nothing the target type cannot hold. **`angleDeg` breaks it the same
+/// way** and carries the same precondition, with its own named reason.
 ///
 /// **Widening rule:** a new pair may be added only when it is likewise
 /// params-interchangeable AND `derive_inputs`-preserving. Anything else is a
@@ -2206,6 +2221,8 @@ fn op_type_edit_allowed(prior: &Operation, next: &Operation) -> Result<(), &'sta
         ) => {
             if p.distance2.is_some() {
                 Err(CHAMFER_D2_FLIP_REASON)
+            } else if p.angle_deg.is_some() {
+                Err(CHAMFER_ANGLE_FLIP_REASON)
             } else {
                 Ok(())
             }
@@ -3589,6 +3606,7 @@ mod tests {
                 crate::document::record::ChamferParams {
                     radius: Scalar::new(2.0),
                     distance2: None,
+                    angle_deg: None,
                     edge_ids: edge_ids.clone(),
                     edges: vec![shell_face("e1", ElementKind::Edge), foreign.clone()],
                     chain_tangent_edges: false,

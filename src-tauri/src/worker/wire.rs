@@ -6329,18 +6329,22 @@ mod body_wire_tests {
         );
     }
 
-    /// SCHEMA §7.3 (2026-08-03): a two-distance chamfer's second leg reaches the
-    /// worker as `params.distance2`, and an equal-leg one emits NO such key — the
-    /// wire form of every existing chamfer is byte-identical.
+    /// SCHEMA §7.3: a two-distance chamfer's second leg reaches the worker as
+    /// `params.distance2` and a distance-angle one as `params.angleDeg` (DEGREES on
+    /// the wire); an equal-leg chamfer emits NEITHER key — the wire form of every
+    /// existing chamfer is byte-identical. The mode is read off PRESENCE, so a
+    /// payload carrying both is refused upstream by the session rather than
+    /// resolved here (`ChamferParams::validate`).
     #[test]
-    fn wire_op_chamfer_carries_distance2_only_when_set() {
+    fn wire_op_chamfer_carries_distance2_or_angle_deg_only_when_set() {
         use onecad_core::document::record::ChamferParams;
 
         let body = BodyId(Uuid::from_u128(0x67));
-        let chamfer = |d2: Option<f64>| {
+        let chamfer = |d2: Option<f64>, angle: Option<f64>| {
             let op = Operation::Known(KnownOperation::Chamfer(ChamferParams {
                 radius: Scalar::new(1.0),
                 distance2: d2.map(Scalar::new),
+                angle_deg: angle.map(Scalar::new),
                 edge_ids: vec![ElementId::new("e:14")],
                 edges: vec![],
                 chain_tangent_edges: true,
@@ -6353,16 +6357,49 @@ mod body_wire_tests {
             wire_op(&planned(op, inputs))
         };
 
-        let equal = chamfer(None);
+        let equal = chamfer(None, None);
         assert!(
             equal["params"].get("distance2").is_none(),
             "equal-leg chamfer emits no distance2: {}",
             equal["params"]
         );
+        assert!(
+            equal["params"].get("angleDeg").is_none(),
+            "equal-leg chamfer emits no angleDeg: {}",
+            equal["params"]
+        );
 
-        let asym = chamfer(Some(2.5));
+        let asym = chamfer(Some(2.5), None);
         assert_eq!(asym["params"]["distance2"], json!({ "value": 2.5 }));
         assert_eq!(asym["params"]["radius"], json!({ "value": 1.0 }));
+        assert!(asym["params"].get("angleDeg").is_none());
+
+        let angled = chamfer(None, Some(30.0));
+        assert_eq!(angled["params"]["angleDeg"], json!({ "value": 30.0 }));
+        assert_eq!(angled["params"]["radius"], json!({ "value": 1.0 }));
+        assert!(
+            angled["params"].get("distance2").is_none(),
+            "a distance-angle chamfer names no second distance: {}",
+            angled["params"]
+        );
+
+        // The mutually-exclusive payload never reaches the wire: it is refused by
+        // the single writer, BY NAME, before an op is ever lowered.
+        let both = ChamferParams {
+            radius: Scalar::new(1.0),
+            distance2: Some(Scalar::new(2.5)),
+            angle_deg: Some(Scalar::new(30.0)),
+            edge_ids: vec![ElementId::new("e:14")],
+            edges: vec![],
+            chain_tangent_edges: true,
+            tangent_closure_version: None,
+            extra: Default::default(),
+        };
+        let err = both.validate().expect_err("both modes at once is refused");
+        assert!(
+            err.contains("distance2") && err.contains("angleDeg"),
+            "the refusal names BOTH fields: {err}"
+        );
     }
 
     #[test]
@@ -6532,6 +6569,7 @@ mod body_wire_tests {
                 Operation::Known(KnownOperation::Chamfer(ChamferParams {
                     radius: Scalar::new(1.0),
                     distance2: None,
+                    angle_deg: None,
                     edge_ids: vec![ElementId::new("e:16")],
                     edges: vec![edge_ref(edge_body, "e:16")],
                     chain_tangent_edges: true,

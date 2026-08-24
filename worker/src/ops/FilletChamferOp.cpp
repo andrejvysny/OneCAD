@@ -207,23 +207,32 @@ std::optional<OpOutcome> validate_chamfer(
 std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
                                        const std::vector<TopoDS_Edge>& edges, double radius,
                                        bool two_distance, double distance2,
+                                       bool distance_angle, double angle_rad,
                                        kernel::validation::PublicationTier validation_tier,
                                        std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
                                        TopoDS_Shape& result) {
     TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
     TopExp::MapShapesAndAncestors(target_shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+    // Both asymmetric forms measure `radius` on the SAME deterministic reference
+    // face, so both need the ordinal map.
+    const bool needs_reference_face = two_distance || distance_angle;
     TopTools_IndexedMapOfShape face_map;
-    if (two_distance) TopExp::MapShapes(target_shape, TopAbs_FACE, face_map);
+    if (needs_reference_face) TopExp::MapShapes(target_shape, TopAbs_FACE, face_map);
     auto chamfer = std::make_shared<BRepFilletAPI_MakeChamfer>(target_shape);
     std::size_t added = 0;
     for (const TopoDS_Edge& edge : edges) {
         const int index = edge_faces.FindIndex(edge);
         if (index == 0 || edge_faces(index).IsEmpty()) continue;
         const TopTools_ListOfShape& faces = edge_faces(index);
-        if (two_distance) {
+        if (needs_reference_face) {
             const TopoDS_Face face = reference_face(face_map, faces);
             if (face.IsNull()) continue;
-            chamfer->Add(radius, distance2, edge, face);
+            if (distance_angle) {
+                // `AddDA` takes RADIANS; the wire field is degrees (SCHEMA §7.3).
+                chamfer->AddDA(radius, angle_rad, edge, face);
+            } else {
+                chamfer->Add(radius, distance2, edge, face);
+            }
         } else {
             chamfer->Add(radius, radius, edge, TopoDS::Face(faces.First()));
         }
@@ -241,6 +250,8 @@ struct EdgeValues {
     double radius = 0.0;
     bool two_distance = false;
     double distance2 = 0.0;
+    bool distance_angle = false;
+    double angle_rad = 0.0;
     int tangent_closure_version = 0;
     std::optional<OpOutcome> stop;
 };
@@ -249,6 +260,24 @@ EdgeValues read_values(const json& op, Mode mode) {
     EdgeValues values;
     const json params =
         op.contains("params") && op["params"].is_object() ? op["params"] : json::object();
+
+    // SCHEMA §7.3 (2026-08-24) FIELD IDENTITY, decided before any value is read.
+    // `angleDeg` is Chamfer-only and mutually exclusive with `distance2`; both
+    // refusals NAME the offending field. Resolving the pair by precedence instead
+    // is how a user's second leg would silently disappear, and the worker is an
+    // independent trust boundary — presence of the key is presence, malformed or
+    // not.
+    const bool angle_present = params.contains("angleDeg");
+    if (angle_present && mode == Mode::Fillet) {
+        values.stop = OpOutcome::fail("OP_FAILED", "Fillet must not carry angleDeg (Chamfer only)");
+        return values;
+    }
+    if (angle_present && params.contains("distance2")) {
+        values.stop = OpOutcome::fail("OP_FAILED",
+                                      "Chamfer angleDeg and distance2 are mutually exclusive");
+        return values;
+    }
+
     // Parameter validation runs before the target body is resolved, and
     // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h),
     // so the floor-only context answers exactly what a measured one would.
@@ -267,6 +296,23 @@ EdgeValues read_values(const json& op, Mode mode) {
     if (values.two_distance &&
         (!std::isfinite(values.distance2) || values.distance2 < min_value)) {
         values.stop = OpOutcome::fail("OP_FAILED", "Chamfer distance2 too small");
+    }
+    if (angle_present) {  // Chamfer only — the Fillet case already returned.
+        double angle_deg = 0.0;
+        std::string angle_error;
+        if (!read_scalar_strict(params, "angleDeg", 0.0, angle_deg, angle_error)) {
+            values.stop = OpOutcome::fail("OP_FAILED", "Chamfer " + angle_error);
+            return values;
+        }
+        // DELIBERATELY LOOSE: the true ceiling depends on the dihedral, so
+        // feasibility beyond this stays a recoverable OP_FAILED out of the build.
+        if (angle_deg <= 0.0 || angle_deg >= 180.0) {
+            values.stop =
+                OpOutcome::fail("OP_FAILED", "Chamfer angleDeg must be within (0, 180) degrees");
+            return values;
+        }
+        values.distance_angle = true;
+        values.angle_rad = angle_deg * M_PI / 180.0;
     }
     if (params.contains("tangentClosureVersion")) {
         if (!params["tangentClosureVersion"].is_number_integer() ||
@@ -396,6 +442,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
                                                : build_chamfer(
                                                      target->geom, resolved.edges, values.radius,
                                                      values.two_distance, values.distance2,
+                                                     values.distance_angle, values.angle_rad,
                                                      result_validation_tier(
                                                          ctx, kernel::validation::PublicationTier::TierB),
                                                      builder, result);

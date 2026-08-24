@@ -443,6 +443,9 @@ impl KnownOperation {
                 if let Some(d2) = p.distance2.as_mut() {
                     out.push(("Chamfer.distance2", d2));
                 }
+                if let Some(angle) = p.angle_deg.as_mut() {
+                    out.push(("Chamfer.angleDeg", angle));
+                }
                 out
             }
             KnownOperation::Shell(p) => vec![("Shell.thickness", &mut p.thickness)],
@@ -1281,6 +1284,13 @@ pub struct FilletParams {
 /// grows a key. [`FilletParams`] has no such field — a Fillet carrying one is
 /// rejected by the session ([`crate::edit`]), not silently round-tripped through
 /// `extra`.
+///
+/// `angleDeg` is the CHAMFER-ONLY third mode (distance-angle), skip-none for the
+/// same backward-compatibility reason. The mode is chosen by PRESENCE, never by
+/// precedence: `angleDeg` present ⇒ distance-angle, else `distance2` present ⇒
+/// two-distance, else equal-leg. Both present at once is refused by name in
+/// [`ChamferParams::validate`] — the two describe the same second leg twice and
+/// picking one would silently discard what the user typed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChamferParams {
@@ -1290,6 +1300,14 @@ pub struct ChamferParams {
     /// deterministic reference-face rule the worker applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance2: Option<Scalar>,
+    /// Angle in DEGREES between the chamfer face and the deterministic reference
+    /// face (the adjacent face with the smaller resolved face ordinal — the same
+    /// face `radius` is measured on, and the same rule `distance2` uses for its
+    /// NON-reference partner), measured in the material. On a 90° dihedral,
+    /// `angleDeg` 45 is the equal-leg chamfer. Absent ⇒ this is not a
+    /// distance-angle chamfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle_deg: Option<Scalar>,
     pub edge_ids: Vec<ElementId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<ElementRef>,
@@ -1307,18 +1325,42 @@ impl ChamferParams {
     /// chamfer the kernel can round down — it is a param the worker would have to
     /// guess at, so it is refused here (the session is the single writer).
     ///
+    /// SCHEMA §7.3 distance-angle validity: `distance2` and `angleDeg` may not both
+    /// be present — they name the same second leg twice, and resolving that by
+    /// precedence would silently discard one of the two numbers the user typed. The
+    /// rejection NAMES both fields so the caller knows which to clear. When present
+    /// alone, `angleDeg` must be finite and strictly between 0 and 180 degrees;
+    /// either endpoint is a degenerate chamfer face (coplanar with the reference
+    /// face, or folded back onto it) rather than a shape the kernel can build. The
+    /// bound is deliberately LOOSE — whether a given angle actually fits the local
+    /// dihedral is the worker's to decide, as a RECOVERABLE `OP_FAILED`.
+    ///
     /// `radius` itself is deliberately NOT range-checked here: the "too small"
     /// floor is the worker's `kMinValue` (1e-3) and is a RECOVERABLE `OP_FAILED`,
     /// not a rejected edit — moving it would change behaviour this WP does not own.
     pub fn validate(&self) -> Result<(), String> {
-        let Some(d2) = self.distance2.as_ref() else {
-            return Ok(());
-        };
-        if !d2.value.is_finite() || d2.value <= 0.0 {
-            return Err(format!(
-                "Chamfer distance2 must be a positive finite length (got {})",
-                d2.value
-            ));
+        if let Some(d2) = self.distance2.as_ref() {
+            if self.angle_deg.is_some() {
+                return Err(
+                    "Chamfer may carry distance2 or angleDeg, not both (SCHEMA §7.3): \
+                     clear one to pick the two-distance or the distance-angle mode"
+                        .to_string(),
+                );
+            }
+            if !d2.value.is_finite() || d2.value <= 0.0 {
+                return Err(format!(
+                    "Chamfer distance2 must be a positive finite length (got {})",
+                    d2.value
+                ));
+            }
+        }
+        if let Some(angle) = self.angle_deg.as_ref() {
+            if !angle.value.is_finite() || angle.value <= 0.0 || angle.value >= 180.0 {
+                return Err(format!(
+                    "Chamfer angleDeg must be a finite angle strictly between 0 and 180 degrees (got {})",
+                    angle.value
+                ));
+            }
         }
         Ok(())
     }
@@ -4856,5 +4898,132 @@ mod tests {
         let mut stale = gear_params();
         stale.involute_external.as_mut().unwrap().offset_hole_offset = Some(Scalar::new(12.0));
         assert!(stale.validate().is_err());
+    }
+
+    // ── Chamfer distance-angle mode: `angleDeg` (SCHEMA §7.3) ────────────────
+
+    fn chamfer_params(distance2: Option<f64>, angle_deg: Option<f64>) -> ChamferParams {
+        ChamferParams {
+            radius: Scalar::new(1.0),
+            distance2: distance2.map(Scalar::new),
+            angle_deg: angle_deg.map(Scalar::new),
+            edge_ids: vec![ElementId::new("e:14")],
+            edges: vec![],
+            chain_tangent_edges: true,
+            tangent_closure_version: None,
+            extra: Extra::new(),
+        }
+    }
+
+    /// `angleDeg` is skip-none, so a chamfer that does not use the distance-angle
+    /// mode serializes to the EXACT bytes it did before the field existed. The
+    /// expected string is a literal pin, not a re-derivation: a regression that
+    /// grew a key here would silently rewrite every stored document.
+    #[test]
+    fn chamfer_without_angle_deg_serializes_byte_identically() {
+        let equal = Operation::Known(KnownOperation::Chamfer(chamfer_params(None, None)));
+        assert_eq!(
+            serde_json::to_string(&equal).unwrap(),
+            r#"{"opType":"Chamfer","params":{"radius":{"value":1.0},"edgeIds":["e:14"],"chainTangentEdges":true}}"#
+        );
+
+        let two_distance =
+            Operation::Known(KnownOperation::Chamfer(chamfer_params(Some(2.5), None)));
+        assert_eq!(
+            serde_json::to_string(&two_distance).unwrap(),
+            r#"{"opType":"Chamfer","params":{"radius":{"value":1.0},"distance2":{"value":2.5},"edgeIds":["e:14"],"chainTangentEdges":true}}"#
+        );
+    }
+
+    /// The distance-angle form emits `angleDeg` in DEGREES right after the two
+    /// distance keys, and round-trips — including the hand-authored bare-number
+    /// SCHEMA form.
+    #[test]
+    fn chamfer_angle_deg_round_trips_in_degrees() {
+        let angled = Operation::Known(KnownOperation::Chamfer(chamfer_params(None, Some(30.0))));
+        let json = serde_json::to_string(&angled).unwrap();
+        assert_eq!(
+            json,
+            r#"{"opType":"Chamfer","params":{"radius":{"value":1.0},"angleDeg":{"value":30.0},"edgeIds":["e:14"],"chainTangentEdges":true}}"#
+        );
+        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), angled);
+
+        let wire = r#"{ "opType": "Chamfer", "params": {
+            "mode": "Chamfer", "radius": 1.0, "angleDeg": 30.0,
+            "edgeIds": ["e:14"], "chainTangentEdges": true } }"#;
+        match serde_json::from_str::<Operation>(wire).unwrap() {
+            Operation::Known(KnownOperation::Chamfer(p)) => {
+                assert_eq!(p.angle_deg.expect("angleDeg parsed").value, 30.0);
+                assert!(p.distance2.is_none());
+            }
+            other => panic!("expected Chamfer, got {other:?}"),
+        }
+    }
+
+    /// The two second-leg spellings are mutually exclusive and the refusal NAMES
+    /// both — resolving them by precedence would drop one of the two numbers the
+    /// user typed.
+    #[test]
+    fn chamfer_refuses_distance2_and_angle_deg_together_by_name() {
+        let err = chamfer_params(Some(2.5), Some(30.0))
+            .validate()
+            .expect_err("both modes at once");
+        assert!(
+            err.contains("distance2") && err.contains("angleDeg"),
+            "the refusal names both fields: {err}"
+        );
+    }
+
+    /// 0 and 180 are EXCLUSIVE bounds (a chamfer face coplanar with, or folded back
+    /// onto, the reference face is not a shape). The bound is otherwise loose on
+    /// purpose: whether an angle fits the local dihedral is the worker's call, as a
+    /// recoverable `OP_FAILED`.
+    #[test]
+    fn chamfer_angle_deg_must_be_strictly_between_0_and_180() {
+        for bad in [0.0, -1.0, 180.0, 270.0] {
+            let err = chamfer_params(None, Some(bad))
+                .validate()
+                .expect_err("out-of-range angleDeg is refused");
+            assert!(err.contains("angleDeg"), "{bad}: {err}");
+        }
+        // `Scalar::new` panics on a non-finite value and deserialize rejects one, so
+        // the finite guard is reachable only through the struct literal — checked
+        // here for the same reason `distance2` checks it.
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut p = chamfer_params(None, Some(1.0));
+            p.angle_deg = Some(Scalar {
+                value: bad,
+                expr: None,
+            });
+            let err = p.validate().expect_err("non-finite angleDeg is refused");
+            assert!(err.contains("angleDeg"), "{bad}: {err}");
+        }
+        for ok in [0.001, 45.0, 90.0, 179.999] {
+            assert!(
+                chamfer_params(None, Some(ok)).validate().is_ok(),
+                "{ok} is in range"
+            );
+        }
+    }
+
+    /// A `Scalar` param left out of `scalars_mut` is silently un-drivable by a
+    /// document variable, keeping its stale cached value forever.
+    #[test]
+    fn chamfer_exposes_angle_deg_as_a_drivable_scalar() {
+        let labels = |mut op: KnownOperation| -> Vec<&'static str> {
+            op.scalars_mut().into_iter().map(|(n, _)| n).collect()
+        };
+        assert_eq!(
+            labels(KnownOperation::Chamfer(chamfer_params(None, None))),
+            vec!["Chamfer.radius"]
+        );
+        assert_eq!(
+            labels(KnownOperation::Chamfer(chamfer_params(None, Some(30.0)))),
+            vec!["Chamfer.radius", "Chamfer.angleDeg"]
+        );
+        assert_eq!(
+            labels(KnownOperation::Chamfer(chamfer_params(Some(2.5), None))),
+            vec!["Chamfer.radius", "Chamfer.distance2"]
+        );
     }
 }

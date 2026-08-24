@@ -1527,6 +1527,7 @@ async fn chamfer_reaches_the_worker() {
             Operation::Known(KnownOperation::Chamfer(ChamferParams {
                 radius: Scalar::new(2.0),
                 distance2: None,
+                angle_deg: None,
                 edge_ids: vec![edge_el],
                 edges: vec![edge_ref],
                 chain_tangent_edges: false,

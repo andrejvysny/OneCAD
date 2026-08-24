@@ -372,6 +372,7 @@ fn chamfer_record(
         Operation::Known(KnownOperation::Chamfer(ChamferParams {
             radius: Scalar::new(distance),
             distance2: None,
+            angle_deg: None,
             edge_ids: vec![edge.clone()],
             edges: vec![anchored_ref(body, edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
@@ -510,6 +511,59 @@ fn top_face_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
         }
     }
     let (idx_best, _, centroid) = best.expect("at least one face");
+    (keys[idx_best].clone(), centroid)
+}
+
+/// A prism's lateral wall: the tessellated face spanning the full extrude height
+/// (a planar cap spans ≈0). Returns its snapshot-scoped `TopoKey` and centroid,
+/// the same `(key, centroid)` shape [`top_face_pick`] returns.
+///
+/// Which of the four walls of a square prism wins is decided by `max_by`, so it is
+/// stable for a given tessellation but deliberately not asserted — the shell
+/// arithmetic below is identical for any one of them.
+fn lateral_face_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
+    let fr = view.section(SEC_FACE_RANGES).expect("FACE_RANGES");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let (frbase, ibase, pbase) = (fr.offset as usize, idx.offset as usize, pos.offset as usize);
+    let keys = id_table(
+        view,
+        blob,
+        SEC_FACE_ID_OFFS,
+        SEC_FACE_ID_CHARS,
+        view.face_count as usize,
+    );
+    let mut best: Option<(usize, f64, Vec3)> = None;
+    for f in 0..view.face_count as usize {
+        let first = u32_le(blob, frbase + f * 8) as usize;
+        let count = u32_le(blob, frbase + f * 8 + 4) as usize;
+        let (mut sx, mut sy, mut sz, mut n) = (0.0, 0.0, 0.0, 0.0f64);
+        let (mut zmin, mut zmax) = (f64::MAX, f64::MIN);
+        for t in first..first + count {
+            let io = ibase + t * 12;
+            for k in 0..3 {
+                let v = vertex(blob, pbase, u32_le(blob, io + k * 4) as usize);
+                sx += v[0];
+                sy += v[1];
+                sz += v[2];
+                n += 1.0;
+                zmin = zmin.min(v[2]);
+                zmax = zmax.max(v[2]);
+            }
+        }
+        if n == 0.0 {
+            continue;
+        }
+        let centroid = Vec3::new_unchecked(sx / n, sy / n, sz / n);
+        if best.is_none_or(|(_, span, _)| zmax - zmin > span) {
+            best = Some((f, zmax - zmin, centroid));
+        }
+    }
+    let (idx_best, span, centroid) = best.expect("at least one face");
+    assert!(
+        span > 1.0,
+        "the picked wall must span the extrude height, got {span}"
+    );
     (keys[idx_best].clone(), centroid)
 }
 
@@ -886,6 +940,133 @@ async fn freshly_promoted_shell_face_previews_without_repair() {
         "reopened shell volume = 2224, got {reopened_volume}"
     );
     wm2.shutdown().await;
+}
+
+/// TWO open faces in ONE Shell, through the whole Rust stack.
+///
+/// Every other Shell case in this repo's Rust lane passes exactly one promoted
+/// ref, so `ShellParams.faces` was only ever a one-element vector on the wire: a
+/// regression that dropped every ref after the first would leave all of them
+/// green. Here the viewport authoring order runs twice over — box → two TopoKey
+/// picks → ONE `AcquireElementIds` → Shell — and the arithmetic separates the
+/// outcomes by a wide margin.
+///
+/// The box is 20×20×25 and `t = 1`. With the +Z cap AND one lateral wall open the
+/// cavity is 19×18×24 = 8208, so the cup is 10000 − 8208 = **1792**. Dropping the
+/// wall would give 2224 (the single-face figure this file already pins), dropping
+/// the cap 2320 — neither is within a hundred of 1792.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_removes_two_open_faces_in_one_op() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (body, snapshot) = build_box_a_at_head(&mut rt, 20.0, 20.0, 25.0).await;
+
+    let stock = body_mesh(&mut rt, body).await;
+    let stock_view = validate_mesh_blob(&stock).expect("stock MESH1 validates");
+    assert_eq!(stock_view.face_count, 6, "the stock is a six-face box");
+    assert!(
+        (mesh_volume(&stock_view, &stock) - 10000.0).abs() < 1.0,
+        "20×20×25 = 10000"
+    );
+
+    let (top_key, top_centroid) = top_face_pick(&stock_view, &stock);
+    let (wall_key, wall_centroid) = lateral_face_pick(&stock_view, &stock);
+    assert_ne!(top_key, wall_key, "the cap and the wall are distinct faces");
+
+    // ONE AcquireElementIds carrying BOTH picks — the multi-select authoring call.
+    let anchor = |at: Vec3| AnchorIntent {
+        world_point: at,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let promoted = rt
+        .promote_selection(
+            snapshot,
+            body,
+            vec![
+                (TopoKey::new(&top_key), Some(anchor(top_centroid))),
+                (TopoKey::new(&wall_key), Some(anchor(wall_centroid))),
+            ],
+        )
+        .await
+        .expect("AcquireElementIds promotes both picks on the current head");
+    assert_eq!(promoted.len(), 2, "both picks come back minted");
+    let cap_id = ElementId::new(&promoted[0].element_id);
+    let wall_id = ElementId::new(&promoted[1].element_id);
+    assert_ne!(cap_id, wall_id, "two picks mint two distinct ElementIds");
+
+    let candidate = shell_record(
+        OP_TAIL,
+        body,
+        vec![
+            anchored_ref(body, &cap_id, ElementKind::Face, top_centroid),
+            anchored_ref(body, &wall_id, ElementKind::Face, wall_centroid),
+        ],
+        1.0,
+    );
+    let Operation::Known(KnownOperation::Shell(params)) = &candidate.op else {
+        unreachable!("shell_record authors Shell")
+    };
+    assert_eq!(params.faces.len(), 2, "two typed faces reach the wire");
+    assert_eq!(params.open_faces.len(), 2, "…and two legacy openFaces ids");
+    params.validate().expect("typed/legacy face views agree");
+
+    let preview = wm
+        .preview_op(
+            candidate.op.clone(),
+            candidate.record_id.to_string(),
+            None,
+            None,
+            Lod::Coarse,
+        )
+        .await
+        .expect("two-face Shell PreviewOp reaches the worker");
+    assert!(
+        preview.needs_repair.is_empty(),
+        "both freshly promoted faces must resolve on the unchanged head, got {:?}",
+        preview.needs_repair
+    );
+    assert_eq!(preview.bodies.len(), 1);
+    let candidate_mesh = &preview.bodies[0].mesh;
+    let candidate_view = validate_mesh_blob(candidate_mesh).expect("two-face preview MESH1");
+    let preview_volume = mesh_volume(&candidate_view, candidate_mesh);
+    assert!(
+        (preview_volume - 1792.0).abs() < 2.0,
+        "shell(20×20×25, t=1, cap + one wall open) = 10000 − 8208 = 1792, got {preview_volume}"
+    );
+
+    add_op(&mut rt, candidate);
+    let committed = regen_all(&mut rt).await;
+    let snap = published(&committed, "two-face Shell commit");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    let after = body_mesh(&mut rt, body).await;
+    let after_view = validate_mesh_blob(&after).expect("committed two-face MESH1");
+    let committed_volume = mesh_volume(&after_view, &after);
+    assert!(
+        (committed_volume - preview_volume).abs() < 1.0,
+        "two-face Shell preview {preview_volume} and commit {committed_volume} must agree"
+    );
+    // Both openings are cut through the SKIN: the outer envelope is untouched, so
+    // the result still spans the full 20×20×25 of the stock.
+    let dims = [
+        f64::from(after_view.bbox_max[0] - after_view.bbox_min[0]),
+        f64::from(after_view.bbox_max[1] - after_view.bbox_min[1]),
+        f64::from(after_view.bbox_max[2] - after_view.bbox_min[2]),
+    ];
+    for (axis, (got, want)) in dims.iter().zip([20.0, 20.0, 25.0]).enumerate() {
+        assert!(
+            (got - want).abs() < 0.01,
+            "the shelled outer envelope keeps axis {axis} at {want}, got {dims:?}"
+        );
+    }
+    eprintln!("Shell two-open-faces PASS: volume {committed_volume} == 1792");
+    wm.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -3065,6 +3065,8 @@ export class ModelToolController {
         onEdgeOp: (k) => this.onEdgeOpChip(k),
         distance2: this.fillet.distance2,
         onDistance2: (v) => this.onEdgeOpDistance2(v),
+        chamferAngleDeg: this.fillet.angleDeg,
+        onChamferAngle: (v) => this.onEdgeOpChamferAngle(v),
         anchorAxisFrom: degraded ? undefined : this.filletAnchor,
       },
     );
@@ -3210,8 +3212,19 @@ export class ModelToolController {
    *
    * With no answer yet (or an answer that proved nothing) this is the identity,
    * which is why arming is safe before the analysis lands.
+   *
+   * `AnalyzeEdgeOpRange` is an EQUAL-LEG oracle (SCHEMA §7.6): it measures a
+   * closure whose two legs are the ONE value it sweeps. A two-distance or
+   * distance-angle chamfer is a different solid, so that bound describes an op the
+   * user is not authoring — enforcing it would forbid a d1 that fits. Both modes
+   * therefore fall back to UNCLAMPED, which is exactly the `confidence: "none"`
+   * behaviour and is read at CALL time, so setting a mode mid-edit lifts a bound
+   * that already arrived and clearing it restores it. Deliberately no re-measure:
+   * these are chip-frequency edits on a lane that must not issue OCCT builds per
+   * frame.
    */
   private guardEdgeOpValue(value: number): number {
+    if (this.fillet.distance2 !== null || this.fillet.angleDeg !== null) return value;
     return clampToEdgeOpRange(value, this.filletRange).value;
   }
 
@@ -3457,7 +3470,13 @@ export class ModelToolController {
     // back hands it straight back), which is exactly why the gate belongs here at
     // the emitting seam rather than in the reducer — a Fillet must never author
     // it, whatever the arm still remembers.
-    if (this.edgeOpKind === "Chamfer" && this.fillet.distance2 !== null) {
+    // The two chamfer modes are EXCLUSIVE (core refuses a record carrying both),
+    // and presence picks the mode — angle first, exactly as the wire and `dto.rs`
+    // read it. The FSM already keeps at most one; the else-if is what makes the
+    // wire invariant true at the seam that emits it.
+    if (this.edgeOpKind === "Chamfer" && this.fillet.angleDeg !== null) {
+      params.angleDeg = this.fillet.angleDeg;
+    } else if (this.edgeOpKind === "Chamfer" && this.fillet.distance2 !== null) {
       params.distance2 = this.fillet.distance2;
     }
     return params;
@@ -3489,11 +3508,37 @@ export class ModelToolController {
    */
   private onEdgeOpDistance2(distance2: number | null): void {
     this.fillet = filletStep(this.fillet, { kind: "setDistance2", distance2 }).state;
-    // Read the value BACK off the FSM — it normalizes (clamp / non-positive ⇒
-    // equal-leg), so echoing the raw input to the chip could show a number the
-    // op will not carry.
-    toolChipStore.getState().setDistance2(this.fillet.distance2);
+    this.pushChamferModeToChip();
     this.sendPreview();
+  }
+
+  /**
+   * The chamfer ANGLE field was typed or cleared (SCHEMA §7.3). Like the second
+   * leg this is a plain params change, so the live preview session stays open and
+   * is simply re-sent.
+   */
+  private onEdgeOpChamferAngle(angleDeg: number | null): void {
+    this.fillet = filletStep(this.fillet, { kind: "setAngleDeg", angleDeg }).state;
+    this.pushChamferModeToChip();
+    this.sendPreview();
+  }
+
+  /**
+   * Push BOTH chamfer mode fields back to the chip from the FSM.
+   *
+   * Read the values BACK off the FSM rather than echoing the input: it normalizes
+   * (out-of-domain ⇒ the mode is off) AND enforces the exclusion, so authoring one
+   * mode clears the other. Pushing both is what makes that clear VISIBLE — the
+   * field the user did not type empties in front of them.
+   */
+  private pushChamferModeToChip(): void {
+    const chip = toolChipStore.getState();
+    chip.setDistance2(this.fillet.distance2);
+    chip.setChamferAngle(this.fillet.angleDeg);
+    // The debug surface is the ONLY readout e2e has of these two (their chip shows
+    // `=` / an empty field, not a number), and a re-edit sends no preview whose
+    // answer would refresh it later — so publish it here.
+    this.updateDebug();
   }
 
   private startBooleanFromSelection(): void {
@@ -5478,11 +5523,17 @@ export class ModelToolController {
       sticky: true,
     });
     this.rebuildMirrorGhost();
-    toolChipStore.getState().showMirror(this.mirror.plane, this.bodyCenter(bodyId), {
-      onPlane: (p) => this.onMirrorPlane(p),
-      onConfirm: () => void this.commitMirror(),
-      onCancel: () => toolStore.getState().setTool("select"),
-    });
+    toolChipStore.getState().showMirror(
+      this.mirror.plane,
+      this.bodyCenter(bodyId),
+      {
+        onPlane: (p) => this.onMirrorPlane(p),
+        onFuse: (f) => this.onMirrorFuse(f),
+        onConfirm: () => void this.commitMirror(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      { fuse: this.patternFuseResult },
+    );
     this.updateDebug();
   }
 
@@ -5490,6 +5541,20 @@ export class ModelToolController {
     this.mirror = mirrorStep(this.mirror, { kind: "setPlane", plane }).state;
     toolChipStore.getState().setPlane(this.mirror.plane);
     this.rebuildMirrorGhost();
+  }
+
+  /**
+   * The armed mirror's fuse flag (`MirrorBodyParams.fuseWithOriginal` — WP6).
+   * Authoring state only: `patternFuseResult` is what `commitMirror` sends, and
+   * the ghost rebuild restates the body lifecycle the new value implies. The
+   * ghost geometry itself is unchanged — fuse decides where the mirrored solid
+   * LANDS, not where it sits.
+   */
+  private onMirrorFuse(fuse: boolean): void {
+    this.patternFuseResult = fuse;
+    toolChipStore.getState().setFuse(fuse);
+    this.rebuildMirrorGhost();
+    this.updateDebug();
   }
 
   private rebuildMirrorGhost(): void {
@@ -7999,6 +8064,13 @@ export class ModelToolController {
       const distance2 = kind === "Chamfer" ? this.fillet.distance2 : null;
       if (distance2 === null) delete base.distance2;
       else patch.distance2 = { value: distance2 };
+      // The angle mode is the same shape of edit (SCHEMA §7.3), and the two are
+      // EXCLUSIVE: whichever the arm does not hold must be REMOVED from the base,
+      // or a mode switch would send a record carrying both and core would refuse
+      // it by name. The FSM guarantees at most one is non-null.
+      const angleDeg = kind === "Chamfer" ? this.fillet.angleDeg : null;
+      if (angleDeg === null) delete base.angleDeg;
+      else patch.angleDeg = { value: angleDeg };
       const res = await this.client.applyEditCommand(
         updateScalarParamsCommand(editFeatureId, kind, base, patch),
       );
@@ -8076,8 +8148,11 @@ export class ModelToolController {
     // The second one comes from the STORED params (skip-none, so absent ⇒
     // equal-leg) and never from `valueText` — that string is a display form, and
     // `radiusFromValueText` deliberately reads only its leading number.
+    // …and a distance-angle one re-opens with its angle, from the stored params for
+    // the same reason (the row's `d1 mm ∠a°` text is a display form).
     const distance2 =
       kind === "Chamfer" ? storedOptionalScalar(stored?.distance2) : null;
+    const angleDeg = kind === "Chamfer" ? storedOptionalScalar(stored?.angleDeg) : null;
     this.fillet = filletStep(filletInit(), {
       kind: "arm",
       edgeCount: 1,
@@ -8086,6 +8161,7 @@ export class ModelToolController {
       auto: false,
       touched: true,
       distance2,
+      angleDeg,
     }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
@@ -8115,6 +8191,8 @@ export class ModelToolController {
         onEdgeOp: (k) => this.onEdgeOpChip(k),
         distance2: this.fillet.distance2,
         onDistance2: (v) => this.onEdgeOpDistance2(v),
+        chamferAngleDeg: this.fillet.angleDeg,
+        onChamferAngle: (v) => this.onEdgeOpChamferAngle(v),
       },
     );
     this.updateDebug();
@@ -8694,6 +8772,9 @@ export class ModelToolController {
       // The CHAMFER second leg (`null` = equal-leg, SCHEMA §7.3) — the only
       // readout e2e has of a value whose chip shows `=` rather than a number.
       edgeOpDistance2: this.fillet.distance2,
+      // The CHAMFER angle in DEGREES (`null` = the distance-angle mode is off).
+      // Exclusive with the second leg above, which is what e2e asserts.
+      edgeOpAngleDeg: this.fillet.angleDeg,
       shellPhase: this.shell.phase,
       // OffsetFace (SCHEMA §7.3). `offsetFaceCount` is the FROZEN CLOSURE, not the
       // picks — the difference between the two is the whole point of the

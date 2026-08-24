@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import {
   openEditorDebug,
   findFaceOnBody,
@@ -37,6 +38,7 @@ interface HoleDebug {
   holeDepth?: number | null;
   holePoint?: [number, number, number] | null;
   holeCbDiameter?: number;
+  holeCsDiameter?: number;
   holeCsAngleDeg?: number;
   holeEdit?: string | null;
 }
@@ -260,6 +262,69 @@ test("the ✕ cancels the armed hole without writing a row", async ({ page }) =>
     return (w.__stores?.document.getState().features ?? []).map((f) => f.label);
   });
   expect(labels).not.toContain("Hole");
+});
+
+/*
+ * A COMMITTED countersink. The spec above only ever *configures* one — it clicks
+ * the chip, reads `holeType` back and moves on — so before this test the browser
+ * lane had no evidence that a countersink survives the commit at all, and the
+ * counterbore was the only dressed profile that ever reached a history row.
+ *
+ * The detour through counterbore is the load-bearing part. `holeParamsOf` emits
+ * the INACTIVE profile's block as `null` rather than omitting it, so a record
+ * committed as a countersink must carry `cbDiameter: null` — and `holeFsmFromParams`
+ * falls back to `DEFAULT_HOLE_CB_DIAMETER` (11) for a null. Authoring a counterbore
+ * at 15 first, then flipping, makes that fallback observable: an 11 on the way back
+ * proves the commit really dropped the counterbore numbers, and a 15 would mean a
+ * stale `cb*` rode along on a countersink — the exact shape `holeStandards.ts`
+ * warns the Rust session rejects.
+ */
+test("a countersink COMMITS, and the row re-opens as a countersink with no stale counterbore", async ({
+  page,
+}) => {
+  await armHoleOnBox(page);
+
+  // Author a full COUNTERBORE first, so there are real cb numbers to leak.
+  await page.getByTestId("chip-hole-counterbore").click();
+  await page.getByTestId("chip-hole-std").click();
+  await page.getByTestId("chip-hole-std-M8-close").click();
+  await expect.poll(async () => (await holeDebug(page))?.holeCbDiameter).toBe(15);
+
+  // …then flip to COUNTERSINK and dress that block instead. M8 is deliberate: its
+  // DIN 74 recess is 16.4, which differs from the M6 default (12.4) the seed would
+  // fall back to, so a restored value cannot be confused with a default one.
+  await page.getByTestId("chip-hole-countersink").click();
+  await page.getByTestId("chip-hole-std").click();
+  await page.getByTestId("chip-hole-std-M8-close").click();
+  await expect.poll(async () => (await holeDebug(page))?.holeCsDiameter).toBe(16.4);
+  await page.getByTestId("chip-hole-cs-100").click();
+  await expect.poll(async () => (await holeDebug(page))?.holeCsAngleDeg).toBe(100);
+
+  await page.getByTestId("chip-confirm").click();
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
+
+  const { id, label, valueText } = await lastFeature(page);
+  expect(label).toBe("Hole");
+  expect(valueText).toBe("Ø8.4"); // ISO 273 close clearance for M8
+
+  await openFullTimeline(page);
+  const row = page.getByTestId(`history-row-${id}`);
+  await expect(row).toBeVisible();
+  await row.dblclick();
+
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("armed");
+  await expect.poll(async () => (await holeDebug(page))?.holeEdit).toBe(id);
+  await expect.poll(async () => (await holeDebug(page))?.holeType).toBe("countersink");
+  await expect.poll(async () => (await holeDebug(page))?.holeDiameter).toBe(8.4);
+  await expect.poll(async () => (await holeDebug(page))?.holeCsDiameter).toBe(16.4);
+  await expect.poll(async () => (await holeDebug(page))?.holeCsAngleDeg).toBe(100);
+  // The counterbore authored before the flip is GONE from the record: 11 is the
+  // default the null falls back to, 15 would be the leak.
+  await expect.poll(async () => (await holeDebug(page))?.holeCbDiameter).toBe(11);
+
+  await expect(page.getByTestId("chip-hole-cs-diameter")).toHaveValue("16.4");
+  await expect(page.getByTestId("chip-hole-cs-100")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("chip-hole-cb-diameter")).toHaveCount(0);
 });
 
 test("double-clicking the row re-arms the hole seeded from the stored params", async ({ page }) => {

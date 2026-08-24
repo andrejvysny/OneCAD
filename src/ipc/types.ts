@@ -1177,6 +1177,17 @@ export interface FilletParams {
    * dropped at the marshalling seam and rejected by core.
    */
   distance2?: number;
+  /**
+   * CHAMFER-ONLY chamfer angle in DEGREES (SCHEMA §7.3). Presence picks the mode:
+   * `angleDeg` ⇒ distance-angle, else `distance2` ⇒ two-distance, else equal-leg.
+   * MUTUALLY EXCLUSIVE with `distance2` — core rejects a Chamfer carrying both by
+   * name, so no marshalling seam may emit both. Strictly between 0 and 180.
+   *
+   * DEGREES end to end on this lane: the op-param convention (`RevolveParams.angleDeg`,
+   * `Hole.csAngleDeg`) is degrees on the wire too, so nothing converts. `src/ipc/angleUnits.ts`
+   * is the SKETCH seam (UI degrees ↔ wire radians) and does not apply here.
+   */
+  angleDeg?: number;
   /** TopoKeys (snapshot-scoped) or ElementIds; resolved through the ladder. */
   edgeIds: string[];
   chainTangentEdges?: boolean;

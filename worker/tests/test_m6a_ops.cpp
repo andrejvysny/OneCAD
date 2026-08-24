@@ -142,6 +142,52 @@ void test_shell_partition_tracked() {
     check_near(vol(bodies.get("body_1")->geom), 4112.0, 1.0, "shell(tracked): vol 4112");
 }
 
+// ── Shell: TWO open faces removed in ONE op. ──────────────────────────────────
+// Every other Shell case here passes a single `openFaces` entry, so the loop that
+// appends each resolved face into `faces_to_remove` was only ever exercised once
+// per op — a Shell that silently dropped every ref after the first would look
+// identical. This one removes the +Z cap AND the +Y wall of the 20×20×25 box at
+// t=2, an L-shaped opening whose cavity is 16×18×23 = 6624 ⇒ 10000 − 6624 = 3376.
+// A one-face regression would land on 4112 (top only) or 4400 (+Y wall only), both
+// far outside the tolerance.
+//
+// Refs are partition-TRACKED (bare, no descriptor/anchor) — the production path
+// where PlanExecutor already minted both elementIds against the predecessor
+// snapshot, and the one that keeps the pick of *which* wall deterministic.
+void test_shell_two_open_faces() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_1", "op0", box);
+    em::ElementMapPartition part;
+    const TopoDS_Shape top = face_by_center(box, 10, 10, 25);     // +Z cap
+    const TopoDS_Shape side = face_by_center(box, 10, 20, 12.5);  // +Y wall
+    part.mint("body_1", "el_top", km::ElementKind::Face, top, box, json::object());
+    part.mint("body_1", "el_side", km::ElementKind::Face, side, box, json::object());
+
+    json op = {{"opType", "Shell"}, {"opId", "opsh_multi"},
+               {"inputs", json::array({
+                   json{{"primary", {{"bodyId", "body_1"}, {"elementId", "el_top"},
+                                     {"kind", "face"}}}},
+                   json{{"primary", {{"bodyId", "body_1"}, {"elementId", "el_side"},
+                                     {"kind", "face"}}}}})},
+               {"params", {{"thickness", 2.0}, {"targetBodyId", "body_1"},
+                           {"openFaces", json::array({"el_top", "el_side"})}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_shell(ctx, op, "opsh_multi");
+    check(oc.status == ops::OpOutcome::Status::Ok, "shell(2 faces): Ok");
+    check(oc.needs_repair.empty(), "shell(2 faces): no NeedsRepair (both refs bind)");
+    check(oc.body_events.size() == 1 && oc.body_events[0].kind == "modified",
+          "shell(2 faces): body modified (id preserved)");
+    check_near(vol(bodies.get("body_1")->geom), 3376.0, 1.0,
+               "shell(2 faces): 10000 − 16·18·23 = 3376");
+    // Both caps really are gone: the result still reaches z=25 and y=20 on the
+    // outside, so the openings are cut through the skin, not offset inward.
+    const auto m = onecad::session::compute_shape_metrics(bodies.get("body_1")->geom);
+    check_near(m.bbox_max[2], 25.0, 1e-4, "shell(2 faces): outer skin still reaches z=25");
+    check_near(m.bbox_max[1], 20.0, 1e-4, "shell(2 faces): outer skin still reaches y=20");
+}
+
 // ── Shell: ambiguous open face (top/bottom symmetric tie) ⇒ NeedsRepair, no build. ─
 void test_shell_ambiguous_needs_repair() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
@@ -495,6 +541,7 @@ void test_mirror_strict_params() {
 int main() {
     test_shell_ladder();
     test_shell_partition_tracked();
+    test_shell_two_open_faces();
     test_shell_ambiguous_needs_repair();
     test_shell_thickness_too_small();
     test_shell_authoring_resolution_boundary();

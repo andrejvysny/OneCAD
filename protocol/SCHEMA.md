@@ -1343,6 +1343,10 @@ chamfer distance).
 // Chamfer params (two-distance, 2026-08-03 — Chamfer only, optional + skip-none)
 { "mode": "Chamfer", "radius": 1.0, "distance2": 2.5, "edgeIds": ["el_…14"],
   "chainTangentEdges": true, "tangentClosureVersion": 1 }
+// Chamfer params (distance-angle, 2026-08-24 — Chamfer only, optional + skip-none;
+// DEGREES. Mutually exclusive with `distance2`.)
+{ "mode": "Chamfer", "radius": 1.0, "angleDeg": 30.0, "edgeIds": ["el_…14"],
+  "chainTangentEdges": true, "tangentClosureVersion": 1 }
 ```
 
 `edgeIds` entries are TopoKeys (snapshot-scoped) or `ElementId`s; the worker
@@ -1371,6 +1375,19 @@ version. `chainTangentEdges:false` means exact picks; authoring refuses
   Fillet⇄Chamfer `updateOperationParams` swap requires field-identical params —
   a Chamfer carrying `distance2` is NOT flippable to Fillet (the edit is
   rejected with the standard allow-list reason) until `distance2` is cleared.
+- `angleDeg` (Chamfer only, optional, skip-none): distance-angle chamfer —
+  `radius` is the distance measured on the reference face (the SAME deterministic
+  face `distance2` uses: the adjacent face with the smaller resolved face
+  ordinal), and `angleDeg` is the angle between the chamfer face and THAT
+  reference face, measured in the material, in DEGREES
+  (`BRepFilletAPI_MakeChamfer::AddDA`, which takes radians — the worker
+  converts). On a 90° dihedral this makes `angleDeg: 45` exactly equal-leg and
+  the far leg `radius · tan(angleDeg)`. The reference face is derived from the
+  frozen-closure seed edge of each contour (closure runs first). Absent ⇒
+  unchanged. `angleDeg` and `distance2` are MUTUALLY EXCLUSIVE: a params object
+  carrying both is refused by name, never resolved by precedence. A Fillet MUST
+  NOT carry it. A Chamfer carrying it is NOT flippable to Fillet (same
+  field-identity precondition `distance2` carries).
 
 Fillet execution is constant-radius only. `radius` MUST be finite and at least
 `1e-3` mm. The worker MUST NOT clamp it or retry with a different radius. OCCT
@@ -2866,7 +2883,7 @@ no bound at all.
 ```json
 // req.args
 { "snapshotId": 5012,               // REQUIRED, FENCED — stale ⇒ STALE_PREVIEW
-  "mode": "Fillet",                 // Fillet | Chamfer (equal-leg)
+  "mode": "Fillet",                 // Fillet | Chamfer (EQUAL-LEG only — see below)
   "pickedEdges": [ { "bodyId": "body_3", "topoKey": "e:4" } ],  // or { "elementId": … }
   "chainTangentEdges": true,
   "range": { "min": 0.001, "max": 12.0 },   // optional mm window; clamped
@@ -2893,6 +2910,15 @@ no bound at all.
 
 **The normative invariant.** `lowerBound ≤ bestKnownMax < provenUpperBound`
 whenever all three are non-null.
+
+**`mode: "Chamfer"` is an EQUAL-LEG oracle, normatively.** Every probe it runs is
+`Add(v, v, edge, refFace)`. A consumer MUST NOT apply the returned bound to a
+chamfer carrying [`angleDeg`](#73-op-payload-schemas-vertical-slice) or
+`distance2`: those build a different solid, so the frontier this verb measured
+says nothing about theirs. There is no partial credit here — the bound is not
+"approximately right" for an asymmetric chamfer, it is a measurement of another
+shape. In those two modes the frontend drops to UNCLAMPED input and lets the
+commit refuse, exactly as it did before this verb existed.
 
 - `provenUpperBound` is the smallest infeasible probe **above `bestKnownMax`**,
   NOT the smallest refusal overall. With an island present those are different
@@ -3616,6 +3642,30 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-24 — §7.3 Chamfer `angleDeg` (distance-angle chamfer)** (WP6 item 1;
+  cross-track sign-off recorded 2026-08-24). Optional skip-none Chamfer-only field
+  in DEGREES (§7.3 op-param convention; the worker converts to the radians
+  `BRepFilletAPI_MakeChamfer::AddDA` takes, the `Revolve.angleDeg` precedent).
+  `radius` is measured on the SAME deterministic reference face `distance2` uses —
+  the adjacent face with the smaller resolved face ordinal — and `angleDeg` is the
+  angle between the chamfer face and that face, in the material, so `angleDeg: 45`
+  on a 90° dihedral is exactly equal-leg and the far leg is `radius · tan(angleDeg)`.
+  Pinning the reference face is the whole point: distance-angle is ambiguous without
+  it, and a second rule on the same op would make a replayed document depend on which
+  mode authored it. `angleDeg` and `distance2` are MUTUALLY EXCLUSIVE and a params
+  object carrying both is refused BY NAME at all four trust boundaries (FSM → wire
+  mapper → `edit/session.rs` → worker) rather than resolved by precedence — a silent
+  precedence rule is how a user's second leg disappears. Absent ⇒ byte-identical to
+  every existing document (equal-leg or two-distance, unchanged). Static validation is
+  `0 < angleDeg < 180` exclusive, deliberately LOOSE: the true ceiling depends on the
+  dihedral (an obtuse edge legitimately takes more than 90°), so geometric feasibility
+  stays a recoverable `OP_FAILED` exactly as `radius` does. Fillet⇄Chamfer type-flip
+  is rejected while set, the same field-identity precondition `distance2` carries.
+  **§7.6 note:** `AnalyzeEdgeOpRange` remains an EQUAL-LEG oracle. Its bound MUST NOT
+  be applied to a chamfer carrying `angleDeg` or `distance2` — it measured a different
+  solid. Additive — new fixture `chamfer_angle_distance.ndjson`, no existing fixture
+  shape moves, **no fixture bump**.
 
 - **2026-08-20 — §7.6 new read-only verb `AnalyzeEdgeOpRange` (WP4).** Nothing in
   the stack could answer "what radius will this edge take?". The frontend clamped

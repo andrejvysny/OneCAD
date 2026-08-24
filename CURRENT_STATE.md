@@ -1,8 +1,32 @@
 # Current State
 
-Last verified: 2026-08-20 21:53 — KERNEL CONTINUATION **WP1+WP2+WP3+WP5+WP4 COMPLETE**, on `master`
+Last verified: 2026-08-24 — WP6 COMPLETE (kernel continuation CLOSED) + sketch-UX merge landed, on `master`
 
-## NOW — KERNEL CONTINUATION RESUMED (2026-08-20, plan `use-the-fable-orchestrator-skill-kind-dawn.md`)
+## NOW — WP6 CLOSE-OUT + NEXT PROGRAM (2026-08-24, plan `act-as-senior-software-purrfect-moler.md`)
+
+- **Sketch-UX hardening merged to master by the USER** (`c731a76`); post-merge sanity measured:
+  tsc clean, vitest 300 files / 5145 / 0 failed (first time the merged combination was gated).
+- **Phase 1 = WP6 small-caliber batch COMPLETE at FULL L3, measured on the main thread:**
+  ctest **154/154** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **87 targets / 1329
+  passed / 0 failed** (teed) · tsc clean · vitest **302 files / 5180 passed / 78 skipped**
+  (one un-teed single-drop, unnamed — flake ledger) · kernelbench **136 rows unchanged** +
+  semantic-compare OK · fmt/clippy/hygiene/hex/verifiers clean · e2e chromium **241/241**;
+  webkit **241/241 alone at calm load** (the loaded 51.8-min combined run went 479/3, all
+  three webkit browser-process stalls, triaged and named in TODO.md — not a product defect).
+  Sidecar restaged and current.
+- **Landed:** chamfer distance-angle mode `angleDeg` end to end (SCHEMA §7.3 + §7.6
+  equal-leg-oracle normative + §14, first canonical chamfer fixture, worker AddDA, Rust
+  core validation + flip gate, FE chip with last-authored-wins exclusion, real-worker Rust
+  proof 991.3397 exact) · MirrorBody fuse toggle (`chip-mirror-fuse`) · evidence gaps closed
+  with no defect (Shell multi-face, countersink browser, circular partial-sweep) · both QA
+  manifests corrected · FE clamp no longer applies the equal-leg range bound to asymmetric
+  chamfers (live `distance2` hole closed) · `previewOps.ts` mode-drop found and fixed.
+- **Next:** Phase 2 sketch FE residuals (near-action error pulse · A12 silent-Esc seam ·
+  screen-constant badge standoff · donut-hole fill) → Phase 3 per-entity constrained-state
+  coloring (§7.4 additive wire field, protocol-auditor first). Owed user-run items unchanged
+  (19-row checklist · Tauri sketch smoke · dirty vendor STEP for G4 micro).
+
+## PREVIOUS — KERNEL CONTINUATION RESUMED (2026-08-20, plan `use-the-fable-orchestrator-skill-kind-dawn.md`)
 
 - **Branch `master`, clean (only untracked `.claude/`), 17 commits this session
   (`3afbdf9` → tip `9f03b72`), tip gated at FULL L3, measured on the main thread:**

@@ -345,6 +345,62 @@ describe("mockClient operations", () => {
     expect(flipped.features.find((f) => f.id === featureId)!.opType).toBe("Fillet");
   });
 
+  // ── distance-angle chamfer (SCHEMA §7.3) ──────────────────────────────────
+
+  it("a distance-angle chamfer's row reads `d1 mm ∠a°` (mirrors dto.rs feature_value_text)", async () => {
+    const res = await mockClient.applyOperation({
+      opType: "Chamfer",
+      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
+      params: { mode: "Chamfer", radius: 1, angleDeg: 30, edgeIds: ["el_e"] },
+    });
+    const row = res.features.find((f) => f.opType === "Chamfer")!;
+    // Byte-identical to the Rust string pinned by
+    // `chamfer_value_text_shows_the_second_distance_only_when_set` (dto.rs).
+    expect(row.valueText).toBe("1.0 mm ∠30.0°");
+    // d1 LEADS in every mode — `radiusFromValueText` seeds a re-edit from it.
+    expect(Number.parseFloat(row.valueText)).toBe(1);
+  });
+
+  it("MIRRORS the core precondition: a Chamfer carrying angleDeg may not flip to Fillet", async () => {
+    const featureId = await commitChamfer();
+    const stored = await mockClient.getOperationParams(featureId);
+    await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Chamfer", stored, { angleDeg: { value: 30 } }),
+    );
+    expect((await mockClient.getOperationParams(featureId)).angleDeg).toEqual({ value: 30 });
+
+    // PINNED VERBATIM against core `session::CHAMFER_ANGLE_FLIP_REASON`
+    // (src-tauri/crates/onecad-core/src/edit/session.rs). A paraphrase here would
+    // let the mock lane stay green on an edit the real backend refuses.
+    await expect(
+      mockClient.applyEditCommand(
+        updateScalarParamsCommand(featureId, "Fillet", await mockClient.getOperationParams(featureId), {
+          radius: { value: 1 },
+        }),
+      ),
+    ).rejects.toThrow(
+      "UpdateOperationParams may not change opType: a Chamfer carrying angleDeg is not flippable to Fillet (clear angleDeg first)",
+    );
+    // Nothing was written by the rejected edit.
+    const afterReject = await mockClient.getOperationParams(featureId);
+    expect(afterReject.angleDeg).toEqual({ value: 30 });
+
+    // Clearing the angle is an ordinary params edit, and THEN the swap goes through.
+    const cleared = { ...afterReject };
+    delete cleared.angleDeg;
+    const clearedRes = await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Chamfer", cleared, { radius: { value: 1 } }),
+    );
+    expect("angleDeg" in (await mockClient.getOperationParams(featureId))).toBe(false);
+    expect(clearedRes.features.find((f) => f.id === featureId)!.valueText).toBe("1.0 mm");
+    const flipped = await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Fillet", await mockClient.getOperationParams(featureId), {
+        radius: { value: 1 },
+      }),
+    );
+    expect(flipped.features.find((f) => f.id === featureId)!.opType).toBe("Fillet");
+  });
+
   it("Shell adds a thickness feature + re-emits the target body; a re-edit updates in place", async () => {
     const created = await mockClient.applyOperation({
       opType: "Shell",
