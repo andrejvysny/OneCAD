@@ -61,3 +61,9 @@ STEP/
 
 # Local-only gear cross-check harness run artifacts (scripts/gear-crosscheck).
 __pycache__/
+
+# Claude Code: agent definitions under .claude/agents/ ARE project source (the
+# four subagent roles CLAUDE.md's operating mode names). Machine-local settings
+# and session checkpoints are not.
+.claude/settings.local.json
+.claude/RESUME.md
