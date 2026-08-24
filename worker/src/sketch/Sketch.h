@@ -188,6 +188,18 @@ struct ReferenceLockPins {
 };
 
 /**
+ * @brief What the solver can PROVE about one entity (SCHEMA §7.4 `entityStates`).
+ *
+ * Two states only. `Conflicting` is deliberately absent: conflict is a property
+ * of a CONSTRAINT, and the reporting layer projects it onto the entities that
+ * constraint names — the dependent-parameter set says nothing about it. There is
+ * no "partially constrained" either: PlaneGCS reports null-space MEMBERSHIP per
+ * parameter, so "some parameter of this entity is still free" is the strongest
+ * honest statement; a per-entity DOF COUNT would be fabricated.
+ */
+enum class EntityConstrainedState { UnderConstrained, FullyConstrained };
+
+/**
  * @brief Main sketch class
  *
  * Manages all 2D geometry and constraints for a single sketch.
@@ -574,6 +586,30 @@ public:
 
     /// True when an entity type not registered with PlaneGCS is present.
     bool hasSolverUnsupportedEntities() const;
+
+    /**
+     * @brief Per-entity constrained state from the LIVE PlaneGCS diagnosis
+     *        (SCHEMA §7.4 `entityStates`).
+     * @return `std::nullopt` when there is nothing to report — an
+     *         ellipse-bearing sketch (which takes the naive-DOF fallback, where
+     *         no diagnosis exists at all) or no live diagnosis. An entity absent
+     *         from a returned map is UNKNOWN, never "unconstrained".
+     *
+     * An entity is `FullyConstrained` iff it is registered with the solver AND
+     * neither its own parameters nor any parameter of a point it OWNS
+     * (`entityPointIds`) is still free. Taking the union over owned points is
+     * what makes a Line answerable at all (it owns no parameter of its own) and
+     * what makes an Arc answer over all NINE of its parameters — center x/y,
+     * radius, start/end angle, and the two endpoint points the tag-0 arc rules
+     * couple to them. Two lines sharing one free point are therefore BOTH
+     * under-constrained, which is correct: neither is pinned down.
+     *
+     * This ADDS NO diagnose() call. It reads whatever diagnosis the caller's
+     * preceding `getDegreesOfFreedom()` / `hasRedundantConstraints()` left
+     * behind, so solve behaviour is bit-identical with and without this query.
+     */
+    std::optional<std::unordered_map<EntityID, EntityConstrainedState>>
+    entityConstrainedStates() const;
 
     /**
      * @brief True when some entity carries an INTERNAL solver coupling — an arc

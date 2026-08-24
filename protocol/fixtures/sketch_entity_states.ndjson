@@ -1,0 +1,96 @@
+# CANONICAL §7.4 fixture — per-entity constrained state (`entityStates`, 2026-08-24),
+# and the FIRST canonical fixture to drive the sketch solver lane at all. It therefore
+# also carries the lane's existing shape (`upserted`, `dof`, `state`, `conflicting`,
+# `sketchRevision`) into the cross-track contract, where only the worker-local
+# fixtures had it before.
+#
+# WHAT IS PINNED HERE.
+#
+# ROUND 1 is the whole argument for the field existing: ONE sketch, reporting
+# `state: "UnderConstrained"` with `dof: 3`, in which the line is completely pinned
+# down and the circle is completely free. If `entityStates` were a whole-sketch echo
+# — or anything read off `dof` — every key would carry the same token and this round
+# would be unfalsifiable. It is the assertion the rest of the file exists to protect.
+#
+# WHAT DELIBERATELY IS NOT PINNED HERE.
+#
+# The two OMISSION rules — an ellipse-bearing sketch omits the WHOLE map, and
+# `SolveDrag` never carries it — cannot be expressed in this file. The NDJSON matcher
+# is SUBSET-only (`protocol/fixtures/README.md`): every key in a matcher must be
+# present, but there is no way to assert a key is ABSENT. Rounds 3 and 5 therefore
+# exercise those paths and assert everything else about them, and the absences
+# themselves are pinned in `worker/tests/test_sketch_entity_states.cpp`
+# (`test_ellipse_omits_the_whole_map`, `test_gesture_carries_the_map_at_both_ends_only`),
+# which can read the response object directly.
+#
+# THE RUST WORKER-STUB OMITS `entityStates` ENTIRELY. It is an optional additive
+# field and the stub implements none of the solver lane, so the presence assertions
+# below bind the C++ lane only. Replaying this fixture against
+# `onecad-worker-stub` is NOT expected to pass and it is not wired into the stub's
+# replay list; the auto-enumerated Rust lane
+# (`onecad-protocol` `ndjson_fixtures_parse_into_message_types`) parses it.
+#
+# No geometry number is pinned. Positions are solved doubles and NDJSON compares
+# numbers exactly — the coordinates live in the worker test, the same contract/corpus
+# split the OffsetFace and AnalyzeEdgeOpRange fixtures use.
+#
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+
+# --- ROUND 1: a pinned line and a free circle in ONE under-constrained sketch ---
+# p1 Fixed at the origin; Horizontal(L) fixes p2.y; Distance(L, 10) fixes p2.x. The
+# line's whole freedom is its two endpoints', and both are gone. The circle carries
+# the sketch's entire remaining dof: 2 for its center, 1 for its radius.
+# The circle's center is an inline-minted point with NO wire id — the map is keyed by
+# the WIRE entity id space (the `curves` keyspace), so it names exactly p1/p2/L/C.
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"es","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"C","type":"Circle","center":[20,20],"radius":5}],"constraints":[{"id":"cF","type":"Fixed","entities":["p1"]},{"id":"cH","type":"Horizontal","entities":["L"]},{"id":"cD","type":"Distance","entities":["L"],"value":10.0}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchId":"es","sketchRevision":1,"dof":3,"state":"UnderConstrained","conflicting":[],"entityStates":{"p1":"fullyConstrained","p2":"fullyConstrained","L":"fullyConstrained","C":"underConstrained"}}}}
+
+# --- ROUND 2: dimension the circle too -> every entity fullyConstrained ---
+# Radius(C) takes the circle's own parameter, Fixed(C.center) takes the point it
+# owns. Both are needed: either alone leaves the circle underConstrained (pinned in
+# the worker test), because the answer is a union over the entity AND its points.
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchUpsert","args":{"sketchId":"es","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"C","type":"Circle","center":[20,20],"radius":5}],"constraints":[{"id":"cF","type":"Fixed","entities":["p1"]},{"id":"cH","type":"Horizontal","entities":["L"]},{"id":"cD","type":"Distance","entities":["L"],"value":10.0},{"id":"cR","type":"Radius","entities":["C"],"value":5.0},{"id":"cC","type":"Fixed","entities":["C"],"positions":["center"]}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"upserted":true,"sketchId":"es","sketchRevision":2,"dof":0,"state":"FullyConstrained","conflicting":[],"entityStates":{"p1":"fullyConstrained","p2":"fullyConstrained","L":"fullyConstrained","C":"fullyConstrained"}}}}
+
+# --- ROUND 3: an ellipse omits the WHOLE map ---
+# An Ellipse is not registered with PlaneGCS (§7.4 documented deviation), so this
+# sketch reports `dof` from a NAIVE static count and no diagnosis exists to answer a
+# per-entity question from. The map is omitted entirely rather than filled in for the
+# entities that happen to have an answer — the sketch they live in was never
+# diagnosed. Everything else about the response is unchanged, which is what this
+# round asserts; the ABSENCE is asserted in the worker test (see the header).
+{"send":{"v":1,"t":"req","id":3,"verb":"SketchUpsert","args":{"sketchId":"el","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"E","type":"Ellipse","center":[30,30],"majorR":8.0,"minorR":4.0}],"constraints":[{"id":"cF","type":"Fixed","entities":["p1"]},{"id":"cH","type":"Horizontal","entities":["L"]},{"id":"cD","type":"Distance","entities":["L"],"value":10.0}]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"upserted":true,"sketchId":"el","sketchRevision":1,"dof":"$any","state":"$any","conflicting":[]}}}
+
+# --- ROUND 4: conflict outranks both other tokens, and reaches the LINE ---
+# Two Fixed points 10 apart plus a HorizontalDistance of 25 between them is
+# unsatisfiable (the corpus (g) recipe). A wire dimension lowers to a constraint on
+# POINTS, so the LINE is only reachable through the endpoints it owns — `L` here is
+# the proof that the projection walks ownership. It over-attributes by construction
+# (a dimension between two entities reds both); `conflicting[]` stays authoritative
+# for WHICH constraints are at fault. The untouched circle keeps its own state, so
+# the projection is targeted rather than a sketch-wide repaint.
+{"send":{"v":1,"t":"req","id":4,"verb":"SketchUpsert","args":{"sketchId":"cf","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"C","type":"Circle","center":[50,50],"radius":4}],"constraints":[{"id":"f1","type":"Fixed","entities":["p1"]},{"id":"f2","type":"Fixed","entities":["p2"]},{"id":"hd","type":"HorizontalDistance","entities":["p1","p2"],"value":25.0}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"upserted":true,"sketchId":"cf","sketchRevision":1,"state":"Conflicting","conflicting":["$any"],"entityStates":{"p1":"conflicting","p2":"conflicting","L":"conflicting","C":"underConstrained"}}}}
+
+# --- ROUND 5: GESTURE-FIXED — the map rides both ENDS of a gesture, never a step ---
+# `BeginGesture` and `EndGesture` carry `entityStates`; `SolveDrag` does not, and the
+# absence is deliberate rather than an oversight: the drag's tag(-1) drives are
+# excluded from the diagnosis Jacobian, so re-deriving per step buys nothing, can
+# strobe on degenerate poses, and costs bandwidth on the one path that runs at
+# pointer rate. Every drag step also ENDS by invalidating the diagnosis the map is
+# derived from, so a per-step re-derivation would read an empty dependent set and
+# report a half-dragged sketch as fully constrained. A drag adds no constraint, so
+# the BeginGesture answer is still the answer at pointer-up — the same gesture-fixed
+# rule `dof`, `redundant` and `conflicting` already follow.
+{"send":{"v":1,"t":"req","id":5,"verb":"SketchUpsert","args":{"sketchId":"gs","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"C","type":"Circle","center":[20,20],"radius":5}],"constraints":[{"id":"cF","type":"Fixed","entities":["p1"]},{"id":"cH","type":"Horizontal","entities":["L"]},{"id":"cD","type":"Distance","entities":["L"],"value":10.0}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"upserted":true,"sketchId":"gs","sketchRevision":1,"dof":3,"state":"UnderConstrained","entityStates":{"L":"fullyConstrained","C":"underConstrained"}}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"BeginGesture","args":{"sketchId":"gs","sketchRevision":1,"gestureId":71,"drag":{"pointId":"C.center"}}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"gestureId":71,"ready":true,"entityStates":{"p1":"fullyConstrained","p2":"fullyConstrained","L":"fullyConstrained","C":"underConstrained"}}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"SolveDrag","args":{"gestureId":71,"seq":1,"target":[25.0,20.0]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"gestureId":71,"seq":1,"status":"success","dof":3,"conflicting":[],"positions":"$any"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"SolveDrag","args":{"gestureId":71,"seq":2,"target":[30.0,20.0]}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"gestureId":71,"seq":2,"status":"success","dof":3,"conflicting":[],"positions":"$any"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"EndGesture","args":{"gestureId":71}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"gestureId":71,"status":"success","dof":3,"sketchRevision":2,"entityStates":{"p1":"fullyConstrained","p2":"fullyConstrained","L":"fullyConstrained","C":"underConstrained"}}}}

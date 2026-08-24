@@ -26,10 +26,13 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "nlohmann/json.hpp"
 
 #include "protocol/Dispatcher.h"
 #include "protocol/Envelope.h"
@@ -81,6 +84,12 @@ private:
         int dof = 0;
         bool redundant = false;  // benign DOF-preserving redundancy (diagnosed at begin)
         std::vector<std::string> conflicting;  // wire constraint ids (structural)
+        // SCHEMA §7.4 `entityStates`, keyed by WIRE entity id — GESTURE-FIXED
+        // for the same reason `dof`/`redundant`/`conflicting` are: a drag
+        // changes no constraint, and every drag step ends by invalidating the
+        // PlaneGCS diagnosis this map is derived from. `std::nullopt` means the
+        // sketch had nothing to report (the §7.4 ellipse rule).
+        std::optional<nlohmann::json> entity_states;
         PosMap baseline;       // positions at BeginGesture
         PosMap last_reported;  // for incremental deltas
         bool last_success = true;

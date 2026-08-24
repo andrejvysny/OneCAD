@@ -39,6 +39,15 @@ add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)
 target_link_libraries(test_sketch_arc_endpoints PRIVATE worker_core)
 add_test(NAME sketch_arc_endpoints COMMAND test_sketch_arc_endpoints)
 
+# --- SCHEMA §7.4 `entityStates`: the PER-ENTITY constrained state. The ownership
+#     union (a Line owns no parameter, an Arc is pinned down by nine), the
+#     conflict projection, the reference-lock pins, the ellipse OMISSION (the
+#     NDJSON matcher is subset-only and cannot assert an absent key), and the
+#     gesture-fixed rule that keeps the map off SolveDrag. ---
+add_executable(test_sketch_entity_states test_sketch_entity_states.cpp)
+target_link_libraries(test_sketch_entity_states PRIVATE worker_core)
+add_test(NAME sketch_entity_states COMMAND test_sketch_entity_states)
+
 # --- SNAP P3: the POINT-PAIR axis alignments (HorizontalPoints/VerticalPoints):
 #     error/DOF, the solver actually moving a point onto the alignment, the loud
 #     unresolved-handle failure, and applicability for two points. ---
@@ -682,6 +691,18 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/chamfer_angle_distance.ndjson
+)
+# SCHEMA §7.4 `entityStates` (per-entity constrained state) — and the FIRST canonical
+# fixture to drive the sketch solver lane at all. Round 1 is the load-bearing one: one
+# under-constrained sketch in which the line is fully constrained and the circle is
+# not, which no whole-sketch echo could produce. The two OMISSION rules (ellipse omits
+# the whole map, SolveDrag never carries it) are NOT assertable here — the matcher is
+# subset-only — and are pinned in test_sketch_entity_states.cpp. See the fixture header.
+add_test(
+    NAME canonical_sketch_entity_states
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_entity_states.ndjson
 )
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no

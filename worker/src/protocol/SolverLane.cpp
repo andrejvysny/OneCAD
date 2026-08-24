@@ -17,6 +17,7 @@
 #include "loop/RegionUtils.h"
 #include "sketch/SketchArc.h"
 #include "sketch/SketchCircle.h"
+#include "sketch/SketchConstraint.h"
 #include "sketch/SketchPoint.h"
 
 namespace onecad::protocol {
@@ -266,6 +267,59 @@ std::string upsert_state(int dof, bool conflicting, bool redundant) {
     return "UnderConstrained";
 }
 
+// SCHEMA §7.4 `entityStates` — {wireEntityId: underConstrained|fullyConstrained|
+// conflicting}. `std::nullopt` means OMIT THE WHOLE MAP: the sketch carries an
+// ellipse, so it took the naive-DOF fallback and no PlaneGCS diagnosis exists to
+// answer from. A wire entity the map does not name is UNKNOWN, never
+// "unconstrained".
+//
+// `conflicting_internal` is the INTERNAL constraint id list (the same one
+// `map_conflicting` renders for the wire). `conflicting` outranks both other
+// tokens, and is projected onto every entity a conflicting constraint NAMES —
+// directly, or through a point that entity owns, because a wire `Distance` on a
+// line lowers to a distance between its two endpoint POINTS and would otherwise
+// name nothing the wire can see. The projection therefore OVER-attributes by
+// construction (a Distance between two entities reds both); it is a HINT, and
+// `conflicting[]` stays authoritative for WHICH constraints are at fault.
+//
+// Adds no diagnose() call: it reads the diagnosis the caller's preceding dof /
+// redundancy queries already left live.
+std::optional<json> entity_states(const sk::Sketch& sketch, const wire::WireIndex& index,
+                                  const std::vector<sk::ConstraintID>& conflicting_internal) {
+    const auto states = sketch.entityConstrainedStates();
+    if (!states) return std::nullopt;
+
+    std::unordered_set<sk::EntityID> conflict_entities;
+    for (const sk::ConstraintID& cid : conflicting_internal) {
+        const sk::SketchConstraint* c = sketch.getConstraint(cid);
+        if (!c) continue;
+        for (const sk::EntityID& eid : c->referencedEntities()) conflict_entities.insert(eid);
+    }
+
+    json out = json::object();
+    for (const auto& [wire_id, internal_id] : index.wire_to_internal) {
+        const auto it = states->find(internal_id);
+        if (it == states->end()) continue;  // not solver-registered => unknown => omitted
+        bool conflict = conflict_entities.count(internal_id) > 0;
+        if (!conflict && !conflict_entities.empty()) {
+            for (const sk::EntityID& pid : sketch.entityPointIds(internal_id)) {
+                if (conflict_entities.count(pid) > 0) {
+                    conflict = true;
+                    break;
+                }
+            }
+        }
+        if (conflict) {
+            out[wire_id] = "conflicting";
+        } else {
+            out[wire_id] = it->second == sk::EntityConstrainedState::FullyConstrained
+                               ? "fullyConstrained"
+                               : "underConstrained";
+        }
+    }
+    return out;
+}
+
 // Preview triangulation lives in loop/PolygonFill.{h,cpp} — holes ARE subtracted
 // so the fill matches the solid the kernel builds from the same region. See that
 // header for the bridge/shared-index invariant the frontend ring derivation
@@ -330,6 +384,9 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
     const auto conflicting = tr.sketch->getConflictingConstraints();
     const bool redundant = tr.sketch->hasRedundantConstraints();
     const std::string state = upsert_state(dof, !conflicting.empty(), redundant);
+    // Read HERE, while the diagnosis the dof + redundancy queries above left
+    // behind is still live (SCHEMA §7.4 additive `entityStates`).
+    std::optional<json> states = entity_states(*tr.sketch, tr.index, conflicting);
 
     json stored_args = args;
     if (solve.success) {
@@ -347,6 +404,9 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
         // as mutually unsatisfiable, wire-mapped (empty when the sketch is solvable).
         {"conflicting", map_conflicting(tr.index, conflicting)},
     };
+    // Optional/additive: absent means "this worker has nothing to say about the
+    // individual entities", never "they are all unconstrained".
+    if (states) result["entityStates"] = std::move(*states);
     return Envelope::ok_response(req.id, std::move(result));
 }
 
@@ -469,6 +529,10 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     const int dof = tr.sketch->getDegreesOfFreedom();
     const auto conflicting_internal = tr.sketch->getConflictingConstraints();
     const bool redundant = tr.sketch->hasRedundantConstraints();
+    // §7.4 `entityStates`, captured HERE for the same reason `dof` and
+    // `redundant` are: this is the last moment the diagnosis describes the
+    // COMMITTED sketch. Every drag step below ends by invalidating it.
+    std::optional<json> states = entity_states(*tr.sketch, tr.index, conflicting_internal);
 
     // ONLY the Point kind opens a point drag: `beginPointDrag` pins every OTHER
     // point, which is right for "one handle to one position" and wrong for all
@@ -486,6 +550,7 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     g.dof = dof;
     g.redundant = redundant;
     g.conflicting = map_conflicting(tr.index, conflicting_internal);
+    g.entity_states = states;
     g.baseline = collect_positions(*tr.sketch);
     g.last_reported = g.baseline;
     g.kind = kind;
@@ -527,6 +592,7 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     gestures_[gesture_id] = std::move(g);
 
     json result = {{"gestureId", gesture_id}, {"ready", true}};
+    if (states) result["entityStates"] = std::move(*states);
     return Envelope::ok_response(req.id, std::move(result));
 }
 
@@ -769,6 +835,11 @@ Envelope SolverLane::on_end(const Envelope& req) {
         {"curves", changed_curves(g.baseline_curves, cur_curves, g.index)},
         {"sketchRevision", new_rev},
     };
+    // §7.4 `entityStates` is GESTURE-FIXED, exactly like `dof`: a drag adds no
+    // constraint, so the answer cannot have changed — and every drag step ends
+    // with `invalidatedDiagnosis()`, so re-deriving it here would read an empty
+    // dependent-parameter set and call the whole sketch fully constrained.
+    if (g.entity_states) result["entityStates"] = *g.entity_states;
     return Envelope::ok_response(req.id, std::move(result));
 }
 

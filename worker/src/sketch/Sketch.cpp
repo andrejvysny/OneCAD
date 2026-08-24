@@ -1824,6 +1824,49 @@ bool Sketch::hasSolverUnsupportedEntities() const {
     return false;
 }
 
+std::optional<std::unordered_map<EntityID, EntityConstrainedState>>
+Sketch::entityConstrainedStates() const {
+    // SCHEMA §7.4 ellipse rule: an ellipse is not registered with PlaneGCS, so
+    // the whole sketch falls back to a naive DOF count and NO diagnosis exists.
+    // Omit the entire map rather than guess per entity.
+    if (hasSolverUnsupportedEntities()) {
+        return std::nullopt;
+    }
+    // Deliberately does NOT rebuild: a rebuild would clear the diagnosis this
+    // reads, and restoring it would mean adding a diagnose() call.
+    if (!solver_ || solverDirty_) {
+        return std::nullopt;
+    }
+    const auto freeOwners = solver_->entitiesWithFreeParams();
+    if (!freeOwners) {
+        return std::nullopt;
+    }
+
+    std::unordered_map<EntityID, EntityConstrainedState> states;
+    states.reserve(entities_.size());
+    for (const auto& entity : entities_) {
+        if (!entity) {
+            continue;
+        }
+        const EntityID id = entity->id();
+        if (!solver_->isRegistered(id)) {
+            continue;  // unknown, not "unconstrained"
+        }
+        bool free = freeOwners->count(id) > 0;
+        if (!free) {
+            for (const EntityID& pointId : entityPointIds(id)) {
+                if (freeOwners->count(pointId) > 0) {
+                    free = true;
+                    break;
+                }
+            }
+        }
+        states[id] = free ? EntityConstrainedState::UnderConstrained
+                          : EntityConstrainedState::FullyConstrained;
+    }
+    return states;
+}
+
 int Sketch::getDegreesOfFreedom() const {
     if (!dofDirty_ && cachedDOF_ >= 0) {
         return cachedDOF_;

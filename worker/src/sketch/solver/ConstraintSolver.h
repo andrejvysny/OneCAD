@@ -24,6 +24,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -347,6 +348,30 @@ public:
     /// True when the last solve/diagnose found redundant constraints.
     bool hasRedundant() const;
 
+    /// True when `id` was registered with the solver (point / line / arc /
+    /// circle). An Ellipse never is.
+    bool isRegistered(EntityID id) const;
+
+    /**
+     * @brief Every registered entity owning at least one FREE parameter per the
+     *        LIVE PlaneGCS diagnosis — the raw material for SCHEMA §7.4
+     *        `entityStates`.
+     * @return `std::nullopt` when no diagnosis is live (nothing to report).
+     *
+     * "Owning" is storage ownership, not geometric influence: a point owns its
+     * x/y, an arc its radius + start/end angle, a circle its radius. A LINE owns
+     * no parameter at all, so a caller asking "is this line pinned down?" must
+     * take the union over the points the entity owns (`Sketch::entityPointIds`)
+     * — which is also where an arc's nine parameters come from (its own three
+     * plus center/start/end, the last two coupled by the tag-0 arc rules).
+     *
+     * Reads `GCS::System::getDependentParams`, which is the null-space
+     * MEMBERSHIP of each parameter: it says a parameter is still free, never how
+     * many degrees of freedom an entity has. Adds no diagnose() call of its own —
+     * the caller must already have one live.
+     */
+    std::optional<std::unordered_set<EntityID>> entitiesWithFreeParams() const;
+
 private:
     struct DragSolveSnapshot {
         std::unordered_map<EntityID, Vec2d> pointPositions;
@@ -388,6 +413,14 @@ private:
     /// Parameter pointers used for direct binding
     std::vector<double*> parameters_;
     std::vector<double*> drivenParameters_;
+
+    /// Which entity each declared parameter BELONGS to — the inverse of
+    /// `parameters_`, maintained at exactly the same three registration sites
+    /// (addPoint / addArc / addCircle) and rebuilt with it in removeEntity().
+    /// Reporting-only bookkeeping for `entitiesWithFreeParams`; it holds the
+    /// same live entity-field pointers `parameters_` does, so it has the same
+    /// lifetime (the solver is rebuild-only).
+    std::unordered_map<const double*, EntityID> paramOwner_;
 
     /// Frozen target values for reference-lock pins. PlaneGCS keeps the raw
     /// `double*` it is handed, so this must be POINTER-STABLE for the solver's

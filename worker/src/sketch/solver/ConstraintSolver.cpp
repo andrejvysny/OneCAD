@@ -176,6 +176,7 @@ void ConstraintSolver::clear() {
     constraints_.clear();
     parameterBackup_.clear();
     parameters_.clear();
+    paramOwner_.clear();
     drivenParameters_.clear();
     pinValues_.clear();
     nextEntityTag_ = 1;
@@ -200,6 +201,8 @@ void ConstraintSolver::addPoint(SketchPoint* point) {
     entityToGcsId_[point->id()] = nextEntityTag_++;
     parameters_.push_back(coordPtr(point, 1));
     parameters_.push_back(coordPtr(point, 2));
+    paramOwner_[coordPtr(point, 1)] = point->id();
+    paramOwner_[coordPtr(point, 2)] = point->id();
 }
 
 void ConstraintSolver::addLine(SketchLine* line) {
@@ -225,6 +228,9 @@ void ConstraintSolver::addArc(SketchArc* arc) {
     parameters_.push_back(&arc->radius());
     parameters_.push_back(&arc->startAngle());
     parameters_.push_back(&arc->endAngle());
+    paramOwner_[&arc->radius()] = arc->id();
+    paramOwner_[&arc->startAngle()] = arc->id();
+    paramOwner_[&arc->endAngle()] = arc->id();
 
     addArcRules(arc);
 }
@@ -277,6 +283,7 @@ void ConstraintSolver::addCircle(SketchCircle* circle) {
     circlesById_[circle->id()] = circle;
     entityToGcsId_[circle->id()] = nextEntityTag_++;
     parameters_.push_back(&circle->radius());
+    paramOwner_[&circle->radius()] = circle->id();
 }
 
 bool ConstraintSolver::addConstraint(SketchConstraint* constraint) {
@@ -357,17 +364,24 @@ void ConstraintSolver::removeEntity(EntityID id) {
     circlesById_.erase(id);
 
     parameters_.clear();
+    paramOwner_.clear();
     for (const auto& [pointId, point] : pointsById_) {
         parameters_.push_back(coordPtr(point, 1));
         parameters_.push_back(coordPtr(point, 2));
+        paramOwner_[coordPtr(point, 1)] = pointId;
+        paramOwner_[coordPtr(point, 2)] = pointId;
     }
     for (const auto& [arcId, arc] : arcsById_) {
         parameters_.push_back(&arc->radius());
         parameters_.push_back(&arc->startAngle());
         parameters_.push_back(&arc->endAngle());
+        paramOwner_[&arc->radius()] = arcId;
+        paramOwner_[&arc->startAngle()] = arcId;
+        paramOwner_[&arc->endAngle()] = arcId;
     }
     for (const auto& [circleId, circle] : circlesById_) {
         parameters_.push_back(&circle->radius());
+        paramOwner_[&circle->radius()] = circleId;
     }
 }
 
@@ -1020,6 +1034,50 @@ bool ConstraintSolver::hasConflicting() const {
 
 bool ConstraintSolver::hasRedundant() const {
     return gcsSystem_ && gcsSystem_->hasRedundant();
+}
+
+bool ConstraintSolver::isRegistered(EntityID id) const {
+    return entityToGcsId_.find(id) != entityToGcsId_.end();
+}
+
+std::optional<std::unordered_set<EntityID>> ConstraintSolver::entitiesWithFreeParams() const {
+    // `dofsNumber()` is -1 exactly when PlaneGCS has no live diagnosis, which is
+    // also when `pDependentParameters` is empty for a reason that has nothing to
+    // do with the sketch being constrained. Reporting nothing beats reporting
+    // "everything is pinned down".
+    if (!gcsSystem_ || gcsSystem_->dofsNumber() < 0) {
+        return std::nullopt;
+    }
+
+    std::unordered_set<EntityID> owners;
+
+    if (gcsSystem_->isEmptyDiagnoseMatrix()) {
+        // Not one driving constraint reached the Jacobian, so diagnose() returns
+        // BEFORE identifying dependent parameters and the list stays empty.
+        // Every declared parameter is free — reading the empty list literally
+        // would report a constraint-free sketch as fully constrained.
+        for (const auto& [param, owner] : paramOwner_) {
+            owners.insert(owner);
+        }
+        return owners;
+    }
+
+    std::vector<double*> dependent;
+    gcsSystem_->getDependentParams(dependent);
+    // DEDUPE AT THE READ SITE. `pDependentParameters` ACCUMULATES: a single
+    // diagnose() pushes the same pointer once per null-space group it appears
+    // in, and only `invalidatedDiagnosis()` ever clears it — so the several
+    // diagnose() calls one SketchUpsert makes (dof, redundancy, each solve's
+    // initSolution) pile duplicates on top of each other. Vendored PlaneGCS is
+    // READ-ONLY, so the fix belongs here, not in GCS.cpp.
+    const std::unordered_set<const double*> unique(dependent.begin(), dependent.end());
+    for (const double* param : unique) {
+        auto it = paramOwner_.find(param);
+        if (it != paramOwner_.end()) {
+            owners.insert(it->second);
+        }
+    }
+    return owners;
 }
 void ConstraintSolver::backupParameters() {
     parameterBackup_.clear();

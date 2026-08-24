@@ -2095,15 +2095,69 @@ Upserts the authoritative sketch (plane + entities + constraints). Increments
 { "sketchId": "sk_1", "plane": { "kind": "XY", "...": "..." },
   "entities": [ … ], "constraints": [ … ] }
 // result
-{ "sketchId": "sk_1", "sketchRevision": 4, "dof": 2,
+{ "upserted": true, "sketchId": "sk_1", "sketchRevision": 4, "dof": 2,
   "state": "UnderConstrained",    // state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
-  "conflicting": [] }             // constraint ids in conflict (non-empty iff state=Conflicting); absent ⇒ []
+  "conflicting": [],              // constraint ids in conflict (non-empty iff state=Conflicting); absent ⇒ []
+  "entityStates": {               // PER-ENTITY state, keyed by WIRE entity id; optional, see below
+    "e1": "fullyConstrained", "e2": "underConstrained", "e7": "conflicting" } }
 ```
 
 `conflicting` lists the constraint ids PlaneGCS reports as mutually unsatisfiable
 (the same id set `SolveDrag`/`EndGesture` emit); it is non-empty exactly when
 `state == "Conflicting"` and empty otherwise. It is **optional/additive** — an
 absent field parses as `[]` (all parsers tolerate the missing/unknown key).
+
+`upserted` is `true` on every successful upsert (a failure is an error frame, not
+an `upserted: false`).
+
+##### `entityStates` — the per-entity constrained state
+
+`state` above answers for the whole sketch. `entityStates` answers for each
+entity, so a frontend can colour a pinned-down line differently from the free
+circle next to it **in the same `UnderConstrained` sketch**. Optional/additive
+throughout: an **absent map means this worker has nothing to say**, never that
+the entities are unconstrained.
+
+- **Keyspace is the WIRE entity id space** — the same ids the request's
+  `entities[]` carry and the same keyspace `SolveDrag`'s `curves` uses. An
+  inline-minted point (a line endpoint, a circle/arc/ellipse center) has no wire
+  id and MUST NOT appear; no other id space may leak in.
+- **Values are exactly three tokens**, camelCase: `underConstrained` |
+  `fullyConstrained` | `conflicting`. A reader MUST treat an unrecognized token
+  as unknown, not as an error.
+- **An entity ABSENT from a present map is UNKNOWN.** A reader MUST NOT default
+  it to `underConstrained`. (Today only solver-unregistered entities are absent.)
+- **Derivation is PlaneGCS's dependent-parameter set.** An entity is
+  `fullyConstrained` iff it is registered with the solver AND neither its own
+  parameters nor any parameter of a point it **owns** is still free;
+  `underConstrained` iff any is. Taking the union over owned points is normative,
+  not an implementation note: a `Line` owns **no parameter of its own** — its
+  freedom is entirely its two endpoints' — and an `Arc` is pinned down only by
+  **all NINE** of its parameters (center x/y, radius, startAngle, endAngle, and
+  the x/y of its two endpoint points, which the internal arc rules couple to the
+  others). Two entities sharing one free point are therefore BOTH
+  `underConstrained`, which is correct: neither is pinned down.
+- **There is NO per-entity DOF count, and there never will be one on this
+  derivation.** PlaneGCS reports null-space MEMBERSHIP per parameter — "this
+  parameter is still free" — not how many degrees of freedom an entity has. A
+  count would be fabricated. `underConstrained` is the strongest honest statement
+  and there is deliberately no `partiallyConstrained`.
+- **`conflicting` outranks both.** An entity that a constraint in the
+  `conflicting[]` set NAMES — directly, or through a point it owns — is reported
+  `conflicting`. The ownership hop is required: a wire dimension on a line lowers
+  to a constraint between its two endpoint POINTS, so the line is reachable no
+  other way. This projection deliberately OVER-attributes (a dimension between
+  two entities reds both) and is a **hint**; `conflicting[]` remains
+  authoritative for WHICH constraints are at fault.
+- **An `Ellipse` in the sketch omits the WHOLE map.** An ellipse is not
+  registered with PlaneGCS (see the documented deviation below), so the sketch
+  falls back to a naive static DOF count and **no diagnosis exists**. A worker
+  MUST NOT report the entities that do happen to have an answer: the sketch they
+  live in was never diagnosed, and a partial map would read as an authoritative
+  one. Same rule for any future entity type the solver does not represent.
+- `solverPolicyVersion` is **unchanged** by this field. It is reporting only:
+  solve behaviour, solved positions and `dof` are bit-identical with and without
+  it, and `entityStates` MUST NOT enter any hash, signature or fingerprint.
 
 The `state` is computed after a full solve, by descending priority:
 **`Conflicting`** (PlaneGCS reports genuinely conflicting constraints — no
@@ -2154,8 +2208,14 @@ pointer grabbed.
 { "sketchId": "sk_1", "sketchRevision": 4, "gestureId": 51, "solverPolicyHash": "3e9a…",
   "drag": { "kind": "radius", "entity": "e7", "grab": [31.2, 4.0] } }
 // result
-{ "gestureId": 51, "ready": true }
+{ "gestureId": 51, "ready": true,
+  "entityStates": { "e1": "fullyConstrained", "e7": "underConstrained" } }
 ```
+
+`entityStates` is the same optional/additive map `SketchUpsert` defines above,
+under all of the same rules, computed for the COMMITTED sketch this gesture
+opened against. It is **gesture-fixed**: `EndGesture` echoes this exact map and
+`SolveDrag` does not carry it at all (see below).
 
 The optional `drag` object is `{ "kind"?, "entity"?, "role"?, "grab"?,
 "pointId"? }` and names the gesture's **target kind**:
@@ -2221,6 +2281,15 @@ of the committed sketch for the whole gesture; it is NOT re-derived per drag
 step (a drag pins the non-dragged points, which would spuriously flag the
 committed constraints as redundant). `EndGesture` uses the same precedence.
 
+**`SolveDrag` does NOT carry `entityStates`, and that is normative.** A worker
+MUST NOT emit it here and a consumer MUST hold the `BeginGesture` map for the
+duration of the gesture — the same gesture-fixed rule `dof`, `redundant` and
+`conflicting` already follow, for a stronger reason. A drag adds no constraint,
+so the answer cannot have changed; the drag's temporary tag(−1) drives are
+excluded from the diagnosis Jacobian, so re-deriving buys nothing; a degenerate
+mid-drag pose would make the map strobe; and it would cost bandwidth on the one
+path that runs at pointer rate (~8 KB per frame at 320 entities).
+
 `positions` reports moved POINTS only, which is not the whole result of a drag:
 a `radius` gesture moves no point at all, an `arcEnd` gesture reshapes the arc's
 radius and angles, and a `Tangent` propagates even a plain `point` drag into a
@@ -2269,6 +2338,7 @@ its result).
   "conflicting": [],   // constraint ids in conflict (non-empty iff status=conflicting); absent ⇒ []
   "positions": { /* final exact positions, changed since BeginGesture */ },
   "curves": { /* final exact curve members, changed since BeginGesture */ },
+  "entityStates": { /* the gesture-fixed map, echoed from BeginGesture */ },
   "sketchRevision": 5 }
 ```
 
@@ -2276,6 +2346,14 @@ its result).
 conflicts, else the gesture-fixed set diagnosed at `BeginGesture`. Optional/additive
 (absent ⇒ `[]`). `curves` is the same additive channel `SolveDrag` defines above,
 baselined at `BeginGesture` (absent ⇒ `{}`).
+
+`entityStates` is the `BeginGesture` map, ECHOED — it is gesture-fixed, so it is
+present here exactly when it was present there and carries the same values. It is
+not re-derived: a drag adds no constraint, and by pointer-up the drag steps have
+invalidated the diagnosis it comes from, so a re-derivation would read an empty
+dependent-parameter set and report the whole sketch as fully constrained. A
+gesture that changes the constraint set does not exist; a caller that adds one
+issues a `SketchUpsert` and gets a fresh map from it.
 
 #### SketchRegions
 Computes closed profile regions for a sketch (for extrude/revolve selection and
@@ -3642,6 +3720,46 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-24 — §7.4 `entityStates` (per-entity constrained state)** (Sketch UX
+  Phase 3; cross-track sign-off recorded 2026-08-24). The solver lane could report
+  only a WHOLE-SKETCH verdict, so a sketch with one pinned-down line and one free
+  circle was a single `UnderConstrained` and the frontend had nothing to colour with.
+  New **optional additive** map on the `SketchUpsert`, `BeginGesture` and
+  `EndGesture` results, keyed by **wire entity id** (the `curves` keyspace — an
+  inline-minted point has no wire id and never appears), valued with exactly **three
+  camelCase tokens**: `underConstrained` | `fullyConstrained` | `conflicting`. An
+  absent map means the worker has nothing to say; an entity absent from a PRESENT map
+  is unknown and MUST NOT default to `underConstrained`.
+  **Derivation is PlaneGCS's dependent-parameter set**, unioned over the entity AND
+  every point it owns. The union is normative, not an implementation detail: a `Line`
+  owns no parameter at all — its freedom is its endpoints' — and an `Arc` is pinned
+  down only by all NINE of its parameters (center x/y, radius, start/end angle, and
+  the two endpoint points the internal arc rules couple to them), so a narrower read
+  mis-reports both. Two entities sharing one free point are BOTH `underConstrained`.
+  **No per-entity DOF count, deliberately**: PlaneGCS reports null-space MEMBERSHIP
+  per parameter, not entity-local freedom, so a count would be fabricated — and there
+  is no `partiallyConstrained` for the same reason. `conflicting` outranks both and is
+  projected onto every entity a conflicting constraint names, directly or through a
+  point it owns (a wire dimension on a line lowers to a constraint between its
+  endpoint POINTS, so the line is reachable no other way); the projection
+  over-attributes by construction and is a HINT, with `conflicting[]` still
+  authoritative.
+  **An `Ellipse` omits the WHOLE map** — an ellipse is not registered with PlaneGCS,
+  so the sketch takes the naive-DOF fallback and no diagnosis exists; a partial map
+  would read as an authoritative one.
+  **`SolveDrag` does NOT carry it**, normatively: the drag's tag(−1) drives are
+  excluded from the diagnosis Jacobian so re-deriving buys nothing, a degenerate
+  mid-drag pose makes it strobe, and it would cost ~8 KB/frame at 320 entities on the
+  one path that runs at pointer rate. Consumers hold the `BeginGesture` map;
+  `EndGesture` echoes it. Same gesture-fixed rule `dof`/`redundant`/`conflicting`
+  already follow.
+  `solverPolicyVersion` stays **1** — reporting only, solve behaviour and solved
+  positions bit-identical, and `entityStates` MUST NOT enter any hash or signature.
+  Additive — new fixture `sketch_entity_states.ndjson` (the first canonical fixture on
+  the solver lane), no existing fixture shape moves, **no fixture bump**. The same
+  entry documents the pre-existing `upserted: true` field on the `SketchUpsert`
+  result, which the worker has always emitted and this file never showed.
 
 - **2026-08-24 — §7.3 Chamfer `angleDeg` (distance-angle chamfer)** (WP6 item 1;
   cross-track sign-off recorded 2026-08-24). Optional skip-none Chamfer-only field
