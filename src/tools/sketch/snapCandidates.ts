@@ -1111,9 +1111,15 @@ function relationForCachedPoint(c: CachedPointCandidate): readonly SnapRelationI
   }
   if (c.ref) return [{ kind: "Coincident", refs: [c.ref] }];
   // A QUADRANT (circle/arc/ellipse extremum) is a derived coordinate with no
-  // point address of its own. Authoring `OnCurve` against the owning curve
-  // would pin the point to the curve but NOT to the extremum, which is a
-  // different — and wrong — relation, so it stays placement-only (SNAP §9.5).
+  // point address of its own, so it cannot author `Coincident` against a point
+  // that does not exist. It IS on the owning curve, though, and `OnCurve` says
+  // exactly that — weaker than "at this extremum" (no such relation kind
+  // exists), but far better than nothing: without it the end silently floats
+  // free of a later edit to the circle/arc, looking attached while not being
+  // (audit A7 — an H5-B-adjacent silent non-attachment).
+  if (c.kind === "quadrant" && c.ownerCurveId) {
+    return [{ kind: "OnCurve", refs: [], curveIds: [c.ownerCurveId] }];
+  }
   return [];
 }
 

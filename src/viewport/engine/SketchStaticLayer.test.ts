@@ -283,6 +283,91 @@ describe("SketchStaticLayer tint", () => {
   });
 });
 
+/*
+ * Audit item #9 (A9) — the recorded §10.5 deferral. While ANOTHER sketch is
+ * being edited, every static sketch drops its region fills and its ink falls
+ * back, so it reads as context rather than competing (a teal fill mid-edit read
+ * as a selection). This is per-entry material state, restored on session end.
+ */
+describe("SketchStaticLayer de-emphasis while a session is active", () => {
+  function built() {
+    const { layer, sketchRoot } = makeLayer();
+    layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [REGION] });
+    const g = groupFor(sketchRoot, "s1");
+    return {
+      layer,
+      drawMat: (g.children.find((c) => c instanceof LineSegments2) as LineSegments2).material as LineMaterial,
+      pointsMat: childOfType<THREE.Points>(g, "Points")!.material as THREE.PointsMaterial,
+      fill: fillFor(g, "r0"),
+    };
+  }
+
+  it("hides region fills and dims the curves, then restores both", () => {
+    const { layer, drawMat, pointsMat, fill } = built();
+    expect(fill.visible).toBe(true);
+    expect(drawMat.opacity).toBe(1);
+
+    layer.setSessionActive(true);
+    expect(fill.visible).toBe(false);
+    // The FAT LineSegments2 is the only curve pass that paints (the plain
+    // LineSegments beside it is an invisible pick proxy — its opacity is
+    // unobservable, so asserting on it would prove nothing about the dimming).
+    expect(drawMat.opacity).toBeLessThan(1);
+    expect(drawMat.opacity).toBeGreaterThan(0);
+    expect(drawMat.transparent).toBe(true);
+
+    layer.setSessionActive(false);
+    expect(fill.visible).toBe(true);
+    expect(drawMat.opacity).toBe(1);
+    expect(pointsMat.opacity).toBe(0);
+  });
+
+  it("keeps hover/selection meaningful mid-session — dimmed, not erased", () => {
+    const { layer, pointsMat } = built();
+    layer.setSessionActive(true);
+    layer.setHover({ kind: "sketch", sketchId: "s1" });
+    // The dot tier's own rule says 1 while hovered; emphasis is a multiplier on
+    // top of it, so a hovered dot is still visible, just quieter.
+    expect(pointsMat.opacity).toBeGreaterThan(0);
+    expect(pointsMat.opacity).toBeLessThan(1);
+  });
+
+  it("takes a hidden fill OUT of the pick set — three raycasts invisible objects", () => {
+    const { layer } = built();
+    const ray = () => new THREE.Raycaster(new THREE.Vector3(0, 0, 50), new THREE.Vector3(0, 0, -1));
+    expect(layer.hitTest(ray())?.kind).toBe("sketchRegion");
+
+    layer.setSessionActive(true);
+    // Nothing else is under the ray (the rect's curves are at ±10), so an
+    // invisible-but-still-pickable fill would show up as a region hit here.
+    expect(layer.hitTest(ray())).toBeNull();
+
+    layer.setSessionActive(false);
+    expect(layer.hitTest(ray())?.kind).toBe("sketchRegion");
+  });
+
+  it("applies to a sketch built mid-session, not just the ones already there", () => {
+    const { layer, sketchRoot } = makeLayer();
+    layer.setSessionActive(true);
+    layer.setSketch("s2", { plane: IDENTITY_PLANE, entities: RECT, regions: [REGION] });
+    const g = groupFor(sketchRoot, "s2");
+    const drawMat = (g.children.find((c) => c instanceof LineSegments2) as LineSegments2).material as LineMaterial;
+    expect(fillFor(g, "r0").visible).toBe(false);
+    expect(drawMat.opacity).toBeLessThan(1);
+  });
+
+  it("model-mode picking is unaffected — regions resolve exactly as before", () => {
+    const { layer } = built();
+    const ray = new THREE.Raycaster(new THREE.Vector3(0, 0, 50), new THREE.Vector3(0, 0, -1));
+    expect(layer.hitTest(ray)).toEqual({
+      kind: "sketchRegion",
+      sketchId: "s1",
+      regionId: "r0",
+      distance: 50,
+    });
+  });
+});
+
 describe("SketchStaticLayer visibility", () => {
   it("hides the edited sketch group and restores it, respecting the editing override", () => {
     const { layer, sketchRoot } = makeLayer();

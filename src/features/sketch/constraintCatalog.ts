@@ -68,5 +68,50 @@ export const GEOMETRIC_TYPES: SketchConstraintType[] = [
   "VerticalPoints",
 ];
 
-/** Ordered dimensional kinds the toolbar surfaces (each opens the Dimension chip). */
-export const DIMENSIONAL_TYPES: SketchConstraintType[] = ["Distance", "Radius", "Diameter", "Angle"];
+/**
+ * Ordered dimensional kinds the toolbar surfaces (each opens the Dimension
+ * chip). H-/V-Distance were wire-encodable and applicable (two-point
+ * selection, `constraintApplicability.ts`) but missing here, making them
+ * unreachable from the Add-constraint menu (audit A11g) — added next to
+ * `Distance`, the rest of the same "two targets, a length" family.
+ */
+export const DIMENSIONAL_TYPES: SketchConstraintType[] = [
+  "Distance",
+  "HorizontalDistance",
+  "VerticalDistance",
+  "Radius",
+  "Diameter",
+  "Angle",
+];
+
+/**
+ * "Why not" reason for a disabled Add-constraint row (design item 4b) — a
+ * short imperative sentence naming the selection shape each kind accepts.
+ * Static, not derived at runtime: `evaluateApplicability`'s selection-shape
+ * rules (constraintApplicability.ts, see its header for the full matrix) are
+ * a fixed fact about each kind, never a function of the current selection, so
+ * a lookup table is the honest representation — no need to restructure the
+ * evaluator to ask it "why not" for a shape it was never offered.
+ */
+export const CONSTRAINT_REQUIREMENT: Record<SketchConstraintType, string> = {
+  Coincident: "Select two points",
+  Horizontal: "Select a line",
+  Vertical: "Select a line",
+  Fixed: "Select a point",
+  Midpoint: "Select a point and a line",
+  OnCurve: "Select a point and a curve",
+  Parallel: "Select two lines",
+  Perpendicular: "Select two lines",
+  Tangent: "Select two curves",
+  Concentric: "Select two circles or arcs",
+  Equal: "Select two lines, or two circles or arcs",
+  Distance: "Select two points or lines",
+  HorizontalDistance: "Select two points",
+  VerticalDistance: "Select two points",
+  Angle: "Select two lines",
+  Radius: "Select a circle or arc",
+  Diameter: "Select a circle or arc",
+  Symmetric: "Select two points and a line",
+  HorizontalPoints: "Select two points",
+  VerticalPoints: "Select two points",
+};

@@ -12,12 +12,19 @@ import { viewportStore } from "@/stores/viewportStore";
 import { paletteStore } from "@/stores/paletteStore";
 import { createClient } from "@/ipc/client";
 import {
+  applyConstraint,
+  deleteConstraints,
   deleteEntities,
   flushSketchMutations,
   redoSketch,
   setEntitiesConstruction,
   undoSketch,
 } from "@/tools/sketch/sketchService";
+import { visibleConstraints } from "@/features/inspector/ConstraintList";
+import { applicableConstraintsFor } from "@/features/sketch/useApplicableConstraints";
+import { CONSTRAINT_REQUIREMENT } from "@/features/sketch/constraintCatalog";
+import { documentStore } from "@/stores/documentStore";
+import type { SketchConstraintType } from "@/ipc/types";
 import { sketchStore } from "@/stores/sketchStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { activateTool } from "@/tools/activateTool";
@@ -74,15 +81,53 @@ function runCancel(): void {
  * `{entityId, point}` pick deletes the whole entity — V1 semantics), so collect
  * the distinct entity ids and hand them to `deleteEntities` (which also cascades
  * the referencing constraints). Selection is cleared once the delete settles.
- * Constraint deletion is NOT keyboard-driven here (a later WP wires the list).
+ *
+ * A CONSTRAINT pick (a canvas badge, plan item 5d) takes precedence and routes
+ * through `deleteConstraints` — the same verb the inspector row's delete button
+ * uses — and it inherits that list's protection: only a constraint the list
+ * would show is deletable, so the machine `Fixed` pins a face-hosted sketch
+ * projects onto locked reference geometry stay put (see `visibleConstraints`).
+ * The two picks are mutually exclusive in the store, so this never has to guess.
  */
 function runDeleteSketchSelection(): void {
   const sel = sketchSelectionStore.getState();
+  if (sel.selectedConstraintId) {
+    const session = sketchStore.getState().session;
+    const deletable = session
+      ? visibleConstraints(session.constraints, session.entities)
+      : [];
+    const target = deletable.find((c) => c.id === sel.selectedConstraintId);
+    sketchSelectionStore.getState().setSelectedConstraint(null);
+    if (target) void deleteConstraints(createClient(), [target.id]);
+    return;
+  }
   const entityIds = [...new Set(sel.selected.map((s) => s.entityId))];
   if (entityIds.length === 0) return;
   void deleteEntities(createClient(), entityIds).then(() => {
     sketchSelectionStore.getState().clear();
   });
+}
+
+/**
+ * ⇧H/⇧V/⇧C/⇧E/⇧P/⇧M — apply one constraint kind to the current selection
+ * (plan item 6). Goes through the SAME `evaluateApplicability` →
+ * `applyConstraint` pair the Add-constraint menu and the context chips use
+ * (`applicableConstraintsFor`), so a chord can never author something the menu
+ * would have refused. Inapplicable ⇒ the kind's own requirement sentence as a
+ * transient info hint, never a silent no-op.
+ */
+function runApplyConstraint(type: SketchConstraintType): void {
+  const session = sketchStore.getState().session;
+  if (!session) return;
+  const selected = sketchSelectionStore.getState().selected;
+  const applicable = applicableConstraintsFor(selected, session.entities).find(
+    (a) => a.type === type,
+  );
+  if (!applicable) {
+    viewportStore.getState().setStatusHint(CONSTRAINT_REQUIREMENT[type]);
+    return;
+  }
+  void applyConstraint(createClient(), applicable);
 }
 
 /**
@@ -117,14 +162,31 @@ function runToggleConstruction(): void {
  * pendingExtrudeSketch from a viewportStore subscription that guards on
  * mode === "model", so setting it while still in sketch mode would be observed
  * once, dropped, and never re-delivered.
+ *
+ * Finishing is otherwise SILENT (audit A12) — the shell just flips back to
+ * model mode — so the last step names what was finished and how big it was
+ * (plan item 10a). It never overwrites an error the finish itself raised: a
+ * failed drain leaves its own hint, and a confirmation on top of it would say
+ * the edit landed when it did not.
  */
 async function finishSketchAction(): Promise<void> {
+  const hintBefore = viewportStore.getState().statusHint;
   await flushSketchMutations();
   const tool = toolStore.getState();
   if (tool.mode !== "sketch") return; // left sketch mode while the queue drained
+  // Counted AFTER the drain — a still-in-flight upsert is part of what is being
+  // finished, so the pre-drain number would under-report the last click.
+  const entityCount = sketchStore.getState().session?.entities.length ?? 0;
   const sketchId = viewportStore.getState().activeSketchId;
+  const name = (sketchId ? documentStore.getState().sketches[sketchId]?.name : null) ?? "sketch";
   tool.setMode("model");
   if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
+  const hintAfter = viewportStore.getState().statusHint;
+  const raisedAnError = hintAfter !== hintBefore && hintAfter?.severity === "error";
+  if (raisedAnError) return;
+  viewportStore
+    .getState()
+    .setStatusHint(`Finished ${name} — ${entityCount} ${entityCount === 1 ? "entity" : "entities"}`);
 }
 
 export function runAction(action: ShortcutAction): void {
@@ -146,6 +208,9 @@ export function runAction(action: ShortcutAction): void {
       break;
     case "toggleConstruction":
       runToggleConstruction();
+      break;
+    case "applyConstraint":
+      runApplyConstraint(action.constraint);
       break;
     case "cancel":
       runCancel();
@@ -232,13 +297,12 @@ export function useShortcuts(): void {
         runRegisteredShortcut(platform, e);
         return;
       }
-      // Delete/Backspace only swallow the key when a sketch entity is selected;
-      // an empty selection falls through so the key keeps its default meaning.
-      if (
-        action.type === "deleteSketchSelection" &&
-        sketchSelectionStore.getState().selected.length === 0
-      ) {
-        return;
+      // Delete/Backspace only swallow the key when a sketch entity OR a
+      // constraint badge is selected; an empty selection falls through so the
+      // key keeps its default meaning.
+      if (action.type === "deleteSketchSelection") {
+        const s = sketchSelectionStore.getState();
+        if (s.selected.length === 0 && s.selectedConstraintId === null) return;
       }
       e.preventDefault();
       runAction(action);

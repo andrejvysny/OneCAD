@@ -251,3 +251,34 @@ describe("persistAcceptedIntents — placement-only clicks", () => {
     expect(r.dropped).toEqual([{ kind: "Coincident", reason: "missing-ref" }]);
   });
 });
+
+// ── A7: quadrant snap authors OnCurve ──────────────────────────────────────
+//
+// `relationForCachedPoint` (snapCandidates.ts) now attaches this exact shape
+// to a quadrant candidate — the same OnCurve intent an onCurve/intersection
+// candidate would, targeting the curve the quadrant is an extremum of.
+describe("persistAcceptedIntents — quadrant snap (A7)", () => {
+  const quadrantIntent: SnapRelationIntent = { kind: "OnCurve", refs: [], curveIds: ["circle1"] };
+
+  it("an accepted quadrant candidate persists OnCurve, bound to the entity and the clicked point role", () => {
+    const r = persistAcceptedIntents(
+      [placed([quadrantIntent], ref("line1", "Start"))],
+      opts(),
+    );
+    expect(r.constraints).toHaveLength(1);
+    expect(r.constraints[0]).toMatchObject({
+      type: "OnCurve",
+      entities: ["line1", "circle1"],
+      positions: ["Start"],
+    });
+  });
+
+  it("Alt still suppresses it, same as any other inferred relation", () => {
+    const r = persistAcceptedIntents(
+      [placed([quadrantIntent], ref("line1", "Start"), true)],
+      opts(),
+    );
+    expect(r.constraints).toEqual([]);
+    expect(r.dropped).toEqual([{ kind: "OnCurve", reason: "alt-suppressed" }]);
+  });
+});

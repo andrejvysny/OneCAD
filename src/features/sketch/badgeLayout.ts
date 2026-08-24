@@ -3,6 +3,17 @@
  * ConstraintBadgeLayer renders (SCHEMA §7.3 constraint kinds). Each badge gets a
  * plane-coord anchor (the engine projects it to screen via HtmlOverlayDriver);
  * screen-space nudging (so the glyph floats off the geometry) is CSS, not here.
+ *
+ * GLYPH STANDOFF (adversarial-review M3 follow-up). A non-dimensional badge's
+ * raw anchor sits ON the entity (a line's midpoint, a circle's centre) — with
+ * no world-space clearance, a `Fixed` glyph at a line's midpoint out-ranked
+ * the line ITSELF in `elementsFromPoint`, silently eating a select-tool click
+ * meant for the curve underneath (e2e/acceptance.spec.ts's delete-round-trip
+ * step). `glyphStandoff` shifts a glyph badge's `at` a fixed few mm off that
+ * raw anchor, perpendicular to its own axis — see {@link GLYPH_STANDOFF_MM}
+ * for the exact value and its derivation. DIMENSIONAL badges are NOT shifted:
+ * they already float off the geometry (`BADGE_OFFSET_PX` in
+ * ConstraintBadgeLayer.tsx) and stay a deliberate click target in every tool.
  */
 import type { SketchConstraint, SketchEntity, SketchSession, ConstraintPosition } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
@@ -94,6 +105,59 @@ function axisFromAwayFrom(e: SketchEntity, position: ConstraintPosition): Point2
   return axisFromFor(e);
 }
 
+/**
+ * Plane-space (mm) clearance a GLYPH badge's anchor is nudged off the raw
+ * entity point, perpendicular to its own axis.
+ *
+ * Sized to DOMINATE `HtmlOverlayDriver`'s own screen-space nudge (glyph
+ * badges pass `axisFrom`+`BADGE_OFFSET_PX` to `overlay.register` for the
+ * leader-line/perpendicular treatment — see ConstraintBadgeLayer.tsx), NOT
+ * merely to add to it: rotating a vector in PLANE space then projecting it is
+ * NOT the same operation as projecting it then rotating in SCREEN space —
+ * for a camera view where they disagree, this bake and the driver's own
+ * nudge land on OPPOSITE sides instead of compounding (measured: a 4mm bake,
+ * on `e2e/acceptance.spec.ts`'s default framing, netted only ~4px of ACTUAL
+ * on-screen clearance instead of the ~19px the plane-space math alone
+ * predicted — the driver's own fixed 20px counter-nudge, in this specific
+ * view, ran almost exactly the other way and cancelled nearly all of it).
+ * The driver's contribution is a FIXED CSS magnitude regardless of camera —
+ * `BADGE_OFFSET_PX` (10) near-edge clearance + half the 20px badge box (10)
+ * — so a bake that clears `16px target + 20px worst-case opposition = 36px`
+ * on its own is safe in EVERY view, not just the ones where the two happen
+ * to agree. At the same measured ~4.74 px/mm (`badgeLayout.test.ts` pins
+ * this against a live-camera probe of that same test's rectangle), 10mm ⇒
+ * ~47px alone, ~27px worst-case net — comfortably past both thresholds.
+ */
+const GLYPH_STANDOFF_MM = 10;
+
+/**
+ * Nudge a glyph badge's raw anchor `at` — AND `axisFrom` by the identical
+ * plane-space delta — {@link GLYPH_STANDOFF_MM} off the entity, perpendicular
+ * to the axis. Shifting BOTH points (not just `at`) keeps `at − axisFrom`
+ * (and therefore whatever `HtmlOverlayDriver` derives from it) EXACTLY as it
+ * was before this bake — see {@link GLYPH_STANDOFF_MM} for why that
+ * independence, rather than trying to align with it, is the point. Returns
+ * both points unmoved when there is no axis to take a direction from (a bare
+ * `Point` has none) — the driver's own (small, ≤20px) fallback still applies
+ * on top of that case, same as before this change.
+ */
+function glyphStandoff(
+  at: Point2,
+  axisFrom: Point2 | undefined,
+): { at: Point2; axisFrom: Point2 | undefined } {
+  if (!axisFrom) return { at, axisFrom };
+  const ax = at.x - axisFrom.x;
+  const ay = at.y - axisFrom.y;
+  const len = Math.hypot(ax, ay);
+  if (len < 1e-9) return { at, axisFrom };
+  const dx = (ay / len) * GLYPH_STANDOFF_MM;
+  const dy = (-ax / len) * GLYPH_STANDOFF_MM;
+  return {
+    at: { x: at.x + dx, y: at.y + dy },
+    axisFrom: { x: axisFrom.x + dx, y: axisFrom.y + dy },
+  };
+}
+
 function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): ConstraintBadge | null {
   const first = byId.get(c.entities[0]);
   if (!first) return null;
@@ -103,22 +167,22 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "Vertical":
     case "Coincident": {
       const position = c.positions?.[0] ?? "Start";
-      const at = c.type === "Coincident" ? entityPointCoord(first, position) : entityAnchor(first);
+      const rawAt = c.type === "Coincident" ? entityPointCoord(first, position) : entityAnchor(first);
       // A Coincident badge sits AT the shared point, so it would otherwise sit
       // directly on top of the vertex marker there — offset it along the
       // entity's own axis, away from that point, same as every other badge.
-      const axisFrom = c.type === "Coincident" ? axisFromAwayFrom(first, position) : axisFromFor(first);
-      return at
-        ? {
-            id: c.id,
-            glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
-            kind: c.type,
-            at,
-            editable: false,
-            offsetIndex: 0,
-            axisFrom,
-          }
-        : null;
+      const rawAxisFrom = c.type === "Coincident" ? axisFromAwayFrom(first, position) : axisFromFor(first);
+      if (!rawAt) return null;
+      const { at, axisFrom } = glyphStandoff(rawAt, rawAxisFrom);
+      return {
+        id: c.id,
+        glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
+        kind: c.type,
+        at,
+        editable: false,
+        offsetIndex: 0,
+        axisFrom,
+      };
     }
     case "Parallel":
     case "Perpendicular":
@@ -129,18 +193,18 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "OnCurve":
     case "Symmetric":
     case "Fixed": {
-      const at = entityAnchor(first);
-      return at
-        ? {
-            id: c.id,
-            glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
-            kind: c.type,
-            at,
-            editable: false,
-            offsetIndex: 0,
-            axisFrom: axisFromFor(first),
-          }
-        : null;
+      const rawAt = entityAnchor(first);
+      if (!rawAt) return null;
+      const { at, axisFrom } = glyphStandoff(rawAt, axisFromFor(first));
+      return {
+        id: c.id,
+        glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
+        kind: c.type,
+        at,
+        editable: false,
+        offsetIndex: 0,
+        axisFrom,
+      };
     }
     case "Distance":
     case "HorizontalDistance":

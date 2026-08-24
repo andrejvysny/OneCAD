@@ -6,7 +6,12 @@
  * branch returns "Under-constrained" for any non-ok status, even with DOF 0.
  */
 import { describe, it, expect } from "vitest";
-import { sketchStatusText, sketchStatusToneClass, sketchStatusIsAlert } from "./constraintStatus";
+import {
+  sketchStatusText,
+  sketchStatusToneClass,
+  sketchStatusIsAlert,
+  emptySketchCard,
+} from "./constraintStatus";
 
 describe("constraintStatus WP0", () => {
   it("does not render 'Under-constrained' when DOF is 0", () => {
@@ -53,5 +58,18 @@ describe("constraintStatus 4-state tone (Sketcher UX cleanup)", () => {
     expect(sketchStatusIsAlert("ok")).toBe(false);
     expect(sketchStatusIsAlert("over")).toBe(true);
     expect(sketchStatusIsAlert("error")).toBe(true);
+  });
+});
+
+describe("emptySketchCard (design item 12 / audit A11a)", () => {
+  it("reads as a neutral 'nothing drawn yet' state, not a false completeness claim", () => {
+    const card = emptySketchCard();
+    expect(card.label).toBe("Empty sketch");
+    expect(card.sentence).toBe("Draw geometry to begin.");
+    // "under" — the same tone `sketchStatusToneClass` maps to the neutral
+    // color, so this never reads as an alert (`sketchStatusIsAlert`).
+    expect(card.tone).toBe("under");
+    expect(sketchStatusToneClass(card.tone)).toBe("text-dof-neutral");
+    expect(sketchStatusIsAlert(card.tone)).toBe(false);
   });
 });

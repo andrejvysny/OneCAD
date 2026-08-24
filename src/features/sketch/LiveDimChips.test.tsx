@@ -325,6 +325,39 @@ describe("LiveDimChips", () => {
     expect(screen.getByTitle("Sets the geometry — no constraint is created")).toBeInTheDocument();
   });
 
+  /*
+   * Audit A11c / plan item 14: the field used to be a hard `w-9` (36px) for
+   * every mm length, so a 5–6 character radius clipped its own text mid-gesture
+   * (the tangent-arc chip does that routinely). jsdom cannot measure real
+   * overflow, so the assertion is on the mechanism: no fixed-width class, and a
+   * `ch` width that TRACKS the rendered text.
+   */
+  it("the field width follows its content instead of a fixed 36px (A11c)", () => {
+    render(<LiveDimChips />);
+    show([chip({ value: 137.25 })]); // "137.25" — six characters
+    const input = screen.getByTestId("live-dim-length");
+
+    expect(input).toHaveValue("137.25");
+    expect(input.className).not.toMatch(/\bw-9\b/);
+    expect(input.className).not.toMatch(/\bw-14\b/);
+    expect(input.style.width).toBe("7ch"); // 6 chars + 1 for the caret
+
+    // Shorter content shrinks, but never below the floor.
+    act(() => liveDimStore.getState().update([chip({ value: 5 })], ANCHORS, {}));
+    expect(screen.getByTestId("live-dim-length").style.width).toBe("4ch");
+  });
+
+  it("the content-driven width applies to non-mm units too", () => {
+    render(<LiveDimChips />);
+    show([chip({ value: 25.4 })]);
+    act(() => settingsStore.getState().setDisplayUnit("in"));
+    // "1" in inches — the old rule gave every non-mm length a fixed 56px.
+    const input = screen.getByTestId("live-dim-length");
+    expect(input).toHaveValue("1");
+    expect(input.style.width).toBe("4ch");
+    expect(input.className).not.toMatch(/\bw-14\b/);
+  });
+
   it("a unit switch re-displays the same mm — it never re-commits", () => {
     render(<LiveDimChips />);
     show([chip({ value: 25.4 })]);

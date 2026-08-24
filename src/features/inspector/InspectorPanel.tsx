@@ -8,6 +8,7 @@ import {
 import { useSelectionStore, primarySelection, type EntityRef } from "@/stores/selectionStore";
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
+import { useSketchStore } from "@/stores/sketchStore";
 import { useRepairStore } from "@/stores/repairStore";
 import { RepairPanel } from "@/features/repair/RepairPanel";
 import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
@@ -21,6 +22,7 @@ import {
   sketchStatusText,
   sketchStatusSentence,
   sketchStatusToneClass,
+  emptySketchCard,
 } from "@/features/sketch/constraintStatus";
 import type { SketchStatus } from "@/stores/documentStore";
 
@@ -53,6 +55,11 @@ export function InspectorPanel() {
   const sketches = useDocumentStore((s) => s.sketches);
   const features = useDocumentStore((s) => s.features);
   const activeSketchId = useViewportStore((s) => s.activeSketchId);
+  // Design item 12 / audit A11a: the DOF card's "empty sketch" branch needs
+  // the LIVE session's entity count, not the document registry's dof/status
+  // — a fresh sketch reports dof 0/"ok" from the registry same as a fully
+  // constrained one, which is exactly the false-completeness copy being fixed.
+  const sketchSession = useSketchStore((s) => s.session);
   const repairPanelOpen = useRepairStore((s) => s.panelOpen);
   const repairItemCount = useRepairStore((s) => s.items.length);
   // Gear Generator G1-h: an armed gear (fresh placement OR `editGearFeature`
@@ -84,6 +91,7 @@ export function InspectorPanel() {
           sketchName={sketches[activeSketchId].name}
           dof={sketches[activeSketchId].dof}
           status={sketches[activeSketchId].status}
+          entityCount={sketchSession?.entities.length ?? 0}
         />
       ) : sketching ? (
         // Plane-pick phase (no activeSketchId yet) or the sketch registry
@@ -233,12 +241,20 @@ function SketchState({
   sketchName,
   dof,
   status,
+  entityCount,
 }: {
   sketchName: string;
   dof: number;
   status: SketchStatus;
+  entityCount: number;
 }) {
-  const { label, tone } = sketchStatusText(status, dof);
+  // A blank sketch has nothing to be "fully defined" about — its registry
+  // dof/status (typically 0/"ok") reads through the ordinary path as the
+  // false completeness claim the audit caught (design item 12 / A11a).
+  const empty = entityCount === 0;
+  const { label, tone, sentence } = empty
+    ? emptySketchCard()
+    : { ...sketchStatusText(status, dof), sentence: sketchStatusSentence(status, dof) };
   // under/ok share the plain neutral card — under-constrained mid-sketch is
   // normal, not a warning. over/error each get their own severity tint so a
   // redundant constraint doesn't read as visually identical to a conflicting
@@ -257,9 +273,7 @@ function SketchState({
       {/* DOF state card (1e treatment folded into 1c per WP spec). */}
       <div className={cn("mt-3 rounded-md border px-3 py-2.5", cardClass)}>
         <div className={cn("text-[12px] font-medium", sketchStatusToneClass(tone))}>{label}</div>
-        <div className={cn("mt-1 text-[12px] leading-normal", bodyClass)}>
-          {sketchStatusSentence(status, dof)}
-        </div>
+        <div className={cn("mt-1 text-[12px] leading-normal", bodyClass)}>{sentence}</div>
       </div>
 
       {/* Moved here from the top chrome bar (Sketcher UX cleanup): constraint

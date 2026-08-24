@@ -4,6 +4,7 @@ import {
   deleteConstraints,
   deleteEntities,
   editConstraintValue,
+  rejectConflictHint,
   setEntitiesConstruction,
   undoSketch,
 } from "./sketchService";
@@ -96,6 +97,68 @@ describe("commitDimensionConstraint — solver round-trip + reject-on-conflict",
     const s = sketchStore.getState().session!;
     expect(s.constraints.map((c) => c.id)).toEqual(["d1"]); // d2 dropped; d1 survives
     expect(sketchStore.getState().conflictingIds).toEqual([]); // the restore solve is clean
+  });
+});
+
+// ── rejectConflictHint — self-blame fix (adversarial-review item 5) ───────────
+
+describe("rejectConflictHint", () => {
+  const named: SketchConstraint = { id: "c14", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 };
+
+  it("names the OTHER conflicting constraint when one is present", () => {
+    expect(rejectConflictHint([named], ["c14", "d1"], "d1", "Dimension")).toBe(
+      "Dimension removed — conflicts with Distance (c14)",
+    );
+  });
+
+  it("falls back to the generic sentence when `conflicting` is empty", () => {
+    expect(rejectConflictHint([], [], "d1", "Dimension")).toBe(
+      "Dimension removed — it would over-constrain the sketch",
+    );
+    expect(rejectConflictHint([], undefined, "d1", "Constraint")).toBe(
+      "Constraint removed — it would over-constrain the sketch",
+    );
+  });
+
+  // The bug: the OLD `?? ids[0]` fallback re-picked the authored id itself when
+  // it was the ONLY entry, naming the just-removed dimension as its own clash
+  // ("Dimension removed — conflicts with Distance (c14)" where c14 IS d1).
+  it("falls back to the generic sentence when the ONLY conflicting id is the authored one", () => {
+    expect(rejectConflictHint([named], ["d1"], "d1", "Dimension")).toBe(
+      "Dimension removed — it would over-constrain the sketch",
+    );
+  });
+});
+
+// Same self-blame case, through the real reject path (mirrors the fake-client
+// shape of "a rejected applied constraint names the clashing constraint" above).
+describe("commitDimensionConstraint — reject hint never blames the authored dimension", () => {
+  beforeEach(() => {
+    resetMockSketches();
+    sketchStore.getState().reset();
+  });
+
+  it("uses the generic sentence when the solve's only conflicting id is the new dimension", async () => {
+    seedSession([
+      { id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] },
+    ]);
+    const dim: SketchConstraint = { id: "c2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 };
+    const client = {
+      sketchUpsert: (() => {
+        let n = 0;
+        return () => {
+          n += 1;
+          return Promise.resolve(
+            n === 1
+              ? { sketchId: "sk-dim", sketchRevision: 2, dof: 0, status: "Conflicting" as const, conflicting: ["c2"], solvedPositions: {} }
+              : { sketchId: "sk-dim", sketchRevision: 3, dof: 0, status: "FullyConstrained" as const, conflicting: [], solvedPositions: {} },
+          );
+        };
+      })(),
+    } as unknown as CadClient;
+    const { rejected, hint } = await commitDimensionConstraint(client, dim);
+    expect(rejected).toBe(true);
+    expect(hint).toBe("Dimension removed — it would over-constrain the sketch");
   });
 });
 
@@ -250,6 +313,33 @@ describe("conflictingIds — solve write-back REPLACES, exit CLEARS, reject-hint
     // The mock lane always reports conflicting: [] — the write-back must clear it.
     await editConstraintValue(mockClient, "c1", 5);
     expect(sketchStore.getState().conflictingIds).toEqual([]);
+  });
+
+  it("a refused EDIT reverts the value and surfaces an error hint (A2 fix)", async () => {
+    seedSession([
+      { id: "c1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+    ]);
+    const client = {
+      // Edit solve → Conflicting blaming only the edited dim itself (the mock
+      // lane's can't-drive refusal shape); restore solve → clean.
+      sketchUpsert: (() => {
+        let n = 0;
+        return () => {
+          n += 1;
+          return Promise.resolve(
+            n === 1
+              ? { sketchId: "sk-dim", sketchRevision: 2, dof: 0, status: "Conflicting" as const, conflicting: ["c1"], solvedPositions: {} }
+              : { sketchId: "sk-dim", sketchRevision: 3, dof: 2, status: "UnderConstrained" as const, conflicting: [], solvedPositions: {} },
+          );
+        };
+      })(),
+    } as unknown as CadClient;
+    await editConstraintValue(client, "c1", 99);
+    const s = sketchStore.getState().session;
+    expect(s?.constraints.find((c) => c.id === "c1")?.value).toBe(40); // reverted, not 99
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+    expect(viewportStore.getState().statusHint?.message).toContain("Dimension edit reverted");
+    expect(sketchStore.getState().conflictingIds).toEqual([]); // restore cleared it
   });
 
   it("setSession(null) (exit / dispose) CLEARS conflictingIds", () => {

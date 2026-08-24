@@ -112,8 +112,12 @@ function sessionSuperseded(gen: number): boolean {
  * Build a reject hint that NAMES the constraint the rejected one clashed with. The
  * solve's `conflicting` ids (frontend ids) resolve against `constraints` (the array
  * INCLUDING the just-authored one); the authored id is excluded so the hint points
- * at the OTHER party. Falls back to the generic over-constrain text when no
- * conflicting id is available (e.g. the mock lane, which never reports ids).
+ * at the OTHER party. Falls back to the generic over-constrain text when no OTHER
+ * conflicting id is available — either `conflicting` is empty (e.g. the mock lane,
+ * which doesn't always report ids), or its only member IS the authored id itself,
+ * which used to fall through to `ids[0]` and re-select that same id: "Dimension
+ * removed — conflicts with Distance (c14)" where c14 IS the dimension just
+ * removed. Same self-blame `editConstraintValueNow` already avoids just below.
  *
  * EXPORTED (append-only) for the draw path's live-dimension fallback, which
  * rejects the typed dimension while KEEPING the entity — same phrasing, so a
@@ -127,7 +131,7 @@ export function rejectConflictHint(
 ): string {
   const generic = `${noun} removed — it would over-constrain the sketch`;
   const ids = conflicting ?? [];
-  const pick = ids.find((id) => id !== authoredId) ?? ids[0];
+  const pick = ids.find((id) => id !== authoredId) ?? null;
   if (!pick) return generic;
   const type = constraints.find((c) => c.id === pick)?.type ?? "constraint";
   return `${noun} removed — conflicts with ${type} (${pick})`;
@@ -156,6 +160,40 @@ async function editConstraintValueNow(
   );
   const result = await client.sketchUpsert(session.sketchId, session.entities, constraints);
   if (sessionSuperseded(gen)) return;
+
+  // Reject-on-conflict, same discipline as `commitDimensionConstraintNow`:
+  // without this branch a refused EDIT (over-constrained, or one the mock
+  // lane's `enforceDriving` cannot drive) landed in the store with the new
+  // value while the geometry stayed put — the exact label-lies-about-geometry
+  // defect of audit A2. Callers are fire-and-forget (`void editConstraint…`),
+  // so the hint is surfaced here rather than returned.
+  if (isConflictStatus(result.status)) {
+    const ids = result.conflicting ?? [];
+    const pick = ids.find((id) => id !== constraintId) ?? null;
+    const clashType = pick ? (constraints.find((c) => c.id === pick)?.type ?? "constraint") : null;
+    const hint = clashType
+      ? `Dimension edit reverted — conflicts with ${clashType} (${pick})`
+      : "Dimension edit reverted — this change needs the desktop solver";
+    const restore = await restoreUpsert(client, session);
+    if (sessionSuperseded(gen)) return;
+    if (!restore) {
+      viewportStore.getState().setStatusHint(`${hint}${RESYNC_WARNING}`, { severity: "error" });
+      return;
+    }
+    const reverted = { ...session, dof: restore.dof, status: restore.status };
+    sketchStore.getState().setSession(reverted);
+    sketchStore.getState().setConflicting(restore.conflicting ?? []);
+    getViewportEngine()?.updateSketchSession(
+      reverted.plane,
+      reverted.entities,
+      reverted.status,
+      reverted.constraints,
+    );
+    documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
+    viewportStore.setState({ dofBadge: restore.dof });
+    viewportStore.getState().setStatusHint(hint, { severity: "error" });
+    return; // rejected: no undo snapshot pushed
+  }
 
   // BOTH solve channels: editing a `Radius` moves no point at all, so a
   // positions-only publication left the rendered circle at its old size while

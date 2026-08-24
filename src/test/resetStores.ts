@@ -38,6 +38,7 @@ export function resetStores(): void {
     cameraViewLabel: "TOP",
     fov: 76,
     cursor: { x: 273, y: 210, z: 0 },
+    cursorPlaneUV: { u: 0, v: 0 },
     dofBadge: null,
     detectedInputDevice: "mouse",
     statusHint: null,

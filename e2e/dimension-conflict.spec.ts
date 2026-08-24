@@ -44,7 +44,7 @@ test("a second Distance on the same points with a different value is rejected + 
   const snap = await getSketchSnapshot(page);
   expect(snap.lines).toHaveLength(1);
   const plane = snap.plane;
-  const line = snap.lines[0];
+  let line = snap.lines[0];
 
   const clickPlanePoint = async (p: { x: number; y: number }) => {
     const c = await planePointToClient(page, plane, p);
@@ -101,15 +101,21 @@ test("a second Distance on the same points with a different value is rejected + 
 
   // ── Second Distance on the SAME two points, a different value: rejected ─────
   await deselect();
+  // Re-snapshot: the first Distance is DRIVING in the mock lane since the A2
+  // fix (`mockEnforce.ts` scales the line to the authored value), so the
+  // endpoints moved and the pre-commit coordinates no longer hit them. The old
+  // pass relied on the exact identity-solve defect this program removed.
+  line = (await getSketchSnapshot(page)).lines[0];
   await selectBothEndpoints();
   await constraintToolbar(page);
   await expect(distanceBtn).toBeEnabled();
   await distanceBtn.click();
 
   await expect(dimInput).toBeVisible();
-  // The chip re-seeds from the (unmoved) actual geometry — same seed as before.
-  // Offsetting further from the FIRST authored value (not just the seed) is what
-  // guarantees a provable R1 clash (|Δvalue| far past the 1e-9 tolerance).
+  // The chip re-seeds from the actual geometry, which the first Distance DROVE
+  // to `firstValue` — so offsetting from the FIRST authored value (not the
+  // original seed) is what guarantees a provable R1 clash (|Δvalue| far past
+  // the 1e-9 tolerance).
   const secondValue = firstValue + 70;
   await dimInput.fill(secondValue.toFixed(1));
   await dimInput.press("Enter");

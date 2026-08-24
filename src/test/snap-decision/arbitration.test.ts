@@ -377,3 +377,65 @@ describe("degenerate inputs", () => {
     }
   });
 });
+
+// ── grid-crossing shadow (user report: "snaps to grid line NEAR the crossing") ──
+//
+// An alignment guide whose row/column IS a grid line composes with numeric
+// rounding into an on-line point at near-zero cost, out-scoring the crossing a
+// few px away. The shadow rule makes the crossing win exactly there — and
+// nowhere else: off-grid guides, geometry points, and guide pairs landing ON
+// the crossing are all untouched.
+describe("grid-crossing shadow", () => {
+  const gridOn = { enableGrid: true, gridStep: 10 } as const;
+
+  it("the crossing beats a guide+rounding composite sitting ON its own column", () => {
+    const anchors = [{ x: 0, y: 0 }];
+    // Guide column x=20 IS a grid column; cursor 3px below the (20,30) crossing.
+    const d = decide({ x: 20.3, y: 27 }, [], {
+      ...gridOn,
+      recentPoints: [{ x: 20, y: 90 }],
+      frame: dimFrame("rect", anchors),
+      toolId: "rect",
+      toolAnchors: anchors,
+      quantum: { length: 1, angle: 1 },
+    });
+    expect(d.primaryKind).toBe("grid");
+    expect(d.point).toEqual({ x: 20, y: 30 });
+    expect(d.rejected.some((r) => r.reason === "grid-crossing-shadow")).toBe(true);
+  });
+
+  it("an OFF-grid guide composite is untouched by the rule", () => {
+    const anchors = [{ x: 0, y: 0 }];
+    // Guide column x=22 is NOT a grid line: the composite stays the winner.
+    const d = decide({ x: 22.3, y: 27 }, [], {
+      ...gridOn,
+      recentPoints: [{ x: 22, y: 90 }],
+      frame: dimFrame("rect", anchors),
+      toolId: "rect",
+      toolAnchors: anchors,
+      quantum: { length: 1, angle: 1 },
+    });
+    expect(d.point.x).toBe(22);
+    expect(d.primaryKind).not.toBe("grid");
+    expect(d.rejected.some((r) => r.reason === "grid-crossing-shadow")).toBe(false);
+  });
+
+  it("a geometry point on the crossing's row is exempt from the shadow", () => {
+    const line = SCENARIO_BUILDERS.line("l1", [20.5, 30], [40, 30]);
+    const d = decide({ x: 20.4, y: 30.1 }, [line], gridOn);
+    expect(d.primaryKind).toBe("endpoint");
+    expect(d.point).toEqual({ x: 20.5, y: 30 });
+  });
+
+  it("a guide PAIR landing exactly ON the crossing is kept, not shadowed", () => {
+    const d = decide({ x: 20.3, y: 30.2 }, [], {
+      ...gridOn,
+      recentPoints: [
+        { x: 20, y: 90 },
+        { x: 90, y: 30 },
+      ],
+    });
+    expect(d.point).toEqual({ x: 20, y: 30 });
+    expect(d.rejected.some((r) => r.reason === "grid-crossing-shadow")).toBe(false);
+  });
+});

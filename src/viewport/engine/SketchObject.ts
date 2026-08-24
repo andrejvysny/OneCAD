@@ -6,10 +6,18 @@
  * that group:
  *   - a low-alpha plane TINT quad (canvas-sketch token) + an adaptive plane grid
  *     (reused GridPlane, re-centered in plane-local coords),
+ *   - translucent fills of the closed LOOPS the entities currently form, so
+ *     "these strokes close" is visible WHILE drawing (audit item #2),
  *   - committed entities as `Line2` (px line width, addons `lines/` — ships with
  *     three 0.185.1 for the WebGLRenderer), colored by constraint state,
  *   - endpoint/center markers as constant-size `THREE.Points`,
  *   - an in-progress PREVIEW channel (rubber-band) the tool machines drive.
+ *
+ * EVERY material here is `depthTest: false` (audit item #1). See renderOrder.ts
+ * rule 3: the active session must paint over a coplanar body face, at the price
+ * of an accepted x-ray look while orbiting mid-session. The plane tint and the
+ * plane grid are deliberately NOT in that set — they are the surface the sketch
+ * sits on, not the sketch, and an x-rayed tint would wash out every body.
  *
  * Line2 needs the material `resolution` in device pixels for correct width, so
  * the engine calls `update(...)` every frame with the viewport size (already
@@ -41,6 +49,7 @@ import type { FrontendPointRef } from "@/tools/sketch/snapTypes";
 import { findClosedLoops, loopCentroid } from "@/tools/sketch/closedLoop";
 import { layoutDimensionLines } from "@/tools/sketch/dimensionLineLayout";
 import type { SketchConstraint } from "@/ipc/types";
+import { buildRingFillGeometry } from "./sketchFillGeometry";
 
 /** Fallback tessellation when no projected scale is known yet (first frame,
  *  jsdom). Adaptive counts take over as soon as `update()` supplies one. */
@@ -95,6 +104,14 @@ const ANGLE_ARC_WIDTH = cssToDevice(CSS_WIDTHS.angleArc);
 const ENDPOINT_IDLE_OPACITY = 0.3;
 const MIDPOINT_IDLE_OPACITY = 0;
 const CENTROID_IDLE_OPACITY = 0;
+
+/**
+ * Live closed-region fill alpha (audit item #2). Lower than the static layer's
+ * 0.18 on purpose: this one is a CLOSURE SIGNAL under geometry the user is
+ * actively drawing on top of, not a selectable model-mode surface, so it has to
+ * read as "closed" without competing with the strokes above it.
+ */
+const ACTIVE_FILL_OPACITY = 0.12;
 
 /**
  * Flat local xyz (z=0) polyline for an entity, in plane coords.
@@ -153,6 +170,53 @@ export function entityPolyline(e: {
   return [];
 }
 
+/** Join tolerance when chaining sampled polylines into one ring. Endpoints are
+ *  either copied verbatim from the entity or reconstructed from an angle
+ *  (`entityPolyline`'s arc branch), so the only gap here is double rounding. */
+const JOIN_EPS = 1e-6;
+
+const nearPoint = (a: [number, number], b: [number, number]): boolean =>
+  Math.abs(a[0] - b[0]) <= JOIN_EPS && Math.abs(a[1] - b[1]) <= JOIN_EPS;
+
+/**
+ * Splice sampled entity polylines into ONE closed plane (u,v) ring.
+ *
+ * `findClosedLoops` hands back entity ids in WALK order, but each entity's own
+ * polyline runs in its authored direction (Line p0→p1, Arc CCW from start) —
+ * two edges drawn outward from a shared corner run head-to-head. Concatenating
+ * blind folds the ring back on itself and ear-clips into a bowtie, so each part
+ * is flipped to continue the chain instead. A part that meets neither end
+ * returns null rather than being forced: a wrong fill is worse than no fill.
+ */
+function chainRing(parts: readonly (readonly [number, number][])[]): [number, number][] | null {
+  if (parts.length === 0 || parts[0].length === 0) return null;
+  const first = [...parts[0]];
+  // Orient the FIRST part off the second one — it has no predecessor to follow.
+  if (parts.length > 1) {
+    const next = parts[1];
+    if (next.length === 0) return null;
+    const tail = first[first.length - 1];
+    if (!nearPoint(tail, next[0]) && !nearPoint(tail, next[next.length - 1])) first.reverse();
+  }
+  const ring = first;
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i];
+    if (part.length === 0) return null;
+    const tail = ring[ring.length - 1];
+    const oriented = nearPoint(part[0], tail)
+      ? part
+      : nearPoint(part[part.length - 1], tail)
+        ? [...part].reverse()
+        : null;
+    if (!oriented) return null;
+    for (let j = 1; j < oriented.length; j++) ring.push(oriented[j]);
+  }
+  // A self-closed curve repeats its first sample last, and so does a chain that
+  // walked all the way round — one closing duplicate, dropped.
+  if (ring.length > 1 && nearPoint(ring[0], ring[ring.length - 1])) ring.pop();
+  return ring.length >= 3 ? ring : null;
+}
+
 /** Endpoint/center markers of an entity, flat local xyz. */
 function entityMarkers(e: SketchEntity): number[] {
   const out: number[] = [];
@@ -199,6 +263,9 @@ interface SketchObjectDeps {
 
 export class SketchObject {
   private readonly planeGroup = new THREE.Group();
+  // Live closed-region fills — its own sub-layer so a fill rebuild never
+  // touches committed entity lines and vice versa.
+  private readonly fillGroup = new THREE.Group();
   private readonly entityGroup = new THREE.Group();
   private readonly previewGroup = new THREE.Group();
   // Destructive doomed-piece overlay (Trim tool hover), above committed entities.
@@ -222,6 +289,8 @@ export class SketchObject {
   // selecting one endpoint never recolors the shared vertex-ring pass.
   private readonly selectedPoints: THREE.Points;
   private readonly selectedPointsMat: THREE.PointsMaterial;
+  /** Shared by every live region fill — they are all the same tone. */
+  private readonly fillMat: THREE.MeshBasicMaterial;
 
   private plane: SketchPlane | null = null;
   private entities: SketchEntity[] = [];
@@ -261,7 +330,9 @@ export class SketchObject {
 
   constructor(private readonly deps: SketchObjectDeps) {
     this.planeGroup.name = "sketchPlane";
+    this.fillGroup.name = "sketchFills";
     this.planeGroup.add(
+      this.fillGroup,
       this.entityGroup,
       this.previewGroup,
       this.trimGhostGroup,
@@ -289,9 +360,25 @@ export class SketchObject {
     this.grid.setVisible(true);
     this.planeGroup.add(this.grid.object3D);
 
+    // Closure fills, under everything else the session draws — one shared
+    // material, since they are all the same tone. See `rebuildFills` for where
+    // the loops come from (deliberately NOT the mock kernel, which is evicted
+    // from production builds and only ever finds one loop anyway).
+    this.fillMat = new THREE.MeshBasicMaterial({
+      color: palette.hover3d(),
+      transparent: true,
+      opacity: ACTIVE_FILL_OPACITY,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
+
     // All in-plane content is coplanar: it renders in the TRANSPARENT pass with
     // depthWrite off, layered by RENDER_ORDER only (see renderOrder.ts). Depth
-    // TEST stays on so solid bodies still occlude sketch content behind them.
+    // TEST is off too, for every ACTIVE-session material — renderOrder.ts rule 3
+    // (audit item #1): a body between the eye and the sketch plane otherwise
+    // hides the stroke entirely.
     this.pointsMat = new THREE.PointsMaterial({
       color: palette.sketchVertex(),
       map: buildDotTexture(0.7) ?? undefined,
@@ -301,6 +388,7 @@ export class SketchObject {
       opacity: ENDPOINT_IDLE_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
+      depthTest: false,
       toneMapped: false,
     });
     this.points = new THREE.Points(new THREE.BufferGeometry(), this.pointsMat);
@@ -316,6 +404,7 @@ export class SketchObject {
       opacity: MIDPOINT_IDLE_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
+      depthTest: false,
       toneMapped: false,
     });
     this.midpoints = new THREE.Points(new THREE.BufferGeometry(), this.midpointsMat);
@@ -331,6 +420,7 @@ export class SketchObject {
       opacity: CENTROID_IDLE_OPACITY,
       alphaTest: 0.05,
       depthWrite: false,
+      depthTest: false,
       toneMapped: false,
     });
     this.centroids = new THREE.Points(new THREE.BufferGeometry(), this.centroidsMat);
@@ -345,6 +435,7 @@ export class SketchObject {
       transparent: true,
       alphaTest: 0.05,
       depthWrite: false,
+      depthTest: false,
       toneMapped: false,
     });
     this.selectedPoints = new THREE.Points(new THREE.BufferGeometry(), this.selectedPointsMat);
@@ -359,6 +450,7 @@ export class SketchObject {
         linewidth: LINE_WIDTH,
         transparent: true,
         depthWrite: false,
+        depthTest: false,
         toneMapped: false,
         ...opts,
       });
@@ -421,6 +513,7 @@ export class SketchObject {
       major: palette.gridMajor(),
       clear: palette.sketchPlane(),
     });
+    this.fillMat.color.copy(palette.hover3d());
     this.pointsMat.color.copy(palette.sketchVertex());
     this.midpointsMat.color.copy(palette.sketchMidpoint());
     this.centroidsMat.color.copy(palette.sketchCentroid());
@@ -444,14 +537,22 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
-  /** Rebuild committed geometry from a session. `constraints` is optional —
-   *  omitted (drag-preview refreshes, which never edit constraints) keeps
-   *  whatever dimension lines are already drawn. */
+  /**
+   * Rebuild committed geometry from a session. `constraints` is optional —
+   * omitted (drag-preview refreshes, which never edit constraints) keeps
+   * whatever dimension lines are already drawn.
+   *
+   * `transient` marks a DRAG-FREQUENCY refresh (one per rAF, from
+   * `SketchController.fireSolve`): the closure fills are skipped and hidden for
+   * the duration, and the first non-transient update rebuilds and shows them.
+   * See `rebuildFills` for why they cannot ride a per-frame path.
+   */
   setSession(
     plane: SketchPlane,
     entities: SketchEntity[],
     status: SketchSolveStatus,
     constraints?: SketchConstraint[],
+    opts?: { transient?: boolean },
   ): void {
     this.plane = plane;
     this.entities = entities;
@@ -462,6 +563,12 @@ export class SketchObject {
     this.planeGroup.matrix.copy(this._basis);
     this.planeGroup.matrixWorldNeedsUpdate = true;
     this.rebuildEntities();
+    if (opts?.transient) {
+      this.fillGroup.visible = false;
+    } else {
+      this.rebuildFills(entities);
+      this.fillGroup.visible = true;
+    }
     this.rebuildPoints();
     this.rebuildMidpoints();
     this.rebuildCentroids();
@@ -740,6 +847,76 @@ export class SketchObject {
     geo.computeBoundingSphere();
   }
 
+  /**
+   * The entity array the fills were last built from — an IDENTITY key, the same
+   * trick `SketchController.snapCache` uses. The loop walk ear-clips every loop
+   * it finds, so it must not run on a pointer frame: the rubber-band preview
+   * goes through `setPreview`, which never touches this; a solve that moved
+   * nothing hands back the same array (`applySketchSolveResult` returns its
+   * input on an identity solve); and a solve that DID move something arrives
+   * with `transient` set for the whole drag (see `setSession`), which skips this
+   * entirely. The identity key alone is not a cadence guard — it only holds
+   * while nothing moves.
+   */
+  private fillKey: SketchEntity[] | null = null;
+
+  /** One entity's sampled plane (u,v) ring — the SAME polyline `rebuildEntities`
+   *  strokes, at the same adaptive segment count, so a fill boundary can never
+   *  disagree with the curve drawn on top of it. */
+  private entityRing(e: SketchEntity): [number, number][] {
+    const flat = entityPolyline(e, segmentsForEntity(e, this.pxPerUnit));
+    const pts: [number, number][] = [];
+    for (let i = 0; i + 2 < flat.length; i += 3) pts.push([flat[i], flat[i + 1]]);
+    return pts;
+  }
+
+  /**
+   * Rebuild the live closure fills (audit item #2) — the "these strokes close"
+   * signal, visible the instant a loop closes instead of minutes later as "No
+   * closed region to extrude".
+   *
+   * Loops come from `findClosedLoops` (the same detector the centroid markers
+   * use), plus every self-closed curve: a Circle/Ellipse has no endpoints, so
+   * the chain walk cannot see it at all, yet a lone circle is the most common
+   * one-entity profile there is. Each loop fills INDEPENDENTLY — a circle inside
+   * a rectangle draws two overlapping fills, so the "hole" reads as filled (v1;
+   * see `buildRingFillGeometry`). Nothing downstream ever reads an id from here:
+   * the region authority is the worker at finish time, and this is a preview.
+   */
+  private rebuildFills(entities: SketchEntity[]): void {
+    if (entities === this.fillKey) return;
+    this.fillKey = entities;
+    for (const c of [...this.fillGroup.children]) (c as THREE.Mesh).geometry.dispose();
+    this.fillGroup.clear();
+    // Construction geometry bounds no extrudable profile, so it must not produce
+    // a closure signal.
+    const live = entities.filter((e) => !e.construction);
+    const byId = new Map(live.map((e) => [e.id, e]));
+    const rings: [number, number][][] = [];
+    for (const loop of findClosedLoops(live)) {
+      const parts: [number, number][][] = [];
+      for (const id of loop.entityIds) {
+        const e = byId.get(id);
+        if (e) parts.push(this.entityRing(e));
+      }
+      const ring = parts.length === loop.entityIds.length ? chainRing(parts) : null;
+      if (ring) rings.push(ring);
+    }
+    for (const e of live) {
+      if (e.type !== "Circle" && e.type !== "Ellipse") continue;
+      const ring = chainRing([this.entityRing(e)]);
+      if (ring) rings.push(ring);
+    }
+    for (const ring of rings) {
+      const geo = buildRingFillGeometry(ring);
+      if (!geo) continue;
+      const mesh = new THREE.Mesh(geo, this.fillMat);
+      mesh.name = "sketchActiveFill";
+      mesh.renderOrder = RENDER_ORDER.ACTIVE_FILL;
+      this.fillGroup.add(mesh);
+    }
+  }
+
   /** Rebuild the dimension-line witnesses — authored constraints only (Track
    *  B3); a merely-selected, unconstrained edge gets a lightweight DOM label
    *  instead (`SelectionDimensionLabels`), not this 3D geometry. */
@@ -804,6 +981,14 @@ export class SketchObject {
       if (needsRetessellation(this.builtSegments, wanted)) {
         this.builtSegments = wanted;
         this.rebuildEntities();
+        // The fills sample the same polylines, so they follow the same rebuild —
+        // otherwise a zoomed-in circle strokes fine and keeps its coarse fill,
+        // which shows as the boundary the fill stops short of. Skipped while a
+        // drag has them hidden; the gesture-end update rebuilds them anyway.
+        if (this.fillGroup.visible) {
+          this.fillKey = null;
+          this.rebuildFills(this.entities);
+        }
       }
     }
     if (this.plane) {
@@ -842,6 +1027,8 @@ export class SketchObject {
     for (const c of [...this.trimGhostGroup.children]) this.disposeLine(c);
     for (const c of [...this.angleArcGroup.children]) this.disposeLine(c);
     for (const c of [...this.dimLineGroup.children]) this.disposeLine(c);
+    for (const c of [...this.fillGroup.children]) (c as THREE.Mesh).geometry.dispose();
+    this.fillMat.dispose();
     this.points.geometry.dispose();
     this.pointsMat.map?.dispose();
     this.pointsMat.dispose();

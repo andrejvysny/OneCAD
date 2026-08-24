@@ -43,7 +43,7 @@ describe("ConstraintMenu", () => {
     expect(screen.queryByRole("button", { name: "Add constraint" })).toBeNull();
   });
 
-  it("renders a closed trigger; opening it shows all 18 constraint buttons, all disabled with no selection", async () => {
+  it("renders a closed trigger; opening it shows all 20 constraint rows (icon + label), all disabled with no selection", async () => {
     const user = userEvent.setup();
     render(<ConstraintMenu />);
     enterSketch(twoLines, []);
@@ -53,8 +53,39 @@ describe("ConstraintMenu", () => {
 
     const bar = screen.getByRole("toolbar", { name: "Constraints" });
     const buttons = bar.querySelectorAll("button");
-    expect(buttons).toHaveLength(18);
+    // 14 geometric + 6 dimensional (A11g adds H-/V-Distance).
+    expect(buttons).toHaveLength(20);
     buttons.forEach((b) => expect(b).toBeDisabled());
+    // Section headers (design item 4a) and a visible text label per row, not
+    // just an icon-only glyph.
+    expect(screen.getByText("Geometric")).toBeInTheDocument();
+    expect(screen.getByText("Dimensional")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Parallel" })).toHaveTextContent("Parallel");
+  });
+
+  it("A11g: Horizontal/Vertical Distance are reachable from the Add-constraint menu", async () => {
+    const user = userEvent.setup();
+    render(<ConstraintMenu />);
+    enterSketch(twoLines, []);
+    await user.click(screen.getByRole("button", { name: "Add constraint" }));
+
+    expect(screen.getByRole("button", { name: "Horizontal distance" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Vertical distance" })).toBeInTheDocument();
+  });
+
+  it("a disabled row's title explains what to select; an enabled row's title is just its label", async () => {
+    const user = userEvent.setup();
+    render(<ConstraintMenu />);
+    enterSketch(twoLines, [{ entityId: "e1" }, { entityId: "e2" }]);
+    await user.click(screen.getByRole("button", { name: "Add constraint" }));
+
+    // Coincident is not applicable to a two-line selection — disabled, reason shown.
+    expect(screen.getByRole("button", { name: "Coincident" })).toHaveAttribute(
+      "title",
+      "Select two points",
+    );
+    // Parallel IS applicable here — title is just the label.
+    expect(screen.getByRole("button", { name: "Parallel" })).toHaveAttribute("title", "Parallel");
   });
 
   it("enables exactly the applicable kinds for a two-line selection", async () => {

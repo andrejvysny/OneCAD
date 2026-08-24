@@ -32,17 +32,29 @@ export interface ApplicableConstraints {
   existingFixed: SketchConstraint | null;
 }
 
+/**
+ * The applicable set for a selection — the SAME derivation the hook exposes,
+ * without the React binding, so the keyboard lane (`useShortcuts`'s
+ * `applyConstraint` action, plan item 6) offers exactly what the menu and the
+ * context chips do instead of re-deriving applicability of its own.
+ */
+export function applicableConstraintsFor(
+  selected: SketchSel[],
+  entities: SketchEntity[],
+): ApplicableConstraint[] {
+  const targets = selected
+    .map((sel) => toConstraintTarget(sel, entities))
+    .filter((t): t is NonNullable<typeof t> => t !== null);
+  return evaluateApplicability(targets, entities);
+}
+
 export function useApplicableConstraints(): ApplicableConstraints {
   const selected = useSketchSelectionStore((s) => s.selected);
   const session = useSketchStore((s) => s.session);
   return useMemo(() => {
     const entities: SketchEntity[] = session?.entities ?? [];
-    const targets = selected
-      .map((sel) => toConstraintTarget(sel, entities))
-      .filter((t): t is NonNullable<typeof t> => t !== null);
-    const applicables = evaluateApplicability(targets, entities);
     return {
-      applicables,
+      applicables: applicableConstraintsFor(selected, entities),
       centroid: selectionCentroid(selected, entities),
       existingFixed: existingFixedOn(selected, session?.constraints ?? []),
     };

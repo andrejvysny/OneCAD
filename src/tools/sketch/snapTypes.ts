@@ -198,7 +198,10 @@ export interface RejectedSnapCandidate {
     | "disabled-source"
     | "invalid-projection"
     /** P5: an extremum with no independent point address — placement only. */
-    | "derived-point-not-persistable";
+    | "derived-point-not-persistable"
+    /** An aid-only set (guides/polar/numeric) landing ON a grid crossing's own
+     *  line, inside the crossing's reach — it yields to the crossing itself. */
+    | "grid-crossing-shadow";
 }
 
 /** The resolved placement for one pointer sample. */
@@ -292,9 +295,20 @@ export function releaseRadiusPx(acquirePx: number): number {
  * Below the square cell's covering radius (√2/2 ≈ 0.707) on purpose: a grid
  * reach that covers the whole cell leaves no mid-cell region where cursor
  * numeric rounding can answer instead, which is what made grid and
- * dimension-rounding mutually exclusive in the legacy ladder.
+ * dimension-rounding mutually exclusive in the legacy ladder. Raised 0.35 →
+ * 0.42 (user request: crossings were too easy to miss); opposing crossings
+ * still leave a 16% mid-cell corridor (2 × 0.42 = 0.84 < 1).
  */
-export const GRID_REACH_FACTOR = 0.35;
+export const GRID_REACH_FACTOR = 0.42;
+
+/**
+ * Grid reach may exceed the user's point reach by this factor (only where the
+ * cell term allows it). A crossing is the easiest target to re-acquire — its
+ * position is knowable without aiming — so a slightly generous reach reads as
+ * helpful rather than grabby, unlike geometry points where reach IS the
+ * hit-test contract and stays at `acquirePx` exactly.
+ */
+export const GRID_REACH_ACQUIRE_FACTOR = 1.25;
 
 /**
  * Grid capture reach, in CSS pixels — CELL-RELATIVE, capped by the user's
@@ -302,9 +316,10 @@ export const GRID_REACH_FACTOR = 0.35;
  *
  * Both halves matter. Without the cell term, a zoomed-out grid whose cell is
  * 3px across is captured everywhere by an 8px point radius, and cursor numeric
- * rounding can never answer. Without the cap, a zoomed-in grid whose cell is
- * 400px across would capture 140px away, far outside anything the user would
- * read as "near a grid line".
+ * rounding can never answer. Without the cap (the point reach ×
+ * GRID_REACH_ACQUIRE_FACTOR), a zoomed-in grid whose cell is 400px across
+ * would capture 168px away, far outside anything the user would read as
+ * "near a grid crossing".
  *
  * Returns 0 (no grid capture) for a degenerate metric or a non-positive step.
  */
@@ -318,7 +333,7 @@ export function gridReachPx(
   const vCellPx = metricNorm(metric, 0, gridStep);
   const cell = Math.min(uCellPx, vCellPx);
   if (!Number.isFinite(cell) || cell < GRID_MIN_CELL_PX) return 0;
-  return Math.min(acquirePx, GRID_REACH_FACTOR * cell);
+  return Math.min(acquirePx * GRID_REACH_ACQUIRE_FACTOR, GRID_REACH_FACTOR * cell);
 }
 
 /**

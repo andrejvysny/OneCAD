@@ -47,6 +47,19 @@ describe("ConstraintContextChips", () => {
     expect(screen.getByRole("button", { name: "Angle" })).toBeInTheDocument();
   });
 
+  // Design item 4d — each icon-only chip carries the constraint's display name
+  // as a native title tooltip (no layout change). Plan item 6 appends the
+  // keyboard chord for the six kinds that have one; the rest are name-only.
+  it("each chip's title is the constraint's display name, plus its chord when bound", () => {
+    render(<ConstraintContextChips />);
+    enterSketch([{ entityId: "e1" }, { entityId: "e2" }]);
+    expect(screen.getByRole("button", { name: "Parallel" })).toHaveAttribute(
+      "title",
+      "Parallel (⇧P)",
+    );
+    expect(screen.getByRole("button", { name: "Angle" })).toHaveAttribute("title", "Angle");
+  });
+
   it("clicking a chip applies the constraint", async () => {
     const user = userEvent.setup();
     render(<ConstraintContextChips />);

@@ -89,6 +89,30 @@ describe("StatusBar", () => {
     expect(info).not.toHaveClass("text-traffic-close");
   });
 
+  /*
+   * `key={statusHint.message}` alone never remounts a REPEATED identical error
+   * (React reuses the node when the key doesn't change), so the one-shot pulse
+   * only ever played once no matter how many times the same failure fired.
+   * `statusHintSeq` (viewportStore) bumps on every `setStatusHint` call, so the
+   * composite key remounts the node even when the message text is unchanged.
+   */
+  it("re-triggers the error pulse for the SAME message fired twice", () => {
+    renderStatusBar();
+
+    act(() =>
+      viewportStore.getState().setStatusHint("Extrude failed: boom", { severity: "error", sticky: true }),
+    );
+    const first = screen.getByTestId("status-hint");
+    expect(first).toHaveClass("hint-error-pulse");
+
+    act(() =>
+      viewportStore.getState().setStatusHint("Extrude failed: boom", { severity: "error", sticky: true }),
+    );
+    const second = screen.getByTestId("status-hint");
+    expect(second).toHaveClass("hint-error-pulse");
+    expect(second).not.toBe(first); // remounted, not reused — the animation replays
+  });
+
   it("toggles projection and dims FOV in ortho", async () => {
     const user = userEvent.setup();
     renderStatusBar();
@@ -136,6 +160,28 @@ describe("StatusBar", () => {
     expect(screen.queryByTestId("fov")).toBeNull();
     expect(screen.queryByRole("tab", { name: "Ortho" })).toBeNull();
     expect(screen.queryByText(/^DOF:/)).toBeNull();
+  });
+
+  /*
+   * Design item 11 / audit A8 — the sketch plane's own u,v, not world X/Y/Z
+   * (on the XY plane world +Y is the sketch's own u, unmatchable to a typed
+   * dimension). `cursorPlaneUV` is written by the same engine writer as
+   * `cursor` (ViewportRoot's rAF-coalesced pointermove); a mocked write here
+   * stands in for that.
+   */
+  it("shows the sketch-plane U/V read-out while a sketch session is active, X/Y/Z otherwise", () => {
+    renderStatusBar();
+    expect(screen.getByText(/X\s+273\.00\s+Y\s+210\.00\s+Z\s+0\.00\s+mm/)).toBeInTheDocument();
+
+    act(() => {
+      toolStore.getState().setMode("sketch", "sketch2");
+      viewportStore.getState().setCursor({ x: 12, y: 34, z: 0 }, { u: 5.5, v: -2.25 });
+    });
+    expect(screen.getByText(/U\s+5\.50\s+V\s+-2\.25\s+mm/)).toBeInTheDocument();
+    expect(screen.queryByText(/^X\s/)).toBeNull();
+
+    act(() => toolStore.getState().setMode("model"));
+    expect(screen.getByText(/X\s+12\.00\s+Y\s+34\.00\s+Z\s+0\.00\s+mm/)).toBeInTheDocument();
   });
 
   it("colors DOF neutrally, never as a warning, in model mode", () => {

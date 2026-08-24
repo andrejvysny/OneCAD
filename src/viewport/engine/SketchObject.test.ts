@@ -16,7 +16,8 @@ import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import type { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { SketchObject } from "./SketchObject";
 import { palette } from "./palette";
-import type { SketchEntity, SketchPlane } from "@/ipc/types";
+import { RENDER_ORDER } from "./renderOrder";
+import type { SketchConstraint, SketchEntity, SketchPlane } from "@/ipc/types";
 
 const IDENTITY_PLANE: SketchPlane = {
   kind: "custom",
@@ -228,6 +229,259 @@ describe("SketchObject — point affordance (Sketcher UX cleanup, Track B1b)", (
     expect(endpointsMat.opacity).toBe(1);
     expect(midpointsMat.opacity).toBeLessThan(1);
     expect(centroidsMat.opacity).toBeLessThan(1);
+    obj.dispose();
+  });
+});
+
+/*
+ * Audit item #1 (A1, S1) — the active sketch must draw OVER a coplanar body
+ * face. In sketch mode the camera looks down the plane normal, so the body's
+ * volume sits between the eye and the plane and its depth-written opaque faces
+ * hid the user's very first stroke completely. Every active-session material is
+ * therefore depthTest:false; the ordering that used to come from depth comes
+ * entirely from the RENDER_ORDER tiers, which is why this also pins them.
+ */
+
+const RECT: SketchEntity[] = [
+  { id: "r1", type: "Line", p0: [-10, -10], p1: [10, -10] },
+  { id: "r2", type: "Line", p0: [10, -10], p1: [10, 10] },
+  { id: "r3", type: "Line", p0: [10, 10], p1: [-10, 10] },
+  { id: "r4", type: "Line", p0: [-10, 10], p1: [-10, -10] },
+];
+
+/** A fully-populated session: fills, entities, halo, markers, dim lines,
+ *  trim ghost and angle arc all present at once. */
+function buildRich(): { obj: SketchObject; root: THREE.Object3D } {
+  const root = new THREE.Object3D();
+  const obj = new SketchObject({ sketchRoot: root, invalidate: vi.fn() });
+  const dim: SketchConstraint = { id: "c1", type: "Distance", entities: ["r1"], value: 20 };
+  obj.setSession(IDENTITY_PLANE, RECT, "UnderConstrained", [dim]);
+  obj.setSelection(["r1"]);
+  obj.setSelectedPoints([{ x: -10, y: -10 }]);
+  obj.setPreview([{ type: "Line", p0: { x: 0, y: 0 }, p1: { x: 5, y: 5 } }]);
+  obj.setTrimGhost({ type: "Line", p0: { x: 0, y: 0 }, p1: { x: 0, y: 5 } });
+  obj.setAnglePreview({ center: { x: 0, y: 0 }, radius: 8, fromDeg: 0, toDeg: 90 });
+  return { obj, root };
+}
+
+/** Every renderable under `root`, paired with the material it draws with. */
+function drawables(root: THREE.Object3D): { obj: THREE.Object3D; mat: THREE.Material }[] {
+  const out: { obj: THREE.Object3D; mat: THREE.Material }[] = [];
+  root.traverse((o) => {
+    const m = (o as THREE.Mesh).material;
+    if (!m) return;
+    for (const one of Array.isArray(m) ? m : [m]) out.push({ obj: o, mat: one });
+  });
+  return out;
+}
+
+/** The tiers the ACTIVE session draws its own content at. The plane tint and
+ *  the plane grid are deliberately NOT here — they keep depth testing. */
+const ACTIVE_TIERS = new Set<number>([
+  RENDER_ORDER.ACTIVE_FILL,
+  RENDER_ORDER.SKETCH_CURVES_HALO,
+  RENDER_ORDER.SKETCH_CURVES,
+  RENDER_ORDER.SKETCH_POINTS,
+  RENDER_ORDER.SKETCH_POINTS + 1, // selected-point ring
+  RENDER_ORDER.DIM_LINE, // == TRIM_GHOST == ANGLE_ARC_PREVIEW
+]);
+
+describe("SketchObject — active-session draw priority (audit item #1)", () => {
+  it("draws EVERY active-session material with depthTest off", () => {
+    const { obj, root } = buildRich();
+    const active = drawables(root).filter((d) => ACTIVE_TIERS.has(d.obj.renderOrder));
+    // Guard the guard: if the scene stopped producing these objects the loop
+    // below would pass vacuously.
+    expect(active.length).toBeGreaterThanOrEqual(8);
+    for (const { obj: o, mat } of active) {
+      expect(mat.depthTest, `${o.type}@${o.renderOrder} must not depth-test`).toBe(false);
+    }
+    obj.dispose();
+  });
+
+  it("covers every channel the session can draw, one material each", () => {
+    const { obj, root } = buildRich();
+    const at = (order: number, pred?: (d: { obj: THREE.Object3D }) => boolean) =>
+      drawables(root).filter((d) => d.obj.renderOrder === order && (pred?.(d) ?? true));
+
+    expect(at(RENDER_ORDER.ACTIVE_FILL, (d) => d.obj.name === "sketchActiveFill").length).toBe(1);
+    expect(at(RENDER_ORDER.SKETCH_CURVES_HALO, (d) => d.obj.userData.selectionHalo === true).length).toBe(1);
+    // 4 committed entity lines + 1 rubber-band preview line.
+    expect(at(RENDER_ORDER.SKETCH_CURVES).length).toBe(5);
+    // endpoints + midpoints + centroids.
+    expect(at(RENDER_ORDER.SKETCH_POINTS).length).toBe(3);
+    // The selected-point ring shares tier 5 with the annotation channels below,
+    // so it is identified by kind rather than by number.
+    expect(at(RENDER_ORDER.SKETCH_POINTS + 1, (d) => d.obj instanceof THREE.Points).length).toBe(1);
+    expect(at(RENDER_ORDER.DIM_LINE, (d) => d.obj.userData.dimLineWitness === true).length).toBeGreaterThan(0);
+    expect(at(RENDER_ORDER.TRIM_GHOST).length).toBeGreaterThan(0);
+    obj.dispose();
+  });
+
+  it("leaves the plane TINT depth-testing — the surface is not the sketch", () => {
+    const { obj, root } = buildRich();
+    const tint = drawables(root).filter((d) => d.obj.renderOrder === RENDER_ORDER.SKETCH_TINT);
+    expect(tint).toHaveLength(1);
+    expect(tint[0].mat.depthTest).toBe(true);
+    obj.dispose();
+  });
+});
+
+/*
+ * Audit item #2 (A5) — live closure fills. Loops come from `findClosedLoops`,
+ * the SAME detector the centroid markers use, plus every self-closed curve:
+ * NOT from the mock kernel, which finds at most one loop and is evicted from
+ * production builds. The worker stays the region authority at finish time; this
+ * is a preview aid and mints no ids.
+ */
+describe("SketchObject — live closure fills (audit item #2)", () => {
+  const fills = (root: THREE.Object3D): THREE.Object3D[] => {
+    const out: THREE.Object3D[] = [];
+    root.traverse((o) => {
+      if (o.name === "sketchActiveFill") out.push(o);
+    });
+    return out;
+  };
+  const fillsVisible = (root: THREE.Object3D): boolean | undefined =>
+    root.getObjectByName("sketchFills")?.visible;
+
+  /** Total triangle area of one fill mesh. A ring spliced without re-orienting
+   *  its parts folds into a bowtie, whose triangulation cannot come out at the
+   *  polygon's true area — so this is what tells a correct splice from a
+   *  plausible-looking one. */
+  const fillArea = (mesh: THREE.Object3D): number => {
+    const geo = (mesh as THREE.Mesh).geometry as THREE.BufferGeometry;
+    const pos = geo.getAttribute("position");
+    const idx = geo.getIndex()!;
+    let area = 0;
+    for (let i = 0; i < idx.count; i += 3) {
+      const [a, b, c] = [idx.getX(i), idx.getX(i + 1), idx.getX(i + 2)];
+      area +=
+        Math.abs(
+          (pos.getX(b) - pos.getX(a)) * (pos.getY(c) - pos.getY(a)) -
+            (pos.getX(c) - pos.getX(a)) * (pos.getY(b) - pos.getY(a)),
+        ) / 2;
+    }
+    return area;
+  };
+
+  /** A second rectangle, disjoint from RECT (x ∈ [20, 40]). */
+  const RECT2: SketchEntity[] = [
+    { id: "q1", type: "Line", p0: [20, -10], p1: [40, -10] },
+    { id: "q2", type: "Line", p0: [40, -10], p1: [40, 10] },
+    { id: "q3", type: "Line", p0: [40, 10], p1: [20, 10] },
+    { id: "q4", type: "Line", p0: [20, 10], p1: [20, -10] },
+  ];
+
+  it("fills a closed rectangle", () => {
+    const { obj, root } = build(RECT);
+    expect(fills(root)).toHaveLength(1);
+    expect(fills(root)[0].renderOrder).toBe(RENDER_ORDER.ACTIVE_FILL);
+    obj.dispose();
+  });
+
+  it("draws NO fill for an open polyline — the closure signal must be honest", () => {
+    const { obj, root } = build(RECT.slice(0, 3));
+    expect(fills(root)).toHaveLength(0);
+    obj.dispose();
+  });
+
+  it("appears the moment the closing entity arrives, and goes away again", () => {
+    const { obj, root } = build(RECT.slice(0, 3));
+    expect(fills(root)).toHaveLength(0);
+    obj.setSession(IDENTITY_PLANE, RECT, "UnderConstrained");
+    expect(fills(root)).toHaveLength(1);
+    obj.setSession(IDENTITY_PLANE, RECT.slice(0, 3), "UnderConstrained");
+    expect(fills(root)).toHaveLength(0);
+    obj.dispose();
+  });
+
+  it("fills a loop whose edges were drawn OUTWARD from shared corners", () => {
+    // Head-to-head parts: `findClosedLoops` still walks the ring, but the two
+    // reversed edges make a blind concatenation self-intersect. 100 (=10×10)
+    // is the only area a correctly-spliced ring can produce.
+    const { obj, root } = build([
+      { id: "a", type: "Line", p0: [0, 0], p1: [10, 0] },
+      { id: "b", type: "Line", p0: [0, 0], p1: [0, 10] },
+      { id: "c", type: "Line", p0: [10, 10], p1: [10, 0] },
+      { id: "d", type: "Line", p0: [10, 10], p1: [0, 10] },
+    ]);
+    expect(fills(root)).toHaveLength(1);
+    expect(fillArea(fills(root)[0])).toBeCloseTo(100, 2);
+    obj.dispose();
+  });
+
+  it("fills BOTH of two disjoint rectangles", () => {
+    // The regression this pins: a single-loop detector fills neither, so a
+    // profile the worker extrudes happily reads as "not closed" on screen.
+    const { obj, root } = build([...RECT, ...RECT2]);
+    expect(fills(root)).toHaveLength(2);
+    obj.dispose();
+  });
+
+  it("fills the closed rectangle even with a stray open line in the sketch", () => {
+    const stray: SketchEntity = { id: "s1", type: "Line", p0: [30, 30], p1: [40, 30] };
+    const { obj, root } = build([...RECT, stray]);
+    expect(fills(root)).toHaveLength(1);
+    obj.dispose();
+  });
+
+  it("fills a lone circle — a self-closed curve has no endpoints to chain", () => {
+    const { obj, root } = build([{ id: "c", type: "Circle", center: [0, 0], radius: 5 }]);
+    expect(fills(root)).toHaveLength(1);
+    obj.dispose();
+  });
+
+  it("fills a lone ellipse too", () => {
+    const { obj, root } = build([
+      { id: "e", type: "Ellipse", center: [0, 0], majorR: 8, minorR: 3, rotation: 0.4 },
+    ]);
+    expect(fills(root)).toHaveLength(1);
+    obj.dispose();
+  });
+
+  it("skips CONSTRUCTION loops — they bound no extrudable profile", () => {
+    const { obj, root } = build(RECT.map((e) => ({ ...e, construction: true })));
+    expect(fills(root)).toHaveLength(0);
+    obj.dispose();
+  });
+
+  it("fills a nested circle and its enclosing loop independently (v1: the hole paints)", () => {
+    const circle: SketchEntity = { id: "c", type: "Circle", center: [0, 0], radius: 3 };
+    const { obj, root } = build([...RECT, circle]);
+    expect(fills(root)).toHaveLength(2);
+    obj.dispose();
+  });
+
+  it("does not re-triangulate when handed the SAME entity array again", () => {
+    const { obj, root } = build(RECT);
+    const before = fills(root)[0];
+    obj.setSession(IDENTITY_PLANE, RECT, "FullyConstrained");
+    // Same object identity ⇒ the loop walk + ear-clip did not run. A solve that
+    // moved nothing hands back its input.
+    expect(fills(root)[0]).toBe(before);
+    obj.dispose();
+  });
+
+  it("HIDES the fills on a transient (drag-frequency) update, rebuilding at gesture end", () => {
+    const { obj, root } = build(RECT);
+    const before = fills(root)[0];
+    expect(fillsVisible(root)).toBe(true);
+
+    // A drag frame: geometry moved, so a new array arrives every rAF. The fills
+    // must neither re-triangulate nor sit stale under the moved strokes.
+    const moved = RECT.map((e) => ({ ...e, p0: [e.p0![0] + 1, e.p0![1]], p1: [e.p1![0] + 1, e.p1![1]] }) as SketchEntity);
+    obj.setSession(IDENTITY_PLANE, moved, "UnderConstrained", undefined, { transient: true });
+    expect(fills(root)).toHaveLength(1);
+    expect(fills(root)[0]).toBe(before);
+    expect(fillsVisible(root)).toBe(false);
+
+    // Gesture end (finishDrag) — non-transient, so they come back rebuilt.
+    const committed = moved.map((e) => ({ ...e }));
+    obj.setSession(IDENTITY_PLANE, committed, "UnderConstrained");
+    expect(fills(root)).toHaveLength(1);
+    expect(fills(root)[0]).not.toBe(before);
+    expect(fillsVisible(root)).toBe(true);
     obj.dispose();
   });
 });

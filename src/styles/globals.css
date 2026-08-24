@@ -47,3 +47,56 @@
     color: var(--color-sel-text);
   }
 }
+
+/*
+ * One-shot feedback animations (Sketch UX item 10). Both are pure CSS and play
+ * ONCE on the element they are attached to — a fresh constraint badge mounts
+ * with `.badge-mount-flash`, and `StatusBar` re-keys its hint span so a NEW
+ * error message remounts with `.hint-error-pulse`. No timers, no toast system.
+ * Colors come from tokens; both are inert under prefers-reduced-motion.
+ *
+ * `badge-mount-flash`'s ring keeps its box-shadow COLOR the exact same
+ * `color-mix()` token string at both keyframes — never animated to the bare
+ * `transparent` keyword, whose RGB channels are (0,0,0): several engines
+ * interpolate a color's channels independently of alpha, so a fade to
+ * `transparent` visibly darkens through grey/black partway through instead of
+ * just thinning out. With the color pinned, only the numeric blur/spread grow
+ * (a plain length interpolation, nothing to mis-blend), and the ring dissolves
+ * via that native blur falloff instead.
+ */
+@keyframes badge-mount-flash {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 55%, transparent);
+    background-color: var(--color-sel-bg);
+  }
+  100% {
+    box-shadow: 0 0 10px 7px color-mix(in srgb, var(--color-accent) 55%, transparent);
+    background-color: transparent;
+  }
+}
+
+.badge-mount-flash {
+  animation: badge-mount-flash 520ms ease-out 1;
+}
+
+@keyframes hint-error-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  25%,
+  75% {
+    opacity: 0.25;
+  }
+}
+
+.hint-error-pulse {
+  animation: hint-error-pulse 600ms ease-in-out 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .badge-mount-flash,
+  .hint-error-pulse {
+    animation: none;
+  }
+}

@@ -14,6 +14,7 @@ import { useWorkerStore, type WorkerLifecycleState } from "@/stores/workerStore"
 import {
   useViewportStore,
   formatCursor,
+  formatCursorPlane,
   type Projection,
 } from "@/stores/viewportStore";
 
@@ -29,7 +30,9 @@ export function StatusBar() {
   const setProjection = useViewportStore((s) => s.setProjection);
   const fov = useViewportStore((s) => s.fov);
   const cursor = useViewportStore((s) => s.cursor);
+  const cursorPlaneUV = useViewportStore((s) => s.cursorPlaneUV);
   const statusHint = useViewportStore((s) => s.statusHint);
+  const statusHintSeq = useViewportStore((s) => s.statusHintSeq);
   const workerState = useWorkerStore((s) => s.state);
   // H7b: > 0 while a regen job is out (real lane: regen-started/finished; mock:
   // the same transitions around its synchronous apply).
@@ -77,7 +80,21 @@ export function StatusBar() {
       {statusHint && (
         <>
           <span aria-hidden="true" className="h-[14px] w-px bg-border" />
-          <span className={statusHint.severity === "error" ? "text-traffic-close" : "text-ink-5"}>
+          {/* Keyed by MESSAGE + SEQ, so a new error remounts this node and its
+              one-shot CSS pulse plays again (audit A10: an error used only to
+              recolor text in the far corner, which is easy to miss) — the seq
+              half is what makes a REPEATED identical error re-pulse too, since
+              a same-message remount would otherwise reuse the node and stay
+              still. The pulse is inert under prefers-reduced-motion. */}
+          <span
+            key={`${statusHint.message}:${statusHintSeq}`}
+            data-testid="status-hint"
+            className={cn(
+              statusHint.severity === "error"
+                ? "hint-error-pulse text-traffic-close"
+                : "text-ink-5",
+            )}
+          >
             {statusHint.message}
           </span>
         </>
@@ -131,7 +148,11 @@ export function StatusBar() {
         </>
       )}
       <MonoValue className="whitespace-pre text-[11.5px]">
-        {formatCursor(cursor, displayUnit)}
+        {/* Design item 11 / audit A8: on the sketch plane world XYZ is not
+            the sketch's own axes (XY plane's u is world +Y) — while sketching
+            the read-out switches to the plane-local U/V the controller itself
+            draws against, same unit formatting as the world X/Y/Z it replaces. */}
+        {sketching ? formatCursorPlane(cursorPlaneUV, displayUnit) : formatCursor(cursor, displayUnit)}
       </MonoValue>
       {/* APPLICATION settings, so shell chrome — it was mounted from
           `ModelTreePanel`, which made "which application-wide preferences exist"

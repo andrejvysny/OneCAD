@@ -219,6 +219,38 @@ describe("halo ring", () => {
   });
 });
 
+/*
+ * Audit item #1 pins this rather than changing it: the snap feedback was ALREADY
+ * depth-independent, and it has to stay that way now that the sketch content
+ * around it is too — a marker occluded by the body the user is snapping onto is
+ * the same defect A1 describes, one layer up.
+ */
+describe("snap feedback is depth-independent", () => {
+  it("draws every indicator material with depthTest off", () => {
+    const { ind, interactionRoot } = makeIndicator();
+    ind.show(
+      decision({
+        primaryKind: "alignHV",
+        guides: [
+          { orientation: "vertical", value: 5, ref: { x: 5, y: 40 } },
+          { orientation: "horizontal", value: 5, ref: { x: 40, y: 5 } },
+        ],
+      }),
+      true,
+    );
+    const mats: THREE.Material[] = [];
+    interactionRoot.getObjectByName("snapIndicator")?.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (!m) return;
+      for (const one of Array.isArray(m) ? m : [m]) mats.push(one);
+    });
+    // halo + marker + ref dots + 2 guides.
+    expect(mats.length).toBeGreaterThanOrEqual(5);
+    for (const m of mats) expect(m.depthTest).toBe(false);
+    ind.dispose();
+  });
+});
+
 describe("guide reference-point dots", () => {
   it("draws one dot per guide, at its REFERENCE end (not the snapped end)", () => {
     const { ind, interactionRoot } = makeIndicator();

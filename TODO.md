@@ -429,6 +429,104 @@ code (claimed every void splits the run) — corrected, citing the new test.
 - **Gate:** covered by the WP1-G1r row above — both packages are worker-only and the measured
   numbers are from the merged tree at this row's commits.
 
+## SKETCH UX HARDENING (2026-08-19/20, branch `OneCAD-sketch-mode-hardening-UI-UX`)
+
+Audit → research → ranked plan → frontend implementation. The plan of record is
+`docs/design/SKETCH_UX_AUDIT.md` (Part C item numbers referenced below); research with
+citations: `docs/design/SKETCH_UX_RESEARCH.md`. Cut line (user): everything frontend-scope;
+wire-needing items recorded as deferred-wire in the doc, NOT built here.
+
+- [x] WP0 hands-on audit (mock lane, playwright-cli) — 12 findings A1–A12; two S1 trust
+      defects: sketch invisible on face-coincident plane (z-order) and mock-lane constraints
+      decorative (identity solve accepts H+V+Parallel, dim edit 25→30 moves nothing).
+- [x] WP1 standards research (Shapr3D gold + SW/Onshape/Fusion), convergence table.
+- [x] WP2 synthesis: ranked P0/P1/P2 + deferred-wire; engine meets/beats standard, gaps are
+      feedback surfaces (region fill, badge interactivity, refusal visibility) + the two S1s.
+- [x] **Wave 1 GATE (2026-08-20)** — #3 snap-indicator clear on commit/chain-end/tool-switch
+      (+ six click-tool handlers) · #4 constraint menu icon+label rows, Geometric/Dimensional
+      sections, why-disabled titles (`CONSTRAINT_REQUIREMENT`), H/V-Distance added to
+      `DIMENSIONAL_TYPES` · #7 quadrant→OnCurve intent (circle/arc/ellipse; deliberately
+      reverses SNAP §9.5 placement-only — silent detachment is the worse failure; axis-align
+      follow-up named in the doc) · #11 U/V readout (same rAF writer; orchestrator fixed the
+      vertical-plane gap — Z=0 miss no longer freezes U/V) · #12 empty-sketch card · #13/#15
+      rect/centerRect phase-2 + point hints · #17 RETRACTED (tooltips already existed —
+      regression test added; audit doc corrected) · #14 root-caused to `LiveDimField` fixed
+      `w-9`, moved to Wave 3. Gate (orchestrator-run, suites alone): tsc clean · vitest
+      **298 files / 5008 passed / 78 skipped** · targeted e2e chromium **24/24** (snap trio,
+      constraint-apply, line, rect, point, live-dim-rect, datum-sketch, auto-mode) · hex gate
+      empty.
+- [x] **Waves 2–4 GATE (2026-08-20)** — #1 x-ray active sketch (depthTest:false on all 12
+      line channels + points + fills; ladder rule 3 documents the deliberate reversal;
+      negative-checked) · #2 live closed-region fill (closedLoop + circle/ellipse pass,
+      drag-transient hide, prod eviction of mock kernel restored) · #9 static/active root
+      split + 0.35 de-emphasis (§10.5 deferral closed) · #16 vpdebug origin pill · #5
+      interactive badges (select-tool-gated glyphs, inert machine pins, 10mm standoff,
+      Delete routes constraint-first) · #6 ⇧H/⇧V/⇧C/⇧E/⇧P/⇧M (keymap contract amended
+      in-file — deliberate product change per contract README policy; this row is the
+      TODO.md record it requires) · #10 partial (finish hint, badge mount flash, StatusBar
+      error pulse w/ re-pulse; near-action pulse + silent-Esc-exit stay open, doc §Landed
+      record) · #14 ch-width chips · #8 mock-lane honesty REDESIGNED delta-driven after
+      adversarial review (2 BLOCKER + 6 MAJOR, all closed or recorded as residuals in the
+      doc): drive circles/weld-free lines, refuse only undrivable EDITS, accept undrivable
+      creations, R5 signed-union-find direction conflicts; orchestrator closed the
+      `editConstraintValueNow` ignore-status gap (revert + error hint). Adversarial full
+      e2e mid-review: 466 passed / 2 failed (acceptance ×2 = the B1 blocker, since fixed).
+      Gate (orchestrator-run, suites alone): tsc clean · vitest **300 files / 5119 passed /
+      78 skipped** · targeted e2e chromium **33/33** (incl. acceptance, dimension-edit,
+      dimension-conflict) · hex gate empty. R3 full e2e both projects: next row.
+- [x] **R3 FINAL (2026-08-20, orchestrator-run, alone):** `bun run e2e` **468 passed /
+      0 failed** both projects, 38.3 min, retries 0 (baseline 464 + 2 dimension-edit + 2
+      net new). Rust/C++/wire untouched this program (`git diff e5572d2..HEAD` is entirely
+      src/ + docs/ + e2e/ + TODO.md), so cargo/ctest not re-run — master's parallel kernel
+      session owns those. Branch is 2 commits on `OneCAD-sketch-mode-hardening-UI-UX`;
+      merge to master = USER step (expect a trivial TODO.md both-added conflict; master
+      advanced with WP1-G2/WP2/WP3 kernel commits meanwhile).
+- [x] **Grid-crossing priority + reach (2026-08-20, user request).** Near a crossing, an
+      alignment guide whose row IS a grid line composed with cursor rounding into an
+      on-line point that out-scored the crossing (bias cap ±2px cannot express the
+      priority) — new targeted `grid-crossing-shadow` arbitration rule: aid-only sets
+      landing on exactly ONE of a reachable crossing's lines yield to the crossing;
+      geometry points and exact-crossing guide pairs exempt. Grid reach: factor 0.35→0.42,
+      cap acquire→acquire×1.25 (M: 8→10px; mid-cell rounding corridor preserved, 0.84<1).
+      4 new arbitration pins + gridLadder pins updated as the deliberate change. Gate:
+      tsc clean · vitest 300 files / 5123 passed / 78 skipped · e2e chromium 13/13 (snap
+      trio, line, rect, live-dim-mouse-rounding). Also: fresh-worktree Tauri build fixed
+      by staging the sidecar (`build-worker.sh Release`, OCCT 8.0.1, selftest 0); `tauri
+      dev` ran healthy (worker heartbeats, clean exit).
+- [ ] OWED USER-RUN at close: Tauri-app smoke of sketch flows against the REAL solver —
+      draw on a face of a real body (x-ray + live fill visible over the body), edit a
+      committed dimension (worker drives geometry), author a conflicting constraint
+      (reject names the loser), ⇧H/⇧V chords, badge select+Delete in the select tool.
+- [ ] Deferred-wire queue (specified in docs/design/SKETCH_UX_AUDIT.md): per-entity
+      constrained coloring (needs per-entity DOF in §7.4 solve result — top item) ·
+      quadrant axis-alignment intent · slot endpoint-tangency kind · slot stray-point
+      wire shape · centerRect symmetric linkage. Frontend residuals: near-action error
+      pulse · cancel-vs-finish seam for the silent Esc exit (A12) · screen-constant badge
+      standoff (HtmlOverlayDriver) · donut-hole fill correctness (v1 fills loops
+      independently).
+- [x] **MERGED TO MASTER (2026-08-24).** `git merge --no-ff` of
+      `OneCAD-sketch-mode-hardening-UI-UX` into `master`. ONE conflict, `TODO.md`, both
+      sides having prepended a program section at the head — resolved by keeping both, this
+      section after § KERNEL CONTINUATION (reverse-chronological). No source file was
+      touched by both sides: this program is `src/` frontend + `docs/` + `e2e/` only, and
+      master's parallel kernel sessions moved `worker/`, `src-tauri/`, `protocol/`, and a
+      disjoint set of `src/ipc/` + `src/tools/modelTools/` files. `git diff --name-only
+      master -- src-tauri worker protocol scripts .github package.json bun.lock` is EMPTY
+      across the merge, so cargo/ctest were not re-run — master's tip `22fe111` already
+      gated them and the merge cannot have changed their inputs.
+      **Merge gate (orchestrator-run on the merged tree, suites alone, retries 0):**
+      `bunx tsc --noEmit` clean · vitest **300 files / 5145 passed / 78 skipped / 0 failed** ·
+      `bun run e2e` chromium **234/234** (15.9 min) and webkit **234/234** (9.8 min) = the
+      same 468 the branch's own R3 row measured, so the merge moved no e2e count · hex gate
+      0 hits.
+      **Flake ledger (both non-reproducible, both in specs NEITHER side touched):**
+      `HistoryList.test.tsx` "clicking the value opens an editor and commits the typed
+      number" dropped once at 5144/1, then 58/58 isolated and 5145/0 on two full re-runs ·
+      webkit `library-browse-place-snap.spec.ts:84` "browse, arm, hover-snap, commit"
+      timed out at 45 s waiting for the "Place in scene" button, then passed in **2.5 s**
+      isolated and 234/0 on the full re-run — an 18× gap that reads as runner starvation,
+      not a defect. Names recorded so a recurrence has something to grep.
+
 ## DAILY DRIVER v1 (2026-08-19, plan `~/.claude/plans/act-as-senior-cad-floofy-locket.md`)
 
 Capability + ship, chosen over kernel continuation. The artifact is faithful after TRUST &

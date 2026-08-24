@@ -9,7 +9,7 @@
  * constraint, SCHEMA §7.4 `conflicting[]`) is reachable and e2e-testable without
  * the C++ worker.
  *
- * Four provable-contradiction shapes:
+ * Five provable-contradiction shapes:
  *   R1 — two dimensional constraints of the SAME kind (Distance/HorizontalDistance/
  *        VerticalDistance/Radius/Diameter/Angle) pinning the SAME normalized target
  *        to two different values.
@@ -19,12 +19,27 @@
  *        pinned at two different actual locations, or (b) a Distance between two
  *        Fixed points whose authored value disagrees with their actual current
  *        separation.
+ *   R5 — direction transitivity: Parallel/Perpendicular constraints partition
+ *        LINE entities into axis-parity classes (a signed union-find — Parallel
+ *        unions same parity, Perpendicular unions flipped parity), and a
+ *        Horizontal/Vertical constraint asserts a parity-to-axis mapping for its
+ *        line's whole class. A contradiction is two H/V constraints in the SAME
+ *        class asserting DIFFERENT mappings — e.g. `H(a) + V(b) + Parallel(a,b)`,
+ *        or `H(a) + H(b) + Perpendicular(a,b)` — at ANY chain depth, not just a
+ *        direct pair (R2 already covers the direct same-line case; R5 is its
+ *        transitive generalization). A standalone Parallel/Perpendicular cycle
+ *        with no H/V anchor is OUT OF SCOPE (not requested, and R3 already
+ *        covers the direct same-pair case).
  *
  * `autoConstrain.ts`'s inferred batches (Horizontal/Vertical/Coincident/
  * Perpendicular/Parallel/Tangent/Concentric/Equal) never trip any rule here —
  * see that module's own mutual-exclusion gates (H xor V; H/V gates Perp/Parallel;
  * a fixed pair can't satisfy both the near-0 and near-90° folded-angle windows)
  * and `mockConflicts.test.ts`'s regression case built from a real inferred batch.
+ * The H/V-gates-Perp/Parallel rule also makes R5's target contradiction
+ * structurally unreachable from inference alone: a line Parallel to an H line
+ * shares its exact direction, so it would itself already classify as H, not
+ * get a separate Parallel constraint — R5 only fires on HAND-AUTHORED chains.
  */
 import type { ConstraintPosition, SketchConstraint, SketchConstraintType, SketchEntity } from "./types";
 
@@ -188,8 +203,88 @@ function detectFixedContradiction(entities: SketchEntity[], constraints: SketchC
 }
 
 /**
+ * A signed (weighted) union-find over line ids: `union(a, b, rel)` with
+ * `rel = 0` (Parallel — same parity) or `rel = 1` (Perpendicular — flipped
+ * parity). `find` path-compresses and returns the parity of `id` RELATIVE TO
+ * its class root. A line never seen before is its own singleton root at
+ * parity 0, so two lines with no Parallel/Perpendicular chain between them are
+ * never in the same class — R5 only fires within a HAND-linked class.
+ *
+ * A union that finds the pair ALREADY in the same class with disagreeing
+ * parity (a standalone Parallel/Perpendicular cycle, no H/V involved) is
+ * silently ignored — out of scope, see the module header.
+ */
+class AxisParityClasses {
+  private readonly parent = new Map<string, string>();
+  private readonly parity = new Map<string, 0 | 1>();
+
+  find(id: string): { root: string; parity: 0 | 1 } {
+    const p = this.parent.get(id);
+    if (p === undefined) {
+      this.parent.set(id, id);
+      this.parity.set(id, 0);
+      return { root: id, parity: 0 };
+    }
+    if (p === id) return { root: id, parity: 0 };
+    const above = this.find(p);
+    const total = ((this.parity.get(id)! ^ above.parity) as 0 | 1);
+    this.parent.set(id, above.root);
+    this.parity.set(id, total);
+    return { root: above.root, parity: total };
+  }
+
+  union(a: string, b: string, rel: 0 | 1): void {
+    const fa = this.find(a);
+    const fb = this.find(b);
+    if (fa.root === fb.root) return; // consistent-or-not, out of scope either way
+    this.parent.set(fa.root, fb.root);
+    this.parity.set(fa.root, (rel ^ fa.parity ^ fb.parity) as 0 | 1);
+  }
+}
+
+/**
+ * R5: direction transitivity. Builds the axis-parity classes from every
+ * Parallel/Perpendicular pair, then for every Horizontal/Vertical constraint
+ * computes `f = Horizontal ? parity : 1 − parity` — the class-relative parity
+ * that would make "this line's parity means Horizontal" a consistent global
+ * rule. Two DIFFERENT `f` values inside the same class is the contradiction
+ * (see the module header for the derivation); the offending class's full H/V
+ * constraint set is returned so the reject-on-conflict UX can name a loser.
+ */
+function detectDirectionTransitivityClash(constraints: SketchConstraint[]): string[] {
+  const classes = new AxisParityClasses();
+  for (const c of constraints) {
+    if (c.type !== "Parallel" && c.type !== "Perpendicular") continue;
+    if (c.entities.length < 2) continue;
+    classes.union(c.entities[0], c.entities[1], c.type === "Perpendicular" ? 1 : 0);
+  }
+
+  const byRoot = new Map<string, Map<0 | 1, SketchConstraint[]>>();
+  for (const c of constraints) {
+    if (c.type !== "Horizontal" && c.type !== "Vertical") continue;
+    const lineId = c.entities[0];
+    if (!lineId) continue;
+    const { root, parity } = classes.find(lineId);
+    const f: 0 | 1 = c.type === "Horizontal" ? parity : ((1 - parity) as 0 | 1);
+    const buckets = byRoot.get(root) ?? new Map<0 | 1, SketchConstraint[]>();
+    const bucket = buckets.get(f) ?? [];
+    bucket.push(c);
+    buckets.set(f, bucket);
+    byRoot.set(root, buckets);
+  }
+
+  for (const buckets of byRoot.values()) {
+    if (buckets.size < 2) continue;
+    const ids: string[] = [];
+    for (const bucket of buckets.values()) for (const c of bucket) ids.push(c.id);
+    return ids;
+  }
+  return [];
+}
+
+/**
  * Ids of ONE clashing constraint group, or `[]` when no provable contradiction
- * exists. Checked R1 → R2 → R3 → R4, first hit wins — a sketch could in
+ * exists. Checked R1 → R2 → R3 → R4 → R5, first hit wins — a sketch could in
  * principle trip more than one rule at once, but the reject-on-conflict UX only
  * needs to NAME one clashing party (`sketchService.ts` `rejectConflictHint`).
  */
@@ -200,5 +295,7 @@ export function detectConflicts(entities: SketchEntity[], constraints: SketchCon
   if (hv.length > 0) return hv;
   const pp = detectParallelPerpClash(constraints);
   if (pp.length > 0) return pp;
-  return detectFixedContradiction(entities, constraints);
+  const fixed = detectFixedContradiction(entities, constraints);
+  if (fixed.length > 0) return fixed;
+  return detectDirectionTransitivityClash(constraints);
 }

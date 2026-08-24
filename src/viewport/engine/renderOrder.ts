@@ -15,9 +15,20 @@
  *    ghosts) is coplanar and cannot be layered by the depth buffer at all
  *    (line vs. triangle rasterization produces per-pixel depth deltas →
  *    stipple punch-through). All of it renders in the transparent pass with
- *    depthWrite: false, layered purely by the ladder below. Depth TEST stays
- *    on, so solid bodies (opaque pass, depth-written, polygonOffset pushes
- *    faces back) still correctly occlude sketch content behind them.
+ *    depthWrite: false, layered purely by the ladder below.
+ * 3. Depth TEST is on for STATIC (model-mode) sketch content, so solid bodies
+ *    (opaque pass, depth-written, polygonOffset pushes faces back) occlude a
+ *    sketch behind them — and OFF for every material of the ACTIVE sketch
+ *    session (audit item #1, reversing what rule 2 used to say). In sketch mode
+ *    the camera looks down the plane normal, so a body sitting between the eye
+ *    and a coplanar sketch plane hid the user's very first stroke completely.
+ *    depthTest: false + the transparent pass (which renders after ALL opaque
+ *    objects) paints the active sketch over bodies unconditionally; the tiers
+ *    below still order it against itself. ACCEPTED CONSEQUENCE: orbiting
+ *    mid-session shows the active sketch through solids (x-ray) — the standard
+ *    CAD behaviour, and the price of the stroke being visible at all. Picking
+ *    is untouched: sketch hit-testing is plane math, not a raycast, and body
+ *    picking reads neither renderOrder nor depthTest.
  *
  * Ties are fine when the objects never overlap or the later look is
  * order-independent.
@@ -43,6 +54,11 @@ export const RENDER_ORDER = {
   DATUM_OUTLINE: -1,
   /** Static (model-mode) sketch region fills. */
   STATIC_FILL: 1,
+  /** Live closed-region fill of the ACTIVE sketch session (audit item #2) —
+   *  the floor of the edit-mode stack, under its own curves and markers.
+   *  Shares STATIC_FILL's number deliberately: item #9 hides every static
+   *  region fill while a session is active, so the two can never co-render. */
+  ACTIVE_FILL: 1,
   /** Body face highlight (hover/selection). */
   HIGHLIGHT_FACE: 2,
   /** Static sketch curves — above their fill. */
@@ -53,11 +69,17 @@ export const RENDER_ORDER = {
   STATIC_POINTS: 3,
   /** Selection/hover halo, BEHIND the entity's own semantic-color line (P1
    *  audit fix — selecting/hovering an entity must not erase its
-   *  under/full/conflict color, only add a tint underneath it). Shares the
-   *  numeric tier with STATIC_CURVES/HIGHLIGHT_FACE, which belong to a
-   *  different object graph (model-mode static sketches / body faces) and
-   *  never co-render with edit-mode `SketchObject` content, so there is no
-   *  real collision. */
+   *  under/full/conflict color, only add a tint underneath it).
+   *
+   *  Shares the numeric tier with STATIC_CURVES, and they DO co-render: audit
+   *  item #9 dims the other sketches mid-session, it does not hide them. The tie
+   *  is therefore resolved by draw order (scene-graph order within the tier),
+   *  which is unspecified — and acceptable here only because the loser is still
+   *  legible either way: the static curve is at 0.35 emphasis and the halo is a
+   *  wide, low-contrast underlay, so neither can hide the other's shape, and the
+   *  entity's own SKETCH_CURVES line (tier 3) paints over both regardless. Do
+   *  not put anything OPAQUE on tier 2. HIGHLIGHT_FACE is a body-face overlay
+   *  and never coplanar with an edit-mode sketch, so it is a true non-collision. */
   SKETCH_CURVES_HALO: 2,
   /** Edit-mode committed entities + rubber-band preview. */
   SKETCH_CURVES: 3,

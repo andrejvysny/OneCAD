@@ -76,13 +76,17 @@ describe("ellipse extrema", () => {
     for (const q of qs) expect(q.ref).toBeUndefined();
   });
 
-  it("is reported as placement-only in the decision trace", () => {
+  it("carries an OnCurve relation against the ellipse (A7)", () => {
+    // Was placement-only (`derived-point-not-persistable`): an extremum has no
+    // independent point address, but it IS on the curve, and leaving it
+    // unconstrained let it silently float free of a later edit — the same
+    // defect the quadrant fix (A7) closes for circle/arc.
     const s = scenario("ellipse-extrema");
     const d = computeSnapDecision(s.raw, s.entities, opts()).decision;
     expect(d.primaryKind).toBe("quadrant");
-    expect(d.rejected.some((r) => r.reason === "derived-point-not-persistable")).toBe(true);
-    // …and it carries no relation to persist.
-    expect(d.accepted.every((c) => c.relationIntents.length === 0)).toBe(true);
+    expect(d.rejected.some((r) => r.reason === "derived-point-not-persistable")).toBe(false);
+    const quadrant = d.accepted.find((c) => c.kind === "quadrant")!;
+    expect(quadrant.relationIntents).toEqual([{ kind: "OnCurve", refs: [], curveIds: ["e1"] }]);
   });
 });
 

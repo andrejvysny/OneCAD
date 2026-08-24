@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeSnap,
+  computeSnapDecision,
   entitySnapPoints,
   arcContainsAngle,
   circleQuadrantPoints,
@@ -91,8 +92,11 @@ describe("computeSnap priority", () => {
   it("emits an H/V alignment guide from a recent point", () => {
     // Deliberately OFF the grid: a reference at a multiple of `gridStep` would
     // put a grid node on the same coordinate, and a grid node is a full-point
-    // candidate that legitimately outranks a one-axis guide (SNAP P2).
-    const r = computeSnap({ x: 12.2, y: 63 }, [], { ...base, recentPoints: [{ x: 12, y: 0 }] });
+    // candidate that legitimately outranks a one-axis guide (SNAP P2). The
+    // cursor sits MID-CELL in y (65 = between 60 and 70): the wider grid reach
+    // (GRID_REACH_ACQUIRE_FACTOR) put the old (12.2, 63) inside the (10, 60)
+    // crossing's capture, where grid rightly wins.
+    const r = computeSnap({ x: 12.2, y: 65 }, [], { ...base, recentPoints: [{ x: 12, y: 0 }] });
     expect(r.kind).toBe("alignV");
     expect(r.point.x).toBe(12);
     expect(r.guides).toEqual([{ orientation: "vertical", value: 12, ref: { x: 12, y: 0 } }]);
@@ -358,6 +362,32 @@ describe("computeSnap — extended priority ladder", () => {
   it("respects the onCurve toggle", () => {
     const r = computeSnap({ x: 15, y: 6 }, [hLine], { ...base, enableOnCurve: false, enableGrid: false });
     expect(r.kind).not.toBe("onCurve");
+  });
+});
+
+// ── A7: a quadrant candidate carries an OnCurve relation intent ───────────────
+//
+// A quadrant has no independent point address (`relationForCachedPoint` in
+// snapCandidates.ts), so it cannot author `Coincident`, but it IS on the curve
+// it is an extremum of — without `OnCurve` the endpoint silently floats free
+// of a later edit to the circle, looking attached while not being.
+describe("quadrant candidate — relation intent (A7)", () => {
+  it("carries OnCurve against the owning circle", () => {
+    const c: SketchEntity = { id: "c1", type: "Circle", center: [0, 0], radius: 20 };
+    const { decision } = computeSnapDecision({ x: 21, y: 1 }, [c], base);
+    expect(decision.primaryKind).toBe("quadrant");
+    const quadrant = decision.accepted.find((a) => a.kind === "quadrant")!;
+    expect(quadrant.relationIntents).toEqual([{ kind: "OnCurve", refs: [], curveIds: ["c1"] }]);
+  });
+
+  it("carries OnCurve against the owning arc", () => {
+    // Half-circle 0°→180°: the 90° quadrant (0,10) is NOT one of its own
+    // endpoints (unlike a quarter arc, where every in-extent quadrant IS an
+    // endpoint and would win the point instead) — an unambiguous quadrant-only probe.
+    const a: SketchEntity = { id: "a1", type: "Arc", center: [0, 0], radius: 10, start: [10, 0], end: [-10, 0] };
+    const { decision } = computeSnapDecision({ x: 0.5, y: 9.5 }, [a], { ...base, enableGrid: false });
+    const quadrant = decision.accepted.find((c) => c.kind === "quadrant")!;
+    expect(quadrant.relationIntents).toEqual([{ kind: "OnCurve", refs: [], curveIds: ["a1"] }]);
   });
 });
 

@@ -200,6 +200,24 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(ents.every((e) => e.type === "Line")).toBe(true);
   });
 
+  it("rect: the hint names the SECOND click once the first corner is armed (A11b)", async () => {
+    await setTool("rect");
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Rectangle — click a corner · type a number for width · Tab for height",
+    );
+
+    click(0, 0); // first corner placed — armed on it
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Rectangle — click the opposite corner · type a number for width · Tab for height",
+    );
+
+    click(50, 50); // commits — back to idle
+    await flushSketchMutations();
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Rectangle — click a corner · type a number for width · Tab for height",
+    );
+  });
+
   it("circle: 2 clicks (center, edge) commit 1 circle with the radius to that edge", async () => {
     await setTool("circle");
     click(0, 0);
@@ -364,6 +382,11 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(viewportStore.getState().statusHint?.message).toBe("Polygon — 5 sides · 3–9 to change");
   });
 
+  it("point: the idle hint names the tool (A11d)", async () => {
+    await setTool("point");
+    expect(viewportStore.getState().statusHint?.message).toBe("Point — click to place");
+  });
+
   it("point: each click commits a Point; a repeat click auto-constrains Coincident", async () => {
     await setTool("point");
     click(0, 0);
@@ -392,6 +415,24 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(cons.some((c) => c.type === "Horizontal")).toBe(true);
     expect(cons.some((c) => c.type === "Vertical")).toBe(true);
     expect(cons.some((c) => c.type === "Coincident")).toBe(true);
+  });
+
+  it("centerRect: the hint names the SECOND click once the centre is armed (A11b)", async () => {
+    await setTool("centerRect");
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Center rectangle — click the centre · type a number for width · Tab for height",
+    );
+
+    click(0, 0); // centre placed — armed on it
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Center rectangle — click a corner · type a number for width · Tab for height",
+    );
+
+    click(50, 25); // commits — back to idle
+    await flushSketchMutations();
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Center rectangle — click the centre · type a number for width · Tab for height",
+    );
   });
 
   it("minSize scales with planePixelWorld (screen-constant reject radius)", async () => {

@@ -9,6 +9,8 @@
  *         · P point
  *         · D dimension · T trim · ⇧T extend · M mirror · F fillet
  *         · X construction (flip selection / sticky mode)
+ *         · ⇧H/⇧V/⇧C/⇧E/⇧P/⇧M apply Horizontal/Vertical/Coincident/Equal/
+ *           Parallel/Midpoint to the selection
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
  *         · Shift+F zoom-to-fit (frames the SELECTION when it names bodies)
  *
@@ -76,11 +78,21 @@
  *     old cross-mode `⇧O`-in-model-mode → sketch-offset fallback (which STARTED A
  *     SKETCH): with a face selected, ⇧O in model mode now means "offset that
  *     face", which is what a modeller pressing it there is asking for.
+ *   - `⇧H`/`⇧V`/`⇧C`/`⇧E`/`⇧P`/`⇧M` (constraint apply, plan item 6 — the
+ *     Shapr3D Shift+letter convention) are sketch-scoped `applyConstraint`
+ *     actions, NOT `tool` actions, so the cross-mode fallback can never leak
+ *     them into model mode. Only `⇧H` overlaps an existing chord: sketch mode
+ *     used to reach the model Hole tool through the cross-mode fallback, which
+ *     it no longer does — mid-sketch, ⇧H means "make this line horizontal",
+ *     and model `⇧H` = Hole is untouched (mode tables are searched first).
+ *     Perpendicular and Tangent are deliberately NOT bound: ⇧T is already
+ *     Extend and neither has a free mnemonic (audit Part C item 6).
  *
  * AUTO-MODE: a key bound only in the OTHER mode resolves cross-mode (tool
  * actions only) so shortcuts drive the automatic mode switch — see
  * `resolveBinding` and `tools/activateTool.ts`.
  */
+import type { SketchConstraintType } from "@/ipc/types";
 import type { EditorMode, Tool } from "@/stores/toolStore";
 import { bindingsForScope, type BindingScope } from "@/modules/modeling/bindings";
 import { SHELL_GLOBAL_BINDINGS } from "@/modules/shell/bindings";
@@ -91,6 +103,8 @@ export type ShortcutAction =
   | { type: "finishSketch" }
   | { type: "deleteSketchSelection" }
   | { type: "toggleConstruction" }
+  /** Apply one constraint kind to the current sketch selection (⇧H/⇧V/…). */
+  | { type: "applyConstraint"; constraint: SketchConstraintType }
   | { type: "cancel" }
   | { type: "zoomFit" }
   | { type: "isolate" }

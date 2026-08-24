@@ -1,7 +1,8 @@
 /*
  * SketchStaticLayer — always-visible, NON-editable presence of every document
  * sketch in MODEL mode (Fusion-style). One group per sketch id, keyed under a
- * root group in `sketchRoot`:
+ * root group in the engine's `staticSketchRoot` (the Layers → Sketches filter's
+ * target — see ViewportEngine's scene graph):
  *   - fills  : one selectable mesh per triangulated profile region,
  *   - curves : a fat `LineSegments2` DRAW pass (dpr-normalized CSS-px width,
  *     see `SketchObject.cssLineWidth`) plus a plain, invisible `LineSegments`
@@ -30,11 +31,21 @@ import { cssLineWidth, entityPolyline } from "./SketchObject";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
+import { buildFillGeometry } from "./sketchFillGeometry";
 
 const FILL_OPACITY = 0.18;
 const FILL_OPACITY_ACTIVE = 0.3;
 const DOT_SIZE = 5;
 const STATIC_CURVE_WIDTH = cssLineWidth(1);
+
+/**
+ * Emphasis multiplier applied to every static curve/dot while a sketch session
+ * is active (audit item #9). The OTHER sketches stay legible as context but stop
+ * competing with the geometry being edited — mid-edit they used to render at
+ * full saturation, region-filled, which read as a selection. Their region fills
+ * are hidden outright (see `applyTint`); only the ink is dimmed.
+ */
+const EDITING_DIM_FACTOR = 0.35;
 
 export interface SketchStaticData {
   plane: SketchPlane;
@@ -109,30 +120,12 @@ function collectDots(e: SketchEntity, out: number[]): void {
   }
 }
 
-/** One region's plane-local (u,v) triangles as an indexed local XY geometry. */
-function buildFillGeometry(region: SketchRegion): THREE.BufferGeometry | null {
-  const triangles = region.previewTriangles;
-  if (!triangles || triangles.positions.length < 6 || triangles.indices.length < 3) {
-    return null;
-  }
-  if ((triangles.holesSubtracted ?? 0) < region.holes.length) return null;
-  const positions = new Float32Array((triangles.positions.length / 2) * 3);
-  for (let i = 0; i < triangles.positions.length / 2; i++) {
-    positions[i * 3] = triangles.positions[i * 2];
-    positions[i * 3 + 1] = triangles.positions[i * 2 + 1];
-    positions[i * 3 + 2] = 0;
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geo.setIndex(triangles.indices.slice());
-  geo.computeBoundingSphere();
-  return geo;
-}
-
 export class SketchStaticLayer {
   private readonly root = new THREE.Group();
   private readonly entries = new Map<string, StaticEntry>();
   private editingId: string | null = null;
+  /** True while ANY sketch session is being edited — see `setSessionActive`. */
+  private sessionActive = false;
   private hover: SketchStaticTarget | null = null;
   private selectedKeys = new Set<string>();
   private readonly _basis = new THREE.Matrix4();
@@ -293,6 +286,23 @@ export class SketchStaticLayer {
     this.deps.invalidate();
   }
 
+  /**
+   * De-emphasise every OTHER sketch while a session is open (audit item #9).
+   *
+   * Distinct from `setEditingSketch`, which hides exactly the one sketch the
+   * live `SketchObject` has taken over: this one applies to all the rest. Region
+   * fills go away entirely (a teal fill mid-edit reads as a selection, and an
+   * only-dimmed one still competes with the active fill of the same tone) and
+   * the ink drops to `EDITING_DIM_FACTOR`. Every material it touches is
+   * per-entry, so nothing here leaks across sketches.
+   */
+  setSessionActive(active: boolean): void {
+    if (this.sessionActive === active) return;
+    this.sessionActive = active;
+    for (const key of this.entries.keys()) this.applyTint(key);
+    this.deps.invalidate();
+  }
+
   setHover(hit: SketchStaticTarget | null): void {
     const before = this.hover ? sketchStaticHitKey(this.hover) : null;
     const next = hit ? sketchStaticHitKey(hit) : null;
@@ -333,11 +343,20 @@ export class SketchStaticLayer {
       : sketchHovered
         ? palette.hover3d()
         : palette.sketchUnder();
+    // Emphasis is a MULTIPLIER on whatever each tier's own opacity rule says, so
+    // a hovered dot is still a hovered dot mid-session, only quieter.
+    const emphasis = this.sessionActive ? EDITING_DIM_FACTOR : 1;
     e.lineMat.color.copy(color);
+    e.lineMat.opacity = emphasis;
     e.drawLineMat.color.copy(color);
+    e.drawLineMat.opacity = emphasis;
     e.pointsMat.color.copy(color);
-    e.pointsMat.opacity = sketchSelected || sketchHovered ? 1 : 0;
+    e.pointsMat.opacity = (sketchSelected || sketchHovered ? 1 : 0) * emphasis;
     for (const [regionId, fill] of e.fills) {
+      // Hidden, not merely dimmed — and therefore not pickable either
+      // (`hitTest` skips them), because an invisible pick target is worse than
+      // no pick target.
+      fill.mesh.visible = !this.sessionActive;
       const regionKey = sketchStaticHitKey({ kind: "sketchRegion", sketchId: id, regionId });
       const selected = sketchSelected || this.selectedKeys.has(regionKey);
       const hovered =
@@ -361,7 +380,10 @@ export class SketchStaticLayer {
     const lines: THREE.Object3D[] = [];
     for (const e of this.entries.values()) {
       if (!e.group.visible) continue;
-      for (const fill of e.fills.values()) fills.push(fill.mesh);
+      // three's `intersectObjects` does NOT consult `visible` (that is why the
+      // invisible pick proxy below works at all), so a fill hidden by
+      // `setSessionActive` has to be filtered out here explicitly.
+      if (!this.sessionActive) for (const fill of e.fills.values()) fills.push(fill.mesh);
       lines.push(e.lines);
     }
     const fillHit = raycaster.intersectObjects(fills, false)[0];

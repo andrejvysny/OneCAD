@@ -20,8 +20,14 @@ import { createClient } from "@/ipc/client";
 import { applyConstraint } from "@/tools/sketch/sketchService";
 import type { SketchConstraintType } from "@/ipc/types";
 import type { ApplicableConstraint } from "@/tools/sketch/constraintApplicability";
+import { constraintShortcutLabel } from "@/modules/modeling/bindings";
 import { useApplicableConstraints } from "./useApplicableConstraints";
-import { CONSTRAINT_PRESENTATION, DIMENSIONAL_TYPES, GEOMETRIC_TYPES } from "./constraintCatalog";
+import {
+  CONSTRAINT_PRESENTATION,
+  CONSTRAINT_REQUIREMENT,
+  DIMENSIONAL_TYPES,
+  GEOMETRIC_TYPES,
+} from "./constraintCatalog";
 
 export function ConstraintMenu() {
   const mode = useToolStore((s) => s.mode);
@@ -47,28 +53,42 @@ export function ConstraintMenu() {
 
   if (mode !== "sketch" || !session) return null;
 
-  const button = (type: SketchConstraintType) => {
+  // Icon + text-label row (audit A4 — the icon-only grid gave zero explanation
+  // for ~18 grey glyphs). Disabled rows keep the native `title` tooltip but
+  // swap its text for `CONSTRAINT_REQUIREMENT`'s why-not sentence instead of
+  // repeating the label a sighted user can already read.
+  const row = (type: SketchConstraintType) => {
     const applicable = byType.get(type);
     const enabled = applicable !== undefined;
     const { icon, label } = CONSTRAINT_PRESENTATION[type];
+    // Right-aligned chord hint for the six kinds that have one (plan item 6),
+    // read from the binding table so the menu can never advertise a key that
+    // is not bound.
+    const chord = constraintShortcutLabel(type);
     return (
       <button
         key={type}
         type="button"
         aria-label={label}
-        title={label}
+        title={enabled ? label : CONSTRAINT_REQUIREMENT[type]}
         disabled={!enabled}
         onClick={() => {
           if (applicable && clientRef.current) void applyConstraint(clientRef.current, applicable);
         }}
         className={cn(
-          "flex h-7 w-7 items-center justify-center rounded-sm leading-none transition-colors",
+          "flex items-center gap-1.5 rounded-sm px-1.5 py-1 leading-none transition-colors",
           enabled
-            ? "cursor-pointer text-ink-4 hover:bg-hover-3 focus-visible:shadow-focus-ring focus-visible:outline-none"
+            ? "cursor-pointer text-ink-3 hover:bg-hover-3 focus-visible:shadow-focus-ring focus-visible:outline-none"
             : "cursor-default text-ink-5 opacity-40",
         )}
       >
-        <Icon name={icon} size={17} strokeWidth={1.7} />
+        <Icon name={icon} size={15} strokeWidth={1.7} className="shrink-0" />
+        <span className="truncate text-[11.5px]">{label}</span>
+        {chord && (
+          <kbd aria-hidden="true" className="ml-auto shrink-0 font-sans text-[10px] text-ink-6">
+            {chord}
+          </kbd>
+        )}
       </button>
     );
   };
@@ -103,15 +123,26 @@ export function ConstraintMenu() {
         onClose={() => setOpen(false)}
         anchorRef={trigger}
         placement="bottom-start"
-        width={196}
+        width={272}
         className="p-1"
       >
         <div role="toolbar" aria-label="Constraints">
-          <div className="grid grid-cols-4 gap-0.5">{GEOMETRIC_TYPES.map(button)}</div>
+          <SectionLabel>Geometric</SectionLabel>
+          <div className="grid grid-cols-2 gap-x-1 gap-y-0.5">{GEOMETRIC_TYPES.map(row)}</div>
           <div aria-hidden="true" className="my-1 h-px bg-border" />
-          <div className="grid grid-cols-4 gap-0.5">{DIMENSIONAL_TYPES.map(button)}</div>
+          <SectionLabel>Dimensional</SectionLabel>
+          <div className="grid grid-cols-2 gap-x-1 gap-y-0.5">{DIMENSIONAL_TYPES.map(row)}</div>
         </div>
       </Popover>
+    </div>
+  );
+}
+
+/** Small uppercase group header ("Geometric" / "Dimensional") over each grid. */
+function SectionLabel({ children }: { children: string }) {
+  return (
+    <div className="px-1.5 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-ink-6">
+      {children}
     </div>
   );
 }

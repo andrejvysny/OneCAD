@@ -13,8 +13,8 @@
  *
  * REUSED from it verbatim: `parseLength`/`formatLength`/`formatUnitless`, the
  * `displayUnit` subscription (which is what re-renders every chip on a unit
- * switch, without ever re-committing), the 400 ms error flash, and the
- * mm-vs-other field width rule.
+ * switch, without ever re-committing) and the 400 ms error flash. The
+ * mm-vs-other field width rule is NOT reused — see `widthCh` below.
  */
 import { useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -29,6 +29,9 @@ const ERROR_FLASH_MS = 400;
  *  reads as a circle while costing a constraint per side. */
 const MIN_SIDES = 3;
 const MAX_SIDES = 12;
+
+/** Floor for the content-driven field width, in `ch` (see `widthCh` below). */
+const MIN_FIELD_CH = 4;
 
 export interface LiveDimFieldProps {
   chip: LiveDimChipField;
@@ -166,9 +169,14 @@ export function LiveDimField({
 
   const shown = focused ? text : formatChip(chip, unit);
   const suffix = suffixFor(chip, unit);
-  // Only a LENGTH in a non-mm unit renders enough decimals to need the wide
-  // field ("0.0394 in" for 1 mm); mm stays prototype-exact at 36px.
-  const wide = chip.domain === "length" && unit !== "mm";
+  // Width FOLLOWS THE CONTENT (audit A11c / plan item 14). The old rule was a
+  // fixed 36px for mm and 56px otherwise, which clipped its own text the
+  // moment an mm value reached 5-6 characters ("12.75", "-137.5") — the
+  // tangent-arc radius chip does that routinely mid-gesture. `ch` is the right
+  // unit here because the field is `font-mono`, so one `ch` IS one glyph; the
+  // floor keeps a short/empty value from collapsing the chip, and the +1
+  // leaves room for the caret past the last character.
+  const widthCh = `${Math.max(MIN_FIELD_CH, shown.length + 1)}ch`;
   // A chained leg's angle sits INSIDE the dashed arc preview (its anchor is
   // moved there — `SketchController.syncAngleReference`) as plain annotation
   // text matching the arc's own color, not a separate floating pill chip —
@@ -197,7 +205,8 @@ export function LiveDimField({
         aria-label={`Live ${chip.field}`}
         aria-invalid={isError}
         data-testid={`live-dim-${chip.field}`}
-        className={`${wide ? "w-14" : "w-9"} bg-transparent text-right outline-none`}
+        style={{ width: widthCh }}
+        className="bg-transparent text-right outline-none"
         value={shown}
         inputMode="decimal"
         onChange={(e) => onText(e.target.value)}

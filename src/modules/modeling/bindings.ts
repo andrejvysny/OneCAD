@@ -10,6 +10,7 @@
  * The collision reasoning that used to live in `keymap.ts` is preserved per entry
  * — it is the part that is expensive to rediscover.
  */
+import type { SketchConstraintType } from "@/ipc/types";
 import type { ShortcutAction } from "@/shortcuts/keymap";
 import type { Tool } from "@/stores/toolStore";
 
@@ -24,6 +25,10 @@ export interface ModelingBindingDescriptor {
 }
 
 const tool = (t: Tool): ShortcutAction => ({ type: "tool", tool: t });
+const constraint = (c: SketchConstraintType): ShortcutAction => ({
+  type: "applyConstraint",
+  constraint: c,
+});
 
 export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
   // ── model ──────────────────────────────────────────────────────────────────
@@ -95,6 +100,19 @@ export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
   // through when nothing is selected.
   { key: "Delete", action: { type: "deleteSketchSelection" }, scope: "sketch" },
   { key: "Backspace", action: { type: "deleteSketchSelection" }, scope: "sketch" },
+  // Constraint apply — Shapr3D's Shift+letter convention (plan item 6). Six
+  // kinds, each on its own initial; all sketch-scoped and NOT `tool` actions,
+  // so the cross-mode fallback can never fire one from model mode. ⇧H is the
+  // only chord that overlaps anything: it shadows sketch mode's cross-mode
+  // reach to the model Hole tool, deliberately (see `keymap.ts` COLLISIONS).
+  // Perpendicular and Tangent are deliberately absent — ⇧T is Extend and
+  // neither kind has a free mnemonic letter left.
+  { key: "h", shift: true, action: constraint("Horizontal"), scope: "sketch" },
+  { key: "v", shift: true, action: constraint("Vertical"), scope: "sketch" },
+  { key: "c", shift: true, action: constraint("Coincident"), scope: "sketch" },
+  { key: "e", shift: true, action: constraint("Equal"), scope: "sketch" },
+  { key: "p", shift: true, action: constraint("Parallel"), scope: "sketch" },
+  { key: "m", shift: true, action: constraint("Midpoint"), scope: "sketch" },
 
   // ── global ─────────────────────────────────────────────────────────────────
   // Global in REACH, modeling in meaning. The two view-navigation chords that
@@ -106,6 +124,19 @@ export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
 
 export function bindingsForScope(scope: BindingScope): readonly ModelingBindingDescriptor[] {
   return MODELING_BINDINGS.filter((b) => b.scope === scope);
+}
+
+/**
+ * Display label ("⇧H") for the chord that applies `type` to the selection, or
+ * undefined when that kind has none. DERIVED from the table above so the menu
+ * row and the chip tooltip can never advertise a chord that is not bound.
+ */
+export function constraintShortcutLabel(type: SketchConstraintType): string | undefined {
+  const b = MODELING_BINDINGS.find(
+    (x) => x.action.type === "applyConstraint" && x.action.constraint === type,
+  );
+  if (!b) return undefined;
+  return `${b.shift ? "⇧" : ""}${b.key.toUpperCase()}`;
 }
 
 /** The binding for a tool in its own scope, if it has one. */
