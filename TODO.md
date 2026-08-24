@@ -108,7 +108,76 @@ SCHEMA: §7.3 bullet · §7.6 `AnalyzeEdgeOpRange` is now NORMATIVELY an equal-l
       caller yet; repair lane is the intended consumer) · the AnalyzeEdgeOpRange equal-leg
       clamp is applied to asymmetric chamfers today (`ModelToolController.ts:3197`) — FE must
       drop to unclamped for `distance2`/`angleDeg`, §7.6 restriction becoming normative.
-- [ ] Phase 2 sketch FE residuals. Phase 3 per-entity DOF coloring.
+- [ ] Phase 2 sketch FE residuals — ALL THREE PACKAGES IMPLEMENTED, orchestrator-reviewed.
+      Gate measured at commit: tsc clean · vitest **305 files / 5217 passed / 78 skipped /
+      0 failed** (teed) · hex 0 · per-package targeted e2e all green (refusal-feedback 3/3,
+      badge-standoff chromium+webkit, sketch-hole-extrude 3/3, dimension-conflict +
+      acceptance unregressed). **Full `bun run e2e` both projects: 484 passed / 8 failed
+      (28.2 min) — triaged: THREE specs were a real regression, the new `sketch-error-pulse`
+      repeats the hint text so bare `getByText` hint locators became strict-mode violations
+      (`sketch-on-face` ×2, `dimension-conflict`) — fixed by scoping those assertions to
+      `status-hint` (the pulse's own spec asserts the pulse); the remaining two
+      (`constraint-badge-standoff:63` chromium, `library-place-freespace:221` webkit) do
+      not reproduce isolated (parallel-run interference). After the fix, ALL previously
+      failing specs isolated: 14/14 both projects + 2/2 webkit. Full-suite re-run owed for
+      the final attributable number (user directed commit first); kicked after commit.** Also landed via approved follow-up: six refusal sites raised info→error
+      (7-pin `refusalSeverity.test.ts`; `dimension-conflict`/`acceptance` unregressed);
+      badge standoff now signed screen-px in `HtmlOverlayDriver` (−16 glyph / +10 chip,
+      sign is load-bearing — opposite sides, no overlap, U9 stagger restored); audit doc
+      residual rows corrected in place. Phase 1 committed `cb01856` (45 files) — kernel
+      continuation program CLOSED.
+- [ ] Phase 2 decisions + seams (record as they land): **donut fill LANDED** (even-odd via
+      boundary-vote containment — interior-point sampling provably fails the donut case,
+      caught red-first; annulus areas ≤0.04% of analytic; audit doc line 235 "hole paints"
+      now stale, correct at phase close). **Pulse + Esc seam LANDED** ("Finished <name> —
+      N entities" now fires on the idle-Esc exit; empty sketch says "Closed <name> —
+      nothing drawn"; only explicit finish arms the Extrude handoff — Esc is an escape
+      hatch). **Orchestrator-approved follow-up in flight:** six refusal sites raised from
+      info to error severity (applyConstraint conflict reject `sketchService.ts:965`,
+      dimension-commit rejects `:1000`/`SketchController.ts:2554`, three
+      `LOCKED_GEOMETRY_HINT` sites) — without it neither pulse fires on the most common
+      refusal, which is A10's whole complaint. **Seam for the USER (recorded, unchanged):
+      idle Esc ladder is FOUR presses out of a fresh sketch, not A12's three** —
+      `openSession` selects the sketch it opened (`SketchController.ts:823`), so the
+      deselect rung always fires first; whether the sketch should eat one of its own Esc
+      presses is a UX call.
+- [ ] Phase 3 per-entity constrained-state coloring — protocol design AUDITED, decisions
+      RECORDED (orchestrator rulings over the audit, 2026-08-24):
+      (a) **wire = three tokens** `underConstrained|fullyConstrained|conflicting` in an
+      optional additive `entityStates` map keyed by wire entity id (the `curves` space);
+      omission from a present map = unknown; ellipse-bearing sketches omit the MAP entirely
+      (no diagnosis exists); NO per-entity DOF count (PlaneGCS reports null-space
+      membership, not entity-local freedom — a count would be fabricated).
+      (b) **DELIBERATE amendment of the frozen constraint-v2 forward corpus**
+      (`src/test/constraint-v2/fixtures.ts` `EntityDefinitionState`, P10-gated, never yet
+      asserted live): its five-state vocabulary (`Unconstrained|PartiallyConstrained|…|
+      Redundant|…`) encodes distinctions the solver CANNOT prove (dependent-parameter set
+      is any-free, not how-many; redundancy is a constraint property, not an entity one).
+      Narrowed to the provable three + unknown. This row is the recorded user-visible
+      decision the corpus header requires.
+      (c) emission on `SketchUpsert`/`BeginGesture`/`EndGesture`; **`SolveDrag` does NOT
+      carry the map** — the drag's tag(−1) pins are excluded from the diagnosis Jacobian
+      so re-derivation buys nothing, can strobe on degenerate poses, and costs ~8 KB/frame
+      at 320 entities; consumers hold the BeginGesture map (mirrors the gesture-fixed
+      `redundant`/`conflicting` rule).
+      (d) mock lane honesty: `conflicting` projected from `detectConflicts` ids only
+      (NEVER from `refusedIds` — a mock limitation is not a geometry contradiction);
+      `fullyConstrained` for `referenceLocked` entities only; everything else omitted;
+      never derive `fullyConstrained` from `dof === 0`; fix the mock `endGesture`
+      `conflicting: []` inconsistency (it disagrees with the mock's own upsert today).
+      (e) viewport reuses the existing three materials (`sketchUnder/Full/Conflict`) —
+      no new token; the amber-viewport vs red-chrome conflict-color split stays as-is,
+      recorded; static sketches do NOT get per-entity coloring (already de-emphasized).
+      (f) `pDependentParameters` duplicate accumulation across repeated `diagnose()` is
+      real (vendored `GCS.cpp` clears conflicts but not it) — dedupe at the READ site,
+      never edit vendored PlaneGCS. (g) `solverPolicyVersion` stays 1 (reporting only,
+      solve behavior bit-identical); `entityStates` must NEVER enter any hash.
+      (h) known over-attribution: conflict projection paints every entity a conflicting
+      constraint names (a Distance between two lines reds both) — same attribution the
+      FE badge tint already does; it is a HINT, `conflicting[]` stays authoritative;
+      shared points make all owning entities under-constrained (correct, matches
+      FreeCAD). First canonical SKETCH fixture (`sketch_entity_states.ndjson`) required;
+      Rust replay lane needs a hand-added stub test (the auto-enumeration only parses).
 
 ## KERNEL CONTINUATION — RESUMED (2026-08-20, plan `~/.claude/plans/use-the-fable-orchestrator-skill-kind-dawn.md`)
 

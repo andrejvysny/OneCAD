@@ -6,10 +6,15 @@
  * (roles, names, selection, hover, tint). Positioning is the driver's own
  * contract and has its own tests (`HtmlOverlayDriver.test.ts`).
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import * as THREE from "three";
 import { ConstraintBadgeLayer } from "./ConstraintBadgeLayer";
+import { setViewportEngine } from "@/viewport/engineBridge";
+import { HtmlOverlayDriver } from "@/viewport/engine/HtmlOverlayDriver";
+import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
+import { GLYPH_STANDOFF_PX, DIMENSION_STANDOFF_PX } from "./badgeLayout";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { settingsStore } from "@/stores/settingsStore";
@@ -230,6 +235,64 @@ describe("ConstraintBadgeLayer — tool gating (M3)", () => {
 
     act(() => toolStore.getState().setTool("circle"));
     expect(screen.getByRole("textbox", { name: "Dimension value" })).toHaveValue("40");
+  });
+});
+
+/*
+ * STANDOFF WIRING (SKETCH_UX_AUDIT #5 residual). The layer hands each badge's
+ * `standoffPx` to the overlay driver, which applies it in SCREEN px every
+ * frame — no React render is involved in positioning. This mounts the real
+ * driver behind the engine seam and reads the transforms it wrote; the
+ * standoff's own zoom-invariance is pinned in `badgeLayout.test.ts`.
+ */
+describe("ConstraintBadgeLayer — standoff reaches the overlay driver", () => {
+  let driver: HtmlOverlayDriver;
+
+  beforeEach(() => {
+    resetStores();
+    sketchSelectionStore.getState().clear();
+    driver = new HtmlOverlayDriver();
+    setViewportEngine({ overlay: driver, invalidate: () => {} } as unknown as ViewportEngine);
+  });
+  afterEach(() => setViewportEngine(null));
+
+  /** The sketch view for an XY sketch: on the plane's +normal side, plane +x
+   *  to screen-right and plane +y up (CadOrbitControls.viewAlongNormal). */
+  function sketchCam(): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(76, 1, 0.1, 10_000);
+    cam.position.set(0, 0, 100);
+    cam.up.set(-1, 0, 0);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    return cam;
+  }
+
+  const yOf = (el: HTMLElement): number => {
+    const m = /translate\(-?[\d.]+px, (-?[\d.]+)px\)/.exec(el.style.transform);
+    if (!m) throw new Error(`no pixel translate in ${el.style.transform}`);
+    return Number(m[1]);
+  };
+
+  it("sends a glyph badge and its entity's dimension chip to opposite sides", () => {
+    render(<ConstraintBadgeLayer />);
+    enterSketch([horizontal, distance]); // both on e1, so both anchor at its midpoint
+    act(() => driver.update(sketchCam(), 800, 800));
+
+    // The registered element is the per-badge WRAPPER (a direct child of the
+    // container) — the one the driver writes transforms on.
+    const container = screen.getByTestId("constraint-badges");
+    const wrapperOf = (el: HTMLElement): HTMLElement => {
+      let node = el;
+      while (node.parentElement && node.parentElement !== container) node = node.parentElement;
+      return node;
+    };
+    const glyph = wrapperOf(badge("c1"));
+    const chip = wrapperOf(screen.getByRole("textbox", { name: "Dimension value" }));
+    // e1 runs along plane +x (screen-right), so both offsets are vertical: the
+    // glyph below the line, the chip above it. 26px apart — clear of the
+    // driver's own 24px cluster floor, which co-anchored badges also get.
+    expect(yOf(glyph) - yOf(chip)).toBeCloseTo(GLYPH_STANDOFF_PX + DIMENSION_STANDOFF_PX, 4);
   });
 });
 

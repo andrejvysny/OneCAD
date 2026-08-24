@@ -134,6 +134,45 @@ describe("HtmlOverlayDriver", () => {
     expect(Math.sign(xyOf(chip)[0] - xyOf(bare)[0])).toBe(-side);
   });
 
+  /*
+   * A NEGATIVE offsetPx is the same clearance on the OTHER side of the axis, so
+   * two families of items anchored to the same point can be sent opposite ways
+   * instead of stacking (sketch constraint glyphs vs dimension chips —
+   * badgeLayout.ts). The half-own-size edge translate has to flip with it: left
+   * unsigned it would drag the element back across the axis, which is the one
+   * thing `offsetPx` (a NEAR-EDGE clearance) promises never happens.
+   */
+  it("a NEGATIVE offsetPx mirrors the side, keeping the same clearance", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const plus = document.createElement("div");
+    const minus = document.createElement("div");
+    const bare = document.createElement("div");
+    const at = new THREE.Vector3(0, 2, 0);
+    const axisFrom = new THREE.Vector3(0, 0, 0);
+    driver.register("plus", plus, at, { axisFrom, offsetPx: 40 });
+    driver.register("minus", minus, at, { axisFrom, offsetPx: -40 });
+    driver.register("bare", bare, at);
+    driver.update(cam, 400, 400);
+
+    const [bx, by] = xyOf(bare);
+    const [px, py] = xyOf(plus);
+    const [mx, my] = xyOf(minus);
+    expect(px - bx).toBeCloseTo(-(mx - bx), 4); // mirrored…
+    expect(Math.abs(mx - bx)).toBeCloseTo(40, 4); // …at the same clearance
+    expect(py).toBeCloseTo(by, 4);
+    expect(my).toBeCloseTo(by, 4);
+
+    // The percentage translate (half the element's own box) points the same way
+    // as the pixel one, so the element grows AWAY from the axis on both sides.
+    const edgeX = (el: HTMLElement): number => {
+      const all = [...el.style.transform.matchAll(/translate\((-?[\d.]+)%, (-?[\d.]+)%\)/g)];
+      return Number(all[all.length - 1][1]);
+    };
+    expect(Math.sign(edgeX(plus))).toBe(Math.sign(px - bx));
+    expect(Math.sign(edgeX(minus))).toBe(Math.sign(mx - bx));
+  });
+
   it("falls back to a fixed offset when the axis projects to a point", () => {
     const cam = camAt(10);
     const driver = new HtmlOverlayDriver();

@@ -232,12 +232,22 @@ Deviations from the spec above, now the record of what shipped:
   (NOT `mockRegions`; its one-loop limit made two disjoint profiles report "no region",
   and it defeated the prod-build eviction of the mock kernel). Fills share the stroke's
   tessellation, rebuild on zoom retess, are hidden during a drag and rebuilt at gesture
-  end. Nested loops fill independently (a donut's hole paints) — v1 limitation, noted.
+  end. ~~Nested loops fill independently (a donut's hole paints)~~ — CLOSED (2026-08-24,
+  residuals wave): even-odd containment classification in `sketchFillGeometry.ts`;
+  containment is judged from a ring's BOUNDARY vertices (interior-point sampling provably
+  misclassifies the donut case — its own outer ring's interior lies inside the hole);
+  islands in holes paint; shared-edge/vertex neighbours abstain-and-vote so they never
+  flip each other.
 - **#5** — glyph badges are interactive ONLY in the select tool (mid-draw they stole the
   pointer from the gesture); machine `Fixed` pins are always inert; dimensional chips are
-  always editable in every tool. Glyph badges stand off the entity by 10mm plane-space so
-  they stop covering the curve's own click corridor. RESIDUAL: the standoff scales with
-  zoom (plane-space); a screen-constant standoff needs `HtmlOverlayDriver` support.
+  always editable in every tool. Glyph badges stand off the entity so they stop covering
+  the curve's own click corridor. ~~RESIDUAL: the standoff scales with zoom~~ — CLOSED
+  (2026-08-24, residuals wave): the 10mm plane-space bake moved to the projection side as
+  a signed screen-px `offsetPx` in `HtmlOverlayDriver` (glyphs −16px near-edge, chips
+  +10px; the sign picks the side and is load-bearing — same side the bake projected to,
+  so glyph and chip never overlap). 16px chosen from measurement: the driver was already
+  cancelling most of the bake (14.4px actual near-edge at entry zoom); now zoom-invariant,
+  2× the 8px select corridor at every zoom.
 - **#8** — enforcement is DELTA-driven: only a constraint whose value changed in THIS
   upsert is driven or refused. Drive: Radius/Diameter on CIRCLES only (arcs would detach
   their stored start/end), Distance/H-/V-Distance on one weld-free line's own endpoints,
@@ -252,9 +262,17 @@ Deviations from the spec above, now the record of what shipped:
   direction transitivity (H+V through Parallel/Perpendicular chains at any depth).
 - **#10** — landed: finish confirmation hint ("Finished <name> — N entities"), new-badge
   mount flash, StatusBar error pulse (re-pulses on repeated identical errors via a hint
-  sequence). RESIDUAL: no near-action error pulse yet, and the Esc-ladder's 3rd-press
-  exit is still silent (cancel-vs-finish is indistinguishable at the mode-flip seam —
-  needs its own seam; A12 stays open).
+  sequence). ~~RESIDUAL: no near-action error pulse yet, and the Esc-ladder's exit is
+  still silent~~ — BOTH CLOSED (2026-08-24, residuals wave): `SketchErrorPulse`
+  (cursor-anchored, error-severity only, 2.5s, pointer-events-none, portals to body) rides
+  the same `statusHint`/`statusHintSeq` bus as the StatusBar; the Esc ladder's last rung
+  goes through `exitSketch(reason)` so the idle-Esc exit fires the same "Finished <name> —
+  N entities" hint (empty sketch: "Closed <name> — nothing drawn"; only explicit finish
+  arms the Extrude handoff). Six refusal sites raised info→error so the pulses fire on the
+  common refusals (applyConstraint conflict, dimension-commit rejects, locked-geometry).
+  A12 amendment from measurement: the idle ladder is FOUR presses out of a fresh sketch
+  (openSession selects the sketch it opened, so deselect eats one) — recorded as a UX
+  seam, unchanged.
 - **#16** — the origin pill is `?vpdebug`-only chrome (A11e overstated — correction), and
   it now hides for the whole active session, not just armed gestures.
 - **#6** — keymap contract amended (documented in-file as a product change): ⇧H/⇧V/⇧C/⇧E/

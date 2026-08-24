@@ -1,19 +1,20 @@
 /*
  * Constraint badge layout (PURE) — maps a solved sketch to the glyphs the
  * ConstraintBadgeLayer renders (SCHEMA §7.3 constraint kinds). Each badge gets a
- * plane-coord anchor (the engine projects it to screen via HtmlOverlayDriver);
- * screen-space nudging (so the glyph floats off the geometry) is CSS, not here.
+ * plane-coord anchor ON its entity plus a SCREEN-px standoff; the engine
+ * projects the anchor and applies the standoff per frame via HtmlOverlayDriver.
  *
- * GLYPH STANDOFF (adversarial-review M3 follow-up). A non-dimensional badge's
- * raw anchor sits ON the entity (a line's midpoint, a circle's centre) — with
- * no world-space clearance, a `Fixed` glyph at a line's midpoint out-ranked
- * the line ITSELF in `elementsFromPoint`, silently eating a select-tool click
- * meant for the curve underneath (e2e/acceptance.spec.ts's delete-round-trip
- * step). `glyphStandoff` shifts a glyph badge's `at` a fixed few mm off that
- * raw anchor, perpendicular to its own axis — see {@link GLYPH_STANDOFF_MM}
- * for the exact value and its derivation. DIMENSIONAL badges are NOT shifted:
- * they already float off the geometry (`BADGE_OFFSET_PX` in
- * ConstraintBadgeLayer.tsx) and stay a deliberate click target in every tool.
+ * GLYPH STANDOFF (adversarial-review M3 follow-up; screen-constant since
+ * SKETCH_UX_AUDIT #5's residual). A non-dimensional badge's raw anchor sits ON
+ * the entity (a line's midpoint, a circle's centre) — with no clearance, a
+ * `Fixed` glyph at a line's midpoint out-ranked the line ITSELF in
+ * `elementsFromPoint`, silently eating a select-tool click meant for the curve
+ * underneath (e2e/acceptance.spec.ts's delete-round-trip step). The standoff
+ * that fixes it is a SCREEN distance, not a plane-space one: see
+ * {@link GLYPH_STANDOFF_PX} for the value, the sign convention, and why the
+ * mm-baked version it replaces could not hold at more than one zoom level.
+ * DIMENSIONAL badges keep the smaller {@link DIMENSION_STANDOFF_PX} and the
+ * opposite side — they are a deliberate click target in every tool.
  */
 import type { SketchConstraint, SketchEntity, SketchSession, ConstraintPosition } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
@@ -29,6 +30,12 @@ export interface ConstraintBadge {
   at: Point2;
   /** Dimensional constraints render an editable DimensionInput chip. */
   editable: boolean;
+  /**
+   * SIGNED screen-px clearance from `at` to this badge's near edge, handed
+   * straight to `HtmlOverlayDriver`'s `offsetPx`. See
+   * {@link GLYPH_STANDOFF_PX} / {@link DIMENSION_STANDOFF_PX}.
+   */
+  standoffPx: number;
   value?: number;
   /**
    * Position among badges sharing the same (quantized) anchor point — 0 for
@@ -106,57 +113,46 @@ function axisFromAwayFrom(e: SketchEntity, position: ConstraintPosition): Point2
 }
 
 /**
- * Plane-space (mm) clearance a GLYPH badge's anchor is nudged off the raw
- * entity point, perpendicular to its own axis.
+ * Screen-px clearance from a GLYPH badge's entity to the badge's near edge —
+ * `HtmlOverlayDriver` applies it per frame, perpendicular to the PROJECTED
+ * axis, so it is the same distance at every zoom.
  *
- * Sized to DOMINATE `HtmlOverlayDriver`'s own screen-space nudge (glyph
- * badges pass `axisFrom`+`BADGE_OFFSET_PX` to `overlay.register` for the
- * leader-line/perpendicular treatment — see ConstraintBadgeLayer.tsx), NOT
- * merely to add to it: rotating a vector in PLANE space then projecting it is
- * NOT the same operation as projecting it then rotating in SCREEN space —
- * for a camera view where they disagree, this bake and the driver's own
- * nudge land on OPPOSITE sides instead of compounding (measured: a 4mm bake,
- * on `e2e/acceptance.spec.ts`'s default framing, netted only ~4px of ACTUAL
- * on-screen clearance instead of the ~19px the plane-space math alone
- * predicted — the driver's own fixed 20px counter-nudge, in this specific
- * view, ran almost exactly the other way and cancelled nearly all of it).
- * The driver's contribution is a FIXED CSS magnitude regardless of camera —
- * `BADGE_OFFSET_PX` (10) near-edge clearance + half the 20px badge box (10)
- * — so a bake that clears `16px target + 20px worst-case opposition = 36px`
- * on its own is safe in EVERY view, not just the ones where the two happen
- * to agree. At the same measured ~4.74 px/mm (`badgeLayout.test.ts` pins
- * this against a live-camera probe of that same test's rectangle), 10mm ⇒
- * ~47px alone, ~27px worst-case net — comfortably past both thresholds.
+ * WHY SCREEN, NOT MM. This replaces a 10mm plane-space bake on `at` itself,
+ * which could only be right at one zoom: it projected to ~47px at the
+ * sketch-entry camera settle (measured — a face-on XY sketch, viewport 722px
+ * tall, camera distance 97.51 at fov 76 ⇒ 4.74 px/mm) and to ~117px after one
+ * wheel-zoom in, while the driver's own screen-space nudge stayed a fixed 22px
+ * the OTHER way (rotating in plane space then projecting is not the same
+ * operation as projecting then rotating in screen space, and for the sketch
+ * camera the two are exact opposites). Net on-screen standoff therefore ran
+ * from ~24px at entry to ~94px zoomed in — crowding the curve at one end (that
+ * 24px centre left only ~14px of clearance to the badge's own edge, inside the
+ * corridor below) and drifting away from it at the other. Both effects are gone
+ * once the standoff IS a screen distance.
+ *
+ * MAGNITUDE. 16px is twice `SketchController.pickTol`'s 8px (SNAP_PX) select
+ * corridor around the curve, and — because the driver's `offsetPx` is the
+ * clearance to the NEAR EDGE, not the centre — it holds whatever the badge's
+ * own box measures. Measured after the change: near edge 16px, badge centre
+ * 27px, identical at both zooms above (the mm bake read 24px at entry), so the
+ * default-zoom look survives within ~3px.
+ *
+ * SIGN. Negative = the side OPPOSITE the driver's default (+90° screen)
+ * perpendicular, which for the sketch camera — always looking at the plane
+ * from its +normal side (`CadOrbitControls.viewAlongNormal`) — is the side the
+ * old plane-space bake projected to. Keeping it is not nostalgia: DIMENSIONAL
+ * chips use the positive side, so a glyph and a dimension on the SAME entity
+ * land on opposite sides of it instead of stacking.
  */
-const GLYPH_STANDOFF_MM = 10;
+export const GLYPH_STANDOFF_PX = 16;
 
 /**
- * Nudge a glyph badge's raw anchor `at` — AND `axisFrom` by the identical
- * plane-space delta — {@link GLYPH_STANDOFF_MM} off the entity, perpendicular
- * to the axis. Shifting BOTH points (not just `at`) keeps `at − axisFrom`
- * (and therefore whatever `HtmlOverlayDriver` derives from it) EXACTLY as it
- * was before this bake — see {@link GLYPH_STANDOFF_MM} for why that
- * independence, rather than trying to align with it, is the point. Returns
- * both points unmoved when there is no axis to take a direction from (a bare
- * `Point` has none) — the driver's own (small, ≤20px) fallback still applies
- * on top of that case, same as before this change.
+ * The same clearance for a DIMENSIONAL chip, on the driver's default side.
+ * Smaller than {@link GLYPH_STANDOFF_PX}: a value pill reads as a label of the
+ * curve it sits beside, and it is a click target in every tool rather than
+ * something that must stay clear of one.
  */
-function glyphStandoff(
-  at: Point2,
-  axisFrom: Point2 | undefined,
-): { at: Point2; axisFrom: Point2 | undefined } {
-  if (!axisFrom) return { at, axisFrom };
-  const ax = at.x - axisFrom.x;
-  const ay = at.y - axisFrom.y;
-  const len = Math.hypot(ax, ay);
-  if (len < 1e-9) return { at, axisFrom };
-  const dx = (ay / len) * GLYPH_STANDOFF_MM;
-  const dy = (-ax / len) * GLYPH_STANDOFF_MM;
-  return {
-    at: { x: at.x + dx, y: at.y + dy },
-    axisFrom: { x: axisFrom.x + dx, y: axisFrom.y + dy },
-  };
-}
+export const DIMENSION_STANDOFF_PX = 10;
 
 function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): ConstraintBadge | null {
   const first = byId.get(c.entities[0]);
@@ -167,19 +163,19 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "Vertical":
     case "Coincident": {
       const position = c.positions?.[0] ?? "Start";
-      const rawAt = c.type === "Coincident" ? entityPointCoord(first, position) : entityAnchor(first);
+      const at = c.type === "Coincident" ? entityPointCoord(first, position) : entityAnchor(first);
       // A Coincident badge sits AT the shared point, so it would otherwise sit
       // directly on top of the vertex marker there — offset it along the
       // entity's own axis, away from that point, same as every other badge.
-      const rawAxisFrom = c.type === "Coincident" ? axisFromAwayFrom(first, position) : axisFromFor(first);
-      if (!rawAt) return null;
-      const { at, axisFrom } = glyphStandoff(rawAt, rawAxisFrom);
+      const axisFrom = c.type === "Coincident" ? axisFromAwayFrom(first, position) : axisFromFor(first);
+      if (!at) return null;
       return {
         id: c.id,
         glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
         kind: c.type,
         at,
         editable: false,
+        standoffPx: -GLYPH_STANDOFF_PX,
         offsetIndex: 0,
         axisFrom,
       };
@@ -193,17 +189,17 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "OnCurve":
     case "Symmetric":
     case "Fixed": {
-      const rawAt = entityAnchor(first);
-      if (!rawAt) return null;
-      const { at, axisFrom } = glyphStandoff(rawAt, axisFromFor(first));
+      const at = entityAnchor(first);
+      if (!at) return null;
       return {
         id: c.id,
         glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
         kind: c.type,
         at,
         editable: false,
+        standoffPx: -GLYPH_STANDOFF_PX,
         offsetIndex: 0,
-        axisFrom,
+        axisFrom: axisFromFor(first),
       };
     }
     case "Distance":
@@ -226,6 +222,7 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
         at,
         editable: true,
         value,
+        standoffPx: DIMENSION_STANDOFF_PX,
         offsetIndex: 0,
         axisFrom: axisFromFor(first),
       };

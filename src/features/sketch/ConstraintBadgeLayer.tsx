@@ -56,10 +56,6 @@ import { anchorKey, layoutBadges } from "./badgeLayout";
 import { CONSTRAINT_PRESENTATION } from "./constraintCatalog";
 import { DimensionInput } from "./DimensionInput";
 
-/** Screen-px clearance from the entity axis to a badge's near edge — the
- *  driver shifts the badge the rest of the way by half its own size. */
-const BADGE_OFFSET_PX = 10;
-
 export function ConstraintBadgeLayer() {
   const mode = useToolStore((s) => s.mode);
   const sketchTool = useToolStore((s) => s.sketchTool);
@@ -156,10 +152,11 @@ export function ConstraintBadgeLayer() {
       // a direction-correct perpendicular offset (a leader-anchored badge
       // reads as "belonging to that line/circle" even at a busy shared
       // vertex); `clusterId` keeps co-anchored badges (same quantized point)
-      // a floor apart on top of that.
+      // a floor apart on top of that. `standoffPx` is SIGNED — the sign is
+      // which side of the entity this badge takes (badgeLayout.ts).
       overlay.register(b.id, el, planePointToWorld(plane, b.at), {
         axisFrom: b.axisFrom ? planePointToWorld(plane, b.axisFrom) : undefined,
-        offsetPx: BADGE_OFFSET_PX,
+        offsetPx: b.standoffPx,
         clusterId: anchorKey(b.at),
       });
       ids.push(b.id);

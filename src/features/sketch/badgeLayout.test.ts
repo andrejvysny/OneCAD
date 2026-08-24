@@ -1,7 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { layoutBadges, entityAnchor, entityPointCoord } from "./badgeLayout";
+import * as THREE from "three";
+import {
+  layoutBadges,
+  entityAnchor,
+  entityPointCoord,
+  GLYPH_STANDOFF_PX,
+  DIMENSION_STANDOFF_PX,
+  type ConstraintBadge,
+} from "./badgeLayout";
 import { planeFor } from "@/ipc/mockSketch";
-import type { SketchSession } from "@/ipc/types";
+import { HtmlOverlayDriver } from "@/viewport/engine/HtmlOverlayDriver";
+import { planePointToWorld } from "@/viewport/engine/sketchBasis";
+import type { SketchPlane, SketchSession } from "@/ipc/types";
 
 const session: SketchSession = {
   sketchId: "sk",
@@ -37,24 +47,28 @@ describe("entityAnchor / entityPointCoord", () => {
 describe("layoutBadges", () => {
   const badges = layoutBadges(session);
 
-  // GLYPH STANDOFF (adversarial-review M3 follow-up): a glyph's `at` is now
-  // nudged GLYPH_STANDOFF_MM (10mm) perpendicular off the raw entity point —
-  // e1 is p0=[0,0],p1=[40,0] (horizontal), so the perpendicular is straight
-  // -y, off the midpoint {x:20,y:0}. See badgeLayout.ts's file header + the
-  // dedicated standoff describe block below for the full derivation.
-  it("places a Horizontal glyph off the line midpoint (standoff)", () => {
+  // GLYPH STANDOFF — CHANGED DELIBERATELY (SKETCH_UX_AUDIT #5 residual): the
+  // standoff used to be baked into `at` as 10mm of PLANE space, so these pins
+  // read a nudged anchor ({x:20,y:-10} here). It is now a SCREEN-px offset the
+  // overlay driver applies per frame (`standoffPx`), so `at` is the raw entity
+  // anchor again and the on-screen clearance no longer scales with zoom. See
+  // badgeLayout.ts's `GLYPH_STANDOFF_PX` and the projection describe below.
+  it("anchors a Horizontal glyph AT the line midpoint, standing it off in screen px", () => {
     const h = badges.find((b) => b.id === "k1")!;
     expect(h.glyph).toBe("H");
-    expect(h.at).toEqual({ x: 20, y: -10 });
+    expect(h.at).toEqual({ x: 20, y: 0 });
+    expect(h.standoffPx).toBe(-GLYPH_STANDOFF_PX);
     expect(h.editable).toBe(false);
   });
 
-  it("places a Coincident dot off the shared point (standoff)", () => {
+  it("anchors a Coincident dot AT the shared point, standing it off in screen px", () => {
     const c = badges.find((b) => b.id === "k2")!;
     expect(c.glyph).toBe("•");
     // k2 is anchored at e2's Start=[40,0]; axisFrom is e2's OTHER endpoint
-    // [40,20] (see the dedicated test below), so the standoff runs -x from it.
-    expect(c.at).toEqual({ x: 30, y: 0 });
+    // [40,20] (see the dedicated test below) — the direction the driver takes
+    // its perpendicular from.
+    expect(c.at).toEqual({ x: 40, y: 0 });
+    expect(c.standoffPx).toBe(-GLYPH_STANDOFF_PX);
   });
 
   it("marks dimensional constraints editable with a value glyph", () => {
@@ -62,6 +76,9 @@ describe("layoutBadges", () => {
     expect(d.editable).toBe(true);
     expect(d.value).toBe(40);
     expect(d.glyph).toBe("40");
+    // Positive standoff = the driver's default side, i.e. the OTHER side of the
+    // entity from the glyph badges (which carry a negative one).
+    expect(d.standoffPx).toBe(DIMENSION_STANDOFF_PX);
     const r = badges.find((b) => b.id === "k4")!;
     expect(r.editable).toBe(true);
     expect(r.at).toEqual({ x: 10, y: 10 });
@@ -73,13 +90,11 @@ describe("layoutBadges", () => {
 
   it("gives a line-anchored badge its endpoint as the leader axisFrom", () => {
     const h = badges.find((b) => b.id === "k1")!;
-    // e1 is p0=[0,0], p1=[40,0] — the leader runs from p0 to the midpoint.
-    // GLYPH STANDOFF: axisFrom is nudged by the SAME delta as `at` (see
-    // badgeLayout.ts's glyphStandoff), so it reads p0 + that delta (0,-10),
-    // not raw p0 — the leader's own (at − axisFrom) vector is preserved
-    // exactly, which is the whole point (no drift into the driver's own
-    // separate screen-space nudge).
-    expect(h.axisFrom).toEqual({ x: 0, y: -10 });
+    // e1 is p0=[0,0], p1=[40,0] — the axis runs from p0 to the midpoint, and
+    // the driver offsets perpendicular to its PROJECTION. Raw p0, not a nudged
+    // copy: with the standoff now living in screen px there is no plane-space
+    // delta to carry (it used to read {x:0,y:-10}).
+    expect(h.axisFrom).toEqual({ x: 0, y: 0 });
   });
 
   it("gives a circle-anchored badge a point on its boundary as axisFrom", () => {
@@ -94,27 +109,24 @@ describe("layoutBadges", () => {
     // p0=[40,0], p1=[40,20] — the axis runs away from the shared point toward
     // e2's OTHER endpoint, so the leader (and the standoff direction) reads
     // off THAT axis, not a zero-length one degenerating at the vertex itself.
-    // Both `at` and `axisFrom` carry the SAME standoff delta (-10,0 here), so
-    // the leader's own (at − axisFrom) vector — and therefore the direction
-    // the overlay driver's own nudge rotates — is unchanged from before.
-    expect(c.axisFrom).toEqual({ x: 30, y: 20 });
-    expect(c.at).toEqual({ x: 30, y: 0 });
+    expect(c.axisFrom).toEqual({ x: 40, y: 20 });
+    expect(c.at).toEqual({ x: 40, y: 0 });
   });
 
-  // Standoff follow-up: k1 (Horizontal, a GLYPH) and k3 (Distance, DIMENSIONAL)
-  // used to co-anchor exactly at e1's midpoint and stagger via offsetIndex —
-  // now only the glyph is nudged off that point, so they no longer share an
-  // anchor at all and each is a standalone offsetIndex-0 group of one. Two
-  // GLYPHS on the same entity still co-anchor (identical standoff applies to
-  // both) and still stagger — see "layoutBadges — offsetIndex stagger" below,
-  // whose zz/aa pair (Horizontal + Fixed, same entity) is exactly that case.
-  it("a glyph (k1) and a co-located dimensional chip (k3) no longer share an anchor", () => {
+  // CHANGED DELIBERATELY with the screen-px standoff: k1 (Horizontal, a GLYPH)
+  // and k3 (Distance, DIMENSIONAL) are both anchored at e1's midpoint again —
+  // the plane-space bake used to separate their anchors as a side effect. They
+  // no longer collide on screen because their standoffs point to OPPOSITE
+  // sides (negative vs positive), and the shared anchor restores the U9
+  // stagger/cluster grouping the anchor key exists for.
+  it("a glyph (k1) and a co-located dimensional chip (k3) share the entity's anchor and stagger", () => {
     const h = badges.find((b) => b.id === "k1")!;
     const d = badges.find((b) => b.id === "k3")!;
-    expect(h.at).not.toEqual(d.at);
-    expect(d.at).toEqual({ x: 20, y: 0 }); // dimensional stays AT the raw midpoint
+    expect(h.at).toEqual(d.at);
+    expect(d.at).toEqual({ x: 20, y: 0 });
+    expect(Math.sign(h.standoffPx)).toBe(-Math.sign(d.standoffPx));
     expect(h.offsetIndex).toBe(0);
-    expect(d.offsetIndex).toBe(0);
+    expect(d.offsetIndex).toBe(1);
   });
 
   it("a badge with no co-anchored sibling gets offsetIndex 0", () => {
@@ -219,64 +231,145 @@ describe("layoutBadges — M6c constraint glyph coverage", () => {
 });
 
 /*
- * Adversarial-review M3 follow-up: e2e/acceptance.spec.ts:161 failed because a
- * `Fixed` glyph badge sat exactly at a line's midpoint and out-ranked the line
- * itself in `elementsFromPoint`, eating a select-tool click meant for the
- * curve. `badgeLayout.ts` is camera-agnostic (mm only), so the ≥16px CSS claim
- * is checked against a PINNED conversion rather than a live projection: a
- * one-off probe against `e2e/acceptance.spec.ts`'s own default-zoom camera
- * (`enterSketchViaPlanePicker`'s framed rectangle, `planePointToClient`
- * before/after a 1mm plane-space nudge) measured ~4.74 px/mm. Re-probe and
- * update this ratio if that framing ever changes.
+ * GLYPH STANDOFF, THROUGH THE PROJECTION (SKETCH_UX_AUDIT #5 residual).
  *
- * The bar this bake alone must clear is NOT the bare 16px target — it must
- * clear 16px PLUS `HtmlOverlayDriver`'s own worst-case counter-nudge (see
- * badgeLayout.ts's `GLYPH_STANDOFF_MM` doc for the measured case where that
- * nudge ran almost exactly opposite this bake and cancelled nearly all of
- * it). That nudge is a fixed CSS magnitude regardless of camera view:
- * `BADGE_OFFSET_PX` (10, ConstraintBadgeLayer.tsx) + half the 20px badge box
- * (10) = 20px.
+ * Origin of the standoff (adversarial-review M3): a `Fixed` glyph badge sat
+ * exactly at a line's midpoint, out-ranked the line itself in
+ * `elementsFromPoint`, and ate a select-tool click meant for the curve
+ * (e2e/acceptance.spec.ts:161).
+ *
+ * The first fix baked 10mm of PLANE space into `at`, which could only be sized
+ * for ONE zoom. Measured in the mock e2e lane (chromium, 1280x800, viewport
+ * 722px tall, sketch-entry camera distance 97.51 at fov 76 ⇒ 4.74 px/mm):
+ * 10mm projected to 47.39px, and the badge's actual on-screen standoff went
+ * from 24.4px at sketch entry to 93.6px after one wheel-zoom in (distance
+ * 39.64). The standoff is now a screen constant the driver applies per frame,
+ * so these tests run `layoutBadges` output through the REAL
+ * `HtmlOverlayDriver` at two zoom levels and compare pixels.
+ *
+ * The camera below is the sketch view `CadOrbitControls.viewAlongNormal`
+ * establishes for an XY sketch: on the plane's +normal side (world +Z), the
+ * plane's own xAxis (world +Y) to screen-right and its yAxis (world -X) up.
  */
-describe("layoutBadges — glyph standoff clears the entity's own click corridor (M3 follow-up)", () => {
-  const PX_PER_MM_AT_DEFAULT_ZOOM = 4.74;
-  const SELECT_CLICK_MIN_PX = 16;
-  const DRIVER_OWN_WORST_CASE_NUDGE_PX = 20;
+describe("glyph standoff is a SCREEN constant (projected through HtmlOverlayDriver)", () => {
+  const VIEW_PX = 800;
+  const SKETCH_PICK_PX = 8; // SketchController.pickTol's select corridor
 
-  it("a line's glyph badge center clears the click corridor even against the driver's own worst-case counter-nudge", () => {
-    const s: SketchSession = {
-      sketchId: "sk",
-      plane: planeFor("XY"),
-      entities: [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
-      constraints: [{ id: "fx1", type: "Fixed", entities: ["e1"] }],
-      dof: 0,
-      status: "FullyConstrained",
-    };
-    const badge = layoutBadges(s)[0];
-    const mid = entityAnchor(s.entities[0])!;
-    const mmOff = Math.hypot(badge.at.x - mid.x, badge.at.y - mid.y);
-    expect(mmOff * PX_PER_MM_AT_DEFAULT_ZOOM).toBeGreaterThanOrEqual(
-      SELECT_CLICK_MIN_PX + DRIVER_OWN_WORST_CASE_NUDGE_PX,
-    );
+  function sketchCam(distance: number): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(76, 1, 0.1, 10_000);
+    cam.position.set(0, 0, distance);
+    cam.up.set(-1, 0, 0);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    return cam;
+  }
+
+  const pxOf = (el: HTMLElement): { x: number; y: number } => {
+    const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(el.style.transform);
+    if (!m) throw new Error(`no pixel translate in ${el.style.transform}`);
+    return { x: Number(m[1]), y: Number(m[2]) };
+  };
+
+  /** Screen position of `badge` and of its own (un-offset) anchor. */
+  function place(badge: ConstraintBadge, plane: SketchPlane, cam: THREE.Camera) {
+    const driver = new HtmlOverlayDriver();
+    const el = document.createElement("div");
+    const anchorEl = document.createElement("div");
+    driver.register("badge", el, planePointToWorld(plane, badge.at), {
+      axisFrom: badge.axisFrom ? planePointToWorld(plane, badge.axisFrom) : undefined,
+      offsetPx: badge.standoffPx,
+    });
+    driver.register("anchor", anchorEl, planePointToWorld(plane, badge.at));
+    driver.update(cam, VIEW_PX, VIEW_PX);
+    return { badge: pxOf(el), anchor: pxOf(anchorEl) };
+  }
+
+  const lineSession = (constraints: SketchSession["constraints"]): SketchSession => ({
+    sketchId: "sk",
+    plane: planeFor("XY"),
+    entities: [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
+    constraints,
+    dof: 0,
+    status: "FullyConstrained",
   });
 
-  it("does not move a dimensional (editable) badge off its raw anchor", () => {
-    const s: SketchSession = {
-      sketchId: "sk",
-      plane: planeFor("XY"),
-      entities: [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
-      constraints: [{ id: "d1", type: "Distance", entities: ["e1"], value: 40 }],
-      dof: 0,
-      status: "FullyConstrained",
-    };
+  // The two zooms this suite compares. Anything that scales with the camera
+  // reads ~2.5x apart between them.
+  const NEAR = 40;
+  const FAR = 100;
+
+  it("a glyph badge stands off by the SAME pixels at two zoom levels", () => {
+    const s = lineSession([{ id: "fx1", type: "Fixed", entities: ["e1"] }]);
     const badge = layoutBadges(s)[0];
-    expect(badge.editable).toBe(true);
-    expect(badge.at).toEqual(entityAnchor(s.entities[0]));
+
+    const far = place(badge, s.plane, sketchCam(FAR));
+    const near = place(badge, s.plane, sketchCam(NEAR));
+
+    const offFar = Math.hypot(far.badge.x - far.anchor.x, far.badge.y - far.anchor.y);
+    const offNear = Math.hypot(near.badge.x - near.anchor.x, near.badge.y - near.anchor.y);
+    expect(offFar).toBeCloseTo(GLYPH_STANDOFF_PX, 4);
+    expect(offNear).toBeCloseTo(GLYPH_STANDOFF_PX, 4);
+
+    // …and the two cameras really do differ: 20mm of the line projects 2.5x
+    // wider at NEAR, which is exactly what the mm-baked standoff followed.
+    const widthAt = (cam: THREE.Camera) => {
+      const driver = new HtmlOverlayDriver();
+      const a = document.createElement("div");
+      const b = document.createElement("div");
+      driver.register("a", a, planePointToWorld(s.plane, { x: 0, y: 0 }));
+      driver.register("b", b, planePointToWorld(s.plane, { x: 20, y: 0 }));
+      driver.update(cam, VIEW_PX, VIEW_PX);
+      return Math.abs(pxOf(b).x - pxOf(a).x);
+    };
+    expect(widthAt(sketchCam(NEAR)) / widthAt(sketchCam(FAR))).toBeCloseTo(FAR / NEAR, 3);
   });
 
-  // A bare `Point` entity's axisFromFor is undefined (no line/center to take a
-  // direction from) — glyphStandoff leaves `at` unmoved rather than guessing;
-  // the driver's own screen-space fallback still applies on top of this case.
-  it("leaves a Point-anchored glyph badge unmoved (no axis to take a direction from)", () => {
+  it("the standoff clears the curve's own click corridor at BOTH zooms", () => {
+    const s = lineSession([{ id: "fx1", type: "Fixed", entities: ["e1"] }]);
+    const badge = layoutBadges(s)[0];
+    // `offsetPx` is the clearance to the badge's NEAR EDGE (the driver adds
+    // half the element's own box on top), so this is the whole guarantee —
+    // no part of the badge reaches within it, whatever the badge measures.
+    expect(GLYPH_STANDOFF_PX).toBeGreaterThanOrEqual(2 * SKETCH_PICK_PX);
+    for (const d of [NEAR, FAR]) {
+      const { badge: b, anchor } = place(badge, s.plane, sketchCam(d));
+      expect(Math.hypot(b.x - anchor.x, b.y - anchor.y)).toBeGreaterThanOrEqual(SKETCH_PICK_PX);
+    }
+  });
+
+  it("the standoff is PERPENDICULAR to the entity, and a glyph takes the opposite side from its dimension", () => {
+    const s = lineSession([
+      { id: "fx1", type: "Fixed", entities: ["e1"] },
+      { id: "d1", type: "Distance", entities: ["e1"], value: 40 },
+    ]);
+    const badges = layoutBadges(s);
+    const cam = sketchCam(FAR);
+    const glyph = place(badges.find((b) => b.id === "fx1")!, s.plane, cam);
+    const dim = place(badges.find((b) => b.id === "d1")!, s.plane, cam);
+
+    // e1 runs along plane +x, which this camera puts on screen-right: the
+    // offset is purely vertical for both.
+    expect(glyph.badge.x).toBeCloseTo(glyph.anchor.x, 4);
+    expect(dim.badge.x).toBeCloseTo(dim.anchor.x, 4);
+    // Opposite sides of the line — the glyph below (the side the old
+    // plane-space bake projected to), the dimension chip above.
+    expect(glyph.badge.y - glyph.anchor.y).toBeCloseTo(GLYPH_STANDOFF_PX, 4);
+    expect(dim.badge.y - dim.anchor.y).toBeCloseTo(-DIMENSION_STANDOFF_PX, 4);
+  });
+
+  it("does not move any badge's plane anchor off its entity", () => {
+    const s = lineSession([
+      { id: "fx1", type: "Fixed", entities: ["e1"] },
+      { id: "d1", type: "Distance", entities: ["e1"], value: 40 },
+    ]);
+    for (const badge of layoutBadges(s)) expect(badge.at).toEqual(entityAnchor(s.entities[0]));
+  });
+
+  // A bare `Point` entity has no axis (`axisFromFor` returns undefined), and
+  // the driver only offsets an item that HAS one — so this badge sits on its
+  // point, exactly as it did under the plane-space bake.
+  it("leaves a Point-anchored glyph badge on its point (no axis to take a direction from)", () => {
     const s: SketchSession = {
       sketchId: "sk",
       plane: planeFor("XY"),
@@ -288,5 +381,7 @@ describe("layoutBadges — glyph standoff clears the entity's own click corridor
     const badge = layoutBadges(s)[0];
     expect(badge.axisFrom).toBeUndefined();
     expect(badge.at).toEqual({ x: 5, y: 5 });
+    const { badge: b, anchor } = place(badge, s.plane, sketchCam(FAR));
+    expect(b).toEqual(anchor);
   });
 });

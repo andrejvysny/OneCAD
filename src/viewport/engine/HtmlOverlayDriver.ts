@@ -54,11 +54,13 @@ export function projectToScreen(
  * so a wide chip cannot reach back over the axis. Measuring the element instead
  * would force a layout read on every rendered frame.
  *
- * The side is chosen deterministically (always the axis rotated +90° in screen
- * space) — picking the "nearer" side per frame would make the element jump across
- * the axis mid-drag. When the axis projects to nothing (the camera is looking
- * straight down it) there is no meaningful perpendicular, so it falls back to a
- * fixed up-right offset instead of dividing by ~0.
+ * The side is chosen deterministically (the axis rotated +90° in screen space,
+ * flipped when `offsetPx` is negative) — picking the "nearer" side per frame
+ * would make the element jump across the axis mid-drag. `(ux, uy)` is the
+ * UNSIGNED +90° direction; `(dx, dy)` already carries the sign. When the axis
+ * projects to nothing (the camera is looking straight down it) there is no
+ * meaningful perpendicular, so it falls back to a fixed up-right offset instead
+ * of dividing by ~0.
  */
 export function offsetForAxis(
   head: { x: number; y: number },
@@ -80,6 +82,7 @@ interface OverlayItem {
    * it the element is centered on `worldPos`, exactly as before.
    */
   axisFrom?: THREE.Vector3;
+  /** SIGNED near-edge clearance in CSS px — see {@link OverlayPlacement}. */
   offsetPx?: number;
   /**
    * Items sharing a cluster id are laid out as ONE group: neighbours are kept a
@@ -126,6 +129,15 @@ function createLeaderEl(): HTMLElement {
 /** Extra placement for an axis-anchored item. */
 export interface OverlayPlacement {
   axisFrom?: THREE.Vector3;
+  /**
+   * Clearance in CSS px from the axis to the element's near EDGE — a SCREEN
+   * constant, so it holds at every zoom.
+   *
+   * SIGNED: positive puts the element on the axis' +90° screen side, negative
+   * on the other one. Two families of items anchored to the SAME point can
+   * therefore be sent to opposite sides instead of stacking (the sketch's
+   * constraint glyphs vs its dimension chips — see badgeLayout.ts).
+   */
   offsetPx?: number;
   clusterId?: string;
   /** Opt into the per-frame keep-out region `update()` is given (the value
@@ -271,8 +283,8 @@ export class HtmlOverlayDriver {
       /** Set for items that opted into the keep-out, so the pass below can find
        *  them with their own size and sticky side. */
       item?: OverlayItem;
-      /** Unit offset direction, needed to turn (x, y) into the element's real
-       *  centre — the `edge` translate shifts it by half its own size. */
+      /** SIGNED unit offset direction, needed to turn (x, y) into the element's
+       *  real centre — the `edge` translate shifts it by half its own size. */
       ux?: number;
       uy?: number;
     }
@@ -302,11 +314,15 @@ export class HtmlOverlayDriver {
         // Half the element's OWN size, in the same direction: `offsetPx` is then
         // the clearance to its near edge, whatever its width. Percentages resolve
         // against the element's border box, and translations compose additively.
-        edge = ` translate(${ux * 50}%, ${uy * 50}%)`;
+        // The sign has to travel with it — for a negative `offsetPx` the element
+        // sits on the other side, so half its size must move it FURTHER from the
+        // axis there too, not back across it.
+        const side = offsetPx < 0 ? -1 : 1;
+        edge = ` translate(${ux * side * 50}%, ${uy * side * 50}%)`;
         anchorX = p.x;
         anchorY = p.y;
-        offsetUx = ux;
-        offsetUy = uy;
+        offsetUx = ux * side;
+        offsetUy = uy * side;
       }
       placed.push({
         el,

@@ -5,6 +5,7 @@ import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useDocumentStore } from "@/stores/documentStore";
 import { runAction } from "@/shortcuts/useShortcuts";
+import { SketchErrorPulse } from "./SketchErrorPulse";
 
 /**
  * Sketch chrome row (prototype 1c), shown only in sketch mode, second row of
@@ -35,6 +36,11 @@ import { runAction } from "@/shortcuts/useShortcuts";
  * collapsed it to ~0px; see `EditorShell.tsx`'s comment on that div).
  * Collapse order, least-important label first: Cancel text → icon only. The
  * sketch name, active tool and Finish never collapse.
+ *
+ * It also HOSTS `SketchErrorPulse` — a plain child component, not a
+ * contribution (the same relationship `ConstraintMenu` has): the pulse portals
+ * itself to `document.body`, so this row supplies only its sketch-mode
+ * lifetime, not its position.
  */
 export function SketchChromeBar() {
   const mode = useToolStore((s) => s.mode);
@@ -53,6 +59,7 @@ export function SketchChromeBar() {
   if (!activeSketchId) {
     return (
       <div className="flex h-[38px] items-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
+        <SketchErrorPulse />
         <Icon
           name="penEdit"
           size={15}
@@ -75,6 +82,7 @@ export function SketchChromeBar() {
 
   return (
     <div className="flex h-[38px] items-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
+      <SketchErrorPulse />
       <Icon
           name="penEdit"
           size={15}

@@ -123,7 +123,8 @@ test("a second Distance on the same points with a different value is rejected + 
   // No new row: the clashing dimension was dropped, not appended.
   await expect(rows()).toHaveCount(rowsAfterFirst);
   // The status hint names the pre-existing Distance constraint it clashed with.
-  await expect(page.getByText(/conflicts with Distance/)).toBeVisible();
+  // (Scoped to the StatusBar: the near-action pulse repeats the same text.)
+  await expect(page.getByTestId("status-hint")).toContainText(/conflicts with Distance/);
   // The sketch reverted to exactly its post-first-dimension state.
   await expect(dofPill(page)).toHaveText(dofAfterFirst);
 });

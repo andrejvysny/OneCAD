@@ -446,10 +446,32 @@ describe("SketchObject — live closure fills (audit item #2)", () => {
     obj.dispose();
   });
 
-  it("fills a nested circle and its enclosing loop independently (v1: the hole paints)", () => {
+  it("SUBTRACTS a nested circle from its enclosing loop — the hole is a hole", () => {
+    // Even-odd nesting: the circle is enclosed by one ring, so it is a hole in
+    // it, not a second fill. Area is what tells the two apart — v1 painted both
+    // rings and covered the hole (400 + 28.3); this paints 400 − 28.3.
     const circle: SketchEntity = { id: "c", type: "Circle", center: [0, 0], radius: 3 };
     const { obj, root } = build([...RECT, circle]);
+    expect(fills(root)).toHaveLength(1);
+    const expected = 400 - Math.PI * 9;
+    expect(fillArea(fills(root)[0])).toBeGreaterThan(expected * 0.99);
+    expect(fillArea(fills(root)[0])).toBeLessThan(expected * 1.01);
+    obj.dispose();
+  });
+
+  it("paints an ISLAND drawn inside that hole — even-odd keeps going", () => {
+    // Straight-edged all the way down, so the area is exact rather than the
+    // stroke tessellation's inscribed approximation.
+    const square = (tag: string, h: number): SketchEntity[] => [
+      { id: `${tag}1`, type: "Line", p0: [-h, -h], p1: [h, -h] },
+      { id: `${tag}2`, type: "Line", p0: [h, -h], p1: [h, h] },
+      { id: `${tag}3`, type: "Line", p0: [h, h], p1: [-h, h] },
+      { id: `${tag}4`, type: "Line", p0: [-h, h], p1: [-h, -h] },
+    ];
+    const { obj, root } = build([...RECT, ...square("hole", 5), ...square("island", 2)]);
     expect(fills(root)).toHaveLength(2);
+    const total = fills(root).reduce((n, f) => n + fillArea(f), 0);
+    expect(total).toBeCloseTo(400 - 100 + 16, 6);
     obj.dispose();
   });
 

@@ -36,7 +36,8 @@ interface NestedSketch {
   annulusPoint: { x: number; y: number };
 }
 
-async function drawNestedSketch(page: Page): Promise<NestedSketch> {
+/** Draw the nested profile and STOP inside the sketch session, before Enter. */
+async function drawNestedSketchOpen(page: Page): Promise<NestedSketch> {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
   await hideSeedSketches(page);
@@ -59,14 +60,72 @@ async function drawNestedSketch(page: Page): Promise<NestedSketch> {
     x: Math.min(...xs) + (Math.max(...xs) - Math.min(...xs)) * 0.15,
     y: circle.center[1],
   };
-
-  await page.keyboard.press("Enter");
-  await waitForCameraSettled(page);
   return {
     plane: snap.plane,
     center: { x: circle.center[0], y: circle.center[1] },
     annulusPoint,
   };
+}
+
+async function drawNestedSketch(page: Page): Promise<NestedSketch> {
+  const sketch = await drawNestedSketchOpen(page);
+  await page.keyboard.press("Enter");
+  await waitForCameraSettled(page);
+  return sketch;
+}
+
+/**
+ * The LIVE closure fills currently drawn by the open session: how many meshes,
+ * and whether their triangles cover a given plane (u,v) point.
+ *
+ * The canvas has no per-entity DOM, so this reads the engine's own scene under
+ * `?vpdebug`. Fill geometry is plane-LOCAL — the same (u,v) frame the sketch
+ * snapshot reports — so no basis transform is needed here.
+ */
+async function liveFillCoverage(
+  page: Page,
+  point: { x: number; y: number },
+): Promise<{ meshes: number; covered: boolean }> {
+  return page.evaluate((p) => {
+    const w = window as unknown as {
+      __vpEngine?: {
+        sketchRoot: {
+          traverse(cb: (o: {
+            name: string;
+            geometry?: {
+              index?: { array: ArrayLike<number> } | null;
+              attributes?: { position?: { array: ArrayLike<number> } };
+            };
+          }) => void): void;
+        };
+      };
+    };
+    if (!w.__vpEngine) throw new Error("__vpEngine unavailable (needs ?vpdebug)");
+    let meshes = 0;
+    let covered = false;
+    w.__vpEngine.sketchRoot.traverse((o) => {
+      if (o.name !== "sketchActiveFill") return;
+      meshes++;
+      const pos = o.geometry?.attributes?.position?.array;
+      const idx = o.geometry?.index?.array;
+      if (!pos || !idx) return;
+      const at = (v: number): [number, number] => [Number(pos[v * 3]), Number(pos[v * 3 + 1])];
+      for (let t = 0; t < idx.length; t += 3) {
+        const a = at(Number(idx[t]));
+        const b = at(Number(idx[t + 1]));
+        const c = at(Number(idx[t + 2]));
+        const sign = (q: [number, number], r: [number, number]): number =>
+          (p.x - r[0]) * (q[1] - r[1]) - (q[0] - r[0]) * (p.y - r[1]);
+        const d1 = sign(a, b);
+        const d2 = sign(b, c);
+        const d3 = sign(c, a);
+        const neg = d1 < 0 || d2 < 0 || d3 < 0;
+        const pos3 = d1 > 0 || d2 > 0 || d3 > 0;
+        if (!(neg && pos3)) covered = true;
+      }
+    });
+    return { meshes, covered };
+  }, point);
 }
 
 async function documentBodyIds(page: Page): Promise<string[]> {
@@ -192,6 +251,16 @@ async function committedCapCovers(
   }).toPass({ timeout: 10_000, intervals: [100, 200, 400] });
   return result as unknown as boolean;
 }
+
+test("the LIVE closure fill leaves the donut's hole unpainted", async ({ page }) => {
+  // Mid-session, before any region exists: the fills are the only "this closes"
+  // signal on screen, and the v1 pass painted the circle's disc on top of the
+  // rectangle's, so the hole read as material.
+  const sketch = await drawNestedSketchOpen(page);
+  await expect.poll(async () => (await liveFillCoverage(page, sketch.annulusPoint)).meshes).toBe(1);
+  expect((await liveFillCoverage(page, sketch.annulusPoint)).covered).toBe(true);
+  expect((await liveFillCoverage(page, sketch.center)).covered).toBe(false);
+});
 
 test("nested inner disc is independently selectable and commits a solid cap", async ({ page }) => {
   const sketch = await drawNestedSketch(page);

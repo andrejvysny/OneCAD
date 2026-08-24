@@ -49,7 +49,7 @@ import type { FrontendPointRef } from "@/tools/sketch/snapTypes";
 import { findClosedLoops, loopCentroid } from "@/tools/sketch/closedLoop";
 import { layoutDimensionLines } from "@/tools/sketch/dimensionLineLayout";
 import type { SketchConstraint } from "@/ipc/types";
-import { buildRingFillGeometry } from "./sketchFillGeometry";
+import { buildNestedFillGeometries } from "./sketchFillGeometry";
 
 /** Fallback tessellation when no projected scale is known yet (first frame,
  *  jsdom). Adaptive counts take over as soon as `update()` supplies one. */
@@ -878,10 +878,11 @@ export class SketchObject {
    * Loops come from `findClosedLoops` (the same detector the centroid markers
    * use), plus every self-closed curve: a Circle/Ellipse has no endpoints, so
    * the chain walk cannot see it at all, yet a lone circle is the most common
-   * one-entity profile there is. Each loop fills INDEPENDENTLY — a circle inside
-   * a rectangle draws two overlapping fills, so the "hole" reads as filled (v1;
-   * see `buildRingFillGeometry`). Nothing downstream ever reads an id from here:
-   * the region authority is the worker at finish time, and this is a preview.
+   * one-entity profile there is. The rings are then classified EVEN-ODD
+   * together (`buildNestedFillGeometries`), so a circle inside a rectangle
+   * paints an annulus rather than over its own hole. Nothing downstream ever
+   * reads an id from here: the region authority is the worker at finish time,
+   * and this is a preview.
    */
   private rebuildFills(entities: SketchEntity[]): void {
     if (entities === this.fillKey) return;
@@ -907,9 +908,7 @@ export class SketchObject {
       const ring = chainRing([this.entityRing(e)]);
       if (ring) rings.push(ring);
     }
-    for (const ring of rings) {
-      const geo = buildRingFillGeometry(ring);
-      if (!geo) continue;
+    for (const geo of buildNestedFillGeometries(rings)) {
       const mesh = new THREE.Mesh(geo, this.fillMat);
       mesh.name = "sketchActiveFill";
       mesh.renderOrder = RENDER_ORDER.ACTIVE_FILL;

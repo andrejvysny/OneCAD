@@ -2549,9 +2549,17 @@ export class SketchController {
     const constraint = buildDimensionConstraint(step.emit, id);
     try {
       const { rejected, hint } = await commitDimensionConstraint(this.deps.client, constraint);
-      viewportStore
-        .getState()
-        .setStatusHint(rejected ? hint ?? "Dimension removed — it would over-constrain the sketch" : null);
+      // A refusal carries ERROR severity (the status bar and the near-action
+      // `SketchErrorPulse` both key off it); acceptance just clears the prompt.
+      if (rejected) {
+        viewportStore
+          .getState()
+          .setStatusHint(hint ?? "Dimension removed — it would over-constrain the sketch", {
+            severity: "error",
+          });
+      } else {
+        viewportStore.getState().setStatusHint(null);
+      }
     } catch (e) {
       viewportStore.getState().setStatusHint(`Dimension failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
     }

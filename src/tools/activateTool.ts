@@ -82,7 +82,7 @@ export function isModelOnlyTool(tool: Tool): boolean {
 
 /**
  * Finish the active sketch and land in model mode with `tool` armed. Mirrors
- * finishSketchAction (useShortcuts): DRAIN the mutation queue first so a
+ * `exitSketch` (useShortcuts): DRAIN the mutation queue first so a
  * still-in-flight upsert settles before regions/undo are computed, THEN flip —
  * the pendingExtrude consumer guards on mode === "model", so the handoff id is
  * only delivered after the flip.

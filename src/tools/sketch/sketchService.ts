@@ -340,7 +340,9 @@ async function deleteEntitiesNow(client: CadClient, ids: string[]): Promise<void
   const deletable = ids.filter((id) => !locked.has(id));
   if (deletable.length === 0) {
     if (ids.some((id) => locked.has(id))) {
-      viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be deleted`);
+      viewportStore
+        .getState()
+        .setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be deleted`, { severity: "error" });
     }
     return;
   }
@@ -528,7 +530,9 @@ async function extendEntityNow(
   // Extend REPLACES the target — refused outright on locked reference geometry,
   // exactly like Trim, so the batch is never authored (see LOCKED_GEOMETRY_HINT).
   if (lockedEntityIds(session.entities).has(entityId)) {
-    viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be extended`);
+    viewportStore
+      .getState()
+      .setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be extended`, { severity: "error" });
     return { ok: false, reason: "refused" };
   }
 
@@ -677,7 +681,9 @@ async function filletSketchCornerNow(
   if (!a || !b) return { ok: false };
   const locked = lockedEntityIds(session.entities);
   if (locked.has(aId) || locked.has(bId)) {
-    viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be filleted`);
+    viewportStore
+      .getState()
+      .setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be filleted`, { severity: "error" });
     return { ok: false };
   }
   const solved = filletGeometry(a, b, radius, opts);
@@ -962,7 +968,10 @@ async function applyConstraintNow(
     );
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
-    viewportStore.getState().setStatusHint(hint);
+    // ERROR severity: this is a REFUSAL, not a status note — the treatment is
+    // what drives both pulses (the status bar's own, and `SketchErrorPulse`
+    // next to the action). Text unchanged.
+    viewportStore.getState().setStatusHint(hint, { severity: "error" });
     return { rejected: true }; // rejected: no undo snapshot pushed
   }
 
@@ -995,9 +1004,17 @@ function openAppliedDimensionChip(client: CadClient, applicable: ApplicableConst
       const constraint = dim.build(v, cid);
       toolChipStore.getState().clear();
       void commitDimensionConstraint(client, constraint).then(({ rejected, hint }) => {
-        viewportStore
-          .getState()
-          .setStatusHint(rejected ? hint ?? "Dimension removed — it would over-constrain the sketch" : null);
+        // A refusal carries ERROR severity (both pulses read it); an accepted
+        // dimension just clears the prompt. Texts unchanged.
+        if (rejected) {
+          viewportStore
+            .getState()
+            .setStatusHint(hint ?? "Dimension removed — it would over-constrain the sketch", {
+              severity: "error",
+            });
+        } else {
+          viewportStore.getState().setStatusHint(null);
+        }
       });
     },
     () => toolChipStore.getState().clear(),

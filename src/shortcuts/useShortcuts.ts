@@ -51,7 +51,8 @@ function isEditableTarget(el: EventTarget | null): boolean {
   );
 }
 
-/** Esc ladder: cancel active tool → exit isolation → deselect → exit sketch mode. */
+/** Esc ladder: cancel active tool → exit isolation → deselect → exit sketch mode
+ *  (the last rung reports what it left — see {@link exitSketch}). */
 function runCancel(): void {
   const tool = toolStore.getState();
   if (activeTool(tool) !== "select") {
@@ -72,7 +73,11 @@ function runCancel(): void {
     return;
   }
   if (tool.mode === "sketch") {
-    tool.setMode("model");
+    // A12: the ladder's last rung used to flip the mode itself, silently. It now
+    // goes through the SAME exit path the Finish button and Enter use, tagged
+    // with the reason — that tag is the whole seam: `exit()` sees only a mode
+    // flip and cannot tell an Esc from a Finish, so the caller has to say.
+    void exitSketch("escape");
   }
 }
 
@@ -154,7 +159,28 @@ function runToggleConstruction(): void {
 }
 
 /**
- * Finish the active sketch → hand it to the model layer for profile selection
+ * WHY the sketch is being left. The mode flip itself carries no intent —
+ * `SketchController.exit()` runs the identical cancel+finish teardown either way
+ * — so the reason travels as an argument, never as a module flag some other
+ * caller could leave stale (audit A12).
+ *   - `finish`  Enter, the Finish button, the command: hand the profile to the
+ *               model layer (arms the Extrude handoff).
+ *   - `escape`  the Esc ladder's last rung: an escape hatch, so no handoff — but
+ *               no longer silent either.
+ */
+type SketchExitReason = "finish" | "escape";
+
+/** What the user is told on the way out. An Esc off an EMPTY sketch is the one
+ *  path that must not claim "Finished": nothing was drawn, and the sketch is
+ *  kept (exit() still mints its timeline record), so it may not claim a discard
+ *  either. */
+function exitHint(reason: SketchExitReason, name: string, entityCount: number): string {
+  if (reason === "escape" && entityCount === 0) return `Closed ${name} — nothing drawn`;
+  return `Finished ${name} — ${entityCount} ${entityCount === 1 ? "entity" : "entities"}`;
+}
+
+/**
+ * Leave the active sketch → hand it to the model layer for profile selection
  * (Shapr3D flow). DRAIN the sketch mutation queue FIRST: a still-in-flight upsert
  * (fast last click / dimension edit) must settle before regions are computed, else
  * the profile is captured from a stale sketch. THEN flip mode — mode must flip
@@ -163,13 +189,13 @@ function runToggleConstruction(): void {
  * mode === "model", so setting it while still in sketch mode would be observed
  * once, dropped, and never re-delivered.
  *
- * Finishing is otherwise SILENT (audit A12) — the shell just flips back to
- * model mode — so the last step names what was finished and how big it was
- * (plan item 10a). It never overwrites an error the finish itself raised: a
+ * Leaving is otherwise SILENT (audit A12) — the shell just flips back to
+ * model mode — so the last step names what was left and how big it was
+ * (plan item 10a). It never overwrites an error the exit itself raised: a
  * failed drain leaves its own hint, and a confirmation on top of it would say
  * the edit landed when it did not.
  */
-async function finishSketchAction(): Promise<void> {
+async function exitSketch(reason: SketchExitReason): Promise<void> {
   const hintBefore = viewportStore.getState().statusHint;
   await flushSketchMutations();
   const tool = toolStore.getState();
@@ -180,13 +206,13 @@ async function finishSketchAction(): Promise<void> {
   const sketchId = viewportStore.getState().activeSketchId;
   const name = (sketchId ? documentStore.getState().sketches[sketchId]?.name : null) ?? "sketch";
   tool.setMode("model");
-  if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
+  // Only an EXPLICIT finish arms the Extrude handoff. Esc means "get me out",
+  // and answering it with a profile prompt would be the opposite of an escape.
+  if (reason === "finish" && sketchId) viewportStore.getState().setPendingExtrude(sketchId);
   const hintAfter = viewportStore.getState().statusHint;
   const raisedAnError = hintAfter !== hintBefore && hintAfter?.severity === "error";
   if (raisedAnError) return;
-  viewportStore
-    .getState()
-    .setStatusHint(`Finished ${name} — ${entityCount} ${entityCount === 1 ? "entity" : "entities"}`);
+  viewportStore.getState().setStatusHint(exitHint(reason, name, entityCount));
 }
 
 export function runAction(action: ShortcutAction): void {
@@ -201,7 +227,7 @@ export function runAction(action: ShortcutAction): void {
       if (tool.mode === "model") tool.setMode("sketch");
       break;
     case "finishSketch":
-      if (tool.mode === "sketch") void finishSketchAction();
+      if (tool.mode === "sketch") void exitSketch("finish");
       break;
     case "deleteSketchSelection":
       runDeleteSketchSelection();

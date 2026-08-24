@@ -131,7 +131,11 @@ async function lineEndpoints(page: Page): Promise<Array<[number, number]>> {
   return snap.lines.flatMap((l) => [l.p0, l.p1]);
 }
 
-const lockedHint = (page: Page) => page.getByText(/Reference geometry is locked/);
+// Scoped to the StatusBar surface: the same text also renders in the transient
+// near-action pulse (`sketch-error-pulse`), so a bare getByText is a strict-mode
+// violation while the pulse is up.
+const lockedHint = (page: Page) =>
+  page.getByTestId("status-hint").filter({ hasText: /Reference geometry is locked/ });
 
 /**
  * Drag the extrude depth handle to an exact client point and RELEASE (which keeps
@@ -453,7 +457,9 @@ test("a NON-PLANAR face refuses to host a sketch and falls back to the plane pic
   // The refusal RIDES INTO the picker prompt: publishing it as its own hint would
   // be overwritten the instant the picker writes its prompt, and the user would
   // be told nothing at all. Not stuck either — the world planes are still there.
-  await expect(page.getByText(/Cannot sketch on that face.*Select a plane/)).toBeVisible({
-    timeout: 10_000,
-  });
+  // Scoped to the StatusBar (the near-action pulse repeats the same text).
+  await expect(page.getByTestId("status-hint")).toContainText(
+    /Cannot sketch on that face.*Select a plane/,
+    { timeout: 10_000 },
+  );
 });

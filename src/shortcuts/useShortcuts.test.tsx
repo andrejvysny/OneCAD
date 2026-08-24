@@ -241,6 +241,87 @@ describe("useShortcuts", () => {
     expect(selectionStore.getState().selected.length).toBe(0);
   });
 
+  /*
+   * A12: the ladder's last rung used to flip out of sketch mode in silence.
+   * It now routes through the same exit path Enter/Finish use, tagged
+   * `"escape"` — same confirmation, no Extrude handoff.
+   */
+  it("A12: the idle Esc out of a sketch confirms what it finished", async () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+    sketchStore.getState().setSession({
+      sketchId: "sketch2",
+      plane: planeFor("XY"),
+      entities: [
+        { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] },
+        { id: "e2", type: "Line", p0: [40, 0], p1: [40, 40] },
+      ],
+      constraints: [],
+      dof: 8,
+      status: "UnderConstrained",
+    });
+    selectionStore.getState().clear();
+
+    // The real ladder, idle: rung 1 drops the armed draw tool, rung 4 exits.
+    press("Escape");
+    expect(toolStore.getState().sketchTool).toBe("select");
+    expect(toolStore.getState().mode).toBe("sketch");
+    await act(async () => {
+      press("Escape");
+      await flush();
+    });
+
+    expect(toolStore.getState().mode).toBe("model");
+    expect(viewportStore.getState().statusHint?.message).toBe("Finished Sketch 2 — 2 entities");
+    // An escape hatch, not a handoff: Esc must not arm the profile prompt the
+    // explicit Finish arms.
+    expect(viewportStore.getState().pendingExtrudeSketch).toBeNull();
+  });
+
+  it("A12: Esc off an EMPTY sketch reports honestly instead of claiming a finish", async () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+    sketchStore.getState().setSession({
+      sketchId: "sketch2",
+      plane: planeFor("XY"),
+      entities: [],
+      constraints: [],
+      dof: 0,
+      status: "UnderConstrained",
+    });
+    selectionStore.getState().clear();
+
+    press("Escape"); // rung 1: drop the armed draw tool
+    await act(async () => {
+      press("Escape");
+      await flush();
+    });
+
+    expect(toolStore.getState().mode).toBe("model");
+    expect(viewportStore.getState().statusHint?.message).toBe("Closed Sketch 2 — nothing drawn");
+  });
+
+  it("the explicit finish still arms the Extrude handoff and names the sketch", async () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+    sketchStore.getState().setSession({
+      sketchId: "sketch2",
+      plane: planeFor("XY"),
+      entities: [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
+      constraints: [],
+      dof: 4,
+      status: "UnderConstrained",
+    });
+
+    await act(async () => {
+      press("Enter");
+      await flush();
+    });
+
+    expect(viewportStore.getState().statusHint?.message).toBe("Finished Sketch 2 — 1 entity");
+    expect(viewportStore.getState().pendingExtrudeSketch).toBe("sketch2");
+  });
+
   it("⇧I isolates the selected bodies, and Esc leaves isolation BEFORE deselecting", () => {
     render(<Harness />);
     selectionStore.getState().set([{ kind: "body", id: "body1" }]);
