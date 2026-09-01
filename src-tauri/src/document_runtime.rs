@@ -55,7 +55,7 @@ use onecad_core::document::record::{
 };
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef};
 use onecad_core::document::repair::RepairItem;
-use onecad_core::document::variables::Variable;
+use onecad_core::document::variables::{Variable, VariableTable};
 use onecad_core::document::Document;
 use onecad_core::edit::session::{empty_outcome, merge_outcome, DocumentSession};
 use onecad_core::edit::{CommandOutcome, EditCommand, SketchEditOp, UndoOutcome};
@@ -83,13 +83,14 @@ use onecad_core::regen::{
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
 use crate::document_runtime::solver_lane::{Claim, LaneOwner, SolverLaneClaims};
+use crate::dto::variable_dtos;
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value,
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDependenciesDto, FeatureDto, FinishSketchDto,
     NeedsRepairItemDto, PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto,
-    SketchSolveStatus, SketchStatus, SketchUpsertDto, VariableDto, GEOMETRY_SOURCE_CACHED,
-    GEOMETRY_SOURCE_LIVE, GEOMETRY_SOURCE_NONE,
+    SketchSolveStatus, SketchStatus, SketchUpsertDto, GEOMETRY_SOURCE_CACHED, GEOMETRY_SOURCE_LIVE,
+    GEOMETRY_SOURCE_NONE,
 };
 use crate::error::ApiError;
 use crate::imports::{ImportWorkspace, PreparedImport};
@@ -482,6 +483,16 @@ pub struct DocumentRuntime {
     /// it is a pure function of (records, variables). The lowest entry is a hard
     /// execution ceiling for [`begin_regen`](Self::begin_regen): nothing at or
     /// after a broken binding may run on a stale cached value.
+    ///
+    /// **Already cursor-filtered by
+    /// [`substituted_timeline`](onecad_core::regen::substituted_timeline)** — it
+    /// holds only steps inside the applied prefix, exactly the set stamped
+    /// `StepState::Error` on the mirror. Every consumer here (the plan ceiling,
+    /// `noop_report`'s `failed_steps`, and `step_diagnostics`) therefore agrees
+    /// with the timeline it is describing, and a broken binding on a DRAFT
+    /// beyond the rollback bar — which can never execute — neither gates a plan
+    /// nor gets reported as a failure. Do not re-filter, and do not widen this
+    /// back to the unfiltered `substitute_variables` result.
     unresolved_variables: BTreeMap<usize, UnresolvedVariable>,
     /// The lock-free fencing tokens (revision + worker epoch). See [`FencingCell`].
     fencing: Arc<FencingCell>,
@@ -824,6 +835,14 @@ impl DocumentRuntime {
     #[must_use]
     pub fn variables(&self) -> Vec<Variable> {
         self.session.document().variables.iter().cloned().collect()
+    }
+
+    /// The document's variable table by reference — for anything that must
+    /// RESOLVE it (expression evaluation is a whole-table operation, so a
+    /// per-row clone would re-resolve once per row).
+    #[must_use]
+    pub fn variables_table(&self) -> &VariableTable {
+        &self.session.document().variables
     }
 
     /// One module's slice of the document, if it has any (ADR-0004).
@@ -2871,8 +2890,11 @@ impl DocumentRuntime {
             // Variables: straight off the authoritative document, in declaration
             // order — the same table `list_variables` serves. It rides here (W5)
             // so a variable edit returns the SAME projection every other mutating
-            // command does and can be correlated against its regen.
-            variables: doc.variables.iter().map(VariableDto::from).collect(),
+            // command does and can be correlated against its regen. Each row
+            // carries its resolved value, inferred dimension and (if it is
+            // broken) why — recomputed from the CURRENT table on every publish,
+            // so a fixed variable's error clears without a regen round-trip.
+            variables: variable_dtos(&doc.variables),
             // Timeline cursor + length drive the legacy-draft recovery hint
             // (`appliedOps < totalOps` ⇒ ops sit beyond the rollback bar).
             applied_ops: doc.timeline.cursor(),
@@ -2930,17 +2952,45 @@ impl DocumentRuntime {
             status_message: feature_status_message(&state),
             // This map and the step state share one atomic snapshot. A successful
             // retry replaces it without this entry, clearing stale evidence.
-            diagnostics: self
-                .latest_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.diagnostics_by_step.get(&index))
-                .map(|items| items.iter().take(64).cloned().collect())
-                .unwrap_or_default(),
+            // The expression diagnostic is MERGED on top afterwards: it is not a
+            // worker verdict and must survive the per-snapshot replace.
+            diagnostics: self.step_diagnostics(index),
             // From the RECORD, not the mirror state: the record is the single source
             // of truth for suppression (the state is derived), and the mirror can lag
             // the authoritative timeline between an edit and its regen.
             suppressed: rec.suppressed,
         }
+    }
+
+    /// The step's diagnostics: the worker's (replaced wholesale per snapshot)
+    /// plus the Rust-side expression diagnostic (merged on top).
+    ///
+    /// The two have different lifetimes, which is why they are not one list at
+    /// the source. A worker diagnostic belongs to a terminal and is replaced by
+    /// the next one. An `EXPR_UNRESOLVED` is a pure function of (records,
+    /// variables) — recomputed by `sync_regen_timeline` on EVERY edit — so it
+    /// appears the instant the binding breaks (no regen round-trip needed) and
+    /// disappears the instant it is fixed. Folding it into the snapshot map
+    /// would make it either flicker (cleared by an unrelated republish) or stick
+    /// (kept after the variable came back).
+    fn step_diagnostics(&self, index: usize) -> Vec<onecad_core::regen::Diagnostic> {
+        let mut out: Vec<onecad_core::regen::Diagnostic> = self
+            .latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.diagnostics_by_step.get(&index))
+            .map(|items| items.iter().take(64).cloned().collect())
+            .unwrap_or_default();
+        if let Some(item) = self.unresolved_variables.get(&index) {
+            out.push(onecad_core::regen::Diagnostic {
+                severity: onecad_core::regen::Severity::Error,
+                code: EXPR_UNRESOLVED_CODE.to_string(),
+                message: item.message.clone(),
+                stage: None,
+                reason_code: Some(expr_reason_code(item.kind).to_string()),
+                evidence: None,
+            });
+        }
+        out
     }
 
     // ── Sketch solver lane (SCHEMA §7.4) ─────────────────────────────────────
@@ -4271,6 +4321,34 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
                 "persisted split_of must re-derive the stored BodyId (deterministic)"
             );
         }
+    }
+}
+
+/// The projection diagnostic `code` for a step whose `Scalar` expression cannot
+/// be evaluated against the current variable table. Rust-minted and
+/// projection-only — it never crosses the OCW1 wire, so it adds nothing to the
+/// SCHEMA §8 taxonomy the worker speaks.
+pub const EXPR_UNRESOLVED_CODE: &str = "EXPR_UNRESOLVED";
+
+/// The machine-routable refusal reason beside [`EXPR_UNRESOLVED_CODE`], so a UI
+/// can distinguish "you typed nonsense" from "that variable is gone" from "those
+/// units cannot combine" without parsing English.
+#[must_use]
+pub fn expr_reason_code(kind: onecad_core::expr::ExprErrorKind) -> &'static str {
+    use onecad_core::expr::ExprErrorKind as K;
+    match kind {
+        K::Parse => "EXPR_PARSE",
+        K::UnknownFunction => "EXPR_UNKNOWN_FUNCTION",
+        K::Arity => "EXPR_ARITY",
+        K::UndefinedVariable => "EXPR_UNDEFINED_VARIABLE",
+        K::DimensionMismatch => "EXPR_DIMENSION_MISMATCH",
+        K::DivideByZero => "EXPR_DIVIDE_BY_ZERO",
+        K::NonFinite => "EXPR_NON_FINITE",
+        K::TooLong => "EXPR_TOO_LONG",
+        // Also the variable-graph over-long-chain refusal, which is unbounded
+        // reference depth by another name.
+        K::TooDeep => "EXPR_TOO_DEEP",
+        K::Cycle => "EXPR_CYCLE",
     }
 }
 

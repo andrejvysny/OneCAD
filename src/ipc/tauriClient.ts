@@ -58,6 +58,8 @@ import type {
   DocumentChange,
   DocumentModule,
   DocumentVariable,
+  EvaluatedExpression,
+  ExpressionDimension,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
@@ -157,6 +159,9 @@ const CMD = {
   listDocumentModules: "list_document_modules",
   listVariables: "list_variables",
   upsertVariable: "upsert_variable",
+  upsertVariableExpr: "upsert_variable_expr",
+  renameVariable: "rename_variable",
+  evaluateExpression: "evaluate_expression",
   removeVariable: "remove_variable",
   closeDocument: "close_document",
   checkRecovery: "check_recovery",
@@ -400,7 +405,10 @@ function toClientError(e: unknown): Error {
  *    policy and would bury every other event in the ring.
  *  • `log_event` IS the forwarding channel; logging it recurses.
  */
-const IPC_LOG_EXEMPT = new Set<string>(["solve_drag", "log_event"]);
+// `evaluate_expression` rides the same exemption as `solve_drag`: it is the
+// live authoring preview, fired on a short debounce while the user types, so
+// logging it would put a keystroke-frequency path in the log lane.
+const IPC_LOG_EXEMPT = new Set<string>(["solve_drag", "log_event", "evaluate_expression"]);
 
 /**
  * A one-line SHAPE summary of the command args — never the payload. Ids and
@@ -2160,6 +2168,24 @@ export function createTauriClient(): CadClient {
     },
     upsertVariable: (name: string, value: number) =>
       variableEdit(CMD.upsertVariable, { name, value }, "SetVariable"),
+    // Same `documentScope` correlation as its literal twin: both lower to a
+    // variable write, and a variable write dirties `[0, len)`.
+    upsertVariableExpr: (name: string, text: string) =>
+      variableEdit(CMD.upsertVariableExpr, { name, text }, "SetVariable"),
+    // A rename rewrites the TIMELINE as well as the table, so it is even more
+    // plainly document-scoped than the other three.
+    renameVariable: (name: string, newName: string) =>
+      variableEdit(CMD.renameVariable, { name, newName }, "RenameVariable"),
+    /*
+     * PURE — deliberately the bare `call` lane, not `applyEdit`.
+     *
+     * `evaluate_expression` records nothing, emits no event and enqueues no
+     * regen, so there is no terminal to correlate and nothing for an awaiter to
+     * wait on. Routing it through the edit lane would make every keystroke sit
+     * out a regen timeout for a command the backend never scheduled work for.
+     */
+    evaluateExpression: (expr: string, site: ExpressionDimension) =>
+      call<EvaluatedExpression>(CMD.evaluateExpression, { expr, site }),
     removeVariable: (name: string) =>
       variableEdit(CMD.removeVariable, { name }, "RemoveVariable"),
     async closeDocument(): Promise<void> {

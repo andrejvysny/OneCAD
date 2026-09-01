@@ -23,6 +23,8 @@ import type {
   DocumentChange,
   DocumentModule,
   DocumentVariable,
+  EvaluatedExpression,
+  ExpressionDimension,
   VariableEditResult,
   DocumentProjectionWire,
   DocumentSnapshot,
@@ -159,6 +161,47 @@ export interface CadClient {
    * Report it; never revert, and never turn it into a rejection.
    */
   upsertVariable(name: string, value: number): Promise<VariableEditResult>;
+  /**
+   * Create (new name) or re-bind (existing name) a variable to an EXPRESSION —
+   * the sibling of {@link CadClient.upsertVariable}, which takes a literal.
+   *
+   * Two calls rather than one optional-expression call because the two authoring
+   * gestures have different failure modes: a number is either finite or not, an
+   * expression can fail many ways and must say WHICH. Passing a plain number
+   * through {@link CadClient.upsertVariable} is also the way BACK from `=w*2` to
+   * a literal — that call clears any stored expression.
+   *
+   * `text` is the expression WITHOUT a leading `=` (the `=` is UI syntax, not
+   * grammar). REJECTED — before anything is recorded — when it does not parse,
+   * names a variable that does not resolve, or closes a cycle. Same two-truths
+   * result contract as {@link CadClient.upsertVariable}.
+   */
+  upsertVariableExpr(name: string, text: string): Promise<VariableEditResult>;
+  /**
+   * Rename a variable AND every expression that references it.
+   *
+   * NOT `removeVariable` + `upsertVariable`: that pair would leave every bound
+   * parameter pointing at a name that no longer exists in between, and the
+   * removal would STAND even if the re-add failed. This is one undoable
+   * transaction that rewrites the references token-wise through the expression
+   * parser, and is refused AS A WHOLE if any of them cannot be rewritten — a
+   * half-renamed document is a silently wrong document.
+   */
+  renameVariable(name: string, newName: string): Promise<VariableEditResult>;
+  /**
+   * Evaluate `expr` at `site` against the open document's variable table — the
+   * live preview behind an authoring field.
+   *
+   * PURE: it records nothing, dirties nothing and schedules no regen, which is
+   * what makes it safe to call while the user types. A bad expression resolves
+   * with a populated `error`, never a rejection.
+   *
+   * `site` is the dimension the field means, and it is what turns `45deg` typed
+   * into a length field into a loud refusal instead of a silent 45 mm. A bare
+   * number inside `expr` is read as ALREADY being in the site's canonical unit
+   * (millimetres / degrees) — no display-unit guesswork anywhere on this path.
+   */
+  evaluateExpression(expr: string, site: ExpressionDimension): Promise<EvaluatedExpression>;
   /**
    * Delete a variable by name. An unknown name is REJECTED, never a silent no-op.
    * Records still bound to it are not rewritten: they fail loudly at regen, which

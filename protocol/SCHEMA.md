@@ -924,11 +924,16 @@ are in-place edits of `PlaceComponent`'s own params at the Rust layer (see
 **Scalar / dimension fields.** Every dimensional param (`distance`, `radius`,
 `angleDeg`, `thickness`, `spacing`, …) is a **scalar**: it MAY be either a bare
 JSON number (`"distance": 25.0`, as the examples below spell it for brevity) **or
-a `{ "value": <number>, "expr"?: <string> }` object** (`expr` = a bare V1 variable
-name). Readers — this worker AND the Rust core — MUST accept both forms. The Rust
-core **normalizes to the object form on write**, so an `ExecutePlan` op authored
-by the core arrives here as `{ "value": … }`; hand-authored/legacy payloads may
-carry a bare number. `NaN`/`±Infinity` are rejected either way ([§4](#4-json-encoding-rules)).
+a `{ "value": <number>, "expr"?: <string> }` object** (`expr` = an OPAQUE
+expression string owned and evaluated by the Rust core — arithmetic, variable
+references and unit suffixes as of 2026-09-01; it was a bare V1 variable name
+before). Readers — this worker AND the Rust core — MUST accept both forms; **the
+worker MUST ignore `expr`** (it never reads it — the evaluated `value` is the
+regen input), and as of 2026-09-01 the Rust core **strips `expr` before lowering**,
+so an `ExecutePlan` op authored by the core arrives here as `{ "value": … }` with
+no `expr` at all; hand-authored/legacy payloads may carry a bare number or an
+`expr`, and both remain legal. `expr` is likewise excluded from the planner hash
+(Rust remains the sole hash authority). `NaN`/`±Infinity` are rejected either way ([§4](#4-json-encoding-rules)).
 
 **Semantic reference** (`inputs[]` element) — the topological input to an op,
 carried as evidence + identity so the resolution ladder can rebind after edits
@@ -3963,6 +3968,18 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-09-01 — §7.3 scalar `expr` is an opaque core-owned expression; the core
+  no longer emits it on the wire** (DAILY DRIVER v2 WP-E; cross-track sign-off
+  recorded 2026-09-01). Prose-only NARROWING, no shape change, no fixture bump:
+  `expr` was documented as "a bare V1 variable name"; it is now an arithmetic
+  expression with variable references and unit suffixes, evaluated by the Rust
+  core (`onecad-core::expr`), and the core strips it before lowering so the
+  worker sees `{ "value": … }` only. The worker never read `expr` (verified —
+  zero references in `worker/src`), so every existing reader stays legal; the
+  string is also excluded from the planner hash on the typed path (`Operation::
+  Opaque` params are untouched), so `=w*2` and `=2*w` plan identically.
+  `protocolVersion` stays 1; no handshake axis or worker fingerprint moves.
 
 - **2026-09-01 — §7.3 `PlaceComponent` `source.kind = "profile"`** (Component
   Library WP-C; cross-track sign-off recorded 2026-09-01). Vendor extrusion stock

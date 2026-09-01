@@ -13,8 +13,10 @@
 use serde::{Deserialize, Serialize};
 
 use onecad_core::document::record::{KnownOperation, OffsetDistanceType, Operation};
-use onecad_core::document::variables::{Scalar, Variable};
+use onecad_core::document::variables::{Scalar, VariableTable};
+use onecad_core::expr::Dimension;
 use onecad_core::history::StepState;
+use onecad_core::regen::resolve_variable_table;
 
 /// Whether a document is open (`src/stores/documentStore.ts` `DocStatus`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -189,13 +191,24 @@ pub struct FeatureDto {
     pub suppressed: bool,
 }
 
-/// One document variable, as the Variables inspector section reads it (WP-VE.2).
+/// One document variable, as the Variables inspector section reads it.
 ///
-/// `value` is the LAST EVALUATED number (`Scalar::value`), which for a plain
-/// user-authored variable is simply what they typed. `expr` is carried so the
-/// section can show that a variable is itself expression-driven — V1 refuses to
-/// resolve such a chain (`regen::variables::resolve_expr`), so a UI that hid it
-/// would leave the user staring at a broken binding with no cause on screen.
+/// Three numbers-and-strings that must not be confused:
+///
+/// * `value` — the STORED number (`Scalar::value`): what the user typed for a
+///   plain variable, or the last evaluated cache for an expression-driven one.
+/// * `expr` — the stored expression text, absent for a plain variable. This is
+///   what an editor puts back in the field.
+/// * `resolvedValue` — what `expr` evaluates to against the CURRENT table right
+///   now. Equal to `value` for a plain variable, and for a broken one it falls
+///   back to `value` (the last number anybody could justify) with `error` set.
+///
+/// `dimension` is INFERRED from the variable's own expression, so `45deg` reads
+/// as an angle and a bare `10` is `"scalar"` — dimensionless, and therefore
+/// usable in a length field as millimetres AND an angle field as degrees.
+/// `error` is present exactly when this variable does not resolve (a parse
+/// failure, a missing reference, or a cycle naming the whole path); it is
+/// recomputed on every projection, so it neither flickers nor sticks.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VariableDto {
@@ -204,17 +217,69 @@ pub struct VariableDto {
     pub value: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expr: Option<String>,
+    pub resolved_value: f64,
+    /// `"length"` | `"angle"` | `"scalar"`.
+    pub dimension: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-impl From<&Variable> for VariableDto {
-    fn from(v: &Variable) -> Self {
-        Self {
-            id: v.id.to_string(),
-            name: v.name.clone(),
-            value: v.value.value,
-            expr: v.value.expr.clone(),
-        }
+/// The stable wire spelling of an expression [`Dimension`].
+#[must_use]
+pub fn dimension_name(dim: Dimension) -> &'static str {
+    match dim {
+        Dimension::Length => "length",
+        Dimension::Angle => "angle",
+        Dimension::Scalar => "scalar",
     }
+}
+
+/// Every variable of `vars`, in declaration order, resolved ONCE against the
+/// whole table.
+///
+/// The single builder for this DTO: resolution is a whole-table operation
+/// (chained references, cycles), so there is no honest per-variable `From` impl
+/// — one would either re-resolve the table per row or report a dimension it did
+/// not compute.
+#[must_use]
+pub fn variable_dtos(vars: &VariableTable) -> Vec<VariableDto> {
+    let (values, errors) = resolve_variable_table(vars);
+    vars.iter()
+        .map(|v| {
+            let resolved = values.get(&v.name);
+            VariableDto {
+                id: v.id.to_string(),
+                name: v.name.clone(),
+                value: v.value.value,
+                expr: v.value.expr.clone(),
+                // A broken variable keeps the last number anybody could justify;
+                // `error` is what tells the UI not to trust it.
+                resolved_value: resolved.map_or(v.value.value, |r| r.number),
+                dimension: dimension_name(resolved.map_or(Dimension::Scalar, |r| r.dim))
+                    .to_string(),
+                error: errors
+                    .iter()
+                    .find(|e| e.name == v.name)
+                    .map(|e| e.message.clone()),
+            }
+        })
+        .collect()
+}
+
+/// One live expression evaluation, for the authoring field's preview
+/// (`CadClient.evaluateExpression`). Pure: nothing is recorded, nothing regens.
+///
+/// `error` set ⇒ `value` is `0.0` and `dimension` echoes the requested site;
+/// read `error` first. (`value` stays a plain `f64` rather than an option so the
+/// field renderer has one shape to bind to.)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluatedExpressionDto {
+    pub value: f64,
+    /// `"length"` | `"angle"` | `"scalar"`.
+    pub dimension: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One datum plane in the tree (`documentStore.ts` `DatumMeta`).
@@ -2115,6 +2180,9 @@ mod tests {
                 name: "height".into(),
                 value: 25.0,
                 expr: None,
+                resolved_value: 25.0,
+                dimension: "scalar".into(),
+                error: None,
             }],
             applied_ops: 1,
             total_ops: 1,
@@ -2135,6 +2203,11 @@ mod tests {
         assert_eq!(v["variables"][0]["name"], "height");
         assert_eq!(v["variables"][0]["value"], 25.0);
         assert!(v["variables"][0].get("expr").is_none());
+        // A plain variable resolves to itself and is DIMENSIONLESS, so it reads
+        // as mm in a length field and degrees in an angle field.
+        assert_eq!(v["variables"][0]["resolvedValue"], 25.0);
+        assert_eq!(v["variables"][0]["dimension"], "scalar");
+        assert!(v["variables"][0].get("error").is_none());
         // Datums project camelCase, keyed by id, carrying the resolved basis
         // VERBATIM (the non-standard XY basis — see sketch/plane.rs).
         assert_eq!(v["datums"]["d1"]["kind"], "OffsetFromPlane");
@@ -2149,6 +2222,53 @@ mod tests {
             v["datums"]["d1"]["plane"]["yAxis"],
             serde_json::json!([-1.0, 0.0, 0.0])
         );
+    }
+
+    /// The three numbers a variable row carries and how a broken one reads.
+    #[test]
+    fn variable_dtos_report_resolution_dimension_and_breakage() {
+        use onecad_core::document::variables::{Unit, Variable};
+        use onecad_core::ids::VariableId;
+
+        let mut t = VariableTable::new();
+        let mut add = |name: &str, value: Scalar| {
+            t.upsert(Variable {
+                id: VariableId::new(),
+                name: name.into(),
+                value,
+                unit: Unit::Mm,
+            });
+        };
+        add("depth", Scalar::new(10.0));
+        add("plate", Scalar::with_expr(0.0, "depth * 2"));
+        add("tilt", Scalar::with_expr(0.0, "45deg"));
+        add("broken", Scalar::with_expr(7.0, "gone + 1"));
+
+        let rows = variable_dtos(&t);
+        assert_eq!(rows.len(), 4);
+
+        // A plain number: dimensionless, resolves to itself.
+        assert_eq!(rows[0].resolved_value, 10.0);
+        assert_eq!(rows[0].dimension, "scalar");
+        assert!(rows[0].error.is_none());
+
+        // A chain: the STORED cache is stale (0.0), the RESOLVED value is live.
+        assert_eq!(rows[1].value, 0.0);
+        assert_eq!(rows[1].resolved_value, 20.0);
+        assert_eq!(rows[1].dimension, "scalar");
+
+        // The dimension is inferred from the variable's OWN expression.
+        assert_eq!(rows[2].resolved_value, 45.0);
+        assert_eq!(rows[2].dimension, "angle");
+
+        // Broken: keeps the last number anybody could justify, plus the reason.
+        assert_eq!(rows[3].resolved_value, 7.0);
+        assert_eq!(rows[3].dimension, "scalar");
+        let err = rows[3]
+            .error
+            .as_deref()
+            .expect("a broken variable says why");
+        assert!(err.contains("gone"), "{err}");
     }
 
     #[test]

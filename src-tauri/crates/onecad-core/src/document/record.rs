@@ -51,6 +51,7 @@ use uuid::Uuid;
 
 use crate::document::refs::{AxisRef, ElementKind, ElementRef, Extra, SketchRegionRef};
 use crate::document::variables::Scalar;
+use crate::expr::Dimension;
 use crate::ids::{BodyId, ElementId, RecordId, SketchId};
 use crate::math::Vec3;
 
@@ -409,76 +410,109 @@ impl KnownOperation {
     }
 
     /// Mutable access to every dimensional [`Scalar`] this op carries as a
-    /// **parameter**, paired with its `opType.field` label for diagnostics.
+    /// **parameter**, paired with its `opType.field` label for diagnostics and
+    /// the [`Dimension`] that label is measured in.
     ///
     /// The variable-substitution pass
     /// ([`crate::regen::variables`]) walks exactly this set to replace an
-    /// expr-bound scalar's cached `value` with the document variable's current
-    /// one, on an effective COPY of the record. Field order is fixed and
-    /// deterministic — the derived write-back zips two records' lists by
+    /// expr-bound scalar's cached `value` with the value its expression
+    /// evaluates to, on an effective COPY of the record. Field order is fixed
+    /// and deterministic — the derived write-back zips two records' lists by
     /// position, so an arm must never reorder its fields.
     ///
-    /// **Adding a `Scalar` param means adding it here.** A field left out is
-    /// silently un-drivable by a variable (it would keep its stale cached value
-    /// forever), which is the exact defect this pass exists to remove. The same
-    /// hand-maintained-table discipline (and hazard) as
-    /// [`element_refs_mut`](Self::element_refs_mut).
+    /// **Adding a `Scalar` param means adding it here, WITH its dimension.** A
+    /// field left out is silently un-drivable by a variable (it would keep its
+    /// stale cached value forever), which is the exact defect this pass exists
+    /// to remove. The dimension is the expression engine's call site: it is what
+    /// makes `"45deg"` a loud refusal in a length field instead of a silent 45 mm,
+    /// so a new scalar MUST declare one rather than defaulting to
+    /// [`Dimension::Scalar`]. The same hand-maintained-table discipline (and
+    /// hazard) as [`element_refs_mut`](Self::element_refs_mut).
+    ///
+    /// Canonical units per dimension are the expression engine's
+    /// ([`crate::expr`]): millimetres for [`Dimension::Length`], **degrees** for
+    /// [`Dimension::Angle`] (the op wire's angle convention — `Revolve.angleDeg`,
+    /// `Chamfer.angleDeg`), unitless for [`Dimension::Scalar`].
     ///
     /// Ops with no dimensional parameter at all — `Sketch` (its entities and
     /// constraints are an opaque, already-solved wire snapshot; see
     /// `crate::sketch::constraint` and WP-VE.3), `Boolean`, `Loft`, `Sweep`,
     /// `MirrorBody`, `DetachComponent` — contribute nothing.
     #[must_use]
-    pub fn scalars_mut(&mut self) -> Vec<(&'static str, &mut Scalar)> {
+    pub fn scalars_mut(&mut self) -> Vec<(&'static str, Dimension, &mut Scalar)> {
         match self {
             KnownOperation::Extrude(p) => vec![
-                ("Extrude.distance", &mut p.distance),
-                ("Extrude.draftAngleDeg", &mut p.draft_angle_deg),
-                ("Extrude.distance2", &mut p.distance2),
+                ("Extrude.distance", Dimension::Length, &mut p.distance),
+                (
+                    "Extrude.draftAngleDeg",
+                    Dimension::Angle,
+                    &mut p.draft_angle_deg,
+                ),
+                ("Extrude.distance2", Dimension::Length, &mut p.distance2),
             ],
-            KnownOperation::Revolve(p) => vec![("Revolve.angleDeg", &mut p.angle_deg)],
-            KnownOperation::Fillet(p) => vec![("Fillet.radius", &mut p.radius)],
+            KnownOperation::Revolve(p) => {
+                vec![("Revolve.angleDeg", Dimension::Angle, &mut p.angle_deg)]
+            }
+            KnownOperation::Fillet(p) => {
+                vec![("Fillet.radius", Dimension::Length, &mut p.radius)]
+            }
             KnownOperation::Chamfer(p) => {
-                let mut out = vec![("Chamfer.radius", &mut p.radius)];
+                let mut out = vec![("Chamfer.radius", Dimension::Length, &mut p.radius)];
                 if let Some(d2) = p.distance2.as_mut() {
-                    out.push(("Chamfer.distance2", d2));
+                    out.push(("Chamfer.distance2", Dimension::Length, d2));
                 }
                 if let Some(angle) = p.angle_deg.as_mut() {
-                    out.push(("Chamfer.angleDeg", angle));
+                    out.push(("Chamfer.angleDeg", Dimension::Angle, angle));
                 }
                 out
             }
-            KnownOperation::Shell(p) => vec![("Shell.thickness", &mut p.thickness)],
-            KnownOperation::LinearPattern(p) => vec![("LinearPattern.spacing", &mut p.spacing)],
-            KnownOperation::CircularPattern(p) => {
-                vec![("CircularPattern.angleDeg", &mut p.angle_deg)]
+            KnownOperation::Shell(p) => {
+                vec![("Shell.thickness", Dimension::Length, &mut p.thickness)]
             }
-            KnownOperation::ImportStep(p) => vec![("ImportStep.unitScale", &mut p.unit_scale)],
+            KnownOperation::LinearPattern(p) => {
+                vec![("LinearPattern.spacing", Dimension::Length, &mut p.spacing)]
+            }
+            KnownOperation::CircularPattern(p) => {
+                vec![(
+                    "CircularPattern.angleDeg",
+                    Dimension::Angle,
+                    &mut p.angle_deg,
+                )]
+            }
+            // A unit scale is a pure ratio — the one genuinely dimensionless
+            // registered scalar.
+            KnownOperation::ImportStep(p) => {
+                vec![("ImportStep.unitScale", Dimension::Scalar, &mut p.unit_scale)]
+            }
             KnownOperation::TransformBody(p) => {
                 let [tx, ty, tz] = &mut p.translate;
                 vec![
-                    ("TransformBody.translate[0]", tx),
-                    ("TransformBody.translate[1]", ty),
-                    ("TransformBody.translate[2]", tz),
-                    ("TransformBody.rotate.angleDeg", &mut p.rotate.angle_deg),
+                    ("TransformBody.translate[0]", Dimension::Length, tx),
+                    ("TransformBody.translate[1]", Dimension::Length, ty),
+                    ("TransformBody.translate[2]", Dimension::Length, tz),
+                    (
+                        "TransformBody.rotate.angleDeg",
+                        Dimension::Angle,
+                        &mut p.rotate.angle_deg,
+                    ),
                 ]
             }
             KnownOperation::Hole(p) => {
-                let mut out = vec![("Hole.diameter", &mut p.diameter)];
+                let mut out = vec![("Hole.diameter", Dimension::Length, &mut p.diameter)];
                 if let Some(s) = p.depth.as_mut() {
-                    out.push(("Hole.depth", s));
+                    out.push(("Hole.depth", Dimension::Length, s));
                 }
                 if let Some(s) = p.cb_diameter.as_mut() {
-                    out.push(("Hole.cbDiameter", s));
+                    out.push(("Hole.cbDiameter", Dimension::Length, s));
                 }
                 if let Some(s) = p.cb_depth.as_mut() {
-                    out.push(("Hole.cbDepth", s));
+                    out.push(("Hole.cbDepth", Dimension::Length, s));
                 }
                 if let Some(s) = p.cs_diameter.as_mut() {
-                    out.push(("Hole.csDiameter", s));
+                    out.push(("Hole.csDiameter", Dimension::Length, s));
                 }
                 if let Some(s) = p.cs_angle_deg.as_mut() {
-                    out.push(("Hole.csAngleDeg", s));
+                    out.push(("Hole.csAngleDeg", Dimension::Angle, s));
                 }
                 out
             }
@@ -489,30 +523,49 @@ impl KnownOperation {
             KnownOperation::Gear(p) => {
                 let mut out = Vec::new();
                 if let Some(inv) = p.involute_external.as_mut() {
-                    out.push(("Gear.module", &mut inv.module));
-                    out.push(("Gear.height", &mut inv.height));
-                    out.push(("Gear.pressureAngleDeg", &mut inv.pressure_angle_deg));
+                    out.push(("Gear.module", Dimension::Length, &mut inv.module));
+                    out.push(("Gear.height", Dimension::Length, &mut inv.height));
+                    out.push((
+                        "Gear.pressureAngleDeg",
+                        Dimension::Angle,
+                        &mut inv.pressure_angle_deg,
+                    ));
                     if let Some(s) = inv.axle_hole_diameter.as_mut() {
-                        out.push(("Gear.axleHoleDiameter", s));
+                        out.push(("Gear.axleHoleDiameter", Dimension::Length, s));
                     }
                     if let Some(s) = inv.offset_hole_diameter.as_mut() {
-                        out.push(("Gear.offsetHoleDiameter", s));
+                        out.push(("Gear.offsetHoleDiameter", Dimension::Length, s));
                     }
                     if let Some(s) = inv.offset_hole_offset.as_mut() {
-                        out.push(("Gear.offsetHoleOffset", s));
+                        out.push(("Gear.offsetHoleOffset", Dimension::Length, s));
                     }
                 }
                 out
             }
-            KnownOperation::OffsetFace(p) => vec![("OffsetFace.distance", &mut p.distance)],
+            KnownOperation::OffsetFace(p) => {
+                vec![("OffsetFace.distance", Dimension::Length, &mut p.distance)]
+            }
             KnownOperation::PlaceComponent(p) => {
                 let [tx, ty, tz] = &mut p.placement.translate;
                 vec![
-                    ("PlaceComponent.placement.translate[0]", tx),
-                    ("PlaceComponent.placement.translate[1]", ty),
-                    ("PlaceComponent.placement.translate[2]", tz),
+                    (
+                        "PlaceComponent.placement.translate[0]",
+                        Dimension::Length,
+                        tx,
+                    ),
+                    (
+                        "PlaceComponent.placement.translate[1]",
+                        Dimension::Length,
+                        ty,
+                    ),
+                    (
+                        "PlaceComponent.placement.translate[2]",
+                        Dimension::Length,
+                        tz,
+                    ),
                     (
                         "PlaceComponent.placement.rotate.angleDeg",
+                        Dimension::Angle,
                         &mut p.placement.rotate.angle_deg,
                     ),
                 ]
@@ -523,6 +576,31 @@ impl KnownOperation {
             | KnownOperation::Sweep(_)
             | KnownOperation::MirrorBody(_)
             | KnownOperation::DetachComponent(_) => Vec::new(),
+        }
+    }
+
+    /// Drops the `expr` text of every **registered** [`Scalar`]
+    /// ([`scalars_mut`](Self::scalars_mut)), leaving each `value` untouched.
+    ///
+    /// The canonical form both the planner hash
+    /// ([`crate::regen::history_prefix_hash`]) and the OCW1 wire lowering are
+    /// taken over: an expression is AUTHORING, not geometry. Two records that
+    /// evaluate to the same number must hash the same and must send the worker
+    /// the same params, whether the number was typed or computed — otherwise
+    /// re-typing `20` where `w*2` stood would invalidate every checkpoint and
+    /// rebuild identical geometry, and the worker would receive a string it has
+    /// no way to evaluate.
+    ///
+    /// Always called on a CLONE: the stored record keeps its binding, which is
+    /// the whole point of storing one.
+    ///
+    /// **Registered scalars only.** `KnownOperation::Sketch` carries its
+    /// dimensional constraint values inside an opaque already-solved wire
+    /// snapshot and exposes no scalars here; sketch-dimension expressions are
+    /// WP-VE.3 and are neither substituted nor stripped by this pass.
+    pub fn clear_scalar_exprs(&mut self) {
+        for (_, _, scalar) in self.scalars_mut() {
+            scalar.expr = None;
         }
     }
 }
@@ -2857,6 +2935,29 @@ pub struct FrozenPlacement {
     pub rotate: TransformRotation,
 }
 
+impl FrozenPlacement {
+    /// Drops every `expr` binding on the four placement scalars, keeping their
+    /// numbers.
+    ///
+    /// **The detach seam calls this; nothing else should.** A detached
+    /// component is INERT PROVENANCE (spec §3.4): it records where the instance
+    /// came from and where it sat, and deliberately stops tracking anything.
+    /// `DetachComponentParams` exposes no drivable scalars
+    /// ([`KnownOperation::scalars_mut`]), so a binding carried across a detach
+    /// would be worse than useless — it would never be substituted again (the
+    /// number silently frozen at whatever it was), it would survive a
+    /// `rename_variable` as a dangling reference, and because the strip that
+    /// keeps an expression out of the planner hash and off the OCW1 wire is
+    /// registry-driven, it would reach BOTH. Clearing it here is what makes
+    /// "inert" true rather than merely intended.
+    pub fn clear_bindings(&mut self) {
+        for scalar in &mut self.translate {
+            scalar.expr = None;
+        }
+        self.rotate.angle_deg.expr = None;
+    }
+}
+
 /// Instantiate a library component (spec §3.1 `PlaceComponent`; Component
 /// Library WP-0.2; new v2 op, no OneCAD-CPP analogue).
 ///
@@ -4982,7 +5083,7 @@ mod tests {
     #[test]
     fn gear_exposes_only_dimensional_scalars() {
         let mut op = KnownOperation::Gear(gear_params());
-        let names: Vec<&str> = op.scalars_mut().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<&str> = op.scalars_mut().into_iter().map(|(n, _, _)| n).collect();
         assert!(names.contains(&"Gear.module"));
         assert!(names.contains(&"Gear.height"));
         assert!(names.contains(&"Gear.pressureAngleDeg"));
@@ -5229,12 +5330,243 @@ mod tests {
         }
     }
 
+    // ── The drivable-scalar registry freeze ─────────────────────────────────
+
+    fn labels_of(mut op: KnownOperation) -> Vec<(&'static str, Dimension)> {
+        op.scalars_mut()
+            .into_iter()
+            .map(|(name, dim, _)| (name, dim))
+            .collect()
+    }
+
+    fn extrude_scalar_params() -> ExtrudeParams {
+        ExtrudeParams {
+            profile: None,
+            distance: Scalar::new(10.0),
+            draft_angle_deg: Scalar::new(0.0),
+            mode: ExtrudeMode::Blind,
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            target_face: None,
+            two_directions: false,
+            mode2: ExtrudeMode::Blind,
+            distance2: Scalar::new(0.0),
+            target_face2: None,
+            extra: Extra::new(),
+        }
+    }
+
+    fn hole_scalar_params() -> HoleParams {
+        HoleParams {
+            target_body: body(1),
+            face: hole_face_ref(),
+            point: Vec3::new_unchecked(0.0, 0.0, 0.0),
+            hole_type: HoleType::Counterbore,
+            diameter: Scalar::new(5.0),
+            depth: Some(Scalar::new(10.0)),
+            cb_diameter: Some(Scalar::new(9.0)),
+            cb_depth: Some(Scalar::new(3.0)),
+            cs_diameter: Some(Scalar::new(9.0)),
+            cs_angle_deg: Some(Scalar::new(90.0)),
+            result_policy_version: None,
+            extra: Extra::new(),
+        }
+    }
+
+    /// **The registry freeze.** Every drivable `Scalar` in every scalar-bearing
+    /// `KnownOperation`, in order, with the [`Dimension`] it is measured in.
+    ///
+    /// Two contracts in one list:
+    ///
+    /// * **Order is normative.** `write_back_resolved_values` zips two records'
+    ///   lists BY POSITION, so reordering an arm silently writes one field's
+    ///   resolved number onto another.
+    /// * **Every entry declares a dimension.** The dimension is the expression
+    ///   engine's call site — it is what makes `"45deg"` a loud refusal in a
+    ///   length field instead of a silent 45 mm — so a scalar added without one
+    ///   (or with the wrong one) is a correctness bug, not a cosmetic omission.
+    ///
+    /// The `Vec::new()` arm of `scalars_mut` is an EXHAUSTIVE match, so a new
+    /// `KnownOperation` variant cannot skip this table without a compile error;
+    /// this test covers every variant that currently contributes an entry.
+    #[test]
+    fn the_drivable_scalar_registry_is_frozen_in_order_and_dimension() {
+        use Dimension::{Angle, Length, Scalar as Unitless};
+
+        assert_eq!(
+            labels_of(KnownOperation::Extrude(extrude_scalar_params())),
+            vec![
+                ("Extrude.distance", Length),
+                ("Extrude.draftAngleDeg", Angle),
+                ("Extrude.distance2", Length),
+            ]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::Revolve(RevolveParams {
+                profile: None,
+                angle_deg: Scalar::new(360.0),
+                axis: None,
+                boolean_mode: BooleanMode::NewBody,
+                target_body: None,
+                extra: Extra::new(),
+            })),
+            vec![("Revolve.angleDeg", Angle)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::Fillet(FilletParams {
+                radius: Scalar::new(2.0),
+                edge_ids: Vec::new(),
+                edges: Vec::new(),
+                chain_tangent_edges: false,
+                tangent_closure_version: None,
+                extra: Extra::new(),
+            })),
+            vec![("Fillet.radius", Length)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::Chamfer(chamfer_params(Some(2.5), None))),
+            vec![("Chamfer.radius", Length), ("Chamfer.distance2", Length)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::Chamfer(chamfer_params(None, Some(30.0)))),
+            vec![("Chamfer.radius", Length), ("Chamfer.angleDeg", Angle)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::Shell(ShellParams {
+                thickness: Scalar::new(1.5),
+                open_faces: Vec::new(),
+                faces: Vec::new(),
+                target_body: None,
+                extra: Extra::new(),
+            })),
+            vec![("Shell.thickness", Length)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::LinearPattern(LinearPatternParams {
+                source_body: None,
+                direction: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                spacing: Scalar::new(10.0),
+                count: 3,
+                fuse_result: false,
+                result_policy_version: None,
+                extra: Extra::new(),
+            })),
+            vec![("LinearPattern.spacing", Length)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::CircularPattern(CircularPatternParams {
+                source_body: None,
+                axis_origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                axis_direction: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                angle_deg: Scalar::new(360.0),
+                count: 4,
+                fuse_result: false,
+                result_policy_version: None,
+                extra: Extra::new(),
+            })),
+            vec![("CircularPattern.angleDeg", Angle)]
+        );
+        // A unit scale is a ratio, not a length: binding it to a `10mm` variable
+        // must be a dimension mismatch, not a silent 10×.
+        assert_eq!(
+            labels_of(KnownOperation::ImportStep(step_params())),
+            vec![("ImportStep.unitScale", Unitless)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::TransformBody(TransformBodyParams {
+                targets: Vec::new(),
+                translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+                rotate: TransformRotation::default(),
+                copy: false,
+                extra: Extra::new(),
+            })),
+            vec![
+                ("TransformBody.translate[0]", Length),
+                ("TransformBody.translate[1]", Length),
+                ("TransformBody.translate[2]", Length),
+                ("TransformBody.rotate.angleDeg", Angle),
+            ]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::Hole(hole_scalar_params())),
+            vec![
+                ("Hole.diameter", Length),
+                ("Hole.depth", Length),
+                ("Hole.cbDiameter", Length),
+                ("Hole.cbDepth", Length),
+                ("Hole.csDiameter", Length),
+                ("Hole.csAngleDeg", Angle),
+            ]
+        );
+        // With every optional hole present, so the full arm is frozen.
+        let mut geared = gear_params();
+        if let Some(inv) = geared.involute_external.as_mut() {
+            inv.axle_hole = true;
+            inv.axle_hole_diameter = Some(Scalar::new(4.0));
+            inv.offset_hole = true;
+            inv.offset_hole_diameter = Some(Scalar::new(3.0));
+            inv.offset_hole_offset = Some(Scalar::new(8.0));
+        }
+        assert_eq!(
+            labels_of(KnownOperation::Gear(geared)),
+            vec![
+                ("Gear.module", Length),
+                ("Gear.height", Length),
+                ("Gear.pressureAngleDeg", Angle),
+                ("Gear.axleHoleDiameter", Length),
+                ("Gear.offsetHoleDiameter", Length),
+                ("Gear.offsetHoleOffset", Length),
+            ]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::OffsetFace(OffsetFaceParams {
+                face_ids: Vec::new(),
+                primary_face_ids: Vec::new(),
+                faces: Vec::new(),
+                distance: Scalar::new(1.0),
+                distance_type: OffsetDistanceType::Offset,
+                chain_tangent_faces: false,
+                opposite_face_id: None,
+                opposite_face: None,
+                target_body: body(1),
+                result_policy_version: None,
+                extra: Extra::new(),
+            })),
+            vec![("OffsetFace.distance", Length)]
+        );
+        assert_eq!(
+            labels_of(KnownOperation::PlaceComponent(place_component_params())),
+            vec![
+                ("PlaceComponent.placement.translate[0]", Length),
+                ("PlaceComponent.placement.translate[1]", Length),
+                ("PlaceComponent.placement.translate[2]", Length),
+                ("PlaceComponent.placement.rotate.angleDeg", Angle),
+            ]
+        );
+    }
+
+    /// The canonical-form / wire strip: every REGISTERED expression goes, every
+    /// `value` stays.
+    #[test]
+    fn clear_scalar_exprs_drops_bindings_and_keeps_numbers() {
+        let mut params = extrude_scalar_params();
+        params.distance = Scalar::with_expr(20.0, "w * 2");
+        params.draft_angle_deg = Scalar::with_expr(3.0, "draft");
+        let mut op = KnownOperation::Extrude(params);
+        op.clear_scalar_exprs();
+        let KnownOperation::Extrude(p) = &op else {
+            panic!("expected an Extrude")
+        };
+        assert_eq!(p.distance, Scalar::new(20.0));
+        assert_eq!(p.draft_angle_deg, Scalar::new(3.0));
+    }
+
     /// A `Scalar` param left out of `scalars_mut` is silently un-drivable by a
     /// document variable, keeping its stale cached value forever.
     #[test]
     fn chamfer_exposes_angle_deg_as_a_drivable_scalar() {
         let labels = |mut op: KnownOperation| -> Vec<&'static str> {
-            op.scalars_mut().into_iter().map(|(n, _)| n).collect()
+            op.scalars_mut().into_iter().map(|(n, _, _)| n).collect()
         };
         assert_eq!(
             labels(KnownOperation::Chamfer(chamfer_params(None, None))),

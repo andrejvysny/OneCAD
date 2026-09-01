@@ -272,8 +272,7 @@ fn lower_operation(
     inputs: &onecad_core::document::record::OperationInputs,
     op_id: &str,
 ) -> Value {
-    let op_val = serde_json::to_value(operation).unwrap_or(Value::Null);
-    let (op_type, mut params) = split_operation(operation, op_val);
+    let (op_type, mut params) = split_operation(operation, wire_form(operation));
     strip_sketch_host_face(operation, &mut params);
     to_wire_body_form(&mut params);
     lift_profile_to_params(&mut params);
@@ -297,6 +296,30 @@ fn split_operation(operation: &Operation, op_val: Value) -> (Value, Value) {
             let op_type = obj.remove("opType").unwrap_or(Value::Null);
             (op_type, Value::Object(obj))
         }
+    }
+}
+
+/// The operation as it is SERIALIZED for the wire: a Known op with every
+/// registered `Scalar`'s `expr` cleared, an Opaque frozen node verbatim.
+///
+/// The worker has no expression engine and no variable table — an `expr` string
+/// is Rust-side authoring, and the number beside it is the whole of the geometry
+/// contract. The records reaching here are the substitution pass's EFFECTIVE
+/// COPIES, so `value` is already what the expression evaluates to.
+///
+/// This is the SAME strip the planner's canonical form applies
+/// (`onecad_core::regen::planner::op_type_and_params`), and applying it in both
+/// places is what keeps the hash a description of the bytes the worker actually
+/// receives. (Rust remains the sole hash authority — the planner hashes the CORE
+/// params under this same rule, so the omission cannot move a hash.)
+fn wire_form(operation: &Operation) -> Value {
+    match operation {
+        Operation::Known(known) => {
+            let mut stripped = known.clone();
+            stripped.clear_scalar_exprs();
+            serde_json::to_value(Operation::Known(stripped)).unwrap_or(Value::Null)
+        }
+        Operation::Opaque(_) => serde_json::to_value(operation).unwrap_or(Value::Null),
     }
 }
 
@@ -6416,6 +6439,83 @@ mod body_wire_tests {
         let inputs = op.derive_inputs();
         let w = wire_op(&planned(op, inputs));
         assert_eq!(w["params"]["targetBodyId"], json!(body_id_wire(target)));
+    }
+
+    /// The worker has no expression engine and no variable table: it receives the
+    /// NUMBER, never the text. (The planner hashes the same stripped form, so the
+    /// hash always describes the bytes the worker actually gets.)
+    #[test]
+    fn wire_op_strips_a_scalar_expression_and_keeps_its_value() {
+        let mut params = extrude_cut(BodyId(Uuid::from_u128(0x33)));
+        params.distance = Scalar::with_expr(25.0, "depth * 2 + 5mm");
+        let op = Operation::Known(KnownOperation::Extrude(params));
+        let inputs = op.derive_inputs();
+        let w = wire_op(&planned(op, inputs));
+        assert_eq!(w["params"]["distance"], json!({ "value": 25.0 }));
+        assert!(
+            !serde_json::to_string(&w["params"])
+                .unwrap()
+                .contains("expr"),
+            "no expression text may reach the wire: {}",
+            w["params"]
+        );
+    }
+
+    /// F1 — the DetachComponent counterpart of the strip test above. This op
+    /// exposes no registered scalars, so `lower_operation`'s strip cannot reach
+    /// its placement: the seam (`FrozenPlacement::clear_bindings`, called by
+    /// `library::detach_component_at`) is the only thing keeping an expression
+    /// off the wire, and the worker has no way to evaluate one.
+    #[test]
+    fn a_detached_placement_carries_no_expression_onto_the_wire() {
+        use onecad_core::document::record::{
+            ComponentSourceRef, DetachComponentParams, FrozenPlacement,
+        };
+
+        let mut placement = FrozenPlacement {
+            translate: [
+                Scalar::with_expr(20.0, "w * 2"),
+                Scalar::new(0.0),
+                Scalar::new(4.0),
+            ],
+            rotate: Default::default(),
+        };
+        let lower = |placement: FrozenPlacement| {
+            let op = Operation::Known(KnownOperation::DetachComponent(DetachComponentParams {
+                source: ComponentSourceRef::Generator {
+                    generator_id: "iso4762".into(),
+                    generator_version: 1,
+                    params: Default::default(),
+                    extra: Default::default(),
+                },
+                placement,
+                extra: Default::default(),
+            }));
+            let inputs = op.derive_inputs();
+            wire_op(&planned(op, inputs))
+        };
+
+        // Unstripped, the text really would reach the worker — asserted so the
+        // check below cannot pass vacuously.
+        assert!(
+            serde_json::to_string(&lower(placement.clone()).clone()["params"])
+                .unwrap()
+                .contains("expr")
+        );
+
+        placement.clear_bindings();
+        let w = lower(placement);
+        assert_eq!(
+            w["params"]["placement"]["translate"][0],
+            json!({ "value": 20.0 })
+        );
+        assert!(
+            !serde_json::to_string(&w["params"])
+                .unwrap()
+                .contains("expr"),
+            "no expression text may reach the wire: {}",
+            w["params"]
+        );
     }
 
     #[test]

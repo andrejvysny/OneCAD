@@ -14,6 +14,12 @@
  */
 import type { SketchConstraintType } from "./types";
 
+/** Radians→degrees conversion factor — the same canonical `rad` unit factor
+ * `onecad-core`'s expr engine uses to fold a `1rad` literal to canonical
+ * degrees (`src-tauri/crates/onecad-core/src/expr/dimension.rs`). Exported
+ * so `src/ipc/expr/dimension.ts` never re-derives it. */
+export const DEGREES_PER_RADIAN = 180 / Math.PI;
+
 export const degToRad = (deg: number): number => (deg * Math.PI) / 180;
 export const radToDeg = (rad: number): number => (rad * 180) / Math.PI;
 

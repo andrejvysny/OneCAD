@@ -8,10 +8,15 @@
  * while placing a dimension, a canvas click must NOT blur-commit the seeded value
  * (a second line click upgrades a length into an angle), and Esc must cancel the
  * whole pick, not just reset the text.
+ *
+ * With `onCommitExpr` the field also runs the `=` EXPRESSION lane: the text is
+ * evaluated live by the backend (`exprPreview.ts`) and the resolved value is
+ * shown under the field before anything is committed. Validity is the
+ * evaluator's verdict, never a second grammar here — see `exprPreview.ts` for
+ * the unit rule and the two authoring guardrails.
  */
 import { useEffect, useRef, useState } from "react";
-import type { SketchConstraintType } from "@/ipc/types";
-import { VARIABLE_NAME_RE } from "@/ipc/types";
+import type { ExpressionDimension, SketchConstraintType } from "@/ipc/types";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
   formatLength,
@@ -20,26 +25,32 @@ import {
   lengthSuffix,
   parseLength,
 } from "@/units/format";
+import { isPlainLiteral, parseExprInput, useExprPreview } from "./exprPreview";
+import { ExprPreviewLine } from "./ExprPreviewLine";
+
+export { parseExprInput } from "./exprPreview";
 
 export interface DimensionInputProps {
   value: number;
   suffix?: string;
   onCommit(value: number): void;
   /**
-   * OPT-IN variable binding (WP-VE.2). When provided, the field also accepts
-   * `=name` — the document variable that should drive this dimension — and
-   * commits through this callback instead of {@link DimensionInputProps.onCommit}.
-   * `null` means "the user typed a plain number over a binding": clear it.
+   * OPT-IN expression binding. When provided, the field also accepts `=<expr>`
+   * — any arithmetic over document variables and unit-suffixed literals
+   * (`=w*2 + 5mm`) — and commits through this callback instead of
+   * {@link DimensionInputProps.onCommit}. `null` means "the user typed a plain
+   * number over a binding": clear it. `value` is the number the expression
+   * currently resolves to, in the DOCUMENT domain (mm / degrees).
    *
    * Opt-in rather than universal because MOST consumers of this chip are sketch
    * constraint badges, whose values are solver dimensions with no `Scalar` and no
-   * `expr` behind them. Accepting `=name` there would show a binding the backend
-   * has nowhere to record. With this prop absent, `=name` is rejected exactly as
-   * any other unparseable text is.
+   * `expr` behind them. Accepting an expression there would show a binding the
+   * backend has nowhere to record. With this prop absent, `=x` is rejected
+   * exactly as any other unparseable text is.
    */
   onCommitExpr?(expr: string | null, value: number): void;
   /** The binding this field currently holds (BACKEND-AUTHORITATIVE — the
-   *  projection's `primaryExpr`), rendered as `=name` while at rest. */
+   *  projection's `primaryExpr`), rendered as `=<expr>` while at rest. */
   expr?: string;
   /**
    * Enter contract for the armed model-tool cluster (MODEL-HARDEN Wave 1): when
@@ -96,14 +107,6 @@ function isValidForKind(kind: SketchConstraintType, n: number): boolean {
       // HorizontalDistance/VerticalDistance are signed — any finite value is legal.
       return true;
   }
-}
-
-/** `=name` (with optional surrounding space), or null. V1 grammar: a bare name. */
-export function parseExprInput(text: string): string | null {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("=")) return null;
-  const name = trimmed.slice(1).trim();
-  return VARIABLE_NAME_RE.test(name) ? name : null;
 }
 
 export function DimensionInput({
@@ -171,6 +174,24 @@ export function DimensionInput({
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /*
+   * The `=` EXPRESSION lane. `exprText` is what the field currently holds after
+   * the `=`, or null when the field is not in expression mode — which is also
+   * how the lane stays completely idle for the sketch-badge chips that never
+   * opted in (`onCommitExpr` absent).
+   *
+   * The SITE is the field's own domain, and it is what turns `=45deg` typed
+   * into a length field into a loud refusal rather than a silent 45 mm.
+   */
+  const site: ExpressionDimension = isAngle ? "angle" : "length";
+  const typedExpr = onCommitExpr ? parseExprInput(text) : null;
+  const exprText = typedExpr !== null && !isPlainLiteral(typedExpr) ? typedExpr : null;
+  const { preview, evaluateNow } = useExprPreview(exprText, site);
+  // A LENGTH expression under any other display unit is the one place the two
+  // unit rules diverge (bare-inside-`=` is mm, bare-alone is the display unit),
+  // so the field says so where it is being typed.
+  const showMmHint = exprText !== null && site === "length" && unit !== "mm";
 
   /*
    * Re-render the SAME value in the new unit. This is a pure re-display: it
@@ -281,24 +302,60 @@ export function DimensionInput({
     return /^[+-]?(\d+\.?\d*|\.\d+)$/.test(t) ? Number.parseFloat(t) : Number.NaN;
   };
 
+  /**
+   * Commit an `=` EXPRESSION. Returns whether the field may close.
+   *
+   * The committed number is the evaluator's, never the field's own parse: the
+   * expression is what the document records, and its value has to be the one
+   * the preview just showed. A refusal keeps the field open with the reason on
+   * screen — the user asked for a binding, and a silent fall-through to the old
+   * number would give them nothing.
+   */
+  const commitExpr = (typed: string): boolean => {
+    // Re-typing the SAME binding is not an edit.
+    if (typed === expr) {
+      setText(`=${typed}`);
+      return true;
+    }
+    if (preview !== null && preview.text === typed) {
+      if (preview.error !== undefined) {
+        flashError();
+        return false;
+      }
+      onCommitExpr?.(typed, preview.value);
+      return true;
+    }
+    /*
+     * Enter (or blur) beat the debounce. Flush the evaluation and finish when
+     * it lands, holding the field open until then — the alternative is
+     * committing a number nobody has computed yet.
+     */
+    void evaluateNow(typed).then((r) => {
+      if (r.error !== undefined) flashError();
+      else onCommitExpr?.(typed, r.value);
+    });
+    return false;
+  };
+
   const commit = (): boolean => {
     /*
-     * WP-VE.2, checked BEFORE the numeric parse so `=height` can never fall
-     * through to it. Only reachable when the caller opted in; otherwise `=x`
-     * stays the unparseable text it has always been.
+     * The `=` lane, checked BEFORE the numeric parse so an expression can never
+     * fall through to it. Only reachable when the caller opted in; otherwise
+     * `=x` stays the unparseable text it has always been.
      */
+    let numericText = text;
     if (onCommitExpr) {
-      const bound = parseExprInput(text);
-      if (bound !== null) {
-        // `value` rides along as the Scalar's cached number — regen replaces it
-        // with the resolved one, and it keeps the row readable until then.
-        if (bound !== expr) onCommitExpr(bound, value);
-        else setText(`=${bound}`);
-        return true;
-      }
-      if (text.trim().startsWith("=")) {
-        // A malformed binding (`=`, `=2x`, `=w * 2`) must NOT silently commit the
-        // old number — the user asked for a binding and got nothing.
+      const typed = parseExprInput(text);
+      if (typed !== null && isPlainLiteral(typed)) {
+        // GUARDRAIL: a pure literal is not an expression anybody wants
+        // recorded, and recording it would make `=2` mean 2 mm while `2` means
+        // 2 in. It commits through the PLAIN path with the `=` dropped.
+        numericText = typed;
+      } else if (typed !== null) {
+        return commitExpr(typed);
+      } else if (text.trim().startsWith("=")) {
+        // `=` with nothing after it: the user asked for a binding and named
+        // none. Never silently re-commit the old number.
         flashError();
         return false;
       }
@@ -309,7 +366,7 @@ export function DimensionInput({
     // (`25mm`, `2.5 cm`, `1 in`) or a BARE number read in the current display
     // unit — and always emits MILLIMETRES, whatever the preference. It REJECTS
     // text it only partly understood ("25abc"), where parseFloat would commit 25.
-    const n = parse(text);
+    const n = parse(numericText);
     if (!Number.isFinite(n)) {
       if (kind) {
         flashError();
@@ -340,7 +397,10 @@ export function DimensionInput({
 
   return (
     <span
-      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border bg-surface px-1 font-mono text-[11px] text-sel-text shadow-ctrl ${
+      /* `relative` anchors the expression preview, which hangs BELOW the chip:
+         the chip itself is laid out against a badge or a history row, and
+         growing it would move whatever it is attached to. */
+      className={`pointer-events-auto relative inline-flex items-center gap-0.5 rounded-sm border bg-surface px-1 font-mono text-[11px] text-sel-text shadow-ctrl ${
         isError ? "border-traffic-close" : "border-accent"
       }`}
     >
@@ -404,7 +464,18 @@ export function DimensionInput({
           }
         }}
       />
-      {shownSuffix && <span className="text-ink-5">{shownSuffix}</span>}
+      {shownSuffix && !exprText && <span className="text-ink-5">{shownSuffix}</span>}
+      {/* The verdict, always: what the expression RESOLVED to, before anything
+          is committed. */}
+      {exprText !== null && (
+        <ExprPreviewLine
+          exprText={exprText}
+          preview={preview}
+          site={site}
+          unit={unit}
+          showMmHint={showMmHint}
+        />
+      )}
     </span>
   );
 }

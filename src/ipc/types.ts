@@ -10,6 +10,10 @@
  * against the mock client. Keep every field here 1:1 with the eventual Rust
  * struct so the swap to the real tauri client (F-WP8) is a no-op for the UI.
  */
+// Type-only, therefore erased: `types.ts` gains no runtime dependency on the
+// expression engine. See `ExpressionDimension` below for why it is aliased
+// rather than re-declared.
+import type { Dimension as ExprDimension } from "./expr/dimension";
 
 /** One entry in the "Recent projects" list on the start screen. */
 export interface RecentProject {
@@ -2179,13 +2183,32 @@ export interface DocumentModule {
 }
 
 /**
- * One document variable (WP-VE.2 — the authoring surface over the table WP-VE.1
- * made drive regen).
+ * The dimension an expression value carries (`dto.rs dimension_name`, and the
+ * `site` argument of {@link CadClient.evaluateExpression}).
  *
- * `value` is the LAST EVALUATED number: for a plain variable that is simply what
- * the user typed; for one that is itself `expr`-driven it is the cached result.
- * V1 refuses to resolve a chained expression at regen, so `expr` is surfaced
- * rather than hidden — a broken binding must be visible where it was authored.
+ * Aliased off the evaluator's own union rather than re-declared, so the wire
+ * spelling and the TS engine can never drift into two different sets of
+ * strings. The import is type-only and therefore erased — `types.ts` gains no
+ * runtime dependency on the expression engine.
+ */
+export type ExpressionDimension = ExprDimension;
+
+/**
+ * One document variable (`dto.rs VariableDto`).
+ *
+ * Three numbers-and-strings that must not be confused:
+ *
+ *  - `value` — the STORED number: what the user typed for a plain variable, or
+ *    the last evaluated cache for an expression-driven one.
+ *  - `expr` — the stored expression text, absent for a plain variable. This is
+ *    what an editor puts back in the field.
+ *  - `resolvedValue` — what `expr` evaluates to against the CURRENT table right
+ *    now. Equal to `value` for a plain variable, and for a broken one it falls
+ *    back to `value` (the last number anybody could justify) with `error` set.
+ *
+ * `dimension` is INFERRED from the variable's own expression, so `45deg` reads
+ * as an angle and a bare `10` is `"scalar"` — dimensionless, and therefore
+ * usable in a length field as millimetres AND an angle field as degrees.
  */
 export interface DocumentVariable {
   id: string;
@@ -2193,9 +2216,34 @@ export interface DocumentVariable {
   value: number;
   /** Present only for a variable whose own value is expression-driven. */
   expr?: string;
+  /** What the variable resolves to against the current table. */
+  resolvedValue: number;
+  dimension: ExpressionDimension;
+  /** Present exactly when this variable does not resolve (a parse failure, a
+   *  missing reference, or a cycle naming the whole path). Read it BEFORE
+   *  trusting `resolvedValue`. */
+  error?: string;
 }
 
-/** The V1 variable-name grammar, shared with `regen::variables::is_bare_name`. */
+/**
+ * One live expression evaluation (`dto.rs EvaluatedExpressionDto`) — the
+ * preview behind an authoring field.
+ *
+ * Pure on both lanes: nothing is recorded and no regen is scheduled, which is
+ * what makes it safe to call while the user is typing. A failure is a populated
+ * `error` in the RESULT, not a rejection: an in-progress expression is not an
+ * API misuse. `error` set ⇒ `value` is 0 and `dimension` echoes the requested
+ * site, so read `error` first.
+ */
+export interface EvaluatedExpression {
+  value: number;
+  dimension: ExpressionDimension;
+  error?: string;
+}
+
+/** The variable-name grammar, shared with `regen::variables::is_bare_name`.
+ *  This is about a variable's NAME; its VALUE may be any expression the engine
+ *  accepts. */
 export const VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**

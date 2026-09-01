@@ -223,6 +223,20 @@ pub enum EditCommand {
         /// Target variable.
         variable: VariableId,
     },
+    /// Rename a variable AND every expression that references it.
+    ///
+    /// A rename is not a metadata edit: a variable's name IS the binding every
+    /// `Scalar.expr` holds, so renaming without rewriting the references would
+    /// break every bound parameter at once. The session rewrites them token-wise
+    /// through the expression parser and refuses the whole command if any
+    /// reference cannot be rewritten — a half-renamed document is a silently
+    /// wrong document.
+    RenameVariable {
+        /// Target variable.
+        variable: VariableId,
+        /// The new name (must be a legal identifier and not already taken).
+        name: String,
+    },
     // ImportStep — DEFERRED (C++ `ImportStepCommand`). It adds imported bodies +
     // per-face colors from worker BREP payloads, which are out of this WP's
     // pure-core scope. Slot reserved for a later WP.
@@ -258,6 +272,7 @@ impl EditCommand {
             Self::SetVariable { .. } => "Set Variable",
             Self::AddVariable { .. } => "Add Variable",
             Self::RemoveVariable { .. } => "Remove Variable",
+            Self::RenameVariable { .. } => "Rename Variable",
         }
     }
 }

@@ -31,6 +31,13 @@ import {
  * number came from. If the commit had not recorded the binding, the row would
  * come back showing a plain number and this test would fail — which is exactly
  * what a unit test over the input component cannot prove.
+ *
+ * The EXPRESSION suites below extend both loops to real arithmetic: a value
+ * cell that takes `20mm`, a binding that takes `=w*2 + 5mm` and previews what it
+ * resolves to before committing, a rename that carries the binding with it, and
+ * the two unit guardrails. The mock resolves all of it through the shared TS
+ * port of `onecad-core`'s evaluator, so these prove the semantics the real
+ * backend applies rather than a lane-local approximation.
  */
 
 interface FeatureRow {
@@ -277,6 +284,153 @@ test("a variable edit that breaks its bound extrude saves the value AND says the
   await expect(page.getByTestId("variable-row-height")).toHaveCount(0);
   await expect(page.getByTestId("variables-empty")).toBeVisible();
   await expect(
-    page.getByText(/Variable saved, but the rebuild failed: .*`height` is not defined/),
+    page.getByText(/Variable saved, but the rebuild failed: .*undefined variable `height`/),
   ).toBeVisible();
+});
+
+/**
+ * Pick a display unit through the REAL control.
+ *
+ * A local copy of `units.spec.ts`'s gesture, including its camera settle: the
+ * ViewCube re-renders on every camera change and the popover lives in the same
+ * subtree, so clicking a tab while the intro framing animates detaches the node
+ * mid-click.
+ */
+async function pickUnit(page: Page, unit: "mm" | "in"): Promise<void> {
+  await waitForCameraSettled(page);
+  const button = page.getByRole("button", { name: /^Display mode/ });
+  await button.click();
+  const tab = page.getByRole("tablist", { name: "Units" }).getByRole("tab", { name: unit });
+  await expect(tab).toBeVisible();
+  await tab.click();
+  // Closed by TOGGLING the anchor, never Escape: Escape is also the global
+  // cancel, and here it would drop the feature selection the timeline view (and
+  // therefore the row under test) depends on. Same hazard units.spec.ts
+  // documents for an armed tool.
+  await button.click();
+  await expect(page.getByRole("tablist", { name: "Units" })).toHaveCount(0);
+}
+
+/** Open the inline value editor on a history row and return its input. */
+function valueEditor(page: Page, featureId: string) {
+  return page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+}
+
+/*
+ * The whole expression loop on one document: author a dimensioned variable as
+ * TEXT, bind a past extrude to arithmetic over it, watch the preview resolve
+ * BEFORE committing, rename the variable and see the binding follow, then
+ * delete it and be told loudly.
+ *
+ * Every step is the real DOM down to the client. The preview in particular is
+ * the honesty gate here: it is a live `evaluateExpression` round trip, so a
+ * lane that could not actually evaluate `w*2 + 5mm` would show nothing to
+ * assert on.
+ */
+test("author, bind, preview, rename and break an expression-driven dimension", async ({
+  page,
+}) => {
+  await openEditorDebug(page);
+  await page.getByTestId("sidebar-tab-variables").click();
+
+  // (1) A variable authored as TEXT with a unit — not a number field.
+  await addVariable(page, "w", "20mm");
+  await expect(page.getByTestId("variable-row-w")).toBeVisible();
+  await expect(page.getByTestId("variable-value-w")).toHaveValue("=20mm");
+  // The row says what it resolves to, with the unit its own expression implies.
+  await expect(page.getByTestId("variable-resolved-w")).toHaveText("= 20 mm");
+
+  await page.getByTestId("sidebar-tab-model").click();
+  const featureId = await drawAndExtrude(page);
+  await openTimelineOn(page, featureId);
+
+  // (2) Bind the extrude to ARITHMETIC over it. The preview resolves live…
+  await page.getByTestId(`history-value-${featureId}`).click();
+  const input = valueEditor(page, featureId);
+  await expect(input).toBeFocused();
+  await input.fill("=w*2 + 5mm");
+  await expect(page.getByTestId("dimension-expr-preview")).toHaveText("= 45 mm");
+
+  // …and the committed number is THAT one, recorded with its expression.
+  await input.press("Enter");
+  await expect
+    .poll(async () => (await features(page)).find((f) => f.id === featureId)?.primaryExpr)
+    .toBe("w*2 + 5mm");
+  const chip = page.getByTestId(`history-value-${featureId}`);
+  await expect(chip).toHaveText("=w*2 + 5mm");
+  await expect(chip).toHaveAttribute("title", "w*2 + 5mm = 45 mm");
+
+  // (3) RENAME. Not remove+add: the binding must follow, in one transaction.
+  await page.getByTestId("sidebar-tab-variables").click();
+  await page.getByTestId("variable-name-w").fill("width");
+  await page.getByTestId("variable-name-w").press("Enter");
+  await expect(page.getByTestId("variable-row-width")).toBeVisible();
+  await expect(page.getByTestId("variable-row-w")).toHaveCount(0);
+  await expect
+    .poll(async () => (await features(page)).find((f) => f.id === featureId)?.primaryExpr)
+    .toBe("width*2 + 5mm");
+
+  // (4) DELETE the variable the extrude still binds. The removal STANDS and the
+  // failure is loud, naming the field and the evaluator's own reason. (On this
+  // lane the surface is the sticky status hint — the mock runs no regen, so
+  // there is no per-step `EXPR_UNRESOLVED` tint for it to stamp.)
+  await page.getByTestId("variable-delete-width").click();
+  await expect(page.getByTestId("variable-row-width")).toHaveCount(0);
+  await expect(
+    page.getByText(
+      /Variable saved, but the rebuild failed: Extrude\.distance: undefined variable `width`/,
+    ),
+  ).toBeVisible();
+});
+
+/*
+ * The two rules a value field now holds at once, and the guardrails that keep
+ * them from contradicting each other silently:
+ *
+ *   - a bare number INSIDE an expression is millimetres (the site's canonical
+ *     unit, matching `substitute_variables`);
+ *   - a bare number typed on its OWN is read in the display unit.
+ *
+ * Displaying inches is the only place they disagree, so that is where this
+ * test lives.
+ */
+test("expression unit guardrails and the site refusal", async ({ page }) => {
+  await openEditorDebug(page);
+  await page.getByTestId("sidebar-tab-variables").click();
+  await addVariable(page, "w", "20mm");
+  await expect(page.getByTestId("variable-row-w")).toBeVisible();
+
+  await page.getByTestId("sidebar-tab-model").click();
+  const featureId = await drawAndExtrude(page);
+  await openTimelineOn(page, featureId);
+  await pickUnit(page, "in");
+
+  // GUARDRAIL (b): a PURE literal after `=` is the plain path — 2 INCHES, the
+  // same as typing `2`, and no binding is recorded. The two spellings of a lone
+  // number must never mean different lengths.
+  await page.getByTestId(`history-value-${featureId}`).click();
+  await valueEditor(page, featureId).fill("=2");
+  await valueEditor(page, featureId).press("Enter");
+  await expect
+    .poll(async () => (await features(page)).find((f) => f.id === featureId)?.primaryValue)
+    .toBeCloseTo(50.8, 3);
+  expect((await features(page)).find((f) => f.id === featureId)?.primaryExpr).toBeUndefined();
+
+  // GUARDRAIL (a)+(c): a real expression previews the millimetres it resolved
+  // to AND the display-unit equivalent, and says where the bare numbers land.
+  await page.getByTestId(`history-value-${featureId}`).click();
+  await valueEditor(page, featureId).fill("=w/2");
+  await expect(page.getByTestId("dimension-expr-preview")).toHaveText("= 10 mm (0.3937 in)");
+  await expect(page.getByTestId("dimension-expr-hint")).toContainText(
+    "bare numbers inside = are millimetres",
+  );
+
+  // An ANGLE in a length field is a loud refusal, inline — never a silent
+  // 45 mm. Typed into the SAME open editor, so nothing is dismissed in between.
+  await valueEditor(page, featureId).fill("=45deg");
+  await expect(page.getByTestId("dimension-expr-preview")).toContainText("expected length");
+  await valueEditor(page, featureId).press("Enter");
+  await expect(valueEditor(page, featureId)).toHaveAttribute("aria-invalid", "true");
+  // Nothing was recorded: the row never took the binding.
+  expect((await features(page)).find((f) => f.id === featureId)?.primaryExpr).toBeUndefined();
 });

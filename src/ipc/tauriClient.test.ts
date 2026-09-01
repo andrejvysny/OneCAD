@@ -2775,7 +2775,14 @@ describe("tauriClient variable commands (W5 result truth)", () => {
    *  whether a regen was enqueued at all. */
   function projectionWithVariables(
     revision: number,
-    variables: { id: string; name: string; value: number }[],
+    variables: {
+      id: string;
+      name: string;
+      value: number;
+      expr?: string;
+      resolvedValue?: number;
+      dimension?: string;
+    }[],
     totalOps = 1,
   ): unknown {
     return { ...(readyProjection(revision) as object), variables, appliedOps: totalOps, totalOps };
@@ -2934,6 +2941,99 @@ describe("tauriClient variable commands (W5 result truth)", () => {
     );
     __setRegenTimeoutForTests(300);
     expect((await createTauriClient().removeVariable("gone")).variables).toEqual([]);
+  });
+
+  /*
+   * The two EXPRESSION writes ride the same `documentScope` correlation as
+   * their literal siblings — both lower to a variable write, and a rename
+   * rewrites the timeline as well as the table.
+   */
+  it("upsertVariableExpr marshals {name, text} and lifts the SAVED table off the projection", async () => {
+    let sent: unknown;
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "upsert_variable_expr") {
+          sent = args;
+          setTimeout(
+            () =>
+              void emit("regen-finished", { revision: 81, sourceRevision: 81, outcome: "published" }),
+            0,
+          );
+          return projectionWithVariables(81, [
+            { id: "v1", name: "plate", value: 45, expr: "w*2 + 5mm", resolvedValue: 45, dimension: "length" },
+          ]);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().upsertVariableExpr("plate", "w*2 + 5mm");
+    expect(sent).toEqual({ name: "plate", text: "w*2 + 5mm" });
+    expect(res.terminal).toBe("published");
+    expect(res.variables[0]).toEqual({
+      id: "v1",
+      name: "plate",
+      value: 45,
+      expr: "w*2 + 5mm",
+      resolvedValue: 45,
+      dimension: "length",
+    });
+  });
+
+  /** camelCase on the wire: Rust's `new_name` parameter is `newName` here. */
+  it("renameVariable marshals {name, newName}", async () => {
+    let sent: unknown;
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "rename_variable") {
+          sent = args;
+          setTimeout(
+            () =>
+              void emit("regen-finished", { revision: 91, sourceRevision: 91, outcome: "published" }),
+            0,
+          );
+          return projectionWithVariables(91, [
+            { id: "v1", name: "width", value: 5, resolvedValue: 5, dimension: "scalar" },
+          ]);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().renameVariable("w", "width");
+    expect(sent).toEqual({ name: "w", newName: "width" });
+    expect(res.variables.map((v) => v.name)).toEqual(["width"]);
+  });
+
+  /*
+   * `evaluate_expression` is PURE and deliberately NOT on the edit lane: it
+   * schedules no regen, so there is no terminal to correlate. This test fires
+   * no events at all — if it were routed through `applyEdit` it would sit out
+   * the timeout and fail.
+   */
+  it("evaluateExpression marshals {expr, site} and returns the DTO verbatim", async () => {
+    let sent: unknown;
+    mockIPC((cmd, args) => {
+      if (cmd === "evaluate_expression") {
+        sent = args;
+        return { value: 45, dimension: "length" };
+      }
+    });
+    const res = await createTauriClient().evaluateExpression("w*2 + 5mm", "length");
+    expect(sent).toEqual({ expr: "w*2 + 5mm", site: "length" });
+    expect(res).toEqual({ value: 45, dimension: "length" });
+  });
+
+  /** A bad expression is a populated `error` in the RESULT, never a rejection —
+   *  an in-progress expression is not an API misuse. */
+  it("evaluateExpression surfaces a refusal as an error field, not a throw", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "evaluate_expression")
+        return { value: 0, dimension: "length", error: "undefined variable `w`" };
+    });
+    const res = await createTauriClient().evaluateExpression("w*2", "length");
+    expect(res.error).toBe("undefined variable `w`");
+    expect(res.value).toBe(0);
   });
 });
 

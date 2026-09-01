@@ -202,15 +202,37 @@ fn wire_line(
 /// Known op contributes its `{opType, params}`; an Opaque frozen node contributes
 /// its `opType` plus its remaining raw payload as `params` (lossless — an edit to
 /// a frozen node still changes the hash).
+///
+/// **A Known op's registered `Scalar` expressions are stripped first**
+/// ([`KnownOperation::clear_scalar_exprs`]). The hash fingerprints GEOMETRY, and
+/// an expression is authoring: a `distance` of `{value: 20, expr: "w*2"}` builds
+/// exactly the solid a literal `{value: 20}` builds, so the two must hash the
+/// same. Without the strip, replacing `w*2` with the number 20 would invalidate
+/// every checkpoint from that step down and rebuild identical geometry — and the
+/// worker, which receives the same stripped params
+/// (`worker::wire::lower_operation`), would be rebuilding from a payload the
+/// hash did not describe. The records this runs over are the substitution pass's
+/// EFFECTIVE COPIES, so `value` is already the evaluated number.
+///
+/// Rust remains the sole hash authority: this is the canonical form's own rule,
+/// not a wire concession, and it is pinned by
+/// `regen_planner::an_expression_bound_scalar_hashes_as_the_literal_it_evaluates_to`.
+///
+/// [`Operation::Opaque`] is UNTOUCHED — a frozen node's raw payload is opaque by
+/// definition (an `expr` key inside one is not a `Scalar` this core understands),
+/// and rewriting it would break the byte-stable round-trip that makes it frozen.
 fn op_type_and_params(op: &Operation) -> (Value, Value) {
-    let op_val = serde_json::to_value(op).unwrap_or(Value::Null);
     match op {
-        Operation::Known(_) => {
+        Operation::Known(known) => {
+            let mut stripped = known.clone();
+            stripped.clear_scalar_exprs();
+            let op_val = serde_json::to_value(Operation::Known(stripped)).unwrap_or(Value::Null);
             let t = op_val.get("opType").cloned().unwrap_or(Value::Null);
             let p = op_val.get("params").cloned().unwrap_or(Value::Null);
             (t, p)
         }
         Operation::Opaque(_) => {
+            let op_val = serde_json::to_value(op).unwrap_or(Value::Null);
             let mut obj = op_val.as_object().cloned().unwrap_or_default();
             let t = obj.remove("opType").unwrap_or(Value::Null);
             (t, Value::Object(obj))

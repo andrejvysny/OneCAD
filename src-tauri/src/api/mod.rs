@@ -33,18 +33,22 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use onecad_core::document::modules::{ModuleId, ModuleState};
 use onecad_core::document::record::Operation;
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
-use onecad_core::document::variables::{Scalar, Unit, Variable};
+use onecad_core::document::variables::{Scalar, Unit, Variable, VariableTable};
 use onecad_core::edit::{EditCommand, SketchEditOp};
+use onecad_core::expr::Dimension;
 use onecad_core::ids::{
     BodyId, ConstraintId, DocumentId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey,
     VariableId,
 };
 use onecad_core::io::container::SaveMeta;
 use onecad_core::io::recovery::{scan_recoverable, RecoveryOffer, SessionMarker};
-use onecad_core::regen::{is_bare_name, RegenRequest, ResolveRef, ResolveRequest};
+use onecad_core::regen::{
+    is_bare_name, resolve_variable_table, RegenRequest, ResolveRef, ResolveRequest,
+};
 
 use crate::autosave;
 use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
+use crate::dto::{dimension_name, variable_dtos, EvaluatedExpressionDto};
 use crate::dto::{
     BeginGestureDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto,
     FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto, RecentProjectDto,
@@ -1232,7 +1236,7 @@ pub async fn list_variables(state: State<'_, AppState>) -> Result<Vec<VariableDt
     let rt = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument("list_variables".into()))?;
-    Ok(rt.variables().iter().map(VariableDto::from).collect())
+    Ok(variable_dtos(rt.variables_table()))
 }
 
 /// Creates or re-values a variable by NAME (`CadClient.upsertVariable`).
@@ -1241,8 +1245,11 @@ pub async fn list_variables(state: State<'_, AppState>) -> Result<Vec<VariableDt
 /// the id never appears in a document expression, so making the frontend carry
 /// one would only give it a second way to be stale.
 ///
-/// Refuses a name `regen::variables::resolve_expr` could never look up, so the
-/// app cannot mint a variable that no binding can ever name. Existing name ⇒
+/// Refuses a name no expression could ever reference, so the app cannot mint a
+/// variable that no binding can ever name. Sets a LITERAL value: an existing
+/// expression on that variable is replaced (`Scalar::try_new` carries no
+/// `expr`), which is how a user goes from `=w*2` back to a plain number.
+/// Existing name ⇒
 /// `SetVariable` (the id and declaration position are preserved); new ⇒
 /// `AddVariable`. Comparison is CASE-SENSITIVE, matching `VariableTable::get`.
 ///
@@ -1284,7 +1291,9 @@ pub async fn upsert_variable(
 /// An unknown name is REFUSED rather than treated as a no-op: the caller believes
 /// it deleted something, and a silent success would leave a variable on screen the
 /// user just asked to be rid of. Records still bound to it are not rewritten —
-/// they fail loudly at regen (`resolve_expr`), which is the WP-VE.1 contract.
+/// they fail loudly at regen with an `EXPR_UNRESOLVED` diagnostic naming the
+/// field and the gone variable — records are never rewritten behind the user's
+/// back. Use `rename_variable` when the intent is to keep the bindings.
 ///
 /// Returns the (pre-regen) [`DocumentProjection`], like [`upsert_variable`]: the
 /// removal STANDS even when the regen it schedules then fails on a record still
@@ -1312,6 +1321,196 @@ pub async fn remove_variable(
     }
     state.note_mutation();
     Ok(projection)
+}
+
+/// The [`EditCommand`] an `upsert_variable_expr(name, text)` lowers to.
+///
+/// The expression-authoring twin of [`upsert_variable_command`]. Both are
+/// name-keyed and both are refused before anything is recorded; the difference
+/// is that this one must EVALUATE first, because the `Scalar` it writes carries
+/// both the expression AND the number it currently evaluates to (the cache every
+/// consumer reads until the next regen).
+///
+/// Evaluation runs against the table this edit WOULD produce, not the current
+/// one, so a self-reference (`w = w + 1`) and a cycle the edit closes are
+/// refused here rather than written and then discovered by every bound parameter
+/// at once.
+fn upsert_variable_expr_command(
+    current: &VariableTable,
+    name: &str,
+    text: &str,
+) -> Result<EditCommand, ApiError> {
+    let name = name.trim();
+    if !is_bare_name(name) {
+        return Err(ApiError::InvalidCommand(format!(
+            "invalid variable name {name:?}: a name must match [A-Za-z_][A-Za-z0-9_]*"
+        )));
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ApiError::InvalidCommand(format!(
+            "variable {name:?}: an expression must not be empty"
+        )));
+    }
+    let existing = current.get(name).cloned();
+    let id = existing.as_ref().map_or_else(VariableId::new, |v| v.id);
+    let mut candidate = current.clone();
+    candidate.upsert(Variable {
+        id,
+        name: name.to_string(),
+        value: Scalar::with_expr(0.0, text),
+        unit: Unit::Mm,
+    });
+    let (values, errors) = resolve_variable_table(&candidate);
+    if let Some(e) = errors.iter().find(|e| e.name == name) {
+        return Err(ApiError::InvalidCommand(format!(
+            "variable {name:?}: {}",
+            e.message
+        )));
+    }
+    let resolved = values
+        .get(name)
+        .map(|v| v.number)
+        .ok_or_else(|| ApiError::Internal(format!("variable {name:?} resolved to nothing")))?;
+    let value = Scalar::with_expr(resolved, text);
+    Ok(match existing {
+        Some(v) => EditCommand::SetVariable {
+            variable: v.id,
+            value,
+        },
+        None => EditCommand::AddVariable {
+            variable: Variable {
+                id,
+                name: name.to_string(),
+                value,
+                unit: Unit::Mm,
+            },
+        },
+    })
+}
+
+/// Creates or re-binds a variable to an EXPRESSION by name
+/// (`CadClient.upsertVariableExpr`).
+///
+/// The sibling of [`upsert_variable`], which takes a literal `f64`. Two commands
+/// rather than one optional-expression command because the two authoring
+/// gestures have different failure modes: a number is either finite or not, an
+/// expression can fail eight ways and must say which. Both are append-only
+/// additions to the IPC surface; neither changes the other's shape.
+///
+/// Returns the (pre-regen) [`DocumentProjection`] with the same emit + schedule +
+/// `note_mutation` tail every mutating command has.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(name = %name), err(Display))]
+pub async fn upsert_variable_expr(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    name: String,
+    text: String,
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("upsert_variable_expr".into()))?;
+        // Read + apply under ONE guard: deciding add-vs-set (and evaluating
+        // against the table) from a read a concurrent edit could invalidate is
+        // how a "set" turns into a duplicate.
+        let command = upsert_variable_expr_command(rt.variables_table(), &name, &text)?;
+        let outcome = rt.apply(command)?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(projection)
+}
+
+/// Renames a variable AND every expression that references it
+/// (`CadClient.renameVariable`).
+///
+/// NOT `remove` + `upsert`: that pair would leave every bound parameter pointing
+/// at a name that no longer exists for the duration, and the removal STANDS even
+/// if the re-add fails. This is one undoable transaction that rewrites the
+/// references token-wise through the expression parser, and is refused as a
+/// whole if any of them cannot be rewritten.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(name = %name, new_name = %new_name), err(Display))]
+pub async fn rename_variable(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    name: String,
+    new_name: String,
+) -> Result<DocumentProjection, ApiError> {
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("rename_variable".into()))?;
+        let target = rt
+            .variables_table()
+            .get(&name)
+            .map(|v| v.id)
+            .ok_or_else(|| ApiError::InvalidCommand(format!("unknown variable {name:?}")))?;
+        let outcome = rt.apply(EditCommand::RenameVariable {
+            variable: target,
+            name: new_name.clone(),
+        })?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(projection)
+}
+
+/// Evaluates `expr` at `site` against the open document's variable table
+/// (`CadClient.evaluateExpression`) — the live preview behind an authoring
+/// field.
+///
+/// **Pure.** It records nothing, marks nothing dirty, schedules no regen and
+/// emits no event, which is what makes it safe to call on every keystroke.
+/// A failure is a populated `error` in the RESULT, not an `Err`: an
+/// in-progress expression is not an API misuse. The only `Err`s are "no document
+/// open" and an unknown `site`.
+#[tauri::command]
+pub async fn evaluate_expression(
+    state: State<'_, AppState>,
+    expr: String,
+    site: String,
+) -> Result<EvaluatedExpressionDto, ApiError> {
+    let dim = match site.as_str() {
+        "length" => Dimension::Length,
+        "angle" => Dimension::Angle,
+        "scalar" => Dimension::Scalar,
+        other => {
+            return Err(ApiError::InvalidCommand(format!(
+                "unknown expression site {other:?}: expected \"length\", \"angle\" or \"scalar\""
+            )))
+        }
+    };
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("evaluate_expression".into()))?;
+    Ok(
+        match onecad_core::regen::evaluate_expression(expr.trim(), dim, rt.variables_table()) {
+            Ok(value) => EvaluatedExpressionDto {
+                value: value.number,
+                dimension: dimension_name(value.dim).to_string(),
+                error: None,
+            },
+            Err((_, message)) => EvaluatedExpressionDto {
+                value: 0.0,
+                dimension: dimension_name(dim).to_string(),
+                error: Some(message),
+            },
+        },
+    )
 }
 
 /// Undoes the last committed edit (`CadClient.undo`).
@@ -3656,7 +3855,7 @@ mod tests {
 
         #[test]
         fn upsert_refuses_a_name_no_expression_could_ever_name() {
-            // Exactly the set `regen::variables::resolve_expr` rejects — an empty
+            // Exactly the set `regen::variables::is_bare_name` rejects — an empty
             // name, a leading digit, punctuation, and an arithmetic expression
             // masquerading as a name.
             for bad in ["", "   ", "2wide", "my-var", "w * 2", "wídth", "a b"] {
@@ -3792,6 +3991,170 @@ mod tests {
                 EditCommand::RemoveVariable { variable } => assert_eq!(variable, want),
                 other => panic!("expected RemoveVariable, got {other:?}"),
             }
+        }
+
+        // ── Expression authoring ─────────────────────────────────────────────
+
+        fn table(vars: &[Variable]) -> VariableTable {
+            let mut t = VariableTable::new();
+            for v in vars {
+                t.upsert(v.clone());
+            }
+            t
+        }
+
+        /// The stored `Scalar` carries BOTH the text and the number it currently
+        /// evaluates to — the cache every consumer reads until the next regen.
+        #[test]
+        fn upsert_expr_stores_the_text_and_its_evaluated_value() {
+            let t = table(&[var("depth", 10.0)]);
+            match upsert_variable_expr_command(&t, "plate", "depth * 2 + 5mm").unwrap() {
+                EditCommand::AddVariable { variable } => {
+                    assert_eq!(variable.name, "plate");
+                    assert_eq!(variable.value.expr.as_deref(), Some("depth * 2 + 5mm"));
+                    assert_eq!(variable.value.value, 25.0);
+                }
+                other => panic!("expected AddVariable, got {other:?}"),
+            }
+        }
+
+        /// Evaluated against the table the edit WOULD produce, so the edit that
+        /// closes a cycle is refused before anything is written.
+        #[test]
+        fn upsert_expr_refuses_a_self_reference_and_a_cycle_it_would_close() {
+            let t = table(&[var("w", 1.0)]);
+            let err = upsert_variable_expr_command(&t, "w", "w + 1")
+                .expect_err("a self-reference must be refused");
+            assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+
+            // a = b already exists; closing it with b = a is the cycle.
+            let mut t = VariableTable::new();
+            t.upsert(Variable {
+                value: Scalar::with_expr(0.0, "b"),
+                ..var("a", 0.0)
+            });
+            t.upsert(var("b", 1.0));
+            let err = upsert_variable_expr_command(&t, "b", "a")
+                .expect_err("closing a cycle must be refused");
+            assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+        }
+
+        #[test]
+        fn upsert_expr_refuses_a_bad_name_a_bad_expression_and_an_empty_one() {
+            let t = table(&[var("w", 1.0)]);
+            for (name, text) in [
+                ("2wide", "w"),   // illegal name
+                ("x", ""),        // empty expression
+                ("x", "   "),     // whitespace-only
+                ("x", "w +"),     // parse failure
+                ("x", "nope"),    // undefined reference
+                ("x", "frob(w)"), // unknown function
+            ] {
+                let err = upsert_variable_expr_command(&t, name, text)
+                    .expect_err(&format!("({name:?}, {text:?}) must be refused"));
+                assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
+            }
+        }
+
+        /// An existing name is a re-bind, keeping the id (and therefore every
+        /// binding already pointing at it).
+        #[test]
+        fn upsert_expr_of_an_existing_name_sets_rather_than_adds() {
+            let existing = var("width", 10.0);
+            let id = existing.id;
+            let t = table(&[existing, var("w", 4.0)]);
+            match upsert_variable_expr_command(&t, "width", "w * 3").unwrap() {
+                EditCommand::SetVariable { variable, value } => {
+                    assert_eq!(variable, id);
+                    assert_eq!(value, Scalar::with_expr(12.0, "w * 3"));
+                }
+                other => panic!("expected SetVariable, got {other:?}"),
+            }
+        }
+
+        /// A rename is one transaction that rewrites every reference — variables
+        /// AND op params — and is undoable as a unit.
+        #[test]
+        fn rename_rewrites_every_reference_and_undoes_as_one_step() {
+            use crate::worker::PendingBackend;
+            use onecad_core::document::record::{
+                BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord,
+            };
+            use onecad_core::ids::RecordId;
+            use std::sync::Arc;
+            use uuid::Uuid;
+
+            let backend = Arc::new(PendingBackend);
+            let mut rt = crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            );
+            rt.apply(upsert_variable_command(&rt.variables(), "depth", 10.0).unwrap())
+                .unwrap();
+            rt.apply(
+                upsert_variable_expr_command(rt.variables_table(), "plate", "depth * 2").unwrap(),
+            )
+            .unwrap();
+            let record = OperationRecord::new(
+                RecordId(Uuid::from_u128(0xE1)),
+                0,
+                "Extrude",
+                Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+                    profile: None,
+                    distance: Scalar::with_expr(25.0, "depth * 2 + 5mm"),
+                    draft_angle_deg: Scalar::new(0.0),
+                    mode: ExtrudeMode::Blind,
+                    boolean_mode: BooleanMode::NewBody,
+                    target_body: None,
+                    target_face: None,
+                    two_directions: false,
+                    mode2: ExtrudeMode::Blind,
+                    distance2: Scalar::new(0.0),
+                    target_face2: None,
+                    extra: Default::default(),
+                })),
+            );
+            rt.apply(EditCommand::AddOperation {
+                record,
+                at_cursor: true,
+            })
+            .unwrap();
+
+            let depth_id = rt.variables_table().get("depth").unwrap().id;
+            rt.apply(EditCommand::RenameVariable {
+                variable: depth_id,
+                name: "d".into(),
+            })
+            .unwrap();
+
+            let exprs = |rt: &crate::document_runtime::DocumentRuntime| {
+                let vars: Vec<Option<String>> = rt
+                    .variables()
+                    .iter()
+                    .map(|v| v.value.expr.clone())
+                    .collect();
+                let params = rt.projection().features[0].primary_expr.clone();
+                (
+                    rt.variables()
+                        .iter()
+                        .map(|v| v.name.clone())
+                        .collect::<Vec<_>>(),
+                    vars,
+                    params,
+                )
+            };
+            let (names, vars, param) = exprs(&rt);
+            assert_eq!(names, vec!["d".to_string(), "plate".to_string()]);
+            assert_eq!(vars, vec![None, Some("d * 2".to_string())]);
+            assert_eq!(param.as_deref(), Some("d * 2 + 5mm"));
+
+            // ONE undo takes the rename AND both rewrites back.
+            rt.undo();
+            let (names, vars, param) = exprs(&rt);
+            assert_eq!(names, vec!["depth".to_string(), "plate".to_string()]);
+            assert_eq!(vars, vec![None, Some("depth * 2".to_string())]);
+            assert_eq!(param.as_deref(), Some("depth * 2 + 5mm"));
         }
     }
 }

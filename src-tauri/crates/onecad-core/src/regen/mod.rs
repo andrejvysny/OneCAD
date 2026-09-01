@@ -26,8 +26,9 @@
 //! * [`scheduler`] — the single-in-flight, latest-wins debounce/coalesce/cancel
 //!   funnel (R-WP8); engine-agnostic, driving an app-supplied [`RegenDriver`].
 //! * [`variables`] — the document-variable substitution pass that turns a
-//!   `Scalar`'s `expr` into the number the planner hashes and the worker builds
-//!   (WP-VE.1), on effective copies of the records.
+//!   `Scalar`'s `expr` (an arithmetic expression over the variable table, see
+//!   [`crate::expr`]) into the number the planner hashes and the worker builds,
+//!   on effective copies of the records.
 //!
 //! ## Test double
 //!
@@ -70,6 +71,7 @@ pub use scheduler::{
 };
 pub use snapshot::{BodySnapshot, Lod, MeshKey, ModelSnapshot, RepairSummary, SnapshotPublisher};
 pub use variables::{
-    is_bare_name, resolve_expr, substitute_variables, substituted_timeline,
-    write_back_resolved_values, UnresolvedVariable,
+    evaluate_expression, is_bare_name, rename_reference, resolve_variable_table,
+    substitute_variables, substituted_timeline, validate_op_expressions,
+    write_back_resolved_values, UnresolvedVariable, VariableError, MAX_VARIABLE_CHAIN,
 };

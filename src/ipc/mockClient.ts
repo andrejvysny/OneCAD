@@ -66,7 +66,10 @@ import type {
   Unsubscribe,
   WorkerStatus,
 } from "./types";
+import type { EvaluatedExpression, ExpressionDimension } from "./types";
 import { IMPORT_STEP_OP_TYPE, VARIABLE_NAME_RE } from "./types";
+import type { ResolvedTable } from "./expr";
+import { evaluateAtSite, renameReference, resolveVariableTable } from "./expr";
 import { BackendError } from "./apiError";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
@@ -229,37 +232,200 @@ function mockRecoveryFixture(): RecoveryInfo[] {
 const mockModuleState = new Map<string, { schemaVersion: number; payload: unknown }>();
 
 /*
- * WP-VE.2 — the mock's document variable table. ORDERED (declaration order is
+ * The mock's document variable table. ORDERED (declaration order is
  * authoritative, mirroring Rust's `VariableTable`) rather than a Map keyed by
  * name, so a re-value keeps its position exactly as the real backend does.
  *
- * The validation below MIRRORS `api::upsert_variable_command`, deliberately
+ * The validation below MIRRORS `api::upsert_variable_command` /
+ * `api::upsert_variable_expr_command` / `session::rename_variable`, deliberately
  * including the messages' shape: the mock lane is where the Variables section's
- * error paths are proved, and a mock that accepted a name the backend refuses
- * would make those tests vacuous.
+ * error paths are proved, and a mock that accepted what the backend refuses
+ * would make those tests vacuous. Every expression is resolved by the SHARED TS
+ * port of the engine (`ipc/expr`), never by a second local approximation.
  */
-let mockVariables: DocumentVariable[] = [];
+
+/** The mock's STORED row, before resolution — `{value, expr?}` is the wire
+ *  `Scalar` a variable holds. `listVariables` projects it plus the resolved
+ *  half, exactly as `dto.rs variable_dtos` does. */
+interface MockVariable {
+  id: string;
+  name: string;
+  value: number;
+  expr?: string;
+}
+
+let mockVariables: MockVariable[] = [];
 let nextVariableSeq = 1;
 
-function mockUpsertVariable(name: string, value: number): DocumentVariable[] {
+/** `DocumentVariable` rows as the backend projects them: the stored numbers,
+ *  plus what the WHOLE table resolves to right now. MIRRORS `variable_dtos`. */
+function mockVariableRows(rows: readonly MockVariable[] = mockVariables): DocumentVariable[] {
+  const table = resolveVariableTable(rows);
+  return rows.map((v) => {
+    const resolved = table.values.get(v.name);
+    const failure = table.errors.find((e) => e.name === v.name);
+    return {
+      id: v.id,
+      name: v.name,
+      value: v.value,
+      expr: v.expr,
+      // A broken variable keeps the last number anybody could justify; `error`
+      // is what tells the UI not to trust it.
+      resolvedValue: resolved?.number ?? v.value,
+      dimension: resolved?.dim ?? "scalar",
+      error: failure?.message,
+    };
+  });
+}
+
+/** The name grammar, refused before anything is stored. MIRRORS
+ *  `regen::variables::is_bare_name`. */
+function mockCheckVariableName(name: string): string {
   const trimmed = name.trim();
   if (!VARIABLE_NAME_RE.test(trimmed)) {
     throw new Error(
       `invalid variable name "${trimmed}": a name must match [A-Za-z_][A-Za-z0-9_]*`,
     );
   }
+  return trimmed;
+}
+
+/** Sets a LITERAL value. An existing expression on that variable is REPLACED
+ *  (Rust's `Scalar::try_new` carries no `expr`), which is how a user goes from
+ *  `=w*2` back to a plain number. */
+function mockUpsertVariable(name: string, value: number): DocumentVariable[] {
+  const trimmed = mockCheckVariableName(name);
   if (!Number.isFinite(value)) throw new Error("variable value must be finite");
   const existing = mockVariables.find((v) => v.name === trimmed);
-  if (existing) existing.value = value;
-  else mockVariables.push({ id: `var${nextVariableSeq++}`, name: trimmed, value });
-  return mockVariables.map((v) => ({ ...v }));
+  if (existing) {
+    existing.value = value;
+    existing.expr = undefined;
+  } else {
+    mockVariables.push({ id: `var${nextVariableSeq++}`, name: trimmed, value });
+  }
+  return mockVariableRows();
+}
+
+/**
+ * Binds a variable to an EXPRESSION. MIRRORS
+ * `api::upsert_variable_expr_command`: the stored `Scalar` carries BOTH the
+ * text and the number it currently evaluates to, and the evaluation runs
+ * against the table this edit WOULD produce — so a self-reference (`w = w + 1`)
+ * and a cycle the edit closes are refused HERE rather than written and then
+ * discovered by every bound parameter at once.
+ */
+function mockUpsertVariableExpr(name: string, text: string): DocumentVariable[] {
+  const trimmed = mockCheckVariableName(name);
+  const expr = text.trim();
+  if (expr === "") throw new Error(`variable "${trimmed}": an expression must not be empty`);
+  const existing = mockVariables.find((v) => v.name === trimmed);
+  const candidate: MockVariable[] = existing
+    ? mockVariables.map((v) => (v.name === trimmed ? { ...v, value: 0, expr } : v))
+    : [...mockVariables, { id: "", name: trimmed, value: 0, expr }];
+  const table = resolveVariableTable(candidate);
+  const failure = table.errors.find((e) => e.name === trimmed);
+  if (failure) throw new Error(`variable "${trimmed}": ${failure.message}`);
+  const resolved = table.values.get(trimmed);
+  if (resolved === undefined) throw new Error(`variable "${trimmed}" resolved to nothing`);
+  if (existing) {
+    existing.value = resolved.number;
+    existing.expr = expr;
+  } else {
+    mockVariables.push({ id: `var${nextVariableSeq++}`, name: trimmed, value: resolved.number, expr });
+  }
+  return mockVariableRows();
+}
+
+/**
+ * Renames a variable AND every expression that references it — the table's own
+ * rows and every timeline scalar the mock holds. MIRRORS
+ * `session::rename_variable`.
+ *
+ * Refused as a WHOLE if any expression cannot be rewritten: a half-renamed
+ * document is a silently wrong document. Every refusal happens BEFORE the first
+ * write, so a rejection leaves nothing behind.
+ */
+function mockRenameVariable(name: string, newName: string): DocumentVariable[] {
+  const target = mockVariables.find((v) => v.name === name);
+  if (!target) throw new Error(`unknown variable "${name}"`);
+  const next = newName.trim();
+  if (next === name) return mockVariableRows();
+  mockCheckVariableName(next);
+  if (mockVariables.some((v) => v.name === next)) {
+    throw new Error(`duplicate variable name ${next}`);
+  }
+
+  // Rewrite into staged copies first; nothing is committed until every site
+  // parsed. `site` names WHERE an unparseable expression lives, so the refusal
+  // points at it.
+  const rewrite = (text: string, site: string): string | null => {
+    try {
+      return renameReference(text, name, next);
+    } catch (e) {
+      throw new Error(
+        `cannot rename \`${name}\`: ${site} carries an expression that does not parse ` +
+          `(${e instanceof Error ? e.message : String(e)})`,
+      );
+    }
+  };
+  const nextVars = mockVariables.map((v) => {
+    const renamed = v.name === name ? next : v.name;
+    const expr = v.expr === undefined ? undefined : (rewrite(v.expr, `variable \`${v.name}\``) ?? v.expr);
+    return { ...v, name: renamed, expr };
+  });
+  const paramPatches: [string, Record<string, unknown>][] = [];
+  for (const [recordId, params] of featureParams) {
+    let changed = false;
+    const patched: Record<string, unknown> = { ...params };
+    for (const [key, raw] of Object.entries(params)) {
+      const expr = scalarExpr(raw);
+      if (expr === undefined) continue;
+      const rewritten = rewrite(expr, `${recordId}.${key}`);
+      if (rewritten === null) continue;
+      patched[key] = { ...(raw as Record<string, unknown>), expr: rewritten };
+      changed = true;
+    }
+    if (changed) paramPatches.push([recordId, patched]);
+  }
+
+  mockVariables = nextVars;
+  for (const [recordId, patched] of paramPatches) featureParams.set(recordId, patched);
+  // Restamp the affected rows off their new params. The real backend rewrites
+  // the RECORD and the projection derives `primaryExpr` from it, so a bound row
+  // reads as the new name the moment the rename lands; a mock that patched only
+  // the params would leave the row claiming a binding the table no longer has.
+  const patchedIds = new Set(paramPatches.map(([recordId]) => recordId));
+  if (patchedIds.size > 0) {
+    mockFeatures = mockFeatures.map((f) => {
+      const params = patchedIds.has(f.id) ? featureParams.get(f.id) : undefined;
+      if (params === undefined) return f;
+      const value = featureValueForParams(f.opType, f.kind, params);
+      return value.valueText === undefined ? f : { ...f, ...value };
+    });
+  }
+  return mockVariableRows();
 }
 
 function mockRemoveVariable(name: string): DocumentVariable[] {
   const at = mockVariables.findIndex((v) => v.name === name);
   if (at < 0) throw new Error(`unknown variable "${name}"`);
   mockVariables.splice(at, 1);
-  return mockVariables.map((v) => ({ ...v }));
+  return mockVariableRows();
+}
+
+/**
+ * Evaluates one expression at its call site against the current table —
+ * MIRRORS `regen::variables::evaluate_expression`, which is what the real
+ * `evaluate_expression` command calls.
+ *
+ * Pure, and a failure is a populated `error` rather than a rejection: an
+ * in-progress expression is not an API misuse.
+ */
+function mockEvaluateExpression(expr: string, site: ExpressionDimension): EvaluatedExpression {
+  const result = evaluateAtSite(expr.trim(), site, resolveVariableTable(mockVariables));
+  return result.ok
+    ? { value: result.value.number, dimension: result.value.dim }
+    : { value: 0, dimension: site, error: result.failure.message };
 }
 
 /**
@@ -1792,30 +1958,35 @@ function scalarExpr(v: unknown): string | undefined {
 }
 
 /**
- * MIRRORS `regen::variables::resolve_expr`. A V1 expression is a BARE variable
- * name: anything else, an undefined name, or a name whose own value is itself
- * expression-driven fails LOUDLY — never a silent fall back to the scalar's
- * cached number, which is the whole point of WP-VE.1.
+ * The call-site [`ExpressionDimension`] of a wire params key — the mock's stand
+ * -in for the `(field, Dimension)` registry
+ * `KnownOperation::scalars_mut` declares (`document/record.rs`).
+ *
+ * Derived from the NAME rather than tabulated per op because the wire spelling
+ * already encodes it: every angle scalar in that registry ends in `angleDeg`
+ * (`draftAngleDeg`, `csAngleDeg`, `pressureAngleDeg`, …) and `unitScale` is the
+ * one genuinely dimensionless entry. A table keyed by op+field would be a
+ * second copy of the registry, free to drift; this reads the same fact off the
+ * key the mock already holds.
  */
-function mockResolveExpr(expr: string): { value: number } | { reason: string } {
-  const name = expr.trim();
-  if (!VARIABLE_NAME_RE.test(name)) {
-    return {
-      reason:
-        `expression \`${expr}\` is not a bare variable name — V1 supports a bare ` +
-        `variable name only (no arithmetic)`,
-    };
-  }
-  const v = mockVariables.find((x) => x.name === name);
-  if (!v) return { reason: `variable \`${name}\` is not defined in this document` };
-  if (v.expr !== undefined) {
-    return {
-      reason:
-        `variable \`${name}\` is itself expression-driven — chained variable ` +
-        `expressions are not supported in V1`,
-    };
-  }
-  return { value: v.value };
+function mockScalarSite(key: string): ExpressionDimension {
+  if (key === "unitScale") return "scalar";
+  return key.toLowerCase().endsWith("angledeg") ? "angle" : "length";
+}
+
+/**
+ * Resolves one bound scalar against the mock's variable table, at its call
+ * site. MIRRORS `regen::variables::substitute_variables`' per-scalar step
+ * (`evaluate_at_site`), through the SHARED evaluator — never a silent fall back
+ * to the scalar's cached number, which is the whole point of the pass.
+ */
+function mockResolveExpr(
+  expr: string,
+  site: ExpressionDimension,
+  table: ResolvedTable,
+): { value: number } | { reason: string } {
+  const result = evaluateAtSite(expr, site, table);
+  return result.ok ? { value: result.value.number } : { reason: result.failure.message };
 }
 
 /** Blind/symmetric extrude distance floor. MIRRORS `worker/src/ops/ExtrudeOp.cpp`
@@ -1842,6 +2013,7 @@ const MOCK_EXTRUDE_MIN_DISTANCE = 1e-3;
  */
 function mockVariableRegenFailures(): { recordId: string; message: string }[] {
   const out: { recordId: string; message: string }[] = [];
+  const table = resolveVariableTable(mockVariables);
   for (const f of mockFeatures) {
     const params = featureParams.get(f.id);
     if (!params || f.suppressed) continue;
@@ -1850,7 +2022,7 @@ function mockVariableRegenFailures(): { recordId: string; message: string }[] {
       if (failure !== undefined) break; // one reason per step, as Rust reports
       const expr = scalarExpr(raw);
       if (expr === undefined) continue;
-      const resolved = mockResolveExpr(expr);
+      const resolved = mockResolveExpr(expr, mockScalarSite(key), table);
       if ("reason" in resolved) {
         // `${opType}.${field}: ${reason}` — the shape `UnresolvedVariable.message`
         // carries (`regen::variables::substitute_variables`).
@@ -2476,7 +2648,7 @@ export const mockClient: CadClient = {
   // renders — has to be exercisable with no backend.
   async listVariables() {
     await wait();
-    return mockVariables.map((v) => ({ ...v }));
+    return mockVariableRows();
   },
   async upsertVariable(name: string, value: number) {
     await wait();
@@ -2488,6 +2660,26 @@ export const mockClient: CadClient = {
     mockRevision += 1;
     emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
     return variableEditResult(variables, "SetVariable");
+  },
+  async upsertVariableExpr(name: string, text: string) {
+    await wait();
+    const variables = mockUpsertVariableExpr(name, text);
+    mockRevision += 1;
+    emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
+    return variableEditResult(variables, "SetVariable");
+  },
+  async renameVariable(name: string, newName: string) {
+    await wait();
+    const variables = mockRenameVariable(name, newName);
+    mockRevision += 1;
+    emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
+    return variableEditResult(variables, "RenameVariable");
+  },
+  /* Pure: no revision bump, no event, no regen — the preview must be safe to
+     call on a debounce while the user types. */
+  async evaluateExpression(expr: string, site: ExpressionDimension) {
+    await wait();
+    return mockEvaluateExpression(expr, site);
   },
   async removeVariable(name: string) {
     await wait();

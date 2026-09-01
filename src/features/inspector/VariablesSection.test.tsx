@@ -38,12 +38,12 @@ describe("VariablesSection (WP-VE.2)", () => {
     await addVariable("height", "25");
 
     await waitFor(() => expect(screen.getByTestId("variable-row-height")).toBeInTheDocument());
-    expect(screen.getByTestId("variable-value-height")).toHaveValue(25);
+    expect(screen.getByTestId("variable-value-height")).toHaveValue("25");
     expect(screen.queryByTestId("variables-empty")).not.toBeInTheDocument();
     // The draft row resets, so a second add does not silently re-submit the first.
     expect(screen.getByTestId("variable-new-name")).toHaveValue("");
     expect(await mockClient.listVariables()).toEqual([
-      { id: expect.any(String), name: "height", value: 25 },
+      { id: expect.any(String), name: "height", value: 25, resolvedValue: 25, dimension: "scalar" },
     ]);
   });
 
@@ -59,7 +59,7 @@ describe("VariablesSection (WP-VE.2)", () => {
 
     await waitFor(async () =>
       expect(await mockClient.listVariables()).toEqual([
-        { id: expect.any(String), name: "width", value: 42 },
+        { id: expect.any(String), name: "width", value: 42, resolvedValue: 42, dimension: "scalar" },
       ]),
     );
   });
@@ -122,7 +122,7 @@ describe("VariablesSection (WP-VE.2)", () => {
 
     await waitFor(async () =>
       expect(await mockClient.listVariables()).toEqual([
-        { id: expect.any(String), name: "depth", value: 9 },
+        { id: expect.any(String), name: "depth", value: 9, resolvedValue: 9, dimension: "scalar" },
       ]),
     );
     expect(screen.getAllByTestId("variable-row-depth")).toHaveLength(1);
@@ -201,10 +201,10 @@ describe("VariablesSection — result truth (W5)", () => {
     // Truth 1 — the save is REAL: the document holds it and the row shows it.
     await waitFor(async () =>
       expect(await mockClient.listVariables()).toEqual([
-        { id: expect.any(String), name: "height", value: 0 },
+        { id: expect.any(String), name: "height", value: 0, resolvedValue: 0, dimension: "scalar" },
       ]),
     );
-    await waitFor(() => expect(screen.getByTestId("variable-value-height")).toHaveValue(0));
+    await waitFor(() => expect(screen.getByTestId("variable-value-height")).toHaveValue("0"));
     // Truth 2 — the failure is LOUD, on the existing status-bar affordance…
     await waitFor(() => {
       const hint = viewportStore.getState().statusHint;
@@ -229,7 +229,7 @@ describe("VariablesSection — result truth (W5)", () => {
     expect(await mockClient.listVariables()).toEqual([]);
     await waitFor(() =>
       expect(viewportStore.getState().statusHint?.message).toMatch(
-        /Variable saved, but the rebuild failed: .*`height` is not defined/,
+        /Variable saved, but the rebuild failed: .*undefined variable `height`/,
       ),
     );
   });
@@ -249,3 +249,184 @@ async function addVariableRow(name: string, value: string) {
   fireEvent.change(screen.getByTestId("variable-new-value"), { target: { value } });
   fireEvent.keyDown(screen.getByTestId("variable-new-value"), { key: "Enter" });
 }
+
+/*
+ * Text authoring — one field takes `25`, `45deg` and `=w*2`, and the routing to
+ * the two write commands is the section's ONLY decision. Whether an expression
+ * is any good is the backend's verdict, surfaced verbatim.
+ */
+describe("VariablesSection — expression authoring", () => {
+  beforeEach(() => {
+    resetMockDocument();
+    setMockLatency(0);
+    viewportStore.getState().setStatusHint(null);
+  });
+
+  async function ready() {
+    render(<VariablesSection />);
+    await waitFor(() => expect(screen.getByTestId("variable-new-name")).toBeInTheDocument());
+  }
+
+  it("authors an expression from the draft row and shows what it resolves to", async () => {
+    await ready();
+    await addVariableRow("w", "20");
+    await waitFor(() => expect(screen.getByTestId("variable-row-w")).toBeInTheDocument());
+
+    await addVariableRow("plate", "=w*2 + 5mm");
+
+    await waitFor(() => expect(screen.getByTestId("variable-row-plate")).toBeInTheDocument());
+    // The field holds what was AUTHORED…
+    expect(screen.getByTestId("variable-value-plate")).toHaveValue("=w*2 + 5mm");
+    // …and the resolved number is on screen beside it, with its unit.
+    expect(screen.getByTestId("variable-resolved-plate")).toHaveTextContent("= 45 mm");
+  });
+
+  /** A unit suffix with no `=` is still an expression — the `=` is a
+   *  convenience, not the grammar. */
+  it("routes a unit-suffixed value through the expression command", async () => {
+    await ready();
+    await addVariableRow("tilt", "45deg");
+    await waitFor(() => expect(screen.getByTestId("variable-row-tilt")).toBeInTheDocument());
+    expect(screen.getByTestId("variable-resolved-tilt")).toHaveTextContent("= 45°");
+    expect((await mockClient.listVariables())[0]).toMatchObject({
+      expr: "45deg",
+      dimension: "angle",
+    });
+  });
+
+  /** A plain number is DIMENSIONLESS, so it gets no unit read-out at all —
+   *  claiming one would claim a dimension it does not have. */
+  it("shows no resolved line for a plain literal", async () => {
+    await ready();
+    await addVariableRow("depth", "10");
+    await waitFor(() => expect(screen.getByTestId("variable-row-depth")).toBeInTheDocument());
+    expect(screen.queryByTestId("variable-resolved-depth")).not.toBeInTheDocument();
+  });
+
+  it("typing a plain number over an expression goes back to a literal", async () => {
+    await ready();
+    await addVariableRow("w", "=8mm");
+    await waitFor(() => expect(screen.getByTestId("variable-row-w")).toBeInTheDocument());
+
+    const field = screen.getByTestId("variable-value-w");
+    fireEvent.change(field, { target: { value: "3" } });
+    fireEvent.blur(field);
+
+    await waitFor(async () =>
+      expect((await mockClient.listVariables())[0]).toEqual({
+        id: expect.any(String),
+        name: "w",
+        value: 3,
+        resolvedValue: 3,
+        dimension: "scalar",
+      }),
+    );
+  });
+
+  it("surfaces the backend's refusal of a bad expression inline, and adds nothing", async () => {
+    await ready();
+    await addVariableRow("plate", "=gone * 2");
+    await waitFor(() =>
+      expect(screen.getByTestId("variables-error")).toHaveTextContent(/undefined variable `gone`/),
+    );
+    expect(await mockClient.listVariables()).toEqual([]);
+    // The draft row KEEPS the text so it can be corrected in place.
+    expect(screen.getByTestId("variable-new-value")).toHaveValue("=gone * 2");
+  });
+
+  /**
+   * A variable broken by a LATER edit is a per-row diagnostic, not a refusal —
+   * and it is shown where the expression was authored, which is the only place
+   * the user can fix it.
+   */
+  it("badges a row whose expression stopped resolving", async () => {
+    await mockClient.upsertVariable("w", 4);
+    await mockClient.upsertVariableExpr("plate", "w * 2");
+    await ready();
+    await waitFor(() => expect(screen.getByTestId("variable-row-plate")).toBeInTheDocument());
+    expect(screen.queryByTestId("variable-error-plate")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("variable-delete-w"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("variable-error-plate")).toHaveTextContent(
+        /undefined variable `w`/,
+      ),
+    );
+    // The stale number is NOT presented as a resolved value beside the reason.
+    expect(screen.queryByTestId("variable-resolved-plate")).not.toBeInTheDocument();
+  });
+});
+
+/*
+ * Rename — one transaction that rewrites the table AND every binding, so a
+ * bound feature follows the name instead of breaking.
+ */
+describe("VariablesSection — rename", () => {
+  beforeEach(() => {
+    resetMockDocument();
+    setMockLatency(0);
+  });
+
+  async function renameTo(from: string, to: string) {
+    const field = screen.getByTestId(`variable-name-${from}`);
+    fireEvent.change(field, { target: { value: to } });
+    fireEvent.blur(field);
+  }
+
+  it("renames the variable and rewrites every reference to it", async () => {
+    await mockClient.upsertVariable("w", 5);
+    await mockClient.upsertVariableExpr("plate", "w * 2");
+    render(<VariablesSection />);
+    await waitFor(() => expect(screen.getByTestId("variable-row-w")).toBeInTheDocument());
+
+    await renameTo("w", "width");
+
+    await waitFor(() => expect(screen.getByTestId("variable-row-width")).toBeInTheDocument());
+    expect(screen.queryByTestId("variable-row-w")).not.toBeInTheDocument();
+    // The reference followed — and it still resolves.
+    expect(screen.getByTestId("variable-value-plate")).toHaveValue("=width * 2");
+    expect(screen.getByTestId("variable-resolved-plate")).toHaveTextContent("= 10");
+  });
+
+  it("refuses a duplicate name and leaves the table untouched", async () => {
+    await mockClient.upsertVariable("w", 1);
+    await mockClient.upsertVariable("h", 2);
+    render(<VariablesSection />);
+    await waitFor(() => expect(screen.getByTestId("variable-row-w")).toBeInTheDocument());
+
+    await renameTo("w", "h");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("variables-error")).toHaveTextContent(/duplicate variable name/),
+    );
+    expect((await mockClient.listVariables()).map((v) => v.name)).toEqual(["w", "h"]);
+  });
+
+  /** Caught before the round trip so the message lands next to the field —
+   *  against the BACKEND's own grammar, never a second copy of it. */
+  it("refuses an illegal new name inline", async () => {
+    await mockClient.upsertVariable("w", 1);
+    render(<VariablesSection />);
+    await waitFor(() => expect(screen.getByTestId("variable-row-w")).toBeInTheDocument());
+
+    await renameTo("w", "2wide");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("variables-error")).toHaveTextContent("Invalid variable name"),
+    );
+    expect((await mockClient.listVariables()).map((v) => v.name)).toEqual(["w"]);
+  });
+
+  it("an unchanged or emptied name field writes nothing", async () => {
+    await mockClient.upsertVariable("w", 1);
+    render(<VariablesSection />);
+    await waitFor(() => expect(screen.getByTestId("variable-row-w")).toBeInTheDocument());
+
+    await renameTo("w", "w");
+    await renameTo("w", "   ");
+
+    expect(screen.queryByTestId("variables-error")).not.toBeInTheDocument();
+    expect((await mockClient.listVariables()).map((v) => v.name)).toEqual(["w"]);
+  });
+});

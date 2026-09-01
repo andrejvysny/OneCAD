@@ -23,7 +23,7 @@
 //! | `RenameSketch` | — | `None` |
 //! | `AddBody` / `DeleteBody` / `RenameBody` / `SetVisibility` | — | `None` |
 //! | `AddDatumPlane` / `DeleteDatum` | — | `None` |
-//! | `SetVariable` / `AddVariable` / `RemoveVariable` | `[0, len)` (conservative) | `ToEnd` / `None` |
+//! | `SetVariable` / `AddVariable` / `RemoveVariable` / `RenameVariable` | `[0, len)` (conservative) | `ToEnd` / `None` |
 //!
 //! `UpdateOperationParams` keeps it simple (`ToEnd`) rather than a `PreviewTo`
 //! interactive path (deferred; plan "keep simple"). Variable edits are
@@ -658,6 +658,7 @@ impl DocumentSession {
             }
             EditCommand::AddVariable { variable } => self.add_variable(variable.clone()),
             EditCommand::RemoveVariable { variable } => self.remove_variable(*variable),
+            EditCommand::RenameVariable { variable, name } => self.rename_variable(*variable, name),
         }
     }
 
@@ -697,6 +698,11 @@ impl DocumentSession {
         validate_place_component(&record.op)?;
         // DetachComponent params must be structurally well-formed (all entry paths).
         validate_detach_component(&record.op)?;
+        // Every `Scalar` expression must evaluate against the CURRENT variable
+        // table (all entry paths) — a record that could never resolve is refused
+        // here rather than written and then discovered at the next regen. An
+        // insert has no prior, so every expression on it is new.
+        validate_expressions(&record.op, None, &self.document.variables)?;
         // F8: re-derive the uniform input view for Known ops (self-healing — don't
         // trust caller-supplied `inputs`; mirrors `update_operation_params` and the
         // record deserialize path). An Opaque frozen node keeps its stored inputs.
@@ -801,6 +807,12 @@ impl DocumentSession {
         validate_place_component(&op)?;
         // DetachComponent params must be structurally well-formed (all entry paths).
         validate_detach_component(&op)?;
+        // Every `Scalar` expression this edit INTRODUCES or CHANGES must
+        // evaluate against the CURRENT variable table (all entry paths). Scoped
+        // to the delta on purpose: a record whose binding was broken by a LATER
+        // variable edit must stay editable on its other fields — see
+        // `validate_op_expressions`.
+        validate_expressions(&op, Some(&prior.op), &self.document.variables)?;
         let mut nr = prior.clone();
         nr.op = op;
         // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
@@ -1596,9 +1608,14 @@ impl DocumentSession {
             .cloned()
             .ok_or_else(|| DomainError::Validation(format!("variable {var_id} not found")))?;
         let prior = self.document.variables.clone();
-        self.document
-            .variables
-            .upsert(Variable { value, ..existing });
+        let updated = Variable { value, ..existing };
+        // Validate on the table this edit WOULD produce, so a cycle the edit
+        // closes (`a = b`, `b = a`) is refused instead of written and then
+        // discovered by every consumer at once.
+        let mut candidate = prior.clone();
+        candidate.upsert(updated.clone());
+        validate_variable_binding(&candidate, &updated.name)?;
+        self.document.variables.upsert(updated);
         Ok((
             self.variable_outcome(),
             Inverse::RestoreVariables {
@@ -1615,6 +1632,9 @@ impl DocumentSession {
             )));
         }
         let prior = self.document.variables.clone();
+        let mut candidate = prior.clone();
+        candidate.upsert(var.clone());
+        validate_variable_binding(&candidate, &var.name)?;
         self.document.variables.upsert(var);
         Ok((
             self.variable_outcome(),
@@ -1647,6 +1667,106 @@ impl DocumentSession {
                 table: Box::new(prior),
             },
         ))
+    }
+
+    /// Renames a variable AND every expression that references it, in one
+    /// undoable step.
+    ///
+    /// Refused as a whole — nothing written — when the new name is illegal, is
+    /// already taken, or when ANY expression that would have to be rewritten
+    /// cannot be parsed. A partial rename is a document whose numbers silently
+    /// stop tracking their variable, which is the failure mode this whole pass
+    /// exists to remove.
+    fn rename_variable(
+        &mut self,
+        var_id: crate::ids::VariableId,
+        new_name: &str,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        let old_name = self
+            .document
+            .variables
+            .iter()
+            .find(|v| v.id == var_id)
+            .map(|v| v.name.clone())
+            .ok_or_else(|| DomainError::Validation(format!("variable {var_id} not found")))?;
+        if new_name == old_name {
+            return Ok((
+                CommandOutcome::metadata_only(ProjectionDelta::default()),
+                Inverse::Noop,
+            ));
+        }
+        if !crate::regen::is_bare_name(new_name) {
+            return Err(DomainError::Validation(format!(
+                "invalid variable name {new_name:?}: a name must match [A-Za-z_][A-Za-z0-9_]*"
+            )));
+        }
+        if self.document.variables.get(new_name).is_some() {
+            return Err(DomainError::Validation(format!(
+                "duplicate variable name {new_name}"
+            )));
+        }
+
+        // 1. The rewritten variable table (renamed entry + every reference).
+        let prior_vars = self.document.variables.clone();
+        let mut next_vars = VariableTable::new();
+        for var in prior_vars.iter() {
+            let mut next = var.clone();
+            if next.id == var_id {
+                next.name = new_name.to_string();
+            }
+            if let Some(text) = next.value.expr.as_deref() {
+                if let Some(rewritten) = rename_in(
+                    text,
+                    &old_name,
+                    new_name,
+                    &format!("variable `{}`", var.name),
+                )? {
+                    next.value.expr = Some(rewritten);
+                }
+            }
+            next_vars.upsert(next);
+        }
+
+        // 2. The rewritten records. Collect the inverse per CHANGED record only,
+        //    so an undo restores exactly what the rename touched.
+        let mut records = self.document.timeline.records().to_vec();
+        let mut restores: Vec<Inverse> = Vec::new();
+        for (index, record) in records.iter_mut().enumerate() {
+            let prior = record.clone();
+            let Operation::Known(known) = &mut record.op else {
+                continue;
+            };
+            let mut changed = false;
+            for (field, _, scalar) in known.scalars_mut() {
+                let Some(text) = scalar.expr.as_deref() else {
+                    continue;
+                };
+                if let Some(rewritten) = rename_in(text, &old_name, new_name, field)? {
+                    scalar.expr = Some(rewritten);
+                    changed = true;
+                }
+            }
+            if changed {
+                restores.push(Inverse::RestoreRecord {
+                    index,
+                    record: Box::new(prior),
+                });
+            }
+        }
+
+        // 3. Commit both halves together (every refusal above happened first).
+        self.document.variables = next_vars;
+        let cursor = self.document.timeline.cursor();
+        self.document.timeline = Timeline::from_records(records);
+        self.document.timeline.set_cursor(cursor);
+        self.rebuild_graph();
+
+        let mut outcome = self.variable_outcome();
+        outcome.projection_delta.timeline_changed = true;
+        restores.push(Inverse::RestoreVariables {
+            table: Box::new(prior_vars),
+        });
+        Ok((outcome, Inverse::Composite(restores)))
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1993,6 +2113,57 @@ fn validate_detach_component(op: &Operation) -> Result<(), DomainError> {
         return Ok(());
     };
     p.validate().map_err(DomainError::Validation)
+}
+
+/// [`crate::regen::rename_reference`] with the failure turned into a
+/// `DomainError` that names WHERE the unparseable expression lives.
+fn rename_in(text: &str, old: &str, new: &str, site: &str) -> Result<Option<String>, DomainError> {
+    crate::regen::rename_reference(text, old, new).map_err(|reason| {
+        DomainError::Validation(format!(
+            "cannot rename `{old}`: {site} carries an expression that does not parse ({reason})"
+        ))
+    })
+}
+
+/// Refuses a variable edit whose own expression cannot resolve against the table
+/// the edit WOULD produce — a bad expression, a missing reference, or a cycle
+/// the edit closes.
+///
+/// Scoped to `name`: an edit is judged by whether IT resolves, not by whether it
+/// broke someone else. A variable that becomes unresolvable because a DIFFERENT
+/// one moved is later breakage, and later breakage is a diagnostic (the
+/// projection's `VariableDto.error`), not a refusal of the edit in front of the
+/// user.
+fn validate_variable_binding(candidate: &VariableTable, name: &str) -> Result<(), DomainError> {
+    let (_, errors) = crate::regen::resolve_variable_table(candidate);
+    match errors.iter().find(|e| e.name == name) {
+        Some(e) => Err(DomainError::Validation(format!(
+            "variable `{name}`: {}",
+            e.message
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Validates the `Scalar` expressions this edit INTRODUCES or CHANGES against
+/// `vars` — the EDIT-TIME half of the expression contract.
+///
+/// A newly written expression that cannot parse, names a missing or broken
+/// variable, or produces the wrong dimension for its call site is refused HERE,
+/// so nothing is recorded. The other half is later breakage: a variable deleted
+/// or re-dimensioned AFTER the record was written cannot be refused
+/// retroactively, and surfaces as a per-step `EXPR_UNRESOLVED` diagnostic plus a
+/// `StepState::Error` at regen instead ([`crate::regen::variables`]).
+///
+/// `prior` is `None` for an insert. Scoping to the delta is what keeps a record
+/// whose binding broke later EDITABLE on its other fields; see
+/// [`crate::regen::validate_op_expressions`] for why that matters.
+fn validate_expressions(
+    op: &Operation,
+    prior: Option<&Operation>,
+    vars: &VariableTable,
+) -> Result<(), DomainError> {
+    crate::regen::validate_op_expressions(op, prior, vars).map_err(DomainError::Validation)
 }
 
 /// The bodies whose GEOMETRY a `TransformBody` record moves — the "target

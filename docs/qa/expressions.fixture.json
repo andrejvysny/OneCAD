@@ -1,0 +1,471 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "expr": "1+2*3",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 7.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "-2^2",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": -4.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "2^3^2",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 512.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "3-1",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 2.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "6/3",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 2.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "4*5",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 20.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "(1+2)*3",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 9.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "-5+3",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": -2.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "10/4",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 2.5,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "2^-3",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 0.125,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "1rad",
+      "site": "angle",
+      "vars": {},
+      "expect": {
+        "value": 57.29577951308232,
+        "dim": "angle"
+      }
+    },
+    {
+      "expr": "0.5in",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": 12.7,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "2cm+3mm",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": 23.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "5mm",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": 5.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "1cm",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": 10.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "1m",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": 1000.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "1deg",
+      "site": "angle",
+      "vars": {},
+      "expect": {
+        "value": 1.0,
+        "dim": "angle"
+      }
+    },
+    {
+      "expr": "1e3mm",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": 1000.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": ".5",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 0.5,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "2 m",
+      "site": "scalar",
+      "vars": {},
+      "error": "Parse"
+    },
+    {
+      "expr": "2*m",
+      "site": "length",
+      "vars": {
+        "m": {
+          "value": 3.0,
+          "dim": "length"
+        }
+      },
+      "expect": {
+        "value": 6.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "sin(30deg)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 0.49999999999999994,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "cos(60deg)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 0.5000000000000001,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "tan(45deg)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 0.9999999999999999,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "sin(0.5rad)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 0.479425538604203,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "asin(0.5)",
+      "site": "angle",
+      "vars": {},
+      "expect": {
+        "value": 29.999999999999996,
+        "dim": "angle"
+      }
+    },
+    {
+      "expr": "acos(0.5)",
+      "site": "angle",
+      "vars": {},
+      "expect": {
+        "value": 59.99999999999999,
+        "dim": "angle"
+      }
+    },
+    {
+      "expr": "atan(1)",
+      "site": "angle",
+      "vars": {},
+      "expect": {
+        "value": 45.0,
+        "dim": "angle"
+      }
+    },
+    {
+      "expr": "sqrt(16)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 4.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "abs(-5)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 5.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "floor(2.7)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 2.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "ceil(2.1)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 3.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "round(2.5)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 3.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "min(3,7)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 3.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "max(3,7)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 7.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "sin(0.5)",
+      "site": "scalar",
+      "vars": {},
+      "error": "DimensionMismatch"
+    },
+    {
+      "expr": "45",
+      "site": "angle",
+      "vars": {},
+      "expect": {
+        "value": 45.0,
+        "dim": "angle"
+      }
+    },
+    {
+      "expr": "w*2",
+      "site": "length",
+      "vars": {
+        "w": {
+          "value": 20.0,
+          "dim": "length"
+        }
+      },
+      "expect": {
+        "value": 40.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "w+2",
+      "site": "length",
+      "vars": {
+        "w": {
+          "value": 20.0,
+          "dim": "length"
+        }
+      },
+      "expect": {
+        "value": 22.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "w/2mm",
+      "site": "length",
+      "vars": {
+        "w": {
+          "value": 20.0,
+          "dim": "length"
+        }
+      },
+      "expect": {
+        "value": 10.0,
+        "dim": "length"
+      }
+    },
+    {
+      "expr": "10mm+30deg",
+      "site": "length",
+      "vars": {},
+      "error": "DimensionMismatch"
+    },
+    {
+      "expr": "w*w",
+      "site": "length",
+      "vars": {
+        "w": {
+          "value": 20.0,
+          "dim": "length"
+        }
+      },
+      "error": "DimensionMismatch"
+    },
+    {
+      "expr": "1/2mm",
+      "site": "scalar",
+      "vars": {},
+      "error": "DimensionMismatch"
+    },
+    {
+      "expr": "1/0",
+      "site": "scalar",
+      "vars": {},
+      "error": "DivideByZero"
+    },
+    {
+      "expr": "unknownVar+1",
+      "site": "scalar",
+      "vars": {},
+      "error": "UndefinedVariable"
+    },
+    {
+      "expr": "foo(1)",
+      "site": "scalar",
+      "vars": {},
+      "error": "UnknownFunction"
+    },
+    {
+      "expr": "sin(1,2)",
+      "site": "scalar",
+      "vars": {},
+      "error": "Arity"
+    },
+    {
+      "expr": "min(1)",
+      "site": "scalar",
+      "vars": {},
+      "error": "Arity"
+    },
+    {
+      "expr": "1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1",
+      "site": "scalar",
+      "vars": {},
+      "error": "TooLong"
+    },
+    {
+      "expr": "((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))",
+      "site": "scalar",
+      "vars": {},
+      "error": "TooDeep"
+    },
+    {
+      "expr": "1 + 2 * 3",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": 7.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "round(-2.5)",
+      "site": "scalar",
+      "vars": {},
+      "expect": {
+        "value": -3.0,
+        "dim": "scalar"
+      }
+    },
+    {
+      "expr": "round(-2.5mm)",
+      "site": "length",
+      "vars": {},
+      "expect": {
+        "value": -3.0,
+        "dim": "length"
+      }
+    }
+  ]
+}

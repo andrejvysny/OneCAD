@@ -1,7 +1,9 @@
 //! Document variables / parameters and the [`Scalar`] dimension type.
 //!
-//! V1 expressions are a **bare variable name only** (no arithmetic); a real
-//! expression engine is deferred (plan "Rust core specifics"). A [`Scalar`] is
+//! A [`Scalar`]'s `expr` is an **arithmetic expression** over document variables
+//! and unit-suffixed literals (`depth * 2 + 5mm`), parsed and evaluated by
+//! [`crate::expr`] and applied to the timeline by
+//! [`crate::regen::variables`] — this module only STORES it. A [`Scalar`] is
 //! the unit of every dimensional op parameter (distance, radius, angle …).
 
 use std::fmt;
@@ -36,8 +38,12 @@ pub enum Unit {
 /// `ExecutePlan` op authored by the core sees the object form; a hand-authored or
 /// legacy payload may carry a bare number.
 ///
-/// V1: `expr`, when set, is a **bare variable name** (looked up in the
-/// [`VariableTable`]); arithmetic expressions are deferred.
+/// `expr`, when set, is an arithmetic expression over the [`VariableTable`] and
+/// unit-suffixed literals, stored VERBATIM. Nothing here parses it — a document
+/// stays loadable, and shows a sane dimension from the cached `value`, even for
+/// a build that cannot evaluate it. A bare variable name (the only form an older
+/// build could write) is simply a one-token expression, which is why widening
+/// this field needed no migration.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scalar {
@@ -61,8 +67,9 @@ impl Scalar {
         value.is_finite().then_some(Self { value, expr: None })
     }
 
-    /// A scalar driven by a bare variable name (V1). `value` is the last
-    /// evaluated/cached value.
+    /// A scalar driven by an expression. `value` is the last evaluated/cached
+    /// value — the number every consumer reads until the next regen resolves the
+    /// expression again.
     #[must_use]
     pub fn with_expr(value: f64, expr: impl Into<String>) -> Self {
         Self {
@@ -130,6 +137,13 @@ pub struct Variable {
     pub id: VariableId,
     pub name: String,
     pub value: Scalar,
+    /// **Vestigial.** The one variant is `Mm`, nothing reads it, and a
+    /// variable's DIMENSION now comes from its own expression (a bare number is
+    /// dimensionless; `45deg` is an angle) rather than from a stored tag — see
+    /// [`crate::regen::variables::resolve_variable_table`]. Kept because the
+    /// enum deserializes by VARIANT NAME and older builds open a document
+    /// read-only on an unknown one (`io::migrate`), so widening or removing it
+    /// is a compatibility event, not a cleanup.
     #[serde(default)]
     pub unit: Unit,
 }

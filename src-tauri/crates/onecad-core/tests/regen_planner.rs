@@ -654,3 +654,139 @@ fn h5_stamped_intent_history_prefix_hash_is_golden() {
         "53b231a27191a637f6bb95d927d8f8765b3c78d0904a6ffbda34fc3dc619ac48"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-VE.2 — the expression STRING leaves the planner hash
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The canonical form fingerprints GEOMETRY. A `distance` of
+/// `{value: 20, expr: "w*2"}` (post-substitution, so `value` IS what the
+/// expression evaluates to) builds exactly the solid a literal `{value: 20}`
+/// builds, so the two MUST hash identically.
+///
+/// Without this, re-typing `20` where `w*2` stood would invalidate every
+/// checkpoint from that step down and rebuild geometry that never changed, and
+/// the hash would describe a payload (`expr`) the worker never receives.
+#[test]
+fn an_expression_bound_scalar_hashes_as_the_literal_it_evaluates_to() {
+    let literal = extrude_record(0x10, 20.0);
+    let mut bound = literal.clone();
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut bound.op else {
+        panic!("expected an Extrude")
+    };
+    p.distance = Scalar::with_expr(20.0, "w * 2");
+
+    assert_ne!(literal, bound, "the two records genuinely differ on disk");
+    assert_eq!(
+        history_prefix_hash(std::slice::from_ref(&literal)),
+        history_prefix_hash(std::slice::from_ref(&bound)),
+        "the expression text must not reach the hash"
+    );
+}
+
+/// The strip is registry-driven, so an `Operation::Opaque` frozen node — whose
+/// raw payload this core cannot interpret — is untouched even when it happens to
+/// carry an `expr` key. A frozen node's byte-stable round-trip is the contract.
+#[test]
+fn an_opaque_node_carrying_an_expr_key_hashes_unchanged() {
+    let raw = serde_json::json!({
+        "opType": "FutureOp",
+        "params": { "distance": { "value": 20.0, "expr": "w * 2" } }
+    });
+    let op: Operation = serde_json::from_value(raw.clone()).expect("Opaque");
+    assert!(matches!(op, Operation::Opaque(_)));
+    let rec = OperationRecord::new(
+        onecad_core::ids::RecordId(Uuid::from_u128(0x0FA)),
+        0,
+        "Frozen",
+        op,
+    );
+    // It round-trips byte-stably, which is what "frozen" means.
+    assert_eq!(serde_json::to_value(&rec.op).unwrap(), raw);
+
+    // And its `expr` STILL reaches the hash: changing nothing but that string
+    // moves the fingerprint. (For a Known op the same edit is a no-op — that is
+    // the sibling test above.)
+    let mut other = raw.clone();
+    other["params"]["distance"]["expr"] = serde_json::json!("w * 3");
+    let other_rec = OperationRecord::new(
+        onecad_core::ids::RecordId(Uuid::from_u128(0x0FA)),
+        0,
+        "Frozen",
+        serde_json::from_value(other).expect("Opaque"),
+    );
+    assert_ne!(
+        history_prefix_hash(std::slice::from_ref(&rec)),
+        history_prefix_hash(std::slice::from_ref(&other_rec)),
+        "an Opaque node's raw payload is hashed verbatim — the strip must not reach it"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F1 — a DETACHED component's placement is inert provenance, so a binding it
+// was lifted from must not survive into the canonical form
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `DetachComponentParams` exposes NO drivable scalars, so the registry-driven
+/// strip that keeps an expression out of the hash cannot reach its placement:
+/// whatever the detach seam writes is what gets hashed, verbatim. That makes
+/// `FrozenPlacement::clear_bindings` — which the seam calls — the thing standing
+/// between a lifted `=w*2` and a fingerprint that disagrees with the identical
+/// geometry built from the literal.
+///
+/// This is the DetachComponent counterpart of
+/// `an_expression_bound_scalar_hashes_as_the_literal_it_evaluates_to`; it pins
+/// the seam rather than the strip, because for this op there is no strip.
+#[test]
+fn a_detached_placement_hashes_as_the_literal_it_was_bound_to() {
+    use onecad_core::document::record::{
+        ComponentSourceRef, DetachComponentParams, FrozenPlacement,
+    };
+
+    let detach = |placement: FrozenPlacement| {
+        OperationRecord::new(
+            onecad_core::ids::RecordId(Uuid::from_u128(0x0DE)),
+            0,
+            "Detach",
+            Operation::Known(KnownOperation::DetachComponent(DetachComponentParams {
+                source: ComponentSourceRef::Generator {
+                    generator_id: "iso4762".into(),
+                    generator_version: 1,
+                    params: Default::default(),
+                    extra: Default::default(),
+                },
+                placement,
+                extra: Default::default(),
+            })),
+        )
+    };
+    let literal = FrozenPlacement {
+        translate: [Scalar::new(20.0), Scalar::new(0.0), Scalar::new(4.0)],
+        rotate: Default::default(),
+    };
+    let mut bound = FrozenPlacement {
+        translate: [
+            Scalar::with_expr(20.0, "w * 2"),
+            Scalar::new(0.0),
+            Scalar::new(4.0),
+        ],
+        rotate: Default::default(),
+    };
+
+    // Straight through, a bound placement really does move the fingerprint —
+    // this is the defect the seam exists to prevent, asserted so the test cannot
+    // pass vacuously.
+    assert_ne!(
+        history_prefix_hash(std::slice::from_ref(&detach(bound.clone()))),
+        history_prefix_hash(std::slice::from_ref(&detach(literal.clone()))),
+        "an unstripped binding is hash-visible on this op"
+    );
+
+    // Through the seam, it does not.
+    bound.clear_bindings();
+    assert_eq!(bound, literal, "the numbers survive, the bindings do not");
+    assert_eq!(
+        history_prefix_hash(std::slice::from_ref(&detach(bound))),
+        history_prefix_hash(std::slice::from_ref(&detach(literal)))
+    );
+}

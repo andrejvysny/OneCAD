@@ -818,6 +818,9 @@ describe("HistoryList — variable bindings", () => {
   });
 
   it("opens the editor seeded with the binding and commits a new one", async () => {
+    // The new binding has to RESOLVE: the committed number is the evaluator's,
+    // not the `primaryValue` the row was seeded with.
+    await mockClient.upsertVariable("width", 40);
     const onCommitExpr = vi.fn();
     render(
       <HistoryList
@@ -831,7 +834,8 @@ describe("HistoryList — variable bindings", () => {
 
     fireEvent.change(field, { target: { value: "=width" } });
     fireEvent.keyDown(field, { key: "Enter" });
-    expect(onCommitExpr).toHaveBeenCalledWith(bound[0], "width", 25);
+    await waitFor(() => expect(onCommitExpr).toHaveBeenCalledWith(bound[0], "width", 40));
+    await mockClient.removeVariable("width");
   });
 
   /** `bindable: false` (a Hole) must not even offer the affordance. */

@@ -855,3 +855,61 @@ fn xorshift(state: &mut u64) -> u64 {
     *state = x;
     x
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Expressions: no migration — a legacy bare-name `expr` IS a valid expression
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A document written by the bare-name-only build (`{"value":10,"expr":"width"}`)
+/// opens unchanged and resolves through the arithmetic evaluator, because a bare
+/// name is just a one-token expression. That is why widening `expr` needed no
+/// container migration and no schema version bump.
+#[test]
+fn a_legacy_bare_name_expr_loads_and_resolves_through_the_evaluator() {
+    use onecad_core::document::variables::{Unit, Variable};
+    use onecad_core::ids::VariableId;
+    use onecad_core::regen::substitute_variables;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.onecad");
+
+    let mut doc = Document::new(DocumentId(Uuid::from_u128(0xD0C)));
+    let mut rec = extrude(0x10, 10.0);
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut rec.op else {
+        panic!("expected an Extrude")
+    };
+    p.distance = Scalar::with_expr(10.0, "width");
+    doc.timeline.insert_at_cursor(rec);
+    doc.variables.upsert(Variable {
+        id: VariableId::new(),
+        name: "width".into(),
+        value: Scalar::new(40.0),
+        unit: Unit::Mm,
+    });
+    ContainerWriter::save(&path, &doc, &ContainerCaches::none(), &meta()).unwrap();
+
+    // The stored form on disk is exactly the legacy shape.
+    let raw: Value = {
+        let entries = read_entries(&path);
+        let (_, bytes) = entries
+            .iter()
+            .find(|(n, _)| n == DOCUMENT_PATH)
+            .expect("document.json");
+        serde_json::from_slice(bytes).unwrap()
+    };
+    assert_eq!(
+        raw["timeline"]["records"][0]["params"]["distance"],
+        serde_json::json!({ "value": 10.0, "expr": "width" })
+    );
+
+    // And it reopens and resolves — no migration, no diagnostic.
+    let loaded = ContainerReader::open(&path).unwrap();
+    let mut records = loaded.document().timeline.records().to_vec();
+    let unresolved = substitute_variables(&mut records, &loaded.document().variables);
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+    let Operation::Known(KnownOperation::Extrude(p)) = &records[0].op else {
+        panic!("expected an Extrude")
+    };
+    assert_eq!(p.distance.value, 40.0, "the table's value, not the cache");
+    assert_eq!(p.distance.expr.as_deref(), Some("width"));
+}

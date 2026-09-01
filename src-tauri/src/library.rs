@@ -2167,12 +2167,22 @@ async fn detach_component_at(
         (source, placement)
     };
 
+    // Spec §3.4 — a detached component is INERT PROVENANCE: it remembers where
+    // the instance came from and where it sat, and stops tracking anything. The
+    // placement is lifted VERBATIM from the `PlaceComponent` record, so it can
+    // arrive carrying a variable binding; `DetachComponentParams` exposes no
+    // drivable scalars, so that binding would never be substituted again, would
+    // survive a rename as a dangling reference, and would ride into the planner
+    // hash and onto the OCW1 wire (both strips are registry-driven). Detach is
+    // the moment the tracking ends, so the bindings end here too — the NUMBERS
+    // are kept exactly as they last resolved.
+    let mut placement: FrozenPlacement = serde_json::from_value(placement)
+        .map_err(|e| ApiError::InvalidCommand(format!("detachComponent: bad placement: {e}")))?;
+    placement.clear_bindings();
     let detach_params = DetachComponentParams {
         source: serde_json::from_value(source)
             .map_err(|e| ApiError::InvalidCommand(format!("detachComponent: bad source: {e}")))?,
-        placement: serde_json::from_value(placement).map_err(|e| {
-            ApiError::InvalidCommand(format!("detachComponent: bad placement: {e}"))
-        })?,
+        placement,
         extra: Default::default(),
     };
     let op = Operation::Known(KnownOperation::DetachComponent(detach_params));
@@ -2441,6 +2451,110 @@ thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simpl
         let rt_guard = guard.runtime.lock().await;
         let rt = rt_guard.as_ref().unwrap();
         assert_eq!(rt.head_body_ids().len(), 0, "no regen ran, so no body yet");
+    }
+
+    /// F1 — spec §3.4 "inert provenance", end to end through the real command
+    /// core: a placement bound to a document variable loses that binding at
+    /// detach, keeping the number it last resolved to.
+    ///
+    /// Detach is the moment tracking ends. `DetachComponentParams` exposes no
+    /// drivable scalars, so a surviving binding would never be substituted
+    /// again, would ride into the planner hash and onto the OCW1 wire (both
+    /// strips being registry-driven), and would outlive a `rename_variable` as a
+    /// dangling reference. The params this asserts on are exactly what
+    /// `get_operation_params` serves the inspector, so this also pins that a
+    /// detached row shows no binding.
+    #[tokio::test]
+    async fn detach_clears_a_placement_variable_binding_and_keeps_its_number() {
+        use onecad_core::document::variables::{Unit, Variable};
+        use onecad_core::ids::VariableId;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        {
+            let mut guard = state.runtime.lock().await;
+            guard
+                .as_mut()
+                .unwrap()
+                .apply(EditCommand::AddVariable {
+                    variable: Variable {
+                        id: VariableId::new(),
+                        name: "gap".into(),
+                        value: Scalar::new(12.0),
+                        unit: Unit::Mm,
+                    },
+                })
+                .expect("AddVariable gap");
+        }
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("place_component_at");
+        let record_id = projection.features[0].id.clone();
+        let record = RecordId::from_str(&record_id).unwrap();
+
+        {
+            let mut guard = state.runtime.lock().await;
+            let rt = guard.as_mut().unwrap();
+            let mut current: PlaceComponentParams =
+                serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+            current.placement.translate[0] = Scalar::with_expr(24.0, "gap * 2");
+            rt.apply(EditCommand::UpdateOperationParams {
+                record,
+                op: Operation::Known(KnownOperation::PlaceComponent(current)),
+            })
+            .expect("bind the placement to `gap`");
+            // Sanity: the binding really is on the record before the detach.
+            let raw = rt.operation_params(record).unwrap();
+            assert_eq!(
+                raw["placement"]["translate"][0]["expr"],
+                serde_json::json!("gap * 2")
+            );
+        }
+
+        let (_outcome, projection) = detach_component_at(&state, record_id.clone())
+            .await
+            .expect("detach_component_at");
+        assert_eq!(projection.features[0].op_type, "DetachComponent");
+
+        let guard = state.runtime.lock().await;
+        let rt = guard.as_ref().unwrap();
+        let raw = rt.operation_params(record).unwrap();
+        assert_eq!(
+            raw["placement"]["translate"][0],
+            serde_json::json!({ "value": 24.0 }),
+            "the number survives; the binding does not"
+        );
+        assert!(
+            !serde_json::to_string(&raw).unwrap().contains("expr"),
+            "a detached placement carries no binding anywhere: {raw}"
+        );
+        // …and the row the inspector draws shows no unresolved-expression state.
+        let feature = projection
+            .features
+            .into_iter()
+            .find(|f| f.id == record_id)
+            .expect("the detached row");
+        assert!(feature.primary_expr.is_none());
+        assert!(feature.diagnostics.is_empty(), "{:?}", feature.diagnostics);
     }
 
     /// WP-H2: a mate whose pick already carries a Rust-minted `ElementId`
@@ -2981,6 +3095,113 @@ generator_version = 1
         .expect_err("a table-role key is not settable at placement either");
         let msg = format!("{err:?}");
         assert!(msg.contains("head_d"), "names the offending key: {msg}");
+    }
+
+    /// `set_component_params` re-emits the WHOLE `PlaceComponent` op through
+    /// `UpdateOperationParams`, so it inherits the edit-scoped expression rule
+    /// for free: a placement bound to a variable that has since been deleted
+    /// keeps its broken binding (and its `EXPR_UNRESOLVED` diagnostic) without
+    /// making the component's own parameters uneditable. Whole-op validation
+    /// would have bricked this path.
+    #[tokio::test]
+    async fn set_component_params_still_works_after_a_placement_variable_is_deleted() {
+        use onecad_core::document::variables::{Unit, Variable};
+        use onecad_core::ids::VariableId;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_generator_package_with_params(dir.path(), "onecad.std.iso4762", "SHCS");
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        // A variable the placement will be bound to.
+        let var_id = VariableId::new();
+        {
+            let mut guard = state.runtime.lock().await;
+            guard
+                .as_mut()
+                .unwrap()
+                .apply(EditCommand::AddVariable {
+                    variable: Variable {
+                        id: var_id,
+                        name: "gap".into(),
+                        value: Scalar::new(12.0),
+                        unit: Unit::Mm,
+                    },
+                })
+                .expect("AddVariable gap");
+        }
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "onecad.std.iso4762".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("place_component_at");
+        let record_id = projection.features[0].id.clone();
+        let record = RecordId::from_str(&record_id).unwrap();
+
+        // Bind the placement's X offset to `gap`, then delete `gap`.
+        {
+            let mut guard = state.runtime.lock().await;
+            let rt = guard.as_mut().unwrap();
+            let mut current: PlaceComponentParams =
+                serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+            current.placement.translate[0] = Scalar::with_expr(12.0, "gap * 2");
+            rt.apply(EditCommand::UpdateOperationParams {
+                record,
+                op: Operation::Known(KnownOperation::PlaceComponent(current)),
+            })
+            .expect("bind the placement to `gap`");
+            rt.apply(EditCommand::RemoveVariable { variable: var_id })
+                .expect("RemoveVariable gap");
+        }
+
+        // The component's OWN parameters still re-edit, broken binding and all.
+        let mut params = BTreeMap::new();
+        params.insert(
+            "thread".to_string(),
+            ComponentParamValue::Text("M8".to_string()),
+        );
+        set_component_params_at(dir.path(), &state, record_id.clone(), params)
+            .await
+            .expect("a broken placement binding must not brick setComponentParams");
+
+        let guard = state.runtime.lock().await;
+        let rt = guard.as_ref().unwrap();
+        let updated: PlaceComponentParams =
+            serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+        assert_eq!(
+            updated.placement.translate[0].expr.as_deref(),
+            Some("gap * 2"),
+            "the binding is preserved verbatim, not silently rewritten"
+        );
+        // …and it is still reported broken, per-step, on the projection.
+        let feature = rt
+            .projection()
+            .features
+            .into_iter()
+            .find(|f| f.id == record_id)
+            .expect("the placement row");
+        assert!(
+            feature
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "EXPR_UNRESOLVED"),
+            "the broken binding keeps surfacing as a diagnostic: {:?}",
+            feature.diagnostics
+        );
     }
 
     #[tokio::test]

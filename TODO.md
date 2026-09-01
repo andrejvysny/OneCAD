@@ -192,6 +192,117 @@ package.
       (refused at `PlaceComponentParams::validate`, nothing on the timeline). `component_ops`
       **14/14**, `library::` unit tests 22/22.
 
+### WP-E — expressions + units (in flight, 2026-09-01)
+- [x] E1 evaluator LANDED (implementer-reported: `cargo test -p onecad-core` 344/0 lib + fixture
+      replay 2/2; fmt/clippy clean): `onecad-core/src/expr/{mod,lexer,parser,eval,dimension}.rs`
+      — pure, dependency-free; grammar/dimension algebra per plan; `min`/`max` arity exactly 2;
+      unit suffix = whole-keyword adjacent match (`1radius` is an error, never `1rad`+`ius`);
+      golden `docs/qa/expressions.fixture.json` (51 cases; transcendental expectations computed
+      independently in Python, not from the Rust impl).
+- [x] E2 integration LANDED (implementer-reported: `ONECAD_REQUIRE_WORKER=1 cargo test
+      --workspace` **91 targets / 1416 passed / 0 failed**, goldens `53b231a2…` etc. untouched,
+      verifiers + hygiene clean; real-worker `depth*2+5mm ⇒ 10000, delete ⇒ EXPR_UNRESOLVED,
+      rename ⇒ unchanged`). Shapes: `VariableDto{id,name,value,expr?,resolvedValue,dimension,
+      error?}`, `EvaluatedExpressionDto{value,dimension,error?}`; commands
+      `upsert_variable_expr(name,text)`, `rename_variable(name,newName)`,
+      `evaluate_expression(expr,site)`; `EXPR_UNRESOLVED` diagnostics with `EXPR_<KIND>`
+      reasonCodes; `expr::evaluate_value` helper added (dimension inference needs the typed
+      value); the planner clones each `KnownOperation` to clear `expr` before hashing (cost
+      noted). Fix round in flight: edit-scoped validation (only the expressions an edit
+      introduces/changes — a record whose binding broke later must stay editable on its other
+      fields) and a distinct `ExprErrorKind::Cycle` (`EXPR_CYCLE`). Hash-strip file set kept
+      separable for its own commit (`planner.rs`, `wire.rs` `wire_form`, `record.rs`
+      `clear_scalar_exprs`, `regen_planner.rs` appended tests).
+      **Fix round LANDED** (implementer-reported: workspace **91 / 1420 / 0**, goldens
+      untouched, `regen_planner.rs` still append-only): edit-scoped validation —
+      `validate_op_expressions(op, prior, vars)` position-zips registered scalars, checks only
+      introduced/changed expressions (different variant/arity ⇒ validate everything; unchanged
+      ⇒ returns before resolving the table); real-worker
+      `a_record_whose_binding_broke_later_stays_editable_on_its_other_fields` + the library-lane
+      regression `set_component_params_still_works_after_a_placement_variable_is_deleted` (that
+      path was bricked under whole-op validation). `ExprErrorKind::Cycle` (`EXPR_CYCLE`),
+      evaluator-unreachable by construction; chain cap keeps `TooDeep`, distinction pinned.
+      **Adversarial review (fresh context): sound with named conditions; F1 reproduced by
+      execution and FIXED in a final round** (workspace **91 / 1426 / 0** after): F1 HIGH —
+      `DetachComponent` placement scalars escaped the strip/substitution/rename (detach lifts
+      the placement verbatim; the binding went silently inert while reaching the wire AND the
+      hash) → `FrozenPlacement::clear_bindings()` at the detach seam (spec §3.4 inert
+      provenance), three non-vacuous tests (each first proves the leak, then the close);
+      F2 label-keyed `unchanged_expressions` (the chamfer `distance2`→`angleDeg` mode swap kept
+      arity 2 and skipped edit-time validation; regen still refused — deferred, not silent);
+      F3 chained-broken variables now relay the real cause; F5 one evaluation per bound scalar
+      (`expr::check_site`); F6 ONE cursor-filtered unresolved view for stamping, ceiling,
+      `failed_steps` and diagnostics (a draft beyond the rollback bar is not a failure).
+      Recorded, not fixed: F4 a >64-member cycle reports `TooDeep` (loud, deterministic);
+      F7 sketch constraint scalars stay outside the registry (WP-VE.3 must register or narrow
+      SCHEMA); F8 renaming onto a deleted name heals a broken binding (property of name-based
+      binding); a hand-authored/legacy `DetachComponent` carrying an inert `expr` bypasses the
+      seam (load is not validated; nothing can author one today). Confirmed sound by execution:
+      diamond deps, determinism (BTreeMap/Vec order), 200k-input fuzz zero panics, rename =
+      one undo slot via `Inverse::Composite`, `evaluate_expression` pure, old build opens a
+      new doc with per-step Error (no crash, no silent number).
+- [ ] E2 original scope (for the record): `scalars_mut` gains `Dimension`; `resolve_variable_table`
+      topological pass (chain cap 64, cycle path named) replaces the V1 chaining refusal; typed-
+      path hash strip (`Opaque` untouched) + wire strip; edit-time refusals; `EXPR_UNRESOLVED`
+      diagnostics merged after the per-snapshot replace; `VariableDto` +`resolvedValue`/
+      `dimension`/`error`; commands `upsert_variable_expr`, `evaluate_expression`,
+      `rename_variable`; schema-freeze + container legacy tests; real-worker
+      `variable_driven_ops` case. Hash-strip lands as its own commit.
+- [x] E3a TS port + parity LANDED (implementer-reported: parity 62/62 over 51 cases, `src/ipc`
+      825/0, tsc clean): `src/ipc/expr/{errors,dimension,lexer,parser,eval,index}.ts` +
+      `parity.test.ts`; `DEGREES_PER_RADIAN` exported from `angleUnits.ts` (the single deg↔rad
+      seam). **Trap found and closed:** Rust `f64::round` is half-away-from-zero, JS
+      `Math.round` is half-toward-+∞ — the port implements Rust's rule; the orchestrator added
+      `round(-2.5)`/`round(-2.5mm)` fixture cases so BOTH lanes pin it (fixture now 53 cases;
+      TS parity 64/64 after the addition).
+- [x] E3b FE editor UX LANDED (implementer-reported: tsc clean · `bun run test` **309 files /
+      5413 passed / 78 skipped / 0 failed** · `e2e/variables.spec.ts` **10/10 both projects** ·
+      hex 0 · verifiers clean): `=` mode with debounced `evaluate_expression` preview (mm-first
+      `= 2 mm (0.079 in)` per the recorded decision), pure-literal `=2` guardrail (plain
+      display-unit path), non-mm hint; async expression commit (field held open until the
+      flushed evaluation resolves); `VariablesSection` text authoring (`VariableRow`,
+      `variableAuthoring.ts`) + rename via `renameVariable` with `applyEditResult` hydration on
+      success (a rename rewrites bindings, the timeline row must re-render); mock lane honest —
+      `mockResolveExpr`/`mockVariableRegenFailures` route through the TS evaluator + new
+      `src/ipc/expr/table.ts` (topological, `Cycle`), `mockUpsertVariable` now clears a stored
+      `expr` (was silently wrong); `evaluate_expression` added to `IPC_LOG_EXEMPT` (keystroke-
+      frequency). CMD names `upsert_variable_expr`/`rename_variable`/`evaluate_expression`;
+      args `{name,text}`/`{name,newName}`/`{expr,site}`. No frozen contract or golden touched;
+      the V1 mock message pins in non-golden tests updated to the evaluator's own wording.
+      **Seam (pre-existing, recorded):** `DimensionInput` Enter → `commit()` then `blur()` →
+      `onBlur` commits again — latent double-commit masked by jsdom + row unmount.
+### Gate — WP-E: expressions + units (2026-09-01) — LANDED
+
+**Gate (measured on the main thread, suites alone, teed; rung FULL L3):** ctest **160/160** ·
+`cargo fmt --all --check` clean · clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace --no-fail-fast` **92 targets / 1426 passed / 0 failed** · `bunx tsc` clean ·
+`bun run test` **309 files / 5413 passed / 78 skipped / 0 failed** (teed re-run; the part-A
+sweep dropped one unnamed test — flake ledger) · hex 0 · verifiers 30/9/16/19 + 38/18 ·
+stdout hygiene clean · kernelbench `fillet/foundation:t0` both backends **136 rows
+unchanged** + `semantic-compare` OK · `bun run e2e` (both projects, retries 0): **499
+passed / 1 failed (28.1 min; suite 496 → 500)** — the drop is
+`constraint-badge-standoff.spec.ts:63` chromium, the EXACT signature already in the ledger as
+parallel-run interference (2026-08-24 record); isolated re-run **2/2 both projects**.
+Attributable e2e: green. SCHEMA §7.3 `expr` prose + §14 narrowing entry; `docs/DEBUGGING.md`
+timing paragraph refreshed.
+
+**Commit-split deviation (recorded):** the plan asked for the hash strip as its own commit;
+the strip's tests and helpers interleave with the integration in `record.rs` /
+`regen_planner.rs` / `wire.rs`, and a non-interactive hunk split would have produced a RED
+intermediate commit (the strip tests land before the strip). One commit instead, with the
+surgical-revert recipe recorded here: to disable the strip, revert `regen/planner.rs`'s
+`op_type_and_params` clone+`clear_scalar_exprs` block and `wire.rs`'s `wire_form` (its
+`split_operation` call site), then delete the four pinned tests
+(`an_expression_bound_scalar_hashes_as_the_literal_it_evaluates_to`,
+`an_opaque_node_carrying_an_expr_key_hashes_unchanged`,
+`wire_op_strips_a_scalar_expression_and_keeps_its_value`,
+`a_detached_placement_hashes_as_the_literal_it_was_bound_to`).
+- **Flake ledger:** WP-E gate part A `bun run test` dropped ONE test (5412/1) with the name
+  NOT captured — the gate script grep-filtered vitest output before writing (the same un-teed
+  mistake the ledger already warns about; scripts must tee raw). Teed re-run immediately after:
+  **309 files / 5413 passed / 78 skipped / 0 failed**. Fifth full-suite-only unnamed single
+  drop across programs.
+
 ### Gate — WP-C: vendor STEP components (2026-09-01) — LANDED
 
 **Landed:** `PlaceComponent` `source.kind = "profile"` (length-parametric prism of a canonical

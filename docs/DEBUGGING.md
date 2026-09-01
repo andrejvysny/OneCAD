@@ -74,8 +74,12 @@ keeps lines short).
 `"2.34s"`) — a human hint from `tracing-subscriber`, not a machine-comparable
 number. Every terminal event that matters (e.g. `regen.drive: done`) carries
 its own explicit **numeric** `elapsed_ms` field instead — see
-`document_runtime.rs` `PreparedRegen::drive` (~line 2083):
-`elapsed_ms = started.elapsed().as_millis() as u64`. Pinned by
+`document_runtime.rs` `PreparedRegen::drive` (grep `"regen.drive: done"`):
+`elapsed_ms = started.elapsed().as_millis() as u64`. Since 2026-09-01 the same
+line also carries the phase split `planner_ms` (phase 1, plan compile under the
+lock), `worker_ms` (worker round trips during the drive) and `mesh_ms` (the
+`ExecutePlan` post-ops window where the worker tessellates inline) — see
+`RegenTimings`; `worker_ms + mesh_ms` is a lower bound on the drive. Pinned by
 `logging.rs::tests::jsonl_schema_carries_the_documented_fields`.
 
 ### 3c. An `fe` line (`api/mod.rs::emit_fe_event`, ~line 1497)

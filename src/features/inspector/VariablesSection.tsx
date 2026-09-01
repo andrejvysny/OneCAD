@@ -7,21 +7,25 @@
  * why it sits LAST in the modeling module's section order — a document-wide
  * table must not push the sections that are about the current selection down.
  *
- * The backend owns every rule (name grammar, duplicate = re-value, unknown
- * remove refused, undoability). This component adds no validation of its own
- * beyond the one thing it can decide locally — an obviously malformed name,
- * caught before a round trip so the message lands next to the field. Every
- * refusal the backend makes is surfaced verbatim: a second, drifting copy of the
- * rule here is how a UI starts accepting names the document rejects.
+ * The backend owns every rule (name grammar, expression validity, duplicate =
+ * re-value, unknown remove refused, undoability). This component adds no
+ * validation of its own beyond the one thing it can decide locally — an
+ * obviously malformed NAME, caught before a round trip so the message lands next
+ * to the field. Every refusal the backend makes is surfaced verbatim: a second,
+ * drifting copy of the rule here is how a UI starts accepting what the document
+ * rejects. In particular nothing here judges an EXPRESSION; `readVariableInput`
+ * only decides which of the two write commands a typed cell goes to.
  */
 import { useCallback, useEffect, useState } from "react";
 import { SectionLabel } from "@/ui/SectionLabel";
-import { Icon } from "@/icons/Icon";
 import { cn } from "@/ui/cn";
 import { createClient } from "@/ipc/client";
-import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
+import { classifyRegen, failureReason, keepsRecord } from "@/ipc/regenOutcome";
+import { applyEditResult } from "./historyActions";
 import { viewportStore } from "@/stores/viewportStore";
 import { VARIABLE_NAME_RE, type DocumentVariable, type VariableEditResult } from "@/ipc/types";
+import { VariableRow } from "./VariableRow";
+import { readVariableInput } from "./variableAuthoring";
 
 const NAME_HINT = "A name must start with a letter or _ and contain only letters, digits and _.";
 
@@ -32,6 +36,11 @@ interface DraftRow {
 }
 
 const EMPTY_DRAFT: DraftRow = { name: "", value: "" };
+
+const DRAFT_FIELD = cn(
+  "rounded-sm border border-border-strong bg-surface px-1 font-mono text-[12px] text-ink-2",
+  "outline-none placeholder:text-ink-6 focus:border-accent",
+);
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -50,9 +59,19 @@ function errorText(e: unknown): string {
  * would lose exactly the distinction the user needs.
  *
  * `needsRepair` / `noop` keep the record (`keepsRecord`) and are successes here.
+ *
+ * On the success path the TIMELINE is hydrated too, through the same
+ * `applyEditResult` every other commit family uses. A variable write can move
+ * feature rows — a RENAME rewrites every binding, so a bound row's `=name` is
+ * stale the moment it lands — and the row is rendered from
+ * `documentStore.features`, not from anything this section holds. Verdict
+ * first, hydrate second: a FAILED rebuild is not hydrated, because the store
+ * then still holds what the backend actually kept.
  */
 function adopt(res: VariableEditResult): DocumentVariable[] {
-  const reason = failureReason(classifyRegen(res));
+  const outcome = classifyRegen(res);
+  if (keepsRecord(outcome)) applyEditResult(res);
+  const reason = failureReason(outcome);
   if (reason !== null) {
     viewportStore
       .getState()
@@ -96,48 +115,73 @@ export function VariablesSection() {
     };
   }, [load]);
 
-  const commit = useCallback(
-    async (name: string, value: number) => {
-      setPending(true);
-      try {
-        setVars(adopt(await createClient().upsertVariable(name, value)));
-        setError(null);
-        return true;
-      } catch (e) {
-        setError(errorText(e));
-        return false;
-      } finally {
-        setPending(false);
-      }
-    },
-    [],
-  );
-
-  const remove = useCallback(async (name: string) => {
+  /**
+   * Run one write. Errors-as-values: a REFUSAL becomes the section's inline
+   * alert and `false`, never a rethrow — the caller decides what to do with a
+   * refused edit (the draft row keeps its text so it can be corrected).
+   */
+  const write = useCallback(async (run: () => Promise<VariableEditResult>) => {
     setPending(true);
     try {
-      setVars(adopt(await createClient().removeVariable(name)));
+      setVars(adopt(await run()));
       setError(null);
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       setPending(false);
     }
   }, []);
 
+  /**
+   * Commit a typed value cell. ONE field authors all three forms; which of the
+   * two write commands it lowers to is `readVariableInput`'s only decision, and
+   * whether the expression itself is any good is the backend's.
+   */
+  const commitValue = useCallback(
+    (name: string, raw: string) => {
+      const authored = readVariableInput(raw);
+      if (authored.kind === "empty") {
+        setError("A variable needs a number or an expression.");
+        return Promise.resolve(false);
+      }
+      const client = createClient();
+      return write(() =>
+        authored.kind === "literal"
+          ? client.upsertVariable(name, authored.value)
+          : client.upsertVariableExpr(name, authored.text),
+      );
+    },
+    [write],
+  );
+
+  const rename = useCallback(
+    (name: string, newName: string) => {
+      if (!VARIABLE_NAME_RE.test(newName)) {
+        setError(`Invalid variable name “${newName}”. ${NAME_HINT}`);
+        return;
+      }
+      void write(() => createClient().renameVariable(name, newName));
+    },
+    [write],
+  );
+
+  const remove = useCallback(
+    (name: string) => {
+      void write(() => createClient().removeVariable(name));
+    },
+    [write],
+  );
+
   const addDraft = useCallback(async () => {
     const name = draft.name.trim();
-    const value = Number.parseFloat(draft.value);
     if (!VARIABLE_NAME_RE.test(name)) {
       setError(`Invalid variable name “${name}”. ${NAME_HINT}`);
       return;
     }
-    if (!Number.isFinite(value)) {
-      setError("A variable needs a number.");
-      return;
-    }
-    if (await commit(name, value)) setDraft(EMPTY_DRAFT);
-  }, [commit, draft]);
+    if (await commitValue(name, draft.value)) setDraft(EMPTY_DRAFT);
+  }, [commitValue, draft]);
 
   if (vars === null) return null;
 
@@ -153,63 +197,14 @@ export function VariablesSection() {
       )}
 
       {vars.map((v) => (
-        <div
+        <VariableRow
           key={v.id}
-          data-testid={`variable-row-${v.name}`}
-          className="mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5"
-        >
-          <span className="flex-1 truncate font-mono text-[12.5px] text-ink-2" title={v.name}>
-            {v.name}
-          </span>
-          {/* An expression-driven variable is READ-ONLY here: V1 refuses to
-              resolve a chained expression at regen, so offering a number field
-              would invite an edit that silently does nothing. */}
-          {v.expr !== undefined ? (
-            <span className="font-mono text-[12px] text-warn" title="Chained expressions are not supported">
-              ={v.expr}
-            </span>
-          ) : (
-            <input
-              /*
-               * KEYED ON THE VALUE. The field is uncontrolled (so typing is not
-               * fought by a re-render mid-edit), which means a new `defaultValue`
-               * alone would NOT reach the DOM — the row would keep showing the
-               * number the user last typed even after the document moved
-               * underneath it (a re-value from the draft row, or an undo). The
-               * key remounts it, which is the only way an uncontrolled input
-               * adopts a new backend value.
-               */
-              key={`${v.id}:${v.value}`}
-              aria-label={`${v.name} value`}
-              data-testid={`variable-value-${v.name}`}
-              type="number"
-              className="w-20 rounded-sm border border-border-strong bg-surface px-1 text-right font-mono text-[12px] text-ink-2 outline-none focus:border-accent"
-              defaultValue={v.value}
-              disabled={pending}
-              onBlur={(e) => {
-                const n = e.target.valueAsNumber;
-                if (!Number.isFinite(n) || n === v.value) return;
-                void commit(v.name, n);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-              }}
-            />
-          )}
-          <button
-            type="button"
-            aria-label={`Delete ${v.name}`}
-            data-testid={`variable-delete-${v.name}`}
-            disabled={pending}
-            className={cn(
-              "cursor-pointer rounded-sm p-0.5 text-ink-5 hover:bg-hover-3 hover:text-ink-2",
-              "focus-visible:shadow-focus-ring focus-visible:outline-none disabled:opacity-50",
-            )}
-            onClick={() => void remove(v.name)}
-          >
-            <Icon name="x" size={12} strokeWidth={2.2} />
-          </button>
-        </div>
+          variable={v}
+          pending={pending}
+          onCommitValue={(name, raw) => void commitValue(name, raw)}
+          onRename={rename}
+          onDelete={remove}
+        />
       ))}
 
       <div className="mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5">
@@ -217,7 +212,7 @@ export function VariablesSection() {
           aria-label="New variable name"
           data-testid="variable-new-name"
           placeholder="name"
-          className="min-w-0 flex-1 rounded-sm border border-border-strong bg-surface px-1 font-mono text-[12px] text-ink-2 outline-none placeholder:text-ink-6 focus:border-accent"
+          className={cn(DRAFT_FIELD, "min-w-0 flex-1")}
           value={draft.name}
           disabled={pending}
           onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
@@ -228,9 +223,10 @@ export function VariablesSection() {
         <input
           aria-label="New variable value"
           data-testid="variable-new-value"
-          type="number"
+          /* TEXT: a new variable may be authored as `25`, `45deg` or `=w*2`,
+             and a numeric input would swallow the last two. */
           placeholder="0"
-          className="w-20 rounded-sm border border-border-strong bg-surface px-1 text-right font-mono text-[12px] text-ink-2 outline-none placeholder:text-ink-6 focus:border-accent"
+          className={cn(DRAFT_FIELD, "w-20 text-right")}
           value={draft.value}
           disabled={pending}
           onChange={(e) => setDraft((d) => ({ ...d, value: e.target.value }))}

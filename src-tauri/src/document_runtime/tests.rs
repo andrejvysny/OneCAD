@@ -3232,6 +3232,101 @@ async fn below_cap_session_still_squashes() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WP-E2 F6 — ONE cursor-filtered view of a broken binding. A draft beyond the
+// rollback bar never executes, so it can neither gate a plan nor be reported as
+// a failure — and the three consumers of `unresolved_variables` (plan ceiling,
+// `noop_report().failed_steps`, per-step diagnostics) must all agree.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_broken_binding_on_a_draft_beyond_the_cursor_neither_gates_nor_reports() {
+    use onecad_core::document::variables::{Unit, Variable};
+    use onecad_core::ids::VariableId;
+
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(EditCommand::AddVariable {
+        variable: Variable {
+            id: VariableId::new(),
+            name: "depth".into(),
+            value: Scalar::new(10.0),
+            unit: Unit::Mm,
+        },
+    })
+    .unwrap();
+
+    // Two applied steps, then roll the bar back to just after step 0 so a third
+    // append lands as a DRAFT (the C++ draft semantic: `cursor < len`).
+    for seed in [0xE60u128, 0xE62] {
+        rt.apply(EditCommand::AddOperation {
+            record: extrude_record(seed, 5.0),
+            at_cursor: false,
+        })
+        .unwrap();
+    }
+    rt.apply(EditCommand::SetRollback { cursor: 1 }).unwrap();
+    let mut draft = extrude_record(0xE61, 5.0);
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut draft.op else {
+        panic!("expected an Extrude")
+    };
+    p.distance = Scalar::with_expr(20.0, "depth * 2");
+    let draft_id = draft.record_id.to_string();
+    rt.apply(EditCommand::AddOperation {
+        record: draft,
+        at_cursor: false,
+    })
+    .unwrap();
+    assert_eq!(
+        rt.projection().applied_ops,
+        1,
+        "the draft is beyond the bar"
+    );
+    assert_eq!(rt.projection().total_ops, 3);
+
+    // Break the binding from the outside.
+    let depth_id = rt.variables()[0].id;
+    rt.apply(EditCommand::RemoveVariable { variable: depth_id })
+        .unwrap();
+
+    // Not reported: no failed step, no diagnostic, no `Error` state on the row.
+    assert!(
+        rt.noop_report().failed_steps.is_empty(),
+        "a draft's broken binding is not a failed step: {:?}",
+        rt.noop_report().failed_steps
+    );
+    let row = rt
+        .projection()
+        .features
+        .into_iter()
+        .find(|f| f.id == draft_id)
+        .expect("the draft row");
+    assert!(row.diagnostics.is_empty(), "{:?}", row.diagnostics);
+    assert_ne!(row.status, crate::dto::FeatureStatus::Error);
+
+    // Not gated: the applied prefix still plans. (A ceiling at step 0 would make
+    // `begin_regen` return `None` — the "nothing may execute" branch.)
+    assert!(
+        rt.begin_regen(RegenRequest::ToEnd { from: 0 }).is_some(),
+        "a draft's broken binding must not gate the applied prefix"
+    );
+
+    // Move the bar past it and the SAME binding becomes a real failure on all
+    // three surfaces at once.
+    rt.apply(EditCommand::SetRollback { cursor: 3 }).unwrap();
+    assert_eq!(rt.noop_report().failed_steps.len(), 1);
+    let row = rt
+        .projection()
+        .features
+        .into_iter()
+        .find(|f| f.id == draft_id)
+        .expect("the now-applied row");
+    assert!(row.diagnostics.iter().any(|d| d.code == "EXPR_UNRESOLVED"));
+    assert!(
+        rt.begin_regen(RegenRequest::ToEnd { from: 0 }).is_some(),
+        "the broken step is gated, but the steps below it still plan"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MODEL-HARDEN finding 8 — a rolled-back (draft) append leaves applied < total, so
 // the frontend can detect the stalled-awaiter case from the projection alone.
 // ─────────────────────────────────────────────────────────────────────────────

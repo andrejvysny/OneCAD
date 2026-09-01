@@ -11,6 +11,7 @@
 pub mod document;
 pub mod edit;
 pub mod error;
+pub mod expr;
 pub mod history;
 pub mod ids;
 pub mod io;

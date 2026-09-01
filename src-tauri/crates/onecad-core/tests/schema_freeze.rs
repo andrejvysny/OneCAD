@@ -606,3 +606,45 @@ fn extrude_toface_full_is_snapshot_locked() {
         .insert("uiColor".into(), serde_json::json!("#ff8800"));
     insta::assert_json_snapshot!("operation_extrude_toface_full", rec);
 }
+
+// ── 10. Snapshot: a Scalar carrying a real arithmetic expression ────────────
+
+/// NEW snapshot (touches none of the existing ones): the on-disk form of an
+/// expression-driven parameter.
+///
+/// `Scalar` serializes as `{value, expr?}` and the expression is stored
+/// VERBATIM — the file keeps both the binding and the last number it evaluated
+/// to, so a build that cannot evaluate expressions still opens the document and
+/// shows a sane dimension. Nothing normalizes, reformats or pre-evaluates the
+/// text on the way to disk.
+#[test]
+fn scalar_with_an_arithmetic_expression_is_snapshot_locked() {
+    let mut rec = record(21, "Extrude bound", op_extrude_newbody());
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut rec.op else {
+        panic!("expected an Extrude")
+    };
+    p.distance = Scalar::with_expr(45.0, "depth * 2 + 5mm");
+    p.draft_angle_deg = Scalar::with_expr(3.0, "draft");
+    insta::assert_json_snapshot!("operation_extrude_expression_bound", rec);
+}
+
+/// The same record survives a serde round-trip with the expression text byte
+/// identical — the property the snapshot alone cannot prove.
+#[test]
+fn an_arithmetic_expression_round_trips_verbatim() {
+    let text = "max(depth, 2) * 2 + 5mm";
+    let mut rec = record(21, "Extrude bound", op_extrude_newbody());
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut rec.op else {
+        panic!("expected an Extrude")
+    };
+    p.distance = Scalar::with_expr(45.0, text);
+
+    let json = serde_json::to_value(&rec).unwrap();
+    assert_eq!(json["params"]["distance"]["expr"], serde_json::json!(text));
+    let back: OperationRecord = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    let Operation::Known(KnownOperation::Extrude(p)) = &back.op else {
+        panic!("expected an Extrude")
+    };
+    assert_eq!(p.distance, Scalar::with_expr(45.0, text));
+}

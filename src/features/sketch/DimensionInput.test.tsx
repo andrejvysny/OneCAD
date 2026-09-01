@@ -3,10 +3,12 @@
  * (ConstraintBadgeLayer wiring). Reject must NOT call onCommit and must flash
  * an error style on the input; back-compat (no `kind`) stays finite-only.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { settingsStore } from "@/stores/settingsStore";
 import { DEFAULT_LENGTH_UNIT, type LengthUnitId } from "@/units/lengthUnits";
+import { mockClient, resetMockDocument, setMockLatency } from "@/ipc/mockClient";
+import type { DimensionInputProps } from "./DimensionInput";
 import { DimensionInput, parseExprInput } from "./DimensionInput";
 
 function input() {
@@ -246,24 +248,62 @@ describe("DimensionInput — display unit", () => {
 
 // ── WP-VE.2: the OPT-IN variable-binding lane ────────────────────────────────
 
-describe("parseExprInput — the `=name` grammar", () => {
-  it("accepts a bare variable name, with or without surrounding space", () => {
+describe("parseExprInput — the `=` syntax", () => {
+  it("returns the expression text after `=`, with or without surrounding space", () => {
     expect(parseExprInput("=height")).toBe("height");
     expect(parseExprInput("  = height ")).toBe("height");
     expect(parseExprInput("=_w2")).toBe("_w2");
   });
 
-  it("rejects anything V1 could not resolve", () => {
-    // No arithmetic (`regen::variables::resolve_expr` refuses it LOUDLY rather
-    // than looking up a variable literally named "w * 2"), no leading digit, no
-    // empty name — and plain numbers are simply not expressions.
-    for (const bad of ["=", "= ", "=2w", "=w * 2", "=a-b", "25", ""]) {
+  /*
+   * It is SYNTAX, not validation. `=w * 2` and `=2w` are now handed to the
+   * evaluator, which is the only thing entitled to say whether they resolve —
+   * a second grammar here would drift from `onecad-core`'s.
+   */
+  it("passes arithmetic and unit suffixes straight through to the evaluator", () => {
+    expect(parseExprInput("=w * 2")).toBe("w * 2");
+    expect(parseExprInput("=a-b")).toBe("a-b");
+    expect(parseExprInput("=5mm + depth")).toBe("5mm + depth");
+    expect(parseExprInput("=2w")).toBe("2w");
+  });
+
+  it("rejects text that is not an `=` entry at all, and a bare `=`", () => {
+    for (const bad of ["=", "= ", "25", ""]) {
       expect(parseExprInput(bad)).toBeNull();
     }
   });
 });
 
-describe("DimensionInput — variable binding (WP-VE.2)", () => {
+/*
+ * The `=` EXPRESSION lane, against the REAL mock client — which resolves
+ * through the shared TS port of `onecad-core`'s evaluator, so these prove the
+ * field against the semantics the backend applies rather than against a stub.
+ */
+describe("DimensionInput — expression mode", () => {
+  beforeEach(() => {
+    resetMockDocument();
+    setMockLatency(0);
+  });
+
+  function renderBindable(props: Partial<DimensionInputProps> = {}) {
+    const onCommit = vi.fn();
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput
+        value={25}
+        suffix="mm"
+        onCommit={onCommit}
+        onCommitExpr={onCommitExpr}
+        {...props}
+      />,
+    );
+    return { onCommit, onCommitExpr };
+  }
+
+  function preview() {
+    return screen.getByTestId("dimension-expr-preview");
+  }
+
   it("without onCommitExpr, `=name` is unparseable text and commits nothing", () => {
     const onCommit = vi.fn();
     render(<DimensionInput value={25} suffix="mm" onCommit={onCommit} />);
@@ -272,39 +312,73 @@ describe("DimensionInput — variable binding (WP-VE.2)", () => {
     // binding would be a promise the backend has nowhere to keep.
     expect(onCommit).not.toHaveBeenCalled();
     expect(input().value).toBe("25");
+    expect(screen.queryByTestId("dimension-expr-preview")).not.toBeInTheDocument();
   });
 
-  it("renders an existing binding as `=name` rather than its resolved number", () => {
+  it("renders an existing binding as `=<expr>` rather than its resolved number", () => {
     render(
-      <DimensionInput value={25} suffix="mm" expr="height" onCommit={vi.fn()} onCommitExpr={vi.fn()} />,
+      <DimensionInput value={45} suffix="mm" expr="w*2+5mm" onCommit={vi.fn()} onCommitExpr={vi.fn()} />,
     );
-    expect(input().value).toBe("=height");
+    expect(input().value).toBe("=w*2+5mm");
   });
 
-  it("commits a typed `=name` through onCommitExpr, never onCommit", () => {
-    const onCommit = vi.fn();
-    const onCommitExpr = vi.fn();
-    render(
-      <DimensionInput value={25} suffix="mm" onCommit={onCommit} onCommitExpr={onCommitExpr} />,
-    );
-    typeAndEnter("=height");
-    // `value` rides along as the Scalar's cached number until regen resolves it.
-    expect(onCommitExpr).toHaveBeenCalledWith("height", 25);
+  it("previews the resolved value while typing, then commits THAT number", async () => {
+    await mockClient.upsertVariable("w", 20);
+    const { onCommit, onCommitExpr } = renderBindable();
+
+    fireEvent.change(input(), { target: { value: "=w*2+5mm" } });
+    await waitFor(() => expect(preview()).toHaveTextContent("= 45 mm"));
+
+    fireEvent.keyDown(input(), { key: "Enter" });
+    // The EVALUATOR's number, not the field's own parse and not the `value`
+    // prop it was seeded with.
+    await waitFor(() => expect(onCommitExpr).toHaveBeenCalledWith("w*2+5mm", 45));
     expect(onCommit).not.toHaveBeenCalled();
   });
 
-  it("clears the binding when a plain number is typed over it", () => {
-    const onCommit = vi.fn();
+  /* Enter can beat the 80 ms debounce, and the commit must still be the
+   * evaluator's number — never the stale one behind the field. */
+  it("flushes the pending evaluation when Enter arrives before the debounce", async () => {
+    await mockClient.upsertVariable("w", 20);
+    const { onCommitExpr } = renderBindable();
+    typeAndEnter("=w*2");
+    await waitFor(() => expect(onCommitExpr).toHaveBeenCalledWith("w*2", 40));
+  });
+
+  it("shows the evaluator's refusal inline and commits nothing", async () => {
+    const { onCommit, onCommitExpr } = renderBindable();
+    fireEvent.change(input(), { target: { value: "=gone*2" } });
+    await waitFor(() => expect(preview()).toHaveTextContent(/undefined variable/));
+
+    fireEvent.keyDown(input(), { key: "Enter" });
+    await waitFor(() => expect(input()).toHaveAttribute("aria-invalid", "true"));
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(onCommitExpr).not.toHaveBeenCalled();
+  });
+
+  /* The site dimension is what makes this a refusal instead of a silent 45 mm. */
+  it("refuses an ANGLE expression in a length field, inline", async () => {
+    const { onCommitExpr } = renderBindable();
+    fireEvent.change(input(), { target: { value: "=45deg" } });
+    await waitFor(() => expect(preview()).toHaveTextContent(/expected length/));
+    fireEvent.keyDown(input(), { key: "Enter" });
+    await waitFor(() => expect(input()).toHaveAttribute("aria-invalid", "true"));
+    expect(onCommitExpr).not.toHaveBeenCalled();
+  });
+
+  it("an ANGLE field evaluates at the angle site and previews degrees", async () => {
     const onCommitExpr = vi.fn();
     render(
-      <DimensionInput
-        value={25}
-        suffix="mm"
-        expr="height"
-        onCommit={onCommit}
-        onCommitExpr={onCommitExpr}
-      />,
+      <DimensionInput value={30} suffix="°" onCommit={vi.fn()} onCommitExpr={onCommitExpr} />,
     );
+    fireEvent.change(input(), { target: { value: "=15deg*3" } });
+    await waitFor(() => expect(preview()).toHaveTextContent("= 45°"));
+    fireEvent.keyDown(input(), { key: "Enter" });
+    await waitFor(() => expect(onCommitExpr).toHaveBeenCalledWith("15deg*3", 45));
+  });
+
+  it("clears the binding when a plain number is typed over it", () => {
+    const { onCommit, onCommitExpr } = renderBindable({ expr: "height" });
     typeAndEnter("40");
     expect(onCommitExpr).toHaveBeenCalledWith(null, 40);
     expect(onCommit).not.toHaveBeenCalled();
@@ -312,37 +386,97 @@ describe("DimensionInput — variable binding (WP-VE.2)", () => {
 
   /** Unbinding IS the edit, even when the number itself does not move. */
   it("clears the binding even when the typed number is unchanged", () => {
-    const onCommitExpr = vi.fn();
-    render(
-      <DimensionInput value={25} suffix="mm" expr="height" onCommit={vi.fn()} onCommitExpr={onCommitExpr} />,
-    );
+    const { onCommitExpr } = renderBindable({ expr: "height" });
     typeAndEnter("25");
     expect(onCommitExpr).toHaveBeenCalledWith(null, 25);
   });
 
-  /*
-   * A malformed binding must NOT fall through to the numeric parse and quietly
-   * re-commit the old number: the user asked for a binding and would get one
-   * silently ignored.
-   */
-  it("flashes an error on a malformed binding instead of committing anything", () => {
-    const onCommit = vi.fn();
-    const onCommitExpr = vi.fn();
-    render(
-      <DimensionInput value={25} suffix="mm" onCommit={onCommit} onCommitExpr={onCommitExpr} />,
-    );
-    typeAndEnter("=w * 2");
+  it("a bare `=` is refused rather than silently re-committing the old number", () => {
+    const { onCommit, onCommitExpr } = renderBindable();
+    typeAndEnter("=");
     expect(onCommit).not.toHaveBeenCalled();
     expect(onCommitExpr).not.toHaveBeenCalled();
     expect(input()).toHaveAttribute("aria-invalid", "true");
   });
 
   it("re-typing the SAME binding is a no-op, not a redundant edit", () => {
+    const { onCommitExpr } = renderBindable({ expr: "height" });
+    typeAndEnter("=height");
+    expect(onCommitExpr).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * The two authoring guardrails around "a bare number inside `=` is
+ * millimetres". They exist because that rule DISAGREES with the field's other
+ * rule — a bare number typed on its own is read in the display unit — and the
+ * disagreement is invisible while millimetres are displayed.
+ */
+describe("DimensionInput — expression unit guardrails", () => {
+  beforeEach(() => {
+    resetMockDocument();
+    setMockLatency(0);
+  });
+
+  it("commits `=2` through the PLAIN path, in the display unit, with no binding", async () => {
+    setUnit("in");
+    const onCommit = vi.fn();
+    const onCommitExpr = vi.fn();
+    render(
+      <DimensionInput value={25} suffix="mm" onCommit={onCommit} onCommitExpr={onCommitExpr} />,
+    );
+    typeAndEnter("=2");
+    // 2 INCHES — identical to typing `2`. A pure literal is never recorded as
+    // an expression, so the two spellings cannot mean different numbers.
+    expect(onCommit).toHaveBeenCalledWith(50.8);
+    expect(onCommitExpr).not.toHaveBeenCalled();
+    // …and it never opened the expression lane at all.
+    expect(screen.queryByTestId("dimension-expr-preview")).not.toBeInTheDocument();
+  });
+
+  it("a pure literal over a BOUND field unbinds it, in the display unit", () => {
+    setUnit("in");
     const onCommitExpr = vi.fn();
     render(
       <DimensionInput value={25} suffix="mm" expr="height" onCommit={vi.fn()} onCommitExpr={onCommitExpr} />,
     );
-    typeAndEnter("=height");
-    expect(onCommitExpr).not.toHaveBeenCalled();
+    typeAndEnter("=2");
+    expect(onCommitExpr).toHaveBeenCalledWith(null, 50.8);
+  });
+
+  it("previews a length in millimetres AND the display unit, and says bare numbers are mm", async () => {
+    setUnit("in");
+    await mockClient.upsertVariable("w", 20);
+    render(<DimensionInput value={25} suffix="mm" onCommit={vi.fn()} onCommitExpr={vi.fn()} />);
+
+    fireEvent.change(input(), { target: { value: "=w/2" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("dimension-expr-preview")).toHaveTextContent("= 10 mm (0.3937 in)"),
+    );
+    expect(screen.getByTestId("dimension-expr-hint")).toHaveTextContent(
+      "bare numbers inside = are millimetres",
+    );
+  });
+
+  it("shows no unit hint while millimetres are displayed — the two rules agree there", async () => {
+    await mockClient.upsertVariable("w", 20);
+    render(<DimensionInput value={25} suffix="mm" onCommit={vi.fn()} onCommitExpr={vi.fn()} />);
+    fireEvent.change(input(), { target: { value: "=w/2" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("dimension-expr-preview")).toHaveTextContent("= 10 mm"),
+    );
+    expect(screen.getByTestId("dimension-expr-preview")).not.toHaveTextContent("(");
+    expect(screen.queryByTestId("dimension-expr-hint")).not.toBeInTheDocument();
+  });
+
+  /* An ANGLE field has no display unit to disagree with, so it never nudges. */
+  it("shows no unit hint on an angle field", async () => {
+    setUnit("in");
+    render(<DimensionInput value={30} suffix="°" onCommit={vi.fn()} onCommitExpr={vi.fn()} />);
+    fireEvent.change(input(), { target: { value: "=30deg*1.5" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("dimension-expr-preview")).toHaveTextContent("= 45°"),
+    );
+    expect(screen.queryByTestId("dimension-expr-hint")).not.toBeInTheDocument();
   });
 });

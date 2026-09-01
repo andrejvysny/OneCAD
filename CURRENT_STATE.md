@@ -28,8 +28,18 @@ Last verified: 2026-09-01 — DAILY DRIVER v2 program started: WP0 hygiene commi
   e2e **496 / 0** (27.6 min) · kernelbench 136 unchanged · fmt/clippy/hex/hygiene/verifiers clean.
 - **Retracted plan claim:** `imports.rs` `unit_scale = 1.0` is correct — the STEP reader always
   converts to mm.
-- **Next:** WP-E expressions + units (design in the plan file: typed-path hash strip, variable-table
-  evaluation pass, canonical mm/deg bare literals with guardrails). Owed user input: the 2–3 dogfood
+- **WP-E expressions + units LANDED (third commit):** `=` expressions with arithmetic, chained
+  variables (cycle detection), unit suffixes (`mm cm m in deg rad`), trig-requires-an-angle;
+  bare literals inside `=` are canonical mm/deg with guardrails (live preview echoes the
+  display unit; a pure-literal `=2` stays display-unit); the expression STRING is stripped
+  from the planner hash and the wire (Opaque untouched; goldens unmoved); edit-time refusals
+  are edit-scoped; later breakage = `EXPR_UNRESOLVED` diagnostics, plan gated below the step;
+  `rename_variable` rewrites references as one undo step; detach clears placement bindings
+  (adversarial F1). Both lanes honest (TS port parity 64/64 on the shared 53-case fixture).
+  Full L3: ctest 160/160 · cargo 92/1426/0 · vitest 5413/0 · e2e 499/1→isolated 2/2 (known
+  ledger signature) · kernelbench 136 unchanged.
+- **Next:** WP-V section view (FE-only; stencil caps; `localClippingEnabled` + `stencil:true`;
+  design + review deltas in the plan file). Owed user input: the 2–3 dogfood
   parts for WP-X; `.clang-format` (`DisableFormat: true`) to neutralise the `auto-format.sh` hook;
   whether to push `3a82910` + the WP-C commit. Owed user-run gates unchanged (19-row checklist,
   Tauri sketch smoke, dirty vendor STEP for G4).
