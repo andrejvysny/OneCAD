@@ -133,21 +133,17 @@ pub struct RecoveryOffer {
     pub modified_ms: u64,
 }
 
-/// Writes (or overwrites) the session marker for the marker's document, atomically
-/// (tmp + rename). Creates the autosave directory if absent.
+/// Writes (or overwrites) the session marker for the marker's document, durably
+/// (tmp + `fsync` + rename + parent `fsync` — see [`super::durable_write`]).
+/// Creates the autosave directory if absent.
 ///
 /// # Errors
 /// [`IoError::Io`] on a filesystem failure.
 pub fn write_marker(app_data: &Path, marker: &SessionMarker) -> IoResult<()> {
-    let dir = autosave_dir(app_data);
-    std::fs::create_dir_all(&dir)?;
     let path = marker_path(app_data, marker.document_id);
     let bytes = serde_json::to_vec_pretty(marker)
         .map_err(|e| IoError::Io(format!("marker serialize: {e}")))?;
-    let tmp = path.with_extension("session.json.tmp");
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    super::durable_write(&path, &bytes)
 }
 
 /// Removes a document's session marker (a clean close). Absent marker is not an
@@ -300,6 +296,37 @@ mod tests {
             last_autosave: "2026-07-16T12:00:00Z".into(),
             title: Some("real".into()),
         }
+    }
+
+    /// A successful [`write_marker`] leaves the temp sibling cleaned up (consumed
+    /// by the rename) and the marker's on-disk bytes exactly match what was
+    /// authored — the durable-write shape (tmp + fsync + rename + parent fsync)
+    /// must not perturb the content it carries.
+    #[test]
+    fn write_marker_is_durable_and_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let id = DocumentId(Uuid::from_u128(0xFEED));
+        let m = marker(root, id, 4242);
+
+        write_marker(root, &m).unwrap();
+
+        let path = marker_path(root, id);
+        let temp = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(
+            !temp.exists(),
+            "the temp sibling must not survive a successful write"
+        );
+
+        let expected = serde_json::to_vec_pretty(&m).unwrap();
+        let actual = std::fs::read(&path).unwrap();
+        assert_eq!(
+            actual, expected,
+            "on-disk bytes match exactly what was authored"
+        );
     }
 
     #[test]

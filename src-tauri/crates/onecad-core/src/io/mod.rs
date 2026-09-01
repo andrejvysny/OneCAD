@@ -61,6 +61,9 @@ pub mod recovery;
 pub mod sketch_io;
 pub mod threemf;
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use thiserror::Error;
 
 /// Typed failures raised by the container IO layer.
@@ -183,4 +186,67 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex_lower(&hasher.finalize())
+}
+
+/// Durably writes `bytes` to `path`: a same-directory temp file, `fsync`, an
+/// atomic `rename` over the target, then an `fsync` of the parent directory so the
+/// rename itself survives a crash (durability of `rename` on macOS/Linux). The
+/// temp file is removed on any failure along the way, so a caller never observes a
+/// half-written `path`, nor an orphaned temp from the attempt itself.
+///
+/// Shared by [`recovery::write_marker`] and the app crate's `recents.json`
+/// writer — anything persisting a small JSON blob outside the ZIP-container
+/// writer ([`container::ContainerWriter`], which streams its archive straight
+/// into the temp file and has its own copy of this same shape for that reason).
+///
+/// # Errors
+/// [`IoError::Io`] on any filesystem failure.
+pub fn durable_write(path: &Path, bytes: &[u8]) -> IoResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp = temp_sibling(path);
+
+    if let Err(e) = write_and_sync(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    fsync_dir(parent);
+    Ok(())
+}
+
+/// Writes `bytes` to `path` and `fsync`s the file (durable content, before the
+/// caller renames it into place).
+fn write_and_sync(path: &Path, bytes: &[u8]) -> IoResult<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// A sibling temp path for `path` (`<name>.tmp`).
+fn temp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    path.with_file_name(format!("{name}.tmp"))
+}
+
+/// fsyncs a directory so a rename inside it is durable (macOS/Unix). A no-op on
+/// other platforms (Windows renames are durable without this).
+fn fsync_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        if let Ok(f) = std::fs::File::open(dir) {
+            let _ = f.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
 }

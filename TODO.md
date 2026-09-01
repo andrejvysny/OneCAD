@@ -1,5 +1,111 @@
 # OneCAD-Tauri Migration TODO
 
+## DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
+
+Program chosen with the user after a full state review, a Codex brainstorm (gpt-5.6-sol/high)
+and a local adversarial plan review (verdict `revise`, all deltas folded). Order:
+**WP0 hygiene → WP-C vendor STEP components → WP-E expressions+units → WP-V section view →
+WP-T1 cosmetic threaded holes → WP-P project edges → WP-S sweep → WP-T2 modelled threads →
+WP-L loft → WP-X dogfood exit gate.** One master commit per WP gate; Loft is the first cut if
+the program slips, then T2. The plan file holds every WP design, the review deltas and the
+per-WP test lists; this section is the gate ledger.
+
+**Decisions recorded (user-visible, 2026-09-01):**
+- **Sweep and Loft are APPROVED** — reverses the 2026-08-15 and 2026-08-20 declines. V1: sweep
+  path = a second sketch's single open Line/Arc chain, fixed-binormal frame, tube profiles
+  supported, `transitionMode` exposed; loft = 2–8 sections, `CheckCompatibility` allowed
+  (circle→square), per-section `seamHint`, no closed loft. Both Tier B, boolean modes via
+  `targetBodyId` (Extrude's exact serde form).
+- **Threads:** cosmetic default + modelled; `HoleParams.thread?` persists resolved facts
+  (`standard, designation, majorDiameterMm, pitchMm, tapDrillMm, depthMm, detail`), chamfer
+  serde form (hash-neutral when absent), right-hand single-start only, modelled capped at 40
+  turns. T1 ships cosmetic; T2 (after Sweep) ships modelled.
+- **Expressions:** `+ - * / ^ ( )`, refs with chaining + cycle detection, `sin cos tan asin acos
+  atan sqrt abs floor ceil round min max` (trig REQUIRES an Angle argument), adjacent unit
+  suffixes `mm cm m in deg rad`. **Bare literals inside an `=` expression are canonical mm/deg**
+  (stored expressions never depend on a UI preference) with guardrails: live preview echoes the
+  resolved value in the display unit, a pure-literal `=2` is treated as the plain display-unit
+  path, inline hint under non-mm units. The expression STRING is stripped from the planner hash
+  on the typed path (`Operation::Opaque` untouched). `rename_variable` rewrites references
+  token-wise. Sketch-dimension expressions stay deferred (WP-VE.3).
+- **Project edges:** frozen snapshot + loud `PROJECTION_STALE` warning comparing PROJECTED UV
+  geometry; regen never blocks; actions Update / Detach; B-spline sources refused by name;
+  edge-on circles project to a line segment; binding stored SKETCH-level (`Sketch.projections`).
+- **Section view:** stencil caps, WebGL only (disabled under experimental WebGPU), one union
+  cap quad unpickable in V1, caps not drawn while a sketch is active, picker filters clipped
+  hits then takes the first survivor.
+- **Keymap (frozen-contract change):** Sweep `⇧S`, Loft `⇧L`, Section `⇧X`, Project edges
+  (sketch) `j`; Sweep/Loft join `NO_CROSS_MODE_CONTRACT`. All verified free 2026-09-01.
+- **WP-C vendor STEP components:** user-library ingestion only (CLI + FE bulk import; `STEP/`
+  stays untracked, `STEP/ingest.toml` tracked; NO built-in seeding — vendor licences
+  unverified); aluminium profiles become a length-parametric `profile` source kind (wire
+  change); multi-solid parts (NEMA17 67 solids, SG90 18 solids) ingest by keep-list + fuse to
+  ONE solid (spec §9 unchanged).
+- **Dogfood exit gate:** the user supplies 2–3 real parts; default proposals are a NEMA17 mount
+  on a 20×20 Rollco frame and an SG90 bracket, both on WP-C's ingested parts.
+
+**State findings at program start (measured 2026-09-01):**
+- Four commits (`cb01856`, `bb70e1f`, `d572d66`, `e0cff2e`) were UNPUSHED; CI had never seen
+  WP6, the residuals wave or entityStates. Pushed in WP0 (user-authorized).
+- The staged sidecar was STALE: `src-tauri/binaries/onecad-worker-aarch64-apple-darwin`
+  (2026-08-24 16:44, sha `adf62589…`) carried no `entityStates` strings while
+  `worker/build/onecad-worker` (18:38, sha `805c7b5d…`) did — `CURRENT_STATE.md`'s "sidecar
+  restaged and current" held for Phase 1 only. Every recorded cargo gate used
+  `ONECAD_WORKER_PATH`, so the numbers stand; a package built before WP0 would have shipped a
+  worker without entityStates. Restaged in WP0.
+- `imports.rs:405` hardcodes `unit_scale = 1.0` (the STEP header unit is inspected and only
+  logged) — inch-authored vendor files silently mis-scale. Fixed in WP-C.
+
+### WP0 — hygiene (in flight)
+- [x] Restage sidecar (`build-worker.sh Release`, OCCT 8.0.1, selftest exit 0, 2026-09-01 14:57): staged sha `805c7b5d…` == `worker/build` sha; `strings | grep -c entityStates` = 1.
+- [x] `git push origin master` (`fea00a0..e0cff2e`, user-authorized 2026-09-01); CI run 33510678029 started on `e0cff2e` — outcome recorded below when it lands.
+- [x] Autosave durability trio LANDED (orchestrator-reviewed): new `onecad_core::io::
+      durable_write` (same-dir temp → `sync_all` → rename → parent fsync, temp removed on failure;
+      the container writer keeps its own streaming copy of the shape — it cannot take a byte
+      slice without materialising up to 4 GB); `write_marker` and `recents::store_at` use it. A
+      corrupt `recents.json` is renamed `recents.json.corrupt-<unix_seconds>` (orchestrator fix:
+      `-<n>` suffix on a same-second collision — the implementer's first version left the corrupt
+      file in place, which the next store would have destroyed; test updated to prove both files
+      survive). `AutosaveEvent` gains `error?`; `autosave_current` keeps its frozen `None`-on-
+      failure contract (RC-10 pin `a_failed_marker_write_fails_the_whole_autosave`) and a sibling
+      `autosave_current_reporting` feeds the two emitting call sites; `tauriClient` subscribes
+      `EVT.autosave` and raises a sticky `Autosave failed: …` hint, cleared only by a later success
+      and only if it is the hint showing.
+- **WP0 gate (measured on the main thread, suites alone, teed; rung L2+ — Rust + FE unit lanes;
+  no Playwright: the only UI-visible change is a Tauri-event hint the mock lane cannot raise):**
+  `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -- -D warnings` clean ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **90 targets / 1347 passed / 0
+  failed / 0 ignored** · `bunx tsc --noEmit` clean · `bun run test` **305 files / 5264 passed / 78
+  skipped / 0 failed** · hex 0. CI on `e0cff2e` at commit time: 9 jobs green (`frontend`,
+  `rust-8.0.1`, `worker-8.0.1`, `e2e-chromium`, `e2e-webkit`, `occt-fingerprint`, both
+  persistence jobs, OCCT build); `linux-worker` (self-hosted) and `tauri-composition` still
+  queued — recorded when they land.
+- [x] Regen timing split LANDED (orchestrator-reviewed): `RegenTimings{planner_ms, worker_ms,
+      mesh_ms}` on `RegenReport` + the unchanged `"regen.drive: done"` line (`grep 'regen:'`
+      still matches). Stopwatch lives in the app-layer `AdoptingEngine` (`worker/mod.rs`
+      `EngineClock`), not in `onecad-core`. **`mesh_ms` is the `ExecutePlan` post-ops window**
+      (last `planStep` → terminal prepare — where the worker tessellates inline; the wire
+      carries no per-verb worker timing, so a true tessellation timer needs a SCHEMA field —
+      deferred), `worker_ms` = dispatch → last `planStep` + `RestoreCheckpoint` +
+      `AcceptPrepared`. New `src-tauri/tests/perf_baseline.rs` (real worker, 60×60×30 block +
+      19 blind pockets = 40 steps, 20 sketches + 20 extrudes, no element refs).
+      **Baseline (2026-09-01, quiet machine, unoptimized Rust + Release worker):**
+      ```
+      case                       | features | planner_ms | worker_ms | mesh_ms | elapsed_ms | triangles
+      cold replay from 0         |       40 |         65 |       416 |       6 |      489.1 |       316
+      edit step 3 (pocket 1)     |       40 |         64 |       407 |       5 |      478.1 |       316
+      edit step 21 (pocket 10)   |       40 |         65 |       408 |       5 |      479.9 |       316
+      edit step 39 (pocket 19)   |       40 |         64 |       406 |       5 |      477.7 |       316
+      ```
+      **FINDING (daily-driver relevant, not fixed here): an edit costs the same wherever it
+      sits — every edit replays from step 0.** `RegenPlanner::plan_with_ceiling` starts at
+      the restore checkpoint or 0, and a checkpoint is minted only by `take_checkpoint_at_head`
+      on explicit save; with no checkpoint below the dirty floor, editing step 39 re-executes
+      all 40 steps (~10 ms/step here; fillet-heavy histories will be far worse). Candidate
+      for the next program: automatic in-session checkpoints at a stride (or before the
+      edited step) — a policy change with fencing implications, not a WP0 item.
+- [ ] Ask the user for the dogfood parts; `docs/qa/dogfood/README.md`.
+
 ## WP6 + SKETCH RESIDUALS + PER-ENTITY DOF (2026-08-24, plan `~/.claude/plans/act-as-senior-software-purrfect-moler.md`)
 
 Three phases chosen with the user: Phase 1 kernel WP6 small-caliber batch (closes § KERNEL

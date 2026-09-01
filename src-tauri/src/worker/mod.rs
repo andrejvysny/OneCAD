@@ -19,7 +19,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -705,6 +707,9 @@ pub fn validate_created(
 pub struct AdoptingEngine {
     inner: Arc<dyn GeometryEngine>,
     existing: HashSet<BodyId>,
+    /// Where the wrapper books how long the worker took, when the caller asked for a
+    /// timing split. `None` ⇒ no measurement (every non-regen caller).
+    clock: Option<Arc<EngineClock>>,
 }
 
 impl AdoptingEngine {
@@ -712,8 +717,74 @@ impl AdoptingEngine {
     /// the scratch base's `existing` bodies.
     #[must_use]
     pub fn new(inner: Arc<dyn GeometryEngine>, existing: HashSet<BodyId>) -> Self {
-        Self { inner, existing }
+        Self {
+            inner,
+            existing,
+            clock: None,
+        }
     }
+
+    /// Books this engine's worker round trips into `clock` (see [`EngineClock`]).
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<EngineClock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+}
+
+/// Nanosecond accumulators for ONE regen's worker work, filled by
+/// [`AdoptingEngine`] while the runtime lock is released and read once — after the
+/// executor returns — by the phase-2 driver that owns them.
+///
+/// Measurement only: nothing branches on these numbers and no budget is asserted.
+/// Plain relaxed atomics because the engine's calls are issued from the executor's
+/// task while the reader waits on that same executor.
+#[derive(Debug, Default)]
+pub struct EngineClock {
+    exec_ns: AtomicU64,
+    mesh_ns: AtomicU64,
+}
+
+impl EngineClock {
+    /// Worker round-trip time: the `ExecutePlan` op window (dispatch → the LAST
+    /// `planStep`) plus the `RestoreCheckpoint` and `AcceptPrepared` calls.
+    #[must_use]
+    pub fn exec_ns(&self) -> u64 {
+        self.exec_ns.load(Ordering::Relaxed)
+    }
+
+    /// The `ExecutePlan` **post-ops** window: last `planStep` → terminal prepare.
+    ///
+    /// That window is where the worker tessellates every prepared body and ships the
+    /// MESH1 blobs in the terminal's binary tail (SCHEMA §7.2 `artifacts.tessellate`),
+    /// so it is the mesh cost this side of the wire can attribute — the wire carries
+    /// no per-verb worker timing. A plan that emits no step at all books its whole
+    /// round trip to [`exec_ns`](Self::exec_ns) instead.
+    #[must_use]
+    pub fn mesh_ns(&self) -> u64 {
+        self.mesh_ns.load(Ordering::Relaxed)
+    }
+
+    fn add_exec(&self, d: Duration) {
+        self.exec_ns.fetch_add(nanos(d), Ordering::Relaxed);
+    }
+
+    /// Splits one `ExecutePlan` round trip at its last `planStep`.
+    fn book_plan(&self, dispatched: Instant, last_step: Option<Instant>, terminal: Instant) {
+        match last_step {
+            Some(step) => {
+                self.add_exec(step - dispatched);
+                self.mesh_ns
+                    .fetch_add(nanos(terminal - step), Ordering::Relaxed);
+            }
+            None => self.add_exec(terminal - dispatched),
+        }
+    }
+}
+
+/// A duration in nanoseconds, saturating at `u64::MAX` (~584 years).
+fn nanos(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[async_trait]
@@ -727,13 +798,25 @@ impl GeometryEngine for AdoptingEngine {
         // Derived here (before `request` is consumed), so a re-planned retry over the
         // same engine validates against the ops it actually executes.
         let known: HashSet<Uuid> = request.ops.iter().map(|o| o.record_id.as_uuid()).collect();
+        let dispatched = Instant::now();
         let mut inner_rx = self.inner.execute_plan(request).await;
         let (tx, rx) = mpsc::channel(256);
         let existing = self.existing.clone();
+        let clock = self.clock.clone();
         tokio::spawn(async move {
             let mut seen: HashSet<BodyId> = HashSet::new();
             let mut violation: Option<String> = None;
+            // Frame-arrival timestamps for the op/mesh split (see `EngineClock`).
+            let mut last_step: Option<Instant> = None;
             while let Some(ev) = inner_rx.recv().await {
+                if let Some(clock) = &clock {
+                    match &ev {
+                        PlanEvent::Step(_) => last_step = Some(Instant::now()),
+                        PlanEvent::Prepared(_) | PlanEvent::Failed(_) => {
+                            clock.book_plan(dispatched, last_step, Instant::now());
+                        }
+                    }
+                }
                 // Validate `created` ids on each step until a violation is latched.
                 if violation.is_none() {
                     if let PlanEvent::Step(step) = &ev {
@@ -784,7 +867,12 @@ impl GeometryEngine for AdoptingEngine {
         job_id: JobId,
         fencing: Fencing,
     ) -> Result<AcceptResult, EngineError> {
-        self.inner.accept_prepared(job_id, fencing).await
+        let started = Instant::now();
+        let accepted = self.inner.accept_prepared(job_id, fencing).await;
+        if let Some(clock) = &self.clock {
+            clock.add_exec(started.elapsed());
+        }
+        accepted
     }
     async fn discard_prepared(&self, job_id: JobId) -> Result<(), EngineError> {
         self.inner.discard_prepared(job_id).await
@@ -799,7 +887,12 @@ impl GeometryEngine for AdoptingEngine {
         self.inner.save_checkpoint(step_index).await
     }
     async fn restore_checkpoint(&self, req: RestoreRequest) -> Result<RestoreResult, EngineError> {
-        self.inner.restore_checkpoint(req).await
+        let started = Instant::now();
+        let restored = self.inner.restore_checkpoint(req).await;
+        if let Some(clock) = &self.clock {
+            clock.add_exec(started.elapsed());
+        }
+        restored
     }
     async fn acquire_element_ids(
         &self,

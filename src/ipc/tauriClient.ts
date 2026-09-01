@@ -43,6 +43,7 @@ import type { CadClient } from "./client";
 import { parseOperationDiagnostics } from "./operationDiagnostics";
 import type {
   ApplyOperationResult,
+  AutosaveEvent,
   BeginGestureResult,
   ClassifyResult,
   ComponentParamValue,
@@ -222,6 +223,7 @@ const EVT = {
   workerStatus: "worker-status",
   needsRepair: "needs-repair",
   closeRequested: "close-requested",
+  autosave: "autosave",
 } as const;
 
 /** Local lane bookkeeping latency; exact Tauri L2 geometry comes from PreviewOp. */
@@ -740,6 +742,30 @@ export function createTauriClient(): CadClient {
     for (const cb of [...closeRequestedListeners]) cb();
   }
 
+  /**
+   * Prefix of the sticky status-bar hint {@link onAutosaveEvent} raises for a
+   * FAILED autosave attempt. Exported-in-spirit like `REGEN_FAILED_HINT_PREFIX`
+   * above — a later successful autosave clears exactly this hint and no other.
+   */
+  const AUTOSAVE_FAILED_HINT_PREFIX = "Autosave failed: ";
+
+  function onAutosaveEvent(ev: AutosaveEvent): void {
+    if (ev.error !== undefined) {
+      traceWarn("ipc", `autosave: write failed at ${ev.path}: ${ev.error}`);
+      viewportStore.getState().setStatusHint(`${AUTOSAVE_FAILED_HINT_PREFIX}${ev.error}`, {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    trace("ipc", `autosave: wrote ${ev.path}`);
+    // Only a later SUCCESS clears the failure hint, and only OUR hint — the
+    // exitIsolate/regen-finished discipline (never stomp an unrelated prompt).
+    if (viewportStore.getState().statusHint?.message.startsWith(AUTOSAVE_FAILED_HINT_PREFIX)) {
+      viewportStore.getState().setStatusHint(null);
+    }
+  }
+
   /** Await the correlated regen completion for a commit. Register BEFORE invoking
    *  (so no event is missed), then `setTarget(R)` once the projection revision is
    *  known. `recordId` (a fresh AddOperation) opts into the failedSteps / affectedBodies
@@ -815,6 +841,7 @@ export function createTauriClient(): CadClient {
           await listen<WorkerStatus>(EVT.workerStatus, (e) => onWorkerStatusEvent(e.payload)),
           await listen<NeedsRepairEvent>(EVT.needsRepair, (e) => onNeedsRepairEvent(e.payload)),
           await listen<void>(EVT.closeRequested, () => onCloseRequestedEvent()),
+          await listen<AutosaveEvent>(EVT.autosave, (e) => onAutosaveEvent(e.payload)),
         );
         return true;
       } catch (e) {

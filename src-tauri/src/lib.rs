@@ -316,9 +316,12 @@ pub fn run() {
                     let Some(app_data) = autosave::autosave_root(&app) else {
                         return;
                     };
-                    if let Some(ev) =
-                        autosave::autosave_current(&state.runtime, &app_data, &state.persistence)
-                            .await
+                    if let Some(ev) = autosave::autosave_current_reporting(
+                        &state.runtime,
+                        &app_data,
+                        &state.persistence,
+                    )
+                    .await
                     {
                         let _ = app.emit(events::AUTOSAVE, &ev);
                     }

@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use onecad_core::io::container;
+use onecad_core::io::{container, durable_write};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -55,29 +55,65 @@ fn recents_file(app: &AppHandle) -> Option<PathBuf> {
         .map(|d| d.join("recents.json"))
 }
 
-/// Loads the persisted entries at `recents_path` (missing / corrupt file ⇒ empty).
+/// Loads the persisted entries at `recents_path`.
+///
+/// - Missing file ⇒ empty.
+/// - Present but unparseable ⇒ [`quarantine_corrupt`] preserves the bytes (never
+///   silently discarded, never later clobbered by [`store_at`]) and this returns
+///   empty, so the caller starts a fresh list.
 fn load_at(recents_path: &Path) -> Vec<RecentEntry> {
     let Ok(bytes) = std::fs::read(recents_path) else {
         return Vec::new();
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
-}
-
-/// Atomically writes `entries` to `recents_path` (temp file + rename), creating
-/// its parent dir if needed. Best-effort: a write failure is swallowed (recents
-/// are non-critical).
-fn store_at(recents_path: &Path, entries: &[RecentEntry]) {
-    if let Some(parent) = recents_path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
+    match serde_json::from_slice(&bytes) {
+        Ok(entries) => entries,
+        Err(e) => {
+            quarantine_corrupt(recents_path, &e);
+            Vec::new()
         }
     }
+}
+
+/// Renames an unparseable `recents.json` aside to `recents.json.corrupt-<unix
+/// seconds>` (or `…-<unix seconds>-<n>` when that name is taken), so the next
+/// [`store_at`] — which only ever targets `recents_path` itself — can never
+/// overwrite the evidence. An existing `.corrupt-*` sibling is never clobbered
+/// either: a free name is always chosen. If the rename itself fails, the corrupt
+/// file is left in place and only logged (losing it would be worse than leaving
+/// stale junk on disk).
+fn quarantine_corrupt(recents_path: &Path, parse_err: &serde_json::Error) {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = format!("recents.json.corrupt-{now_secs}");
+    let mut quarantined = recents_path.with_file_name(&base);
+    let mut n = 1u32;
+    while quarantined.exists() {
+        quarantined = recents_path.with_file_name(format!("{base}-{n}"));
+        n += 1;
+    }
+    match std::fs::rename(recents_path, &quarantined) {
+        Ok(()) => tracing::warn!(
+            "recents.json was corrupt ({parse_err}); original preserved at {}",
+            quarantined.display()
+        ),
+        Err(rename_err) => tracing::warn!(
+            "recents.json is corrupt ({parse_err}) and could not be quarantined ({rename_err}); left in place"
+        ),
+    }
+}
+
+/// Durably (tmp + `fsync` + rename + parent `fsync`) writes `entries` to
+/// `recents_path`, creating its parent dir if needed. Best-effort: a write
+/// failure is logged and swallowed (recents are non-critical, unlike the
+/// document itself).
+fn store_at(recents_path: &Path, entries: &[RecentEntry]) {
     let Ok(json) = serde_json::to_vec_pretty(entries) else {
         return;
     };
-    let tmp = recents_path.with_extension("json.tmp");
-    if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, recents_path);
+    if let Err(e) = durable_write(recents_path, &json) {
+        tracing::warn!("recents.json write failed: {e}");
     }
 }
 
@@ -394,5 +430,93 @@ mod tests {
         assert!(remove_at(&recents_path, &path).is_err());
         let entries = load_at(&recents_path);
         assert_eq!(entries.len(), 1);
+    }
+
+    /// Finds the single `recents.json.corrupt-*` sibling next to `recents_path`
+    /// (panics if there isn't exactly one — the tests below only ever produce one).
+    fn find_quarantine_file(recents_path: &Path) -> PathBuf {
+        let dir = recents_path.parent().unwrap();
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("recents.json.corrupt-"))
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "expected exactly one quarantine file");
+        found.pop().unwrap()
+    }
+
+    #[test]
+    fn a_corrupt_recents_json_is_quarantined_and_never_overwritten_by_the_next_store() {
+        let scratch = tempfile::tempdir().unwrap();
+        let recents_path = scratch.path().join("recents.json");
+        let dir = tempfile::tempdir().unwrap();
+
+        // 3 valid entries.
+        for name in ["A", "B", "C"] {
+            let p = dir.path().join(format!("{name}.onecad"));
+            touch(&p);
+            record_at(&recents_path, &p);
+        }
+        assert_eq!(load_at(&recents_path).len(), 3);
+
+        // Corrupt it in place (simulating a torn/partial write from before this
+        // durability fix).
+        let corrupt_bytes: &[u8] = b"{ this is not valid json at all";
+        std::fs::write(&recents_path, corrupt_bytes).unwrap();
+
+        // Load returns empty AND the corrupt bytes survive untouched at a
+        // `.corrupt-*` sibling.
+        assert!(load_at(&recents_path).is_empty());
+        let quarantine = find_quarantine_file(&recents_path);
+        assert_eq!(std::fs::read(&quarantine).unwrap(), corrupt_bytes);
+
+        // Store 1 fresh entry: recents.json holds exactly that entry, and the
+        // quarantine file is untouched.
+        let fresh = dir.path().join("D.onecad");
+        touch(&fresh);
+        record_at(&recents_path, &fresh);
+        let entries = load_at(&recents_path);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "D");
+        assert_eq!(
+            std::fs::read(&quarantine).unwrap(),
+            corrupt_bytes,
+            "the quarantine file must survive the next store untouched"
+        );
+    }
+
+    #[test]
+    fn quarantine_never_clobbers_an_existing_corrupt_file_at_the_same_second() {
+        let scratch = tempfile::tempdir().unwrap();
+        let recents_path = scratch.path().join("recents.json");
+
+        std::fs::write(&recents_path, b"first corruption").unwrap();
+        assert!(load_at(&recents_path).is_empty());
+        let first = find_quarantine_file(&recents_path);
+        assert_eq!(std::fs::read(&first).unwrap(), b"first corruption");
+
+        // A second corruption event in the same wall-clock second: the base name
+        // collides, so a `-<n>` suffix is chosen — BOTH corrupt files survive and
+        // `recents.json` is gone, so the next store cannot destroy either.
+        std::fs::write(&recents_path, b"second corruption").unwrap();
+        quarantine_corrupt(
+            &recents_path,
+            &serde_json::from_slice::<Vec<RecentEntry>>(b"x").unwrap_err(),
+        );
+        assert!(
+            !recents_path.exists(),
+            "the corrupt file must be moved aside"
+        );
+        assert_eq!(std::fs::read(&first).unwrap(), b"first corruption");
+        let second = first.with_file_name(format!(
+            "{}-1",
+            first.file_name().unwrap().to_string_lossy()
+        ));
+        assert_eq!(std::fs::read(&second).unwrap(), b"second corruption");
     }
 }

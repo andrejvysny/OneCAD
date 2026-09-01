@@ -2271,6 +2271,50 @@ describe("tauriClient sticky rebuild-failure hint", () => {
   });
 });
 
+// ── autosave event → sticky failure hint ───────────────────────────────────────
+
+describe("tauriClient autosave failure hint", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("a failure payload raises a sticky error hint naming the failure", async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    createTauriClient();
+    await flush();
+
+    await emit("autosave", { path: "/tmp/doc.onecad", atMs: 1, error: "disk full" });
+    await flush();
+
+    const hint = viewportStore.getState().statusHint;
+    expect(hint).toMatchObject({ severity: "error", sticky: true });
+    expect(hint?.message).toBe("Autosave failed: disk full");
+  });
+
+  it("a later success payload clears the hint", async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    createTauriClient();
+    await flush();
+
+    await emit("autosave", { path: "/tmp/doc.onecad", atMs: 1, error: "disk full" });
+    await flush();
+    expect(viewportStore.getState().statusHint?.message).toBe("Autosave failed: disk full");
+
+    await emit("autosave", { path: "/tmp/doc.onecad", atMs: 2 });
+    await flush();
+    expect(viewportStore.getState().statusHint).toBeNull();
+  });
+
+  it("a success payload never clears an unrelated sticky hint", async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    createTauriClient();
+    await flush();
+
+    viewportStore.getState().setStatusHint("Isolation on — Esc or ⇧I to exit", { sticky: true });
+    await emit("autosave", { path: "/tmp/doc.onecad", atMs: 1 });
+    await flush();
+    expect(viewportStore.getState().statusHint?.message).toContain("Isolation");
+  });
+});
+
 // ── Correlation reset on document replacement (finding 3) ─────────────────────
 
 describe("tauriClient correlation reset on document replacement", () => {

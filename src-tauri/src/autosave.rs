@@ -92,15 +92,20 @@ pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_secs(30);
 pub const AUTOSAVE_MAX_AGE: Duration =
     Duration::from_secs(onecad_core::io::recovery::AUTOSAVE_INTERVAL_SECS);
 
-/// One completed autosave — the payload of the [`events::AUTOSAVE`](crate::events::AUTOSAVE)
-/// event (`{path, atMs}`).
+/// One autosave ATTEMPT — the payload of the [`events::AUTOSAVE`](crate::events::AUTOSAVE)
+/// event (`{path, atMs, error?}`). `error` absent ⇒ the container + marker were
+/// written; present ⇒ the write at `path` was attempted and failed (`path` is the
+/// INTENDED target, not a written one) — see [`autosave_current_reporting`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutosaveEvent {
-    /// The autosave container that was written (absolute path).
+    /// The autosave container written, or (on failure) the one that was attempted.
     pub path: String,
-    /// Wall-clock time of the write, in Unix-epoch milliseconds.
+    /// Wall-clock time of the write attempt, in Unix-epoch milliseconds.
     pub at_ms: u64,
+    /// Why the attempt failed. Absent on a completed autosave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The app-data root the autosave layout lives under
@@ -137,10 +142,26 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// The outcome of one [`attempt`] — richer than [`autosave_current`]'s collapsed
+/// `Option`, so a caller that surfaces autosave state to the user can tell "there
+/// was nothing to do" from "we tried and it broke".
+enum AutosaveAttempt {
+    /// No document open, or the open one is not dirty — nothing was attempted.
+    Skipped,
+    /// The container + marker were written.
+    Written(AutosaveEvent),
+    /// A write was attempted and failed (already logged); `AutosaveEvent.error`
+    /// carries why and `AutosaveEvent.path` is the target that was attempted.
+    Failed(AutosaveEvent),
+}
+
 /// Writes an autosave container + refreshes the session crash marker for the
 /// currently-open document. Returns the [`AutosaveEvent`], or `None` when **no
 /// document is open**, when the document is **not dirty**, or when the write
-/// failed (logged).
+/// failed (logged) — the frozen contract `tests/recovery_hardening.rs` RC-10 pins:
+/// a failed attempt must never be mistaken for a completed one. Callers that also
+/// need to SURFACE a failure (rather than merely never report a false success) use
+/// [`autosave_current_reporting`] instead — both share [`attempt`].
 ///
 /// ## Why the dirty gate
 ///
@@ -158,20 +179,49 @@ pub fn pid_alive(pid: u32) -> bool {
 ///
 /// The document's live save path and dirty flag are untouched (this is a recovery
 /// snapshot, not a real save — see [`DocumentRuntime::build_save_payload`]).
-///
-/// **Off the runtime lock.** The lock is held only for the
-/// [`SavePayload`](crate::document_runtime::SavePayload) snapshot; the container
-/// write runs on a blocking thread under `lane` (see the module docs), and the join
-/// handle is **awaited** — `None` is this function's failure contract, and a
-/// detached write would both break it and let two writers race one target path.
-///
-/// The marker is written only after a successful container write, and under the same
-/// `lane` acquisition, so a marker never advertises an autosave that does not exist.
 pub async fn autosave_current(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
     lane: &Mutex<()>,
 ) -> Option<AutosaveEvent> {
+    match attempt(runtime, app_data, lane).await {
+        AutosaveAttempt::Written(ev) => Some(ev),
+        AutosaveAttempt::Skipped | AutosaveAttempt::Failed(_) => None,
+    }
+}
+
+/// Same as [`autosave_current`], except a FAILED attempt is also reported (as an
+/// [`AutosaveEvent`] carrying `error`) rather than collapsed to `None`. Used by the
+/// debounced [`run`] driver and the window-blur flush — the two call sites that
+/// actually emit [`events::AUTOSAVE`](crate::events::AUTOSAVE) to the frontend —
+/// so a broken autosave is visible instead of silently absent.
+pub async fn autosave_current_reporting(
+    runtime: &Mutex<Option<DocumentRuntime>>,
+    app_data: &Path,
+    lane: &Mutex<()>,
+) -> Option<AutosaveEvent> {
+    match attempt(runtime, app_data, lane).await {
+        AutosaveAttempt::Written(ev) | AutosaveAttempt::Failed(ev) => Some(ev),
+        AutosaveAttempt::Skipped => None,
+    }
+}
+
+/// The shared attempt logic — see [`autosave_current`] for the gate/lock-order
+/// contract both public wrappers rely on.
+///
+/// **Off the runtime lock.** The lock is held only for the
+/// [`SavePayload`](crate::document_runtime::SavePayload) snapshot; the container
+/// write runs on a blocking thread under `lane` (see the module docs), and the join
+/// handle is **awaited** — a detached write would let two writers race one target
+/// path.
+///
+/// The marker is written only after a successful container write, and under the same
+/// `lane` acquisition, so a marker never advertises an autosave that does not exist.
+async fn attempt(
+    runtime: &Mutex<Option<DocumentRuntime>>,
+    app_data: &Path,
+    lane: &Mutex<()>,
+) -> AutosaveAttempt {
     let now = now_rfc3339();
     let meta = SaveMeta {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -186,9 +236,11 @@ pub async fn autosave_current(
     //    "paint at open" caches belong to an explicit save.
     let (payload, doc_id, opened, title) = {
         let mut guard = runtime.lock().await;
-        let rt = guard.as_mut()?; // no document open ⇒ zero autosave activity.
+        let Some(rt) = guard.as_mut() else {
+            return AutosaveAttempt::Skipped; // no document open.
+        };
         if !rt.is_dirty() {
-            return None; // nothing at risk ⇒ no container, no marker, no offer.
+            return AutosaveAttempt::Skipped; // nothing at risk.
         }
         let doc_id = rt.document_uuid();
         let opened = rt.path().map(Path::to_path_buf);
@@ -200,13 +252,13 @@ pub async fn autosave_current(
             title,
         )
     };
+    let path = autosave_path(app_data, doc_id);
 
     // The marker writer creates the dir, but the container writer needs it first.
     if let Err(e) = std::fs::create_dir_all(autosave_dir(app_data)) {
         tracing::warn!("autosave: create dir failed: {e}");
-        return None;
+        return AutosaveAttempt::Failed(failed_event(&path, format!("create dir: {e}")));
     }
-    let path = autosave_path(app_data, doc_id);
 
     // ── Persistence lane: container write + marker, serialized against an
     //    explicit save's write + recovery clearing (M2/M3). ──
@@ -218,11 +270,11 @@ pub async fn autosave_current(
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             tracing::warn!("autosave: write container failed: {e}");
-            return None;
+            return AutosaveAttempt::Failed(failed_event(&path, format!("write container: {e}")));
         }
         Err(e) => {
             tracing::warn!("autosave: write task did not complete: {e}");
-            return None;
+            return AutosaveAttempt::Failed(failed_event(&path, format!("write task: {e}")));
         }
     }
     let marker = SessionMarker {
@@ -241,12 +293,22 @@ pub async fn autosave_current(
         if let Err(e) = std::fs::remove_file(&path) {
             tracing::warn!("autosave: rollback of {path:?} failed: {e}");
         }
-        return None;
+        return AutosaveAttempt::Failed(failed_event(&path, format!("write marker: {e}")));
     }
-    Some(AutosaveEvent {
+    AutosaveAttempt::Written(AutosaveEvent {
         path: path.to_string_lossy().into_owned(),
         at_ms: now_ms(),
+        error: None,
     })
+}
+
+/// An [`AutosaveEvent`] describing a failed attempt at `path`.
+fn failed_event(path: &Path, message: String) -> AutosaveEvent {
+    AutosaveEvent {
+        path: path.to_string_lossy().into_owned(),
+        at_ms: now_ms(),
+        error: Some(message),
+    }
 }
 
 /// The explicit save's **persistence half**: container write (off the runtime lock,
@@ -352,7 +414,7 @@ pub async fn run<F>(
                 }
             }
         }
-        if let Some(ev) = autosave_current(&runtime, &app_data, &lane).await {
+        if let Some(ev) = autosave_current_reporting(&runtime, &app_data, &lane).await {
             emit(ev);
         }
     }

@@ -94,7 +94,7 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::imports::{ImportWorkspace, PreparedImport};
 use crate::mesh_cache::MeshCache;
-use crate::worker::{lod_str, wire, AdoptingEngine, MeshProvider, SolverEngine};
+use crate::worker::{lod_str, wire, AdoptingEngine, EngineClock, MeshProvider, SolverEngine};
 
 /// The `(documentRevision, workerEpoch)` fencing tokens behind an `Arc` so the
 /// regen driver's [`RevisionGate`](onecad_core::regen::RevisionGate) can read them
@@ -143,6 +143,31 @@ impl FencingCell {
     }
 }
 
+/// The wall-clock split of one regen — **measurement only**. Nothing branches on
+/// these numbers, no budget is asserted, and they are backend/test-facing (no DTO
+/// carries them to the frontend).
+///
+/// * [`planner_ms`](Self::planner_ms) — phase 1: compiling the plan under the
+///   runtime lock ([`begin_regen`](DocumentRuntime::begin_regen)).
+/// * [`worker_ms`](Self::worker_ms) — phase 2: the worker round trips
+///   ([`EngineClock::exec_ns`]).
+/// * [`mesh_ms`](Self::mesh_ms) — phase 2: the `ExecutePlan` post-ops window, where
+///   the worker tessellates the prepared bodies and inlines their MESH1 blobs
+///   ([`EngineClock::mesh_ns`]).
+///
+/// Phase 1 is disjoint from phase 2, and `worker_ms + mesh_ms` is a lower bound on
+/// the drive — the remainder is the executor's own Rust-side fold and publish.
+/// Each is truncated to whole milliseconds, so a sub-millisecond phase reads `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegenTimings {
+    /// Plan compilation (phase 1, locked).
+    pub planner_ms: u64,
+    /// Worker round trips during the drive (phase 2, unlocked).
+    pub worker_ms: u64,
+    /// The worker's inline tessellation window during the drive (phase 2).
+    pub mesh_ms: u64,
+}
+
 /// What one regen produced, for event emission. `outcome` is the executor's
 /// terminal; `changed`/`removed` drive the pull-model `document-changed` event.
 #[derive(Debug)]
@@ -183,6 +208,9 @@ pub struct RegenReport {
     /// (`document-changed` wire form). Empty on non-published outcomes. Threaded into
     /// `regen-finished` `affectedBodies` for precise per-commit correlation.
     pub affected_bodies: BTreeMap<String, Vec<String>>,
+    /// Where this regen's wall clock went (measurement only — see [`RegenTimings`]).
+    /// Reported on every terminal, including the ones that publish nothing.
+    pub timings: RegenTimings,
 }
 
 impl RegenReport {
@@ -1213,6 +1241,7 @@ impl DocumentRuntime {
                 .collect(),
             diagnostics: Vec::new(),
             affected_bodies: BTreeMap::new(),
+            timings: RegenTimings::default(),
         }
     }
 
@@ -1221,6 +1250,7 @@ impl DocumentRuntime {
     /// lock-free on the copy. `None` for an empty plan. Enforces D1 body-id
     /// adoption via [`AdoptingEngine`].
     pub fn begin_regen(&mut self, request: RegenRequest) -> Option<PreparedRegen> {
+        let planning_started = std::time::Instant::now();
         let ctx = PlanContext {
             policy_versions: PolicyVersions::default(),
             occt_fingerprint: self.occt_fingerprint.clone(),
@@ -1271,7 +1301,8 @@ impl DocumentRuntime {
             // covers the whole applied prefix and every op in it is suppressed (or nothing
             // is applied at all), the correct result is NO geometry — reporting NoOp here
             // left the last published bodies on screen AND in the saved container.
-            if let Some(prepared) = self.prepare_clear_regen(&plan) {
+            if let Some(mut prepared) = self.prepare_clear_regen(&plan) {
+                prepared.planner_ms = planning_started.elapsed().as_millis() as u64;
                 tracing::info!("begin_regen: EMPTY plan → CLEAR publish (all ops suppressed)");
                 return Some(prepared);
             }
@@ -1324,13 +1355,17 @@ impl DocumentRuntime {
             .map(|s| s.bodies.iter().map(|b| b.body).collect())
             .unwrap_or_default();
         let executed: BTreeSet<RecordId> = plan_req.ops.iter().map(|o| o.record_id).collect();
+        let clock = Arc::new(EngineClock::default());
         Some(PreparedRegen {
             work: PreparedWork::Plan {
                 plan_req: Box::new(plan_req),
                 // D1: worker-minted `created` ids must match an op in the plan the
                 // engine is handed and be unique. Replay-from-0 base is empty, so
                 // collisions are in-plan.
-                engine: Box::new(AdoptingEngine::new(self.engine.clone(), HashSet::new())),
+                engine: Box::new(
+                    AdoptingEngine::new(self.engine.clone(), HashSet::new())
+                        .with_clock(clock.clone()),
+                ),
             },
             scratch: self.clone_regen_session(),
             fencing: self.fencing.clone(),
@@ -1344,6 +1379,8 @@ impl DocumentRuntime {
             base_hash_prefix,
             step_count,
             mesh_sink: MeshSink::default(),
+            planner_ms: planning_started.elapsed().as_millis() as u64,
+            clock,
         })
     }
 
@@ -1402,6 +1439,10 @@ impl DocumentRuntime {
             // No worker round-trip ⇒ no inline artifacts. A CLEAR publishes NO
             // geometry, so there is nothing to cache either way.
             mesh_sink: MeshSink::default(),
+            // Stamped by the caller once the whole phase-1 compile is done; no worker
+            // runs on this path, so the clock stays at zero.
+            planner_ms: 0,
+            clock: Arc::new(EngineClock::default()),
         })
     }
 
@@ -1460,6 +1501,7 @@ impl DocumentRuntime {
             base_hash_prefix,
             step_count,
             mesh_sink,
+            timings,
         } = driven;
         let job = JobLabel(job);
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
@@ -1535,6 +1577,7 @@ impl DocumentRuntime {
                     failed_steps,
                     diagnostics,
                     affected_bodies,
+                    timings,
                 };
                 log_regen_outcome(job, &base_hash_prefix, step_count, &report);
                 return report;
@@ -1558,6 +1601,7 @@ impl DocumentRuntime {
                 failed_steps: Vec::new(),
                 diagnostics: Vec::new(),
                 affected_bodies: BTreeMap::new(),
+                timings,
             };
             log_regen_outcome(job, &base_hash_prefix, step_count, &report);
             return report;
@@ -1602,6 +1646,7 @@ impl DocumentRuntime {
             failed_steps: Vec::new(),
             diagnostics,
             affected_bodies: BTreeMap::new(),
+            timings,
         };
         log_regen_outcome(job, &base_hash_prefix, step_count, &report);
         report
@@ -3953,6 +3998,10 @@ pub struct PreparedRegen {
     /// that commits, so a superseded regen's geometry is dropped with the sink.
     /// Always empty on the CLEAR path (no worker round-trip).
     mesh_sink: MeshSink,
+    /// How long phase 1 spent compiling this plan (see [`RegenTimings`]).
+    planner_ms: u64,
+    /// Where the wrapped engine books its worker round trips during phase 2.
+    clock: Arc<EngineClock>,
 }
 
 /// Renders an optional [`JobId`] for the regen lane: the bare uuid, or `clear` for
@@ -4049,6 +4098,8 @@ impl PreparedRegen {
             base_hash_prefix,
             step_count,
             mesh_sink,
+            planner_ms,
+            clock,
         } = self;
         // The phase-2 span. Everything the executor awaits nests inside it — INCLUDING
         // the `onecad_protocol::frames` tx/rx events, which is the join from a regen to
@@ -4078,11 +4129,21 @@ impl PreparedRegen {
                 span.in_scope(|| drive_clear(&mut scratch, &publisher, &cancel, target))
             }
         };
+        // The phase split (measurement only — see `RegenTimings`). Read AFTER the
+        // executor returned, so every worker call this regen made is already booked.
+        let timings = RegenTimings {
+            planner_ms,
+            worker_ms: clock.exec_ns() / 1_000_000,
+            mesh_ms: clock.mesh_ns() / 1_000_000,
+        };
         span.in_scope(|| {
             tracing::info!(
                 outcome = outcome_label(&outcome),
                 // Machine timing: the span-close `time.busy` is a unit-suffixed STRING.
                 elapsed_ms = started.elapsed().as_millis() as u64,
+                planner_ms = timings.planner_ms,
+                worker_ms = timings.worker_ms,
+                mesh_ms = timings.mesh_ms,
                 "regen.drive: done"
             );
         });
@@ -4098,6 +4159,7 @@ impl PreparedRegen {
             base_hash_prefix,
             step_count,
             mesh_sink,
+            timings,
         }
     }
 }
@@ -4175,6 +4237,8 @@ pub struct DrivenRegen {
     step_count: usize,
     /// The inline meshes phase 2 collected — see [`PreparedRegen::mesh_sink`].
     mesh_sink: MeshSink,
+    /// The phase-1 + phase-2 wall-clock split, measured by [`PreparedRegen::drive`].
+    timings: RegenTimings,
 }
 
 /// Logs once when an opened container still carries the pre-V2 `checkpoints/` cache.

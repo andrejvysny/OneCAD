@@ -1102,6 +1102,21 @@ export interface WorkerStatus {
   epoch: number;
 }
 
+/**
+ * The `autosave` event payload (mirrors Rust `autosave::AutosaveEvent`). A
+ * completed autosave carries `error: undefined`; a failed attempt carries the
+ * INTENDED target path (nothing was actually written there) plus `error`
+ * describing why.
+ */
+export interface AutosaveEvent {
+  /** The autosave container written, or (on failure) the one that was attempted. */
+  path: string;
+  /** Wall-clock time of the write attempt, in Unix-epoch milliseconds. */
+  atMs: number;
+  /** Why the attempt failed. Absent on a completed autosave. */
+  error?: string;
+}
+
 // ── Model operations (SCHEMA §7.3 op payloads) ───────────────────────────────
 //
 // These mirror the JSON the C++ worker consumes inside `ExecutePlan.ops`. The
