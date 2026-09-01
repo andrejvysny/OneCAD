@@ -1966,8 +1966,8 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   placed component is a first-class instance, never a copied-in body (spec
   §3). A component resolves to exactly ONE solid in v1 (spec §9,
   `single_solid_policy`).
-- `source.kind` ∈ `generator` | `embedded` | `document` — **all three
-  implemented** (WP-3.2). An unknown kind refuses recoverably with
+- `source.kind` ∈ `generator` | `embedded` | `document` | `profile` — **all
+  four implemented** (WP-3.2, WP-C). An unknown kind refuses recoverably with
   `UNSUPPORTED`.
   - `generator` — `{generatorId, generatorVersion, params}`. Table-driven per
     thread size as of WP-2.1 (spec §6), and DISPATCHED PER FAMILY on
@@ -2001,9 +2001,78 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
     never a regen input: the geometry they produced is already in `sha256`, the
     re-bake happens Rust-side on its own worker, and this worker ignores them
     exactly as it always has.
-  - The two blob kinds are read by the SAME reader and differ only in the
-    record's provenance fields; both must resolve to **exactly one solid**
-    (spec §9), and a blob carrying more is refused rather than reduced.
+  - `profile` — a **length-parametric extrusion of an embedded planar profile**
+    (Component Library WP-C). It exists because vendor stock arrives as one
+    fixed length — an aluminium extrusion STEP is a 500 mm stick — while the
+    component must be placeable at any length. `{sha256, codec, brepFormat,
+    params}`, plus the same wire-only, NON-hashed `source.path` Rust injects for
+    the other blob kinds, and the same "an unmaterialized blob lowers an EMPTY
+    path so only THAT step fails" rule.
+    - `codec` MUST be `"brep"` and `brepFormat` MUST pin the BinTools version
+      this worker writes. Any other codec is `PROFILE_CODEC_UNSUPPORTED`: the
+      `step` and `xbf` readers on this lane return SOLIDS, so accepting them
+      would answer a face question with a solid reader and fail obscurely. A
+      `brepFormat` that is absent, non-integer, or a version this worker does not
+      write is `PROFILE_FORMAT_UNSUPPORTED` — the same loud-not-misparsed rule
+      `ImportStep` enforces, given a name here because §7.3 promises every
+      FACE-shaped refusal on this kind carries one.
+    - The blob is exactly ONE planar `TopoDS_Face` — one outer wire plus zero or
+      more inner wires — either bare or wrapped in a single-child compound (the
+      same "a producer that skipped the compound wrapper still replays" leniency
+      the solid reader grants). Anything else is `PROFILE_BLOB_NOT_ONE_FACE`; a
+      non-planar face is `PROFILE_FACE_NOT_PLANAR`.
+    - **The worker enforces exactly three canonicality properties**: the face's
+      surface is a plane through `z = 0` (|d| ≤ 1e-6 mm), its
+      orientation-corrected unit normal is `+Z` (|n − (0,0,1)| ≤ 1e-6), and its
+      AREA centroid is on the local origin (|c| ≤ 1e-6 mm,
+      `BRepGProp::SurfaceProperties`, holes subtracted). Violation is
+      `PROFILE_FACE_NOT_CANONICAL`. The first two decide which way the prism
+      grows; the third decides WHERE the component lands — an off-centre face is
+      still on `z = 0` with a `+Z` normal, so without this check the instance
+      sits that far from its `placement.translate` and nothing anywhere refuses,
+      which is the silent-wrong-position class this design exists to stop. All
+      three are one cheap measurement each.
+      The REMAINING half of the ingest convention — the tie-broken principal
+      in-plane axis on `+X` — is an AUTHORING rule owned by the component-library
+      spec and is deliberately NOT re-checked here: that one alone would need a
+      per-regen eigen-solve whose degenerate branch is platform-sensitive, and a
+      component must never start refusing because a last bit moved. A
+      rotated-but-centred profile still places in the right PLACE; an off-centre
+      one does not, which is why the line is drawn here and not earlier.
+    - `params.length` is millimetres, REQUIRED, finite, and `0 < length ≤ 1e5`;
+      otherwise `PROFILE_LENGTH_INVALID`. Unlike a `document` source's `params`
+      (provenance only, never read here), this one IS a regen input — it is the
+      entire point of the kind. It is covered by the planner hash, so editing it
+      moves geometry rather than relabelling it, and it needs no re-bake.
+    - The solid is `BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, length))`, followed
+      by the SAME Tier-A input preflight, `placement` transform and single-solid
+      publication every other kind runs. Spec §9's one-solid rule holds by
+      construction: a prism over one face is one solid.
+    - Every refusal above is a recoverable `OP_FAILED` whose fine-grained reason
+      rides `detail.diagnostics[].reasonCode` (§8) — one of
+      `PROFILE_CODEC_UNSUPPORTED` | `PROFILE_FORMAT_UNSUPPORTED` |
+      `PROFILE_BLOB_NOT_ONE_FACE` | `PROFILE_FACE_NOT_PLANAR` |
+      `PROFILE_FACE_NOT_CANONICAL` | `PROFILE_LENGTH_INVALID`. The top-level
+      `error.code` taxonomy is closed and does not grow.
+      The two BLOB-PLUMBING legs are deliberately excluded and carry the generic
+      `OP_FAILED` of `embedded`/`document` with no reason code: an unmaterialized
+      blob (empty `source.path`) and a path that is not a readable file. Those
+      failures are identical for every blob-backed kind and say nothing about the
+      face, so giving them a `PROFILE_*` name would claim a diagnosis this kind
+      did not make.
+    - `DetachComponent` inherits this kind unchanged (it carries the identical
+      `source` shape): a detached profile component keeps re-extruding from its
+      frozen `params.length`, which is indistinguishable from a static copy —
+      the same property a `generator` source has.
+    - The canonical face itself is produced by [`ExtractPrismProfile`](#extractprismprofile)
+      (§7.8), which is the only thing in the protocol that can emit one.
+  - The two BAKED blob kinds (`embedded` / `document`) are read by the SAME
+    reader and differ only in the record's provenance fields; both must resolve
+    to **exactly one solid** (spec §9), and a blob carrying more is refused
+    rather than reduced. `profile` is the third blob-backed kind: it shares the
+    blob PLUMBING — copy-in, refcount, `source.path` injection, the sha256 and
+    format pin — but not the reader, because its blob is a FACE and it therefore
+    owns the refusal vocabulary above.
 - `mate` is optional; absent ⇒ dropped in free space, positioned by
   `placement` alone. When present, `target` is a full semantic ref so the
   resolution ladder can re-resolve it after upstream edits — this is what
@@ -3299,6 +3368,180 @@ Bakes live bodies into one of the **§7.3 replay codecs** — the byte forms
   rewrites the face set, and the source body's face indices no longer address
   anything (the same rule the multi-solid case above follows).
 
+#### ExtractPrismProfile
+
+**Snapshot-fenced prism analysis + canonical profile bake** — the worker half of
+the component-library "vendor a STEP extrusion" ingest tool ([§7.3](#73-op-payload-schemas-vertical-slice)
+`source.kind = "profile"`). Given a body it decides whether that body IS a prism,
+and when it is, writes the canonical end-cap FACE to a Rust-provided temp path in
+the `brep` replay codec — the exact byte form a `profile` source reads back.
+
+It does not fence-and-clone, prepare, accept, discard, publish or **mint**: no
+`bodyEvents`, no `elementMapDelta`, no scratch, no snapshot, no bin tail.
+`GetWorkerHead` is byte-identical before and after (fixture-asserted).
+"Read-only" here means read-only with respect to SESSION state; it writes a file,
+exactly as the other §7.8 verbs do.
+
+Its answer is FROZEN into a package, so — like `PrepareOffsetFace` and unlike the
+advisory §7.5 reads — `snapshotId` is REQUIRED and FENCED: a value that is not
+the current head snapshot is `STALE_PREVIEW`.
+
+```json
+// req.args
+{ "snapshotId": 5012,
+  "bodyId": "body_3",
+  "path": "/tmp/onecad/profile_ab12.brep",   // optional; omit to analyse only
+  "axisHint": [0, 0, 1] }                    // optional
+// result — a prism
+{ "prism": { "axis": [0, 0, 1],
+             "endCap": { "topoKey": "f:6" },
+             "lengthMm": 500.0,
+             "areaMm2": 380.3650459150638,
+             "volumeRatio": 1.0,
+             "outerEdgeCount": 4,
+             "innerWireCount": 1 },
+  "written": true, "bytes": 4312, "codec": "brep", "format": 4,
+  "sha256": "…",
+  "refusal": null }
+// result — not a prism
+{ "prism": null, "written": false, "bytes": 0, "codec": "brep", "format": 4,
+  "sha256": null,
+  "refusal": { "code": "notAPrism",
+               "message": "volume is 87% of endCapArea x length",
+               "volumeRatio": 0.87 } }
+```
+
+**The key set is CONSTANT** across all three branches (prism + write, prism with
+no `path`, refusal), so a reader parses one shape. `codec` / `format` always
+report the byte form this verb writes — the value a caller records as the
+`profile` source's pin — even on a branch that wrote nothing, where `bytes` is
+`0` and `sha256` is `null`.
+
+**Addressing is `bodyId` only.** An unknown or absent body is a recoverable
+`REF_UNRESOLVED`, matching `QueryBodyTopology` — NOT `present:false`. A `BodyId`
+is persistent, so a miss is a real resolve failure, not a stale snapshot-scoped
+reference. There is deliberately no `present` field: the fence and the body
+lookup consume both miss branches.
+
+**The axis** is `axisHint` when supplied (normalized; a degenerate vector is
+`PROTOCOL_ERROR`), else the longest axis-aligned bounding-box dimension, emitted
+as an exact canonical basis vector. A bbox tie falls to X, then Y, then Z — a
+cube has no distinguished axis and choosing one silently would be a guess.
+
+**The end caps** are the two ANALYTIC planar faces (`BRepAdaptor_Surface`
+reporting `GeomAbs_Plane`; a cap a translator stored as a degenerate B-spline is
+not recognised in V1, and the refusal message says so rather than pretending the
+body has no caps) whose orientation-corrected normal is
+parallel/anti-parallel to the axis within 1e-6, one at each extreme along it,
+each the LARGEST-area such face at its end. `endCap.topoKey` names the one at the
+axis MINIMUM; that is the face the canonical frame is built from and the face
+whose bytes are written. `lengthMm` is the **plane-to-plane distance between the
+two end caps**, not a bounding-box extent — a `Bnd_Box` is inflated by the
+shape's tolerance, and this number is multiplied into the prism-ness test.
+
+**Prism-ness is proved, not assumed.** THREE tests must pass:
+
+1. **No axis-perpendicular planar face lies strictly between the two end caps** —
+   every collected candidate is within 1e-6 mm of one extreme or the other.
+2. `|volume − endCapArea·lengthMm| ≤ 1e-6·volume`.
+3. `|areaMin − areaMax| ≤ 1e-6·max(areaMin, areaMax)`.
+
+Test 1 is structural and is the only one that catches a body the two
+MEASUREMENTS both accept: a 20×20 stick fused end to end onto a 40×10 stick has
+equal cap areas (400 mm²) and a volume that is exactly `endCapArea·lengthMm`, so
+it passes 2 and 3 and would bake the 20×20 square as "the section". The step face
+at the junction is the evidence. It cannot refuse a true prism — a prism's
+lateral faces are PARALLEL to the axis and are never collected as candidates —
+and it catches counterbores and internal steps for free.
+
+Tests 2 and 3 carry the SAME 1e-6 margin on purpose. A tighter area gate has no
+engineering meaning: the two caps of a real vendor extrusion are rounded
+independently by whatever wrote the STEP, and at 1e-9 a 10 pm taper across a
+20 mm edge would refuse a stick that is a prism by every measure a machinist has.
+A taper that matters fails test 2 long before test 3 notices.
+
+Failure is a refusal ANSWER (`ok:true`, `refusal.code:"notAPrism"`) carrying BOTH
+measurements — `volumeRatio = volume / (endCapArea·lengthMm)` and
+`areaDelta = |areaMin − areaMax| / max(areaMin, areaMax)` — so a cross-drilled or
+tapered stick refuses honestly and says by how much, which is what lets an ingest
+UI explain itself. Each is `0` when the refusal was reached before that
+measurement ran (a null shape, fewer than two axis-perpendicular planar faces,
+all such faces coplanar, or a face strictly between the caps); the refusal object
+therefore has a CONSTANT key set, like the result that carries it. Nothing is
+written on a refusal. `refusal` and `prism` are mutually exclusive and exactly one
+is non-null. A failed canonical bake or a failed write to `path` is a recoverable
+`OP_FAILED` (the `ExportGeometry` rule); an absent or non-integer `snapshotId`, a
+degenerate `axisHint`, or a non-string `path` is `PROTOCOL_ERROR` (§8 malformed
+`args`).
+
+**The canonical bake** runs only when `path` is present and the body is a prism.
+The end-cap face is copied and rigidly transformed so that: its plane is `z = 0`;
+its orientation-corrected normal is `+Z` and its stored orientation is `FORWARD`;
+its AREA centroid (`BRepGProp::SurfaceProperties`, holes subtracted) is the
+origin; and its in-plane basis is the tie-broken principal frame below. The
+result is written with `BinTools` at `format` (the version this worker writes),
+and `sha256` is the SHA-256 of the bytes actually written — the value the caller
+records verbatim as the `profile` source's `sha256`.
+
+**The in-plane frame is tie-broken, normatively, and the rule depends only on the
+SHAPE.** Take the principal in-plane angle θ of the area moment tensor about the
+centroid (`GProp_GProps::MatrixOfInertia` on the centred face,
+`θ = ½·atan2(2·Jxy, Jxx − Jyy)`). Which of the two principal axes θ names does
+NOT matter: the candidate set is the four quarter-turns `{θ, θ+90°, θ+180°,
+θ+270°}` either way, and the frame is ALWAYS selected from those four — never by
+eigenvalue order and never by an eigenvector sign — by the rule below. When
+`|L1 - L2| <= 1e-9*(L1 + L2)` the profile is in-plane isotropic, θ is defined as
+`0`, and the four candidates are the quarter-turns of the shape-derived
+intermediate frame described further down. The rule: for each candidate, list every vertex of the face expressed in that frame,
+quantise each coordinate to 1e-7 mm, sort the list lexicographically, and take
+the candidate whose sorted list is lexicographically smallest. A profile with a
+true rotational symmetry produces IDENTICAL lists for several candidates, so the
+tie is harmless — the transformed face is the same face either way. Selecting on
+a raw eigenvector sign, or on the source's world-space orientation, is
+FORBIDDEN: both make the blob a function of the input file's pose rather than of
+its geometry, and content addressing then silently stops deduplicating two
+ingests of the same physical profile.
+
+**The isotropic branch is closed by a SHAPE-DERIVED seed, not by the eigen
+solve.** When the two moments are equal every in-plane frame diagonalises the
+tensor, so "the eigenvectors" are whatever basis the solve happened to be
+expressed in — and a square, the commonest extrusion section there is, is exactly
+that case. The tensor is therefore expressed in an intermediate frame whose first
+axis is the in-plane direction from the centroid to the FIRST face vertex in
+`TopExp` ordinal order, and the isotropic branch takes that intermediate frame as
+its candidate pair. A world-seeded intermediate frame would satisfy the paragraph
+above and still make a square's canonical bytes a function of its world pose.
+There is consequently NO world-space fallback: a face offering no vertex off its
+centroid (unreachable for any real profile — even a full circle carries its seam
+vertex) fails the bake with `OP_FAILED` rather than canonicalising against an
+arbitrary axis. A refusal a caller can see beats a blob that silently stops
+deduplicating.
+
+**Determinism.** For the same head and the same request, the JSON response and
+the written bytes are byte-identical across fresh worker processes. There is no
+randomness and no pointer/hash iteration; every face, wire, edge and vertex walk
+is `TopExp::MapShapes` INDEXED-MAP ordinal order — the 1-based order `TopoKey`
+itself is defined in, so `endCap.topoKey` and the frame's seed vertex are indexed
+by the same rule the resolution ladder uses. (`ProjectFaceBoundary` states the
+same determinism rule over `TopExp_Explorer` / `BRepTools_WireExplorer`; an
+indexed map is the stricter instrument, because it additionally de-duplicates a
+seam shared by two wires.) Byte equality is a claim about the SAME input,
+not about two poses of one profile: a real rotation and its canonical undo are
+not bit-exact in IEEE754, so two ingests of one physical extrusion agree to
+rounding (measured ~2e-15 mm), which is what content addressing over a
+tolerance-free byte form can honestly promise.
+
+**Lane.** Kernel lane. It runs GProp plus one transform, not a build ladder, so
+it forwards no cancel token: there is no long loop to interrupt.
+
+**Why not an existing verb.** `ExportGeometry` flattens a body to its SOLIDS and
+refuses one that has none, so it cannot emit a face. `QueryBodyTopology` returns
+counts only, with no face addressing. `ProjectFaceBoundary` can describe a face's
+boundary once someone has FOUND it, but only as 2D Line/Circle/Arc entities in a
+caller-supplied UV, with a permanent lossy polyline fallback for every other
+curve type — it cannot content-address a BRep blob, and locating the end cap is
+the part this verb exists for.
+
 #### ExportStep
 
 ```json
@@ -3418,7 +3661,7 @@ where an unknown value is ignorable.
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
 | Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
-| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`) | `STALE_PREVIEW` | none — head untouched | caller re-picks / re-previews against the fresh head snapshot ([§7.6](#76-geometry)) |
+| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ExtractPrismProfile`) | `STALE_PREVIEW` | none — head untouched | caller re-picks / re-previews against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
 | Worker crash / abnormal exit | *(no frame)* | fatal | **restart + replay** from last checkpoint/head; crash **circuit breaker** on repeated `(historyPrefixHash, opId, occtFingerprint)` |
@@ -3720,6 +3963,88 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-09-01 — §7.3 `PlaceComponent` `source.kind = "profile"`** (Component
+  Library WP-C; cross-track sign-off recorded 2026-09-01). Vendor extrusion stock
+  arrives as one fixed length — a 500 mm aluminium stick — while the component has
+  to be placeable at any length, and none of the three existing kinds could express
+  it: `embedded`/`document` are BAKED solids by definition, and `generator`
+  has no blob copy-in path at all (`ComponentSourceRef::blob_ref` returns `None`
+  for it, and four separate mechanisms key off that walk). So `profile` is the
+  fourth `source.kind` and the third blob-backed one: one canonical planar FACE
+  plus a `params.length`, and the worker builds the solid by prism.
+  **Additive, and byte-identical when absent.** Serde is internally tagged on
+  `kind`, so no existing record's bytes or planner hash move; `blob_ref()` gains
+  one arm and the blob copy-in, refcount, `source.path` injection and sha256/
+  format validation all follow from it unchanged. `codec` is pinned to `"brep"`
+  by name — the `step` and `xbf` readers on this lane return solids, and
+  accepting them would answer a face question with a solid reader.
+  **`params.length` is a REGEN INPUT, not provenance** — the one place this kind
+  diverges from `document`, whose `params` the worker still ignores. It is
+  covered by the planner hash, so an edit moves geometry, and
+  `setComponentParams` handles it with an in-place param merge and NO re-bake
+  (there is no authoring document to replay). The worker re-checks THREE
+  canonicality properties — plane `z = 0`, normal `+Z`, and the AREA centroid on
+  the origin — each one cheap measurement. Only the principal-axis half of the
+  canonical frame stays an authoring rule in the library spec, because that one
+  needs a per-regen eigen-solve with a platform-sensitive degenerate branch and a
+  component must not start refusing over a last bit. The centroid is NOT in that
+  category and is checked: without it an off-centre face places the instance away
+  from its `placement.translate` with nothing refusing, which is the
+  silent-wrong-position failure, not a cosmetic one.
+  Refusals are recoverable `OP_FAILED` with `detail.diagnostics[].reasonCode` in
+  six values: `PROFILE_BLOB_NOT_ONE_FACE` | `PROFILE_FACE_NOT_PLANAR` |
+  `PROFILE_FACE_NOT_CANONICAL` | `PROFILE_LENGTH_INVALID` |
+  `PROFILE_CODEC_UNSUPPORTED` | `PROFILE_FORMAT_UNSUPPORTED`. The two
+  blob-plumbing legs (unmaterialized blob, unreadable path) keep the generic
+  `OP_FAILED` every blob kind shares — they diagnose the file system, not the
+  face. The §8 top-level code taxonomy does not grow.
+  `DetachComponent` inherits the kind unchanged. `protocolVersion` stays 1; no
+  handshake axis and no worker fingerprint moves. New fixture
+  `place_component_profile.ndjson`, no existing fixture shape moves, **no fixture
+  bump**.
+
+- **2026-09-01 — §7.8 `ExtractPrismProfile`** (Component Library WP-C ingest;
+  cross-track sign-off recorded 2026-09-01). New read-only, snapshot-fenced verb:
+  is this body a prism, and if so write its canonical end-cap face. It exists
+  because nothing else could do it — `ExportGeometry` flattens to SOLIDS and
+  refuses a body with none, `QueryBodyTopology` returns counts with no face
+  addressing, and `ProjectFaceBoundary` needs the face already found and is
+  permanently lossy outside Line/Circle/Arc.
+  **It writes a FILE, not a bin tail** — the `ExportGeometry` shape rather than
+  the `InspectStep` one. Deliberate: the digest then rides the JSON envelope,
+  where the golden-fixture lanes can actually assert it. Neither harness
+  implements `@file` or `binSha256`, so bytes in a tail can never be pinned by a
+  fixture, and a determinism claim nothing can falsify is not a claim.
+  Fenced like `PrepareOffsetFace` and for the same reason — the answer is frozen
+  into a package — so a stale `snapshotId` is `STALE_PREVIEW` (§8's row gains
+  this verb). Unknown body is `REF_UNRESOLVED`, matching `QueryBodyTopology`;
+  there is no `present` field because no miss branch is left. Prism-ness is
+  PROVED by THREE tests — one structural, two measured — and failing any is a
+  refusal ANSWER (`ok:true`, `refusal.code:"notAPrism"`) carrying both
+  `volumeRatio` and `areaDelta`, so a cross-drilled stick refuses with a number
+  rather than a shrug. The structural test (no axis-perpendicular planar face
+  strictly between the caps) is load-bearing, not belt-and-braces: a 20×20 stick
+  fused end to end onto a 40×10 one has equal cap areas AND a volume that is
+  exactly area×length, so both measurements accept it and only the step face at
+  the junction refuses. The two measured gates carry the same 1e-6 margin,
+  because independently rounded vendor caps have no 1e-9 in them.
+  The in-plane canonical frame is tie-broken by a rule that reads only the SHAPE
+  (quantised, sorted vertex lists over the candidate frames), never a raw
+  eigenvector sign or the source's world pose — either of those would make the
+  blob a function of the input file's orientation and silently break dedup for
+  two ingests of the same physical profile. The isotropic branch — a SQUARE
+  section, the commonest one there is — additionally needs a shape-derived seed
+  for the intermediate frame, because there the eigenvectors carry no information
+  at all; the §7.8 text states that as part of the rule. It mints nothing,
+  publishes nothing, and leaves `GetWorkerHead` byte-identical.
+  `protocolVersion` stays 1. New fixtures `place_component_profile.ndjson` and
+  `extract_prism_profile_refusal.ndjson`; no existing fixture shape moves, **no
+  fixture bump**. The cross-PROCESS half of the determinism claim is gated by
+  `canonical_extract_prism_profile_bytes`, which replays the fixture in two fresh
+  workers and `cmp`s what each wrote — no digest literal is pinned anywhere,
+  because libm differs across macOS and Linux and a frozen SHA-256 would gate the
+  platform instead of the determinism.
 
 - **2026-08-24 — §7.4 `entityStates` (per-entity constrained state)** (Sketch UX
   Phase 3; cross-track sign-off recorded 2026-08-24). The solver lane could report

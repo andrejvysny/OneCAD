@@ -368,6 +368,73 @@ describe("tauriClient file commands", () => {
   });
 });
 
+// ── Bulk component ingest (Component Library WP-C2) ────────────────────────────
+// The Rust `ingest_components` handler lands in a later package; this pins the
+// invoke NAME and the request/response shape so both sides land in lockstep.
+
+describe("tauriClient ingestComponents (WP-C2)", () => {
+  it("invokes ingest_components with the request verbatim and returns the report", async () => {
+    let payload: unknown;
+    const report = {
+      libraryRoot: "/lib",
+      parts: [
+        { path: "/a.step", id: "vendor.a", version: "1.0.0", kind: "embedded", status: "ok" },
+        { path: "/b.step", status: "failed", message: "not a solid" },
+      ],
+    };
+    mockIPC((cmd, p) => {
+      if (cmd === "ingest_components") {
+        payload = p;
+        return report;
+      }
+    });
+    const result = await createTauriClient().ingestComponents({
+      paths: ["/a.step", "/b.step"],
+      defaults: { vendor: "vendor", category: ["imported"] },
+    });
+    expect(payload).toEqual({
+      paths: ["/a.step", "/b.step"],
+      libraryRoot: null,
+      defaults: { vendor: "vendor", category: ["imported"] },
+    });
+    expect(result).toEqual(report);
+  });
+
+  it("forwards an explicit libraryRoot instead of null", async () => {
+    let payload: unknown;
+    mockIPC((cmd, p) => {
+      if (cmd === "ingest_components") {
+        payload = p;
+        return { libraryRoot: "/custom", parts: [] };
+      }
+    });
+    await createTauriClient().ingestComponents({
+      paths: [],
+      libraryRoot: "/custom",
+      defaults: { vendor: "v", category: [] },
+    });
+    expect((payload as { libraryRoot: unknown }).libraryRoot).toBe("/custom");
+  });
+
+  it("pickComponentFiles invokes pick_component_files with no args and returns the chosen paths", async () => {
+    const payloads: Record<string, unknown> = {};
+    mockIPC((cmd, payload) => {
+      payloads[cmd] = payload;
+      if (cmd === "pick_component_files") return ["/vendor/a.step", "/vendor/b.stp"];
+    });
+    expect(await createTauriClient().pickComponentFiles()).toEqual([
+      "/vendor/a.step",
+      "/vendor/b.stp",
+    ]);
+    expect(payloads["pick_component_files"]).toEqual({});
+  });
+
+  it("pickComponentFiles resolves [] on cancel", async () => {
+    mockIPC((cmd) => (cmd === "pick_component_files" ? [] : undefined));
+    expect(await createTauriClient().pickComponentFiles()).toEqual([]);
+  });
+});
+
 // ── worker-status event ───────────────────────────────────────────────────────
 
 describe("tauriClient worker-status", () => {

@@ -1237,3 +1237,558 @@ async fn the_seeded_geometry_free_starters_open_and_publish_nothing() {
 
     wm.shutdown().await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-C: `source.kind = "profile"` — a length-parametric extrusion, end to end
+//
+// The claim: vendor stock ships as ONE fixed length (a 500 mm aluminium stick)
+// and must still place at any length. Nothing else in the library can express
+// that — `embedded`/`document` are baked SOLIDS by definition and `generator`
+// has no blob at all — so this lane bakes a single canonical planar FACE and the
+// worker prisms it per instance.
+//
+// Every number below is exact and analytic: the profile is a 20×20 square minus
+// a Ø5 hole, so its area is `400 − π·2.5²` and a placement's volume is that
+// times its own `length`. The volumes come from `QueryMassProperties`
+// (`BRepGProp` over the real BRep), never from a mesh.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `400 − π·2.5²` — the 20×20 + Ø5 profile's exact area. `worker/tests/
+/// test_extract_prism_profile.cpp` pins the identical constant, so a divergence
+/// between the two tracks shows up on both sides.
+const PROFILE_AREA_MM2: f64 = 400.0 - std::f64::consts::PI * 2.5 * 2.5;
+const STOCK_LENGTH_MM: f64 = 500.0;
+const PLACED_LENGTH_MM: f64 = 120.0;
+const RE_LENGTHED_MM: f64 = 300.0;
+
+fn xy_plane_ref() -> onecad_core::document::record::SketchPlaneRef {
+    onecad_core::document::record::SketchPlaneRef {
+        kind: onecad_core::document::record::PlaneKind::Xy,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+/// A closed 20×20 square with a concentric Ø5 hole — the extrusion cross
+/// section a real aluminium profile has, in miniature.
+fn stock_profile_sketch(
+    sid: onecad_core::ids::SketchId,
+    base: u128,
+) -> onecad_core::sketch::Sketch {
+    use onecad_core::ids::EntityId;
+    use onecad_core::math::Vec2;
+    use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Stock profile", WorldPlane::XY);
+    let point = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .expect("point");
+    };
+    point(&mut sk, e(0), 0.0, 0.0);
+    point(&mut sk, e(1), 20.0, 0.0);
+    point(&mut sk, e(2), 20.0, 20.0);
+    point(&mut sk, e(3), 0.0, 20.0);
+    for (l, a, b) in [(0x10, 0, 1), (0x11, 1, 2), (0x12, 2, 3), (0x13, 3, 0)] {
+        sk.add_entity(SketchEntity::line(e(l), e(a), e(b), false))
+            .expect("line");
+    }
+    point(&mut sk, e(0x20), 10.0, 10.0);
+    sk.add_entity(SketchEntity::circle(e(0x21), e(0x20), 2.5, false).expect("finite radius"))
+        .expect("circle");
+    sk
+}
+
+fn stock_sketch_record(rec: u128, sk: &onecad_core::sketch::Sketch) -> OperationRecord {
+    let (_plane, entities, constraints) = onecad_lib::worker::wire::sketch_wire(sk);
+    let op = Operation::Known(KnownOperation::Sketch(
+        onecad_core::document::record::SketchOpParams {
+            sketch: sk.id,
+            plane: xy_plane_ref(),
+            entities: entities.as_array().cloned().unwrap_or_default(),
+            constraints: constraints.as_array().cloned().unwrap_or_default(),
+            host_face: None,
+            extra: Default::default(),
+        },
+    ));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Sketch", op)
+}
+
+fn stock_extrude_record(
+    rec: u128,
+    sketch: onecad_core::ids::SketchId,
+    distance: f64,
+) -> OperationRecord {
+    use onecad_core::document::record::{BooleanMode, ExtrudeMode, ExtrudeParams};
+    let op = Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+        profile: Some(onecad_core::document::refs::SketchRegionRef {
+            sketch,
+            region: onecad_core::ids::RegionId::new(""), // first-region fallback
+            region_identity_version: None,
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(distance),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(rec)), 0, "Extrude", op)
+}
+
+/// An `AppState` wired to the SAME `WorkerManager` for every facet (verbatim
+/// from `component_rebake.rs` — production's `real_worker_factory` minus the
+/// restart-hook wiring these tests never exercise).
+fn app_state_over(wm: &WorkerManager) -> onecad_lib::state::AppState {
+    use onecad_lib::worker::{
+        CircuitControl, FaceBoundaryProjection, PreviewEngine, StepImport, WorkerReadiness,
+    };
+    let wm = wm.clone();
+    onecad_lib::state::AppState::new(Arc::new(move || {
+        let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+        let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+        let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+        let exporter: Arc<dyn onecad_lib::export::GeometryExporter> = Arc::new(wm.clone());
+        let elements: Arc<dyn ElementQuery> = Arc::new(wm.clone());
+        let preview: Arc<dyn PreviewEngine> = Arc::new(wm.clone());
+        let face_projection: Arc<dyn FaceBoundaryProjection> = Arc::new(wm.clone());
+        let step_import: Arc<dyn StepImport> = Arc::new(wm.clone());
+        let circuit: Arc<dyn CircuitControl> = Arc::new(wm.clone());
+        let readiness: Arc<dyn WorkerReadiness> = Arc::new(wm.clone());
+        (
+            engine,
+            meshes,
+            solver,
+            exporter,
+            elements,
+            preview,
+            face_projection,
+            step_import,
+            circuit,
+            readiness,
+        )
+    }))
+}
+
+async fn open_blank(app_state: &onecad_lib::state::AppState) {
+    let (engine, meshes, solver) = app_state.make_backend();
+    *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+}
+
+/// The `source` blob digest a placed record currently names — the number that
+/// MUST NOT move when only `params.length` is edited.
+async fn placed_source_sha(
+    state: &tauri::State<'_, onecad_lib::state::AppState>,
+    record: &str,
+) -> String {
+    use std::str::FromStr;
+    let guard = state.runtime.lock().await;
+    let rt = guard.as_ref().expect("open document");
+    let raw = rt
+        .operation_params(RecordId::from_str(record).expect("record id"))
+        .expect("params for the placed record");
+    let params: PlaceComponentParams = serde_json::from_value(raw).expect("a placed component");
+    params
+        .source
+        .blob_ref()
+        .expect("a profile source is blob-backed")
+        .sha256
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_profile_component_extrudes_to_its_own_length_and_re_lengths_without_a_re_bake() {
+    use onecad_lib::dto::PrismProfileAnswerDto;
+    use tauri::Manager;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin).await;
+    let app_state = app_state_over(&wm);
+    open_blank(&app_state).await;
+
+    // ── 1. The vendor stick: one 500 mm extrusion of the 20×20 + Ø5 profile ──
+    const BASE: u128 = 0xC0FE00;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let stock_body = {
+        let mut guard = app_state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(
+            rt,
+            stock_sketch_record(BASE, &stock_profile_sketch(sid, BASE + 0x1000)),
+        );
+        add_op(rt, stock_extrude_record(BASE + 1, sid, STOCK_LENGTH_MM));
+        let report = regen_all(rt).await;
+        let snap = published(&report, "the 500 mm stock");
+        assert_eq!(snap.bodies.len(), 1, "the stock document has one body");
+        snap.bodies[0].body
+    };
+    let stock_volume = exact_volume(&wm, stock_body).await;
+    let want_stock = PROFILE_AREA_MM2 * STOCK_LENGTH_MM;
+    assert!(
+        (stock_volume - want_stock).abs() <= 1e-6 * want_stock,
+        "the stock must be the square MINUS the hole: got {stock_volume}, want {want_stock} \
+         (if this is 400×500 the first-region fallback picked the wrong loop)"
+    );
+
+    // ── 2. ExtractPrismProfile: is it a prism, and bake its canonical face ──
+    let face_path = scratch.path().join("stock_profile.brep");
+    let answer = onecad_lib::library::extract_prism_profile_at(
+        &app_state.runtime,
+        app_state.exporter(),
+        &stock_body.to_string(),
+        Some(&face_path.to_string_lossy()),
+    )
+    .await
+    .expect(
+        "ExtractPrismProfile must answer. An `unknown verb` / protocol error here means the \
+         C++ half of WP-C is NOT in the staged worker — rebuild the sidecar; this test must \
+         never be read as green without it",
+    );
+    let PrismProfileAnswerDto::Prism(prism) = answer else {
+        panic!("a plain prismatic extrusion must not refuse: {answer:?}");
+    };
+    assert!(
+        (prism.area_mm2 - PROFILE_AREA_MM2).abs() < 1e-9,
+        "areaMm2 {} != {PROFILE_AREA_MM2} (400 − π·2.5²)",
+        prism.area_mm2
+    );
+    assert!(
+        (prism.length_mm - STOCK_LENGTH_MM).abs() < 1e-9,
+        "lengthMm {} != {STOCK_LENGTH_MM} — this is the PLANE-TO-PLANE distance, not a bbox \
+         extent (a Bnd_Box is inflated by the shape's tolerance)",
+        prism.length_mm
+    );
+    assert!(
+        (prism.volume_ratio - 1.0).abs() < 1e-6,
+        "a true prism measures volumeRatio 1.0, got {}",
+        prism.volume_ratio
+    );
+    assert_eq!(prism.axis, [0.0, 0.0, 1.0], "the extrude ran along +Z");
+    let bake = prism
+        .bake
+        .expect("a path was supplied and the body is a prism, so the face must be written");
+    assert_eq!(
+        bake.codec, "brep",
+        "a face comes back only from the brep reader"
+    );
+    let face_bytes = std::fs::read(&face_path).expect("the worker wrote the canonical face");
+    assert_eq!(
+        face_bytes.len() as u64,
+        bake.bytes,
+        "the reported byte count must be the file that landed"
+    );
+
+    // ── 3. Author a `profile` package from those bytes ──
+    let mut library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let mut package_parameters = std::collections::BTreeMap::new();
+    package_parameters.insert(
+        "length".to_string(),
+        // The package's DECLARED default: the stick the vendor ships. An
+        // instance that overrides nothing places at exactly this length.
+        onecad_library::package::ParameterSpec::free_variable("length", STOCK_LENGTH_MM),
+    );
+    let saved = library
+        .save_embedded_component(onecad_library::EmbeddedComponentRequest {
+            package: onecad_library::ComponentPackage {
+                identity: onecad_library::package::Identity {
+                    id: "acme.extrusion.2020".to_string(),
+                    version: "1.0.0".to_string(),
+                    revision: format!("sha256:{}", "0".repeat(64)),
+                },
+                metadata: onecad_library::package::Metadata {
+                    name: "2020 extrusion".to_string(),
+                    unit: "mm".to_string(),
+                    ..Default::default()
+                },
+                // Overwritten by the save with the profile source it produces.
+                source: onecad_library::package::SourceSpec::Generator {
+                    generator: "ignored".to_string(),
+                    generator_version: 0,
+                },
+                parameters: package_parameters,
+                attachments: Default::default(),
+            },
+            kind: onecad_library::BlobComponentKind::Profile,
+            geometry: face_bytes,
+            geometry_codec: bake.codec.clone(),
+            geometry_format: Some(bake.format),
+            preview_png: None,
+        })
+        .expect("save the profile package");
+    assert_eq!(
+        saved.sha256, bake.sha256,
+        "the worker content-addressed the bytes it wrote; the store must key them by the \
+         SAME digest, or the placed record's sha256 would name nothing"
+    );
+    let (_v, entry) = library.get("acme.extrusion.2020", None).expect("indexed");
+    assert_eq!(entry.source_kind, "profile");
+
+    // ── 4. Place it at 120 mm — a length the vendor never shipped ──
+    open_blank(&app_state).await;
+    let app = tauri::test::mock_app();
+    app.manage(app_state);
+    let state: tauri::State<'_, onecad_lib::state::AppState> = app.state();
+
+    let mut at_120 = std::collections::BTreeMap::new();
+    at_120.insert(
+        "length".to_string(),
+        ComponentParamValue::Number(PLACED_LENGTH_MM),
+    );
+    let (_outcome, projection) = onecad_lib::library::place_component_at(
+        library_dir.path(),
+        &state,
+        "acme.extrusion.2020".to_string(),
+        "1.0.0".to_string(),
+        [0.0, 0.0, 0.0],
+        None,
+        at_120,
+        None,
+    )
+    .await
+    .expect("place the profile component at 120 mm");
+    let record_id = projection.features[0].id.clone();
+
+    let placed_volume = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let report = regen_all(rt).await;
+        let snap = published(&report, "place the profile at 120");
+        assert_eq!(snap.bodies.len(), 1, "a prism over one face is one solid");
+        exact_volume(&wm, snap.bodies[0].body).await
+    };
+    let want_120 = PROFILE_AREA_MM2 * PLACED_LENGTH_MM;
+    assert!(
+        (placed_volume - want_120).abs() <= 1e-6 * want_120,
+        "placed at 120 mm: got {placed_volume}, want {want_120}"
+    );
+    let sha_at_120 = placed_source_sha(&state, &record_id).await;
+
+    // ── 5. Re-length to 300 mm: geometry moves, the blob does NOT ──
+    let mut at_300 = std::collections::BTreeMap::new();
+    at_300.insert(
+        "length".to_string(),
+        ComponentParamValue::Number(RE_LENGTHED_MM),
+    );
+    onecad_lib::library::set_component_params_at(
+        library_dir.path(),
+        &state,
+        record_id.clone(),
+        at_300,
+    )
+    .await
+    .expect("re-length the placed instance");
+
+    let re_lengthed_volume = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let report = regen_all(rt).await;
+        let snap = published(&report, "re-length to 300");
+        assert_eq!(snap.bodies.len(), 1);
+        exact_volume(&wm, snap.bodies[0].body).await
+    };
+    let want_300 = PROFILE_AREA_MM2 * RE_LENGTHED_MM;
+    assert!(
+        (re_lengthed_volume - want_300).abs() <= 1e-6 * want_300,
+        "re-lengthed to 300 mm: got {re_lengthed_volume}, want {want_300} — a params edit on \
+         a profile source must MOVE geometry, not relabel it"
+    );
+    assert_eq!(
+        placed_source_sha(&state, &record_id).await,
+        sha_at_120,
+        "a length edit re-prisms the SAME canonical face: no re-bake, so the blob digest must \
+         not move (that is the whole difference from a `document` source)"
+    );
+
+    wm.shutdown().await;
+}
+
+/// The `profile`-kind analogue of `a_baked_component_survives_save_and_reopen_with_no_library`:
+/// a length-parametric extrusion places, saves, and — with the temp LIBRARY ROOT DELETED
+/// entirely before reopen — still regenerates on a FRESH worker to the same volume. Spec §4's
+/// "geometry is always cached locally" claim covers `profile` exactly like `embedded`/
+/// `document`: the canonical face blob is copied into the placing document's own `imports/`
+/// section at place time (`blob_ref()` walks all three kinds uniformly), so nothing on this
+/// lane should depend on the library surviving past place time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_profile_component_survives_save_and_reopen_with_no_library() {
+    use onecad_lib::dto::PrismProfileAnswerDto;
+    use tauri::Manager;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let wm = spawn_worker(bin.clone()).await;
+    let app_state = app_state_over(&wm);
+    open_blank(&app_state).await;
+
+    // ── 1. The vendor stick, same profile as the extrude/re-length test ──
+    const BASE: u128 = 0xC0FE20;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let stock_body = {
+        let mut guard = app_state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        add_op(
+            rt,
+            stock_sketch_record(BASE, &stock_profile_sketch(sid, BASE + 0x1000)),
+        );
+        add_op(rt, stock_extrude_record(BASE + 1, sid, STOCK_LENGTH_MM));
+        let report = regen_all(rt).await;
+        let snap = published(&report, "the 500 mm stock");
+        assert_eq!(snap.bodies.len(), 1, "the stock document has one body");
+        snap.bodies[0].body
+    };
+
+    // ── 2. ExtractPrismProfile + bake the canonical face ──
+    let face_path = scratch.path().join("stock_profile.brep");
+    let answer = onecad_lib::library::extract_prism_profile_at(
+        &app_state.runtime,
+        app_state.exporter(),
+        &stock_body.to_string(),
+        Some(&face_path.to_string_lossy()),
+    )
+    .await
+    .expect(
+        "ExtractPrismProfile must answer. An `unknown verb` / protocol error here means the \
+         C++ half of WP-C is NOT in the staged worker — rebuild the sidecar; this test must \
+         never be read as green without it",
+    );
+    let PrismProfileAnswerDto::Prism(prism) = answer else {
+        panic!("a plain prismatic extrusion must not refuse: {answer:?}");
+    };
+    let bake = prism
+        .bake
+        .expect("a path was supplied and the body is a prism, so the face must be written");
+    let face_bytes = std::fs::read(&face_path).expect("the worker wrote the canonical face");
+    let sha = bake.sha256.clone();
+
+    // ── 3. Author a `profile` package from those bytes ──
+    let mut library = onecad_library::Library::open(library_dir.path()).expect("open library");
+    let mut package_parameters = std::collections::BTreeMap::new();
+    package_parameters.insert(
+        "length".to_string(),
+        onecad_library::package::ParameterSpec::free_variable("length", STOCK_LENGTH_MM),
+    );
+    library
+        .save_embedded_component(onecad_library::EmbeddedComponentRequest {
+            package: onecad_library::ComponentPackage {
+                identity: onecad_library::package::Identity {
+                    id: "acme.extrusion.reopen".to_string(),
+                    version: "1.0.0".to_string(),
+                    revision: format!("sha256:{}", "0".repeat(64)),
+                },
+                metadata: onecad_library::package::Metadata {
+                    name: "2020 extrusion (reopen, no library)".to_string(),
+                    unit: "mm".to_string(),
+                    ..Default::default()
+                },
+                source: onecad_library::package::SourceSpec::Generator {
+                    generator: "ignored".to_string(),
+                    generator_version: 0,
+                },
+                parameters: package_parameters,
+                attachments: Default::default(),
+            },
+            kind: onecad_library::BlobComponentKind::Profile,
+            geometry: face_bytes,
+            geometry_codec: bake.codec.clone(),
+            geometry_format: Some(bake.format),
+            preview_png: None,
+        })
+        .expect("save the profile package");
+
+    // ── 4. Place it at 120 mm into a FRESH document ──
+    open_blank(&app_state).await;
+    let app = tauri::test::mock_app();
+    app.manage(app_state);
+    let state: tauri::State<'_, onecad_lib::state::AppState> = app.state();
+
+    let mut at_120 = std::collections::BTreeMap::new();
+    at_120.insert(
+        "length".to_string(),
+        ComponentParamValue::Number(PLACED_LENGTH_MM),
+    );
+    onecad_lib::library::place_component_at(
+        library_dir.path(),
+        &state,
+        "acme.extrusion.reopen".to_string(),
+        "1.0.0".to_string(),
+        [0.0, 0.0, 0.0],
+        None,
+        at_120,
+        None,
+    )
+    .await
+    .expect("place the profile component at 120 mm");
+
+    let want_120 = PROFILE_AREA_MM2 * PLACED_LENGTH_MM;
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        let report = regen_all(rt).await;
+        let snap = published(&report, "place the profile at 120");
+        assert_eq!(snap.bodies.len(), 1, "a prism over one face is one solid");
+        let placed_volume = exact_volume(&wm, snap.bodies[0].body).await;
+        assert!(
+            (placed_volume - want_120).abs() <= 1e-6 * want_120,
+            "placed at 120 mm: got {placed_volume}, want {want_120}"
+        );
+    }
+
+    // ── 5. Save, then DELETE the library root entirely ──
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("profile_reopen.onecad");
+    {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        rt.save(&path, save_meta()).expect("save");
+    }
+    std::fs::remove_dir_all(library_dir.path()).expect("delete the library root entirely");
+    wm.shutdown().await;
+
+    // ── 6. Reopen on a FRESH worker. No library root exists anywhere — the
+    //    ONLY thing carrying the canonical face is the saved container.
+    let wm2 = spawn_worker(bin).await;
+    let mut rt2 = open_over(&wm2, &path);
+    assert!(
+        rt2.import_blob_shas().contains(&sha),
+        "the canonical face came back out of the container's imports/ section (the save-time \
+         refcount kept it, exactly like `embedded`/`document`)"
+    );
+    let report2 = regen_all(&mut rt2).await;
+    let snap2 = published(&report2, "reopen the profile component");
+    assert_eq!(
+        snap2.bodies.len(),
+        1,
+        "reopen still publishes the placed profile component"
+    );
+    let vol2 = exact_volume(&wm2, snap2.bodies[0].body).await;
+    assert!(
+        (vol2 - want_120).abs() <= 1e-6 * want_120,
+        "reopened volume {vol2} != placed {want_120} — a `profile` source must regen with no \
+         library reachable, exactly like a baked one"
+    );
+
+    wm2.shutdown().await;
+}

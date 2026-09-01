@@ -1,0 +1,64 @@
+# CANONICAL §7.8 fixture — `ExtractPrismProfile` REFUSES, and refuses with a
+# number. The companion to `place_component_profile.ndjson`, which drives the
+# same verb's success leg.
+#
+# The subject is a 20x20x100 stick CROSS-DRILLED through its side. It passes the
+# easy half of the prism test — two parallel 400 mm² end caps, one at each end of
+# the axis — and fails the half that matters: the volume the section would sweep
+# is not the volume the body has. That is exactly the case a naive
+# "find two parallel faces" ingest would accept and then silently re-extrude as a
+# solid stick, losing the bore. So prism-ness is PROVED, not assumed, and failing
+# the proof is an ANSWER (`ok:true`, `refusal.code:"notAPrism"`) carrying the
+# measured `volumeRatio` — an ingest UI can say by how much it missed.
+#
+# The ratio itself is `$present`: `json_subset` compares numbers exactly and this
+# one is a measurement. Its value is pinned in
+# `worker/tests/test_extract_prism_profile.cpp`, together with the tapered-stick
+# case and the case NEITHER measurement catches — a 20x20 stick fused end to end
+# onto a 40x10 one, whose cap areas are equal and whose volume IS area x length.
+# Only the step face between the caps refuses that, which is why prism-ness is
+# three tests and not two.
+#
+# `volumeRatio` and `areaDelta` are BOTH always present on a refusal, each `0`
+# when the refusal was reached before that measurement ran — the same
+# constant-key-set discipline the top-level result follows, so a reader branches
+# on the code and not on which keys arrived.
+#
+# Also pinned: the two addressing errors, which are deliberately DIFFERENT codes.
+# A stale `snapshotId` is `STALE_PREVIEW` because the answer is about to be frozen
+# into a package and the picks were taken against a head that no longer exists. An
+# unknown `bodyId` is `REF_UNRESOLVED` — a `BodyId` is persistent, so a miss is a
+# real resolve failure and not a staleness question. There is no `present:false`
+# branch: the fence and the body lookup consume both misses. And `snapshotId` is
+# REQUIRED, not optional-with-a-default — an absent one is a `PROTOCOL_ERROR`,
+# because defaulting it to the head would silently unfence the verb.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_extract_prism_refusal","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# 20x20x100 stick, then a Ø8 bore straight through its side at mid height.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":81,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"e2","type":"Line","p0":[20,0],"p1":[20,20]},{"id":"e3","type":"Line","p0":[20,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk1","distance":100.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk2","plane":{"kind":"XZ"},"entities":[{"id":"c1","type":"Circle","center":[10,50],"radius":4.0}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"params":{"sketchId":"sk2","distance":60.0,"extrudeMode":"Symmetric","booleanMode":"Cut","targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":81}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":81,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":81}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":3,"jobId":81,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":81,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":81,"documentRevision":0,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":81,"result":{"accepted":true,"snapshotId":1}}}
+# The refusal. Nothing is written, `prism` and `refusal` are mutually exclusive,
+# and the number that explains it rides the answer.
+{"send":{"v":1,"t":"req","id":4,"verb":"ExtractPrismProfile","args":{"snapshotId":1,"bodyId":"body_op1","path":"/tmp/onecad_never_written.brep"}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"prism":null,"written":false,"bytes":0,"codec":"brep","format":4,"sha256":null,"refusal":{"code":"notAPrism","message":"$present","volumeRatio":"$present","areaDelta":"$present"}}}}
+# A stale snapshotId is refused before any geometry is touched.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExtractPrismProfile","args":{"snapshotId":99,"bodyId":"body_op1"}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false}}}
+# An unknown body is a RESOLVE failure, not a staleness one.
+{"send":{"v":1,"t":"req","id":6,"verb":"ExtractPrismProfile","args":{"snapshotId":1,"bodyId":"body_nope"}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":false,"error":{"code":"REF_UNRESOLVED","retriable":false}}}
+# The fence is mandatory, not defaulted.
+{"send":{"v":1,"t":"req","id":7,"verb":"ExtractPrismProfile","args":{"bodyId":"body_op1"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":false,"error":{"code":"PROTOCOL_ERROR","retriable":false}}}
+# The head survived all four: byte-identical to the one AcceptPrepared left.
+{"send":{"v":1,"t":"req","id":8,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"documentRevision":0,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"goodbye":true}}}

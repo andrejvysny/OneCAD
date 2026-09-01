@@ -2929,6 +2929,85 @@ pub async fn step_file_dialog(app: AppHandle) -> Result<Option<String>, ApiError
     Ok(pick_step_open(app).await)
 }
 
+/// Shows a native **multi-select** STEP open dialog for the "Import components…"
+/// lane, resolving to the chosen absolute paths (empty on cancel).
+///
+/// Rust owns every dialog in this app — the webview has no filesystem capability
+/// at all and `@tauri-apps/plugin-dialog`'s JS binding is not a dependency — so a
+/// batch ingest cannot pick its own files. This is the only multi-select picker;
+/// the singular pickers above deliberately stay singular.
+#[tauri::command]
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn pick_component_files(app: AppHandle) -> Result<Vec<String>, ApiError> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("STEP", &["step", "stp", "STEP", "STP"])
+        .pick_files(move |files: Option<Vec<tauri_plugin_dialog::FilePath>>| {
+            let _ = tx.send(files);
+        });
+    Ok(rx
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect())
+}
+
+/// Bulk vendor-STEP → library-component ingest (`CadClient.ingestComponents`;
+/// Component Library WP-C2).
+///
+/// Every requested path becomes an **`embedded`** package: one solid, stored as
+/// baked geometry, keeping everything the STEP reader recovered except the
+/// fastener sub-products vendors ship inside an assembly. Re-ingesting a stick as
+/// a length-parametric **`profile`** is deliberately NOT available here — which
+/// solids are the extrusion, and what its default length is, are per-part human
+/// decisions, and those go through an `onecad-library-ingest` recipe.
+///
+/// **Runs on its own worker and its own scratch runtime**, so the open document is
+/// untouched: no record is authored in it, its session is never re-entered, and a
+/// file that fails to read costs it nothing. The worker is one session per
+/// process, so this is the only way to import without trampling the session the
+/// user is editing (same reasoning as the component re-bake lane).
+///
+/// Never partially fails: the answer always carries one row per requested path,
+/// each `ok` / `refused` / `failed` with its own reason.
+///
+/// Arguments are FLAT and camelCase on the wire (`{paths, libraryRoot, defaults}`),
+/// matching `tauriClient.ingestComponents` — the frontend's `IngestComponentsRequest`
+/// is a TS-side aggregate, not a single wire object.
+///
+/// # Errors
+/// [`ApiError::Internal`] when no library root resolves, and the environment
+/// errors from spawning the ingest worker.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(paths = paths.len()), err(Display))]
+pub async fn ingest_components(
+    app: AppHandle,
+    paths: Vec<String>,
+    library_root: Option<String>,
+    defaults: crate::dto::IngestDefaultsDto,
+) -> Result<crate::dto::IngestComponentsReportDto, ApiError> {
+    let root = match library_root.as_deref() {
+        Some(p) => PathBuf::from(p),
+        None => crate::library::library_root(&app)
+            .ok_or_else(|| ApiError::Internal("ingestComponents: no app data dir".into()))?,
+    };
+    let defaults = crate::library_ingest::IngestDefaults {
+        vendor: defaults.vendor,
+        category: defaults.category,
+        tags: defaults.tags,
+        ..Default::default()
+    };
+    let plan = crate::library_ingest::plan_from_paths(&paths, &defaults);
+    let worker = crate::library_ingest::spawn_ingest_worker().await?;
+    Ok(crate::library_ingest::ingest_components_at(&worker.0, &root, &plan).await)
+}
+
 async fn pick_file(app: AppHandle, save: bool) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();

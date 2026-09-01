@@ -398,6 +398,20 @@
       "uiExposure": "exposed"
     },
     {
+      "operation": "PlaceComponent",
+      "mode": "profile source (length-parametric extrusion)",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_component_blob_source.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/component_ops.rs",
+      "frontendTest": "src/modules/library/componentMeta.test.ts",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; linux-worker; rust-8-0-1; frontend",
+      "notes": "Component Library WP-C / SCHEMA §7.3 source.kind = \"profile\". A length-parametric extrusion of an embedded canonical planar FACE: vendor stock ships as one fixed length (a 500 mm aluminium stick) while the component must place at any length, which no baked kind can express. The worker prisms the face along +Z by source.params.length. params.length is a REGEN INPUT, unlike a document source's provenance-only params: it is covered by the planner hash, so setComponentParams merges it in place with NO re-bake. One solid by construction — a prism over one face is one solid — so the §9 single-solid rule needs no separate check. codec is pinned to brep by name because the step and xbf readers return solids. The ingest half is the read-only fenced §7.8 verb ExtractPrismProfile. uiExposure hidden: the Rust/worker halves are live, the ingest UI is not authored yet, so there is deliberately no browser lane to cite.",
+      "uiExposure": "hidden"
+    },
+    {
       "operation": "DetachComponent",
       "mode": "drop library identity, keep geometry",
       "supportStatus": "supported",

@@ -56,7 +56,190 @@ per-WP test lists; this section is the gate ledger.
 - `imports.rs:405` hardcodes `unit_scale = 1.0` (the STEP header unit is inspected and only
   logged) — inch-authored vendor files silently mis-scale. Fixed in WP-C.
 
-### WP0 — hygiene (in flight)
+### WP-C — vendor STEP components (2026-09-01) — see the gate row above
+Protocol design audited BEFORE code (`protocol-auditor`, approve_with_changes; the verb was
+revised to the file-writing §7.8 shape): `PlaceComponent` `source.kind = "profile"` (fourth
+`blob_ref()` participant, `codec` pinned `brep`, worker re-checks only plane z=0 + normal +Z,
+`params.length` is a hashed regen input) and §7.8 `ExtractPrismProfile` (snapshot-fenced,
+writes a file, `notAPrism` is an ANSWER with `volumeRatio`, shape-intrinsic canonical-frame
+tie-break). Full audited text in the session scratchpad; SCHEMA + §14 land with the worker
+package.
+- [x] C2a Rust (orchestrator-reviewed): `ComponentSourceRef::Profile` + `blob_ref` arm +
+      validation; two NEW schema-freeze snapshots (`place_component_generator`, `…_profile` —
+      no component op was snapshot-locked before; no existing `.snap` moved); `onecad-library`
+      `SourceSpec::Profile`, `ResolvedSource::Profile`, and the missing blob-kind authoring leg
+      `Library::save_embedded_component` (`SourceSpec::Embedded` was never constructed anywhere
+      before today); `library.rs` profile arms (declared `length` default seeded from the
+      package, gesture length MERGES, re-length = in-place param edit with no re-bake);
+      `ExtractPrismProfile` client on `GeometryExporter` + `library::extract_prism_profile_at`;
+      wire tests prove `source.path` is injected for `profile` and never enters the hash;
+      coverage/contracts rows `PlaceComponent :: profile source` (uiExposure `hidden`, no
+      browser lane yet). Real-worker profile test written and BLOCKED on the C++ verb (fails
+      loudly `unknown verb: ExtractPrismProfile` by design) — re-run at the gate.
+- **Plan claim RETRACTED:** `imports.rs:405` `unit_scale = 1.0` is NOT a bug. The STEP reader
+  always converts to mm at read time (`StepRead.h:60,100-101`, SCHEMA §7.3 `unitScale` is an
+  "explicit escape hatch … the reader itself always converts to mm"); applying
+  `source_unit` would double-scale inch files ×25.4. Found by the C2a implementer; verified.
+- [x] C3 FE (orchestrator-reviewed): `PlaceComponentSource` gains `profile`;
+      `placementController.withGestureParams` MERGES gesture params over a profile's own
+      (`generator` still replaces) so `params.length` cannot be dropped by an unrelated gesture
+      key; `CadClient.ingestComponents` (append-only) with `CMD.ingestComponents =
+      "ingest_components"` and the frozen request/response DTO; mock refuses by name (`MOCK
+      LIMIT: component ingestion needs the OCCT worker`); `IngestComponentsDialog` + "Import
+      components…" header button in the Library modal; vitest 306 files / 5276 passed; e2e
+      `library-ingest-components.spec.ts` + two library specs 5/5 chromium, 5/5 webkit after one
+      webkit re-run (`library-browse-place-snap:107` timeout, isolated 2/2 — pre-existing).
+- **Seams found (recorded, not fixed here):** (1) Library modal "Library options" `Popover`
+  (`z-[100]`) renders BEHIND the modal content (`z-[110]`) where they overlap — every item in
+  that overflow is unclickable there (pre-existing; a scratch probe reproduced it on "Rebuild
+  index"); the new button is a standalone header button for that reason. (2) The webview has
+  no dialog capability by design, so the real-lane file picker is a Rust-owned
+  `pick_component_files` command (C2b); the dialog's hidden `<input type=file>` serves the
+  mock lane only.
+- [x] C1 worker LANDED (implementer-reported, orchestrator spot-checked; independent audits in
+      flight): `BrepCodec::{read_brep_shape,write_brep_shape}` (header check first);
+      `ComponentOp.cpp` `profile` arm (`build_profile_solid`, five `PROFILE_*` reasonCodes on
+      `OP_FAILED`); `session/ExtractPrismProfile.{h,cpp}` on the kernel lane (fenced
+      `snapshotId` → `STALE_PREVIEW`, unknown body → `REF_UNRESOLVED`, missing snapshotId →
+      `PROTOCOL_ERROR`, `notAPrism` answer with `volumeRatio`, constant response key set, file
+      bake with `sha256`); SCHEMA §7.3 `:1969` + `:2004-2006` (+50 lines), §7.8 `+133` lines
+      before `ExportStep`, §8 `STALE_PREVIEW` row, §14 ×2; spec §2.1 + §9; fixtures
+      `place_component_profile.ndjson` (two refusal legs) + `extract_prism_profile_refusal.
+      ndjson`; ctests `test_extract_prism_profile` + `test_component_blob_source` profile loop.
+      Implementer-measured: `build-worker.sh` exit 0 (sidecar restaged, sha `4b79fe64…`, verb
+      present), ctest **159/159**, hygiene clean, `ndjson_fixtures_parse_into_message_types` 1/1.
+      Deviations recorded in SCHEMA: pose-independence is geometric identity (≤2e-15 mm), byte
+      identity only for identical input; isotropic-profile tie-break uses an intermediate frame
+      from the centroid to the first `TopExp`-ordinal vertex (the audit's ≤4-candidate rule is
+      under-determined for a square); `endCap.topoKey` is 1-based (`f:6` in the example);
+      FORWARD-normalised geometric normal → +Z so the bottom cap re-extrudes the original, not a
+      mirror. Orchestrator re-ran the previously blocked Rust test: `cargo test --test
+      component_ops` **13 passed / 0 failed** (profile place at 120 → 45643.8055…, re-length →
+      no re-bake).
+- **Environment hazard (recorded):** a `PostToolUse` formatter hook reflows C++ through
+  clang-format defaults (2-space, pointer-right) — no `.clang-format` in the repo, codebase is
+  4-space/100-col/pointer-left. The implementer's first `Edit` on `BrepCodec.h` produced 37
+  lines of pure reformatting; reverted, and all later C++ edits went through Bash. Fix = commit
+  a `.clang-format` matching the codebase or scope the hook — user decision.
+- **Independent reviews of the landed worker/Rust/protocol diff (2026-09-01):**
+  - `protocol-auditor` post-landing: **approve_with_changes** — one doc-only blocker (the §7.8
+    tie-break paragraph described a four-candidate eigenvector rule while the code always uses
+    the four quarter-turns of the principal angle; rewritten to match, tensor named as
+    `MatrixOfInertia`) + N1–N10 (world-seeded fallback, count slip, refusal fixture missing
+    `codec`/`format`, `volumeRatio` 0 before measurement, OP_FAILED legs, anchor, TopExp
+    wording, `f:0` in a Rust parser test, pre-existing `[]` prefix-match in fixtures). Orchestrator
+    applied the prose + fixture fixes; canonical fixtures re-run 2/2. Sign-off line recorded at
+    the gate.
+  - `adversarial-reviewer`: **two real defects, both demonstrated with runnable inputs.**
+    F1 BLOCKER — `analyze_prism` accepted a 20×20→40×10 equal-area step body (V = A·L and equal
+    caps both hold): the intermediate axis-perpendicular faces were collected and ignored.
+    F2 HIGH — the `profile` arm accepted an off-centre canonical face (plane + normal checked,
+    centroid not) and placed the component 37/12 mm from its `placement.translate`, no refusal.
+    F3 area gate 1e-9 (10 pm taper refuses; no margin for vendor rounding) · F4 B-spline planar
+    caps unrecognised (deferred, message only) · F5 format-pin branch carries no reasonCode ·
+    F6 cross-process determinism untested · N1/F7/F8/F13 prose. Confirmed sound: REVERSED faces
+    still extrude correctly, no forked publish path, undo path for re-length, fencing, serde,
+    hash exclusion of `source.path`, blob lifecycle, 1-based topoKeys, bbox axis choice stable
+    under tessellation. Fix round sent to the worker implementer (F1, F2, F3, F5, F6, N1, F7,
+    F8, F13; F4 deferred); Rust follow-ups recorded: profile save/reopen-without-library test,
+    no-`length` package refusal test.
+- [x] C1 fix round LANDED (implementer-reported; red-checked both blockers): F1 structural
+      test — any axis-perpendicular planar face strictly between the end caps refuses
+      (`notAPrism`, "the body is more than one prism"); F2 centroid-at-origin joins
+      `PROFILE_FACE_NOT_CANONICAL` (three enforced properties now); F3 area gate 1e-9 → 1e-6 with
+      `refusal.areaDelta` always present; F5 `PROFILE_FORMAT_UNSUPPORTED` (six codes), blob-
+      plumbing legs stay generic `OP_FAILED` (SCHEMA says so); F6 new ctest
+      `canonical_extract_prism_profile_bytes` — two fresh worker processes, `cmp` of the written
+      files (1199 bytes identical); N1 world-seed fallback → bake error; F4 deferred (message
+      names "ANALYTIC planar faces"); F7 canonical-frame convention written into spec §2.1; F8/
+      F13 wording. Implementer-measured: ctest **160/160**, hygiene clean, `ndjson_fixtures` 1/1,
+      verifiers exit 0. Orchestrator re-runs everything at the gate below.
+- [x] C2b Rust LANDED (implementer-reported): `src-tauri/src/library_ingest.rs` (recipe
+      parser, keep-list resolution, `ingest_components_at`, `inspect_components_at`, ephemeral
+      ingest worker behind a `Drop` guard with a 30 s × 4 ping budget — the production 5 s × 2
+      SIGKILLed the worker mid-NEMA17), CLI crate `onecad-library-ingest` (`--inspect`, `--json`,
+      exit 0/1/3), commands `ingest_components` (flat camelCase args matching the FE) +
+      `pick_component_files` (Rust-owned multi-select dialog), `.gitignore` `STEP/*` +
+      `!STEP/ingest.toml`, tracked recipe. **Ingest report (temp library root, real worker):**
+      ```
+      ok       onecad.vendor.rollco.rp4030   profile   1 found / 1 kept /  78 faces / 142 ms
+      ok       onecad.vendor.rollco.rp4031   profile   1 / 1 /  78 / 142 ms   (modelled along +X — axis found)
+      ok       onecad.vendor.rollco.rp4040   profile   1 / 1 / 126 / 234 ms
+      ok       onecad.vendor.rollco.rp4050   profile   1 / 1 / 174 / 345 ms
+      ok       onecad.vendor.rollco.rp4070   profile   1 / 1 / 183 / 373 ms
+      REFUSED  onecad.vendor.generic.nema17-17hs4023  embedded  67 / 2 / — / 9056 ms
+               INGEST_DISJOINT_AFTER_FUSE: Boolean failed self-interference validation
+      ok       onecad.vendor.towerpro.sg90   embedded  19 / 3 / 268 faces / 4444 ms
+      ```
+      SG90: keep `[16,17,18]` (three case solids, 87.9 % of volume, fuse to one 268-face solid);
+      the file carries NO product names (`names 0/19`), so the ISO 7045 screws cannot be dropped
+      by name — indices instead. **NEMA17 refuses honestly:** the envelope solids 65 and 66
+      (86 % of volume) each fail OCCT's `BRepAlgoAPI_Check` self-intersection test, so every
+      keep-list containing either fails Tier B's `PUBLICATION_SELF_INTERFERENCE`; seven
+      keep-lists tried and recorded in the recipe; keeping `[66]` alone would put half a motor
+      in the library under a whole-motor name — deliberately not done. Options for the user:
+      a cleaner NEMA17 download, or seeding the worker's existing `nema17` frame GENERATOR
+      (dropped from the seed catalogue at SEED_VERSION 4 as "breadth without a consumer" — it
+      now has one). Real-worker `library_ingest` **4/4**; app lib **361/0**; onecad-library 51/0.
+- **Defect found by C2b, fix in flight:** every blob-kind package gets the SAME
+  `identity.revision` (`sha256:e3b0c442…` = SHA of empty input) because `compute_revision`
+  hashes package-directory files only and blob-kind geometry lives in `blobs/` — two different
+  components are revision-identical and a blob swap under a fixed `id@version` is undetectable
+  by `resolve()`. Fix: fold the referenced blob digests (+codec/format) into the revision.
+- [x] Follow-up Rust tests LANDED: `a_profile_component_survives_save_and_reopen_with_no_
+      library` (delete the library root, fresh worker, reopen → volume 380.365…×120, blob in
+      `imports/`) and `a_profile_package_without_a_declared_length_is_refused_by_name`
+      (refused at `PlaceComponentParams::validate`, nothing on the timeline). `component_ops`
+      **14/14**, `library::` unit tests 22/22.
+
+### Gate — WP-C: vendor STEP components (2026-09-01) — LANDED
+
+**Landed:** `PlaceComponent` `source.kind = "profile"` (length-parametric prism of a canonical
+planar face; three enforced canonicality properties; six `PROFILE_*` reasonCodes) · §7.8
+`ExtractPrismProfile` (fenced, file-writing, three-condition prism proof, `notAPrism` answer
+with `volumeRatio`/`areaDelta`, shape-intrinsic quarter-turn frame, cross-process byte gate) ·
+Rust `ComponentSourceRef::Profile` + `blob_ref` arm + validation + two NEW schema-freeze
+snapshots · `onecad-library` `SourceSpec::Profile`, `save_embedded_component` (the first writer
+of `embedded`-kind packages), revision hash now folds referenced blob digests (blob-kind
+packages were ALL `sha256:e3b0c442…`; generator revisions unchanged so seed manifests stay
+valid) · `library_ingest.rs` core + `onecad-library-ingest` CLI + `ingest_components` /
+`pick_component_files` commands + tracked `STEP/ingest.toml` · FE `profile` kind, Import-
+components dialog with Rust-owned multi-file picker, mock refuses by name · coverage/contracts
+rows `PlaceComponent :: profile source` (hidden) · spec §2.1 canonical-frame convention + §9.
+
+**Protocol sign-off (protocol-auditor, post-landing, 2026-09-01):** SCHEMA §7.3
+`source.kind="profile"` + §7.8 `ExtractPrismProfile` + §8 `STALE_PREVIEW` row + two §14 entries.
+`protocolVersion` 1 unchanged; worker fingerprint `0a6a1dce34181289` unchanged; no fixture bump
+(additive, internally-tagged serde; no existing `.snap` moved). Rust (`record.rs`, `wire.rs`,
+`dto.rs`, `manager.rs`, `export.rs`) and C++ (`main.cpp` register_verb, `ComponentOp.cpp`
+profile arm, `session/ExtractPrismProfile.cpp`) match the schema; all six `PROFILE_*` refusal
+names agree in both directions. Lanes: C++ `canonical_place_component_profile` +
+`canonical_extract_prism_profile_refusal` + `canonical_extract_prism_profile_bytes` replay
+(PASS); Rust PARSE lane `ndjson_fixtures_parse_into_message_types` (PASS, directory-
+enumerated). **No Rust replay claimed** — that lane is stub-only. Blocking B1 (tie-break prose)
+corrected; N1–N10 folded or recorded. Adversarial review F1/F2 (blocker/high) fixed and
+red-checked; F3/F5/F6/N1/F7/F8/F13 fixed; F4 deferred (message only).
+
+**Gate (measured on the main thread, suites alone, teed; rung FULL L3):** sidecar restaged
+and current (verb present) · `check-worker-stdout-hygiene.sh` clean · ctest **160/160** ·
+`cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -- -D warnings` clean ·
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **91 targets / 1379 passed / 0
+failed / 0 ignored** (a first run went 1378/1: `library_seed::tests::declared_revisions_match_
+a_manifest_only_package` — the revision fix had folded `generator` sources into the hash and
+moved the seed revision; generator sources now contribute nothing; re-run clean) · `bunx tsc
+--noEmit` clean · `bun run test` **306 files / 5281 passed / 78 skipped / 0 failed** · hex 0 ·
+kernelbench `fillet/foundation:t0` both backends **136 rows unchanged** + `semantic-compare` OK
+(136 records, 0 fail, 128 pass, 8 char) · coverage 30/9/16/19 · contracts 38/18 · `bun run e2e`
+(both projects, retries 0): **496 passed / 0 failed, 27.6 min** (suite grew 494 → 496: the
+library-ingest spec in both browsers).
+
+**Seams recorded (not fixed here):** `library_ingest.rs` is 1325 lines (split recipe / core in
+a later pass) · NEMA17 vendor file refuses (self-intersecting envelope solids) — user options:
+cleaner download or seed the worker's `nema17` frame generator · Library modal "Library options"
+`Popover` z-order defect · F4 B-spline planar caps · the `identity.id`/`version` are not part of
+a package revision (pre-existing design) · `axis_hint` plumbed in Rust, used only by the recipe.
+
+### WP0 — hygiene — committed `3a82910`
 - [x] Restage sidecar (`build-worker.sh Release`, OCCT 8.0.1, selftest exit 0, 2026-09-01 14:57): staged sha `805c7b5d…` == `worker/build` sha; `strings | grep -c entityStates` = 1.
 - [x] `git push origin master` (`fea00a0..e0cff2e`, user-authorized 2026-09-01); CI run 33510678029 started on `e0cff2e` — outcome recorded below when it lands.
 - [x] Autosave durability trio LANDED (orchestrator-reviewed): new `onecad_core::io::
@@ -78,8 +261,12 @@ per-WP test lists; this section is the gate ledger.
   failed / 0 ignored** · `bunx tsc --noEmit` clean · `bun run test` **305 files / 5264 passed / 78
   skipped / 0 failed** · hex 0. CI on `e0cff2e` at commit time: 9 jobs green (`frontend`,
   `rust-8.0.1`, `worker-8.0.1`, `e2e-chromium`, `e2e-webkit`, `occt-fingerprint`, both
-  persistence jobs, OCCT build); `linux-worker` (self-hosted) and `tauri-composition` still
-  queued — recorded when they land.
+  persistence jobs, OCCT build). **`tauri-composition` CANCELLED at 14:52Z inside "Build and
+  stage worker" after 95 min (started 13:17Z) — a job-timeout on the GitHub macOS runner
+  building the OCCT worker from source, not a product red; the same job was cancelled on
+  `fea00a0` (2026-08-24) and last succeeded on `33dd36c` (2026-08-18). Infra item: cache the
+  worker build or raise the timeout. `linux-worker` stayed `queued` (self-hosted runner
+  offline) — user-side runner.
 - [x] Regen timing split LANDED (orchestrator-reviewed): `RegenTimings{planner_ms, worker_ms,
       mesh_ms}` on `RegenReport` + the unchanged `"regen.drive: done"` line (`grep 'regen:'`
       still matches). Stopwatch lives in the app-layer `AdoptingEngine` (`worker/mod.rs`

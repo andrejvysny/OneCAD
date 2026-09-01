@@ -1,0 +1,71 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ed2",
+  "recordSchemaVersion": 1,
+  "stepIndex": 18,
+  "name": "Component 2",
+  "opType": "PlaceComponent",
+  "params": {
+    "componentId": "acme.extrusion.2020",
+    "componentRevision": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "componentVersion": "1.0.0",
+    "params": {
+      "length": 120.0
+    },
+    "placement": {
+      "rotate": {
+        "angleDeg": {
+          "value": 0.0
+        },
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "translate": [
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 0.0
+        }
+      ]
+    },
+    "source": {
+      "brepFormat": 4,
+      "codec": "brep",
+      "kind": "profile",
+      "params": {
+        "length": 120.0
+      },
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  },
+  "inputs": {
+    "bodies": [],
+    "sketches": [],
+    "elements": []
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

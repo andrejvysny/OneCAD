@@ -1,0 +1,71 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ed1",
+  "recordSchemaVersion": 1,
+  "stepIndex": 17,
+  "name": "Component 1",
+  "opType": "PlaceComponent",
+  "params": {
+    "componentId": "onecad.std.iso4762",
+    "componentRevision": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "componentVersion": "1.0.0",
+    "params": {
+      "thread": "M6"
+    },
+    "placement": {
+      "rotate": {
+        "angleDeg": {
+          "value": 0.0
+        },
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "translate": [
+        {
+          "value": 10.0
+        },
+        {
+          "value": 0.0
+        },
+        {
+          "value": 4.0
+        }
+      ]
+    },
+    "source": {
+      "generatorId": "iso4762",
+      "generatorVersion": 1,
+      "kind": "generator",
+      "params": {
+        "length": 20.0,
+        "thread": "M6"
+      }
+    }
+  },
+  "inputs": {
+    "bodies": [],
+    "sketches": [],
+    "elements": []
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

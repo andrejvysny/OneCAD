@@ -1,0 +1,83 @@
+# CANONICAL §7.3/§7.8 fixture — Component Library WP-C: the `profile` source kind
+# and the `ExtractPrismProfile` verb that produces what it reads.
+#
+# THE FIXTURE GENERATES ITS OWN INPUT. There is no tracked binary: plan 91 builds
+# the vendor stick (a 20x20 section with a Ø5 bore, extruded 500 mm — the shape an
+# aluminium-extrusion STEP actually contains), `ExtractPrismProfile` bakes its
+# canonical end-cap FACE to a worker-writable temp path, and plan 92 places that
+# face back as a component AT A DIFFERENT LENGTH. That length change is the whole
+# point of the kind: vendor stock is one fixed length, the component is not.
+# (Same self-generating rationale as worker/tests/fixtures/import_step.ndjson.)
+#
+# WHAT IS PINNED HERE, AND WHAT DELIBERATELY IS NOT.
+#
+# No measured float appears in this file. `areaMm2`, `volumeRatio` and the placed
+# `volume` are `$present`: `json_subset` compares numbers EXACTLY and NDJSON is the
+# wrong instrument for a millimetre. Their values — section area 380.3650459150638,
+# volume at 120 mm 45643.80550980765 — are pinned in
+# `worker/tests/test_extract_prism_profile.cpp` and
+# `worker/tests/test_component_blob_source.cpp`, which can measure a solid. Same
+# contract/corpus split the OffsetFace pair and `analyze_edge_op_range` use.
+#
+# What IS pinned is the protocol shape a Rust or frontend reader branches on: that
+# the verb answers a constant key set with `refusal:null` on success, that it
+# reports the codec and format pin the caller must record, that its digest is a
+# SHA-256 of the bytes it wrote, that the profile's boundary is described (4 outer
+# edges, 1 inner wire) — and that the verb MINTS AND PUBLISHES NOTHING, asserted as
+# a `GetWorkerHead` identical field-for-field either side of it.
+#
+# `lengthMm` is `500.0` exactly and that is not a measurement: it is the
+# PLANE-TO-PLANE distance between two end caps the extrude placed at exactly z=0
+# and z=500. A bounding-box extent — inflated by the shape's tolerance — would not
+# be exact, which is why the contract forbids one.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_place_component_profile","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The vendor stick.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":91,"documentRevision":0,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"e2","type":"Line","p0":[20,0],"p1":[20,20]},{"id":"e3","type":"Line","p0":[20,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]},{"id":"c1","type":"Circle","center":[10,10],"radius":2.5}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk1","distance":500.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":91}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":91,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":91,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":91,"documentRevision":0,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":91,"result":{"accepted":true,"snapshotId":1,"documentRevision":0}}}
+# HEAD BEFORE the verb.
+{"send":{"v":1,"t":"req","id":4,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"documentRevision":0,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# The ingest probe: prism-ness proved, canonical end-cap face written.
+{"send":{"v":1,"t":"req","id":5,"verb":"ExtractPrismProfile","args":{"snapshotId":1,"bodyId":"body_op1","path":"/tmp/onecad_canonical_profile.brep"}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"written":true,"bytes":"$present","codec":"brep","format":4,"sha256":"$hex64","refusal":null,"prism":{"axis":[0.0,0.0,1.0],"endCap":{"topoKey":"$present"},"lengthMm":500.0,"areaMm2":"$present","volumeRatio":"$present","outerEdgeCount":4,"innerWireCount":1}}}}
+# …and it published nothing: field for field the head from id 4.
+{"send":{"v":1,"t":"req","id":6,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"documentRevision":0,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# The placement. `source.sha256` is a LITERAL the worker never verifies against the
+# bytes at `source.path` (integrity is the Rust blob store's job), so this file can
+# carry a fixed digest while the path is generated above. `params.length` is 120 —
+# a length the stick never had, which is what makes this kind different from the
+# two baked ones.
+{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":92,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op2","stepIndex":0,"inputs":[],"params":{"componentId":"acme.extrusion.2020","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"profile","sha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","codec":"brep","brepFormat":4,"params":{"length":120.0},"path":"/tmp/onecad_canonical_profile.brep"},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":0,"jobId":92,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op2"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":92,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok","bodyIds":["body_op2"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"AcceptPrepared","args":{"jobId":92,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":92,"result":{"accepted":true,"snapshotId":2,"documentRevision":1}}}
+# The prism really was rebuilt from the face — it has a volume, and the exact
+# number is pinned in test_component_blob_source.cpp.
+{"send":{"v":1,"t":"req","id":9,"verb":"QueryMassProperties","args":{"bodyId":"body_op2"}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"volume":"$present","surfaceArea":"$present"}}}
+# REFUSAL LEG. A negative length is a RECOVERABLE step failure carrying the
+# machine-readable reason on `diagnostics[].reasonCode`, while the top-level §8
+# code stays `OP_FAILED` — the taxonomy does not grow for a new refusal reason.
+{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":93,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op3","stepIndex":0,"inputs":[],"params":{"componentId":"acme.extrusion.2020","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"profile","sha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","codec":"brep","brepFormat":4,"params":{"length":-1.0},"path":"/tmp/onecad_canonical_profile.brep"},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":93,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"OP_FAILED","stage":"build","reasonCode":"PROFILE_LENGTH_INVALID","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"DiscardPrepared","args":{"jobId":93}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":93,"result":{"discarded":true}}}
+# A codec this lane cannot answer a FACE question with is named too: the `step` and
+# `xbf` readers return SOLIDS.
+{"send":{"v":1,"t":"req","id":12,"verb":"ExecutePlan","args":{"jobId":94,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":0,"ops":[{"opType":"PlaceComponent","opId":"op3","stepIndex":0,"inputs":[],"params":{"componentId":"acme.extrusion.2020","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"profile","sha256":"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","codec":"xbf","brepFormat":12,"params":{"length":120.0},"path":"/tmp/onecad_canonical_profile.brep"},"placement":{"translate":[0.0,0.0,0.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":94,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"OP_FAILED","stage":"build","reasonCode":"PROFILE_CODEC_UNSUPPORTED","message":"$present"}]}]}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"DiscardPrepared","args":{"jobId":94}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":94,"result":{"discarded":true}}}
+# The head moved exactly twice in this file, and only where AcceptPrepared said so.
+{"send":{"v":1,"t":"req","id":14,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":2,"hasScratch":false,"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"goodbye":true}}}

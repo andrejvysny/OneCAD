@@ -28,6 +28,8 @@ import type {
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
+  IngestComponentsRequest,
+  IngestComponentsReport,
   LibraryComponent,
   MassProperties,
   ModuleState,
@@ -585,6 +587,41 @@ export interface CadClient {
     previewPng?: string | null,
     unionSolids?: boolean,
   ): Promise<LibraryComponent>;
+
+  /**
+   * Bulk-imports STEP files as catalog components in ONE round trip
+   * (Component Library WP-C2 "Import components…" — the Library modal's
+   * vendor-stock bulk-import flow, distinct from `saveAsComponent`'s
+   * one-body-from-the-open-document authoring path).
+   *
+   * Each `req.paths` entry is analysed independently and reported with its
+   * own {@link IngestPartResult} — a malformed or refused file never aborts
+   * the batch, so ten good parts still land when the eleventh is garbage.
+   * `req.defaults` seeds the vendor/category/tags every ingested part is
+   * catalogued under, offered once for the whole batch rather than per file.
+   *
+   * Never throws PER PART: a whole-call rejection (e.g. no worker reachable)
+   * is the only thing that can reject this promise, and callers must treat
+   * that the same way as every other backend call — errors as values, not a
+   * thrown exception left to bubble past a status row.
+   *
+   * MOCK LIMIT: the mock lane has no STEP reader and no worker, so every
+   * requested path resolves `status: "refused"` — see `mockClient`'s own
+   * comment.
+   */
+  ingestComponents(req: IngestComponentsRequest): Promise<IngestComponentsReport>;
+
+  /**
+   * Shows a native MULTI-select STEP open dialog for the "Import components…"
+   * batch picker, resolving to the chosen absolute paths (empty on cancel).
+   *
+   * Rust owns this dialog like every other one — the webview has no fs/dialog
+   * capability — and it is the one MULTI-select picker in the app; every other
+   * file dialog here is singular. MOCK LIMIT: the mock lane cannot open a
+   * native dialog, so it always resolves `[]`; `IngestComponentsDialog` falls
+   * back to its hidden `<input type="file" multiple>` only on that lane.
+   */
+  pickComponentFiles(): Promise<string[]>;
 
   /**
    * Swaps a placed instance to a different component, IN PLACE at the same

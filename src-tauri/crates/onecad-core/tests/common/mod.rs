@@ -8,10 +8,11 @@ use uuid::Uuid;
 
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, CircularPatternParams,
-    DeterminismSettings, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation,
-    LinearPatternParams, LoftParams, MirrorBodyParams, OffsetDistanceType, OffsetFaceParams,
-    OpaqueOperation, Operation, OperationRecord, PlaneKind, RevolveParams, ShellParams,
-    SketchOpParams, SketchPlaneRef, SweepParams,
+    ComponentParamValue, ComponentSourceRef, DeterminismSettings, ExtrudeMode, ExtrudeParams,
+    FilletParams, FrozenPlacement, ImportSourceCodec, KnownOperation, LinearPatternParams,
+    LoftParams, MirrorBodyParams, OffsetDistanceType, OffsetFaceParams, OpaqueOperation, Operation,
+    OperationRecord, PlaceComponentParams, PlaneKind, RevolveParams, ShellParams, SketchOpParams,
+    SketchPlaneRef, SweepParams,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, IntentQuery, LocalFrame, PrimaryRef,
@@ -410,6 +411,69 @@ pub fn op_offset_face_total() -> Operation {
     }))
 }
 
+/// A `generator`-source `PlaceComponent` — the no-blob kind, whose geometry is
+/// re-derived from `source.params` on every regen.
+pub fn op_place_component_generator() -> Operation {
+    let mut instance_params = std::collections::BTreeMap::new();
+    instance_params.insert(
+        "thread".to_string(),
+        ComponentParamValue::Text("M6".to_string()),
+    );
+    let mut resolved = std::collections::BTreeMap::new();
+    resolved.insert(
+        "thread".to_string(),
+        ComponentParamValue::Text("M6".to_string()),
+    );
+    resolved.insert("length".to_string(), ComponentParamValue::Number(20.0));
+    Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "onecad.std.iso4762".into(),
+        component_version: "1.0.0".into(),
+        component_revision: format!("sha256:{}", "1".repeat(64)),
+        params: instance_params,
+        source: ComponentSourceRef::Generator {
+            generator_id: "iso4762".into(),
+            generator_version: 1,
+            params: resolved,
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(10.0), Scalar::new(0.0), Scalar::new(4.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }))
+}
+
+/// A `profile`-source `PlaceComponent` (WP-C) — a length-parametric extrusion
+/// of an embedded canonical planar face. `source.params.length` is the regen
+/// input that makes vendor stock placeable at any length.
+pub fn op_place_component_profile() -> Operation {
+    let mut source_params = std::collections::BTreeMap::new();
+    source_params.insert("length".to_string(), ComponentParamValue::Number(120.0));
+    let mut instance_params = std::collections::BTreeMap::new();
+    instance_params.insert("length".to_string(), ComponentParamValue::Number(120.0));
+    Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "acme.extrusion.2020".into(),
+        component_version: "1.0.0".into(),
+        component_revision: format!("sha256:{}", "2".repeat(64)),
+        params: instance_params,
+        source: ComponentSourceRef::Profile {
+            sha256: "3".repeat(64),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            params: source_params,
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }))
+}
+
 /// An unknown-`opType` op, captured as a frozen node.
 pub fn op_opaque() -> Operation {
     let mut raw = serde_json::Map::new();
@@ -470,6 +534,14 @@ pub fn canonical_records() -> Vec<(&'static str, OperationRecord)> {
         (
             "offsetface_total",
             record(16, "Offset face 3", op_offset_face_total()),
+        ),
+        (
+            "place_component_generator",
+            record(17, "Component 1", op_place_component_generator()),
+        ),
+        (
+            "place_component_profile",
+            record(18, "Component 2", op_place_component_profile()),
         ),
     ]
 }

@@ -35,6 +35,7 @@
 #include "session/FaceProjection.h"
 #include "session/MassProperties.h"
 #include "session/BodyTopology.h"
+#include "session/ExtractPrismProfile.h"
 #include "session/PrepareOffsetFace.h"
 #include "session/AnalyzeEdgeOpRange.h"
 #include "session/PrepareEdgeOp.h"
@@ -372,6 +373,16 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "ExportGeometry",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::io::handle_export_geometry(session, r);
+        });
+    // --- Component Library WP-C: the "vendor a STEP extrusion" ingest probe
+    //     (SCHEMA §7.8). Read-only with respect to SESSION state — no mint, no
+    //     publish, no scratch — but SNAPSHOT-FENCED like PrepareOffsetFace,
+    //     because its answer is frozen into a package. It writes the canonical
+    //     end-cap FACE a §7.3 `profile` source reads back. ---
+    dispatcher.register_verb(
+        "ExtractPrismProfile",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_extract_prism_profile(session, r);
         });
     // --- STEP-IMPORT WP-A W1: read-only STEP probe + brep conversion lane
     //     (SCHEMA §7.8). No session argument by design: no head, no scratch, no

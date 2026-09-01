@@ -29,6 +29,11 @@ pub enum ResolvedSource {
     },
     /// A static payload from the blob store.
     Embedded { blob: ResolvedBlob },
+    /// A canonical planar FACE from the blob store, prismed to the placing
+    /// instance's `length` at regen (WP-C; see [`SourceSpec::Profile`]). The
+    /// blob is bytes like any other — what differs is that the placement carries
+    /// a live parameter rather than a frozen solid.
+    Profile { blob: ResolvedBlob },
     /// A user-authored component: the baked solid, plus the digest of the frozen
     /// authoring document it was baked from (recorded as provenance and as the
     /// key a future re-bake would need — see [`SourceSpec::Document`]).
@@ -121,6 +126,35 @@ pub fn resolve(
                 format,
             )?,
         }),
+        SourceSpec::Profile {
+            blob,
+            codec,
+            format,
+        } => {
+            // Pinned by NAME, here at the door, rather than left to the worker:
+            // the other readers return solids, so a mis-declared codec would fail
+            // at the first regen on someone else's machine instead of at ingest.
+            if codec != package::PROFILE_CODEC {
+                return Err(LibraryError::MalformedPackage {
+                    path: manifest_path,
+                    message: format!(
+                        "source.codec `{codec}` is not `{}` — a profile blob is a single planar \
+                         face, and only the brep reader returns one",
+                        package::PROFILE_CODEC
+                    ),
+                });
+            }
+            Ok(ResolvedSource::Profile {
+                blob: read_blob(
+                    library_root,
+                    &manifest_path,
+                    "source.blob",
+                    &blob,
+                    &codec,
+                    format,
+                )?,
+            })
+        }
         SourceSpec::Document {
             file,
             geometry,

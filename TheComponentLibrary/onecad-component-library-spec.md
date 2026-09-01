@@ -75,10 +75,13 @@ tags        = ["metric", "shcs"]
 unit        = "mm"
 
 [source]
-kind = "generator"                   # exactly one of: embedded | generator | document
+kind = "generator"                   # exactly one of: embedded | generator | document | profile
 # embedded:  blob = "sha256:…"      (a STEP/BREP payload in the blob store)
 # generator: generator = "iso4762", generator_version = 1
 # document:  file = "source.onecad"
+# profile:   blob = "sha256:…"      (ONE canonical planar face; the instance's
+#                                    `length` free param extrudes it — vendor
+#                                    stock is one fixed length, the part is not)
 
 [parameters]
 # role: free (user-editable per instance) | table (derived from dim table, locked)
@@ -93,6 +96,38 @@ thread_detail = { role = "free",  value = "cosmetic", domain = ["cosmetic","simp
 head_seat  = { on = "face:head_underside", accepts = ["plane"] }
 shank_axis = { on = "cylinder:shank",      accepts = ["cylinder", "hole", "circularEdge"] }
 ```
+
+**The canonical profile frame (`kind = "profile"` only).** A profile blob is ONE
+planar face stored in a frame this spec fixes, because the placement machinery
+re-extrudes it on every regen and two ingests of the same physical extrusion have
+to produce the same bytes or content addressing stops deduplicating them. The
+convention, in full:
+
+1. The face lies on the plane `z = 0`.
+2. Its orientation-corrected normal is `+Z`, and its stored orientation is
+   `FORWARD`. The prism grows along `+Z` for `length` millimetres.
+3. Its AREA centroid — holes subtracted — is on the local origin. This is what
+   makes `placement.translate` mean "put the section's centre here"; a face
+   authored off-centre puts the part somewhere else.
+4. Its in-plane basis is the principal frame of the section's area moment about
+   that centroid, with the ambiguity closed by a tie-break that reads only the
+   shape: of the four quarter-turn candidates, take the one whose face-vertex
+   list, expressed in that frame, quantised to 1e-7 mm and sorted, is
+   lexicographically smallest. When the section is in-plane isotropic — a square,
+   a circle, any regular polygon — the moments carry no direction at all and the
+   candidates are the quarter-turns of a frame seeded from the shape's own first
+   vertex. Never from world space: a world seed makes the blob a function of the
+   pose the vendor happened to model in.
+
+**Do not hand-author this frame.** `ExtractPrismProfile` (SCHEMA §7.8) produces
+it from a vendor stick, and rule 4 in particular is not something to reproduce by
+eye. The worker re-checks rules 1–3 on every placement and refuses
+(`PROFILE_FACE_NOT_CANONICAL`) — each is one cheap measurement with a consequence
+a user would see. It deliberately does NOT re-check rule 4: that needs a
+per-regen eigen-solve whose degenerate branch is platform-sensitive, and an
+already-placed component must never start refusing because a last bit moved. A
+profile that violates rule 4 alone still places in the right place at the right
+size; it just fails to deduplicate against another ingest of the same stock.
 
 ### 2.2 The index — `library.json`
 
@@ -311,7 +346,7 @@ A template is a frozen `.onecad` package stored under `templates/` in the librar
 
 ## 9. Open constraint — single-solid publication
 
-The publication policy is solid-like at the top level (`single_solid_policy`). A placed component is one solid, so v1 is compatible. A multi-body "subassembly component" (motor + connector) is a compound and is **out of scope for v1** — author multi-body content as separate components or union to one solid. Revisit only when persistent mates give a compound meaning. State this honestly in authoring UI rather than letting users discover it at placement time.
+The publication policy is solid-like at the top level (`single_solid_policy`). A placed component is one solid, so v1 is compatible. A `profile` source satisfies this by construction rather than by check: a prism over one face is one solid. A multi-body "subassembly component" (motor + connector) is a compound and is **out of scope for v1** — author multi-body content as separate components or union to one solid. Revisit only when persistent mates give a compound meaning. State this honestly in authoring UI rather than letting users discover it at placement time.
 
 ---
 

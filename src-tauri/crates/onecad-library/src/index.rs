@@ -245,6 +245,7 @@ fn load_package_entry(
             Some(*generator_version),
         ),
         crate::package::SourceSpec::Document { .. } => ("document", None, None),
+        crate::package::SourceSpec::Profile { .. } => ("profile", None, None),
     };
     let entry = IndexEntry {
         path: rel_path,

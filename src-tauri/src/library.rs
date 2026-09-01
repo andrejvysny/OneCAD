@@ -47,7 +47,9 @@ use onecad_core::math::Vec3;
 use onecad_core::regen::{CancelToken, GeometryEngine, Outcome, RegenRequest};
 
 use onecad_library::index::LibraryIndex;
-use onecad_library::package::{self, ComponentPackage, ParameterRole, COMPONENT_MANIFEST_FILE};
+use onecad_library::package::{
+    self, ComponentPackage, ParameterRole, ParameterSpec, COMPONENT_MANIFEST_FILE,
+};
 use onecad_library::resolve::{ResolveRequest, ResolvedBlob, ResolvedSource};
 use onecad_library::Library;
 
@@ -405,6 +407,7 @@ pub async fn place_component_at(
             ))
         })?;
     let revision = entry.revision.clone();
+    let declared = declared_numeric_params(&entry.parameters);
     let resolved = library.resolve_source(&ResolveRequest {
         component_id: &component_id,
         component_version: &component_version,
@@ -419,7 +422,7 @@ pub async fn place_component_at(
             component_package_at("placeComponent", root, &component_id, &component_version)?;
         check_free_params("placeComponent", &package, &component_id, &free_params)?;
     }
-    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
     let source = source_with_free_params(source, &free_params, &component_id)?;
 
     let params = PlaceComponentParams {
@@ -484,11 +487,19 @@ fn check_free_params(
 
 /// Carries the caller's free params into the resolved source.
 ///
-/// ONLY a `generator` source consumes them — it re-derives geometry from
-/// params on every regen, which is exactly what makes a size editable. A
-/// blob-backed source carries geometry BAKED at authoring time, so recording
-/// params against it would show one designation over unrelated geometry: the
-/// silent substitution spec §0 invariant 4 forbids. Refused loudly instead.
+/// Only the two kinds that re-derive geometry from params consume them. A
+/// `generator` source re-runs the generator on every regen, and a `profile`
+/// source re-prisms its canonical face to `params.length` — which is exactly
+/// what makes each one's size editable. A source carrying geometry BAKED at
+/// authoring time has no such lane: recording params against it would show one
+/// designation over unrelated geometry, the silent substitution spec §0
+/// invariant 4 forbids. Refused loudly instead.
+///
+/// The two live kinds differ in how the params arrive. A `generator`'s are the
+/// RESOLVED set and are replaced wholesale. A `profile`'s are MERGED over the
+/// package defaults already seeded by
+/// [`component_source_from_resolved`] — `length` is required, so dropping the
+/// seed to honour a partial override would author an invalid record.
 ///
 /// A `document` component's params ARE editable — but only through
 /// `set_component_params_at`, which re-bakes (WP-F1.3). The PLACEMENT gesture
@@ -514,6 +525,22 @@ fn source_with_free_params(
             params: free_params.clone(),
             extra,
         }),
+        ComponentSourceRef::Profile {
+            sha256,
+            codec,
+            brep_format,
+            mut params,
+            extra,
+        } => {
+            params.extend(free_params.clone());
+            Ok(ComponentSourceRef::Profile {
+                sha256,
+                codec,
+                brep_format,
+                params,
+                extra,
+            })
+        }
         ComponentSourceRef::Embedded { .. } | ComponentSourceRef::Document { .. } => {
             Err(ApiError::InvalidCommand(format!(
                 "placeComponent: {component_id} carries baked geometry, which has no free \
@@ -532,15 +559,45 @@ struct StagedBlob {
     bytes: Vec<u8>,
 }
 
-/// Translates a library resolution into the record's `source` plus, for the two
+/// The numeric defaults a package DECLARES for its free parameters, in the
+/// record's own param domain.
+///
+/// A `profile` source's `params` are a REGEN INPUT — unlike every other kind's
+/// — so they must be COMPLETE at authoring: `params.length` is required and
+/// there is no library lookup at regen to fall back on. The package's
+/// `[parameters]` table is where that number lives (a 500 mm vendor stick
+/// declares `length = 500`), and the caller's free params override it.
+///
+/// Numbers only: `ParameterSpec::number()` is the whole accessor this crate has,
+/// because the package format's `toml::Value` is deliberately not a dependency
+/// here.
+fn declared_numeric_params(
+    specs: &BTreeMap<String, ParameterSpec>,
+) -> BTreeMap<String, ComponentParamValue> {
+    specs
+        .iter()
+        .filter(|(_, spec)| spec.role == ParameterRole::Free)
+        .filter_map(|(key, spec)| {
+            spec.number()
+                .map(|v| (key.clone(), ComponentParamValue::Number(v)))
+        })
+        .collect()
+}
+
+/// Translates a library resolution into the record's `source` plus, for the
 /// blob-backed kinds, the bytes the placing document must cache.
 ///
 /// This is the type-family bridge this module exists for: `onecad-library` owns
 /// the package format, `onecad-core` owns the wire/record form, and neither
 /// depends on the other.
+///
+/// `declared` is the package's own default parameter set
+/// ([`declared_numeric_params`]); only a `profile` source reads it, because it
+/// is the only kind whose `params` regen actually consumes.
 fn component_source_from_resolved(
     resolved: ResolvedSource,
     component_id: &str,
+    declared: &BTreeMap<String, ComponentParamValue>,
 ) -> Result<(ComponentSourceRef, Option<StagedBlob>), ApiError> {
     match resolved {
         ResolvedSource::Generator {
@@ -562,6 +619,23 @@ fn component_source_from_resolved(
                     sha256: staged.sha256.clone(),
                     codec: staged.codec,
                     brep_format: staged.format,
+                    extra: Default::default(),
+                },
+                Some(staged),
+            ))
+        }
+        // WP-C: the blob is a canonical planar FACE, not a solid, and the
+        // placement carries the length the worker prisms it to. That number
+        // starts at the package's declared default and is overridden by the
+        // gesture's free params (`source_with_free_params`).
+        ResolvedSource::Profile { blob } => {
+            let staged = staged_blob(blob, component_id)?;
+            Ok((
+                ComponentSourceRef::Profile {
+                    sha256: staged.sha256.clone(),
+                    codec: staged.codec,
+                    brep_format: staged.format,
+                    params: declared.clone(),
                     extra: Default::default(),
                 },
                 Some(staged),
@@ -697,12 +771,13 @@ async fn resolve_component_source_at(
             ))
         })?;
     let revision = entry.revision.clone();
+    let declared = declared_numeric_params(&entry.parameters);
     let resolved = library.resolve_source(&ResolveRequest {
         component_id: &component_id,
         component_version: &component_version,
         component_revision: &revision,
     })?;
-    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
     if let Some(blob) = blob {
         let mut guard = state.runtime.lock().await;
         let rt = guard
@@ -1118,6 +1193,32 @@ pub async fn set_component_params_at(
                 "setComponentParams: an embedded-source placement has no free parameters".into(),
             ))
         }
+        // WP-C: a `profile` source's `params` ARE the regen input — the worker
+        // re-prisms the SAME canonical face to the new `length` — so the edit is
+        // a plain in-place merge with NO re-bake. There is no authoring document
+        // to replay and the blob does not move, which is why this arm stages
+        // nothing: the planner hash covers `source.params`, so the value change
+        // alone is what moves the geometry.
+        ComponentSourceRef::Profile {
+            sha256,
+            codec,
+            brep_format,
+            params: source_params,
+            extra,
+        } => {
+            let mut source_params = source_params.clone();
+            source_params.extend(merged.clone());
+            (
+                ComponentSourceRef::Profile {
+                    sha256: sha256.clone(),
+                    codec: *codec,
+                    brep_format: *brep_format,
+                    params: source_params,
+                    extra: extra.clone(),
+                },
+                None,
+            )
+        }
         // A `document` component's geometry is a solid BAKED from its authoring
         // document (WP-3.2), so an override is honored by RE-BAKING: replay the
         // frozen source with the new variable values and swap in the solid it
@@ -1241,21 +1342,24 @@ pub async fn component_preview_mesh_at(
             ))
         })?;
     let revision = entry.revision.clone();
+    let declared = declared_numeric_params(&entry.parameters);
     let resolved = library.resolve_source(&ResolveRequest {
         component_id: &component_id,
         component_version: &component_version,
         component_revision: &revision,
     })?;
-    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
-    // Free params select geometry only for a GENERATOR. A blob-backed component
-    // previews the solid its package carries, so its params are dropped here
-    // rather than refused: since WP-F1.3 a `document` package legitimately
-    // declares free params, and the configurator asks for a picture of the
-    // component with them — erroring on a thumbnail would be the wrong answer to
-    // the right question. This is a catalog preview of the PACKAGE; a placed
-    // instance's re-baked geometry lives in the document, not here.
+    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
+    // Free params select geometry only for the two kinds that re-derive it: a
+    // GENERATOR and (WP-C) a PROFILE, whose `length` is the whole point of the
+    // preview. A BAKED component previews the solid its package carries, so its
+    // params are dropped here rather than refused: since WP-F1.3 a `document`
+    // package legitimately declares free params, and the configurator asks for a
+    // picture of the component with them — erroring on a thumbnail would be the
+    // wrong answer to the right question. This is a catalog preview of the
+    // PACKAGE; a placed instance's re-baked geometry lives in the document, not
+    // here.
     let source = match source {
-        ComponentSourceRef::Generator { .. } => {
+        ComponentSourceRef::Generator { .. } | ComponentSourceRef::Profile { .. } => {
             source_with_free_params(source, &params.unwrap_or_default(), &component_id)?
         }
         baked => baked,
@@ -1574,6 +1678,64 @@ pub async fn save_as_component(
     .await
 }
 
+/// The `profile`-source ingest probe (SCHEMA §7.8 `ExtractPrismProfile`) —
+/// "is this body a length-parametric extrusion, and if so give me its canonical
+/// end-cap face".
+///
+/// The Rust half of WP-C's authoring flow: import a vendor STEP, point at the
+/// 500 mm stick it produced, and get back the measurements plus a `brep` file
+/// containing exactly ONE canonical planar face. The caller hands those bytes to
+/// [`Library::save_embedded_component`](onecad_library::Library::save_embedded_component)
+/// as a `profile` package; every later placement re-prisms that face to its own
+/// `length`.
+///
+/// Fences on the CURRENT head, read under a short lock and released before the
+/// worker round-trip (the R-WP11 rule — the single writer is never held across
+/// worker IO). A head that moves under the call comes back `STALE_PREVIEW` from
+/// the worker's own fence, which is the point: the answer is about to be frozen
+/// into a package.
+///
+/// A body that is not a prism is a successful
+/// [`Refused`](crate::dto::PrismProfileAnswerDto::Refused) answer carrying the
+/// measured `volumeRatio`, not an error — a cross-drilled stick must be able to
+/// say by how much it missed.
+///
+/// # Errors
+/// [`ApiError::NoDocument`] with no document open, [`ApiError::InvalidCommand`]
+/// for a malformed body id or one that is not at head, and the worker's own
+/// errors (`stalePreview`, `opFailed` for an unresolved body) otherwise.
+pub async fn extract_prism_profile_at(
+    runtime: &tokio::sync::Mutex<Option<DocumentRuntime>>,
+    extractor: Arc<dyn GeometryExporter>,
+    body_id: &str,
+    path: Option<&str>,
+) -> Result<crate::dto::PrismProfileAnswerDto, ApiError> {
+    let body = BodyId::from_str(body_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId {body_id:?}: {e}")))?;
+
+    let snapshot = {
+        let guard = runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("extractPrismProfile".into()))?;
+        if !rt.head_body_ids().contains(&body) {
+            return Err(ApiError::InvalidCommand(format!(
+                "extractPrismProfile: {body_id} is not a body at head"
+            )));
+        }
+        rt.head_snapshot_id().ok_or_else(|| {
+            ApiError::InvalidCommand(
+                "extractPrismProfile: no published snapshot to fence against yet".into(),
+            )
+        })?
+    };
+
+    extractor
+        .extract_prism_profile(snapshot, body, path, None)
+        .await
+        .map_err(Into::into)
+}
+
 /// The testable core of [`save_as_component`].
 ///
 /// Takes the runtime and the exporter EXPLICITLY rather than an `AppState`, so
@@ -1823,6 +1985,7 @@ async fn replace_component_at(
             ))
         })?;
     let revision = entry.revision.clone();
+    let declared = declared_numeric_params(&entry.parameters);
     let resolved = library.resolve_source(&ResolveRequest {
         component_id: &component_id,
         component_version: &component_version,
@@ -1835,7 +1998,7 @@ async fn replace_component_at(
     // old component called free may not exist here at all.
     check_free_params("replaceComponent", &package, &component_id, &free_params)?;
 
-    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    let (source, blob) = component_source_from_resolved(resolved, &component_id, &declared)?;
     let source = source_with_free_params(source, &free_params, &component_id)?;
 
     let (mate, dropped_attachment) = match current.mate {
@@ -3197,6 +3360,204 @@ geometry_format = 4
         assert!(matches!(err, ApiError::InvalidCommand(_)), "got {err:?}");
     }
 
+    /// The `length` a `profile` source currently carries.
+    fn profile_length(source: &ComponentSourceRef) -> f64 {
+        match source {
+            ComponentSourceRef::Profile { params, .. } => match params.get("length") {
+                Some(ComponentParamValue::Number(v)) => *v,
+                other => panic!("profile source has no numeric length: {other:?}"),
+            },
+            other => panic!("expected a Profile source, got {other:?}"),
+        }
+    }
+
+    fn write_profile_package(root: &Path, id: &str, face: &[u8]) -> String {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sha = onecad_library::blob::BlobStore::new(root)
+            .put(face)
+            .expect("blob put");
+        let toml = format!(
+            r#"
+[identity]
+id = "{id}"
+version = "1.0.0"
+revision = "sha256:{zeros}"
+
+[metadata]
+name = "2020 extrusion"
+
+[source]
+kind = "profile"
+blob = "sha256:{sha}"
+codec = "brep"
+format = 4
+
+[parameters]
+length = {{ role = "free", key = "length", value = 500.0, min = 1.0 }}
+"#,
+            zeros = "0".repeat(64)
+        );
+        std::fs::write(dir.join("component.toml"), toml).unwrap();
+        sha
+    }
+
+    async fn profile_state(dir: &Path) -> (tauri::App<tauri::test::MockRuntime>, String) {
+        let sha = write_profile_package(dir, "acme.extrusion.2020", b"pretend canonical face");
+        reindex_library_at(dir).unwrap();
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        (app, sha)
+    }
+
+    #[tokio::test]
+    async fn a_profile_placement_with_no_free_params_lands_the_packages_declared_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, face_sha) = profile_state(dir.path()).await;
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.extrusion.2020".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("place a profile component at its declared default");
+
+        let rt_guard = state.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        assert_eq!(
+            rt.import_blob_shas(),
+            vec![face_sha.clone()],
+            "the canonical FACE is cached in the placing document, like every other blob kind"
+        );
+        let record = RecordId::from_str(&projection.features[0].id).unwrap();
+        let params: PlaceComponentParams =
+            serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+        assert_eq!(
+            profile_length(&params.source),
+            500.0,
+            "a placement that overrides nothing must still carry a complete length"
+        );
+        assert_eq!(params.source.blob_ref().unwrap().sha256, face_sha);
+    }
+
+    /// WP-C's two load-bearing app-crate arms, through the SAME timeline
+    /// surface every other kind uses — no worker needed, because
+    /// `place_component_at` / `set_component_params_at` are pure timeline
+    /// mutations (regen-level proof is `component_ops.rs`'s job, against the
+    /// real worker).
+    ///
+    /// 1. A gesture length MERGES over the package default rather than being
+    ///    refused: the non-generator arm used to hard-error, so a 300 mm stick
+    ///    could not be placed at all.
+    /// 2. A re-length is an in-place param edit with NO re-bake — the blob
+    ///    digest must not move, which is the whole difference from a `document`
+    ///    source (whose edit replays an authoring document and swaps the blob).
+    #[tokio::test]
+    async fn a_profile_length_merges_at_placement_and_re_lengths_without_a_re_bake() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, face_sha) = profile_state(dir.path()).await;
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let mut at_120 = BTreeMap::new();
+        at_120.insert("length".to_string(), ComponentParamValue::Number(120.0));
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.extrusion.2020".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            at_120,
+            None,
+        )
+        .await
+        .expect("a gesture length must PLACE, not hard-error");
+        let record_id = projection.features[0].id.clone();
+        let record = RecordId::from_str(&record_id).unwrap();
+
+        {
+            let rt_guard = state.runtime.lock().await;
+            let rt = rt_guard.as_ref().unwrap();
+            let params: PlaceComponentParams =
+                serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+            assert_eq!(profile_length(&params.source), 120.0);
+        }
+
+        let mut at_300 = BTreeMap::new();
+        at_300.insert("length".to_string(), ComponentParamValue::Number(300.0));
+        set_component_params_at(dir.path(), &state, record_id, at_300)
+            .await
+            .expect("re-length the placed instance");
+
+        let rt_guard = state.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        let params: PlaceComponentParams =
+            serde_json::from_value(rt.operation_params(record).unwrap()).unwrap();
+        assert_eq!(profile_length(&params.source), 300.0);
+        assert_eq!(
+            params.params.get("length"),
+            Some(&ComponentParamValue::Number(300.0)),
+            "the instance's own override tracks the source"
+        );
+        assert_eq!(
+            params.source.blob_ref().unwrap().sha256,
+            face_sha,
+            "a length edit re-prisms the SAME face: no re-bake, so the digest must not move"
+        );
+        assert_eq!(
+            rt.import_blob_shas(),
+            vec![face_sha],
+            "and no second blob was staged"
+        );
+    }
+
+    /// `length` is a REGEN INPUT, so an impossible one dies at the AUTHORING
+    /// door (`PlaceComponentParams::validate` via the edit session), not at the
+    /// next regen on someone else's machine.
+    #[tokio::test]
+    async fn a_profile_re_length_to_an_impossible_value_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _sha) = profile_state(dir.path()).await;
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let (_outcome, projection) = place_component_at(
+            dir.path(),
+            &state,
+            "acme.extrusion.2020".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("place");
+        let record_id = projection.features[0].id.clone();
+
+        for bad in [-1.0, 0.0, 1e5 + 1.0] {
+            let mut params = BTreeMap::new();
+            params.insert("length".to_string(), ComponentParamValue::Number(bad));
+            let err = set_component_params_at(dir.path(), &state, record_id.clone(), params)
+                .await
+                .expect_err("an impossible length must be refused at the edit");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("length"),
+                "length {bad}: the refusal must name the parameter, got {msg}"
+            );
+        }
+    }
+
     /// A `role = "free"` parameter with no `key` names no source variable, so
     /// the re-bake has nothing to set. Refused BY NAME and before any worker is
     /// spawned — guessing a variable (the first one, the same-named one) is the
@@ -3243,6 +3604,86 @@ geometry_format = 4
         assert!(
             msg.contains("depth") && msg.contains("key"),
             "the refusal must name the parameter and what it is missing: {msg}"
+        );
+    }
+
+    /// Same shape as [`write_profile_package`], minus the `[parameters]` table
+    /// entirely — a package that never declares `length` at all.
+    fn write_profile_package_without_length(root: &Path, id: &str, face: &[u8]) -> String {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sha = onecad_library::blob::BlobStore::new(root)
+            .put(face)
+            .expect("blob put");
+        let toml = format!(
+            r#"
+[identity]
+id = "{id}"
+version = "1.0.0"
+revision = "sha256:{zeros}"
+
+[metadata]
+name = "2020 extrusion, no declared length"
+
+[source]
+kind = "profile"
+blob = "sha256:{sha}"
+codec = "brep"
+format = 4
+"#,
+            zeros = "0".repeat(64)
+        );
+        std::fs::write(dir.join("component.toml"), toml).unwrap();
+        sha
+    }
+
+    /// `component_source_from_resolved` seeds a `profile` record's `params` from
+    /// `declared_numeric_params(&entry.parameters)` — the package's own
+    /// `[parameters]` table. A package that declares NO `length` at all seeds an
+    /// EMPTY map, and `PlaceComponentParams::validate` (`validate_component_source`)
+    /// catches that at `AddOperation`: `length` is a REGEN INPUT with no
+    /// worker-side fallback, so an incomplete record must be refused BY NAME at
+    /// authoring, not left to fail obscurely at the next regen.
+    #[tokio::test]
+    async fn a_profile_package_without_a_declared_length_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_profile_package_without_length(
+            dir.path(),
+            "acme.extrusion.nolength",
+            b"pretend canonical face",
+        );
+        reindex_library_at(dir.path()).unwrap();
+
+        let app_state = pending_app_state();
+        let (engine, meshes, solver) = app_state.make_backend();
+        *app_state.runtime.lock().await = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let app = tauri::test::mock_app();
+        app.manage(app_state);
+        let state: tauri::State<'_, AppState> = app.state();
+
+        let err = place_component_at(
+            dir.path(),
+            &state,
+            "acme.extrusion.nolength".to_string(),
+            "1.0.0".to_string(),
+            [0.0, 0.0, 0.0],
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect_err("a profile package with no declared length cannot author a complete record");
+        assert!(
+            err.to_string().contains("length"),
+            "the refusal must name the missing key, got: {err}"
+        );
+
+        let guard = app.state::<AppState>();
+        let rt_guard = guard.runtime.lock().await;
+        let rt = rt_guard.as_ref().unwrap();
+        assert!(
+            rt.projection().features.is_empty(),
+            "fail closed: nothing was authored"
         );
     }
 }

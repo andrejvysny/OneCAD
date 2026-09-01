@@ -242,14 +242,27 @@ function placementDraftParams(
 }
 
 /**
- * `source` with the gesture's chosen free params folded in. Only a generator
- * source takes them: a blob-backed component's geometry was baked at authoring
- * time and has no parameters to re-derive from (the backend refuses the same
- * combination, loudly, rather than recording an inert override).
+ * `source` with the gesture's chosen free params folded in. `embedded`/
+ * `document` take none — that geometry was baked at authoring time and has no
+ * parameters to re-derive from (the backend refuses the same combination,
+ * loudly, rather than recording an inert override).
+ *
+ * `generator` REPLACES `params` wholesale: the resolved source rarely carries
+ * any of its own, so gestureParams IS the whole override set. `profile`
+ * MERGES gestureParams OVER the resolved source's own params instead — its
+ * `params.length` is not an override, it is the regen input the resolved
+ * source already carries (WP-C), and a replace would silently drop it the
+ * moment an unrelated gesture key (e.g. auto-size's `thread`) got folded in,
+ * which is exactly the "profile component's gesture length silently dropped"
+ * defect this exists to avoid.
  */
 function withGestureParams(source: PlaceComponentSource): PlaceComponentSource {
-  if (source.kind !== "generator" || Object.keys(gestureParams).length === 0) return source;
-  return { ...source, params: { ...gestureParams } };
+  if (Object.keys(gestureParams).length === 0) return source;
+  if (source.kind === "generator") return { ...source, params: { ...gestureParams } };
+  if (source.kind === "profile") {
+    return { ...source, params: { ...source.params, ...gestureParams } };
+  }
+  return source;
 }
 
 /**

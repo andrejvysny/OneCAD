@@ -1525,6 +1525,154 @@ pub fn export_geometry_args(
     })
 }
 
+/// `ExtractPrismProfile.args` (SCHEMA §7.8): `{snapshotId, bodyId, path?,
+/// axisHint?}`.
+///
+/// `snapshotId` is REQUIRED and FENCED, not advisory: the answer is about to be
+/// frozen into a library package, so a head that has moved is `STALE_PREVIEW`
+/// rather than a silently stale reading (the `PrepareOffsetFace` rule).
+///
+/// `path` absent ⇒ ANALYSE only: the prism measurements come back and nothing is
+/// written. `axis_hint` absent ⇒ the worker picks the longest bounding-box
+/// dimension.
+#[must_use]
+pub fn extract_prism_profile_args(
+    snapshot: SnapshotId,
+    body: BodyId,
+    path: Option<&str>,
+    axis_hint: Option<[f64; 3]>,
+) -> Value {
+    let mut args = json!({
+        "snapshotId": snapshot.0,
+        "bodyId": body_id_wire(body),
+    });
+    let map = args.as_object_mut().expect("json! object");
+    if let Some(path) = path {
+        map.insert("path".into(), Value::String(path.to_string()));
+    }
+    if let Some(axis) = axis_hint {
+        map.insert("axisHint".into(), json!(axis));
+    }
+    args
+}
+
+/// Parses an `ExtractPrismProfile` result (SCHEMA §7.8).
+///
+/// **Strict, and never defaulted.** This response is what an ingest FREEZES into
+/// a package: a fabricated `sha256`, a silently-zero `lengthMm` or a guessed
+/// `areaMm2` would author a component whose geometry no one can reproduce. So a
+/// malformed result is a PROTOCOL break, exactly as `PrepareOffsetFace` treats
+/// its closure.
+///
+/// `prism` and `refusal` are mutually exclusive and exactly one must be non-null
+/// — "both" and "neither" are refused here rather than represented.
+pub fn parse_extract_prism_profile(
+    result: &Value,
+) -> Result<crate::dto::PrismProfileAnswerDto, String> {
+    let prism = result.get("prism").filter(|v| !v.is_null());
+    let refusal = result.get("refusal").filter(|v| !v.is_null());
+    match (prism, refusal) {
+        (Some(_), Some(_)) => Err(
+            "ExtractPrismProfile: `prism` and `refusal` are mutually exclusive but both are \
+             present"
+                .into(),
+        ),
+        (None, None) => Err(
+            "ExtractPrismProfile: exactly one of `prism` / `refusal` must be non-null, got \
+             neither"
+                .into(),
+        ),
+        (None, Some(r)) => Ok(crate::dto::PrismProfileAnswerDto::Refused(
+            crate::dto::PrismRefusalDto {
+                code: prism_str(r, "code", "refusal.code")?,
+                message: prism_str(r, "message", "refusal.message")?,
+                volume_ratio: r.get("volumeRatio").and_then(Value::as_f64),
+            },
+        )),
+        (Some(p), None) => {
+            let axis = match p.get("axis").and_then(Value::as_array) {
+                Some(a) if a.len() == 3 => {
+                    let mut out = [0.0; 3];
+                    for (slot, v) in out.iter_mut().zip(a) {
+                        *slot = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
+                            "ExtractPrismProfile: `prism.axis` has a non-finite component"
+                                .to_string()
+                        })?;
+                    }
+                    out
+                }
+                _ => return Err("ExtractPrismProfile: `prism.axis` must be 3 numbers".into()),
+            };
+            // A bake is present only when the caller asked for one AND the worker
+            // wrote it. `written:false` with a `path` means nothing landed, so
+            // there is no digest to record.
+            let bake = if result.get("written").and_then(Value::as_bool) == Some(true) {
+                Some(crate::dto::PrismBakeDto {
+                    bytes: result.get("bytes").and_then(Value::as_u64).ok_or_else(|| {
+                        "ExtractPrismProfile: `written` is true but `bytes` is missing".to_string()
+                    })?,
+                    codec: prism_str(result, "codec", "codec")?,
+                    format: u32::try_from(
+                        result
+                            .get("format")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| {
+                                "ExtractPrismProfile: `written` is true but `format` is missing"
+                                    .to_string()
+                            })?,
+                    )
+                    .map_err(|_| "ExtractPrismProfile: `format` is out of range".to_string())?,
+                    sha256: prism_str(result, "sha256", "sha256")?,
+                })
+            } else {
+                None
+            };
+            Ok(crate::dto::PrismProfileAnswerDto::Prism(
+                crate::dto::PrismProfileDto {
+                    axis,
+                    end_cap_topo_key: p
+                        .get("endCap")
+                        .and_then(|c| c.get("topoKey"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            "ExtractPrismProfile: `prism.endCap.topoKey` is missing".to_string()
+                        })?
+                        .to_string(),
+                    length_mm: prism_finite(p, "lengthMm", "prism.lengthMm")?,
+                    area_mm2: prism_finite(p, "areaMm2", "prism.areaMm2")?,
+                    volume_ratio: prism_finite(p, "volumeRatio", "prism.volumeRatio")?,
+                    outer_edge_count: prism_count(p, "outerEdgeCount")?,
+                    inner_wire_count: prism_count(p, "innerWireCount")?,
+                    bake,
+                },
+            ))
+        }
+    }
+}
+
+fn prism_str(v: &Value, key: &str, label: &str) -> Result<String, String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("ExtractPrismProfile: `{label}` is missing or empty"))
+}
+
+fn prism_finite(v: &Value, key: &str, label: &str) -> Result<f64, String> {
+    v.get(key)
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite())
+        .ok_or_else(|| format!("ExtractPrismProfile: `{label}` is missing or not finite"))
+}
+
+fn prism_count(v: &Value, key: &str) -> Result<u32, String> {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("ExtractPrismProfile: `prism.{key}` is missing or out of range"))
+}
+
 /// `InspectStep.args` (SCHEMA §7.8): `{path, includeGeometry}`.
 #[must_use]
 pub fn inspect_step_args(path: &str, include_geometry: bool) -> Value {
@@ -7742,6 +7890,164 @@ mod prepare_offset_face_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ExtractPrismProfile (SCHEMA §7.8; Component Library WP-C)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod extract_prism_profile_tests {
+    use super::*;
+    use crate::dto::PrismProfileAnswerDto;
+
+    fn body() -> BodyId {
+        BodyId(Uuid::from_u128(0xB0D1))
+    }
+
+    fn prism_result() -> Value {
+        json!({
+            "prism": {
+                "axis": [0.0, 0.0, 1.0],
+                "endCap": { "topoKey": "f:0" },
+                "lengthMm": 500.0,
+                "areaMm2": 380.3650459150638,
+                "volumeRatio": 1.0,
+                "outerEdgeCount": 4,
+                "innerWireCount": 1
+            },
+            "written": true,
+            "bytes": 4312,
+            "codec": "brep",
+            "format": 4,
+            "sha256": "a".repeat(64),
+            "refusal": Value::Null
+        })
+    }
+
+    #[test]
+    fn args_carry_the_fence_and_omit_the_optional_keys_when_unset() {
+        let args = extract_prism_profile_args(SnapshotId(5012), body(), None, None);
+        assert_eq!(args["snapshotId"], json!(5012));
+        assert_eq!(args["bodyId"], json!(body_id_wire(body())));
+        assert!(
+            args.get("path").is_none(),
+            "no path ⇒ ANALYSE only; an empty string would ask the worker to write to \"\""
+        );
+        assert!(args.get("axisHint").is_none());
+
+        let args = extract_prism_profile_args(
+            SnapshotId(5012),
+            body(),
+            Some("/tmp/p.brep"),
+            Some([0.0, 1.0, 0.0]),
+        );
+        assert_eq!(args["path"], json!("/tmp/p.brep"));
+        assert_eq!(args["axisHint"], json!([0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn a_prism_answer_parses_with_its_bake() {
+        let dto = parse_extract_prism_profile(&prism_result()).expect("prism");
+        let PrismProfileAnswerDto::Prism(p) = dto else {
+            panic!("expected a prism answer");
+        };
+        assert_eq!(p.axis, [0.0, 0.0, 1.0]);
+        assert_eq!(p.end_cap_topo_key, "f:0");
+        assert_eq!(p.length_mm, 500.0);
+        assert_eq!(p.area_mm2, 380.3650459150638);
+        assert_eq!(p.volume_ratio, 1.0);
+        assert_eq!(p.outer_edge_count, 4);
+        assert_eq!(p.inner_wire_count, 1);
+        let bake = p.bake.expect("written:true ⇒ a bake");
+        assert_eq!(bake.bytes, 4312);
+        assert_eq!(bake.codec, "brep");
+        assert_eq!(bake.format, 4);
+        assert_eq!(bake.sha256, "a".repeat(64));
+    }
+
+    /// `path` omitted ⇒ measurements without a bake. The answer is still an
+    /// answer; there is simply no digest to record.
+    #[test]
+    fn an_analyse_only_answer_has_no_bake() {
+        let mut r = prism_result();
+        r["written"] = json!(false);
+        r["sha256"] = Value::Null;
+        let PrismProfileAnswerDto::Prism(p) = parse_extract_prism_profile(&r).expect("prism")
+        else {
+            panic!("expected a prism answer");
+        };
+        assert!(p.bake.is_none());
+    }
+
+    #[test]
+    fn a_refusal_is_an_answer_carrying_the_number_that_decided_it() {
+        let r = json!({
+            "prism": Value::Null,
+            "written": false,
+            "sha256": Value::Null,
+            "refusal": {
+                "code": "notAPrism",
+                "message": "volume is 87% of endCapArea x length",
+                "volumeRatio": 0.87
+            }
+        });
+        let PrismProfileAnswerDto::Refused(refusal) =
+            parse_extract_prism_profile(&r).expect("refusal")
+        else {
+            panic!("expected a refusal answer");
+        };
+        assert_eq!(refusal.code, "notAPrism");
+        assert_eq!(refusal.volume_ratio, Some(0.87));
+    }
+
+    /// `prism` and `refusal` are mutually exclusive on the wire. Both, or
+    /// neither, is a PROTOCOL break — not a state this parser will represent,
+    /// because nothing downstream knows how to read it.
+    #[test]
+    fn both_or_neither_is_a_protocol_break() {
+        let mut both = prism_result();
+        both["refusal"] = json!({ "code": "notAPrism", "message": "x" });
+        assert!(parse_extract_prism_profile(&both).is_err());
+
+        let neither = json!({ "prism": Value::Null, "refusal": Value::Null, "written": false });
+        assert!(parse_extract_prism_profile(&neither).is_err());
+    }
+
+    /// This response is FROZEN into a package, so a missing digest, area or
+    /// length is refused rather than defaulted: a fabricated `sha256` would
+    /// author a component whose geometry nobody can reproduce.
+    #[test]
+    fn a_malformed_prism_is_refused_never_defaulted() {
+        for missing in ["sha256", "codec", "format", "bytes"] {
+            let mut r = prism_result();
+            r.as_object_mut().unwrap().remove(missing);
+            assert!(
+                parse_extract_prism_profile(&r).is_err(),
+                "`{missing}` missing on a written bake must be refused"
+            );
+        }
+        for missing in [
+            "axis",
+            "lengthMm",
+            "areaMm2",
+            "volumeRatio",
+            "outerEdgeCount",
+        ] {
+            let mut r = prism_result();
+            r["prism"].as_object_mut().unwrap().remove(missing);
+            assert!(
+                parse_extract_prism_profile(&r).is_err(),
+                "`prism.{missing}` missing must be refused"
+            );
+        }
+        let mut nan = prism_result();
+        nan["prism"]["lengthMm"] = json!("500");
+        assert!(parse_extract_prism_profile(&nan).is_err());
+
+        let mut no_cap = prism_result();
+        no_cap["prism"]["endCap"] = json!({ "topoKey": "" });
+        assert!(parse_extract_prism_profile(&no_cap).is_err());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Component-source blob path injection (Component Library WP-3.2)
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
@@ -7825,6 +8131,113 @@ mod component_blob_path_tests {
     fn an_unmaterialized_component_blob_lowers_an_empty_path() {
         let wire = preview_wire_op(&place(embedded(&"e".repeat(64))), "op_3");
         assert_eq!(wire["params"]["source"]["path"], json!(""));
+    }
+
+    fn profile(sha: &str, length_mm: f64) -> ComponentSourceRef {
+        let mut params = std::collections::BTreeMap::new();
+        params.insert(
+            "length".to_string(),
+            onecad_core::document::record::ComponentParamValue::Number(length_mm),
+        );
+        ComponentSourceRef::Profile {
+            sha256: sha.to_string(),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            params,
+            extra: Default::default(),
+        }
+    }
+
+    /// WP-C's `profile` (the fourth `source.kind`, third blob-backed) rides the SAME `blob_ref()` walk, so it gets the
+    /// path injection for free — but "for free" is exactly what silently breaks,
+    /// so it is pinned here. Without it the worker reads no face and every
+    /// profile placement fails.
+    #[test]
+    fn a_materialized_profile_blob_lowers_its_path_under_source() {
+        let bytes = b"pretend canonical face bytes";
+        let sha = crate::imports::sha256_hex(bytes);
+        let mut ws = crate::imports::ImportWorkspace::new(DocumentId(Uuid::from_u128(0xFACE)));
+        let written = ws
+            .materialize(&sha, ImportSourceCodec::Brep, bytes)
+            .expect("materialize");
+
+        let wire = preview_wire_op(&place(profile(&sha, 500.0)), "op_p1");
+        assert_eq!(
+            wire["params"]["source"]["path"],
+            json!(written.to_string_lossy())
+        );
+        assert_eq!(wire["params"]["source"]["kind"], json!("profile"));
+        assert_eq!(wire["params"]["source"]["sha256"], json!(sha));
+        assert_eq!(wire["params"]["source"]["brepFormat"], json!(4));
+        // The regen input the whole kind exists for reaches the worker verbatim.
+        assert_eq!(wire["params"]["source"]["params"]["length"], json!(500.0));
+    }
+
+    #[test]
+    fn an_unmaterialized_profile_blob_lowers_an_empty_path() {
+        let wire = preview_wire_op(&place(profile(&"f".repeat(64), 500.0)), "op_p2");
+        assert_eq!(wire["params"]["source"]["path"], json!(""));
+    }
+
+    /// **`source.path` is wire-only and MUST NOT enter the planner hash.** It is
+    /// a per-process scratch location: the same document opened twice, or on two
+    /// machines, materializes the same blob to different absolute paths. If the
+    /// path were hashed, every reopen would compute a different
+    /// `historyPrefixHash`, the `expectedBaseHash` fence would reject a plan that
+    /// is in fact identical, and every profile placement would regen from zero
+    /// forever.
+    ///
+    /// The hash is computed over the RECORD (which has no `path` field at all);
+    /// this asserts the property end to end by materializing the blob between two
+    /// hashes of the same record and checking the number did not move, while the
+    /// wire form provably did gain the path.
+    #[test]
+    fn a_profile_records_hash_does_not_depend_on_the_injected_path() {
+        use onecad_core::document::record::OperationRecord;
+        use onecad_core::ids::RecordId;
+        use onecad_core::regen::planner::history_prefix_hash;
+
+        let bytes = b"hash-independence face bytes";
+        let sha = crate::imports::sha256_hex(bytes);
+        let record = OperationRecord::new(
+            RecordId(Uuid::from_u128(0x9F17)),
+            0,
+            "Place Component",
+            place(profile(&sha, 500.0)),
+        );
+
+        let before = history_prefix_hash(std::slice::from_ref(&record));
+        assert_eq!(
+            preview_wire_op(&record.op, "op_p3")["params"]["source"]["path"],
+            json!(""),
+            "precondition: the blob is not materialized yet"
+        );
+
+        let mut ws = crate::imports::ImportWorkspace::new(DocumentId(Uuid::from_u128(0x9F17)));
+        let written = ws
+            .materialize(&sha, ImportSourceCodec::Brep, bytes)
+            .expect("materialize");
+        assert_eq!(
+            preview_wire_op(&record.op, "op_p3")["params"]["source"]["path"],
+            json!(written.to_string_lossy()),
+            "the wire form really did change"
+        );
+
+        assert_eq!(
+            history_prefix_hash(std::slice::from_ref(&record)),
+            before,
+            "materializing the blob must not move the planner hash — `source.path` is \
+             wire-only and per-process"
+        );
+
+        // And the LENGTH, which is a genuine regen input, must move it.
+        let mut longer = record.clone();
+        longer.op = place(profile(&sha, 300.0));
+        assert_ne!(
+            history_prefix_hash(std::slice::from_ref(&longer)),
+            before,
+            "`source.params.length` IS a regen input and must be covered by the hash"
+        );
     }
 
     /// A generator source depends on no bytes, so nothing is injected — a `path`

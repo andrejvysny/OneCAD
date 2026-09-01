@@ -157,7 +157,7 @@ describe("provenancePhraseOf", () => {
    * the "Generators" menu title, which names tools, not provenance.
    */
   it("never leaks the internal source enum", () => {
-    for (const kind of ["generator", "document", "embedded", "somethingNew"]) {
+    for (const kind of ["generator", "document", "embedded", "profile", "somethingNew"]) {
       expect(provenancePhraseOf(component({ sourceKind: kind })).toLowerCase()).not.toContain(
         "generator",
       );

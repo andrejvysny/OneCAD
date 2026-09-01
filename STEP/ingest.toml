@@ -1,0 +1,191 @@
+# Vendor-STEP → component-library ingest recipe.
+#
+#   cd src-tauri
+#   cargo run --release -p onecad-library-ingest -- ../STEP/ingest.toml --inspect
+#   cargo run --release -p onecad-library-ingest -- ../STEP/ingest.toml --library-root <dir>
+#
+# The STEP files themselves are gitignored (vendor downloads, 0.2–7 MB); only
+# this recipe is tracked, so the exact keep-lists below survive even where the
+# files do not. Every `[part.keep]` decision is recorded with the `--inspect`
+# evidence it was made from — solid index, volume and bounding box — because
+# neither of the two assemblies here carries usable product names (see the
+# comments on each), so nothing about the choice is re-derivable from the file.
+
+[defaults]
+vendor = "vendor"
+category = ["imported"]
+version = "1.0.0"
+
+# ── Rollco T-slot aluminium extrusions ───────────────────────────────────────
+#
+# Each file is ONE solid: a 500 mm stick, AP203, named by the vendor. They are
+# ingested as `profile` rather than `embedded` because the vendor ships one
+# length and a usable library needs every length: `ExtractPrismProfile` bakes
+# the canonical end-cap face and the worker re-prisms it per instance.
+#
+# `--inspect` evidence (solid 0 of 1 in every file):
+#   RP4030   91925.946 mm³   78 faces   20.0×20.0×500.0   "PP4030-500-Rollco"
+#   RP4031   94405.231 mm³   78 faces   500.0×20.0×20.0   "RP4031"   ← along +X
+#   RP4040  165849.450 mm³  126 faces   40.0×20.0×500.0   "PP4040-500-Rollco"
+#   RP4050  239772.954 mm³  174 faces   60.0×20.0×500.0   "PP4050-500-Rollco"
+#   RP4070  257077.206 mm³  183 faces   40.0×40.0×500.0   "PP4070-500-Rollco"
+#
+# No keep-list on any of them: one solid in, one solid out. RP4031 needs no
+# `axis_hint` either — the worker finds the extrusion axis itself, and it is the
+# only one of the five modelled along +X rather than +Z.
+
+[[part]]
+file = "AluminiumProfiles/CAD_RP4030_5_20x20_Normal_Rollco.step"
+kind = "profile"
+id = "onecad.vendor.rollco.rp4030"
+name = "Rollco RP4030 20x20"
+vendor = "rollco"
+standard = "Rollco RP"
+designation = "RP4030 20x20 L={length}"
+category = ["profiles", "aluminium"]
+tags = ["20x20", "t-slot", "rollco"]
+[part.profile]
+length_default = 500.0
+length_min = 1.0
+
+[[part]]
+file = "AluminiumProfiles/CAD_RP4031_5_20x20_1N_Normal_Rollco.STEP"
+kind = "profile"
+id = "onecad.vendor.rollco.rp4031"
+name = "Rollco RP4031 20x20 1N"
+vendor = "rollco"
+standard = "Rollco RP"
+designation = "RP4031 20x20 1N L={length}"
+category = ["profiles", "aluminium"]
+tags = ["20x20", "t-slot", "rollco"]
+[part.profile]
+length_default = 500.0
+length_min = 1.0
+
+[[part]]
+file = "AluminiumProfiles/CAD_RP4040_5_20x40_Normal_Rollco.step"
+kind = "profile"
+id = "onecad.vendor.rollco.rp4040"
+name = "Rollco RP4040 20x40"
+vendor = "rollco"
+standard = "Rollco RP"
+designation = "RP4040 20x40 L={length}"
+category = ["profiles", "aluminium"]
+tags = ["20x40", "t-slot", "rollco"]
+[part.profile]
+length_default = 500.0
+length_min = 1.0
+
+[[part]]
+file = "AluminiumProfiles/CAD_RP4050_5_20x60_Normal_Rollco.step"
+kind = "profile"
+id = "onecad.vendor.rollco.rp4050"
+name = "Rollco RP4050 20x60"
+vendor = "rollco"
+standard = "Rollco RP"
+designation = "RP4050 20x60 L={length}"
+category = ["profiles", "aluminium"]
+tags = ["20x60", "t-slot", "rollco"]
+[part.profile]
+length_default = 500.0
+length_min = 1.0
+
+[[part]]
+file = "AluminiumProfiles/CAD_RP4070_5_40x40_Normal_Rollco.step"
+kind = "profile"
+id = "onecad.vendor.rollco.rp4070"
+name = "Rollco RP4070 40x40"
+vendor = "rollco"
+standard = "Rollco RP"
+designation = "RP4070 40x40 L={length}"
+category = ["profiles", "aluminium"]
+tags = ["40x40", "t-slot", "rollco"]
+[part.profile]
+length_default = 500.0
+length_min = 1.0
+
+# ── NEMA 17 stepper — KNOWN REFUSAL, kept deliberately ───────────────────────
+#
+# 67 solids, 2035 faces. Every product name in the file is the literal string
+# "Open CASCADE STEP translator 7.6 1" (the file was re-exported through OCCT
+# and lost them), so `keep.mode = "names"` and `drop_names` are both useless
+# here and the keep-list has to be ordinal.
+#
+# The exterior envelope is the two large solids, 86 % of the total volume:
+#   65  19331.332 mm³  170 faces  55.2×60.4×14.2 @ z −0.1  (spans z −0.1 … 14.1)
+#   66  29858.173 mm³  242 faces  55.2×55.2×15.5 @ z 18.5  (spans z 18.5 … 34.0)
+# and below them, in descending volume, the shaft and the internals:
+#   62   1859.702 mm³    7 faces   6.7×6.7×57.0  @ z  4.1  (the through shaft)
+#   63   1931.139 mm³   12 faces  20.9×20.9×6.6  @ z 23.5
+#   64   1931.139 mm³   12 faces  20.9×20.9×6.6  @ z  4.4
+#   59    325.209 mm³  242 faces  55.2×55.2×9.4  @ z 11.7
+# then 53 further solids under 1 mm³ each (wire strands and terminal detail).
+#
+# THIS PART REFUSES, and that is the recorded finding rather than an oversight.
+# Six keep-lists were run against the real worker — [65,66], [59,65,66],
+# [59,62,63,64,65,66], volume_fraction 0.02, [59,66], [64,65] and [62,66] — and
+# EVERY one of them failed the same way:
+#
+#   INGEST_DISJOINT_AFTER_FUSE: the fuse chain failed at <rec>:
+#   Boolean failed self-interference validation
+#
+# That is not disjointness. `Boolean` publishes at Tier B, which refuses any
+# result carrying a `BOPAlgo_SelfIntersect` face pair, and both 65 and 66 carry
+# one — every pair containing either of them refuses, while each of them ALONE
+# saves cleanly (a one-solid keep-list runs no Boolean and no Tier B check).
+# The vendor solids are self-intersecting; the kernel is right to say so.
+#
+# Keeping the honest two-solid envelope rather than silently narrowing to
+# `indices = [66]`: that would succeed and would put HALF a motor in the
+# library under a name claiming a whole one. A red row in the report is the
+# better answer, and it is actionable — this file needs healing (or a different
+# download), not a different keep-list.
+[[part]]
+file = "Nema17 Stepper Motor 17Hs4023.step"
+kind = "embedded"
+id = "onecad.vendor.generic.nema17-17hs4023"
+name = "NEMA 17 stepper 17HS4023"
+vendor = "generic"
+designation = "NEMA 17 17HS4023"
+category = ["motors", "stepper"]
+tags = ["nema17", "stepper", "17hs4023"]
+[part.keep]
+mode = "indices"
+indices = [65, 66]
+
+# ── TowerPro SG90 micro servo ────────────────────────────────────────────────
+#
+# 19 solids. The STEP carries NO product names at all (`InspectStep: names 0/19`)
+# — the "Body 1 … Body 19" labels in `--inspect` are OneCAD's own default body
+# naming, not the file's. So the two ISO 7045 screws the brief expected to drop
+# by name cannot be addressed by name; they are simply not in the keep-list.
+#
+# The keep-list is the three case solids, 87.9 % of the total volume:
+#   16  1461.476 mm³  157 faces  22.5× 5.5×12.2 @ z 21.7
+#   17  2582.975 mm³  102 faces  32.2×11.2×12.3 @ z 21.6  (the 32.2 mm is the
+#                                                          case WITH its tabs)
+#   18  2820.962 mm³   10 faces  22.5×10.3×12.2 @ z 21.7
+# and they fuse to ONE solid of 268 faces — verified against the real worker.
+#
+# Dropped: the output-shaft and gear train (12 at 119 mm³, 13/14/15 at 155–296
+# mm³, 10/11 at 36.6 mm³, 7 at 17.8 mm³), the two 0.1 mm-thick sheets 8/9, and
+# the seven sub-3 mm³ contacts 0–6. Adding 15 to the keep-list was tried and
+# refuses: `[15,16,17,18]` breaks the fuse chain (15 does not touch 18), which
+# is exactly the disjoint case the refusal exists for.
+#
+# `indices` rather than `volume_fraction = 0.05`: the threshold selects the same
+# three solids today, but an index list says WHICH three and cannot silently
+# select a fourth.
+[[part]]
+file = "SG90 - Micro Servo 9g - Tower Pro.STEP"
+kind = "embedded"
+id = "onecad.vendor.towerpro.sg90"
+name = "TowerPro SG90 micro servo"
+vendor = "towerpro"
+standard = "TowerPro SG90"
+designation = "SG90 9g micro servo"
+category = ["actuators", "servo"]
+tags = ["sg90", "servo", "9g", "towerpro"]
+[part.keep]
+mode = "indices"
+indices = [16, 17, 18]

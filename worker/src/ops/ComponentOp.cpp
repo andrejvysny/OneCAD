@@ -11,12 +11,18 @@
 #include <vector>
 
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -52,6 +58,23 @@ constexpr double kDefaultLengthMm = 20.0;
 // caller (nothing sends `source.params.thread_detail` yet) stays
 // byte-identical, same rule as thread/length above.
 constexpr const char* kDefaultThreadDetail = "cosmetic";
+
+// §7.3 `source.kind:"profile"`. The worker enforces exactly THREE canonicality
+// properties — the face's plane passes through `z = 0`, its orientation-corrected
+// normal is `+Z`, and its AREA centroid is on the origin. Each is one cheap
+// measurement and each has a consequence a user would see: the first two decide
+// which way the prism grows, the third decides WHERE the component lands.
+//
+// The remaining half of the ingest convention — the tie-broken principal in-plane
+// axis on `+X` — stays an AUTHORING rule owned by the component-library spec and
+// is deliberately NOT re-checked: that one needs a per-regen eigen-solve whose
+// degenerate branch is platform-sensitive, and a placed component must never
+// START refusing because a last bit moved. A rotated-but-centred profile still
+// places in the right place; an off-centre one does not.
+constexpr double kProfileCanonicalTol = 1.0e-6;
+// `params.length` upper bound (mm). A prism longer than this is an authoring
+// mistake (a unit slip), not a part.
+constexpr double kMaxProfileLengthMm = 1.0e5;
 
 // Reads `placement.{translate,rotate}` into a `gp_Trsf`, SAME normative order
 // as TransformBody: `X' = T ∘ R(center, axis, angleDeg) · X` — rotate about
@@ -331,6 +354,149 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
     return MateReseat{*candidate, candidate_trsf};
 }
 
+// A CONVERTED codec must pin the binary format version it was written in, and a
+// pin this worker does not write fails loudly rather than being misparsed (the
+// same rule `ImportStep` enforces). Shared by every blob-backed source kind.
+std::string format_pin_error(const json& source, const std::string& codec, int expected,
+                             const std::string& op_label) {
+    if (!source.contains("brepFormat") || !source["brepFormat"].is_number_integer()) {
+        return op_label + ": source codec '" + codec + "' requires an integer brepFormat";
+    }
+    const int got = source["brepFormat"].get<int>();
+    if (got != expected) {
+        return op_label + ": source brepFormat " + std::to_string(got) +
+               " is not the version this worker writes (" + std::to_string(expected) + ")";
+    }
+    return {};
+}
+
+// A `profile` refusal: a RECOVERABLE `OP_FAILED` whose fine-grained reason rides
+// `detail.diagnostics[].reasonCode` (SCHEMA §8). The top-level `error.code`
+// taxonomy is closed and never grows a value for a new refusal reason.
+OpOutcome profile_refusal(const char* reason_code, const std::string& message) {
+    OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+    failure.diagnostics.push_back({{"severity", "error"},
+                                   {"code", "OP_FAILED"},
+                                   {"message", message},
+                                   {"stage", "build"},
+                                   {"reasonCode", reason_code}});
+    return failure;
+}
+
+// `source.params.length` in mm. Unlike a `document` source's `params`
+// (provenance only, never read here) this one IS a regen input — it is the
+// entire point of the kind — so it is validated, not defaulted.
+bool read_profile_length(const json& source, double& length_mm) {
+    if (!source.contains("params") || !source["params"].is_object()) return false;
+    const json& params = source["params"];
+    if (!params.contains("length")) return false;
+    const json& value = params["length"];
+    if (value.is_number()) {
+        length_mm = value.get<double>();
+    } else if (value.is_object() && value.contains("value") && value["value"].is_number()) {
+        length_mm = value["value"].get<double>();
+    } else {
+        return false;
+    }
+    return std::isfinite(length_mm) && length_mm > 0.0 && length_mm <= kMaxProfileLengthMm;
+}
+
+// The §7.3 `profile` arm (Component Library WP-C): a LENGTH-PARAMETRIC extrusion
+// of an embedded canonical planar profile. It exists because vendor stock
+// arrives as one fixed length — an aluminium extrusion STEP is a 500 mm stick —
+// while the component has to be placeable at any length, which no baked-solid
+// kind can express.
+//
+// `codec` is pinned to `brep` BY NAME: the `step` and `xbf` readers on this lane
+// return SOLIDS, so accepting them would answer a face question with a solid
+// reader and fail obscurely much later.
+//
+// Returns `nullopt` on success (`solid_out` filled), else the failing outcome.
+std::optional<OpOutcome> build_profile_solid(const json& source, const std::string& op_label,
+                                             TopoDS_Shape& solid_out) {
+    const std::string codec = read_str(source, "codec");
+    if (codec != "brep") {
+        return profile_refusal("PROFILE_CODEC_UNSUPPORTED",
+                               op_label + ": a profile source must be codec 'brep' (got '" +
+                                   codec + "') — the step and xbf readers on this lane return "
+                                           "solids, not a face");
+    }
+    const std::string bad = format_pin_error(source, codec, io::kBrepFormatVersion, op_label);
+    if (!bad.empty()) return profile_refusal("PROFILE_FORMAT_UNSUPPORTED", bad);
+
+    // Same "an unmaterialized blob lowers an EMPTY path so only THAT step fails"
+    // rule the other blob kinds follow — and the same GENERIC `OP_FAILED` those
+    // two legs carry there. They are blob-plumbing failures, identical for every
+    // blob-backed kind, so they are deliberately NOT given a PROFILE_* reason
+    // code: the fine-grained vocabulary describes the FACE, not the file system.
+    const std::string path = read_str(source, "path");
+    if (path.empty()) {
+        return OpOutcome::fail("OP_FAILED",
+                               op_label + ": no materialized geometry for source blob '" +
+                                   read_str(source, "sha256") + "'");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        return OpOutcome::fail("OP_FAILED", op_label + ": source geometry path is not a readable "
+                                                       "file (" +
+                                                path + ")");
+    }
+
+    const io::BrepShapeResult read = io::read_brep_shape(path);
+    if (!read.ok()) return OpOutcome::fail("OP_FAILED", op_label + ": " + read.error);
+    if (read.shape.ShapeType() != TopAbs_FACE) {
+        return profile_refusal("PROFILE_BLOB_NOT_ONE_FACE",
+                               op_label + ": a profile source must carry exactly one face, bare "
+                                          "or in a single-child compound");
+    }
+    const TopoDS_Face face = TopoDS::Face(read.shape);
+    gp_Pln plane;
+    gp_Dir normal;
+    if (!planar_face_plane_normal(face, plane, normal)) {
+        return profile_refusal("PROFILE_FACE_NOT_PLANAR",
+                               op_label + ": the profile face is not planar");
+    }
+    // The AREA centroid is checked too, and it costs one GProp call — no
+    // eigen-solve, so the "platform-sensitive degenerate branch" argument that
+    // keeps the principal-axis half an authoring rule does not reach it. Without
+    // this an off-centre face places the component that far from its
+    // `placement.translate` and NOTHING refuses: the part is silently in the
+    // wrong place, which is the failure class this whole design exists to stop.
+    GProp_GProps area_props;
+    BRepGProp::SurfaceProperties(face, area_props);
+    const double centroid_offset = area_props.CentreOfMass().XYZ().Modulus();
+    if (std::abs(plane.Distance(gp_Pnt(0.0, 0.0, 0.0))) > kProfileCanonicalTol ||
+        (normal.XYZ() - gp_XYZ(0.0, 0.0, 1.0)).Modulus() > kProfileCanonicalTol ||
+        centroid_offset > kProfileCanonicalTol) {
+        return profile_refusal("PROFILE_FACE_NOT_CANONICAL",
+                               op_label + ": the profile face must lie on the plane z = 0, with a "
+                                          "+Z orientation-corrected normal and its area centroid "
+                                          "on the origin");
+    }
+
+    double length_mm = 0.0;
+    if (!read_profile_length(source, length_mm)) {
+        return profile_refusal("PROFILE_LENGTH_INVALID",
+                               op_label + ": source.params.length must be a finite length in "
+                                          "(0, 100000] mm");
+    }
+
+    try {
+        BRepPrimAPI_MakePrism prism(face, gp_Vec(0.0, 0.0, length_mm));
+        prism.Build();
+        if (!prism.IsDone() || prism.Shape().IsNull()) {
+            return OpOutcome::fail("OP_FAILED", op_label + ": the profile prism failed to build");
+        }
+        solid_out = prism.Shape();
+    } catch (const Standard_Failure& f) {
+        return OpOutcome::fail("OP_FAILED",
+                               op_label + ": the profile prism raised: " +
+                                   (f.GetMessageString() != nullptr ? f.GetMessageString()
+                                                                    : "OCCT failure"));
+    }
+    return std::nullopt;
+}
+
 // Reads the baked solid behind an `embedded` / `document` source (spec §2.1,
 // WP-3.2) out of the wire-only `source.path` Rust materialized for it.
 //
@@ -371,15 +537,7 @@ std::optional<OpOutcome> read_source_blob(const json& source, const std::string&
     }
 
     const auto check_format = [&](int expected) -> std::string {
-        if (!source.contains("brepFormat") || !source["brepFormat"].is_number_integer()) {
-            return op_label + ": source codec '" + codec + "' requires an integer brepFormat";
-        }
-        const int got = source["brepFormat"].get<int>();
-        if (got != expected) {
-            return op_label + ": source brepFormat " + std::to_string(got) +
-                   " is not the version this worker writes (" + std::to_string(expected) + ")";
-        }
-        return {};
+        return format_pin_error(source, codec, expected, op_label);
     };
 
     std::vector<TopoDS_Shape> solids;
@@ -427,8 +585,9 @@ std::optional<OpOutcome> read_source_blob(const json& source, const std::string&
 // mate, DetachComponent carries neither, per spec §3.4's "no component_*
 // fields remain"). `op_label` names the caller in error messages.
 //
-// `source.kind` is `"generator"`, `"embedded"`, or `"document"` (spec §2.1).
-// The two blob-backed kinds share ONE arm (`read_source_blob`): they differ
+// `source.kind` is `"generator"`, `"embedded"`, `"document"` or `"profile"`
+// (spec §2.1). The two BAKED blob kinds share ONE arm (`read_source_blob`):
+// they differ
 // only in what the RECORD remembers about the solid's provenance, never in how
 // the solid is produced — a baked solid read back from this document's own
 // cached bytes. The generator arm dispatches on `source.generatorId` through
@@ -444,15 +603,20 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     }
     const json& source = params["source"];
     const std::string kind = read_str(source, "kind");
-    if (kind != "generator" && kind != "embedded" && kind != "document") {
+    if (kind != "generator" && kind != "embedded" && kind != "document" && kind != "profile") {
         return OpOutcome::fail("UNSUPPORTED",
                                op_label + ": source.kind '" + kind +
-                                   "' is unknown (known: generator, embedded, document)");
+                                   "' is unknown (known: generator, embedded, document, profile)");
     }
     TopoDS_Shape solid;
     std::string err;
 
-    if (kind != "generator") {
+    if (kind == "profile") {
+        if (std::optional<OpOutcome> failure = build_profile_solid(source, op_label, solid)) {
+            return *failure;
+        }
+        if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+    } else if (kind != "generator") {
         if (std::optional<OpOutcome> failure =
                 read_source_blob(source, op_label, ctx.cancel, solid)) {
             return *failure;

@@ -62,6 +62,8 @@ import type {
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
+  IngestComponentsRequest,
+  IngestComponentsReport,
   LibraryComponent,
   PlaceComponentSource,
   MassProperties,
@@ -196,6 +198,11 @@ const CMD = {
   resolveComponentSource: "resolve_component_source",
   placeComponent: "place_component",
   saveAsComponent: "save_as_component",
+  // WP-C2: named here ahead of the Rust command so this map and the invoke
+  // name it fixes stay in lockstep the moment the handler lands (no rename
+  // window). See `ingestComponents` below and `mockClient`'s refusal.
+  ingestComponents: "ingest_components",
+  pickComponentFiles: "pick_component_files",
   componentPreviewMesh: "component_preview_mesh",
   listTemplates: "list_templates",
   saveAsTemplate: "save_as_template",
@@ -1919,6 +1926,21 @@ export function createTauriClient(): CadClient {
     });
   }
 
+  /** WP-C2. A plain report round trip — nothing here mutates the open document. */
+  async function ingestComponents(req: IngestComponentsRequest): Promise<IngestComponentsReport> {
+    return call<IngestComponentsReport>(CMD.ingestComponents, {
+      paths: req.paths,
+      libraryRoot: req.libraryRoot ?? null,
+      defaults: req.defaults,
+    });
+  }
+
+  /** WP-C2 real-lane picker. A plain round trip — Rust owns the multi-select
+   *  dialog and resolves the absolute paths (empty on cancel). */
+  async function pickComponentFiles(): Promise<string[]> {
+    return call<string[]>(CMD.pickComponentFiles);
+  }
+
   /**
    * A replace is an `UpdateOperationParams` on an EXISTING record that re-bakes
    * the component's geometry, so it correlates on that `recordId` exactly like
@@ -2287,6 +2309,8 @@ export function createTauriClient(): CadClient {
     resolveComponentSource,
     placeComponent,
     saveAsComponent,
+    ingestComponents,
+    pickComponentFiles,
     componentPreviewMesh,
     listTemplates,
     saveAsTemplate,

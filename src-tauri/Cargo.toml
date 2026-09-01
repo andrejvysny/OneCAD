@@ -7,6 +7,7 @@ members = [
     "crates/onecad-regen",
     "crates/onecad-kernelbench",
     "crates/onecad-library",
+    "crates/onecad-library-ingest",
 ]
 
 # Shared dependency versions for every workspace member. Individual crates
@@ -94,6 +95,10 @@ sha2 = { workspace = true }
 # as a `data:` URL in `list_recents`). Already in the lock as a tauri transitive at
 # this exact version — declaring it adds no crate to the build graph.
 base64 = "0.22"
+# Parses the `onecad-library-ingest` recipe (`STEP/ingest.toml`). Same version
+# `onecad-library` pins, and already in the lock as its dependency — declaring it
+# adds no crate to the build graph.
+toml = "0.8"
 # Recents card management: move a deleted project to the OS trash instead of
 # a permanent `remove_file` (macOS/Windows/Linux).
 trash = "5"

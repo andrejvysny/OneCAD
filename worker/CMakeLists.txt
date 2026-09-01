@@ -147,6 +147,7 @@ add_library(worker_core STATIC
     # --- WP3-C5: the `resultPolicyVersion: 3` blend-aware closure walk. ---
     src/ops/OffsetFaceBlend.cpp
     src/session/PrepareOffsetFace.cpp
+    src/session/ExtractPrismProfile.cpp
     src/session/EdgePicks.cpp
     src/session/PrepareEdgeOp.cpp
     # --- WP4: the read-only feasible-range query behind the edge-op guard

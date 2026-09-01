@@ -2581,8 +2581,9 @@ pub enum ComponentParamValue {
 
 /// Where a placed component's geometry comes from (spec §3.1 `source`).
 ///
-/// All three spec §2.1 kinds, as of WP-3.2. `Embedded` and `Document` both
-/// resolve to **the same thing at regen time** — a baked solid, content
+/// The three spec §2.1 kinds as of WP-3.2, plus WP-C's [`Self::Profile`].
+///
+/// `Embedded` and `Document` both resolve to **the same thing at regen time** — a baked solid, content
 /// addressed, cached in this document's own
 /// [`imports`](crate::io::imports) section — and differ only in what the
 /// record remembers about where that solid came from. That is deliberate: a
@@ -2677,14 +2678,65 @@ pub enum ComponentSourceRef {
         #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
         extra: Extra,
     },
+    /// A **length-parametric extrusion of an embedded planar profile**
+    /// (Component Library WP-C; SCHEMA §7.3).
+    ///
+    /// It exists because vendor stock arrives as ONE fixed length — an
+    /// aluminium extrusion STEP is a 500 mm stick — while the component has to
+    /// be placeable at any length, and none of the other three kinds could
+    /// express that: `embedded`/`document` are baked SOLIDS by definition, and
+    /// `generator` has no blob at all. So the blob here is a single canonical
+    /// planar FACE and the worker builds the solid by prism
+    /// (`BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, length))`).
+    ///
+    /// **`params.length` is a REGEN INPUT** — the one place this kind diverges
+    /// from [`Self::Document`], whose `params` the worker still ignores. It is
+    /// covered by the planner hash, so editing it MOVES geometry rather than
+    /// relabelling it, and it needs no re-bake (there is no authoring document
+    /// to replay).
+    Profile {
+        /// Content address of the canonical face blob, in this document's own
+        /// `imports/` section — the same pointer discipline
+        /// [`Self::Embedded`] follows.
+        sha256: String,
+        /// MUST be [`ImportSourceCodec::Brep`]: the `step` and `xbf` readers on
+        /// this lane return SOLIDS, so accepting them would answer a face
+        /// question with a solid reader and fail obscurely.
+        codec: ImportSourceCodec,
+        /// Format pin for `sha256`'s bytes — see [`Self::Embedded::brep_format`].
+        #[serde(
+            rename = "brepFormat",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        brep_format: Option<u32>,
+        /// The extrusion parameters. `length` (millimetres) is REQUIRED,
+        /// finite, and `0 < length ≤ 1e5` — see
+        /// [`validate_component_source`].
+        #[serde(default)]
+        params: BTreeMap<String, ComponentParamValue>,
+        #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+        extra: Extra,
+    },
 }
 
-/// The baked-blob pointer an `embedded` / `document` component source carries:
-/// everything the regen path needs, with the provenance differences stripped.
+/// The `params` key a [`ComponentSourceRef::Profile`] extrudes along, in
+/// millimetres (SCHEMA §7.3). Named so [`validate_component_source`] and the
+/// tests that pin it cannot drift apart, and public because it is part of the
+/// kind's authored contract — a package declaring some other key for its length
+/// produces a record this validator refuses.
+pub const PROFILE_LENGTH_PARAM: &str = "length";
+
+/// Upper bound on a profile extrusion's length, in millimetres.
+const PROFILE_MAX_LENGTH_MM: f64 = 1e5;
+
+/// The baked-blob pointer an `embedded` / `document` / `profile` component
+/// source carries: everything the regen path needs, with the provenance
+/// differences stripped.
 ///
-/// Exists so the two blob-backed kinds are handled ONCE — wire lowering and the
-/// save-time blob refcount both walk this, not a per-variant match, which is what
-/// keeps a future fourth kind from silently missing one of them.
+/// Exists so the three blob-backed kinds are handled ONCE — wire lowering and
+/// the save-time blob refcount both walk this, not a per-variant match, which is
+/// what keeps a future fifth kind from silently missing one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComponentBlobRef<'a> {
     /// The blob's content address, keying this document's `imports/` section.
@@ -2709,6 +2761,12 @@ impl ComponentSourceRef {
                 ..
             }
             | ComponentSourceRef::Document {
+                sha256,
+                codec,
+                brep_format,
+                ..
+            }
+            | ComponentSourceRef::Profile {
                 sha256,
                 codec,
                 brep_format,
@@ -2971,15 +3029,60 @@ fn validate_component_source(source: &ComponentSourceRef, op_name: &str) -> Resu
         ));
     }
     match blob.codec {
-        ImportSourceCodec::Step => Ok(()),
+        ImportSourceCodec::Step => {
+            // A `profile` blob is a FACE, and only the `brep` reader returns one
+            // (below). Every other kind accepts `step`.
+            if matches!(source, ComponentSourceRef::Profile { .. }) {
+                return Err(profile_codec_error(op_name, blob.codec));
+            }
+            Ok(())
+        }
         ImportSourceCodec::Brep | ImportSourceCodec::Xbf if blob.brep_format.is_none() => {
             Err(format!(
                 "{op_name} source.brepFormat is required for sourceCodec `{}`",
                 blob.codec.extension()
             ))
         }
+        ImportSourceCodec::Xbf if matches!(source, ComponentSourceRef::Profile { .. }) => {
+            Err(profile_codec_error(op_name, blob.codec))
+        }
         ImportSourceCodec::Brep | ImportSourceCodec::Xbf => Ok(()),
+    }?;
+    // `profile` alone reads `params` as a REGEN INPUT, so its one required key
+    // is checked here rather than left to the worker: an out-of-range length
+    // authored into a record would otherwise only fail at the next regen, on
+    // someone else's machine.
+    if let ComponentSourceRef::Profile { params, .. } = source {
+        let length = match params.get(PROFILE_LENGTH_PARAM) {
+            Some(ComponentParamValue::Number(l)) => *l,
+            Some(_) => {
+                return Err(format!(
+                    "{op_name} source.params.{PROFILE_LENGTH_PARAM} must be a number"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "{op_name} source.params.{PROFILE_LENGTH_PARAM} is required for a `profile` \
+                     source (it is the extrusion distance, in millimetres)"
+                ))
+            }
+        };
+        if !length.is_finite() || length <= 0.0 || length > PROFILE_MAX_LENGTH_MM {
+            return Err(format!(
+                "{op_name} source.params.{PROFILE_LENGTH_PARAM} must be finite and in \
+                 (0, {PROFILE_MAX_LENGTH_MM}] mm (got {length})"
+            ));
+        }
     }
+    Ok(())
+}
+
+fn profile_codec_error(op_name: &str, codec: ImportSourceCodec) -> String {
+    format!(
+        "{op_name} source.codec must be `brep` for a `profile` source (got `{}`) — the \
+         other readers return solids, and this blob is a single planar face",
+        codec.extension()
+    )
 }
 
 /// Drop a placed component's library identity, keeping its cached geometry as
@@ -4452,6 +4555,126 @@ mod tests {
         // The GEOMETRY digest, never the provenance one — swapping them would
         // pin the wrong blob at save and materialize the wrong path at regen.
         assert_eq!(document.blob_ref().unwrap().sha256, "c".repeat(64));
+
+        let profile = ComponentSourceRef::Profile {
+            sha256: "d".repeat(64),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            params: BTreeMap::new(),
+            extra: Extra::new(),
+        };
+        let blob = profile.blob_ref().expect("profile carries a blob");
+        assert_eq!(blob.sha256, "d".repeat(64));
+        assert_eq!(blob.codec, ImportSourceCodec::Brep);
+        assert_eq!(blob.brep_format, Some(4));
+    }
+
+    /// WP-C: `profile` is the one kind whose `params` are a REGEN INPUT, so its
+    /// `length` is validated at authoring rather than left to the worker. And
+    /// the codec is pinned to `brep` BY NAME — the `step` and `xbf` readers
+    /// return solids, so accepting them would answer a face question with a
+    /// solid reader.
+    #[test]
+    fn profile_component_source_validation_matrix() {
+        let with_source = |source| {
+            let mut p = place_component_params();
+            p.source = source;
+            p
+        };
+        let profile = |codec, brep_format, params: BTreeMap<String, ComponentParamValue>| {
+            ComponentSourceRef::Profile {
+                sha256: "d".repeat(64),
+                codec,
+                brep_format,
+                params,
+                extra: Extra::new(),
+            }
+        };
+        let length = |mm| {
+            let mut m = BTreeMap::new();
+            m.insert(
+                PROFILE_LENGTH_PARAM.to_string(),
+                ComponentParamValue::Number(mm),
+            );
+            m
+        };
+
+        assert!(
+            with_source(profile(ImportSourceCodec::Brep, Some(4), length(500.0)))
+                .validate()
+                .is_ok()
+        );
+
+        for bad_codec in [ImportSourceCodec::Step, ImportSourceCodec::Xbf] {
+            assert!(
+                with_source(profile(bad_codec, Some(4), length(500.0)))
+                    .validate()
+                    .is_err(),
+                "codec `{}` must be refused for a profile source",
+                bad_codec.extension()
+            );
+        }
+        assert!(
+            with_source(profile(ImportSourceCodec::Brep, None, length(500.0)))
+                .validate()
+                .is_err(),
+            "brepFormat pins the BinTools version the face was written in"
+        );
+        assert!(
+            with_source(profile(ImportSourceCodec::Brep, Some(4), BTreeMap::new()))
+                .validate()
+                .is_err(),
+            "length is the whole point of the kind — its absence is not a default"
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e5 + 1.0] {
+            assert!(
+                with_source(profile(ImportSourceCodec::Brep, Some(4), length(bad)))
+                    .validate()
+                    .is_err(),
+                "length {bad} must be refused"
+            );
+        }
+        let mut text_length = BTreeMap::new();
+        text_length.insert(
+            PROFILE_LENGTH_PARAM.to_string(),
+            ComponentParamValue::Text("500".into()),
+        );
+        assert!(
+            with_source(profile(ImportSourceCodec::Brep, Some(4), text_length))
+                .validate()
+                .is_err(),
+            "a stringly-typed length must not be coerced"
+        );
+    }
+
+    /// Same camelCase trap the other arms carry, plus the shape the worker
+    /// branches on: `kind: "profile"` with `params` alongside the blob pointer.
+    #[test]
+    fn profile_component_source_wire_shape() {
+        let mut params = place_component_params();
+        let mut source_params = BTreeMap::new();
+        source_params.insert(
+            PROFILE_LENGTH_PARAM.to_string(),
+            ComponentParamValue::Number(500.0),
+        );
+        params.source = ComponentSourceRef::Profile {
+            sha256: "d".repeat(64),
+            codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            params: source_params,
+            extra: Extra::new(),
+        };
+        let op = Operation::Known(KnownOperation::PlaceComponent(params));
+        let json = serde_json::to_value(&op).unwrap();
+        let source = &json["params"]["source"];
+        assert_eq!(source["kind"], serde_json::json!("profile"));
+        assert_eq!(source["codec"], serde_json::json!("brep"));
+        assert_eq!(source["brepFormat"], serde_json::json!(4));
+        assert_eq!(source["params"]["length"], serde_json::json!(500.0));
+        assert!(source.get("brep_format").is_none());
+
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op, "the profile kind round-trips through KNOWN");
     }
 
     /// `inputs[]` = the mate target ONLY when a mate is present (spec §3.1); a

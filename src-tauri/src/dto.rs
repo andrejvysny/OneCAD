@@ -468,6 +468,87 @@ pub struct ReindexReportDto {
     pub skipped: Vec<String>,
 }
 
+/// The catalog defaults every part of one `ingest_components` request is filed
+/// under (`types.ts` `IngestComponentsRequest.defaults`; WP-C2). `vendor` is also
+/// the id namespace (`onecad.vendor.<vendor>.<slug>`).
+///
+/// The request's other two members (`paths`, `libraryRoot`) are flat command
+/// arguments rather than fields of a wire object — `IngestComponentsRequest` is a
+/// TS-side aggregate, and `tauriClient` spreads it into the invoke payload.
+///
+/// The interactive lane only ever ingests `embedded` parts under one shared set of
+/// these defaults; re-ingesting a stick as a length-parametric `profile` needs a
+/// per-part decision, which is what the `onecad-library-ingest` recipe is for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestDefaultsDto {
+    pub vendor: String,
+    #[serde(default)]
+    pub category: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Which package kind one ingested part became (`types.ts` `IngestPartKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IngestPartKindDto {
+    Embedded,
+    Profile,
+}
+
+/// How one ingested part ended (`types.ts` `IngestPartResult.status`).
+///
+/// `Refused` and `Failed` are deliberately distinct: a refusal is the ingest
+/// working correctly and saying no (the fused envelope is still several disjoint
+/// solids, the stick is not a prism), while a failure is the file or the worker
+/// not cooperating. Collapsing them would hide which of the two the author can fix
+/// by editing a keep-list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IngestStatusDto {
+    Ok,
+    Refused,
+    Failed,
+}
+
+/// One path's outcome from `ingest_components` (`types.ts` `IngestPartResult`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestPartResultDto {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<IngestPartKindDto>,
+    pub status: IngestStatusDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Solids the STEP reader recovered, before any keep-list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solids_found: Option<usize>,
+    /// Solids the keep-list kept, before any fuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solids_kept: Option<usize>,
+    /// Exact `QueryBodyTopology` face count of the solid actually saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face_count: Option<u32>,
+    /// Wall-clock milliseconds for read + convert + regen of this part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_ms: Option<u64>,
+}
+
+/// `ingest_components`'s batch outcome — one [`IngestPartResultDto`] per requested
+/// path, in request order (`types.ts` `IngestComponentsReport`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestComponentsReportDto {
+    pub parts: Vec<IngestPartResultDto>,
+    pub library_root: String,
+}
+
 /// An opt-in upgrade offer for one placed instance (`component_upgrade_available`;
 /// `types.ts` `ComponentUpgrade`) — spec §3.3's "existing instances keep their
 /// recorded revision and offer opt-in upgrade".
@@ -1004,6 +1085,78 @@ pub struct PrepareOffsetFaceDto {
     /// `Some` ⇒ the handshake REFUSED and `faces` is not a usable closure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<OffsetFaceRefusalDto>,
+}
+
+/// The canonical face `ExtractPrismProfile` wrote, and where (SCHEMA §7.8).
+///
+/// Absent when the caller asked to ANALYSE only (no `path`): the prism
+/// measurements are still an answer without a bake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrismBakeDto {
+    /// Size of the file the worker wrote.
+    pub bytes: u64,
+    /// The replay codec those bytes are in — always `"brep"` for a profile.
+    pub codec: String,
+    /// The BinTools format version the worker wrote, to pin as `brepFormat`.
+    pub format: u32,
+    /// SHA-256 of the bytes actually written — recorded VERBATIM as the
+    /// `profile` source's `sha256`, never re-derived here.
+    pub sha256: String,
+}
+
+/// A body that IS a prism, as measured (SCHEMA §7.8 `ExtractPrismProfile`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrismProfileDto {
+    /// The extrusion axis, as an exact canonical basis vector.
+    pub axis: [f64; 3],
+    /// Snapshot-scoped ordinal key of the end cap at the axis MINIMUM — the face
+    /// the canonical frame was built from and whose bytes were written. Evidence,
+    /// never an identity (Invariant 2).
+    pub end_cap_topo_key: String,
+    /// Plane-to-plane distance between the two end caps, in millimetres. NOT a
+    /// bounding-box extent — a `Bnd_Box` is inflated by the shape's tolerance,
+    /// and this number is multiplied into the prism-ness test.
+    pub length_mm: f64,
+    /// End-cap area in mm², holes subtracted.
+    pub area_mm2: f64,
+    /// `volume / (areaMm2 · lengthMm)` — `1.0` for a true prism.
+    pub volume_ratio: f64,
+    pub outer_edge_count: u32,
+    pub inner_wire_count: u32,
+    /// The bake, when one was asked for and performed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bake: Option<PrismBakeDto>,
+}
+
+/// An `ExtractPrismProfile` REFUSAL — an answer with `ok:true`, not an error.
+///
+/// `code` is `notAPrism` today; `volume_ratio` carries the measured number that
+/// decided it, so a cross-drilled or tapered stick refuses honestly and says by
+/// how much rather than shrugging.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrismRefusalDto {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_ratio: Option<f64>,
+}
+
+/// What `ExtractPrismProfile` answered (SCHEMA §7.8).
+///
+/// An ENUM, not two `Option`s, because the wire contract is that `prism` and
+/// `refusal` are mutually exclusive and exactly one is non-null. Modelling it as
+/// two optionals would make "both" and "neither" representable states nothing
+/// downstream knows how to read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PrismProfileAnswerDto {
+    /// The body is a prism; these are its measurements.
+    Prism(PrismProfileDto),
+    /// The body is not a prism; nothing was written.
+    Refused(PrismRefusalDto),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

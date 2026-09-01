@@ -26,6 +26,8 @@ import type {
   DocumentVariable,
   DocumentSnapshot,
   ElementInfo,
+  IngestComponentsRequest,
+  IngestComponentsReport,
   LibraryComponent,
   PlaceComponentSource,
   MassProperties,
@@ -3059,6 +3061,33 @@ export const mockClient: CadClient = {
     };
     mockAuthored.push(authored);
     return authored;
+  },
+
+  /**
+   * MOCK LIMIT, stated rather than faked: bulk STEP ingest needs a real STEP
+   * reader plus the worker's `ExtractPrismProfile` canonicalization (SCHEMA
+   * §7.3/§7.8 — WP-C), and this lane has neither. Every requested path
+   * refuses BY NAME rather than fabricating a plausible catalog entry, so the
+   * dialog's own wiring (batch call → per-row report → refresh-on-`ok`) is
+   * exercisable without ever pretending a component was imported.
+   */
+  async ingestComponents(req: IngestComponentsRequest): Promise<IngestComponentsReport> {
+    await wait(MESH_LATENCY_MS);
+    return {
+      libraryRoot: "<mock>",
+      parts: req.paths.map((path) => ({
+        path,
+        status: "refused" as const,
+        message: "MOCK LIMIT: component ingestion needs the OCCT worker",
+      })),
+    };
+  },
+
+  /** The mock lane cannot open a native dialog — `IngestComponentsDialog` falls
+   *  back to its hidden `<input type="file" multiple>` when this resolves `[]`. */
+  async pickComponentFiles(): Promise<string[]> {
+    await wait(40);
+    return [];
   },
 
   /** The mock lane has one fixture component and nothing to replace it with.

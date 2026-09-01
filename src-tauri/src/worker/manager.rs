@@ -563,6 +563,44 @@ impl WorkerManager {
         })
     }
 
+    /// `ExtractPrismProfile` verb passthrough (SCHEMA §7.8) — the worker half of
+    /// the Component Library's "vendor a STEP extrusion" ingest: is this body a
+    /// prism, and if so write its canonical end-cap FACE to `path` in the `brep`
+    /// replay codec.
+    ///
+    /// Read-only with respect to SESSION state: it fences, but mints, publishes
+    /// and prepares nothing. `snapshot` is FENCED — a head that has moved is
+    /// `STALE_PREVIEW`, because the answer is about to be frozen into a package.
+    /// An unknown body is `REF_UNRESOLVED`.
+    ///
+    /// `path` absent ⇒ analyse only. A body that is not a prism comes back as a
+    /// successful REFUSAL, not an error.
+    ///
+    /// # Errors
+    /// [`EngineError`] on a disconnected worker, a stale fence, an unresolved
+    /// body, or a malformed response.
+    pub async fn extract_prism_profile(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        path: Option<&str>,
+        axis_hint: Option<[f64; 3]>,
+    ) -> Result<crate::dto::PrismProfileAnswerDto, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "ExtractPrismProfile",
+                wire::extract_prism_profile_args(snapshot, body, path, axis_hint),
+            )
+            .await
+            .map_err(protocol_err)?;
+        // A malformed answer is a PROTOCOL break, never a default: this response
+        // is what an ingest freezes into a package, so a fabricated digest or a
+        // silently-zero length would author a component nobody can reproduce.
+        wire::parse_extract_prism_profile(&ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
+
     /// `ExportStep` verb passthrough (SCHEMA §7.8) — surfaced here so an app
     /// command can drive STEP export later. Returns bytes written.
     ///

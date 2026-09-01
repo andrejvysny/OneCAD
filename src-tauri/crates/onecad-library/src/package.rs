@@ -87,6 +87,27 @@ pub enum SourceSpec {
         generator: String,
         generator_version: u32,
     },
+    /// A **length-parametric extrusion of an embedded planar profile** (WP-C).
+    ///
+    /// Vendor stock arrives as one fixed length — a 500 mm aluminium stick —
+    /// while the component has to be placeable at any length, which no baked
+    /// kind can express. `blob` is a SINGLE canonical planar face in the `brep`
+    /// replay codec, not a solid, and the worker prisms it along `+Z` by the
+    /// placing instance's `length`. The `[parameters].length` entry declares the
+    /// package default.
+    Profile {
+        /// Blob-store key of the canonical face. Accepts a bare 64-hex digest or
+        /// spec §2.1's `"sha256:<hex>"` spelling.
+        blob: String,
+        /// Pinned to `brep` by name — the `step` and `xbf` readers return
+        /// SOLIDS, and this blob is a face.
+        #[serde(default = "default_profile_codec")]
+        codec: String,
+        /// BinTools format version `blob` was written in. REQUIRED in practice;
+        /// [`resolve`](crate::resolve::resolve) refuses its absence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<u32>,
+    },
     Document {
         /// The frozen `.onecad` inside the package directory — identity,
         /// provenance, and the input a future re-bake (parameter overrides)
@@ -105,6 +126,15 @@ pub enum SourceSpec {
 fn default_blob_codec() -> String {
     "step".to_string()
 }
+
+fn default_profile_codec() -> String {
+    // A canonical profile face is written by the worker's own BinTools lane, and
+    // only the `brep` reader hands a face back.
+    PROFILE_CODEC.to_string()
+}
+
+/// The one codec a [`SourceSpec::Profile`] blob may be in.
+pub const PROFILE_CODEC: &str = "brep";
 
 fn default_document_geometry_codec() -> String {
     // A bake comes out of the worker's own ExportGeometry lane, whose
@@ -432,9 +462,29 @@ fn is_sha256_hex(s: &str) -> bool {
 }
 
 /// Recomputes a package directory's content hash (spec §2.1 `identity.revision`):
-/// SHA-256 over every file in the package directory EXCEPT `component.toml`
-/// itself (the manifest that carries the hash cannot hash itself), sorted by
-/// relative path for determinism, each entry contributing `path\0<bytes>\0`.
+/// the [`SourceSpec`] references [`hash_referenced_geometry`] folds in
+/// FIRST, then SHA-256 over every file in the package directory EXCEPT
+/// `component.toml` itself (the manifest that carries the hash cannot hash
+/// itself), sorted by relative path for determinism, each entry contributing
+/// `path\0<bytes>\0`.
+///
+/// **Why the source is hashed at all.** `embedded`/`profile` packages
+/// (`Library::save_embedded_component`) keep their geometry in the library's
+/// content-addressed `blobs/` store, one level ABOVE the package directory —
+/// the file walk below never sees it. Without folding in the blob digest,
+/// every such package hashes to the SHA-256 of an empty input regardless of
+/// what geometry it actually references: two different components come out
+/// revision-identical, and swapping the blob under a fixed `id@version` is
+/// undetectable by [`resolve`](crate::resolve::resolve)'s revision check. A
+/// `document` package's frozen `source.onecad` IS in the directory (walked
+/// below) but its baked `geometry` field is itself a `blobs/` pointer, so it
+/// is folded in for the same reason.
+///
+/// **This only affects the revision RECOMPUTED at [`write_package`] time.**
+/// A `document`-kind package already on disk keeps whatever `identity.revision`
+/// its manifest carries — [`crate::index`] caches that value on reindex and
+/// never recomputes it on read, so an existing package written before this
+/// fix keeps its old (empty-hash-derived) revision until it is next saved.
 ///
 /// # Errors
 /// An I/O error reading the directory or a file within it.
@@ -444,6 +494,8 @@ pub fn compute_revision(package_dir: &Path) -> LibraryResult<String> {
     entries.sort();
 
     let mut hasher = Sha256::new();
+    hash_referenced_geometry(package_dir, &mut hasher)?;
+
     for rel in &entries {
         if rel == Path::new(COMPONENT_MANIFEST_FILE) {
             continue;
@@ -455,6 +507,83 @@ pub fn compute_revision(package_dir: &Path) -> LibraryResult<String> {
         hasher.update([0u8]);
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Folds the content address of geometry `component.toml`'s `[source]`
+/// references — which may live outside `package_dir` entirely — into
+/// `hasher`, BEFORE [`compute_revision`]'s file-entry loop, so the two halves
+/// of the hash can never collide in interpretation (a blob digest can never
+/// be mistaken for a file's contents, or vice versa).
+///
+/// One domain-separated line per source kind: `source:embedded:<sha>:<codec>:
+/// <format>\n` for [`SourceSpec::Embedded`], `source:profile:…` for
+/// [`SourceSpec::Profile`], `source:document:…` for [`SourceSpec::Document`]'s
+/// baked `geometry` pointer, `source:generator:<id>:<version>\n` for
+/// [`SourceSpec::Generator`] (which references no blob at all, but is still
+/// pinned so a generator swap under a fixed id/version is not silently
+/// invisible either). A blob digest is normalized to bare 64-hex before
+/// hashing — both spellings `resolve`'s own blob reader accepts
+/// (`"sha256:<hex>"` and bare) must produce the SAME revision.
+///
+/// A missing or unparsable manifest contributes nothing: `compute_revision`
+/// is sometimes called (directly, by tests) against a directory whose
+/// `component.toml` does not exist yet, and identity validity is
+/// [`validate_identity`]'s job, not this one's.
+fn hash_referenced_geometry(package_dir: &Path, hasher: &mut Sha256) -> LibraryResult<()> {
+    let manifest_path = package_dir.join(COMPONENT_MANIFEST_FILE);
+    let raw = match std::fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let Ok(pkg) = parse(&raw, &manifest_path) else {
+        return Ok(());
+    };
+    match pkg.source {
+        SourceSpec::Embedded {
+            blob,
+            codec,
+            format,
+        } => hash_blob_ref(hasher, "embedded", &blob, &codec, format),
+        SourceSpec::Profile {
+            blob,
+            codec,
+            format,
+        } => hash_blob_ref(hasher, "profile", &blob, &codec, format),
+        SourceSpec::Document {
+            geometry,
+            geometry_codec,
+            geometry_format,
+            ..
+        } => hash_blob_ref(
+            hasher,
+            "document",
+            &geometry,
+            &geometry_codec,
+            geometry_format,
+        ),
+        // A generator package references no blob, so it contributes nothing
+        // here: its revision stays exactly what it was before blob-kind sources
+        // joined this hash, which keeps every shipped seed manifest's DECLARED
+        // revision valid (`library_seed::tests::declared_revisions_match_a_
+        // manifest_only_package` pins that). A generator swap under a fixed
+        // id@version is already visible through `generator`/`generator_version`
+        // in the manifest itself.
+        SourceSpec::Generator { .. } => {}
+    }
+    Ok(())
+}
+
+/// One `source:<kind>:<bare-sha256>:<codec>:<format>\n` line — see
+/// [`hash_referenced_geometry`].
+fn hash_blob_ref(hasher: &mut Sha256, kind: &str, blob: &str, codec: &str, format: Option<u32>) {
+    // Spec §2.1 writes the pointer as `"sha256:<hex>"`; `resolve::read_blob`
+    // accepts a bare digest too. Both spellings must hash the same.
+    let bare = blob.strip_prefix("sha256:").unwrap_or(blob);
+    let format = format
+        .map(|f| f.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    hasher.update(format!("source:{kind}:{bare}:{codec}:{format}\n").as_bytes());
 }
 
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> LibraryResult<()> {
@@ -660,6 +789,99 @@ shank_axis = { on = "cylinder:shank", accepts = ["cylinder", "hole", "circularEd
         assert_eq!(
             rev1, rev4,
             "component.toml's own bytes are excluded from its hash"
+        );
+    }
+
+    /// Swaps `valid_toml()`'s `[source]` table for an arbitrary one — the
+    /// tests below only care about `[source]`, not the rest of the manifest.
+    fn toml_with_source(source_block: &str) -> String {
+        valid_toml().replace(
+            "[source]\nkind = \"generator\"\ngenerator = \"iso4762\"\ngenerator_version = 1",
+            source_block,
+        )
+    }
+
+    /// The defect this fix exists for: an `embedded` package's geometry lives
+    /// in `blobs/`, outside the directory the file-entry loop hashes, so
+    /// without folding the blob digest in, every embedded package hashed to
+    /// the SHA-256 of empty input regardless of what it referenced. Also
+    /// covers `format`: it is not cosmetic (a `brep`/`xbf` reader keyed to the
+    /// wrong version reads the wrong bytes), so it must move the revision too.
+    #[test]
+    fn embedded_source_folds_the_blob_digest_and_format_into_the_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let write_and_hash = |blob_hex: &str, format: u32| -> String {
+            let toml = toml_with_source(&format!(
+                "[source]\nkind = \"embedded\"\nblob = \"sha256:{blob_hex}\"\ncodec = \"brep\"\nformat = {format}"
+            ));
+            std::fs::write(dir.path().join(COMPONENT_MANIFEST_FILE), toml).unwrap();
+            compute_revision(dir.path()).unwrap()
+        };
+
+        let rev_a = write_and_hash(&"a".repeat(64), 3);
+        let rev_b = write_and_hash(&"b".repeat(64), 3);
+        assert_ne!(
+            rev_a, rev_b,
+            "a different blob digest must move the revision"
+        );
+
+        let rev_a_fmt4 = write_and_hash(&"a".repeat(64), 4);
+        assert_ne!(
+            rev_a, rev_a_fmt4,
+            "changing `format` alone (same blob) must move the revision"
+        );
+    }
+
+    /// Spec §2.1 writes a blob pointer as `"sha256:<hex>"`; the blob store (and
+    /// `resolve::read_blob`) key on the bare digest and accept both spellings.
+    /// The revision must not depend on which spelling an author typed.
+    #[test]
+    fn bare_and_sha256_prefixed_blob_spellings_hash_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let hex = "c".repeat(64);
+
+        let prefixed = toml_with_source(&format!(
+            "[source]\nkind = \"embedded\"\nblob = \"sha256:{hex}\"\ncodec = \"brep\"\nformat = 1"
+        ));
+        std::fs::write(dir.path().join(COMPONENT_MANIFEST_FILE), prefixed).unwrap();
+        let rev_prefixed = compute_revision(dir.path()).unwrap();
+
+        let bare = toml_with_source(&format!(
+            "[source]\nkind = \"embedded\"\nblob = \"{hex}\"\ncodec = \"brep\"\nformat = 1"
+        ));
+        std::fs::write(dir.path().join(COMPONENT_MANIFEST_FILE), bare).unwrap();
+        let rev_bare = compute_revision(dir.path()).unwrap();
+
+        assert_eq!(
+            rev_prefixed, rev_bare,
+            "`sha256:` and bare spellings of the same blob must be the same revision"
+        );
+    }
+
+    /// A `document` package's frozen `source.onecad` IS in the directory (so
+    /// the file-entry loop already covers IT), but its baked `geometry`
+    /// pointer is itself a `blobs/` digest — a re-bake under the same document
+    /// must move the revision just as much as an embedded blob swap does.
+    #[test]
+    fn document_source_revision_changes_when_its_geometry_blob_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        // Held constant across both computations so the change is isolated to
+        // the `geometry` pointer, not the file the loop below also hashes.
+        std::fs::write(dir.path().join("source.onecad"), b"frozen document bytes").unwrap();
+
+        let write_and_hash = |geometry_hex: &str| -> String {
+            let toml = toml_with_source(&format!(
+                "[source]\nkind = \"document\"\nfile = \"source.onecad\"\ngeometry = \"{geometry_hex}\"\ngeometry_codec = \"xbf\"\ngeometry_format = 4"
+            ));
+            std::fs::write(dir.path().join(COMPONENT_MANIFEST_FILE), toml).unwrap();
+            compute_revision(dir.path()).unwrap()
+        };
+
+        let rev_a = write_and_hash(&"1".repeat(64));
+        let rev_b = write_and_hash(&"2".repeat(64));
+        assert_ne!(
+            rev_a, rev_b,
+            "a re-baked geometry blob under the same document must move the revision"
         );
     }
 

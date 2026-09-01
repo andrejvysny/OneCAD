@@ -165,6 +165,81 @@ impl Library {
         Ok(revision)
     }
 
+    /// The BLOB-kind authoring leg (spec §7): writes an `embedded`- or
+    /// `profile`-kind package from geometry bytes the caller already has.
+    ///
+    /// [`save_component`](Self::save_component) is the `document` leg — it
+    /// freezes an authoring `.onecad` and bakes a solid from it. This one has no
+    /// authoring document at all: the bytes ARE the component. Two callers want
+    /// that. An `embedded` package is a vendor solid dropped in as-is; a
+    /// `profile` package is WP-C's canonical planar face, placed at any length.
+    ///
+    /// Same write ORDER and the same refusals as `save_component` — blob first,
+    /// then the package directory, then `component.toml` with the revision
+    /// recomputed over what is on disk, then reindex; an existing `id@version`
+    /// is refused rather than overwritten, because instances out in documents
+    /// recorded the old revision.
+    ///
+    /// # Errors
+    /// [`LibraryError::InvalidIdentity`] for a malformed id/version, a plain
+    /// I/O error for a taken `id@version` or a filesystem failure.
+    pub fn save_embedded_component(
+        &mut self,
+        req: EmbeddedComponentRequest,
+    ) -> LibraryResult<SavedComponent> {
+        let EmbeddedComponentRequest {
+            mut package,
+            kind,
+            geometry,
+            geometry_codec,
+            geometry_format,
+            preview_png,
+        } = req;
+        package::validate_identity(&package)?;
+
+        let id = package.identity.id.clone();
+        let version = package.identity.version.clone();
+        if self.index.get(&id, Some(&version)).is_some() {
+            return Err(LibraryError::Io(format!(
+                "{id}@{version} already exists — re-saving a component is a version bump \
+                 (existing instances recorded the old revision)"
+            )));
+        }
+        if matches!(kind, BlobComponentKind::Profile) && geometry_codec != package::PROFILE_CODEC {
+            return Err(LibraryError::Io(format!(
+                "a profile component's geometry must be `{}` (got `{geometry_codec}`) — the \
+                 blob is a single planar face, and only the brep reader returns one",
+                package::PROFILE_CODEC
+            )));
+        }
+
+        let sha256 = self.blobs.put(&geometry)?;
+        // VERSION-QUALIFIED directory, for the same reason `save_component`
+        // uses one: two versions of one component are two index entries and must
+        // be two directories.
+        let dir = self.root.join(format!("{id}@{version}"));
+        std::fs::create_dir_all(&dir)?;
+        if let Some(png) = &preview_png {
+            std::fs::write(dir.join("preview.png"), png)?;
+        }
+        package.source = match kind {
+            BlobComponentKind::Embedded => package::SourceSpec::Embedded {
+                blob: sha256.clone(),
+                codec: geometry_codec,
+                format: geometry_format,
+            },
+            BlobComponentKind::Profile => package::SourceSpec::Profile {
+                blob: sha256.clone(),
+                codec: geometry_codec,
+                format: geometry_format,
+            },
+        };
+
+        let revision = package::write_package(&dir, &package)?;
+        self.reindex()?;
+        Ok(SavedComponent { revision, sha256 })
+    }
+
     /// "Save as Template" (spec §8) — writes a frozen document under
     /// `templates/`. See [`template`] for why templates are listed by reading
     /// the directory rather than through `library.json`.
@@ -214,6 +289,50 @@ pub struct NewComponent {
     pub geometry_format: Option<u32>,
     /// Optional thumbnail (PNG bytes from the viewport snapshot).
     pub preview_png: Option<Vec<u8>>,
+}
+
+/// Which blob-kind [`Library::save_embedded_component`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobComponentKind {
+    /// A vendor solid stored as-is.
+    Embedded,
+    /// WP-C's canonical planar face, prismed to the instance's `length`.
+    Profile,
+}
+
+/// Input to [`Library::save_embedded_component`].
+///
+/// `package.source` is IGNORED and overwritten with the source this save
+/// actually produces — the caller describes identity, metadata, parameters and
+/// attachments; the storage layer decides how geometry is referenced, because it
+/// is the half that knows where the blob landed.
+#[derive(Debug, Clone)]
+pub struct EmbeddedComponentRequest {
+    pub package: ComponentPackage,
+    pub kind: BlobComponentKind,
+    /// The geometry bytes. A solid for [`BlobComponentKind::Embedded`], a single
+    /// canonical planar face for [`BlobComponentKind::Profile`].
+    pub geometry: Vec<u8>,
+    /// `step` | `brep` | `xbf` — must be `brep` for a profile.
+    pub geometry_codec: String,
+    /// Binary format pin for `brep`/`xbf`; absent for `step`.
+    pub geometry_format: Option<u32>,
+    /// Optional thumbnail (PNG bytes from the viewport snapshot).
+    pub preview_png: Option<Vec<u8>>,
+}
+
+/// What [`Library::save_embedded_component`] recorded.
+///
+/// Carries the blob digest as well as the revision because the WP-C ingest lane
+/// needs it: the worker content-addressed the face it wrote, and the caller
+/// records that same digest as the placed `profile` source's `sha256` rather
+/// than re-hashing the bytes it just handed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedComponent {
+    /// The recorded `"sha256:…"` package revision.
+    pub revision: String,
+    /// Bare 64-hex digest of the geometry blob in the store.
+    pub sha256: String,
 }
 
 #[cfg(test)]
@@ -416,5 +535,235 @@ generator_version = 1
             .save_component(new_component("unnamespaced", "1.0.0", b"x"))
             .is_err());
         assert!(!dir.path().join("unnamespaced@1.0.0").exists());
+    }
+
+    fn blob_request(
+        id: &str,
+        kind: BlobComponentKind,
+        geometry: &[u8],
+        codec: &str,
+    ) -> EmbeddedComponentRequest {
+        EmbeddedComponentRequest {
+            package: authored_package(id, "1.0.0"),
+            kind,
+            geometry: geometry.to_vec(),
+            geometry_codec: codec.to_string(),
+            geometry_format: Some(4),
+            preview_png: Some(b"\x89PNG\r\n".to_vec()),
+        }
+    }
+
+    /// The `embedded` leg existed as a KIND from WP-3.2 but had no authoring
+    /// path at all — nothing in the workspace ever constructed
+    /// `SourceSpec::Embedded`, so a vendor solid could be read back but never
+    /// written. This is that leg, end to end.
+    #[test]
+    fn save_embedded_component_writes_a_package_that_resolves_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let saved = lib
+            .save_embedded_component(blob_request(
+                "acme.spacer",
+                BlobComponentKind::Embedded,
+                b"vendor solid bytes",
+                "brep",
+            ))
+            .unwrap();
+
+        let (_v, entry) = lib.get("acme.spacer", None).expect("indexed");
+        assert_eq!(entry.revision, saved.revision);
+        assert_eq!(entry.source_kind, "embedded");
+
+        let resolved = lib
+            .resolve_source(&ResolveRequest {
+                component_id: "acme.spacer",
+                component_version: "1.0.0",
+                component_revision: &saved.revision,
+            })
+            .unwrap();
+        match resolved {
+            ResolvedSource::Embedded { blob } => {
+                assert_eq!(blob.bytes, b"vendor solid bytes");
+                assert_eq!(blob.codec, "brep");
+                assert_eq!(blob.format, Some(4));
+                assert_eq!(
+                    blob.sha256, saved.sha256,
+                    "the reported digest is the one the store keyed the bytes by"
+                );
+            }
+            other => panic!("expected an embedded source, got {other:?}"),
+        }
+        // No `source.onecad`: the bytes ARE the component, there is nothing to
+        // replay.
+        assert!(!dir.path().join("acme.spacer@1.0.0/source.onecad").exists());
+        assert!(dir.path().join("acme.spacer@1.0.0/preview.png").is_file());
+    }
+
+    /// WP-C: the same leg writing a `profile` package, whose blob is a single
+    /// canonical planar FACE the worker prisms to the placing instance's length.
+    #[test]
+    fn save_embedded_component_writes_a_profile_package_that_resolves_back() {
+        use crate::package::{ParameterRole, ParameterSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let mut req = blob_request(
+            "acme.extrusion.2020",
+            BlobComponentKind::Profile,
+            b"canonical face bytes",
+            "brep",
+        );
+        // The package's declared default length — the stick the vendor ships.
+        req.package.parameters.insert(
+            "length".to_string(),
+            ParameterSpec {
+                role: ParameterRole::Free,
+                key: Some("length".to_string()),
+                value: Some(toml::Value::Float(500.0)),
+                domain: None,
+                snap: None,
+                min: Some(1.0),
+                from: None,
+            },
+        );
+        let saved = lib.save_embedded_component(req).unwrap();
+
+        let (_v, entry) = lib.get("acme.extrusion.2020", None).expect("indexed");
+        assert_eq!(entry.source_kind, "profile");
+        assert_eq!(entry.parameter_keys, vec!["length".to_string()]);
+
+        let resolved = lib
+            .resolve_source(&ResolveRequest {
+                component_id: "acme.extrusion.2020",
+                component_version: "1.0.0",
+                component_revision: &saved.revision,
+            })
+            .unwrap();
+        match resolved {
+            ResolvedSource::Profile { blob } => {
+                assert_eq!(blob.bytes, b"canonical face bytes");
+                assert_eq!(blob.codec, "brep");
+                assert_eq!(blob.format, Some(4));
+                assert_eq!(blob.sha256, saved.sha256);
+            }
+            other => panic!("expected a profile source, got {other:?}"),
+        }
+    }
+
+    /// A profile blob is a FACE, and only the brep reader returns one. A `step`
+    /// or `xbf` profile must die at authoring, not at the first regen on
+    /// someone else's machine.
+    #[test]
+    fn a_profile_component_refuses_a_non_brep_codec() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        for codec in ["step", "xbf"] {
+            let err = lib
+                .save_embedded_component(blob_request(
+                    "acme.extrusion.2020",
+                    BlobComponentKind::Profile,
+                    b"not a face",
+                    codec,
+                ))
+                .expect_err("a non-brep profile codec must be refused");
+            assert!(format!("{err:?}").contains("brep"), "{err:?}");
+        }
+        assert!(!dir.path().join("acme.extrusion.2020@1.0.0").exists());
+    }
+
+    #[test]
+    fn saving_the_same_blob_component_id_and_version_twice_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        lib.save_embedded_component(blob_request(
+            "acme.spacer",
+            BlobComponentKind::Embedded,
+            b"v1",
+            "brep",
+        ))
+        .unwrap();
+        let err = lib
+            .save_embedded_component(blob_request(
+                "acme.spacer",
+                BlobComponentKind::Embedded,
+                b"v2",
+                "brep",
+            ))
+            .expect_err("same id@version");
+        assert!(format!("{err:?}").contains("already exists"), "{err:?}");
+    }
+
+    /// The SHA-256 of an empty input — what EVERY embedded/profile package's
+    /// revision collapsed to before `compute_revision` folded the referenced
+    /// blob digest in, because their geometry lives in `blobs/`, outside the
+    /// package directory the file walk hashes.
+    const EMPTY_INPUT_SHA256: &str =
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    /// The defect this crate shipped with: two different components, saved
+    /// with otherwise-identical manifests, must not come out revision-identical
+    /// just because their geometry lives in the blob store rather than the
+    /// package directory.
+    #[test]
+    fn embedded_components_with_different_geometry_get_different_revisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        let saved_a = lib
+            .save_embedded_component(blob_request(
+                "acme.spacer.a",
+                BlobComponentKind::Embedded,
+                b"vendor solid A",
+                "brep",
+            ))
+            .unwrap();
+        let saved_b = lib
+            .save_embedded_component(blob_request(
+                "acme.spacer.b",
+                BlobComponentKind::Embedded,
+                b"vendor solid B, different geometry entirely",
+                "brep",
+            ))
+            .unwrap();
+        assert_ne!(
+            saved_a.revision, saved_b.revision,
+            "different geometry must not share a revision"
+        );
+        assert_ne!(
+            saved_a.revision, EMPTY_INPUT_SHA256,
+            "no longer the empty-input tell"
+        );
+        assert_ne!(
+            saved_b.revision, EMPTY_INPUT_SHA256,
+            "no longer the empty-input tell"
+        );
+    }
+
+    /// Proves the check `resolve()` performs is meaningful again: the OLD
+    /// bug's revision (every embedded package used to share it) no longer
+    /// matches a freshly written package, so a stale caller carrying it is
+    /// refused loudly rather than silently bound to the wrong geometry.
+    #[test]
+    fn resolve_refuses_the_pre_fix_empty_input_revision_against_a_new_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        lib.save_embedded_component(blob_request(
+            "acme.spacer",
+            BlobComponentKind::Embedded,
+            b"vendor solid bytes",
+            "brep",
+        ))
+        .unwrap();
+
+        let err = lib
+            .resolve_source(&ResolveRequest {
+                component_id: "acme.spacer",
+                component_version: "1.0.0",
+                component_revision: EMPTY_INPUT_SHA256,
+            })
+            .expect_err("a stale revision must never resolve");
+        assert!(
+            matches!(err, LibraryError::RevisionMismatch { .. }),
+            "{err:?}"
+        );
     }
 }

@@ -220,6 +220,30 @@ pub trait GeometryExporter: Send + Sync {
         codec: &str,
         union_solids: bool,
     ) -> Result<BakedGeometry, EngineError>;
+
+    /// `ExtractPrismProfile` (SCHEMA §7.8) — decides whether `body` is a prism
+    /// and, when `path` is given, writes its canonical end-cap FACE there in the
+    /// `brep` replay codec.
+    ///
+    /// On this trait rather than a new seam because it is the same KIND of call
+    /// as [`export_geometry`](Self::export_geometry): a §7.8 verb that writes a
+    /// FILE, minting and publishing nothing, whose one consumer is the same
+    /// authoring lane that already holds `Arc<dyn GeometryExporter>`. It differs
+    /// only in that it is snapshot-FENCED — the answer is frozen into a library
+    /// package, so a moved head is `STALE_PREVIEW` rather than a stale reading.
+    ///
+    /// A body that is not a prism is a successful REFUSAL, not an error.
+    ///
+    /// # Errors
+    /// [`EngineError`] on a disconnected worker, a stale fence, an unresolved
+    /// body, or a malformed response.
+    async fn extract_prism_profile(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        path: Option<&str>,
+        axis_hint: Option<[f64; 3]>,
+    ) -> Result<crate::dto::PrismProfileAnswerDto, EngineError>;
 }
 
 #[async_trait]
@@ -271,6 +295,16 @@ impl GeometryExporter for WorkerManager {
     ) -> Result<BakedGeometry, EngineError> {
         WorkerManager::export_geometry(self, path, bodies, codec, union_solids).await
     }
+
+    async fn extract_prism_profile(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        path: Option<&str>,
+        axis_hint: Option<[f64; 3]>,
+    ) -> Result<crate::dto::PrismProfileAnswerDto, EngineError> {
+        WorkerManager::extract_prism_profile(self, snapshot, body, path, axis_hint).await
+    }
 }
 
 #[async_trait]
@@ -312,6 +346,16 @@ impl GeometryExporter for PendingBackend {
         _union_solids: bool,
     ) -> Result<BakedGeometry, EngineError> {
         Err(not_ready("component geometry"))
+    }
+
+    async fn extract_prism_profile(
+        &self,
+        _snapshot: SnapshotId,
+        _body: BodyId,
+        _path: Option<&str>,
+        _axis_hint: Option<[f64; 3]>,
+    ) -> Result<crate::dto::PrismProfileAnswerDto, EngineError> {
+        Err(not_ready("prism profile extraction"))
     }
 }
 

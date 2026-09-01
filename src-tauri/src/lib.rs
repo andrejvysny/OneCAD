@@ -24,6 +24,7 @@ pub mod export;
 pub mod export_threemf;
 pub mod imports;
 pub mod library;
+pub mod library_ingest;
 pub mod library_seed;
 pub mod library_seed_templates;
 pub mod logging;
@@ -489,6 +490,8 @@ pub fn run() {
             api::import_file_dialog,
             api::open_file_dialog,
             api::step_file_dialog,
+            api::pick_component_files,
+            api::ingest_components,
             api::save_file_dialog,
             api::confirm_exit,
             api::cancel_exit,

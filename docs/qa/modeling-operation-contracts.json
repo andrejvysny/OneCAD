@@ -766,6 +766,27 @@
       "uiExposure": "exposed"
     },
     {
+      "operation": "PlaceComponent",
+      "mode": "profile source",
+      "supportStatus": "supported",
+      "inputTopLevelShapes": "one planar TopoDS_Face from the embedded brep blob — bare or wrapped in a single-child compound — plus source.params.length in millimetres",
+      "requiresExactlyOneSolid": true,
+      "emptyResultSemantics": "cannot occur: a prism over a non-degenerate face is never empty. A blob that is not exactly one planar face refuses BEFORE the prism (PROFILE_BLOB_NOT_ONE_FACE / PROFILE_FACE_NOT_PLANAR)",
+      "multiSolidResultSemantics": "cannot occur by construction — BRepPrimAPI_MakePrism over one face yields one solid, so the §9 single-solid rule holds without a separate bake-time check",
+      "bodyLifecycle": "created",
+      "bodyIdPolicy": "worker-minted deterministic body_<opId>, adopted by Rust at AcceptPrepared like every other NewBody op (decision D1)",
+      "authoritativeHistory": "none — the solid is built from the embedded face and the frozen length, not from a document input, so there is no upstream lineage to carry",
+      "historyAbsenceBehavior": "not applicable; the mate (when present) resolves against the TARGET body's ladder, never against the placed body",
+      "validationTier": "Tier B",
+      "toleranceEvidence": "the worker re-checks only the two canonicality properties a regen can afford: the face's plane is z = 0 (|d| <= 1e-6 mm) and its orientation-corrected normal is +Z (|n - (0,0,1)| <= 1e-6). The centroid/principal-axis half of the canonical frame stays an AUTHORING rule, because a per-regen eigen-solve has a platform-sensitive degenerate branch and a placed component must never start refusing over a last bit. params.length must be finite and in (0, 1e5] mm (PROFILE_LENGTH_INVALID). Exact numbers for the 20x20 + Ø5 stick are pinned in component_ops.rs: areaMm2 = 380.3650459150638, volume@120 = 45643.80550980765, volume@300 = 114109.51377451913",
+      "cancellationPolicy": "single prism + transform; no long-running loop to cancel",
+      "persistenceBehavior": "source ref (sha256/codec/brepFormat/params), instance params, frozen placement and mate round-trip; the canonical FACE blob is pinned in the container by the same ComponentSourceRef::blob_ref refcount as every other blob kind",
+      "previewFidelity": "exact kernel BRep via PreviewOp — the preview runs the same prism the commit does, so a length change previews at its true geometry",
+      "userRecoveryBehavior": "every profile refusal is a recoverable OP_FAILED on the step with a fine-grained detail.diagnostics[].reasonCode (PROFILE_BLOB_NOT_ONE_FACE | PROFILE_FACE_NOT_PLANAR | PROFILE_FACE_NOT_CANONICAL | PROFILE_LENGTH_INVALID | PROFILE_CODEC_UNSUPPORTED | PROFILE_FORMAT_UNSUPPORTED); the plan stops at that step and every earlier feature stays published",
+      "notes": "Component Library WP-C / SCHEMA §7.3 + §7.8. params.length is the one component param regen actually READS — a document source's params are provenance the worker ignores — so setComponentParams honours a length edit with an in-place merge and NO re-bake, and the planner hash covering source.params is what makes that edit move geometry. DetachComponent inherits the kind unchanged: a detached profile keeps re-extruding from its frozen length, indistinguishable from a static copy. The ingest half is ExtractPrismProfile (§7.8), snapshot-FENCED like PrepareOffsetFace because its answer is frozen into a package.",
+      "uiExposure": "hidden"
+    },
+    {
       "operation": "DetachComponent",
       "mode": "drop library identity, keep geometry",
       "supportStatus": "supported",

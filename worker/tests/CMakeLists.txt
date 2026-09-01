@@ -177,6 +177,17 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# Component Library WP-C: the §7.8 `ExtractPrismProfile` verb and the geometry it
+# measures — the exact section area / length / ratio, the named refusals, and the
+# POSE INDEPENDENCE proof (the same stick rotated 37° about its own axis
+# canonicalises to the same FACE — to rounding, ~2e-15 mm; a rotation and its
+# canonical undo are not bit-exact, so byte equality is asserted for the same
+# input twice instead). The fixtures pin the protocol shape; the millimetres and
+# the frame-selection proof live here.
+add_executable(test_extract_prism_profile test_extract_prism_profile.cpp)
+target_link_libraries(test_extract_prism_profile PRIVATE worker_core)
+add_test(NAME extract_prism_profile COMMAND test_extract_prism_profile)
+
 # WP0.6: a requested draft must be applied or NAMED-refused, never silently
 # dropped. Carries the circular-profile red probe the work package mandates.
 add_executable(test_extrude_draft test_extrude_draft.cpp)
@@ -703,6 +714,40 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/sketch_entity_states.ndjson
+)
+# SCHEMA §7.3 `source.kind:"profile"` + §7.8 `ExtractPrismProfile` (Component
+# Library WP-C). SELF-GENERATING: the fixture builds the vendor stick, bakes its
+# canonical end-cap face to a temp path, and places that face back at a DIFFERENT
+# length — so no binary is tracked and the input is reproducible from the file
+# alone (the `import_step.ndjson` pattern). Every measured number is `$present`
+# here and pinned in test_extract_prism_profile.cpp / test_component_blob_source.cpp,
+# the same contract/corpus split the OffsetFace pair uses. See the fixture headers.
+add_test(
+    NAME canonical_place_component_profile
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/place_component_profile.ndjson
+)
+add_test(
+    NAME canonical_extract_prism_profile_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/extract_prism_profile_refusal.ndjson
+)
+# …and the determinism half of that contract, which no in-process test can prove:
+# replay the SAME fixture twice, each replay spawning its own worker, and `cmp`
+# the two written profiles. §7.8 claims the bytes are identical across FRESH
+# PROCESSES, so a frame that quietly depends on process-scoped state — a static
+# initialised in load order, an OCCT session tolerance — is only visible here.
+# No digest literal is pinned: libm differs across macOS and Linux, so a frozen
+# SHA-256 would gate the platform instead of the determinism.
+add_test(
+    NAME canonical_extract_prism_profile_bytes
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/determinism/check_prism_profile_bytes.sh
+            $<TARGET_FILE:worker_harness>
+            $<TARGET_FILE:onecad-worker>
+            ${PROTOCOL_FIXTURES}/place_component_profile.ndjson
+            /tmp/onecad_canonical_profile.brep
 )
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no

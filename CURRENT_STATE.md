@@ -1,8 +1,40 @@
 # Current State
 
-Last verified: 2026-08-24 (late) — ALL THREE PHASES COMPLETE: WP6 (kernel closed) · sketch residuals · entityStates per-entity coloring, on `master`
+Last verified: 2026-09-01 — DAILY DRIVER v2 program started: WP0 hygiene committed (`3a82910`), WP-C vendor STEP components gated at full L3 and committed, on `master`
 
-## NOW — WP6 CLOSE-OUT + NEXT PROGRAM (2026-08-24, plan `act-as-senior-software-purrfect-moler.md`)
+## NOW — DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
+
+- **Program (user-chosen after a full state review, a Codex brainstorm and a local adversarial plan
+  review):** WP0 → **WP-C** vendor STEP components → WP-E expressions+units → WP-V section view →
+  WP-T1 cosmetic threads → WP-P project edges → WP-S sweep → WP-T2 modelled threads → WP-L loft →
+  WP-X dogfood exit gate. Sweep and Loft are APPROVED (reversal recorded). One master commit per WP
+  gate; `TODO.md` § DAILY DRIVER v2 is the ledger with every decision and gate row.
+- **WP0 (`3a82910`):** the four unpushed commits pushed (CI 9 green; `tauri-composition` cancelled at
+  the 95-min job timeout inside "Build and stage worker" — infra; `linux-worker` queued — self-hosted
+  runner offline); stale sidecar restaged; autosave durability trio (`durable_write`, quarantined
+  corrupt `recents.json`, FE `Autosave failed` hint); regen timing split (`RegenTimings`) and a
+  40-feature perf baseline. **Finding: every edit replays from step 0** (checkpoints only on
+  explicit save) — ~480 ms for 40 pocket features; next-program candidate.
+- **WP-C (this commit):** `PlaceComponent` `source.kind = "profile"` (length-parametric extrusion of a
+  canonical planar face) + §7.8 `ExtractPrismProfile` (protocol-audited before AND after landing;
+  adversarial review found and fixed a non-prism acceptance and an off-centre face); the first
+  writer of `embedded`-kind packages; package revision now folds referenced blob digests; a headless
+  ingest core + `onecad-library-ingest` CLI + `ingest_components`/`pick_component_files` commands +
+  FE "Import components…"; tracked recipe `STEP/ingest.toml`. **Ingest: 6 of 7 vendor files** — five
+  Rollco profiles as `profile` packages (any length), SG90 as a fused three-solid embedded package;
+  **NEMA17 refuses honestly** (its envelope solids fail OCCT's self-intersection check, so Tier B
+  refuses the fuse) — options: a cleaner download, or seed the worker's existing `nema17` frame
+  generator. Full L3: ctest **160/160** · cargo **91 / 1379 / 0** · vitest **306 / 5281 / 78 skipped** ·
+  e2e **496 / 0** (27.6 min) · kernelbench 136 unchanged · fmt/clippy/hex/hygiene/verifiers clean.
+- **Retracted plan claim:** `imports.rs` `unit_scale = 1.0` is correct — the STEP reader always
+  converts to mm.
+- **Next:** WP-E expressions + units (design in the plan file: typed-path hash strip, variable-table
+  evaluation pass, canonical mm/deg bare literals with guardrails). Owed user input: the 2–3 dogfood
+  parts for WP-X; `.clang-format` (`DisableFormat: true`) to neutralise the `auto-format.sh` hook;
+  whether to push `3a82910` + the WP-C commit. Owed user-run gates unchanged (19-row checklist,
+  Tauri sketch smoke, dirty vendor STEP for G4).
+
+## PREVIOUS — WP6 CLOSE-OUT + NEXT PROGRAM (2026-08-24, plan `act-as-senior-software-purrfect-moler.md`)
 
 - **Sketch-UX hardening merged to master by the USER** (`c731a76`); post-merge sanity measured:
   tsc clean, vitest 300 files / 5145 / 0 failed (first time the merged combination was gated).

@@ -1,0 +1,28 @@
+[package]
+name = "onecad-library-ingest"
+version = "0.1.0"
+edition = "2021"
+description = "Headless vendor-STEP → OneCAD component-library ingest, driven by a tracked recipe"
+
+[[bin]]
+name = "onecad-library-ingest"
+path = "src/main.rs"
+
+[dependencies]
+# The CLI reuses the app crate's ingest lane verbatim (`onecad_lib::library_ingest`),
+# exactly as `onecad-regen` reuses its regen path, so the recipe run and the
+# in-app "Import components…" run are the same code. The transitive `tauri` dep
+# is never initialised (no app is built).
+onecad = { path = "../.." }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "io-util",
+    "time",
+    "sync",
+] }
+serde_json = { workspace = true }
+# stderr-only diagnostics with a `RUST_LOG`-aware filter (stdout stays reserved
+# for the report / `--json`). No file layer: only the app writes `logs/dev.jsonl`.
+tracing-subscriber = { workspace = true }

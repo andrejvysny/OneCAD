@@ -2442,6 +2442,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2488,6 +2489,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.2",
+]
+
+[[package]]
+name = "onecad-library-ingest"
+version = "0.1.0"
+dependencies = [
+ "onecad",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

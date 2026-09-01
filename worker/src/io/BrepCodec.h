@@ -31,6 +31,12 @@ inline constexpr int kBrepFormatVersion = 4;
 std::string write_brep_compound(const std::vector<TopoDS_Shape>& solids,
                                 std::vector<std::uint8_t>& bytes_out);
 
+// Serialize ONE shape verbatim — NO compound wrapper — in the same BinTools
+// `kBrepFormatVersion` form, with the same triangulation/normal exclusions.
+// The §7.3 `source.kind:"profile"` blob is a single planar FACE; wrapping it
+// would make every reader rely on the unwrap leniency instead of the contract.
+std::string write_brep_shape(const TopoDS_Shape& shape, std::vector<std::uint8_t>& bytes_out);
+
 struct BrepReadResult {
     // Direct children of the stored compound, IN STORED ORDER (never re-sorted).
     std::vector<TopoDS_Shape> solids;
@@ -48,5 +54,25 @@ struct BrepReadResult {
 // reports a version mismatch by printing to `std::cout` directly, which is the
 // worker's frame channel (see the rationale in the .cpp).
 BrepReadResult read_brep_solids(const std::string& path);
+
+struct BrepShapeResult {
+    TopoDS_Shape shape;  // null on failure
+    std::string error;   // "" on success
+
+    bool ok() const { return error.empty(); }
+};
+
+// Deserialize a BinTools file as ONE shape, with NO shape-kind policy of its
+// own — that question belongs to the caller, which owns the refusal that names
+// it (§7.3 `profile` wants a planar face and answers `PROFILE_BLOB_NOT_ONE_FACE`).
+//
+// A compound carrying EXACTLY ONE child is unwrapped to that child — the same
+// leniency `read_brep_solids` grants a producer that skipped the wrapper, in the
+// other direction. A compound with any other child count is returned AS the
+// compound, so the caller refuses it by name instead of receiving a silently
+// chosen first child.
+//
+// Header-checked before OCCT sees the bytes, for the `read_brep_solids` reason.
+BrepShapeResult read_brep_shape(const std::string& path);
 
 }  // namespace onecad::io

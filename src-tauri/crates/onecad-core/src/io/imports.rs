@@ -434,10 +434,40 @@ mod tests {
             extra: Default::default(),
         }));
 
+        // WP-C's fourth kind rides the SAME `blob_ref()` walk. Its blob is a
+        // canonical FACE rather than a solid, but the pin rule is identical: lose
+        // it and the extrusion has nothing to prism at the next open.
+        let profiled = sha_of(b"canonical 2020 profile face");
+        let mut profile_params = std::collections::BTreeMap::new();
+        profile_params.insert(
+            "length".to_string(),
+            crate::document::record::ComponentParamValue::Number(500.0),
+        );
+        let profile = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+            component_id: "acme.extrusion".into(),
+            component_version: "1.0.0".into(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: Default::default(),
+            source: ComponentSourceRef::Profile {
+                sha256: profiled.clone(),
+                codec: ImportSourceCodec::Brep,
+                brep_format: Some(4),
+                params: profile_params,
+                extra: Default::default(),
+            },
+            mate: None,
+            placement: FrozenPlacement {
+                translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+                rotate: Default::default(),
+            },
+            extra: Default::default(),
+        }));
+
         let d = doc_with_imports(&[
             (0x1, generator, false),
             (0x2, place, false),
             (0x3, detach, false),
+            (0x4, profile, false),
         ]);
         let refs = referenced_import_shas(&d);
         assert!(refs.contains(&placed), "a placed component pins its blob");
@@ -445,7 +475,11 @@ mod tests {
             refs.contains(&detached),
             "detaching keeps the geometry, so it keeps the pin"
         );
-        assert_eq!(refs.len(), 2, "a generator component pins nothing");
+        assert!(
+            refs.contains(&profiled),
+            "a profile component pins its canonical face blob"
+        );
+        assert_eq!(refs.len(), 3, "a generator component pins nothing");
     }
 
     #[test]

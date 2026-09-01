@@ -109,6 +109,42 @@ describe("mockClient library catalog — mirrors the shipped seed packages", () 
   });
 });
 
+describe("mockClient.ingestComponents — MOCK LIMIT refusal (WP-C2)", () => {
+  it("refuses every requested path by name, never fabricating a catalog entry", async () => {
+    const report = await mockClient.ingestComponents({
+      paths: ["/vendor/a.step", "/vendor/b.step"],
+      defaults: { vendor: "vendor", category: ["imported"] },
+    });
+    expect(report.libraryRoot).toBe("<mock>");
+    expect(report.parts).toEqual([
+      {
+        path: "/vendor/a.step",
+        status: "refused",
+        message: "MOCK LIMIT: component ingestion needs the OCCT worker",
+      },
+      {
+        path: "/vendor/b.step",
+        status: "refused",
+        message: "MOCK LIMIT: component ingestion needs the OCCT worker",
+      },
+    ]);
+  });
+
+  it("an empty batch reports an empty batch, not an error", async () => {
+    const report = await mockClient.ingestComponents({
+      paths: [],
+      defaults: { vendor: "vendor", category: ["imported"] },
+    });
+    expect(report.parts).toEqual([]);
+  });
+});
+
+describe("mockClient.pickComponentFiles — no native dialog on this lane (WP-C2)", () => {
+  it("always resolves [] — the mock cannot open a native picker", async () => {
+    expect(await mockClient.pickComponentFiles()).toEqual([]);
+  });
+});
+
 describe("mockClient project templates — the built-in starters", () => {
   it("offers nothing without the flag (there is no seeded root on this lane)", async () => {
     setLibraryFlag(false);

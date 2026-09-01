@@ -17,6 +17,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/icons/Icon";
+import { Button } from "@/ui/Button";
 import { TextInput } from "@/ui/TextInput";
 import { Popover } from "@/ui/Popover";
 import { MenuItem } from "@/ui/MenuItem";
@@ -25,6 +26,7 @@ import type { LibraryComponent } from "@/ipc/types";
 import { tasksStore } from "@/stores/tasksStore";
 import { ComponentCard } from "./ComponentCard";
 import { ComponentDetailRail } from "./ComponentDetailRail";
+import { IngestComponentsDialog } from "./IngestComponentsDialog";
 import { armPlacement } from "@/modules/library/placementController";
 
 export interface LibraryModalProps {
@@ -61,6 +63,7 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
   const [reindexing, setReindexing] = useState(false);
   const [selected, setSelected] = useState<LibraryComponent | null>(null);
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const overflowRef = useRef<HTMLButtonElement>(null);
 
   const load = () => {
@@ -131,7 +134,26 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
       >
         <div className="flex flex-none items-center justify-between border-b border-border px-4 py-2.5">
           <div className="text-[13px] font-semibold text-ink-3">Library</div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
+            {/*
+              A standalone header button, not tucked into the "Library
+              options" overflow beside it: that Popover (`z-[100]`) renders
+              BEHIND this modal's own content (`z-[110]`) wherever the two
+              overlap on screen, a pre-existing stacking defect unrelated to
+              this feature (confirmed by a scratch e2e probe against the
+              pre-existing "Rebuild index" item — flagged, not fixed here,
+              since `Popover` is a shared primitive well outside this WP).
+              Bulk import is also a real, deliberate action worth a visible
+              slot, unlike the maintenance-only "Rebuild index" verb below.
+            */}
+            <Button
+              variant="secondary"
+              size="sm"
+              data-testid="library-import-components"
+              onClick={() => setImportOpen(true)}
+            >
+              Import components…
+            </Button>
             {/*
               "Rebuild index" lives in an overflow, not on the toolbar (LGU-1
               WP-A, defect F9). Reindexing is maintenance for a catalog that
@@ -252,6 +274,11 @@ export function LibraryModal({ open, onClose, canPlace, initialSelection }: Libr
           </div>
         </div>
       </div>
+      <IngestComponentsDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={load}
+      />
     </div>,
     document.body,
   );

@@ -14,6 +14,13 @@
  * A future non-fastener generator with a different local convention will
  * need its own solver branch; nothing here is fastener-agnostic yet, which
  * is honest for a P1 library whose only real geometry IS the M6 SHCS stub.
+ *
+ * A `profile` (WP-C) component's convention is separate again: its local +Z
+ * is the extrusion axis the worker prisms along, and the identity frame
+ * (no attachment picked) seats at the canonical end cap's `z = 0` plane — the
+ * face `ExtractPrismProfile` bakes and `PlaceComponent` reads back — so an
+ * unmated drop stands the stick up from that cap, matching a `generator`
+ * component's identity seat.
  */
 import type { ClassifyFrame, ClassifyResult } from "@/ipc/types";
 

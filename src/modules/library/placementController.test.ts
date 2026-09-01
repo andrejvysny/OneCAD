@@ -18,7 +18,7 @@
  * and the commit agree even when nothing fits, still only happens here.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import type { ClassifyResult, LibraryComponent, PreviewSession } from "@/ipc/types";
+import type { ClassifyResult, LibraryComponent, PlaceComponentSource, PreviewSession } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import {
@@ -27,17 +27,21 @@ import {
   configurePlacementController,
 } from "./placementController";
 
+/** The default resolution; a `mock`-prefixed name is what vitest hoists `vi.mock` against. */
+let mockResolvedSource: PlaceComponentSource = {
+  kind: "generator",
+  generatorId: "iso4762",
+  generatorVersion: 1,
+};
+
 // Hoisted by vitest regardless of placement; kept at top level so the file
 // reads in the order it actually executes. The controller resolves a
-// component's real geometry source at arm time (WP-3.2) — here it is a plain
-// generator, which is what auto-size applies to.
+// component's real geometry source at arm time (WP-3.2) — mutable per-test via
+// `mockResolvedSource` so the WP-C `profile`-kind test below can arm against a
+// different resolved source without a second mock module.
 vi.mock("@/ipc/client", () => ({
   createClient: () => ({
-    resolveComponentSource: async () => ({
-      kind: "generator",
-      generatorId: "iso4762",
-      generatorVersion: 1,
-    }),
+    resolveComponentSource: async () => mockResolvedSource,
   }),
 }));
 
@@ -78,6 +82,7 @@ function cylinderClassify(radius: number): ClassifyResult {
 interface Harness {
   updatePreview: ReturnType<typeof vi.fn>;
   placeComponent: ReturnType<typeof vi.fn>;
+  beginPreview: ReturnType<typeof vi.fn>;
 }
 
 /**
@@ -113,6 +118,8 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
     previewBodyId: "preview_1",
   } as PreviewSession;
 
+  const beginPreview = vi.fn(async () => session);
+
   configurePlacementController({
     geometryQuery: {
       classifyElement: vi.fn(async () => cylinderClassify(radius)),
@@ -120,14 +127,14 @@ function install(radius: number, opts?: { hit?: boolean }): Harness {
     commandApi: {
       placeComponent,
       detachComponent: vi.fn(),
-      beginPreview: vi.fn(async () => session),
+      beginPreview,
       updatePreview,
       endPreview: vi.fn(async () => null),
       onPreviewResult: vi.fn(() => () => undefined),
     },
   } as unknown as Parameters<typeof configurePlacementController>[0]);
 
-  return { updatePreview, placeComponent };
+  return { updatePreview, placeComponent, beginPreview };
 }
 
 /** Lets every awaited microtask in the hover/arm chains settle. */
@@ -206,6 +213,87 @@ describe("placementController auto-size", () => {
       source: { params?: Record<string, unknown> };
     };
     expect(previewParams.source.params).toBeUndefined();
+  });
+});
+
+/*
+ * PROFILE SOURCE (Component Library WP-C). `withGestureParams` used to return
+ * a NON-generator source unchanged, so a profile component's gesture override
+ * never reached the ghost at all. Broadening it to `profile` had to MERGE
+ * rather than replace: `source.params.length` is the resolved source's own
+ * regen input (not an override), and a naive copy of the generator branch's
+ * replace-with-gestureParams behaviour would have silently dropped it the
+ * moment an unrelated gesture key (auto-size's `thread`) got folded in.
+ */
+describe("placementController profile source (WP-C)", () => {
+  afterEach(() => {
+    cancelPlacement();
+    configurePlacementController(null);
+    setViewportEngine(null);
+    mockResolvedSource = { kind: "generator", generatorId: "iso4762", generatorVersion: 1 };
+  });
+
+  function profileComponentFixture(): LibraryComponent {
+    return {
+      id: "vendor.extrusion-2020",
+      version: "1.0.0",
+      name: "2020 Extrusion",
+      category: ["structural"],
+      tags: [],
+      sourceKind: "profile",
+      revision: `sha256:${"0".repeat(64)}`,
+      attachments: {
+        shank_axis: { on: "cylinder:shank", accepts: ["cylinder", "hole", "circularEdge"] },
+      },
+      parameters: {
+        thread: { role: "free", key: "M6", domain: ["M3", "M4", "M5", "M6", "M8", "M10"] },
+      },
+    } as LibraryComponent;
+  }
+
+  it("carries a gesture override into the ghost WITHOUT dropping the resolved length", async () => {
+    mockResolvedSource = {
+      kind: "profile",
+      sha256: "a".repeat(64),
+      codec: "brep",
+      brepFormat: 4,
+      params: { length: 120 },
+    };
+    const harness = install(CLEARANCE_HOLE_M6_RADIUS);
+    armPlacement(profileComponentFixture());
+    await settle();
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 10, clientY: 10 }));
+    await settle();
+
+    const calls = harness.updatePreview.mock.calls;
+    const previewParams = calls[calls.length - 1][1] as {
+      source: { params?: Record<string, unknown> };
+    };
+    // Both survive: the gesture's own `thread` override rides ALONGSIDE the
+    // resolved source's `length` — a replace-based merge would have dropped it.
+    expect(previewParams.source.params).toMatchObject({ length: 120, thread: "M6" });
+  });
+
+  it("previews the resolved length verbatim when the gesture chose no override", async () => {
+    mockResolvedSource = {
+      kind: "profile",
+      sha256: "a".repeat(64),
+      codec: "brep",
+      brepFormat: 4,
+      params: { length: 250 },
+    };
+    // No hover at all — this is the FIRST preview `armPlacement` opens
+    // (`beginPreview`, not `updatePreview`), with gestureParams still empty.
+    const harness = install(0.5);
+    armPlacement(profileComponentFixture());
+    await settle();
+
+    expect(harness.beginPreview).toHaveBeenCalledTimes(1);
+    const draft = harness.beginPreview.mock.calls[0][0] as {
+      params: { source: { params?: Record<string, unknown> } };
+    };
+    expect(draft.params.source.params).toEqual({ length: 250 });
   });
 });
 

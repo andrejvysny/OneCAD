@@ -776,6 +776,45 @@ export interface ReindexReport {
   skipped: string[];
 }
 
+// ── Bulk component ingest (Component Library WP-C2 "Import components…") ──────
+
+/** One `ingestComponents()` request (mirrors the future Rust `ingest_components`). */
+export interface IngestComponentsRequest {
+  /** Absolute STEP/STP paths to analyse, one component per path. */
+  paths: string[];
+  /** Overrides the configured on-disk library location; absent uses it. */
+  libraryRoot?: string;
+  /** Catalog defaults every ingested part is filed under. */
+  defaults: {
+    vendor: string;
+    category: string[];
+    tags?: string[];
+  };
+}
+
+/** Which shape the worker read back for one ingested part (SCHEMA §7.3/§7.8). */
+export type IngestPartKind = "embedded" | "profile";
+
+/** One path's outcome from `ingestComponents()`. */
+export interface IngestPartResult {
+  path: string;
+  id?: string;
+  version?: string;
+  kind?: IngestPartKind;
+  status: "ok" | "refused" | "failed";
+  message?: string;
+  solidsFound?: number;
+  solidsKept?: number;
+  faceCount?: number;
+  importMs?: number;
+}
+
+/** `ingestComponents()`'s batch outcome — one {@link IngestPartResult} per requested path. */
+export interface IngestComponentsReport {
+  parts: IngestPartResult[];
+  libraryRoot: string;
+}
+
 // ── Topology repair (SCHEMA §9; M4b) — the `needs-repair` event + `resolveRefs` ─
 //
 // These MIRROR the Rust DTOs in `src-tauri/src/dto.rs` (camelCase serde):
@@ -1743,7 +1782,23 @@ export type PlaceComponentSource =
       params?: Record<string, ComponentParamValue>;
     }
   | ({ kind: "embedded" } & ComponentGeometry)
-  | ({ kind: "document"; documentSha256: string } & ComponentGeometry);
+  | ({ kind: "document"; documentSha256: string } & ComponentGeometry)
+  | {
+      /**
+       * A length-parametric extrusion of an embedded planar profile (SCHEMA
+       * §7.3; Component Library WP-C). Vendor stock arrives as one fixed
+       * length — an aluminium extrusion STEP is a 500 mm stick — while the
+       * component must be placeable at any length, so the worker prisms the
+       * canonical end-cap face by `params.length` at regen time.
+       */
+      kind: "profile";
+      sha256: string;
+      /** Always `"brep"` — the `step`/`xbf` readers on this lane return solids. */
+      codec: "brep";
+      brepFormat: number;
+      /** `length` (mm, `0 < length ≤ 1e5`) is REQUIRED — it drives the prism, not just an override. */
+      params: Record<string, ComponentParamValue>;
+    };
 
 /**
  * The staged geometry pointer `stageComponentGeometry` returns (Rust

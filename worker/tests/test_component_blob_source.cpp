@@ -8,6 +8,11 @@
 // component. If the writer and the reader ever disagree, this test fails at the
 // place, which is exactly where a user would.
 //
+// WP-C adds the third blob-backed kind, `profile` (a LENGTH-PARAMETRIC prism of
+// an embedded canonical planar face), on the same loop: the stick is baked
+// through `ExtractPrismProfile` and the face it writes is placed back at a
+// DIFFERENT length than the stick was.
+//
 // Also pins the refusals — a 2-solid blob (spec §9's one-solid rule), a
 // `brepFormat` this worker does not write, an unmaterialized blob (Rust lowers
 // an EMPTY path when a document's carrier is missing the bytes), and an unknown
@@ -22,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <GProp_GProps.hxx>
@@ -30,6 +36,8 @@
 #include <Message_PrinterOStream.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "io/BrepCodec.h"
@@ -40,6 +48,7 @@
 #include "ops/OpTypes.h"
 #include "protocol/Envelope.h"
 #include "session/BodyStore.h"
+#include "session/ExtractPrismProfile.h"
 #include "session/PlanExecutor.h"
 #include "session/Session.h"
 #include "util/Cancel.h"
@@ -246,6 +255,26 @@ void place_expect_failure(const json& source, const std::string& op_id, const st
     check(bodies.get("body_" + op_id) == nullptr, what + ": nothing published");
 }
 
+// As `place_expect_failure`, but also pins the §8 `diagnostics[].reasonCode` —
+// the machine-readable half of a `profile` refusal. The top-level code stays
+// `OP_FAILED`; the taxonomy does not grow for a new refusal reason.
+void place_expect_reason(const json& source, const std::string& op_id,
+                         const std::string& reason_code, const std::string& what) {
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc =
+        ops::execute_place_component(ctx, place_op(op_id, source, 0.0, 0.0, 0.0), op_id);
+    check(oc.status == ops::OpOutcome::Status::Failed, what + ": recoverable OP_FAILED");
+    check(oc.error_code == "OP_FAILED", what + ": top-level code stays OP_FAILED, got " +
+                                            oc.error_code);
+    check(bodies.get("body_" + op_id) == nullptr, what + ": nothing published");
+    const bool named = !oc.diagnostics.empty() &&
+                       oc.diagnostics.front().value("reasonCode", std::string()) == reason_code;
+    check(named, what + ": reasonCode == " + reason_code);
+}
+
 // Spec §9: a component is ONE solid in v1. A 2-solid blob is an authoring
 // mistake, and picking the first solid would place a part the author never made.
 void test_multi_solid_blob_is_refused() {
@@ -302,6 +331,167 @@ void test_unknown_codec_is_refused() {
 
 void test_unknown_source_kind_is_refused() {
     place_expect_failure(json{{"kind", "registry"}}, "opx7", "unknown source kind");
+}
+
+// ── The `profile` source kind (WP-C) ─────────────────────────────────────────
+// A vendor extrusion arrives as ONE fixed length. Here the 500 mm stick is baked
+// down to its canonical end-cap FACE by `ExtractPrismProfile`, and that face is
+// placed back at 120 mm — the length the stick never had, which is the entire
+// point of the kind.
+
+constexpr double kProfileArea = 380.3650459150638;  // 20x20 minus a Ø5 hole
+
+// Publishes `body_op1`: the 20x20-with-hole profile extruded 500 mm.
+void publish_stick(Session& s) {
+    s.open("doc", 0, 3, "determinism");
+    const json sketch = {
+        {"sketchId", "sk"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({line_ent("e1", 0, 0, 20, 0), line_ent("e2", 20, 0, 20, 20),
+                      line_ent("e3", 20, 20, 0, 20), line_ent("e4", 0, 20, 0, 0),
+                      json{{"id", "c1"},
+                           {"type", "Circle"},
+                           {"center", {10.0, 10.0}},
+                           {"radius", 2.5}}})},
+        {"constraints", json::array()}};
+    const json plan_ops = json::array(
+        {json{{"opType", "Sketch"}, {"opId", "op0"}, {"stepIndex", 0}, {"params", sketch}},
+         json{{"opType", "Extrude"},
+              {"opId", "op1"},
+              {"stepIndex", 1},
+              {"params",
+               {{"sketchId", "sk"},
+                {"distance", 500.0},
+                {"extrudeMode", "Blind"},
+                {"booleanMode", "NewBody"}}}}});
+    CancelToken tok;
+    HandlerContext ctx{tok, [](int) {}, [](Envelope&) {}};
+    const json args = {{"jobId", 1},
+                       {"documentRevision", 0},
+                       {"workerEpoch", 3},
+                       {"expectedBaseHash", kEmpty},
+                       {"prefixHashes", json::array({"a", "b"})},
+                       {"targetStep", 1},
+                       {"ops", plan_ops}};
+    onecad::session::handle_execute_plan(s, Envelope::request(1, "ExecutePlan", args), ctx);
+    const Envelope acc = onecad::session::handle_accept_prepared(
+        s, Envelope::request(1, "AcceptPrepared",
+                             json{{"jobId", 1}, {"documentRevision", 0}, {"workerEpoch", 3}}));
+    check(acc.ok.value_or(false), "fixture: stick published");
+}
+
+json profile_source(const std::string& path, const std::string& codec, int brep_format,
+                    const json& length) {
+    json source = {{"kind", "profile"},
+                   {"sha256", kFakeSha},
+                   {"codec", codec},
+                   {"path", path},
+                   {"params", {{"length", length}}}};
+    if (brep_format >= 0) source["brepFormat"] = brep_format;
+    return source;
+}
+
+void write_bytes(const std::string& path, const std::vector<std::uint8_t>& bytes) {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    check(f != nullptr, "fixture: opened " + path);
+    if (f == nullptr) return;
+    std::fwrite(bytes.data(), 1, bytes.size(), f);
+    std::fclose(f);
+}
+
+void test_profile_places_at_a_new_length() {
+    Session s;
+    publish_stick(s);
+    const std::string path = temp_path("onecad_wpc_profile.brep");
+    const Envelope baked = onecad::session::handle_extract_prism_profile(
+        s, Envelope::request(7, "ExtractPrismProfile",
+                             json{{"snapshotId", s.current_snapshot_id()},
+                                  {"bodyId", "body_op1"},
+                                  {"path", path}}));
+    check(baked.ok.value_or(false) && baked.result.value("written", false),
+          "profile: the canonical face was baked");
+
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_place_component(
+        ctx, place_op("opp1", profile_source(path, "brep", io::kBrepFormatVersion, 120.0), 0.0,
+                      0.0, 0.0),
+        "opp1");
+    check(oc.status == ops::OpOutcome::Status::Ok, "profile: Ok (" + oc.error_message + ")");
+    const onecad::session::BodyRecord* rec = bodies.get("body_opp1");
+    check(rec != nullptr, "profile: body published");
+    if (rec != nullptr) {
+        const double want = kProfileArea * 120.0;
+        check_near(volume_of(rec->geom), want, want * 1e-6,
+                   "profile: volume is the section swept 120 mm, not the stick's 500");
+    }
+
+    // The refusals, all against the SAME good blob so only the named field moves.
+    place_expect_reason(profile_source(path, "brep", io::kBrepFormatVersion, -1.0), "opp2",
+                        "PROFILE_LENGTH_INVALID", "profile length -1");
+    place_expect_reason(profile_source(path, "brep", io::kBrepFormatVersion, json()), "opp3",
+                        "PROFILE_LENGTH_INVALID", "profile length null");
+    place_expect_reason(profile_source(path, io::kXcafCodecName, io::kXcafFormatVersion, 120.0),
+                        "opp4", "PROFILE_CODEC_UNSUPPORTED", "profile codec xbf");
+
+    // A face lifted off z = 0 is refused: the worker enforces exactly the two
+    // canonicality properties a prism rebuild depends on.
+    const io::BrepShapeResult read = io::read_brep_shape(path);
+    check(read.ok(), "profile: the baked face reads back");
+    gp_Trsf lift;
+    lift.SetTranslation(gp_Vec(0.0, 0.0, 3.0));
+    std::vector<std::uint8_t> lifted;
+    check(io::write_brep_shape(
+              BRepBuilderAPI_Transform(read.shape, lift, Standard_True).Shape(), lifted)
+              .empty(),
+          "fixture: lifted face written");
+    const std::string lifted_path = temp_path("onecad_wpc_profile_z3.brep");
+    write_bytes(lifted_path, lifted);
+    place_expect_reason(profile_source(lifted_path, "brep", io::kBrepFormatVersion, 120.0), "opp5",
+                        "PROFILE_FACE_NOT_CANONICAL", "profile face at z = 3");
+
+    // AN OFF-CENTRE FACE IS THE DANGEROUS ONE. It is still on z = 0 with a +Z
+    // normal, so the plane and normal checks both pass — and the component would
+    // land 37, 12 mm from its `placement.translate` with nothing anywhere saying
+    // so. That is the silent-wrong-position failure, which must be a refusal.
+    gp_Trsf slide;
+    slide.SetTranslation(gp_Vec(37.0, 12.0, 0.0));
+    std::vector<std::uint8_t> slid;
+    check(io::write_brep_shape(
+              BRepBuilderAPI_Transform(read.shape, slide, Standard_True).Shape(), slid)
+              .empty(),
+          "fixture: off-centre face written");
+    const std::string slid_path = temp_path("onecad_wpc_profile_offcentre.brep");
+    write_bytes(slid_path, slid);
+    place_expect_reason(profile_source(slid_path, "brep", io::kBrepFormatVersion, 120.0), "opp7",
+                        "PROFILE_FACE_NOT_CANONICAL", "profile face centroid off the origin");
+
+    // A format pin this worker does not write is named too — §7.3 promises every
+    // FACE-shaped refusal on this kind carries a reasonCode.
+    place_expect_reason(profile_source(path, "brep", io::kBrepFormatVersion + 1, 120.0), "opp8",
+                        "PROFILE_FORMAT_UNSUPPORTED", "profile brepFormat pin mismatch");
+    place_expect_reason(profile_source(path, "brep", -1, 120.0), "opp9",
+                        "PROFILE_FORMAT_UNSUPPORTED", "profile brepFormat absent");
+
+    // A SOLID blob answers the face question with a solid — named, not misread.
+    const std::string solid_path = temp_path("onecad_wpc_profile_solid.brep");
+    std::vector<std::uint8_t> solid_bytes;
+    check(io::write_brep_compound({BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10, 10, 10).Shape()},
+                                  solid_bytes)
+              .empty(),
+          "fixture: solid blob written");
+    write_bytes(solid_path, solid_bytes);
+    place_expect_reason(profile_source(solid_path, "brep", io::kBrepFormatVersion, 120.0), "opp6",
+                        "PROFILE_BLOB_NOT_ONE_FACE", "profile blob is a solid");
+
+    std::error_code rm;
+    std::filesystem::remove(path, rm);
+    std::filesystem::remove(lifted_path, rm);
+    std::filesystem::remove(slid_path, rm);
+    std::filesystem::remove(solid_path, rm);
 }
 
 // ── ExportGeometry's own refusals ────────────────────────────────────────────
@@ -472,6 +662,7 @@ int main() {
     test_unmaterialized_blob_is_refused();
     test_unknown_codec_is_refused();
     test_unknown_source_kind_is_refused();
+    test_profile_places_at_a_new_length();
     test_export_refusals(s);
     test_fuse_helper();
     test_union_bakes_one_solid();

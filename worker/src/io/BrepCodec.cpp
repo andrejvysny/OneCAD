@@ -73,6 +73,65 @@ std::string write_brep_compound(const std::vector<TopoDS_Shape>& solids,
     return "";
 }
 
+std::string write_brep_shape(const TopoDS_Shape& shape, std::vector<std::uint8_t>& bytes_out) {
+    if (shape.IsNull()) return "BrepCodec write refused: the shape is null";
+    try {
+        std::ostringstream os(std::ios::out | std::ios::binary);
+        BinTools::Write(shape, os, /*withTriangles=*/Standard_False,
+                        /*withNormals=*/Standard_False, kWriteVersion);
+        const std::string blob = os.str();
+        bytes_out.assign(blob.begin(), blob.end());
+    } catch (const Standard_Failure& f) {
+        return std::string("BrepCodec write raised: ") +
+               (f.GetMessageString() != nullptr ? f.GetMessageString() : "OCCT failure");
+    } catch (const std::exception& e) {
+        return std::string("BrepCodec write raised: ") + e.what();
+    }
+    return "";
+}
+
+BrepShapeResult read_brep_shape(const std::string& path) {
+    BrepShapeResult out;
+    out.error = header_error(path);
+    if (!out.error.empty()) return out;
+
+    TopoDS_Shape shape;
+    try {
+        if (BinTools::Read(shape, path.c_str()) != Standard_True) {
+            out.error = "brep bytes are not readable as BinTools: " + path;
+            return out;
+        }
+    } catch (const Standard_Failure& f) {
+        out.error = std::string("brep read raised: ") +
+                    (f.GetMessageString() != nullptr ? f.GetMessageString() : "OCCT failure");
+        return out;
+    } catch (const std::exception& e) {
+        out.error = std::string("brep read raised: ") + e.what();
+        return out;
+    }
+
+    if (shape.IsNull()) {
+        out.error = "brep bytes decoded to a null shape: " + path;
+        return out;
+    }
+
+    // Unwrap a single-child compound; anything else travels verbatim so the
+    // caller's own shape-kind refusal is the one the user reads.
+    if (shape.ShapeType() == TopAbs_COMPOUND) {
+        TopoDS_Iterator it(shape);
+        if (it.More()) {
+            const TopoDS_Shape first = it.Value();
+            it.Next();
+            if (!it.More()) {
+                out.shape = first;
+                return out;
+            }
+        }
+    }
+    out.shape = shape;
+    return out;
+}
+
 BrepReadResult read_brep_solids(const std::string& path) {
     BrepReadResult out;
     out.error = header_error(path);

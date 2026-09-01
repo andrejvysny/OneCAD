@@ -57,7 +57,12 @@ graphify-out/
 skills-lock.json
 
 # Sample CAD exports used for manual import testing.
-STEP/
+# `STEP/*` and not `STEP/`: git never descends into an excluded DIRECTORY, so
+# the negation below would have no effect under the directory form.
+STEP/*
+# …except the ingest recipe: the vendor STEP files are downloads, but the
+# keep-lists authored against them (and the evidence for each) are source.
+!STEP/ingest.toml
 
 # Local-only gear cross-check harness run artifacts (scripts/gear-crosscheck).
 __pycache__/
