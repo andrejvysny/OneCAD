@@ -26,6 +26,7 @@
  * the transient ISOLATION mask (viewportStore, session-only). Both are applied
  * here rather than in the engine because the bodyId→handle map lives here.
  */
+import type * as THREE from "three";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod, Rgba } from "@/ipc/types";
 import type { BodyMeta } from "@/stores/documentStore";
@@ -271,6 +272,17 @@ export class MeshIngest {
    */
   private currentModeDef(): RenderModeDef {
     return RENDER_MODES[coerceRenderMode(settingsStore.getState().displayMode)];
+  }
+
+  /**
+   * Section view: clip (or unclip, with `null`) every COMMITTED body.
+   *
+   * The engine owns the plane and its own preview library but cannot reach this
+   * one, so `ViewportRoot` drives both — the same split the theme refresh has.
+   */
+  setClippingPlanes(planes: THREE.Plane[] | null): void {
+    this.materials?.setClippingPlanes(planes);
+    this.engine?.invalidate();
   }
 
   /**

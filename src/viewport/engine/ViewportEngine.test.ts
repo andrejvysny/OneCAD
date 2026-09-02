@@ -31,7 +31,14 @@ vi.mock("./renderer", () => ({ createRenderer: mocks.createRenderer }));
 import { ViewportEngine } from "./ViewportEngine";
 import * as THREE from "three";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
-import { buildBodyObjects } from "../mesh/meshRegistry";
+import {
+  buildBodyObjects,
+  swap,
+  disposeAll,
+  __resetRegistryForTests,
+} from "../mesh/meshRegistry";
+import { buildBodyObject } from "./BodyObject";
+import { BodyMaterialLibrary } from "./bodyMaterials";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 
 let rafCbs: FrameRequestCallback[] = [];
@@ -551,6 +558,163 @@ describe("ViewportEngine interaction-overlay bounds", () => {
     engine.hideValueHandle();
     expect(engine.getInteractionOverlayBounds("valueHandle")).toBeNull();
 
+    engine.dispose();
+  });
+});
+
+/*
+ * Section view at the engine seam: what `ViewportRoot` calls, what it gets back
+ * for the OTHER material library, and the repaint budget.
+ */
+describe("ViewportEngine.setSection", () => {
+  const SECTION = { enabled: true, plane: "XY" as const, offsetMm: 5, flip: false };
+  const SKETCH_PLANE = {
+    kind: "custom" as const,
+    origin: [0, 0, 0] as [number, number, number],
+    xAxis: [1, 0, 0] as [number, number, number],
+    yAxis: [0, 1, 0] as [number, number, number],
+    normal: [0, 0, 1] as [number, number, number],
+  };
+
+  it("publishes the live plane, repaints ONCE, then goes idle again", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    flushFrame();
+    expect(rafCbs.length).toBe(0); // idle: on-demand rendering schedules nothing
+
+    const planes = engine.setSection(SECTION);
+
+    expect(planes).toHaveLength(1);
+    expect(planes![0].constant).toBe(5);
+    expect(engine.sectionClippingPlanes()).toBe(planes);
+    expect(rafCbs.length).toBe(1); // exactly one frame, not a loop
+
+    flushFrame();
+    expect(rafCbs.length).toBe(0);
+    engine.dispose();
+  });
+
+  it("drops the planes again when the section is turned off", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+
+    engine.setSection(SECTION);
+    expect(engine.setSection({ ...SECTION, enabled: false })).toBeNull();
+    expect(engine.sectionClippingPlanes()).toBeNull();
+    engine.dispose();
+  });
+
+  it("refuses on WebGPU — those materials ignore clippingPlanes entirely", async () => {
+    mocks.createRenderer.mockResolvedValueOnce({
+      renderer: mocks.renderer,
+      isWebGPU: true,
+      dispose: mocks.handleDispose,
+    });
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+
+    expect(engine.setSection(SECTION)).toBeNull();
+    expect(engine.sectionClippingPlanes()).toBeNull();
+    engine.dispose();
+  });
+
+  it("reports the cut in debugSnapshot, including the CLIPPED MATERIAL count", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+
+    const before = engine.debugSnapshot().section as Record<string, unknown>;
+    expect(before).toMatchObject({ enabled: false, clippedMaterials: 0, capVisible: false });
+
+    // A real body in the scene, clipped through the material library the way
+    // MeshIngest does it — the count has to read the SCENE, not a flag.
+    const entry = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1);
+    const library = new BodyMaterialLibrary();
+    engine.bodiesRoot.add(buildBodyObject(entry, library).group);
+    const planes = engine.setSection({ ...SECTION, flip: true });
+    library.setClippingPlanes(planes);
+
+    const after = engine.debugSnapshot().section as Record<string, unknown>;
+    expect(after).toMatchObject({ enabled: true, plane: "XY", offsetMm: 5, flip: true });
+    // face + edge material of the one body (the wireframe edge material is not
+    // in the scene until the render mode switches to it).
+    expect(after.clippedMaterials).toBe(2);
+
+    flushFrame(); // the frame is what builds the stencil pairs behind the cap
+    expect((engine.debugSnapshot().section as { capVisible: boolean }).capVisible).toBe(true);
+
+    library.dispose();
+    engine.dispose();
+  });
+
+  it("clips the selection overlays and the pattern ghosts, not just the bodies", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const entry = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1);
+    swap("body1", entry); // the highlight layer resolves refs through the REGISTRY
+    const library = new BodyMaterialLibrary();
+    engine.bodiesRoot.add(buildBodyObject(entry, library).group);
+
+    // A selection made BEFORE the cut is the defect this covers: the edge
+    // overlays are depthTest:false, so an unclipped one paints its tint in the
+    // empty half, floating over nothing.
+    engine.setHighlightState({ kind: "face", id: "body1#f:4", bodyId: "body1", topoKey: "f:4" }, [
+      { kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" },
+    ]);
+    expect((engine.debugSnapshot().section as { clippedOverlays: number }).clippedOverlays).toBe(0);
+
+    const planes = engine.setSection(SECTION);
+
+    expect(
+      (engine.debugSnapshot().section as { clippedOverlays: number }).clippedOverlays,
+    ).toBeGreaterThan(0);
+
+    // A ghost layer built AFTER the section was enabled must inherit the cut —
+    // a pattern preview is a copy of a real body and has to obey the same plane.
+    engine.showGhostPreview(entry, [{ kind: "translate", offset: [10, 0, 0] }]);
+    const ghostMat = (() => {
+      let found: THREE.Material | null = null;
+      engine.interactionRoot.traverse((o) => {
+        if (o.parent?.name === "ghostLayer") found = (o as THREE.Mesh).material as THREE.Material;
+      });
+      return found as THREE.Material | null;
+    })();
+    expect(ghostMat).not.toBeNull();
+    expect(ghostMat!.clippingPlanes).toBe(planes);
+
+    engine.setSection({ ...SECTION, enabled: false });
+    expect((engine.debugSnapshot().section as { clippedOverlays: number }).clippedOverlays).toBe(0);
+    expect(ghostMat!.clippingPlanes).toBeNull();
+
+    library.dispose();
+    engine.dispose();
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  it("hides the cap for the duration of a sketch session, keeping the clip", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const entry = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1);
+    const library = new BodyMaterialLibrary();
+    engine.bodiesRoot.add(buildBodyObject(entry, library).group);
+    engine.setSection(SECTION);
+    flushFrame();
+    expect((engine.debugSnapshot().section as { capVisible: boolean }).capVisible).toBe(true);
+
+    engine.enterSketch(SKETCH_PLANE, [], "UnderConstrained");
+    expect((engine.debugSnapshot().section as { capVisible: boolean }).capVisible).toBe(false);
+    expect(engine.sectionClippingPlanes()).toHaveLength(1);
+
+    engine.exitSketch();
+    expect((engine.debugSnapshot().section as { capVisible: boolean }).capVisible).toBe(true);
+
+    library.dispose();
     engine.dispose();
   });
 });

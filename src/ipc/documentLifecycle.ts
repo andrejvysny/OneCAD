@@ -18,6 +18,10 @@ export function resetDocumentScopedUi(): void {
   // Isolation names bodies of the OUTGOING document — carrying it over would
   // hide every body of the incoming one (its ids never match).
   viewportStore.getState().exitIsolate();
+  // Same reasoning one step out: a cut set up against the outgoing model is
+  // meaningless against the incoming one, and a viewport that opens a file
+  // already sliced in half looks like a broken load.
+  viewportStore.getState().exitSection();
   selectionStore.getState().clear();
   selectionStore.getState().setHover(null);
   // Overlay/local UI stores also carry state scoped to the outgoing document — an

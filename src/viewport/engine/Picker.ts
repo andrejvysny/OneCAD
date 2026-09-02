@@ -114,6 +114,31 @@ export function choosePreferredHit(
 }
 
 /**
+ * The first intersection that the section view has NOT cut away.
+ *
+ * three discards a fragment whose signed distance to a clipping plane is
+ * negative, so a hit on the far side of the cut is geometry the user cannot
+ * see. Taking `[0]` regardless is what would make an invisible face pickable —
+ * and worse, would keep the newly exposed INTERIOR face unselectable, which is
+ * the whole point of cutting. The anchor tested is the one that lies on the
+ * geometry (`pointOnLine` for a fat line, `point` for a triangle), the same
+ * choice `resolvePick` makes.
+ *
+ * `planes` null/empty ⇒ plain `[0]`, i.e. exactly the previous behavior.
+ */
+export function firstUnclippedHit(
+  hits: readonly THREE.Intersection[],
+  planes: readonly THREE.Plane[] | null,
+): THREE.Intersection | null {
+  if (!planes || planes.length === 0) return hits[0] ?? null;
+  for (const hit of hits) {
+    const at = hit.pointOnLine ?? hit.point;
+    if (planes.every((p) => p.distanceToPoint(at) >= 0)) return hit;
+  }
+  return null;
+}
+
+/**
  * Whether a secondary sketch hit is in front of, or numerically coplanar with,
  * a body hit. A farther sketch never selects through an occluding body.
  */
@@ -202,6 +227,12 @@ export interface PickerDeps {
    */
   getResolution: () => { w: number; h: number };
   invalidate: () => void;
+  /**
+   * Live section-view clipping planes, or null when the section is off. Injected
+   * as a GETTER (the `getCamera`/`getRoot` pattern) because the engine mutates
+   * the plane in place as the offset slider moves.
+   */
+  getClippingPlanes?: () => THREE.Plane[] | null;
   /** Picking is only live in this mode (model + select); returns false in sketch mode. */
   isActive: () => boolean;
   /**
@@ -361,8 +392,11 @@ export class Picker {
     });
     this.flushEdgeResolution(edgeObjects);
 
-    const faceHit = this.raycaster.intersectObjects(faceObjects, false)[0] ?? null;
-    const edgeHit = this.raycaster.intersectObjects(edgeObjects, false)[0] ?? null;
+    // The WHOLE sorted array, not `[0]`: under a section cut the nearest hit is
+    // routinely on the half that was clipped away.
+    const planes = this.deps.getClippingPlanes?.() ?? null;
+    const faceHit = firstUnclippedHit(this.raycaster.intersectObjects(faceObjects, false), planes);
+    const edgeHit = firstUnclippedHit(this.raycaster.intersectObjects(edgeObjects, false), planes);
     return choosePreferredHit(faceHit, edgeHit, threshold);
   }
 

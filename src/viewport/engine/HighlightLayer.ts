@@ -122,6 +122,32 @@ export class HighlightLayer {
     this.selEdgeMat = new LineMaterial({ color: palette.selectedEdge().getHex(), ...edgeOverlay });
   }
 
+  /**
+   * Section view: clip every overlay material (`null` = unclipped).
+   *
+   * These five materials are OUTSIDE both `BodyMaterialLibrary` instances, so
+   * the body fan-out cannot reach them — and an unclipped highlight is worse
+   * than a merely inconsistent one: the edge overlays are `depthTest: false`,
+   * so a face selected BEFORE the cut paints its tint in mid-air, in the empty
+   * space where the removed half used to be.
+   */
+  setClippingPlanes(planes: THREE.Plane[] | null): void {
+    for (const mat of [
+      this.hoverFaceMat,
+      this.selFaceMat,
+      this.selBodyMat,
+      this.hoverEdgeMat,
+      this.selEdgeMat,
+    ] as THREE.Material[]) {
+      // Only a COUNT change recompiles (the plane count is baked into the
+      // shader); moving a plane is picked up per frame with no material write.
+      const before = mat.clippingPlanes?.length ?? 0;
+      mat.clippingPlanes = planes;
+      if (before !== (planes?.length ?? 0)) mat.needsUpdate = true;
+    }
+    this.deps.invalidate();
+  }
+
   setState(hover: EntityRef | null, selected: EntityRef[]): void {
     this.hover = hover;
     this.selected = selected;

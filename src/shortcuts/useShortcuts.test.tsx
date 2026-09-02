@@ -163,6 +163,15 @@ describe("keymap resolveBinding", () => {
     expect(resolveBinding("i", true, "sketch")).toBeNull();
   });
 
+  it("⇧X is the section view in model mode and INERT everywhere else", () => {
+    expect(resolveBinding("x", true, "model")).toEqual({ type: "toggleSection" });
+    // Exact shift chord — sketch mode's plain `x` (construction) is untouched…
+    expect(resolveBinding("x", false, "sketch")).toEqual({ type: "toggleConstruction" });
+    expect(resolveBinding("x", false, "model")).toBeNull();
+    // …and neither action is a `tool`, so neither can cross the mode boundary.
+    expect(resolveBinding("x", true, "sketch")).toBeNull();
+  });
+
   it("W3: ⇧I collides with nothing — the pinned neighbours keep their meaning", () => {
     expect(resolveBinding("f", true, "model")).toEqual({ type: "zoomFit" });
     expect(resolveBinding("r", true, "sketch")).toEqual({ type: "tool", tool: "centerRect" });
@@ -345,6 +354,41 @@ describe("useShortcuts", () => {
     press("i", { shift: true });
     press("i", { shift: true });
     expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+  });
+
+  it("⇧X toggles the section view, and Esc leaves it BEFORE deselecting", () => {
+    render(<Harness />);
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+
+    press("x", { shift: true });
+    expect(viewportStore.getState().section.enabled).toBe(true);
+
+    press("x", { shift: true });
+    expect(viewportStore.getState().section.enabled).toBe(false);
+
+    // Same ladder rung as isolation: the view mode goes before the selection.
+    press("x", { shift: true });
+    press("Escape");
+    expect(viewportStore.getState().section.enabled).toBe(false);
+    expect(selectionStore.getState().selected).toHaveLength(1);
+
+    press("Escape");
+    expect(selectionStore.getState().selected).toHaveLength(0);
+  });
+
+  it("Esc drops ISOLATION first, then the section view — one rung per press", () => {
+    render(<Harness />);
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    press("i", { shift: true });
+    press("x", { shift: true });
+
+    press("Escape");
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+    expect(viewportStore.getState().section.enabled).toBe(true);
+
+    press("Escape");
+    expect(viewportStore.getState().section.enabled).toBe(false);
+    expect(selectionStore.getState().selected).toHaveLength(1);
   });
 
   it("plain `i` does nothing (the chord is exact-shift)", () => {

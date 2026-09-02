@@ -206,6 +206,10 @@
   /* Wireframe-render-mode edge: no shaded face sits behind it, so it carries
      its own contrast budget separate from --color-body-edge. */
   --color-body-edge-wire: #111418;
+  /* Section-view cut cap — the solid material revealed where a clipping plane
+     slices a body. Denser than --color-body-fill so the cut reads as MATERIAL
+     rather than as another lit outer face. */
+  --color-section-cap: #8f959e;
 
   /* ---- Sketch entity colors (viewport, F-WP6 constraint states) ---- */
   /* Under-constrained sketch geometry (sketch base blue); same family as
@@ -437,6 +441,9 @@
   /* INVERTED, and load-bearing: wireframe mode draws edges with no faces
      behind them, so a near-black edge on a dark canvas would be invisible. */
   --color-body-edge-wire: #cfd4db;
+  /* Dimmer than the light theme's cut cap, for the same reason
+     --color-body-fill is: the dark canvas needs less luminance to read as solid. */
+  --color-section-cap: #6b7079;
 
   /* ---- Sketch entity colors (viewport, F-WP6 constraint states) ---- */
   --color-sketch-under: #5aa2ff;

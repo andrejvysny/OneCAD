@@ -13,6 +13,7 @@ import {
   linePickThreshold,
   line2PickThreshold,
   choosePreferredHit,
+  firstUnclippedHit,
   secondaryHitWins,
   resolvePick,
   pickKey,
@@ -336,6 +337,116 @@ describe("Picker → real LineSegments2 raycast", () => {
     // Non-vacuity guard for the test above: neuter the flush (report zeros) and
     // the identical pick goes silently null.
     const { picker, probe } = harness({ w: 0, h: 0 });
+    expect(probe()).toBeNull();
+    picker.dispose();
+  });
+});
+
+describe("firstUnclippedHit — section view drops what the cut removed", () => {
+  const near = { distance: 1, point: new THREE.Vector3(0, 0, 10) } as THREE.Intersection;
+  const far = { distance: 2, point: new THREE.Vector3(0, 0, -10) } as THREE.Intersection;
+  // Keeps z <= 0 (the unflipped XY cut), i.e. `near` above is cut away.
+  const planes = [new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
+
+  it("returns [0] verbatim with no planes — the pre-section behavior", () => {
+    expect(firstUnclippedHit([near, far], null)).toBe(near);
+    expect(firstUnclippedHit([near, far], [])).toBe(near);
+    expect(firstUnclippedHit([], planes)).toBeNull();
+  });
+
+  it("skips the cut-away hit and takes the first SURVIVOR", () => {
+    expect(firstUnclippedHit([near, far], planes)).toBe(far);
+  });
+
+  it("is null when the cut removed everything under the pointer", () => {
+    expect(firstUnclippedHit([near], planes)).toBeNull();
+  });
+
+  it("tests a fat line at its point ON the segment, not the one on the ray", () => {
+    // pointOnLine is kept (z = -1); point is cut away (z = +1). Taking `point`
+    // would drop a visible edge lying just under the plane.
+    const edge = {
+      distance: 1,
+      point: new THREE.Vector3(0, 0, 1),
+      pointOnLine: new THREE.Vector3(0, 0, -1),
+    } as unknown as THREE.Intersection;
+    expect(firstUnclippedHit([edge], planes)).toBe(edge);
+  });
+});
+
+describe("Picker under a section cut — clicking through selects the interior", () => {
+  const VIEW = { w: 800, h: 600 };
+
+  afterEach(() => {
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  /**
+   * The mock box (80x60x30 at the origin) seen from above and slightly in front,
+   * so the ray through the canvas centre crosses the TOP face (f:4, z=+15) and
+   * then the BOTTOM one (f:5, z=-15). `up` stays world +Z (engine invariant) and
+   * the camera is tilted off the pole for the same reason CameraRig clamps pitch.
+   */
+  function harness(planes: THREE.Plane[] | null) {
+    const entry = boxEntry();
+    swap("body1", entry);
+    const mesh = new THREE.Mesh(
+      entry.geometry,
+      // DoubleSide, exactly like the real body face material: the bottom face is
+      // hit from behind, and a FrontSide material would hide the survivor.
+      new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }),
+    );
+    mesh.userData = { bodyId: "body1", kind: "face" };
+    mesh.updateMatrixWorld(true);
+    const root = new THREE.Group();
+    root.add(mesh);
+
+    const camera = new THREE.PerspectiveCamera(50, VIEW.w / VIEW.h, 0.1, 5000);
+    camera.up.set(0, 0, 1);
+    camera.position.set(0, -20, 400);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
+
+    const canvas = document.createElement("canvas");
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: VIEW.w, height: VIEW.h }) as DOMRect;
+
+    const picker = new Picker({
+      canvas,
+      getCamera: () => camera,
+      getRoot: () => root,
+      getViewportHeight: () => VIEW.h,
+      getFocusDistance: () => 400,
+      getResolution: () => ({ w: VIEW.w, h: VIEW.h }),
+      invalidate: vi.fn(),
+      getClippingPlanes: () => planes,
+      isActive: () => true,
+      onHover: vi.fn(),
+      onPick: vi.fn(),
+    });
+    return { picker, probe: () => picker.probe(VIEW.w / 2, VIEW.h / 2) };
+  }
+
+  it("picks the nearest face when there is no cut", () => {
+    const { picker, probe } = harness(null);
+    expect(probe()?.topoKey).toBe("f:4"); // the top face, +Z
+    picker.dispose();
+  });
+
+  it("picks the face the cut EXPOSED, never the one it removed", () => {
+    // The unflipped XY cut at 0 keeps z <= 0, so the top face is not on screen.
+    const { picker, probe } = harness([new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)]);
+    const hit = probe();
+    expect(hit?.topoKey).not.toBe("f:4");
+    expect(hit?.topoKey).toBe("f:5"); // the bottom face, now visible through the cut
+    expect(hit?.worldPos.z).toBeCloseTo(-15, 3);
+    picker.dispose();
+  });
+
+  it("finds nothing when the cut removed the whole body under the pointer", () => {
+    // Keeps z >= 100 — the box is entirely on the discarded side.
+    const { picker, probe } = harness([new THREE.Plane(new THREE.Vector3(0, 0, 1), -100)]);
     expect(probe()).toBeNull();
     picker.dispose();
   });

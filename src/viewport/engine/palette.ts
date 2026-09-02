@@ -48,6 +48,7 @@ export type TokenName =
   | "--color-body-fill"
   | "--color-body-edge"
   | "--color-body-edge-wire"
+  | "--color-section-cap"
   | "--color-sketch-under"
   | "--color-sketch-done"
   | "--color-sketch-sel"
@@ -88,6 +89,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-body-fill": "rgb(169, 174, 182)",
     "--color-body-edge": "rgb(58, 63, 71)",
     "--color-body-edge-wire": "rgb(17, 20, 24)",
+    "--color-section-cap": "rgb(143, 149, 158)",
     "--color-sketch-under": "rgb(45, 127, 249)",
     "--color-sketch-done": "rgb(31, 157, 85)",
     "--color-sketch-sel": "rgb(217, 119, 6)",
@@ -124,6 +126,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-body-fill": "rgb(125, 131, 140)",
     "--color-body-edge": "rgb(34, 38, 44)",
     "--color-body-edge-wire": "rgb(207, 212, 219)",
+    "--color-section-cap": "rgb(107, 112, 121)",
     "--color-sketch-under": "rgb(90, 162, 255)",
     "--color-sketch-done": "rgb(67, 193, 122)",
     "--color-sketch-sel": "rgb(240, 162, 74)",
@@ -199,6 +202,8 @@ export const palette = {
   bodyEdge: () => tokenColor("--color-body-edge"),
   /** Wireframe-mode edge lines — no shaded face behind them, so this one DOES invert (light in dark theme) for legibility. */
   bodyEdgeWire: () => tokenColor("--color-body-edge-wire"),
+  /** Section-view cut cap — the material face a clipping plane exposes. */
+  sectionCap: () => tokenColor("--color-section-cap"),
   /** Neutral gray for reference/overlay layers — deliberately NOT the body fill, which is lighter. */
   referenceNeutral: () => tokenColor("--color-ink-5"),
   /** Hover accent (face + edge highlight) — previews/UI hover states. */

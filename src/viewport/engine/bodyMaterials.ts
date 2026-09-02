@@ -61,6 +61,8 @@ export class BodyMaterialLibrary {
   private dimmed = false;
   /** Face color override (Cut tint); `null` = the palette default. Never a borrowed instance. */
   private faceColor: THREE.Color | null = null;
+  /** Section-view clipping planes; `null` = unclipped. See {@link setClippingPlanes}. */
+  private clippingPlanes: THREE.Plane[] | null = null;
 
   /** The shared material set for `kind`, created on first use. */
   get(kind: MaterialKind): BodyMaterialSet {
@@ -71,6 +73,7 @@ export class BodyMaterialLibrary {
       // A set born while the library is dimmed still needs the dim; its saved
       // prior is its constructor defaults, so undimming restores it correctly.
       if (this.dimmed) this.applyDim(kind, set);
+      applyClipping(set, this.clippingPlanes);
     }
     return set;
   }
@@ -87,6 +90,7 @@ export class BodyMaterialLibrary {
       set.face.color.copy(assemblyColorForBody(bodyId));
       this.assemblySets.set(bodyId, set);
       if (this.dimmed) this.applyDim("assemblyColor", set);
+      applyClipping(set, this.clippingPlanes);
     }
     return set;
   }
@@ -171,6 +175,28 @@ export class BodyMaterialLibrary {
   }
 
   /**
+   * Section view: clip every face and BOTH edge materials against `planes`
+   * (`null` = unclipped). One write per material — the shared-material
+   * discipline is exactly what makes a whole-document clip this cheap.
+   *
+   * The planes are RETAINED, not copied, on purpose: `SectionLayer` mutates the
+   * single `THREE.Plane` in place as the offset slider moves, and three reads
+   * `material.clippingPlanes` per frame, so a live reference is what makes a
+   * drag repaint without touching a material at all — see `applyClipping` for
+   * the other half of that (no `needsUpdate` unless the plane COUNT moves).
+   *
+   * Applied to future sets too (see `get` / `getAssemblyColor`): a render-mode
+   * switch or an assembly-colored body arriving AFTER the section was enabled
+   * builds its set here, and an unclipped set born late is exactly the kind of
+   * silent half-applied state the dim path already guards against.
+   */
+  setClippingPlanes(planes: THREE.Plane[] | null): void {
+    this.clippingPlanes = planes;
+    for (const set of this.sets.values()) applyClipping(set, planes);
+    for (const set of this.assemblySets.values()) applyClipping(set, planes);
+  }
+
+  /**
    * Override the face color of every live AND future set (the model-tool Cut
    * tint). The color is COPIED, never retained: `palette.*()` returns a shared
    * cached THREE.Color, and holding it would let one tint mutate the palette
@@ -244,6 +270,24 @@ export class BodyMaterialLibrary {
     }
     this.assemblySets.clear();
     this.savedFaceStates.clear();
+  }
+}
+
+/**
+ * Point every material of `set` at `planes` (or clear them with `null`).
+ *
+ * `needsUpdate` is set ONLY when the plane COUNT changes, because the count is
+ * all the shader bakes in — a plane's normal and constant are uniforms read per
+ * frame. This is what keeps an offset drag free of material writes: the slider
+ * mutates the one plane in place and re-runs this for every set, and an
+ * unconditional `needsUpdate` would recompile every body material on every tick.
+ */
+function applyClipping(set: BodyMaterialSet, planes: THREE.Plane[] | null): void {
+  const after = planes?.length ?? 0;
+  for (const mat of [set.face, set.edge, set.edgeWire] as THREE.Material[]) {
+    const before = mat.clippingPlanes?.length ?? 0;
+    mat.clippingPlanes = planes;
+    if (before !== after) mat.needsUpdate = true;
   }
 }
 

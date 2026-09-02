@@ -51,8 +51,9 @@ function isEditableTarget(el: EventTarget | null): boolean {
   );
 }
 
-/** Esc ladder: cancel active tool → exit isolation → deselect → exit sketch mode
- *  (the last rung reports what it left — see {@link exitSketch}). */
+/** Esc ladder: cancel active tool → exit isolation → exit section view →
+ *  deselect → exit sketch mode (the last rung reports what it left — see
+ *  {@link exitSketch}). */
 function runCancel(): void {
   const tool = toolStore.getState();
   if (activeTool(tool) !== "select") {
@@ -65,6 +66,13 @@ function runCancel(): void {
   const viewport = viewportStore.getState();
   if (viewport.isolatedBodyIds !== null) {
     viewport.exitIsolate();
+    return;
+  }
+  // Section view sits on the same rung of the ladder as isolation, for the same
+  // reason: it is a sticky, hint-announced view mode, and leaving the user cut
+  // in half with no obvious way back is the failure mode being avoided.
+  if (viewport.section.enabled) {
+    viewport.exitSection();
     return;
   }
   const sel = selectionStore.getState();
@@ -249,6 +257,10 @@ export function runAction(action: ShortcutAction): void {
     case "isolate":
       // Isolation stays modeling — it masks BODIES, which the host knows nothing about.
       viewportStore.getState().toggleIsolate();
+      break;
+    case "toggleSection":
+      // Same call the NavPill button makes, so chord and button can never drift.
+      viewportStore.getState().toggleSection();
       break;
     case "home":
       viewportNavigation.home();

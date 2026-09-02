@@ -152,6 +152,58 @@ describe("overlay materials", () => {
  * must never be disposed; edge overlays own the InstancedInterleavedBuffer
  * `setPositions` built for them and leak a GL buffer per hover if they are not.
  */
+describe("setClippingPlanes (section view)", () => {
+  const planes = () => [new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
+
+  it("reaches all FIVE overlay materials, including the ones not drawn yet", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    const p = planes();
+
+    layer.setClippingPlanes(p);
+
+    // Hover + selection, face + edge, at once: that is four of the five, and the
+    // whole-body tint is the fifth.
+    layer.setState({ kind: "edge", id: "body1#e:1", bodyId: "body1", topoKey: "e:1" }, [
+      { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0" },
+      { kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" },
+      { kind: "body", id: "body1" },
+    ]);
+    const mats = new Set<THREE.Material>();
+    d.root.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      if (m) mats.add(m);
+    });
+    expect(mats.size).toBeGreaterThan(0);
+    for (const m of mats) expect(m.clippingPlanes).toBe(p);
+
+    layer.setClippingPlanes(null);
+    for (const m of mats) expect(m.clippingPlanes).toBeNull();
+    layer.dispose();
+  });
+
+  it("recompiles only on a plane COUNT change, and repaints every time", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    layer.setState(null, [{ kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0" }]);
+    const mat = (d.root.children[0] as THREE.Mesh).material as THREE.Material;
+    const p = planes();
+
+    layer.setClippingPlanes(p);
+    const version = mat.version;
+    const repaints = d.invalidate.mock.calls.length; // setState repainted too
+    layer.setClippingPlanes(p);
+    layer.setClippingPlanes(p);
+
+    expect(mat.version).toBe(version);
+    // Still one repaint per call: the plane MOVED even when nothing recompiled.
+    expect(d.invalidate.mock.calls.length).toBe(repaints + 2);
+    layer.dispose();
+  });
+});
+
 describe("geometry ownership on rebuild", () => {
   it("disposes an edge overlay's geometry but never a face overlay's", () => {
     const d = deps();

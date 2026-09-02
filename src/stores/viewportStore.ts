@@ -55,6 +55,58 @@ export interface CursorPlaneCoords {
 /** Sticky status hint shown for the whole time isolation is on. */
 export const ISOLATE_HINT = "Isolation on — Esc or ⇧I to exit";
 
+/** Sticky status hint shown for the whole time the section view is on. */
+export const SECTION_HINT = "Section view on — Esc or ⇧X to exit";
+
+/** Refusal shown when the backend cannot clip at all (experimental WebGPU). */
+export const SECTION_UNSUPPORTED_HINT =
+  "Section view is unavailable on the experimental WebGPU renderer";
+
+/** The three world planes a section cut can run along (its normal's axis). */
+export type SectionPlaneId = "XY" | "XZ" | "YZ";
+
+/**
+ * TRANSIENT section (cut-away) view. Never persisted and never a document fact:
+ * it clips what the VIEWPORT draws and writes nothing, exactly like
+ * {@link ViewportState.isolatedBodyIds}. `plane`/`offsetMm`/`flip` survive a
+ * toggle so re-enabling returns to the cut the user set up, and the cut is
+ * turned OFF on document close (`resetDocumentScopedUi`) — a plane positioned
+ * against the outgoing model means nothing against the incoming one.
+ */
+export interface SectionState {
+  enabled: boolean;
+  plane: SectionPlaneId;
+  /** Distance along the plane's axis, in MILLIMETRES (the document unit). */
+  offsetMm: number;
+  /** Keep the other half of the model instead. */
+  flip: boolean;
+}
+
+export const SECTION_DEFAULT: SectionState = {
+  enabled: false,
+  plane: "XY",
+  offsetMm: 0,
+  flip: false,
+};
+
+/**
+ * Where the cut should start on a given plane: the MIDDLE of the scene along
+ * that plane's axis.
+ *
+ * Not 0. The unflipped cut keeps `axis · p <= offset`, so a plain
+ * sketch-on-XY-then-extrude body — which occupies z ∈ [0, depth] — is discarded
+ * ENTIRELY by a cut at the origin: an empty viewport, no cross-section, and no
+ * cap to explain it, recoverable only by finding the slider. Seeding from the
+ * scene means turning the section on always cuts THROUGH something.
+ *
+ * `null` from the engine (no bodies, or no engine yet) falls back to 0, which is
+ * the only defensible guess with nothing to measure.
+ */
+function seededOffset(plane: SectionPlaneId): number {
+  const range = getViewportEngine()?.sectionOffsetRange(plane) ?? null;
+  return range ? (range.min + range.max) / 2 : 0;
+}
+
 /** Non-sticky hints self-clear after this long. */
 export const AUTO_DISMISS_MS = 4000;
 
@@ -118,6 +170,12 @@ export interface ViewportState {
    */
   isolatedBodyIds: string[] | null;
   /**
+   * TRANSIENT section view (see {@link SectionState}). Read by `ViewportRoot`,
+   * which drives BOTH body-material owners plus the engine's `SectionLayer` —
+   * the same two-owner shape the theme refresh has.
+   */
+  section: SectionState;
+  /**
    * True while the document is READY but at least one visible body has no
    * scene object yet (the open-to-first-mesh window). Owned by `MeshIngest`
    * (`src/viewport/mesh/meshSync.ts`); drives the "Rebuilding geometry…" chip.
@@ -167,6 +225,19 @@ export interface ViewportState {
    * document close) runs after the preview has already been cancelled.
    */
   toggleIsolate(): void;
+  /**
+   * ⇧X / the NavPill button / the Layers row: turn the section view on or off.
+   * REFUSED on the WebGPU backend, which ignores `material.clippingPlanes`.
+   */
+  toggleSection(): void;
+  /** Which world plane the cut runs along. Leaves the offset alone. */
+  setSectionPlane(plane: SectionPlaneId): void;
+  /** Move the cut along its axis (mm) — called once per slider/drag tick. */
+  setSectionOffset(offsetMm: number): void;
+  /** Keep the other half. */
+  flipSection(): void;
+  /** Leave the section view (Esc ladder, document close). Idempotent. */
+  exitSection(): void;
   /** Set (no-op-guarded to avoid render churn) whether geometry is still loading. */
   setGeometryPending(pending: boolean): void;
 }
@@ -192,6 +263,7 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
   statusHintSeq: 0,
   pendingExtrudeSketch: null,
   isolatedBodyIds: null,
+  section: SECTION_DEFAULT,
   geometryPending: false,
 
   setPendingExtrude(sketchId) {
@@ -282,6 +354,51 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
     if (getViewportEngine()?.hasPreviewHiddenBodies()) return;
     if (get().isolatedBodyIds !== null) get().exitIsolate();
     else get().isolateSelection();
+  },
+
+  toggleSection() {
+    // The NavPill button is disabled on WebGPU, but ⇧X is not — and turning on a
+    // cut that cannot cut (three's WebGPU materials ignore clippingPlanes) would
+    // announce a section that never appears. Say so instead.
+    if (getViewportEngine()?.isWebGPU) {
+      get().setStatusHint(SECTION_UNSUPPORTED_HINT, { severity: "error" });
+      return;
+    }
+    if (get().section.enabled) get().exitSection();
+    else {
+      // Re-seeded on every enable, which also stops a stale offset from the
+      // PREVIOUS document surviving into this one (the plane/offset deliberately
+      // outlive a toggle, so nothing else would reset them).
+      set((s) => ({
+        section: { ...s.section, enabled: true, offsetMm: seededOffset(s.section.plane) },
+      }));
+      get().setStatusHint(SECTION_HINT, { sticky: true });
+    }
+  },
+
+  setSectionPlane(plane) {
+    if (get().section.plane === plane) return;
+    // The offset was measured along the OLD axis, so carrying it over would put
+    // the cut somewhere the user never asked for — and 0 can be entirely off the
+    // model. Re-seed to the middle of the scene along the NEW axis.
+    set((s) => ({ section: { ...s.section, plane, offsetMm: seededOffset(plane) } }));
+  },
+
+  setSectionOffset(offsetMm) {
+    if (!Number.isFinite(offsetMm) || get().section.offsetMm === offsetMm) return;
+    set((s) => ({ section: { ...s.section, offsetMm } }));
+  },
+
+  flipSection() {
+    set((s) => ({ section: { ...s.section, flip: !s.section.flip } }));
+  },
+
+  exitSection() {
+    if (!get().section.enabled) return;
+    set((s) => ({ section: { ...s.section, enabled: false } }));
+    // Clear only OUR hint — same rule as exitIsolate: a tool that armed while
+    // the section was on has already published its own prompt.
+    if (get().statusHint?.message === SECTION_HINT) get().setStatusHint(null);
   },
 
   setGeometryPending(pending) {

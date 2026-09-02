@@ -66,6 +66,8 @@ import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
 import { lightRigPose, type LightRigPose } from "./lightRig";
 import { GhostLayer, type GhostInstances } from "./GhostLayer";
+import { SectionLayer, sectionOffsetRange } from "./SectionLayer";
+import type { SectionPlaneId, SectionState } from "@/stores/viewportStore";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
 import { buildBodyObject, type BodyObjectHandle } from "./BodyObject";
@@ -272,6 +274,9 @@ export class ViewportEngine {
   private autoFitTimer: ReturnType<typeof setTimeout> | null = null;
   private grid: GridPlane | null = null;
   private triad: OriginTriad | null = null;
+  private section: SectionLayer | null = null;
+  /** Last section state applied — reported verbatim by `debugSnapshot`. */
+  private sectionState: SectionState | null = null;
   private readonly overlayDriver = new HtmlOverlayDriver();
   readonly bodiesRoot = new THREE.Group();
   /**
@@ -442,6 +447,16 @@ export class ViewportEngine {
     );
     this.scene.add(this.triad.object3D);
 
+    // Built eagerly (like the grid) rather than on first use: it must be in
+    // applyTheme()'s list from the first frame, and it costs one hidden group
+    // plus three materials until the user actually cuts something.
+    this.section = new SectionLayer({
+      root: this.scene,
+      getBodiesRoot: () => this.bodiesRoot,
+      getBounds: this.getSceneBounds,
+      invalidate: () => this.invalidate(),
+    });
+
     this.controls = new CadOrbitControls({
       rig: this.rig,
       element: this.canvas,
@@ -471,6 +486,10 @@ export class ViewportEngine {
         return { w: width * dpr, h: height * dpr };
       },
       invalidate: () => this.invalidate(),
+      // Section view: a hit on geometry the cut removed is not on screen, so it
+      // must not be pickable either (Picker.raycast drops it and takes the next
+      // survivor — clicking through the cut selects the exposed interior).
+      getClippingPlanes: () => this.sectionClippingPlanes(),
       isActive: () => this.pickHandlers?.isActive() ?? false,
       onHover: (hit, x, y, alt) => this.pickHandlers?.onHover(hit, x, y, alt),
       onPick: (hit, mods, x, y) => this.pickHandlers?.onPick(hit, mods, x, y),
@@ -545,6 +564,7 @@ export class ViewportEngine {
     this.triad?.setColors({ x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() });
 
     this.highlights?.refreshColors();
+    this.section?.refreshColors();
     this.planePicker?.refreshColors();
     this.contributions.applyTheme();
     this.regionPickLayer?.refreshColors();
@@ -583,6 +603,7 @@ export class ViewportEngine {
       bodiesChildren: this.bodiesRoot.children.length,
       sceneChildren: this.scene.children.length,
       gridVisible: this.grid?.object3D.visible,
+      section: this.sectionDebug(),
       bounds: bounds
         ? { min: bounds.min.toArray(), max: bounds.max.toArray() }
         : null,
@@ -846,6 +867,9 @@ export class ViewportEngine {
         worldPerPixel(camera, this.transformGizmo.worldAnchor(), height),
       );
     }
+    // Before the draw: the cut's stencil pairs mirror whatever bodies are
+    // visible RIGHT NOW (no-op while the section is off).
+    this.section?.update();
     this.rendererHandle.renderer.render(this.scene, camera);
     // The arrow is oriented and scaled just above, so its box is current for this
     // frame — chips that opted in are pushed clear of it inside `update`.
@@ -1046,6 +1070,92 @@ export class ViewportEngine {
     this.invalidate();
   }
 
+  // ---- Section view (capped clipping) ----
+
+  /**
+   * Apply the store's section state and return the clipping planes the BODY
+   * materials must hold (`null` = unclipped).
+   *
+   * The engine can only reach ONE of the two `BodyMaterialLibrary` instances —
+   * its own preview library — so the caller (`ViewportRoot`) feeds the returned
+   * array to `MeshIngest`'s committed-body library as well. Same two-owner shape
+   * as the theme refresh, and for the same reason: neither owner can see the
+   * other.
+   *
+   * WebGPU has no clipping path here (three's WebGPU materials ignore
+   * `clippingPlanes`), so the section is refused outright rather than half
+   * applied — the UI disables the control on that backend.
+   */
+  setSection(state: SectionState): THREE.Plane[] | null {
+    if (this.isWebGPU) return null;
+    this.sectionState = state;
+    this.section?.setState(state);
+    const planes = this.section?.clippingPlanes() ?? null;
+    // Everything the engine owns that draws BODY geometry — the preview body
+    // library, the selection/hover overlays and the pattern/mirror ghosts. The
+    // overlays matter most: they are `depthTest: false`, so an unclipped
+    // selection made before the cut paints in the empty half.
+    //
+    // ACCEPTED: an L2 preview body reads HOLLOW inside a cut. It is clipped like
+    // a committed body but gets no stencil pair — `SectionLayer` mirrors
+    // `bodiesRoot` only — so the union cap does not cover it and you see through
+    // to its back faces. Capping a shape that is still being dragged would mean
+    // rebuilding the stencil set per preview frame, which is real work on the
+    // drag path for a body the user is about to replace anyway.
+    this.previewMaterials?.setClippingPlanes(planes);
+    this.highlights?.setClippingPlanes(planes);
+    this.ghostLayer?.setClippingPlanes(planes);
+    return planes;
+  }
+
+  /** The live clipping planes (the Picker reads these to reject cut-away hits). */
+  sectionClippingPlanes(): THREE.Plane[] | null {
+    return this.section?.clippingPlanes() ?? null;
+  }
+
+  /** The offset span of the current scene along `plane`'s axis — the slider range. */
+  sectionOffsetRange(plane: SectionPlaneId): { min: number; max: number } | null {
+    return sectionOffsetRange(this.getSceneBounds(), plane);
+  }
+
+  /** `?vpdebug` probe: what the section is actually doing to the scene. */
+  private sectionDebug(): Record<string, unknown> {
+    const state = this.sectionState;
+    return {
+      enabled: state?.enabled ?? false,
+      plane: state?.plane ?? null,
+      offsetMm: state?.offsetMm ?? 0,
+      flip: state?.flip ?? false,
+      // Counted off the SCENE, not off a library the engine happens to hold: the
+      // fan-out reaching the committed bodies is the thing that can silently
+      // fail, so the probe has to read the materials those bodies draw with.
+      clippedMaterials: this.countClippedMaterials(this.bodiesRoot),
+      clippedOverlays: this.countClippedMaterials(this.interactionRoot),
+      capVisible: this.section?.capVisible ?? false,
+    };
+  }
+
+  /**
+   * Distinct clipped materials actually in the scene, by root.
+   *
+   * `interactionRoot` is counted separately and deliberately: the highlight
+   * overlays are the one family that lives outside both material libraries, so
+   * "the cut reached the bodies" and "the cut reached the selection drawn on
+   * top of them" are two different claims and an e2e has to be able to tell
+   * them apart.
+   */
+  private countClippedMaterials(root: THREE.Object3D): number {
+    const seen = new Set<THREE.Material>();
+    root.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      if (!m) return;
+      for (const mat of Array.isArray(m) ? m : [m]) {
+        if (mat.clippingPlanes && mat.clippingPlanes.length > 0) seen.add(mat);
+      }
+    });
+    return seen.size;
+  }
+
   homeView(): void {
     this.controls?.homeView(true);
   }
@@ -1201,6 +1311,9 @@ export class ViewportEngine {
     // Every OTHER sketch steps back while this one is edited (audit item #9),
     // and the debug origin pill stops sitting on the sketch origin (item #16).
     this.sketchStatic?.setSessionActive(true);
+    // Dimmed bodies render in the TRANSPARENT pass and would paint over the cut
+    // cap; the clip itself stays on (renderOrder.ts rule 4).
+    this.section?.setSketchActive(true);
     this.setDebugOriginVisible(false);
     // The sketch grid inherits the STORED preference before the first frame,
     // and the world grid steps aside for it (SNAP §10.4).
@@ -1450,6 +1563,7 @@ export class ViewportEngine {
     this.sketch?.dispose();
     this.sketch = null;
     this.sketchStatic?.setSessionActive(false);
+    this.section?.setSketchActive(false);
     this.setDebugOriginVisible(true);
     // Hand the grid back to the world plane at the preference the user left it
     // at — sketch mode borrowed the surface, it did not change the setting.
@@ -1563,6 +1677,11 @@ export class ViewportEngine {
    * WHY a body is hidden (isolation vs the tree eye) must re-check its own store.
    */
   probeMaterial(origin: Vec3, dir: Vec3): MaterialProbeHit | null {
+    // DELIBERATELY blind to the section view. This answers "is there solid
+    // material along this ray", which decides how an extrude is planned — a
+    // MODELLING fact. A view filter must never change what an operation does,
+    // so unlike `Picker.raycast` (where the question is "what can the user
+    // see and click") the clipping planes are not consulted here.
     if (this.disposed) return null;
     const d = new THREE.Vector3().fromArray(dir);
     if (d.lengthSq() < 1e-12) return null;
@@ -1816,6 +1935,9 @@ export class ViewportEngine {
     if (this.disposed) return;
     if (!this.ghostLayer) {
       this.ghostLayer = new GhostLayer({ root: this.interactionRoot, invalidate: () => this.invalidate() });
+      // Born AFTER the section was enabled ⇒ starts unclipped (same trap as the
+      // preview material library below).
+      this.ghostLayer.setClippingPlanes(this.sectionClippingPlanes());
     }
     this.ghostLayer.showMulti(items);
   }
@@ -1966,7 +2088,12 @@ export class ViewportEngine {
    */
   setPreviewBody(entry: MeshEntry): void {
     if (this.disposed) return;
-    if (!this.previewMaterials) this.previewMaterials = new BodyMaterialLibrary();
+    if (!this.previewMaterials) {
+      this.previewMaterials = new BodyMaterialLibrary();
+      // A library born AFTER the section was enabled starts unclipped, which
+      // would leave an L2 preview body whole inside a cut-open model.
+      this.previewMaterials.setClippingPlanes(this.sectionClippingPlanes());
+    }
     const prev = this.previewBodies.get(entry.bodyId);
     if (prev) this.previewRoot.remove(prev.group);
     const handle = buildBodyObject(entry, this.previewMaterials);
@@ -2283,6 +2410,10 @@ export class ViewportEngine {
 
     this.triad?.dispose();
     this.triad = null;
+
+    this.section?.dispose();
+    this.section = null;
+    this.sectionState = null;
 
     this.overlayDriver.clear();
     this.cameraListeners.clear();

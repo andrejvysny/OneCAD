@@ -10,6 +10,12 @@
  * neither has a free mnemonic). Nothing existing moved: the only overlap is ⇧H,
  * which sketch mode previously reached only through the cross-mode fallback to
  * the model Hole tool; model ⇧H = Hole is unchanged.
+ *
+ * AMENDED 2026-09-01 (Section view WP, a deliberate PRODUCT change, not a probe
+ * fix — recorded in TODO.md § DAILY DRIVER v2 keymap table): the model table
+ * gains ⇧X = `toggleSection`. ⇧X was free in BOTH tables; sketch mode's plain
+ * `x` (construction) is untouched, and neither action is a `tool`, so the
+ * cross-mode fallback cannot carry either one into the other mode.
  */
 import type { KeyBinding } from "@/shortcuts/keymap";
 import type { Tool } from "@/stores/toolStore";
@@ -32,6 +38,7 @@ export const MODEL_KEYS_CONTRACT: readonly KeyBinding[] = [
   { key: "g", shift: true, action: { type: "tool", tool: "gear" } },
   { key: "?", shift: true, action: { type: "tool", tool: "measure" } },
   { key: "i", shift: true, action: { type: "isolate" } },
+  { key: "x", shift: true, action: { type: "toggleSection" } },
 ];
 
 export const SKETCH_KEYS_CONTRACT: readonly KeyBinding[] = [

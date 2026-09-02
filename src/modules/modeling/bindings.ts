@@ -65,6 +65,11 @@ export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
   // fallback can never fire it while drawing — isolating bodies mid-sketch would
   // hide the very geometry the sketch is being drawn against.
   { key: "i", shift: true, action: { type: "isolate" }, scope: "model" },
+  // Section view (2026-09-01). MODEL-scoped and NOT a `tool` action, same shape
+  // as Isolate: cutting the model open mid-sketch would clip the very geometry
+  // the sketch is being drawn against. Plain `x` is sketch mode's construction
+  // toggle and is likewise not a tool, so the two never reach each other.
+  { key: "x", shift: true, action: { type: "toggleSection" }, scope: "model" },
 
   // ── sketch ─────────────────────────────────────────────────────────────────
   { key: "v", action: tool("select"), scope: "sketch" },

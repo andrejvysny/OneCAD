@@ -41,6 +41,12 @@ function dirtyDocumentScopedUi(): void {
   // Isolation names bodies of the OUTGOING document (W3) — a carried-over set
   // would hide every body of the incoming one, since no id can match.
   viewportStore.setState({ isolatedBodyIds: ["body1"] });
+  // Same class as isolation, one step out: the section plane was positioned
+  // against the OUTGOING model's extents, so carrying it over can open the
+  // incoming document already cut in half (or, worse, cut entirely away).
+  viewportStore.setState({
+    section: { enabled: true, plane: "XZ", offsetMm: 12, flip: true },
+  });
 }
 
 function expectDocumentScopedUiClean(): void {
@@ -54,6 +60,7 @@ function expectDocumentScopedUiClean(): void {
   expect(sketchStore.getState().conflictingIds).toEqual([]);
   expect(toolChipStore.getState().kind).toBe("none");
   expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+  expect(viewportStore.getState().section.enabled).toBe(false);
 }
 
 describe("resetDocumentScopedUi", () => {

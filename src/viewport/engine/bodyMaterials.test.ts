@@ -295,3 +295,95 @@ describe("BodyMaterialLibrary face color", () => {
     lib.dispose();
   });
 });
+
+describe("BodyMaterialLibrary.setClippingPlanes (section view)", () => {
+  const plane = () => [new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
+
+  it("reaches the face AND both edge materials of every live set", () => {
+    const lib = new BodyMaterialLibrary();
+    const standard = lib.get("standard");
+    const vertex = lib.get("shadedVertex");
+    const planes = plane();
+
+    lib.setClippingPlanes(planes);
+
+    for (const set of [standard, vertex]) {
+      // edgeWire is the trap: the mode not currently drawn still has to be
+      // clipped, or pressing the wireframe button un-cuts the model.
+      expect(set.face.clippingPlanes).toBe(planes);
+      expect(set.edge.clippingPlanes).toBe(planes);
+      expect(set.edgeWire.clippingPlanes).toBe(planes);
+    }
+    lib.dispose();
+  });
+
+  it("a set built AFTER the section was enabled is born clipped", () => {
+    const lib = new BodyMaterialLibrary();
+    const planes = plane();
+    lib.setClippingPlanes(planes);
+
+    // A render-mode switch reaches a kind for the first time…
+    const late = lib.get("shadedVertex");
+    expect(late.face.clippingPlanes).toBe(planes);
+    expect(late.edgeWire.clippingPlanes).toBe(planes);
+
+    // …and so does an assembly-colored body arriving mid-section (the LAZY map).
+    const assembly = lib.getAssemblyColor("body-late");
+    expect(assembly.face.clippingPlanes).toBe(planes);
+    expect(assembly.edge.clippingPlanes).toBe(planes);
+    expect(assembly.edgeWire.clippingPlanes).toBe(planes);
+    lib.dispose();
+  });
+
+  it("reaches an assembly set created BEFORE the section, and null unclips everything", () => {
+    const lib = new BodyMaterialLibrary();
+    const shared = lib.get("standard");
+    const assembly = lib.getAssemblyColor("body1");
+    const planes = plane();
+
+    lib.setClippingPlanes(planes);
+    expect(assembly.face.clippingPlanes).toBe(planes);
+
+    lib.setClippingPlanes(null);
+    for (const set of [shared, assembly]) {
+      expect(set.face.clippingPlanes).toBeNull();
+      expect(set.edge.clippingPlanes).toBeNull();
+      expect(set.edgeWire.clippingPlanes).toBeNull();
+    }
+    lib.dispose();
+  });
+
+  it("recompiles ONLY when the plane count changes — a drag tick writes no material", () => {
+    const lib = new BodyMaterialLibrary();
+    const { face, edge, edgeWire } = lib.get("standard");
+    const planes = plane();
+
+    lib.setClippingPlanes(planes); // 0 → 1 plane: the shader bakes the count
+    const afterFirst = [face.version, edge.version, edgeWire.version];
+
+    // Five more applications of the SAME array — what an offset drag does, once
+    // per tick, for every live set. The plane itself is mutated in place and is
+    // read as a uniform, so nothing here may recompile.
+    for (let i = 0; i < 5; i++) lib.setClippingPlanes(planes);
+    expect([face.version, edge.version, edgeWire.version]).toEqual(afterFirst);
+
+    // …and clearing them (1 → 0) does bump it again, so the guard is a COUNT
+    // check and not a blanket "never recompile".
+    lib.setClippingPlanes(null);
+    expect(face.version).toBeGreaterThan(afterFirst[0]);
+    lib.dispose();
+  });
+
+  it("keeps the assembly body color and the dim state it was already carrying", () => {
+    const lib = new BodyMaterialLibrary();
+    lib.setDimmed(true);
+    const assembly = lib.getAssemblyColor("body1");
+    const colorHex = assembly.face.color.getHex();
+
+    lib.setClippingPlanes(plane());
+
+    expect(assembly.face.color.getHex()).toBe(colorHex);
+    expect(assembly.face.transparent).toBe(true);
+    lib.dispose();
+  });
+});

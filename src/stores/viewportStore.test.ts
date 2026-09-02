@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { viewportStore, AUTO_DISMISS_MS, ISOLATE_HINT } from "./viewportStore";
+import {
+  viewportStore,
+  AUTO_DISMISS_MS,
+  ISOLATE_HINT,
+  SECTION_DEFAULT,
+  SECTION_HINT,
+  SECTION_UNSUPPORTED_HINT,
+} from "./viewportStore";
 import { selectionStore, type EntityRef } from "./selectionStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
@@ -77,6 +84,8 @@ function fakeEngine(previewHidden = false) {
     fitView: vi.fn(),
     fitToBodies: vi.fn(),
     hasPreviewHiddenBodies: vi.fn(() => previewHidden),
+    // The section seeds its offset from the scene; default to "no bodies".
+    sectionOffsetRange: vi.fn((): { min: number; max: number } | null => null),
   };
   setViewportEngine(engine as unknown as ViewportEngine);
   return engine;
@@ -197,5 +206,143 @@ describe("viewportStore isolate", () => {
     engine.hasPreviewHiddenBodies.mockReturnValue(true);
     viewportStore.getState().toggleIsolate();
     expect(viewportStore.getState().isolatedBodyIds).toEqual(["bodyA"]); // still isolated
+  });
+});
+
+describe("viewportStore section (transient cut-away)", () => {
+  const section = () => viewportStore.getState().section;
+  beforeEach(() => {
+    viewportStore.setState({ section: SECTION_DEFAULT });
+    set(null);
+  });
+  afterEach(() => {
+    viewportStore.setState({ section: SECTION_DEFAULT });
+    set(null);
+  });
+
+  it("starts off, on XY, at the origin", () => {
+    expect(section()).toEqual({ enabled: false, plane: "XY", offsetMm: 0, flip: false });
+  });
+
+  it("toggles on with the sticky hint and back off, clearing it", () => {
+    viewportStore.getState().toggleSection();
+    expect(section().enabled).toBe(true);
+    expect(hint()).toEqual({ message: SECTION_HINT, severity: "info", sticky: true });
+
+    viewportStore.getState().toggleSection();
+    expect(section().enabled).toBe(false);
+    expect(hint()).toBeNull();
+  });
+
+  it("keeps the plane and flip across a toggle; the OFFSET is re-seeded on enable", () => {
+    fakeEngine(); // no bodies ⇒ the seed is 0
+    viewportStore.getState().toggleSection();
+    viewportStore.getState().setSectionPlane("YZ");
+    viewportStore.getState().setSectionOffset(12);
+    viewportStore.getState().flipSection();
+    viewportStore.getState().toggleSection();
+
+    // Off: nothing is thrown away, so the menu still shows the cut it had.
+    expect(section()).toEqual({ enabled: false, plane: "YZ", offsetMm: 12, flip: true });
+
+    // On again: plane and flip are the user's CHOICE and survive, but the offset
+    // is re-measured against whatever is in the scene now (see the seeding tests
+    // below) — 12 mm may not intersect this document at all.
+    viewportStore.getState().toggleSection();
+    expect(section()).toEqual({ enabled: true, plane: "YZ", offsetMm: 0, flip: true });
+  });
+
+  it("changing the plane re-seeds the offset — it was measured along the OLD axis", () => {
+    fakeEngine(); // no bodies ⇒ range null ⇒ 0
+    viewportStore.getState().setSectionOffset(9);
+    viewportStore.getState().setSectionPlane("XZ");
+    expect(section()).toMatchObject({ plane: "XZ", offsetMm: 0 });
+  });
+
+  /*
+   * The offset SEEDING, which is what keeps the feature from erasing an ordinary
+   * part: a body extruded up from the XY plane occupies z ∈ [0, depth], and the
+   * unflipped cut keeps `z <= offset` — so a cut seeded at 0 discards the whole
+   * body, caps nothing (the stencil sums to zero) and leaves an empty viewport
+   * that only the slider can undo.
+   */
+  it("seeds the offset to the MIDDLE of the scene on enable, not to the origin", () => {
+    const engine = fakeEngine();
+    engine.sectionOffsetRange.mockReturnValue({ min: 0, max: 20 });
+
+    viewportStore.getState().toggleSection();
+
+    expect(engine.sectionOffsetRange).toHaveBeenCalledWith("XY");
+    expect(section()).toMatchObject({ enabled: true, offsetMm: 10 });
+  });
+
+  it("re-seeds along the NEW axis when the plane changes", () => {
+    const engine = fakeEngine();
+    engine.sectionOffsetRange.mockReturnValue({ min: 0, max: 20 });
+    viewportStore.getState().toggleSection();
+
+    engine.sectionOffsetRange.mockReturnValue({ min: -50, max: -10 });
+    viewportStore.getState().setSectionPlane("YZ");
+
+    expect(engine.sectionOffsetRange).toHaveBeenLastCalledWith("YZ");
+    expect(section()).toMatchObject({ plane: "YZ", offsetMm: -30 });
+  });
+
+  it("re-seeds on every enable, so a stale offset cannot survive into a new document", () => {
+    const engine = fakeEngine();
+    engine.sectionOffsetRange.mockReturnValue({ min: 0, max: 20 });
+    viewportStore.getState().toggleSection();
+    viewportStore.getState().setSectionOffset(19);
+    viewportStore.getState().toggleSection(); // off; the offset is deliberately kept
+
+    engine.sectionOffsetRange.mockReturnValue({ min: 100, max: 140 });
+    viewportStore.getState().toggleSection();
+
+    expect(section()).toMatchObject({ enabled: true, offsetMm: 120 });
+  });
+
+  it("falls back to 0 with nothing in the scene to measure", () => {
+    fakeEngine(); // range null
+    viewportStore.getState().toggleSection();
+    expect(section().offsetMm).toBe(0);
+  });
+
+  it("no-ops on an unchanged plane or offset (a drag tick must not churn state)", () => {
+    const before = section();
+    viewportStore.getState().setSectionPlane("XY");
+    viewportStore.getState().setSectionOffset(0);
+    expect(section()).toBe(before); // same object ⇒ no subscriber fired
+  });
+
+  it("rejects a non-finite offset", () => {
+    viewportStore.getState().setSectionOffset(Number.NaN);
+    expect(section().offsetMm).toBe(0);
+  });
+
+  it("refuses on the WebGPU backend — a cut that cannot cut is announced, not shown", () => {
+    const engine = fakeEngine();
+    (engine as unknown as { isWebGPU: boolean }).isWebGPU = true;
+
+    viewportStore.getState().toggleSection();
+
+    expect(section().enabled).toBe(false);
+    expect(hint()).toEqual({
+      message: SECTION_UNSUPPORTED_HINT,
+      severity: "error",
+      sticky: false,
+    });
+    setViewportEngine(null);
+  });
+
+  it("exitSection is idempotent and leaves a FOREIGN hint alone", () => {
+    set("Drag the arrow to set depth", { sticky: true });
+    viewportStore.getState().exitSection();
+    expect(hint()?.message).toBe("Drag the arrow to set depth");
+
+    viewportStore.getState().toggleSection();
+    set("Select a face to measure", { sticky: true });
+    viewportStore.getState().exitSection();
+    expect(section().enabled).toBe(false);
+    expect(hint()?.message).toBe("Select a face to measure");
   });
 });

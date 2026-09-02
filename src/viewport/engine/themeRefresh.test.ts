@@ -23,6 +23,7 @@ import { TransformGizmo } from "./TransformGizmo";
 import { PreviewMesh } from "./PreviewMesh";
 import { RevolvePreview } from "./RevolvePreview";
 import { DatumLayer, datumGhostPlane } from "./DatumLayer";
+import { SectionLayer } from "./SectionLayer";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import {
   buildBodyObjects,
@@ -328,6 +329,42 @@ describe("refreshColors picks up a theme flip", () => {
     // rebuild under the new theme with an edge hovered so the cyan pair shows.
     layer.setState({ kind: "edge", id: "body1#e:1", bodyId: "body1", topoKey: "e:1" }, []);
     expectNoLightLeftovers(d.root, lightOnly);
+    layer.dispose();
+  });
+
+  it("SectionLayer leaves no light-theme color behind on the cut cap", () => {
+    // The cap material is the ONLY palette reader in the layer, and it is built
+    // once in the constructor — so a missing entry in ViewportEngine.applyTheme()
+    // leaves a cut surface wearing the previous theme's metal until the user
+    // toggles the section off and on. Negative-checked by neutering
+    // `SectionLayer.refreshColors()` and confirming this goes red.
+    const lightOnly = lightOnlyHexes();
+    setTheme("light");
+    const root = new THREE.Group();
+    const layer = new SectionLayer({
+      root,
+      // A visible body face mesh, so the stencil pair is built too and the
+      // traversal below is not looking at the cap alone.
+      getBodiesRoot: () => {
+        const bodies = new THREE.Group();
+        const face = new THREE.Mesh(
+          new THREE.BoxGeometry(1, 1, 1),
+          new THREE.MeshStandardMaterial(),
+        );
+        face.userData = { bodyId: "body1", kind: "face" };
+        bodies.add(face);
+        return bodies;
+      },
+      getBounds: () => new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1)),
+      invalidate: vi.fn(),
+    });
+    layer.setState({ enabled: true, plane: "XY", offsetMm: 0, flip: false });
+    layer.update();
+
+    setTheme("dark");
+    layer.refreshColors();
+
+    expectNoLightLeftovers(root, lightOnly);
     layer.dispose();
   });
 

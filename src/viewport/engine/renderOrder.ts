@@ -30,11 +30,35 @@
  *    is untouched: sketch hit-testing is plane math, not a raycast, and body
  *    picking reads neither renderOrder nor depthTest.
  *
+ * 4. renderOrder ORDERS WITHIN A LIST, it does not move an object between them.
+ *    The section-view cut cap depends on that: its stencil pair, the cap quad
+ *    and the body faces must be drawn in that sequence, which the tiers below
+ *    guarantee only while all three sit in the OPAQUE list. Sketch mode dims the
+ *    body face material (`BodyMaterialLibrary.setDimmed` sets transparent:true),
+ *    which moves every body into the TRANSPARENT list — drawn after the cap, on
+ *    top of it, at 0.35 opacity. There is no tier that can fix that, so
+ *    `SectionLayer` hides the cap (clipping stays) for as long as a sketch
+ *    session is open.
+ *
  * Ties are fine when the objects never overlap or the later look is
  * order-independent.
  */
 export const RENDER_ORDER = {
   // ---- opaque pass ----
+  /**
+   * Section view (capped clipping), in draw sequence and all BELOW the grid so
+   * the whole cut is resolved before anything else paints:
+   *   1. back faces of every clipped body INCREMENT the stencil,
+   *   2. front faces DECREMENT it — what is left non-zero is the cross-section,
+   *   3. the cap quad paints exactly there (and resets the stencil to 0).
+   * The stencil pair writes no color and no depth, so its position relative to
+   * the grid is unobservable; the CAP writes depth with a negative polygon
+   * offset, which is what keeps the coplanar Z=0 grid from stippling through a
+   * cap on the XY plane at offset 0.
+   */
+  SECTION_STENCIL_BACK: -4,
+  SECTION_STENCIL_FRONT: -3,
+  SECTION_CAP: -2,
   /** Ground grid + sketch-plane grid. depthWrite MUST stay false. */
   GRID: -1,
   /** Origin triad — above the grid, depth-tested against bodies. */

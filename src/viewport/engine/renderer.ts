@@ -64,16 +64,30 @@ async function webGpuAvailable(): Promise<boolean> {
   }
 }
 
+/**
+ * The WebGL context attributes, exported so the unit suite can pin them without
+ * a GL context (jsdom has none). Two of the four are load-bearing:
+ *
+ * - `preserveDrawingBuffer` — on-demand rendering means the last frame must keep
+ *   displaying while idle, and `ViewportEngine.captureThumbnail` reads it back.
+ *   Without it a demand-driven canvas composites blank between renders.
+ * - `stencil` — three asks for a stencil buffer by DEFAULT, but stating it here
+ *   makes the dependency explicit: `SectionLayer`'s capped cut is a stencil
+ *   algorithm and silently degrades to an uncapped hole without one.
+ */
+export const WEBGL_CONTEXT_ATTRS = {
+  antialias: true,
+  powerPreference: "high-performance",
+  preserveDrawingBuffer: true,
+  stencil: true,
+} as const;
+
 function createWebGl(canvas: HTMLCanvasElement): RendererHandle {
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    powerPreference: "high-performance",
-    // On-demand rendering: retain the drawing buffer so the last frame keeps
-    // displaying while idle (and is captured by screenshots/thumbnails). Without
-    // this a demand-driven canvas composites blank between renders.
-    preserveDrawingBuffer: true,
-  });
+  const renderer = new THREE.WebGLRenderer({ canvas, ...WEBGL_CONTEXT_ATTRS });
+  // Material-local clipping planes (`material.clippingPlanes`, which is how
+  // section view clips ONLY the committed bodies) are skipped ENTIRELY when this
+  // is false — no warning, no error, just an unclipped scene. Off by default.
+  renderer.localClippingEnabled = true;
   renderer.setClearColor(palette.clear(), 1);
   // Studio look: Neutral (Khronos PBR neutral) compresses highlights without the
   // filmic color shift ACES imposes, so a body's albedo token still reads as

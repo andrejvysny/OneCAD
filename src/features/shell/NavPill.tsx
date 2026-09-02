@@ -7,6 +7,7 @@ import { Icon } from "@/icons/Icon";
 import type { IconName } from "@/icons/paths";
 import { useViewportStore } from "@/stores/viewportStore";
 import { selectedBodyIds, useSelectionStore } from "@/stores/selectionStore";
+import { useViewportEngine } from "@/viewport/engineBridge";
 
 function NavButton({
   icon,
@@ -16,6 +17,7 @@ function NavButton({
   disabled = false,
   onClick,
   ref,
+  testId,
 }: {
   icon: IconName;
   label: string;
@@ -25,12 +27,14 @@ function NavButton({
   disabled?: boolean;
   onClick: () => void;
   ref?: Ref<HTMLButtonElement>;
+  testId?: string;
 }) {
   return (
     <Tooltip label={label}>
       <button
         ref={ref}
         type="button"
+        data-testid={testId}
         aria-label={label}
         aria-pressed={active}
         disabled={disabled}
@@ -56,15 +60,20 @@ function NavButton({
  * presets. Zoom-to-fit is Shift+F because plain F is the Fillet tool (see keymap
  * note), so the tooltip reads "(⇧F)".
  *
- * Isolate is a TRANSIENT view state (viewportStore), never a document write — it
- * shows the pressed treatment while on, and is disabled when there is nothing to
- * isolate (no body-shaped selection) and nothing to leave.
+ * Isolate and Section are TRANSIENT view states (viewportStore), never document
+ * writes — each shows the pressed treatment while on. Isolate is disabled when
+ * there is nothing to isolate (no body-shaped selection) and nothing to leave;
+ * Section is disabled on the WebGPU backend, whose materials ignore
+ * `clippingPlanes` entirely (there is no cut to show).
  */
 export function NavPill() {
   const zoomFit = useViewportStore((s) => s.zoomFit);
   const homeView = useViewportStore((s) => s.homeView);
   const toggleIsolate = useViewportStore((s) => s.toggleIsolate);
   const isolated = useViewportStore((s) => s.isolatedBodyIds !== null);
+  const toggleSection = useViewportStore((s) => s.toggleSection);
+  const sectionOn = useViewportStore((s) => s.section.enabled);
+  const noSectionSupport = useViewportEngine()?.isWebGPU ?? false;
   const hasBodySelection = useSelectionStore((s) => selectedBodyIds(s.selected).length > 0);
   const layersOpen = useLayersStore((s) => s.open);
   const toggleLayers = useLayersStore((s) => s.toggleOpen);
@@ -81,6 +90,25 @@ export function NavPill() {
         active={isolated}
         disabled={!isolated && !hasBodySelection}
         onClick={toggleIsolate}
+      />
+      <NavButton
+        // Shares the datum glyph deliberately: a section IS a plane, the icon
+        // family has no cut-away master, and no datum button appears in this
+        // pill — so the two never sit side by side. Swap it the day a section
+        // glyph is drawn.
+        icon="plane"
+        testId="nav-section"
+        label={
+          noSectionSupport
+            ? "Section view — unavailable on the WebGPU backend"
+            : sectionOn
+              ? "Exit section view (⇧X)"
+              : "Section view (⇧X)"
+        }
+        strokeWidth={1.6}
+        active={sectionOn}
+        disabled={noSectionSupport}
+        onClick={toggleSection}
       />
       <NavButton
         ref={layersBtn}

@@ -120,6 +120,22 @@ export class GhostLayer {
     this.material.color.copy(palette.hoverAccent());
   }
 
+  /**
+   * Section view: clip the ghost clones (`null` = unclipped).
+   *
+   * A pattern/mirror ghost is a copy of a REAL body, so it has to obey the same
+   * cut the original does — otherwise the tool previews solid clones floating in
+   * the half the user just removed. The L1 previews that are NOT body copies
+   * (prism, revolve shell, drag handles) stay unclipped on purpose: half an
+   * armed preview is worse than an inconsistent one.
+   */
+  setClippingPlanes(planes: THREE.Plane[] | null): void {
+    const before = this.material.clippingPlanes?.length ?? 0;
+    this.material.clippingPlanes = planes;
+    if (before !== (planes?.length ?? 0)) this.material.needsUpdate = true;
+    this.deps.invalidate();
+  }
+
   /** Show translucent clones of `entry`'s geometry at each transform. */
   show(entry: MeshEntry, transforms: GhostTransform[]): void {
     this.showMulti([{ entry, transforms }]);

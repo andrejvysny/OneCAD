@@ -3,7 +3,7 @@
  *
  * Model:  V select · S new-sketch (enters sketch mode) · D datum plane · E extrude
  *         · R revolve · F fillet · B combine/boolean · K shell · ⇧O offset face
- *         · T move/rotate body · ⇧I isolate selection
+ *         · T move/rotate body · ⇧I isolate selection · ⇧X section view
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
  *         · O ellipse · ⇧O offset · A arc · ⇧A 3-point arc · G polygon · S slot
  *         · P point
@@ -78,6 +78,10 @@
  *     old cross-mode `⇧O`-in-model-mode → sketch-offset fallback (which STARTED A
  *     SKETCH): with a face selected, ⇧O in model mode now means "offset that
  *     face", which is what a modeller pressing it there is asking for.
+ *   - `⇧X` (section view) is an exact shift chord in the MODEL table. Sketch mode
+ *     owns plain `x` (construction geometry), and that is a `toggleConstruction`
+ *     action, not a `tool`, so neither key can cross the mode boundary: ⇧X while
+ *     drawing does nothing rather than slicing the model the sketch sits on.
  *   - `⇧H`/`⇧V`/`⇧C`/`⇧E`/`⇧P`/`⇧M` (constraint apply, plan item 6 — the
  *     Shapr3D Shift+letter convention) are sketch-scoped `applyConstraint`
  *     actions, NOT `tool` actions, so the cross-mode fallback can never leak
@@ -108,6 +112,7 @@ export type ShortcutAction =
   | { type: "cancel" }
   | { type: "zoomFit" }
   | { type: "isolate" }
+  | { type: "toggleSection" }
   | { type: "home" };
 
 export interface KeyBinding {

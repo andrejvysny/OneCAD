@@ -580,6 +580,33 @@ export function ViewportRoot({ className }: { className?: string }) {
           }),
         );
 
+        // ── Section view (transient cut-away) ──
+        // ONE subscriber for the same reason the theme has one: the clip has to
+        // reach BOTH `BodyMaterialLibrary` owners — the engine's preview library
+        // (which `setSection` handles itself) and MeshIngest's committed-body
+        // library, which the engine cannot see. Seeded immediately so a section
+        // left on across an engine remount comes back clipped.
+        let lastSection = viewportStore.getState().section;
+        const applySection = (state: typeof lastSection) => {
+          // Switching to the experimental WebGPU backend REMOUNTS the engine, so
+          // a section enabled under WebGL arrives here on a renderer that cannot
+          // clip. The engine refuses it; without this the store would stay on —
+          // pressed button, sticky "Section view on" hint, uncut model.
+          if (engine.isWebGPU && state.enabled) {
+            viewportStore.getState().exitSection();
+            return;
+          }
+          meshIngest.setClippingPlanes(engine.setSection(state));
+        };
+        applySection(lastSection);
+        cleanups.push(
+          viewportStore.subscribe((s) => {
+            if (s.section === lastSection) return;
+            lastSection = s.section;
+            applySection(s.section);
+          }),
+        );
+
         // store → engine (viewport layers). Seeded once, then diffed, for the
         // same reason the grid is: the subscriber fires on EVERY store write.
         let lastLayers = layersStore.getState().visible;
