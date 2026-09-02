@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementIndex;
-use onecad_core::document::record::{FilletParams, KnownOperation, Operation, OperationRecord};
+use onecad_core::document::record::{
+    FilletParams, HoleParams, HoleType, KnownOperation, Operation, OperationRecord,
+    HOLE_RESULT_POLICY_VERSION,
+};
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef};
 use onecad_core::document::variables::Scalar;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
@@ -652,6 +655,55 @@ fn h5_stamped_intent_history_prefix_hash_is_golden() {
     assert_eq!(
         hash.to_string(),
         "53b231a27191a637f6bb95d927d8f8765b3c78d0904a6ffbda34fc3dc619ac48"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-T1 (commit N) — a BASE, unthreaded Hole's golden history-prefix hash,
+// pinned BEFORE `HoleParams::thread` exists. Commit N+1 adds the field with
+// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a record
+// with no `thread` must serialize byte-identically to this one — this hash
+// MUST NOT move, and that is the falsifiable half of the byte-identity claim.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A canonical SIMPLE blind hole (SCHEMA §7.3 `Hole`), independent of
+/// `common::op_hole()` (this file has no `mod common;`) but built from the
+/// same field values.
+fn base_hole_record() -> OperationRecord {
+    let op = Operation::Known(KnownOperation::Hole(HoleParams {
+        target_body: BodyId(Uuid::from_u128(0xB0D1)),
+        face: ElementRef {
+            primary: Some(PrimaryRef {
+                body: BodyId(Uuid::from_u128(0xB0D1)),
+                element: ElementId::new("el_face_top"),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        },
+        point: Vec3::new_unchecked(25.0, 10.0, 30.0),
+        hole_type: HoleType::Simple,
+        diameter: Scalar::new(5.5),
+        depth: Some(Scalar::new(20.0)),
+        cb_diameter: None,
+        cb_depth: None,
+        cs_diameter: None,
+        cs_angle_deg: None,
+        thread: None,
+        result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
+        extra: Default::default(),
+    }));
+    OperationRecord::new(rid(0x605), 0, "Hole 1", op)
+}
+
+#[test]
+fn hole_base_history_prefix_hash_is_golden() {
+    let hash = history_prefix_hash(&[base_hole_record()]);
+    assert_eq!(
+        hash.to_string(),
+        "cf8f35ac17e8c07fc773797df9c26ce403ef68d5c849851a748a06e676e09524"
     );
 }
 

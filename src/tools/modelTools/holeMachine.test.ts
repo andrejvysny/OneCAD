@@ -215,6 +215,91 @@ describe("holeStep — standards presets", () => {
   });
 });
 
+describe("holeStep — thread (WP-T1)", () => {
+  const M6_THREAD = {
+    standard: "ISO261" as const,
+    designation: "M6x1",
+    majorDiameterMm: 6,
+    pitchMm: 1.0,
+    depthMm: null,
+    detail: "cosmetic" as const,
+  };
+
+  it("is null on a fresh arm and absent from holeParamsOf", () => {
+    const s = armed();
+    expect(s.thread).toBeNull();
+    expect(holeParamsOf(s)).not.toHaveProperty("thread");
+  });
+
+  it("setThread sets it, and holeParamsOf carries it verbatim", () => {
+    const next = holeStep(armed(), { kind: "setThread", thread: M6_THREAD }).state;
+    expect(next.thread).toEqual(M6_THREAD);
+    expect(holeParamsOf(next).thread).toEqual(M6_THREAD);
+  });
+
+  it("setThread with null clears an existing thread", () => {
+    const threaded = holeStep(armed(), { kind: "setThread", thread: M6_THREAD }).state;
+    const cleared = holeStep(threaded, { kind: "setThread", thread: null }).state;
+    expect(cleared.thread).toBeNull();
+    expect(holeParamsOf(cleared)).not.toHaveProperty("thread");
+  });
+
+  it("survives a holeType flip untouched — ORTHOGONAL to cb*/cs*", () => {
+    let s = holeStep(armed(), { kind: "setThread", thread: M6_THREAD }).state;
+    s = holeStep(s, { kind: "setHoleType", holeType: "counterbore" }).state;
+    expect(s.thread).toEqual(M6_THREAD);
+    s = holeStep(s, { kind: "setHoleType", holeType: "countersink" }).state;
+    expect(s.thread).toEqual(M6_THREAD);
+  });
+
+  it("a threaded standards pick fills BOTH the tap-drill diameter and the thread", () => {
+    const patch = holeStandardPatch("M6", "normal", "simple", true)!;
+    const next = holeStep(armed(), { kind: "applyStandard", patch }).state;
+    expect(next.diameter).toBe(5.0); // tap drill, not the ISO 273 clearance Ø
+    expect(next.thread).toEqual(M6_THREAD);
+  });
+
+  it("an UNTHREADED standards pick clears a prior thread", () => {
+    const threaded = holeStep(armed(), { kind: "setThread", thread: M6_THREAD }).state;
+    const patch = holeStandardPatch("M8", "normal", "simple")!;
+    const next = holeStep(threaded, { kind: "applyStandard", patch }).state;
+    expect(next.thread).toBeNull();
+  });
+
+  it("holeFsmFromParams round-trips a stored thread block", () => {
+    const seeded = holeFsmFromParams({
+      targetBodyId: "b",
+      face: { primary: { bodyId: "b", elementId: "e", kind: "face" } },
+      point: [0, 0, 0],
+      holeType: "simple",
+      diameter: 5.0,
+      depth: null,
+      thread: {
+        standard: "ISO261",
+        designation: "M6x1",
+        majorDiameterMm: 6,
+        pitchMm: { value: 1.0 },
+        depthMm: null,
+        detail: "cosmetic",
+      },
+    });
+    expect(seeded!.thread).toEqual(M6_THREAD);
+    expect(holeParamsOf(seeded!).thread).toEqual(M6_THREAD);
+  });
+
+  it("an absent stored thread seeds null (unthreaded)", () => {
+    const seeded = holeFsmFromParams({
+      targetBodyId: "b",
+      face: { primary: { bodyId: "b", elementId: "e", kind: "face" } },
+      point: [0, 0, 0],
+      holeType: "simple",
+      diameter: 6,
+      depth: null,
+    });
+    expect(seeded!.thread).toBeNull();
+  });
+});
+
 describe("holeFsmFromParams — re-edit seed", () => {
   it("restores every field, including the frozen seat", () => {
     const seeded = holeFsmFromParams({
@@ -300,5 +385,11 @@ describe("holeValueText", () => {
     expect(holeValueText(5.5)).toBe("Ø5.5");
     expect(holeValueText(6)).toBe("Ø6.0");
     expect(holeValueText(13.5)).toBe("Ø13.5");
+  });
+
+  it("appends the designation for a threaded hole (WP-T1)", () => {
+    expect(holeValueText(5.0, "M6x1")).toBe("Ø5.0 · M6x1");
+    // No designation ⇒ the unthreaded form, byte-identical to before WP-T1.
+    expect(holeValueText(5.0, undefined)).toBe("Ø5.0");
   });
 });

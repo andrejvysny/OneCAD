@@ -667,6 +667,7 @@ fn hole_record_at(seed: u128, body: BodyId, face: &str, anchor: Vec3) -> Operati
         cb_depth: None,
         cs_diameter: None,
         cs_angle_deg: None,
+        thread: None,
         result_policy_version: Some(2),
         extra: Default::default(),
     }));

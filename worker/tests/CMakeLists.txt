@@ -703,6 +703,18 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/chamfer_angle_distance.ndjson
 )
+# SCHEMA §7.3 `Hole.thread` (WP-T1) — cosmetic tapped hole. Pins that a threaded
+# hole and its unthreaded reference produce the IDENTICAL matcher character for
+# character (Option B: `params.diameter` is the drilled hole either way, and the
+# worker reads nothing else from `thread`), plus the two `detail` preflight
+# refusals (`HOLE_THREAD_DETAIL_UNSUPPORTED`/`_UNKNOWN`) and the head surviving
+# both. The volume identity itself is measured in test_hole_op.cpp.
+add_test(
+    NAME canonical_hole_threaded
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/hole_threaded.ndjson
+)
 # SCHEMA §7.4 `entityStates` (per-entity constrained state) — and the FIRST canonical
 # fixture to drive the sketch solver lane at all. Round 1 is the load-bearing one: one
 # under-constrained sketch in which the line is fully constrained and the circle is

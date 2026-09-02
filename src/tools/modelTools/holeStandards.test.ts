@@ -56,6 +56,41 @@ describe("holeStandards — ISO 273 clearance columns", () => {
   });
 });
 
+describe("holeStandards — ISO 261 pitch / tap-drill columns (WP-T1)", () => {
+  /**
+   * ISO 261 coarse-pitch series, hand-transcribed independently of
+   * `HOLE_STANDARDS` and cross-referenced against BOTH other in-repo copies:
+   * `worker/src/ops/FastenerTables.cpp` `iso4762_table()` and
+   * `src-tauri/crates/onecad-library/src/tables/iso4762.rs` `ISO4762_ROWS`
+   * (three-copy drift risk — a transcription error in any one is caught here).
+   */
+  const ISO_261_PITCH: Record<string, number> = {
+    M3: 0.5,
+    M4: 0.7,
+    M5: 0.8,
+    M6: 1.0,
+    M8: 1.25,
+    M10: 1.5,
+    M12: 1.75,
+  };
+
+  it.each(Object.entries(ISO_261_PITCH))("%s pitch matches ISO 261", (thread, pitchMm) => {
+    const size = holeStandard(thread);
+    expect(size!.pitchMm).toBe(pitchMm);
+    // tapDrillMm is the derived Option B geometry: nominal − pitch.
+    expect(size!.tapDrillMm).toBeCloseTo(size!.nominal - pitchMm, 10);
+  });
+
+  it("keeps every tap drill BELOW its own ISO 273 close clearance", () => {
+    // The tap drill removes less material than even the TIGHTEST clearance
+    // hole of the same nominal — otherwise Option B's "diameter IS the drill"
+    // would silently oversize the thread.
+    for (const s of HOLE_STANDARDS) {
+      expect(s.tapDrillMm, `${s.thread} tap drill`).toBeLessThan(s.clearance.close);
+    }
+  });
+});
+
 describe("holeStandards — recess columns", () => {
   it("keeps every counterbore/countersink WIDER than its own clearance hole", () => {
     // The backend refuses `cbDiameter <= diameter` / `csDiameter <= diameter`
@@ -110,5 +145,39 @@ describe("holeStandardPatch", () => {
   it("refuses an unknown thread rather than guessing a size", () => {
     expect(holeStandardPatch("M7", "normal", "simple")).toBeUndefined();
     expect(holeStandard("M42")).toBeUndefined();
+  });
+
+  describe("threaded (WP-T1)", () => {
+    it("fills the TAP-DRILL diameter and a cosmetic ISO 261 thread block", () => {
+      const p = holeStandardPatch("M6", "normal", "simple", true);
+      expect(p).toEqual({
+        diameter: 5.0,
+        thread: {
+          standard: "ISO261",
+          designation: "M6x1",
+          majorDiameterMm: 6,
+          pitchMm: 1.0,
+          depthMm: null,
+          detail: "cosmetic",
+        },
+      });
+    });
+
+    it("ignores `fit` — a threaded hole has no clearance-series choice", () => {
+      expect(holeStandardPatch("M6", "close", "simple", true)).toEqual(
+        holeStandardPatch("M6", "normal", "simple", true),
+      );
+    });
+
+    it("is Simple-only — counterbore/countersink refuse rather than mix profiles", () => {
+      expect(holeStandardPatch("M6", "normal", "counterbore", true)).toBeUndefined();
+      expect(holeStandardPatch("M6", "normal", "countersink", true)).toBeUndefined();
+    });
+
+    it("trims a non-integer pitch without a trailing zero", () => {
+      expect(holeStandardPatch("M8", "normal", "simple", true)!.thread!.designation).toBe(
+        "M8x1.25",
+      );
+    });
   });
 });

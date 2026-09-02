@@ -454,6 +454,71 @@ void test_determinism() {
     check(volume[0] == volume[1], "determinism: volume bit-equal across runs");
 }
 
+// ── 9. WP-T1 `thread` — Option B geometry identity + the detail preflight ────
+// `params.diameter` IS the drilled hole, threaded or not: a threaded hole must
+// remove EXACTLY the same volume as an unthreaded one at the same diameter,
+// because the worker reads nothing from `thread` for geometry.
+void test_threaded_hole_is_volume_identical_to_unthreaded() {
+    const json thread{{"standard", "ISO261"},   {"designation", "M6x1"},
+                      {"majorDiameterMm", 6.0}, {"pitchMm", 1.0},
+                      {"depthMm", nullptr},     {"detail", "cosmetic"}};
+    BodyStore plain_bodies, threaded_bodies;
+    em::ElementMapPartition plain_part, threaded_part;
+    const ops::OpOutcome plain = run_hole(plain_bodies, plain_part, json{{"depth", 10.0}});
+    const ops::OpOutcome threaded =
+        run_hole(threaded_bodies, threaded_part, json{{"depth", 10.0}, {"thread", thread}});
+    check(plain.status == ops::OpOutcome::Status::Ok, "threaded identity: plain Ok");
+    check(threaded.status == ops::OpOutcome::Status::Ok, "threaded identity: threaded Ok");
+    check_rel(vol(threaded_bodies.get("body_1")->geom), vol(plain_bodies.get("body_1")->geom),
+              1e-12, "threaded == unthreaded volume at equal diameter (Option B geometry)");
+}
+
+// Table-driven, same shape as `test_conditional_invariants` above.
+void test_thread_detail_refusals() {
+    struct Case {
+        json thread;
+        const char* reason_code;
+        const char* what;
+    };
+    auto thread_with_detail = [](const char* detail) {
+        return json{{"standard", "ISO261"},   {"designation", "M6x1"},
+                    {"majorDiameterMm", 6.0}, {"pitchMm", 1.0},
+                    {"depthMm", nullptr},     {"detail", detail}};
+    };
+    json thread_no_detail = thread_with_detail("cosmetic");
+    thread_no_detail.erase("detail");
+    const std::vector<Case> cases = {
+        {thread_with_detail("simplified"), "HOLE_THREAD_DETAIL_UNSUPPORTED",
+         "simplified is not implemented"},
+        {thread_with_detail("modeled"), "HOLE_THREAD_DETAIL_UNSUPPORTED",
+         "modeled is not implemented"},
+        {thread_with_detail("tapered"), "HOLE_THREAD_DETAIL_UNKNOWN", "unknown spelling"},
+        {thread_no_detail, "HOLE_THREAD_DETAIL_UNKNOWN", "absent detail beside a present thread"},
+    };
+    for (const Case& c : cases) {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome oc =
+            run_hole(bodies, part, json{{"depth", 10.0}, {"thread", c.thread}});
+        check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+              std::string("thread detail (") + c.what + "): recoverable OP_FAILED");
+        check(!oc.diagnostics.empty() &&
+                  oc.diagnostics.front().value("reasonCode", "") == c.reason_code &&
+                  oc.diagnostics.front().value("stage", "") == "preflight",
+              std::string("thread detail (") + c.what + "): reasonCode " + c.reason_code);
+        check_rel(vol(bodies.get("body_1")->geom), kBoxVol, 1e-12,
+                  std::string("thread detail (") + c.what + "): host untouched");
+    }
+    // "cosmetic" is implemented and drills normally (not a refusal).
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const ops::OpOutcome oc = run_hole(
+            bodies, part, json{{"depth", 10.0}, {"thread", thread_with_detail("cosmetic")}});
+        check(oc.status == ops::OpOutcome::Status::Ok, "thread detail (cosmetic): Ok");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -468,6 +533,8 @@ int main() {
     test_result_policy_versions();
     test_quarantined_host_is_not_modelable();
     test_determinism();
+    test_threaded_hole_is_volume_identical_to_unthreaded();
+    test_thread_detail_refusals();
     if (g_failures == 0) std::fprintf(stderr, "test_hole_op: all checks passed\n");
     return g_failures;
 }

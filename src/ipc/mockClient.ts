@@ -1308,8 +1308,9 @@ function mutateOp(op: OperationOp): {
     const bodyId = op.params.targetBodyId || op.inputs?.[0]?.primary.bodyId || "body1";
     const featureId = op.featureId ?? nextFeatureId();
     // ONE formatter, shared with the tool layer, mirroring `dto.rs
-    // feature_value_text` for Hole exactly (`Ø` + one decimal).
-    const valueText = holeValueText(op.params.diameter);
+    // feature_value_text` for Hole exactly (`Ø` + one decimal, plus the WP-T1
+    // designation when threaded).
+    const valueText = holeValueText(op.params.diameter, op.params.thread?.designation);
     const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(op.params.diameter, "diameter") } : f));
@@ -2127,7 +2128,15 @@ function featureValueForParams(
     }
     case "Hole": {
       const d = scalarValue(params.diameter);
-      return d === undefined ? none : dimensioned(params.diameter, holeValueText(d), d, "diameter");
+      if (d === undefined) return none;
+      // WP-T1: `thread.designation`, read defensively off the raw wire params
+      // (untyped here, unlike `HoleParams["thread"]` in the typed op builders).
+      const thread = params.thread;
+      const designation =
+        thread && typeof thread === "object" && typeof (thread as { designation?: unknown }).designation === "string"
+          ? (thread as { designation: string }).designation
+          : undefined;
+      return dimensioned(params.diameter, holeValueText(d, designation), d, "diameter");
     }
     case "OffsetFace": {
       const d = scalarValue(params.distance);

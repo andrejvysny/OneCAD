@@ -1926,13 +1926,16 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
         // A hole's one identifying number is its DRILL diameter — the counterbore
         // /countersink dimensions dress it but never change what fastener it takes.
         // Diameter-prefixed (`Ø`) rather than " mm"-suffixed so the row cannot be
-        // misread as a length; the unit is mm document-wide.
-        KnownOperation::Hole(p) => FeatureValue::dimensioned(
-            format!("Ø{:.1}", p.diameter.value),
-            p.diameter.value,
-            "diameter",
-        )
-        .bound(&p.diameter),
+        // misread as a length; the unit is mm document-wide. A threaded hole
+        // (WP-T1) appends its designation — `Ø5.0 · M6x1` — because the drilled
+        // diameter alone no longer names the fastener the hole takes.
+        KnownOperation::Hole(p) => {
+            let text = match &p.thread {
+                Some(t) => format!("Ø{:.1} · {}", p.diameter.value, t.designation),
+                None => format!("Ø{:.1}", p.diameter.value),
+            };
+            FeatureValue::dimensioned(text, p.diameter.value, "diameter").bound(&p.diameter)
+        }
         // An offset's one identifying number is its `distance`, but WHAT that
         // number means is `distanceType`'s to say — so the row is prefixed the way
         // the user typed it (`Ø` / `R` for the absolute cylindrical forms, the Hole
@@ -2360,6 +2363,26 @@ mod tests {
             }
         }));
         check(&hole, "Ø6.0", Some(6.0), Some("diameter"));
+
+        // A threaded hole (WP-T1) appends its designation — the drilled Ø alone
+        // no longer names the fastener; `primary`/`primaryKind` stay the drilled
+        // diameter (the row's editable number is unchanged).
+        let threaded_hole = from_json(serde_json::json!({
+            "opType": "Hole",
+            "params": {
+                "targetBodyId": "00000000-0000-0000-0000-000000000001",
+                "face": { "primary": { "bodyId": "00000000-0000-0000-0000-000000000001",
+                                       "elementId": "el_face_top", "kind": "face" } },
+                "point": [0.0, 0.0, 0.0],
+                "holeType": "simple",
+                "diameter": 5.0,
+                "depth": null,
+                "thread": { "standard": "ISO261", "designation": "M6x1",
+                            "majorDiameterMm": 6.0, "pitchMm": 1.0,
+                            "depthMm": null, "detail": "cosmetic" }
+            }
+        }));
+        check(&threaded_hole, "Ø5.0 · M6x1", Some(5.0), Some("diameter"));
 
         // A gear's row is text-only, DELIBERATELY not `dimensioned`: `displayValue`
         // (`HistoryList.tsx`) prefers `primary`+`primary_kind` over `text` outright

@@ -9,10 +9,10 @@ use uuid::Uuid;
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, CircularPatternParams,
     ComponentParamValue, ComponentSourceRef, DeterminismSettings, ExtrudeMode, ExtrudeParams,
-    FilletParams, FrozenPlacement, ImportSourceCodec, KnownOperation, LinearPatternParams,
-    LoftParams, MirrorBodyParams, OffsetDistanceType, OffsetFaceParams, OpaqueOperation, Operation,
-    OperationRecord, PlaceComponentParams, PlaneKind, RevolveParams, ShellParams, SketchOpParams,
-    SketchPlaneRef, SweepParams,
+    FilletParams, FrozenPlacement, HoleParams, HoleType, ImportSourceCodec, KnownOperation,
+    LinearPatternParams, LoftParams, MirrorBodyParams, OffsetDistanceType, OffsetFaceParams,
+    OpaqueOperation, Operation, OperationRecord, PlaceComponentParams, PlaneKind, RevolveParams,
+    ShellParams, SketchOpParams, SketchPlaneRef, SweepParams, HOLE_RESULT_POLICY_VERSION,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, IntentQuery, LocalFrame, PrimaryRef,
@@ -317,6 +317,43 @@ pub fn op_sweep() -> Operation {
     }))
 }
 
+/// A face ref on `body_a` (the host face a Hole is machined into) — identity
+/// only, no intent/anchor, mirroring `hole_face_ref()` in `record.rs`'s own
+/// test module.
+pub fn hole_face_ref() -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body: body_a(),
+            element: ElementId::new("el_face_top"),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: None,
+        extra: Default::default(),
+    }
+}
+
+/// A canonical SIMPLE blind hole (SCHEMA §7.3 `Hole`) — the base, unthreaded
+/// case (WP-T1 byte-identity commit N).
+pub fn op_hole() -> Operation {
+    Operation::Known(KnownOperation::Hole(HoleParams {
+        target_body: body_a(),
+        face: hole_face_ref(),
+        point: v3(25.0, 10.0, 30.0),
+        hole_type: HoleType::Simple,
+        diameter: Scalar::new(5.5),
+        depth: Some(Scalar::new(20.0)),
+        cb_diameter: None,
+        cb_depth: None,
+        cs_diameter: None,
+        cs_angle_deg: None,
+        thread: None,
+        result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
+        extra: Default::default(),
+    }))
+}
+
 pub fn op_mirror() -> Operation {
     Operation::Known(KnownOperation::MirrorBody(MirrorBodyParams {
         source_body: Some(body_a()),
@@ -543,5 +580,6 @@ pub fn canonical_records() -> Vec<(&'static str, OperationRecord)> {
             "place_component_profile",
             record(18, "Component 2", op_place_component_profile()),
         ),
+        ("hole", record(19, "Hole 1", op_hole())),
     ]
 }

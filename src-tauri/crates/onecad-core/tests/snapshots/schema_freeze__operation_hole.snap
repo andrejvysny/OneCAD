@@ -1,0 +1,57 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ed3",
+  "recordSchemaVersion": 1,
+  "stepIndex": 19,
+  "name": "Hole 1",
+  "opType": "Hole",
+  "params": {
+    "cbDepth": null,
+    "cbDiameter": null,
+    "csAngleDeg": null,
+    "csDiameter": null,
+    "depth": {
+      "value": 20.0
+    },
+    "diameter": {
+      "value": 5.5
+    },
+    "face": {
+      "primary": {
+        "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+        "elementId": "el_face_top",
+        "kind": "face"
+      }
+    },
+    "holeType": "simple",
+    "point": [
+      25.0,
+      10.0,
+      30.0
+    ],
+    "resultPolicyVersion": 2,
+    "targetBodyId": "00000000-0000-0000-0000-00000000b0d1"
+  },
+  "inputs": {
+    "bodies": [
+      "00000000-0000-0000-0000-00000000b0d1"
+    ],
+    "sketches": [],
+    "elements": [
+      "el_face_top"
+    ]
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

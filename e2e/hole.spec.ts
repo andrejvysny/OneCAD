@@ -355,3 +355,47 @@ test("double-clicking the row re-arms the hole seeded from the stored params", a
   await expect.poll(async () => (await holeDebug(page))?.holePoint).not.toBeNull();
   await expect(page.getByTestId("chip-hole-cb-diameter")).toHaveValue("15");
 });
+
+/*
+ * WP-T1 — the thread toggle inside the standards panel. `modeled`/`simplified`
+ * are worker-side refusals with no frontend affordance in T1 (no segment
+ * control for `detail` yet — see HoleChipCluster.tsx), so they are proven at
+ * the protocol layer (protocol/fixtures/hole_threaded.ndjson) and the Rust
+ * layer (hole_ops.rs), never here.
+ */
+test("the thread toggle fills the ISO 261 tap-drill diameter, and the row keeps the designation", async ({
+  page,
+}) => {
+  await armHoleOnBox(page);
+
+  await page.getByTestId("chip-hole-std").click();
+  const toggle = page.getByTestId("chip-hole-thread");
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+  await page.getByTestId("chip-hole-std-M6-thread").click();
+  // Option B: the DRILLED diameter is the ISO 261 tap drill (major − pitch),
+  // never the ISO 273 clearance Ø (6.6) the untreaded M6 pick would fill.
+  await expect.poll(async () => (await holeDebug(page))?.holeDiameter).toBe(5.0);
+  await expect(diameterInput(page)).toHaveValue("5");
+  // The picker is a one-shot filler, not a mode.
+  await expect(page.getByTestId("chip-hole-std-panel")).toHaveCount(0);
+
+  await page.getByTestId("chip-confirm").click();
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
+
+  const { id, label, valueText } = await lastFeature(page);
+  expect(label).toBe("Hole");
+  // Mirrors `dto.rs feature_value_text`'s threaded row exactly: `Ø<drill> · <designation>`.
+  expect(valueText).toBe("Ø5.0 · M6x1");
+
+  await openFullTimeline(page);
+  const row = page.getByTestId(`history-row-${id}`);
+  await expect(row).toBeVisible();
+  await row.dblclick();
+
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("armed");
+  await expect.poll(async () => (await holeDebug(page))?.holeEdit).toBe(id);
+  await expect.poll(async () => (await holeDebug(page))?.holeDiameter).toBe(5.0);
+});

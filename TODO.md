@@ -192,6 +192,72 @@ package.
       (refused at `PlaceComponentParams::validate`, nothing on the timeline). `component_ops`
       **14/14**, `library::` unit tests 22/22.
 
+### WP-V + WP-T1 (2026-09-01/02) — LANDED, shared tip gate below
+- [ ] WP-V section view: LANDED with the FULL STENCIL CAP (no fallback; implementer-measured
+      vitest 311 files / 5465 / 0, section+neighbour e2e 24/24, hex 0; the cap material resets
+      stencil to 0 as it draws — no clear pass needed; per-frame `traverseVisible` reconcile
+      instead of a register hook so tree-eye/isolate/layer filters stay correct; `⇧X` refused
+      with a hint under WebGPU; Esc ladder tool → isolate → section → deselect → exit sketch).
+      **Adversarial review (fresh context): sound with named conditions — stencil algebra
+      hand-verified for seven body configurations, both material owners reached, fat edges
+      clip (`LineMaterial clipping:true`), cap unpickable, idle-zero-frames holds, theme
+      non-vacuity genuinely red-first. Fix round IN FLIGHT:** F1 HIGH default offset 0
+      annihilates a z∈[0,depth] extrude (empty viewport; the origin-centred mock box hid it) →
+      seed offset from `sectionOffsetRange` midpoint on enable/plane-change; F2 HIGH
+      `HighlightLayer`/`GhostLayer` materials escape the clip (a pre-⇧X selection paints in
+      mid-air; edge highlights are `depthTest:false`) → join the fan-out; F3 MEDIUM
+      unconditional `needsUpdate` + `capDirty` defeat the zero-writes drag design (verified
+      `Material.version` 0→5) → bump only on plane-count change, reposition-only on offset;
+      F4 documentLifecycle reset untested; F6 WebGL→WebGPU switch leaves the store claiming a
+      cut; F7 slider-range memo pins null before the first mesh. Notes: keymap-contract line
+      is inert for non-tool actions (pre-existing — ⇧I too); `capVisible` means "a face mesh
+      exists", not "the cap paints".
+      **Fix round LANDED** (implementer-measured: touched suites 12 files / 262; full vitest
+      **311 files / 5499 passed / 78 skipped / 0 failed** (+34); `section-view.spec.ts` 12/12
+      both projects; hex 0): F1 offset seeds from the SCENE bounds midpoint on enable and
+      plane change (scene-level guarantee — the plane always crosses the model's bbox; a
+      single plane cannot promise every body survives; e2e asserts the midpoint seed on an
+      asymmetric fixture, pickability, a parked-outside-bounds counterfactual with NOTHING
+      pickable, and recovery); F2 `HighlightLayer` (5 materials) + `GhostLayer` join the clip
+      fan-out, probe split into `clippedMaterials` vs `clippedOverlays`, select-before-cut
+      covered by unit + e2e; F3 `needsUpdate` only on plane-COUNT change (version pinned over
+      six re-applies) and cap bounds cached behind `boundsDirty` (offset ticks never call
+      `getSceneBounds`); F4 documentLifecycle reset negative-checked (4 red without
+      `exitSection`); F6 a WebGL→WebGPU switch under a live section exits it; F7 slider range
+      read per render + `geometryPending` edge. `capVisible` documented as "cap is drawn".
+      Commit follows with WP-T1 at the shared tip gate.
+- [x] WP-T1 cosmetic threads LANDED (implementer-measured: ctest **161/161** incl.
+      `canonical_hole_threaded` · `hole_ops` 13/0 real-worker (Option B volume identity,
+      round-trip, expression-driven `pitchMm`) · vitest **311 / 5500 / 0** · `e2e/hole.spec.ts`
+      10/10 both projects · coverage **31** rows / contracts **39** rows + 15 negative
+      controls · fmt/clippy/tsc/hex/hygiene clean). **Byte-identity proof:** unthreaded-Hole
+      schema-freeze snapshot + golden `history_prefix_hash`
+      `cf8f35ac17e8c07fc773797df9c26ce403ef68d5c849851a748a06e676e09524` pinned BEFORE the
+      field existed (temporal ordering inside the implementer session; the intended separate
+      commit-N was made impossible by shared files — recorded as a deviation) and re-verified
+      unchanged after. Fixture found a real worker fact en route: re-drilling an accepted
+      hole's exact point refuses with "point lies outside the resolved face boundary" — R5
+      drills a second point. One `git checkout --` used by the implementer to revert an
+      accidental clang-format reflow of `HoleOp.cpp` (the recorded hook hazard).
+- [ ] WP-T1 original scope (for the record): **protocol-auditor pre-audit APPLIED, all
+      recommendations accepted** — B1 vocabulary reuses the SHIPPED `cosmetic|simplified|
+      modeled` spelling (never "modelled" — `thread_detail` already ships it); **geometry rule
+      = Option B**: `params.diameter` IS the drill (FE fills tap-drill = major − pitch, as it
+      fills clearance today), the worker reads NO geometry from `thread` and only refuses
+      non-cosmetic `detail` by name (`HOLE_THREAD_DETAIL_UNSUPPORTED` / `_UNKNOWN`, WP-C
+      diagnostic shape) — Option A would make `diameter` a lie for five shipped consumers
+      (timeline row, inspector primary edit, analytic volume fixtures both tracks, the
+      `cbDiameter > diameter` invariant, the preview mapper); NO `tapDrillMm` field (duplicate
+      of `diameter`); `pitchMm`/`depthMm` drivable Scalars (Length), `majorDiameterMm` plain
+      (a resolved table fact must not drift from its own designation); byte-identity made
+      FALSIFIABLE — the unthreaded Hole schema-freeze snapshot + golden hash literal are
+      authored BEFORE the field exists and land as their own commit; fixture
+      `hole_threaded.ndjson` R1/R2 use the character-identical-matcher trick, R5 pins the
+      Option-B contract (unknown keys + bogus provenance forward-ignored); no `$present`
+      (the Rust stub matcher lacks it — divergence filed as a seam); no `iso261.rs` crate
+      table (the FE pins its literals against the worker's `FastenerTables.cpp:34-38` and
+      `iso4762.rs:20-24` copies — three-copy drift named as the risk).
+
 ### WP-E — expressions + units (in flight, 2026-09-01)
 - [x] E1 evaluator LANDED (implementer-reported: `cargo test -p onecad-core` 344/0 lib + fixture
       replay 2/2; fmt/clippy clean): `onecad-core/src/expr/{mod,lexer,parser,eval,dimension}.rs`
@@ -271,6 +337,17 @@ package.
       the V1 mock message pins in non-golden tests updated to the evaluator's own wording.
       **Seam (pre-existing, recorded):** `DimensionInput` Enter → `commit()` then `blur()` →
       `onBlur` commits again — latent double-commit masked by jsdom + row unmount.
+### Gate — WP-V section view + WP-T1 cosmetic threads (2026-09-02) — gate row
+
+**Gate (measured on the main thread over the COMBINED tree, suites alone, teed; rung FULL
+L3):** ctest **161/161** · fmt/clippy clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+--no-fail-fast` **92 targets / 1433 passed / 0 failed** · tsc clean · `bun run test` **311
+files / 5500 passed / 78 skipped / 0 failed** · hex 0 · coverage **31**/9/16/19 · contracts
+**39**/18 · negative controls OK · stdout hygiene clean · kernelbench `fillet/foundation:t0`
+both backends **136 rows unchanged** + `semantic-compare` OK · `bun run e2e` (both projects,
+retries 0): **514 passed / 0 failed** (29.5 min; suite 500 → 514). Two commits at this gate:
+WP-V (viewport file set) then WP-T1 (+ledgers), in that order.
+
 ### Gate — WP-E: expressions + units (2026-09-01) — LANDED
 
 **Gate (measured on the main thread, suites alone, teed; rung FULL L3):** ctest **160/160** ·

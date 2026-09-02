@@ -1,0 +1,99 @@
+# CANONICAL §7.3 fixture — `Hole.thread` (WP-T1, cosmetic tapped hole).
+#
+# WHAT IS PINNED HERE, AND WHAT DELIBERATELY IS NOT.
+#
+# No measured geometry number appears in this file (`signatures.geometry` is
+# `$hex64`). Option B — `params.diameter` IS the drilled hole, threaded or
+# not, and the worker reads NOTHING from `thread` for geometry — is proven
+# numerically in worker/tests/test_hole_op.cpp
+# (`test_threaded_hole_is_volume_identical_to_unthreaded`), which can measure
+# a solid. Same contract/corpus split the OffsetFace pair and
+# `analyze_edge_op_range` use.
+#
+# What IS pinned here is the protocol shape a Rust or frontend reader branches
+# on: that a threaded Hole produces the IDENTICAL `bodyEvents`/`needsRepair`/
+# `signatures` shape an unthreaded one does (ROUND 1 vs ROUND 2 below — the
+# `expect` `payload` block is CHARACTER-FOR-CHARACTER the same object, proving
+# `thread`'s presence changes nothing about the step's identity bookkeeping),
+# that the two `detail` preflight refusals carry their reasonCode at
+# `stage:"preflight"` (ROUND 3 `HOLE_THREAD_DETAIL_UNSUPPORTED`, ROUND 4
+# `HOLE_THREAD_DETAIL_UNKNOWN`) without moving the head, and that the worker
+# forward-ignores an unknown `thread` key and never range-checks a field it
+# doesn't consume (ROUND 5 — `pitchMm:-1` plus an unknown `handedness` key
+# still drills cleanly; the authoring-side refusal of that same `pitchMm:-1`
+# lives in `record.rs`'s `hole_thread_validation_matrix`, a DIFFERENT trust
+# boundary this fixture does not exercise).
+#
+# ROUND 1's Hole is DISCARDED (never committed) and ROUND 2's — byte-identical
+# send params plus `thread` — is ACCEPTED, so ROUND 3/4/5 run against a host
+# that already has ROUND 2's hole cut into its top face. ROUND 3/4 are
+# preflight refusals (they never reach face resolution, so this is moot for
+# them); ROUND 5 drills at a DIFFERENT point on the same face, because
+# re-drilling ROUND 2's now-permanently-removed location would correctly
+# refuse ("point lies outside the resolved face boundary") — a worker
+# correctness fact discovered by running this fixture against the real
+# worker, not a bug. ROUND 5's `expect` payload is still the exact ROUND 1
+# shape (bodyEvents/needsRepair/signature format), which is the property
+# under test.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_hole_threaded","documentRevision":0,"workerEpoch":5,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The subject: a 10mm square sketch, extruded 10mm Blind/NewBody.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":100,"documentRevision":1,"workerEpoch":5,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"e2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"e3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":2,"stepIndex":0,"jobId":100,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":2,"stepIndex":1,"jobId":100,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":100,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":100,"documentRevision":1,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":100,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# The top face (topoKey f:6 for this shape), bound to a durable id.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"}]}}}
+# HEAD BEFORE. Every round below is compared against this.
+{"send":{"v":1,"t":"req","id":5,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"documentRevision":1,"workerEpoch":5,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# ROUND 1 — UNTHREADED, DISCARDED. The reference matcher: this `payload` block
+# is copied CHARACTER-FOR-CHARACTER as ROUND 2's below.
+{"send":{"v":1,"t":"req","id":6,"verb":"ExecutePlan","args":{"jobId":101,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-7.0,3.0,10.0],"holeType":"simple","diameter":5.0,"depth":8.0}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":6,"stepIndex":2,"jobId":101,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":101,"result":{"planPrepared":true,"preparedSnapshotId":2,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"DiscardPrepared","args":{"jobId":101}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":101,"result":{"discarded":true}}}
+# ROUND 2 — byte-identical SEND params plus `thread` (ISO 261 M6x1 cosmetic).
+# The IDENTICAL matcher, character-for-character. ACCEPTED — the head
+# advances and this hole is now permanent.
+{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":102,"documentRevision":2,"workerEpoch":5,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-7.0,3.0,10.0],"holeType":"simple","diameter":5.0,"depth":8.0,"thread":{"standard":"ISO261","designation":"M6x1","majorDiameterMm":6.0,"pitchMm":1.0,"depthMm":null,"detail":"cosmetic"}}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":8,"stepIndex":2,"jobId":102,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":102,"result":{"planPrepared":true,"preparedSnapshotId":3,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"AcceptPrepared","args":{"jobId":102,"documentRevision":2,"workerEpoch":5}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":102,"result":{"accepted":true,"snapshotId":3,"documentRevision":2}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"documentRevision":2,"workerEpoch":5,"snapshotId":3,"hasScratch":false,"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+# ROUND 3 — `detail:"modeled"` is a KNOWN vocabulary value that is simply not
+# implemented — refused BY NAME at the preflight rung, never silently answered
+# with a plain hole. Head untouched.
+{"send":{"v":1,"t":"req","id":11,"verb":"ExecutePlan","args":{"jobId":103,"documentRevision":3,"workerEpoch":5,"expectedBaseHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-7.0,3.0,10.0],"holeType":"simple","diameter":5.0,"depth":8.0,"thread":{"standard":"ISO261","designation":"M6x1","majorDiameterMm":6.0,"pitchMm":1.0,"depthMm":null,"detail":"modeled"}}}]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":103,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"HOLE_THREAD_DETAIL_UNSUPPORTED","stage":"preflight"}]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"DiscardPrepared","args":{"jobId":103}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":103,"result":{"discarded":true}}}
+# ROUND 4 — `detail:"tapered"` is not a spelling this wire has ever admitted —
+# UNKNOWN, distinct from UNSUPPORTED. Head untouched.
+{"send":{"v":1,"t":"req","id":13,"verb":"ExecutePlan","args":{"jobId":104,"documentRevision":3,"workerEpoch":5,"expectedBaseHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-7.0,3.0,10.0],"holeType":"simple","diameter":5.0,"depth":8.0,"thread":{"standard":"ISO261","designation":"M6x1","majorDiameterMm":6.0,"pitchMm":1.0,"depthMm":null,"detail":"tapered"}}}]}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":104,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","diagnostics":[{"severity":"error","code":"OP_FAILED","reasonCode":"HOLE_THREAD_DETAIL_UNKNOWN","stage":"preflight"}]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"DiscardPrepared","args":{"jobId":104}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":104,"result":{"discarded":true}}}
+# ROUND 5 — `cosmetic` (valid) plus an unknown key (`handedness`) and a
+# provenance value the worker never range-checks (`pitchMm:-1`, refused only
+# at the Rust authoring boundary — see record.rs). Drilled at a DIFFERENT
+# point on the same face (ROUND 2's point is now permanently void material);
+# the `payload` block is the ROUND 1 shape again. DISCARDED.
+{"send":{"v":1,"t":"req","id":15,"verb":"ExecutePlan","args":{"jobId":105,"documentRevision":3,"workerEpoch":5,"expectedBaseHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","prefixHashes":["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],"targetStep":2,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"point":[-3.0,7.0,10.0],"holeType":"simple","diameter":5.0,"depth":8.0,"thread":{"standard":"ISO261","designation":"M6x1","majorDiameterMm":6.0,"pitchMm":-1,"depthMm":null,"detail":"cosmetic","handedness":"left"}}}]}}}
+{"expect":{"v":1,"t":"event","event":"planStep","id":15,"stepIndex":2,"jobId":105,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"jobId":105,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}}
+{"send":{"v":1,"t":"req","id":16,"verb":"DiscardPrepared","args":{"jobId":105}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"jobId":105,"result":{"discarded":true}}}
+# The session survived two refusals and a discarded garbage-key round: the
+# head is still exactly ROUND 2's, field for field.
+{"send":{"v":1,"t":"req","id":17,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"result":{"documentRevision":2,"workerEpoch":5,"snapshotId":3,"hasScratch":false,"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":18,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":18,"ok":true,"result":{"goodbye":true}}}

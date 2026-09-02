@@ -313,6 +313,46 @@ describe("previewOps OP_BUILDERS mirror their commit call sites", () => {
     expect(op.params).toMatchObject({ depth: null, cbDiameter: null, csAngleDeg: null });
   });
 
+  it("Hole (WP-T1) carries a threaded params.thread verbatim (preview==commit single mapper)", () => {
+    const face: SemanticRef = { primary: { bodyId: "b", elementId: "el", kind: "face" } };
+    const thread = {
+      standard: "ISO261" as const,
+      designation: "M6x1",
+      majorDiameterMm: 6.0,
+      pitchMm: 1.0,
+      depthMm: null,
+      detail: "cosmetic" as const,
+    };
+    const op = buildPreviewOp(
+      session({
+        opType: "Hole",
+        latestParams: {
+          targetBodyId: "b",
+          face,
+          point: [0, 0, 0],
+          holeType: "simple",
+          diameter: 5.0,
+          depth: null,
+          thread,
+        },
+      }),
+    );
+    expect(op.params).toMatchObject({ thread });
+  });
+
+  it("Hole thread REFUSES malformed structural values, same house rule as cb*/cs*", () => {
+    const face: SemanticRef = { primary: { bodyId: "b", elementId: "el", kind: "face" } };
+    const base = { targetBodyId: "b", face, point: [0, 0, 0] as [number, number, number], diameter: 6, depth: null, holeType: "simple" as const };
+    const build = (thread: Record<string, unknown>) => () =>
+      buildPreviewOp(
+        session({ opType: "Hole", latestParams: { ...base, thread } as unknown as PreviewParams }),
+      );
+    expect(build({ standard: "ISO68", designation: "M6x1", majorDiameterMm: 6, pitchMm: 1, detail: "cosmetic" })).toThrow(/thread.standard/);
+    expect(build({ standard: "ISO261", designation: "", majorDiameterMm: 6, pitchMm: 1, detail: "cosmetic" })).toThrow(/thread.designation/);
+    expect(build({ standard: "ISO261", designation: "M6x1", majorDiameterMm: 0, pitchMm: 1, detail: "cosmetic" })).toThrow(/majorDiameterMm/);
+    expect(build({ standard: "ISO261", designation: "M6x1", majorDiameterMm: 6, pitchMm: 1, detail: "tapered" })).toThrow(/thread.detail/);
+  });
+
   it("Hole REFUSES the invariants the backend would refuse", () => {
     const face: SemanticRef = { primary: { bodyId: "b", elementId: "el", kind: "face" } };
     const base = { targetBodyId: "b", face, point: [0, 0, 0] as [number, number, number], diameter: 6, depth: null };

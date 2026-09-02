@@ -26,6 +26,7 @@
 #include "elementmap/Ladder.h"
 #include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
+#include "ops/ComponentGenerators.h"
 #include "ops/HoleTool.h"
 #include "ops/OpCommon.h"
 
@@ -65,6 +66,46 @@ bool read_result_policy(const json& params, HoleResultPolicy& policy,
 // worker is an independent trust boundary — a hand-authored plan never passes
 // through the Rust session's validator.
 constexpr double kCsAngles[] = {82.0, 90.0, 100.0, 120.0};
+
+// A `thread.detail` refusal: a RECOVERABLE `OP_FAILED` whose fine-grained
+// reason rides `detail.diagnostics[].reasonCode` (SCHEMA §8) — the SAME
+// WP-C `ComponentOp.cpp::profile_refusal` diagnostic shape, not the bare
+// {severity,code,message,stage} local shape `read_result_policy` uses above.
+OpOutcome thread_detail_refusal(const char* reason_code, const std::string& message) {
+    OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+    failure.diagnostics.push_back({{"severity", "error"},
+                                   {"code", "OP_FAILED"},
+                                   {"message", message},
+                                   {"stage", "preflight"},
+                                   {"reasonCode", reason_code}});
+    return failure;
+}
+
+// SCHEMA §7.3 `Hole.thread` (WP-T1): a PRESENT thread's `detail` is the ONLY
+// thread field this worker reads — every other field is resolved-fact
+// provenance it never consumes (SCHEMA §7.3 the `PlaceComponent`
+// `source.params` precedent). "cosmetic" is implemented; "simplified" /
+// "modeled" are refused BY NAME rather than silently answered with a plain
+// hole, and an unknown or absent `detail` beside a present `thread` is
+// likewise refused (never guessed). Reuses `parse_thread_detail`
+// (ComponentGenerators.h) — one vocabulary, one parser. Absent `thread` ⇒
+// nothing to check (an unthreaded hole; this worker never sees the block).
+std::optional<OpOutcome> read_thread_detail(const json& params) {
+    if (!params.contains("thread") || !params["thread"].is_object()) return std::nullopt;
+    const json& thread = params["thread"];
+    const std::string detail_str = read_str(thread, "detail");
+    ThreadDetail detail;
+    if (!parse_thread_detail(detail_str, detail)) {
+        return thread_detail_refusal("HOLE_THREAD_DETAIL_UNKNOWN",
+                                     "Hole thread.detail '" + detail_str + "' is unknown");
+    }
+    if (detail != ThreadDetail::Cosmetic) {
+        return thread_detail_refusal("HOLE_THREAD_DETAIL_UNSUPPORTED",
+                                     "Hole thread.detail '" + detail_str +
+                                         "' is not implemented (only cosmetic)");
+    }
+    return std::nullopt;
+}
 
 // The host body id: params.targetBodyId, else the first whole-BODY input ref.
 // A face/edge primary is NOT an acceptable fallback (the ExtrudeOp `input_body`
@@ -213,6 +254,13 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
                                        {"message", message},
                                        {"stage", "preflight"}});
         return failure;
+    }
+
+    // WP-T1: `thread.detail` is a preflight, same rung as `resultPolicyVersion`
+    // above — checked before ownership/body resolution, independent of any
+    // geometry this op will build.
+    if (std::optional<OpOutcome> refusal = read_thread_detail(params)) {
+        return std::move(*refusal);
     }
 
     if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {

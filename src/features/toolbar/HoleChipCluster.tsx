@@ -220,9 +220,19 @@ function DimField({
  * numbers into the params and the thread designation is never persisted (SCHEMA
  * §7.3: "standard-size TABLES … are a FRONTEND concern"). See
  * `tools/modelTools/holeStandards.ts` for each column's cited standard.
+ *
+ * `chip-hole-thread` (WP-T1) is the PANEL's own mode toggle — local UI state,
+ * not persisted — that swaps each row's fit pair for a single tap-drill pick.
+ * `detail` is fixed `"cosmetic"` in T1 (the only implemented level), so there
+ * is no segment control for it yet.
  */
-function StandardsPicker({ onPick }: { onPick: (thread: string, fit: HoleFit) => void }) {
+function StandardsPicker({
+  onPick,
+}: {
+  onPick: (thread: string, fit: HoleFit, threaded?: boolean) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [threaded, setThreaded] = useState(false);
   return (
     <span className="pointer-events-auto relative inline-flex">
       <button
@@ -240,15 +250,43 @@ function StandardsPicker({ onPick }: { onPick: (thread: string, fit: HoleFit) =>
           data-testid="chip-hole-std-panel"
           className="absolute left-0 top-full z-10 mt-1 rounded-md border border-border bg-surface p-1 shadow-panel"
         >
+          <button
+            type="button"
+            data-testid="chip-hole-thread"
+            aria-pressed={threaded}
+            title="Fill the ISO 261 tap-drill diameter and a cosmetic thread, instead of an ISO 273 clearance hole"
+            onClick={() => setThreaded((v) => !v)}
+            className={cn(
+              "mb-1 w-full rounded px-1.5 py-0.5 text-left text-[10px] font-medium",
+              threaded ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+            )}
+          >
+            Thread
+          </button>
           <div className="grid grid-cols-[auto_auto_auto] items-center gap-x-1 gap-y-0.5">
             <span aria-hidden className="px-1 text-[10px] font-medium text-ink-4" />
-            {FITS.map((f) => (
-              <span key={f.fit} aria-hidden className="px-1 text-[10px] font-medium text-ink-4">
-                {f.label}
+            {threaded ? (
+              <span
+                aria-hidden
+                className="col-span-2 px-1 text-[10px] font-medium text-ink-4"
+              >
+                Tap drill
               </span>
-            ))}
+            ) : (
+              FITS.map((f) => (
+                <span key={f.fit} aria-hidden className="px-1 text-[10px] font-medium text-ink-4">
+                  {f.label}
+                </span>
+              ))
+            )}
             {HOLE_STANDARDS.map((size) => (
-              <FragmentRow key={size.thread} thread={size.thread} onPick={onPick} setOpen={setOpen} />
+              <FragmentRow
+                key={size.thread}
+                thread={size.thread}
+                threaded={threaded}
+                onPick={onPick}
+                setOpen={setOpen}
+              />
             ))}
           </div>
         </div>
@@ -259,13 +297,33 @@ function StandardsPicker({ onPick }: { onPick: (thread: string, fit: HoleFit) =>
 
 function FragmentRow({
   thread,
+  threaded,
   onPick,
   setOpen,
 }: {
   thread: string;
-  onPick: (thread: string, fit: HoleFit) => void;
+  threaded: boolean;
+  onPick: (thread: string, fit: HoleFit, threaded?: boolean) => void;
   setOpen: (v: boolean) => void;
 }) {
+  if (threaded) {
+    return (
+      <>
+        <span className="col-span-2 px-1 font-mono text-[11px] text-ink-2">{thread}</span>
+        <button
+          type="button"
+          data-testid={`chip-hole-std-${thread}-thread`}
+          onClick={() => {
+            onPick(thread, "normal", true);
+            setOpen(false);
+          }}
+          className="rounded-full bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink-3 hover:bg-hover-2"
+        >
+          ·
+        </button>
+      </>
+    );
+  }
   return (
     <>
       <span className="px-1 font-mono text-[11px] text-ink-2">{thread}</span>
@@ -357,7 +415,13 @@ export function HoleChipCluster() {
           />
         </>
       )}
-      <StandardsPicker onPick={(thread, fit) => toolChipStore.getState().onStandard?.(thread, fit)} />
+      <StandardsPicker
+        onPick={(thread, fit, threaded) =>
+          threaded
+            ? toolChipStore.getState().onStandard?.(thread, fit, threaded)
+            : toolChipStore.getState().onStandard?.(thread, fit)
+        }
+      />
     </>
   );
 }

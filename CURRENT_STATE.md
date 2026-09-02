@@ -38,8 +38,22 @@ Last verified: 2026-09-01 — DAILY DRIVER v2 program started: WP0 hygiene commi
   (adversarial F1). Both lanes honest (TS port parity 64/64 on the shared 53-case fixture).
   Full L3: ctest 160/160 · cargo 92/1426/0 · vitest 5413/0 · e2e 499/1→isolated 2/2 (known
   ledger signature) · kernelbench 136 unchanged.
-- **Next:** WP-V section view (FE-only; stencil caps; `localClippingEnabled` + `stencil:true`;
-  design + review deltas in the plan file). Owed user input: the 2–3 dogfood
+- **WP-V section view LANDED (fourth commit):** stencil-capped cut against XY/XZ/YZ with
+  offset+flip, `⇧X`, NavPill + Layers controls; offset seeds from the scene-bounds midpoint;
+  highlights/ghosts join the clip; picker filters clipped hits then takes the first survivor;
+  cap unpickable, hidden during a sketch session; WebGPU refused with a hint. Adversarially
+  reviewed (stencil algebra hand-verified), two HIGH findings fixed red-first.
+- **WP-T1 cosmetic threaded holes LANDED (fifth commit):** `HoleParams.thread` (presence-
+  discriminated; `cosmetic|simplified|modeled` — the shipped vocabulary; only cosmetic
+  implemented, the worker refuses the rest by name), **Option B**: `diameter` IS the drill
+  (FE fills tap-drill = major − pitch), worker geometry untouched; `pitchMm`/`depthMm`
+  expression-drivable; byte-identity pinned by a pre-field golden
+  (`cf8f35ac…`); fixture `hole_threaded.ndjson` with the identical-matcher trick.
+  Combined tip gate: ctest 161/161 · cargo 92/1433/0 · vitest 5500/0 · e2e **514/0** ·
+  kernelbench 136 unchanged.
+- **Next:** WP-P project edges (wire change; design + review deltas in the plan file:
+  `ProjectToSketchPlane` verb, snapshot+`PROJECTION_STALE` on projected-UV comparison,
+  `promote_selection` promotion, sketch-level `Sketch.projections`, Update/Detach). Owed user input: the 2–3 dogfood
   parts for WP-X; `.clang-format` (`DisableFormat: true`) to neutralise the `auto-format.sh` hook;
   whether to push `3a82910` + the WP-C commit. Owed user-run gates unchanged (19-row checklist,
   Tauri sketch smoke, dirty vendor STEP for G4).

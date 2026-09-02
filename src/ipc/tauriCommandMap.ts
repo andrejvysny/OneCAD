@@ -46,6 +46,8 @@ import type {
   SemanticRef,
   GearParams,
   HoleParams,
+  HoleThreadDetail,
+  HoleThreadStandard,
   ShellParams,
   TransformBodyParams,
 } from "./types";
@@ -150,6 +152,24 @@ type WireVec3 = [number, number, number];
  * countersink" looks like on the wire. `depth: null` is the through-all end
  * condition, not a missing field.
  */
+/**
+ * Rust `HoleThread` (record.rs; SCHEMA §7.3 `Hole.thread`, WP-T1). Emitted
+ * ONLY for a threaded hole — the Rust field is skip-none, so an unthreaded
+ * hole must marshal without the key or its wire form stops being
+ * byte-identical to every document authored before the field existed (the
+ * same rule {@link WireFilletParams.distance2} carries). `majorDiameterMm` is
+ * a PLAIN number, not a `WireScalar` — a resolved table fact, not a
+ * dimension. `pitchMm`/`depthMm` ARE scalars (expression-drivable).
+ */
+interface WireHoleThread {
+  standard: HoleThreadStandard;
+  designation: string;
+  majorDiameterMm: number;
+  pitchMm: WireScalar;
+  depthMm: WireScalar | null;
+  detail: HoleThreadDetail;
+}
+
 interface WireHoleParams {
   targetBodyId: string;
   face: WireElementRef;
@@ -161,6 +181,7 @@ interface WireHoleParams {
   cbDepth: WireScalar | null;
   csDiameter: WireScalar | null;
   csAngleDeg: WireScalar | null;
+  thread?: WireHoleThread;
   resultPolicyVersion?: 2;
 }
 
@@ -667,6 +688,21 @@ function holeParams(p: HoleParams): WireHoleParams {
     cbDepth: optional(cb, p.cbDepth),
     csDiameter: optional(cs, p.csDiameter),
     csAngleDeg: optional(cs, p.csAngleDeg),
+    ...(p.thread
+      ? {
+          thread: {
+            standard: p.thread.standard,
+            designation: p.thread.designation,
+            majorDiameterMm: p.thread.majorDiameterMm,
+            pitchMm: scalar(p.thread.pitchMm),
+            depthMm:
+              typeof p.thread.depthMm === "number" && Number.isFinite(p.thread.depthMm)
+                ? scalar(p.thread.depthMm)
+                : null,
+            detail: p.thread.detail,
+          },
+        }
+      : {}),
     ...(p.resultPolicyVersion === 2 ? { resultPolicyVersion: 2 as const } : {}),
   };
 }

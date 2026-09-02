@@ -1319,6 +1319,37 @@ export interface ShellParams {
  */
 export type HoleType = "simple" | "counterbore" | "countersink";
 
+/** The one supported thread standard for {@link HoleThread} (SCHEMA §7.3, WP-T1). */
+export type HoleThreadStandard = "ISO261";
+
+/**
+ * Thread rendering level (SCHEMA §7.3 `Hole.thread.detail`) — the SAME
+ * vocabulary as `PlaceComponent.source.params.thread_detail`. T1 ships
+ * `"cosmetic"` only; the worker refuses the other two by name.
+ */
+export type HoleThreadDetail = "cosmetic" | "simplified" | "modeled";
+
+/**
+ * A tapped hole (SCHEMA §7.3 `Hole.thread`, WP-T1). Presence-discriminated
+ * and orthogonal to `holeType` — absent is an unthreaded hole. Right-hand
+ * single-start only in V1.
+ *
+ * `params.diameter` (on {@link HoleParams}) IS the drilled hole, threaded or
+ * not (Option B): the frontend fills it with the ISO 261 TAP-DRILL diameter
+ * (major − pitch) when a thread is chosen. `majorDiameterMm` is a resolved
+ * table fact, not expression-drivable; `pitchMm`/`depthMm` are.
+ */
+export interface HoleThread {
+  standard: HoleThreadStandard;
+  /** Display/BOM label (e.g. `"M6x1"`), ≤32 bytes. Never a lookup key. */
+  designation: string;
+  majorDiameterMm: number;
+  pitchMm: number;
+  /** `null` = the thread runs the full hole depth. */
+  depthMm: number | null;
+  detail: HoleThreadDetail;
+}
+
 /**
  * Hole op params (SCHEMA §7.3 `Hole`, Rust `HoleParams`; WP-C T3).
  *
@@ -1346,6 +1377,8 @@ export interface HoleParams {
   cbDepth?: number | null;
   csDiameter?: number | null;
   csAngleDeg?: number | null;
+  /** Absent (WP-T1) = unthreaded hole; byte-identical to every prior record. */
+  thread?: HoleThread;
   /** Absent = legacy split-host replay; 2 = strict one-connected-solid result. */
   resultPolicyVersion?: 2;
 }

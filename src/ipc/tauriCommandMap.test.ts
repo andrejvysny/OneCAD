@@ -899,6 +899,76 @@ describe("Chamfer marshalling", () => {
   });
 });
 
+// ── Hole thread (WP-T1) ──────────────────────────────────────────────────────
+
+describe("Hole marshalling — thread (WP-T1)", () => {
+  const holeFace = {
+    primary: { bodyId: "body_11111111-1111-1111-1111-111111111111", elementId: "el_top", kind: "face" as const },
+  };
+  const baseParams = {
+    targetBodyId: "body_11111111-1111-1111-1111-111111111111",
+    face: holeFace,
+    point: [1, 2, 3] as [number, number, number],
+    holeType: "simple" as const,
+    diameter: 5.0,
+    depth: 8.0,
+  };
+
+  it("emits no `thread` key at all when absent — byte-identical to before the field existed", () => {
+    const cmd = operationToEditCommand({ opType: "Hole", params: baseParams });
+    const rec = addedRecord(cmd);
+    expect(rec.params).not.toHaveProperty("thread");
+  });
+
+  it("round-trips a full threaded HoleParams to the wire shape", () => {
+    const cmd = operationToEditCommand({
+      opType: "Hole",
+      params: {
+        ...baseParams,
+        thread: {
+          standard: "ISO261",
+          designation: "M6x1",
+          majorDiameterMm: 6.0,
+          pitchMm: 1.0,
+          depthMm: null,
+          detail: "cosmetic",
+        },
+      },
+    });
+    const rec = addedRecord(cmd);
+    expect(rec.params.thread).toEqual({
+      standard: "ISO261",
+      designation: "M6x1",
+      // `majorDiameterMm` is a PLAIN wire number, not a Scalar `{value}` object.
+      majorDiameterMm: 6.0,
+      // `pitchMm` IS a Scalar (expression-drivable).
+      pitchMm: { value: 1.0 },
+      // `depthMm: null` is explicit — through the full hole depth, not omitted.
+      depthMm: null,
+      detail: "cosmetic",
+    });
+  });
+
+  it("marshals a finite depthMm as a Scalar too", () => {
+    const cmd = operationToEditCommand({
+      opType: "Hole",
+      params: {
+        ...baseParams,
+        thread: {
+          standard: "ISO261",
+          designation: "M6x1",
+          majorDiameterMm: 6.0,
+          pitchMm: 1.0,
+          depthMm: 4.0,
+          detail: "cosmetic",
+        },
+      },
+    });
+    const rec = addedRecord(cmd);
+    expect(rec.params.thread).toMatchObject({ depthMm: { value: 4.0 } });
+  });
+});
+
 // ── Datum planes (DATUM W1) ──────────────────────────────────────────────────
 
 describe("buildAddDatumPlane", () => {

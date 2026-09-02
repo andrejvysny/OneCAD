@@ -2549,6 +2549,7 @@ fn hole_op(hole_type: HoleType, diameter: f64, cb: Option<(f64, f64)>) -> Operat
         cb_depth: cb.map(|(_, t)| Scalar::new(t)),
         cs_diameter: None,
         cs_angle_deg: None,
+        thread: None,
         result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
         extra: Default::default(),
     }))

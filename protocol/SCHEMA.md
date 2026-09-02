@@ -1450,7 +1450,55 @@ countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
   drill deeper than through-all extent is fine (clamped = through), cb/cs
   invariant violations, OCCT boolean failure — all name the reason.
 - Standard-size TABLES (M-series clearance, SHCS counterbores, DIN 74
-  countersinks) are a FRONTEND concern — params always carry raw mm.
+  countersinks, ISO 261 coarse pitch) are a FRONTEND concern — the dimensional
+  params always carry raw mm, and a table revision therefore never re-cuts an
+  existing document. The one thing a record keeps FROM a table is `thread`
+  below, which persists the RESOLVED facts (not a lookup key): the worker reads
+  no table for a hole.
+- `thread` (OPTIONAL) — a tapped hole. **Presence-discriminated and orthogonal
+  to `holeType`**: absent is an unthreaded hole and is BYTE-IDENTICAL to every
+  record written before this field existed, so no hash and no fixture moves.
+  Right-hand single-start only in V1; there is no handedness field, and adding
+  one later is additive.
+
+  ```json
+  "thread": { "standard": "ISO261", "designation": "M6x1",
+              "majorDiameterMm": 6.0, "pitchMm": 1.0,
+              "depthMm": null, "detail": "cosmetic" }
+  ```
+
+  - **`params.diameter` IS the drilled hole**, threaded or not. For a tapped
+    hole the frontend fills it with the TAP-DRILL diameter (ISO 261: major −
+    pitch), exactly as it already fills a clearance diameter from ISO 273. The
+    worker's geometry is unchanged and reads NOTHING from this block: the drill,
+    the `cb*`/`cs*` seats, the `cbDiameter > diameter` invariant, the tool solid
+    and the cut are bit-for-bit what an unthreaded hole of the same `diameter`
+    produces. A threaded hole is an unthreaded hole plus metadata.
+  - `standard` ∈ `"ISO261"`. `designation` is the display/BOM label (e.g.
+    `"M6x1"`), ≤32 bytes, never a lookup key.
+  - `majorDiameterMm` is a plain number; `pitchMm` and `depthMm` are scalars
+    (§4) and are expression-drivable. `depthMm: null` means the thread runs the
+    full hole depth. These are RESOLVED FACTS persisted at authoring so a later
+    table revision cannot silently re-cut the document.
+  - Rust is the single writer and refuses at authoring: a non-`"ISO261"`
+    `standard`, an empty or oversized `designation`, a non-finite or
+    non-positive `majorDiameterMm`/`pitchMm`/`depthMm`, a `majorDiameterMm`
+    above 1000 mm, and `pitchMm >= majorDiameterMm`. The worker does NOT
+    re-check any of them — they are provenance it never consumes, the same line
+    §7.3 `PlaceComponent` draws between a `document` source's `params` and
+    `profile`'s `params.length`.
+  - `detail` ∈ `"cosmetic"` | `"simplified"` | `"modeled"` — the SAME vocabulary
+    as `PlaceComponent.source.params.thread_detail`, so one word means one thing
+    on this wire. **Only `"cosmetic"` is implemented.** The worker DOES check
+    this one, because a `detail` it cannot honour must never be answered with a
+    plain hole and a success: `"simplified"`/`"modeled"` refuse with a
+    recoverable `OP_FAILED` carrying `detail.diagnostics[].reasonCode`
+    `HOLE_THREAD_DETAIL_UNSUPPORTED`, and an unknown or absent `detail` beside a
+    present `thread` refuses with `HOLE_THREAD_DETAIL_UNKNOWN`. The §8 top-level
+    `error.code` taxonomy is closed and does not grow.
+  - Export is unchanged: a cosmetic thread is annotation, so STEP/STL/3MF carry
+    the drilled geometry and nothing else. `resultPolicyVersion` is untouched —
+    it governs solid-count publication only.
 
 **Gear** (`op.gear`) — a fully parametric generated gear body. No sketch, no
 host body: the op MINTS a new body from a typed parameter block and a
@@ -3968,6 +4016,56 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-09-01 — §7.3 `Hole.thread`, an OPTIONAL cosmetic-thread block** (WP-T1;
+  cross-track sign-off recorded 2026-09-01). Presence-discriminated and
+  ORTHOGONAL to `holeType`: absent is an unthreaded hole and is BYTE-IDENTICAL
+  to every record written before this field existed — `skip_serializing_if`,
+  matching the `distance2`/`angleDeg` Chamfer precedent rather than the bare
+  `cb*`/`cs*` shape — so no hash and no fixture shape moves for an absent
+  thread. `thread: { standard, designation, majorDiameterMm, pitchMm, depthMm,
+  detail }`; only `standard: "ISO261"` is defined.
+  **Option B is the geometry rule: `params.diameter` IS the drilled hole,
+  threaded or not.** The frontend fills it with the ISO 261 TAP-DRILL diameter
+  (major − pitch) when a thread is chosen, exactly as it already fills a
+  clearance diameter from ISO 273 — the SAME pattern standard-size tables
+  already use, just a different published table. The worker's geometry reads
+  NOTHING from `thread`: the drill, the `cb*`/`cs*` seats, the tool solid and
+  the cut are bit-for-bit what an unthreaded hole of the same `diameter`
+  produces. This was chosen over a worker-side thread-cutting geometry (which
+  would have required new OCCT machinery and diverged Rust's planner hash from
+  the worker's actual build) and over a `tapDrillMm` companion field (two
+  copies of the drilled diameter would only ever be one edit away from
+  disagreeing — `diameter` stays the single source of truth).
+  `standard`/`detail` are closed enums, `designation` is a ≤32-byte display/BOM
+  label (never a lookup key), `majorDiameterMm` is a plain number (a resolved
+  table fact, NOT expression-drivable — a later table revision must not
+  silently re-cut the document), `pitchMm`/`depthMm` are scalars (§4) and ARE
+  expression-drivable, `depthMm: null` means the thread runs the full hole
+  depth. Rust refuses at authoring: non-`"ISO261"` `standard`, an empty or
+  oversized `designation`, a non-finite/non-positive `majorDiameterMm` (also
+  capped at 1000 mm) / `pitchMm` / `depthMm`, and `pitchMm >= majorDiameterMm`.
+  The worker does NOT re-check any of those — provenance it never consumes,
+  the same trust boundary `PlaceComponent`'s `source.params` draws for a
+  `document` source.
+  **`detail` is the one field the worker DOES check**, reusing the SAME
+  vocabulary `PlaceComponent.source.params.thread_detail` already shipped
+  (`"cosmetic" | "simplified" | "modeled"` — one word, one meaning, on this
+  wire), so a `detail` this worker cannot honour is never silently answered
+  with a plain hole: only `"cosmetic"` is implemented in this wave;
+  `"simplified"`/`"modeled"` refuse with a recoverable `OP_FAILED` carrying
+  `detail.diagnostics[].reasonCode` `HOLE_THREAD_DETAIL_UNSUPPORTED`, and an
+  unknown or absent `detail` beside a present `thread` refuses with
+  `HOLE_THREAD_DETAIL_UNKNOWN`. Documented here in §7.3 prose, not the §7.2
+  publication-`reasonCode` table — both new codes are `OP_FAILED` preflight
+  refusals, the same non-publication-table precedent `HOLE_DISJOINT_RESULT`
+  and `UNSUPPORTED_HOLE_RESULT_POLICY_VERSION` already set. The §8 top-level
+  `error.code` taxonomy is closed and does not grow.
+  Export is unchanged (a cosmetic thread is annotation — STEP/STL/3MF carry the
+  drilled geometry and nothing else); `resultPolicyVersion` is untouched (it
+  governs solid-count publication only). New fixture `hole_threaded.ndjson`; no
+  existing fixture shape moves, **no fixture bump**. `protocolVersion` stays 1;
+  no handshake axis or worker fingerprint moves.
 
 - **2026-09-01 — §7.3 scalar `expr` is an opaque core-owned expression; the core
   no longer emits it on the wire** (DAILY DRIVER v2 WP-E; cross-track sign-off

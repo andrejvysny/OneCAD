@@ -4687,8 +4687,8 @@ export class ModelToolController {
         onCbDepth: (v) => this.onHoleEvent({ kind: "setCbDepth", value: v }),
         onCsDiameter: (v) => this.onHoleEvent({ kind: "setCsDiameter", value: v }),
         onCsAngle: (deg) => this.onHoleEvent({ kind: "setCsAngle", angleDeg: deg }),
-        onStandard: (thread, fit) => {
-          const patch = holeStandardPatch(thread, fit, this.hole.holeType);
+        onStandard: (thread, fit, threaded) => {
+          const patch = holeStandardPatch(thread, fit, this.hole.holeType, threaded);
           if (patch) this.onHoleEvent({ kind: "applyStandard", patch });
         },
         onConfirm: () => void this.commitHole(),

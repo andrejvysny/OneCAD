@@ -244,6 +244,20 @@
       "uiExposure": "exposed"
     },
     {
+      "operation": "Hole",
+      "mode": "threaded (cosmetic)",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_hole_op.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/hole_ops.rs",
+      "frontendTest": "src/tools/modelTools/holeStandards.test.ts; src/tools/modelTools/ModelToolController.hole.test.ts",
+      "playwrightTest": "e2e/hole.spec.ts",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
+      "notes": "WP-T1 — Option B: params.diameter IS the drilled hole, threaded or not; the worker reads nothing from `thread` for geometry (only `detail`, which it preflight-refuses when not \"cosmetic\"). Volume identity vs an unthreaded hole is measured in worker/tests/test_hole_op.cpp and proven again through the real worker in hole_ops.rs, which also round-trips the block through save/reopen and an expression-driven pitchMm. Only \"cosmetic\" detail is implemented; \"simplified\"/\"modeled\" are not frontend-reachable in T1 (no UI).",
+      "uiExposure": "exposed"
+    },
+    {
       "operation": "LinearPattern",
       "mode": "V1; V2 fused/non-fused",
       "supportStatus": "supported",

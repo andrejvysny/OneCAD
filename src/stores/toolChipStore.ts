@@ -225,8 +225,13 @@ export interface HoleChipHandlers {
   onCbDepth: (v: number) => void;
   onCsDiameter: (v: number) => void;
   onCsAngle: (deg: number) => void;
-  /** A standards-picker row was chosen (thread + fit), already reduced to mm. */
-  onStandard: (thread: string, fit: HoleFit) => void;
+  /**
+   * A standards-picker row was chosen, already reduced to mm. `threaded`
+   * (WP-T1) is the panel's OWN mode toggle, not persisted state: true fills
+   * the ISO 261 tap-drill diameter + a cosmetic `thread` block instead of the
+   * ISO 273 clearance `fit`.
+   */
+  onStandard: (thread: string, fit: HoleFit, threaded?: boolean) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -455,7 +460,7 @@ export interface ToolChipState {
   onCbDepth: ((v: number) => void) | null;
   onCsDiameter: ((v: number) => void) | null;
   onCsAngle: ((deg: number) => void) | null;
-  onStandard: ((thread: string, fit: HoleFit) => void) | null;
+  onStandard: ((thread: string, fit: HoleFit, threaded?: boolean) => void) | null;
   /**
    * Armed gear tooth block (Gear Generator G1-h). `value`/`count` above carry
    * module/teeth (the two headline numbers); every other involute field lives

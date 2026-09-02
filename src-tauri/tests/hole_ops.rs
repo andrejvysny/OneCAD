@@ -42,23 +42,28 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, HoleParams, HoleType, KnownOperation, Operation,
-    OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
+    BooleanMode, ExtrudeMode, ExtrudeParams, HoleParams, HoleThread, HoleThreadDetail,
+    HoleThreadStandard, HoleType, KnownOperation, Operation, OperationRecord, PlaneKind,
+    SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
 };
-use onecad_core::document::variables::Scalar;
+use onecad_core::document::variables::{Scalar, Unit, Variable};
 use onecad_core::edit::{EditCommand, InputPath, InputRef};
-use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::ids::{
+    BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, VariableId,
+};
 use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
-    CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, StoppedReason,
+    CancelToken, Diagnostic, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest,
+    StoppedReason,
 };
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_lib::dto::FeatureStatus;
 use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::wire::sketch_wire;
 use onecad_lib::worker::{
@@ -360,9 +365,59 @@ fn hole_params(body: BodyId, element: &str, at: Vec3, diameter: f64) -> HolePara
         cb_depth: None,
         cs_diameter: None,
         cs_angle_deg: None,
+        thread: None,
         result_policy_version: Some(2),
         extra: Default::default(),
     }
+}
+
+/// A canonical ISO 261 M6x1 cosmetic thread — `pitchMm` optionally
+/// expression-driven (WP-T1 × WP-VE.2).
+fn hole_thread(pitch: Scalar) -> HoleThread {
+    HoleThread {
+        standard: HoleThreadStandard::Iso261,
+        designation: "M6x1".into(),
+        major_diameter_mm: 6.0,
+        pitch_mm: pitch,
+        depth_mm: None,
+        detail: HoleThreadDetail::Cosmetic,
+    }
+}
+
+fn var(name: &str, value: f64) -> (VariableId, Variable) {
+    let id = VariableId::new();
+    (
+        id,
+        Variable {
+            id,
+            name: name.to_string(),
+            value: Scalar::new(value),
+            unit: Unit::Mm,
+        },
+    )
+}
+
+/// The `EXPR_UNRESOLVED` projection diagnostic for a record, if it has one.
+fn expr_diagnostic(rt: &DocumentRuntime, rec: u128) -> Option<Diagnostic> {
+    let id = RecordId(Uuid::from_u128(rec)).to_string();
+    rt.projection()
+        .features
+        .into_iter()
+        .find(|f| f.id == id)?
+        .diagnostics
+        .into_iter()
+        .find(|d| d.code == "EXPR_UNRESOLVED")
+}
+
+/// The `FeatureStatus` for a record's projection row.
+fn row_status(rt: &DocumentRuntime, rec: u128) -> FeatureStatus {
+    let id = RecordId(Uuid::from_u128(rec)).to_string();
+    rt.projection()
+        .features
+        .into_iter()
+        .find(|f| f.id == id)
+        .unwrap_or_else(|| panic!("no feature row for record {id}"))
+        .status
 }
 
 fn hole_record(rec: u128, params: HoleParams) -> OperationRecord {
@@ -1150,6 +1205,161 @@ async fn hole_face_rebind_is_refused_without_identity_or_on_the_wrong_op() {
     assert!(
         format!("{err}").contains("does not match the operation type"),
         "expected a path/op mismatch rejection, got: {err}"
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. WP-T1 — `thread` (cosmetic tapped hole)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Option B end to end: a threaded hole removes EXACTLY the volume an
+/// unthreaded one of the same diameter does — `removed_volume` is reused
+/// UNCHANGED, because the worker reads nothing from `thread` for geometry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn threaded_hole_matches_the_unthreaded_removed_volume() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (body, top) = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 25.0).await;
+
+    let mut params = hole_params(body, "el_hole_a", top, 5.0);
+    params.depth = Some(Scalar::new(8.0));
+    params.thread = Some(hole_thread(Scalar::new(1.0)));
+    add_op(&mut rt, hole_record(HOLE_A, params));
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "threaded hole");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+
+    let want = 10000.0 - removed_volume(5.0, 8.0, None, None);
+    let got = exact_volume(&wm, body).await;
+    assert!(
+        (got - want).abs() < want * 1e-9,
+        "threaded Ø5 (M6x1 tap drill) drills exactly like an unthreaded Ø5: want {want}, got {got}"
+    );
+    wm.shutdown().await;
+}
+
+/// A threaded hole's `thread` block survives save → reopen byte-identically,
+/// and the reopened body still measures the SAME volume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_threaded_hole_round_trips_the_block() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = tmp.path().join("hole-threaded.onecad");
+
+    let (body, volume) = {
+        let wm = spawn_worker(bin.clone()).await;
+        let mut rt = runtime_over(&wm);
+        let (body, top) = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 25.0).await;
+        let mut params = hole_params(body, "el_hole_a", top, 5.0);
+        params.depth = Some(Scalar::new(8.0));
+        params.thread = Some(hole_thread(Scalar::new(1.0)));
+        add_op(&mut rt, hole_record(HOLE_A, params));
+        published(&regen_all(&mut rt).await, "threaded hole, session 1");
+        let volume = exact_volume(&wm, body).await;
+        rt.save(&doc, save_meta()).expect("save");
+        wm.shutdown().await;
+        (body, volume)
+    };
+
+    // The raw container bytes carry the `thread` block verbatim.
+    let json = document_json(&doc);
+    let parsed: serde_json::Value = serde_json::from_slice(&json).expect("document.json parses");
+    let hole_op = parsed["timeline"]["records"]
+        .as_array()
+        .expect("records array")
+        .iter()
+        .find(|r| r["recordId"] == RecordId(Uuid::from_u128(HOLE_A)).to_string())
+        .expect("the Hole record is present");
+    assert_eq!(
+        hole_op["params"]["thread"],
+        serde_json::json!({
+            "standard": "ISO261",
+            "designation": "M6x1",
+            "majorDiameterMm": 6.0,
+            "pitchMm": { "value": 1.0 },
+            "depthMm": null,
+            "detail": "cosmetic",
+        }),
+        "the saved thread block: {}",
+        hole_op["params"]["thread"]
+    );
+
+    let wm = spawn_worker(bin).await;
+    let mut rt = open_over(&wm, &doc);
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "threaded hole, reopen");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    assert_eq!(rt.head_body_ids(), vec![body]);
+    let reopened = exact_volume(&wm, body).await;
+    assert_eq!(
+        reopened, volume,
+        "a reopened threaded hole replays identically"
+    );
+    wm.shutdown().await;
+}
+
+/// `thread.pitchMm` is a REGISTERED scalar (`KnownOperation::scalars_mut`), so
+/// it is a real expression-substitution target — proven both by a working
+/// binding and by the SAME binding breaking loudly when its variable is
+/// removed, the `variable_driven_ops.rs` pattern applied to `Hole.thread`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expression_driven_thread_pitch_substitutes_and_breaks_loudly_when_undefined() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (body, top) = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 25.0).await;
+
+    let (pitch_id, pitch_var) = var("p", 1.0);
+    rt.apply(EditCommand::AddVariable {
+        variable: pitch_var,
+    })
+    .expect("AddVariable p");
+
+    let mut params = hole_params(body, "el_hole_a", top, 5.0);
+    params.depth = Some(Scalar::new(8.0));
+    params.thread = Some(hole_thread(Scalar::with_expr(1.0, "p")));
+    add_op(&mut rt, hole_record(HOLE_A, params));
+
+    // The binding resolves: no EXPR_UNRESOLVED, and geometry is unaffected
+    // (Option B — pitch never drives the drill).
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "threaded hole, pitch = p");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    assert!(expr_diagnostic(&rt, HOLE_A).is_none());
+    let want = 10000.0 - removed_volume(5.0, 8.0, None, None);
+    let got = exact_volume(&wm, body).await;
+    assert!((got - want).abs() < want * 1e-9);
+
+    // Removing `p` breaks the SAME step loudly — proves `thread.pitchMm` is
+    // really wired into the substitution pass, not silently skipped.
+    rt.apply(EditCommand::RemoveVariable { variable: pitch_id })
+        .expect("RemoveVariable p");
+    let report = regen_all(&mut rt).await;
+    assert_eq!(
+        row_status(&rt, HOLE_A),
+        FeatureStatus::Error,
+        "an unresolvable thread.pitchMm binding must fail AS THAT STEP"
+    );
+    let diag = expr_diagnostic(&rt, HOLE_A).expect("EXPR_UNRESOLVED diagnostic");
+    assert_eq!(diag.reason_code.as_deref(), Some("EXPR_UNDEFINED_VARIABLE"));
+    assert!(
+        report
+            .failed_steps
+            .iter()
+            .any(|f| f.record_id == RecordId(Uuid::from_u128(HOLE_A)).to_string()),
+        "the regen report must surface the failed step: {:?}",
+        report.failed_steps
     );
     wm.shutdown().await;
 }

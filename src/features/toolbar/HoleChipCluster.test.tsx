@@ -168,6 +168,29 @@ describe("HoleChipCluster", () => {
     expect(screen.queryByTestId("chip-hole-std-panel")).toBeNull();
   });
 
+  it("the thread toggle (WP-T1) swaps the fit pair for a single tap-drill pick", () => {
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple" }));
+    fireEvent.click(screen.getByTestId("chip-hole-std"));
+
+    const toggle = screen.getByTestId("chip-hole-thread");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    // Off: the ordinary fit pair is there and NO thread row.
+    expect(screen.getByTestId("chip-hole-std-M6-close")).toBeInTheDocument();
+    expect(screen.queryByTestId("chip-hole-std-M6-thread")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    // On: the fit pair is gone, replaced by ONE pick per size.
+    expect(screen.queryByTestId("chip-hole-std-M6-close")).toBeNull();
+    expect(screen.queryByTestId("chip-hole-std-M6-normal")).toBeNull();
+    expect(screen.getByTestId("chip-hole-std-M6-thread")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("chip-hole-std-M6-thread"));
+    expect(h.onStandard).toHaveBeenCalledWith("M6", "normal", true);
+    expect(screen.queryByTestId("chip-hole-std-panel")).toBeNull();
+  });
+
   it("a cb dimension edit dispatches the raw millimetres", () => {
     render(<ModelToolChips />);
     act(() =>

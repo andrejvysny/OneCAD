@@ -50,6 +50,9 @@ import type {
   GearParams,
   GearFrame,
   HoleParams,
+  HoleThread,
+  HoleThreadDetail,
+  HoleThreadStandard,
   HoleType,
   OffsetDistanceType,
   OffsetFaceParams,
@@ -349,6 +352,8 @@ function shellOp(s: PreviewSessionState): OperationOp {
 const HOLE_TYPES = ["simple", "counterbore", "countersink"] as const;
 /** SCHEMA §7.3: the countersink included angles the backend admits. */
 const HOLE_CS_ANGLES = [82, 90, 100, 120];
+/** SCHEMA §7.3 `Hole.thread.detail` (WP-T1) — the closed vocabulary. */
+const HOLE_THREAD_DETAILS: readonly HoleThreadDetail[] = ["cosmetic", "simplified", "modeled"];
 
 /** A positive finite dimension, or a throw naming the field (the house rule). */
 function positiveDim(v: unknown, what: string): number {
@@ -501,6 +506,33 @@ function holeOp(s: PreviewSessionState): OperationOp {
     if (params.csDiameter <= diameter) {
       throw new Error("Hole csDiameter must exceed diameter");
     }
+  }
+
+  // `thread` (WP-T1) is orthogonal to `holeType` — structural guards only
+  // (Rust owns the authoring bounds; the worker range-checks nothing here
+  // except `detail`, which it preflight-refuses rather than silently ignores).
+  const thread = s.latestParams.thread as HoleThread | undefined;
+  if (thread) {
+    if (thread.standard !== "ISO261") {
+      throw new Error(`Unsupported Hole thread.standard ${String(thread.standard)}`);
+    }
+    if (typeof thread.designation !== "string" || thread.designation.length === 0) {
+      throw new Error("Hole thread.designation must be non-empty");
+    }
+    if (!HOLE_THREAD_DETAILS.includes(thread.detail)) {
+      throw new Error(`Unsupported Hole thread.detail ${String(thread.detail)}`);
+    }
+    params.thread = {
+      standard: thread.standard as HoleThreadStandard,
+      designation: thread.designation,
+      majorDiameterMm: positiveDim(thread.majorDiameterMm, "Hole thread.majorDiameterMm"),
+      pitchMm: positiveDim(thread.pitchMm, "Hole thread.pitchMm"),
+      depthMm:
+        thread.depthMm === null || thread.depthMm === undefined
+          ? null
+          : positiveDim(thread.depthMm, "Hole thread.depthMm"),
+      detail: thread.detail,
+    };
   }
 
   return {

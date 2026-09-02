@@ -26,7 +26,7 @@
  * record is the truth.
  */
 
-import type { HoleParams, HoleType, SemanticRef } from "@/ipc/types";
+import type { HoleParams, HoleThread, HoleType, SemanticRef } from "@/ipc/types";
 import type { ModelPhase, ToolEffect } from "./modelToolMachine";
 import type { HoleStandardPatch } from "./holeStandards";
 
@@ -70,6 +70,12 @@ export interface HoleFsm {
   /** Countersink block — same retention rule. */
   csDiameter: number;
   csAngleDeg: number;
+  /**
+   * A tapped hole (WP-T1). Presence-discriminated and ORTHOGONAL to
+   * `holeType` — unlike `cb*`/`cs*` it survives every profile flip untouched.
+   * `null` = unthreaded.
+   */
+  thread: HoleThread | null;
   /** Absent on a re-edited legacy Hole; fresh authoring uses strict V2. */
   resultPolicyVersion?: 2;
   /**
@@ -95,6 +101,8 @@ export type HoleEvent =
   | { kind: "setCbDepth"; value: number }
   | { kind: "setCsDiameter"; value: number }
   | { kind: "setCsAngle"; angleDeg: number }
+  /** WP-T1: `null` clears the thread (back to an unthreaded hole). */
+  | { kind: "setThread"; thread: HoleThread | null }
   /** A standards-picker choice, already reduced to raw mm. */
   | { kind: "applyStandard"; patch: HoleStandardPatch }
   | { kind: "confirm" }
@@ -120,6 +128,7 @@ export function holeInit(): HoleFsm {
     cbDepth: DEFAULT_HOLE_CB_DEPTH,
     csDiameter: DEFAULT_HOLE_CS_DIAMETER,
     csAngleDeg: DEFAULT_HOLE_CS_ANGLE,
+    thread: null,
     resultPolicyVersion: 2,
     touched: false,
   };
@@ -205,6 +214,10 @@ export function holeStep(s: HoleFsm, e: HoleEvent): HoleStep {
       }
       return { state: { ...s, csAngleDeg: e.angleDeg }, effect: "update" };
 
+    case "setThread":
+      if (!editable(s)) return { state: s, effect: "none" };
+      return { state: { ...s, thread: e.thread }, effect: "update" };
+
     case "applyStandard": {
       if (!editable(s)) return { state: s, effect: "none" };
       const p = e.patch;
@@ -216,6 +229,11 @@ export function holeStep(s: HoleFsm, e: HoleEvent): HoleStep {
           cbDepth: p.cbDepth === undefined ? s.cbDepth : dim(p.cbDepth, s.cbDepth),
           csDiameter: p.csDiameter === undefined ? s.csDiameter : dim(p.csDiameter, s.csDiameter),
           csAngleDeg: p.csAngleDeg ?? s.csAngleDeg,
+          // A standards pick is AUTHORITATIVE for thread presence: `p.thread` is
+          // set only when the caller's thread toggle is on (`holeStandardPatch`'s
+          // `threaded` arg), so an untreaded pick clears any prior thread rather
+          // than leaving it stranded against a diameter it no longer matches.
+          thread: p.thread ?? null,
           // A preset IS an authored size — a later profile flip must not undo it.
           touched: true,
         },
@@ -273,6 +291,7 @@ export function holeParamsOf(s: HoleFsm): HoleParams {
     cbDepth: cb ? s.cbDepth : null,
     csDiameter: cs ? s.csDiameter : null,
     csAngleDeg: cs ? s.csAngleDeg : null,
+    ...(s.thread ? { thread: s.thread } : {}),
     ...(s.resultPolicyVersion === 2 ? { resultPolicyVersion: 2 as const } : {}),
   };
 }
@@ -285,6 +304,33 @@ function wireScalar(v: unknown): number | undefined {
     if (typeof n === "number" && Number.isFinite(n)) return n;
   }
   return undefined;
+}
+
+/**
+ * A stored `thread` block (WP-T1), or `null` for an unthreaded hole / a block
+ * this build cannot make sense of (missing/malformed — restoring nothing is
+ * the honest outcome, matching {@link holeFsmFromParams}'s own refusal rule).
+ * `majorDiameterMm` is a PLAIN wire number (not a Scalar); `pitchMm`/`depthMm`
+ * are.
+ */
+function threadFromWire(stored: unknown): HoleThread | null {
+  if (!stored || typeof stored !== "object") return null;
+  const t = stored as Record<string, unknown>;
+  if (t.standard !== "ISO261") return null;
+  if (typeof t.designation !== "string" || t.designation.length === 0) return null;
+  if (typeof t.majorDiameterMm !== "number" || !Number.isFinite(t.majorDiameterMm)) return null;
+  const pitchMm = wireScalar(t.pitchMm);
+  if (pitchMm === undefined) return null;
+  const detail = t.detail;
+  if (detail !== "cosmetic" && detail !== "simplified" && detail !== "modeled") return null;
+  return {
+    standard: "ISO261",
+    designation: t.designation,
+    majorDiameterMm: t.majorDiameterMm,
+    pitchMm,
+    depthMm: wireScalar(t.depthMm) ?? null,
+    detail,
+  };
 }
 
 /**
@@ -335,13 +381,19 @@ export function holeFsmFromParams(stored: Record<string, unknown> | undefined): 
     cbDepth: wireScalar(stored.cbDepth) ?? base.cbDepth,
     csDiameter: wireScalar(stored.csDiameter) ?? base.csDiameter,
     csAngleDeg: wireScalar(stored.csAngleDeg) ?? base.csAngleDeg,
+    thread: threadFromWire(stored.thread),
     resultPolicyVersion: policy === 2 ? 2 : undefined,
     // A restored size is an authored one.
     touched: true,
   };
 }
 
-/** The mono value text a hole's history row shows — mirrors `dto.rs feature_value_text`. */
-export function holeValueText(diameter: number): string {
-  return `Ø${diameter.toFixed(1)}`;
+/**
+ * The mono value text a hole's history row shows — mirrors `dto.rs
+ * feature_value_text` exactly, including the WP-T1 threaded form
+ * (`designation` appended as `Ø5.0 · M6x1`).
+ */
+export function holeValueText(diameter: number, designation?: string): string {
+  const base = `Ø${diameter.toFixed(1)}`;
+  return designation ? `${base} · ${designation}` : base;
 }

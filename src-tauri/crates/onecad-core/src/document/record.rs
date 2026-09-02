@@ -514,6 +514,14 @@ impl KnownOperation {
                 if let Some(s) = p.cs_angle_deg.as_mut() {
                     out.push(("Hole.csAngleDeg", Dimension::Angle, s));
                 }
+                // `thread` scalars APPEND last (order is normative — never
+                // interleave with the cb*/cs* block above).
+                if let Some(t) = p.thread.as_mut() {
+                    out.push(("Hole.thread.pitchMm", Dimension::Length, &mut t.pitch_mm));
+                    if let Some(s) = t.depth_mm.as_mut() {
+                        out.push(("Hole.thread.depthMm", Dimension::Length, s));
+                    }
+                }
                 out
             }
             // Gear: the DIMENSIONS a variable may drive. `shift`, `clearance`,
@@ -1913,8 +1921,68 @@ impl TransformBodyParams {
 /// stored axis and a re-resolved face can disagree.
 ///
 /// Standard-size tables (M-series clearance, SHCS counterbores, DIN 74
-/// countersinks) are a **frontend** concern: these params always carry raw mm.
+/// countersinks, ISO 261 coarse pitch) are a **frontend** concern: these
+/// params always carry raw mm. The one thing a record keeps FROM a table is
+/// [`HoleParams::thread`], which persists the RESOLVED facts (not a lookup
+/// key) — the worker reads no table for a hole.
 pub const HOLE_RESULT_POLICY_VERSION: u8 = 2;
+
+/// The one supported thread standard for [`HoleThread`] (SCHEMA §7.3, added
+/// 2026-09-01 — WP-T1). Closed: any other string is a deserialize error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HoleThreadStandard {
+    #[serde(rename = "ISO261")]
+    Iso261,
+}
+
+/// Thread rendering level (SCHEMA §7.3 `Hole.thread.detail`) — the SAME
+/// vocabulary as `PlaceComponent.source.params.thread_detail`
+/// (`worker/src/ops/ComponentGenerators.h` `ThreadDetail`), so one word means
+/// one thing on this wire. **Only `Cosmetic` is implemented**: the worker
+/// refuses `Simplified`/`Modeled` by name (`HOLE_THREAD_DETAIL_UNSUPPORTED`)
+/// rather than silently answering with a plain hole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HoleThreadDetail {
+    Cosmetic,
+    Simplified,
+    Modeled,
+}
+
+/// A tapped hole (SCHEMA §7.3 `Hole.thread`, added 2026-09-01 — WP-T1).
+/// **Presence-discriminated and orthogonal to `holeType`**: absent is an
+/// unthreaded hole, byte-identical to every record written before this field
+/// existed. Right-hand single-start only in V1 — there is no handedness
+/// field, and adding one later is additive.
+///
+/// **`HoleParams::diameter` IS the drilled hole, threaded or not (Option
+/// B).** The frontend fills it with the ISO 261 tap-drill diameter
+/// (major − pitch) when a thread is chosen, exactly as it already fills a
+/// clearance diameter from ISO 273. The worker reads NOTHING here for
+/// geometry — every field below is resolved-fact PROVENANCE the worker never
+/// consumes (except `detail`, which it preflight-checks), the same trust
+/// boundary `PlaceComponent`'s `source.params` draws for a `document` source
+/// (SCHEMA §7.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoleThread {
+    pub standard: HoleThreadStandard,
+    /// Display/BOM label (e.g. `"M6x1"`), 1..=32 bytes. Never a lookup key.
+    pub designation: String,
+    /// Resolved table fact, NOT expression-drivable (unlike `pitchMm`) — a
+    /// plain number, not a [`Scalar`] object, so a later table revision
+    /// cannot silently re-cut the document by re-evaluating it.
+    pub major_diameter_mm: f64,
+    /// Expression-drivable (registered in
+    /// [`KnownOperation::scalars_mut`]).
+    pub pitch_mm: Scalar,
+    /// `None` means the thread runs the full hole depth. Serialized
+    /// explicitly (always present when `thread` is, even as `null`) —
+    /// through-all is an authored choice, mirroring [`HoleParams::depth`].
+    #[serde(default)]
+    pub depth_mm: Option<Scalar>,
+    pub detail: HoleThreadDetail,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1951,6 +2019,13 @@ pub struct HoleParams {
     /// REQUIRED iff `hole_type == Countersink`.
     #[serde(default)]
     pub cs_angle_deg: Option<Scalar>,
+    /// A tapped hole (SCHEMA §7.3, added 2026-09-01 — WP-T1). Presence-
+    /// discriminated and orthogonal to `holeType`; see [`HoleThread`]. Absent
+    /// is BYTE-IDENTICAL to every record written before this field existed —
+    /// `skip_serializing_if`, matching [`ChamferParams::distance2`]'s form,
+    /// not the bare-default `cb*`/`cs*` shape (which always writes `null`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<HoleThread>,
     /// Absent preserves the legacy split-host residual. Fresh authoring writes V2,
     /// which refuses any result that is not exactly one connected solid.
     #[serde(
@@ -2005,6 +2080,34 @@ impl HoleParams {
         positive("Hole diameter", self.diameter.value)?;
         if let Some(d) = &self.depth {
             positive("Hole depth", d.value)?;
+        }
+        // `thread` is orthogonal to `holeType` — checked regardless of profile.
+        // `standard`/`detail` are closed enums (deserialize already rejects any
+        // other spelling); `detail`'s IMPLEMENTABILITY is a worker-side
+        // preflight, not an authoring refusal (SCHEMA §7.3).
+        if let Some(t) = &self.thread {
+            if t.designation.is_empty() || t.designation.len() > 32 {
+                return Err(format!(
+                    "Hole thread.designation must be 1..=32 bytes (got {} bytes)",
+                    t.designation.len()
+                ));
+            }
+            let major = t.major_diameter_mm;
+            if !major.is_finite() || major <= 0.0 || major > 1000.0 {
+                return Err(format!(
+                    "Hole thread.majorDiameterMm must be finite, positive and <= 1000 (got {major})"
+                ));
+            }
+            positive("Hole thread.pitchMm", t.pitch_mm.value)?;
+            if t.pitch_mm.value >= major {
+                return Err(format!(
+                    "Hole thread.pitchMm must be less than majorDiameterMm (got {} >= {major})",
+                    t.pitch_mm.value
+                ));
+            }
+            if let Some(d) = &t.depth_mm {
+                positive("Hole thread.depthMm", d.value)?;
+            }
         }
         match self.hole_type {
             HoleType::Simple => {
@@ -3753,6 +3856,7 @@ mod tests {
             cb_depth: None,
             cs_diameter: None,
             cs_angle_deg: None,
+            thread: None,
             result_policy_version: Some(HOLE_RESULT_POLICY_VERSION),
             extra: Extra::new(),
         }
@@ -3772,6 +3876,29 @@ mod tests {
             hole_type: HoleType::Countersink,
             cs_diameter: Some(Scalar::new(11.0)),
             cs_angle_deg: Some(Scalar::new(90.0)),
+            ..hole_params()
+        }
+    }
+
+    /// A canonical ISO 261 M6x1 cosmetic thread block — `pitchMm` = 1.0mm,
+    /// `depthMm: None` = through the full hole depth.
+    fn hole_thread() -> HoleThread {
+        HoleThread {
+            standard: HoleThreadStandard::Iso261,
+            designation: "M6x1".into(),
+            major_diameter_mm: 6.0,
+            pitch_mm: Scalar::new(1.0),
+            depth_mm: None,
+            detail: HoleThreadDetail::Cosmetic,
+        }
+    }
+
+    /// A canonical SIMPLE hole carrying an M6x1 cosmetic thread — `diameter`
+    /// is the ISO 261 tap-drill Ø (major − pitch = 5.0), matching Option B.
+    fn threaded_hole_params() -> HoleParams {
+        HoleParams {
+            diameter: Scalar::new(5.0),
+            thread: Some(hole_thread()),
             ..hole_params()
         }
     }
@@ -3806,6 +3933,36 @@ mod tests {
         assert!(p["csDiameter"].is_null() && p["csAngleDeg"].is_null());
         assert_eq!(p["resultPolicyVersion"], serde_json::json!(2));
         assert_eq!(p["face"]["primary"]["kind"], serde_json::json!("face"));
+        // No `thread` key at all when absent — byte-identity for every record
+        // written before the field existed (WP-T1).
+        assert!(p.get("thread").is_none());
+    }
+
+    /// A `thread` block serializes to the exact SCHEMA §7.3 shape (WP-T1).
+    #[test]
+    fn hole_thread_serializes_to_the_schema_shape() {
+        let json = serde_json::to_value(KnownOperation::Hole(threaded_hole_params())).unwrap();
+        let t = &json["params"]["thread"];
+        assert_eq!(t["standard"], serde_json::json!("ISO261"));
+        assert_eq!(t["designation"], serde_json::json!("M6x1"));
+        // `majorDiameterMm` is a PLAIN number, not the Scalar `{value}` object —
+        // a resolved table fact, not an expression-drivable dimension.
+        assert_eq!(t["majorDiameterMm"], serde_json::json!(6.0));
+        assert_eq!(t["pitchMm"]["value"], serde_json::json!(1.0));
+        // `depthMm: null` is explicit (through the full hole depth), not omitted.
+        assert!(t["depthMm"].is_null());
+        assert_eq!(t["detail"], serde_json::json!("cosmetic"));
+
+        let back: KnownOperation = serde_json::from_value(serde_json::json!({
+            "opType": "Hole",
+            "params": json["params"].clone()
+        }))
+        .map(|op: Operation| match op {
+            Operation::Known(k) => k,
+            Operation::Opaque(_) => panic!("expected Known"),
+        })
+        .unwrap();
+        assert_eq!(back, KnownOperation::Hole(threaded_hole_params()));
     }
 
     /// `depth: null` IS through-all, and survives a round-trip as `None`.
@@ -4016,6 +4173,170 @@ mod tests {
             ..countersink_params()
         };
         assert!(p.validate().unwrap_err().contains("counterbore-only"));
+    }
+
+    /// `HoleParams::validate` refuses each `thread` bound BY NAME (WP-T1).
+    /// `thread` is orthogonal to `holeType` — the base fixture is a counterbore
+    /// so the matrix also proves thread validity is checked independently of
+    /// the conditional-block match.
+    #[test]
+    fn hole_thread_validation_matrix() {
+        // The canonical thread is valid on every hole profile.
+        assert!(threaded_hole_params().validate().is_ok());
+        let threaded_counterbore = HoleParams {
+            thread: Some(hole_thread()),
+            ..counterbore_params()
+        };
+        assert!(threaded_counterbore.validate().is_ok());
+
+        // designation: empty.
+        let p = HoleParams {
+            thread: Some(HoleThread {
+                designation: String::new(),
+                ..hole_thread()
+            }),
+            ..threaded_hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("thread.designation"));
+        // designation: 33 bytes (over the 32-byte cap).
+        let p = HoleParams {
+            thread: Some(HoleThread {
+                designation: "x".repeat(33),
+                ..hole_thread()
+            }),
+            ..threaded_hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("thread.designation"));
+        // designation: exactly 32 bytes is the boundary and is VALID.
+        let p = HoleParams {
+            thread: Some(HoleThread {
+                designation: "x".repeat(32),
+                ..hole_thread()
+            }),
+            ..threaded_hole_params()
+        };
+        assert!(
+            p.validate().is_ok(),
+            "32-byte designation is the boundary, not a refusal"
+        );
+
+        // majorDiameterMm: non-finite / non-positive / over the 1000mm cap.
+        for bad in [0.0, -1.0, 1000.1, f64::NAN, f64::INFINITY] {
+            let p = HoleParams {
+                thread: Some(HoleThread {
+                    major_diameter_mm: bad,
+                    ..hole_thread()
+                }),
+                ..threaded_hole_params()
+            };
+            assert!(
+                p.validate().unwrap_err().contains("thread.majorDiameterMm"),
+                "majorDiameterMm {bad} must be rejected"
+            );
+        }
+        // majorDiameterMm: exactly 1000mm is the boundary and is VALID (pitch
+        // still has to stay below it, so widen the pitch's own bound too).
+        let p = HoleParams {
+            thread: Some(HoleThread {
+                major_diameter_mm: 1000.0,
+                pitch_mm: Scalar::new(500.0),
+                ..hole_thread()
+            }),
+            ..threaded_hole_params()
+        };
+        assert!(
+            p.validate().is_ok(),
+            "1000mm majorDiameterMm is the boundary, not a refusal"
+        );
+
+        // pitchMm: non-finite / non-positive.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let p = HoleParams {
+                thread: Some(HoleThread {
+                    pitch_mm: Scalar {
+                        value: bad,
+                        expr: None,
+                    },
+                    ..hole_thread()
+                }),
+                ..threaded_hole_params()
+            };
+            assert!(
+                p.validate().unwrap_err().contains("thread.pitchMm"),
+                "pitchMm {bad} must be rejected"
+            );
+        }
+        // pitchMm >= majorDiameterMm (equal, and over).
+        for pitch in [6.0, 6.5] {
+            let p = HoleParams {
+                thread: Some(HoleThread {
+                    pitch_mm: Scalar::new(pitch),
+                    ..hole_thread()
+                }),
+                ..threaded_hole_params()
+            };
+            assert!(p
+                .validate()
+                .unwrap_err()
+                .contains("thread.pitchMm must be less than"));
+        }
+
+        // depthMm: Some(non-finite / non-positive).
+        for bad in [0.0, -1.0, f64::NAN] {
+            let p = HoleParams {
+                thread: Some(HoleThread {
+                    depth_mm: Some(Scalar {
+                        value: bad,
+                        expr: None,
+                    }),
+                    ..hole_thread()
+                }),
+                ..threaded_hole_params()
+            };
+            assert!(
+                p.validate().unwrap_err().contains("thread.depthMm"),
+                "depthMm {bad} must be rejected"
+            );
+        }
+        // depthMm: None (through the full hole depth) is VALID.
+        let p = HoleParams {
+            thread: Some(HoleThread {
+                depth_mm: None,
+                ..hole_thread()
+            }),
+            ..threaded_hole_params()
+        };
+        assert!(p.validate().is_ok());
+        // depthMm has NO depth>hole check — deliberately loose (through-all is
+        // uncomputable in Rust, same precedent as the chamfer-angle bound).
+        let p = HoleParams {
+            thread: Some(HoleThread {
+                depth_mm: Some(Scalar::new(1_000_000.0)),
+                ..hole_thread()
+            }),
+            ..threaded_hole_params()
+        };
+        assert!(
+            p.validate().is_ok(),
+            "depthMm is not fenced against hole depth"
+        );
+
+        // `detail` is a closed enum, valid by construction — every variant is
+        // authoring-VALID (the worker, not Rust, refuses an unimplemented one).
+        for detail in [
+            HoleThreadDetail::Cosmetic,
+            HoleThreadDetail::Simplified,
+            HoleThreadDetail::Modeled,
+        ] {
+            let p = HoleParams {
+                thread: Some(HoleThread {
+                    detail,
+                    ..hole_thread()
+                }),
+                ..threaded_hole_params()
+            };
+            assert!(p.validate().is_ok(), "{detail:?} is authoring-valid");
+        }
     }
 
     #[test]
@@ -5368,8 +5689,26 @@ mod tests {
             cb_depth: Some(Scalar::new(3.0)),
             cs_diameter: Some(Scalar::new(9.0)),
             cs_angle_deg: Some(Scalar::new(90.0)),
+            thread: None,
             result_policy_version: None,
             extra: Extra::new(),
+        }
+    }
+
+    /// [`hole_scalar_params`] plus a full `thread` block (both `pitchMm` and
+    /// `depthMm` present), so the registry-freeze test below covers the whole
+    /// arm, APPENDED last.
+    fn hole_scalar_params_threaded() -> HoleParams {
+        HoleParams {
+            thread: Some(HoleThread {
+                standard: HoleThreadStandard::Iso261,
+                designation: "M6x1".into(),
+                major_diameter_mm: 6.0,
+                pitch_mm: Scalar::new(1.0),
+                depth_mm: Some(Scalar::new(4.0)),
+                detail: HoleThreadDetail::Cosmetic,
+            }),
+            ..hole_scalar_params()
         }
     }
 
@@ -5498,6 +5837,20 @@ mod tests {
                 ("Hole.csAngleDeg", Angle),
             ]
         );
+        // `thread`'s scalars APPEND last, never interleaved with cb*/cs*.
+        assert_eq!(
+            labels_of(KnownOperation::Hole(hole_scalar_params_threaded())),
+            vec![
+                ("Hole.diameter", Length),
+                ("Hole.depth", Length),
+                ("Hole.cbDiameter", Length),
+                ("Hole.cbDepth", Length),
+                ("Hole.csDiameter", Length),
+                ("Hole.csAngleDeg", Angle),
+                ("Hole.thread.pitchMm", Length),
+                ("Hole.thread.depthMm", Length),
+            ]
+        );
         // With every optional hole present, so the full arm is frozen.
         let mut geared = gear_params();
         if let Some(inv) = geared.involute_external.as_mut() {
@@ -5579,6 +5932,39 @@ mod tests {
         assert_eq!(
             labels(KnownOperation::Chamfer(chamfer_params(Some(2.5), None))),
             vec!["Chamfer.radius", "Chamfer.distance2"]
+        );
+    }
+
+    /// A hole with no `thread` exposes none of its scalars; a hole with a
+    /// `thread` but no `depthMm` exposes `pitchMm` only.
+    #[test]
+    fn hole_exposes_thread_scalars_only_when_threaded() {
+        let labels = |mut op: KnownOperation| -> Vec<&'static str> {
+            op.scalars_mut().into_iter().map(|(n, _, _)| n).collect()
+        };
+        let unthreaded = labels(KnownOperation::Hole(hole_params()));
+        assert!(
+            !unthreaded.iter().any(|n| n.starts_with("Hole.thread")),
+            "an unthreaded hole must not expose any Hole.thread.* scalar"
+        );
+        assert_eq!(
+            labels(KnownOperation::Hole(threaded_hole_params())),
+            vec!["Hole.diameter", "Hole.depth", "Hole.thread.pitchMm"],
+            "depthMm: None (through the full hole depth) exposes pitchMm only"
+        );
+        assert_eq!(
+            labels(KnownOperation::Hole(hole_scalar_params_threaded())),
+            vec![
+                "Hole.diameter",
+                "Hole.depth",
+                "Hole.cbDiameter",
+                "Hole.cbDepth",
+                "Hole.csDiameter",
+                "Hole.csAngleDeg",
+                "Hole.thread.pitchMm",
+                "Hole.thread.depthMm",
+            ],
+            "a Some(depthMm) exposes both thread scalars, appended last"
         );
     }
 }

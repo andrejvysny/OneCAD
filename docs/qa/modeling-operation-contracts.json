@@ -619,6 +619,28 @@
       "uiExposure": "exposed"
     },
     {
+      "operation": "Hole",
+      "mode": "threaded (cosmetic)",
+      "supportStatus": "supported",
+      "inputTopLevelShapes": "one target solid + host face + point on face",
+      "requiresExactlyOneSolid": true,
+      "emptyResultSemantics": "refuse if host face missing or point off face",
+      "multiSolidResultSemantics": "legacy V1: disconnected host remains one multi-solid body (documented residual); new-record refusal is deferred",
+      "bodyLifecycle": "target modified in place",
+      "bodyIdPolicy": "target BodyId preserved",
+      "authoritativeHistory": "BRepFeat_MakeCylinderPrism / local Boolean history",
+      "historyAbsenceBehavior": "descriptor ladder on target body; stale promotion refused",
+      "validationTier": "Tier B",
+      "toleranceEvidence": "BRepCheck + volume recorded; analytic volume fixtures",
+      "cancellationPolicy": "single OCCT feature call",
+      "previewFidelity": "exact kernel BRep — identical to the unthreaded hole of the same diameter",
+      "persistenceBehavior": "typed host face and point persist; `thread` (WP-T1) is presence-discriminated and skip-none, so an absent thread is byte-identical to a pre-WP-T1 record",
+      "userRecoveryBehavior": "cross-body host ref refused; stale promotion leaves pick mode",
+      "resultPolicyVersion": "unchanged",
+      "notes": "WP-T1: `thread` is a cosmetic-annotation block the worker's geometry never reads (Option B — `diameter` is the drilled hole, threaded or not). Only `detail` is worker-checked: \"cosmetic\" is implemented, \"simplified\"/\"modeled\" refuse with recoverable OP_FAILED + reasonCode HOLE_THREAD_DETAIL_UNSUPPORTED, an unknown/absent detail beside a present thread refuses with HOLE_THREAD_DETAIL_UNKNOWN.",
+      "uiExposure": "exposed"
+    },
+    {
       "operation": "OffsetFace",
       "mode": "Offset",
       "supportStatus": "supported",
