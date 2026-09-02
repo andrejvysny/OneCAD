@@ -59,11 +59,20 @@ ScoreResult score_candidate(const km::ElementDescriptor& intent, bool has_intent
         feats.push_back({is_face ? "area" : "length", 0.25,
                          magnitude_similarity(intent.magnitude, candidate.magnitude)});
 
-        // direction: |normal·normal| (face) / |tangent·tangent| (edge). Absolute
-        // value so an orientation flip (a mirror twin) still aligns — that keeps a
-        // symmetric split a genuine descriptor TIE (→ NeedsRepair) rather than
-        // silently favouring one twin.
-        if (is_face && intent.hasNormal && candidate.hasNormal) {
+        // SIDEDNESS (v4): the SIGNED outward direction. A cap face and the face on
+        // the opposite cap, or a rim edge and its twin on the opposite rim, share
+        // every other descriptor feature; their outward directions oppose (faces)
+        // or are perpendicular (edges: +Z+side vs −Z+side), so max(0, dot) is 0.
+        // Same-facing twins (two identical bosses) still tie — that remains the
+        // margin gate's NeedsRepair, never a guess.
+        const bool sided = intent.hasOutward && candidate.hasOutward;
+        if (sided) {
+            const double dot = intent.outward.Dot(candidate.outward);
+            feats.push_back({"outward", 0.20, std::clamp(dot, 0.0, 1.0)});
+        }
+        // direction: |tangent·tangent| (edge); |normal·normal| (face) only for a
+        // legacy ref with no `outward` — the unsigned form kept a mirror twin tied.
+        if (is_face && !sided && intent.hasNormal && candidate.hasNormal) {
             const double dot = std::abs(intent.normal.Dot(candidate.normal));
             feats.push_back({"normal", 0.20, std::clamp(dot, 0.0, 1.0)});
         } else if (is_edge && intent.hasTangent && candidate.hasTangent) {
@@ -94,7 +103,11 @@ ScoreResult score_candidate(const km::ElementDescriptor& intent, bool has_intent
     // ~0 — hence 1e-7 rather than a modelling-scale constant.
     if (anchor.has_world_point) {
         const double scale = anchor_scale(body_diag);
-        const double dist = anchor.world_point.Distance(candidate.center);
+        // v4: the distance to the SUB-SHAPE when the caller measured it (a pick on
+        // an element is at distance 0 whatever its centroid), else the v3 centroid.
+        const double dist = anchor.shape_distance >= 0.0
+                                ? anchor.shape_distance
+                                : anchor.world_point.Distance(candidate.center);
         feats.push_back({"anchor", 0.25, std::max(0.0, 1.0 - dist / scale)});
     }
 

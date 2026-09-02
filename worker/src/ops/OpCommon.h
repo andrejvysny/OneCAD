@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -56,8 +57,12 @@ bool read_string_array_strict(const nlohmann::json& params, const char* key,
 
 // Collect policy-tier evidence and classify one operation result. Callers own
 // lifecycle changes only after this returns `Publishable` or `LifecycleOnly`.
+// `cancel` (optional) is handed to the Tier B self-interference pass; a caller
+// that passes it must treat `ctx.cancel->cancelled()` after the decision as
+// CANCELLED (the evidence then carries an audit error, never a verdict).
 kernel::validation::PublicationDecision publication_decision(
-    const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy);
+    const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy,
+    const onecad::CancelToken* cancel = nullptr);
 
 // Turn a refused `PublicationDecision` into the operation's failure outcome.
 // Sets the §8 top-level code/message from the decision AND attaches the full
@@ -112,6 +117,16 @@ std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_param
 // false when the face is null / non-planar.
 bool planar_face_plane_normal(const TopoDS_Face& face, gp_Pln& plane_out, gp_Dir& normal_out);
 
+// Stage `algo` as `arg ∘ tool` WITHOUT building it (WP-E). Every auxiliary
+// boolean that is not a `checked_boolean` goes through here so it shares the
+// two properties the head depends on: `SetNonDestructive(true)` — the BOP must
+// never raise tolerances on argument TShapes it shares with the live head or the
+// scratch (see `checked_boolean`) — and single-threaded execution (Invariant 5).
+// The two-shape OCCT constructors build in the constructor, BEFORE any option
+// can be set, which is why callers must default-construct and then `Build()`.
+void stage_boolean(BRepAlgoAPI_BooleanOperation& algo, const TopoDS_Shape& arg,
+                   const TopoDS_Shape& tool);
+
 // Result of a checked boolean: the shape (null on failure) + the §8 error code to
 // surface. `hist_out` receives the builder so the caller can apply OCCT history to
 // the ElementMap partition (SCHEMA §10 ladder level 1 — builder kept alive).
@@ -156,6 +171,22 @@ std::vector<RankedSolid> ranked_solids(const TopoDS_Shape& shape);
 std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape);
 
 enum class BooleanPublishResult { Published, Empty };
+
+// The boolean RESULT POLICY shared by Boolean / Extrude / Revolve (kernel-hardening
+// WP-C). Runs on the raw `checked_boolean` result BEFORE publication:
+//   * Add: the result must hold exactly as many solids as the target did. OCCT's
+//     Fuse of two DISJOINT solids "succeeds" as a compound of both; publishing that
+//     as a D1 split would DELETE the target's BodyId and every element tracked on
+//     it, so it is a named refusal (`add_disjoint_code`) with the target intact.
+//   * Cut / Intersect: an empty result is a named refusal (`empty_code`), never a
+//     silent `deleted` lifecycle event. A multi-solid Cut stays the D1 split.
+// Returns the failure to hand back, or nullopt when the result may be published.
+std::optional<OpOutcome> boolean_result_policy(app::BooleanMode mode, const TopoDS_Shape& target,
+                                                const TopoDS_Shape& result, const char* op_name,
+                                                const std::string& target_id,
+                                                const char* add_disjoint_code,
+                                                const char* empty_code,
+                                                nlohmann::json evidence_extra = nlohmann::json::object());
 
 // Publish a boolean / boolean-mode-Cut result into the scratch as the successor of
 // `target_id`. A SINGLE-solid result MODIFIES `target_id` in place (BodyId preserved

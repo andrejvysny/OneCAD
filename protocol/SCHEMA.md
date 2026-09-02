@@ -546,18 +546,18 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   a step **strictly greater than** `editedFrom`. `> `, not `>= `: step
   `editedFrom` is the edited op itself and Rust re-stamped its refs as part of the
   edit, so they are fresh.
-  **ABSENT means "no claim", and absence is the safe default.** Only the edit lane
-  sets it — a `RegenToEnd(from)` whose `from > 0`, i.e. one the scheduler derived
-  from an `UpdateOperationParams` / `EditOperationInput` / `AddOperation` /
-  `RemoveOperation` / suppression command's dirty floor. Every **no-edit replay**
-  lane omits it: open-time replay, STEP import, crash recovery, undo, redo — all of
-  which request `RegenToEnd(0)` explicitly — and every `RegenToStep(k)` preview.
-  **`from == 0` is deliberately treated as absent**: a from-0 replay is
-  indistinguishable from a first-record edit here, and it rebuilds exactly the
-  geometry every stored anchor was authored against, so claiming an edit there
-  would veto every congruent-twin resolution in the document and make a clean
-  reopen un-resolvable. Under-claiming costs one veto on a step-0 edit;
-  over-claiming breaks reopen — the conservative direction is ABSENT.
+  **ABSENT means "no claim", and absence is the safe default.** Every `ToEnd(from)`
+  regen claims its floor — including **`from == 0`** (since resolverVersion 4,
+  2026-09-02): a base-sketch or variable edit is exactly the edit class the
+  descriptor-tie veto exists for, and it can only be expressed as a from-0 regen.
+  Open-time replay, STEP import and crash recovery are also `ToEnd(0)` and
+  therefore also carry `editedFrom: 0`; a clean reopen stays resolvable because
+  the geometry it rebuilds is byte-identical to what every stored anchor was
+  authored against, so the true element is anchor-exact and the §10 carve-out lets
+  it bind. The lanes that OMIT the claim are `RevertToEnd` (undo, redo, rollback)
+  and every `RegenToStep(k)` preview — they replay history the user did not just
+  edit. Before resolverVersion 4 `from == 0` was treated as absent; the worker MUST
+  still tolerate absence.
   Rust owns this field entirely: it is the only side that knows *why* a regen was
   requested. The worker MUST tolerate its absence (pre-`resolverVersion`-2
   behaviour) and SHOULD treat a non-integer value as absent rather than as an
@@ -634,15 +634,18 @@ diagnostics are consumed per carrier.
 **`diagnostics[].reasonCode` — the machine-readable publication-refusal reason.**
 `code` answers *which taxonomy bucket*; `reasonCode` answers *which policy branch
 refused*. It is a SIBLING of `code`, never a replacement: `code` stays the closed
-§8 value (`GEOMETRY_INVALID` on every publication refusal), so a reader may route
-on the reason without the top-level error enum ever growing a member it cannot
-parse. Absent means "this producer made no claim", never "no reason exists" — a
+§8 value (`GEOMETRY_INVALID` on a generic publication refusal; a NAMED recoverable
+refusal such as `MIRROR_DISJOINT_RESULT` / `PATTERN_DISJOINT_RESULT` keeps its own
+`code` with top-level `OP_FAILED` and still carries the `reasonCode` + evidence that
+explain it), so a reader may route on the reason without the top-level error enum
+ever growing a member it cannot parse. Absent means "this producer made no claim", never "no reason exists" — a
 reader MUST NOT infer anything from the absence and MUST NOT parse `message` as a
 substitute. Unknown values are forward compatibility, not errors: a reader that
 does not recognise a `reasonCode` treats the diagnostic exactly as it would with
 the field missing. The values below are 1:1 with the branches of the worker's
-`evaluate_publication_policy`; every one of them ships with top-level
-`GEOMETRY_INVALID`.
+`evaluate_publication_policy`; each ships with top-level `GEOMETRY_INVALID` unless
+the op re-labels the refusal by name (the recoverable disjoint-result codes above),
+in which case the `reasonCode` is unchanged and only `code`/top-level differ.
 
 | `reasonCode` | Refused because |
 |---|---|
@@ -658,21 +661,56 @@ the field missing. The values below are 1:1 with the branches of the worker's
 | `PUBLICATION_NON_POSITIVE_VOLUME` | volume is unmeasured, non-finite, or ≤ 0 |
 | `PUBLICATION_TOLERANCE_UNKNOWN` | B-Rep tolerances are unmeasured or not finite |
 | `PUBLICATION_TOLERANCE_BUDGET` | measured tolerance exceeded the operation's tolerance ceiling |
-| `PUBLICATION_OPEN_MANIFOLD` | closed-manifold validation failed (open or non-manifold edge use) |
+| `PUBLICATION_OPEN_MANIFOLD` | closed-manifold validation failed (open or non-manifold edge use); evidence is collected PER SOLID, so children of a legitimate split that merely touch along an edge do not trip it |
 | `PUBLICATION_SELF_INTERFERENCE` | Tier B self-interference validation failed or was not run |
 
+**Commit tier (kernel-hardening WP-E, 2026-09-02).** Every op that PUBLISHES
+NEW committed geometry validates it at **Tier B** — closed manifold, sliver
+bound, BOP self-interference: `Extrude` and `Revolve` NewBody (previously Tier
+A), every boolean result (`Boolean`, the Extrude/Revolve boolean tails, `Hole`,
+fused `MirrorBody`, fused Pattern), `Fillet`, `Chamfer`, `Shell`, `OffsetFace`,
+`Gear`, and `PlaceComponent` for the `embedded` / `document` / `profile` source
+kinds (geometry the worker did not build). `ImportStep` is the recorded
+exception: an imported solid is admitted by the import health policy (§7.3
+`ImportStep`, BRepCheck + heal), not by Tier B — closing that gap is the owed
+"Tier B evidence at `classify_solids`" item. Tier A is retained, by ruling, where the result is an ISOMETRY of an
+already-published body — `TransformBody` (copy or move), unfused `MirrorBody`,
+unfused Pattern V2 children — because closed-manifold, BRepCheck and
+self-interference are invariant under a rigid motion and the pass would only
+re-pay its cost (minutes for a threaded fastener); and for `PlaceComponent`
+`generator` sources (in-repo deterministic geometry with exact-volume tests; the
+BOP self-interference pass on a modeled helical thread face measured > 5 min per
+placement). `PreviewOp` downgrades every Tier B site to Tier A, and the Tier B
+self-interference pass is interruptible at every Tier B publication site listed
+above (a `cancel` frame mid-check ends the op as `CANCELLED`, never as a verdict)
+— with ONE recorded exception: `Fillet`'s audit runs inside the fillet kernel
+(`FilletBuilder`), where it is neither preview-downgraded nor cancellable; the
+cancel token gates only between fillet phases. The standalone
+Boolean, the Revolve boolean tail and Hole now carry the same tolerance ceiling
+Extrude's boolean applies (`max(authoring resolution, 2 × input tolerance +
+1e-6)`). Every boolean the worker runs against committed or head geometry — the
+op-lane `checked_boolean` and the auxiliary fuses/commons staged through
+`stage_boolean`, `PrepareOffsetFace`'s commons, `ExportGeometry`'s `union` fuse —
+runs `SetNonDestructive(true)`: a failed, cancelled or previewed boolean never
+raises the tolerances of the argument shapes it shares with the live head. The
+sliver-face width floor is now `max(microEdgeLength, authoringResolution / 100)`
+where `microEdgeLength = 2 × max(Confusion, |coordinate| × 1e-14)`, i.e. 1e-5 mm
+for any part smaller than ~1e9 mm.
+
+`PUBLICATION_SLIVER_FACE` IS reachable: every Tier B single-solid policy sets
+`max_sliver_face_count = 0` (WP1-G4), and since the 2026-09-02 commit-tier change
+every publication of NEW geometry listed above is evaluated at Tier B, so a face
+whose width (2·area/perimeter) is below the 1e-5 mm floor refuses by that code.
 IMPLEMENTED BEHIND A DISABLED BOUND, and therefore **not emitted today**:
-`PUBLICATION_MICRO_EDGE`, `PUBLICATION_SLIVER_FACE`,
-`PUBLICATION_MICRO_TOPOLOGY_UNKNOWN`. The evidence for all three
-(`microEdgeCount`, `sliverFaceCount`, `degenerateEdgeCount`, `minimumEdgeLength`,
-`minimumFaceWidth`, `microTopologyChecked`) is collected at Tier B, and the
-refusal branches exist — but every micro-topology bound in the worker's
-publication policy defaults to DISABLED, and no operation enables one, so no
-branch is reachable. `PUBLICATION_MICRO_TOPOLOGY_UNKNOWN` is the missing-evidence
+`PUBLICATION_MICRO_EDGE`. Its bound (`max_micro_edge_count`) stays DISABLED in
+every operation's policy until a characterized dirty-import fixture exists (the
+micro rule is tolerance-relative and a healed import may legally carry a 1.0 mm
+edge tolerance). `PUBLICATION_MICRO_TOPOLOGY_UNKNOWN` is the missing-evidence
 refusal: with a bound enabled, unmeasured micro topology REFUSES rather than
-passes. Emission begins when an operation's policy first enables a bound; a
-reader may see these values from that point on and MUST already treat them like
-any other `reasonCode`.
+passes. The evidence for all three (`microEdgeCount`, `sliverFaceCount`,
+`degenerateEdgeCount`, `minimumEdgeLength`, `minimumFaceWidth`,
+`microTopologyChecked`) is collected at every tier. A reader MUST treat all three
+codes like any other `reasonCode`.
 
 - `elementMapDelta.added` / `.relabeled` entries carry a **REQUIRED `bodyId`**:
   `{ elementId, topoKey, kind, bodyId }`. A single step can create/modify several
@@ -692,14 +730,18 @@ any other `reasonCode`.
   malformed or colliding id **rejects** the prepared plan (the worker's terminal is
   treated as `PROTOCOL_ERROR`, the scratch is **discarded, never published**).
   `modified`/`deleted` events reference bodies that already exist. A **boolean split**
-  (a boolean-mode op — Boolean, or boolean-mode Extrude/Revolve — whose result is
-  **multi-solid**, in practice a Cut/Intersect that bisects a body) **deletes the
+  (a boolean-mode op — Boolean, or boolean-mode Extrude/Revolve — whose **Cut or
+  Intersect** result is **multi-solid**, i.e. bisects a body; an **Add/Union** never
+  splits — a fuse whose tool does not touch the target is a NAMED refusal, see
+  §7.3 "Boolean result policy") **deletes the
   parent** (a `deleted` event) and mints ordered split children `body_<opId>:<k>`, each
   emitted as its **own `created` event** and adopted + fenced under the **same** D1
   rules above (the `body_` prefix + `<opId>` a known plan op, the `:<k>` ordinals
   contiguous from 0, ids unique — else the plan is rejected). A **single-solid**
   boolean result instead emits a `modified` on the surviving target (its `BodyId`
-  preserved). The `:<k>` rule is **generic**: ANY op whose result is N > 1
+  preserved). Closed-manifold evidence for a multi-solid result is measured per
+  solid (each child must be closed on its own); an edge shared between two children
+  is not a non-manifold use. The `:<k>` rule is **generic**: ANY op whose result is N > 1
   deterministically-ordered bodies mints `body_<opId>:<k>` children under these
   same adoption rules — a boolean split is today's only producer, but the naming
   contract does not assume a `deleted` parent accompanies the `created` children
@@ -1261,6 +1303,39 @@ OneCAD-CPP `ExtrudeParams`.
   which is the correct termination there too. With no seated run the profile
   starts in free space and termination is the minimum of the intersection.
 
+- **`Symmetric` and two-direction extrudes are ONE prism** (kernel-hardening WP-D,
+  2026-09-02). `Symmetric` builds a single prism of length `|distance|` centred on
+  the sketch plane (`distance` is the TOTAL, half on each side — the corpus
+  semantics); a two-direction extrude whose legs are both plain distances (Blind /
+  ThroughAll / ToNext / parallel ToFace) builds a single prism from the profile
+  shifted back by `distance2` sweeping `distance + distance2`. Only a TILTED
+  `ToFace` leg keeps the two-prism fuse, and that path merges the coplanar wall
+  halves (`ShapeUpgrade_UnifySameDomain`). A rectangle therefore always yields the
+  6-face / 12-edge / 8-vertex box; a mid-plane seam is a defect.
+- **Two-direction legs are non-negative lengths along their own side.** With
+  `twoDirections:true`, a negative `distance` or `distance2` is refused by name
+  (`EXTRUDE_TWO_DIRECTION_NEGATIVE_LEG`, `stage:"classify"`, evidence
+  `{extrude:{distance,distance2}}`); a negative leg used to build both prisms on one
+  side with the shorter one silently absorbed.
+- **`ThroughAll` is a tool extent, never published material.** With `NewBody` there
+  is no reference body to reach through, so the combination is refused by name
+  (`EXTRUDE_THROUGH_ALL_NO_TARGET`, `stage:"classify"`); it used to publish a 10⁵ mm
+  prism. With `Add` the tool ends EXACTLY at the target's far extent along the
+  extrude direction (the exact directional maximum over the target body, edge and
+  face interiors included), so the joined material never overshoots the far face;
+  `Cut`/`Intersect` keep the deliberate overshoot past the far face.
+- **Boolean result policy** (shared with Boolean and Revolve, WP-C): a boolean-mode
+  `Add` whose result holds MORE solids than the target did — the tool never touched
+  the target, OCCT's fuse "succeeded" as a compound of both — is a recoverable
+  `OP_FAILED` carrying diagnostic `EXTRUDE_ADD_DISJOINT` (`stage:"publish"`,
+  evidence `{boolean:{operation,targetBodyId,targetSolids,solidCount}}`); the
+  target keeps its id, geometry and every tracked element. It is NEVER published
+  as a split (which retired the target id and dropped its partition). A `Cut` /
+  `Intersect` that leaves no material is likewise a recoverable `OP_FAILED` with
+  diagnostic `EXTRUDE_EMPTY_RESULT` and the target untouched — never a silent
+  `deleted` lifecycle event. Revolve carries the same two codes as
+  `REVOLVE_ADD_DISJOINT` / `REVOLVE_EMPTY_RESULT`. Cross-track fixture:
+  `protocol/fixtures/extrude_add_disjoint_refusal.ndjson`.
 - **Draft is applied completely and measured, or refused — never silently
   degraded.** V1 proves draft semantics only for a single-direction `Blind`
   extrusion; any other end condition or `twoDirections:true` is refused until its
@@ -1333,6 +1408,20 @@ the legacy `bodyId`; a malformed, foreign, or curved axis is named refused, whil
 missing/deleted/ambiguous typed edges surface `NeedsRepair` with refId
 `<opId>.input0`. Repair writes `edgeRef.primary` and the legacy `bodyId`/`edgeId`
 together. This is additive; old readers may continue to use the legacy pair.
+
+- **The profile must lie on ONE side of its axis** (kernel-hardening WP-E,
+  2026-09-02). A profile that crosses the axis sweeps through itself: OCCT builds
+  the figure-8 solid, `BRepCheck` accepts it face by face and its volume is
+  positive. The worker classifies the whole profile BOUNDARY against the axis in
+  the profile plane BEFORE any kernel work — every edge's endpoints plus the
+  analytic extrema of Circle/Ellipse arcs (free-form curves sampled), since a full
+  circle has one vertex and an arc's extremum lies between its endpoints — and
+  refuses a crossing by name — top-level
+  `OP_FAILED`, diagnostic `REVOLVE_PROFILE_CROSSES_AXIS` (`stage:"classify"`,
+  evidence `{revolve:{minSignedOffset,maxSignedOffset,authoringResolution}}`).
+  Touching the axis (an edge or vertex on it) is legal — it makes the degenerate
+  pole edges of a shaft or a sphere. Pinned by
+  `worker/tests/test_commit_tier_validation.cpp`.
 
 **Fillet** (`op.fillet`) and **Chamfer** (`op.chamfer`) — split ops sharing the
 OneCAD-CPP `FilletChamferParams` shape (`mode` distinguishes; radius doubles as
@@ -1605,6 +1694,12 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
   on the CODE rather than on message text — the §8 top-level value is the generic
   `OP_FAILED` every Boolean failure shares. Cross-track fixture:
   `protocol/fixtures/boolean_empty_refusal.ndjson`.
+- A `Union` whose tool does not touch the target (the result holds more solids
+  than the target did) is the same kind of recoverable `OP_FAILED`, carrying
+  diagnostic `BOOLEAN_DISJOINT_RESULT` (`stage:"publish"`, evidence
+  `{boolean:{operation:"Add",targetBodyId,toolBodyId,targetSolids,solidCount}}`):
+  target and tool stay intact, nothing is consumed. It is never a split — a split
+  is a Cut/Intersect outcome only (§7.2). Kernel-hardening WP-C, 2026-09-02.
 
 **Shell** (`op.shell`) — hollow a body, removing (opening) selected faces. Field
 names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelog)).
@@ -1888,6 +1983,13 @@ from OneCAD-CPP `MirrorBodyParams` (flat `planePointX/Y/Z` + `planeNormalX/Y/Z` 
   (`gp_Trsf::SetMirror(gp_Ax2(planePoint, planeNormal))`).
 - `fuseWithOriginal` (default `false`): `true` ⇒ source + mirror image FUSED into
   one solid; `false` ⇒ the mirror image alone. Either way ONE new body
+- A `fuseWithOriginal:true` mirror whose image never touches its source fuses into
+  a compound of two solids: a recoverable `OP_FAILED` carrying diagnostic
+  `MIRROR_DISJOINT_RESULT` (`stage:"publication"`, plus the publication
+  `reasonCode` `PUBLICATION_TOO_MANY_SOLIDS` and its shape evidence), the same
+  "move the plane" refusal Pattern names `PATTERN_DISJOINT_RESULT` — not a generic
+  `GEOMETRY_INVALID`. Kernel-hardening WP-C, 2026-09-02; pinned by
+  `protocol/fixtures/publication_refusal.ndjson`.
 
 **ImportStep** (`op.importStep`) — materialize the solids of a STEP file as
 document bodies, as a **plan step** (NOT a session verb: an import must live on
@@ -3763,7 +3865,7 @@ STATE (see [§8](#8-error-taxonomy)).
   "ladderFailed": "descriptor",          // "history" | "descriptor"
   "reason": "ambiguous",                 // "ambiguous" | "no-candidates" | "low-confidence"
                                          //   | "ordinal-permutation" (Rust-seeded only)
-  "scoringVersion": 3,                   // = resolverVersion the scores were computed under
+  "scoringVersion": 4,                   // = resolverVersion the scores were computed under
   "candidates": [
     {
       "topoKey": "f:31",
@@ -3832,7 +3934,9 @@ evidence so the policy can later move to Rust.
 **Descriptor** (evidence, never identity — Invariant 2). Ported from OneCAD-CPP
 `ElementMap.h`: an `ElementDescriptor` of `{shapeType, center, size (bbox
 diagonal), magnitude (area/length/volume), surfaceType, curveType, normal,
-tangent, hasNormal, hasTangent, adjacencyHash}`, quantized into a match key
+tangent, hasNormal, hasTangent, adjacencyHash}` plus, since resolverVersion 4,
+the signed `outward` direction with `hasOutward` (additive; scored, but NOT part
+of the match key, so its arrival moves no descriptor hash), quantized into a match key
 (shape/surface/curve type + quantized center xyz + normal xyz + tangent xyz +
 size + magnitude + adjacencyHash). Quantization step **`1e-6`**
 (`llround(value / 1e-6)`). Hashing **FNV-1a 64-bit** (offset basis
@@ -3842,9 +3946,11 @@ count (edges). This is `quantizationVersion = 1` / `descriptorVersion = 1`.
 
 **Scoring (REDESIGNED — normalized).** OneCAD-CPP's `score()` is an unbounded,
 scale-dependent cost that cannot express the locked policy; this protocol replaces
-it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 3`;
-version 2 added the edit-scoped veto and proportional anchor scale; version 1 had
-neither). Version 3 adds Modified-channel provenance only at the history rung.
+it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 4`;
+version 3 added Modified-channel provenance at the history rung; version 2 added
+the edit-scoped veto and proportional anchor scale; version 1 had neither).
+Version 4 adds the signed `outward` sidedness feature and the relative,
+shape-measured anchor — see "Sidedness and the relative anchor" below.
 Higher = better match. Policy:
 
 - **Auto-bind iff** `score1 ≥ 0.85` **AND** `(score1 − score2) ≥ 0.10`
@@ -3874,10 +3980,12 @@ EXACTLY in descriptor space, so the `anchor` is the only feature that can separa
 them. Whether letting it do so is correct depends on something the worker cannot
 see in the geometry:
 
-- On a **no-edit replay** (no [§7.2](#72-regen--executeplan) `editedFrom`) the
-  geometry is rebuilt exactly as the ref was authored against, so the stored anchor
-  sits on its element and **the anchor MAY decide the tie** — this is what makes a
-  reopen, a rollback and an undo/redo resolve cleanly.
+- On a **no-edit replay** — a `RevertToEnd` lane with no [§7.2](#72-regen--executeplan)
+  `editedFrom` (rollback, undo, redo), or a from-0 reopen that claims `editedFrom: 0`
+  under resolverVersion 4 — the geometry is rebuilt exactly as the ref was authored
+  against, so the stored anchor sits ON its element and **the anchor MAY decide the
+  tie**: with no claim by rule, with a claim through the anchor-exact carve-out
+  below. This is what makes a reopen, a rollback and an undo/redo resolve cleanly.
 - After an **upstream content edit** (`editedFrom = k`, for refs owned by a step
   `> k`) the geometry moved out from under the stored anchor, which can now sit
   closer to a twin than to the real element. There the anchor is precisely the
@@ -3942,6 +4050,61 @@ generated side topology must not erase stronger direct lineage. A Modified image
 therefore adds `0.09` to its normalized history score (clamped to `1.0`). The value
 is strictly below the locked `0.10` margin, so a descriptor/anchor tie still emits
 NeedsRepair; the underlying geometry evidence must supply the remaining separation.
+
+**Sidedness and the relative anchor (`resolverVersion = 4`, kernel-hardening
+WP-A, 2026-09-02).** Measured on version 3: a Ø6 hole seated on the top face of a
+100×100×5 plate, and a fillet on one of its top rim edges, were **NeedsRepair at
+commit** — before any edit. The top and bottom caps (and the top and bottom rim
+edges) are exact descriptor twins: same type, same area/length, `|normal|` /
+`|tangent|` identical, and an adjacency hash built from sorted edge lengths
+(faces) or centre-relative vertex offsets (edges). The only separator was the
+anchor feature, scaled by half the body diagonal (70.8 mm), so a 5 mm separation
+was worth `0.25 × 5/70.8 = 0.018` of margin against a `0.10` gate. Every regen
+replays from step 0 with an empty partition, so that gate decided every ref every
+time. Two changes:
+
+- **`outward` — signed sidedness.** The descriptor gains an OUTWARD unit direction:
+  a face's outward normal (surface normal × face orientation in its body); an
+  edge's normalized sum of its adjacent faces' outward normals, each evaluated at
+  the point nearest the edge midpoint. It rides in `intent.descriptor` as
+  `"outward": [x,y,z]` — ADDITIVE and OPTIONAL: a descriptor computed without a
+  body (and every pre-v4 record) omits it, and a ref without it scores exactly as
+  in version 3. Feature weight `0.20`, similarity `max(0, outward·outward)`. It
+  REPLACES the unsigned face `normal` feature (which deliberately kept a mirror
+  twin tied) and JOINS the edge `tangent` feature. Opposite caps score `0`; a rim
+  edge and its twin on the opposite rim (`+Z+side` vs `−Z+side`) score `0`; two
+  identical SAME-FACING faces (two bosses, two halves of a split top) still tie —
+  that remains the margin gate's NeedsRepair, never a guess. Consequence for
+  authoring: an element promoted WITHOUT an anchor is no longer an automatic tie
+  with its opposite-facing twin; a genuine tie needs a same-facing twin.
+- **Shape-measured anchor + the anchor-decisive tie-break.** At the descriptor
+  rung the anchor feature measures the pick point's distance to each candidate
+  SUB-SHAPE (`BRepExtrema`, centroid fallback) instead of to its bbox centre; the
+  scale stays the version-2 `0.5 × bodyDiagonal`. On top of the `0.85` / `0.10`
+  gates, when the best two candidates TIE in descriptor space (same-facing twins,
+  or an anchor-only ref such as a Hole seat) the pick is allowed to decide below
+  the `0.10` margin iff it lies ON the winner — within **0.01 mm**, the anchor
+  separation floor, deliberately NOT the veto's wider anchor-exact band (`0.05 ×
+  0.5 × bodyDiagonal`, ≈ 3.5 mm on a 100 mm plate, which would let a pick left 3 mm
+  from a congruent twin after an upstream edit bind to the twin) — and every rival
+  is at least **10×** farther than `max(winnerDistance, 0.01 mm)`. A pick made on one of two identical bosses names
+  that boss; two candidates both at the pick (a shared vertex, a split through the
+  pick point) still tie. The history rung keeps the centroid form — a pick the op
+  itself carved away (a hole drilled AT the pick) would otherwise be equidistant
+  from the modified face and the wall generated inside it — and now drops
+  cross-kind images (a face's section edges, an edge's split vertices) before
+  scoring, so they can no longer turn a unique same-kind successor into an
+  "ambiguous" split. A relative `rival/(d+rival)` anchor was tried and rejected: it
+  credits a decoy parked at a stale anchor and lets a far-away congruent corner
+  bind after a destructive edit. The edit-scoped veto, its carve-out and the
+  min-cost assignment are unchanged.
+
+The reported `scoringVersion` (§9) moves 3 → 4; Rust's `policyVersions.resolverVersion`
+(§7.2, the checkpoint-compatibility axis) stays 1 — whether a v3-minted checkpoint
+partition may be restored under v4 scoring is a recorded open item. Pinned by `worker/tests/test_wp6_ladder.cpp` (v4 cases), the real-worker
+probes `hole_ops.rs::plate_hole_survives_commit_and_reopen` and
+`topology_rebind.rs::plate_top_edge_fillet_survives_commit_and_reopen`, and the
+`scoringVersion` fixtures.
 
 ---
 
@@ -4016,6 +4179,67 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-09-02 — Commit-tier validation (kernel-hardening WP-E).**
+  [§7.2](#72-regen--executeplan): every publication of NEW geometry is validated
+  at Tier B (`Extrude`/`Revolve` NewBody join the boolean results, `Fillet`,
+  `Chamfer`, `Shell`, `OffsetFace`, `Gear` and non-generator `PlaceComponent`;
+  isometries — `TransformBody`, unfused `MirrorBody`/Pattern children — and
+  `generator` components stay Tier A by ruling; `ImportStep` stays on the import
+  health policy — see §7.2), the self-interference pass is cancellable at every
+  op-lane site (`Fillet`'s kernel-lane audit excepted, recorded), every boolean
+  run against committed or head geometry is non-destructive,
+  Boolean/Revolve-boolean/Hole gain Extrude's tolerance ceiling (the standalone
+  Boolean budgets from the WORSE of its two inputs), the sliver width floor is
+  1e-5 mm. Deferred: `HasWarnings()` diagnostics, a pre-BOP `fuzzyValue` clamp.
+  [§7.3](#73-op-payload-schemas-vertical-slice) Revolve: a profile crossing its
+  axis refuses `REVOLVE_PROFILE_CROSSES_AXIS`. *Reason:* the audit found every
+  NewBody commit at Tier A, so a self-intersecting revolve or draft published with
+  positive volume and failed only much later inside an unrelated fillet's input
+  audit. *Fixtures:* new `protocol/fixtures/revolve_profile_crosses_axis.ndjson`
+  (both lanes). No wire shape moves. Cross-track sign-off recorded 2026-09-02 — protocol-auditor: schema-vs-code review (read-only), `approve` after every filed change was applied; worker + Rust gates re-verified by the orchestrator (ctest and `cargo test --workspace` counts in the TODO.md § KERNEL HARDENING gate row).
+
+- **2026-09-02 — resolverVersion 4: sidedness + relative anchor (kernel-hardening
+  WP-A).** [§10](#10-resolution-ladder) adds the signed `outward` descriptor
+  feature (additive `intent.descriptor.outward`, optional), measures the anchor to
+  the candidate sub-shape, adds the anchor-decisive tie-break for descriptor-tied
+  candidates, and drops cross-kind history images; [§9](#9-needsrepair-payload)
+  `scoringVersion` moves 3 → 4 (Rust's `policyVersions.resolverVersion` stays 1); `ToEnd
+  { from: 0 }` now CLAIMS `editedFrom: 0` (a base-sketch or variable edit is the
+  edit class the veto exists for; a from-0 reopen stays resolvable because the true
+  element is anchor-exact). *Reason:* measured on v3, a hole and a rim fillet on a
+  100×100×5 plate were NeedsRepair at COMMIT — cap-side congruent twins were
+  separable only by an anchor scaled to the body diagonal. *Fixtures:*
+  `protocol/fixtures/resolve_refs.ndjson` (moved from the harness lane so the pin
+  runs in BOTH lanes, §13) and `worker/tests/fixtures/executeplan_needsrepair.ndjson`
+  (`scoringVersion` 3 → 4); the descriptor field is additive, so no shape moves.
+  Cross-track sign-off recorded 2026-09-02 — protocol-auditor: schema-vs-code review (read-only), `approve` after every filed change was applied; worker + Rust gates re-verified by the orchestrator (ctest and `cargo test --workspace` counts in the TODO.md § KERNEL HARDENING gate row).
+
+- **2026-09-02 — Boolean result policy + extrude construction (kernel-hardening
+  WP-C / WP-D).** [§7.2](#72-regen--executeplan): a split is a Cut/Intersect
+  outcome only. [§7.3](#73-op-payload-schemas-vertical-slice): (1) an `Add`/`Union`
+  whose tool never touches the target is a NAMED recoverable refusal
+  (`EXTRUDE_ADD_DISJOINT` / `BOOLEAN_DISJOINT_RESULT` / `REVOLVE_ADD_DISJOINT`) with
+  the target intact — it used to publish as a split that DELETED the target's
+  BodyId and every element tracked on it; (2) an Extrude/Revolve Cut or Intersect
+  that leaves no material refuses (`EXTRUDE_EMPTY_RESULT` / `REVOLVE_EMPTY_RESULT`)
+  instead of emitting a silent `deleted` (Boolean already refused
+  `BOOLEAN_EMPTY_RESULT`); (3) a disconnected `MirrorBody` fuse is
+  `MIRROR_DISJOINT_RESULT` (top-level `OP_FAILED`, still carrying the publication
+  `reasonCode` + evidence) instead of a generic `GEOMETRY_INVALID`; (4) `Symmetric`
+  and plain two-direction extrudes are ONE prism (6/12/8 box topology, no mid-plane
+  seam); (5) `ThroughAll` + `NewBody` refuses `EXTRUDE_THROUGH_ALL_NO_TARGET` and
+  `ThroughAll` + `Add` ends exactly at the target's far extent; (6) a negative
+  two-direction leg refuses `EXTRUDE_TWO_DIRECTION_NEGATIVE_LEG`; (7) closed-manifold
+  publication evidence is collected PER SOLID, so a Cut whose children touch along
+  one edge is a legitimate split rather than `PUBLICATION_OPEN_MANIFOLD`. *Fixtures:*
+  new `extrude_add_disjoint_refusal.ndjson`; `publication_refusal.ndjson` re-pinned
+  to the named Mirror code (same `reasonCode`/evidence). *Reason:* the audit's
+  red-first probe `worker/tests/test_extrude_boolean_modes.cpp` measured every one
+  of these on the shipped kernel (target id destroyed by a missed Add, 10/20/12
+  topology for a symmetric box, a 10⁵ mm ThroughAll prism, 4020.8 mm³ of overshoot
+  material); `docs/qa/modeling-operation-contracts.json` already promised the
+  refusals. Cross-track sign-off recorded 2026-09-02 — protocol-auditor: schema-vs-code review (read-only), `approve` after every filed change was applied; worker + Rust gates re-verified by the orchestrator (ctest and `cargo test --workspace` counts in the TODO.md § KERNEL HARDENING gate row).
 
 - **2026-09-01 — §7.3 `Hole.thread`, an OPTIONAL cosmetic-thread block** (WP-T1;
   cross-track sign-off recorded 2026-09-01). Presence-discriminated and
@@ -4990,7 +5214,7 @@ sign-off) once fixtures exist.
   The old `1.0 mm` floor separately made every sub-2 mm part un-resolvable by
   collapsing all anchor similarities towards 1.
   **Fixture bump — 2 files.** `worker/tests/fixtures/executeplan_needsrepair.ndjson`
-  and `worker/tests/fixtures/resolve_refs.ndjson` pin `scoringVersion` and move
+  and `protocol/fixtures/resolve_refs.ndjson` (formerly under `worker/tests/fixtures/`) pin `scoringVersion` and move
   `1` → `2`. No shape, signature, id or geometry moves: the NeedsRepair payloads are
   otherwise byte-identical and both files are subset matchers. `protocol/fixtures/`
   (hello/echo only) is untouched, and no `policyVersions.resolverVersion` on the
@@ -5609,7 +5833,7 @@ sign-off) once fixtures exist.
   `topoKey` in the `elementId` slot (R-WP12 flag). The Rust parser now reads the
   `elementId` slot strictly (with a one-release tolerance: a legacy `topoKey`-only
   `autoBind` still parses, the `topoKey` landing as evidence). *Fixture bump:*
-  `worker/tests/fixtures/resolve_refs.ndjson` `r_autobind` now asserts the `elementId`
+  `protocol/fixtures/resolve_refs.ndjson` (formerly under `worker/tests/fixtures/`) `r_autobind` now asserts the `elementId`
   slot present beside `topoKey`. No wire-shape change beyond code-to-spec (§7.5 already
   specified `elementId`); no canonical `protocol/fixtures/` change (they carry no
   `ResolveRefs` `autoBind` flow).

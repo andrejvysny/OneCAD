@@ -9,6 +9,9 @@
 #include <BOPAlgo_CheckResult.hxx>
 #include <BOPAlgo_CheckStatus.hxx>
 #include <BRepAlgoAPI_Check.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressRange.hxx>
+#include <Message_ProgressScope.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
@@ -31,6 +34,21 @@
 namespace onecad::kernel::validation {
 
 namespace {
+
+// A progress indicator whose only job is to abort the self-interference pass when
+// the worker's cooperative cancel token flips (mirrors ops/CancelProgress.h; kept
+// local so the validator does not depend on the ops layer).
+class CancelIndicator : public Message_ProgressIndicator {
+public:
+  explicit CancelIndicator(const onecad::CancelToken &token) : token_(token) {}
+  Standard_Boolean UserBreak() override {
+    return token_.cancelled() ? Standard_True : Standard_False;
+  }
+  void Show(const Message_ProgressScope &, const Standard_Boolean) override {}
+
+private:
+  const onecad::CancelToken &token_;
+};
 
 bool solid_container(TopAbs_ShapeEnum shape_type) {
   return shape_type == TopAbs_SOLID || shape_type == TopAbs_COMPSOLID ||
@@ -79,7 +97,9 @@ double elapsed_ms(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
-void collect_manifold_evidence(const TopoDS_Shape &shape, ShapeEvidence &out) {
+// Edge-use census of ONE closed shell candidate (a solid, or the whole shape when
+// it holds no solid).
+void census_manifold(const TopoDS_Shape &shape, ShapeEvidence &out) {
   NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> edges;
   NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faces;
   TopExp::MapShapes(shape, TopAbs_EDGE, edges);
@@ -97,6 +117,22 @@ void collect_manifold_evidence(const TopoDS_Shape &shape, ShapeEvidence &out) {
       continue;
     out.open_edge_count += uses[static_cast<std::size_t>(i)] < 2 ? 1 : 0;
     out.non_manifold_edge_count += uses[static_cast<std::size_t>(i)] > 2 ? 1 : 0;
+  }
+}
+
+// Manifold-ness is a PER-SOLID property (WP-C). A multi-solid result whose children
+// touch along one edge shares that edge's TShape between both solids' faces; a
+// whole-compound census would count it four times and refuse a legitimate split as
+// PUBLICATION_OPEN_MANIFOLD. Each solid is therefore judged on its own; only a
+// solid that is itself open or non-manifold contributes.
+void collect_manifold_evidence(const TopoDS_Shape &shape, ShapeEvidence &out) {
+  TopTools_IndexedMapOfShape solids;
+  TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+  if (solids.Extent() == 0) {
+    census_manifold(shape, out);
+  } else {
+    for (int i = 1; i <= solids.Extent(); ++i)
+      census_manifold(solids(i), out);
   }
   out.manifold_checked = true;
 }
@@ -290,9 +326,11 @@ PublicationPolicy single_solid_policy(std::string name, PublicationTier tier) {
   policy.allowed_top_level_shapes = TopLevelShapePolicy::SingleBody;
   policy.require_closed_manifold = tier == PublicationTier::TierB;
   // WP1-G4, sliver half only. The width metric is absolute (2·area/perimeter vs
-  // a 2e-7 mm floor) and tolerance-independent, and the 120-row census plus a
-  // computed worst case (a 10×10 filter plate with 10k holes reports 0.0254 mm,
-  // five orders above the bar) show no realistic face can trip it by accident.
+  // the `sliver_face_width()` floor — 1e-5 mm since WP-E, was 2e-7 mm) and
+  // tolerance-independent; the 120-row census plus a computed worst case (a
+  // 10×10 filter plate with 10k holes reports 0.0254 mm, three orders above the
+  // bar) show no realistic face can trip it by accident. Since WP-E this bound is
+  // exercised by every committed NewBody op, not only fused mirrors.
   // `max_micro_edge_count` stays DISABLED: the micro rule's tolerance-relative
   // half means a healed dirty import (edge tolerance legally up to 1.0 mm,
   // StepReadPolicy::max_precision_val) could carry a 2.0 mm micro bar, and that
@@ -393,7 +431,8 @@ PublicationDecision evaluate_publication_policy(const ShapeEvidence &evidence,
   return make_decision(PublicationDisposition::Publishable, "", "", "", evidence);
 }
 
-ShapeEvidence collect_shape_evidence(const TopoDS_Shape &shape, PublicationTier tier) {
+ShapeEvidence collect_shape_evidence(const TopoDS_Shape &shape, PublicationTier tier,
+                                     const onecad::CancelToken *cancel) {
   const auto started = std::chrono::steady_clock::now();
   ShapeEvidence out;
   out.null_shape = shape.IsNull();
@@ -431,7 +470,18 @@ ShapeEvidence collect_shape_evidence(const TopoDS_Shape &shape, PublicationTier 
       BRepAlgoAPI_Check checker;
       checker.SetData(shape, /*bTestSE=*/false, /*bTestSI=*/true);
       checker.SetRunParallel(false);
-      checker.Perform();
+      Message_ProgressRange range;
+      Handle(CancelIndicator) indicator;
+      if (cancel != nullptr) {
+        indicator = new CancelIndicator(*cancel);
+        range = indicator->Start();
+      }
+      checker.Perform(range);
+      if (cancel != nullptr && cancel->cancelled()) {
+        out.error = "self-interference check cancelled";
+        out.validator_duration_ms = elapsed_ms(started);
+        return out;
+      }
       if (checker.HasErrors()) {
         out.error = "OCCT self-interference check failed";
         out.validator_duration_ms = elapsed_ms(started);

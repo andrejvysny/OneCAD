@@ -333,7 +333,11 @@ int main() {
         check_head_untouched(session, base, "NeedsRepair");
     }
 
-    // ── 8. Lifecycle deletions are explicit; only survivors carry meshes ─────
+    // ── 8. A disjoint Union is a NAMED refusal in preview, exactly as at commit ──
+    // (WP-C). body_a and body_b never touch: OCCT's fuse hands back a compound of
+    // both, which used to preview (and commit) as a split that retired BOTH ids.
+    // The preview now carries the same BOOLEAN_DISJOINT_RESULT diagnostic the
+    // commit lane refuses with, so preview == commit holds for the refusal too.
     {
         json op = {
             {"opType", "Boolean"},
@@ -345,14 +349,16 @@ int main() {
         };
         Envelope resp =
             onecad::session::handle_preview_op(session, preview_req(json{{"op", op}}));
-        CHECK(!resp.error.has_value());
-        CHECK(resp.result["changedBodies"].size() == 2);
-        CHECK(resp.result["deletedBodies"].size() == 2);
-        CHECK(resp.result["deletedBodies"][0] == "body_a");
-        CHECK(resp.result["deletedBodies"][1] == "body_b");
-        CHECK(resp.result["meshes"].size() == 2);
-        CHECK(resp.result["bodyEvents"].size() == 4);
-        check_head_untouched(session, base, "body lifecycle");
+        CHECK(resp.error.has_value());
+        CHECK(resp.error.has_value() && resp.error->code == "OP_FAILED");
+        bool named = false;
+        if (resp.error.has_value() && resp.error->detail.has_value() &&
+            resp.error->detail->contains("diagnostics")) {
+            for (const json& d : (*resp.error->detail)["diagnostics"])
+                named = named || d.value("code", "") == "BOOLEAN_DISJOINT_RESULT";
+        }
+        CHECK(named);
+        check_head_untouched(session, base, "disjoint union refusal");
     }
 
     // ── 9. Dispatcher cancellation token reaches the candidate executor ─────

@@ -1,5 +1,202 @@
 # OneCAD-Tauri Migration TODO
 
+## KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
+
+Program from the modeling-kernel correctness audit (plan file holds the full findings ledger:
+19 verified, 14 code-confirmed, ~130 unverified routed to red-first probes; the audit workflow
+itself hit the monthly spend limit at 318 agents — **no further dynamic workflows; Fable is the
+main session**). Every claim below is a measured run on the main thread.
+
+### WP-C + WP-D — boolean result policy + extrude construction — LANDED (uncommitted)
+Red-first probe `worker/tests/test_extrude_boolean_modes.cpp` measured on the shipped kernel:
+a non-touching Add SPLIT the target (id deleted, `body_op3:0/:1` minted), a full-consumption
+Cut and an empty Intersect silently `deleted` the target, Symmetric/two-direction extrudes were
+**10 faces / 20 edges / 12 vertices**, ThroughAll+NewBody published a 100 000 mm prism,
+ThroughAll+Add left **4020.8 mm³** (zmax 11.3 on a 10 mm box), a negative two-direction leg
+was absorbed, and a Cut leaving two solids sharing one edge refused `GEOMETRY_INVALID`.
+- `OpCommon::boolean_result_policy` (shared by Boolean/Extrude/Revolve): Add with more result
+  solids than the target → `EXTRUDE_ADD_DISJOINT` / `BOOLEAN_DISJOINT_RESULT` /
+  `REVOLVE_ADD_DISJOINT`, target + tool intact; empty Cut/Intersect → `EXTRUDE_EMPTY_RESULT` /
+  `REVOLVE_EMPTY_RESULT` (Boolean keeps `BOOLEAN_EMPTY_RESULT`). Mirror disjoint fuse →
+  `MIRROR_DISJOINT_RESULT` (top-level `OP_FAILED`, still carrying the publication `reasonCode` +
+  evidence). Closed-manifold evidence is collected PER SOLID (`ShapeAudit.cpp`).
+- Extrude: Symmetric = one prism centred on the plane (distance is the TOTAL); two-direction
+  Blind/Blind = one prism shifted by `distance2`; the trimmed-leg fuse path unifies same-domain
+  faces; ThroughAll+NewBody refuses `EXTRUDE_THROUGH_ALL_NO_TARGET`; ThroughAll+Add ends at the
+  target's exact directional maximum; negative legs refuse `EXTRUDE_TWO_DIRECTION_NEGATIVE_LEG`.
+- FE: L1 symmetric preview spans `depth` total (was 2·depth — the user approved a body twice
+  the committed size); arrow head at +|depth|/2; Through-all segment disabled under New Body.
+- Protocol: SCHEMA §7.2/§7.3/§14 (2026-09-02 entries); new canonical fixture
+  `extrude_add_disjoint_refusal.ndjson`; `publication_refusal.ndjson` re-pinned to the named
+  Mirror code; contracts JSON rows for Add/Union were already promising these refusals.
+- Tests re-expressed (recorded decisions): `test_preview_op` case 8 (disjoint Union previews as
+  the named refusal, preview == commit), `test_revolve_boolean_modes` empty message + code,
+  `ModelToolController.extrudeGesture` symmetric head at +|depth|/2.
+
+### WP-A — identity ladder resolverVersion 4 — LANDED (uncommitted), lineage step NOT started
+Red-first probes measured RED on the shipped v3 at COMMIT (no edit, no reopen needed):
+`hole_ops.rs::plate_hole_survives_commit_and_reopen` (Ø6 hole on a 100×100×5 plate →
+NeedsRepair) and `topology_rebind.rs::plate_top_edge_fillet_survives_commit_and_reopen`
+(rim fillet → NeedsRepair). Root cause: every regen replays from 0 with an empty partition, so
+the descriptor ladder decides every ref, and cap-side twins tie on every v3 feature with only a
+body-diagonal-scaled anchor to separate them (0.018 of margin against 0.10). Both probes GREEN
+now.
+- Signed `outward` sidedness on faces (outward normal) and edges (adjacent-normal sum), ridden
+  additively in `intent.descriptor.outward`; replaces the unsigned face `normal` feature,
+  joins the edge `tangent` feature (weight 0.20, `max(0, dot)`). History images are oriented
+  via their instance in the body (history lists hand back neutral orientation — found by the
+  `composed_history` test the first time).
+- Anchor measured to the candidate SUB-SHAPE at the descriptor rung; the ANCHOR-DECISIVE
+  tie-break lets a pick that lies ON one of two descriptor-tied candidates decide when every
+  rival is ≥10× farther (anchor-only Hole seats, same-facing twins at authoring/reopen). A
+  RELATIVE `rival/(d+rival)` anchor was tried and REJECTED by the H5 decoy/destructive tests
+  (it credits a decoy parked at a stale anchor and lets a far-away congruent corner bind).
+  History rung keeps the centroid form (a hole drilled AT the pick made the modified face and
+  the new wall equidistant) and now drops cross-kind images before scoring (finding
+  element-identity-8).
+- `ToEnd { from: 0 }` claims `editedFrom: 0` (base-sketch and variable edits arm the veto;
+  reopen stays resolvable via the anchor-exact carve-out).
+- Tests re-expressed for v4 (recorded decisions): `test_wp5_partition_history` and the two
+  Rust anchor-less ambiguity tests (`face_color_reopen`, `step_export_attributes`) now use
+  SAME-FACING twins (a half-top boss), because opposite caps are no longer a tie;
+  `h6a_edit_lane_vetoes_a_drifted_twin` now pins that a drifted anchor on a sided ref
+  re-binds its own corner (the four vertical edges are no longer congruent). `scoringVersion`
+  fixtures 3 → 4. New v4 unit cases in `test_wp6_ladder.cpp`.
+- NOT done from the plan: feature LINEAGE on partition entries (deleted element vs same-facing
+  twin still relies on the anchor/margin — residual documented in SCHEMA §10); redo on the
+  edit lane (`document_runtime.rs` is under concurrent WP-P edit — deferred); the
+  `session-executor-0` checkpoint/ElementIndex probe.
+
+### WP-E — commit-tier validation — LANDED (uncommitted), built and gated 2026-09-02 evening
+Written by the morning session and never compiled; the evening session (plan
+`~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`) built it, fixed it and gated it.
+- **Did not compile as written:** `RevolveOp.cpp` used `precision_of` without including
+  `kernel/validation/GeometryPrecision.h` (3 errors). Fixed.
+- **Fix-round from the pre-build audit:** `ctx.cancel` + post-decision `cancelled()` check on
+  the Mirror and fused-Pattern Tier B sites (they silently defeated cancellability) and, after
+  the protocol audit, on the five PRE-EXISTING Tier B sites too (Shell, Gear, Chamfer —
+  `validate_chamfer`/`build_chamfer` gained a `cancel` param — OffsetFace ×2); a new
+  `OpCommon::stage_boolean()` helper (default-construct + `SetArguments`/`SetTools` +
+  `SetNonDestructive(true)` + single-thread) on the five auxiliary BOPs that `checked_boolean`
+  did not cover (Mirror/Pattern/HoleTool fuses, Extrude ToNext/ToFace commons, two-direction
+  fuse) — the two-shape OCCT constructors BUILD in the constructor, so the flag could not be
+  set on them as written; `SetNonDestructive` also on `PrepareOffsetFace::common_of` (live
+  head) and the `ExportGeometry` union fuse.
+- **Ruling D3b (orchestrator, recorded in SCHEMA §7.2 + §14):** the first full ctest was
+  ABORTED after `test_component_ops` ran > 5 min at 100 % CPU — `sample` showed
+  `BOPAlgo_CheckerSI::CheckFaceSelfIntersection → IntPatch_PrmPrmIntersection` on a modeled
+  helical thread face, reached from WP-E's Tier B on `PlaceComponent`. Tier B therefore applies
+  where NEW geometry is published (Extrude/Revolve NewBody, every boolean result, fused
+  Mirror/Pattern, Fillet/Chamfer/Shell/OffsetFace, Gear, PlaceComponent for
+  embedded/document/profile). Tier A is retained for ISOMETRIES of an already-published body
+  (TransformBody copy and move, unfused Mirror, unfused Pattern children — validity is
+  invariant under a rigid motion) and for `generator` components (in-repo deterministic
+  geometry with exact-volume tests). ImportStep stays on the import health policy (recorded
+  exception). Owed follow-up: an offline Tier B census over the generator/thread-detail outputs.
+- **Protocol audit (kernel SCHEMA hunks, WP-C/D/A/E): approve_with_changes, all applied** —
+  reasonCode preamble carve-out for named recoverable refusals; `policyVersions.resolverVersion`
+  claim dropped (Rust axis stays 1 — whether a v3-minted checkpoint partition may be restored
+  under v4 scoring is an OPEN item); §7.2 `editedFrom` + §10 no-edit-replay prose rewritten
+  for v4; `outward`/`hasOutward` in the §10 descriptor list (out of the match key); per-solid
+  manifold rule in §7.2; exact sliver formula. Fixtures: NEW
+  `protocol/fixtures/revolve_profile_crosses_axis.ndjson` (exact evidence pinned);
+  `resolve_refs.ndjson` MOVED harness → `protocol/fixtures/` (`canonical_resolve_refs`) so
+  `scoringVersion: 4` is pinned in both lanes (§13). Sign-off lines on the three §14 entries.
+- **Adversarial review (fresh context) of WP-A v4 + WP-E — four HIGH, all fixed red-first:**
+  (H2) the crosses-axis classifier iterated profile VERTICES, so every closed-curve profile
+  (a circle has one vertex) fell through to a generic `OP_FAILED` — measured on the real worker
+  for three crossing circles; the classifier now takes every edge's endpoints plus the analytic
+  Circle/Ellipse extrema (free-form curves sampled), pinned by two new
+  `test_commit_tier_validation` cases (crossing circle refused BY NAME; one-side circle → exact
+  torus volume). (H4) the anchor-decisive "pick lies ON the winner" used the veto's carve-out band
+  (`0.05 × 0.5 × diag` ≈ 3.5 mm on a 100 mm plate) — a pick left 3 mm from a congruent twin after
+  an upstream edit could bind to the twin below the margin; now `kAnchorMinSeparationMm`
+  (0.01 mm), SCHEMA §10 corrected. (H3) `editedFrom: 0` on the CHECKPOINT-FALLBACK replay lane —
+  where the anchor-exact carve-out is disabled by design — would veto every descriptor-tied ref
+  on a reopen whose checkpoint failed to restore; the fallback now drops a `0` claim
+  (`executor.rs`). (H1) `h6a_edit_lane_vetoes_a_drifted_twin` asserted only `face_count >= 7`,
+  which a fillet on ANY of the four congruent corners satisfies; it now pins WHICH corner from
+  the mesh's vertical edges. Recorded, not fixed (this session): `describe(shape, body)` rebuilds
+  the body maps per candidate (O(E²) on resolve — measure on the 40-feature baseline);
+  `SetNonDestructive` on `checked_boolean` may hand `apply_history` argument COPIES (gate =
+  `topology_rebind` / `m2_gate`); stale frozen anchors + `editedFrom: 0` make a same-facing-twin
+  ref NeedsRepair on every reopen unless repair rewrites the anchor (open question); the v4
+  `outward` path has no veto coverage (`b3_twin_scene` uses the body-less `describe`); WP-E's
+  headline claims (Tier B promotion, ceilings, sliver floor, non-destructive) have no direct
+  test; `outward` is evaluated at the face's UV-bbox midpoint (fragile for faces with holes,
+  seam-dependent on cylinders); `Fillet`'s kernel-lane audit is neither cancellable nor
+  preview-downgraded (recorded exception in §7.2).
+- **cargo run 1: 93 targets / 1471 / 1 FAILED** — `library_ingest::the_tracked_vendor_recipe_ingests`:
+  the SG90 fuse refused `PUBLICATION_TOLERANCE_BUDGET` (result max tolerance 4.47e-3 mm) because
+  WP-E's standalone-Boolean ceiling budgeted from the TARGET's input tolerance only, while the
+  tool (another imported case solid) already carried that tolerance. Fixed: budget from the WORSE
+  of the two inputs (`BooleanOp.cpp`); ingest CLI re-run 6 of 7 ok (NEMA17 the recorded refusal).
+- **Deferred (WP-E.2, recorded in §14):** `HasWarnings()` diagnostics, pre-BOP `fuzzyValue`
+  clamp, absolute tolerance ceiling + `Degraded` import health, Shell/Chamfer ceilings, Tier B
+  evidence at `classify_solids`.
+- **Also landed this evening (WP-P P2b, WP-P-owned files):** `SketchSessionDto.projections`
+  (`ProjectedSourceDto`, omitted when empty) filled by `enter_sketch` and `get_sketch`; TS
+  `SketchSession.projections` + `frontendProjections` re-key; tests in both lanes. Without it
+  the FE could not tell a projected entity from a sketch-on-face locked one after a reload.
+
+### Gate after WP-E + review fix rounds (main thread, 2026-09-02 evening; suites run alone)
+ctest **168/168** (43 s; 166 → +`commit_tier_validation`, +`canonical_revolve_profile_crosses_axis`,
++`canonical_resolve_refs`, −`harness_resolve_refs`) · stdout hygiene clean · sidecar restaged
+(`13d66fd9…`, manifest sha == binary) · `cargo fmt --all --check` clean · `cargo clippy --workspace
+--all-targets -- -D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`
+**93 targets / 1472 passed / 0 failed / 0 skipped-for-no-worker** (teed; the four WP-A/WP-E
+probes and `the_tracked_vendor_recipe_ingests` all `ok`) · `bunx tsc --noEmit` clean · `bun run
+test` **311 files / 5505 passed / 78 skipped / 0 failed** · hex 0 · coverage 32/9/16/19 ·
+contracts 39/18 · verifier negative controls OK · `live-dim-rect.spec.ts` isolated **2/2**
+(chromium + webkit — the 12:43 failure artifact from this morning's SIGTERM'd, overlapped run
+did not reproduce; flake-ledger note, not a defect) · kernelbench `fillet/foundation:t0` both
+backends **136 rows unchanged** + `semantic-compare` OK (136 records, 0 fail, 128 pass, 8 char) ·
+`bun run e2e` (both projects, retries 0) **514 passed / 0 failed, 29.4 min** — attribution: no
+`src`/`e2e` file mtime after the run start (`find -newer`); the md5-of-md5s recipe differed only
+because `find` order is unstable — pipe through `sort` next time.
+
+### Gate BEFORE WP-E (main thread, 2026-09-02 morning)
+ctest **166/166** · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **93 targets /
+1471 passed / 0 failed** · vitest **311 files / 5502 passed / 78 skipped** · tsc clean · clippy
+clean · fmt clean · hex 0 · stdout hygiene clean · verifiers OK · Playwright chromium targeted
+(`extrude-end-conditions`, `extrude-boolean`) 2/2 · **full `bun run e2e` running at the time of
+writing (both projects, retries 0) — result recorded below when it lands** · sidecar restaged.
+Note: ctest, vitest and cargo overlapped in time on this run; nothing failed, so no
+attribution question arose.
+
+### Now (2026-09-02 evening — plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
+- [x] Build WP-E · fix-round · Tier B scope ruling D3b · full ctest **168/168** · restage.
+- [x] Protocol audit of the kernel SCHEMA hunks (`approve` after changes) · adversarial review
+      of WP-A v4 + WP-E (four HIGH fixed red-first) · SG90 ingest regression fixed.
+- [x] Rust gate: `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **93 / 1472 / 0**; fmt/clippy
+      clean · vitest **311 / 5505 / 78 skipped** · tsc · hex 0 · verifiers · kernelbench 136
+      unchanged + semantics OK.
+- [x] Full `bun run e2e` (both projects, retries 0) **514 / 0**, 29.4 min; kernelbench 136 unchanged.
+- [ ] Commit A (kernel hardening, carved) + isolated-worktree compile · commit B (WP-P P1+P2+P2b)
+      · `git diff HEAD` empty · push (authorized).
+- [ ] WP-P P3 FE (brief in the session scratchpad `p3_brief.md`; design in the plan § B) →
+      adversarial-reviewed staleness half already done → full L3 → commit C → push.
+- [ ] Hygiene: `.clang-format` `DisableFormat: true` (authorized) · CLAUDE.md drift (settingsStore
+      v11, ctest count, no 3MF verb).
+- [ ] WP-E.2 owed: `HasWarnings()` diagnostics · pre-BOP `fuzzyValue` clamp · absolute ceiling +
+      `Degraded` import health · Shell/Chamfer ceilings · Tier B evidence at `classify_solids` ·
+      offline Tier B census of generator outputs · direct tests for the WP-E headline claims ·
+      `Fillet` kernel-lane audit cancellable + preview-downgraded.
+- [ ] WP-A owed: lineage (opId provenance) on partition entries · redo-lane `editedFrom` claim ·
+      `session-executor-0` probe · **resolver axis question** (Rust `policyVersions.resolverVersion`
+      stays 1 while `scoringVersion` is 4 — may a v3-minted checkpoint partition be restored under
+      v4?) · does repair rewrite the frozen anchor? · `describe(shape, body)` O(E²) map rebuild
+      (measure on the 40-feature baseline) · v4 `outward` veto coverage · `outward` at the UV-bbox
+      midpoint (holes, cylinder seams).
+- [ ] WP-B (plan § D): probes P-B1..P-B4 red-first → `regionAnchor` (largest preview-triangle
+      centroid) + anchor ladder in `build_profile_face` → adaptive fragment sampling + bbox cull +
+      degenerate warning → solver residual (`Converged` ≠ satisfied) → `finish_sketch`
+      record-before-regions → adversarial review → L3 → commit D.
+- [ ] WP-F (plan § E): chamfer `referenceFaces` typed refs + `adjacentFaces` on QueryElement →
+      L3 → commit E. Then WP-H/I/J (next plan).
+- [ ] Owed user-run gates unchanged (19-row checklist, Tauri smoke, dirty vendor STEP, WP-X
+      dogfood with the default parts).
+
 ## DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
 
 Program chosen with the user after a full state review, a Codex brainstorm (gpt-5.6-sol/high)

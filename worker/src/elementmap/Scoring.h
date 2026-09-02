@@ -17,8 +17,11 @@
 // ref still yields a bounded [0,1] score). Weights (faces / edges):
 //   type       0.20  surfaceType (face) / curveType (edge) exact match → 1 else 0
 //   magnitude  0.25  area (face) / length (edge) relative closeness
-//   direction  0.20  |normal·normal| (face) / |tangent·tangent| (edge)
-//   anchor     0.25  world-point proximity to the candidate centre (narrowing)
+//   direction  0.20  |tangent·tangent| (edge); |normal·normal| (face, only when a
+//                    legacy ref carries no `outward`)
+//   outward    0.20  max(0, outward·outward) — SIGNED sidedness (v4), face + edge
+//   anchor     0.25  pick-point proximity to the candidate SUB-SHAPE over the body
+//                    scale (v4; centroid distance for callers that measured none)
 //   adjacency  0.10  adjacencyHash exact match → 1 else 0
 // `adjacency` is deliberately LOW-weight: the ported adjacency hash is all-or-nothing
 // (ANY dimensional edit flips it to 0), so a higher weight would sink a
@@ -44,6 +47,23 @@ namespace km = onecad::kernel::elementmap;
 // resolverVersion (SCHEMA §10 / handshake §13). Bump on any scoring change; it is
 // stamped into every NeedsRepair evidence payload (`scoringVersion`).
 //
+// 4 (kernel-hardening WP-A) — SIDEDNESS + DECISIVE ANCHOR. (a) A signed `outward`
+// feature (face outward normal / edge adjacent-normal sum, weight 0.20, similarity
+// max(0, dot)) replaces the unsigned face `normal` feature and joins the edge
+// `tangent` feature, so a cap face/edge no longer ties with its twin on the
+// opposite cap. (b) The `anchor` feature measures the distance from the pick
+// point to the candidate SUB-SHAPE (not its bbox centre); the scale stays the v2
+// body-diagonal form. (c) The margin gate gains the ANCHOR-DECISIVE tie-break
+// (Ladder.cpp): when the top two candidates tie in descriptor space and the pick
+// lies ON the winner (within the anchor-exact eps) while every rival is at least
+// `kAnchorDecisiveRatio` times farther, the anchor is allowed to decide even
+// below the 0.10 margin — the pick WAS made on that element. A relative
+// `rival/(d+rival)` anchor was tried and rejected: it credits a decoy parked at a
+// stale anchor and lets a far-away congruent corner bind after a destructive edit
+// (`topology_rebind.rs` H5 cases). Measured on the shipped v3: a Ø6 hole and a
+// rim fillet on a 100×100×5 plate were NeedsRepair at COMMIT
+// (`hole_ops.rs::plate_hole_survives_commit_and_reopen`,
+// `topology_rebind.rs::plate_top_edge_fillet_survives_commit_and_reopen`).
 // 3 — history candidates add explicit Modified-channel provenance confidence;
 // Generated-only successors remain eligible, while generated side topology no
 // longer makes a strong Modified successor spuriously ambiguous.
@@ -51,7 +71,7 @@ namespace km = onecad::kernel::elementmap;
 // (`LadderEditContext`, gated on the plan's `editedFrom`) and the PROPORTIONAL
 // anchor floor (the fixed 1.0 mm scale floor became a 1e-7 divide-by-zero guard).
 // 1 (W-WP6) — the original normalized [0,1] confidence.
-inline constexpr int kResolverVersion = 3;
+inline constexpr int kResolverVersion = 4;
 
 // Locked confidence policy (SCHEMA §10). A false positive (silent wrong bind) is
 // strictly worse than a false negative (asking the user), so BOTH must hold.
@@ -103,7 +123,23 @@ double anchor_scale(double body_diag);
 struct AnchorEvidence {
     bool has_world_point = false;
     gp_Pnt world_point{0.0, 0.0, 0.0};
+    // resolverVersion 4: the distance from `world_point` to the candidate SUB-SHAPE,
+    // MEASURED by the caller (`BRepExtrema`). Negative means "not measured": the
+    // scorer then falls back to the v3 centroid distance.
+    double shape_distance = -1.0;
 };
+
+// ANCHOR-DECISIVE tie-break (resolverVersion 4, Ladder.cpp). When the best two
+// candidates tie in descriptor space (same-facing twins, or an anchor-only ref),
+// the pick point is allowed to decide below the 0.10 margin iff it lies ON the
+// winner (within `kAnchorMinSeparationMm`, 0.01 mm — the veto's wider anchor-exact
+// band is deliberately NOT reused here) and every rival is at least
+// `kAnchorDecisiveRatio` times farther than `max(winnerDistance,
+// kAnchorMinSeparationMm)`. A pick made on one of two identical bosses names that
+// boss; two candidates both at the pick (a shared vertex, a split through the
+// pick point) still tie.
+inline constexpr double kAnchorDecisiveRatio = 10.0;
+inline constexpr double kAnchorMinSeparationMm = 0.01;  // 10× the authoring resolution
 
 // A normalized [0,1] confidence + the per-feature contributions that produced it
 // (they sum to `score`). Reported verbatim as NeedsRepair `featureContributions`

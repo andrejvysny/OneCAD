@@ -1501,11 +1501,12 @@ export class ModelToolController {
   /**
    * Where the arrow's TAIL sits for a given depth — the far face of the prism, so
    * the arrow extends past the geometry it is driving instead of being buried in
-   * it. Symmetric grows both ways from the centroid (`PreviewMesh.setDepth`), so
-   * the head marks the +|depth| face.
+   * it. Symmetric grows both ways from the centroid with `depth` as the TOTAL
+   * (`PreviewMesh.setDepth`), so the head marks the +|depth|/2 face — the face the
+   * worker actually builds.
    */
   private extrudeHeadWorld(depth: number): Vec3 {
-    const d = this.extrude.symmetric ? Math.abs(depth) : depth;
+    const d = this.extrude.symmetric ? Math.abs(depth) / 2 : depth;
     return [
       this.centroidWorld[0] + this.normal[0] * d,
       this.centroidWorld[1] + this.normal[1] * d,

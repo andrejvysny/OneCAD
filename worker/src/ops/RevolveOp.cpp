@@ -9,7 +9,13 @@
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <gp_Vec.hxx>
+#include <gp_Pln.hxx>
+#include <BRep_Tool.hxx>
+#include <TopExp_Explorer.hxx>
 #include <GeomAbs_CurveType.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -21,6 +27,7 @@
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
 #include "sketch/Sketch.h"
@@ -308,6 +315,98 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
+    // --- profile-vs-axis classification (WP-E) ---
+    // A profile that CROSSES its axis sweeps through itself: OCCT builds the
+    // figure-8 solid, BRepCheck accepts it face by face, and the volume is positive,
+    // so only a global self-interference pass would ever notice. Refuse it by name
+    // before any kernel work: every point of the profile boundary must lie on ONE
+    // side of the axis (measured in the profile plane; touching the axis is legal —
+    // it makes the degenerate pole edges of a shaft or a sphere).
+    {
+        gp_Pln profile_pln;
+        gp_Dir profile_n;
+        if (planar_face_plane_normal(*profile, profile_pln, profile_n)) {
+            const double resolution =
+                kernel::validation::precision_of(*profile).authoring_resolution();
+            // side(P) = ((P − O) × a) · n = (P − O) · w with w = a × n: the signed
+            // in-plane offset from the axis, linear in P. Vertices alone are NOT
+            // enough — a full circle has one vertex (its seam) and an arc's extremum
+            // can lie between its endpoints — so every edge contributes its endpoints
+            // plus the analytic extrema of a Circle/Ellipse (the parameters where
+            // d side/dt = 0 that fall inside the edge's range), and a free-form curve
+            // is sampled. Adversarial review 2026-09-02 measured the vertex-only form
+            // missing every crossing circle profile.
+            const gp_Vec w = gp_Vec(axis.Direction()).Crossed(gp_Vec(profile_n));
+            auto side_of = [&](const gp_Pnt& p) { return gp_Vec(axis.Location(), p).Dot(w); };
+            double lo = 0.0, hi = 0.0;
+            bool any = false;
+            auto take = [&](double side) {
+                lo = any ? std::min(lo, side) : side;
+                hi = any ? std::max(hi, side) : side;
+                any = true;
+            };
+            constexpr double kTwoPi = 2.0 * 3.14159265358979323846;
+            for (TopExp_Explorer exp(*profile, TopAbs_EDGE); exp.More(); exp.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(exp.Current());
+                if (BRep_Tool::Degenerated(edge)) continue;
+                BRepAdaptor_Curve curve(edge);
+                const double first = curve.FirstParameter();
+                const double last = curve.LastParameter();
+                take(side_of(curve.Value(first)));
+                take(side_of(curve.Value(last)));
+                // Extremum parameters of a conic: side(t) = s_c + A cos t + B sin t.
+                auto take_conic_extrema = [&](const gp_Pnt& centre, const gp_Dir& xdir,
+                                              const gp_Dir& ydir, double rx, double ry) {
+                    const double a = gp_Vec(xdir).Dot(w) * rx;
+                    const double b = gp_Vec(ydir).Dot(w) * ry;
+                    const double t_star = std::atan2(b, a);
+                    for (const double t : {t_star, t_star + kTwoPi / 2.0}) {
+                        // Fold t into [first, first + 2π) and keep it if it lies on the arc.
+                        double tt = first + std::fmod(std::fmod(t - first, kTwoPi) + kTwoPi, kTwoPi);
+                        if (tt <= last + 1.0e-9) take(side_of(curve.Value(tt)));
+                    }
+                    (void)centre;
+                };
+                switch (curve.GetType()) {
+                    case GeomAbs_Line: break;
+                    case GeomAbs_Circle: {
+                        const gp_Circ c = curve.Circle();
+                        take_conic_extrema(c.Location(), c.XAxis().Direction(),
+                                           c.YAxis().Direction(), c.Radius(), c.Radius());
+                        break;
+                    }
+                    case GeomAbs_Ellipse: {
+                        const gp_Elips e = curve.Ellipse();
+                        take_conic_extrema(e.Location(), e.XAxis().Direction(),
+                                           e.YAxis().Direction(), e.MajorRadius(), e.MinorRadius());
+                        break;
+                    }
+                    default: {
+                        constexpr int kSamples = 128;
+                        for (int k = 1; k < kSamples; ++k) {
+                            const double t = first + (last - first) * k / kSamples;
+                            take(side_of(curve.Value(t)));
+                        }
+                        break;
+                    }
+                }
+            }
+            if (any && lo < -resolution && hi > resolution) {
+                const std::string message =
+                    "Revolve profile crosses its axis (the sweep would pass through itself)";
+                OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+                failure.diagnostics.push_back(
+                    {{"severity", "error"},
+                     {"code", "REVOLVE_PROFILE_CROSSES_AXIS"},
+                     {"message", message},
+                     {"stage", "classify"},
+                     {"evidence", {{"revolve", {{"minSignedOffset", lo}, {"maxSignedOffset", hi},
+                                                {"authoringResolution", resolution}}}}}});
+                return failure;
+            }
+        }
+    }
+
     // --- build the revolved tool shape ---
     TopoDS_Shape tool_shape;
     try {
@@ -328,9 +427,14 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
 
     OpOutcome out;
     if (boolean_mode == app::BooleanMode::NewBody) {
-        const kernel::validation::PublicationDecision decision = publication_decision(
-            tool_shape, kernel::validation::single_solid_policy(
-                            "Revolve", kernel::validation::PublicationTier::TierA));
+        // WP-E: committed NewBody at Tier B (self-interference), preview at Tier A.
+        kernel::validation::PublicationPolicy policy = kernel::validation::single_solid_policy(
+            "Revolve", result_validation_tier(ctx, kernel::validation::PublicationTier::TierB));
+        policy.maximum_tolerance =
+            kernel::validation::precision_of(tool_shape).authoring_resolution();
+        const kernel::validation::PublicationDecision decision =
+            publication_decision(tool_shape, policy, ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
         if (!decision.publishable()) {
             return publication_refusal(decision, "publication");
         }
@@ -355,6 +459,11 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
                                        ctx.occt_options, ctx.cancel, builder);
     if (br.error_code == "CANCELLED") return OpOutcome::cancelled();
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
+    if (auto refusal = boolean_result_policy(boolean_mode, target_rec->geom, br.shape, "Revolve",
+                                             target_id, "REVOLVE_ADD_DISJOINT",
+                                             "REVOLVE_EMPTY_RESULT")) {
+        return *refusal;
+    }
     kernel::validation::PublicationPolicy policy;
     policy.name = "Revolve boolean";
     policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
@@ -363,8 +472,16 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
         ctx, kernel::validation::PublicationTier::TierB);
     policy.require_closed_manifold =
         policy.tier == kernel::validation::PublicationTier::TierB;
+    // WP-E: the same tolerance budget Extrude's boolean applies — grow from the
+    // target's tolerance, ×2 plus slack, never unbounded.
+    {
+        const auto prec = kernel::validation::precision_of(target_rec->geom);
+        policy.maximum_tolerance = prec.tolerance_ceiling(prec.input_tolerance, 2.0, 1.0e-6);
+    }
     policy.allow_empty_lifecycle = true;
-    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(br.shape, policy, ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable() && !decision.lifecycle_only()) {
         return publication_refusal(decision, "publication");
     }
@@ -374,6 +491,7 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     // (SCHEMA §2, §7.2, D1 — parity with ExtrudeOp/BooleanOp).
     if (publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out) ==
         BooleanPublishResult::Empty) {
+        // Unreachable after boolean_result_policy; kept as a defensive terminal.
         return OpOutcome::fail("OP_FAILED", "Revolve boolean produced no solids");
     }
     return out;

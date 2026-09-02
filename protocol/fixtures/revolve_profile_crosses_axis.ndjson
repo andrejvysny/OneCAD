@@ -1,0 +1,23 @@
+# CANONICAL fixture — kernel-hardening WP-E: a Revolve whose profile CROSSES its axis
+# is refused by name (`REVOLVE_PROFILE_CROSSES_AXIS`) at the classify stage, before
+# any kernel work, and nothing is published for that step.
+#
+# Recipe: sketch on XZ (u = y, v = z) — a rectangle u∈[-3,7] × v∈[0,10] plus a
+# construction axis line at u = 0; Revolve 360° NewBody about that line. The swept
+# solid would pass through itself (a figure-8 section); it passes BRepCheck face by
+# face and has positive volume, so only this classifier catches it. Evidence carries
+# the signed profile offsets from the axis in the sketch plane and the authoring
+# resolution used as the touching tolerance. The prepared prefix (step 0) is kept and
+# AcceptPrepared publishes it.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_revolve_crosses_axis","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":94,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk","plane":{"kind":"XZ"},"entities":[{"id":"r1","type":"Line","p0":[-3,0],"p1":[7,0]},{"id":"r2","type":"Line","p0":[7,0],"p1":[7,10]},{"id":"r3","type":"Line","p0":[7,10],"p1":[-3,10]},{"id":"r4","type":"Line","p0":[-3,10],"p1":[-3,0]},{"id":"axis","type":"Line","p0":[0,-5],"p1":[0,15],"construction":true}],"constraints":[]}},{"opType":"Revolve","opId":"op1","stepIndex":1,"params":{"sketchId":"sk","angleDeg":360.0,"booleanMode":"NewBody","axis":{"kind":"sketchLine","sketchId":"sk","lineId":"axis"}}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":94,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":94,"result":{"planPrepared":true,"preparedSnapshotId":1,"lastValidStep":0,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"opFailed","message":"Revolve profile crosses its axis (the sweep would pass through itself)","diagnostics":[{"severity":"error","code":"REVOLVE_PROFILE_CROSSES_AXIS","message":"Revolve profile crosses its axis (the sweep would pass through itself)","stage":"classify","evidence":{"revolve":{"minSignedOffset":-3.0,"maxSignedOffset":7.0,"authoringResolution":0.001}}}]}],"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":94,"documentRevision":1,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":94,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"documentRevision":1,"workerEpoch":3,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"goodbye":true}}}

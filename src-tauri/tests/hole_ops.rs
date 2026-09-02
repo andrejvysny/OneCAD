@@ -514,6 +514,35 @@ async fn build_box(
     (body, top_face_centroid(&view, &mesh))
 }
 
+/// `build_box` with an explicit footprint: the WP-A identity probe needs a PLATE
+/// (thin relative to its diagonal), which the 20×20 box helper cannot express.
+async fn build_plate(
+    rt: &mut DocumentRuntime,
+    sketch_rec: u128,
+    extrude_rec: u128,
+    sketch_base: u128,
+    w: f64,
+    d: f64,
+    thickness: f64,
+) -> (BodyId, Vec3) {
+    let sid = SketchId(Uuid::from_u128(sketch_base));
+    add_op(
+        rt,
+        sketch_record(
+            sketch_rec,
+            &rect_sketch(sid, sketch_base + 0x1000, 0.0, 0.0, w, d),
+        ),
+    );
+    add_op(rt, extrude_record(extrude_rec, sid, thickness));
+    let rep = regen_all(rt).await;
+    let _ = published(&rep, "plate");
+    let body = BodyId(Uuid::from_u128(extrude_rec));
+    let mesh = body_mesh(rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("plate MESH1 validates");
+    assert_eq!(view.face_count, 6, "a fresh plate has 6 faces");
+    (body, top_face_centroid(&view, &mesh))
+}
+
 const SKETCH_A: u128 = 0xA00;
 const EXTRUDE_A: u128 = 0xA01;
 const SKETCH_B: u128 = 0xB00;
@@ -1360,6 +1389,69 @@ async fn expression_driven_thread_pitch_substitutes_and_breaks_loudly_when_undef
             .any(|f| f.record_id == RecordId(Uuid::from_u128(HOLE_A)).to_string()),
         "the regen report must surface the failed step: {:?}",
         report.failed_steps
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-A identity probe — a hole on a THIN PLATE must survive a from-zero replay.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Kernel-hardening WP-A red-first probe. The top and bottom faces of a plate are
+/// exact descriptor twins (same type, area, |normal|, adjacency hash); the ladder's
+/// only separator is the anchor feature, scaled by half the body diagonal, so a
+/// 100×100×5 plate (twins 5 mm apart on a 141 mm diagonal) cannot clear the 0.10
+/// auto-bind margin. Every regen replays from step 0 with an empty partition, so
+/// the ref goes through the descriptor stage at COMMIT and again on REOPEN — the
+/// most ordinary part in the product's domain could not keep a hole. This test
+/// pins the contract the ladder must meet: no NeedsRepair, exact volume, both
+/// at commit and after save → fresh worker → reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plate_hole_survives_commit_and_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = tmp.path().join("plate-hole.onecad");
+    let want = 100.0 * 100.0 * 5.0 - removed_volume(6.0, 5.0, None, None);
+
+    let (body, volume) = {
+        let wm = spawn_worker(bin.clone()).await;
+        let mut rt = runtime_over(&wm);
+        let (body, top) = build_plate(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 100.0, 100.0, 5.0).await;
+        let params = hole_params(body, "el_hole_plate", top, 6.0);
+        add_op(&mut rt, hole_record(HOLE_A, params));
+        let rep = regen_all(&mut rt).await;
+        let snap = published(&rep, "plate hole commit");
+        assert_eq!(
+            snap.repair_summary.needs_repair_count, 0,
+            "WP-A: a hole on the top face of a 100x100x5 plate must bind at COMMIT \
+             (cap-side congruent twins must not defeat the ladder)"
+        );
+        let volume = exact_volume(&wm, body).await;
+        assert!(
+            (volume - want).abs() < want * 1e-9,
+            "the plate hole must drill: want {want}, got {volume}"
+        );
+        rt.save(&doc, save_meta()).expect("save");
+        wm.shutdown().await;
+        (body, volume)
+    };
+
+    let wm = spawn_worker(bin).await;
+    let mut rt = open_over(&wm, &doc);
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "plate hole reopen");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "WP-A: the plate hole must re-bind on a from-zero reopen"
+    );
+    assert_eq!(rt.head_body_ids(), vec![body], "same body, same id");
+    assert_eq!(
+        exact_volume(&wm, body).await,
+        volume,
+        "identical volume after reopen"
     );
     wm.shutdown().await;
 }

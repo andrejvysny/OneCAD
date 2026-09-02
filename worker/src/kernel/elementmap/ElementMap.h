@@ -68,6 +68,15 @@ struct ElementDescriptor {
     bool hasNormal{false};
     bool hasTangent{false};
     std::uint64_t adjacencyHash{0};
+    // SIDEDNESS (kernel-hardening WP-A, resolverVersion 4). The OUTWARD unit
+    // direction of the element within its body: a face's outward normal (surface
+    // normal times the face orientation), an edge's normalized sum of its adjacent
+    // faces' outward normals. `computeDescriptor` leaves it unset (the ported
+    // 14-field descriptor is unchanged); `ElementMapPartition::describe(shape,
+    // body)` fills it. It is what tells a cap edge from its congruent twin on the
+    // opposite cap — the two share type, length, |tangent| and adjacency hash.
+    gp_Dir outward{0.0, 0.0, 1.0};
+    bool hasOutward{false};
 };
 
 struct Entry {

@@ -209,7 +209,9 @@ pub struct PlanRequest {
     ///
     /// Derived from the triggering [`RegenRequest`](super::planner::RegenRequest)
     /// via [`RegenRequest::edited_from`](super::planner::RegenRequest::edited_from)
-    /// — see there for why `from == 0` counts as absent. Stamped onto the request by
+    /// — since resolverVersion 4 a `ToEnd { from: 0 }` claims `0` (a base-sketch or
+    /// variable edit is the veto's class); only `RevertToEnd`/`ToStep` omit it, and
+    /// the checkpoint-fallback replay drops a `0` claim. Stamped onto the request by
     /// the caller that owns the request (the runtime's `begin_regen`), NOT by the
     /// pure planner, which has no notion of *why* it is planning.
     ///

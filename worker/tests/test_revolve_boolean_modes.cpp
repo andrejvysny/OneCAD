@@ -280,8 +280,15 @@ void test_intersect_disjoint_refuses() {
     const json& steps = prepared.result["perStepResults"];
     check(steps.size() == 4 && steps[3].value("status", "") == "opFailed",
           "revolve-empty: failed step is reported as opFailed");
-    check(steps.size() == 4 && steps[3].value("message", "") == "Revolve boolean produced no solids",
+    check(steps.size() == 4 &&
+              steps[3].value("message", "") == "Revolve Intersect: the result would be empty",
           "revolve-empty: refusal reason reaches the plan result");
+    // WP-C: the empty result is a NAMED refusal (never a silent `deleted`).
+    bool named = false;
+    if (steps.size() == 4 && steps[3].contains("diagnostics")) {
+        for (const json& d : steps[3]["diagnostics"]) named = named || d.value("code", "") == "REVOLVE_EMPTY_RESULT";
+    }
+    check(named, "revolve-empty: diagnostic REVOLVE_EMPTY_RESULT rides the failed step");
 
     const onecad::session::BodyStore bodies = s.bodies_copy();
     check(bodies.contains("body_op1") && bodies.all().size() == 1,

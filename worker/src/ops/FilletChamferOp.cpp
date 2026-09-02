@@ -196,10 +196,12 @@ std::optional<OpOutcome> build_fillet(
     return failure;
 }
 
-std::optional<OpOutcome> validate_chamfer(
-    const TopoDS_Shape& result, kernel::validation::PublicationTier tier) {
+std::optional<OpOutcome> validate_chamfer(const TopoDS_Shape& result,
+                                          kernel::validation::PublicationTier tier,
+                                          const onecad::CancelToken* cancel) {
     const kernel::validation::PublicationDecision decision = publication_decision(
-        result, kernel::validation::single_solid_policy("Chamfer", tier));
+        result, kernel::validation::single_solid_policy("Chamfer", tier), cancel);
+    if (cancel && cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) return publication_refusal(decision, "publication");
     return std::nullopt;
 }
@@ -209,6 +211,7 @@ std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
                                        bool two_distance, double distance2,
                                        bool distance_angle, double angle_rad,
                                        kernel::validation::PublicationTier validation_tier,
+                                       const onecad::CancelToken* cancel,
                                        std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
                                        TopoDS_Shape& result) {
     TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
@@ -243,7 +246,7 @@ std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
     if (!chamfer->IsDone()) return OpOutcome::fail("OP_FAILED", "Chamfer operation failed");
     result = chamfer->Shape();
     builder = chamfer;
-    return validate_chamfer(result, validation_tier);
+    return validate_chamfer(result, validation_tier, cancel);
 }
 
 struct EdgeValues {
@@ -445,7 +448,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
                                                      values.distance_angle, values.angle_rad,
                                                      result_validation_tier(
                                                          ctx, kernel::validation::PublicationTier::TierB),
-                                                     builder, result);
+                                                     ctx.cancel, builder, result);
         if (failure) return std::move(*failure);
     } catch (const Standard_Failure& error) {
         return OpOutcome::fail(

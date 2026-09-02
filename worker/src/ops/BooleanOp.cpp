@@ -8,6 +8,7 @@
 #include <TopoDS_Shape.hxx>
 
 #include "modeling/BooleanMode.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "ops/OpCommon.h"
 
 namespace onecad::ops {
@@ -55,6 +56,16 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
                                        ctx.cancel, builder);
     if (br.error_code == "CANCELLED") return OpOutcome::cancelled();
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
+    // A Union whose tool never touched the target is a REFUSAL (WP-C), never a
+    // split that retires the target id. The empty Cut/Intersect case keeps its
+    // fixture-pinned BOOLEAN_EMPTY_RESULT shape below.
+    if (*mode == app::BooleanMode::Add) {
+        if (auto refusal = boolean_result_policy(
+                *mode, old_target, br.shape, "Boolean", target_id, "BOOLEAN_DISJOINT_RESULT",
+                "BOOLEAN_EMPTY_RESULT", json{{"toolBodyId", tool_id}})) {
+            return *refusal;
+        }
+    }
     kernel::validation::PublicationPolicy policy;
     policy.name = "Boolean";
     policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
@@ -63,8 +74,21 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
         ctx, kernel::validation::PublicationTier::TierB);
     policy.require_closed_manifold =
         policy.tier == kernel::validation::PublicationTier::TierB;
+    // WP-E: the same tolerance budget Extrude's boolean applies — grown from the
+    // WORSE of the two inputs. Unlike Extrude, whose tool is a fresh prism, a
+    // standalone Boolean's tool is a committed body that may already carry an
+    // imported tolerance (vendor STEP solids sit at 1e-3..1e-2 mm); budgeting from
+    // the target alone refused the SG90 ingest fuse at 4.5 µm (2026-09-02).
+    {
+        const auto prec = kernel::validation::precision_of(old_target);
+        const double tool_tol = kernel::validation::precision_of(tool_rec->geom).input_tolerance;
+        policy.maximum_tolerance = prec.tolerance_ceiling(
+            std::max(prec.input_tolerance, tool_tol), 2.0, 1.0e-6);
+    }
     policy.allow_empty_lifecycle = true;
-    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(br.shape, policy, ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable() && !decision.lifecycle_only()) {
         return publication_refusal(decision, "publication");
     }

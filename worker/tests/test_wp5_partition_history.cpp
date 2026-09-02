@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <TopExp.hxx>
@@ -116,15 +117,25 @@ void test_union_ambiguity_and_deletion_precedence() {
     const TopoDS_Shape right = face_by_center(body, 10, 5, 5);
 
     {  // Distinct images across the two channels enter the same confidence gate.
+        // resolverVersion 4 (WP-A): opposite-facing faces are told apart by their
+        // signed `outward`, so the genuine ambiguity is a SAME-FACING pair — two
+        // 10×10 top faces of a slotted 30×10×10 bar, anchor midway between them.
+        const TopoDS_Shape bar = BRepPrimAPI_MakeBox(30.0, 10.0, 10.0).Shape();
+        const TopoDS_Shape slot = BRepPrimAPI_MakeBox(gp_Pnt(10, -1, 5), 10.0, 12.0, 6.0).Shape();
+        BRepAlgoAPI_Cut slotted(bar, slot);
+        slotted.Build();
+        const TopoDS_Shape twin_body = slotted.Shape();
+        const TopoDS_Shape top_left = face_by_center(twin_body, 5, 5, 10);
+        const TopoDS_Shape top_right = face_by_center(twin_body, 25, 5, 10);
         em::ElementMapPartition part;
-        part.mint("A", "ambiguous", km::ElementKind::Face, left, body,
-                  nlohmann::json{{"worldPoint", {5.0, 5.0, 5.0}}});
+        part.mint("A", "ambiguous", km::ElementKind::Face, top_left, twin_body,
+                  nlohmann::json{{"worldPoint", {15.0, 5.0, 10.0}}});
         SyntheticHistory history;
-        history.modified.Append(left);
-        history.generated.Append(right);
+        history.modified.Append(top_left);
+        history.generated.Append(top_right);
         em::ElementMapDelta delta;
         std::vector<nlohmann::json> needs_repair;
-        part.apply_history("A", body, history, delta, &needs_repair);
+        part.apply_history("A", twin_body, history, delta, &needs_repair);
         check(!part.contains("ambiguous"),
               "history union: ambiguous multi-image lineage never guesses");
         check(needs_repair.size() == 1 && needs_repair[0].value("reason", "") == "ambiguous",

@@ -8,9 +8,23 @@
 #include <cstdlib>
 #include <vector>
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Vec.hxx>
 #include <gp_XYZ.hxx>
@@ -100,6 +114,107 @@ km::ElementDescriptor ElementMapPartition::describe(const TopoDS_Shape& shape) {
     return km::ElementDescriptor{};
 }
 
+namespace {
+
+// Outward unit normal of `face` (as oriented in its body) at the surface point
+// nearest `near` — the surface normal flipped for a REVERSED face.
+bool face_outward_at(const TopoDS_Face& face, const gp_Pnt& near, gp_Dir& out) {
+    try {
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (surface.IsNull()) return false;
+        double u = 0.0, v = 0.0;
+        GeomAPI_ProjectPointOnSurf projector(near, surface);
+        if (projector.IsDone() && projector.NbPoints() > 0) {
+            projector.LowerDistanceParameters(u, v);
+        } else {
+            double umin, umax, vmin, vmax;
+            BRepTools::UVBounds(face, umin, umax, vmin, vmax);
+            u = 0.5 * (umin + umax);
+            v = 0.5 * (vmin + vmax);
+        }
+        gp_Pnt p;
+        gp_Vec du, dv;
+        surface->D1(u, v, p, du, dv);
+        gp_Vec n = du.Crossed(dv);
+        if (n.Magnitude() <= 1e-12) return false;
+        if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+        out = gp_Dir(n);
+        return true;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// The v4 SIDEDNESS evidence: a face's outward normal at its UV centre; an edge's
+// normalized sum of the outward normals of its adjacent faces, each evaluated at
+// the point nearest the edge midpoint. Deterministic (pure geometry, indexed maps).
+bool outward_of(const TopoDS_Shape& shape_in, const TopoDS_Shape& body_shape, gp_Dir& out) {
+    if (shape_in.IsNull()) return false;
+    try {
+        // Orientation is a property of the shape's OCCURRENCE in the body: history
+        // lists (Modified/Generated) hand back neutral instances, so the sign is
+        // taken from the body's own instance of the same TShape. `FindIndex` matches
+        // by IsSame (orientation-blind) and returns the body-oriented shape.
+        TopoDS_Shape shape = shape_in;
+        if (!body_shape.IsNull()) {
+            TopTools_IndexedMapOfShape located;
+            TopExp::MapShapes(body_shape, shape_in.ShapeType(), located);
+            const int index = located.FindIndex(shape_in);
+            if (index > 0) shape = located(index);
+        }
+        if (shape.ShapeType() == TopAbs_FACE) {
+            const TopoDS_Face face = TopoDS::Face(shape);
+            double umin, umax, vmin, vmax;
+            BRepTools::UVBounds(face, umin, umax, vmin, vmax);
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (surface.IsNull()) return false;
+            gp_Pnt mid;
+            gp_Vec du, dv;
+            surface->D1(0.5 * (umin + umax), 0.5 * (vmin + vmax), mid, du, dv);
+            return face_outward_at(face, mid, out);
+        }
+        if (shape.ShapeType() == TopAbs_EDGE && !body_shape.IsNull()) {
+            const TopoDS_Edge edge = TopoDS::Edge(shape);
+            BRepAdaptor_Curve curve(edge);
+            const gp_Pnt mid = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
+            TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+            TopExp::MapShapesAndAncestors(body_shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+            const int index = edge_faces.FindIndex(edge);
+            if (index == 0) return false;
+            gp_Vec sum(0.0, 0.0, 0.0);
+            std::vector<TopoDS_Shape> seen;
+            for (TopTools_ListIteratorOfListOfShape it(edge_faces(index)); it.More(); it.Next()) {
+                const TopoDS_Shape& f = it.Value();
+                bool duplicate = false;
+                for (const TopoDS_Shape& s : seen) duplicate = duplicate || s.IsSame(f);
+                if (duplicate) continue;
+                seen.push_back(f);
+                gp_Dir n;
+                if (face_outward_at(TopoDS::Face(f), mid, n)) sum += gp_Vec(n);
+            }
+            if (sum.Magnitude() <= 1e-9) return false;
+            out = gp_Dir(sum);
+            return true;
+        }
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    return false;
+}
+
+}  // namespace
+
+km::ElementDescriptor ElementMapPartition::describe(const TopoDS_Shape& shape,
+                                                    const TopoDS_Shape& body_shape) {
+    km::ElementDescriptor d = describe(shape);
+    gp_Dir outward;
+    if (outward_of(shape, body_shape, outward)) {
+        d.outward = outward;
+        d.hasOutward = true;
+    }
+    return d;
+}
+
 std::string ElementMapPartition::topokey_for_shape(const TopoDS_Shape& body_shape,
                                                    const TopoDS_Shape& sub_shape,
                                                    km::ElementKind kind) {
@@ -161,7 +276,7 @@ TopoDS_Shape ElementMapPartition::nearest_subshape(const TopoDS_Shape& body_shap
 }
 
 nlohmann::json ElementMapPartition::descriptor_to_json(const km::ElementDescriptor& d) {
-    return nlohmann::json{
+    nlohmann::json out = nlohmann::json{
         {"shapeType", static_cast<int>(d.shapeType)},
         {"center", {d.center.X(), d.center.Y(), d.center.Z()}},
         {"size", d.size},
@@ -180,6 +295,10 @@ nlohmann::json ElementMapPartition::descriptor_to_json(const km::ElementDescript
              return std::string(buf);
          }()},
     };
+    // v4 sidedness rides ADDITIVELY: absent on a descriptor computed without a body
+    // (and on every pre-v4 record), so old readers and old fixtures are untouched.
+    if (d.hasOutward) out["outward"] = {d.outward.X(), d.outward.Y(), d.outward.Z()};
+    return out;
 }
 
 km::ElementDescriptor ElementMapPartition::descriptor_from_json(const nlohmann::json& j) {
@@ -219,6 +338,15 @@ km::ElementDescriptor ElementMapPartition::descriptor_from_json(const nlohmann::
         d.adjacencyHash =
             std::strtoull(j["adjacencyHash"].get<std::string>().c_str(), nullptr, 16);
     }
+    if (j.contains("outward") && j["outward"].is_array() && j["outward"].size() >= 3 &&
+        j["outward"][0].is_number() && j["outward"][1].is_number() && j["outward"][2].is_number()) {
+        const gp_XYZ o(j["outward"][0].get<double>(), j["outward"][1].get<double>(),
+                       j["outward"][2].get<double>());
+        if (o.Modulus() > 1e-12) {
+            d.outward = gp_Dir(o);
+            d.hasOutward = true;
+        }
+    }
     return d;
 }
 
@@ -253,7 +381,7 @@ DeltaEntry ElementMapPartition::mint(const std::string& body_id, const std::stri
     e.kind = kind;
     e.shape = sub_shape;
     e.topo_key = topokey_for_shape(body_shape, sub_shape, kind);
-    e.descriptor = describe(sub_shape);
+    e.descriptor = describe(sub_shape, body_shape);
     if (!anchor.is_null()) e.anchor = std::move(anchor);
     return DeltaEntry{element_id, e.topo_key, kind_name(kind), body_id};
 }
@@ -361,8 +489,17 @@ void ElementMapPartition::apply_history(const std::string& body_id,
 
         // Ladder level 1 (SCHEMA §10): consult the union of both OCCT history
         // channels. Some builders expose same-kind successors only as Generated().
+        // Cross-kind images (a face's section EDGES, an edge's split VERTICES) can
+        // never be bound to this entry — `topokey_for_shape(kind)` would find no
+        // ordinal — so they are dropped BEFORE scoring rather than allowed to turn
+        // a unique same-kind image into an "ambiguous" split (v4).
         std::vector<HistorySuccessor> successors;
-        if (!old.IsNull()) successors = history_successors(hist, old);
+        if (!old.IsNull()) {
+            const TopAbs_ShapeEnum want = old.ShapeType();
+            for (HistorySuccessor& s : history_successors(hist, old)) {
+                if (!s.shape.IsNull() && s.shape.ShapeType() == want) successors.push_back(s);
+            }
+        }
 
         TopoDS_Shape image;
         if (successors.empty()) {
@@ -375,18 +512,30 @@ void ElementMapPartition::apply_history(const std::string& body_id,
             // SPLIT: >1 images. EXPLICIT LINEAGE — score every image candidate
             // against the entry's frozen descriptor + anchor and gate on confidence
             // (W-WP6, closes review finding 2 — no forced Modified().First()).
+            // The anchor is measured to the image CENTROID here (v3 form), not to
+            // the sub-shape: the images are successors of ONE element, and a pick
+            // point the op itself carved away (a hole drilled AT the pick) would be
+            // equidistant from the modified face and the wall generated inside it.
             const AnchorEvidence anchor = anchor_of(e.anchor);
             std::vector<TopoDS_Shape> imgs;
             std::vector<double> scores;
             std::vector<km::ElementDescriptor> descs;
             for (const HistorySuccessor& successor : successors) {
-                const km::ElementDescriptor cd = describe(successor.shape);
                 imgs.push_back(successor.shape);
-                descs.push_back(cd);
-                double score = score_candidate(e.descriptor, /*has_intent_descriptor=*/true,
-                                               anchor, cd, body_diag)
-                                   .score;
-                if (successor.modified) score += kModifiedHistoryConfidence;
+                descs.push_back(describe(successor.shape, new_body_shape));
+            }
+            for (std::size_t k = 0; k < imgs.size(); ++k) {
+                const ScoreResult sr = score_candidate(e.descriptor, /*has_intent_descriptor=*/true,
+                                                       anchor, descs[k], body_diag);
+                double score = sr.score;
+                if (successors[k].modified) score += kModifiedHistoryConfidence;
+                if (std::getenv("ONECAD_LADDER_DEBUG")) {
+                    std::string contrib;
+                    for (const auto& [n, v] : sr.contributions) contrib += n + "=" + std::to_string(v) + " ";
+                    std::fprintf(stderr, "[ladder] %s image %zu kind=%d modified=%d score=%.4f {%s}\n",
+                                 id.c_str(), k, static_cast<int>(imgs[k].ShapeType()),
+                                 successors[k].modified ? 1 : 0, score, contrib.c_str());
+                }
                 scores.push_back(std::min(score, 1.0));
             }
             // best / runner-up (deterministic tie-break by list order).
@@ -450,7 +599,7 @@ void ElementMapPartition::apply_history(const std::string& body_id,
         const bool changed = (new_key != e.topo_key) || !image.IsSame(e.shape);
         e.shape = image;
         e.topo_key = new_key;
-        e.descriptor = describe(image);
+        e.descriptor = describe(image, new_body_shape);
         if (changed) {
             delta.relabeled.push_back(DeltaEntry{id, new_key, kind_name(e.kind), body_id});
         }

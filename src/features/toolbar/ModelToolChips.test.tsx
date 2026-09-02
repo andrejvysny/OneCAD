@@ -714,9 +714,26 @@ describe("extrude end-condition segments", () => {
     expect(onEnd).toHaveBeenCalledWith("ToNext");
   });
 
+  // `ThroughAll` is a tool EXTENT: with NewBody there is no body to reach through
+  // and the worker refuses the pair by name (`EXTRUDE_THROUGH_ALL_NO_TARGET`), so
+  // the segment is disabled under NewBody even when bodies exist — and back on
+  // for Add/Cut.
+  it("disables Through all under NewBody even when bodies exist", () => {
+    render(<ModelToolChips />);
+    showExtrude({ canUseBodyEnds: true, booleanMode: "NewBody" });
+    expect(screen.getByTestId("chip-end-throughall")).toBeDisabled();
+    expect(screen.getByTestId("chip-end-tonext")).toBeEnabled();
+  });
+
+  it("offers Through all again under Add", () => {
+    render(<ModelToolChips />);
+    showExtrude({ canUseBodyEnds: true, booleanMode: "Add" });
+    expect(screen.getByTestId("chip-end-throughall")).toBeEnabled();
+  });
+
   it("marks the active condition pressed", () => {
     render(<ModelToolChips />);
-    showExtrude({ canUseBodyEnds: true, endCondition: "ThroughAll" });
+    showExtrude({ canUseBodyEnds: true, booleanMode: "Cut", endCondition: "ThroughAll" });
     expect(screen.getByTestId("chip-end-throughall")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("chip-end-blind")).toHaveAttribute("aria-pressed", "false");
   });

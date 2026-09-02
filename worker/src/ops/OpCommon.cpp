@@ -111,9 +111,10 @@ bool read_string_array_strict(const json& params, const char* key,
 }
 
 kernel::validation::PublicationDecision publication_decision(
-    const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy) {
+    const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy,
+    const onecad::CancelToken* cancel) {
     const kernel::validation::ShapeEvidence evidence =
-        kernel::validation::collect_shape_evidence(shape, policy.tier);
+        kernel::validation::collect_shape_evidence(shape, policy.tier, cancel);
     return kernel::validation::evaluate_publication_policy(evidence, policy);
 }
 
@@ -480,6 +481,17 @@ BOPAlgo_Operation bop_of(app::BooleanMode mode) {
 }
 }  // namespace
 
+void stage_boolean(BRepAlgoAPI_BooleanOperation& algo, const TopoDS_Shape& arg,
+                   const TopoDS_Shape& tool) {
+    TopTools_ListOfShape args, tools;
+    args.Append(arg);
+    tools.Append(tool);
+    algo.SetArguments(args);
+    algo.SetTools(tools);
+    algo.SetNonDestructive(Standard_True);
+    algo.SetRunParallel(Standard_False);
+}
+
 BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& tool,
                               app::BooleanMode mode, bool parallel, const json& occt_options,
                               const onecad::CancelToken* cancel,
@@ -508,6 +520,11 @@ BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& to
     algo->SetArguments(args);
     algo->SetTools(tools);
     algo->SetOperation(bop);
+    // WP-E: NEVER let the BOP raise tolerances on the ARGUMENTS in place. The
+    // scratch, the preview job and the live head share TShapes, so a failed,
+    // cancelled or merely previewed boolean would otherwise inflate committed
+    // geometry invisibly to rollback.
+    algo->SetNonDestructive(Standard_True);
     // Determinism: single-threaded in determinism mode (Invariant 5). §7.3
     // occtOptions apply to both modes.
     algo->SetRunParallel(parallel ? Standard_True : Standard_False);
@@ -599,6 +616,58 @@ std::vector<RankedSolid> ranked_solids(const TopoDS_Shape& shape) {
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](const RankedSolid& a, const RankedSolid& b) { return a.key < b.key; });
     return ranked;
+}
+
+namespace {
+int solid_count_of(const TopoDS_Shape& shape) {
+    if (shape.IsNull()) return 0;
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+    return solids.Extent();
+}
+const char* boolean_mode_name(app::BooleanMode mode) {
+    switch (mode) {
+        case app::BooleanMode::Add: return "Add";
+        case app::BooleanMode::Cut: return "Cut";
+        case app::BooleanMode::Intersect: return "Intersect";
+        default: return "NewBody";
+    }
+}
+}  // namespace
+
+std::optional<OpOutcome> boolean_result_policy(app::BooleanMode mode, const TopoDS_Shape& target,
+                                                const TopoDS_Shape& result, const char* op_name,
+                                                const std::string& target_id,
+                                                const char* add_disjoint_code,
+                                                const char* empty_code, json evidence_extra) {
+    const int target_solids = solid_count_of(target);
+    const int result_solids = solid_count_of(result);
+    json evidence = std::move(evidence_extra);
+    evidence["operation"] = boolean_mode_name(mode);
+    evidence["targetBodyId"] = target_id;
+    evidence["targetSolids"] = target_solids;
+    evidence["solidCount"] = result_solids;
+    const auto refuse = [&](const char* code, const std::string& message) {
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back({{"severity", "error"},
+                                       {"code", code},
+                                       {"message", message},
+                                       {"stage", "publish"},
+                                       {"evidence", json{{"boolean", evidence}}}});
+        return failure;
+    };
+    if (mode == app::BooleanMode::Add) {
+        if (result_solids > target_solids) {
+            return refuse(add_disjoint_code,
+                          std::string(op_name) + " Add: the tool does not touch the target body");
+        }
+        return std::nullopt;
+    }
+    if (result_solids == 0) {
+        return refuse(empty_code, std::string(op_name) + " " + boolean_mode_name(mode) +
+                                      ": the result would be empty");
+    }
+    return std::nullopt;
 }
 
 std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape) {

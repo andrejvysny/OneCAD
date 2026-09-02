@@ -61,7 +61,10 @@ double GeometryPrecisionContext::micro_edge_length() const {
 }
 
 double GeometryPrecisionContext::sliver_face_width() const {
-  return micro_edge_length();
+  // WP-E: the micro-edge floor (2·Confusion = 2e-7 mm) made the sliver rule
+  // vacuous — the 1e-5..1e-4 mm slivers a near-coincident boolean actually leaves
+  // sat 500× above it. Floor the width at 1 % of the authoring resolution.
+  return std::max(micro_edge_length(), kAuthoringResolutionMm / 100.0);
 }
 
 nlohmann::json GeometryPrecisionContext::to_json() const {

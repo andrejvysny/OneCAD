@@ -105,6 +105,8 @@ TopoDS_Shape common_of(const TopoDS_Shape& a, const TopoDS_Shape& b) {
         builder.SetArguments(args);
         builder.SetTools(tools);
         builder.SetRunParallel(Standard_False);  // determinism (Invariant 5)
+        // WP-E: `a`/`b` are LIVE head shapes; the BOP must not raise their tolerances.
+        builder.SetNonDestructive(Standard_True);
         builder.Build();
         if (!builder.IsDone() || builder.HasErrors()) return TopoDS_Shape();
         return builder.Shape();

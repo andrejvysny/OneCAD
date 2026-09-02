@@ -106,10 +106,15 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
                                                         " transform failed at instance " +
                                                         std::to_string(i));
             }
+            // WP-E ruling: an unfused child is a rigid copy of an already-published
+            // body (validity is isometry-invariant), so Tier A; the FUSED result below
+            // is new boolean geometry and stays Tier B.
             const kernel::validation::PublicationDecision decision = publication_decision(
-                xf.Shape(), kernel::validation::single_solid_policy(
-                                std::string(op_name) + " v2 child",
-                                kernel::validation::PublicationTier::TierA));
+                xf.Shape(),
+                kernel::validation::single_solid_policy(std::string(op_name) + " v2 child",
+                                                        kernel::validation::PublicationTier::TierA),
+                ctx.cancel);
+            if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
             if (!decision.publishable()) return publication_refusal(decision, "publication");
             const std::string bid = "body_" + op_id + ":" + std::to_string(i - 1);
             ctx.bodies.create(bid, op_id, xf.Shape());
@@ -137,7 +142,8 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
                                                         std::to_string(i));
             }
             if (fuse_result) {
-                BRepAlgoAPI_Fuse fuse(result, xf.Shape());
+                BRepAlgoAPI_Fuse fuse;
+                stage_boolean(fuse, result, xf.Shape());
                 fuse.Build();
                 if (!fuse.IsDone() || fuse.Shape().IsNull()) {
                     return OpOutcome::fail("OP_FAILED", std::string(op_name) +
@@ -167,10 +173,12 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
     }
     if (fuse_result && result_policy == PatternResultPolicy::V2) {
         const kernel::validation::PublicationDecision decision = publication_decision(
-            result, kernel::validation::single_solid_policy(
-                        std::string(op_name) + " fused result",
-                        result_validation_tier(
-                            ctx, kernel::validation::PublicationTier::TierB)));
+            result,
+            kernel::validation::single_solid_policy(
+                std::string(op_name) + " fused result",
+                result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)),
+            ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
         if (!decision.publishable()) {
             if (ordered_solids(result).size() > 1) {
                 return OpOutcome::fail("PATTERN_DISJOINT_RESULT",

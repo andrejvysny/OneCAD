@@ -51,21 +51,37 @@ const END_CONDITIONS: {
 export function EndConditionSegments({
   active,
   canUseBodyEnds,
+  booleanMode,
   onPick,
 }: {
   active: ExtrudeEndCondition;
   canUseBodyEnds: boolean;
+  /**
+   * `ThroughAll` is a TOOL extent: with `NewBody` there is no body to reach
+   * through, and the worker refuses the pair by name
+   * (`EXTRUDE_THROUGH_ALL_NO_TARGET`, SCHEMA §7.3) — so the segment is disabled
+   * rather than offered and refused at commit.
+   */
+  booleanMode: BooleanMode;
   onPick: (end: ExtrudeEndCondition) => void;
 }) {
+  const throughAllNeedsTarget = booleanMode === "NewBody";
   return (
     <div
       className="flex overflow-hidden rounded-full"
       role="group"
       aria-label="End condition"
-      title={canUseBodyEnds ? undefined : "Through all / To next / To face need an existing body"}
+      title={
+        canUseBodyEnds
+          ? throughAllNeedsTarget
+            ? "Through all needs Add or Cut (a body to reach through)"
+            : undefined
+          : "Through all / To next / To face need an existing body"
+      }
     >
       {END_CONDITIONS.map((c) => {
-        const disabled = c.needsBody && !canUseBodyEnds;
+        const disabled =
+          (c.needsBody && !canUseBodyEnds) || (c.end === "ThroughAll" && throughAllNeedsTarget);
         return (
           <button
             key={c.end}
@@ -256,6 +272,7 @@ export function ExtrudeOverflow(props: ExtrudeOverflowProps): React.ReactElement
         <EndConditionSegments
           active={props.endCondition}
           canUseBodyEnds={props.canUseBodyEnds}
+          booleanMode={props.booleanMode}
           onPick={(end) => props.onEndCondition?.(end)}
         />
       )}

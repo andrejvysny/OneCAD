@@ -1,0 +1,23 @@
+# CANONICAL fixture — kernel-hardening WP-C: an Extrude `Add` whose tool never touches
+# its target is a NAMED, recoverable refusal (`EXTRUDE_ADD_DISJOINT`), never a split.
+#
+# Recipe: a 20×20×10 box, then a 4×4 boss sketched on a plane 15 mm above it and
+# extruded 10 mm AWAY from it (a 5 mm gap). OCCT's Fuse of two disjoint solids
+# "succeeds" as a compound of both; publishing that as the D1 split used to DELETE
+# the target's BodyId and every element tracked on it. The refusal keeps the
+# prepared prefix through step 2, AcceptPrepared publishes it, and the target body
+# lives on with its id and geometry untouched.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_extrude_add_disjoint","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":93,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk_a","plane":{"kind":"XY"},"entities":[{"id":"a1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"a2","type":"Line","p0":[20,0],"p1":[20,20]},{"id":"a3","type":"Line","p0":[20,20],"p1":[0,20]},{"id":"a4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk_a","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk_b","plane":{"kind":"custom","origin":[0,0,15],"xAxis":[0,1,0],"yAxis":[-1,0,0],"normal":[0,0,1]},"entities":[{"id":"b1","type":"Line","p0":[8,8],"p1":[12,8]},{"id":"b2","type":"Line","p0":[12,8],"p1":[12,12]},{"id":"b3","type":"Line","p0":[12,12],"p1":[8,12]},{"id":"b4","type":"Line","p0":[8,12],"p1":[8,8]}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"body_op1","kind":"body"}}],"params":{"sketchId":"sk_b","distance":10.0,"extrudeMode":"Blind","booleanMode":"Add","targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":93,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":93,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":93,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":93,"result":{"planPrepared":true,"preparedSnapshotId":1,"lastValidStep":2,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]},{"stepIndex":2,"status":"ok"},{"stepIndex":3,"status":"opFailed","message":"Extrude Add: the tool does not touch the target body","diagnostics":[{"severity":"error","code":"EXTRUDE_ADD_DISJOINT","message":"Extrude Add: the tool does not touch the target body","stage":"publish","evidence":{"boolean":{"operation":"Add","targetBodyId":"body_op1","targetSolids":1,"solidCount":2}}}]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":93,"documentRevision":1,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":93,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"documentRevision":1,"workerEpoch":3,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"goodbye":true}}}

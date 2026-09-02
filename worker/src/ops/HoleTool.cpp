@@ -1,5 +1,6 @@
 // HoleTool.cpp — see HoleTool.h.
 #include "ops/HoleTool.h"
+#include "ops/OpCommon.h"
 
 #include <algorithm>
 #include <cmath>
@@ -109,7 +110,8 @@ TopoDS_Shape build_hole_tool(const gp_Pnt& origin, const gp_Dir& axis, const Hol
 
         TopoDS_Shape tool = pieces.front();
         for (std::size_t i = 1; i < pieces.size(); ++i) {
-            BRepAlgoAPI_Fuse fuse(tool, pieces[i]);
+            BRepAlgoAPI_Fuse fuse;
+            stage_boolean(fuse, tool, pieces[i]);
             fuse.Build();
             if (!fuse.IsDone()) {
                 err = "Hole tool solid could not be fused";

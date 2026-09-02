@@ -267,6 +267,64 @@ fn sketch_record(rec: u128, sk: &Sketch) -> OperationRecord {
     )
 }
 
+/// The XY frame lifted to `z` — a boss sketched ON the top of a 25 mm box.
+fn plane_ref_at_z(z: f64) -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Custom,
+        origin: Vec3::new_unchecked(0.0, 0.0, z),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+/// `sketch_record` on an explicit plane.
+fn sketch_record_on(rec: u128, sk: &Sketch, plane: SketchPlaneRef) -> OperationRecord {
+    let (_plane, entities, constraints) = sketch_wire(sk);
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Sketch",
+        Operation::Known(KnownOperation::Sketch(SketchOpParams {
+            sketch: sk.id,
+            plane,
+            entities: entities.as_array().cloned().unwrap_or_default(),
+            constraints: constraints.as_array().cloned().unwrap_or_default(),
+            host_face: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+/// `extrude_record` in `Add` mode against `target` (a boss joined onto a body).
+fn extrude_add_record(rec: u128, sketch: SketchId, dist: f64, target: BodyId) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+            profile: Some(SketchRegionRef {
+                sketch,
+                region: RegionId::new(""),
+                region_identity_version: None,
+                extra: Default::default(),
+            }),
+            distance: Scalar::new(dist),
+            draft_angle_deg: Scalar::new(0.0),
+            mode: ExtrudeMode::Blind,
+            boolean_mode: BooleanMode::Add,
+            target_body: Some(target),
+            target_face: None,
+            two_directions: false,
+            mode2: ExtrudeMode::Blind,
+            distance2: Scalar::new(0.0),
+            target_face2: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
 fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
@@ -434,6 +492,22 @@ async fn author_and_save(
         sketch_record(SKETCH_REC, &rect_sketch(sid, 0x2000, 0.0, 0.0, 20.0, 20.0)),
     );
     add_op(&mut rt, extrude_record(EXTRUDE_REC, sid, 25.0));
+    if !with_anchor {
+        // The anchor-less case needs a GENUINE tie: a 20×10×10 boss on half of the
+        // top gives the boss top and the uncovered base top identical descriptors
+        // (planar, 200 mm², +Z, same sorted-edge hash). resolverVersion 4 tells the
+        // pre-v4 top/bottom pair apart by `outward`, so that pair no longer ties.
+        let boss_sid = SketchId(Uuid::from_u128(0xE11));
+        add_op(
+            &mut rt,
+            sketch_record_on(
+                0xE12,
+                &rect_sketch(boss_sid, 0x3000, 0.0, 0.0, 20.0, 10.0),
+                plane_ref_at_z(25.0),
+            ),
+        );
+        add_op(&mut rt, extrude_add_record(0xE13, boss_sid, 10.0, body));
+    }
     let report = regen_all(&mut rt).await;
     let snapshot = SnapshotId(published(&report, "stock box").id.0);
 

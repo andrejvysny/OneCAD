@@ -155,7 +155,7 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
                       {"bodyId", body_id},
                       {"elementId", held ? held->element_id : ""},
                       {"descriptor", em::ElementMapPartition::descriptor_to_json(
-                                           em::ElementMapPartition::describe(sub))}};
+                                           em::ElementMapPartition::describe(sub, body->geom))}};
         if (pick.contains("anchor")) entry["anchor"] = pick["anchor"];
         ids.push_back(std::move(entry));
     }
@@ -228,7 +228,7 @@ json query_by_topokey(const PublishedStateSnapshot& state, const json& args) {
                 {"bodyId", body_id},
                 {"kind", em::ElementMapPartition::kind_name(kind)},
                 {"descriptor", em::ElementMapPartition::descriptor_to_json(
-                                   em::ElementMapPartition::describe(sub))},
+                                   em::ElementMapPartition::describe(sub, body->geom))},
                 {"present", true}};
 }
 

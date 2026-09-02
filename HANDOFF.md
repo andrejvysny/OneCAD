@@ -1,3 +1,84 @@
+# Handoff — KERNEL HARDENING (WP-C/WP-D/WP-A/WP-E landed, gated, reviewed; commit A carved from the combined tree)
+
+Session 25 · 2026-09-02 (evening) · plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`
+
+> Program plan for this and the next sessions (close-out → WP-B region identity → WP-F chamfer
+> reference face) is the plan file above; its **Run log** carries every task, measured count
+> and deviation. Ledger with the gate rows: `TODO.md` § KERNEL HARDENING (top).
+> **Decisions this session (user):** next program = kernel hardening P0/P1 · two commits carved
+> from ONE gated tree (A = kernel hardening, B = WP-P P1+P2+P2b), a third (C) for the WP-P FE
+> package after its own gate · critical / sequential / ≤ 2 implementers · push authorized after
+> each gated commit · `.clang-format` `DisableFormat: true` authorized · default dogfood parts
+> (NEMA17 mount on a Rollco 20×20 frame, SG90 bracket) authorized.
+
+## Goal
+
+Make the modeling kernel correct and robust enough to compete with Parasolid-backed tools for
+daily-driver parts, risk-first. This session closed WP-E and the review debt of WP-A/C/D.
+
+## Done this session (and why)
+
+- **WP-E built for the first time.** It did not compile as written (`RevolveOp.cpp` used
+  `precision_of` without its include). Fix-round: cancel propagation on Mirror/fused-Pattern
+  and on the five PRE-EXISTING Tier B sites (Shell, Gear, Chamfer, OffsetFace ×2);
+  `OpCommon::stage_boolean()` puts `SetNonDestructive(true)` + single-thread on every
+  auxiliary BOP (the two-shape OCCT constructors build in the constructor, so the flag could not
+  be set on them); non-destructive `PrepareOffsetFace::common_of` and `ExportGeometry` fuse.
+- **Ruling D3b — Tier B scope.** The first full ctest stalled > 5 min in
+  `BOPAlgo_CheckerSI::CheckFaceSelfIntersection` on a modeled thread face. Tier B applies where
+  NEW geometry is published (Extrude/Revolve NewBody, every boolean result, fused Mirror/Pattern,
+  Fillet/Chamfer/Shell/OffsetFace, Gear, non-generator PlaceComponent); Tier A stays for
+  isometries (TransformBody copy AND move, unfused Mirror/Pattern children) and `generator`
+  components; ImportStep stays on the import health policy. Recorded in SCHEMA §7.2 + §14.
+- **Protocol audit of the kernel SCHEMA hunks → `approve`** after four blockers (reasonCode
+  preamble carve-out; `policyVersions.resolverVersion` claim dropped — Rust axis stays 1, OPEN
+  whether a v3-minted checkpoint partition may be restored under v4 scoring; `editedFrom` prose
+  for v4; `outward` in the §10 descriptor list) and the code fixes above; new cross-track fixture
+  `revolve_profile_crosses_axis.ndjson`; `resolve_refs.ndjson` MOVED to `protocol/fixtures/`
+  (`canonical_resolve_refs`) so `scoringVersion: 4` is pinned in both lanes.
+- **Adversarial review of WP-A v4 + WP-E → four HIGH fixed red-first:** the crosses-axis
+  classifier missed every closed-curve profile (vertex-only; now edge endpoints + analytic
+  Circle/Ellipse extrema, two new ctest cases); the anchor-decisive "ON the winner" threshold
+  was 2.5 % of the body diagonal (now 0.01 mm); `editedFrom: 0` on the checkpoint-fallback lane
+  (carve-out disabled there) would veto every descriptor-tied ref on a failed-checkpoint reopen
+  (the fallback now drops a `0` claim); `h6a` asserted only a face count that any of four
+  congruent corners satisfies (now pins WHICH corner). Residuals recorded in TODO.md.
+- **Regression found by the gate and fixed:** the SG90 vendor ingest refused
+  `PUBLICATION_TOLERANCE_BUDGET` because the standalone-Boolean ceiling budgeted from the target
+  only; now from the WORSE of the two inputs. 6 of 7 vendor files ingest again.
+- **WP-P P2b (WP-P-owned files, goes to commit B):** `SketchSessionDto.projections` provenance
+  reaches the FE on `enter_sketch`/`get_sketch` (+ TS type + `frontendProjections` re-key +
+  tests). Without it the FE could not tell a projected entity from a sketch-on-face locked one
+  after a reload — the P3 stale badge could not survive a reload.
+
+## Gate (main thread, suites alone) — see TODO.md § KERNEL HARDENING for the full row
+
+ctest 168/168 · hygiene clean · sidecar restaged (`13d66fd9…`) · fmt/clippy clean · cargo
+`--workspace` 93 targets / 1472 / 0 · tsc clean · vitest 311 / 5505 / 78 skipped · hex 0 ·
+verifiers OK · kernelbench T0 compare + full e2e: see the TODO.md row (running at handoff time).
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; read the plan file's Run log (bottom) and TODO.md
+   § KERNEL HARDENING § Now checkboxes.
+2. If commits A/B are not yet on `master`: the carve tooling is in the session scratchpad
+   (`carve.py`, `stage_commit_a.sh` — index-only, never touches the worktree); the plan's
+   Design § A gives the hunk ownership. Verify `git diff HEAD` is EMPTY after commit B.
+3. Then P3 FE (brief drafted in the scratchpad `p3_brief.md`, design in the plan § B) → full L3
+   → commit C → push. Then WP-B (plan § D, probes first), WP-F (plan § E).
+
+## Open questions
+
+- Rust `policyVersions.resolverVersion` (checkpoint-compatibility axis) stays 1 while the
+  worker's `scoringVersion` moved to 4: may a v3-minted checkpoint partition be restored under v4
+  scoring? (`MemoryCheckpointStore::save` writes `resolver_version: 1` literally — bumping the
+  axis needs both sides.)
+- Does repair rewrite the frozen `intent.anchor`? If not, a same-facing-twin ref stays
+  NeedsRepair on every reopen under `editedFrom: 0`.
+- `describe(shape, body)` per-candidate map rebuild (O(E²)) — measure on the 40-feature baseline.
+
+---
+
 # Handoff — Kernel Continuation RESUMED and (nearly) completed
 
 Session 22 · 2026-08-20

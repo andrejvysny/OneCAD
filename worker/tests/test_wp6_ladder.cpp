@@ -436,7 +436,124 @@ void test_veto_does_not_fire_on_distinguishable_descriptors() {
 
 }  // namespace
 
+// ── resolverVersion 4 (kernel-hardening WP-A): SIDEDNESS + RELATIVE ANCHOR ─────
+// (v4-a) OPPOSITE-FACING TWINS separate on `outward`: the two 10×10 end faces of a
+// 10×10×20 bar are descriptor twins in every v3 feature. A ref minted WITH the body
+// (so it carries `outward`) ranks its own face FIRST BY A FULL MARGIN with the
+// anchor at the body centre, where the anchor cannot help (equidistant) — the
+// signed outward alone tells +Z from −Z. (The absolute score is low-confidence
+// there, so the outcome is NeedsRepair; with the pick ON the face it AutoBinds.)
+void test_v4_opposite_facing_twins_resolve() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Pnt(-5, -5, -10), 10.0, 10.0, 20.0).Shape();
+    const TopoDS_Shape top = face_by_center(box, 0, 0, 10);
+    const std::string tk = em::ElementMapPartition::topokey_for_shape(box, top, km::ElementKind::Face);
+    em::LadderRef r;
+    r.ref_id = "op.input0";
+    r.element_id = "el_top";
+    r.kind = km::ElementKind::Face;
+    r.has_descriptor = true;
+    r.descriptor = em::ElementMapPartition::describe(top, box);  // sided
+    r.anchor.has_world_point = true;
+    r.anchor.world_point = gp_Pnt(0, 0, 0);  // equidistant to both end faces
+    r.anchor_json = {{"worldPoint", {0.0, 0.0, 0.0}}};
+    check(r.descriptor.hasOutward, "v4: a body-described face carries outward");
+    const auto res = em::resolve_descriptor_stage(box, "body", {r});
+    check(res.size() == 1 && !res[0].candidates.empty() && res[0].candidates[0].topo_key == tk,
+          "v4: the +Z face ranks first on outward with the anchor at the centre");
+    check(res.size() == 1 && !res[0].candidates.empty() &&
+              res[0].candidates[0].margin >= em::kAutoBindMinMargin,
+          "v4: the outward feature alone supplies the 0.10 margin over the −Z twin");
+    // The pick ON the face: the ordinary AutoBind.
+    r.anchor.world_point = gp_Pnt(0, 0, 10);
+    r.anchor_json = {{"worldPoint", {0.0, 0.0, 10.0}}};
+    const auto on = em::resolve_descriptor_stage(box, "body", {r});
+    check(on.size() == 1 && on[0].outcome == em::LadderOutcome::AutoBind,
+          "v4: a pick on the +Z face AutoBinds");
+    check(on.size() == 1 && on[0].bound_topo_key == tk, "v4: bound the +Z face, not its −Z twin");
+}
+
+// (v4-b) SAME-FACING TWINS still tie: a slotted 30×10×10 bar has two identical +Z
+// top faces; a sided ref with the anchor midway between them is a genuine
+// ambiguity ⇒ NeedsRepair, never a guess.
+void test_v4_same_facing_twins_still_tie() {
+    const TopoDS_Shape bar = BRepPrimAPI_MakeBox(30.0, 10.0, 10.0).Shape();
+    const TopoDS_Shape slot = BRepPrimAPI_MakeBox(gp_Pnt(10, -1, 5), 10.0, 12.0, 6.0).Shape();
+    BRepAlgoAPI_Cut cut(bar, slot);
+    cut.Build();
+    const TopoDS_Shape body = cut.Shape();
+    const TopoDS_Shape top_left = face_by_center(body, 5, 5, 10);
+    em::LadderRef r;
+    r.ref_id = "op.input0";
+    r.element_id = "el_left";
+    r.kind = km::ElementKind::Face;
+    r.has_descriptor = true;
+    r.descriptor = em::ElementMapPartition::describe(top_left, body);
+    r.anchor.has_world_point = true;
+    r.anchor.world_point = gp_Pnt(15, 5, 10);
+    r.anchor_json = {{"worldPoint", {15.0, 5.0, 10.0}}};
+    const auto res = em::resolve_descriptor_stage(body, "body", {r});
+    check(res.size() == 1 && res[0].outcome == em::LadderOutcome::NeedsRepair,
+          "v4: same-facing twins with an equidistant anchor still NeedsRepair");
+    check(res.size() == 1 && res[0].reason == "ambiguous", "v4: reason ambiguous");
+}
+
+// (v4-c) THE PLATE: a rim edge of a 100×100×5 plate against its twin on the
+// opposite rim. In v3 the anchor (scaled by half the 141 mm diagonal) could not
+// clear the 0.10 margin (measured: NeedsRepair at commit); v4 binds it on
+// outward + the relative anchor. Anchor-only ref too (the Hole seat form).
+void test_v4_plate_rim_edge_and_anchor_only_face() {
+    const TopoDS_Shape plate = BRepPrimAPI_MakeBox(100.0, 100.0, 5.0).Shape();
+    // The top rim edge along X at y=0: midpoint (50, 0, 5).
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(plate, TopAbs_EDGE, edges);
+    TopoDS_Shape rim;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const km::ElementDescriptor d = em::ElementMapPartition::describe(edges(i));
+        if (std::abs(d.center.X() - 50.0) < 1e-6 && std::abs(d.center.Y()) < 1e-6 &&
+            std::abs(d.center.Z() - 5.0) < 1e-6) rim = edges(i);
+    }
+    check(!rim.IsNull(), "v4 plate: located the top rim edge");
+    if (rim.IsNull()) return;
+    em::LadderRef r;
+    r.ref_id = "op.input0";
+    r.element_id = "el_rim";
+    r.kind = km::ElementKind::Edge;
+    r.has_descriptor = true;
+    r.descriptor = em::ElementMapPartition::describe(rim, plate);
+    r.anchor.has_world_point = true;
+    r.anchor.world_point = gp_Pnt(50, 0, 5);
+    r.anchor_json = {{"worldPoint", {50.0, 0.0, 5.0}}};
+    const auto res = em::resolve_descriptor_stage(plate, "body", {r});
+    check(res.size() == 1 && res[0].outcome == em::LadderOutcome::AutoBind,
+          "v4 plate: the top rim edge binds (score " +
+              (res.empty() ? std::string("?") : std::to_string(res[0].score)) + ", margin " +
+              (res.empty() ? std::string("?") : std::to_string(res[0].margin)) + ")");
+    const std::string tk = em::ElementMapPartition::topokey_for_shape(plate, rim, km::ElementKind::Edge);
+    check(res.size() == 1 && res[0].bound_topo_key == tk, "v4 plate: bound the TOP rim, not the bottom twin");
+
+    // Anchor-only ref on the top FACE (the Hole seat form): the pick lies ON the
+    // face and 5 mm from its twin — decisive under the relative anchor.
+    em::LadderRef f;
+    f.ref_id = "op.input1";
+    f.element_id = "el_seat";
+    f.kind = km::ElementKind::Face;
+    f.has_descriptor = false;
+    f.anchor.has_world_point = true;
+    f.anchor.world_point = gp_Pnt(30, 40, 5);
+    f.anchor_json = {{"worldPoint", {30.0, 40.0, 5.0}}};
+    const auto fres = em::resolve_descriptor_stage(plate, "body", {f});
+    check(fres.size() == 1 && fres[0].outcome == em::LadderOutcome::AutoBind,
+          "v4 plate: an anchor-only top-face pick binds (score " +
+              (fres.empty() ? std::string("?") : std::to_string(fres[0].score)) + ")");
+    const TopoDS_Shape top = face_by_center(plate, 50, 50, 5);
+    const std::string ftk = em::ElementMapPartition::topokey_for_shape(plate, top, km::ElementKind::Face);
+    check(fres.size() == 1 && fres[0].bound_topo_key == ftk, "v4 plate: bound the TOP face");
+}
+
 int main() {
+    test_v4_opposite_facing_twins_resolve();
+    test_v4_same_facing_twins_still_tie();
+    test_v4_plate_rim_edge_and_anchor_only_face();
     test_symmetric_tie();
     test_confident_autobind();
     test_history_resolves_no_scoring();

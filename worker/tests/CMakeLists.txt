@@ -521,7 +521,7 @@ add_test(NAME hole_extrude COMMAND test_hole_extrude)
 # Harness-driven ExecutePlan / session fixtures (NDJSON send/expect flows).
 foreach(_fx executeplan_happy executeplan_fail_step executeplan_needsrepair
             executeplan_fencing executeplan_discard double_executeplan session_reset
-            executeplan_deltas tessellate_acquire resolve_refs
+            executeplan_deltas tessellate_acquire
             executeplan_region_nomatch export_mesh checkpoint_roundtrip
             executeplan_linearpattern executeplan_shell executeplan_offsetface
             executeplan_ellipse_extrude import_step)
@@ -859,3 +859,37 @@ add_test(NAME gear_tool COMMAND test_gear_tool)
 add_executable(test_gear_op test_gear_op.cpp)
 target_link_libraries(test_gear_op PRIVATE worker_core)
 add_test(NAME gear_op COMMAND test_gear_op)
+
+add_executable(test_extrude_boolean_modes test_extrude_boolean_modes.cpp)
+target_link_libraries(test_extrude_boolean_modes PRIVATE worker_core)
+add_test(NAME extrude_boolean_modes COMMAND test_extrude_boolean_modes)
+# Kernel-hardening WP-C — an Extrude `Add` whose tool never touches the target is a
+# NAMED refusal (`EXTRUDE_ADD_DISJOINT`) with the target intact, never a split.
+add_test(
+    NAME canonical_extrude_add_disjoint_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/extrude_add_disjoint_refusal.ndjson
+)
+# Kernel-hardening WP-E — a revolve profile that CROSSES its axis is refused by name
+# (`REVOLVE_PROFILE_CROSSES_AXIS`) before any kernel work; cross-track pin.
+add_test(
+    NAME canonical_revolve_profile_crosses_axis
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/revolve_profile_crosses_axis.ndjson
+)
+# Kernel-hardening WP-A — ResolveRefs all-three-outcome coverage, moved from the
+# harness lane so the §9 `scoringVersion` (4) is pinned in BOTH lanes (§13).
+add_test(
+    NAME canonical_resolve_refs
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/resolve_refs.ndjson
+)
+
+# Kernel-hardening WP-E — commit-tier validation: a revolve profile crossing its axis
+# refuses by name; touching the axis is legal (degenerate pole edges).
+add_executable(test_commit_tier_validation test_commit_tier_validation.cpp)
+target_link_libraries(test_commit_tier_validation PRIVATE worker_core)
+add_test(NAME commit_tier_validation COMMAND test_commit_tier_validation)

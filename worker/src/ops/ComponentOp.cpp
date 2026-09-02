@@ -727,9 +727,20 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
 
     // spec §9: a component resolves to exactly ONE solid in v1 — the same
     // publication policy every other NewBody-minting op satisfies.
-    const kernel::validation::PublicationDecision decision = publication_decision(
-        solid,
-        kernel::validation::single_solid_policy(op_label, kernel::validation::PublicationTier::TierA));
+    // WP-E: an `embedded`/`document`/`profile` source is geometry this worker did
+    // not build (a package blob, a container blob, a vendor prism) and commits at
+    // Tier B (self-interference; preview Tier A). A `generator` source stays Tier A:
+    // the library is in-repo, deterministic and exact-volume tested, and the BOP
+    // self-interference pass on a modeled helical thread face ran for more than five
+    // minutes on ONE M-series case (2026-09-02, `test_component_ops`), which would
+    // make every regen of a placed fastener unusable. An offline Tier B census of
+    // the generator outputs is the recorded follow-up (TODO.md § KERNEL HARDENING).
+    const kernel::validation::PublicationTier tier =
+        kind == "generator" ? kernel::validation::PublicationTier::TierA
+                            : result_validation_tier(ctx, kernel::validation::PublicationTier::TierB);
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(solid, kernel::validation::single_solid_policy(op_label, tier), ctx.cancel);
+    if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) {
         return publication_refusal(decision, "publication");
     }

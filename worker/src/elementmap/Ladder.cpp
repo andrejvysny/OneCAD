@@ -126,7 +126,7 @@ CandidatePool enumerate_candidates(const TopoDS_Shape& body_shape, km::ElementKi
     for (int i = 1; i <= map.Extent(); ++i) {
         pool.shapes.push_back(map(i));
         pool.topo_keys.push_back(std::string(1, prefix) + ":" + std::to_string(i));
-        pool.descriptors.push_back(ElementMapPartition::describe(map(i)));
+        pool.descriptors.push_back(ElementMapPartition::describe(map(i), body_shape));
     }
     return pool;
 }
@@ -183,11 +183,26 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
         std::vector<std::vector<double>> desc_score(n, std::vector<double>(std::max(c, 1), 0.0));
         std::vector<char> anchor_scored(n, 0);  // the anchor feature contributed at all
         std::vector<std::vector<std::map<std::string, double>>> contribs(n);
+        // Pick-to-sub-shape distances per (ref, candidate), kept for the veto's
+        // carve-out and the v4 anchor-decisive tie-break.
+        std::vector<std::vector<double>> shape_dists(n);
         for (int i = 0; i < n; ++i) {
             const LadderRef& r = refs[idxs[i]];
             contribs[i].resize(std::max(c, 0));
+            // v4: the anchor is measured to each candidate SUB-SHAPE, and scored
+            // relative to the nearest rival (Scoring.h). Distances are computed once
+            // per (ref, candidate).
+            std::vector<double>& dists = shape_dists[i];
+            dists.assign(static_cast<std::size_t>(std::max(c, 0)), -1.0);
+            if (r.anchor.has_world_point) {
+                for (int j = 0; j < c; ++j)
+                    dists[j] = distance_to_shape(r.anchor.world_point, pool.shapes[j],
+                                                 pool.descriptors[j].center);
+            }
             for (int j = 0; j < c; ++j) {
-                const ScoreResult s = score_candidate(r.descriptor, r.has_descriptor, r.anchor,
+                AnchorEvidence anchor = r.anchor;
+                if (anchor.has_world_point) anchor.shape_distance = dists[j];
+                const ScoreResult s = score_candidate(r.descriptor, r.has_descriptor, anchor,
                                                       pool.descriptors[j], body_diag);
                 score[i][j] = s.score;
                 desc_score[i][j] = s.descriptor_score;
@@ -308,12 +323,46 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 anchor_decided_a_tie = descriptor_tie && (!anchor_exact || !allow_anchor_exact);
             }
 
+            // ANCHOR-DECISIVE tie-break (v4, Scoring.h): the top two candidates tie
+            // in descriptor space, the pick lies ON the winner, and every rival is
+            // an order of magnitude farther — the pick names the element. This is
+            // what lets an anchor-only face pick (the Hole seat) and a pick on one
+            // of two same-facing twins resolve without a body-diagonal margin.
+            bool anchor_decisive = false;
+            if (!anchor_decided_a_tie && c >= 2 && anchor_scored[i] &&
+                assigned >= kAutoBindMinScore && margin < kAutoBindMinMargin) {
+                int runner = -1;
+                for (int j = 0; j < c; ++j) {
+                    if (j == aj) continue;
+                    if (runner < 0 || score[i][j] > score[i][runner]) runner = j;
+                }
+                const bool descriptor_tie =
+                    runner >= 0 && std::abs(desc_score[i][aj] - desc_score[i][runner]) <
+                                       kDescriptorTieEpsilon;
+                const double winner_d = shape_dists[i][aj];
+                double rival_d = -1.0;
+                for (int j = 0; j < c; ++j) {
+                    if (j == aj) continue;
+                    if (rival_d < 0.0 || shape_dists[i][j] < rival_d) rival_d = shape_dists[i][j];
+                }
+                // "ON the winner" means on it: within the 0.01 mm separation floor, NOT
+                // the veto's carve-out band (0.05 × 0.5 × bodyDiag ≈ 3.5 mm on a 100 mm
+                // plate). Adversarial review 2026-09-02: with the wide band a pick left
+                // 3 mm from a congruent twin after an upstream edit would have bound to
+                // the twin below the margin. Both WP-A probes have winner_d == 0.
+                const bool winner_exact = winner_d >= 0.0 && winner_d <= kAnchorMinSeparationMm;
+                const bool rivals_far =
+                    rival_d >= kAnchorDecisiveRatio * std::max(winner_d, kAnchorMinSeparationMm);
+                anchor_decisive = descriptor_tie && winner_exact && rivals_far;
+            }
+
             if (anchor_decided_a_tie) {
                 res.outcome = LadderOutcome::NeedsRepair;
                 res.reason = "ambiguous";  // no new §9 token
                 res.score = assigned;
                 res.margin = margin;
-            } else if (assigned >= kAutoBindMinScore && margin >= kAutoBindMinMargin) {
+            } else if (assigned >= kAutoBindMinScore &&
+                       (margin >= kAutoBindMinMargin || anchor_decisive)) {
                 res.outcome = LadderOutcome::AutoBind;
                 res.bound_shape = pool.shapes[aj];
                 res.bound_topo_key = pool.topo_keys[aj];

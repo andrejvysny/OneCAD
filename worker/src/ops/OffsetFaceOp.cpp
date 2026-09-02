@@ -1712,7 +1712,8 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
             kernel::validation::precision_of(pipeline.shape)
                 .tolerance_ceiling(construction_tol, 2.0, 0.0);
         const kernel::validation::PublicationDecision v3_decision =
-            publication_decision(pipeline.shape, v3_policy);
+            publication_decision(pipeline.shape, v3_policy, ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
         if (!v3_decision.publishable()) {
             return publication_refusal(v3_decision, "publication");
         }
@@ -1829,7 +1830,8 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     publication_policy.maximum_tolerance =
         kernel::validation::precision_of(result).tolerance_ceiling(construction_tol, 2.0, 0.0);
     const kernel::validation::PublicationDecision decision =
-        publication_decision(result, publication_policy);
+        publication_decision(result, publication_policy, ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) {
         return publication_refusal(decision, "publication");
     }

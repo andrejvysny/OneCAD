@@ -490,6 +490,107 @@ fn vertical_edge_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
     (keys[idx].clone(), centroid)
 }
 
+/// Pick the LONGEST edge lying entirely on the body's top plane (z == bbox max) →
+/// `(topoKey, centroid-anchor)`. A cap edge moves WITH the cap under a depth edit
+/// and has an exact descriptor twin on the bottom cap — the WP-A identity case the
+/// vertical-edge pick above never exercises.
+fn top_edge_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
+    assert!(
+        view.has_edges(),
+        "MESH1 must carry edges for the fillet pick"
+    );
+    let er = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let ep = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let keys = id_table(
+        view,
+        blob,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let (erbase, epbase) = (er.offset as usize, ep.offset as usize);
+    let ztop = f64::from(view.bbox_max[2]);
+
+    let mut best: Option<(usize, f64, Vec3)> = None;
+    for i in 0..view.edge_count as usize {
+        let first = u32_le(blob, erbase + i * 8) as usize;
+        let count = u32_le(blob, erbase + i * 8 + 4) as usize;
+        if count < 2 {
+            continue;
+        }
+        let mut on_top = true;
+        let (mut sx, mut sy, mut sz) = (0.0f64, 0.0f64, 0.0f64);
+        let mut pts: Vec<[f64; 3]> = Vec::with_capacity(count);
+        for p in 0..count {
+            let o = epbase + (first + p) * 12;
+            let pt = [
+                f32_le(blob, o) as f64,
+                f32_le(blob, o + 4) as f64,
+                f32_le(blob, o + 8) as f64,
+            ];
+            if (pt[2] - ztop).abs() > 1e-3 {
+                on_top = false;
+            }
+            sx += pt[0];
+            sy += pt[1];
+            sz += pt[2];
+            pts.push(pt);
+        }
+        if !on_top {
+            continue;
+        }
+        let (a, b) = (pts[0], pts[count - 1]);
+        let len = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+        let centroid = Vec3::new_unchecked(sx / count as f64, sy / count as f64, sz / count as f64);
+        if best.is_none_or(|(_, l, _)| len > l) {
+            best = Some((i, len, centroid));
+        }
+    }
+    let (idx, _len, centroid) = best.expect("at least one top edge");
+    (keys[idx].clone(), centroid)
+}
+
+/// The (x, y) of the four vertical bbox corners.
+fn bbox_xy_corners(view: &MeshHeaderView) -> [(f64, f64); 4] {
+    let (x0, y0) = (f64::from(view.bbox_min[0]), f64::from(view.bbox_min[1]));
+    let (x1, y1) = (f64::from(view.bbox_max[0]), f64::from(view.bbox_max[1]));
+    [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+}
+
+/// The (x, y) centroid of every VERTICAL edge (z-span >= 60 % of the bbox height).
+fn vertical_edge_xy(view: &MeshHeaderView, blob: &[u8]) -> Vec<(f64, f64)> {
+    let er = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let ep = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let (erbase, epbase) = (er.offset as usize, ep.offset as usize);
+    let height = f64::from(view.bbox_max[2] - view.bbox_min[2]);
+    let mut out = Vec::new();
+    for i in 0..view.edge_count as usize {
+        let first = u32_le(blob, erbase + i * 8) as usize;
+        let count = u32_le(blob, erbase + i * 8 + 4) as usize;
+        if count == 0 {
+            continue;
+        }
+        let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut sx, mut sy) = (0.0f64, 0.0f64);
+        for p in 0..count {
+            let o = epbase + (first + p) * 12;
+            let (x, y, z) = (
+                f32_le(blob, o) as f64,
+                f32_le(blob, o + 4) as f64,
+                f32_le(blob, o + 8) as f64,
+            );
+            zmin = zmin.min(z);
+            zmax = zmax.max(z);
+            sx += x;
+            sy += y;
+        }
+        if zmax - zmin >= 0.6 * height {
+            out.push((sx / count as f64, sy / count as f64));
+        }
+    }
+    out
+}
+
 fn bbox_center(view: &MeshHeaderView) -> Vec3 {
     Vec3::new_unchecked(
         f64::from(view.bbox_min[0] + view.bbox_max[0]) / 2.0,
@@ -770,7 +871,8 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
 /// `h6a_edit_lane_vetoes_a_drifted_twin` is the other half that proves it did not
 /// simply give up on B3.
 ///
-/// The reopen leg (`ToEnd { from: 0 }` ⇒ no `editedFrom`) pins the second axis: the
+/// The reopen leg (`ToEnd { from: 0 }` ⇒ `editedFrom: 0` under resolverVersion 4) pins
+/// the second axis: the
 /// SAME document replayed from 0 off disk rebuilds byte-identical geometry, so the
 /// anchor is authoritative there regardless of the carve-out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -864,15 +966,19 @@ async fn h6a_flagship_edit_lane_fillet_survives_and_reopens_clean() {
     wm.shutdown().await;
 }
 
-/// H6a **the other half** — the DRIFT class the veto must still catch, so the
-/// anchor-exact carve-out cannot be accused of quietly disabling it.
+/// H6a **the other half** — a DRIFTED anchor on the edit lane.
 ///
-/// Same symmetric box, same edit lane, one difference: the fillet's stored anchor is
-/// authored deliberately OFF its edge, pushed toward the body interior. After the
-/// upstream edit nothing is sitting at that anchor any more — the ref's own edge is
-/// no longer anchor-exact, and the only thing the ladder could do is bind whichever
-/// congruent twin happens to be nearest a point that names nothing. That is exactly
-/// review finding B3, and it must come back as deterministic `NeedsRepair`.
+/// Same box, same edit lane, one difference: the fillet's stored anchor is authored
+/// deliberately OFF its edge, pushed toward the body interior. Under resolverVersion
+/// 2/3 the four vertical edges were exact descriptor twins, so after the upstream
+/// edit the drifted anchor named nothing and the veto had to refuse (review finding
+/// B3). Under resolverVersion 4 (kernel-hardening WP-A) the four corners are NOT
+/// twins: each edge's signed `outward` (the sum of its two wall normals) points into
+/// a different quadrant, so the descriptor alone separates them by a full margin and
+/// the drifted anchor is no longer the deciding evidence — the fillet re-binds to
+/// the SAME corner it was authored on. The veto still guards the class it exists
+/// for (same-facing twins: `h5_*` comb cases); this test now pins that a drifted
+/// anchor on a sided ref resolves rather than strands the user.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h6a_edit_lane_vetoes_a_drifted_twin() {
     let Some(bin) = real_worker() else {
@@ -945,19 +1051,52 @@ async fn h6a_edit_lane_vetoes_a_drifted_twin() {
         other => panic!("H6a drift edit lane: expected Published, got {other:?}"),
     };
     eprintln!("H6a DRIFT edit lane (editedFrom=1): needsRepair={repairs}");
-    assert!(
-        repairs > 0,
-        "H6a DRIFT: with nothing sitting at the stale anchor, a congruent twin must \
-         NOT be bound on proximity alone (review finding B3)"
+    assert_eq!(
+        repairs, 0,
+        "H6a DRIFT (v4): the four vertical edges separate on `outward`, so the drifted \
+         anchor is not the deciding evidence and the fillet re-binds to its own corner"
     );
-    let items = rt.repair_items();
+    let emesh = body_mesh(&mut rt, body).await;
+    let eview = validate_mesh_blob(&emesh).expect("post-edit MESH1 validates");
     assert!(
-        items
+        eview.face_count >= 7,
+        "H6a DRIFT (v4): the fillet survived the edit (faces {} >= 7)",
+        eview.face_count
+    );
+    // WHICH corner: a fillet on any of the four congruent verticals gives the same
+    // face count and volume, so pin the position. The authored corner must have no
+    // sharp vertical edge left within 1.5 mm (the fillet's two seam edges sit 2 mm
+    // away along the walls), and each of the other three box corners must still
+    // carry its sharp vertical edge.
+    let verticals = vertical_edge_xy(&eview, &emesh);
+    let corners = bbox_xy_corners(&eview);
+    let picked = corners
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            let da = (a.0 - edge_anchor.x).hypot(a.1 - edge_anchor.y);
+            let db = (b.0 - edge_anchor.x).hypot(b.1 - edge_anchor.y);
+            da.partial_cmp(&db).unwrap()
+        })
+        .expect("four corners");
+    let nearest_to_picked = verticals
+        .iter()
+        .map(|(x, y)| (x - picked.0).hypot(y - picked.1))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        nearest_to_picked >= 1.5,
+        "H6a DRIFT (v4): the AUTHORED corner {picked:?} is rounded (nearest vertical edge          {nearest_to_picked:.3} mm away, expected >= 1.5)"
+    );
+    for corner in corners.iter().filter(|c| **c != picked) {
+        let d = verticals
             .iter()
-            .any(|i| i.ref_id.contains(&format!("{:x}", FILLET_REC))),
-        "H6a DRIFT: the repair item names the fillet's ref — got {:?}",
-        items.iter().map(|i| i.ref_id.clone()).collect::<Vec<_>>()
-    );
+            .map(|(x, y)| (x - corner.0).hypot(y - corner.1))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            d <= 0.05,
+            "H6a DRIFT (v4): corner {corner:?} must keep its sharp vertical edge (nearest {d:.3} mm)"
+        );
+    }
 
     // ── H8: UNDOING that edit must NOT re-arm the veto. ──────────────────────
     // The undo restores exactly the state the drifted anchor was authored against,
@@ -2945,6 +3084,107 @@ async fn vfm5_lane_d_checkpoint_fallback_replay_must_not_bind_the_decoy() {
          reported no repair. The anchors were frozen against a basis this replay does \
          not reproduce, so the anchor-exact carve-out must be disabled here.",
         c[1]
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-A identity probe — a fillet on a TOP (cap) edge of a thin plate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Kernel-hardening WP-A red-first probe (the cap-side twin the flagship H6a/H5b
+/// tests never pick). Every regen replays from step 0 with an empty partition, so
+/// the fillet's edge ref is resolved by the descriptor ladder at COMMIT: on a
+/// 100×100×5 plate the top and bottom rim edges are exact descriptor twins
+/// (length, tangent up to sign, position-relative adjacency hash) and only the
+/// anchor — scaled by half the 141 mm diagonal — can tell them apart, which is far
+/// under the 0.10 margin. Contract: the fillet applies (faces >= 7, volume drops by
+/// the analytic quarter-round remnant), with no NeedsRepair at commit or after a
+/// save → fresh worker → reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plate_top_edge_fillet_survives_commit_and_reopen() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("plate-fillet.onecad");
+    let sid = SketchId(Uuid::from_u128(0x7A));
+    const W: f64 = 100.0;
+    const D: f64 = 100.0;
+    const T: f64 = 5.0;
+    const R: f64 = 1.0;
+
+    let (body, vol) = {
+        let wm = spawn_worker(bin.clone()).await;
+        let mut rt = runtime_over(&wm);
+        add_op(&mut rt, sketch_record(&single_rect(sid, 0.0, 0.0, W, D)));
+        add_op(&mut rt, extrude_record(sid, "", T));
+        let report = regen_all(&mut rt).await;
+        let _ = published(&report, "plate extrude");
+        let body = report.changed[0].0;
+        let snap_id = SnapshotId(report.snapshot_id);
+        let mesh = body_mesh(&mut rt, body).await;
+        let view = validate_mesh_blob(&mesh).expect("plate MESH1 validates");
+        let (edge_key, edge_anchor) = top_edge_pick(&view, &mesh);
+        assert!(
+            (edge_anchor.z - T).abs() < 1e-3,
+            "the pick is a TOP edge (z = {T}), got z = {}",
+            edge_anchor.z
+        );
+        let anchor = AnchorIntent {
+            world_point: edge_anchor,
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        };
+        let promoted = rt
+            .promote_selection(snap_id, body, vec![(TopoKey::new(&edge_key), Some(anchor))])
+            .await
+            .expect("promote top edge");
+        let edge_el = ElementId::new(promoted[0].element_id.clone());
+        add_op(&mut rt, fillet_record(body, edge_el, edge_anchor, R));
+        let fil = regen_all(&mut rt).await;
+        let snap = published(&fil, "plate fillet commit").clone();
+        assert_eq!(
+            snap.repair_summary.needs_repair_count, 0,
+            "WP-A: a fillet on a TOP edge of a 100x100x5 plate must bind at COMMIT — \
+             cap-side congruent twins must not defeat the ladder"
+        );
+        let fmesh = body_mesh(&mut rt, body).await;
+        let fview = validate_mesh_blob(&fmesh).expect("filleted MESH1 validates");
+        assert!(
+            fview.face_count >= 7,
+            "the fillet applied (faces {} >= 7)",
+            fview.face_count
+        );
+        // Removed volume of a quarter-round along a 100 mm edge: (1 − π/4)·R²·L.
+        let vol = mesh_volume(&fview, &fmesh);
+        let want = W * D * T - (1.0 - std::f64::consts::FRAC_PI_4) * R * R * W;
+        assert!(
+            (vol - want).abs() < 0.5,
+            "the fillet removed the quarter-round remnant: want ~{want:.3}, got {vol:.3}"
+        );
+        rt.save(&path, save_meta()).expect("save");
+        wm.shutdown().await;
+        (body, vol)
+    };
+
+    let wm = spawn_worker(bin).await;
+    let mut reopened = open_over(&wm, &path);
+    let replay = regen_from(&mut reopened, 0).await;
+    let snap = published(&replay, "plate fillet reopen").clone();
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "WP-A: the plate's top-edge fillet must re-bind on a from-zero reopen"
+    );
+    let mesh = body_mesh(&mut reopened, body).await;
+    let view = validate_mesh_blob(&mesh).expect("reopened MESH1 validates");
+    assert!(view.face_count >= 7, "the fillet is present after reopen");
+    assert!(
+        (mesh_volume(&view, &mesh) - vol).abs() < 1e-6,
+        "identical volume after reopen"
     );
     wm.shutdown().await;
 }

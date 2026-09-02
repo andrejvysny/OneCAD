@@ -20,6 +20,7 @@
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRep_Builder.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
@@ -297,8 +298,8 @@ ToNextResult to_next_distance(const TopoDS_Face& profile, const gp_Dir& dir,
         BRepPrimAPI_MakePrism sweep(lifted.Shape(), gp_Vec(dir) * sweep_distance,
                                     Standard_True);
         if (sweep.Shape().IsNull()) return {ToNextStatus::Unprovable, -1.0};
-        BRepAlgoAPI_Common common(sweep.Shape(), body);
-        common.SetRunParallel(Standard_False);
+        BRepAlgoAPI_Common common;
+        stage_boolean(common, sweep.Shape(), body);
         common.Build();
         if (!common.IsDone() || common.HasErrors() || common.Shape().IsNull())
             return {ToNextStatus::Unprovable, -1.0};
@@ -548,8 +549,8 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref,
             out.error = "ToFace could not project the profile onto the selected face";
             return out;
         }
-        BRepAlgoAPI_Common common(moved.Shape(), target_face);
-        common.SetRunParallel(Standard_False);
+        BRepAlgoAPI_Common common;
+        stage_boolean(common, moved.Shape(), target_face);
         common.Build();
         if (!common.IsDone() || common.HasErrors()) {
             out.error = "ToFace could not prove bounded-face coverage";
@@ -687,8 +688,8 @@ std::optional<TopoDS_Shape> trim_prism_to_target(const TopoDS_Shape& prism,
             error = "ToFace could not build the target half-space";
             return std::nullopt;
         }
-        BRepAlgoAPI_Common trimmed(prism, half_space);
-        trimmed.SetRunParallel(Standard_False);
+        BRepAlgoAPI_Common trimmed;
+        stage_boolean(trimmed, prism, half_space);
         trimmed.Build();
         if (!trimmed.IsDone() || trimmed.HasErrors() || trimmed.Shape().IsNull()) {
             error = "ToFace could not trim the prism to the target plane";
@@ -719,8 +720,8 @@ std::optional<TopoDS_Shape> trim_prism_to_target(const TopoDS_Shape& prism,
             return std::nullopt;
         }
 
-        BRepAlgoAPI_Common coverage(cap.shape, trim.face);
-        coverage.SetRunParallel(Standard_False);
+        BRepAlgoAPI_Common coverage;
+        stage_boolean(coverage, cap.shape, trim.face);
         coverage.Build();
         if (!coverage.IsDone() || coverage.HasErrors()) {
             error = "ToFace could not prove bounded-face coverage";
@@ -1012,6 +1013,21 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     if (two_dirs && mode2_str == "Blind" && std::abs(distance2) < min_value) {
         return OpOutcome::fail("OP_FAILED", "Extrude second distance too small");
     }
+    // Two-direction sign contract (WP-D): each leg is a NON-NEGATIVE length along its
+    // own side. A negative leg used to build both prisms on one side and the fuse
+    // silently absorbed the shorter one.
+    if (two_dirs && (distance < 0.0 || distance2 < 0.0)) {
+        const std::string message =
+            "Extrude two-direction legs must be non-negative lengths along their own side";
+        OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+        failure.diagnostics.push_back(
+            {{"severity", "error"},
+             {"code", "EXTRUDE_TWO_DIRECTION_NEGATIVE_LEG"},
+             {"message", message},
+             {"stage", "classify"},
+             {"evidence", {{"extrude", {{"distance", distance}, {"distance2", distance2}}}}}});
+        return failure;
+    }
 
     // Resolve a signed extrude distance for one end condition + direction. ToFace
     // resolution can raise NeedsRepair (surfaced via `nr`), a named refusal
@@ -1025,7 +1041,31 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
                                   std::optional<ToFaceTrim>& trim, std::optional<json>& nr,
                                   std::string& err) -> std::optional<double> {
         if (m == "Blind" || m == "Symmetric") return blind;
-        if (m == "ThroughAll") return through_all_distance(blind, origin, ref_dir, ref_shape);
+        if (m == "ThroughAll") {
+            // WP-D: the ThroughAll extent is a synthetic TOOL length. With no reference
+            // body it is a 100 m constant, and for Add the overshoot past the target's
+            // far face would become published material — both are refused/measured.
+            if (!ref_shape) {
+                tf_fail = ToFaceFailure{
+                    "EXTRUDE_THROUGH_ALL_NO_TARGET",
+                    "Extrude ThroughAll requires a reference body (not available for NewBody)",
+                    nlohmann::json{{"throughAll", {{"booleanMode", boolean_mode_str}}}}, "classify"};
+                err = tf_fail->message;
+                return std::nullopt;
+            }
+            if (*boolean_mode == app::BooleanMode::Add) {
+                const double sign = blind >= 0.0 ? 1.0 : -1.0;
+                const gp_Dir ray = sign > 0.0 ? ref_dir : ref_dir.Reversed();
+                const std::optional<double> far =
+                    maximum_directional_projection(*ref_shape, origin, ray);
+                if (!far || !(*far > min_value)) {
+                    err = "Extrude ThroughAll Add: could not measure the target's far extent";
+                    return std::nullopt;
+                }
+                return sign * *far;  // EXACT far extent: the joined material ends on it
+            }
+            return through_all_distance(blind, origin, ref_dir, ref_shape);
+        }
         if (m == "ToFace") {
             ToFaceResolve tf =
                 resolve_to_face(ctx, face_ref, *profile, origin, ref_dir, ref_id);
@@ -1098,43 +1138,62 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
                 if (tf_fail) return to_face_refusal(*tf_fail);
                 return OpOutcome::fail("OP_FAILED", err.empty() ? "Extrude: bad end condition" : err);
             }
-            TopoDS_Shape p1 = make_prism(*profile, direction, *d1, err);
-            if (p1.IsNull()) return OpOutcome::fail("OP_FAILED", err);
-            TopoDS_Shape p2 = make_prism(*profile, dir2, *d2, err);
-            if (p2.IsNull()) return OpOutcome::fail("OP_FAILED", err);
-            if (trim1) {
-                std::optional<TopoDS_Shape> cut = trim_prism_to_target(p1, *trim1, tf_fail, err);
-                if (!cut) {
-                    if (tf_fail) return to_face_refusal(*tf_fail);
-                    return OpOutcome::fail("OP_FAILED", err);
+            if (!trim1 && !trim2 && *d1 > 0.0 && *d2 > 0.0) {
+                // Both legs are plain distances: ONE prism from the profile shifted
+                // back by the second leg (WP-D). Never a fuse of two halves, which
+                // splits every wall at the sketch plane.
+                gp_Trsf shift;
+                shift.SetTranslation(gp_Vec(direction) * (-*d2));
+                BRepBuilderAPI_Transform shifted(*profile, shift, Standard_True);
+                if (!shifted.IsDone() || shifted.Shape().IsNull()) {
+                    return OpOutcome::fail("OP_FAILED", "Two-direction extrude could not place the profile");
                 }
-                p1 = std::move(*cut);
-            }
-            if (trim2) {
-                std::optional<TopoDS_Shape> cut = trim_prism_to_target(p2, *trim2, tf_fail, err);
-                if (!cut) {
-                    if (tf_fail) return to_face_refusal(*tf_fail);
-                    return OpOutcome::fail("OP_FAILED", err);
+                tool_shape = make_prism(shifted.Shape(), direction, *d1 + *d2, err);
+                if (tool_shape.IsNull()) return OpOutcome::fail("OP_FAILED", err);
+            } else {
+                TopoDS_Shape p1 = make_prism(*profile, direction, *d1, err);
+                if (p1.IsNull()) return OpOutcome::fail("OP_FAILED", err);
+                TopoDS_Shape p2 = make_prism(*profile, dir2, *d2, err);
+                if (p2.IsNull()) return OpOutcome::fail("OP_FAILED", err);
+                if (trim1) {
+                    std::optional<TopoDS_Shape> cut = trim_prism_to_target(p1, *trim1, tf_fail, err);
+                    if (!cut) {
+                        if (tf_fail) return to_face_refusal(*tf_fail);
+                        return OpOutcome::fail("OP_FAILED", err);
+                    }
+                    p1 = std::move(*cut);
                 }
-                p2 = std::move(*cut);
+                if (trim2) {
+                    std::optional<TopoDS_Shape> cut = trim_prism_to_target(p2, *trim2, tf_fail, err);
+                    if (!cut) {
+                        if (tf_fail) return to_face_refusal(*tf_fail);
+                        return OpOutcome::fail("OP_FAILED", err);
+                    }
+                    p2 = std::move(*cut);
+                }
+                BRepAlgoAPI_Fuse fuse;
+                stage_boolean(fuse, p1, p2);
+                fuse.Build();
+                if (!fuse.IsDone()) return OpOutcome::fail("OP_FAILED", "Two-direction extrude fuse failed");
+                // A trimmed leg forces the fuse; merge the coplanar wall halves it leaves.
+                ShapeUpgrade_UnifySameDomain unify(fuse.Shape(), Standard_True, Standard_True,
+                                                   Standard_True);
+                unify.Build();
+                tool_shape = unify.Shape().IsNull() ? fuse.Shape() : unify.Shape();
             }
-            BRepAlgoAPI_Fuse fuse(p1, p2);
-            fuse.Build();
-            if (!fuse.IsDone()) return OpOutcome::fail("OP_FAILED", "Two-direction extrude fuse failed");
-            tool_shape = fuse.Shape();
         } else if (mode_str == "Symmetric") {
-            const double half = distance * 0.5;
-            gp_Vec fwd(direction.X() * half, direction.Y() * half, direction.Z() * half);
-            gp_Vec bwd = fwd.Reversed();
-            BRepPrimAPI_MakePrism fwd_prism(*profile, fwd, Standard_True);
-            BRepPrimAPI_MakePrism bwd_prism(*profile, bwd, Standard_True);
-            if (fwd_prism.Shape().IsNull() || bwd_prism.Shape().IsNull()) {
-                return OpOutcome::fail("OP_FAILED", "Symmetric extrude prism produced null shape");
+            // ONE prism centred on the sketch plane (WP-D): `distance` is the TOTAL
+            // (corpus semantics), half on each side. A fuse of two half-prisms left
+            // every wall split by a mid-plane seam (10 faces for a box).
+            const double total = std::abs(distance);
+            gp_Trsf shift;
+            shift.SetTranslation(gp_Vec(direction) * (-0.5 * total));
+            BRepBuilderAPI_Transform shifted(*profile, shift, Standard_True);
+            if (!shifted.IsDone() || shifted.Shape().IsNull()) {
+                return OpOutcome::fail("OP_FAILED", "Symmetric extrude could not place the profile");
             }
-            BRepAlgoAPI_Fuse fuse(fwd_prism.Shape(), bwd_prism.Shape());
-            fuse.Build();
-            if (!fuse.IsDone()) return OpOutcome::fail("OP_FAILED", "Symmetric extrude fuse failed");
-            tool_shape = fuse.Shape();
+            tool_shape = make_prism(shifted.Shape(), direction, total, err);
+            if (tool_shape.IsNull()) return OpOutcome::fail("OP_FAILED", err);
         } else {
             auto d1 = effective_distance(mode_str, distance, direction, params.value("targetFace", json()),
                                          op_id + ".targetFace", trim1, nr, err);
@@ -1184,15 +1243,18 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
 
     // --- boolean mode dispatch ---
     if (*boolean_mode == app::BooleanMode::NewBody) {
+        // WP-E: a COMMITTED NewBody is held to Tier B (closed manifold, sliver bound,
+        // BOP self-interference) — Tier A stays the interactive-preview downgrade.
         kernel::validation::PublicationPolicy policy =
             kernel::validation::single_solid_policy(
-                "Extrude", kernel::validation::PublicationTier::TierA);
+                "Extrude", result_validation_tier(ctx, kernel::validation::PublicationTier::TierB));
         // A fresh body has no input tolerance to grow FROM, so the ceiling is the
         // authoring resolution outright.
         policy.maximum_tolerance =
             kernel::validation::precision_of(tool_shape).authoring_resolution();
         const kernel::validation::PublicationDecision decision =
-            publication_decision(tool_shape, policy);
+            publication_decision(tool_shape, policy, ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
         if (!decision.publishable()) {
             return publication_refusal(decision, "publication");
         }
@@ -1217,6 +1279,14 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
                                        ctx.occt_options, ctx.cancel, builder);
     if (br.error_code == "CANCELLED") return OpOutcome::cancelled();
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
+    // WP-C result policy: a non-touching Add and an empty Cut/Intersect are NAMED
+    // refusals with the target intact — never a split that retires the target id,
+    // never a silent `deleted`.
+    if (auto refusal = boolean_result_policy(*boolean_mode, old_target, br.shape, "Extrude",
+                                             target_id, "EXTRUDE_ADD_DISJOINT",
+                                             "EXTRUDE_EMPTY_RESULT")) {
+        return *refusal;
+    }
     kernel::validation::PublicationPolicy policy;
     policy.name = "Extrude boolean";
     policy.allowed_top_level_shapes = kernel::validation::TopLevelShapePolicy::SolidSet;
@@ -1232,18 +1302,11 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         policy.maximum_tolerance = prec.tolerance_ceiling(prec.input_tolerance, 2.0, 1.0e-6);
     }
     policy.allow_empty_lifecycle = true;
-    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(br.shape, policy, ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable() && !decision.lifecycle_only()) {
         return publication_refusal(decision, "publication");
-    }
-
-    // A complete Cut/Intersect removes the target. Publishing an empty compound as
-    // a modified body would leave an unmeshable ghost in the document.
-    if (ordered_solids(br.shape).empty()) {
-        ctx.partition.remove_body(target_id, out.delta);
-        ctx.bodies.erase(target_id);
-        out.body_events.push_back({"deleted", target_id, {}});  // no rankKey: no ordinal ranked
-        return out;
     }
 
     // Publish the successor: a single-solid result modifies the target in place; a

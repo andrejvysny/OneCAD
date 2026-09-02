@@ -78,7 +78,8 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
         result = mirror.Shape();
 
         if (fuse_with_original) {
-            BRepAlgoAPI_Fuse fuse(source, result);
+            BRepAlgoAPI_Fuse fuse;
+            stage_boolean(fuse, source, result);
             fuse.Build();
             if (!fuse.IsDone() || fuse.Shape().IsNull()) {
                 return OpOutcome::fail("OP_FAILED", "MirrorBody fuse failed");
@@ -96,13 +97,39 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
     if (result.IsNull()) {
         return OpOutcome::fail("GEOMETRY_INVALID", "MirrorBody produced null shape");
     }
-    const kernel::validation::PublicationTier tier = fuse_with_original
-        ? result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)
-        : kernel::validation::PublicationTier::TierA;
+    // WP-E: a FUSED mirror is new boolean geometry and commits at Tier B (preview
+    // Tier A). An unfused mirror is a reflection of an already-published body —
+    // closed-manifold, BRepCheck and self-interference are invariant under an
+    // isometry, so re-running Tier B would cost the full BOP self-interference pass
+    // (minutes on a threaded fastener) and prove nothing new: Tier A.
+    const kernel::validation::PublicationTier tier =
+        fuse_with_original ? result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)
+                           : kernel::validation::PublicationTier::TierA;
     const kernel::validation::PublicationDecision decision = publication_decision(
-        result, kernel::validation::single_solid_policy(
-                    fuse_with_original ? "MirrorBody fused result" : "MirrorBody result", tier));
-    if (!decision.publishable()) return publication_refusal(decision, "publication");
+        result,
+        kernel::validation::single_solid_policy(
+            fuse_with_original ? "MirrorBody fused result" : "MirrorBody result", tier),
+        ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+    if (!decision.publishable()) {
+        // A mirror image that never touches its source fuses into a compound of two
+        // solids. That is the RECOVERABLE "move the plane" case, named like
+        // PatternOp's PATTERN_DISJOINT_RESULT (WP-C) so a caller never has to read
+        // it as a kernel validity failure; the publication `reasonCode` + evidence
+        // still ride the diagnostic (SCHEMA §7.2), so the fixture pin stays honest.
+        if (fuse_with_original && decision.evidence.solid_count > 1) {
+            const std::string message = "MirrorBody fused result is disconnected";
+            OpOutcome failure = OpOutcome::fail("OP_FAILED", message);
+            failure.diagnostics.push_back({{"severity", "error"},
+                                           {"code", "MIRROR_DISJOINT_RESULT"},
+                                           {"message", message},
+                                           {"stage", "publication"},
+                                           {"reasonCode", decision.reason_code},
+                                           {"evidence", decision.evidence.to_json()}});
+            return failure;
+        }
+        return publication_refusal(decision, "publication");
+    }
 
     // NewBody lineage: fresh body `body_<opId>` (D1); the source body is preserved.
     OpOutcome out;

@@ -7,6 +7,7 @@
 #include <TopAbs_ShapeEnum.hxx>
 
 #include "nlohmann/json.hpp"
+#include "util/Cancel.h"
 
 namespace onecad::kernel::validation {
 
@@ -141,8 +142,12 @@ PublicationPolicy single_solid_policy(std::string name, PublicationTier tier);
 PublicationDecision evaluate_publication_policy(const ShapeEvidence &evidence,
                                                  const PublicationPolicy &policy);
 
+// `cancel` (optional) makes the Tier B self-interference pass interruptible: a
+// cooperative cancel mid-`BRepAlgoAPI_Check` returns evidence whose `error` names
+// the cancellation, and the caller maps its op to CANCELLED (kernel-hardening WP-E).
 ShapeEvidence collect_shape_evidence(const TopoDS_Shape &shape,
-                                     PublicationTier tier = PublicationTier::TierB);
+                                     PublicationTier tier = PublicationTier::TierB,
+                                     const onecad::CancelToken *cancel = nullptr);
 
 // Compatibility name for existing diagnostics and benchmark callers.
 inline ShapeEvidence audit_shape(const TopoDS_Shape &shape) {

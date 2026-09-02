@@ -56,7 +56,16 @@ std::string fuse_to_single_solid(const std::vector<TopoDS_Shape>& solids, TopoDS
     TopoDS_Shape acc = solids.front();
     try {
         for (std::size_t i = 1; i < solids.size(); ++i) {
-            BRepAlgoAPI_Fuse fuse(acc, solids[i]);
+            // WP-E: the solids are head geometry — stage the fuse non-destructively
+            // (the two-shape constructor would build before the flag could be set).
+            BRepAlgoAPI_Fuse fuse;
+            TopTools_ListOfShape args, tools;
+            args.Append(acc);
+            tools.Append(solids[i]);
+            fuse.SetArguments(args);
+            fuse.SetTools(tools);
+            fuse.SetNonDestructive(Standard_True);
+            fuse.SetRunParallel(Standard_False);
             fuse.Build();
             if (!fuse.IsDone() || fuse.Shape().IsNull()) {
                 return "fuse failed at solid " + std::to_string(i + 1) + " of " +

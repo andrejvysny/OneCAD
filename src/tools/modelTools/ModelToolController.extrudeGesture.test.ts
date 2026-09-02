@@ -315,12 +315,13 @@ describe("ModelToolController extrude gesture (chip exclusion + grab-relative de
     expect(origin[2]).toBeCloseTo(58, 6); // 25 + 33
   });
 
-  it("symmetric keeps ONE head, at the +|depth| face", () => {
+  it("symmetric keeps ONE head, at the +|depth|/2 face the worker builds", () => {
     controller.forceExtrudeGrab();
     move(yFor(-18));
     toolChipStore.getState().onSymmetric?.(true);
     const [origin, dir, mode] = handle();
-    expect(origin[2]).toBeCloseTo(43, 6); // 25 + |−18|
+    // `depth` is the TOTAL span of a symmetric extrude (SCHEMA §7.3), half per side.
+    expect(origin[2]).toBeCloseTo(34, 6); // 25 + |−18| / 2
     expect(dir[2]).toBeCloseTo(1, 6);
     expect(mode).toBe("forward");
   });

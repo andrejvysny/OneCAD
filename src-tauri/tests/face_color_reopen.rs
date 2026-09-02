@@ -262,6 +262,64 @@ fn sketch_record(rec: u128, sk: &Sketch) -> OperationRecord {
     )
 }
 
+/// The XY frame lifted to `z` — a boss sketched ON the top of a 25 mm box.
+fn plane_ref_at_z(z: f64) -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Custom,
+        origin: Vec3::new_unchecked(0.0, 0.0, z),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+/// `sketch_record` on an explicit plane.
+fn sketch_record_on(rec: u128, sk: &Sketch, plane: SketchPlaneRef) -> OperationRecord {
+    let (_plane, entities, constraints) = sketch_wire(sk);
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Sketch",
+        Operation::Known(KnownOperation::Sketch(SketchOpParams {
+            sketch: sk.id,
+            plane,
+            entities: entities.as_array().cloned().unwrap_or_default(),
+            constraints: constraints.as_array().cloned().unwrap_or_default(),
+            host_face: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
+/// `extrude_record` in `Add` mode against `target` (a boss joined onto a body).
+fn extrude_add_record(rec: u128, sketch: SketchId, dist: f64, target: BodyId) -> OperationRecord {
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+            profile: Some(SketchRegionRef {
+                sketch,
+                region: RegionId::new(""),
+                region_identity_version: None,
+                extra: Default::default(),
+            }),
+            distance: Scalar::new(dist),
+            draft_angle_deg: Scalar::new(0.0),
+            mode: ExtrudeMode::Blind,
+            boolean_mode: BooleanMode::Add,
+            target_body: Some(target),
+            target_face: None,
+            two_directions: false,
+            mode2: ExtrudeMode::Blind,
+            distance2: Scalar::new(0.0),
+            target_face2: None,
+            extra: Default::default(),
+        })),
+    )
+}
+
 fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
@@ -541,12 +599,14 @@ async fn an_authored_face_colour_reopens_as_data_but_its_element_no_longer_resol
 /// The other half of DI-4: a persisted id whose evidence CANNOT discriminate must
 /// stay unbound rather than be guessed onto a plausible face.
 ///
-/// This is not a hypothetical. The two caps of this box are both planar, both
-/// 400 mm², and both score **1.0** on descriptor evidence alone — measured from the
-/// ladder's own refusal payload, whose candidate list gives `f:5` and `f:6` identical
-/// scores with margin 0 and `reason: "ambiguous"`. The anchor is what tells them
-/// apart, so a pick made without one (a programmatic promotion, or a legacy entry
-/// written before the anchor was persisted) is a real tie.
+/// This is not a hypothetical. The scene is a 20×20×25 box with a 20×10×10 boss
+/// joined onto half of its top: the boss top (z = 35) and the uncovered half of the
+/// base top (z = 25) are both planar, both 200 mm², both face +Z and carry the same
+/// sorted-edge adjacency hash — identical on EVERY descriptor feature, `outward`
+/// included (resolverVersion 4 tells opposite-facing caps apart, which is why the
+/// pre-v4 top/bottom pair no longer serves as the tie). The anchor is what tells
+/// them apart, so a pick made without one (a programmatic promotion, or a legacy
+/// entry written before the anchor was persisted) is a real tie.
 ///
 /// Binding either candidate would paint the user's colour onto the WRONG face and
 /// look entirely successful — the silent mis-bind (H5-B) this migration exists to
@@ -568,10 +628,21 @@ async fn an_ambiguous_persisted_element_refuses_to_bind_rather_than_guess() {
         sketch_record(SKETCH_REC, &rect_sketch(sid, 0x1000, 0.0, 0.0, 20.0, 20.0)),
     );
     add_op(&mut rt, extrude_record(EXTRUDE_REC, sid, 25.0));
+    // The same-facing twin: a 20×10×10 boss on HALF of the top.
+    let boss_sid = SketchId(Uuid::from_u128(0xC11));
+    add_op(
+        &mut rt,
+        sketch_record_on(
+            0xC12,
+            &rect_sketch(boss_sid, 0x2000, 0.0, 0.0, 20.0, 10.0),
+            plane_ref_at_z(25.0),
+        ),
+    );
+    add_op(&mut rt, extrude_add_record(0xC13, boss_sid, 10.0, body));
     let report = regen_all(&mut rt).await;
-    let snapshot = SnapshotId(published(&report, "stock box").id.0);
+    let snapshot = SnapshotId(published(&report, "stock box with boss").id.0);
 
-    // The SAME pick as the test above, minus the anchor.
+    // The highest face is the boss top — picked WITHOUT an anchor.
     let (top_key, _centroid, _) = top_face(&mut rt, body).await;
     let promoted = rt
         .promote_selection(snapshot, body, vec![(TopoKey::new(&top_key), None)])

@@ -203,10 +203,18 @@ OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::stri
             return OpOutcome::fail("OP_FAILED", "TransformBody raised an unknown exception");
         }
 
+        // WP-E ruling: Tier A, for a copy as much as for a move. A rigid motion of an
+        // already-published body is an isometry — closed-manifold, BRepCheck and BOP
+        // self-interference are all invariant under it — so Tier B here would re-pay
+        // the full self-interference pass on every drag commit (minutes on a threaded
+        // fastener, measured 2026-09-02) and could never find anything the source
+        // body's own publication did not. New geometry is validated where it is made.
         const kernel::validation::PublicationDecision decision = publication_decision(
             result,
-            kernel::validation::single_solid_policy(
-                "TransformBody", kernel::validation::PublicationTier::TierA));
+            kernel::validation::single_solid_policy("TransformBody",
+                                                    kernel::validation::PublicationTier::TierA),
+            ctx.cancel);
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
         if (!decision.publishable()) {
             return publication_refusal(decision, "publication",
                                        decision.message + " on body " + target_id);

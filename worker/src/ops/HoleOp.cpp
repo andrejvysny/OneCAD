@@ -386,8 +386,14 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
         policy.require_closed_manifold =
             validation_tier == kernel::validation::PublicationTier::TierB;
     }
+    // WP-E: tolerance budget grown from the host, as Extrude's boolean does.
+    {
+        const auto prec = kernel::validation::precision_of(target_shape);
+        policy.maximum_tolerance = prec.tolerance_ceiling(prec.input_tolerance, 2.0, 1.0e-6);
+    }
     const kernel::validation::PublicationDecision decision =
-        publication_decision(br.shape, policy);
+        publication_decision(br.shape, policy, ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) {
         const std::size_t solid_count = ordered_solids(br.shape).size();
         if (solid_count == 0) {

@@ -165,9 +165,11 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
     }
 
     const kernel::validation::PublicationDecision decision = publication_decision(
-        result, kernel::validation::single_solid_policy(
-                    "Shell", result_validation_tier(
-                                 ctx, kernel::validation::PublicationTier::TierB)));
+        result,
+        kernel::validation::single_solid_policy(
+            "Shell", result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)),
+        ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) {
         return publication_refusal(decision, "publication");
     }

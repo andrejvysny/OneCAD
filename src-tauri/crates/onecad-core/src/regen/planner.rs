@@ -315,14 +315,15 @@ impl RegenRequest {
     /// `RemoveOperation` / suppression — to `ToEnd { from = dirty.from }`, and
     /// `DirtyRange::from` IS the index of the record the command edited.
     ///
-    /// **`from == 0` is deliberately treated as ABSENT.** Every no-edit replay lane
-    /// —`open_document`, `import_step`, recovery, `undo`, `redo` — requests
-    /// `ToEnd { from: 0 }` explicitly, and so does a first-record edit. Those two are
-    /// indistinguishable here, and the conservative direction is ABSENT: a from-0
-    /// replay rebuilds the geometry every stored anchor was authored against, so
-    /// claiming an edit there would veto every congruent-twin resolution in the
-    /// document and make a clean reopen un-resolvable (SCHEMA §10). Under-claiming
-    /// costs only the veto on a step-0 edit; over-claiming breaks reopen.
+    /// **`from == 0` is claimed too** (kernel-hardening WP-A, 2026-09-02). A
+    /// base-sketch edit and every variable edit dirty the timeline from step 0, and
+    /// those are exactly the edits that move geometry out from under every stored
+    /// anchor — the class the H6a veto exists for. The no-edit lanes that also
+    /// request `ToEnd { from: 0 }` (`open_document`, `import_step`, recovery) are
+    /// safe under the claim: a from-0 replay rebuilds the geometry every anchor was
+    /// authored against, so the true element is ANCHOR-EXACT and the veto's
+    /// carve-out lets the anchor decide (SCHEMA §10). Undo/redo still ride
+    /// [`RevertToEnd`](Self::RevertToEnd), which makes no claim.
     ///
     /// `ToStep` previews never carry it — a preview resolves against the state it is
     /// previewing, and its result is never published.
@@ -334,8 +335,8 @@ impl RegenRequest {
     #[must_use]
     pub fn edited_from(self) -> Option<usize> {
         match self {
-            Self::ToEnd { from } if from > 0 => Some(from),
-            Self::ToEnd { .. } | Self::ToStep(_) | Self::RevertToEnd { .. } => None,
+            Self::ToEnd { from } => Some(from),
+            Self::ToStep(_) | Self::RevertToEnd { .. } => None,
         }
     }
 }
@@ -704,16 +705,16 @@ mod tests {
         tl
     }
 
-    /// SCHEMA §7.2 `editedFrom` derivation — the edit lane claims, every no-edit
-    /// replay lane stays silent, and `from == 0` is deliberately silent too.
+    /// SCHEMA §7.2 `editedFrom` derivation — every `ToEnd` claims its floor
+    /// (a step-0 edit included, WP-A), previews and reverts stay silent.
     #[test]
     fn edited_from_is_claimed_only_by_the_edit_lane() {
         assert_eq!(RegenRequest::ToEnd { from: 1 }.edited_from(), Some(1));
         assert_eq!(RegenRequest::ToEnd { from: 7 }.edited_from(), Some(7));
-        // Open / import / recovery / undo / redo all request from-0 explicitly: a
-        // from-0 replay rebuilds exactly the geometry the anchors were authored
-        // against, so claiming an edit there would veto a clean reopen.
-        assert_eq!(RegenRequest::ToEnd { from: 0 }.edited_from(), None);
+        // A base-sketch or variable edit dirties from 0 and moves geometry under
+        // every stored anchor — the veto must be armed there too. A from-0 reopen
+        // stays resolvable because the true element is anchor-exact.
+        assert_eq!(RegenRequest::ToEnd { from: 0 }.edited_from(), Some(0));
         // Previews resolve against the state they preview and never publish.
         assert_eq!(RegenRequest::ToStep(0).edited_from(), None);
         assert_eq!(RegenRequest::ToStep(4).edited_from(), None);

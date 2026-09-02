@@ -385,8 +385,9 @@ OpOutcome execute_gear(OpContext& ctx, const json& op, const std::string& op_id)
     const kernel::validation::PublicationDecision decision = publication_decision(
         built.shape,
         kernel::validation::single_solid_policy(
-            "Gear", result_validation_tier(
-                        ctx, kernel::validation::PublicationTier::TierB)));
+            "Gear", result_validation_tier(ctx, kernel::validation::PublicationTier::TierB)),
+        ctx.cancel);
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) {
         return publication_refusal(decision, "publication");
     }

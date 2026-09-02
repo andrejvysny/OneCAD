@@ -102,6 +102,12 @@ public:
     std::size_t size() const { return entries_.size(); }
     std::vector<const PartitionEntry*> entries_for_body(const std::string& body_id) const;
 
+    // Kernel descriptor PLUS the v4 sidedness evidence (`outward`), which needs the
+    // owning body for an edge's adjacent faces. Prefer this form wherever the body
+    // is at hand; the body-less `describe(shape)` leaves `hasOutward` false.
+    static km::ElementDescriptor describe(const TopoDS_Shape& shape,
+                                          const TopoDS_Shape& body_shape);
+
     // --- minting (ID-on-demand) ---
     // Mint (or refresh) an entry for `element_id` bound to `sub_shape` within
     // `body_shape`. Computes the TopoKey (ordinal in body_shape) + descriptor.

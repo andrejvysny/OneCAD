@@ -68,16 +68,18 @@ export class PreviewMesh {
   }
 
   /**
-   * Set the live depth on every prism. Symmetric grows both ways (span 2·|depth|,
-   * centred on the plane); a negative depth extrudes the other side (drag-through-
-   * zero flip).
+   * Set the live depth on every prism. Symmetric grows both ways from the plane
+   * with `depth` as the TOTAL span (half on each side) — exactly what the worker
+   * builds for `extrudeMode: "Symmetric"` (SCHEMA §7.3; the L1 used to draw
+   * 2·|depth| and the user approved a body twice the committed size). A negative
+   * depth extrudes the other side (drag-through-zero flip).
    */
   setDepth(depth: number, symmetric: boolean): void {
     for (const mesh of this.meshes) {
       if (symmetric) {
         const h = Math.abs(depth) || 1e-4;
-        mesh.scale.z = 2 * h;
-        mesh.position.z = -h;
+        mesh.scale.z = h;
+        mesh.position.z = -h / 2;
       } else {
         mesh.scale.z = Math.abs(depth) < 1e-4 ? 1e-4 : depth;
         mesh.position.z = 0;

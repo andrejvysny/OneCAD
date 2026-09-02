@@ -441,7 +441,14 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 // is still post-edit, so the veto must stay armed (SCHEMA §7.2/§10).
                 let from_zero = RegenPlanner::without_checkpoint(&session.timeline, target)
                     .into_request(job, plan_rev, epoch, policy, artifacts)
-                    .with_edited_from(edited_from)
+                    // A `ToEnd { from: 0 }` claims `editedFrom: 0` on the normal lane
+                    // (resolverVersion 4) and stays resolvable only through the §10
+                    // anchor-exact carve-out — which the fallback flag below DISABLES.
+                    // Carrying the 0 here would veto every descriptor-tied ref in the
+                    // document (an anchor-only Hole seat ties by construction) on a
+                    // reopen whose checkpoint merely failed to restore. A genuine
+                    // upstream edit (`from > 0`) keeps its claim: that geometry did move.
+                    .with_edited_from(edited_from.filter(|k| *k > 0))
                     // SCHEMA §7.2: the ONLY place this may be claimed. The anchors
                     // this replay resolves against were frozen for a basis the
                     // checkpoint attempt failed to reproduce, so the §10

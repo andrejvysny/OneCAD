@@ -1,6 +1,50 @@
 # Current State
 
-Last verified: 2026-09-01 — DAILY DRIVER v2 program started: WP0 hygiene committed (`3a82910`), WP-C vendor STEP components gated at full L3 and committed, on `master`
+Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
+
+## NOW — KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
+
+Last verified: 2026-09-02 12:41 — `master`, DIRTY: two uncommitted programs interleaved
+(this one + Session 23's WP-P; see HANDOFF.md § Session 24 for the split). No commits this session.
+
+- **Changed by this program:** worker `ops/{OpCommon.cpp,.h,BooleanOp,ExtrudeOp,RevolveOp,MirrorOp,
+  HoleOp,TransformOp,PatternOp,ComponentOp}.cpp`, `kernel/validation/{ShapeAudit.cpp,.h,
+  GeometryPrecision.cpp}`, `elementmap/{ElementMapPartition.cpp,.h,Ladder.cpp,Scoring.cpp,.h}`,
+  `kernel/elementmap/ElementMap.h`, `session/ElementIdentity.cpp`; tests
+  `test_extrude_boolean_modes.cpp` (new), `test_commit_tier_validation.cpp` (new, unbuilt),
+  `test_wp6_ladder.cpp`, `test_wp5_partition_history.cpp`, `test_preview_op.cpp`,
+  `test_revolve_boolean_modes.cpp`, fixtures `resolve_refs`/`executeplan_needsrepair`
+  (`scoringVersion` 4), `worker/tests/CMakeLists.txt` (two add_test blocks appended);
+  protocol `SCHEMA.md` (§7.2, §7.3 Extrude/Boolean/Revolve/Mirror, §9, §10, §14 ×3),
+  `fixtures/extrude_add_disjoint_refusal.ndjson` (new), `fixtures/publication_refusal.ndjson`;
+  Rust `regen/planner.rs` (`edited_from` claims 0), tests `hole_ops.rs`, `topology_rebind.rs`,
+  `face_color_reopen.rs`, `step_export_attributes.rs`; FE `PreviewMesh.ts`,
+  `ModelToolController.ts` (symmetric head), `ExtrudeChipControls.tsx` (ThroughAll gate),
+  two FE tests; ledger `TODO.md`, this file, `HANDOFF.md`.
+- **Gate measured BEFORE WP-E was written (main thread):** ctest **166/166** ·
+  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **93 targets / 1471 / 0** ·
+  vitest **311 files / 5502 passed / 78 skipped** · tsc/clippy/fmt/hex/hygiene/verifiers clean ·
+  Playwright chromium targeted 2/2 · full `bun run e2e` **in flight: 295 passed / 0 failed**
+  (chromium done, webkit running) — log `scratchpad/e2e_gate.log` · sidecar restaged (pre-WP-E).
+- **WP-E BUILT, FIXED, REVIEWED, GATED (evening session, plan
+  `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`):** did not compile as written
+  (missing include); fix-round for cancel propagation + `stage_boolean()` non-destructive
+  auxiliary BOPs; **ruling D3b** — Tier B only where NEW geometry is published, Tier A kept for
+  isometries (TransformBody, unfused Mirror/Pattern children) and `generator` components after
+  `test_component_ops` ran > 5 min in `BOPAlgo_CheckerSI` on a modeled thread face; protocol
+  audit `approve` after 4 blockers + code fixes (cancel on 5 pre-existing Tier B sites,
+  non-destructive `PrepareOffsetFace`/`ExportGeometry`, prose, 2 cross-track fixtures);
+  adversarial review 4 HIGH fixed red-first (edge-extrema crosses-axis classifier, 0.01 mm
+  anchor-decisive threshold, fallback lane drops `editedFrom: 0`, h6a pins WHICH corner);
+  SG90 ingest regression fixed (Boolean ceiling from the worse input). ctest 168/168. Full
+  cargo / vitest / e2e in flight — rows in TODO.md § KERNEL HARDENING. **Also landed: WP-P P2b**
+  (`SketchSessionDto.projections` provenance) so P3 can survive a reload.
+- **Key decisions:** non-touching Add / empty Cut REFUSE by name (never split / silent delete);
+  Symmetric distance is the TOTAL; ThroughAll needs a target; resolverVersion 4 = signed
+  `outward` + sub-shape anchor + anchor-decisive tie-break (relative anchor REJECTED — see
+  HANDOFF dead-ends); every committed NewBody is Tier B (WP-E, unverified); no dynamic workflows.
+- **Blockers:** none technical. `document_runtime.rs` is under concurrent WP-P edit — the redo
+  claim and the `finish_sketch` reorder wait for coordination.
 
 ## NOW — DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
 
