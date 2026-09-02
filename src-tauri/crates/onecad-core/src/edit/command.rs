@@ -38,7 +38,9 @@ use crate::ids::{
     BodyId, ConstraintId, DatumPlaneId, ElementId, EntityId, RecordId, SketchId, VariableId,
 };
 use crate::math::Vec2;
-use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchPlane};
+use crate::sketch::{
+    Constraint, ProjectedSource, Sketch, SketchAttachment, SketchEntity, SketchPlane,
+};
 
 /// The full document mutation vocabulary (serde tag `"cmd"`, camelCase).
 #[allow(clippy::large_enum_variant)]
@@ -324,6 +326,35 @@ pub enum SketchEditOp {
         entity: EntityId,
         /// New flag value.
         construction: bool,
+    },
+    /// Set or clear one entity's `referenceLocked` flag (WP-P detach).
+    ///
+    /// **The ONLY way out of the lock.** Every other geometry-mutating op refuses
+    /// a locked entity outright, which is what keeps projected geometry congruent
+    /// with the model it came from. Detaching a projection is the one legitimate
+    /// reason to leave that state, so it gets its own named op instead of a
+    /// relaxation of the existing guards — the refusal stays absolute everywhere
+    /// else, and an unlock is a visible, undoable step in the timeline rather than
+    /// a side effect of some other edit.
+    SetEntityReferenceLocked {
+        /// Target entity (any kind).
+        entity: EntityId,
+        /// New flag value.
+        locked: bool,
+    },
+    /// Set (`Some`) or clear (`None`) one row of the sketch's
+    /// [`projections`](crate::sketch::Sketch::projections) map (WP-P).
+    ///
+    /// Carried as a sketch op — rather than written outside the edit layer — so
+    /// that projecting, re-projecting and detaching each land in exactly ONE
+    /// undoable transaction together with the entities they describe. A row can
+    /// never outlive its entity: the batch re-filters the map against the final
+    /// entity set.
+    SetEntityProjection {
+        /// Target entity (must exist in the sketch).
+        entity: EntityId,
+        /// The new provenance row, or `None` to detach.
+        source: Option<ProjectedSource>,
     },
 }
 

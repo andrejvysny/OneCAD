@@ -77,6 +77,17 @@ add_executable(test_face_projection test_face_projection.cpp)
 target_link_libraries(test_face_projection PRIVATE worker_core)
 add_test(NAME face_projection COMMAND test_face_projection)
 
+# --- WP-P: the `ProjectToSketchPlane` curve rules (`sketch/EdgeProjector`,
+#     SCHEMA §7.6). Everything the canonical fixture cannot hold: the irrational
+#     `minorR = r*cos(theta)` at three angles, both radius-relative threshold
+#     brackets, the two refusals no plan can reach (`degenerate`,
+#     `faceNotPlanar`), the EMPTY-buffer atomicity of a refusal, the
+#     `faceOutline` == `ProjectFaceBoundary faceOnly` equality at the projector,
+#     and the `projectedHash` reference digests. ---
+add_executable(test_edge_projector test_edge_projector.cpp)
+target_link_libraries(test_edge_projector PRIVATE worker_core)
+add_test(NAME edge_projector COMMAND test_edge_projector)
+
 # --- WP-C1: exact mass properties verb (SCHEMA §7.5). Analytic solids with
 #     self-derived expectations + the read-only/determinism invariants. ---
 add_executable(test_mass_properties test_mass_properties.cpp)
@@ -726,6 +737,36 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/sketch_entity_states.ndjson
+)
+# SCHEMA §7.6 `ProjectToSketchPlane` (WP-P) — project picked body edges, or a
+# picked face's whole boundary, into the ACTIVE sketch's plane. Self-generating:
+# four bodies plus a fillet are built in-file, so the input is reproducible from
+# the fixture alone. Rounds A/L are the load-bearing pair — the same face through
+# BOTH this verb's `faceOutline` and `ProjectFaceBoundary` `scope:"faceOnly"`,
+# asserted entity for entity and ref for ref, because two projectors answering
+# "project this face's boundary" is exactly the drift no other lane catches. The
+# irrational values (`minorR`, `rotation`, the arc angles) are `$any` here and
+# measured in test_edge_projector.cpp; `projectedHash` is `$hex64` only.
+add_test(
+    NAME canonical_project_to_sketch_plane
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/project_to_sketch_plane.ndjson
+)
+# …and the determinism half of that contract, which no in-process test can prove:
+# replay the SAME fixture's request stream twice through `--repl`, each replay
+# spawning its own worker, and `cmp` the two transcripts. §7.6 claims the response
+# is byte-identical across FRESH PROCESSES, so an answer that quietly depends on
+# process-scoped state — a static initialised in load order, an OCCT session
+# tolerance — is only visible here. No digest literal is pinned: the transcript
+# carries `projectedHash` values computed from OCCT doubles and libm differs
+# across macOS and Linux, so a frozen digest would gate the platform.
+add_test(
+    NAME canonical_project_to_sketch_plane_frames
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/determinism/check_project_to_sketch_plane_frames.sh
+            $<TARGET_FILE:worker_harness>
+            $<TARGET_FILE:onecad-worker>
+            ${PROTOCOL_FIXTURES}/project_to_sketch_plane.ndjson
 )
 # SCHEMA §7.3 `source.kind:"profile"` + §7.8 `ExtractPrismProfile` (Component
 # Library WP-C). SELF-GENERATING: the fixture builds the vendor stick, bakes its

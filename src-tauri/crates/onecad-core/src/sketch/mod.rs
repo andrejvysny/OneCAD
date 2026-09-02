@@ -19,7 +19,7 @@ pub mod entity;
 pub mod plane;
 pub mod projection;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,10 @@ use crate::math::Vec2;
 pub use constraint::{Constraint, CurvePosition};
 pub use entity::SketchEntity;
 pub use plane::{plane_from_point_normal, SketchPlane};
-pub use projection::{projected_sketch_content, FaceFrame, ProjectedEntity, ProjectionPayload};
+pub use projection::{
+    projected_sketch_content, FaceFrame, ProjectedEntity, ProjectedGeometry, ProjectedSource,
+    ProjectionPayload,
+};
 
 /// A named world reference plane (SCHEMA §7.3 `plane.kind` ∈ `XY`|`XZ`|`YZ`).
 /// The concrete basis is [`SketchPlane::xy`]/[`xz`](SketchPlane::xz)/
@@ -281,6 +284,10 @@ struct SketchData {
     constraints: Vec<Constraint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     regions: Vec<RegionInfo>,
+    /// Projection provenance (WP-P). Additive and OMITTED when empty, so every
+    /// pre-WP-P sketch serializes byte-identically and no schema version moves.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    projections: BTreeMap<EntityId, ProjectedSource>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     extra: Extra,
 }
@@ -306,6 +313,19 @@ pub struct Sketch {
     pub attachment: SketchAttachment,
     /// Region cache (not authoritative — see [`RegionInfo`]).
     pub regions: Vec<RegionInfo>,
+    /// Projected-entity provenance: `entity → the source it was projected from`
+    /// plus the hash of the geometry it was projected TO (WP-P; SCHEMA §7.6
+    /// `ProjectToSketchPlane`).
+    ///
+    /// **Only projected entities appear here**, and only the CURVES — a projected
+    /// point is shared by the curves meeting at it, so it has no single source.
+    /// An entity in this map is `reference_locked`; the converse does not hold
+    /// (sketch-on-face boundary geometry is locked and unprojected).
+    ///
+    /// **Every key names a live entity.** Deserialization drops orphans (see
+    /// [`From<SketchData>`]) and the edit layer re-filters after every batch, so a
+    /// removed entity can never leave a row behind.
+    pub projections: BTreeMap<EntityId, ProjectedSource>,
     /// Document-level unknown keys, preserved verbatim.
     pub extra: Extra,
 
@@ -324,6 +344,7 @@ impl From<SketchData> for Sketch {
             plane: d.plane,
             attachment: d.attachment,
             regions: d.regions,
+            projections: d.projections,
             extra: d.extra,
             entities: d.entities,
             constraints: d.constraints,
@@ -333,6 +354,14 @@ impl From<SketchData> for Sketch {
         // Deserialize trusts the stored file (a valid file has no dup/dangling
         // ids); validation is enforced on the mutation API, not on load.
         s.rebuild_indexes();
+        // ORPHAN RECONCILE (WP-P). A row whose entity is gone is unusable — it can
+        // be neither updated nor detached — and would make `update_projection`
+        // re-project geometry into nothing. Dropping it here makes "every key names
+        // a live entity" a type-level invariant for every deserialize, whatever the
+        // source. The user-visible load diagnostic is minted separately, on the raw
+        // value, by `io::migrate` (this conversion cannot report).
+        s.projections
+            .retain(|id, _| s.entity_index.contains_key(id));
         s
     }
 }
@@ -347,6 +376,7 @@ impl From<Sketch> for SketchData {
             entities: s.entities,
             constraints: s.constraints,
             regions: s.regions,
+            projections: s.projections,
             extra: s.extra,
         }
     }
@@ -368,6 +398,7 @@ impl Sketch {
             plane,
             attachment,
             regions: Vec::new(),
+            projections: BTreeMap::new(),
             extra: Extra::new(),
             entities: Vec::new(),
             constraints: Vec::new(),
@@ -992,5 +1023,64 @@ mod tests {
                 plane: WorldPlane::XZ
             }
         );
+    }
+
+    /// WP-P: an empty `projections` map is OMITTED, so every pre-WP-P sketch
+    /// serializes byte-identically and no schema version has to move.
+    #[test]
+    fn an_empty_projections_map_is_omitted_from_the_json() {
+        let (s, _, _) = sketch_with_two_points();
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(
+            v.get("projections").is_none(),
+            "empty projections must not appear on the wire: {v}"
+        );
+    }
+
+    /// WP-P: a populated map round-trips, keyed by entity id.
+    #[test]
+    fn a_populated_projections_map_round_trips() {
+        let (mut s, p0, _) = sketch_with_two_points();
+        s.projections.insert(
+            p0,
+            ProjectedSource {
+                source_body: crate::ids::BodyId(Uuid::from_u128(0xB0D1)),
+                source_element_id: crate::ids::ElementId::new("el_edge_7"),
+                source_kind: crate::document::refs::ElementKind::Edge,
+                source_ordinal: 0,
+                projected_hash: "9f2c4d1e77a0b355".into(),
+            },
+        );
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v["projections"][p0.to_string()]["sourceElementId"],
+            serde_json::json!("el_edge_7")
+        );
+        let back: Sketch = serde_json::from_value(v).unwrap();
+        assert_eq!(back.projections, s.projections);
+    }
+
+    /// WP-P orphan reconcile: a row naming an entity the sketch no longer has is
+    /// DROPPED on deserialize. An orphan can be neither updated nor detached, and
+    /// it would make the staleness pass re-project into nothing.
+    #[test]
+    fn a_projection_row_for_a_missing_entity_is_dropped_on_load() {
+        let (mut s, p0, _) = sketch_with_two_points();
+        let source = ProjectedSource {
+            source_body: crate::ids::BodyId(Uuid::from_u128(0xB0D1)),
+            source_element_id: crate::ids::ElementId::new("el_edge_7"),
+            source_kind: crate::document::refs::ElementKind::Edge,
+            source_ordinal: 0,
+            projected_hash: "9f2c4d1e77a0b355".into(),
+        };
+        s.projections.insert(p0, source.clone());
+        let mut v = serde_json::to_value(&s).unwrap();
+        // Plant a row for an entity that is not in `entities`.
+        v["projections"][eid(0xDEAD).to_string()] = serde_json::to_value(&source).unwrap();
+
+        let back: Sketch = serde_json::from_value(v).unwrap();
+        assert_eq!(back.projections.len(), 1, "the orphan row is dropped");
+        assert!(back.projections.contains_key(&p0));
+        assert!(!back.projections.contains_key(&eid(0xDEAD)));
     }
 }

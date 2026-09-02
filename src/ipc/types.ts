@@ -253,6 +253,19 @@ export type EntityConstrainedState = "underConstrained" | "fullyConstrained" | "
  */
 export type SketchEntityStates = Record<string, EntityConstrainedState>;
 
+/** Provenance of ONE projected sketch entity (WP-P; Rust `ProjectedSourceDto`,
+ *  mirroring `Sketch.projections`). Ids are backend-rendered: `sourceBodyId` is
+ *  the `body_<uuid>` wire form, `sourceElementId` the Rust-minted ElementId. */
+export interface ProjectedSource {
+  sourceBodyId: string;
+  sourceElementId: string;
+  sourceKind: "edge" | "face" | "vertex";
+  /** 0-based index within the source's emission run (0 for an edge source). */
+  sourceOrdinal: number;
+  /** Worker-minted FNV-1a 64 over the projected UV geometry, carried verbatim. */
+  projectedHash: string;
+}
+
 /** Full authoritative sketch, returned by `enterSketch`. */
 export interface SketchSession {
   sketchId: string;
@@ -269,6 +282,10 @@ export interface SketchSession {
    *  is — hand-written `CadClient` doubles predate it; absent ⇒ `{}` (unknown
    *  for every entity), never "everything is under-constrained". */
   entityStates?: SketchEntityStates;
+  /** Projected-edge provenance keyed by FRONTEND entity id (WP-P). Absent ⇒ no
+   *  projections. This — not `referenceLocked` — is what marks an entity as a
+   *  projection across a reload (sketch-on-face boundary geometry is locked too). */
+  projections?: Record<string, ProjectedSource>;
 }
 
 /** `enterSketch` target: an existing sketch id, or a fresh sketch on a plane. */

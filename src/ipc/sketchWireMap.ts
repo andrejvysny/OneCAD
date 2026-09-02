@@ -41,6 +41,7 @@ import type {
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
+  ProjectedSource,
   SketchEntityStates,
   SketchPlaneKind,
 } from "./types";
@@ -1338,6 +1339,30 @@ export function frontendEntityStates(
   for (const [uuid, state] of Object.entries(dtoStates)) {
     const id = byUuid.get(uuid);
     if (id) out[id] = state;
+  }
+  return out;
+}
+
+/**
+ * Re-key a `projections` map from backend ENTITY uuids to frontend ids (WP-P).
+ * Same drop-unknown rule as `frontendEntityStates`. Without an id-map (a pure
+ * `getSketch` read of a never-entered sketch) the frontend ids ARE the backend
+ * uuids, so the map passes through unchanged. Values are backend-rendered ids
+ * (`body_<uuid>`, ElementId) and are NOT re-keyed — they address the model, not
+ * the sketch.
+ */
+export function frontendProjections(
+  map: SketchIdMap | undefined,
+  dto: Record<string, ProjectedSource> | undefined | null,
+): Record<string, ProjectedSource> | undefined {
+  if (!dto) return undefined;
+  if (!map) return { ...dto };
+  const byUuid = new Map<string, string>();
+  for (const [frontendId, uuid] of map.entity) if (!byUuid.has(uuid)) byUuid.set(uuid, frontendId);
+  const out: Record<string, ProjectedSource> = {};
+  for (const [uuid, source] of Object.entries(dto)) {
+    const id = byUuid.get(uuid);
+    if (id) out[id] = source;
   }
   return out;
 }

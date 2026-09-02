@@ -29,7 +29,8 @@ use onecad_core::document::record::{
 use onecad_core::document::refs::{AnchorIntent, AxisRef, ElementKind, ElementRef};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::ids::{
-    BodyId, DocumentRevision, ElementId, EntityId, JobId, SnapshotId, TopoKey, WorkerEpoch,
+    BodyId, DocumentRevision, ElementId, EntityId, JobId, SketchId, SnapshotId, TopoKey,
+    WorkerEpoch,
 };
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
@@ -2998,9 +2999,332 @@ pub fn parse_project_face_boundary(result: &Value) -> Result<Option<ProjectionPa
             .unwrap_or(0)
             .try_into()
             .unwrap_or(u32::MAX),
-        points,
-        entities,
+        geometry: onecad_core::sketch::ProjectedGeometry {
+            points,
+            entities,
+            // `ProjectFaceBoundary` has no per-entity source (SCHEMA §7.6): its
+            // answer is ONE face's boundary, not a batch of picks.
+            entity_sources: Vec::new(),
+        },
     }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Body-edge projection into a sketch (SCHEMA §7.6 `ProjectToSketchPlane`, WP-P)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What the caller claims a source sub-shape IS (SCHEMA §7.6 `sources[].kind`).
+///
+/// CHECKED by the worker, not trusted: a resolved shape type that contradicts the
+/// declared kind comes back as a per-source `kindMismatch` refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionSourceKind {
+    /// A body edge.
+    Edge,
+    /// A body face.
+    Face,
+}
+
+impl ProjectionSourceKind {
+    /// The wire token.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Edge => "edge",
+            Self::Face => "face",
+        }
+    }
+}
+
+/// What to project (SCHEMA §7.6 `mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectionMode {
+    /// Project each source edge.
+    #[default]
+    Edges,
+    /// Project every boundary edge of each source FACE (outer wire, then holes).
+    FaceOutline,
+}
+
+impl ProjectionMode {
+    /// The wire token.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Edges => "edges",
+            Self::FaceOutline => "faceOutline",
+        }
+    }
+
+    /// Parses a frontend token; `None` for anything else (refused at the command
+    /// boundary rather than defaulted, so a typo cannot silently project the
+    /// wrong thing).
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "edges" => Some(Self::Edges),
+            "faceOutline" => Some(Self::FaceOutline),
+            _ => None,
+        }
+    }
+}
+
+/// One source to project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionSource<'a> {
+    /// The body the sub-shape belongs to.
+    pub body: BodyId,
+    /// The addressing rung — `elementId`, else `{bodyId, topoKey}`.
+    pub address: FaceAddress<'a>,
+    /// The declared kind.
+    pub kind: ProjectionSourceKind,
+}
+
+/// One source the worker declined to project (SCHEMA §7.6 `refusals[]`).
+///
+/// A refusal is an ANSWER, per source, on an `ok:true` response: one dead pick in
+/// a thirty-edge selection must not void the other twenty-nine. That is the
+/// deliberate deviation from single-target `ProjectFaceBoundary`, which answers
+/// `present:false` / `OP_FAILED` for the whole call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRefusal {
+    /// Echo of the refused source's body, in `body_<uuid>` wire form.
+    pub body_id: String,
+    /// Echo of the refused source's `elementId`, when it was addressed that way.
+    pub element_id: String,
+    /// Echo of the refused source's `topoKey`, when it was addressed that way.
+    pub topo_key: String,
+    /// `absent` | `kindMismatch` | `unsupportedCurve` | `trimmedTiltedArc` |
+    /// `degenerate` | `faceNotPlanar`. Carried VERBATIM — Rust does not enumerate
+    /// the worker's vocabulary, it displays it.
+    pub code: String,
+    /// The worker's human-readable reason.
+    pub message: String,
+}
+
+/// A parsed `ProjectToSketchPlane` result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectToSketchPlaneResult {
+    /// The projected points + curves + per-curve provenance.
+    pub geometry: onecad_core::sketch::ProjectedGeometry,
+    /// The sources that were declined, in request order.
+    pub refusals: Vec<ProjectionRefusal>,
+}
+
+/// `ProjectToSketchPlane` args (SCHEMA §7.6).
+///
+/// `plane` is INPUT and AUTHORITATIVE and `sketchId` is an opaque ECHO: the
+/// worker's solver-lane sketch store holds a copy that can lag the document, so
+/// resolving the id to a basis there would express the answer in a stale frame.
+/// Rust owns the frame, exactly as it does for `ProjectFaceBoundary`.
+///
+/// `snapshotId` FENCES this call (unlike `ProjectFaceBoundary`, which is
+/// advisory): the answer is committed into a document sketch and its
+/// `projectedHash` becomes the baseline every later staleness check compares
+/// against, so a stale capture would write a baseline that can never afterwards
+/// be detected as wrong.
+#[must_use]
+pub fn project_to_sketch_plane_args(
+    snapshot: SnapshotId,
+    sketch_id: SketchId,
+    plane: &SketchPlane,
+    mode: ProjectionMode,
+    sources: &[ProjectionSource<'_>],
+) -> Value {
+    let sources: Vec<Value> = sources
+        .iter()
+        .map(|source| {
+            let mut entry = json!({
+                "bodyId": body_id_wire(source.body),
+                "kind": source.kind.wire(),
+            });
+            source.address.write_into(&mut entry);
+            entry
+        })
+        .collect();
+    json!({
+        "snapshotId": snapshot.0,
+        "sketchId": sketch_id.to_string(),
+        "plane": {
+            "origin": [plane.origin.x, plane.origin.y, plane.origin.z],
+            "xAxis": [plane.x_axis.x, plane.x_axis.y, plane.x_axis.z],
+            "yAxis": [plane.y_axis.x, plane.y_axis.y, plane.y_axis.z],
+            "normal": [plane.normal.x, plane.normal.y, plane.normal.z],
+        },
+        "mode": mode.wire(),
+        "sources": sources,
+    })
+}
+
+/// Reads a required non-empty string off a §7.6 entity/refusal.
+fn projection_str(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("ProjectToSketchPlane: {field} must be a non-empty string"))
+}
+
+/// Parses a `ProjectToSketchPlane` result against the `sources` that produced it.
+///
+/// The request is an input because two persisted fields are Rust's to decide, not
+/// the worker's: the source's `ElementKind` (which is what a later
+/// `update_projection` re-requests it as) and the entity's ORDINAL within its
+/// source's emission run (SCHEMA §7.6 makes that order normative). Cross-checking
+/// each echoed `sourceRef` against the request is also the loud guard that the
+/// answer describes the picks that were actually sent.
+///
+/// # Errors
+/// A human-readable reason for any malformed field, which the caller surfaces as
+/// `PROTOCOL_ERROR`. There is no lenient path and no default: a dropped curve
+/// would leave an open profile that silently fails to form a region later, and a
+/// missing `projectedHash` would install a baseline the staleness pass can never
+/// match — both far from the cause.
+pub fn parse_project_to_sketch_plane(
+    result: &Value,
+    sources: &[ProjectionSource<'_>],
+) -> Result<ProjectToSketchPlaneResult, String> {
+    let kind_of = |body: BodyId, element: &str| -> Option<ElementKind> {
+        sources
+            .iter()
+            .find(|s| {
+                s.body == body && matches!(s.address, FaceAddress::ElementId(id) if id == element)
+            })
+            .map(|s| match s.kind {
+                ProjectionSourceKind::Edge => ElementKind::Edge,
+                ProjectionSourceKind::Face => ElementKind::Face,
+            })
+    };
+    let mut runs: BTreeMap<(BodyId, String), u32> = BTreeMap::new();
+    let mut points = Vec::new();
+    for (i, p) in result
+        .get("points")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        let at = p
+            .get("at")
+            .and_then(Value::as_array)
+            .filter(|a| a.len() == 2)
+            .ok_or_else(|| {
+                format!("ProjectToSketchPlane: points[{i}].at must be a 2-number array")
+            })?;
+        let g = |k: usize| -> Result<f64, String> {
+            at[k]
+                .as_f64()
+                .ok_or_else(|| format!("ProjectToSketchPlane: points[{i}].at[{k}] is not a number"))
+        };
+        points.push(
+            Vec2::new(g(0)?, g(1)?)
+                .ok_or_else(|| format!("ProjectToSketchPlane: points[{i}].at is non-finite"))?,
+        );
+    }
+
+    let mut entities = Vec::new();
+    let mut entity_sources = Vec::new();
+    for e in result
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let kind = e
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "ProjectToSketchPlane: entity is missing `type`".to_string())?;
+        entities.push(match kind {
+            "Line" => ProjectedEntity::Line {
+                p0: parse_point_ref(e, "p0Ref", points.len())?,
+                p1: parse_point_ref(e, "p1Ref", points.len())?,
+            },
+            "Circle" => ProjectedEntity::Circle {
+                center: parse_point_ref(e, "centerRef", points.len())?,
+                radius: projection_number(e, "radius")?,
+            },
+            "Arc" => ProjectedEntity::Arc {
+                center: parse_point_ref(e, "centerRef", points.len())?,
+                radius: projection_number(e, "radius")?,
+                // Already the CCW-ordered pair (SCHEMA §7.6) — carried verbatim.
+                start_angle: projection_number(e, "startAngle")?,
+                end_angle: projection_number(e, "endAngle")?,
+                ccw: e.get("ccw").and_then(Value::as_bool).unwrap_or(true),
+            },
+            "Ellipse" => ProjectedEntity::Ellipse {
+                center: parse_point_ref(e, "centerRef", points.len())?,
+                major_r: projection_number(e, "majorR")?,
+                minor_r: projection_number(e, "minorR")?,
+                rotation: projection_number(e, "rotation")?,
+            },
+            other => {
+                return Err(format!(
+                    "ProjectToSketchPlane: unknown entity type {other:?} (SCHEMA §7.6 emits only \
+                     Line/Circle/Arc/Ellipse; every other curve is a per-source refusal)"
+                ))
+            }
+        });
+        // A curve without provenance is unusable: it could never be updated,
+        // detached, or checked for staleness. Missing is a protocol break, not a
+        // reason to commit an untracked reference-locked entity.
+        let source_ref = e
+            .get("sourceRef")
+            .ok_or_else(|| "ProjectToSketchPlane: entity is missing `sourceRef`".to_string())?;
+        let body = parse_body_id(&projection_str(source_ref, "bodyId")?)?;
+        let element = projection_str(source_ref, "elementId")?;
+        // An echoed source we never sent means the answer is not about our picks.
+        // Defaulting the kind here would persist a source that `update_projection`
+        // would then re-request in the wrong mode forever.
+        let source_kind = kind_of(body, &element).ok_or_else(|| {
+            format!(
+                "ProjectToSketchPlane: entity sourceRef {element:?} is not one of the requested \
+                 sources"
+            )
+        })?;
+        let run = runs.entry((body, element.clone())).or_insert(0);
+        let source_ordinal = *run;
+        *run += 1;
+        entity_sources.push(onecad_core::sketch::ProjectedSource {
+            source_body: body,
+            source_element_id: ElementId::new(element),
+            source_kind,
+            source_ordinal,
+            projected_hash: projection_str(e, "projectedHash")?,
+        });
+    }
+
+    let mut refusals = Vec::new();
+    for r in result
+        .get("refusals")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let text = |field: &str| -> String {
+            r.get(field)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        refusals.push(ProjectionRefusal {
+            body_id: text("bodyId"),
+            element_id: text("elementId"),
+            topo_key: text("topoKey"),
+            code: projection_str(r, "code")?,
+            message: text("message"),
+        });
+    }
+
+    Ok(ProjectToSketchPlaneResult {
+        geometry: onecad_core::sketch::ProjectedGeometry {
+            points,
+            entities,
+            entity_sources,
+        },
+        refusals,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8354,5 +8678,237 @@ mod component_blob_path_tests {
             "op_4",
         );
         assert!(wire["params"]["source"].get("path").is_none());
+    }
+}
+
+/// SCHEMA §7.6 `ProjectToSketchPlane` (WP-P) — the request shape and the parse
+/// refusals. Its own module because the verb's fixtures share a body / source
+/// helper that nothing else here wants.
+#[cfg(test)]
+mod project_to_sketch_plane_tests {
+    use super::*;
+
+    fn wpp_body() -> BodyId {
+        BodyId(Uuid::from_u128(0xB0D1))
+    }
+
+    fn wpp_sources<'a>(element: &'a str, kind: ProjectionSourceKind) -> Vec<ProjectionSource<'a>> {
+        vec![ProjectionSource {
+            body: wpp_body(),
+            address: FaceAddress::ElementId(element),
+            kind,
+        }]
+    }
+
+    /// The request carries the plane VERBATIM and `sketchId` as an opaque echo:
+    /// the worker's solver-lane sketch store can lag the document, so resolving
+    /// the id to a basis there would express the answer in a stale frame.
+    #[test]
+    fn project_to_sketch_plane_args_send_the_plane_and_echo_the_sketch_id() {
+        let plane = SketchPlane::xz();
+        let sketch = SketchId(Uuid::from_u128(0x5C01));
+        let args = project_to_sketch_plane_args(
+            SnapshotId(5012),
+            sketch,
+            &plane,
+            ProjectionMode::FaceOutline,
+            &wpp_sources("el_a", ProjectionSourceKind::Face),
+        );
+        assert_eq!(args["snapshotId"], json!(5012));
+        assert_eq!(args["sketchId"], json!(sketch.to_string()));
+        assert_eq!(args["mode"], json!("faceOutline"));
+        assert_eq!(
+            args["plane"]["normal"],
+            json!([plane.normal.x, plane.normal.y, plane.normal.z]),
+            "the plane is INPUT and carried verbatim — the worker must not derive one"
+        );
+        assert_eq!(
+            args["plane"]["xAxis"],
+            json!([plane.x_axis.x, plane.x_axis.y, plane.x_axis.z])
+        );
+        assert_eq!(
+            args["sources"][0]["bodyId"],
+            json!(body_id_wire(wpp_body()))
+        );
+        assert_eq!(args["sources"][0]["elementId"], json!("el_a"));
+        assert_eq!(args["sources"][0]["kind"], json!("face"));
+        assert!(
+            args["sources"][0].get("topoKey").is_none(),
+            "the two addressing rungs are mutually exclusive on the wire"
+        );
+    }
+
+    /// A face source's entities carry a RUNNING ordinal within that source's
+    /// emission run — that pair is what re-associates a re-projection with the
+    /// entity already committed from it.
+    #[test]
+    fn parse_project_to_sketch_plane_numbers_each_source_run() {
+        let body = body_id_wire(wpp_body());
+        let result = json!({
+            "points": [{"ref": "p0", "at": [0.0, 0.0]}, {"ref": "p1", "at": [20.0, 0.0]}],
+            "entities": [
+                {"type": "Line", "p0Ref": "p0", "p1Ref": "p1",
+                 "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""},
+                 "projectedHash": "9f2c4d1e77a0b355"},
+                {"type": "Line", "p0Ref": "p1", "p1Ref": "p0",
+                 "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""},
+                 "projectedHash": "0123456789abcdef"}
+            ],
+            "refusals": []
+        });
+        let parsed = parse_project_to_sketch_plane(
+            &result,
+            &wpp_sources("el_a", ProjectionSourceKind::Face),
+        )
+        .expect("a well-formed faceOutline response parses");
+        assert_eq!(parsed.geometry.points.len(), 2);
+        assert_eq!(parsed.geometry.entity_sources[0].source_ordinal, 0);
+        assert_eq!(parsed.geometry.entity_sources[1].source_ordinal, 1);
+        assert_eq!(
+            parsed.geometry.entity_sources[0].source_kind,
+            ElementKind::Face,
+            "the KIND comes from the request; the wire sourceRef does not carry one"
+        );
+    }
+
+    /// An `Ellipse` is a WP-P-only entity type — `ProjectFaceBoundary` never
+    /// emits one — and its four scalars are carried verbatim.
+    #[test]
+    fn parse_project_to_sketch_plane_reads_an_ellipse() {
+        let body = body_id_wire(wpp_body());
+        let result = json!({
+            "points": [{"ref": "p0", "at": [5.0, 5.0]}],
+            "entities": [{
+                "type": "Ellipse", "centerRef": "p0",
+                "majorR": 10.0, "minorR": 7.5, "rotation": 0.25,
+                "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""},
+                "projectedHash": "9f2c4d1e77a0b355"
+            }],
+            "refusals": []
+        });
+        let parsed = parse_project_to_sketch_plane(
+            &result,
+            &wpp_sources("el_a", ProjectionSourceKind::Edge),
+        )
+        .expect("an Ellipse parses");
+        assert_eq!(
+            parsed.geometry.entities[0],
+            ProjectedEntity::Ellipse {
+                center: 0,
+                major_r: 10.0,
+                minor_r: 7.5,
+                rotation: 0.25
+            }
+        );
+    }
+
+    /// A refusal is an ANSWER, per source, on an `ok:true` response — one dead
+    /// pick must not void the rest of the batch.
+    #[test]
+    fn parse_project_to_sketch_plane_keeps_entities_and_refusals_together() {
+        let body = body_id_wire(wpp_body());
+        let result = json!({
+            "points": [{"ref": "p0", "at": [0.0, 0.0]}, {"ref": "p1", "at": [1.0, 0.0]}],
+            "entities": [{
+                "type": "Line", "p0Ref": "p0", "p1Ref": "p1",
+                "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""},
+                "projectedHash": "9f2c4d1e77a0b355"
+            }],
+            "refusals": [{
+                "bodyId": body, "elementId": "el_b", "topoKey": "",
+                "code": "trimmedTiltedArc", "message": "no angular extent"
+            }]
+        });
+        let mut sources = wpp_sources("el_a", ProjectionSourceKind::Edge);
+        sources.push(ProjectionSource {
+            body: wpp_body(),
+            address: FaceAddress::ElementId("el_b"),
+            kind: ProjectionSourceKind::Edge,
+        });
+        let parsed = parse_project_to_sketch_plane(&result, &sources).expect("batch parses");
+        assert_eq!(parsed.geometry.entities.len(), 1);
+        assert_eq!(parsed.refusals.len(), 1);
+        assert_eq!(parsed.refusals[0].code, "trimmedTiltedArc");
+        assert_eq!(parsed.refusals[0].element_id, "el_b");
+    }
+
+    /// A curve with no `projectedHash` is a PROTOCOL break, never a default: it
+    /// would install a staleness baseline the check can never match.
+    #[test]
+    fn a_curve_without_a_projected_hash_is_a_protocol_error() {
+        let body = body_id_wire(wpp_body());
+        let result = json!({
+            "points": [{"ref": "p0", "at": [0.0, 0.0]}, {"ref": "p1", "at": [1.0, 0.0]}],
+            "entities": [{
+                "type": "Line", "p0Ref": "p0", "p1Ref": "p1",
+                "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""}
+            }],
+            "refusals": []
+        });
+        let err = parse_project_to_sketch_plane(
+            &result,
+            &wpp_sources("el_a", ProjectionSourceKind::Edge),
+        )
+        .expect_err("a missing projectedHash must be loud");
+        assert!(err.contains("projectedHash"), "got {err}");
+    }
+
+    /// An echoed `sourceRef` naming a source we never sent means the answer is
+    /// not about our picks — refused rather than defaulted.
+    #[test]
+    fn an_unrequested_source_ref_is_a_protocol_error() {
+        let body = body_id_wire(wpp_body());
+        let result = json!({
+            "points": [{"ref": "p0", "at": [0.0, 0.0]}, {"ref": "p1", "at": [1.0, 0.0]}],
+            "entities": [{
+                "type": "Line", "p0Ref": "p0", "p1Ref": "p1",
+                "sourceRef": {"bodyId": body, "elementId": "el_ZZZ", "topoKey": ""},
+                "projectedHash": "9f2c4d1e77a0b355"
+            }],
+            "refusals": []
+        });
+        let err = parse_project_to_sketch_plane(
+            &result,
+            &wpp_sources("el_a", ProjectionSourceKind::Edge),
+        )
+        .expect_err("an unrequested sourceRef must be loud");
+        assert!(
+            err.contains("not one of the requested sources"),
+            "got {err}"
+        );
+    }
+
+    /// A `p<N>` ref out of range is a protocol break, not a dropped curve: a
+    /// silently missing boundary line fails as an open profile far from the cause.
+    #[test]
+    fn an_out_of_range_point_ref_is_a_protocol_error() {
+        let body = body_id_wire(wpp_body());
+        let result = json!({
+            "points": [{"ref": "p0", "at": [0.0, 0.0]}],
+            "entities": [{
+                "type": "Line", "p0Ref": "p0", "p1Ref": "p9",
+                "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""},
+                "projectedHash": "9f2c4d1e77a0b355"
+            }],
+            "refusals": []
+        });
+        assert!(parse_project_to_sketch_plane(
+            &result,
+            &wpp_sources("el_a", ProjectionSourceKind::Edge)
+        )
+        .is_err());
+    }
+
+    /// An unknown `mode` token is refused at the command boundary, never
+    /// defaulted to `edges` — a typo must not project the wrong thing.
+    #[test]
+    fn an_unknown_projection_mode_does_not_parse() {
+        assert_eq!(ProjectionMode::parse("edges"), Some(ProjectionMode::Edges));
+        assert_eq!(
+            ProjectionMode::parse("faceOutline"),
+            Some(ProjectionMode::FaceOutline)
+        );
+        assert_eq!(ProjectionMode::parse("FaceOutline"), None);
+        assert_eq!(ProjectionMode::parse(""), None);
     }
 }

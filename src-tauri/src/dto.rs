@@ -819,6 +819,21 @@ impl EntityConstrainedState {
 /// unconstrained". An entity missing from a NON-empty map is likewise unknown.
 pub type EntityStates = std::collections::BTreeMap<String, EntityConstrainedState>;
 
+/// Provenance of ONE projected sketch entity (WP-P; `Sketch.projections`), as the
+/// frontend sees it on a session read. Mirrors `onecad_core::sketch::ProjectedSource`
+/// field for field; ids are rendered the way every other DTO renders them
+/// (`body_<uuid>` for bodies, the raw `ElementId` string for elements).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedSourceDto {
+    pub source_body_id: String,
+    pub source_element_id: String,
+    /// `edge` | `face` (SCHEMA §7.5 element kinds, lowercase).
+    pub source_kind: String,
+    pub source_ordinal: u32,
+    pub projected_hash: String,
+}
+
 /// A live sketch session (`enterSketch` result; `types.ts SketchSession`). The
 /// `plane`/`entities`/`constraints` carry the SCHEMA §7.3/§7.4 wire JSON verbatim
 /// (identical to the frontend wire form) so the seam is a drop-in.
@@ -841,6 +856,13 @@ pub struct SketchSessionDto {
     /// static [`DocumentRuntime::get_sketch`](crate::document_runtime::DocumentRuntime::get_sketch)
     /// read, which carries no live solve.
     pub entity_states: EntityStates,
+    /// Projected-edge provenance keyed by ENTITY uuid (WP-P). Omitted when empty.
+    /// This is what tells the frontend which `referenceLocked` entities are
+    /// PROJECTIONS (stale badge, Update, Detach) across a reload — the lock flag
+    /// alone cannot, because sketch-on-face boundary geometry is locked and
+    /// unprojected. Filled by both `enter_sketch` and the static `get_sketch`.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub projections: std::collections::BTreeMap<String, ProjectedSourceDto>,
 }
 
 /// A re-solve result (`sketchUpsert`/`endGesture`; `types.ts SketchUpsertResult`).
@@ -1150,6 +1172,85 @@ pub struct PrepareOffsetFaceDto {
     /// `Some` ⇒ the handshake REFUSED and `faces` is not a usable closure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<OffsetFaceRefusalDto>,
+}
+
+/// One source the projection declined, echoed per source (SCHEMA §7.6
+/// `ProjectToSketchPlane` `refusals[]`).
+///
+/// A refusal is an ANSWER, not an error: one dead pick in a thirty-edge selection
+/// must not void the other twenty-nine, so `entities` and `refusals` are both
+/// populated on a successful call. `code` is carried VERBATIM from the worker
+/// (`absent` | `kindMismatch` | `unsupportedCurve` | `trimmedTiltedArc` |
+/// `degenerate` | `faceNotPlanar`) — Rust displays that vocabulary, it does not
+/// enumerate it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionRefusalDto {
+    /// The refused source's body, in `body_<uuid>` wire form.
+    pub body_id: String,
+    /// The refused source's `elementId`, when it was addressed that way.
+    pub element_id: String,
+    /// The refused source's `topoKey`, when it was addressed that way.
+    pub topo_key: String,
+    /// The refusal reason token.
+    pub code: String,
+    /// The worker's human-readable reason.
+    pub message: String,
+}
+
+/// One projected curve as COMMITTED into the sketch (WP-P).
+///
+/// `entity_id` is the document entity the frontend selects and draws; the
+/// response-local `p<N>` refs of SCHEMA §7.6 are deliberately NOT echoed, because
+/// they name points that only existed for the duration of the response — every
+/// one of them is now an `EntityId` in the sketch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedEntityDto {
+    /// The minted sketch entity id.
+    pub entity_id: String,
+    /// The §7.6 entity type token (`Line` | `Circle` | `Arc` | `Ellipse`).
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    /// The source body, in `body_<uuid>` wire form.
+    pub source_body_id: String,
+    /// The source edge / face `ElementId`.
+    pub source_element_id: String,
+    /// The projected-geometry hash committed as this entity's staleness baseline.
+    pub projected_hash: String,
+}
+
+/// `project_to_sketch` / `update_projection` result (SCHEMA §7.6
+/// `ProjectToSketchPlane`, WP-P).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectToSketchDto {
+    /// The sketch the geometry landed in.
+    pub sketch_id: String,
+    /// Echo of the FENCED head the projection answered against.
+    pub snapshot_id: u64,
+    /// The projected CURVES, in emission order.
+    pub entities: Vec<ProjectedEntityDto>,
+    /// How many merged projected POINTS were committed alongside them. A point is
+    /// shared by the curves meeting at it, which is what closes an outline into a
+    /// region, so it has no single source and no `projections` row.
+    pub point_count: u32,
+    /// The sources the worker declined, in request order.
+    pub refusals: Vec<ProjectionRefusalDto>,
+}
+
+/// `detach_projection` result (WP-P).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachProjectionDto {
+    /// The sketch that was detached from.
+    pub sketch_id: String,
+    /// The entities that were unlocked and freed, in map order.
+    pub entity_ids: Vec<String>,
+    /// How many `Fixed` pins were dropped with them.
+    pub released_constraints: u32,
+    /// Projection rows still on the sketch after the detach.
+    pub remaining: u32,
 }
 
 /// The canonical face `ExtractPrismProfile` wrote, and where (SCHEMA §7.8).
@@ -2602,6 +2703,7 @@ mod tests {
             status: SketchSolveStatus::Conflicting,
             conflicting: vec!["c-a".into()],
             entity_states: EntityStates::new(),
+            projections: Default::default(),
         };
         assert_eq!(
             serde_json::to_value(&session).unwrap()["conflicting"],
@@ -2667,6 +2769,7 @@ mod tests {
                 "e1".to_string(),
                 EntityConstrainedState::FullyConstrained,
             )]),
+            projections: Default::default(),
         };
         assert_eq!(
             serde_json::to_value(&session).unwrap()["entityStates"],

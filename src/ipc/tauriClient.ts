@@ -99,6 +99,7 @@ import type {
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
+  ProjectedSource,
   SketchEntityStates,
   SketchAttachTarget,
   SketchPlane,
@@ -130,6 +131,7 @@ import {
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
   frontendEntityStates,
+  frontendProjections,
   frontendSolvedCurves,
   frontendSolvedPositions,
   marshalUpsert,
@@ -301,6 +303,9 @@ interface SketchSessionDto {
    *  Rust always serializes it, older payloads simply lack the key). Re-keyed to
    *  frontend ids here — unknown keys dropped. */
   entityStates?: SketchEntityStates;
+  /** Projected-edge provenance keyed by backend ENTITY uuid (WP-P); Rust omits the
+   *  key when empty. Re-keyed to frontend ids like `entityStates`. */
+  projections?: Record<string, ProjectedSource>;
 }
 /** `add_sketch_on_face` result (Rust `SketchOnFaceDto`; SKETCH-ON-FACE W1b).
  *  Deliberately lean — the sketch's geometry arrives through the normal
@@ -1355,6 +1360,8 @@ export function createTauriClient(): CadClient {
       // map is keyed by wire ENTITY uuid, so re-keying it before
       // `seedIdMapFromWire` above would drop every entry of a re-entered sketch.
       entityStates: frontendEntityStates(map, dto.entityStates),
+      // WP-P provenance, same keyspace and seeding-order dependency as `entityStates`.
+      projections: frontendProjections(map, dto.projections),
     };
   }
 
@@ -1495,6 +1502,9 @@ export function createTauriClient(): CadClient {
       // A pure static read opens no session + seeds no id-map, so backend uuids can't
       // be mapped; the display layer carries no conflict tint (backend returns []).
       conflicting: [],
+      // WP-P provenance survives the pure read: an ENTERED sketch re-keys through
+      // its id-map, a never-entered one passes through (frontend id == backend uuid).
+      projections: frontendProjections(sketchMaps.get(sketchId), dto.projections),
     };
   }
 

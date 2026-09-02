@@ -77,8 +77,8 @@ use onecad_core::regen::{
     CheckpointStore, ElementBinding, EngineError, GeometryEngine, InMemoryCheckpointStore, Lod,
     MeshKey, MeshSink, ModelSnapshot, Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest,
     PolicyVersions, RefResolution, RegenExecutor, RegenPlan, RegenPlanner, RegenRequest,
-    RegenSession, ResolveOutcome, ResolveRef, ResolveRequest, SnapshotPublisher, TessellateSpec,
-    UnresolvedVariable,
+    RegenSession, ResolveOutcome, ResolveRef, ResolveRequest, Signature, SnapshotPublisher,
+    TessellateSpec, UnresolvedVariable,
 };
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
@@ -494,6 +494,20 @@ pub struct DocumentRuntime {
     /// nor gets reported as a failure. Do not re-filter, and do not widen this
     /// back to the unfiltered `substitute_variables` result.
     unresolved_variables: BTreeMap<usize, UnresolvedVariable>,
+    /// Sketches whose projected geometry no longer matches its source, keyed by
+    /// the sketch's TIMELINE STEP so it merges through the same
+    /// [`step_diagnostics`](Self::step_diagnostics) point `EXPR_UNRESOLVED` uses
+    /// (WP-P B4).
+    ///
+    /// Written ONLY by [`adopt_projection_staleness`](Self::adopt_projection_staleness),
+    /// from an UNLOCKED post-publish re-projection — never from `finish_regen`,
+    /// which holds the single-writer lock and must not do worker IO.
+    projection_stale: BTreeMap<usize, ProjectionStale>,
+    /// The source-body geometry signatures each sketch's projections were last
+    /// checked against. A publish that leaves every source body's signature
+    /// unchanged skips the re-projection entirely, so the check costs nothing on
+    /// an edit that cannot possibly have moved a projected curve.
+    projection_checked: BTreeMap<SketchId, BTreeMap<BodyId, Signature>>,
     /// The lock-free fencing tokens (revision + worker epoch). See [`FencingCell`].
     fencing: Arc<FencingCell>,
     /// Identity of THIS runtime object, minted per construction and never reused.
@@ -722,6 +736,8 @@ impl DocumentRuntime {
             mesh_cache: MeshCache::new(),
             cached_meshes: HashMap::new(),
             preview_png: None,
+            projection_stale: BTreeMap::new(),
+            projection_checked: BTreeMap::new(),
             latest_snapshot: None,
             // No snapshot yet; `prepare_checkpoint` refuses before the first publish
             // regardless, and the first commit stamps the real value.
@@ -2990,7 +3006,191 @@ impl DocumentRuntime {
                 evidence: None,
             });
         }
+        // WP-P B4, merged on top for the same reason: a projection's staleness is
+        // a Rust-side verdict about the DOCUMENT, not a worker verdict about a
+        // terminal, so folding it into the per-snapshot map would let an unrelated
+        // republish clear it. It is a WARNING — the projected geometry is still
+        // exactly what it was, it has simply stopped agreeing with its source, and
+        // the user decides whether to update or detach.
+        if let Some(item) = self.projection_stale.get(&index) {
+            out.push(onecad_core::regen::Diagnostic {
+                severity: onecad_core::regen::Severity::Warning,
+                code: PROJECTION_STALE_CODE.to_string(),
+                message: item.message.clone(),
+                stage: None,
+                reason_code: Some(PROJECTION_STALE_CODE.to_string()),
+                evidence: None,
+            });
+        }
         out
+    }
+
+    // ── Projected-geometry staleness (WP-P B4) ───────────────────────────────
+
+    /// The per-sketch re-projection work a just-published snapshot owes.
+    ///
+    /// Returns one [`ProjectionProbe`] per sketch that (a) has a non-empty
+    /// [`projections`](onecad_core::sketch::Sketch::projections) map and (b) has at
+    /// least one SOURCE BODY whose geometry signature differs from the one the
+    /// last completed check for that sketch answered against. A publish that moved
+    /// none of a sketch's source bodies therefore costs zero worker round-trips.
+    ///
+    /// **Read-only.** The caller drives each probe with the lock RELEASED and
+    /// hands the verdict back to
+    /// [`adopt_projection_staleness`](Self::adopt_projection_staleness), which
+    /// re-checks the head before writing anything.
+    #[must_use]
+    pub fn projection_probes(&self) -> Vec<ProjectionProbe> {
+        let Some(snapshot) = self.latest_snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let live: BTreeMap<BodyId, Signature> = snapshot
+            .bodies
+            .iter()
+            .map(|b| (b.body, b.signature.clone()))
+            .collect();
+        let mut out = Vec::new();
+        for sketch in self.session.document().sketches.values() {
+            if sketch.projections.is_empty() {
+                continue;
+            }
+            let signatures: BTreeMap<BodyId, Signature> = sketch
+                .projections
+                .values()
+                .filter_map(|src| live.get_key_value(&src.source_body))
+                .map(|(body, sig)| (*body, sig.clone()))
+                .collect();
+            // A source body that has VANISHED from the snapshot leaves no signature
+            // to compare, so it can never be "unchanged": the probe runs and the
+            // ladder miss comes back as `absent`, which is the stale verdict. That
+            // is deliberate — a vanished source must be reported, never re-bound.
+            let all_present = sketch
+                .projections
+                .values()
+                .all(|src| live.contains_key(&src.source_body));
+            if all_present && self.projection_checked.get(&sketch.id) == Some(&signatures) {
+                continue;
+            }
+            out.push(ProjectionProbe {
+                sketch: sketch.id,
+                snapshot: snapshot.id,
+                plane: sketch.plane,
+                sources: sketch
+                    .projections
+                    .iter()
+                    .map(|(entity, src)| (*entity, src.clone()))
+                    .collect(),
+                signatures,
+            });
+        }
+        out
+    }
+
+    /// Records one probe's verdict: the entities whose re-projected `projectedHash`
+    /// no longer matches the one committed with them.
+    ///
+    /// **Drops its own result if the head moved.** A slow re-check answers against
+    /// a snapshot that may no longer exist by the time it returns, and reporting
+    /// staleness against a vanished head is worse than reporting nothing: the next
+    /// publish re-probes anyway. Returns `true` when the verdict was adopted.
+    pub fn adopt_projection_staleness(
+        &mut self,
+        probe: &ProjectionProbe,
+        stale: Vec<EntityId>,
+    ) -> bool {
+        if self.latest_snapshot.as_ref().map(|s| s.id) != Some(probe.snapshot) {
+            return false;
+        }
+        // The sketch may have been edited (or deleted) while the probe was out.
+        let Some(sketch) = self.session.document().sketches.get(&probe.sketch) else {
+            return false;
+        };
+        let stale: Vec<EntityId> = stale
+            .into_iter()
+            .filter(|e| sketch.projections.contains_key(e))
+            .collect();
+        self.projection_checked
+            .insert(probe.sketch, probe.signatures.clone());
+        let Some(index) = self.sketch_step_index(probe.sketch) else {
+            // No timeline record yet (an unfinished sketch) — nowhere to hang the
+            // diagnostic. The signature is still recorded, so the next real edit
+            // re-probes.
+            return true;
+        };
+        if stale.is_empty() {
+            self.projection_stale.remove(&index);
+            return true;
+        }
+        let message = format!(
+            "{} projected {} in this sketch no longer {} its source geometry — update the \
+             projection to re-cut it, or detach it to keep the current shape",
+            stale.len(),
+            if stale.len() == 1 {
+                "entity"
+            } else {
+                "entities"
+            },
+            if stale.len() == 1 { "matches" } else { "match" },
+        );
+        self.projection_stale.insert(
+            index,
+            ProjectionStale {
+                sketch: probe.sketch,
+                entities: stale,
+                message,
+            },
+        );
+        true
+    }
+
+    /// Drops a sketch's staleness verdict and its checked-signature baseline, so
+    /// the next publish re-probes from scratch (`update_projection` /
+    /// `detach_projection`).
+    pub fn clear_projection_staleness(&mut self, sketch: SketchId) {
+        self.projection_checked.remove(&sketch);
+        if let Some(index) = self.sketch_step_index(sketch) {
+            self.projection_stale.remove(&index);
+        }
+    }
+
+    /// The stale-projection verdict for a sketch, if the last completed check
+    /// found one (introspection / tests).
+    #[must_use]
+    pub fn projection_stale_entities(&self, sketch: SketchId) -> Vec<EntityId> {
+        self.projection_stale
+            .values()
+            .find(|item| item.sketch == sketch)
+            .map(|item| item.entities.clone())
+            .unwrap_or_default()
+    }
+
+    /// The timeline index of a sketch's own `Sketch` record, if it has one.
+    fn sketch_step_index(&self, sketch: SketchId) -> Option<usize> {
+        self.session.document().timeline.records().iter().position(
+            |r| matches!(&r.op, Operation::Known(KnownOperation::Sketch(p)) if p.sketch == sketch),
+        )
+    }
+
+    /// Applies a sketch edit that is only valid against the snapshot the picks
+    /// behind it were taken from (WP-P).
+    ///
+    /// The fence is the point: promote → project → commit must be atomic with
+    /// respect to the head, or a projection captured against one head lands in a
+    /// sketch belonging to another and mints a `projectedHash` baseline that can
+    /// never afterwards be detected as wrong.
+    ///
+    /// # Errors
+    /// [`EngineError::OpFailed`] with `RefUnresolved` when the head moved, or the
+    /// edit layer's own refusal.
+    pub fn apply_sketch_edit_fenced(
+        &mut self,
+        snapshot: SnapshotId,
+        sketch: SketchId,
+        ops: Vec<SketchEditOp>,
+    ) -> Result<CommandOutcome, EngineError> {
+        self.gate_stale_pick(snapshot)?;
+        self.apply(EditCommand::SketchEdit { sketch, ops })
+            .map_err(|e| op_failed(e.to_string()))
     }
 
     // ── Sketch solver lane (SCHEMA §7.4) ─────────────────────────────────────
@@ -3046,6 +3246,7 @@ impl DocumentRuntime {
             // Same projection for the per-entity state: entering a sketch colours
             // its pinned-down entities without waiting for the next upsert.
             entity_states: solved.entity_states,
+            projections: crate::sketch_projection::projections_dto(&sketch),
         })
     }
 
@@ -3080,6 +3281,7 @@ impl DocumentRuntime {
             // Likewise no per-entity evidence: empty means "nothing to say"
             // (SCHEMA §7.4), which is exactly true of a cache-backed read.
             entity_states: crate::dto::EntityStates::new(),
+            projections: crate::sketch_projection::projections_dto(&sketch),
         })
     }
 
@@ -3801,6 +4003,82 @@ impl DocumentRuntime {
             return (0, 0);
         }
 
+        match self.rebind_entries(snapshot, &pending).await {
+            Ok(counts) => counts,
+            Err(()) => {
+                self.note_rebind_transport_failure();
+                (0, pending.len())
+            }
+        }
+    }
+
+    /// The persisted element entries a sketch's projections are sourced from
+    /// (WP-P). Only entries the current head still has a body for.
+    fn projection_source_entries(&self, sketch: SketchId) -> Vec<(ElementId, ElementEntry)> {
+        let Some(sketch) = self.session.document().sketch(sketch) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(ElementId, ElementEntry)> = Vec::new();
+        for source in sketch.projections.values() {
+            let id = &source.source_element_id;
+            if out.iter().any(|(existing, _)| existing == id) {
+                continue;
+            }
+            let Some(entry) = self.regen.elements.get(id) else {
+                continue;
+            };
+            if !entry.has_rebind_evidence() || !self.regen.bodies.contains(entry.body) {
+                continue;
+            }
+            out.push((id.clone(), entry.clone()));
+        }
+        out
+    }
+
+    /// Re-binds the elements a sketch projects from into the CURRENT head's
+    /// partition, through the same §7.5 ladder every other reference uses (WP-P).
+    ///
+    /// **Why this is needed at all.** The worker's element map is minted on
+    /// demand and is snapshot-scoped: a `TopoKey` is a 1-based ordinal, so a
+    /// regen that renumbers sub-shapes leaves a promoted `ElementId` naming
+    /// nothing. Re-projecting from it without this pass answers `absent` for
+    /// every source once the source body has been edited even once — which is
+    /// exactly when a projection most needs updating.
+    ///
+    /// **Only an `AutoBind` binds** (score ≥ 0.85, margin ≥ 0.10). Anything else
+    /// is left unbound, the re-projection answers `absent`, and the projection is
+    /// reported STALE. Binding a best guess here would be the silent wrong-bind
+    /// this migration exists to eliminate: the projected geometry would silently
+    /// re-cut itself to a different edge.
+    ///
+    /// Returns `(bound, unresolved)`. A transport failure binds nothing and is
+    /// reported as unresolved rather than raised — the caller's next publish
+    /// retries.
+    ///
+    /// Worker IO, and it takes the runtime lock like the DI-4 re-bind it shares a
+    /// ladder with. The EXPENSIVE half of a projection refresh — the projection
+    /// itself — stays unlocked.
+    pub async fn rebind_projection_sources(&self, sketch: SketchId) -> (usize, usize) {
+        let Some(snapshot) = self.head_snapshot_id() else {
+            return (0, 0);
+        };
+        let pending = self.projection_source_entries(sketch);
+        if pending.is_empty() {
+            return (0, 0);
+        }
+        self.rebind_entries(snapshot, &pending)
+            .await
+            .unwrap_or((0, pending.len()))
+    }
+
+    /// Resolves `pending` through the §7.5 ladder against `snapshot` and installs
+    /// ONLY the `AutoBind`s. `Err(())` is a transport failure (the ladder never
+    /// answered), which the caller distinguishes from "the ladder said no".
+    async fn rebind_entries(
+        &self,
+        snapshot: SnapshotId,
+        pending: &[(ElementId, ElementEntry)],
+    ) -> Result<(usize, usize), ()> {
         // The ref is authored exactly like a stored op input: last-known identity in
         // `primary`, the frozen worker descriptor in `intent`, and the pick anchor.
         // Passing the anchor alone would be an EMPTY ref for most entries — the
@@ -3847,8 +4125,7 @@ impl DocumentRuntime {
                     pending = pending.len(),
                     "rebind: ladder resolution failed; persisted element ids stay unbound"
                 );
-                self.note_rebind_transport_failure();
-                return (0, pending.len());
+                return Err(());
             }
         };
 
@@ -3894,8 +4171,7 @@ impl DocumentRuntime {
                     error = %err,
                     "rebind: BindElementIds failed; persisted element ids stay unbound"
                 );
-                self.note_rebind_transport_failure();
-                return (0, pending.len());
+                return Err(());
             }
         }
         if unresolved > 0 {
@@ -3906,7 +4182,7 @@ impl DocumentRuntime {
                 "rebind: some persisted element ids did not resolve confidently and stay unbound"
             );
         }
-        (bound, unresolved)
+        Ok((bound, unresolved))
     }
 
     /// A transport failure re-arms [`rebind_persisted_elements`] for the next
@@ -3963,6 +4239,28 @@ impl DocumentRuntime {
     }
 
     // ── Sketch-flow helpers ──────────────────────────────────────────────────
+
+    /// A CLONE of the named sketch — plane, entities, constraints and the WP-P
+    /// provenance map — for authoring commands that must do worker IO with the
+    /// runtime lock released.
+    ///
+    /// # Errors
+    /// [`EngineError`] when the sketch does not exist.
+    pub fn sketch_snapshot(&self, id: SketchId, verb: &str) -> Result<Sketch, EngineError> {
+        self.sketch_or_err(id, verb)
+    }
+
+    /// True when a drag gesture is open on `sketch`.
+    ///
+    /// A projection commit rewrites the sketch body wholesale; landing that under
+    /// an open gesture would make `EndGesture` apply solved drag positions onto a
+    /// sketch that no longer has the entities it was solving.
+    #[must_use]
+    pub fn has_active_gesture(&self, sketch: SketchId) -> bool {
+        self.active_gesture
+            .as_ref()
+            .is_some_and(|g| g.sketch_id == sketch)
+    }
 
     fn sketch_or_err(&self, id: SketchId, verb: &str) -> Result<Sketch, EngineError> {
         self.session
@@ -4322,6 +4620,44 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
             );
         }
     }
+}
+
+/// The projection diagnostic `code` for a sketch whose projected geometry no
+/// longer matches the model it was projected from (WP-P B4). Rust-minted and
+/// projection-only — it never crosses the OCW1 wire, so it adds nothing to the
+/// SCHEMA §8 taxonomy the worker speaks.
+pub const PROJECTION_STALE_CODE: &str = "PROJECTION_STALE";
+
+/// One sketch's stale-projection verdict (WP-P B4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionStale {
+    /// The sketch the projected entities live in.
+    pub sketch: SketchId,
+    /// The projected entities whose geometry stopped matching their source.
+    pub entities: Vec<EntityId>,
+    /// The user-facing reason, merged into the sketch step's diagnostics.
+    pub message: String,
+}
+
+/// One sketch's projection re-check request (WP-P B4).
+///
+/// Captured under the runtime lock, driven with it RELEASED, then handed back to
+/// [`DocumentRuntime::adopt_projection_staleness`], which re-checks the head
+/// before writing anything.
+#[derive(Debug, Clone)]
+pub struct ProjectionProbe {
+    /// The sketch being re-checked.
+    pub sketch: SketchId,
+    /// The head this probe was captured against. The verdict is DROPPED if the
+    /// head has moved by the time it comes back.
+    pub snapshot: SnapshotId,
+    /// The sketch's frozen plane — authoritative for the re-projection, exactly as
+    /// it was for the original one.
+    pub plane: onecad_core::sketch::SketchPlane,
+    /// `(entity, its committed source + hash)` in map order.
+    pub sources: Vec<(EntityId, onecad_core::sketch::ProjectedSource)>,
+    /// The source-body geometry signatures this probe answers against.
+    pub signatures: BTreeMap<BodyId, Signature>,
 }
 
 /// The projection diagnostic `code` for a step whose `Scalar` expression cannot

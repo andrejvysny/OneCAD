@@ -2798,9 +2798,15 @@ fn want_body(r: &InputRef) -> Result<BodyId, DomainError> {
 /// mutation, so the batch is atomic and the caller's memento/inverse is never
 /// captured for a rejected edit. Adding a constraint against locked geometry is
 /// deliberately NOT guarded (that is how a profile snaps to the face boundary).
+///
+/// [`SketchEditOp::SetEntityReferenceLocked`] is the ONE op that is exempt: it is
+/// the named exit from the lock (WP-P detach). Everything else stays absolute, so
+/// unlocking is always an explicit, undoable step and never a side effect. Ops
+/// apply IN ORDER, so a batch may unlock and then edit within one transaction.
 fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, DomainError> {
     let mut entities: Vec<SketchEntity> = prior.entities().to_vec();
     let mut constraints: Vec<Constraint> = prior.constraints().to_vec();
+    let mut projections = prior.projections.clone();
 
     let locked = |entities: &[SketchEntity], id: crate::ids::EntityId| -> Result<(), DomainError> {
         match entities.iter().find(|e| e.id() == id) {
@@ -2868,9 +2874,27 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
                     .ok_or_else(|| DomainError::Validation(format!("entity {entity} not found")))?;
                 *e = entity_with_construction(e, *construction);
             }
+            SketchEditOp::SetEntityReferenceLocked { entity, locked } => {
+                let e = entities
+                    .iter_mut()
+                    .find(|e| e.id() == *entity)
+                    .ok_or_else(|| DomainError::Validation(format!("entity {entity} not found")))?;
+                e.set_reference_locked(*locked);
+            }
+            SketchEditOp::SetEntityProjection { entity, source } => {
+                if !entities.iter().any(|e| e.id() == *entity) {
+                    return Err(DomainError::Validation(format!(
+                        "entity {entity} not found"
+                    )));
+                }
+                match source {
+                    Some(source) => projections.insert(*entity, source.clone()),
+                    None => projections.remove(entity),
+                };
+            }
         }
     }
-    rebuild_sketch(prior, entities, constraints)
+    rebuild_sketch(prior, entities, constraints, projections)
 }
 
 /// `seed` plus, to a fixpoint, every entity that transitively references it —
@@ -2919,6 +2943,7 @@ fn rebuild_sketch(
     prior: &Sketch,
     entities: Vec<SketchEntity>,
     constraints: Vec<Constraint>,
+    projections: BTreeMap<crate::ids::EntityId, crate::sketch::ProjectedSource>,
 ) -> Result<Sketch, DomainError> {
     let mut s = Sketch::new(prior.id, prior.name.clone(), prior.attachment.clone());
     s.plane = prior.plane;
@@ -2930,6 +2955,12 @@ fn rebuild_sketch(
     for c in constraints {
         s.add_constraint(c).map_err(sketch_err)?;
     }
+    // A cascade-removed entity takes its provenance row with it: the map must
+    // never name an entity the sketch does not have (WP-P).
+    s.projections = projections
+        .into_iter()
+        .filter(|(id, _)| s.contains_entity(*id))
+        .collect();
     Ok(s)
 }
 
@@ -3511,6 +3542,175 @@ mod tests {
             moved.get_entity(eid(2)).unwrap(),
             SketchEntity::Point { at, .. } if [at.x, at.y] == [3.0, 4.0]
         ));
+    }
+
+    /// WP-P B2: the unlock op is the ONE exit from the lock, and a batch may
+    /// unlock and then edit in the same transaction (ops apply in order).
+    #[test]
+    fn the_unlock_op_is_the_only_way_out_of_reference_locked() {
+        let s = locked_sketch();
+
+        // Unlock alone — the flag flips, nothing else moves.
+        let unlocked = apply_sketch_ops(
+            &s,
+            &[SketchEditOp::SetEntityReferenceLocked {
+                entity: eid(3),
+                locked: false,
+            }],
+        )
+        .expect("the unlock op is exempt from the lock guard");
+        assert!(!unlocked.get_entity(eid(3)).unwrap().is_reference_locked());
+        assert!(
+            unlocked.get_entity(eid(1)).unwrap().is_reference_locked(),
+            "only the named entity is unlocked"
+        );
+
+        // Unlock THEN edit, in one batch — the guard sees the working state, so
+        // the second op is no longer refused.
+        let flipped = apply_sketch_ops(
+            &s,
+            &[
+                SketchEditOp::SetEntityReferenceLocked {
+                    entity: eid(3),
+                    locked: false,
+                },
+                SketchEditOp::SetEntityConstruction {
+                    entity: eid(3),
+                    construction: true,
+                },
+            ],
+        )
+        .expect("an unlocked entity accepts a construction flip");
+        assert!(flipped.get_entity(eid(3)).unwrap().is_construction());
+
+        // Order matters: the same pair the other way round is still refused.
+        assert!(apply_sketch_ops(
+            &s,
+            &[
+                SketchEditOp::SetEntityConstruction {
+                    entity: eid(3),
+                    construction: true,
+                },
+                SketchEditOp::SetEntityReferenceLocked {
+                    entity: eid(3),
+                    locked: false,
+                },
+            ],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_unlock_op_rejects_an_unknown_entity() {
+        let s = locked_sketch();
+        assert!(matches!(
+            apply_sketch_ops(
+                &s,
+                &[SketchEditOp::SetEntityReferenceLocked {
+                    entity: eid(999),
+                    locked: false,
+                }]
+            ),
+            Err(DomainError::Validation(_))
+        ));
+    }
+
+    fn projected_source(hash: &str) -> crate::sketch::ProjectedSource {
+        crate::sketch::ProjectedSource {
+            source_body: crate::ids::BodyId(uuid::Uuid::from_u128(0xB0D1)),
+            source_element_id: crate::ids::ElementId::new("el_edge_7"),
+            source_kind: crate::document::refs::ElementKind::Edge,
+            source_ordinal: 0,
+            projected_hash: hash.to_string(),
+        }
+    }
+
+    /// WP-P: the provenance map is written, replaced and cleared through ops, so
+    /// project / update / detach each ride ONE undoable transaction.
+    #[test]
+    fn projection_rows_are_set_replaced_and_cleared_by_ops() {
+        let s = locked_sketch();
+
+        let set = apply_sketch_ops(
+            &s,
+            &[SketchEditOp::SetEntityProjection {
+                entity: eid(3),
+                source: Some(projected_source("aaaaaaaaaaaaaaaa")),
+            }],
+        )
+        .unwrap();
+        assert_eq!(set.projections[&eid(3)].projected_hash, "aaaaaaaaaaaaaaaa");
+
+        let replaced = apply_sketch_ops(
+            &set,
+            &[SketchEditOp::SetEntityProjection {
+                entity: eid(3),
+                source: Some(projected_source("bbbbbbbbbbbbbbbb")),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            replaced.projections[&eid(3)].projected_hash,
+            "bbbbbbbbbbbbbbbb"
+        );
+
+        let cleared = apply_sketch_ops(
+            &replaced,
+            &[SketchEditOp::SetEntityProjection {
+                entity: eid(3),
+                source: None,
+            }],
+        )
+        .unwrap();
+        assert!(cleared.projections.is_empty());
+    }
+
+    #[test]
+    fn a_projection_row_cannot_name_an_entity_the_sketch_lacks() {
+        let s = locked_sketch();
+        assert!(matches!(
+            apply_sketch_ops(
+                &s,
+                &[SketchEditOp::SetEntityProjection {
+                    entity: eid(999),
+                    source: Some(projected_source("aaaaaaaaaaaaaaaa")),
+                }]
+            ),
+            Err(DomainError::Validation(_))
+        ));
+    }
+
+    /// A removed entity takes its provenance row with it — the full detach
+    /// sequence (clear the row, unlock, remove) leaves nothing behind, and so
+    /// does an unlock-then-remove that forgets to clear the row.
+    #[test]
+    fn removing_an_entity_drops_its_projection_row() {
+        let s = apply_sketch_ops(
+            &locked_sketch(),
+            &[SketchEditOp::SetEntityProjection {
+                entity: eid(3),
+                source: Some(projected_source("aaaaaaaaaaaaaaaa")),
+            }],
+        )
+        .unwrap();
+        assert_eq!(s.projections.len(), 1);
+
+        let gone = apply_sketch_ops(
+            &s,
+            &[
+                SketchEditOp::SetEntityReferenceLocked {
+                    entity: eid(3),
+                    locked: false,
+                },
+                SketchEditOp::RemoveEntity { entity: eid(3) },
+            ],
+        )
+        .unwrap();
+        assert!(gone.get_entity(eid(3)).is_none());
+        assert!(
+            gone.projections.is_empty(),
+            "the map may never name an entity the sketch does not have"
+        );
     }
 
     #[test]

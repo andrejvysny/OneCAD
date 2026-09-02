@@ -79,6 +79,91 @@ verifiers OK · kernelbench T0 compare + full e2e: see the TODO.md row (running 
 
 ---
 
+# Handoff — DAILY DRIVER v2, paused mid-WP-P by user order
+
+Session 23 · 2026-09-02
+
+> Program plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md` (state review,
+> capability inventory, all WP designs, Codex + adversarial review deltas, execution log).
+> FIVE work packages committed on `master` this session, each behind a measured full-L3 gate:
+> `3a82910` WP0 hygiene · `a60da42` WP-C vendor STEP components · `e7010ce` WP-E
+> expressions+units · `1d7b4a0` WP-V section view · `a38b940` WP-T1 cosmetic threads.
+> WP-P (project edges) is TWO-THIRDS LANDED and deliberately UNCOMMITTED — the user ordered
+> a stop when its two implementers finished.
+
+## Goal
+
+DAILY DRIVER v2: user-chosen capability program (order WP0 → C → E → V → T1 → P → S → T2 →
+L → X) for print + machined daily-driver value. Sweep/Loft are APPROVED (reversal recorded).
+Loft is the first cut if the program slips, then T2.
+
+## Done so far (and why) — headlines; every gate row with measured numbers is in TODO.md
+
+- **WP0** — pushed the 4 stale commits, restaged the stale sidecar, autosave durability trio,
+  regen timing split + 40-feature baseline. FINDING: every edit replays from step 0
+  (checkpoints only on explicit save; ~10 ms/step) — next-program candidate.
+- **WP-C** — `PlaceComponent source.kind="profile"` (length-parametric extrusion of a
+  canonical face) + §7.8 `ExtractPrismProfile`; first `embedded`-package writer; revision-hash
+  fix; headless ingest core + `onecad-library-ingest` CLI + FE Import-components dialog.
+  6/7 vendor STEP files ingest; NEMA17 refuses honestly (self-intersecting envelope solids).
+- **WP-E** — expressions with chained variables, unit suffixes, trig-requires-angle; the
+  expression STRING stripped from the planner hash AND the wire (Opaque untouched, goldens
+  unmoved); edit-scoped validation; `EXPR_UNRESOLVED` diagnostics; `rename_variable` as one
+  undo step; TS-port parity 64/64 on the shared 53-case fixture; detach clears placement
+  bindings (adversarial F1, reproduced then fixed).
+- **WP-V** — stencil-capped section view (⇧X, three world planes, offset seeded from scene
+  bounds, highlights/ghosts clipped, clip-aware picking, WebGPU refused); stencil algebra
+  hand-verified in review; two HIGH review findings fixed red-first.
+- **WP-T1** — `Hole.thread` metadata with the SHIPPED `cosmetic|simplified|modeled`
+  vocabulary; Option B (`diameter` IS the drill; FE fills tap-drill); byte-identity pinned by
+  a pre-field golden `cf8f35ac…`; worker refuses non-cosmetic by name.
+- **WP-P (uncommitted)** — P1 worker + P2 Rust landed and green by their package gates
+  (ctest 164/164 · `project_edges` 3/3 real-worker, orchestrator re-verified · workspace
+  1469/0). Full decision/deviation/defect record: TODO.md § "WP-P project edges".
+- **Process:** every wire change was protocol-audited BEFORE code; kernel/identity diffs got
+  fresh-context adversarial reviews (they caught real defects in WP-C, WP-E, WP-V — all fixed
+  red-first); every gate number in TODO.md was measured on the main thread, suites alone.
+
+## Dead-ends / rulings (do not re-litigate)
+
+- `imports.rs` `unit_scale = 1.0` is CORRECT (the STEP reader converts to mm) — plan claim retracted.
+- WP-E hash strip: typed path only; a JSON-level strip would weaken Opaque hashing.
+- Trimmed tilted arcs REFUSED in WP-P (wire Ellipse is full-only everywhere); edge-on circles
+  are answers (2r line / endpoint chord); thresholds radius-relative.
+- The WP-E commit split (strip as its own commit) was abandoned — a hunk split would have made
+  a red intermediate; the revert recipe is in TODO.md instead.
+- `modelled` spelling rejected: the wire already ships `modeled`.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume". Read `CURRENT_STATE.md` head, then TODO.md
+   § "DAILY DRIVER v2" (top) — the WP-P section carries the exact FE command shapes P3 must
+   match and the owed list.
+2. The tree holds WP-P P1+P2 (19 modified + 10 new files, 2,718 insertions). Do NOT commit
+   until: P3 FE lands, the adversarial review of the staleness/re-bind half passes, and the
+   orchestrator re-runs FULL L3 (expect ctest 164, suite counts in TODO.md). Sidecar is
+   staged and current (`2a86c2d3…`, verb present).
+3. Environment notes: an Opus subagent 429'd on the monthly spend limit once (recovered);
+   C++ edits must go through Bash (the `auto-format.sh` hook reflows C++; no `.clang-format`);
+   tee every heavy run; suites alone.
+
+## Open questions (user)
+
+- Dogfood parts for WP-X (defaults proposed: NEMA17 mount on a 20×20 Rollco frame; SG90 bracket).
+- NEMA17: cleaner vendor file, or seed the worker's existing `nema17` frame generator?
+- `.clang-format` with `DisableFormat: true` — yes/no?
+- Push authorization for the five program commits (5 ahead of origin).
+- Owed user-run gates unchanged: 19-row `MANUAL_RELEASE_GATES.md`, Tauri sketch smoke
+  (now incl. per-entity tint + section view + threaded holes), dirty vendor STEP for G4.
+
+## Pointers
+
+- Tasks → TODO.md (§ DAILY DRIVER v2) · Snapshot → CURRENT_STATE.md ·
+  Plan → `~/.claude/plans/act-as-senior-software-abstract-eclipse.md` ·
+  Audited WP designs → session scratchpad (`wpt1-`/`wpp-protocol-audit.md`, `wpc-protocol-audit.md`)
+
+---
+
 # Handoff — Kernel Continuation RESUMED and (nearly) completed
 
 Session 22 · 2026-08-20

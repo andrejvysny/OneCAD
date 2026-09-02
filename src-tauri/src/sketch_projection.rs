@@ -1,0 +1,1006 @@
+//! Pure planning for projected sketch geometry (WP-P; SCHEMA §7.6
+//! `ProjectToSketchPlane`).
+//!
+//! **No worker, no lock, no document mutation.** Everything here turns a
+//! [`Sketch`] plus a fresh projection result into a batch of [`SketchEditOp`]s the
+//! caller applies as ONE undoable transaction, or into the list of entities whose
+//! projected geometry has gone stale. The commands in [`crate::api`] own the IO
+//! and the fencing; this module owns the reasoning, so it is unit-testable
+//! without a worker.
+//!
+//! ## Re-association is by `(source element, ordinal)`, never by shape
+//!
+//! SCHEMA §7.6 makes emission order normative, and
+//! [`ProjectedSource::source_ordinal`] freezes each entity's index within its
+//! source's run at commit time. Matching on that pair is what lets an update keep
+//! the existing `EntityId`s when a box wall merely moved: every user constraint
+//! hung off the projected line survives, and no derived `regionId` changes.
+//!
+//! Matching on GEOMETRY instead would be a guess, and a wrong guess here is the
+//! silent-wrong-bind class this migration exists to remove. So a row whose
+//! re-projection came back a different entity TYPE, or did not come back at all,
+//! is reported as a `topologyChanged` refusal and left stale — the user detaches
+//! or re-projects, and nothing is rebound behind their back.
+
+use std::collections::BTreeMap;
+
+use onecad_core::document::refs::ElementKind;
+use onecad_core::edit::SketchEditOp;
+use onecad_core::ids::{BodyId, EntityId};
+use onecad_core::math::Vec2;
+use onecad_core::sketch::{
+    Constraint, ProjectedEntity, ProjectedGeometry, ProjectedSource, Sketch, SketchEntity,
+};
+
+use crate::dto::ProjectedSourceDto;
+use crate::worker::wire::{body_id_wire, ProjectionMode, ProjectionRefusal, ProjectionSourceKind};
+
+/// Rust's own per-source refusal code, minted when a re-projection no longer
+/// matches the committed run. It sits in the same `refusals` list as the worker's
+/// six codes because it is the same KIND of answer — "this one source did not come
+/// through, here is why" — and never becomes a whole-call error.
+pub const TOPOLOGY_CHANGED: &str = "topologyChanged";
+
+/// A projected entity's committed geometry, keyed for re-association.
+type SourceKey = (BodyId, String, u32);
+
+fn key_of(source: &ProjectedSource) -> SourceKey {
+    (
+        source.source_body,
+        source.source_element_id.as_str().to_string(),
+        source.source_ordinal,
+    )
+}
+
+/// The `(mode, sources)` calls needed to re-project a sketch's provenance rows.
+///
+/// An EDGE source is re-requested with `mode:"edges"` and a FACE source with
+/// `mode:"faceOutline"`; sending the other one comes back as a `kindMismatch`
+/// refusal, which is why the kind is persisted rather than assumed. Sources are
+/// de-duplicated (a `faceOutline` face owns several entities) and ordered
+/// deterministically by the sketch's own map order.
+#[must_use]
+pub fn projection_request_plan(sketch: &Sketch) -> Vec<(ProjectionMode, Vec<(BodyId, String)>)> {
+    let mut out = Vec::new();
+    for (mode, kind) in [
+        (ProjectionMode::Edges, ElementKind::Edge),
+        (ProjectionMode::FaceOutline, ElementKind::Face),
+    ] {
+        let mut seen: Vec<(BodyId, String)> = Vec::new();
+        for source in sketch.projections.values() {
+            if source.source_kind != kind {
+                continue;
+            }
+            let entry = (
+                source.source_body,
+                source.source_element_id.as_str().to_string(),
+            );
+            if !seen.contains(&entry) {
+                seen.push(entry);
+            }
+        }
+        if !seen.is_empty() {
+            out.push((mode, seen));
+        }
+    }
+    out
+}
+
+/// The wire `kind` token for an [`ElementKind`] on this verb.
+#[must_use]
+pub fn source_kind_wire(kind: ElementKind) -> ProjectionSourceKind {
+    match kind {
+        ElementKind::Face => ProjectionSourceKind::Face,
+        _ => ProjectionSourceKind::Edge,
+    }
+}
+
+/// One fresh projection result, flattened for lookup.
+struct Fresh<'a> {
+    by_key: BTreeMap<SourceKey, (&'a ProjectedGeometry, usize)>,
+    refused: Vec<(BodyId, String)>,
+}
+
+impl<'a> Fresh<'a> {
+    fn build(results: &'a [(ProjectedGeometry, Vec<ProjectionRefusal>)]) -> Self {
+        let mut by_key = BTreeMap::new();
+        let mut refused = Vec::new();
+        for (geometry, refusals) in results {
+            for (index, source) in geometry.entity_sources.iter().enumerate() {
+                by_key.insert(key_of(source), (geometry, index));
+            }
+            for refusal in refusals {
+                if let Ok(body) = crate::worker::wire::parse_body_id(&refusal.body_id) {
+                    refused.push((body, refusal.element_id.clone()));
+                }
+            }
+        }
+        Self { by_key, refused }
+    }
+
+    fn was_refused(&self, source: &ProjectedSource) -> bool {
+        self.refused
+            .iter()
+            .any(|(b, e)| *b == source.source_body && e == source.source_element_id.as_str())
+    }
+}
+
+/// The entities whose re-projected geometry no longer matches the hash committed
+/// with them (WP-P B4).
+///
+/// A source that VANISHED (a ladder miss, or a per-source `absent` refusal) counts
+/// as stale too, and deliberately so: the projection is reported, never re-bound
+/// to whatever now occupies that ordinal.
+///
+/// The comparison is on `projectedHash` alone — the projected UV geometry — so a
+/// source body that merely slid along the sketch normal is NOT stale. That is
+/// correct for a projection: the question is whether the picture in this sketch
+/// changed, not whether the model did.
+#[must_use]
+pub fn stale_projected_entities(
+    rows: &[(EntityId, ProjectedSource)],
+    results: &[(ProjectedGeometry, Vec<ProjectionRefusal>)],
+) -> Vec<EntityId> {
+    let fresh = Fresh::build(results);
+    rows.iter()
+        .filter(|(_, source)| match fresh.by_key.get(&key_of(source)) {
+            Some((geometry, index)) => {
+                geometry.entity_sources[*index].projected_hash != source.projected_hash
+            }
+            None => true,
+        })
+        .map(|(entity, _)| *entity)
+        .collect()
+}
+
+/// One replaced projected entity, for the command's DTO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacedEntity {
+    /// The entity that was updated in place (its id is UNCHANGED).
+    pub entity: EntityId,
+    /// The SCHEMA §7.6 type token.
+    pub entity_type: &'static str,
+    /// The source body, `body_<uuid>` wire form.
+    pub source_body_id: String,
+    /// The source element id.
+    pub source_element_id: String,
+    /// The refreshed hash now serving as the staleness baseline.
+    pub projected_hash: String,
+}
+
+/// The batch an `update_projection` should apply.
+#[derive(Debug, Default)]
+pub struct ProjectionUpdatePlan {
+    /// The ops, in apply order. Empty when nothing moved.
+    pub ops: Vec<SketchEditOp>,
+    /// The entities whose geometry was replaced.
+    pub replaced: Vec<ReplacedEntity>,
+    /// Rows that could not be re-associated, as per-source refusals.
+    pub refusals: Vec<ProjectionRefusal>,
+}
+
+/// Plans the in-place replacement of every projected entity whose geometry moved.
+///
+/// Returns an EMPTY plan when nothing changed — a re-projection that agrees with
+/// the committed hashes must not enter the undo stack.
+#[must_use]
+pub fn build_projection_update(
+    sketch: &Sketch,
+    results: &[(ProjectedGeometry, Vec<ProjectionRefusal>)],
+) -> ProjectionUpdatePlan {
+    let fresh = Fresh::build(results);
+    let mut plan = ProjectionUpdatePlan::default();
+
+    // Target positions per projected POINT, de-duplicated: a corner point is
+    // shared by the two lines that meet there, and both would name it.
+    let mut moves: BTreeMap<EntityId, Vec2> = BTreeMap::new();
+    // Curves whose OWN scalars (radius / angles / radii) changed and therefore
+    // cannot be updated by moving a point.
+    let mut rebuilt: Vec<SketchEntity> = Vec::new();
+    let mut sources: Vec<(EntityId, ProjectedSource)> = Vec::new();
+
+    for (entity_id, old) in &sketch.projections {
+        let Some(existing) = sketch.get_entity(*entity_id) else {
+            continue; // the map cannot name a missing entity; defence in depth.
+        };
+        let Some((geometry, index)) = fresh.by_key.get(&key_of(old)).copied() else {
+            if !fresh.was_refused(old) {
+                plan.refusals.push(topology_changed(*entity_id, old));
+            }
+            continue;
+        };
+        let new_source = geometry.entity_sources[index].clone();
+        if new_source.projected_hash == old.projected_hash {
+            continue;
+        }
+        let Some((point_moves, rebuild)) =
+            replace_in_place(existing, &geometry.entities[index], &geometry.points)
+        else {
+            plan.refusals.push(topology_changed(*entity_id, old));
+            continue;
+        };
+        // Only points that ACTUALLY moved: a re-projection that shifts one wall
+        // still names both endpoints of every line it touches, and unlocking,
+        // re-pinning and re-locking a point at the coordinate it already has is
+        // three ops of pure churn in the undo entry.
+        moves.extend(point_moves.into_iter().filter(|(id, at)| {
+            sketch
+                .get_entity(*id)
+                .is_none_or(|e| !matches!(e, SketchEntity::Point { at: now, .. } if now == at))
+        }));
+        if let Some(entity) = rebuild {
+            rebuilt.push(entity);
+        }
+        plan.replaced.push(ReplacedEntity {
+            entity: *entity_id,
+            entity_type: type_token(existing),
+            source_body_id: crate::worker::wire::body_id_wire(new_source.source_body),
+            source_element_id: new_source.source_element_id.as_str().to_string(),
+            projected_hash: new_source.projected_hash.clone(),
+        });
+        sources.push((*entity_id, new_source));
+    }
+
+    if moves.is_empty() && rebuilt.is_empty() {
+        return plan;
+    }
+
+    // ── Points: unlock → move → re-pin the `Fixed` at the new UV → re-lock ──
+    let locked_points: Vec<EntityId> = moves
+        .keys()
+        .copied()
+        .filter(|id| {
+            sketch
+                .get_entity(*id)
+                .is_some_and(SketchEntity::is_reference_locked)
+        })
+        .collect();
+    for point in &locked_points {
+        plan.ops.push(SketchEditOp::SetEntityReferenceLocked {
+            entity: *point,
+            locked: false,
+        });
+    }
+    if !moves.is_empty() {
+        plan.ops.push(SketchEditOp::SetEntityPositions {
+            positions: moves.iter().map(|(id, at)| (*id, *at)).collect(),
+        });
+    }
+    // The pin holds the point at its OWN UV, so a moved point whose pin still
+    // names the old coordinate would be dragged straight back by the solver. The
+    // constraint id is reused: the batch removes it before re-adding it.
+    for constraint in sketch.constraints() {
+        let Constraint::Fixed {
+            id,
+            point,
+            point_position,
+            ..
+        } = constraint
+        else {
+            continue;
+        };
+        let Some(at) = moves.get(point) else { continue };
+        plan.ops
+            .push(SketchEditOp::RemoveConstraint { constraint: *id });
+        plan.ops.push(SketchEditOp::AddConstraint {
+            constraint: Constraint::Fixed {
+                id: *id,
+                point: *point,
+                point_position: *point_position,
+                at: *at,
+            },
+        });
+    }
+    for point in &locked_points {
+        plan.ops.push(SketchEditOp::SetEntityReferenceLocked {
+            entity: *point,
+            locked: true,
+        });
+    }
+
+    // ── Curves whose own scalars moved: remove + re-add under the SAME id ────
+    // There is no op that rewrites a curve's radius or angles, and minting a new
+    // id would break every constraint and region that names this one. The
+    // constraints the cascade drops are re-added verbatim after.
+    for entity in rebuilt {
+        let id = entity.id();
+        let dependents = sketch.dependents_of(id);
+        plan.ops.push(SketchEditOp::SetEntityReferenceLocked {
+            entity: id,
+            locked: false,
+        });
+        plan.ops.push(SketchEditOp::RemoveEntity { entity: id });
+        plan.ops.push(SketchEditOp::AddEntity { entity });
+        for constraint in dependents.constraints {
+            if let Some(c) = sketch.get_constraint(constraint) {
+                plan.ops.push(SketchEditOp::AddConstraint {
+                    constraint: c.clone(),
+                });
+            }
+        }
+    }
+
+    for (entity, source) in sources {
+        plan.ops.push(SketchEditOp::SetEntityProjection {
+            entity,
+            source: Some(source),
+        });
+    }
+    plan
+}
+
+fn topology_changed(entity: EntityId, source: &ProjectedSource) -> ProjectionRefusal {
+    ProjectionRefusal {
+        body_id: crate::worker::wire::body_id_wire(source.source_body),
+        element_id: source.source_element_id.as_str().to_string(),
+        topo_key: String::new(),
+        code: TOPOLOGY_CHANGED.to_string(),
+        message: format!(
+            "the re-projection of {} no longer matches the entity {entity} committed from it — \
+             detach it or re-project the source",
+            source.source_element_id.as_str()
+        ),
+    }
+}
+
+/// A point move (`entity`, new UV).
+type PointMove = (EntityId, Vec2);
+
+/// The point moves (and, when the curve's own scalars changed, the rebuilt curve)
+/// that turn `existing` into `projected`. `None` when the shapes are not the same
+/// KIND — that is a topology change, not an update.
+fn replace_in_place(
+    existing: &SketchEntity,
+    projected: &ProjectedEntity,
+    points: &[Vec2],
+) -> Option<(Vec<PointMove>, Option<SketchEntity>)> {
+    let at = |i: usize| points.get(i).copied();
+    match (existing, projected) {
+        (SketchEntity::Line { start, end, .. }, ProjectedEntity::Line { p0, p1 }) => {
+            Some((vec![(*start, at(*p0)?), (*end, at(*p1)?)], None))
+        }
+        (
+            SketchEntity::Circle {
+                id,
+                center,
+                radius,
+                construction,
+                ..
+            },
+            ProjectedEntity::Circle {
+                center: c,
+                radius: r,
+            },
+        ) => {
+            let moves = vec![(*center, at(*c)?)];
+            let rebuild = (radius != r)
+                .then(|| SketchEntity::circle(*id, *center, *r, *construction))
+                .flatten()
+                .map(|e| e.with_reference_locked(true));
+            Some((moves, rebuild))
+        }
+        (
+            SketchEntity::Arc {
+                id,
+                center,
+                radius,
+                start_angle,
+                end_angle,
+                construction,
+                ..
+            },
+            ProjectedEntity::Arc {
+                center: c,
+                radius: r,
+                start_angle: s,
+                end_angle: e,
+                ..
+            },
+        ) => {
+            let moves = vec![(*center, at(*c)?)];
+            let rebuild = (radius != r || start_angle != s || end_angle != e)
+                .then(|| SketchEntity::arc(*id, *center, *r, *s, *e, *construction))
+                .flatten()
+                .map(|e| e.with_reference_locked(true));
+            Some((moves, rebuild))
+        }
+        (
+            SketchEntity::Ellipse {
+                id,
+                center,
+                major_r,
+                minor_r,
+                rotation,
+                construction,
+                ..
+            },
+            ProjectedEntity::Ellipse {
+                center: c,
+                major_r: ma,
+                minor_r: mi,
+                rotation: rot,
+            },
+        ) => {
+            let moves = vec![(*center, at(*c)?)];
+            let rebuild = (major_r != ma || minor_r != mi || rotation != rot)
+                .then(|| SketchEntity::ellipse(*id, *center, *ma, *mi, *rot, *construction))
+                .flatten()
+                .map(|e| e.with_reference_locked(true));
+            Some((moves, rebuild))
+        }
+        _ => None,
+    }
+}
+
+/// The SCHEMA §7.6 entity-type token for a committed sketch entity.
+#[must_use]
+pub fn type_token(entity: &SketchEntity) -> &'static str {
+    match entity {
+        SketchEntity::Point { .. } => "Point",
+        SketchEntity::Line { .. } => "Line",
+        SketchEntity::Arc { .. } => "Arc",
+        SketchEntity::Circle { .. } => "Circle",
+        SketchEntity::Ellipse { .. } => "Ellipse",
+    }
+}
+
+/// Plans a detach: drop each target's provenance row, release the `Fixed` pins
+/// that hold it, and unlock it and the points it exclusively owns.
+///
+/// Returns `(ops, released_pin_count)`.
+///
+/// A projected POINT is released only when every still-projected curve has let go
+/// of it. Two projected lines meeting at a corner share one point, and freeing it
+/// while one of them is still reference-locked would leave locked geometry hanging
+/// off a movable vertex.
+#[must_use]
+pub fn build_projection_detach(sketch: &Sketch, targets: &[EntityId]) -> (Vec<SketchEditOp>, u32) {
+    let mut ops = Vec::new();
+
+    // Points still held by a projected curve that is NOT being detached.
+    let mut held: Vec<EntityId> = Vec::new();
+    for entity in sketch.projections.keys() {
+        if targets.contains(entity) {
+            continue;
+        }
+        if let Some(e) = sketch.get_entity(*entity) {
+            held.extend(e.referenced_entities());
+        }
+    }
+
+    let mut free_points: Vec<EntityId> = Vec::new();
+    for target in targets {
+        let Some(entity) = sketch.get_entity(*target) else {
+            continue;
+        };
+        for point in entity.referenced_entities() {
+            if held.contains(&point) || free_points.contains(&point) {
+                continue;
+            }
+            if sketch
+                .get_entity(point)
+                .is_some_and(SketchEntity::is_reference_locked)
+            {
+                free_points.push(point);
+            }
+        }
+        ops.push(SketchEditOp::SetEntityProjection {
+            entity: *target,
+            source: None,
+        });
+        ops.push(SketchEditOp::SetEntityReferenceLocked {
+            entity: *target,
+            locked: false,
+        });
+    }
+
+    let mut released = 0u32;
+    for constraint in sketch.constraints() {
+        let Constraint::Fixed { id, point, .. } = constraint else {
+            continue;
+        };
+        if !free_points.contains(point) {
+            continue;
+        }
+        ops.push(SketchEditOp::RemoveConstraint { constraint: *id });
+        released += 1;
+    }
+    for point in free_points {
+        ops.push(SketchEditOp::SetEntityReferenceLocked {
+            entity: point,
+            locked: false,
+        });
+    }
+    (ops, released)
+}
+
+/// Re-checks every sketch whose projected geometry could have moved under a
+/// just-published snapshot, and records the verdict (WP-P B4).
+///
+/// **Runs with the runtime lock RELEASED**, and must never be called from
+/// `finish_regen`: it does a worker round-trip per affected sketch, and holding
+/// the single writer across worker IO is the anti-pattern R-WP11 removed for
+/// regen. The shape is `mint_rollback_checkpoint`'s — capture under the lock,
+/// drive unlocked, re-lock and adopt — and
+/// [`DocumentRuntime::adopt_projection_staleness`] DROPS the verdict if the head
+/// moved while the probe was out, because staleness reported against a snapshot
+/// that no longer exists is worse than no report: the next publish re-probes
+/// anyway.
+///
+/// A publish that moved none of a sketch's source bodies costs ZERO round-trips —
+/// [`DocumentRuntime::projection_probes`] filters on the source bodies' geometry
+/// signatures. Nothing here is on the drag or preview path.
+pub async fn refresh_projection_staleness(
+    runtime: &std::sync::Arc<tokio::sync::Mutex<Option<crate::document_runtime::DocumentRuntime>>>,
+    projector: &std::sync::Arc<dyn crate::worker::FaceBoundaryProjection>,
+) {
+    let (probes, document_id) = {
+        let guard = runtime.lock().await;
+        let Some(rt) = guard.as_ref() else {
+            return;
+        };
+        (rt.projection_probes(), rt.document_uuid())
+    };
+    for probe in probes {
+        let Some(sketch) = ({
+            let guard = runtime.lock().await;
+            let Some(rt) = guard
+                .as_ref()
+                .filter(|rt| rt.document_uuid() == document_id)
+            else {
+                return;
+            };
+            // Re-bind the sources through the §7.5 ladder first. A `TopoKey` is a
+            // snapshot ordinal, so after the regen that just published, a source
+            // promoted earlier names nothing until the ladder says otherwise —
+            // and without this every projection would report stale forever after
+            // its first edit. Only an AutoBind binds; anything else stays absent
+            // and IS the stale verdict.
+            rt.rebind_projection_sources(probe.sketch).await;
+            rt.sketch_snapshot(probe.sketch, "projectionStaleness").ok()
+        }) else {
+            return;
+        };
+        let mut fresh = Vec::new();
+        let mut failed = false;
+        for (mode, sources) in projection_request_plan(&sketch) {
+            let wire_sources: Vec<crate::worker::wire::ProjectionSource<'_>> = sources
+                .iter()
+                .map(|(body, element)| crate::worker::wire::ProjectionSource {
+                    body: *body,
+                    address: crate::worker::wire::FaceAddress::ElementId(element.as_str()),
+                    kind: match mode {
+                        ProjectionMode::FaceOutline => ProjectionSourceKind::Face,
+                        ProjectionMode::Edges => ProjectionSourceKind::Edge,
+                    },
+                })
+                .collect();
+            match projector
+                .project_to_sketch_plane(
+                    probe.snapshot,
+                    probe.sketch,
+                    &probe.plane,
+                    mode,
+                    &wire_sources,
+                )
+                .await
+            {
+                Ok(result) => fresh.push((result.geometry, result.refusals)),
+                Err(e) => {
+                    // A refused or failed probe records NOTHING — leaving the
+                    // previous verdict standing is honest, and the next publish
+                    // retries. Writing "fresh" here would clear a real warning on
+                    // a transport hiccup.
+                    tracing::debug!(
+                        target: "onecad_lib::regen",
+                        sketch = %probe.sketch,
+                        "projection staleness probe failed: {e}"
+                    );
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            continue;
+        }
+        let stale = stale_projected_entities(&probe.sources, &fresh);
+        let mut guard = runtime.lock().await;
+        if let Some(rt) = guard
+            .as_mut()
+            .filter(|rt| rt.document_uuid() == document_id)
+        {
+            let adopted = rt.adopt_projection_staleness(&probe, stale);
+            if !adopted {
+                return; // the head moved; the next publish re-probes.
+            }
+        }
+    }
+}
+
+/// The `SketchSessionDto.projections` map for a sketch: every provenance row,
+/// keyed by the entity uuid the wire uses for that entity, ids rendered exactly
+/// as `ProjectedEntityDto` renders them (WP-P P2b). Pure; no worker, no lock.
+pub fn projections_dto(sketch: &Sketch) -> BTreeMap<String, ProjectedSourceDto> {
+    sketch
+        .projections
+        .iter()
+        .map(|(entity, source)| {
+            let kind = match source.source_kind {
+                ElementKind::Edge => "edge",
+                ElementKind::Face => "face",
+                ElementKind::Vertex => "vertex",
+            };
+            (
+                entity.to_string(),
+                ProjectedSourceDto {
+                    source_body_id: body_id_wire(source.source_body),
+                    source_element_id: source.source_element_id.as_str().to_string(),
+                    source_kind: kind.to_string(),
+                    source_ordinal: source.source_ordinal,
+                    projected_hash: source.projected_hash.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onecad_core::ids::{BodyId, ConstraintId, ElementId, SketchId};
+    use onecad_core::sketch::{CurvePosition, SketchAttachment, WorldPlane};
+    use uuid::Uuid;
+
+    fn eid(n: u128) -> EntityId {
+        EntityId(Uuid::from_u128(n))
+    }
+    fn cid(n: u128) -> ConstraintId {
+        ConstraintId(Uuid::from_u128(n))
+    }
+    fn body() -> BodyId {
+        BodyId(Uuid::from_u128(0xB0D1))
+    }
+    fn v2(x: f64, y: f64) -> Vec2 {
+        Vec2::new(x, y).expect("finite")
+    }
+
+    fn source(element: &str, ordinal: u32, hash: &str) -> ProjectedSource {
+        ProjectedSource {
+            source_body: body(),
+            source_element_id: ElementId::new(element),
+            source_kind: ElementKind::Edge,
+            source_ordinal: ordinal,
+            projected_hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn projections_dto_renders_every_row_keyed_by_entity_uuid() {
+        let sketch = projected_sketch();
+        assert!(
+            !sketch.projections.is_empty(),
+            "fixture must carry provenance"
+        );
+        let dto = projections_dto(&sketch);
+        assert_eq!(dto.len(), sketch.projections.len());
+        for (entity, source) in &sketch.projections {
+            let row = dto
+                .get(&entity.to_string())
+                .expect("row per projected entity");
+            assert_eq!(row.source_body_id, body_id_wire(source.source_body));
+            assert_eq!(row.source_element_id, source.source_element_id.as_str());
+            assert_eq!(row.source_kind, "edge");
+            assert_eq!(row.source_ordinal, source.source_ordinal);
+            assert_eq!(row.projected_hash, source.projected_hash);
+        }
+        // Serialized on the session DTO under camelCase keys; omitted when empty.
+        let session = crate::dto::SketchSessionDto {
+            sketch_id: "sk".into(),
+            plane: serde_json::json!({}),
+            entities: serde_json::json!([]),
+            constraints: serde_json::json!([]),
+            dof: 0,
+            status: crate::dto::SketchSolveStatus::UnderConstrained,
+            conflicting: vec![],
+            entity_states: crate::dto::EntityStates::new(),
+            projections: dto.clone(),
+        };
+        let v = serde_json::to_value(&session).unwrap();
+        let (first_entity, first_row) = dto.iter().next().unwrap();
+        assert_eq!(v["projections"][first_entity]["sourceKind"], "edge");
+        assert_eq!(
+            v["projections"][first_entity]["sourceElementId"],
+            serde_json::json!(first_row.source_element_id)
+        );
+        let empty = crate::dto::SketchSessionDto {
+            projections: Default::default(),
+            ..session
+        };
+        assert!(serde_json::to_value(&empty)
+            .unwrap()
+            .get("projections")
+            .is_none());
+    }
+
+    /// Two projected lines sharing the corner point `p1`, each from its own edge.
+    fn projected_sketch() -> Sketch {
+        let mut s = Sketch::new(
+            SketchId(Uuid::from_u128(1)),
+            "S",
+            SketchAttachment::World {
+                plane: WorldPlane::XY,
+            },
+        );
+        for (id, at) in [
+            (1u128, v2(0.0, 0.0)),
+            (2, v2(10.0, 0.0)),
+            (3, v2(10.0, 10.0)),
+        ] {
+            s.add_entity(SketchEntity::point(eid(id), at, false, true))
+                .unwrap();
+        }
+        s.add_entity(
+            SketchEntity::line(eid(10), eid(1), eid(2), false).with_reference_locked(true),
+        )
+        .unwrap();
+        s.add_entity(
+            SketchEntity::line(eid(11), eid(2), eid(3), false).with_reference_locked(true),
+        )
+        .unwrap();
+        for (c, p, at) in [
+            (1u128, 1u128, v2(0.0, 0.0)),
+            (2, 2, v2(10.0, 0.0)),
+            (3, 3, v2(10.0, 10.0)),
+        ] {
+            s.add_constraint(Constraint::Fixed {
+                id: cid(c),
+                point: eid(p),
+                point_position: CurvePosition::Arbitrary,
+                at,
+            })
+            .unwrap();
+        }
+        s.projections.insert(eid(10), source("el_a", 0, "aaaa"));
+        s.projections.insert(eid(11), source("el_b", 0, "bbbb"));
+        s
+    }
+
+    fn geometry(
+        points: &[[f64; 2]],
+        entities: Vec<ProjectedEntity>,
+        sources: Vec<ProjectedSource>,
+    ) -> ProjectedGeometry {
+        ProjectedGeometry {
+            points: points.iter().map(|p| v2(p[0], p[1])).collect(),
+            entities,
+            entity_sources: sources,
+        }
+    }
+
+    /// The whole point of hashing the PROJECTED UV: a source that moved along the
+    /// sketch normal re-projects to the same picture and is NOT stale.
+    #[test]
+    fn an_unchanged_hash_is_not_stale_and_plans_nothing() {
+        let s = projected_sketch();
+        let fresh = vec![(
+            geometry(
+                &[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+                vec![
+                    ProjectedEntity::Line { p0: 0, p1: 1 },
+                    ProjectedEntity::Line { p0: 1, p1: 2 },
+                ],
+                vec![source("el_a", 0, "aaaa"), source("el_b", 0, "bbbb")],
+            ),
+            Vec::new(),
+        )];
+        let rows: Vec<_> = s.projections.iter().map(|(e, p)| (*e, p.clone())).collect();
+        assert!(stale_projected_entities(&rows, &fresh).is_empty());
+        let plan = build_projection_update(&s, &fresh);
+        assert!(
+            plan.ops.is_empty(),
+            "an unchanged projection is not an edit"
+        );
+        assert!(plan.replaced.is_empty());
+    }
+
+    /// A moved wall: both lines re-hash, the shared corner point moves ONCE, its
+    /// pin is re-issued at the new UV, and the entity ids are unchanged.
+    #[test]
+    fn a_moved_line_updates_in_place_and_repins_the_shared_point() {
+        let s = projected_sketch();
+        let fresh = vec![(
+            geometry(
+                &[[0.0, 0.0], [30.0, 0.0], [30.0, 10.0]],
+                vec![
+                    ProjectedEntity::Line { p0: 0, p1: 1 },
+                    ProjectedEntity::Line { p0: 1, p1: 2 },
+                ],
+                vec![source("el_a", 0, "cccc"), source("el_b", 0, "dddd")],
+            ),
+            Vec::new(),
+        )];
+        let rows: Vec<_> = s.projections.iter().map(|(e, p)| (*e, p.clone())).collect();
+        assert_eq!(stale_projected_entities(&rows, &fresh).len(), 2);
+
+        let plan = build_projection_update(&s, &fresh);
+        assert_eq!(plan.replaced.len(), 2);
+        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.replaced.iter().map(|r| r.entity).collect::<Vec<_>>(),
+            vec![eid(10), eid(11)],
+            "the entity ids are preserved — an update is not a re-mint"
+        );
+
+        let moves: Vec<_> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                SketchEditOp::SetEntityPositions { positions } => Some(positions.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moves.len(), 1, "one batched move op");
+        assert_eq!(moves[0].len(), 2, "p1 and p2 moved; p0 did not");
+        assert!(moves[0].iter().any(|(id, at)| *id == eid(2)
+            && (at.x - 30.0).abs() < f64::EPSILON
+            && at.y.abs() < f64::EPSILON));
+
+        // Every moved point is unlocked before and re-locked after.
+        let unlocks = plan.ops.iter().filter(|op| {
+            matches!(
+                op,
+                SketchEditOp::SetEntityReferenceLocked { locked: false, .. }
+            )
+        });
+        assert_eq!(unlocks.count(), 2);
+        // …and the pin follows the point.
+        let repin = plan.ops.iter().any(|op| {
+            matches!(
+                op,
+                SketchEditOp::AddConstraint { constraint: Constraint::Fixed { point, at, .. } }
+                    if *point == eid(2) && (at.x - 30.0).abs() < f64::EPSILON
+            )
+        });
+        assert!(repin, "the Fixed pin must move with its point");
+    }
+
+    /// A source that vanished from the re-projection is STALE and refused by name
+    /// — never re-associated with whatever now occupies that ordinal.
+    #[test]
+    fn a_vanished_source_is_stale_and_refused_as_topology_changed() {
+        let s = projected_sketch();
+        let fresh = vec![(
+            geometry(
+                &[[0.0, 0.0], [10.0, 0.0]],
+                vec![ProjectedEntity::Line { p0: 0, p1: 1 }],
+                vec![source("el_a", 0, "aaaa")],
+            ),
+            Vec::new(),
+        )];
+        let rows: Vec<_> = s.projections.iter().map(|(e, p)| (*e, p.clone())).collect();
+        assert_eq!(stale_projected_entities(&rows, &fresh), vec![eid(11)]);
+
+        let plan = build_projection_update(&s, &fresh);
+        assert_eq!(plan.refusals.len(), 1);
+        assert_eq!(plan.refusals[0].code, TOPOLOGY_CHANGED);
+        assert_eq!(plan.refusals[0].element_id, "el_b");
+        assert!(
+            plan.ops.is_empty(),
+            "nothing else changed, so nothing is applied"
+        );
+    }
+
+    /// A worker refusal for the source is not doubled up with a Rust one.
+    #[test]
+    fn a_worker_refused_source_does_not_also_get_a_rust_refusal() {
+        let s = projected_sketch();
+        let fresh = vec![(
+            geometry(
+                &[[0.0, 0.0], [10.0, 0.0]],
+                vec![ProjectedEntity::Line { p0: 0, p1: 1 }],
+                vec![source("el_a", 0, "aaaa")],
+            ),
+            vec![ProjectionRefusal {
+                body_id: crate::worker::wire::body_id_wire(body()),
+                element_id: "el_b".into(),
+                topo_key: String::new(),
+                code: "absent".into(),
+                message: "gone".into(),
+            }],
+        )];
+        let plan = build_projection_update(&s, &fresh);
+        assert!(plan.refusals.is_empty(), "the worker already said it");
+    }
+
+    /// A re-projection that came back a DIFFERENT SHAPE is refused, not guessed at.
+    #[test]
+    fn a_changed_entity_type_is_refused_not_reshaped() {
+        let s = projected_sketch();
+        let fresh = vec![(
+            geometry(
+                &[[0.0, 0.0]],
+                vec![ProjectedEntity::Circle {
+                    center: 0,
+                    radius: 5.0,
+                }],
+                vec![source("el_a", 0, "cccc")],
+            ),
+            Vec::new(),
+        )];
+        let plan = build_projection_update(&s, &fresh);
+        assert_eq!(plan.refusals.len(), 2, "el_a reshaped, el_b vanished");
+        assert!(plan.refusals.iter().all(|r| r.code == TOPOLOGY_CHANGED));
+        assert!(plan.replaced.is_empty());
+    }
+
+    /// Detaching ONE of two lines frees only the point the other has let go of.
+    #[test]
+    fn detach_releases_only_the_points_no_projection_still_holds() {
+        let s = projected_sketch();
+        let (ops, released) = build_projection_detach(&s, &[eid(10)]);
+
+        assert_eq!(released, 1, "only p0 is freed; p1 is still held by line 11");
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            SketchEditOp::SetEntityProjection { entity, source: None } if *entity == eid(10)
+        )));
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            SketchEditOp::SetEntityReferenceLocked { entity, locked: false } if *entity == eid(1)
+        )));
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                SketchEditOp::SetEntityReferenceLocked { entity, locked: false } if *entity == eid(2)
+            )),
+            "the shared corner stays locked while line 11 is still projected"
+        );
+    }
+
+    /// Detaching everything frees every point and drops every pin.
+    #[test]
+    fn detach_all_frees_every_point_and_pin() {
+        let s = projected_sketch();
+        let targets: Vec<EntityId> = s.projections.keys().copied().collect();
+        let (ops, released) = build_projection_detach(&s, &targets);
+        assert_eq!(released, 3);
+        let unlocked: Vec<EntityId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                SketchEditOp::SetEntityReferenceLocked {
+                    entity,
+                    locked: false,
+                } => Some(*entity),
+                _ => None,
+            })
+            .collect();
+        for id in [1u128, 2, 3, 10, 11] {
+            assert!(unlocked.contains(&eid(id)), "entity {id} must be unlocked");
+        }
+    }
+
+    /// The re-request plan splits by kind, because an edge source and a face
+    /// source are asked for in different MODES.
+    #[test]
+    fn the_request_plan_splits_edge_and_face_sources_by_mode() {
+        let mut s = projected_sketch();
+        let mut face = source("el_face", 0, "eeee");
+        face.source_kind = ElementKind::Face;
+        s.projections.insert(eid(12), face.clone());
+        let mut face2 = face.clone();
+        face2.source_ordinal = 1;
+        s.projections.insert(eid(13), face2);
+
+        let plan = projection_request_plan(&s);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].0, ProjectionMode::Edges);
+        assert_eq!(plan[0].1.len(), 2);
+        assert_eq!(plan[1].0, ProjectionMode::FaceOutline);
+        assert_eq!(
+            plan[1].1.len(),
+            1,
+            "one face source, however many entities it owns"
+        );
+    }
+}

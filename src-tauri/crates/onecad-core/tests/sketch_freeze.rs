@@ -16,7 +16,7 @@ use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RegionId, Sket
 use onecad_core::math::Vec2;
 use onecad_core::sketch::constraint::{Constraint, CurvePosition};
 use onecad_core::sketch::entity::SketchEntity;
-use onecad_core::sketch::{RegionInfo, Sketch, SketchAttachment, WorldPlane};
+use onecad_core::sketch::{ProjectedSource, RegionInfo, Sketch, SketchAttachment, WorldPlane};
 use uuid::Uuid;
 
 fn eid(n: u128) -> EntityId {
@@ -352,4 +352,72 @@ fn full_sketch_round_trips_byte_stable() {
         "sketch document round-trip must be byte-stable"
     );
     assert_eq!(s, back);
+}
+
+/// The canonical sketch WITH a populated WP-P `projections` map.
+///
+/// Separate from [`canonical_sketch`] on purpose: `projections` is
+/// `skip_serializing_if` empty, so the pre-WP-P snapshot does not move and this
+/// case is the only thing freezing the new field's wire shape. Without it the
+/// field would ship unfrozen and the "no version bump" claim would be untested.
+fn projected_sketch() -> Sketch {
+    let mut s = canonical_sketch();
+    s.projections.insert(
+        eid(LINE_A),
+        ProjectedSource {
+            source_body: BodyId(Uuid::from_u128(0xB0D1)),
+            source_element_id: ElementId::new("el_edge_41"),
+            source_kind: ElementKind::Edge,
+            source_ordinal: 0,
+            projected_hash: "9f2c4d1e77a0b355".into(),
+        },
+    );
+    s.projections.insert(
+        eid(CIRCLE),
+        ProjectedSource {
+            source_body: BodyId(Uuid::from_u128(0xB0D2)),
+            source_element_id: ElementId::new("el_edge_7"),
+            source_kind: ElementKind::Face,
+            source_ordinal: 2,
+            projected_hash: "0123456789abcdef".into(),
+        },
+    );
+    s
+}
+
+/// FREEZE — the WP-P `projections` map's persisted shape.
+#[test]
+fn a_populated_projections_map_is_snapshot_locked() {
+    insta::assert_json_snapshot!("sketch_document_projections", projected_sketch());
+}
+
+/// The populated form round-trips byte-stably like the base document.
+#[test]
+fn a_projected_sketch_round_trips_byte_stable() {
+    let s = projected_sketch();
+    let json1 = serde_json::to_value(&s).unwrap();
+    let back: Sketch = serde_json::from_value(json1.clone()).unwrap();
+    let json2 = serde_json::to_value(&back).unwrap();
+    assert_eq!(json1, json2);
+    assert_eq!(s, back);
+}
+
+/// **No version bump.** A pre-WP-P sketch (empty `projections`) serializes with
+/// NO `projections` key at all and re-parses identically, so every document
+/// written before this field existed is byte-unchanged by it. This is what makes
+/// the additive claim testable rather than asserted.
+#[test]
+fn a_pre_wpp_sketch_round_trips_byte_identically() {
+    let before = serde_json::to_value(canonical_sketch()).unwrap();
+    assert!(
+        before.get("projections").is_none(),
+        "an empty projections map must be omitted entirely: {before}"
+    );
+    let back: Sketch = serde_json::from_value(before.clone()).unwrap();
+    assert!(back.projections.is_empty());
+    assert_eq!(
+        before,
+        serde_json::to_value(&back).unwrap(),
+        "a pre-WP-P sketch must round-trip byte-identically"
+    );
 }

@@ -203,6 +203,12 @@ add_library(worker_core STATIC
     # --- SKETCH-ON-FACE W1: face-boundary projection (SCHEMA §7.6) ---
     src/sketch/FaceBoundaryProjector.cpp
     src/session/FaceProjection.cpp
+    # --- WP-P: project picked body edges / face outlines into the ACTIVE sketch
+    #     plane (`ProjectToSketchPlane`, SCHEMA §7.6). Read-only and head-copy
+    #     like its neighbour, but SNAPSHOT-FENCED: its answer is committed into a
+    #     document sketch and its `projectedHash` becomes the staleness baseline. ---
+    src/sketch/EdgeProjector.cpp
+    src/session/ProjectToSketchPlane.cpp
     # --- COMPONENT-LIBRARY P0.1: interactive surface classification (SCHEMA §7.5) ---
     src/session/ClassifyElement.cpp
     # --- GEAR-GENERATOR G0: pure-math gear samplers (no OCCT), SCHEMA §7.3

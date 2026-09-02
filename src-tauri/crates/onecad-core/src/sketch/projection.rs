@@ -44,7 +44,10 @@
 //! CCW convention, so re-swapping on a `ccw:false` arc would invert a correct
 //! sweep. `ccw` is therefore informational here and is deliberately NOT applied.
 
-use crate::ids::{ConstraintId, EntityId};
+use serde::{Deserialize, Serialize};
+
+use crate::document::refs::ElementKind;
+use crate::ids::{BodyId, ConstraintId, ElementId, EntityId};
 use crate::math::{Vec2, Vec3};
 use crate::sketch::{Constraint, CurvePosition, SketchEntity};
 
@@ -109,6 +112,87 @@ pub enum ProjectedEntity {
         /// angle pair is CCW-ordered regardless.
         ccw: bool,
     },
+    /// A **full** ellipse — the parallel projection of a tilted, closed circular
+    /// edge (SCHEMA §7.6 `ProjectToSketchPlane`). `ProjectFaceBoundary` never
+    /// emits one.
+    ///
+    /// There is no elliptical ARC anywhere in the stack (no angular extent on the
+    /// wire, in this enum, or in [`SketchEntity::Ellipse`]), which is why a
+    /// TRIMMED tilted circular edge is refused by name on the wire instead of
+    /// being approximated here.
+    Ellipse {
+        /// Centre point index.
+        center: usize,
+        /// Semi-major radius (mm), already `>= minor_r` (wire normalization).
+        major_r: f64,
+        /// Semi-minor radius (mm).
+        minor_r: f64,
+        /// Major-axis rotation (radians, CCW from +U).
+        rotation: f64,
+    },
+}
+
+/// Where one projected entity came from, plus the hash of the geometry it was
+/// projected to (SCHEMA §7.6 `ProjectToSketchPlane` `sourceRef` + `projectedHash`).
+///
+/// **Persisted** on [`Sketch::projections`](crate::sketch::Sketch::projections),
+/// which is what makes a projection re-runnable (update) and detachable, and what
+/// gives the staleness check a baseline to compare against.
+///
+/// `projected_hash` covers the projected **UV geometry only** — never the source
+/// in 3D, never the point refs, never emission order. Two edges projecting onto
+/// the same 2D curve hash identically, deliberately: the question it answers is
+/// "did the picture in this sketch change", not "did the model change", so a
+/// source that slides along the sketch normal is NOT stale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedSource {
+    /// The body the source sub-shape belongs to. Persisted because re-running the
+    /// verb addresses each source as `{bodyId, elementId}` — an `ElementId` alone
+    /// cannot be turned back into a request.
+    pub source_body: BodyId,
+    /// The Rust-minted `ElementId` of the source edge / face.
+    pub source_element_id: ElementId,
+    /// Whether the source is an EDGE or a FACE. Persisted because it decides the
+    /// re-request: an edge source is re-projected with `mode:"edges"`, a face
+    /// source with `mode:"faceOutline"`, and sending the wrong one comes back as a
+    /// `kindMismatch` refusal.
+    pub source_kind: ElementKind,
+    /// This entity's 0-based index within its SOURCE's emission run.
+    ///
+    /// Always `0` for an edge source (one edge projects to one curve); `0..n` for
+    /// a face source under `faceOutline`, which emits its whole boundary. SCHEMA
+    /// §7.6 makes emission order normative, so this ordinal is what re-associates
+    /// a re-projected curve with the entity that already carries it — without it,
+    /// a four-line face outline could only be replaced wholesale, discarding every
+    /// user constraint hung off it and moving the region ids.
+    pub source_ordinal: u32,
+    /// FNV-1a 64-bit over the projected UV geometry, 16 lowercase hex chars
+    /// (`quantizationVersion = 1`, `llround(v / 1e-6)`). Minted by the worker and
+    /// carried VERBATIM — Rust never recomputes it.
+    pub projected_hash: String,
+}
+
+/// The projected 2D content of ONE §7.6 response: merged points plus the curves
+/// that reference them by index.
+///
+/// Shared by both projection verbs. `ProjectFaceBoundary` wraps it in a
+/// [`ProjectionPayload`] (which adds the seed face's kernel-exact frame);
+/// `ProjectToSketchPlane` returns it on its own, because a batch of picked edges
+/// has no single face and therefore no frame to report. Keeping the frame OUT of
+/// this struct is what lets the batch verb reuse the translator without
+/// fabricating one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectedGeometry {
+    /// Projected points in plane UV (mm), indexed by the wire's `p<N>` ordinal.
+    pub points: Vec<Vec2>,
+    /// Projected curves, in the worker's normative emission order.
+    pub entities: Vec<ProjectedEntity>,
+    /// Per-entity source + projected hash, **parallel to `entities`** (SCHEMA §7.6
+    /// `ProjectToSketchPlane`). EMPTY for a `ProjectFaceBoundary` response, which
+    /// has no per-entity source — an entity with no entry simply gets no
+    /// `projections` map row.
+    pub entity_sources: Vec<ProjectedSource>,
 }
 
 /// A parsed SCHEMA §7.6 `ProjectFaceBoundary` result (the `present: true` case).
@@ -120,38 +204,49 @@ pub struct ProjectionPayload {
     pub has_closed_boundary: bool,
     /// How many faces were projected (seed + coplanar companions).
     pub face_count: u32,
-    /// Projected points in plane UV (mm), indexed by the wire's `p<N>` ordinal.
-    pub points: Vec<Vec2>,
-    /// Projected boundary curves, in the worker's normative emission order.
-    pub entities: Vec<ProjectedEntity>,
+    /// The projected points + curves.
+    pub geometry: ProjectedGeometry,
 }
 
-/// Translates a projected face boundary into locked sketch content.
+/// Translates a projected boundary into locked sketch content.
 ///
-/// Returns `(entities, constraints)` in **insertion order**: every point first,
-/// then the curves that reference them, so feeding the result straight into
-/// [`Sketch::add_entity`](crate::sketch::Sketch::add_entity) never trips the
-/// dangling-reference check. The constraints are one [`Constraint::Fixed`] per
-/// projected point, pinned at that point's own UV.
+/// Returns `(entities, constraints, projections)` in **insertion order**: every
+/// point first, then the curves that reference them, so feeding the result
+/// straight into [`Sketch::add_entity`](crate::sketch::Sketch::add_entity) never
+/// trips the dangling-reference check. The constraints are one
+/// [`Constraint::Fixed`] per projected point, pinned at that point's own UV.
+///
+/// `projections` pairs each minted CURVE with its
+/// [`ProjectedSource`], for the caller to write into
+/// [`Sketch::projections`](crate::sketch::Sketch::projections). It is EMPTY when
+/// the payload carries no `entity_sources` (every `ProjectFaceBoundary` payload),
+/// and it never names a projected POINT: a point is shared by the curves that
+/// meet at it, so it has no single source.
 ///
 /// Ids come from the caller's minters (Invariant 1 — Rust mints identity); the
 /// function itself is deterministic given deterministic minters.
 ///
 /// An entity whose point index is out of range is **skipped** rather than
 /// panicking; the parser is responsible for rejecting a malformed response
-/// loudly, so this is defence in depth, not the primary guard.
+/// loudly, so this is defence in depth, not the primary guard. A skipped entity
+/// contributes no `projections` row either — the map can never name an entity the
+/// sketch does not have.
 pub fn projected_sketch_content(
-    payload: &ProjectionPayload,
+    geometry: &ProjectedGeometry,
     mint_entity: &mut impl FnMut() -> EntityId,
     mint_constraint: &mut impl FnMut() -> ConstraintId,
-) -> (Vec<SketchEntity>, Vec<Constraint>) {
-    let mut entities = Vec::with_capacity(payload.points.len() + payload.entities.len());
-    let mut constraints = Vec::with_capacity(payload.points.len());
+) -> (
+    Vec<SketchEntity>,
+    Vec<Constraint>,
+    Vec<(EntityId, ProjectedSource)>,
+) {
+    let mut entities = Vec::with_capacity(geometry.points.len() + geometry.entities.len());
+    let mut constraints = Vec::with_capacity(geometry.points.len());
 
     // One Point entity per payload point — the merge already happened in the
     // worker, so a shared endpoint is ONE point here and both adjacent curves
     // reference it (that is what makes the boundary a closed loop to the solver).
-    let point_ids: Vec<EntityId> = payload
+    let point_ids: Vec<EntityId> = geometry
         .points
         .iter()
         .map(|at| {
@@ -168,7 +263,8 @@ pub fn projected_sketch_content(
         })
         .collect();
 
-    for projected in &payload.entities {
+    let mut projections: Vec<(EntityId, ProjectedSource)> = Vec::new();
+    for (index, projected) in geometry.entities.iter().enumerate() {
         let entity = match *projected {
             ProjectedEntity::Line { p0, p1 } => match (point_ids.get(p0), point_ids.get(p1)) {
                 (Some(&start), Some(&end)) => {
@@ -191,13 +287,25 @@ pub fn projected_sketch_content(
             } => point_ids.get(center).and_then(|&c| {
                 SketchEntity::arc(mint_entity(), c, radius, start_angle, end_angle, false)
             }),
+            ProjectedEntity::Ellipse {
+                center,
+                major_r,
+                minor_r,
+                rotation,
+            } => point_ids.get(center).and_then(|&c| {
+                SketchEntity::ellipse(mint_entity(), c, major_r, minor_r, rotation, false)
+            }),
         };
         if let Some(entity) = entity {
-            entities.push(entity.with_reference_locked(true));
+            let entity = entity.with_reference_locked(true);
+            if let Some(source) = geometry.entity_sources.get(index) {
+                projections.push((entity.id(), source.clone()));
+            }
+            entities.push(entity);
         }
     }
 
-    (entities, constraints)
+    (entities, constraints, projections)
 }
 
 #[cfg(test)]
@@ -222,19 +330,24 @@ mod tests {
         )
     }
 
-    fn payload(points: &[[f64; 2]], entities: Vec<ProjectedEntity>) -> ProjectionPayload {
-        ProjectionPayload {
-            exact: FaceFrame {
-                origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
-                normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
-            },
-            has_closed_boundary: true,
-            face_count: 1,
+    fn source(element: &str, hash: &str) -> ProjectedSource {
+        ProjectedSource {
+            source_body: crate::ids::BodyId(Uuid::from_u128(0xB0D1)),
+            source_element_id: ElementId::new(element),
+            source_kind: ElementKind::Edge,
+            source_ordinal: 0,
+            projected_hash: hash.to_string(),
+        }
+    }
+
+    fn payload(points: &[[f64; 2]], entities: Vec<ProjectedEntity>) -> ProjectedGeometry {
+        ProjectedGeometry {
             points: points
                 .iter()
                 .map(|p| Vec2::new_unchecked(p[0], p[1]))
                 .collect(),
             entities,
+            entity_sources: Vec::new(),
         }
     }
 
@@ -252,7 +365,7 @@ mod tests {
             ],
         );
         let (mut me, mut mc) = minters();
-        let (entities, constraints) = projected_sketch_content(&p, &mut me, &mut mc);
+        let (entities, constraints, _) = projected_sketch_content(&p, &mut me, &mut mc);
 
         assert_eq!(entities.len(), 8, "4 points + 4 lines");
         assert_eq!(constraints.len(), 4, "one Fixed per projected point");
@@ -299,7 +412,7 @@ mod tests {
             }],
         );
         let (mut me, mut mc) = minters();
-        let (entities, constraints) = projected_sketch_content(&p, &mut me, &mut mc);
+        let (entities, constraints, _) = projected_sketch_content(&p, &mut me, &mut mc);
 
         assert_eq!(entities.len(), 2, "centre point + circle");
         assert_eq!(constraints.len(), 1);
@@ -334,7 +447,7 @@ mod tests {
             }],
         );
         let (mut me, mut mc) = minters();
-        let (entities, _) = projected_sketch_content(&p, &mut me, &mut mc);
+        let (entities, _, _) = projected_sketch_content(&p, &mut me, &mut mc);
 
         let SketchEntity::Arc {
             start_angle,
@@ -365,7 +478,7 @@ mod tests {
             ],
         );
         let (mut me, mut mc) = minters();
-        let (entities, constraints) = projected_sketch_content(&p, &mut me, &mut mc);
+        let (entities, constraints, _) = projected_sketch_content(&p, &mut me, &mut mc);
 
         assert_eq!(entities.len(), 5, "3 points + 2 lines (NOT 4 points)");
         assert_eq!(constraints.len(), 3, "one Fixed per DISTINCT point");
@@ -379,13 +492,116 @@ mod tests {
         assert_eq!(end, entities[1].id());
     }
 
+    /// A tilted, CLOSED circular edge projects to a full Ellipse (WP-P). It is
+    /// locked like every other projected curve; §7.4 forbids naming an ellipse
+    /// ENTITY in any curve-taking constraint, so `reference_locked` is the ONLY
+    /// thing holding its `major_r`/`minor_r`/`rotation` — which is sound, because
+    /// nothing can move them either.
+    #[test]
+    fn a_tilted_circle_projects_to_a_locked_full_ellipse() {
+        let p = payload(
+            &[[5.0, 5.0]],
+            vec![ProjectedEntity::Ellipse {
+                center: 0,
+                major_r: 10.0,
+                minor_r: 7.0710678118654755,
+                rotation: 0.25,
+            }],
+        );
+        let (mut me, mut mc) = minters();
+        let (entities, constraints, _) = projected_sketch_content(&p, &mut me, &mut mc);
+
+        assert_eq!(entities.len(), 2, "centre point + ellipse");
+        assert_eq!(
+            constraints.len(),
+            1,
+            "the CENTRE is Fixed; the radii are not"
+        );
+        let SketchEntity::Ellipse {
+            center,
+            major_r,
+            minor_r,
+            rotation,
+            ..
+        } = entities[1]
+        else {
+            panic!("expected an Ellipse, got {:?}", entities[1]);
+        };
+        assert_eq!(center, entities[0].id());
+        assert!((major_r - 10.0).abs() < f64::EPSILON);
+        assert!((minor_r - 7.0710678118654755).abs() < f64::EPSILON);
+        assert!((rotation - 0.25).abs() < f64::EPSILON);
+        assert!(entities[1].is_reference_locked());
+    }
+
+    /// `entity_sources` is parallel to `entities` and lands on the CURVES only —
+    /// a projected point is shared by the curves meeting at it and has no single
+    /// source.
+    #[test]
+    fn entity_sources_map_onto_the_minted_curves_not_the_points() {
+        let mut p = payload(
+            &[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+            vec![
+                ProjectedEntity::Line { p0: 0, p1: 1 },
+                ProjectedEntity::Line { p0: 1, p1: 2 },
+            ],
+        );
+        p.entity_sources = vec![source("el_a", "aaaa"), source("el_b", "bbbb")];
+
+        let (mut me, mut mc) = minters();
+        let (entities, _, projections) = projected_sketch_content(&p, &mut me, &mut mc);
+
+        assert_eq!(
+            projections.len(),
+            2,
+            "one row per CURVE (3 points, 2 lines)"
+        );
+        assert_eq!(projections[0].0, entities[3].id());
+        assert_eq!(projections[1].0, entities[4].id());
+        assert_eq!(projections[0].1.source_element_id.as_str(), "el_a");
+        assert_eq!(projections[1].1.projected_hash, "bbbb");
+    }
+
+    /// A `ProjectFaceBoundary` payload carries no sources, so it writes no map
+    /// rows — the field is additive, not a behaviour change for sketch-on-face.
+    #[test]
+    fn a_payload_without_sources_writes_no_projection_rows() {
+        let p = payload(
+            &[[0.0, 0.0], [1.0, 0.0]],
+            vec![ProjectedEntity::Line { p0: 0, p1: 1 }],
+        );
+        let (mut me, mut mc) = minters();
+        let (_, _, projections) = projected_sketch_content(&p, &mut me, &mut mc);
+        assert!(projections.is_empty());
+    }
+
+    /// A DROPPED curve (out-of-range ref) must not leave a `projections` row
+    /// naming an entity the sketch never got.
+    #[test]
+    fn a_dropped_curve_contributes_no_projection_row() {
+        let mut p = payload(
+            &[[0.0, 0.0], [1.0, 0.0]],
+            vec![
+                ProjectedEntity::Line { p0: 0, p1: 9 },
+                ProjectedEntity::Line { p0: 0, p1: 1 },
+            ],
+        );
+        p.entity_sources = vec![source("el_dead", "dead"), source("el_live", "live")];
+        let (mut me, mut mc) = minters();
+        let (entities, _, projections) = projected_sketch_content(&p, &mut me, &mut mc);
+        assert_eq!(entities.len(), 3, "2 points + the surviving line");
+        assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].0, entities[2].id());
+        assert_eq!(projections[0].1.source_element_id.as_str(), "el_live");
+    }
+
     /// Defence in depth: an out-of-range index drops that curve instead of
     /// panicking (the parser is the loud guard).
     #[test]
     fn an_out_of_range_point_index_drops_the_entity() {
         let p = payload(&[[0.0, 0.0]], vec![ProjectedEntity::Line { p0: 0, p1: 9 }]);
         let (mut me, mut mc) = minters();
-        let (entities, _) = projected_sketch_content(&p, &mut me, &mut mc);
+        let (entities, _, _) = projected_sketch_content(&p, &mut me, &mut mc);
         assert_eq!(entities.len(), 1, "only the point survives");
     }
 }

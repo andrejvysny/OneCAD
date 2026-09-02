@@ -30,6 +30,7 @@ pub mod library_seed_templates;
 pub mod logging;
 pub mod mesh_cache;
 pub mod recents;
+pub mod sketch_projection;
 pub mod state;
 #[cfg(feature = "tauri-e2e")]
 mod tauri_e2e;
@@ -98,6 +99,18 @@ pub type RegenEmitter = Arc<dyn Fn(&RegenReport, &DocumentProjection) + Send + S
 /// other caller passes the no-op ([`regen_driver_with_emitter`]).
 pub type RegenStartEmitter = Arc<dyn Fn() + Send + Sync>;
 
+/// A post-PUBLISH sink, awaited after the driver's own post-publish work (the
+/// DI-4 element re-bind) and therefore after the resolution ladder has had its
+/// chance to re-bind persisted element ids.
+///
+/// Ordering is the whole reason this is a hook rather than a spawn inside the
+/// completion sink: WP-P's projection staleness check re-projects from persisted
+/// `ElementId`s, and probing before the re-bind would report a freshly-republished
+/// projection as stale purely because its source had not been re-bound yet.
+///
+/// Every test harness passes the no-op ([`regen_driver_with_emitter`]).
+pub type RegenPostPublish = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Builds the app-layer regen driver over an explicit completion [`RegenEmitter`]
 /// (plan "app layer runs the executor"), with NO start sink — the shape every
 /// test harness wants. See [`regen_driver_with_started`] for the full seam.
@@ -116,7 +129,13 @@ pub fn regen_driver_with_emitter(
     emit: RegenEmitter,
     autosave_tick: Arc<watch::Sender<u64>>,
 ) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
-    regen_driver_with_started(runtime, emit, Arc::new(|| {}), autosave_tick)
+    regen_driver_with_started(
+        runtime,
+        emit,
+        Arc::new(|| {}),
+        Arc::new(|| Box::pin(async {})),
+        autosave_tick,
+    )
 }
 
 /// [`regen_driver_with_emitter`] plus a [`RegenStartEmitter`] fired right after
@@ -128,12 +147,14 @@ pub fn regen_driver_with_started(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     emit: RegenEmitter,
     on_started: RegenStartEmitter,
+    post_publish: RegenPostPublish,
     autosave_tick: Arc<watch::Sender<u64>>,
 ) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
     move |directive: RegenDirective| {
         let runtime = runtime.clone();
         let emit = emit.clone();
         let on_started = on_started.clone();
+        let post_publish = post_publish.clone();
         let autosave_tick = autosave_tick.clone();
         Box::pin(async move {
             // Phase 1 (locked): compile the plan + clone the scratch session. An EMPTY
@@ -197,6 +218,11 @@ pub fn regen_driver_with_started(
                         );
                     }
                 }
+                drop(guard);
+                // AFTER the re-bind, and with the lock released: the WP-P
+                // projection staleness pass. It is the last thing a publish owes
+                // and the first that must not hold anything up.
+                post_publish().await;
             }
             // HISTORY-HARDEN H8: a published ROLLBACK is the one completion worth a
             // free checkpoint (see `mint_rollback_checkpoint`).
@@ -268,6 +294,7 @@ fn make_regen_driver(
     autosave_tick: Arc<watch::Sender<u64>>,
 ) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
     let start_app = app.clone();
+    let publish_app = app.clone();
     let emit: RegenEmitter = Arc::new(
         move |report: &RegenReport, projection: &DocumentProjection| {
             api::emit_regen_events(&app, report, projection);
@@ -276,7 +303,19 @@ fn make_regen_driver(
     let on_started: RegenStartEmitter = Arc::new(move || {
         let _ = start_app.emit(events::REGEN_STARTED, ());
     });
-    regen_driver_with_started(runtime, emit, on_started, autosave_tick)
+    // WP-P B4: after every publish (and after the DI-4 re-bind above it), re-check
+    // whether any sketch's projected geometry has stopped matching its source. It
+    // does a worker round-trip per AFFECTED sketch — none at all when no source
+    // body's signature moved — and runs entirely with the runtime lock released.
+    let post_publish: RegenPostPublish = Arc::new(move || {
+        let state = publish_app.state::<AppState>();
+        let runtime = state.runtime.clone();
+        let projector = state.face_projection();
+        Box::pin(async move {
+            sketch_projection::refresh_projection_staleness(&runtime, &projector).await;
+        })
+    });
+    regen_driver_with_started(runtime, emit, on_started, post_publish, autosave_tick)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -463,6 +502,9 @@ pub fn run() {
             api::promote_selection,
             api::face_sketch_plane,
             api::add_sketch_on_face,
+            api::project_to_sketch,
+            api::update_projection,
+            api::detach_projection,
             api::element_info,
             api::query_mass_properties,
             api::classify_element,

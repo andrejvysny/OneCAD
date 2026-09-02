@@ -14,6 +14,7 @@ import {
   frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
+  frontendProjections,
   frontendSolvedCurves,
   frontendSolvedPositions,
   isDimensional,
@@ -1158,5 +1159,30 @@ describe("applySolvedCurves — reshape Circle/Arc from solved curve members", (
     marshalUpsert(map, { entities, constraints: [] }, mint);
     const frontend = frontendSolvedCurves(map, { [map.entity.get("e1")!]: { radius: 8 } });
     expect(applySolvedCurves(entities, frontend)[0].radius).toBe(8);
+  });
+});
+
+describe("frontendProjections (WP-P provenance re-key)", () => {
+  const src = {
+    sourceBodyId: "body_11111111-1111-1111-1111-111111111111",
+    sourceElementId: "el-7",
+    sourceKind: "edge" as const,
+    sourceOrdinal: 0,
+    projectedHash: "0123456789abcdef",
+  };
+
+  it("re-keys backend entity uuids to frontend ids through the id-map and drops unknown keys", () => {
+    const map = createIdMap("sk-backend", "XY");
+    map.entity.set("l1", "uuid-l1");
+    expect(frontendProjections(map, { "uuid-l1": src, "uuid-ghost": src })).toEqual({ l1: src });
+  });
+
+  it("passes through without an id-map (never-entered sketch: frontend id == uuid)", () => {
+    expect(frontendProjections(undefined, { "uuid-l1": src })).toEqual({ "uuid-l1": src });
+  });
+
+  it("keeps an absent map absent (Rust omits the key when empty)", () => {
+    expect(frontendProjections(undefined, undefined)).toBeUndefined();
+    expect(frontendProjections(createIdMap("sk", "XY"), null)).toBeUndefined();
   });
 });

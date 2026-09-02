@@ -389,6 +389,91 @@ package.
       (refused at `PlaceComponentParams::validate`, nothing on the timeline). `component_ops`
       **14/14**, `library::` unit tests 22/22.
 
+### WP-P project edges (in flight, 2026-09-02)
+Protocol pre-audit APPLIED, all rulings accepted (full audited text preserved in the session
+scratchpad): **`ProjectToSketchPlane` is snapshot-FENCED** (`STALE_PREVIEW`) — advisory would
+let a stale capture mint the `projectedHash` baseline that every later staleness check
+compares against (a permanently silent wrong bind; `add_sketch_on_face` fences on NOTHING,
+only a tripwire, and cannot be copied here); the commit itself is `gate_stale_pick`-gated so
+promote → project → commit is atomic vs the head. **Trimmed tilted arcs are REFUSED by name**
+(`trimmedTiltedArc`) — the wire `Ellipse` is FULL-ONLY everywhere in the stack, a full-ellipse
+stand-in would BOUND REGIONS the model does not contain, and polylines are §7.6-forbidden;
+`GeomAbs_Ellipse` SOURCES likewise (`unsupportedCurve`). Edge-on circles are ANSWERS: closed →
+a 2r line along `n_c × n_s`, trimmed → the endpoint chord; thresholds RADIUS-RELATIVE (an
+absolute ε would emit micron sliver ellipses). Refusals are per-SOURCE answers (`ok:true`,
+six camelCase codes) — one dead pick never voids a 30-edge batch. `projectedHash` =
+`quantizationVersion 1` verbatim (FNV-1a 64 over the 1e-6 grid; covers projected UV geometry
+ONLY — motion along the sketch normal is deliberately NOT stale; the grid is the macOS/Linux
+libm defence; never pin a hash literal in a fixture). Blockers B2 (reference-locked entities
+cannot be unlocked — new `SketchEditOp` variant required for Detach) and B4 (staleness needs
+an UNLOCKED post-publish worker round-trip that drops its result if the head moved) are
+scoped into the Rust package; B3 recorded in §7.6 (a projected Ellipse is held by
+`referenceLocked` alone, deliberately); B5 pinned by a fixture round asserting
+`faceOutline` ≡ `ProjectFaceBoundary faceOnly`. Risks recorded: a projection that SPLITS an
+existing profile moves both region ids (downstream fails loudly — house-correct, accepted);
+ellipse contagion also disables OverConstrained detection for that sketch (the hint says so).
+- [x] P1 worker LANDED (implementer-measured: build exit 0 + restage · targeted ctest 3/3 ·
+      full ctest **164/164** · hygiene clean · `ndjson_fixtures` parse 1/1 · verifiers exit 0):
+      `EdgeProjector.{h,cpp}` (curve rules, radius-relative thresholds, point-merge,
+      `projectedHash`), `session/ProjectToSketchPlane.{h,cpp}` (snapshot-fenced), SCHEMA §7.6
+      at `:3027-3178` + §8 `:3870` + §14 `:4173-4221`, fixture rounds A–L with measured
+      ordinals (`body_op1 f:6`, cylinder top `e:3`, fillet arc `e:5` r=3 ccw:false, ellipse cap
+      `e:2`), two new canonical ctests incl. a two-process byte-identical frame transcript
+      (161 → 164). **Deviations recorded in SCHEMA:** Ellipse `rotation` folded onto (−π/2,
+      π/2] (else the "same 2D curve ⇒ same hash" rule is false — axis-reversed twin pinned to
+      one hash); `faceOutline` ≡ `ProjectFaceBoundary` is an ASSERTED equality (delegation
+      would have changed the older verb's off-plane answer), qualified to where both verbs
+      answer; `sourceRef`/refusals always carry all three address keys (empty-string rungs);
+      `kind` defaulting + mode coupling made explicit; refusal atomicity + the
+      one-bad-edge-fails-the-face rule for `faceOutline`; `kMaxSources = 512`. **Defect found,
+      not fixed (recorded):** `FaceBoundaryProjector::addLineSegment` guards 1e-9 but merges at
+      1e-5 — a projected edge between those lengths emits a degenerate `p0 == p1` Line on the
+      OLD verb's wire; replicated deliberately in the outline path for round-L equality, caught
+      as `degenerate` in `edges` mode; fix belongs to `ProjectFaceBoundary`'s owner. Owed to
+      P2/P3: the coverage `nonOperationRows` entry; the §14 sign-off line is a process claim to
+      confirm at the gate.
+- [x] P2 Rust LANDED (implementer-measured: fmt/clippy clean · `cargo test -p onecad-core`
+      574/0 (one NEW `sketch_freeze` snapshot, none modified) · app lib 389/0 · real-worker
+      `project_edges` **3/3** (RAN, verb present, sidecar sha `2a86c2d3…`) ·
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1469 / 0** · coverage **32** rows /
+      contracts 39). Commands the FE must match: `project_to_sketch{snapshotId, sketchId,
+      mode, sources[{bodyId, topoKey, anchor?}]}` / `update_projection{sketchId}` /
+      `detach_projection{sketchId, entityIds?}` → `ProjectToSketchDto{entities[{entityId,
+      type, sourceBodyId, sourceElementId, projectedHash}], refusals[...]}`; refusal codes =
+      the worker's six + Rust-minted `topologyChanged`. **Deviations (accepted):**
+      `ProjectedSource` persists five fields (`sourceOrdinal` re-associates a faceOutline
+      line with its committed entity — without it update replaces wholesale and moves region
+      ids); TWO new `SketchEditOp`s (`SetEntityReferenceLocked` = B2 unlock,
+      `SetEntityProjection` = one provenance row per undoable transaction); B4 is an ORDERED
+      `RegenPostPublish` hook awaited AFTER the DI-4 re-bind (a spawn races it); update/
+      staleness re-bind sources through the §7.5 ladder first (a promoted id's partition
+      binding is snapshot-scoped — discovered empirically; only `AutoBind` binds, anything
+      else stays stale, never a guess); the pick `anchor` is load-bearing (without it the
+      ladder answers NeedsRepair on cap-vs-cap); commands use the `AppState.app` slot (an
+      `AppHandle` param is untestable under `mock_app`).
+      **Product limitation (recorded):** a LARGE source change (box 40→60) scores 0.7765 <
+      0.85 → `LowConfidence` → the projection stays stale rather than auto-updating — the
+      ladder working as designed. **Partial-staleness semantics:** widening +X leaves the
+      u=0 wall's line unchanged — 3 of 4 entities stale, per-entity by design.
+      **Pre-existing defects found, NOT fixed:** `squash_sketch_session` cannot redo a sketch
+      with reference-locked geometry (remove-all + re-add refuses on locked; also drops the
+      `projections` map) — predates WP-P, hits sketch-on-face today; `promote_selection` /
+      `promote_prepared_edges` / the DI-4 rebind do worker IO under the runtime lock
+      (precedent my steps follow; the projection call itself is unlocked). **Audit risk 1
+      (accepted, now recorded):** a projected edge that SPLITS an existing closed profile
+      moves both region ids and a downstream non-empty `regionId` fails loudly — the
+      house-correct outcome.
+- [ ] **P3 FE — NOT STARTED (user-ordered stop):** sketch `project` tool (key `j`), CMD map +
+      `CadClient` + `types.ts` DTOs for the three commands above, mock box-outline honesty +
+      named refusals, `PROJECTION_STALE` badge + first-ellipse hint (incl. "OverConstrained
+      detection goes dark"), Update/Detach UI, `e2e/project-edges.spec.ts`. The coverage row
+      records `frontendTest`/`playwrightTest` as empty until this lands.
+- [ ] **WP-P gate — NOT RUN; NOTHING COMMITTED.** The tree holds P1+P2 (worker+protocol+Rust+
+      one manifest). Owed at resume: orchestrator-run full L3 over the combined tree (ctest
+      164 expected · cargo workspace · vitest · e2e both projects · kernelbench · fmt/clippy/
+      hex/verifiers/hygiene), adversarial review of the staleness/rebind half, P3, then the
+      WP-P commit(s). §14's "cross-track sign-off recorded" line becomes true at that gate.
+
 ### WP-V + WP-T1 (2026-09-01/02) — LANDED, shared tip gate below
 - [ ] WP-V section view: LANDED with the FULL STENCIL CAP (no fallback; implementer-measured
       vitest 311 files / 5465 / 0, section+neighbour e2e 24/24, hex 0; the cap material resets

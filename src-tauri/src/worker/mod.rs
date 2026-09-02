@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use onecad_core::document::body::BodyLifecycleEvent;
 use onecad_core::document::record::Operation;
-use onecad_core::ids::{BodyId, DocumentId, JobId, SnapshotId, WorkerEpoch};
+use onecad_core::ids::{BodyId, DocumentId, JobId, SketchId, SnapshotId, WorkerEpoch};
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, BindElementIdsRequest, CheckpointArtifacts, EngineError, Fencing,
     GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest, RefResolution, ResolveRequest,
@@ -366,6 +366,34 @@ pub trait FaceBoundaryProjection: Send + Sync {
         plane: &onecad_core::sketch::SketchPlane,
         scope: wire::ProjectionScope,
     ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError>;
+
+    /// `ProjectToSketchPlane` (SCHEMA §7.6, WP-P) — projects a BATCH of picked
+    /// body edges (or a picked face's whole boundary) into the supplied sketch
+    /// plane's UV, each returned entity carrying the source it came from and a
+    /// hash of its projected geometry.
+    ///
+    /// On this trait beside [`project_face_boundary`](Self::project_face_boundary)
+    /// because it is the same kind of call — a read-only, non-minting projection
+    /// query served off a copy of the head, with Rust owning the plane.
+    ///
+    /// It is **snapshot-FENCED** rather than advisory, unlike its single-target
+    /// model: the answer is committed into a document sketch and the
+    /// `projectedHash` it mints becomes the baseline every later staleness check
+    /// compares against, so a stale capture would write a baseline that can never
+    /// afterwards be detected as wrong.
+    ///
+    /// No `Option`: a source that does not resolve is a per-source `absent`
+    /// REFUSAL inside
+    /// [`ProjectToSketchPlaneResult::refusals`](wire::ProjectToSketchPlaneResult::refusals),
+    /// not a whole-call answer — one dead pick must not void the rest of a batch.
+    async fn project_to_sketch_plane(
+        &self,
+        snapshot: SnapshotId,
+        sketch_id: SketchId,
+        plane: &onecad_core::sketch::SketchPlane,
+        mode: wire::ProjectionMode,
+        sources: &[wire::ProjectionSource<'_>],
+    ) -> Result<wire::ProjectToSketchPlaneResult, EngineError>;
 
     /// `PrepareOffsetFace` (SCHEMA §7.6) — the read-only OffsetFace authoring
     /// handshake: the G1 tangent closure over the picked faces, the `Total`
@@ -1084,6 +1112,17 @@ impl FaceBoundaryProjection for PendingBackend {
         _plane: &onecad_core::sketch::SketchPlane,
         _scope: wire::ProjectionScope,
     ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn project_to_sketch_plane(
+        &self,
+        _snapshot: SnapshotId,
+        _sketch_id: SketchId,
+        _plane: &onecad_core::sketch::SketchPlane,
+        _mode: wire::ProjectionMode,
+        _sources: &[wire::ProjectionSource<'_>],
+    ) -> Result<wire::ProjectToSketchPlaneResult, EngineError> {
         Err(Self::not_ready())
     }
 

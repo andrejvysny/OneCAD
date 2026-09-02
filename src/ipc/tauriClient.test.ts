@@ -507,10 +507,30 @@ describe("tauriClient getSketch (pure read)", () => {
           constraints: [{ id: "co", type: "Coincident", entities: ["p1", "p2"] }],
           dof: 2,
           status: "UnderConstrained",
+          // WP-P provenance keyed by the backend entity uuid (== frontend id here,
+          // because a never-entered sketch has no id-map).
+          projections: {
+            l1: {
+              sourceBodyId: "body_22222222-2222-2222-2222-222222222222",
+              sourceElementId: "el-9",
+              sourceKind: "edge",
+              sourceOrdinal: 0,
+              projectedHash: "fedcba9876543210",
+            },
+          },
         };
       }
     });
     const session = await createTauriClient().getSketch("sketch2");
+    expect(session.projections).toEqual({
+      l1: {
+        sourceBodyId: "body_22222222-2222-2222-2222-222222222222",
+        sourceElementId: "el-9",
+        sourceKind: "edge",
+        sourceOrdinal: 0,
+        projectedHash: "fedcba9876543210",
+      },
+    });
 
     expect(args).toEqual({ sketchId: "sketch2" });
     expect(session.plane.kind).toBe("XZ");

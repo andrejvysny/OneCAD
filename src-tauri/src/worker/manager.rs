@@ -51,7 +51,8 @@ use onecad_core::document::body::{BodyMeta, BodyRegistry};
 use onecad_core::document::element_index::ElementIndex;
 use onecad_core::document::record::Operation;
 use onecad_core::ids::{
-    BodyId, DocumentId, DocumentRevision, EntityId, JobId, RecordId, SnapshotId, WorkerEpoch,
+    BodyId, DocumentId, DocumentRevision, EntityId, JobId, RecordId, SketchId, SnapshotId,
+    WorkerEpoch,
 };
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector, CheckpointArtifacts,
@@ -2100,6 +2101,29 @@ impl crate::worker::FaceBoundaryProjection for WorkerManager {
             .await
             .map_err(protocol_err)?;
         wire::parse_project_face_boundary(&ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
+
+    async fn project_to_sketch_plane(
+        &self,
+        snapshot: SnapshotId,
+        sketch_id: SketchId,
+        plane: &onecad_core::sketch::SketchPlane,
+        mode: wire::ProjectionMode,
+        sources: &[wire::ProjectionSource<'_>],
+    ) -> Result<wire::ProjectToSketchPlaneResult, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "ProjectToSketchPlane",
+                wire::project_to_sketch_plane_args(snapshot, sketch_id, plane, mode, sources),
+            )
+            .await
+            .map_err(protocol_err)?;
+        // A malformed frame is a PROTOCOL break, never a default: a curve with no
+        // `projectedHash` would install a baseline the staleness pass can never
+        // match, and a silently dropped curve would leave an open profile.
+        wire::parse_project_to_sketch_plane(&ok_result(resp)?, sources)
             .map_err(|message| EngineError::Protocol { message })
     }
 

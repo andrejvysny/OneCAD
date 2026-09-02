@@ -1,0 +1,166 @@
+# CANONICAL §7.6 fixture — `ProjectToSketchPlane` (WP-P, 2026-09-02): project
+# picked body edges, or a picked face's whole boundary, into the ACTIVE sketch's
+# plane. The verb Rust commits as reference-locked sketch geometry.
+#
+# SELF-GENERATING. Four bodies are built from integer sketches in one plan, then a
+# 3 mm fillet is applied in a second, so the whole input is reproducible from this
+# file alone and no binary is tracked. NOTE the worker's `plane:{"kind":"XY"}`
+# convention (`SketchPlane::XY()`): user X maps to world +Y and user Y to world
+# −X, so a world point (X,Y) is authored below as the sketch pair (Y, −X). That is
+# why the squares read `[[0,0],[0,-20],[20,-20],[20,0]]` and land on the world
+# square x,y ∈ [0,20]. Every PROJECTED number in the rounds is in world/plane UV.
+#
+# WHAT IS PINNED HERE, AND WHAT DELIBERATELY IS NOT.
+#
+# Pinned: every value that is an integer or an exactly-representable consequence
+# of the construction — the box outline's four corners, the cylinder cap's
+# `radius: 10.0` and centre `[50,0]`, the edge-on chord's `[40,20]`/`[60,20]`, the
+# tilted ellipse's `majorR: 10.0`, the fillet arc's `radius: 3.0` and `ccw` — plus
+# every branch a reader takes: the entity `type`, the `sourceRef` echo, the four
+# refusal codes reachable from a built body here (`trimmedTiltedArc`,
+# `unsupportedCurve`, `absent`, `kindMismatch`), and the fenced error. The other
+# two — `degenerate` and `faceNotPlanar` — need shapes no plan can build, and are
+# pinned in test_edge_projector.cpp against self-built OCCT geometry.
+#
+# NOT pinned: `minorR`, `rotation`, the tilted centre's v, and the arc's angles.
+# They are irrational or measurement-shaped, and `json_subset` compares numbers
+# EXACTLY — NDJSON is the wrong instrument for a value allowed to move by less
+# than a nanometre. Their pins live in `worker/tests/test_edge_projector.cpp`
+# (minorR = r·cosθ at three θ, the rotation values, the sliver threshold), the
+# same contract/corpus split `analyze_edge_op_range` uses.
+#
+# `projectedHash` is NEVER pinned to a literal, only `$hex64`. It is FNV-1a over a
+# 1e-6 quantization of doubles OCCT and libm produce, and a frozen digest would
+# gate the platform instead of the contract (worker/tests/CMakeLists.txt:752-756
+# gives the same reason for the profile bytes).
+#
+# ARRAY LENGTHS. `json_subset` is a SUBSET match over arrays: listing one entry
+# asserts "at least one", and an expected `[]` asserts only "this key is an array".
+# So the `"entities":[]` on the refusal rounds pins the response SHAPE (every
+# branch answers the same key set, so Rust parses one shape) and NOT emptiness.
+# The exact counts — "no entity was emitted for a refused source", "exactly one
+# refusal" — are asserted in test_edge_projector.cpp, which can see the parsed
+# result. Do not read a bare `[]` here as a length assertion.
+#
+# THE READ-ONLY GUARANTEE is asserted structurally: `GetWorkerHead` brackets every
+# round and must be IDENTICAL field for field. This verb takes a head COPY — no
+# scratch, no snapshot, no minting, no `bodyEvents`, no bin tail.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_project_to_sketch_plane","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# SETUP, plan 1 — four bodies, each chosen for one curve rule:
+#   `body_op1` 20 mm box at world x,y ∈ [0,20]  — the coplanar face outline (A/L)
+#   `body_op3` r=10 cylinder at world (50,0)    — parallel / edge-on / tilted circle
+#   `body_op5` second 20 mm box at x ∈ [100,120] — host for the fillet arc
+#   `body_op7` extruded Ellipse                  — the `GeomAbs_Ellipse` SOURCE,
+#                                                  which nothing else in the tree
+#                                                  can produce
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":31,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222"],"targetStep":7,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"a1","type":"Line","p0":[0,0],"p1":[0,-20]},{"id":"a2","type":"Line","p0":[0,-20],"p1":[20,-20]},{"id":"a3","type":"Line","p0":[20,-20],"p1":[20,0]},{"id":"a4","type":"Line","p0":[20,0],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":20.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk2","plane":{"kind":"XY"},"entities":[{"id":"c1","type":"Circle","center":[0,-50],"radius":10}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"","elementId":"sk2.region.r0","kind":"face"}}],"params":{"sketchId":"sk2","distance":20.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op4","stepIndex":4,"params":{"sketchId":"sk3","plane":{"kind":"XY"},"entities":[{"id":"b1","type":"Line","p0":[0,-100],"p1":[0,-120]},{"id":"b2","type":"Line","p0":[0,-120],"p1":[20,-120]},{"id":"b3","type":"Line","p0":[20,-120],"p1":[20,-100]},{"id":"b4","type":"Line","p0":[20,-100],"p1":[0,-100]}],"constraints":[]}},{"opType":"Extrude","opId":"op5","stepIndex":5,"inputs":[{"primary":{"bodyId":"","elementId":"sk3.region.r0","kind":"face"}}],"params":{"sketchId":"sk3","distance":20.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op6","stepIndex":6,"params":{"sketchId":"sk4","plane":{"kind":"XY"},"entities":[{"id":"el1","type":"Ellipse","center":[60,0],"majorR":12,"minorR":6,"rotation":0}],"constraints":[]}},{"opType":"Extrude","opId":"op7","stepIndex":7,"inputs":[{"primary":{"bodyId":"","elementId":"sk4.region.r0","kind":"face"}}],"params":{"sketchId":"sk4","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":3,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":4,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":5,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op5"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":6,"jobId":31,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":7,"jobId":31,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op7"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"planPrepared":true,"lastValidStep":7,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":31,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# SETUP, plan 2 — a 3 mm fillet on one vertical edge of `body_op5`. Its two
+# TRIMMED circular edges are what rounds E and F address: the same arc is an
+# exact `Arc` seen from a parallel plane and a NAMED REFUSAL seen from a tilted
+# one, which is the whole trimmed-tilted ruling in two rounds.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op5","topoKey":"e:1","elementId":"el_fillet_edge","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op5","topoKey":"e:1","elementId":"el_fillet_edge","kind":"edge"}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":32,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"2222222222222222222222222222222222222222222222222222222222222222","prefixHashes":["3333333333333333333333333333333333333333333333333333333333333333"],"targetStep":8,"ops":[{"opType":"Fillet","opId":"op8","stepIndex":8,"inputs":[{"primary":{"bodyId":"body_op5","elementId":"el_fillet_edge","kind":"edge"},"anchor":{"worldPoint":[100,0,10]}}],"params":{"mode":"Fillet","radius":3.0,"edgeIds":["el_fillet_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op5"}}]}}}
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":8,"jobId":32,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op5"}],"elementMapDelta":{"removed":["el_fillet_edge"]}}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"planPrepared":true,"lastValidStep":8,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":32,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"accepted":true,"snapshotId":2,"documentRevision":2}}}
+# The cylinder's TOP cap edge, given a Rust-minted durable identity — the second
+# addressing rung, and the rung the frontend uses once an edge is promoted. Round B
+# addresses it by `elementId`; rounds C and D address the same edge by `topoKey`,
+# so both rungs are exercised over identical geometry.
+{"send":{"v":1,"t":"req","id":7,"verb":"BindElementIds","args":{"snapshotId":2,"bindings":[{"bodyId":"body_op3","topoKey":"e:3","elementId":"el_cyl_top","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"bound":[{"bodyId":"body_op3","topoKey":"e:3","elementId":"el_cyl_top","kind":"edge"}]}}}
+# HEAD BEFORE. Every round below is compared against this.
+{"send":{"v":1,"t":"req","id":8,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"documentRevision":2,"workerEpoch":4,"snapshotId":2,"hasScratch":false,"historyPrefixHash":"3333333333333333333333333333333333333333333333333333333333333333"}}}
+# ROUND A — `faceOutline` on the box's TOP face, into that face's own plane.
+# The load-bearing assertion is the POINT MERGE: four edges, four points, and each
+# ref REUSED by the neighbouring line. That reuse is what makes the projection a
+# closed loop the region detector can bound, and nothing but a shared buffer slot
+# produces it.
+{"send":{"v":1,"t":"req","id":9,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"faceOutline","sources":[{"bodyId":"body_op1","topoKey":"f:6","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[{"ref":"p0","at":[0.0,0.0]},{"ref":"p1","at":[20.0,0.0]},{"ref":"p2","at":[20.0,20.0]},{"ref":"p3","at":[0.0,20.0]}],"entities":[{"type":"Line","p0Ref":"p0","p1Ref":"p1","sourceRef":{"bodyId":"body_op1","elementId":"","topoKey":"f:6"},"projectedHash":"$hex64"},{"type":"Line","p0Ref":"p1","p1Ref":"p2","sourceRef":{"bodyId":"body_op1","elementId":"","topoKey":"f:6"},"projectedHash":"$hex64"},{"type":"Line","p0Ref":"p2","p1Ref":"p3","sourceRef":{"bodyId":"body_op1","elementId":"","topoKey":"f:6"},"projectedHash":"$hex64"},{"type":"Line","p0Ref":"p3","p1Ref":"p0","sourceRef":{"bodyId":"body_op1","elementId":"","topoKey":"f:6"},"projectedHash":"$hex64"}],"refusals":[]}}}
+# ROUND L — the SAME face and the SAME plane through `ProjectFaceBoundary`
+# `scope:"faceOnly"`. Byte for byte the `points[]` and the p-refs of round A: two
+# verbs answering "project this face's boundary" from two code paths is exactly the
+# drift no lane catches, so §7.6 makes the equality normative and this pair pins
+# it. (The equality binds where both verbs answer at all: `ProjectFaceBoundary`
+# TESSELLATES an unsupported curve, WP-P refuses it by name — see round G.)
+{"send":{"v":1,"t":"req","id":10,"verb":"ProjectFaceBoundary","args":{"bodyId":"body_op1","topoKey":"f:6","scope":"faceOnly","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]}}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"present":true,"points":[{"ref":"p0","at":[0.0,0.0]},{"ref":"p1","at":[20.0,0.0]},{"ref":"p2","at":[20.0,20.0]},{"ref":"p3","at":[0.0,20.0]}],"entities":[{"type":"Line","p0Ref":"p0","p1Ref":"p1"},{"type":"Line","p0Ref":"p1","p1Ref":"p2"},{"type":"Line","p0Ref":"p2","p1Ref":"p3"},{"type":"Line","p0Ref":"p3","p1Ref":"p0"}]}}}
+# ROUND B — PLANE-PARALLEL circle. The cap edge lies in a plane parallel to the
+# sketch plane, so the projection keeps the radius verbatim and stays a `Circle`.
+# Addressed by `elementId`; note the `sourceRef` echoes the rung that was used.
+{"send":{"v":1,"t":"req","id":11,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"edges","sources":[{"bodyId":"body_op3","elementId":"el_cyl_top","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[{"ref":"p0","at":[50.0,0.0]}],"entities":[{"type":"Circle","centerRef":"p0","radius":10.0,"sourceRef":{"bodyId":"body_op3","elementId":"el_cyl_top","topoKey":""},"projectedHash":"$hex64"}],"refusals":[]}}}
+# ROUND C — EDGE-ON, closed. The orchestrator's ruling, in exact integers: a
+# sketch on a side face sees a hole as a LINE of length 2r along n_c x n_s, centred
+# on the projected centre. It is an ANSWER, not a refusal. r=10 at world (50,0,20)
+# ⇒ the chord [40,20]..[60,20] in this plane's UV.
+{"send":{"v":1,"t":"req","id":12,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,0],"xAxis":[1,0,0],"yAxis":[0,0,1],"normal":[0,-1,0]},"mode":"edges","sources":[{"bodyId":"body_op3","topoKey":"e:3","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[{"ref":"p0","at":[40.0,20.0]},{"ref":"p1","at":[60.0,20.0]}],"entities":[{"type":"Line","p0Ref":"p0","p1Ref":"p1","sourceRef":{"bodyId":"body_op3","elementId":"","topoKey":"e:3"},"projectedHash":"$hex64"}],"refusals":[]}}}
+# ROUND D — TILTED and closed ⇒ `Ellipse`. `majorR` is the radius verbatim (the
+# axis n_c x n_s lies in the sketch plane and is not foreshortened); `minorR` is
+# r·|n_c·n_s| and, at 45°, irrational — so it, `rotation` and the centre's v are
+# `$any` here and measured in test_edge_projector.cpp. This is the round that would
+# be a WRONG full-radius Circle if the projector reused `emitCircularEdge`.
+{"send":{"v":1,"t":"req","id":13,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,0],"xAxis":[1,0,0],"yAxis":[0,0.7071067811865476,0.7071067811865476],"normal":[0,-0.7071067811865476,0.7071067811865476]},"mode":"edges","sources":[{"bodyId":"body_op3","topoKey":"e:3","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[{"ref":"p0","at":[50.0,"$any"]}],"entities":[{"type":"Ellipse","centerRef":"p0","majorR":10.0,"minorR":"$any","rotation":"$any","sourceRef":{"bodyId":"body_op3","elementId":"","topoKey":"e:3"},"projectedHash":"$hex64"}],"refusals":[]}}}
+# ROUND E — PLANE-PARALLEL and TRIMMED ⇒ `Arc`. The fillet's cap arc, seen from a
+# plane parallel to it. `ccw` reports the UNDERLYING kernel curve's direction, not
+# the emitted angle order (`startAngle`/`endAngle` are always the CCW-ordered pair),
+# which is why a `false` here is contract and not a bug.
+{"send":{"v":1,"t":"req","id":14,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"edges","sources":[{"bodyId":"body_op5","topoKey":"e:5","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[{"ref":"p0","at":[103.0,"$any"]}],"entities":[{"type":"Arc","centerRef":"p0","radius":3.0,"startAngle":"$any","endAngle":"$any","ccw":false,"sourceRef":{"bodyId":"body_op5","elementId":"","topoKey":"e:5"},"projectedHash":"$hex64"}],"refusals":[]}}}
+# ROUND F — the SAME arc, TILTED ⇒ refused BY NAME. The wire `Ellipse` has no
+# angular extent (§7.3), and neither does the core model nor `Sketch::addEllipse`,
+# so a partially-trimmed tilted circle has no exact form anywhere in the stack.
+# Emitting the full ellipse was rejected because reference-locked geometry BOUNDS
+# REGIONS: an extrude taken off it would cut a shape the model does not contain.
+{"send":{"v":1,"t":"req","id":15,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,0],"xAxis":[1,0,0],"yAxis":[0,0.7071067811865476,0.7071067811865476],"normal":[0,-0.7071067811865476,0.7071067811865476]},"mode":"edges","sources":[{"bodyId":"body_op5","topoKey":"e:5","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[],"entities":[],"refusals":[{"bodyId":"body_op5","elementId":"","topoKey":"e:5","code":"trimmedTiltedArc","message":"$any"}]}}}
+# ROUND G — a `GeomAbs_Ellipse` SOURCE (the extruded ellipse's cap edge) is
+# refused by name in V1: its general projection needs a 2x2 decomposition and it
+# inherits the same trimmed problem. There is no polyline fallback on this verb —
+# the §7.6 Exactness note calls tessellation lossy and permanent.
+{"send":{"v":1,"t":"req","id":16,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"edges","sources":[{"bodyId":"body_op7","topoKey":"e:2","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[],"entities":[],"refusals":[{"bodyId":"body_op7","elementId":"","topoKey":"e:2","code":"unsupportedCurve","message":"$any"}]}}}
+# ROUND H — THE BATCH RULE. One live edge and one stale `topoKey` in one request:
+# the live one still projects and the dead one refuses individually. This verb has
+# no `present:false` precisely because a batch has no single presence answer, and
+# one dead pick in a thirty-edge selection must not void the other twenty-nine.
+{"send":{"v":1,"t":"req","id":17,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"edges","sources":[{"bodyId":"body_op3","topoKey":"e:3","kind":"edge"},{"bodyId":"body_op3","topoKey":"e:9999","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[{"ref":"p0","at":[50.0,0.0]}],"entities":[{"type":"Circle","centerRef":"p0","radius":10.0,"sourceRef":{"bodyId":"body_op3","elementId":"","topoKey":"e:3"},"projectedHash":"$hex64"}],"refusals":[{"bodyId":"body_op3","elementId":"","topoKey":"e:9999","code":"absent","message":"$any"}]}}}
+# ROUND I — `kind` is CHECKED, not trusted: a face addressed as an edge is a
+# per-source `kindMismatch` ANSWER, not the whole-call `OP_FAILED` its single-target
+# model `ProjectFaceBoundary` returns. That difference is deliberate and is the
+# second batch deviation §7.6 records.
+{"send":{"v":1,"t":"req","id":18,"verb":"ProjectToSketchPlane","args":{"snapshotId":2,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"edges","sources":[{"bodyId":"body_op1","topoKey":"f:1","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":18,"ok":true,"result":{"snapshotId":2,"sketchId":"sk_1","points":[],"entities":[],"refusals":[{"bodyId":"body_op1","elementId":"","topoKey":"f:1","code":"kindMismatch","message":"$any"}]}}}
+# ROUND J — a stale snapshot is an ERROR, not an answer. Unlike its model
+# `ProjectFaceBoundary`, this verb IS fenced: its answer is committed into a
+# document sketch and the `projectedHash` it mints becomes the baseline every later
+# staleness check compares against, so a stale capture would write a baseline that
+# can never afterwards be detected as wrong.
+{"send":{"v":1,"t":"req","id":19,"verb":"ProjectToSketchPlane","args":{"snapshotId":99,"sketchId":"sk_1","plane":{"origin":[0,0,20],"xAxis":[1,0,0],"yAxis":[0,1,0],"normal":[0,0,1]},"mode":"edges","sources":[{"bodyId":"body_op3","topoKey":"e:3","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":19,"ok":false,"error":{"code":"STALE_PREVIEW"}}}
+# HEAD AFTER — identical to id 8, field for field. Eleven projections ran between
+# the two and not one of them was allowed to leave a trace.
+{"send":{"v":1,"t":"req","id":20,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":20,"ok":true,"result":{"documentRevision":2,"workerEpoch":4,"snapshotId":2,"hasScratch":false,"historyPrefixHash":"3333333333333333333333333333333333333333333333333333333333333333"}}}
+{"send":{"v":1,"t":"req","id":21,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":21,"ok":true,"result":{"goodbye":true}}}

@@ -33,6 +33,7 @@
 #include "session/ClassifyElement.h"
 #include "session/ElementIdentity.h"
 #include "session/FaceProjection.h"
+#include "session/ProjectToSketchPlane.h"
 #include "session/MassProperties.h"
 #include "session/BodyTopology.h"
 #include "session/ExtractPrismProfile.h"
@@ -335,6 +336,16 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "ProjectFaceBoundary",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_project_face_boundary(session, r);
+        });
+    // --- WP-P: project picked body edges (or a picked face's whole boundary)
+    //     into the ACTIVE sketch's plane (SCHEMA §7.6). Head COPY like its
+    //     neighbour above, but SNAPSHOT-FENCED (stale ⇒ STALE_PREVIEW): the
+    //     answer is committed into a document sketch and the `projectedHash` it
+    //     mints is the baseline every later staleness check compares against. ---
+    dispatcher.register_verb(
+        "ProjectToSketchPlane",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_project_to_sketch_plane(session, r);
         });
     // --- OFFSET-FACE W1: the read-only `op.offsetFace` authoring handshake
     //     (SCHEMA §7.6). Head COPY, no minting — but SNAPSHOT-FENCED, because its

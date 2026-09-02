@@ -2,7 +2,8 @@
   "version": 1,
   "nonOperationRows": [
     "ResolveRefs",
-    "Timeline"
+    "Timeline",
+    "ProjectToSketchPlane"
   ],
   "rows": [
     {
@@ -353,6 +354,20 @@
       "kernelbenchSuite": "",
       "ciJob": "worker-8-0-1; rust-8-0-1",
       "notes": "Must produce NeedsRepair. A protocol verb, not a KnownOperation — declared in nonOperationRows. The §7.5 snapshot echo is pinned by protocol/fixtures/resolve_refs_snapshot_echo.ndjson.",
+      "uiExposure": "hidden"
+    },
+    {
+      "operation": "ProjectToSketchPlane",
+      "mode": "faceOutline + staleness",
+      "supportStatus": "supported",
+      "cppTest": "worker/tests/test_edge_projector.cpp",
+      "rustRealWorkerTest": "src-tauri/tests/project_edges.rs",
+      "frontendTest": "",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1; rust-8-0-1",
+      "notes": "A protocol verb, not a KnownOperation — declared in nonOperationRows. Projects picked body edges (or a face's whole boundary) into a sketch plane as referenceLocked geometry pinned by Fixed. Snapshot-FENCED, unlike ProjectFaceBoundary: the projectedHash it mints is the baseline every later staleness check compares against. A trimmed tilted circular edge and a GeomAbs_Ellipse source are refused BY NAME (the wire Ellipse has no angular extent). update_projection re-binds its sources through the §7.5 ladder first, so a source the ladder cannot AutoBind stays absent and the projection stays PROJECTION_STALE rather than re-binding to a guess. No frontend lane yet — left empty rather than cited falsely.",
       "uiExposure": "hidden"
     },
     {

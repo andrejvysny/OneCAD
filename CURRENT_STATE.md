@@ -95,9 +95,28 @@ Last verified: 2026-09-02 12:41 — `master`, DIRTY: two uncommitted programs in
   (`cf8f35ac…`); fixture `hole_threaded.ndjson` with the identical-matcher trick.
   Combined tip gate: ctest 161/161 · cargo 92/1433/0 · vitest 5500/0 · e2e **514/0** ·
   kernelbench 136 unchanged.
-- **Next:** WP-P project edges (wire change; design + review deltas in the plan file:
-  `ProjectToSketchPlane` verb, snapshot+`PROJECTION_STALE` on projected-UV comparison,
-  `promote_selection` promotion, sketch-level `Sketch.projections`, Update/Detach). Owed user input: the 2–3 dogfood
+- **WP-P project edges — PAUSED at the user's order, two of three packages landed,
+  UNCOMMITTED:** P1 worker (`EdgeProjector` + snapshot-fenced `ProjectToSketchPlane`,
+  SCHEMA §7.6/§8/§14, fixture rounds A–L, ctest **164/164**, cross-process byte-identical
+  transcripts) and P2 Rust (`Sketch.projections` provenance, B2 unlock + provenance
+  `SketchEditOp`s, `project_to_sketch` / `update_projection` / `detach_projection` commands,
+  ordered `RegenPostPublish` staleness → `PROJECTION_STALE`, §7.5 re-bind before update,
+  real-worker `project_edges` **3/3** — re-verified by the orchestrator on the final tree,
+  `cargo --workspace` 1469/0, coverage 32 rows) are green by their own package gates.
+  **Owed to close WP-P:** the FE package (P3 — `project` tool on `j`, CMD/DTOs per
+  `TODO.md` § WP-P2 record, mock honesty, stale badge + first-ellipse hint, e2e), an
+  adversarial review of the staleness/re-bind half, the orchestrator-run FULL L3 over the
+  combined tree, and the commit. `TODO.md` § "WP-P project edges" holds every decision,
+  deviation, found defect (incl. two pre-existing: `squash_sketch_session` vs
+  reference-locked sketches; worker IO under the runtime lock in the promotion/rebind
+  precedents) and the accepted region-split consequence.
+- **Session flake/infra notes:** one Opus subagent hit the account's monthly spend limit
+  mid-run (429) and recovered on retry; `linux-worker` CI stayed queued all day (self-hosted
+  runner offline) and `tauri-composition` cancels at its 95-min timeout building OCCT.
+- **Next (in order):** P3 FE → adversarial review → full L3 → WP-P commit → WP-S sweep →
+  WP-T2 modelled threads → WP-L loft → WP-X dogfood. Open user inputs unchanged: dogfood
+  parts (defaults proposed), NEMA17 route (cleaner file vs seeding the existing `nema17`
+  generator), `.clang-format` `DisableFormat: true`, push authorization for the five commits. Owed user input: the 2–3 dogfood
   parts for WP-X; `.clang-format` (`DisableFormat: true`) to neutralise the `auto-format.sh` hook;
   whether to push `3a82910` + the WP-C commit. Owed user-run gates unchanged (19-row checklist,
   Tauri sketch smoke, dirty vendor STEP for G4).

@@ -3126,6 +3126,159 @@ byte-identical across fresh worker processes. The emission order is normative:
 **Lane.** Kernel lane, alongside `ExecutePlan`/`PreviewOp`. It takes no locks
 beyond the brief head copy, so it does not block an in-flight regen.
 
+#### ProjectToSketchPlane
+
+**Read-only, snapshot-FENCED kernel query.** Projects picked body edges (or a
+picked face's whole boundary) into a supplied sketch plane's UV and returns them
+as `Point`/`Line`/`Circle`/`Arc`/`Ellipse` entities, each carrying the source it
+came from and a hash of its projected geometry. Added 2026-09-02.
+
+It mints nothing, prepares nothing, and touches no head. Unlike its model
+[`ProjectFaceBoundary`](#projectfaceboundary) it **IS snapshot-fenced**: a stale
+`snapshotId` is `STALE_PREVIEW` ([§8](#8-error-taxonomy)), by the same rule
+[`PrepareOffsetFace`](#prepareoffsetface) follows — the answer is committed into
+a document sketch, and the `projectedHash` it mints becomes the baseline every
+later staleness check compares against. An advisory read would let a stale
+capture write a baseline that can never afterwards be detected as wrong.
+
+```json
+// req.args
+{ "snapshotId": 5012,
+  "sketchId": "sk_1",
+  "plane": { "origin": [0,0,20], "xAxis": [1,0,0], "yAxis": [0,1,0], "normal": [0,0,1] },
+  "mode": "edges",                          // "edges" | "faceOutline"
+  "sources": [ { "bodyId": "body_3", "elementId": "el_…4a1", "kind": "edge" },
+               { "bodyId": "body_3", "topoKey": "e:41",      "kind": "edge" } ],
+  "options": { "pointMergeTolerance": 1e-5, "radiusTolerance": 1e-5 } }
+// result
+{ "snapshotId": 5012,
+  "sketchId": "sk_1",
+  "points":   [ { "ref": "p0", "at": [0,0] }, { "ref": "p1", "at": [20,0] } ],
+  "entities": [ { "type": "Line", "p0Ref": "p0", "p1Ref": "p1",
+                  "sourceRef": { "bodyId": "body_3", "elementId": "el_…4a1", "topoKey": "" },
+                  "projectedHash": "9f2c4d1e77a0b355" } ],
+  "refusals": [ { "bodyId": "body_3", "elementId": "el_…9c", "topoKey": "",
+                  "code": "trimmedTiltedArc", "message": "…" } ] }
+```
+
+**`plane` is authoritative and `sketchId` is an ECHO.** Every `at`, centre and
+angle is expressed in the supplied plane's UV; the worker MUST NOT substitute a
+basis of its own, and MUST NOT resolve `sketchId` against its solver-lane sketch
+store to obtain one (that copy can lag the document). `plane` is REQUIRED;
+absent, it is `PROTOCOL_ERROR`. Units mm; angles radians CCW from +U.
+
+**Addressing** is per source: `elementId`, else `{bodyId, topoKey}`, resolving all
+the way to a real sub-shape exactly as `ProjectFaceBoundary` does. `kind` ∈
+`edge` | `face` and is CHECKED, not trusted. `sourceRef` and every `refusals[]`
+entry echo the address AS SENT — all three keys always present, empty string for
+the rung that was not used — so a reader parses one shape and can tie either back
+to the pick it sent.
+
+**`mode`.** `edges` projects each source edge. `faceOutline` projects every
+boundary edge of each source face — outer wire first, then holes, in
+`TopExp_Explorer(face, TopAbs_WIRE)` order. For a face COPLANAR with the supplied
+plane, `faceOutline` MUST produce the identical `entities[]` and point numbering
+`ProjectFaceBoundary` `scope:"faceOnly"` produces for the same face and plane; a
+divergence is a defect in this verb, not a licensed difference. The two projectors
+share one point-merge rule, one wire order and one plane-parallel circle branch,
+and the equality is ASSERTED rather than assumed — the canonical fixture runs both
+verbs over the same face in one file, and `test_edge_projector` compares the two
+buffers point for point. It binds wherever both verbs answer at all:
+`ProjectFaceBoundary` TESSELLATES a curve type it cannot represent exactly, this
+verb refuses it by name (below), so the equality covers exactly the faces whose
+boundary is Lines and exactly-representable circular edges — which is every planar
+face this stack builds.
+
+**Point refs are response-local**, `p<N>`, 0-based, indexing THIS response's
+`points[]` — the `ProjectFaceBoundary` rule verbatim, including the merge: points
+within `pointMergeTolerance` collapse onto one entry, so **a ref reused across
+entities IS the same point**. That merge is what lets a projected outline close
+into a region. It is response-scoped and spans SOURCES, so two picked edges that
+share a vertex share a point and the pair closes.
+
+**Curve rules.** `n_c` is the source curve's plane normal, `n_s` the supplied
+plane's normal. Both thresholds are RADIUS-RELATIVE, so the Line branch is the
+exact continuous limit of the Ellipse branch:
+
+* `GeomAbs_Line` → a `Line` between the projected endpoints.
+* `GeomAbs_Circle`, plane-parallel (`r·(1 − |n_c·n_s|) ≤ radiusTolerance`) →
+  `Circle` when closed, `Arc` when trimmed. An `Arc`'s `startAngle`/`endAngle`
+  are the CCW-ordered pair and `ccw` reports the underlying kernel curve, exactly
+  as in `ProjectFaceBoundary`.
+* `GeomAbs_Circle`, edge-on (`r·|n_c·n_s| ≤ pointMergeTolerance`) → a `Line`. For
+  a CLOSED edge it is the full chord: length `2r`, along `n_c × n_s`, centred on
+  the projected centre — a sketch on a side face sees a hole as a line, and that
+  is an answer, not a refusal. For a TRIMMED edge it is the chord between the two
+  projected endpoints; a `2r` segment there would invent geometry the model does
+  not have.
+* `GeomAbs_Circle`, tilted and CLOSED → `Ellipse` with `majorR = r`,
+  `minorR = r·|n_c·n_s|`, and `rotation` from the projected `n_c × n_s`
+  direction, normalized per [§7.3](#73-op-payload-schemas-vertical-slice) and
+  then FOLDED onto `(−π/2, π/2]`. The fold is required, not cosmetic: a major
+  axis is a LINE, so `rotation` and `rotation ± π` are the same curve, while
+  `n_c` and `−n_c` are the same circle — without it the sign of a source's axis,
+  which is a fact about the model and not about the projected picture, would
+  reach `projectedHash` and two identical projections could report different
+  staleness.
+* `GeomAbs_Circle`, tilted and TRIMMED → **refused** `trimmedTiltedArc`. The wire
+  `Ellipse` has no angular extent (§7.3), so a partial tilted circle has no exact
+  form. It is NOT approximated: emitting a full ellipse would BOUND A REGION the
+  model does not contain, and a polyline is lossy and permanent (see
+  `ProjectFaceBoundary`'s Exactness note).
+* Every other curve type, `GeomAbs_Ellipse` INCLUDED → **refused**
+  `unsupportedCurve`, naming the `GeomAbs` type. There is no polyline fallback on
+  this verb.
+
+**A projected `Ellipse` is held by `referenceLocked` alone.** Rust pins projected
+POINTS with `Fixed`, and §7.4 forbids naming an ellipse ENTITY in any
+curve-taking constraint, so an ellipse's `majorR`/`minorR`/`rotation` carry no
+constraint — and, being unregistered with PlaneGCS, no solver pin either. Nothing
+can move them, so this is sound; it is stated because the obvious "fix" (add a
+`Radius`) is an unsupported-constraint failure. Note the §7.4 consequence: one
+projected tilted circle introduces an `Ellipse` and its sketch then omits the
+WHOLE `entityStates` map.
+
+**Refusals are ANSWERS, per source** (`ok:true`), never whole-call errors:
+`absent` (unknown `elementId`, stale `topoKey`, missing body — this verb has no
+`present:false`, because a batch has no single presence answer), `kindMismatch`
+(the declared `kind` is not the one `mode` projects, or the resolved shape type
+contradicts it), `unsupportedCurve`, `trimmedTiltedArc`, `degenerate` (zero-length
+edge, `r ≤ kPointEpsilon`, an edge that projects onto a single point),
+`faceNotPlanar` (`faceOutline` on a non-planar face). One dead pick never voids
+the other sources; `entities[]` and `refusals[]` are both populated. A refusal is
+ATOMIC: a refused source contributes neither an entity nor a point, so `points[]`
+numbering never records a source that produced nothing. Within `faceOutline` a
+single degenerate boundary edge is SKIPPED rather than refused (as
+`ProjectFaceBoundary` skips it), but any NAMED refusal fails the whole face —
+half an outline does not close, and reference-locked geometry that merely LOOKS
+like an outline is worse than a named refusal.
+
+Only two conditions are whole-call errors, and neither grows the §8 taxonomy: a
+stale `snapshotId` is `STALE_PREVIEW`, and a malformed request — absent or
+degenerate `plane`, unknown `mode`, a `kind` outside `edge`/`face`, an empty or
+over-cap `sources` — is `PROTOCOL_ERROR`.
+
+**`projectedHash`** is FNV-1a 64-bit over the entity type token followed by that
+type's shape scalars, each `llround(v / 1e-6)` as i64 little-endian — the
+`quantizationVersion = 1` grid ([§10](#10-resolution-ladder)). Field order:
+`Line` u0,v0,u1,v1 · `Circle` cu,cv,r · `Arc` cu,cv,r,startAngle,endAngle
+(`ccw` NOT hashed) · `Ellipse` cu,cv,majorR,minorR,rotation post-normalization.
+Coordinates are the MERGED `points[]` values, the ones the reader sees.
+It covers the PROJECTED UV GEOMETRY ONLY — not `sourceRef`, not point refs, not
+emission order, and nothing about the source in 3D. Two edges projecting onto the
+same 2D curve hash identically, deliberately: the question is "did the picture in
+this sketch change", not "did the model change", so a source that slides along
+the sketch normal is NOT stale. The 1e-6 grid is also what makes the hash survive
+the libm differences between macOS and Linux.
+
+**Determinism.** Same head + same request ⇒ byte-identical response. Emission
+order is normative: `sources[]` in REQUEST order; within a `faceOutline` face,
+outer wire then holes; within a wire, `BRepTools_WireExplorer` order;
+`points[]` numbered by first use; `refusals[]` in request order.
+
+**Lane.** Kernel lane. Head copy only; no scratch, no snapshot, no minting, no
+`bodyEvents`, no bin tail.
+
 #### PrepareEdgeOp
 
 Read-only, snapshot-fenced Fillet/Chamfer authoring handshake. OCCT contour
@@ -3816,7 +3969,7 @@ where an unknown value is ignorable.
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
 | Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
-| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ExtractPrismProfile`) | `STALE_PREVIEW` | none — head untouched | caller re-picks / re-previews against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
+| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`) | `STALE_PREVIEW` | none — head untouched | caller re-picks / re-previews against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
 | Worker crash / abnormal exit | *(no frame)* | fatal | **restart + replay** from last checkpoint/head; crash **circuit breaker** on repeated `(historyPrefixHash, opId, occtFingerprint)` |
@@ -4241,6 +4394,55 @@ sign-off) once fixtures exist.
   material); `docs/qa/modeling-operation-contracts.json` already promised the
   refusals. Cross-track sign-off recorded 2026-09-02 — protocol-auditor: schema-vs-code review (read-only), `approve` after every filed change was applied; worker + Rust gates re-verified by the orchestrator (ctest and `cargo test --workspace` counts in the TODO.md § KERNEL HARDENING gate row).
 
+- **2026-09-02 — §7.6 NEW read-only verb `ProjectToSketchPlane`** (WP-P; project
+  body edges into the active sketch; cross-track sign-off recorded 2026-09-02).
+  Given a sketch plane and a batch of picked edges or faces, it returns their
+  projection as `Point`/`Line`/`Circle`/`Arc`/`Ellipse` in that plane's UV, each
+  carrying its `sourceRef` and a `projectedHash`. Rust commits the entities as
+  `referenceLocked` geometry pinned by `Fixed`, through the existing
+  `projected_sketch_content` path, in ONE undoable transaction.
+  **Snapshot-FENCED, unlike its model `ProjectFaceBoundary` and for the
+  `PrepareOffsetFace` reason:** the answer is committed into a document sketch and
+  its `projectedHash` becomes the baseline every later staleness check compares
+  against, so a stale capture would write a baseline that can never afterwards be
+  detected as wrong. §8's `STALE_PREVIEW` row gains this verb; the top-level code
+  taxonomy does not grow.
+  **The trimmed tilted arc is REFUSED BY NAME**, not approximated. The wire
+  `Ellipse` has no angular extent (§7.3) and neither does the core model or the
+  worker's `addEllipse`, so a partially-trimmed tilted circular edge has no exact
+  form anywhere in the stack. Emitting a full ellipse was rejected because
+  reference-locked geometry BOUNDS REGIONS: an extrude taken off it would cut a
+  shape the model does not contain. A polyline was rejected on §7.6's own
+  Exactness note — lossy and permanent. A `GeomAbs_Ellipse` SOURCE is refused for
+  the same reason (its general projection needs a 2×2 decomposition and inherits
+  the same trimmed problem); both become projections, with no fixture shape
+  moving, when the wire gains an ellipse arc.
+  The **edge-on** case is an ANSWER, not a refusal: a closed circular edge seen
+  from a side-face sketch projects to a `Line` of length `2r` along `n_c × n_s`.
+  Both curve thresholds are RADIUS-RELATIVE (`r·(1−|n_c·n_s|) ≤ radiusTolerance`
+  parallel, `r·|n_c·n_s| ≤ pointMergeTolerance` edge-on) so the Line branch is the
+  exact continuous limit of the Ellipse branch; an absolute epsilon would emit
+  micron-thin sliver ellipses that neither the region detector nor `addEllipse`
+  normalization can handle.
+  **Refusals are per-SOURCE answers** (`ok:true`) in six values: `absent` |
+  `kindMismatch` | `unsupportedCurve` | `trimmedTiltedArc` | `degenerate` |
+  `faceNotPlanar`. This verb has no `present:false` — a batch has no single
+  presence answer, so an unresolvable source refuses individually while the rest
+  of the batch still projects. That is the deliberate deviation from
+  `ProjectFaceBoundary`, which is single-target.
+  `projectedHash` reuses `quantizationVersion = 1` verbatim (`llround(v / 1e-6)`,
+  FNV-1a 64-bit, 16 hex chars per §2) rather than introducing an eighth,
+  unversioned quantization axis. The 1e-6 grid is load-bearing twice: it matches
+  the resolution ladder's own addressing grid, and it absorbs the libm difference
+  between macOS and Linux that would otherwise make a document saved on one
+  report false staleness on the other. A projected `Ellipse`'s `rotation` is
+  additionally FOLDED onto `(−π/2, π/2]` before it is emitted or hashed, because a
+  major axis is a line and `n_c`/`−n_c` are the same circle: without the fold the
+  sign of the source's axis would reach the hash and two identical projected
+  pictures could report different staleness.
+  `protocolVersion` stays 1; no handshake axis and no worker fingerprint moves.
+  New fixture `project_to_sketch_plane.ndjson`; no existing fixture shape moves,
+  **no fixture bump**.
 - **2026-09-01 — §7.3 `Hole.thread`, an OPTIONAL cosmetic-thread block** (WP-T1;
   cross-track sign-off recorded 2026-09-01). Presence-discriminated and
   ORTHOGONAL to `holeType`: absent is an unthreaded hole and is BYTE-IDENTICAL

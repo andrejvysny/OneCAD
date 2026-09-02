@@ -357,6 +357,64 @@ fn sanitize_region_ids(value: &mut Value) -> Vec<Diagnostic> {
     diags
 }
 
+/// Load-time reconcile (WP-P): drops any `sketches[*].projections` row whose
+/// entity is no longer in that sketch.
+///
+/// An orphan row is unusable — it can be neither updated (there is nothing to
+/// replace) nor detached (there is nothing to unlock) — and it would make the
+/// staleness pass re-project geometry into nothing. The typed
+/// `From<SketchData> for Sketch` conversion drops orphans unconditionally, so the
+/// document is safe either way; this pass exists to make the drop VISIBLE, since
+/// that conversion has no channel to report on.
+///
+/// Returns the diagnostics (empty ⇒ nothing changed).
+fn sanitize_sketch_projections(value: &mut Value) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let Some(sketches) = value
+        .pointer_mut("/sketches")
+        .and_then(Value::as_object_mut)
+    else {
+        return diags;
+    };
+    for (sketch_id, sketch) in sketches.iter_mut() {
+        let live: Vec<String> = sketch
+            .get("entities")
+            .and_then(Value::as_array)
+            .map(|entities| {
+                entities
+                    .iter()
+                    .filter_map(|e| e.get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(projections) = sketch.get_mut("projections").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let orphans: Vec<String> = projections
+            .keys()
+            .filter(|k| !live.contains(k))
+            .cloned()
+            .collect();
+        if orphans.is_empty() {
+            continue;
+        }
+        for key in &orphans {
+            projections.remove(key);
+        }
+        diags.push(Diagnostic::warning(
+            "projection-orphan-dropped",
+            format!(
+                "sketch {sketch_id}: dropped {} projection row(s) naming entities that are no \
+                 longer in the sketch ({}); re-project to restore the reference",
+                orphans.len(),
+                orphans.join(", ")
+            ),
+        ));
+    }
+    diags
+}
+
 fn value_contains_string(value: &Value, needle: &str) -> bool {
     match value {
         Value::String(text) => text == needle,
@@ -528,6 +586,7 @@ pub fn open_policy(
         Ordering::Equal => {
             // Same version: still normalize legacy placeholder region ids (M4a).
             let mut diagnostics = sanitize_region_ids(&mut value);
+            diagnostics.extend(sanitize_sketch_projections(&mut value));
             diagnostics.extend(migrate_absent_pattern_result_policies(&mut value));
             let records_changed = !diagnostics.is_empty();
             Ok(MigratedValue {
@@ -580,8 +639,12 @@ pub fn open_policy(
             });
             // Also normalize legacy placeholder region ids on the migrated value (M4a).
             let region_diags = sanitize_region_ids(&mut value);
+            let projection_diags = sanitize_sketch_projections(&mut value);
             let pattern_diags = migrate_absent_pattern_result_policies(&mut value);
-            let records_changed = applied || !region_diags.is_empty() || !pattern_diags.is_empty();
+            let records_changed = applied
+                || !region_diags.is_empty()
+                || !projection_diags.is_empty()
+                || !pattern_diags.is_empty();
             let mut diagnostics = Vec::new();
             if applied {
                 diagnostics.push(Diagnostic::info(
@@ -596,6 +659,7 @@ pub fn open_policy(
                 ));
             }
             diagnostics.extend(region_diags);
+            diagnostics.extend(projection_diags);
             diagnostics.extend(pattern_diags);
             if let Some(reason) = &read_only_reason {
                 diagnostics.push(Diagnostic::warning("migration-read-only", reason.clone()));
@@ -843,5 +907,64 @@ mod tests {
         assert_eq!(plan.confidence, MigrationConfidence::Low);
         let out = open_policy(&reg, serde_json::json!({"oldName":1}), 0, 2).unwrap();
         assert!(out.read_only);
+    }
+
+    /// WP-P: a same-version open drops orphan `projections` rows and SAYS SO.
+    #[test]
+    fn orphan_projection_rows_are_dropped_with_a_load_diagnostic() {
+        let reg = MigrationRegistry::new();
+        let value = serde_json::json!({
+            "sketches": {
+                "11111111-1111-1111-1111-111111111111": {
+                    "entities": [ { "type": "point", "id": "aaaaaaaa-0000-0000-0000-000000000001" } ],
+                    "projections": {
+                        "aaaaaaaa-0000-0000-0000-000000000001": {
+                            "sourceBody": "bbbbbbbb-0000-0000-0000-000000000001",
+                            "sourceElementId": "el_live",
+                            "projectedHash": "0123456789abcdef"
+                        },
+                        "aaaaaaaa-0000-0000-0000-00000000dead": {
+                            "sourceBody": "bbbbbbbb-0000-0000-0000-000000000001",
+                            "sourceElementId": "el_dead",
+                            "projectedHash": "0123456789abcdef"
+                        }
+                    }
+                }
+            }
+        });
+        let out = open_policy(&reg, value, 1, 1).unwrap();
+        let projections =
+            &out.value["sketches"]["11111111-1111-1111-1111-111111111111"]["projections"];
+        assert!(projections["aaaaaaaa-0000-0000-0000-000000000001"].is_object());
+        assert!(projections
+            .get("aaaaaaaa-0000-0000-0000-00000000dead")
+            .is_none());
+        assert!(out.records_changed);
+        assert_eq!(out.diagnostics.len(), 1);
+        assert_eq!(out.diagnostics[0].code, "projection-orphan-dropped");
+    }
+
+    /// …and a sketch with no orphan is left completely alone (no diagnostic, no
+    /// `records_changed`, so an untouched document never invalidates its caches).
+    #[test]
+    fn a_clean_projections_map_produces_no_diagnostic() {
+        let reg = MigrationRegistry::new();
+        let value = serde_json::json!({
+            "sketches": {
+                "11111111-1111-1111-1111-111111111111": {
+                    "entities": [ { "type": "point", "id": "aaaaaaaa-0000-0000-0000-000000000001" } ],
+                    "projections": {
+                        "aaaaaaaa-0000-0000-0000-000000000001": {
+                            "sourceBody": "bbbbbbbb-0000-0000-0000-000000000001",
+                            "sourceElementId": "el_live",
+                            "projectedHash": "0123456789abcdef"
+                        }
+                    }
+                }
+            }
+        });
+        let out = open_policy(&reg, value, 1, 1).unwrap();
+        assert!(out.diagnostics.is_empty());
+        assert!(!out.records_changed);
     }
 }

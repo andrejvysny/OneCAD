@@ -23,6 +23,7 @@
 //!   routine, so it would ERROR-flood once per drag frame. Those keep their
 //!   hand-rolled debug/warn match.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,6 +59,7 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::events;
 use crate::recents;
+use crate::sketch_projection;
 use crate::state::AppState;
 use crate::worker::{lod_from_str, wire};
 
@@ -2295,8 +2297,11 @@ pub async fn add_sketch_on_face(
     }
 
     // ── Translate + build (pure; no worker, no lock) ─────────────────────────
-    let (entities, constraints) = onecad_core::sketch::projected_sketch_content(
-        &payload,
+    // `_projections` is always empty here: `ProjectFaceBoundary` carries no
+    // per-entity source (SCHEMA §7.6), so a sketch-on-face boundary is locked but
+    // NOT projection-tracked. Only `project_to_sketch` writes that map.
+    let (entities, constraints, _projections) = onecad_core::sketch::projected_sketch_content(
+        &payload.geometry,
         &mut EntityId::new,
         &mut ConstraintId::new,
     );
@@ -2379,6 +2384,500 @@ pub async fn add_sketch_on_face(
         face_count: payload.face_count,
         has_closed_boundary: payload.has_closed_boundary,
         projected_boundary_version: 1,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Body-edge projection into a sketch (SCHEMA §7.6 `ProjectToSketchPlane`, WP-P)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One source to project — a [`PickInput`] plus the body it belongs to.
+///
+/// There is no `kind` field on purpose: the kind is whatever the promotion says
+/// the picked sub-shape IS, and a caller-supplied one could only ever disagree
+/// with it. The wire carries the promoted kind, which the worker then CHECKS
+/// against the resolved shape and refuses per source on a mismatch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionSourceInput {
+    pub body_id: String,
+    pub topo_key: String,
+    #[serde(default)]
+    pub anchor: Option<AnchorIntent>,
+}
+
+fn refusal_dtos(refusals: Vec<wire::ProjectionRefusal>) -> Vec<crate::dto::ProjectionRefusalDto> {
+    refusals
+        .into_iter()
+        .map(|r| crate::dto::ProjectionRefusalDto {
+            body_id: r.body_id,
+            element_id: r.element_id,
+            topo_key: r.topo_key,
+            code: r.code,
+            message: r.message,
+        })
+        .collect()
+}
+
+/// Projects picked body edges (or a picked face's whole boundary) into an
+/// EXISTING sketch as locked reference geometry (WP-P; SCHEMA §7.6
+/// `ProjectToSketchPlane`).
+///
+/// The authoring sibling of [`add_sketch_on_face`], and deliberately unlike it in
+/// three ways:
+///
+/// * **It is FENCED, not tripwired.** `add_sketch_on_face` compares a second
+///   round-trip's echoed `exact` frame against the first; that works because a
+///   planar face has a cheap kernel-exact frame to echo, and for a batch of edges
+///   the answer IS the geometry, so comparing it against itself proves nothing.
+///   Here the snapshot fences the worker call AND
+///   [`DocumentRuntime::apply_sketch_edit_fenced`] fences the commit, so the
+///   promote → project → commit triple is atomic with respect to the head.
+/// * **It merges into a sketch that may already hold the user's profile**, inside
+///   ONE undo entry. A wrong new sketch is visible and deletable; a stale merge is
+///   not.
+/// * **The `projectedHash` it commits becomes the staleness baseline.** An
+///   advisory read would let a stale capture write a baseline that can never
+///   afterwards be detected as wrong — a permanently silent wrong bind, the H5-B
+///   class this migration exists to remove.
+///
+/// Picks are promoted through the existing [`promote_selection`] path first, so
+/// every source is addressed by its Rust-minted `ElementId` (Invariant 1) and is
+/// bound in the worker's partition before the projection asks for it.
+///
+/// Refused while a drag gesture is open on the sketch: the commit rewrites the
+/// sketch body, and `EndGesture` would then apply solved positions onto entities
+/// that no longer exist.
+#[tauri::command]
+#[tracing::instrument(
+    skip_all,
+    fields(sketchId = %sketch_id, snapshot = snapshot_id, sources = sources.len()),
+    err(Display)
+)]
+pub async fn project_to_sketch(
+    state: State<'_, AppState>,
+    snapshot_id: u64,
+    sketch_id: String,
+    mode: String,
+    sources: Vec<ProjectionSourceInput>,
+) -> Result<crate::dto::ProjectToSketchDto, ApiError> {
+    let sketch = parse_sketch_id(&sketch_id)?;
+    let mode = wire::ProjectionMode::parse(&mode).ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "projectToSketch: unknown mode {mode:?} (edges|faceOutline)"
+        ))
+    })?;
+    if sources.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "projectToSketch: at least one source is required".into(),
+        ));
+    }
+    // De-duplicate on (body, topoKey), preserving request order: a doubled pick
+    // would otherwise promote as a mismatched batch and project the same edge
+    // twice into the sketch.
+    let mut picks: Vec<(BodyId, TopoKey, Option<AnchorIntent>)> = Vec::new();
+    for source in sources {
+        if source.topo_key.is_empty() {
+            return Err(ApiError::InvalidCommand(
+                "projectToSketch: every source needs a topoKey".into(),
+            ));
+        }
+        let body = wire::parse_body_id(&source.body_id).map_err(ApiError::InvalidCommand)?;
+        let key = TopoKey::new(source.topo_key);
+        if picks.iter().any(|(b, k, _)| *b == body && *k == key) {
+            continue;
+        }
+        picks.push((body, key, source.anchor));
+    }
+    let snapshot = SnapshotId(snapshot_id);
+
+    // ── Locked: presence, the gesture refusal, the plane, and the promotion ──
+    // The promotion is worker IO under the lock, exactly as `promote_selection`
+    // and `promote_prepared_edges` already do it; the PROJECTION below is not.
+    let (plane, promoted, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("projectToSketch".into()))?;
+        if rt.has_active_gesture(sketch) {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "projectToSketch: sketch {sketch} has an active drag gesture — retry after \
+                     pointer-up"
+                ),
+                diagnostics: Vec::new(),
+            });
+        }
+        let plane = rt.sketch_snapshot(sketch, "projectToSketch")?.plane;
+        let mut promoted = Vec::new();
+        for (body, group) in group_picks_by_body(&picks) {
+            promoted.extend(rt.promote_selection(snapshot, body, group).await?);
+        }
+        (plane, promoted, rt.projection())
+    };
+    // The AppHandle comes from the set-once `AppState` slot, never a command
+    // parameter: it is generic over the runtime, and taking it here would pin this
+    // command to `Wry` and make it uncallable from a `mock_app` test — the only
+    // way to exercise it against the real worker.
+    if let Some(app) = state.app.get() {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    }
+
+    let mut wire_sources = Vec::with_capacity(picks.len());
+    for (body, key, _) in &picks {
+        let body_wire = wire::body_id_wire(*body);
+        let hit = promoted
+            .iter()
+            .find(|p| p.body_id == body_wire && p.topo_key == key.as_str())
+            .ok_or_else(|| {
+                ApiError::Internal(format!(
+                    "projectToSketch: promotion returned no identity for {body_wire} {}",
+                    key.as_str()
+                ))
+            })?;
+        wire_sources.push(wire::ProjectionSource {
+            body: *body,
+            address: wire::FaceAddress::ElementId(hit.element_id.as_str()),
+            kind: match hit.kind.as_str() {
+                "face" => wire::ProjectionSourceKind::Face,
+                _ => wire::ProjectionSourceKind::Edge,
+            },
+        });
+    }
+
+    // ── Unlocked: the fenced kernel query ────────────────────────────────────
+    let result = state
+        .face_projection()
+        .project_to_sketch_plane(snapshot, sketch, &plane, mode, &wire_sources)
+        .await?;
+
+    // ── Pure translate (no worker, no lock) ──────────────────────────────────
+    let (entities, constraints, projections) = onecad_core::sketch::projected_sketch_content(
+        &result.geometry,
+        &mut EntityId::new,
+        &mut ConstraintId::new,
+    );
+    let point_count = result.geometry.points.len().try_into().unwrap_or(u32::MAX);
+    let type_by_id: HashMap<EntityId, &'static str> = entities
+        .iter()
+        .map(|e| (e.id(), sketch_projection::type_token(e)))
+        .collect();
+    let mut ops: Vec<SketchEditOp> = Vec::new();
+    for entity in entities {
+        ops.push(SketchEditOp::AddEntity { entity });
+    }
+    for constraint in constraints {
+        ops.push(SketchEditOp::AddConstraint { constraint });
+    }
+    let mut dtos = Vec::with_capacity(projections.len());
+    for (entity, source) in projections {
+        dtos.push(crate::dto::ProjectedEntityDto {
+            entity_id: entity.to_string(),
+            entity_type: type_by_id.get(&entity).copied().unwrap_or("Line").into(),
+            source_body_id: wire::body_id_wire(source.source_body),
+            source_element_id: source.source_element_id.as_str().to_string(),
+            projected_hash: source.projected_hash.clone(),
+        });
+        ops.push(SketchEditOp::SetEntityProjection {
+            entity,
+            source: Some(source),
+        });
+    }
+
+    // ── The single locked, FENCED write ──────────────────────────────────────
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("projectToSketch".into()))?;
+        let outcome = rt.apply_sketch_edit_fenced(snapshot, sketch, ops)?;
+        rt.clear_projection_staleness(sketch);
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "project_to_sketch: sketch={sketch} entities={} points={point_count} refusals={}",
+        dtos.len(),
+        result.refusals.len()
+    );
+    // The AppHandle comes from the set-once `AppState` slot, never a command
+    // parameter: it is generic over the runtime, and taking it here would pin this
+    // command to `Wry` and make it uncallable from a `mock_app` test — the only
+    // way to exercise it against the real worker.
+    if let Some(app) = state.app.get() {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(crate::dto::ProjectToSketchDto {
+        sketch_id: sketch.to_string(),
+        snapshot_id,
+        entities: dtos,
+        point_count,
+        refusals: refusal_dtos(result.refusals),
+    })
+}
+
+/// One pick, resolved to its body (`promote_selection` batches per body).
+type BodyPick = (TopoKey, Option<AnchorIntent>);
+
+/// Groups picks by body, preserving first-seen body order.
+fn group_picks_by_body(
+    picks: &[(BodyId, TopoKey, Option<AnchorIntent>)],
+) -> Vec<(BodyId, Vec<BodyPick>)> {
+    let mut out: Vec<(BodyId, Vec<BodyPick>)> = Vec::new();
+    for (body, key, anchor) in picks {
+        match out.iter_mut().find(|(b, _)| b == body) {
+            Some((_, group)) => group.push((key.clone(), anchor.clone())),
+            None => out.push((*body, vec![(key.clone(), anchor.clone())])),
+        }
+    }
+    out
+}
+
+/// Re-runs the projection for a sketch's mapped sources and replaces the entities
+/// whose projected geometry actually MOVED, in one undoable edit (WP-P).
+///
+/// Matching is by `(source element, ordinal within that source's emission run)`,
+/// which SCHEMA §7.6 makes deterministic. That is what lets the update keep the
+/// existing `EntityId`s: a re-projection that merely moved a box wall leaves every
+/// user constraint hung off the projected line intact and every derived `regionId`
+/// unchanged. A row whose re-projection came back a DIFFERENT SHAPE (a different
+/// entity type, or gone entirely) is NOT guessed at — it is reported as a
+/// `topologyChanged` refusal and left stale for the user to detach or re-project.
+///
+/// Fenced on the current head: the sources are already-promoted `ElementId`s, so
+/// there is no older pick snapshot to be stale against, and a concurrent edit is
+/// caught by the same commit gate `project_to_sketch` uses.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
+pub async fn update_projection(
+    state: State<'_, AppState>,
+    sketch_id: String,
+) -> Result<crate::dto::ProjectToSketchDto, ApiError> {
+    let sketch_key = parse_sketch_id(&sketch_id)?;
+    let (sketch, snapshot) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("updateProjection".into()))?;
+        if rt.has_active_gesture(sketch_key) {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "updateProjection: sketch {sketch_key} has an active drag gesture — retry \
+                     after pointer-up"
+                ),
+                diagnostics: Vec::new(),
+            });
+        }
+        let sketch = rt.sketch_snapshot(sketch_key, "updateProjection")?;
+        let snapshot = rt.head_snapshot_id().unwrap_or(SnapshotId(0));
+        // The sources are snapshot-scoped in the WORKER even though the
+        // `ElementId`s are Rust-owned: a regen renumbers sub-shapes, so a source
+        // promoted two edits ago names nothing until the §7.5 ladder re-binds it.
+        // Only an AutoBind binds; anything else stays absent and comes back as a
+        // per-source refusal rather than a guess.
+        let (bound, unresolved) = rt.rebind_projection_sources(sketch_key).await;
+        tracing::debug!("update_projection: rebind bound={bound} unresolved={unresolved}");
+        (sketch, snapshot)
+    };
+    if sketch.projections.is_empty() {
+        return Ok(crate::dto::ProjectToSketchDto {
+            sketch_id,
+            snapshot_id: snapshot.0,
+            entities: Vec::new(),
+            point_count: 0,
+            refusals: Vec::new(),
+        });
+    }
+
+    // ── Unlocked: one call per MODE, since a face source is re-requested as
+    // `faceOutline` and an edge source as `edges` ───────────────────────────
+    let projector = state.face_projection();
+    let mut fresh = Vec::new();
+    for (mode, sources) in sketch_projection::projection_request_plan(&sketch) {
+        let wire_sources: Vec<wire::ProjectionSource<'_>> = sources
+            .iter()
+            .map(|(body, element)| wire::ProjectionSource {
+                body: *body,
+                address: wire::FaceAddress::ElementId(element.as_str()),
+                kind: match mode {
+                    wire::ProjectionMode::FaceOutline => wire::ProjectionSourceKind::Face,
+                    wire::ProjectionMode::Edges => wire::ProjectionSourceKind::Edge,
+                },
+            })
+            .collect();
+        let result = projector
+            .project_to_sketch_plane(snapshot, sketch_key, &sketch.plane, mode, &wire_sources)
+            .await?;
+        fresh.push((result.geometry, result.refusals));
+    }
+
+    // ── Pure: match by (source element, ordinal) and build the ops ───────────
+    let plan = sketch_projection::build_projection_update(&sketch, &fresh);
+    let mut refusals: Vec<wire::ProjectionRefusal> =
+        fresh.iter().flat_map(|(_, r)| r.iter().cloned()).collect();
+    refusals.extend(plan.refusals.iter().cloned());
+    let dtos: Vec<crate::dto::ProjectedEntityDto> = plan
+        .replaced
+        .iter()
+        .map(|r| crate::dto::ProjectedEntityDto {
+            entity_id: r.entity.to_string(),
+            entity_type: r.entity_type.to_string(),
+            source_body_id: r.source_body_id.clone(),
+            source_element_id: r.source_element_id.clone(),
+            projected_hash: r.projected_hash.clone(),
+        })
+        .collect();
+    if plan.ops.is_empty() {
+        return Ok(crate::dto::ProjectToSketchDto {
+            sketch_id,
+            snapshot_id: snapshot.0,
+            entities: dtos,
+            point_count: 0,
+            refusals: refusal_dtos(refusals),
+        });
+    }
+
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("updateProjection".into()))?;
+        let outcome = rt.apply_sketch_edit_fenced(snapshot, sketch_key, plan.ops)?;
+        rt.clear_projection_staleness(sketch_key);
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "update_projection: sketch={sketch_key} replaced={} refusals={}",
+        dtos.len(),
+        refusals.len()
+    );
+    // The AppHandle comes from the set-once `AppState` slot, never a command
+    // parameter: it is generic over the runtime, and taking it here would pin this
+    // command to `Wry` and make it uncallable from a `mock_app` test — the only
+    // way to exercise it against the real worker.
+    if let Some(app) = state.app.get() {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(crate::dto::ProjectToSketchDto {
+        sketch_id,
+        snapshot_id: snapshot.0,
+        entities: dtos,
+        point_count: 0,
+        refusals: refusal_dtos(refusals),
+    })
+}
+
+/// Detaches projected geometry: drops its provenance rows, releases the `Fixed`
+/// pins that hold it, and unlocks it — one undoable transaction (WP-P).
+///
+/// Afterwards the entities are ordinary editable sketch geometry that no longer
+/// tracks the model. `entity_ids` selects a subset; absent detaches everything the
+/// sketch has projected.
+///
+/// A projected POINT is released only when EVERY still-projected curve has let go
+/// of it: two projected lines meeting at a corner share one point, and freeing it
+/// while one of them is still reference-locked would leave locked geometry hanging
+/// off a movable vertex.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
+pub async fn detach_projection(
+    state: State<'_, AppState>,
+    sketch_id: String,
+    entity_ids: Option<Vec<String>>,
+) -> Result<crate::dto::DetachProjectionDto, ApiError> {
+    let sketch_key = parse_sketch_id(&sketch_id)?;
+    let sketch = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("detachProjection".into()))?;
+        if rt.has_active_gesture(sketch_key) {
+            return Err(ApiError::OpFailed {
+                message: format!(
+                    "detachProjection: sketch {sketch_key} has an active drag gesture — retry \
+                     after pointer-up"
+                ),
+                diagnostics: Vec::new(),
+            });
+        }
+        rt.sketch_snapshot(sketch_key, "detachProjection")?
+    };
+
+    let targets: Vec<EntityId> = match entity_ids {
+        None => sketch.projections.keys().copied().collect(),
+        Some(ids) => {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let entity = EntityId::from_str(&id).map_err(|e| {
+                    ApiError::InvalidCommand(format!("detachProjection: bad entityId {id:?}: {e}"))
+                })?;
+                if !sketch.projections.contains_key(&entity) {
+                    return Err(ApiError::InvalidCommand(format!(
+                        "detachProjection: entity {entity} is not projected in sketch {sketch_key}"
+                    )));
+                }
+                // A repeated id is the caller's, not a second projection: counting
+                // it twice would make `remaining` underflow.
+                if !out.contains(&entity) {
+                    out.push(entity);
+                }
+            }
+            out
+        }
+    };
+    let (ops, freed_constraints) = sketch_projection::build_projection_detach(&sketch, &targets);
+    let remaining = sketch
+        .projections
+        .len()
+        .saturating_sub(targets.len())
+        .try_into()
+        .unwrap_or(u32::MAX);
+
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("detachProjection".into()))?;
+        let outcome = rt
+            .apply(EditCommand::SketchEdit {
+                sketch: sketch_key,
+                ops,
+            })
+            .map_err(|e| ApiError::InvalidCommand(format!("detachProjection: {e}")))?;
+        rt.clear_projection_staleness(sketch_key);
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "detach_projection: sketch={sketch_key} entities={} pins={freed_constraints} \
+         remaining={remaining}",
+        targets.len()
+    );
+    // The AppHandle comes from the set-once `AppState` slot, never a command
+    // parameter: it is generic over the runtime, and taking it here would pin this
+    // command to `Wry` and make it uncallable from a `mock_app` test — the only
+    // way to exercise it against the real worker.
+    if let Some(app) = state.app.get() {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(crate::dto::DetachProjectionDto {
+        sketch_id,
+        entity_ids: targets.iter().map(ToString::to_string).collect(),
+        released_constraints: freed_constraints,
+        remaining,
     })
 }
 
