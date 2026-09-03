@@ -386,6 +386,12 @@ fn lift_profile_to_params(params: &mut Value) {
     if let Some(version) = pobj.get("regionIdentityVersion") {
         map.insert("regionIdentityVersion".into(), version.clone());
     }
+    // SCHEMA §7.3 "Region anchor": forwarded VERBATIM as the `[u, v]` array the
+    // core stores. The worker consults it only after the exact `regionId` misses;
+    // absent here means the worker keeps the plain stale-id refusal.
+    if let Some(anchor) = pobj.get("regionAnchor") {
+        map.insert("regionAnchor".into(), anchor.clone());
+    }
 }
 
 /// Injects the **wire-only, NON-hashed** `params.path` an `ImportStep` op needs
@@ -7118,6 +7124,7 @@ mod body_wire_tests {
             sketch: sid,
             region: RegionId::new(region),
             region_identity_version: Some(2),
+            region_anchor: None,
             extra: Default::default(),
         };
 
@@ -7169,6 +7176,7 @@ mod body_wire_tests {
                 sketch: sid,
                 region: RegionId::new(""),
                 region_identity_version: None,
+                region_anchor: None,
                 extra: Default::default(),
             }),
             distance: Scalar::new(5.0),
@@ -7191,6 +7199,71 @@ mod body_wire_tests {
         );
     }
 
+    /// SCHEMA §7.3 "Region anchor": the optional `regionAnchor` rides the wire as
+    /// a FLAT `params.regionAnchor` `[u, v]` array — present exactly when the core
+    /// profile carries one, and absent otherwise (an anchor key the worker sees is
+    /// an anchor the user actually picked, never a lift artifact).
+    #[test]
+    fn wire_op_lifts_region_anchor_only_when_the_profile_carries_one() {
+        use onecad_core::document::refs::SketchRegionRef;
+        use onecad_core::ids::{RegionId, SketchId};
+
+        let sid = SketchId(Uuid::from_u128(0x5d));
+        let profile = |anchor: Option<[f64; 2]>| SketchRegionRef {
+            sketch: sid,
+            region: RegionId::new("r_anchor"),
+            region_identity_version: Some(3),
+            region_anchor: anchor,
+            extra: Default::default(),
+        };
+        let extrude = |anchor: Option<[f64; 2]>| {
+            Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+                profile: Some(profile(anchor)),
+                distance: Scalar::new(5.0),
+                draft_angle_deg: Scalar::new(0.0),
+                mode: ExtrudeMode::Blind,
+                boolean_mode: BooleanMode::NewBody,
+                target_body: None,
+                target_face: None,
+                two_directions: false,
+                mode2: ExtrudeMode::Blind,
+                distance2: Scalar::new(0.0),
+                target_face2: None,
+                extra: Default::default(),
+            }))
+        };
+        let revolve = |anchor: Option<[f64; 2]>| {
+            Operation::Known(KnownOperation::Revolve(RevolveParams {
+                profile: Some(profile(anchor)),
+                angle_deg: Scalar::new(360.0),
+                axis: None,
+                boolean_mode: BooleanMode::NewBody,
+                target_body: None,
+                extra: Default::default(),
+            }))
+        };
+
+        for build in [
+            &extrude as &dyn Fn(Option<[f64; 2]>) -> Operation,
+            &revolve as &dyn Fn(Option<[f64; 2]>) -> Operation,
+        ] {
+            let with = build(Some([12.0, 8.0]));
+            let w = wire_op(&planned(with.clone(), with.derive_inputs()));
+            assert_eq!(
+                w["params"]["regionAnchor"],
+                json!([12.0, 8.0]),
+                "a picked anchor rides the wire flat and verbatim"
+            );
+
+            let without = build(None);
+            let w = wire_op(&planned(without.clone(), without.derive_inputs()));
+            assert!(
+                w["params"].get("regionAnchor").is_none(),
+                "no anchor in the core profile means no key on the wire"
+            );
+        }
+    }
+
     /// PreviewOp and ExecutePlan MUST lower the SAME typed `Operation` to the SAME
     /// wire op — for EVERY op the frontend can open a preview session on, not just
     /// Extrude (`src/ipc/previewOps.ts` `OP_BUILDERS`). Both sides go through
@@ -7209,6 +7282,7 @@ mod body_wire_tests {
             sketch: SketchId(Uuid::from_u128(0x99)),
             region: RegionId::new("r_non_first"),
             region_identity_version: Some(2),
+            region_anchor: None,
             extra: Default::default(),
         };
         let edge_ref = |body: BodyId, element: &str| ElementRef {

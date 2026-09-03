@@ -19,10 +19,14 @@ use onecad_core::document::record::{
     FilletParams, HoleParams, HoleType, KnownOperation, Operation, OperationRecord,
     HOLE_RESULT_POLICY_VERSION,
 };
-use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef};
+use onecad_core::document::refs::{
+    AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef, SketchRegionRef,
+};
 use onecad_core::document::variables::Scalar;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
-use onecad_core::ids::{BodyId, DocumentRevision, ElementId, JobId, WorkerEpoch};
+use onecad_core::ids::{
+    BodyId, DocumentRevision, ElementId, JobId, RegionId, SketchId, WorkerEpoch,
+};
 use onecad_core::math::Vec3;
 use onecad_core::regen::{
     history_prefix_hash, CancelToken, CheckpointArtifact, CheckpointArtifacts, CheckpointEnvelope,
@@ -704,6 +708,73 @@ fn hole_base_history_prefix_hash_is_golden() {
     assert_eq!(
         hash.to_string(),
         "cf8f35ac17e8c07fc773797df9c26ce403ef68d5c849851a748a06e676e09524"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel-hardening WP-B — the optional `regionAnchor` (SCHEMA §7.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A blind extrude bound to a region, optionally carrying a pick-time anchor.
+fn extrude_with_anchor(anchor: Option<[f64; 2]>) -> OperationRecord {
+    let mut rec = extrude_record(0x1B, 20.0);
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut rec.op else {
+        panic!("expected an Extrude")
+    };
+    p.profile = Some(SketchRegionRef {
+        sketch: SketchId(Uuid::from_u128(0x5C)),
+        region: RegionId::new("r_cell"),
+        region_identity_version: Some(3),
+        region_anchor: anchor,
+        extra: Default::default(),
+    });
+    // Re-mint so `inputs` is derived from the profile we just attached (a
+    // deserialized record re-derives them, so this is what round-trips).
+    OperationRecord::new(rec.record_id, 0, "Extrude", rec.op)
+}
+
+/// A PRESENT anchor is a regen input — it changes which cell the op may bind to —
+/// so two records differing only in it MUST fingerprint differently. Were it
+/// stripped, a re-pick that moved the anchor would silently reuse the checkpoint
+/// built from the old cell.
+#[test]
+fn a_present_region_anchor_moves_the_planner_hash() {
+    let none = extrude_with_anchor(None);
+    let a = extrude_with_anchor(Some([10.0, 10.0]));
+    let b = extrude_with_anchor(Some([10.0, 11.0]));
+
+    assert_ne!(
+        history_prefix_hash(std::slice::from_ref(&none)),
+        history_prefix_hash(std::slice::from_ref(&a)),
+        "adding an anchor changes what the op may bind to"
+    );
+    assert_ne!(
+        history_prefix_hash(std::slice::from_ref(&a)),
+        history_prefix_hash(std::slice::from_ref(&b)),
+        "moving the anchor changes what the op may bind to"
+    );
+}
+
+/// …and an ABSENT one is hash-NEUTRAL: it emits no key, so every document
+/// authored before the field existed replays byte-identically and keeps its
+/// checkpoints. The golden literal is the fence — dropping
+/// `skip_serializing_if` on `regionAnchor` would move it, invalidating every
+/// stored checkpoint in the field.
+#[test]
+fn an_absent_region_anchor_is_hash_neutral_and_golden() {
+    let none = extrude_with_anchor(None);
+    let json = serde_json::to_value(&none).expect("serialize");
+    assert!(
+        json["params"]["profile"].get("regionAnchor").is_none(),
+        "an absent anchor must emit NO key, got {json}"
+    );
+    // The pre-field on-disk form (no `regionAnchor` anywhere) parses back to the
+    // same record and therefore the same fingerprint.
+    let legacy: OperationRecord = serde_json::from_value(json).expect("parse");
+    assert_eq!(none, legacy, "the pre-field on-disk form round-trips");
+    assert_eq!(
+        history_prefix_hash(std::slice::from_ref(&none)).to_string(),
+        "cc5862b8414702decda9e7ac2cfe4ad8d5cf2c1082b0d84dd99177512d896c9f"
     );
 }
 

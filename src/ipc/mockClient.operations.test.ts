@@ -43,6 +43,41 @@ describe("mockClient operations", () => {
     expect(mesh.byteLength).toBeGreaterThan(64);
   });
 
+  // SCHEMA §7.3 WP-B "Region anchor": the mock never uses regionAnchor geometrically
+  // (it ignores it) — it must simply PERSIST it, so a re-edit reads the pick-time
+  // value back byte-identical from `getOperationParams`.
+  it("applyOperation(Extrude) with a regionAnchor round-trips it through getOperationParams", async () => {
+    const regionId = await seedRegion();
+    const op: OperationOp = {
+      opType: "Extrude",
+      sketchId: "skA",
+      regionId,
+      regionAnchor: [1.5, -2.25],
+      params: { distance: 25 },
+    };
+    const res = await mockClient.applyOperation(op);
+    const featureId = res.features[res.features.length - 1].id;
+
+    const stored = await mockClient.getOperationParams(featureId);
+    expect(stored.profile).toEqual({ sketchId: "skA", regionId, regionAnchor: [1.5, -2.25] });
+  });
+
+  it("applyOperation(Revolve) with a regionAnchor round-trips it through getOperationParams", async () => {
+    const regionId = await seedRegion();
+    const op: OperationOp = {
+      opType: "Revolve",
+      sketchId: "skA",
+      regionId,
+      regionAnchor: [3, 4],
+      params: { angleDeg: 90, booleanMode: "NewBody" },
+    };
+    const res = await mockClient.applyOperation(op);
+    const featureId = res.features[res.features.length - 1].id;
+
+    const stored = await mockClient.getOperationParams(featureId);
+    expect(stored.profile).toEqual({ sketchId: "skA", regionId, regionAnchor: [3, 4] });
+  });
+
   it("repeated persisted-sketch region reads stay exact after plane caching", async () => {
     const first = await mockClient.getSketchRegions("sketch2");
     const second = await mockClient.getSketchRegions("sketch2");

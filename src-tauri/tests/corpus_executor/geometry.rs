@@ -109,6 +109,7 @@ fn extrude_record_for(
                 sketch,
                 region: RegionId::new(""),
                 region_identity_version: None,
+                region_anchor: None,
                 extra: Default::default(),
             }),
             distance: Scalar::new(distance),

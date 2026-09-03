@@ -4,6 +4,7 @@
 
 #include "../sketch/SketchTypes.h"
 #include "CurveFragment.h"
+#include "DetectionWarning.h"
 
 #include <optional>
 #include <string>
@@ -44,6 +45,10 @@ struct AdjacencyGraph {
     std::unordered_map<sk::EntityID, int> nodeByPointId;
     std::unordered_map<sk::EntityID, int> edgeByEntity;
     std::string errorMessage;
+    /// Entities dropped during graph construction; never a refusal.
+    std::vector<DetectionWarning> warnings;
+    /// Curve pairs kept by the broad-phase cull during exact refinement.
+    std::size_t curvePairs = 0;
     std::vector<CurveFragment> closedCurves;
 
     int findOrCreateNode(const sk::Vec2d& pos,

@@ -439,6 +439,44 @@ describe("HistoryList failure tones (H7b)", () => {
     expect(screen.getByText("Extrude").className).toContain("text-warn");
   });
 
+  it("an ok row with a warning diagnostic gets the diagnostic badge, titled with the message", () => {
+    render(
+      <HistoryList
+        items={tinted([
+          {},
+          { diagnostics: [{ severity: "warning", code: "REGION_REBOUND_BY_ANCHOR", message: "re-bound via anchor" }] },
+          {},
+        ])}
+      />,
+    );
+    expect(screen.getByTestId("feature-diagnostic-badge-f2")).toHaveAttribute("data-severity", "warning");
+    expect(screen.getByTestId("feature-diagnostic-badge-f2")).toHaveAttribute("title", "re-bound via anchor");
+    expect(screen.queryByTestId("feature-diagnostic-badge-f1")).toBeNull();
+  });
+
+  it("has no diagnostic badge for a plain ok row", () => {
+    render(<HistoryList items={items} />);
+    expect(screen.queryByTestId("feature-diagnostic-badge-f2")).toBeNull();
+  });
+
+  it("suppresses the diagnostic badge on an errored row (already red end to end)", () => {
+    render(
+      <HistoryList
+        items={tinted([
+          {},
+          {
+            status: "error",
+            statusMessage: "boom",
+            diagnostics: [{ severity: "error", code: "KERNEL_REFUSED", message: "boom" }],
+          },
+          {},
+        ])}
+      />,
+    );
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute("data-tone", "error");
+    expect(screen.queryByTestId("feature-diagnostic-badge-f2")).toBeNull();
+  });
+
   it("grays only the dirty rows AFTER the halt — a pre-halt dirty row is normal", () => {
     // f1 dirty (ordinary mid-regen), f2 errored (the halt), f3 dirty (blocked).
     render(

@@ -362,7 +362,7 @@ First-look greps: `grep '"level":"ERROR"' logs/dev.jsonl` · `grep '"target":"wo
 
 On a failing e2e test, or any pageerror at all, `test-results/<test>/` gets `console.log`, `pageerror.log`, `fe-logs.json` (the FE ring via `__logsDump()`), plus Playwright's trace on retry.
 
-White-box surfaces (dev builds only): `window.__logs` / `__logsDump()` / `__logsClear()`, `window.__stores` (12 keys: document, sketch, viewport, tool, settings, selection, measure, app, toolChip, worker, repair, sketchSelection), `window.__vpEngine` (`?vpdebug`), `window.__extrudePreview`.
+White-box surfaces (dev builds only): `window.__logs` / `__logsDump()` / `__logsClear()`, `window.__client` (the live `CadClient`, so a spec can read committed op params via `getOperationParams`), `window.__stores` (12 keys: document, sketch, viewport, tool, settings, selection, measure, app, toolChip, worker, repair, sketchSelection), `window.__vpEngine` (`?vpdebug`), `window.__extrudePreview`.
 
 Policy: never log a drag-frequency path (per-frame preview, pointer, or solver ticks) on either side. `ctx` payloads are capped and never carry raw geometry.
 

@@ -1,0 +1,51 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ed6",
+  "recordSchemaVersion": 1,
+  "stepIndex": 22,
+  "name": "Extrude anchored",
+  "opType": "Extrude",
+  "params": {
+    "booleanMode": "NewBody",
+    "distance": {
+      "value": 25.0
+    },
+    "distance2": {
+      "value": 0.0
+    },
+    "draftAngleDeg": {
+      "value": 0.0
+    },
+    "extrudeMode": "Blind",
+    "extrudeMode2": "Blind",
+    "profile": {
+      "regionAnchor": [
+        12.0,
+        8.0
+      ],
+      "regionId": "r0",
+      "sketchId": "00000000-0000-0000-0000-000000005c01"
+    },
+    "twoDirections": false
+  },
+  "inputs": {
+    "bodies": [],
+    "sketches": [
+      "00000000-0000-0000-0000-000000005c01"
+    ],
+    "elements": []
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

@@ -88,7 +88,11 @@ struct SolverResult {
     /// Number of iterations used
     int iterations = 0;
 
-    /// Final residual error
+    /// SCHEMA §7.4 `maxResidual` (REPORTING ONLY): the largest per-constraint
+    /// residual left by the solve, each constraint in ITS OWN dimension (mm or
+    /// radians — see `maxConstraintResidual`). Measured only when `solve()` is
+    /// given a residual context; 0.0 means "measured, nothing violated" there
+    /// and "unmeasured" everywhere else (the drag entries never measure).
     double residual = 0.0;
 
     /// Time taken for solve
@@ -246,8 +250,17 @@ public:
      * 3. If failure, original coordinates preserved
      *
      * Calls PlaneGCS solve() and applies or reverts the solution.
+     *
+     * @param residualContext When non-null, the sketch whose entities back the
+     *        registered parameters. `SolverResult::residual` is then MEASURED
+     *        from it over the constraints registered with THIS solver, on the
+     *        parameters the solve left in place (SCHEMA §7.4 `maxResidual` —
+     *        REPORTING ONLY: nothing below reads it, so no decision moves).
+     *        Null leaves the field at 0, i.e. unmeasured — which is what the
+     *        drag entries report, because the per-frame lane must not pay for a
+     *        measurement nobody consumes (house logging/drag policy).
      */
-    SolverResult solve();
+    SolverResult solve(const Sketch* residualContext = nullptr);
 
     /**
      * @brief Solve with a point being dragged

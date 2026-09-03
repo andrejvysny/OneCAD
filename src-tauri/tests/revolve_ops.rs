@@ -457,6 +457,7 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
             sketch,
             region: RegionId::new(""), // first-region fallback
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),
@@ -495,6 +496,7 @@ fn revolve_record(
             sketch,
             region: RegionId::new(region),
             region_identity_version: (!region.is_empty()).then_some(3),
+            region_anchor: None,
             extra: Default::default(),
         }),
         angle_deg: Scalar::new(angle_deg),
@@ -1572,6 +1574,7 @@ fn revolve_typed_axis_record(
             sketch,
             region: RegionId::new(""),
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         angle_deg: Scalar::new(angle_deg),

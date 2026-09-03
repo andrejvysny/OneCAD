@@ -76,6 +76,9 @@ struct FakeBackend {
     /// When set, the solver lane (`sketch_upsert`) hard-fails — models a worker error
     /// on `enter_sketch` (finding 2c: a failed enter must open NO session).
     solver_fails: bool,
+    /// When set, `sketch_regions` hard-fails — models the worker refusing the
+    /// region derivation on an otherwise-valid finish (sketch-regions-3).
+    regions_fail: bool,
     /// When set, `execute_plan` emits a single `Failed` terminal — models a hard regen
     /// failure (finding 5: EngineFailed-while-superseded downgrades to Superseded).
     plan_fails: bool,
@@ -112,6 +115,7 @@ impl Default for FakeBackend {
         Self {
             body_overrides: HashMap::new(),
             solver_fails: false,
+            regions_fail: false,
             plan_fails: false,
             checkpoints_work: false,
             inline_meshes: false,
@@ -142,6 +146,14 @@ impl FakeBackend {
     fn with_failing_solver() -> Self {
         Self {
             solver_fails: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `sketch_regions` fails every call.
+    fn with_failing_regions() -> Self {
+        Self {
+            regions_fail: true,
             ..Self::default()
         }
     }
@@ -551,6 +563,14 @@ impl SolverEngine for FakeBackend {
         })
     }
     async fn sketch_regions(&self, _sketch_id: &str) -> Result<FinishSketchDto, EngineError> {
+        if self.regions_fail {
+            return Err(EngineError::OpFailed {
+                code: OpFailureCode::OpFailed,
+                recoverable: true,
+                message: "fake region derivation failure".into(),
+                diagnostics: vec![],
+            });
+        }
         Ok(FinishSketchDto {
             region_identity_version: 2,
             regions: vec![],
@@ -2081,6 +2101,7 @@ async fn sketch_mutations_expose_regen_outcomes_to_the_scheduler() {
         sketch: sid,
         region: RegionId::new("r_profile"),
         region_identity_version: None,
+        region_anchor: None,
         extra: Default::default(),
     });
     dependent.inputs = dependent.op.derive_inputs();
@@ -3541,6 +3562,45 @@ fn host_face_attachment(body: BodyId, el: &str) -> onecad_core::sketch::SketchAt
         },
         projected_boundary_version: 1,
     }
+}
+
+/// A worker that refuses the region derivation must NOT cost the user their
+/// timeline record (sketch-regions-3). The record is the durable half; the
+/// regions are a rebuildable cache. Before the reorder, `sketch_regions` ran
+/// first and its refusal returned early, leaving the record pinned to the
+/// PRE-edit sketch while the document already held the edited one — so the next
+/// regen quietly rebuilt stale geometry.
+#[tokio::test]
+async fn finish_sketch_keeps_the_timeline_record_when_regions_refuse() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::with_failing_regions()));
+    let sid = SketchId(Uuid::from_u128(0x503));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Refused", WorldPlane::XY),
+    })
+    .unwrap();
+
+    let err = rt
+        .finish_sketch_with_outcome(sid)
+        .await
+        .expect_err("a refused region derivation is reported");
+    assert!(
+        err.committed.is_some(),
+        "the refusal carries the committed record outcome for the api layer"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("finishSketch") && message.contains("fake region derivation failure"),
+        "the refusal names finishSketch and the worker's reason, got {message}"
+    );
+
+    assert!(
+        rt.projection()
+            .features
+            .iter()
+            .any(|f| f.op_type == "Sketch"),
+        "the timeline record is committed BEFORE the regions are computed, so a \
+         region refusal must leave it in place"
+    );
 }
 
 /// Finishing a face-hosted sketch STAMPS the record's `host_face`, which is what

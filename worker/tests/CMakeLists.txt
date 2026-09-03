@@ -920,6 +920,28 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/revolve_profile_crosses_axis.ndjson
 )
+# Kernel-hardening WP-B — an optional `regionAnchor` rebinds a profile whose stored
+# V3 `regionId` a dimensional edit re-minted; cross-track pin of the §7.2 warning
+# `REGION_REBOUND_BY_ANCHOR` and of the two literal cell ids.
+add_test(
+    NAME canonical_region_anchor_rebind
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/region_anchor_rebind.ndjson
+)
+# Kernel-hardening WP-B — §7.4 `maxResidual`, REPORTING ONLY. Rounds 1 and 2 are the
+# load-bearing pair (0.0 on a well-conditioned dimensioned rectangle, non-zero on the
+# contradictory Distance 10/20 pair), rounds 3 and 4 carry the field onto BOTH
+# `EndGesture` branches. Every round also pins the verdict PlaneGCS reported, so a
+# measurement that ever moved a decision fails here. No non-zero residual literal is
+# pinned and the SolveDrag/BeginGesture ABSENCES are not assertable by a subset
+# matcher — both live in test_solver_residual.cpp. See the fixture header.
+add_test(
+    NAME canonical_sketch_solve_residual
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_solve_residual.ndjson
+)
 # Kernel-hardening WP-A — ResolveRefs all-three-outcome coverage, moved from the
 # harness lane so the §9 `scoringVersion` (4) is pinned in BOTH lanes (§13).
 add_test(
@@ -934,3 +956,25 @@ add_test(
 add_executable(test_commit_tier_validation test_commit_tier_validation.cpp)
 target_link_libraries(test_commit_tier_validation PRIVATE worker_core)
 add_test(NAME commit_tier_validation COMMAND test_commit_tier_validation)
+
+# Kernel-hardening WP-B — `regionAnchor` rebinds a profile whose stored V3 `regionId`
+# was re-minted by a dimensional edit; an anchor outside every cell keeps the refusal.
+add_executable(test_region_anchor test_region_anchor.cpp)
+target_link_libraries(test_region_anchor PRIVATE worker_core)
+add_test(NAME region_anchor COMMAND test_region_anchor)
+
+# WP-B probes — region identity/detection robustness and honest solve reporting.
+# Nesting under a large-radius arc, and a 100-line profile against the
+# exact-refinement curve-pair ceiling.
+add_executable(test_region_containment test_region_containment.cpp)
+target_link_libraries(test_region_containment PRIVATE worker_core)
+add_test(NAME region_containment COMMAND test_region_containment)
+
+# A solve that converges to a local minimum of an unsatisfiable system must not
+# report success (ConstraintSolver.cpp `Success || Converged`) — and, since T4.4,
+# the §7.4 `maxResidual` numbers and absences the canonical fixture cannot pin:
+# the measured 10 mm / ~0, the +infinity skip, that `EndGesture` measures on its
+# `commit.finalTarget` branch too, and that `SolveDrag`/`BeginGesture` never do.
+add_executable(test_solver_residual test_solver_residual.cpp)
+target_link_libraries(test_solver_residual PRIVATE worker_core)
+add_test(NAME solver_residual COMMAND test_solver_residual)

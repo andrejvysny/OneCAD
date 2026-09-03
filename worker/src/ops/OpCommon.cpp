@@ -2,6 +2,7 @@
 #include "ops/OpCommon.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -10,12 +11,14 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -28,6 +31,7 @@
 #include "loop/RegionTable.h"
 #include "loop/RegionUtils.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "kernel/validation/ShapeAudit.h"
 #include "ops/CancelProgress.h"
 #include "sketch/WireSketch.h"
@@ -107,6 +111,32 @@ bool read_string_array_strict(const json& params, const char* key,
         }
         value_out.push_back(std::move(id));
     }
+    return true;
+}
+
+bool read_region_anchor(const json& params,
+                        std::optional<std::array<double, 2>>& value_out,
+                        std::string& error_out) {
+    value_out.reset();
+    if (!params.is_object() || !params.contains("regionAnchor")) return true;
+    const json& value = params["regionAnchor"];
+    if (!value.is_array() || value.size() != 2) {
+        error_out = "regionAnchor must be [u, v]";
+        return false;
+    }
+    std::array<double, 2> anchor{};
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (!value[i].is_number()) {
+            error_out = "regionAnchor must be [u, v]";
+            return false;
+        }
+        anchor[i] = value[i].get<double>();
+        if (!std::isfinite(anchor[i])) {
+            error_out = "regionAnchor must be finite";
+            return false;
+        }
+    }
+    value_out = anchor;
     return true;
 }
 
@@ -326,10 +356,73 @@ std::vector<json> operation_ref_ownership_repairs(const json& op, const std::str
     return out;
 }
 
-std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
-                                              const std::string& region_id,
-                                              std::optional<int> region_identity_version,
-                                              std::string& err) {
+namespace {
+
+// The one cell of `table` whose built face CONTAINS `anchor` (SCHEMA §7.3 "Region
+// anchor"). Iteration follows table order and nothing else, so the verdict is
+// deterministic. `TopAbs_ON` deliberately does not count, and a SECOND `TopAbs_IN`
+// hit returns "no unique cell" instead of picking one: nothing here can rank two
+// containing cells, so a guess would be exactly the silent mis-bind this project
+// exists to prevent. Do NOT weaken this to "the table forbids overlapping cells" —
+// `buildRegionTable` enforces only id uniqueness; disjointness comes from
+// `LoopDetector::findFaces` and hole parenting is a tessellation test that can
+// fail (probe P-B2). The face is built with the SAME `loop::FaceBuilder` call the
+// selected cell uses, so a cell that cannot be built cannot be bound either.
+const loop::RegionDefinition* cell_containing_anchor(const loop::RegionTable& table,
+                                                     const sk::Sketch& sketch,
+                                                     const std::array<double, 2>& anchor) {
+    const gp_Pln plane = loop::FaceBuilder::sketchPlaneToGpPln(sketch.getPlane());
+    const gp_Pnt point = loop::FaceBuilder::toGpPnt(anchor[0], anchor[1], plane);
+    const double tolerance =
+        kernel::validation::GeometryPrecisionContext{}.authoring_resolution();
+    const loop::FaceBuilder builder;
+    const loop::RegionDefinition* found = nullptr;
+    for (const loop::RegionDefinition& region : table.regions) {
+        loop::Face candidate;
+        candidate.outerLoop = region.outerLoop;
+        candidate.innerLoops = region.holes;
+        const loop::FaceBuildResult built = builder.buildFace(candidate, sketch);
+        if (!built.success || built.face.IsNull()) continue;
+        BRepClass_FaceClassifier classifier(built.face, point, tolerance);
+        if (classifier.State() != TopAbs_IN) continue;
+        if (found != nullptr) return nullptr;
+        found = &region;
+    }
+    return found;
+}
+
+json anchor_rebind_diagnostic(const std::string& stale_id, const std::string& bound_id,
+                              const std::array<double, 2>& anchor) {
+    return json{{"severity", "warning"},
+                {"code", "REGION_REBOUND_BY_ANCHOR"},
+                {"message", "profile: regionId '" + stale_id +
+                                "' matched no cell after an edit; bound the cell "
+                                "containing regionAnchor"},
+                {"stage", "profile"},
+                {"evidence",
+                 json{{"region", json{{"from", stale_id},
+                                      {"to", bound_id},
+                                      {"anchor", json::array({anchor[0], anchor[1]})}}}}}};
+}
+
+// Kernel-hardening WP-B: an entity below the authoring resolution carries no
+// usable boundary, so region detection drops it and keeps going. The step still
+// succeeds; this is how the user learns which entity was ignored.
+json degenerate_entity_diagnostic(const loop::DetectionWarning& warning) {
+    return json{{"severity", "warning"},
+                {"code", "SKETCH_ENTITY_DEGENERATE"},
+                {"message", "profile: " + warning.text()},
+                {"stage", "profile"},
+                {"evidence", json{{"entityId", warning.entityId}}}};
+}
+
+}  // namespace
+
+std::optional<TopoDS_Face> build_profile_face(
+    const json& sketch_params, const std::string& region_id,
+    std::optional<int> region_identity_version, std::string& err,
+    std::vector<json>* diagnostics_out,
+    const std::optional<std::array<double, 2>>& region_anchor) {
     // Sketch params → live Sketch (plane + entities + constraints). Mirrors
     // RegenerationEngine.cpp:1639-1667 buildFaceFromSketchRegion, but the sketch
     // is supplied inline in the plan (deterministic replay) rather than looked up
@@ -372,6 +465,11 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         : loop::RegionIdentityVersion::V2;
     const loop::RegionTable table = loop::buildRegionTable(
         det, map_edge, sk::constants::COINCIDENCE_TOLERANCE, table_version);
+    if (diagnostics_out != nullptr) {
+        for (const loop::DetectionWarning& warning : table.warnings) {
+            diagnostics_out->push_back(degenerate_entity_diagnostic(warning));
+        }
+    }
     if (!table.success) {
         err = "profile: " + table.errorMessage;
         return std::nullopt;
@@ -415,7 +513,21 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
                 matches.push_back(&region);
             }
         }
-        if (exact_legacy_ambiguous || matches.size() != 1) {
+        const loop::RegionDefinition* bound =
+            (!exact_legacy_ambiguous && matches.size() == 1) ? matches.front() : nullptr;
+        // SCHEMA §7.3 "Region anchor": the anchor is a fallback for a STALE id
+        // (zero matches) ONLY. An ambiguous id stays a refusal — the anchor must
+        // never break a tie the id itself could not, and it never runs before the
+        // exact lookup, so a document that still matches replays byte-identically.
+        if (bound == nullptr && !exact_legacy_ambiguous && matches.empty() &&
+            region_anchor.has_value()) {
+            bound = cell_containing_anchor(table, *tr.sketch, *region_anchor);
+            if (bound != nullptr && diagnostics_out != nullptr) {
+                diagnostics_out->push_back(
+                    anchor_rebind_diagnostic(region_id, bound->id, *region_anchor));
+            }
+        }
+        if (bound == nullptr) {
             if (exact_alias_table.has_value() && exact_alias_table->success) {
                     available.clear();
                     for (const loop::RegionDefinition& region : exact_alias_table->regions) {
@@ -434,7 +546,7 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
                   " (available: [" + avail + "])";
             return std::nullopt;
         }
-        selected = matches.front();
+        selected = bound;
     }
 
     loop::Face face;
@@ -453,6 +565,30 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
 std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
                                               const std::string& region_id, std::string& err) {
     return build_profile_face(sketch_params, region_id, std::nullopt, err);
+}
+
+void attach_profile_diagnostics(OpOutcome& out, std::vector<json>& diagnostics) {
+    // A cancelled outcome carries nothing. A FAILED one keeps its advisories: a
+    // dropped degenerate entity is often exactly why the profile then has no
+    // closed region, and `PlanExecutor::execute_ops` appends the failure
+    // diagnostic AFTER the carried advisories (advisory_limit 63 + 1), so the
+    // step message still reads the failure text (adversarial review 2026-09-03).
+    if (out.status == OpOutcome::Status::Cancelled) {
+        diagnostics.clear();
+        return;
+    }
+    if (out.diagnostics.empty()) {
+        for (json& diagnostic : diagnostics) out.diagnostics.push_back(std::move(diagnostic));
+    } else {
+        // Advisories go FIRST so a failure diagnostic already on the outcome stays
+        // last — `perStepResults[].message` derives from `diagnostics.back()`.
+        std::vector<json> merged;
+        merged.reserve(diagnostics.size() + out.diagnostics.size());
+        for (json& diagnostic : diagnostics) merged.push_back(std::move(diagnostic));
+        for (json& diagnostic : out.diagnostics) merged.push_back(std::move(diagnostic));
+        out.diagnostics = std::move(merged);
+    }
+    diagnostics.clear();
 }
 
 bool planar_face_plane_normal(const TopoDS_Face& face, gp_Pln& plane_out, gp_Dir& normal_out) {

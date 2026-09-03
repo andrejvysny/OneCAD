@@ -169,6 +169,22 @@ public:
     void setConfig(const FaceBuilderConfig& config) { config_ = config; }
     const FaceBuilderConfig& getConfig() const { return config_; }
 
+    /**
+     * @brief Create OCCT plane from sketch plane
+     *
+     * Public because any consumer that must place a 2D sketch point in the SAME
+     * 3D frame as the built face has to use this exact transform — notably the
+     * `regionAnchor` containment test in `ops::build_profile_face` (SCHEMA §7.3
+     * "Region anchor"). Re-deriving the frame there would risk divergence.
+     */
+    static gp_Pln sketchPlaneToGpPln(const sk::SketchPlane& sketchPlane);
+
+    /**
+     * @brief Convert 2D sketch point to 3D point on plane
+     */
+    static gp_Pnt toGpPnt(const sk::Vec2d& p2d, const gp_Pln& plane);
+    static gp_Pnt toGpPnt(double x, double y, const gp_Pln& plane);
+
 private:
     FaceBuilderConfig config_;
 
@@ -187,16 +203,6 @@ private:
                                                    const TopoDS_Vertex& end,
                                                    bool forward) const;
 
-    /**
-     * @brief Create OCCT plane from sketch plane
-     */
-    static gp_Pln sketchPlaneToGpPln(const sk::SketchPlane& sketchPlane);
-
-    /**
-     * @brief Convert 2D sketch point to 3D point on plane
-     */
-    static gp_Pnt toGpPnt(const sk::Vec2d& p2d, const gp_Pln& plane);
-    static gp_Pnt toGpPnt(double x, double y, const gp_Pln& plane);
 };
 
 } // namespace onecad::core::loop

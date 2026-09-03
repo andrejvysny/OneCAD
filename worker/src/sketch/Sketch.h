@@ -126,6 +126,10 @@ struct HostFaceAttachment {
 struct SolveResult {
     bool success = false;
     int iterations = 0;
+    /// SCHEMA §7.4 `maxResidual` (REPORTING ONLY), populated by the EXACT
+    /// `solve()` only — see `SolverResult::residual`. The drag entries
+    /// (`solveWithDrag`/`solveWithGroupDrag`/`solveWithTargets`) leave it at 0,
+    /// which means "unmeasured" there, not "nothing violated".
     double residual = 0.0;
     std::vector<EntityID> movedEntities;
     std::vector<ConstraintID> conflictingConstraints;

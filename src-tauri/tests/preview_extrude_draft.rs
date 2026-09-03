@@ -292,6 +292,7 @@ fn draft_extrude_record(rec: u128, sketch: SketchId, dist: f64, draft_deg: f64) 
             sketch,
             region: RegionId::new(""), // first-region fallback (V1)
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),

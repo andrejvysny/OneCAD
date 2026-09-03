@@ -648,3 +648,33 @@ fn an_arithmetic_expression_round_trips_verbatim() {
     };
     assert_eq!(p.distance, Scalar::with_expr(45.0, text));
 }
+
+// ── 11. Snapshot: a profile carrying the optional §7.3 `regionAnchor` ───────
+
+/// NEW snapshots (they touch none of the existing ones): the on-disk form of an
+/// Extrude / Revolve profile carrying a pick-time `regionAnchor` — a flat
+/// `[u, v]` array of finite numbers beside `regionId`.
+///
+/// The ABSENT case needs no new snapshot: `operation_extrude_newbody` and
+/// `operation_revolve` already pin it, and the fact that they do NOT move when
+/// this field is added is the byte-identity guarantee for every existing
+/// document (SCHEMA §7.3 "Region anchor" — absent ⇒ hash-neutral).
+#[test]
+fn extrude_with_a_region_anchor_is_snapshot_locked() {
+    let mut rec = record(22, "Extrude anchored", op_extrude_newbody());
+    let Operation::Known(KnownOperation::Extrude(p)) = &mut rec.op else {
+        panic!("expected an Extrude")
+    };
+    p.profile.as_mut().expect("profile").region_anchor = Some([12.0, 8.0]);
+    insta::assert_json_snapshot!("operation_extrude_with_region_anchor", rec);
+}
+
+#[test]
+fn revolve_with_a_region_anchor_is_snapshot_locked() {
+    let mut rec = record(23, "Revolve anchored", op_revolve());
+    let Operation::Known(KnownOperation::Revolve(p)) = &mut rec.op else {
+        panic!("expected a Revolve")
+    };
+    p.profile.as_mut().expect("profile").region_anchor = Some([12.0, 8.0]);
+    insta::assert_json_snapshot!("operation_revolve_with_region_anchor", rec);
+}

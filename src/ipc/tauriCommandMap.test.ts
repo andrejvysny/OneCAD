@@ -218,6 +218,23 @@ describe("updateScalarParamsCommand — re-edit deep-merge (Findings 3+4)", () =
     expect(p.booleanMode).toBe("NewBody");
   });
 
+  // SCHEMA §7.3 WP-B "Region anchor": persisted ONCE at pick, so a re-edit's
+  // scalar-only patch (never a `profile` key) must leave the stored anchor
+  // byte-identical through the shallow `{...storedParams, ...patch}` merge.
+  it("preserves a stored profile.regionAnchor byte-identical across a distance re-edit", () => {
+    const stored = {
+      distance: { value: 10 },
+      extrudeMode: "Blind",
+      booleanMode: "NewBody",
+      profile: { sketchId: "sk", regionId: "r1", regionAnchor: [1.5, -2.25] },
+    };
+    const cmd = updateScalarParamsCommand("ext-rec", "Extrude", stored, { distance: { value: 25 } });
+    if (cmd.cmd !== "updateOperationParams") throw new Error("unreachable");
+    const p = cmd.op.params as unknown as Record<string, unknown>;
+    expect(p.distance).toEqual({ value: 25 }); // only the scalar changed
+    expect(p.profile).toEqual({ sketchId: "sk", regionId: "r1", regionAnchor: [1.5, -2.25] }); // untouched
+  });
+
   it("preserves shell openFaces + targetBodyId while changing thickness", () => {
     const stored = { thickness: { value: 2 }, openFaces: ["el_a", "el_b"], targetBodyId: "b-uuid" };
     const cmd = updateScalarParamsCommand("shell-rec", "Shell", stored, { thickness: { value: 4 } });
@@ -410,6 +427,52 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
       regionId: "r_v2",
       regionIdentityVersion: 2,
     });
+  });
+
+  // SCHEMA §7.3 WP-B "Region anchor" — the pick-time `[u, v]` centroid rides
+  // inside the SAME `profile` (Rust `SketchRegionRef.regionAnchor`).
+  it("carries regionAnchor inside the stored profile for Extrude and Revolve", () => {
+    const extrudeCmd = operationToEditCommand({
+      opType: "Extrude",
+      sketchId: "sk",
+      regionId: "r",
+      regionAnchor: [1.5, -2.25],
+      params: { distance: 5 },
+    });
+    if (extrudeCmd.cmd !== "addOperation") throw new Error("expected addOperation");
+    expect((extrudeCmd.record.params as { profile?: unknown }).profile).toEqual({
+      sketchId: "sk",
+      regionId: "r",
+      regionAnchor: [1.5, -2.25],
+    });
+
+    const revolveCmd = operationToEditCommand({
+      opType: "Revolve",
+      sketchId: "sk",
+      regionId: "r",
+      regionAnchor: [3, 4],
+      params: { angleDeg: 90 },
+    });
+    if (revolveCmd.cmd !== "addOperation") throw new Error("expected addOperation");
+    expect((revolveCmd.record.params as { profile?: unknown }).profile).toEqual({
+      sketchId: "sk",
+      regionId: "r",
+      regionAnchor: [3, 4],
+    });
+  });
+
+  it("omits a non-finite regionAnchor instead of sending it (the worker refuses one)", () => {
+    const command = operationToEditCommand({
+      opType: "Extrude",
+      sketchId: "sk",
+      regionId: "r",
+      regionAnchor: [Number.NaN, 1],
+      params: { distance: 5 },
+    });
+    if (command.cmd !== "addOperation") throw new Error("expected addOperation");
+    const profile = (command.record.params as { profile?: Record<string, unknown> }).profile;
+    expect(profile).toEqual({ sketchId: "sk", regionId: "r" });
+    expect("regionAnchor" in (profile ?? {})).toBe(false);
   });
 
   it("Shell maps openFaces + typed faces in lockstep", () => {

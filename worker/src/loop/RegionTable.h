@@ -14,6 +14,9 @@ struct RegionTable {
     bool success = false;
     std::string errorMessage;
     std::vector<RegionDefinition> regions;
+    /// Advisory findings forwarded from loop detection, with each `entityId`
+    /// remapped through `mapBaseEdge` into the caller's id space.
+    std::vector<DetectionWarning> warnings;
 };
 
 using WireEdgeMapper = std::function<std::string(const sk::EntityID&)>;

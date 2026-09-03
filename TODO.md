@@ -273,8 +273,9 @@ attribution question arose.
       `cargo test -p onecad --lib sketch_projection` 15/15, clippy clean, workspace re-run recorded
       below).
 - [x] Final `cargo test --workspace` after the `run_reordered` tightening: **93 / 1486 / 0**. Commit C
-      = this commit, pushed. The three red CI jobs of run 33683904198 are re-running (the run was
-      cancelled by hand — it was held open only by the queued self-hosted `linux-worker`).
+      `78daecb` pushed. **CI re-run of run 33683904198's three red jobs: `rust-8.0.1` ✓, `e2e-webkit`
+      ✓, `e2e-chromium` ✓** — the 1.98 lint fix holds and both e2e reds were runner-side flakes (the
+      badge race now hardened in the spec). Run 33739376259 for `78daecb` queued.
 - [x] Hygiene: `.clang-format` `DisableFormat: true` added (authorized; probed — a one-word C++
       comment edit through the Edit tool now yields a 1-line diff, no reflow) · CLAUDE.md drift
       fixed (settingsStore v11, ctest 168, no 3MF export verb). Lands with commit C.
@@ -288,10 +289,77 @@ attribution question arose.
       v4?) · does repair rewrite the frozen anchor? · `describe(shape, body)` O(E²) map rebuild
       (measure on the 40-feature baseline) · v4 `outward` veto coverage · `outward` at the UV-bbox
       midpoint (holes, cylinder seams).
-- [ ] WP-B (plan § D): probes P-B1..P-B4 red-first → `regionAnchor` (largest preview-triangle
-      centroid) + anchor ladder in `build_profile_face` → adaptive fragment sampling + bbox cull +
-      degenerate warning → solver residual (`Converged` ≠ satisfied) → `finish_sketch`
-      record-before-regions → adversarial review → L3 → commit D.
+- [ ] **WP-B (plan § D) — IN FLIGHT 2026-09-03.** Probes measured on `78daecb` (impl-critical,
+      tests only): **P-B1 RED** — rect 40×20 + circle r=6 across its edge, extrude the largest cell
+      (volume 7434.513322354 exact), edit the radius to 7 → the extrude fails `profile: regionId
+      'r_ebe211b1…' matched no selectable region (available: [3 new ids])`; the regen still reports
+      `outcome=published` with a populated `failed_steps` (seam: a caller gating on the terminal
+      alone reads success). **P-B2 GREEN on the specified fixture** — the chord at y=50 subtends
+      240° (my geometry error: sagitta 0.856 mm < the 1 mm clearance, and a sample lands exactly at
+      270°); the probe's measurement sweep reproduces the defect at 262.5° / 0.8 mm clearance
+      (`largestCellHoles=0`) — the asserting fixture moves there in T4.3. **P-B3 RED** — a closed
+      100-line profile refuses `profile refinement exceeds curve-pair limit` (C(100,2)=4950 > 4096)
+      in < 1 ms. **P-B4 GREEN (not reproduced)** — Distance 10 + Distance 20 on one pair comes back
+      `Diverged` (DogLeg fails, LM fails), `success=false`, `conflicting=2`, positions restored; the
+      `Converged`-as-success path exists but this fixture never reaches it; `SolverResult::residual`
+      is never assigned (constant 0) → the `maxResidual` wire field + gate lands as a guard, not a
+      fix. Test files: `sketch_regions.rs` (+P-B1), `test_region_containment.cpp` (new),
+      `test_solver_residual.cpp` (new). SCHEMA §7.2/§7.3/§7.4/§14 written (protocol audit in
+      flight); T4.2 (anchor ladder) and T4.3 (sampling/cull/degenerate) implementing in parallel.
+      **Landed (2026-09-03 afternoon):** T4.2 worker anchor ladder — `build_profile_face(…, err,
+      diagnostics_out = nullptr, region_anchor = nullopt)`, exact id → unique `IN` cell → refuse;
+      `REGION_REBOUND_BY_ANCHOR` on Ok planSteps; six probe cases (`test_region_anchor`: rebind
+      volume 7230.3098, outside anchor refuses, malformed anchor `OP_FAILED`, empty id keeps V1
+      fallback, ambiguous id never reaches the anchor); fixture `region_anchor_rebind.ndjson` pins ids
+      `r_b3ee58…` → `r_af50cd…` (`canonical_region_anchor_rebind`, 12 expectations, mismatch proven).
+      T4.3 detector — chord-tolerance sampling (R=100/240° → 149 segments; ellipses by MAJOR
+      radius — the minor-radius rule under-samples by √(a/b)), bbox cull (100-line profile 4950 →
+      100 pairs, 1.09 ms; a re-intersect audit of every culled pair found 0 violations over 172
+      tests, proven live), degenerate line/circle/arc → `SKETCH_ENTITY_DEGENERATE` warning; P-B2
+      moved to 262.5°/0.8 mm RED → GREEN, P-B3 RED → GREEN, P-B5 RED → GREEN; region ids
+      byte-identical across the sampling change. T4.5 Rust — `SketchRegionRef.region_anchor`
+      (frozen serde form; present ⇒ hash moves, absent golden `cc5862b8…`), validation at both
+      session entry paths, 4-key wire lift, two NEW schema-freeze snapshots (none moved),
+      `finish_sketch_with_outcome` record-before-regions (+ failing-regions runtime test),
+      `RegenReport` seam documented; **P-B1 GREEN** (volume 7230.309799870, Δ 9e-13, diagnostic
+      pinned). Protocol audit of the SCHEMA text: `approve_with_changes` (9 blockers applied —
+      notably `maxResidual` became REPORTING ONLY because a mixed mm/radian gate would false-reject
+      angle constraints). T4.4 residual — `maxResidual` = max over each
+      constraint's own `getError` (mm/radians by kind, non-finite skipped), measured AFTER the
+      apply/undo decision (one write site, one read site — no decision can consult it), on
+      SketchUpsert + EndGesture only (drag lane asserted absent; EndGesture measures from the
+      sketch because the `commit.finalTarget` branch would otherwise report 0.0 — proven
+      red-first); fixture `sketch_solve_residual.ndjson` (4 rounds; `canonical_sketch_solve_
+      residual`); the per-expect `"tolerance": {abs, rel}` matcher that `protocol/fixtures/
+      README.md` documented was NEVER implemented in `worker_harness` — implemented now, proven
+      live (A/B/C). T4.6 FE — `regionAnchorOf` (largest-area triangle, first-wins tie), single wire
+      mapper `regionRefOf()` (non-finite → omitted), fresh at pick / STORED on re-edit (patch
+      byte-identical), mock round-trips, e2e asserts a finite committed anchor; dev-only
+      `window.__client` debug surface added (CLAUDE.md white-box list updated). Protocol re-verification: `approve_with_changes`, no blockers (unit comments, the
+      sampling fix's persisted-id consequence recorded in §14, `stage:"profile"` on the warning
+      rows) — applied, sign-off recorded. **Adversarial review (fresh context): DEFECTIVE, fixed
+      red-first** — B1 the degenerate drop's 1e-3 threshold vs the graph's 1e-6 coincidence DELETED
+      a hole whose last edge piece was 0.0005 mm (extrude 8000 instead of 7000, step ok; a 0.0005
+      chamfer made a rectangle "no closed region") → threshold = coincidence tolerance, P-B6/P-B7;
+      H1 the rebind warning reached no UI → inspector shows warning diagnostics + history-row badge
+      (FE task); H2 the anchor binds the cell containing the pick after a boundary crosses it —
+      ruled intended semantics with the warning as the signal (follow-up: pick-time cell area as a
+      plausibility bound); H3 advisories were cleared on failed steps → kept, failure last; M1 the
+      `finish_sketch` reorder dropped event/scheduler/autosave on a regions refusal →
+      `FinishSketchError{error, committed}`; M2 fixture plan 3 makes plan 1's id load-bearing; M4
+      honest message. Untested branches recorded: two-`IN` refusal, unbuildable-face skip.
+      FE H1/L4 landed (inspector shows warning diagnostics; history-row badge; revolve anchor
+      array length-safe).
+- [x] **Commit-D gate (main thread, suites alone, 2026-09-03 13:58–14:32 + Rust re-run):** ctest
+      **173/173** · hygiene clean · sidecar restaged (`40f73299…`) · fmt clean · clippy **1.97.0 AND
+      1.98.0** clean (the first 1.98 pass flagged `result_large_err` on the new `FinishSketchError`
+      — boxed, re-run) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **93 / 1496 / 0** · tsc
+      clean · vitest **317 files / 5566 / 78 skipped** · hex 0 · coverage 32/9/16/19 · contracts
+      39/18 · negative controls OK · kernelbench **136 rows unchanged** + semantics OK · `bun run
+      e2e` **518 passed / 0 failed** (30.1 min; sorted-md5 identical before/after). Commit D = this
+      commit, pushed. Recorded follow-ups: fragment sample memory ceiling (8192 × 1025 samples worst
+      case), degenerate warning dropped on a FAILED profile, `SketchRegions` has no diagnostics
+      channel, zero-minor-radius ellipse still refuses.
 - [ ] WP-F (plan § E): chamfer `referenceFaces` typed refs + `adjacentFaces` on QueryElement →
       L3 → commit E. Then WP-H/I/J (next plan).
 - [ ] Owed user-run gates unchanged (19-row checklist, Tauri smoke, dirty vendor STEP, WP-X

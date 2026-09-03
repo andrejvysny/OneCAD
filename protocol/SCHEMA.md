@@ -631,6 +631,14 @@ array. Readers ignore and log malformed diagnostic entries or optional fields;
 malformed diagnostics never invalidate an otherwise valid frame. At most 64
 diagnostics are consumed per carrier.
 
+Named `warning` codes a `planStep` may carry (additive; a reader treats an
+unknown code as an opaque warning):
+
+| code | meaning |
+|---|---|
+| `REGION_REBOUND_BY_ANCHOR` | the op's stored `regionId` matched no cell after an edit moved a crossing; the op bound the unique cell containing `regionAnchor` instead (§7.3 "Region anchor"). `stage` is `"profile"`. Evidence `{ "region": { "from": "<stale regionId>", "to": "<bound regionId>", "anchor": [u, v] } }`. The params are unchanged; the warning repeats on every regen until the user re-picks. |
+| `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) only — `SketchRegions` (§7.4) has no diagnostics channel and stays silent about it. |
+
 **`diagnostics[].reasonCode` — the machine-readable publication-refusal reason.**
 `code` answers *which taxonomy bucket*; `reasonCode` answers *which policy branch
 refused*. It is a SIBLING of `code`, never a replacement: `code` stays the closed
@@ -1212,6 +1220,7 @@ OneCAD-CPP `ExtrudeParams`.
   "sketchId": "sk_1",             // profile sketch (see "Profile binding")
   "regionId": "r_ac127d8846949…",
   "regionIdentityVersion": 3,    // new authoring; persisted V1/V2 remain frozen
+  "regionAnchor": [12.0, 8.0],   // optional (WP-B): a point strictly INSIDE the picked cell, sketch UV
   "distance": 25.0,
   "draftAngleDeg": 0.0,
   "extrudeMode": "Blind",         // Blind | ThroughAll | Symmetric | ToNext | ToFace
@@ -1362,14 +1371,67 @@ OneCAD-CPP `ExtrudeParams`.
 **Profile binding (NORMATIVE, Extrude / Revolve / Sweep).** The sketch profile is
 carried as **flat `params.sketchId` + `params.regionId`**, NOT as a semantic ref
 in `inputs[]`. A region is identified by the derived `regionId` (§7.4), which is
-already a stable, content-addressed identity — it needs no anchor/intent evidence
-and no ladder, so the semantic-ref machinery does not apply to it. Rust's core
+a stable, content-addressed identity and is matched EXACTLY. It carries no
+`intent` subtree and does not enter the §10 resolution ladder — the semantic-ref
+machinery does not apply to it. The optional `regionAnchor` below is a second,
+independent evidence channel consulted only after an exact-id miss; it is not a
+ladder, produces no score, and never overrides a matching id. Rust's core
 `ExtrudeParams`/`RevolveParams` hold a typed `profile { sketchId, regionId,
-regionIdentityVersion? }`
-object; the wire layer FLATTENS it (`src-tauri/src/worker/wire.rs`
-`lift_profile_to_params`) and the worker reads the flat keys
+regionIdentityVersion?, regionAnchor? }` object (`SketchRegionRef`); the wire
+layer FLATTENS it (`src-tauri/src/worker/wire.rs` `lift_profile_to_params` lifts
+all four keys) and the worker reads the flat keys
 (`worker/src/ops/OpCommon.cpp` `build_profile_face`). Producers MUST send the
 flat form; a nested `params.profile` is not consumed by the worker.
+
+**Region anchor (kernel-hardening WP-B, 2026-09-03; Extrude / Revolve).** A V3
+`regionId` hashes the cell's bounding fragments INCLUDING their intersection
+parameters, so any dimensional edit that moves a crossing re-mints every cell id
+in the sketch and a dependent op used to fail `regionId … matched no selectable
+region` on every such edit (measured: a 40×20 rectangle with a circle across one
+edge; changing the circle's radius orphaned the extrude). The optional
+`regionAnchor: [u, v]` (two finite numbers in sketch-plane coordinates — the
+same 2D frame `entities[].at` / `p0` use and the XY of the §7.4 fill) names a
+point inside the cell the user picked. Producers set it ONCE, at pick time, as
+the centroid of the LARGEST-area triangle of the picked region's
+`previewTriangles` fill — the triangle furthest from the boundary approximation,
+which makes the choice deterministic and robust to the fill's chord error (a
+near-boundary anchor classifies `ON` or `OUT` and refuses rather than
+mis-binding) — and persist it verbatim; it is NEVER re-derived at regen (the fill
+sampling may change between versions; a re-derived anchor would move the planner
+hash of existing documents). A producer without the fill omits the field.
+Absent ⇒ hash-neutral (the frozen serde form `#[serde(default,
+skip_serializing_if = "Option::is_none")]` — `ChamferParams.distance2` /
+`angleDeg` are the precedent — so existing documents replay byte-identically);
+present ⇒ it IS a regen input and enters the planner hash, because it changes
+what the op may bind to. A present `regionAnchor` that is not a two-element
+array of finite numbers is a recoverable `OP_FAILED`, NOT a silently-dropped
+optional field (the deliberate exception to §4's ignore-malformed-optional rule):
+the anchor decides what the op may bind to, so a malformed one refuses by name
+rather than falling through to the stale-id refusal and reading as a different
+defect (`NaN`/`Infinity` are already `PROTOCOL_ERROR` per §4).
+
+Resolution order in `build_profile_face` at every regen: (1) the exact
+`regionId` — V3 `cell-v3` / V2 frozen / V1 legacy, unchanged; an EMPTY
+`regionId` under `regionIdentityVersion` 2/3 is the existing hard error
+("requires regionId"), and under V1 keeps the frozen first-region fallback — in
+both cases the anchor is ignored;
+an AMBIGUOUS id (two or more matches, including the V1 legacy-alias ambiguity) is
+refused as today and never reaches the anchor. (2) Only when (1) matches NO cell
+and `regionAnchor` is present: every cell's face is built with the same builder
+the selected cell uses (a cell whose face fails to build is skipped), the anchor
+is lifted into 3D through the sketch plane and classified with
+`BRepClass_FaceClassifier` at the authoring resolution
+(`kAuthoringResolutionMm`, 1e-3 mm — this tolerance decides `IN` versus `ON`);
+exactly one `IN` cell binds; `ON` does not count; two or more `IN` hits are a
+refusal, never a pick — a guess there would be the silent mis-bind this project
+exists to prevent. (3) Otherwise the existing refusal that names the available
+ids. A bind through (2) publishes a `warning` diagnostic
+`REGION_REBOUND_BY_ANCHOR` (evidence `{ region: { from, to, anchor } }`) on that
+step; the params are NEVER rewritten — the resolution repeats deterministically
+on every regen, and only a user re-pick (or a future explicit migration) moves
+the stored id. `PreviewOp` shares `build_profile_face`, so preview and commit
+resolve identically. `PlaceComponent` `source.kind = "profile"` binds a package
+face, not a sketch cell, and carries no anchor.
 
 `inputs[]` still carries genuine semantic refs for elements that DO need the
 ladder — the Extrude `ToFace` target face, typed Revolve body-edge axis,
@@ -1390,6 +1452,7 @@ produced or consumed.
   "sketchId": "sk_1",
   "regionId": "r_ac127d8846949…",
   "regionIdentityVersion": 3,
+  "regionAnchor": [12.0, 8.0],   // optional (WP-B), same rule as Extrude
   "angleDeg": 360.0,
   "axis": { "kind": "sketchLine", "sketchId": "sk_1", "lineId": "e1" },
               // axis.kind ∈ "sketchLine" {sketchId,lineId} | "edge" {bodyId,edgeId,edgeRef?} | "none"
@@ -2322,6 +2385,7 @@ Upserts the authoritative sketch (plane + entities + constraints). Increments
 { "upserted": true, "sketchId": "sk_1", "sketchRevision": 4, "dof": 2,
   "state": "UnderConstrained",    // state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
   "conflicting": [],              // constraint ids in conflict (non-empty iff state=Conflicting); absent ⇒ []
+  "maxResidual": 0.0,             // largest |constraint residual| after the solve, each in its OWN dimension (mm or rad) — reporting only (WP-B); absent ⇒ unmeasured
   "entityStates": {               // PER-ENTITY state, keyed by WIRE entity id; optional, see below
     "e1": "fullyConstrained", "e2": "underConstrained", "e7": "conflicting" } }
 ```
@@ -2333,6 +2397,27 @@ absent field parses as `[]` (all parsers tolerate the missing/unknown key).
 
 `upserted` is `true` on every successful upsert (a failure is an error frame, not
 an `upserted: false`).
+
+**`maxResidual` (kernel-hardening WP-B, 2026-09-03; additive on `SketchUpsert`
+and `EndGesture`; REPORTING ONLY).** The largest per-constraint residual after
+the solve, each constraint measured in ITS OWN dimension — mm for a length-valued
+constraint (Distance, Radius, Diameter, Tangent), radians for an angle-valued one
+(Angle, Parallel, Perpendicular) — evaluated on the parameters the solve left in
+place. A single number therefore mixes dimensions: a reader displays it and never
+compares it across constraint kinds or against a tolerance of its own. A
+constraint whose entities cannot be read yields no residual and is skipped, never
+`+infinity`. It is computed on the `SketchUpsert` and `EndGesture` exact solves
+only — never on the per-frame `SolveDrag` lane — and it changes NO decision: the
+solve's success, `state`/`status` and `conflicting` are exactly what PlaneGCS
+reports (`GCS::SolveStatus`; a contradictory Distance 10 / Distance 20 pair
+already comes back `Diverged`, measured 2026-09-03). The field exists because
+PlaneGCS reports `Converged` for a solve whose step fell below its convergence
+criterion whether or not the residual is negligible, and the previous `residual`
+slot was never assigned; a future per-dimension gate (length residual ≤
+`SolverConfig::tolerance` = 1e-4 mm, angular residual ≤ a named angular
+tolerance) is a recorded follow-up that would land only with a reproduced
+local-minimum case and its own §14 entry. Absent ⇒ unmeasured (older workers);
+readers MUST NOT treat absence as zero.
 
 ##### `entityStates` — the per-entity constrained state
 
@@ -2560,6 +2645,7 @@ its result).
 // result
 { "gestureId": 51, "status": "success", "dof": 0,
   "conflicting": [],   // constraint ids in conflict (non-empty iff status=conflicting); absent ⇒ []
+  "maxResidual": 0.0,  // own dimension (mm or rad), reporting only (WP-B), same rule as SketchUpsert; absent ⇒ unmeasured
   "positions": { /* final exact positions, changed since BeginGesture */ },
   "curves": { /* final exact curve members, changed since BeginGesture */ },
   "entityStates": { /* the gesture-fixed map, echoed from BeginGesture */ },
@@ -2681,7 +2767,15 @@ preview fill).
   `regionIdentityVersion: 3` for new authoring. A persisted V1 or V2 record keeps
   that version through load/save/re-edit/undo/reopen; neither bytes nor lookup
   behavior migrate implicitly. V2 keeps its frozen raw-parameter behavior. V3
-  requires one exact `cell-v3` id and fails closed. An absent persisted version
+  requires one exact `cell-v3` id for the ID channel and fails closed on it: zero
+  matches is stale, two or more is ambiguous, and neither ever picks a cell. An
+  op that ALSO carries a §7.3 `regionAnchor` may, on a zero-match only, bind the
+  unique cell containing that anchor and MUST announce it with the
+  `REGION_REBOUND_BY_ANCHOR` warning; an ambiguous id never reaches the anchor,
+  and a bind through the anchor never rewrites the stored id. A record without an
+  anchor — every persisted V1 and V2 record, and every V3 record authored before
+  this field existed — behaves exactly as before, so no persisted lookup behavior
+  migrates implicitly. An absent persisted version
   is V1 and keeps its legacy first-region fallback. A future explicit migration
   may proceed only when every old region maps uniquely; ambiguity aborts it.
 
@@ -4492,6 +4586,40 @@ sign-off) once fixtures exist.
   governs solid-count publication only). New fixture `hole_threaded.ndjson`; no
   existing fixture shape moves, **no fixture bump**. `protocolVersion` stays 1;
   no handshake axis or worker fingerprint moves.
+
+- **2026-09-03 — Region identity by anchor + robust detection + solve residual
+  (kernel-hardening WP-B).** [§7.3](#73-op-payload-schemas-vertical-slice) Extrude /
+  Revolve: additive `regionAnchor` with the exact-id → anchor-cell → refuse order
+  and the [§7.2](#72-regen--executeplan) `warning` `REGION_REBOUND_BY_ANCHOR`
+  (§7.4's V3 fails-closed rule re-stated to cover the announced anchor bind);
+  [§7.4](#74-sketch-solver-lane) additive `maxResidual` on `SketchUpsert` /
+  `EndGesture`, REPORTING ONLY (per-constraint, own dimension; no decision changes).
+  Detector: split-curve fragments sampled by chord tolerance (0.01 mm) instead of a
+  fixed 16 segments; curve pairs bbox-culled before the 4096 cap; a degenerate entity
+  is skipped and reported with the new §7.2 warning `SKETCH_ENTITY_DEGENERATE` instead
+  of refusing the whole graph. *Reason (measured red-first 2026-09-03):* a V3 region id
+  embeds intersection parameters, so editing the radius of a circle crossing a
+  rectangle orphaned the extrude bound to the rectangle cell (`regionId … matched no
+  selectable region`); the 16-segment polygon of a 240° R=100 arc has a 0.86 mm
+  sagitta and drops a 1 mm hole 0.8 mm inside the rim; a closed 100-line profile
+  refused `profile refinement exceeds curve-pair limit` (C(100,2) = 4950 > 4096); the
+  contradictory-constraint probe came back `Diverged`, so no solver decision changes —
+  the residual is reported for the UI and a future gate. *Fixtures:*
+  `region_anchor_rebind.ndjson`, `sketch_solve_residual.ndjson`. `regionAnchor` and
+  `maxResidual` are additive optional fields, so no existing fixture shape moves, no
+  fixture bump; `protocolVersion` stays 1; no handshake axis and no worker fingerprint
+  moves. One persisted-binding consequence is deliberate: hole parenting is decided
+  against the sampled polygon and holes are hashed into the `cell-v3` id, so a document
+  whose cell USED to lose a hole to the 16-segment sagitta now gains it, its id changes
+  and a persisted Extrude/Revolve bound to that cell goes stale — rescued by the anchor
+  when one is present, refused by name (and re-picked) when not; that is the geometry
+  the model actually contains, not a regression. Also in this change, outside the wire:
+  `finish_sketch` commits the timeline record BEFORE computing regions (finding
+  sketch-regions-3). Cross-track sign-off recorded 2026-09-03 — protocol-auditor:
+  schema-vs-code review (read-only), `approve` after every filed change was applied
+  (two passes: B1–B9/M1–M9, then C1–C3); worker + Rust gates re-verified by the
+  orchestrator (ctest and `cargo test --workspace` counts in the TODO.md § KERNEL
+  HARDENING gate row).
 
 - **2026-09-01 — §7.3 scalar `expr` is an opaque core-owned expression; the core
   no longer emits it on the wire** (DAILY DRIVER v2 WP-E; cross-track sign-off

@@ -95,6 +95,7 @@ fn extrude_record(id: RecordId, sketch: SketchId, out: BodyId) -> OperationRecor
             sketch,
             region: RegionId::new(""),
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(10.0),

@@ -299,6 +299,7 @@ fn extrude_record(
             sketch,
             region: RegionId::new(""), // first-region fallback
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: match expr {

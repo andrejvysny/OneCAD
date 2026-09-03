@@ -82,6 +82,8 @@ export interface PreviewSessionState {
   sketchId?: string;
   regionId?: string;
   regionIdentityVersion?: number;
+  /** Pick-time region anchor (SCHEMA §7.3), carried verbatim from `PreviewDraft`. */
+  regionAnchor?: [number, number];
   /** Verbatim from `PreviewDraft.inputs` — see the Fillet/Chamfer note above. */
   inputs?: SemanticRef[];
   /** Newest complete immutable params snapshot the caller pushed. */
@@ -202,6 +204,7 @@ function extrudeOp(s: PreviewSessionState): OperationOp {
     sketchId: s.sketchId,
     regionId: s.regionId,
     regionIdentityVersion: s.regionIdentityVersion,
+    regionAnchor: s.regionAnchor,
     featureId: s.editFeatureId,
     inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
     params,
@@ -245,6 +248,7 @@ function revolveOp(s: PreviewSessionState): OperationOp {
     sketchId: s.sketchId,
     regionId: s.regionId,
     regionIdentityVersion: s.regionIdentityVersion,
+    regionAnchor: s.regionAnchor,
     featureId: s.editFeatureId,
     inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
     params: { angleDeg, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },

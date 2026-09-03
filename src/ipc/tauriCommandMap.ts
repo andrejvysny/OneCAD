@@ -67,8 +67,18 @@ interface WireScalar {
   expr?: string;
 }
 
+/** Rust `SketchRegionRef` (SCHEMA §7.3). `regionAnchor` is the WP-B pick-time
+ *  anchor — a malformed one is refused by the worker, so the mapper below
+ *  emits it only when both components are finite. */
+interface WireRegionRef {
+  sketchId: string;
+  regionId: string;
+  regionIdentityVersion?: number;
+  regionAnchor?: [number, number];
+}
+
 interface WireExtrudeParams {
-  profile?: { sketchId: string; regionId: string; regionIdentityVersion?: number };
+  profile?: WireRegionRef;
   distance: WireScalar;
   draftAngleDeg: WireScalar;
   extrudeMode: ExtrudeMode;
@@ -93,7 +103,7 @@ type WireAxisRef =
   | { kind: "edge"; bodyId: string; edgeId: string };
 
 interface WireRevolveParams {
-  profile?: { sketchId: string; regionId: string; regionIdentityVersion?: number };
+  profile?: WireRegionRef;
   /** Rust `angleDeg` Scalar — DEGREES (no radians conversion). */
   angleDeg: WireScalar;
   axis?: WireAxisRef;
@@ -861,6 +871,30 @@ function placeComponentParams(p: PlaceComponentParams): WirePlaceComponentParams
   };
 }
 
+/**
+ * Build the wire `SketchRegionRef` for an Extrude/Revolve op — the sole mapper
+ * for `regionAnchor`. A non-finite anchor (should never occur; `regionAnchorOf`
+ * only ever derives one from real triangle coordinates) is OMITTED rather than
+ * sent, since the worker refuses a malformed `[u, v]` outright.
+ */
+function regionRefOf(
+  sketchId: string,
+  regionId: string,
+  regionIdentityVersion: number | undefined,
+  regionAnchor: [number, number] | undefined,
+): WireRegionRef {
+  const anchor =
+    regionAnchor && Number.isFinite(regionAnchor[0]) && Number.isFinite(regionAnchor[1])
+      ? regionAnchor
+      : undefined;
+  return {
+    sketchId,
+    regionId,
+    ...(regionIdentityVersion === undefined ? {} : { regionIdentityVersion }),
+    ...(anchor ? { regionAnchor: anchor } : {}),
+  };
+}
+
 /** Build the `{opType, params}` wire op for an OperationOp (no ids yet). */
 export function wireOperation(op: OperationOp): WireOperation {
   const identity = op.opId ? { opId: op.opId } : {};
@@ -869,13 +903,7 @@ export function wireOperation(op: OperationOp): WireOperation {
       const params = extrudeParams(op.params);
       // The profile is a SketchRegionRef; the ids are real once R-WP12 lands.
       if (op.sketchId && op.regionId) {
-        params.profile = {
-          sketchId: op.sketchId,
-          regionId: op.regionId,
-          ...(op.regionIdentityVersion === undefined
-            ? {}
-            : { regionIdentityVersion: op.regionIdentityVersion }),
-        };
+        params.profile = regionRefOf(op.sketchId, op.regionId, op.regionIdentityVersion, op.regionAnchor);
       }
       return { ...identity, opType: "Extrude", params };
     }
@@ -883,13 +911,7 @@ export function wireOperation(op: OperationOp): WireOperation {
       const params = revolveParams(op.params);
       // The profile is a SketchRegionRef (ids real once R-WP12 lands, as Extrude).
       if (op.sketchId && op.regionId) {
-        params.profile = {
-          sketchId: op.sketchId,
-          regionId: op.regionId,
-          ...(op.regionIdentityVersion === undefined
-            ? {}
-            : { regionIdentityVersion: op.regionIdentityVersion }),
-        };
+        params.profile = regionRefOf(op.sketchId, op.regionId, op.regionIdentityVersion, op.regionAnchor);
       }
       return { ...identity, opType: "Revolve", params };
     }

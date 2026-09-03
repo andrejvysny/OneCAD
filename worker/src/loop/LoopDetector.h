@@ -21,6 +21,7 @@
 
 #include "../sketch/SketchTypes.h"
 #include "CurveFragment.h"
+#include "DetectionWarning.h"
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -178,9 +179,17 @@ struct LoopDetectionResult {
     /// Error message if failed
     std::string errorMessage;
 
+    /// Entities dropped without refusing the rest of the graph. Advisory only:
+    /// a warning never makes `success` false.
+    std::vector<DetectionWarning> warnings;
+
     /// Statistics
     int totalLoopsFound = 0;
     int facesWithHoles = 0;
+
+    /// Curve pairs that survived the broad-phase cull and were intersected by
+    /// exact analytic refinement (0 on every other path).
+    int planarizedCurvePairs = 0;
 };
 
 /**

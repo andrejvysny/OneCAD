@@ -1122,3 +1122,40 @@ describe("PlaceComponent ghost carries the backend's resolved source", () => {
     expect(() => OP_BUILDERS.PlaceComponent!(bad({ length: Number.NaN }))).toThrow(/finite/);
   });
 });
+
+// ── regionAnchor (SCHEMA §7.3 "Region anchor", kernel-hardening WP-B) ─────────
+
+describe("previewOps carries regionAnchor through Extrude/Revolve", () => {
+  it("Extrude: builder passes the session's regionAnchor onto the op verbatim", () => {
+    const op = buildPreviewOp(
+      session({
+        opType: "Extrude",
+        sketchId: "sk",
+        regionId: "r",
+        regionAnchor: [1.5, -2.25],
+        latestParams: { distance: 12 },
+      }),
+    );
+    expect((op as { regionAnchor?: [number, number] }).regionAnchor).toEqual([1.5, -2.25]);
+  });
+
+  it("Extrude: an absent session anchor stays absent on the op", () => {
+    const op = buildPreviewOp(
+      session({ opType: "Extrude", sketchId: "sk", regionId: "r", latestParams: { distance: 12 } }),
+    );
+    expect((op as { regionAnchor?: [number, number] }).regionAnchor).toBeUndefined();
+  });
+
+  it("Revolve: builder passes the session's regionAnchor onto the op verbatim", () => {
+    const op = buildPreviewOp(
+      session({
+        opType: "Revolve",
+        sketchId: "sk",
+        regionId: "r",
+        regionAnchor: [3, 4],
+        latestParams: { angleDeg: 90 },
+      }),
+    );
+    expect((op as { regionAnchor?: [number, number] }).regionAnchor).toEqual([3, 4]);
+  });
+});

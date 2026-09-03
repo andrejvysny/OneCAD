@@ -292,6 +292,7 @@ fn extrude_op(sketch: SketchId, dist: f64) -> Operation {
             sketch,
             region: RegionId::new(""), // first-region fallback
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),

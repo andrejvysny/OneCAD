@@ -403,7 +403,7 @@ void ConstraintSolver::removeConstraint(ConstraintID id) {
                        constraints_.end());
 }
 
-SolverResult ConstraintSolver::solve() {
+SolverResult ConstraintSolver::solve(const Sketch* residualContext) {
     SolverResult result;
     auto start = std::chrono::steady_clock::now();
 
@@ -438,6 +438,15 @@ SolverResult ConstraintSolver::solve() {
     } else {
         gcsSystem_->undoSolution();
         restoreParameters();
+    }
+
+    // SCHEMA §7.4 `maxResidual` — measured HERE, after apply/undo, so it reads
+    // the parameters the solve actually LEFT IN PLACE: the applied solution on
+    // success, the restored pre-solve pose on failure. Read-only with respect to
+    // everything below: `success`, `status` and `conflicting` are exactly what
+    // PlaneGCS reported and no branch consults `result.residual`.
+    if (residualContext) {
+        result.residual = maxConstraintResidual(*residualContext, constraints_);
     }
 
     std::vector<int> conflictingTags;

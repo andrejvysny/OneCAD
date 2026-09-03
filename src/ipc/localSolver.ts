@@ -740,6 +740,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         sketchId: draft.sketchId,
         regionId: draft.regionId,
         regionIdentityVersion: draft.regionIdentityVersion,
+        regionAnchor: draft.regionAnchor,
         inputs: draft.inputs,
         plane,
         profile,

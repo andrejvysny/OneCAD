@@ -262,6 +262,7 @@ fn extrude_record_bound(rec: u128, sketch: SketchId, cached: f64, expr: &str) ->
             sketch,
             region: RegionId::new(""), // first-region fallback
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: Scalar::with_expr(cached, expr),

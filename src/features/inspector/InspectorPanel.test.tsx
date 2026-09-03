@@ -169,6 +169,34 @@ describe("InspectorPanel", () => {
     }
   });
 
+  it("renders a warning diagnostic for an ok feature, framed with warn tokens", () => {
+    documentStore.setState({
+      features: [{
+        id: "f-warn", kind: "revolve", opType: "Revolve", label: "Revolve", valueText: "90°",
+        status: "ok",
+        diagnostics: [{ severity: "warning", code: "REGION_REBOUND_BY_ANCHOR", message: "profile re-bound via region anchor" }],
+      }],
+    });
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "f-warn" }]));
+
+    expect(screen.getByTestId("feature-diagnostic-section")).toBeInTheDocument();
+    expect(screen.getByText("REGION_REBOUND_BY_ANCHOR")).toBeInTheDocument();
+    expect(screen.getByText("profile re-bound via region anchor")).toBeInTheDocument();
+    expect(screen.queryByTestId("feature-edit-retry")).toBeNull();
+  });
+
+  it("renders nothing extra for an ok feature with no diagnostics", () => {
+    documentStore.setState({
+      features: [{ id: "f-clean", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "5 mm", status: "ok" }],
+    });
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "f-clean" }]));
+
+    expect(screen.queryByTestId("feature-diagnostic-section")).toBeNull();
+    expect(screen.queryByTestId("operation-diagnostics")).toBeNull();
+  });
+
   it("shows the SKETCH state (DOF card + one row per live constraint) in sketch mode", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {

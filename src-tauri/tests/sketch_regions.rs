@@ -20,6 +20,10 @@
 //!   frontend's `profileFromRegion` depends on this; a bridge segment that leaked
 //!   out as a boundary edge would fabricate a wall.
 //! * **no-hole control** — a plain rectangle still fills to its full area.
+//!
+//! Later additions live below the MODEL-OPS W2 / W3 banners; the last is the WP-B
+//! **region-identity-under-edit** probe, which binds an extrude to a canonical cell
+//! and then edits the dimension of the circle that bounds it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,17 +32,20 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use onecad_core::document::record::ExtrudeParams;
 use onecad_core::edit::{EditCommand, SketchEditOp};
-use onecad_core::ids::{BodyId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::math::Vec2;
-use onecad_core::regen::{EngineError, GeometryEngine};
-use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+use onecad_core::regen::{CancelToken, EngineError, GeometryEngine, Outcome, RegenRequest};
+use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
 
-use onecad_lib::document_runtime::DocumentRuntime;
+use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_lib::dto::PreviewTrianglesDto;
 use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::wire::GestureTarget;
-use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+use onecad_lib::worker::{
+    resolve_worker_path, ElementQuery, MeshProvider, SolverEngine, WorkerManager,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Harness (mirrors sketch_edit.rs)
@@ -449,6 +456,7 @@ async fn an_extrude_off_a_face_hosted_sketch_lands_on_that_frame() {
             sketch: sid,
             region: RegionId::new(""),
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: onecad_core::document::variables::Scalar::new(5.0),
@@ -828,6 +836,295 @@ async fn a_standalone_ellipse_publishes_one_region_matching_the_corpus_oracle() 
         (got - analytic).abs() / analytic < 0.01,
         "fill area {got:.4} within 1% of π·a·b = {analytic:.4} \
          (the fill is a tessellation, hence the band)"
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-B P-B1 — region identity survives a parametric edit of the geometry that
+// BOUNDS the region.
+//
+// A 40×20 rectangle with an r=6 circle centred on its right edge partitions the
+// plane into three cells: rect-minus-lens, the lens itself, and circle-minus-lens.
+// An extrude bound to the LARGEST cell is a perfectly ordinary feature. Editing
+// the circle's radius through the sketch dimension it carries changes that cell's
+// SHAPE but not its identity as a design intent — the extrude must follow it.
+//
+// This is the H5-B class the migration exists to close: the alternative to
+// "follows the edit" is not a wrong bind here (`build_profile_face` fails loudly),
+// but a feature that dies on every dimension change, which is the same defect
+// seen from the other side.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PX: u128 = 0x130; // right-edge circle centre
+const CX: u128 = 0x310; // right-edge circle
+const RAD: u128 = 0x510; // its Radius dimension
+const CROSS_R0: f64 = 6.0;
+const CROSS_R1: f64 = 7.0;
+
+/// The 40×20 rectangle plus a radius-dimensioned circle centred on the midpoint
+/// of its RIGHT edge, so exactly half the disc lies inside the rectangle.
+fn crossing_circle_sketch(sid: SketchId, radius: f64) -> Sketch {
+    let mut sk = Sketch::on_world_plane(sid, "Crossing", WorldPlane::XY);
+    point(&mut sk, P0, 0.0, 0.0);
+    point(&mut sk, P1, W, 0.0);
+    point(&mut sk, P2, W, H);
+    point(&mut sk, P3, 0.0, H);
+    for (l, a, b) in [(L0, P0, P1), (L1, P1, P2), (L2, P2, P3), (L3, P3, P0)] {
+        sk.add_entity(SketchEntity::line(eid(l), eid(a), eid(b), false))
+            .unwrap();
+    }
+    point(&mut sk, PX, W, H / 2.0);
+    sk.add_entity(SketchEntity::circle(eid(CX), eid(PX), radius, false).expect("circle"))
+        .unwrap();
+    sk.add_constraint(Constraint::Radius {
+        id: ConstraintId(Uuid::from_u128(RAD)),
+        entity: eid(CX),
+        value: onecad_core::document::variables::Scalar::new(radius),
+    })
+    .expect("radius dimension");
+    sk
+}
+
+/// Analytic area of the rect-minus-half-disc cell, and the 10 mm prism over it.
+fn crossing_volume(radius: f64) -> f64 {
+    (W * H - (std::f64::consts::PI * radius * radius / 2.0)) * 10.0
+}
+
+/// Exact kernel volume (`QueryMassProperties`, SCHEMA §7.5) — read off the BRep,
+/// never re-derived from the tessellation, so the analytic figure can be asserted
+/// to kernel precision.
+async fn exact_volume(wm: &WorkerManager, body: BodyId) -> f64 {
+    ElementQuery::query_mass_properties(wm, body, "b".into())
+        .await
+        .expect("QueryMassProperties")
+        .volume
+}
+
+/// A regen that PUBLISHED and left no step in error.
+///
+/// `Outcome::Published` on its own is not a green regen: a from-0 regen builds
+/// every step it can and leaves the rest in `StepState::Error`, so a broken
+/// feature reads as a success unless [`RegenReport::failed_steps`] is checked too
+/// (see the type's own doc comment). `#[track_caller]` puts the panic on the call
+/// site, so the two uses below stay tellable apart.
+#[track_caller]
+fn assert_published_clean(report: &RegenReport) {
+    assert!(
+        matches!(report.outcome, Outcome::Published(_)),
+        "expected a published regen, got {:?}",
+        report.outcome
+    );
+    assert!(
+        report.failed_steps.is_empty(),
+        "published, but with steps in error: {:?}",
+        report.failed_steps
+    );
+}
+
+/// The extrude under test. `anchor` is the SCHEMA §7.3 `regionAnchor`: a point
+/// the producer picked INSIDE the chosen cell, which the worker falls back to
+/// when the stored `regionId` matches nothing after an edit.
+fn extrude_bound_to(
+    sid: SketchId,
+    region: &str,
+    identity_version: Option<u32>,
+    anchor: Option<[f64; 2]>,
+) -> ExtrudeParams {
+    ExtrudeParams {
+        profile: Some(onecad_core::document::refs::SketchRegionRef {
+            sketch: sid,
+            region: RegionId::new(region),
+            region_identity_version: identity_version,
+            region_anchor: anchor,
+            extra: Default::default(),
+        }),
+        distance: onecad_core::document::variables::Scalar::new(10.0),
+        draft_angle_deg: onecad_core::document::variables::Scalar::new(0.0),
+        mode: onecad_core::document::record::ExtrudeMode::Blind,
+        boolean_mode: onecad_core::document::record::BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: onecad_core::document::record::ExtrudeMode::Blind,
+        distance2: onecad_core::document::variables::Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bound_region_survives_editing_the_circle_that_bounds_it() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(0x9E50));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Crossing", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    rt.sketch_upsert(sid, edit_ops(&crossing_circle_sketch(sid, CROSS_R0)))
+        .await
+        .expect("sketch_upsert");
+    let finished = rt.finish_sketch(sid).await.expect("finish_sketch");
+    let identity_version = Some(finished.region_identity_version);
+
+    // Three cells: rect−lens, lens, circle−lens. The one to extrude is the
+    // largest; `SketchRegionDto` carries no area, so it is measured off the fill.
+    assert_eq!(
+        finished.regions.len(),
+        3,
+        "a circle straddling the right edge partitions the plane into three cells, got {:#?}",
+        finished.regions
+    );
+    let mut cells: Vec<(String, f64)> = finished
+        .regions
+        .iter()
+        .map(|r| {
+            (
+                r.region_id.clone(),
+                fill_area(r.preview_triangles.as_ref().expect("region fill")),
+            )
+        })
+        .collect();
+    cells.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("finite areas"));
+    eprintln!("P-B1 cells (id, fill area): {cells:#?}");
+    let (region_id, region_area) = cells[0].clone();
+    let want_area = W * H - (std::f64::consts::PI * CROSS_R0 * CROSS_R0 / 2.0);
+    assert!(
+        (region_area - want_area).abs() / want_area < 0.01,
+        "the largest cell is rect−half-disc ≈ {want_area:.4} (sampled {region_area:.4})"
+    );
+
+    // ── the feature, bound to that cell by its canonical id ──────────────────
+    let rec = RecordId(Uuid::from_u128(0x9E51));
+    rt.apply(EditCommand::AddOperation {
+        record: onecad_core::document::record::OperationRecord::new(
+            rec,
+            0,
+            "Extrude",
+            onecad_core::document::record::Operation::Known(
+                onecad_core::document::record::KnownOperation::Extrude(extrude_bound_to(
+                    sid,
+                    &region_id,
+                    identity_version,
+                    // Inside the rect−lens cell and far from every boundary — the
+                    // producer's pick-time evidence, persisted verbatim.
+                    Some([10.0, 10.0]),
+                )),
+            ),
+        ),
+        at_cursor: true,
+    })
+    .expect("AddOperation extrude");
+
+    let body = BodyId(Uuid::from_u128(0x9E51));
+    let before = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert_published_clean(&before);
+    let got_before = exact_volume(&wm, body).await;
+    let want_before = crossing_volume(CROSS_R0);
+    eprintln!(
+        "P-B1 r={CROSS_R0}: volume {got_before:.9} (analytic {want_before:.9}, \
+         Δ {:.3e})",
+        (got_before - want_before).abs()
+    );
+    assert!(
+        (got_before - want_before).abs() < want_before * 1e-9,
+        "r={CROSS_R0} prism volume {got_before} vs analytic {want_before}"
+    );
+
+    // ── the parametric edit: Ø12 → Ø14, same centre, same entity ─────────────
+    rt.enter_sketch(sid).await.expect("re-enter the sketch");
+    rt.sketch_upsert(
+        sid,
+        vec![SketchEditOp::SetDimension {
+            constraint: ConstraintId(Uuid::from_u128(RAD)),
+            value: onecad_core::document::variables::Scalar::new(CROSS_R1),
+        }],
+    )
+    .await
+    .expect("SetDimension on the circle's radius");
+    let refinished = rt
+        .finish_sketch(sid)
+        .await
+        .expect("finish_sketch after edit");
+    eprintln!(
+        "P-B1 after r={CROSS_R1}: identityVersion={} regions={:#?}",
+        refinished.region_identity_version,
+        refinished
+            .regions
+            .iter()
+            .map(|r| (
+                r.region_id.clone(),
+                fill_area(r.preview_triangles.as_ref().expect("region fill"))
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let after = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    eprintln!(
+        "P-B1 regen after the edit: outcome={} failedSteps={:#?}",
+        after.outcome_str(),
+        after.failed_steps
+    );
+    // Editing the radius of the circle that bounds the profile must NOT break the
+    // extrude bound to it.
+    assert_published_clean(&after);
+
+    // The rebind is LOUD, and it names the id it could not find: the params are
+    // never rewritten, so the warning repeats on every regen until the user
+    // re-picks (SCHEMA §7.3 "Region anchor").
+    let diagnostics: Vec<_> = rt
+        .projection()
+        .features
+        .iter()
+        .flat_map(|f| f.diagnostics.iter())
+        .cloned()
+        .collect();
+    eprintln!("P-B1 step diagnostics after the edit: {diagnostics:#?}");
+    let rebound = diagnostics
+        .iter()
+        .find(|d| d.code == "REGION_REBOUND_BY_ANCHOR")
+        .expect("the anchor rebind publishes a REGION_REBOUND_BY_ANCHOR warning");
+    let evidence = rebound
+        .evidence
+        .as_ref()
+        .expect("REGION_REBOUND_BY_ANCHOR carries evidence");
+    assert_eq!(
+        evidence["region"]["from"],
+        serde_json::json!(region_id),
+        "the evidence names the STALE id the op still stores, got {evidence}"
+    );
+    assert_ne!(
+        evidence["region"]["to"],
+        serde_json::json!(region_id),
+        "…and the freshly-minted id it bound instead, got {evidence}"
+    );
+    assert_eq!(
+        evidence["region"]["anchor"],
+        serde_json::json!([10.0, 10.0]),
+        "…and the anchor that decided it, got {evidence}"
+    );
+
+    let got_after = exact_volume(&wm, body).await;
+    let want_after = crossing_volume(CROSS_R1);
+    eprintln!(
+        "P-B1 r={CROSS_R1}: volume {got_after:.9} (analytic {want_after:.9}, Δ {:.3e})",
+        (got_after - want_after).abs()
+    );
+    assert!(
+        (got_after - want_after).abs() < want_after * 1e-9,
+        "r={CROSS_R1} prism volume {got_after} vs analytic {want_after}"
     );
 
     wm.shutdown().await;

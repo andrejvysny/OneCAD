@@ -1956,6 +1956,14 @@ export type OperationOp =
       regionId: string;
       /** Absent retains the persisted v1 profile lookup semantics. */
       regionIdentityVersion?: number;
+      /**
+       * Pick-time centroid `[u, v]` of the picked region's LARGEST-area fill
+       * triangle (SCHEMA §7.3 "Region anchor", kernel-hardening WP-B). Computed
+       * ONCE at pick (`regionAnchorOf`) and carried verbatim through re-edits —
+       * never recomputed from a possibly-changed fill. Absent when the region
+       * had no `previewTriangles` to derive one from.
+       */
+      regionAnchor?: [number, number];
       inputs?: SemanticRef[];
       params: ExtrudeParams;
     }
@@ -1967,6 +1975,8 @@ export type OperationOp =
       regionId: string;
       /** Absent retains the persisted v1 profile lookup semantics. */
       regionIdentityVersion?: number;
+      /** See the Extrude variant's `regionAnchor` doc — identical contract. */
+      regionAnchor?: [number, number];
       inputs?: SemanticRef[];
       params: RevolveParams;
     }
@@ -2215,6 +2225,9 @@ export interface PreviewDraft {
   regionId?: string;
   /** Forwarded into a new `SketchRegionRef`; absent preserves v1 storage. */
   regionIdentityVersion?: number;
+  /** Forwarded into the new `SketchRegionRef.regionAnchor` — see `OperationOp`'s
+   *  Extrude variant for the pick-time-only contract. */
+  regionAnchor?: [number, number];
   /**
    * Typed op inputs, carried verbatim into the session. Load-bearing for
    * Fillet/Chamfer and Shell — `wireOperation` drops an op's top-level inputs,

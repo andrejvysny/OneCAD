@@ -199,6 +199,20 @@ const TONE_ICON: Record<HistoryRowTone, string> = {
   stale: "text-ink-6",
 };
 
+/**
+ * Highest-severity diagnostic worth a row badge, or `null` when there is none —
+ * `info` diagnostics stay silent (they're not actionable at a glance). An
+ * `error`-toned row already reads red end to end, so the caller suppresses the
+ * badge there to avoid a redundant second glyph.
+ */
+function diagnosticBadgeSeverity(item: FeatureMeta): "warning" | "error" | null {
+  const diagnostics = item.diagnostics;
+  if (!diagnostics || diagnostics.length === 0) return null;
+  if (diagnostics.some((d) => d.severity === "error")) return "error";
+  if (diagnostics.some((d) => d.severity === "warning")) return "warning";
+  return null;
+}
+
 /** The row's tooltip: the failure reason if any, else the rollback explanation. */
 function rowTitle(item: FeatureMeta, tone: HistoryRowTone, applied: boolean): string | undefined {
   if (tone === "error") return item.statusMessage;
@@ -265,6 +279,10 @@ function FeatureRow({
   // An errored feature (regen failure) tints red + tooltips the worker reason
   // (MODEL-HARDEN W0.5). Selection styling still wins so a selected row stays legible.
   const isError = tone === "error";
+  // Warning/error diagnostics (REGION_REBOUND_BY_ANCHOR, SKETCH_ENTITY_DEGENERATE, …)
+  // that the tone system otherwise hides — an `error`-tone row already reads red, so
+  // this only ever fires alongside `repair`/`stale`/`normal`.
+  const diagnosticBadge = isError ? null : diagnosticBadgeSeverity(item);
 
   return (
     <div
@@ -311,6 +329,18 @@ function FeatureRow({
         >
           ⚠
         </span>
+      )}
+      {diagnosticBadge && (
+        <span
+          data-testid={`feature-diagnostic-badge-${item.id}`}
+          data-severity={diagnosticBadge}
+          title={item.diagnostics?.[0]?.message}
+          aria-label={`${diagnosticBadge} diagnostic`}
+          className={cn(
+            "h-[6px] w-[6px] shrink-0 rounded-full",
+            selected ? "bg-sel-text" : diagnosticBadge === "error" ? "bg-traffic-close" : "bg-warn",
+          )}
+        />
       )}
 
       {/* The value is ALWAYS rendered — it used to disappear the moment a row grew

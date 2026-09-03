@@ -690,6 +690,9 @@ impl DocumentSession {
         // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
         // invariants (all entry paths).
         validate_offset_face(&record.op)?;
+        // An Extrude/Revolve `regionAnchor`, when present, must be two finite
+        // numbers (all entry paths).
+        validate_region_anchor(&record.op)?;
         // PlaceComponent params must be structurally well-formed (all entry paths).
         validate_place_component(&record.op)?;
         // DetachComponent params must be structurally well-formed (all entry paths).
@@ -799,6 +802,9 @@ impl DocumentSession {
         // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
         // invariants (all entry paths).
         validate_offset_face(&op)?;
+        // An Extrude/Revolve `regionAnchor`, when present, must be two finite
+        // numbers (all entry paths).
+        validate_region_anchor(&op)?;
         // PlaceComponent params must be structurally well-formed (all entry paths).
         validate_place_component(&op)?;
         // DetachComponent params must be structurally well-formed (all entry paths).
@@ -2071,6 +2077,26 @@ fn validate_offset_face(op: &Operation) -> Result<(), DomainError> {
         return Ok(());
     };
     p.validate().map_err(DomainError::Validation)
+}
+
+/// Validates the optional SCHEMA §7.3 `regionAnchor` an Extrude/Revolve profile
+/// may carry: present ⇒ two FINITE numbers. Other and opaque ops are trivially
+/// valid.
+///
+/// Enforced here for the same single-writer reason as [`validate_hole`]: a
+/// malformed anchor decides what the op may bind to, so it is refused BY NAME at
+/// the writer instead of reaching the worker, where it would surface as the
+/// generic stale-`regionId` refusal and read as a different defect.
+fn validate_region_anchor(op: &Operation) -> Result<(), DomainError> {
+    match op {
+        Operation::Known(KnownOperation::Extrude(p)) => {
+            p.validate().map_err(DomainError::Validation)
+        }
+        Operation::Known(KnownOperation::Revolve(p)) => {
+            p.validate().map_err(DomainError::Validation)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Validates a [`KnownOperation::PlaceComponent`] record's params: a

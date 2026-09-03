@@ -13,6 +13,7 @@
 #include "SketchTypes.h"
 
 #include <gp_Pnt2d.hxx>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <memory>
@@ -184,6 +185,41 @@ protected:
 // W-WP3a: ConstraintFactory (JSON-driven constraint deserialization) removed —
 // serialization is Rust-owned; the worker constructs constraints programmatically
 // via the concrete constraint constructors in constraints/Constraints.h.
+
+/**
+ * @brief SCHEMA §7.4 `maxResidual` (REPORTING ONLY) — the largest residual over
+ *        `constraints`, each measured in ITS OWN dimension.
+ *
+ * The dimension is whatever `getError` returns for that kind: mm for a
+ * length-valued constraint (Distance, Radius, Diameter, Tangent, Coincident, …),
+ * radians for an angle-valued one (Angle, Parallel, Perpendicular). A single
+ * number therefore MIXES dimensions — a reader displays it and never compares it
+ * across kinds or against a tolerance of its own.
+ *
+ * A constraint whose entities cannot be read yields `+infinity` from `getError`;
+ * it is SKIPPED here rather than winning the maximum, because an unreadable
+ * constraint has no residual and "infinitely wrong" would be a lie about a
+ * sketch that is merely incomplete. A non-finite value can therefore never reach
+ * the wire, where it is rejected outright (SCHEMA §4). An empty — or wholly
+ * unreadable — set measures 0.0: nothing is violated.
+ *
+ * Purely a measurement: nothing reads the answer back into a solve, so it
+ * changes no decision.
+ *
+ * @param constraints any range of pointer-like handles (raw or `unique_ptr`);
+ *        null entries are skipped.
+ */
+template <typename ConstraintPtrRange>
+double maxConstraintResidual(const Sketch& sketch, const ConstraintPtrRange& constraints) {
+    double worst = 0.0;
+    for (const auto& constraint : constraints) {
+        if (!constraint) continue;
+        const double error = std::abs(constraint->getError(sketch));
+        if (!std::isfinite(error)) continue;
+        if (error > worst) worst = error;
+    }
+    return worst;
+}
 
 } // namespace onecad::core::sketch
 

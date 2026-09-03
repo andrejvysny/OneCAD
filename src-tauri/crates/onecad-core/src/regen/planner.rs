@@ -1037,6 +1037,7 @@ mod tests {
             sketch,
             region: crate::ids::RegionId::new(""),
             region_identity_version: None,
+            region_anchor: None,
             extra: Default::default(),
         });
         rec.inputs = rec.op.derive_inputs();

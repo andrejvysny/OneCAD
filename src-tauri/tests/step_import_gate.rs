@@ -537,6 +537,7 @@ fn extrude_params(sketch: SketchId, region: &str, dist: f64) -> ExtrudeParams {
             sketch,
             region: RegionId::new(region),
             region_identity_version: (!region.is_empty()).then_some(3),
+            region_anchor: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./app/ErrorBoundary";
 import { logError } from "./debug/log";
+import { createClient } from "./ipc/client";
 import { installLogForwarder } from "./debug/logSink";
 import { startThemeController } from "./theme/themeController";
 import "./styles/globals.css";
@@ -90,6 +91,10 @@ if (import.meta.env.DEV) {
       };
     },
   );
+  // Dev-only CadClient handle (mirrors __stores) — e2e reads WIRE params
+  // (`getOperationParams`) that never reach a store, e.g. an Extrude/Revolve's
+  // `profile.regionAnchor` (SCHEMA §7.3 WP-B).
+  (window as unknown as Record<string, unknown>).__client = createClient();
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

@@ -77,6 +77,7 @@ import {
   type SideProbe,
 } from "./materialProbe";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
+import { regionAnchorOf } from "@/tools/modelTools/regionAnchor";
 import { regionAtPoint } from "@/tools/preview/regionPick";
 import { axisDepthFromRay, normalize, type Vec3 } from "@/tools/preview/depthProjection";
 import {
@@ -832,6 +833,8 @@ export class ModelToolController {
   private revolveProfiles: PrismProfile[] = [];
   private revolveRegionIds: string[] = [];
   private revolveRegionIdentityVersions: Array<number | undefined> = [];
+  /** Pick-time region anchors (SCHEMA §7.3 WP-B), index-aligned with `revolveRegionIds`. */
+  private revolveRegionAnchors: Array<[number, number] | undefined> = [];
   private revolveSketchId: string | null = null;
   private revolveRegionId: string | null = null;
   private revolveEditFeatureId: string | undefined;
@@ -1390,11 +1393,18 @@ export class ModelToolController {
     for (let i = 0; i < regions.length; i++) {
       const params = this.extrudePreviewParams(startDepth);
       if (editFeatureId) params.featureId = editFeatureId;
+      // Pick-time-only anchor (SCHEMA §7.3 WP-B): a re-edit reads the PERSISTED
+      // value back off the stored record rather than recomputing it from the
+      // region's current fill, which the re-edit's own sketch changes may have moved.
+      const regionAnchor = editFeatureId
+        ? storedRegionAnchor(this.extrudeStoredParams)
+        : regionAnchorOf(regions[i]);
       const draft: PreviewDraft = {
         opType: "Extrude",
         sketchId,
         regionId: regions[i].regionId,
         regionIdentityVersion: regions[i].regionIdentityVersion,
+        regionAnchor,
         params,
       };
       let session: PreviewSession;
@@ -2278,6 +2288,16 @@ export class ModelToolController {
     this.revolveProfiles = profiles;
     this.revolveRegionIds = regions.map((r) => r.regionId);
     this.revolveRegionIdentityVersions = regions.map((r) => r.regionIdentityVersion);
+    // Pick-time-only anchor (SCHEMA §7.3 WP-B): a re-edit reads the PERSISTED value
+    // back off the stored record (never recomputed from a possibly-moved fill) —
+    // mirrors `beginExtrudeArmed`. A fresh arm derives it from each region's own fill.
+    // Length-matched to `revolveRegionIds` (both derive from `regions`), not
+    // hardcoded to one element — a re-edit's stored anchor only ever applies to
+    // the PRIMARY region (index 0); any further index defensively reads
+    // `undefined` rather than assuming `regions` stays single-element forever.
+    this.revolveRegionAnchors = editFeatureId
+      ? regions.map((_, i) => (i === 0 ? storedRegionAnchor(storedParams) : undefined))
+      : regions.map((r) => regionAnchorOf(r));
     this.revolveSketchId = sketchId;
     this.revolveRegionId = region.regionId;
     this.revolveEditFeatureId = editFeatureId;
@@ -2543,6 +2563,7 @@ export class ModelToolController {
         sketchId,
         regionId: regionIds[i],
         regionIdentityVersion: this.revolveRegionIdentityVersions[i],
+        regionAnchor: this.revolveRegionAnchors[i],
         params: this.revolvePreviewParams(),
       };
       let session: PreviewSession;
@@ -2786,6 +2807,7 @@ export class ModelToolController {
           sketchId,
           regionId: regionIds[k],
           regionIdentityVersion: this.revolveRegionIdentityVersions[k],
+          regionAnchor: this.revolveRegionAnchors[k],
           inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
           params: { angleDeg: angle, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },
         };
@@ -2874,6 +2896,7 @@ export class ModelToolController {
     if (this.revolveRegionIds.length) {
       this.revolveRegionIds = this.revolveRegionIds.slice(k);
       this.revolveRegionIdentityVersions = this.revolveRegionIdentityVersions.slice(k);
+      this.revolveRegionAnchors = this.revolveRegionAnchors.slice(k);
       this.revolveProfiles = this.revolveProfiles.slice(k);
       this.revolveRegionId = this.revolveRegionIds[0] ?? this.revolveRegionId;
       this.revolveProfile = this.revolveProfiles[0] ?? this.revolveProfile;
@@ -2963,6 +2986,7 @@ export class ModelToolController {
     this.revolveProfiles = [];
     this.revolveRegionIds = [];
     this.revolveRegionIdentityVersions = [];
+    this.revolveRegionAnchors = [];
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveAxisCandidates = [];
@@ -9223,6 +9247,7 @@ export class ModelToolController {
     this.revolveProfiles = [];
     this.revolveRegionIds = [];
     this.revolveRegionIdentityVersions = [];
+    this.revolveRegionAnchors = [];
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveAxisCandidates = [];
@@ -9367,6 +9392,29 @@ function axisLineIdFromParams(stored: Record<string, unknown> | undefined): stri
   if (!axis || typeof axis !== "object") return null;
   const { kind, lineId } = axis as { kind?: unknown; lineId?: unknown };
   return kind === "sketchLine" && typeof lineId === "string" && lineId.length > 0 ? lineId : null;
+}
+
+/**
+ * The `regionAnchor` of a stored `SketchRegionRef` (`stored.profile.regionAnchor`,
+ * SCHEMA §7.3). A re-edit reads it from here rather than from `regionAnchorOf` —
+ * the anchor is persisted ONCE at pick, never recomputed from a fill that may
+ * have moved since. Anything short of a `[finite, finite]` pair yields `undefined`.
+ */
+function storedRegionAnchor(stored: Record<string, unknown> | undefined): [number, number] | undefined {
+  const profile = stored?.profile;
+  if (!profile || typeof profile !== "object") return undefined;
+  const anchor = (profile as { regionAnchor?: unknown }).regionAnchor;
+  if (
+    Array.isArray(anchor) &&
+    anchor.length === 2 &&
+    typeof anchor[0] === "number" &&
+    typeof anchor[1] === "number" &&
+    Number.isFinite(anchor[0]) &&
+    Number.isFinite(anchor[1])
+  ) {
+    return [anchor[0], anchor[1]];
+  }
+  return undefined;
 }
 
 /** True when a keyboard event targets a text field (skip the capture-Enter commit). */

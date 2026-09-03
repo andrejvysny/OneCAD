@@ -1,0 +1,63 @@
+# CANONICAL fixture — kernel-hardening WP-B: an optional `regionAnchor` rebinds a
+# profile whose stored V3 `regionId` was re-minted by a dimensional edit
+# (SCHEMA §7.3 "Region anchor", §7.2 warning `REGION_REBOUND_BY_ANCHOR`).
+#
+# Recipe: a 40x20 rectangle with a circle centred ON its right edge at (40, 10),
+# so the circle CROSSES the edge and the region table holds three bounded cells.
+# A V3 id hashes the cell's bounding fragments including their intersection
+# parameters, so changing the circle's radius re-mints every id in the sketch.
+#
+# Plan 1 (r = 6) extrudes the largest cell by its then-current id, with an anchor
+# at (10, 10) — deep inside the rectangle, far from the circle. The exact id
+# matches, so the anchor is never consulted and the step carries no warning.
+#
+# Plan 2 is the SAME plan with r = 7 and the SAME (now stale) id. The exact
+# lookup matches nothing; the anchor still lies in exactly one cell, so that cell
+# is bound, the step is `ok`, and `planStep` 1 carries the warning with
+# `evidence.region.from/to/anchor`. `params` are never rewritten — the stored id
+# stays stale and the rebind repeats deterministically on every regen, which is
+# why plan 2 sends the same `regionId` bytes plan 1 did.
+#
+# The two ids are pinned literally (plan 3 re-sends the r=6 id WITHOUT an anchor, so
+# a corrupted plan-1 id cannot be rescued by the anchor and hide). They are Rust-independent content hashes of
+# the cell geometry, so a change to either value is a region-identity break and
+# must be treated as one; `worker/tests/test_region_anchor.cpp` derives the same
+# two ids from `buildRegionTable` and pins the volumes (800 - pi*r*r/2)*10.
+#
+# Plan 2 is a from-0 replay (D5: `expectedBaseHash` is the empty-prefix anchor),
+# which is exactly the shape Rust sends for a parametric edit of step 0.
+#
+# The harness matches an array ELEMENT BY ELEMENT from index 0, so the pinned
+# `diagnostics` order is load-bearing: the rebind warning must be the FIRST entry.
+# This sketch has no degenerate entity, so no `SKETCH_ENTITY_DEGENERATE` warning
+# precedes it today; anything that starts emitting one here must update this file
+# rather than reorder the array, because the order IS part of the contract.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_region_anchor","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# Plan 1 — r = 6. The id is fresh, so the anchor is not consulted.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":40,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk","plane":{"kind":"XY"},"entities":[{"id":"l1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"l2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"l3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"l4","type":"Line","p0":[0,20],"p1":[0,0]},{"id":"c1","type":"Circle","center":[40,10],"radius":6}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk","regionId":"r_b3ee587515654da7","regionIdentityVersion":3,"regionAnchor":[10.0,10.0],"distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":40,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":40,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":40,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":40,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":40,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# Plan 2 — r = 7 re-mints every id, so the SAME regionId now matches no cell.
+{"send":{"v":1,"t":"req","id":4,"verb":"ExecutePlan","args":{"jobId":41,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk","plane":{"kind":"XY"},"entities":[{"id":"l1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"l2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"l3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"l4","type":"Line","p0":[0,20],"p1":[0,0]},{"id":"c1","type":"Circle","center":[40,10],"radius":7}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk","regionId":"r_b3ee587515654da7","regionIdentityVersion":3,"regionAnchor":[10.0,10.0],"distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":4,"event":"planStep","stepIndex":0,"jobId":41,"payload":{"bodyEvents":[]}}}
+# The rebind: `ok`, one body, and the §7.2 warning naming both ids and the anchor.
+{"expect":{"v":1,"t":"event","id":4,"event":"planStep","stepIndex":1,"jobId":41,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}],"diagnostics":[{"severity":"warning","code":"REGION_REBOUND_BY_ANCHOR","message":"profile: regionId 'r_b3ee587515654da7' matched no cell after an edit; bound the cell containing regionAnchor","stage":"profile","evidence":{"region":{"from":"r_b3ee587515654da7","to":"r_af50cd81c88497ec","anchor":[10.0,10.0]}}}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"jobId":41,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"AcceptPrepared","args":{"jobId":41,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":41,"result":{"accepted":true,"snapshotId":2,"documentRevision":2}}}
+# Plan 3 — r = 6 again with the r=6 id and NO anchor: the id must match on its own.
+# This is what makes plan 1's literal id load-bearing (without it the anchor in
+# plan 1 would rescue a corrupted id and the fixture could not tell).
+{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":42,"documentRevision":3,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk","plane":{"kind":"XY"},"entities":[{"id":"l1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"l2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"l3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"l4","type":"Line","p0":[0,20],"p1":[0,0]},{"id":"c1","type":"Circle","center":[40,10],"radius":6}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk","regionId":"r_b3ee587515654da7","regionIdentityVersion":3,"distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":8,"event":"planStep","stepIndex":0,"jobId":42,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":8,"event":"planStep","stepIndex":1,"jobId":42,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":42,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"AcceptPrepared","args":{"jobId":42,"documentRevision":3,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":42,"result":{"accepted":true,"snapshotId":3,"documentRevision":3}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"goodbye":true}}}

@@ -1,0 +1,101 @@
+# CANONICAL §7.4 fixture — `maxResidual`, REPORTING ONLY (kernel-hardening WP-B,
+# 2026-09-03). The largest per-constraint residual left by an exact solve, each
+# constraint measured in ITS OWN dimension (mm for a length-valued one, radians for
+# an angle-valued one), additive on `SketchUpsert` and `EndGesture` and on nothing
+# else.
+#
+# WHY THE FIELD EXISTS. PlaneGCS answers `Converged` when its STEP fell below the
+# convergence criterion, whether or not the ERROR did — a local minimum of an
+# inconsistent system reads as a converged solve. The `residual` slot that should
+# have said so was declared and never assigned. This field is the honest number.
+#
+# WHAT IS PINNED HERE.
+#
+# ROUND 1 is the load-bearing pair with ROUND 2. The SAME field reads 0.0 on a
+# well-conditioned dimensioned rectangle and non-zero on a contradictory pair. A
+# hardcoded constant, or anything read off `state`/`success`, fails one of them.
+#
+# ROUND 1 carries a per-expect `"tolerance": {"abs": 1e-4}` (see
+# protocol/fixtures/README.md § Float tolerance) because 0.0 is a SOLVED double:
+# the tolerance is the solver's own convergence tolerance, `SolverConfig::tolerance`
+# = 1e-4 mm, which is the only threshold this number may honestly be read against
+# for a length-valued constraint.
+#
+# REPORTING ONLY is asserted structurally, not by a comment: every round also pins
+# the verdict PlaneGCS reported next to the residual — `state` and `conflicting` in
+# rounds 1-2, `status` and `conflicting` in rounds 3-4. If measuring the residual
+# ever moved a decision, one of those moves with it.
+#
+# WHAT DELIBERATELY IS NOT PINNED HERE.
+#
+# NO NON-ZERO RESIDUAL LITERAL. A violated dimension's residual is a solved double
+# and the NDJSON matcher compares numbers per tolerance, not by rank — a literal
+# would freeze a value the solver is free to reach differently. Rounds 2 and 4
+# assert PRESENCE (`$any`); the numbers (10 mm on both the contradictory upsert and
+# the contradictory pointer-up) are measured in `worker/tests/test_solver_residual.cpp`,
+# the same contract/corpus split the OffsetFace and `entityStates` fixtures use.
+#
+# ABSENCE. `SolveDrag` and `BeginGesture` must NOT carry the field — the per-frame
+# lane measures nothing (house drag policy) — but the matcher is SUBSET-only and
+# cannot assert a key is missing. Round 3 drives both verbs and asserts everything
+# else about them; the absences are pinned in test_solver_residual.cpp.
+#
+# THE RUST WORKER-STUB implements none of the solver lane, so — exactly as for
+# `sketch_entity_states.ndjson` — this file binds the C++ lane only and is not in
+# the stub's replay list. The Rust lane parses it
+# (`onecad-protocol` `ndjson_fixtures_parse_into_message_types`).
+#
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+
+# --- ROUND 1: a well-conditioned rectangle with two dimensions -> 0.0 -----------
+# p1 Fixed at the origin, the four sides Horizontal/Vertical, and TWO dimensions
+# (width 40, height 20) authored at values the pose already satisfies. Every
+# constraint is satisfiable and satisfied, so the largest residual over all seven is
+# zero to within the solver's own 1e-4 mm tolerance.
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"rect","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[40,0]},{"id":"p3","type":"Point","at":[40,20]},{"id":"p4","type":"Point","at":[0,20]},{"id":"L1","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"L2","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"L3","type":"Line","p0Ref":"p3","p1Ref":"p4"},{"id":"L4","type":"Line","p0Ref":"p4","p1Ref":"p1"}],"constraints":[{"id":"cF","type":"Fixed","entities":["p1"]},{"id":"cH1","type":"Horizontal","entities":["L1"]},{"id":"cH3","type":"Horizontal","entities":["L3"]},{"id":"cV2","type":"Vertical","entities":["L2"]},{"id":"cV4","type":"Vertical","entities":["L4"]},{"id":"cW","type":"Distance","entities":["L1"],"value":40.0},{"id":"cHt","type":"Distance","entities":["L2"],"value":20.0}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"tolerance":{"abs":1e-4},"result":{"upserted":true,"sketchId":"rect","sketchRevision":1,"dof":0,"state":"FullyConstrained","conflicting":[],"maxResidual":0.0}}}
+
+# --- ROUND 2: the contradictory Distance 10 / Distance 20 pair -----------------
+# ONE point pair carrying TWO Distance constraints: no placement makes both true.
+# The solve is REFUSED (it restores the pre-solve pose), PlaneGCS blames BOTH
+# constraints, and the field says how far out the sketch is left. The two ids are
+# `$any` because WHICH of the pair is blamed first is PlaneGCS's business — that
+# both are is the contract, and it is `conflicting`'s, not this field's.
+#
+# REPORTING ONLY, structurally: `state` and `conflicting` here are exactly what
+# rounds of this shape reported before the field existed (see
+# test_solver_residual.cpp, which measured `Diverged` / 2 conflicts red-first).
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchUpsert","args":{"sketchId":"cx","plane":{"kind":"XY"},"entities":[{"id":"q1","type":"Point","at":[0,0]},{"id":"q2","type":"Point","at":[10,0]}],"constraints":[{"id":"d10","type":"Distance","entities":["q1","q2"],"value":10.0},{"id":"d20","type":"Distance","entities":["q1","q2"],"value":20.0}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"upserted":true,"sketchId":"cx","sketchRevision":1,"state":"Conflicting","conflicting":["$any","$any"],"maxResidual":"$any"}}}
+
+# --- ROUND 3: the field rides EndGesture too -----------------------------------
+# `EndGesture` performs the second of §7.4's two exact solves, so it carries the
+# field on the same terms. A pinned line next to a free circle; the gesture drags
+# the circle's center, which is genuinely free, so the pointer-up pose really did
+# move and 0.0 is a measurement of THAT pose, not of the authored one.
+#
+# `SolveDrag` (id 6) is driven on purpose: it is the lane that must NOT measure.
+# The matcher cannot say "no maxResidual key", so it pins the rest of the step and
+# the absence lives in test_solver_residual.cpp.
+{"send":{"v":1,"t":"req","id":3,"verb":"SketchUpsert","args":{"sketchId":"gs","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"C","type":"Circle","center":[20,20],"radius":5}],"constraints":[{"id":"cF","type":"Fixed","entities":["p1"]},{"id":"cH","type":"Horizontal","entities":["L"]},{"id":"cD","type":"Distance","entities":["L"],"value":10.0}]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"tolerance":{"abs":1e-4},"result":{"upserted":true,"sketchId":"gs","sketchRevision":1,"dof":3,"state":"UnderConstrained","conflicting":[],"maxResidual":0.0}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"BeginGesture","args":{"sketchId":"gs","sketchRevision":1,"gestureId":91,"drag":{"pointId":"C.center"}}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"gestureId":91,"ready":true}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"SolveDrag","args":{"gestureId":91,"seq":1,"target":[30.0,25.0]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"gestureId":91,"seq":1,"status":"success","dof":3,"conflicting":[],"positions":{"C.center":[30.0,25.0]}}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"EndGesture","args":{"gestureId":91}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"tolerance":{"abs":1e-4},"result":{"gestureId":91,"status":"success","dof":3,"conflicting":[],"sketchRevision":2,"maxResidual":0.0}}}
+
+# --- ROUND 4: a pointer-up that ends CONFLICTING still measures -----------------
+# The same contradictory sketch, gestured. `commit.finalTarget` sends the final
+# exact solve down `on_end`'s OTHER branch — the committed-target one — and the
+# field must still be measured there. That branch's solve result is produced by a
+# DRAG entry, which by policy measures nothing, so a lane sourcing the field from
+# it would report a satisfied-looking 0.0 on every committed pointer-up. `$any`
+# only pins presence here; that the value is 10 mm and not 0.0 is asserted in
+# test_solver_residual.cpp.
+{"send":{"v":1,"t":"req","id":7,"verb":"BeginGesture","args":{"sketchId":"cx","sketchRevision":1,"gestureId":92,"drag":{"pointId":"q2"}}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"gestureId":92,"ready":true}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"EndGesture","args":{"gestureId":92,"commit":{"finalTarget":[12.0,0.0]}}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"gestureId":92,"status":"conflicting","conflicting":["$any","$any"],"sketchRevision":2,"maxResidual":"$any"}}}

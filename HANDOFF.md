@@ -60,11 +60,14 @@ verifiers OK · kernelbench T0 compare + full e2e: see the TODO.md row (running 
 ## How to resume
 
 1. Run the `handoff` skill with "resume"; read the plan file's Run log (bottom) and TODO.md
-   § KERNEL HARDENING § Now checkboxes. Commits A `bd4b6c5`, B `da01b3f` are pushed; commit C
-   (WP-P P3 + the Rust fix round + hygiene) is the last close-out commit — check `git log`.
-2. Then WP-B (plan § D — probes P-B1..P-B4 first; the SCHEMA draft `wpb_schema_draft.md` and the
-   probe brief `wpb_probes_brief.md` were drafted in the 2026-09-03 session scratchpad and may be
-   gone — the plan § D carries the same design), then WP-F (plan § E; `wpf_design_draft.md`).
+   § KERNEL HARDENING § Now checkboxes. Commits A `bd4b6c5`, B `da01b3f`, C `78daecb`, D (WP-B)
+   are pushed — check `git log`.
+2. Next: WP-F chamfer reference face (plan § E — probe first: box, asymmetric chamfer d1=4/d2=1,
+   upstream hole reorders face ordinals → the legs mirror today; typed `referenceFaces[]`
+   parallel to `edges[]`, `adjacentFaces` on `QueryElement`, legacy rule per D10). Then WP-H/I/J
+   in a new plan. Process rule re-learned this session: run the adversarial review BEFORE the
+   commit, not after — both WP-P and WP-B reviews found real defects (a positional re-association
+   and a hole-deleting threshold).
 3. CI: re-run status of run 33683904198's failed jobs; `linux-worker` needs the self-hosted runner
    back; `tauri-composition` needs the OCCT build cached or the timeout raised.
 

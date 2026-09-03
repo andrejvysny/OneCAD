@@ -1330,6 +1330,40 @@ pub struct RevolveParams {
     pub extra: Extra,
 }
 
+/// Validates a profile's optional SCHEMA §7.3 `regionAnchor`.
+///
+/// A present anchor decides what the op may BIND to, so a malformed one is a
+/// named refusal rather than a silently-dropped optional field: falling through
+/// would surface later as the stale-id refusal and read as a different defect.
+/// `[f64; 2]` already pins the arity, so finiteness is all that is left —
+/// `NaN`/`Infinity` are not JSON numbers on the wire (SCHEMA §4), and a document
+/// carrying one must not reach the worker as a silent no-match.
+fn validate_region_anchor(profile: Option<&SketchRegionRef>, op: &str) -> Result<(), String> {
+    let Some([u, v]) = profile.and_then(|p| p.region_anchor) else {
+        return Ok(());
+    };
+    if !u.is_finite() || !v.is_finite() {
+        return Err(format!(
+            "{op} regionAnchor must be two finite numbers (got [{u}, {v}])"
+        ));
+    }
+    Ok(())
+}
+
+impl ExtrudeParams {
+    /// Validates the profile's optional `regionAnchor` (SCHEMA §7.3).
+    pub fn validate(&self) -> Result<(), String> {
+        validate_region_anchor(self.profile.as_ref(), "Extrude")
+    }
+}
+
+impl RevolveParams {
+    /// Validates the profile's optional `regionAnchor` (SCHEMA §7.3).
+    pub fn validate(&self) -> Result<(), String> {
+        validate_region_anchor(self.profile.as_ref(), "Revolve")
+    }
+}
+
 /// Fillet parameters (SPLIT from OneCAD-CPP `FilletChamferParams`
 /// `OperationRecord.h:114-120`). SCHEMA §7.3 field names.
 ///
@@ -5966,5 +6000,91 @@ mod tests {
             ],
             "a Some(depthMm) exposes both thread scalars, appended last"
         );
+    }
+}
+
+#[cfg(test)]
+mod region_anchor_tests {
+    use super::*;
+    use crate::document::refs::SketchRegionRef;
+    use crate::ids::{RegionId, SketchId};
+
+    fn profile(anchor: Option<[f64; 2]>) -> SketchRegionRef {
+        SketchRegionRef {
+            sketch: SketchId(uuid::Uuid::from_u128(0x5C)),
+            region: RegionId::new("r_cell"),
+            region_identity_version: Some(3),
+            region_anchor: anchor,
+            extra: Extra::new(),
+        }
+    }
+
+    fn extrude(anchor: Option<[f64; 2]>) -> ExtrudeParams {
+        ExtrudeParams {
+            profile: Some(profile(anchor)),
+            distance: Scalar::new(10.0),
+            draft_angle_deg: Scalar::new(0.0),
+            mode: ExtrudeMode::Blind,
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            target_face: None,
+            two_directions: false,
+            mode2: ExtrudeMode::Blind,
+            distance2: Scalar::new(0.0),
+            target_face2: None,
+            extra: Extra::new(),
+        }
+    }
+
+    fn revolve(anchor: Option<[f64; 2]>) -> RevolveParams {
+        RevolveParams {
+            profile: Some(profile(anchor)),
+            angle_deg: Scalar::new(360.0),
+            axis: None,
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            extra: Extra::new(),
+        }
+    }
+
+    /// No profile and no anchor are both trivially valid — the field is optional
+    /// and a producer without a region fill legitimately omits it.
+    #[test]
+    fn an_absent_anchor_is_valid() {
+        assert!(extrude(None).validate().is_ok());
+        assert!(revolve(None).validate().is_ok());
+        let mut p = extrude(None);
+        p.profile = None;
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn a_finite_anchor_is_valid() {
+        assert!(extrude(Some([12.0, -8.5])).validate().is_ok());
+        assert!(revolve(Some([0.0, 0.0])).validate().is_ok());
+    }
+
+    /// A non-finite anchor is refused BY NAME. It decides what the op may bind
+    /// to, so dropping it silently would resurface later as the generic stale-id
+    /// refusal and read as a different defect (SCHEMA §7.3).
+    #[test]
+    fn a_non_finite_anchor_is_refused_by_name() {
+        for bad in [
+            [f64::NAN, 0.0],
+            [0.0, f64::NAN],
+            [f64::INFINITY, 0.0],
+            [0.0, f64::NEG_INFINITY],
+        ] {
+            let err = extrude(Some(bad)).validate().unwrap_err();
+            assert!(
+                err.contains("Extrude") && err.contains("regionAnchor"),
+                "the refusal names the op and the field: {err}"
+            );
+            let err = revolve(Some(bad)).validate().unwrap_err();
+            assert!(
+                err.contains("Revolve") && err.contains("regionAnchor"),
+                "the refusal names the op and the field: {err}"
+            );
+        }
     }
 }

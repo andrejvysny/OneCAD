@@ -127,6 +127,24 @@ pub struct SketchRegionRef {
     /// Absent is a persisted v1 profile and deliberately retains legacy lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region_identity_version: Option<u32>,
+    /// A point strictly INSIDE the cell the user picked, in the sketch-plane UV
+    /// frame (SCHEMA §7.3 "Region anchor", kernel-hardening WP-B). The worker
+    /// consults it ONLY after the exact `region` id matches no cell, and then
+    /// binds the unique cell containing it (`REGION_REBOUND_BY_ANCHOR`).
+    ///
+    /// Written ONCE, at pick time, and persisted verbatim — it is NEVER
+    /// re-derived at regen: the region fill's sampling may change between
+    /// versions, and a re-derived anchor would move the planner hash of an
+    /// existing document. Absent is hash-neutral (`skip_serializing_if`, the
+    /// `ChamferParams::distance2` precedent), so every document authored before
+    /// this field existed still replays byte-identically; present, it IS a regen
+    /// input and enters the hash, because it changes what the op may bind to.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "regionAnchor"
+    )]
+    pub region_anchor: Option<[f64; 2]>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }

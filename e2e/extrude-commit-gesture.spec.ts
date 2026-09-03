@@ -256,3 +256,35 @@ test("Enter-commit waits for the final exact preview epoch (commit barrier)", as
   expect(finalEpoch).toBeGreaterThan(0);
   expect(committedEpoch).toBe(finalEpoch);
 });
+
+// SCHEMA §7.3 "Region anchor" (kernel-hardening WP-B): a committed Extrude
+// carries the picked region's pick-time anchor on its stored `profile`.
+test("a committed Extrude's stored params carry profile.regionAnchor", async ({ page }) => {
+  await armExtrude(page);
+  const bodiesBefore = await bodyOptions(page).count();
+  await page.getByTestId("chip-confirm").click();
+  await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
+
+  const featureId = await page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { document: { getState(): { features: Array<{ id: string }> } } };
+    };
+    const features = w.__stores?.document.getState().features ?? [];
+    return features[features.length - 1]?.id ?? null;
+  });
+  expect(featureId).not.toBeNull();
+
+  const profile = await page.evaluate(async (id: string) => {
+    const w = window as unknown as {
+      __client?: { getOperationParams(recordId: string): Promise<Record<string, unknown>> };
+    };
+    const stored = await w.__client?.getOperationParams(id);
+    return (stored?.profile ?? null) as { regionAnchor?: [number, number] } | null;
+  }, featureId as string);
+
+  expect(profile).not.toBeNull();
+  expect(Array.isArray(profile!.regionAnchor)).toBe(true);
+  expect(profile!.regionAnchor).toHaveLength(2);
+  expect(Number.isFinite(profile!.regionAnchor![0])).toBe(true);
+  expect(Number.isFinite(profile!.regionAnchor![1])).toBe(true);
+});

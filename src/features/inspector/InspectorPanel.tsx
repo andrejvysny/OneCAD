@@ -213,7 +213,7 @@ function FeatureState({
         {feat?.kind ? `${cap(feat.kind)} feature` : "Feature"}
         {feat?.valueText ? ` · ${feat.valueText}` : ""}
       </div>
-      {feat?.status === "error" && (
+      {feat?.status === "error" ? (
         <>
           <div className="mt-3 rounded-sm border border-border bg-well px-2.5 py-2">
             <div className="text-[12px] font-medium text-traffic-close">Feature failed</div>
@@ -229,6 +229,19 @@ function FeatureState({
             Edit and retry
           </button>
         </>
+      ) : (
+        feat?.diagnostics &&
+        feat.diagnostics.length > 0 && (
+          // Non-error terminal (e.g. REGION_REBOUND_BY_ANCHOR, SKETCH_ENTITY_DEGENERATE):
+          // same detail rendering, framed with the warn tokens instead of the failure well.
+          <div
+            data-testid="feature-diagnostic-section"
+            className="mt-3 rounded-sm border border-[color:var(--banner-warn-line)] bg-[var(--banner-warn-bg)] px-2.5 py-2"
+          >
+            <div className="text-[12px] font-medium text-warn">Feature warning</div>
+            <OperationDiagnosticDetails diagnostics={feat.diagnostics} />
+          </div>
+        )
       )}
       <InspectorSectionHost />
     </>

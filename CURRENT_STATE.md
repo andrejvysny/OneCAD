@@ -4,9 +4,8 @@ Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: fiv
 
 ## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
-Last verified: 2026-09-03 10:30 — `master`; commits A `bd4b6c5` (kernel hardening WP-C/D/A/E) and
-B `da01b3f` (WP-P worker+Rust+P2b) PUSHED; commit C (WP-P P3 frontend + the WP-P Rust fix round +
-hygiene) staged for commit after the final cargo re-run — see TODO.md § KERNEL HARDENING § Now.
+Last verified: 2026-09-03 14:40 — `master`; commits A `bd4b6c5`, B `da01b3f`, C `78daecb` and D
+(WP-B) on origin — see TODO.md § KERNEL HARDENING § Now.
 
 - **Kernel hardening WP-C/D/A/E:** landed, protocol-audited (`approve`), adversarially reviewed
   (4 HIGH fixed red-first), gated, committed, pushed. Ruling D3b: Tier B where NEW geometry is
@@ -29,10 +28,21 @@ hygiene) staged for commit after the final cargo re-run — see TODO.md § KERNE
   (`constraint-badge-standoff` — a measurement race now fixed in the spec; `sketch-snap-composition
   :172` webkit — passes locally, re-running); `tauri-composition` times out building OCCT;
   `linux-worker` self-hosted runner offline (the run had to be cancelled by hand to re-run jobs).
-- **Next (plan § D/E):** WP-B region identity by anchor + robust detection + honest solve (probes
-  P-B1..P-B4 first; briefs drafted in the session scratchpad) → WP-F chamfer reference face.
-  User-run gates unchanged (19-row checklist, Tauri smoke incl. project edges, dirty vendor STEP,
-  WP-X dogfood with the default parts).
+- **WP-B region identity by anchor + robust detection + solve residual — LANDED (commit D,
+  2026-09-03):** `profile.regionAnchor` (set once at pick, never re-derived, hash-neutral when
+  absent) with the exact-id → anchor-cell → refuse ladder and the `REGION_REBOUND_BY_ANCHOR`
+  warning (now visible in the inspector + a history-row badge); chord-tolerance fragment sampling,
+  bbox pair cull, degenerate-entity drop at the graph's 1e-6 coincidence (the adversarial review
+  caught a 1e-3 threshold that DELETED a hole — fixed red-first); `maxResidual` reporting only;
+  `finish_sketch` commits the record before regions (with the outcome still forwarded on a
+  refusal). Probes: P-B1/P-B3/P-B5/P-B6/P-B7 red → green; P-B2 red at 0.8 mm clearance → green;
+  P-B4 not reproduced. Protocol audit `approve` (two passes + re-verification); adversarial
+  review 1 BLOCKER + 3 HIGH + 4 MEDIUM fixed. Follow-ups in TODO.md (H2 plausibility bound,
+  1024-sample clamp signal, `maxResidual` has no consumer yet, harness matchers).
+- **Next (plan § E):** WP-F chamfer reference face as a typed ref (design draft
+  `wpf_design_draft.md` in the 2026-09-03 scratchpad; plan § E is authoritative). Then WP-H/I/J
+  (next plan). User-run gates unchanged (19-row checklist, Tauri smoke incl. project edges +
+  region anchor, dirty vendor STEP, WP-X dogfood with the default parts).
 
 ## NOW — DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
 

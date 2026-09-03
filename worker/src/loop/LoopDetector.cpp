@@ -9,9 +9,11 @@
 #include "../sketch/SketchEllipse.h"
 #include "../sketch/SketchLine.h"
 #include "../sketch/SketchPoint.h"
+#include "kernel/validation/GeometryPrecision.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <numbers>
@@ -148,7 +150,59 @@ struct AnalyticSource {
     Handle(Geom2d_Curve) basis;
     Handle(Geom2d_Curve) bounded;
     bool closed = false;
+    /// Radius the chord-tolerance sample count is measured against; 0 for a line.
+    /// An ellipse reports its MAJOR radius: the sagitta of a parametric step is
+    /// largest at the major-axis vertex, where it equals `major·(Δt²/8)`, so the
+    /// major radius is the value that makes the circle formula an upper bound.
+    double radius = 0.0;
+    /// Conservative axis-aligned box of the source: exact for a line, the FULL
+    /// circle/ellipse box for a conic (an arc's own extent is a subset of it).
+    /// Broad-phase culling depends on this never being smaller than the curve.
+    sk::Vec2d boundsMin{};
+    sk::Vec2d boundsMax{};
 };
+
+/// Chord tolerance for fragment sampling (mm): ten times the authoring
+/// resolution, i.e. the largest polygon-to-curve gap region detection is willing
+/// to decide containment across.
+constexpr double kFragmentChordToleranceMm =
+    10.0 * kernel::validation::kAuthoringResolutionMm;
+
+/// Never fewer samples than the fixed count this replaced.
+constexpr int kMinFragmentSegments = 16;
+
+/// Bounds the per-fragment sample allocation.
+constexpr int kMaxFragmentSegments = 1024;
+
+/**
+ * @brief Segments to inscribe in one analytic fragment so the sampled polygon
+ *        never dips more than `kFragmentChordToleranceMm` inside the true curve.
+ *
+ * A chord subtending `theta = sweep/n` on a curve of radius `r` dips
+ * `r*(1 - cos(theta/2))` below it at the chord midpoint. Setting that equal to
+ * the tolerance gives `n = sweep / (2*acos(1 - tol/r))`. Containment and the
+ * planar walk are decided against exactly these samples, so that dip IS the
+ * error budget a near-rim hole has to clear.
+ *
+ * Worked example, R=100 over a 240 degree sweep: the fixed 16 segments dipped
+ * 0.856 mm and lost a hole sitting 0.8 mm inside the rim; this yields 149
+ * segments and a 0.0099 mm dip. A unit circle over 360 degrees yields 23.
+ */
+int fragmentSampleCount(CurveFragmentKind kind, double radius, double sweep) {
+    if (kind == CurveFragmentKind::Line) return 1;
+    if (!std::isfinite(radius) || radius <= 0.0 || !std::isfinite(sweep)) {
+        return kMinFragmentSegments;
+    }
+    // Clamped so a radius at or below the tolerance — a curve the tolerance
+    // cannot resolve at all — degrades to the floor instead of producing NaN.
+    const double cosine = std::clamp(1.0 - kFragmentChordToleranceMm / radius, -1.0, 1.0);
+    const double step = 2.0 * std::acos(cosine);
+    // A radius so large the angular step underflows needs more than the ceiling.
+    if (!(step > 0.0)) return kMaxFragmentSegments;
+    const double required = std::ceil(std::abs(sweep) / step);
+    if (!(required < static_cast<double>(kMaxFragmentSegments))) return kMaxFragmentSegments;
+    return std::max(kMinFragmentSegments, static_cast<int>(required));
+}
 
 struct CurveSplit {
     double parameter = 0.0;
@@ -352,6 +406,8 @@ std::optional<AnalyticSource> makeAnalyticSource(const sk::SketchEntity& entity,
                                                 gp_Dir2d((b.x - a.x) / length,
                                                          (b.y - a.y) / length)));
         source.bounded = new Geom2d_TrimmedCurve(source.basis, 0.0, length);
+        source.boundsMin = {std::min(a.x, b.x), std::min(a.y, b.y)};
+        source.boundsMax = {std::max(a.x, b.x), std::max(a.y, b.y)};
         source.fragment.sourceFirstParameter = source.fragment.firstParameter;
         source.fragment.sourceLastParameter = source.fragment.lastParameter;
         return source;
@@ -376,6 +432,11 @@ std::optional<AnalyticSource> makeAnalyticSource(const sk::SketchEntity& entity,
                                                   arc->radius()));
         source.bounded = new Geom2d_TrimmedCurve(source.basis, source.fragment.firstParameter,
                                                    source.fragment.lastParameter);
+        source.radius = arc->radius();
+        // The FULL circle box, deliberately: an arc's own extent is a subset of
+        // it, so this can never exclude an intersection the arc really has.
+        source.boundsMin = {center.x - arc->radius(), center.y - arc->radius()};
+        source.boundsMax = {center.x + arc->radius(), center.y + arc->radius()};
         source.fragment.sourceFirstParameter = source.fragment.firstParameter;
         source.fragment.sourceLastParameter = source.fragment.lastParameter;
         return source;
@@ -398,6 +459,9 @@ std::optional<AnalyticSource> makeAnalyticSource(const sk::SketchEntity& entity,
         source.bounded = new Geom2d_TrimmedCurve(source.basis, 0.0,
                                                    source.fragment.lastParameter);
         source.closed = true;
+        source.radius = circle->radius();
+        source.boundsMin = {center.x - circle->radius(), center.y - circle->radius()};
+        source.boundsMax = {center.x + circle->radius(), center.y + circle->radius()};
         source.fragment.sourceFirstParameter = source.fragment.firstParameter;
         source.fragment.sourceLastParameter = source.fragment.lastParameter;
         return source;
@@ -425,9 +489,66 @@ std::optional<AnalyticSource> makeAnalyticSource(const sk::SketchEntity& entity,
     source.bounded = new Geom2d_TrimmedCurve(source.basis, 0.0,
                                                source.fragment.lastParameter);
     source.closed = true;
+    source.radius = ellipse->majorRadius();
+    // Rotation-independent: the ellipse never leaves the circumscribing circle of
+    // its major radius, whatever its rotation.
+    source.boundsMin = {center.x - ellipse->majorRadius(), center.y - ellipse->majorRadius()};
+    source.boundsMax = {center.x + ellipse->majorRadius(), center.y + ellipse->majorRadius()};
     source.fragment.sourceFirstParameter = source.fragment.firstParameter;
     source.fragment.sourceLastParameter = source.fragment.lastParameter;
     return source;
+}
+
+/**
+ * @brief Why this entity carries no usable boundary, or `nullopt` if it does.
+ *
+ * `kAuthoringResolutionMm` is the smallest geometric change OneCAD claims it can
+ * make, so anything below it is not geometry a region can be bound to. Exact
+ * refinement cannot give such an entity analytic provenance; dropping it with a
+ * warning is strictly better than the V3 alternative of refusing every region in
+ * the sketch because ONE entity was malformed.
+ */
+// `tolerance` is the graph's own node-merge (coincidence) tolerance: an entity is
+// degenerate only when it is zero-length TO THIS GRAPH — its endpoints would merge
+// into one node, so it can carry no edge. Anything longer is real boundary: a
+// 0.0005 mm hole edge survived as an edge before (its endpoints are two nodes at
+// the 1e-6 coincidence), and dropping it opened the hole loop and DELETED the
+// hole from the region (adversarial review 2026-09-03: an extrude published
+// 8000 mm³ where the user drew 7000). Never widen this to the authoring
+// resolution.
+std::optional<std::string> degenerateEntityReason(const sk::SketchEntity& entity,
+                                                  const sk::Sketch& sketch,
+                                                  double tolerance) {
+    const auto describe = [&](const char* what, double measured) {
+        char buffer[160];
+        std::snprintf(buffer, sizeof(buffer), "%s (%.3g mm, below the %.3g mm coincidence tolerance)",
+                      what, measured, tolerance);
+        return std::string(buffer);
+    };
+    if (entity.type() == sk::EntityType::Line) {
+        const auto* line = dynamic_cast<const sk::SketchLine*>(&entity);
+        if (!line) return std::nullopt;
+        const auto* start = sketch.getEntityAs<sk::SketchPoint>(line->startPointId());
+        const auto* end = sketch.getEntityAs<sk::SketchPoint>(line->endPointId());
+        if (!start || !end) return std::nullopt;
+        const double length =
+            std::sqrt(distanceSquared(toVec2(start->position()), toVec2(end->position())));
+        if (length < tolerance) return describe("zero-length line", length);
+        return std::nullopt;
+    }
+    if (entity.type() == sk::EntityType::Arc) {
+        const auto* arc = dynamic_cast<const sk::SketchArc*>(&entity);
+        if (arc && arc->radius() < tolerance) return describe("zero-radius arc", arc->radius());
+        return std::nullopt;
+    }
+    if (entity.type() == sk::EntityType::Circle) {
+        const auto* circle = dynamic_cast<const sk::SketchCircle*>(&entity);
+        if (circle && circle->radius() < tolerance) {
+            return describe("zero-radius circle", circle->radius());
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
 }
 
 std::optional<double> physicalCurveIntervalLength(const AnalyticSource& source,
@@ -644,6 +765,10 @@ LoopDetectionResult LoopDetector::detect(const sk::Sketch& sketch,
         result.errorMessage = "Failed to build adjacency graph";
         return result;
     }
+    // Advisory findings survive a later refusal: they are often WHY it refused.
+    result.warnings = graph->warnings;
+    result.planarizedCurvePairs = static_cast<int>(
+        std::min<std::size_t>(graph->curvePairs, std::numeric_limits<int>::max()));
     if (!graph->errorMessage.empty()) {
         result.success = false;
         result.errorMessage = graph->errorMessage;
@@ -1091,6 +1216,15 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
         if (selection && !selection->empty() && selection->find(entity->id()) == selection->end()) {
             continue;
         }
+        // One malformed entity must not cost the sketch every region: drop it,
+        // say so, and detect the rest. If that opens a loop, the ordinary "no
+        // closed region" outcome follows — which is a result, not a refusal.
+        if (const std::optional<std::string> degeneracy = degenerateEntityReason(
+                *entity, sketch,
+                std::min(config_.coincidenceTolerance, sk::constants::COINCIDENCE_TOLERANCE))) {
+            graph->warnings.push_back({entity->id(), *degeneracy});
+            continue;
+        }
         auto source = makeAnalyticSource(*entity, sketch);
         if (!source.has_value()) {
             const bool supported = entity->type() == sk::EntityType::Line ||
@@ -1116,6 +1250,20 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
         ProfileTolerancePolicy::forSources(sources, config_.coincidenceTolerance);
     tolerance = tolerancePolicy.coincidence;
 
+    // Broad phase. Two sources whose boxes stay further apart than the
+    // intersection tolerance have nothing for the narrow phase to find, and the
+    // curve-pair ceiling must bound the pairs actually worth testing — C(n,2)
+    // alone refuses an ordinary closed 100-line profile. Every box is a superset
+    // of its curve (the full circle box for an arc) and both are grown by the
+    // same tolerance the pair test uses, so the cull cannot drop a real crossing.
+    const auto boxesMayTouch = [tolerance](const AnalyticSource& first,
+                                           const AnalyticSource& second) {
+        return first.boundsMin.x - tolerance <= second.boundsMax.x + tolerance &&
+               second.boundsMin.x - tolerance <= first.boundsMax.x + tolerance &&
+               first.boundsMin.y - tolerance <= second.boundsMax.y + tolerance &&
+               second.boundsMin.y - tolerance <= first.boundsMax.y + tolerance;
+    };
+
     std::set<std::pair<std::size_t, std::size_t>> candidatePairs;
     for (std::size_t first = 0; first < sources.size(); ++first) {
         for (std::size_t second = first + 1; second < sources.size(); ++second) {
@@ -1123,6 +1271,7 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                 graph->errorMessage = "profile refinement cancelled";
                 return graph;
             }
+            if (!boxesMayTouch(sources[first], sources[second])) continue;
             candidatePairs.emplace(first, second);
             if (candidatePairs.size() > config_.maxPlanarizedCurvePairs) {
                 graph->errorMessage = "profile refinement exceeds curve-pair limit";
@@ -1130,6 +1279,7 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             }
         }
     }
+    graph->curvePairs = candidatePairs.size();
 
     std::vector<std::vector<CurveSplit>> splits(sources.size());
     for (std::size_t i = 0; i < sources.size(); ++i) {
@@ -1282,7 +1432,9 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             fragment.lastParameter = end.parameter;
             fragment.startPoint = start.point;
             fragment.endPoint = end.point;
-            const int sampleCount = fragment.kind == CurveFragmentKind::Line ? 1 : 16;
+            const int sampleCount = fragmentSampleCount(
+                fragment.kind, sources[sourceIndex].radius,
+                fragment.lastParameter - fragment.firstParameter);
             fragment.samples.reserve(static_cast<std::size_t>(sampleCount) + 1);
             for (int sample = 0; sample <= sampleCount; ++sample) {
                 const double ratio = static_cast<double>(sample) / static_cast<double>(sampleCount);

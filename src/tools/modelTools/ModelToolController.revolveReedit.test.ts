@@ -292,6 +292,34 @@ describe("ModelToolController revolve re-edit (REVOLVE-REGION-PARITY)", () => {
     expect(engineMock.showRegionPick).not.toHaveBeenCalled(); // a re-edit never re-picks
   });
 
+  // ── (b') the anchor array stays length-matched to revolveRegionIds on re-edit ──
+
+  it("re-edit's revolveRegionAnchors array is length-matched to revolveRegionIds, anchor at index 0", async () => {
+    twoSketchDoc();
+    const storedAnchor: [number, number] = [1.5, -2.5];
+    build({
+      regions: { "sk-2": [R1] },
+      entities: [AXIS_A],
+      storedParams: {
+        profile: { sketchId: "sk-2", regionId: "r1", regionAnchor: storedAnchor },
+        angleDeg: { value: 90 },
+        axis: { kind: "sketchLine", sketchId: "sk-2", lineId: "line-a" },
+      },
+    });
+
+    controller.editRevolveFeature("rev-1");
+    await flush();
+    await flush();
+    await flush();
+
+    const priv = controller as unknown as {
+      revolveRegionIds: string[];
+      revolveRegionAnchors: Array<[number, number] | undefined>;
+    };
+    expect(priv.revolveRegionAnchors).toHaveLength(priv.revolveRegionIds.length);
+    expect(priv.revolveRegionAnchors[0]).toEqual(storedAnchor);
+  });
+
   // ── (c) a stale stored regionId refuses loudly ────────────────────────────────
 
   it("refuses a stale stored regionId with the available ids — nothing armed, nothing committed", async () => {

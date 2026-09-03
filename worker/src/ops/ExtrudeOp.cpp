@@ -3,6 +3,7 @@
 #include "ops/ExtrudeOp.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -919,9 +920,11 @@ OpOutcome draft_refusal(const DraftFailure& failure) {
     return out;
 }
 
-}  // namespace
-
-OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_id) {
+// WP-B: the profile may rebind by `regionAnchor`, which publishes a step warning.
+// This function has many early returns, so it COLLECTS profile advisories and
+// `execute_extrude` attaches them once, on a non-refused outcome only.
+OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
+                       std::vector<json>& profile_diagnostics) {
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
@@ -967,10 +970,16 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
         }
         region_identity_version = params["regionIdentityVersion"].get<int>();
     }
+    std::optional<std::array<double, 2>> region_anchor;
+    std::string anchor_error;
+    if (!read_region_anchor(params, region_anchor, anchor_error)) {
+        return OpOutcome::fail("OP_FAILED", "Extrude: " + anchor_error);
+    }
     std::string perr;
     std::optional<TopoDS_Face> profile =
         build_profile_face(*sketch_params, read_str(params, "regionId"),
-                           region_identity_version, perr);
+                           region_identity_version, perr, &profile_diagnostics,
+                           region_anchor);
     if (!profile) return OpOutcome::fail("OP_FAILED", perr);
 
     gp_Pln plane;
@@ -1312,6 +1321,15 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     // Publish the successor: a single-solid result modifies the target in place; a
     // multi-solid boolean-Cut splits into deterministic children (SCHEMA §2, D1).
     publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out);
+    return out;
+}
+
+}  // namespace
+
+OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_id) {
+    std::vector<json> profile_diagnostics;
+    OpOutcome out = extrude_impl(ctx, op, op_id, profile_diagnostics);
+    attach_profile_diagnostics(out, profile_diagnostics);
     return out;
 }
 

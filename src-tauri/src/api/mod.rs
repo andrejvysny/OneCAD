@@ -1879,12 +1879,17 @@ pub async fn finish_sketch(
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("finishSketch".into()))?;
-        let (dto, outcome) = rt.finish_sketch_with_outcome(id).await?;
+        // A regions refusal after the record commit still carries the outcome:
+        // the record must reach the scheduler, the projection and autosave.
+        let (dto, outcome) = match rt.finish_sketch_with_outcome(id).await {
+            Ok((dto, outcome)) => (Ok(dto), outcome),
+            Err(e) => (Err(e.error), e.committed.map(|c| *c)),
+        };
         (dto, outcome, rt.projection())
     };
     tracing::info!(
         "finish_sketch: sketch={id} regions={} recordOutcome={}",
-        dto.regions.len(),
+        dto.as_ref().map(|d| d.regions.len()).unwrap_or(0),
         outcome.is_some()
     );
     // The finish may have appended/refreshed the sketch's timeline record: the
@@ -1897,7 +1902,7 @@ pub async fn finish_sketch(
         }
         state.note_mutation();
     }
-    Ok(dto)
+    Ok(dto?)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

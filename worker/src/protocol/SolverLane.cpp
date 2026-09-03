@@ -403,6 +403,11 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
         // Per-constraint conflict ids (SCHEMA §7.4): the constraints PlaneGCS reports
         // as mutually unsatisfiable, wire-mapped (empty when the sketch is solvable).
         {"conflicting", map_conflicting(tr.index, conflicting)},
+        // SCHEMA §7.4 `maxResidual`, REPORTING ONLY — the largest per-constraint
+        // residual the exact solve above left behind, each in its own dimension.
+        // It is measured, never acted on: `state` and `conflicting` are already
+        // fixed above and nothing below re-reads it.
+        {"maxResidual", solve.residual},
     };
     // Optional/additive: absent means "this worker has nothing to say about the
     // individual entities", never "they are all unconstrained".
@@ -833,6 +838,13 @@ Envelope SolverLane::on_end(const Envelope& req) {
         {"positions", changed_positions(g.baseline, cur, g.index)},
         // Same additive §7.4 channel as SolveDrag, baselined at BeginGesture.
         {"curves", changed_curves(g.baseline_curves, cur_curves, g.index)},
+        // SCHEMA §7.4 `maxResidual`, REPORTING ONLY. Measured from the SKETCH
+        // rather than from `r`: the `commit.finalTarget` branch above produced
+        // `r` through a DRAG entry, which by policy measures nothing, so
+        // `r.residual` is 0-as-unmeasured exactly half the time. Both branches
+        // leave the final pose in the sketch, and that pose is what §7.4 says to
+        // evaluate — so it is read once, here, after the final solve.
+        {"maxResidual", sk::maxConstraintResidual(*g.sketch, g.sketch->getAllConstraints())},
         {"sketchRevision", new_rev},
     };
     // §7.4 `entityStates` is GESTURE-FIXED, exactly like `dof`: a drag adds no

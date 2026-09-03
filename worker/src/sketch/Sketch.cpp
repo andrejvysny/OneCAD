@@ -1294,7 +1294,10 @@ SolveResult Sketch::solve() {
         return result;
     }
 
-    SolverResult solverResult = solver_->solve();
+    // `this` is the residual context: the EXACT solve measures SCHEMA §7.4
+    // `maxResidual`. The three drag entries below deliberately do not — the
+    // per-frame lane pays for nothing it does not report.
+    SolverResult solverResult = solver_->solve(this);
     result.success = solverResult.success;
     result.iterations = solverResult.iterations;
     result.residual = solverResult.residual;

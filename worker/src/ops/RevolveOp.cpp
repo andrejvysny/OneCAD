@@ -1,9 +1,11 @@
 // RevolveOp.cpp — see RevolveOp.h. Ports RegenerationEngine.cpp buildRevolve.
 #include "ops/RevolveOp.h"
 
+#include <array>
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
@@ -232,9 +234,11 @@ bool axis_from_legacy_edge(const OpContext& ctx, const std::string& body_id, con
         elementmap::ElementMapPartition::shape_for_topokey(rec->geom, edge_id), axis_out, err);
 }
 
-}  // namespace
-
-OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_id) {
+// WP-B: the profile may rebind by `regionAnchor`, which publishes a step warning.
+// This function has many early returns, so it COLLECTS profile advisories and
+// `execute_revolve` attaches them once, on a non-refused outcome only.
+OpOutcome revolve_impl(OpContext& ctx, const json& op, const std::string& op_id,
+                       std::vector<json>& profile_diagnostics) {
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
@@ -276,10 +280,16 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
         }
         region_identity_version = params["regionIdentityVersion"].get<int>();
     }
+    std::optional<std::array<double, 2>> region_anchor;
+    std::string anchor_error;
+    if (!read_region_anchor(params, region_anchor, anchor_error)) {
+        return OpOutcome::fail("OP_FAILED", "Revolve: " + anchor_error);
+    }
     std::string perr;
     std::optional<TopoDS_Face> profile =
         build_profile_face(*sketch_params, read_str(params, "regionId"),
-                           region_identity_version, perr);
+                           region_identity_version, perr, &profile_diagnostics,
+                           region_anchor);
     if (!profile) return OpOutcome::fail("OP_FAILED", perr);
 
     // --- axis ---
@@ -494,6 +504,15 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
         // Unreachable after boolean_result_policy; kept as a defensive terminal.
         return OpOutcome::fail("OP_FAILED", "Revolve boolean produced no solids");
     }
+    return out;
+}
+
+}  // namespace
+
+OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_id) {
+    std::vector<json> profile_diagnostics;
+    OpOutcome out = revolve_impl(ctx, op, op_id, profile_diagnostics);
+    attach_profile_diagnostics(out, profile_diagnostics);
     return out;
 }
 

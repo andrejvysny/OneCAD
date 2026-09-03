@@ -44,6 +44,7 @@ fn parse_sketch_profile(input: &Value, labels: &mut Labels) -> Option<SketchRegi
         sketch: SketchId(labels.uuid(sketch_label)),
         region: RegionId::new(""), // V1 first-region fallback
         region_identity_version: None,
+        region_anchor: None,
         extra: Default::default(),
     })
 }

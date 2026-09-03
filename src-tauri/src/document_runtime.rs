@@ -171,6 +171,12 @@ pub struct RegenTimings {
 
 /// What one regen produced, for event emission. `outcome` is the executor's
 /// terminal; `changed`/`removed` drive the pull-model `document-changed` event.
+///
+/// **`Outcome::Published` and a populated [`failed_steps`](Self::failed_steps)
+/// coexist** — that pair is the normal shape of a partially-broken timeline, not
+/// a contradiction. A from-0 regen publishes every step it COULD build and leaves
+/// the ones it could not in `StepState::Error`, so a caller that asserts only on
+/// `outcome` will read a broken feature as a success. Assert on BOTH.
 #[derive(Debug)]
 pub struct RegenReport {
     /// The executor terminal (Published / Superseded / EngineFailed / Cancelled / NoOp).
@@ -3618,19 +3624,23 @@ impl DocumentRuntime {
         self.finish_sketch_with_outcome(sketch_id)
             .await
             .map(|(dto, _)| dto)
+            .map_err(|e| e.error)
     }
 
     /// [`finish_sketch`](Self::finish_sketch) plus the timeline-record outcome the
     /// api layer must forward to the regen scheduler (mirrors
     /// [`sketch_upsert_with_outcome`](Self::sketch_upsert_with_outcome)).
+    ///
+    /// The timeline record is upserted BEFORE the regions are computed, and a
+    /// region refusal is reported without rolling it back — see the ordering
+    /// comment at the `sketch_regions` call for why (sketch-regions-3).
     pub async fn finish_sketch_with_outcome(
         &mut self,
         sketch_id: SketchId,
-    ) -> Result<(FinishSketchDto, Option<CommandOutcome>), EngineError> {
+    ) -> Result<(FinishSketchDto, Option<CommandOutcome>), FinishSketchError> {
         let sketch = self.sketch_or_err(sketch_id, "finishSketch")?;
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
-        let regions = self.solver.sketch_regions(&sketch_id.to_string()).await?;
         // The Enter/E finish handoff can land while a drag is still live (the
         // frontend's pointer-up cancel lost the race) — clear the dangling
         // gesture here too (cancel_sketch's take-once, scoped to this sketch)
@@ -3657,6 +3667,27 @@ impl DocumentRuntime {
         let outcome = self
             .upsert_sketch_record(sketch_id)
             .map_err(|e| op_failed(format!("finishSketch: sketch record: {e}")))?;
+        // ORDER MATTERS — regions are computed AFTER the record is committed.
+        // The regions call is the one step here that a worker can refuse, and it
+        // used to run FIRST: a refusal returned early, leaving the timeline record
+        // pinned to the PRE-edit sketch while the document held the edited one, so
+        // the next regen silently rebuilt stale geometry (sketch-regions-3). The
+        // record is the durable half and the regions are a rebuildable cache, so
+        // the cache is what fails: the record stays committed and the refusal
+        // surfaces as an `opFailed` naming the worker's reason.
+        // A refusal here happens AFTER the record was committed: the error carries
+        // that outcome so the api layer still emits the projection, schedules the
+        // regen and notes the mutation (adversarial review 2026-09-03 — without it
+        // the committed record was unregenerated, invisible and unsaved).
+        let regions = match self.solver.sketch_regions(&sketch_id.to_string()).await {
+            Ok(regions) => regions,
+            Err(e) => {
+                return Err(FinishSketchError {
+                    error: op_failed(format!("finishSketch: {e}")),
+                    committed: outcome.map(Box::new),
+                })
+            }
+        };
         Ok((regions, outcome))
     }
 
@@ -4675,6 +4706,34 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
 /// projection-only — it never crosses the OCW1 wire, so it adds nothing to the
 /// SCHEMA §8 taxonomy the worker speaks.
 pub const PROJECTION_STALE_CODE: &str = "PROJECTION_STALE";
+
+/// A `finish_sketch` failure that may have happened AFTER the sketch's timeline
+/// record was committed (the regions call is the one refusable step and it runs
+/// last). `committed` is the record outcome the api layer must still forward to
+/// the scheduler / projection / autosave even though the call failed; `None` when
+/// the failure preceded the commit. `?` from an [`EngineError`] yields `None`.
+/// Boxed: `CommandOutcome` is large and clippy's `result_large_err` (1.98) fires
+/// on an unboxed `Err` this size.
+#[derive(Debug)]
+pub struct FinishSketchError {
+    pub error: EngineError,
+    pub committed: Option<Box<CommandOutcome>>,
+}
+
+impl From<EngineError> for FinishSketchError {
+    fn from(error: EngineError) -> Self {
+        Self {
+            error,
+            committed: None,
+        }
+    }
+}
+
+impl std::fmt::Display for FinishSketchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
 
 /// One sketch's stale-projection verdict (WP-P B4).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,6 +10,7 @@
 //   * scalar reader (bare number OR {value, expr?}, SCHEMA §7.3).
 #pragma once
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -101,17 +102,47 @@ std::optional<OpOutcome> validate_modeling_body(
 std::vector<nlohmann::json> operation_ref_ownership_repairs(
     const nlohmann::json& op, const std::string& op_id);
 
+// `params.regionAnchor` as a finite `[u, v]` in sketch UV (SCHEMA §7.3 "Region
+// anchor"). Absence yields `nullopt` + `true` — the field is optional, and a
+// producer without the region fill omits it. A PRESENT value that is not a
+// two-element array of finite numbers is an error, never a silent drop: the
+// anchor decides what the op may bind to, so a malformed one must refuse rather
+// than fall through to the stale-id refusal and look like a different defect.
+bool read_region_anchor(const nlohmann::json& params,
+                        std::optional<std::array<double, 2>>& value_out,
+                        std::string& error_out);
+
 // Build one selectable planar-cell face from a solved Sketch op. Publication and
 // lookup use the same RegionTable. Version 2 requires one exact canonical id;
 // absent keeps the legacy detector and its documented first-region fallback.
-std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_params,
-                                              const std::string& region_id,
-                                              std::optional<int> region_identity_version,
-                                              std::string& err);
+//
+// `region_anchor` (SCHEMA §7.3 "Region anchor", kernel-hardening WP-B) is
+// consulted ONLY when the exact `region_id` lookup matched NO cell — never to
+// break an ambiguous match, and never before the id. When it resolves to exactly
+// one containing cell, that cell is bound and a `REGION_REBOUND_BY_ANCHOR`
+// `warning` is appended to `diagnostics_out` (when non-null); zero or two or more
+// containing cells fall through to the unchanged refusal. The stored params are
+// never rewritten, so the resolution repeats deterministically on every regen.
+// Both trailing parameters are optional and default to the pre-WP-B behavior, so
+// an existing 4-argument call is unchanged in meaning as well as in shape.
+std::optional<TopoDS_Face> build_profile_face(
+    const nlohmann::json& sketch_params, const std::string& region_id,
+    std::optional<int> region_identity_version, std::string& err,
+    std::vector<nlohmann::json>* diagnostics_out = nullptr,
+    const std::optional<std::array<double, 2>>& region_anchor = std::nullopt);
 
 // Compatibility overload for direct V1 callers and fixtures.
 std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_params,
                                               const std::string& region_id, std::string& err);
+
+// Fold the profile advisories (`SKETCH_ENTITY_DEGENERATE`, `REGION_REBOUND_BY_ANCHOR`)
+// onto the op's outcome. They ride an Ok step's `planStep` diagnostics AND a
+// Failed/Unsupported step's `perStepResults[].diagnostics` — a dropped
+// degenerate entity is often exactly why the profile then has no closed region.
+// Advisories are placed FIRST: `PlanExecutor::execute_ops` derives the step
+// message from the LAST diagnostic, and reserves the last slot for the failure
+// (advisory_limit 63 + 1). A Cancelled outcome carries nothing.
+void attach_profile_diagnostics(OpOutcome& out, std::vector<nlohmann::json>& diagnostics);
 
 // Plane + outward normal of a planar face (normal reversed for REVERSED faces).
 // false when the face is null / non-planar.

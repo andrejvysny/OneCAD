@@ -229,9 +229,23 @@ bool assignIdentity(RegionDefinition& region, const WireEdgeMapper& mapper,
     return true;
 }
 
-RegionTable failed(std::string message) {
+RegionTable failed(std::string message, std::vector<DetectionWarning> warnings = {}) {
     RegionTable result;
     result.errorMessage = std::move(message);
+    result.warnings = std::move(warnings);
+    return result;
+}
+
+// Detection reports an internal sketch entity id; the caller only knows its own
+// id space, so a warning is useless until it is remapped the same way loop edges
+// are. `mapBaseEdge` returns the input unchanged for an unmapped id.
+std::vector<DetectionWarning> mappedWarnings(const std::vector<DetectionWarning>& warnings,
+                                             const WireEdgeMapper& mapper) {
+    std::vector<DetectionWarning> result;
+    result.reserve(warnings.size());
+    for (const DetectionWarning& warning : warnings) {
+        result.push_back({mapper(warning.entityId), warning.reason});
+    }
     return result;
 }
 
@@ -243,11 +257,14 @@ RegionTable buildRegionTable(const LoopDetectionResult& result,
                              RegionIdentityVersion identityVersion) {
     if (!result.success) {
         return failed(result.errorMessage.empty() ? "loop detection failed"
-                                                   : result.errorMessage);
+                                                   : result.errorMessage,
+                      mapBaseEdge ? mappedWarnings(result.warnings, mapBaseEdge)
+                                  : result.warnings);
     }
     if (!mapBaseEdge) return failed("region table requires an edge-id mapper");
 
     RegionTable table;
+    table.warnings = mappedWarnings(result.warnings, mapBaseEdge);
     table.regions = buildRegionDefinitions(result, tolerance);
     std::unordered_set<std::string> uniqueIds;
     for (RegionDefinition& region : table.regions) {
@@ -256,10 +273,11 @@ RegionTable buildRegionTable(const LoopDetectionResult& result,
         std::string error;
         if (!populateWireEdges(region, mapBaseEdge, error) ||
             !assignIdentity(region, mapBaseEdge, identityVersion, error)) {
-            return failed(std::move(error));
+            return failed(std::move(error), std::move(table.warnings));
         }
         if (!uniqueIds.insert(region.id).second) {
-            return failed("region identity collision after canonical derivation");
+            return failed("region identity collision after canonical derivation",
+                          std::move(table.warnings));
         }
     }
     table.success = true;

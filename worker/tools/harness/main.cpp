@@ -16,6 +16,13 @@
 //   "$hex64"             assert a lowercase-hex string (16 or 64 chars) — a
 //                        64-bit (or SHA-256) hash per SCHEMA §2.
 //
+// Numeric leaves compare EXACTLY by default. A matcher may relax that for
+// itself with the reserved key `"tolerance": {"abs": …, "rel": …}` (the
+// per-expect form in protocol/fixtures/README.md § Float tolerance): the key is
+// stripped before matching, and a numeric leaf then matches iff
+// |actual − expected| <= max(abs, rel · |expected|). A non-finite actual never
+// matches — those are rejected on the wire (SCHEMA §4).
+//
 // The worker emits an UNSOLICITED hello as its first frame (SCHEMA §6), so a
 // fixture's first `expect` matches that hello.
 //
@@ -27,6 +34,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -115,10 +124,25 @@ bool is_hex_hash(const std::string& s) {
     return true;
 }
 
+// Per-expect float tolerance (protocol/fixtures/README.md). Both zero = exact,
+// which is the default every fixture without a `tolerance` key keeps.
+struct FloatTolerance {
+    double abs = 0.0;
+    double rel = 0.0;
+
+    bool relaxed() const { return abs > 0.0 || rel > 0.0; }
+
+    bool matches(double expected, double actual) const {
+        if (!std::isfinite(actual)) return false;  // NaN/Inf are wire failures
+        return std::fabs(actual - expected) <= std::max(abs, rel * std::fabs(expected));
+    }
+};
+
 // Recursive subset match: is `expected` contained within `actual`?
 // String placeholders: "$any"/"$present" match any value (presence-only);
 // "$hex64" matches a lowercase-hex hash string.
-bool json_subset(const json& expected, const json& actual, std::string& where) {
+bool json_subset(const json& expected, const json& actual, std::string& where,
+                 const FloatTolerance& tol) {
     if (expected.is_string()) {
         const std::string tok = expected.get<std::string>();
         if (tok == "$present" || tok == "$any") {
@@ -141,7 +165,7 @@ bool json_subset(const json& expected, const json& actual, std::string& where) {
                 return false;
             }
             std::string sub;
-            if (!json_subset(val, actual.at(key), sub)) {
+            if (!json_subset(val, actual.at(key), sub, tol)) {
                 where = key + (sub.empty() ? "" : "." + sub);
                 return false;
             }
@@ -155,12 +179,17 @@ bool json_subset(const json& expected, const json& actual, std::string& where) {
         }
         for (std::size_t i = 0; i < expected.size(); ++i) {
             std::string sub;
-            if (!json_subset(expected[i], actual[i], sub)) {
+            if (!json_subset(expected[i], actual[i], sub, tol)) {
                 where = "[" + std::to_string(i) + "]" + (sub.empty() ? "" : "." + sub);
                 return false;
             }
         }
         return true;
+    }
+    if (tol.relaxed() && expected.is_number() && actual.is_number()) {
+        if (tol.matches(expected.get<double>(), actual.get<double>())) return true;
+        where = "value: expected " + expected.dump() + " within tolerance, got " + actual.dump();
+        return false;
     }
     if (expected != actual) {
         where = "value: expected " + expected.dump() + ", got " + actual.dump();
@@ -234,14 +263,30 @@ int run_fixture(const std::string& worker_path, const std::string& fixture_path)
                 break;
             }
         } else if (directive.contains("expect")) {
-            const json& matcher = directive.at("expect");
+            json matcher = directive.at("expect");
+            // `tolerance` is a matcher DIRECTIVE, not an expected response key:
+            // strip it before matching or it would demand a `tolerance` field in
+            // the frame. Absent ⇒ exact comparison, as before.
+            FloatTolerance tol;
+            if (matcher.is_object() && matcher.contains("tolerance")) {
+                const json spec = matcher.at("tolerance");
+                if (!spec.is_object()) {
+                    std::cerr << "harness: line " << lineno
+                              << ": 'tolerance' must be an object, got " << spec.dump() << "\n";
+                    ok = false;
+                    break;
+                }
+                tol.abs = spec.value("abs", 0.0);
+                tol.rel = spec.value("rel", 0.0);
+                matcher.erase("tolerance");
+            }
             json response;
             if (!read_response(w, response)) {
                 ok = false;
                 break;
             }
             std::string where;
-            if (!json_subset(matcher, response, where)) {
+            if (!json_subset(matcher, response, where, tol)) {
                 std::cerr << "harness: line " << lineno << ": MISMATCH at " << where << "\n"
                           << "  matcher:  " << matcher.dump() << "\n"
                           << "  response: " << response.dump() << "\n";
