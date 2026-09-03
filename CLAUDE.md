@@ -46,7 +46,7 @@ Two specific traps that make a green run a lie:
 
 Pause for the user only when the work genuinely requires them: a destructive or irreversible action, a real scope change, a gate only a human can run, or input only they can provide. If you hit one, ask and end the turn rather than ending on a promise.
 
-Gates the user must run (record as owed in `TODO.md`, don't fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD / the 3MF in a slicer".
+Gates the user must run (record as owed in `TODO.md`, don't fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (There is no 3MF export verb yet — the worker exports STEP/STL/OBJ; a "3MF opens in a slicer" gate is owed to WP-J, not to today.)
 
 Before ending a turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done, do that work now with tool calls.
 
@@ -289,7 +289,7 @@ Layer stack: Application Shell → OneCAD Platform (domain-neutral infra: docume
 ### TypeScript / frontend
 
 - Strict TS; functional components and hooks only; no `any`; no raw hex in TS/TSX.
-- **Zustand store pattern** (copy `src/stores/appStore.ts`): vanilla `createStore<State>()((set, get) => ({…}))` plus a typed `useXxxStore<T>(selector)` hook in the same file; export the mechanical pair `xxxStore` / `useXxxStore`. Only `settingsStore` is persisted (`persist`, key `onecad.settings`, version 10 — bump and migrate on reserved-field removal). No `devtools` middleware. Cross-store access via direct imports plus `store.getState()` or `.subscribe()`.
+- **Zustand store pattern** (copy `src/stores/appStore.ts`): vanilla `createStore<State>()((set, get) => ({…}))` plus a typed `useXxxStore<T>(selector)` hook in the same file; export the mechanical pair `xxxStore` / `useXxxStore`. Only `settingsStore` is persisted (`persist`, key `onecad.settings`, version 11 — bump and migrate on reserved-field removal). No `devtools` middleware. Cross-store access via direct imports plus `store.getState()` or `.subscribe()`.
 - `documentStore` is backend-authoritative: written only by `applySnapshot` / `applyChange` / `applySaveOutcome` from events. Store→engine handoff goes through the module singleton `getViewportEngine()`, never through stores.
 - **`src/ipc/client.ts` — `CadClient` is the single seam to the backend.** Two impls: `mockClient` (in-memory, drives the whole UI with no backend) and `tauriClient`, selected at runtime by presence of `__TAURI_INTERNALS__` (prod builds compile-evict the mock via `evictMockClientInProd`). Keep additions to the interface append-only so both evolve together.
 - **`src/ipc/localSolver.ts`** — the sketch-solver and drag-preview lanes are *shared by both clients*. The mock runs the identical lane logic over a local identity solve; the tauri client routes the same calls to the worker's live gesture verbs (SCHEMA §7.4: `SketchUpsert` / `BeginGesture` / `SolveDrag` / `EndGesture` are fully wired). Only `commit` differs, injected as a dependency. Don't duplicate lane logic into either client.
@@ -303,7 +303,7 @@ Layer stack: Application Shell → OneCAD Platform (domain-neutral infra: docume
 ### Rust
 
 - `document_runtime.rs` is the **single writer** and is Tauri-free, so it is testable without a webview. `#[tauri::command]` fns in `api/mod.rs` are thin delegating wrappers. Regen runs in three phases so a slow worker never blocks edits: `begin_regen` (locked, compiles the plan and clones the session) → `PreparedRegen::drive` (**unlocked**, executor runs on the clone) → `finish_regen` (locked, commits only if fencing tokens are unchanged, else reports `Superseded`). The backend sits behind `Arc<dyn GeometryEngine>` + `Arc<dyn MeshProvider>`; `PendingBackend` is the no-worker fallback.
-- Clippy-clean with `-D warnings`; prefer `&str` over `String` for params; `#[tracing::instrument]` on arg-identifying commands, never on drag-frequency ones.
+- Clippy-clean with `-D warnings` — on the NEWEST stable, not just the local toolchain: CI installs `stable` unpinned, so a new release's lints go red there first (2026-09-02: 1.98's `chunks_exact_to_as_chunks`); before pushing, `rustup toolchain install <stable> -c clippy` and `cargo +<stable> clippy --workspace --all-targets -- -D warnings` on a scratch `CARGO_TARGET_DIR`. Prefer `&str` over `String` for params; `#[tracing::instrument]` on arg-identifying commands, never on drag-frequency ones.
 - `onecad-core` **must not depend on tauri**; `onecad-library` has no tauri and no network I/O. Shared versions live in `[workspace.dependencies]`; crates opt in with `{ workspace = true }`.
 - `ApiError` conversion is the choke point for `EngineError` → wire.
 - Release worker resolution is bundled-only (`<exe_dir>/onecad-worker`); debug uses `ONECAD_WORKER_PATH` → `../worker/build/onecad-worker` → bundled.
@@ -334,7 +334,7 @@ Five lanes plus the oracle. The coverage manifest is **enforced, not aspirationa
 | Frontend unit | Vitest 4 (jsdom), colocated `*.test.ts(x)` | Stores, controllers, viewport engine, IPC marshalling — against `mockClient` or `@tauri-apps/api/mocks` `mockIPC` (which exercises the real tauriClient) |
 | Playwright | `e2e/`, chromium + webkit | Real Vite app, real WebGL, **mock backend**; port 4177; `retries: 0` is policy |
 | Rust integration | `cargo test --workspace` | Real worker over OCW1 via `WorkerManager` / `DocumentRuntime` (`m2_gate.rs`, `corpus_executor.rs`), stub chaos drills (`worker_chaos.rs`), persistence/autosave; `tauri::test::mock_app` for command tests |
-| Worker CTest | `ctest --test-dir worker/build` | 136+ targets: in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim, `parity_*` gates vs `corpus/expected-values/` |
+| Worker CTest | `ctest --test-dir worker/build` | 168 targets (2026-09-02; count drifts upward — read it off `ctest -N`, never off this file): in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim, `parity_*` gates vs `corpus/expected-values/` |
 | WDIO | `e2e-tauri/`, CI `tauri-composition` | Real bundled `.app`: real Tauri IPC and real worker; one composition spec (sketch→extrude→fillet→undo→save/reopen) |
 
 Conventions:

@@ -85,6 +85,11 @@ import type {
   PrepareEdgeOpResult,
   AnalyzeEdgeOpRangeRequest,
   AnalyzeEdgeOpRangeResult,
+  ProjectToSketchRequest,
+  ProjectToSketchResult,
+  ProjectedEntity,
+  ProjectionRefusal,
+  DetachProjectionResult,
   PromotedElement,
   PromotePick,
   RecentProject,
@@ -131,6 +136,7 @@ import {
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
   frontendEntityStates,
+  frontendProjectedEntities,
   frontendProjections,
   frontendSolvedCurves,
   frontendSolvedPositions,
@@ -221,6 +227,9 @@ const CMD = {
   prepareOffsetFace: "prepare_offset_face",
   prepareEdgeOp: "prepare_edge_op",
   analyzeEdgeOpRange: "analyze_edge_op_range",
+  projectToSketch: "project_to_sketch",
+  updateProjection: "update_projection",
+  detachProjection: "detach_projection",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
   clearWorkerCircuit: "clear_worker_circuit",
@@ -306,6 +315,24 @@ interface SketchSessionDto {
   /** Projected-edge provenance keyed by backend ENTITY uuid (WP-P); Rust omits the
    *  key when empty. Re-keyed to frontend ids like `entityStates`. */
   projections?: Record<string, ProjectedSource>;
+}
+/** `project_to_sketch` / `update_projection` result (Rust `ProjectToSketchDto`,
+ *  WP-P). `entities[].entityId` is a backend ENTITY uuid, re-keyed to a frontend
+ *  id by `frontendProjectedEntities` before it reaches the caller. */
+interface ProjectToSketchDto {
+  sketchId: string;
+  snapshotId: number;
+  entities: ProjectedEntity[];
+  pointCount: number;
+  refusals: ProjectionRefusal[];
+}
+/** `detach_projection` result (Rust `DetachProjectionDto`, WP-P). `entityIds`
+ *  are backend ENTITY uuids, re-keyed the same way. */
+interface DetachProjectionDto {
+  sketchId: string;
+  entityIds: string[];
+  releasedConstraints: number;
+  remaining: number;
 }
 /** `add_sketch_on_face` result (Rust `SketchOnFaceDto`; SKETCH-ON-FACE W1b).
  *  Deliberately lean — the sketch's geometry arrives through the normal
@@ -2099,6 +2126,80 @@ export function createTauriClient(): CadClient {
     return out.map((e) => ({ topoKey: e.topoKey, elementId: e.elementId, kind: e.kind, bodyId: e.bodyId }));
   }
 
+  /** Re-key a `detach_projection` `entityIds` array the same way
+   *  `frontendProjectedEntities` re-keys `ProjectToSketchDto.entities` — drop-unknown,
+   *  passthrough with no id-map. */
+  function frontendProjectionIds(map: SketchIdMap | undefined, ids: string[]): string[] {
+    if (!map) return [...ids];
+    const byUuid = new Map<string, string>();
+    for (const [frontendId, uuid] of map.entity) if (!byUuid.has(uuid)) byUuid.set(uuid, frontendId);
+    const out: string[] = [];
+    for (const id of ids) {
+      const frontendId = byUuid.get(id);
+      if (frontendId) out.push(frontendId);
+    }
+    return out;
+  }
+
+  async function projectToSketch(req: ProjectToSketchRequest): Promise<ProjectToSketchResult> {
+    const map = sketchMaps.get(req.sketchId);
+    const backendSketchId = map?.backendSketchId ?? req.sketchId;
+    const dto = await call<ProjectToSketchDto>(CMD.projectToSketch, {
+      // Same default as `prepareEdgeOp`: the caller is a viewport gesture, which
+      // has no snapshot id of its own, so the transport's current head is the
+      // honest answer to "the head these picks came off".
+      snapshotId: req.snapshotId ?? currentSnapshotId,
+      sketchId: backendSketchId,
+      mode: req.mode,
+      // Same `body_<uuid>` wire form promoteSelection uses; a caller hands the
+      // bare uuid `document-changed` gave it.
+      sources: req.sources.map((s) => ({
+        bodyId: s.bodyId.startsWith("body_") ? s.bodyId : `body_${s.bodyId}`,
+        topoKey: s.topoKey,
+        anchor: s.anchor ?? null,
+      })),
+    });
+    return {
+      sketchId: req.sketchId,
+      snapshotId: dto.snapshotId,
+      entities: frontendProjectedEntities(map, dto.entities),
+      pointCount: dto.pointCount,
+      refusals: dto.refusals,
+    };
+  }
+
+  async function updateProjection(sketchId: string): Promise<ProjectToSketchResult> {
+    const map = sketchMaps.get(sketchId);
+    const backendSketchId = map?.backendSketchId ?? sketchId;
+    const dto = await call<ProjectToSketchDto>(CMD.updateProjection, { sketchId: backendSketchId });
+    return {
+      sketchId,
+      snapshotId: dto.snapshotId,
+      entities: frontendProjectedEntities(map, dto.entities),
+      pointCount: dto.pointCount,
+      refusals: dto.refusals,
+    };
+  }
+
+  async function detachProjection(
+    sketchId: string,
+    entityIds?: string[],
+  ): Promise<DetachProjectionResult> {
+    const map = sketchMaps.get(sketchId);
+    const backendSketchId = map?.backendSketchId ?? sketchId;
+    const wireEntityIds = entityIds?.map((id) => map?.entity.get(id) ?? id) ?? null;
+    const dto = await call<DetachProjectionDto>(CMD.detachProjection, {
+      sketchId: backendSketchId,
+      entityIds: wireEntityIds,
+    });
+    return {
+      sketchId,
+      entityIds: frontendProjectionIds(map, dto.entityIds),
+      releasedConstraints: dto.releasedConstraints,
+      remaining: dto.remaining,
+    };
+  }
+
   return {
     async listRecents(): Promise<RecentProject[]> {
       return call<RecentProject[]>(CMD.listRecents);
@@ -2358,6 +2459,9 @@ export function createTauriClient(): CadClient {
     prepareOffsetFace,
     prepareEdgeOp,
     analyzeEdgeOpRange,
+    projectToSketch,
+    updateProjection,
+    detachProjection,
     resolveRefs,
     applyEditCommand,
     clearWorkerCircuit,

@@ -595,6 +595,180 @@ describe("tauriClient getSketch (pure read)", () => {
   });
 });
 
+// ── Body-edge projection into a sketch (SCHEMA §7.6 `ProjectToSketchPlane`,
+//    WP-P; Rust `project_to_sketch` / `update_projection` / `detach_projection`) ─
+
+describe("tauriClient projectToSketch / updateProjection / detachProjection (WP-P)", () => {
+  it("projectToSketch: invokes project_to_sketch with the wire arg shape, echoes the frontend sketchId, and re-keys known entities (dropping unknown ones)", async () => {
+    let enterId = "";
+    let args: unknown;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch") {
+          enterId = (payload as { sketchId: string }).sketchId;
+          return {
+            sketchId: enterId,
+            plane: XZ_PLANE,
+            // "l1" is hydrated NOW — the id-map knows it by the time project_to_sketch
+            // returns, so it re-keys (to itself: backend-authored ids ARE frontend ids).
+            entities: [
+              { id: "p1", type: "Point", at: [0, 0] },
+              { id: "p2", type: "Point", at: [1, 0] },
+              { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+            ],
+            constraints: [],
+            dof: 2,
+            status: "UnderConstrained",
+          };
+        }
+        if (cmd === "project_to_sketch") {
+          args = payload;
+          return {
+            sketchId: enterId,
+            snapshotId: 7,
+            entities: [
+              { entityId: "l1", type: "Line", sourceBodyId: "body_9999", sourceElementId: "el-1", projectedHash: "aa" },
+              // Freshly minted THIS call — the id-map does not know it yet, so it drops.
+              { entityId: "uuid-fresh", type: "Line", sourceBodyId: "body_9999", sourceElementId: "el-2", projectedHash: "bb" },
+            ],
+            pointCount: 3,
+            refusals: [
+              { bodyId: "body_9999", elementId: "", topoKey: "f:5", code: "faceNotPlanar", message: "cylinder wall" },
+            ],
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    const session = await client.enterSketch({ newOnPlane: "XZ" });
+    const result = await client.projectToSketch({
+      snapshotId: 7,
+      sketchId: session.sketchId,
+      mode: "faceOutline",
+      sources: [{ bodyId: "body1", topoKey: "f:4" }],
+    });
+    // Same body_<uuid> wire form promoteSelection uses; anchor absent → null.
+    expect(args).toEqual({
+      snapshotId: 7,
+      sketchId: enterId,
+      mode: "faceOutline",
+      sources: [{ bodyId: "body_body1", topoKey: "f:4", anchor: null }],
+    });
+    expect(result.sketchId).toBe(session.sketchId); // the FRONTEND id, not the wire echo
+    expect(result.snapshotId).toBe(7);
+    expect(result.pointCount).toBe(3);
+    expect(result.entities).toEqual([
+      { entityId: "l1", type: "Line", sourceBodyId: "body_9999", sourceElementId: "el-1", projectedHash: "aa" },
+    ]);
+    expect(result.refusals).toEqual([
+      { bodyId: "body_9999", elementId: "", topoKey: "f:5", code: "faceNotPlanar", message: "cylinder wall" },
+    ]);
+  });
+
+  it("updateProjection: invokes update_projection with { sketchId } (backend uuid) and re-keys the DTO", async () => {
+    let enterId = "";
+    let args: unknown;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch") {
+          enterId = (payload as { sketchId: string }).sketchId;
+          return {
+            sketchId: enterId,
+            plane: XZ_PLANE,
+            entities: [
+              { id: "p1", type: "Point", at: [0, 0] },
+              { id: "p2", type: "Point", at: [1, 0] },
+              { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+            ],
+            constraints: [],
+            dof: 2,
+            status: "UnderConstrained",
+          };
+        }
+        if (cmd === "update_projection") {
+          args = payload;
+          return {
+            sketchId: enterId,
+            snapshotId: 8,
+            entities: [
+              { entityId: "l1", type: "Line", sourceBodyId: "body_9999", sourceElementId: "el-1", projectedHash: "cc" },
+            ],
+            pointCount: 0,
+            refusals: [],
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    const session = await client.enterSketch({ newOnPlane: "XZ" });
+    const result = await client.updateProjection(session.sketchId);
+    expect(args).toEqual({ sketchId: enterId });
+    expect(result.sketchId).toBe(session.sketchId);
+    expect(result.entities).toEqual([
+      { entityId: "l1", type: "Line", sourceBodyId: "body_9999", sourceElementId: "el-1", projectedHash: "cc" },
+    ]);
+  });
+
+  it("detachProjection: maps frontend entityIds to backend uuids before sending, and re-keys the result back", async () => {
+    let enterId = "";
+    let upsertArgs: { ops?: { op: string; entity?: { kind: string; id: string } }[] } | undefined;
+    let detachArgs: unknown;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch") {
+          enterId = (payload as { sketchId: string }).sketchId;
+          return { sketchId: enterId, plane: XZ_PLANE, entities: [], constraints: [], dof: 0, status: "FullyConstrained" };
+        }
+        if (cmd === "sketch_upsert") {
+          upsertArgs = payload as typeof upsertArgs;
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            sketchRevision: 1,
+            dof: 0,
+            status: "FullyConstrained",
+            solvedPositions: {},
+          };
+        }
+        if (cmd === "detach_projection") {
+          detachArgs = payload;
+          const backendLineId = upsertArgs?.ops?.find(
+            (o) => o.op === "addEntity" && o.entity?.kind === "line",
+          )?.entity?.id;
+          return {
+            sketchId: enterId,
+            entityIds: [backendLineId],
+            releasedConstraints: 2,
+            remaining: 0,
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    const session = await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    // Marshal ONE frontend-authored line so the id-map holds "e1" → a minted uuid
+    // DIFFERENT from "e1" — the case `frontendProjections`-style re-keying exists for.
+    await client.sketchUpsert("sk", [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }], []);
+    const backendLineId = upsertArgs?.ops?.find(
+      (o) => o.op === "addEntity" && o.entity?.kind === "line",
+    )?.entity?.id;
+    expect(backendLineId).toBeDefined();
+    expect(backendLineId).not.toBe("e1");
+
+    const result = await client.detachProjection("sk", ["e1"]);
+    expect(detachArgs).toEqual({ sketchId: enterId, entityIds: [backendLineId] });
+    expect(result.sketchId).toBe(session.sketchId);
+    expect(result.entityIds).toEqual(["e1"]);
+    expect(result.releasedConstraints).toBe(2);
+    expect(result.remaining).toBe(0);
+  });
+});
+
 // ── Re-entry after reopen: enter a PERSISTED sketch without duplicating it ────
 
 describe("tauriClient enter persisted sketch (re-entry hydration)", () => {

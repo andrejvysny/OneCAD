@@ -3976,3 +3976,121 @@ async fn removing_a_bound_variable_stands_and_the_noop_report_names_the_broken_s
         report.failed_steps[0].message
     );
 }
+
+/// WP-P F4 / F8 / F9 — the staleness bookkeeping, driven through
+/// [`DocumentRuntime::adopt_projection_staleness`] with a hand-built probe.
+///
+/// * **F9** — a sketch with no timeline record records nothing at all, so the
+///   next publish re-probes instead of trusting a signature nobody could see.
+/// * **F4** — the verdict is keyed by SKETCH, so removing an earlier record (and
+///   shifting every later step index down) leaves it on the sketch's own step.
+/// * **F8** — the snapshot fence cannot see a SKETCH edit, and `update_projection`
+///   / `detach_projection` rewrite the rows without publishing. A verdict computed
+///   against rows that have since moved is dropped.
+#[tokio::test]
+async fn projection_staleness_is_keyed_by_sketch_and_fenced_on_the_rows() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sid = SketchId(Uuid::from_u128(0x9001));
+    let (p0, p1, line) = (
+        EntityId(Uuid::from_u128(0x9010)),
+        EntityId(Uuid::from_u128(0x9011)),
+        EntityId(Uuid::from_u128(0x9012)),
+    );
+    let source = |hash: &str| onecad_core::sketch::ProjectedSource {
+        source_body: BodyId(Uuid::from_u128(0xB0D1)),
+        source_element_id: ElementId::new("el_a"),
+        source_kind: ElementKind::Edge,
+        source_ordinal: 0,
+        projected_hash: hash.to_string(),
+    };
+
+    let mut sk = Sketch::on_world_plane(sid, "Projected", WorldPlane::XY);
+    sk.add_entity(SketchEntity::point(
+        p0,
+        Vec2::new_unchecked(0.0, 0.0),
+        false,
+        true,
+    ))
+    .unwrap();
+    sk.add_entity(SketchEntity::point(
+        p1,
+        Vec2::new_unchecked(9.0, 0.0),
+        false,
+        true,
+    ))
+    .unwrap();
+    sk.add_entity(SketchEntity::line(line, p0, p1, false).with_reference_locked(true))
+        .unwrap();
+    sk.projections.insert(line, source("aaaaaaaaaaaaaaaa"));
+    let plane = sk.plane;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let probe = |snapshot: SnapshotId, hash: &str| ProjectionProbe {
+        sketch: sid,
+        snapshot,
+        plane,
+        sources: vec![(line, source(hash))],
+        signatures: Default::default(),
+    };
+
+    // A published head to fence against.
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let head = SnapshotId(report.snapshot_id);
+
+    // F9 — no `Sketch` record yet: nothing to hang the diagnostic on, so nothing
+    // is recorded and nothing is silenced.
+    assert!(
+        !rt.adopt_projection_staleness(&probe(head, "aaaaaaaaaaaaaaaa"), vec![line]),
+        "a sketch with no timeline record adopts nothing"
+    );
+    assert!(rt.projection_stale_entities(sid).is_empty());
+
+    // Give it one, and the verdict lands on it.
+    rt.finish_sketch(sid).await.expect("finishSketch");
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let head = SnapshotId(report.snapshot_id);
+    assert!(rt.adopt_projection_staleness(&probe(head, "aaaaaaaaaaaaaaaa"), vec![line]));
+    assert_eq!(rt.projection_stale_entities(sid), vec![line]);
+
+    // F4 — drop the record BEFORE the sketch's. Every later step index shifts
+    // down; the verdict must follow the sketch, not the row it happened to sit at.
+    rt.apply(EditCommand::RemoveOperation {
+        record: RecordId(Uuid::from_u128(0x10)),
+    })
+    .unwrap();
+    let features = rt.projection().features;
+    assert_eq!(features.len(), 1, "only the sketch's own record remains");
+    assert!(
+        features[0]
+            .diagnostics
+            .iter()
+            .any(|d| d.code == PROJECTION_STALE_CODE),
+        "the verdict is keyed by sketch, not by step index: {:?}",
+        features[0].diagnostics
+    );
+
+    // F8 — an update rewrites the row without moving the head, so the snapshot
+    // fence sees nothing. The probe's own rows are the second fence.
+    assert_eq!(
+        rt.head_snapshot_id(),
+        Some(head),
+        "a sketch edit does not publish — the snapshot fence alone cannot catch it"
+    );
+    rt.apply(EditCommand::SketchEdit {
+        sketch: sid,
+        ops: vec![SketchEditOp::SetEntityProjection {
+            entity: line,
+            source: Some(source("bbbbbbbbbbbbbbbb")),
+        }],
+    })
+    .unwrap();
+    assert!(
+        !rt.adopt_projection_staleness(&probe(head, "aaaaaaaaaaaaaaaa"), vec![line]),
+        "the rows moved under the probe; the next publish re-probes"
+    );
+}

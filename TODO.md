@@ -172,12 +172,112 @@ attribution question arose.
       clean · vitest **311 / 5505 / 78 skipped** · tsc · hex 0 · verifiers · kernelbench 136
       unchanged + semantics OK.
 - [x] Full `bun run e2e` (both projects, retries 0) **514 / 0**, 29.4 min; kernelbench 136 unchanged.
-- [ ] Commit A (kernel hardening, carved) + isolated-worktree compile · commit B (WP-P P1+P2+P2b)
-      · `git diff HEAD` empty · push (authorized).
-- [ ] WP-P P3 FE (brief in the session scratchpad `p3_brief.md`; design in the plan § B) →
-      adversarial-reviewed staleness half already done → full L3 → commit C → push.
-- [ ] Hygiene: `.clang-format` `DisableFormat: true` (authorized) · CLAUDE.md drift (settingsStore
-      v11, ctest count, no 3MF verb).
+- [x] Commit A `bd4b6c5` (kernel hardening, carved) · commit B `da01b3f` (WP-P P1+P2+P2b) ·
+      `git diff HEAD` empty · commit A alone compiled in an isolated detached worktree (worker
+      configure+build exit 0, 104 test binaries, sidecar staged; `cargo clippy --workspace
+      --all-targets -D warnings` exit 0 on a fresh target dir) · pushed to origin.
+- [ ] **CI on `da01b3f` (run 33683904198), triage:** `rust-8.0.1` RED at clippy — GitHub's
+      stable moved to Rust 1.98.0 (2026-08-18) and its new `clippy::chunks_exact_to_as_chunks` lint
+      fires on PRE-EXISTING test code (`sketch_regions.rs:169,182`, `revolve_ops.rs:233`,
+      `wire_contract.rs:273`), reproduced locally with `cargo +1.98.0 clippy`; FIXED with
+      `as_chunks::<3>()` (stable since 1.88) — clippy clean on 1.98.0 AND 1.97.0, fmt clean, the
+      three test targets 10/10/19 — rides commit C. `e2e-chromium` 256/1:
+      `constraint-badge-standoff.spec.ts:63` (badge centre moved 586 px on the runner; passes
+      locally both projects; this spec landed 2026-08-24 and CI has NEVER run green since —
+      every run was cancelled at the OCCT timeout — so it is unproven on the runner, not a
+      regression of tonight's commits, which touch no badge code). `e2e-webkit` 256/1:
+      `sketch-snap-composition.spec.ts:172` (snap hint not hidden; passed on the last green CI
+      2026-08-18; passes locally). Both: re-run the failed jobs once the run completes; if they
+      repeat, triage on a runner-shaped viewport. `tauri-composition` still building OCCT at
+      the 95-min timeout (infra, unchanged); `linux-worker` queued (self-hosted offline).
+- [x] WP-P P3 FE landed (see § WP-P project edges).
+- [ ] **Adversarial review of the WP-P Rust half (fresh context, 2026-09-03; was owed BEFORE
+      commit B — process deviation) → DEFECTIVE, fix round in flight (impl-critical):**
+      **BLOCKER** `build_projection_update` re-associates `faceOutline` rows by POSITIONAL
+      `sourceOrdinal`; a boundary edge that splits (notch) or a re-ordered wire walk rewrites an
+      entity in place from a DIFFERENT physical edge, keeps its id/constraints/regionId, reports
+      `refusals: []` — the H5-B class. **HIGH:** a face that gains a hole updates "successfully"
+      with the hole omitted (outer-wire ordinals unchanged, hashes equal, no staleness); point-move
+      collision is last-write-wins when a merged corner splits; `projection_stale` keyed by timeline
+      INDEX — deleting an earlier op moves the verdict onto an unrelated feature and orphans it;
+      `squash_sketch_session` drops `projections` on redo (permanently locked, undetachable
+      geometry) and its RemoveEntity prelude refuses locked entities (redo fails) — the second half
+      pre-existing, both now reachable for every projected sketch. **MEDIUM:** post-publish probe
+      not cancel-aware (drops into the 5 s cancel-grace → spurious regen Timeout);
+      `update_projection` holds the runtime lock across a kernel-lane round-trip (UI freeze behind
+      an in-flight ExecutePlan); adopt fences on snapshot but not on the rows (false re-stale after
+      a successful Update); a sketch without a timeline record drops the verdict AND disarms the
+      next probe; one deleted sketch aborts every other probe; `SetEntityReferenceLocked{false}`
+      is FE-reachable and unscoped (can unlock sketch-on-face boundary geometry); update is a
+      read-modify-write a concurrent Detach slips through. **LOW:** lenient array parse in the
+      wire reader; `projectedHash` shape unchecked; re-projecting the same source mints a
+      coincident second outline. **Fixes (design fixed by the orchestrator):** per-source
+      cardinality + pure-permutation gates → `topologyChanged` for the whole source; point-move
+      conflict → refuse both sources; `projection_stale` keyed by `SketchId`; squash carries
+      `SetEntityProjection` rows + unlocks prior locked entities first + `net_zero` compares
+      projections; `RegenPostPublish` takes the cancel token; rebind runs unlocked; adopt drops on
+      row-hash drift; no-record → no `projection_checked`; missing sketch → `continue`; unlock
+      allowed only for entities with a provenance row at batch start; update carries the read-time
+      rows into the fenced commit; strict wire parse + 16-hex hash; Rust-minted `alreadyProjected`.
+      Red-first test for the BLOCKER (notched cap → `topologyChanged`, rows stay stale), an
+      `edges`-mode case, a subset detach case. Confirmed sound by the review: promote→project→commit
+      fencing, ladder refuses instead of guessing, per-entity hash staleness, detach point-release,
+      orphan handling, undo of unsquashed commands, wire fidelity, stdout hygiene.
+- [x] **G2 (first pass, before the Rust fix round; main thread, suites alone):** ctest **168/168** ·
+      `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **93 / 1472 / 0** · tsc clean · vitest
+      **315 files / 5544 / 78 skipped** · verifiers OK (row `exposed`) · hex 0 · `bun run e2e`
+      **515 passed / 1 failed** (32.9 min; sorted-md5 of `src`+`e2e` identical before/after — valid
+      attribution). The one red: `constraint-badge-standoff.spec.ts:63` with delta **586.1996 px —
+      the identical number CI chromium produced on `da01b3f`**, and it passes isolated (2/2, then
+      8/8 with `--repeat-each 4`). Named cause: the spec read the badge's DOM box once right after
+      `waitForCameraSettled`; `HtmlOverlayDriver` re-positions the badge on the NEXT engine frame,
+      so under load the new line projection was paired with the badge's PREVIOUS box; the same
+      1280×720 viewport on CI and locally made the wrong number identical. Fix: `measureStable`
+      waits for two consecutive frames to agree within 0.5 px (spec-only change; product unchanged).
+      Rides commit C; the full e2e re-runs at the commit-C gate.
+- [x] **Fix round LANDED (impl-critical, orchestrator-reviewed; 12 files, +1825/−227):** per-source
+      run guard (`refused_sources`: count change, ordinals out of line, pure re-order → ONE
+      `topologyChanged` for the source, all its rows stay stale, nothing touched); shared-corner
+      claim conflict → both sources refused (claims recorded before the no-op filter);
+      `projection_stale` keyed by `SketchId` (+ `sketch_at_step`); adopt fences on row hashes AND row
+      count, no-record → no `projection_checked`; missing sketch → continue; `RegenPostPublish`
+      takes the cancel token; `update_projection` drives resolve+bind UNLOCKED via a rebind ticket
+      (`rebind_projection_sources` removed — its contract was the trap) and refuses "projections
+      changed while updating — retry" when the rows moved; squash redo carries `SetEntityProjection`
+      rows + unlock prefix for projected geometry, `net_zero` compares projections; unlock guarded to
+      projected geometry OR a point a projected curve is built from (sketch-on-face host boundary
+      has no rows → refused); strict array parse + 16-lowercase-hex `projectedHash`; Rust-minted
+      `alreadyProjected`. **Red-first proof:** the notched-cap test FAILED with the guard bypassed
+      (all 4 rows rewritten from the first four ordinals of the new 8-edge run) and passes with it.
+      New real-worker cases: `a_single_projected_edge_is_one_line_at_ordinal_zero` (edges mode),
+      `a_split_face_boundary_refuses_the_source_instead_of_re_associating` (+ detach subset);
+      side-face case tightened; onecad-core edit tests +3; wire tests +2; runtime test for the
+      SketchId keying + row fence. **Deviations (accepted):** the unlock guard widened to shared
+      points (the literal rule would have broken detach/update); the squash unlock prefix scoped
+      the same way, so redo of a PLAIN sketch-on-face session is still refused exactly as before
+      (pre-existing; needs a decision — provenance rows for host geometry, or a narrower redo
+      bypass). **Follow-ups:** a PARTIAL detach leaves N−1 rows against an N-edge run → the run
+      guard refuses that source's updates forever (safe direction; consider keying the count on
+      the committed ordinal span); a refused source can still visually follow a shared point a
+      surviving source moves (its row stays stale — warning correct); three-way corner claims are
+      order-deterministic but arbitrary between two agreeing sources.
+- [x] **Commit-C gate (main thread, suites alone, 2026-09-03 01:27–02:01):** `cargo fmt` clean ·
+      clippy **1.97.0 AND 1.98.0** clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **93 targets /
+      1485 passed / 0 failed** · ctest **168/168** · tsc clean · vitest **315 files / 5544 / 78 skipped** ·
+      hex 0 · coverage 32/9/16/19 · contracts 39/18 · negative controls OK · stdout hygiene clean ·
+      `bun run e2e` **516 passed / 0 failed** (29.6 min; sorted-md5 of `src`+`e2e` identical before/
+      after). Orchestrator review of the fix round found one gap: `run_reordered` disarmed itself
+      on ANY agreeing row, but a REVERSED wire walk keeps its start edge and swaps the rest — now
+      the permutation check keeps agreeing rows in the multiset and requires ≥ 1 moved row; unit test
+      `a_reversed_walk_with_a_fixed_start_edge_is_still_refused` (Rust-only change after the gate;
+      `cargo test -p onecad --lib sketch_projection` 15/15, clippy clean, workspace re-run recorded
+      below).
+- [x] Final `cargo test --workspace` after the `run_reordered` tightening: **93 / 1486 / 0**. Commit C
+      = this commit, pushed. The three red CI jobs of run 33683904198 are re-running (the run was
+      cancelled by hand — it was held open only by the queued self-hosted `linux-worker`).
+- [x] Hygiene: `.clang-format` `DisableFormat: true` added (authorized; probed — a one-word C++
+      comment edit through the Edit tool now yields a 1-line diff, no reflow) · CLAUDE.md drift
+      fixed (settingsStore v11, ctest 168, no 3MF export verb). Lands with commit C.
 - [ ] WP-E.2 owed: `HasWarnings()` diagnostics · pre-BOP `fuzzyValue` clamp · absolute ceiling +
       `Degraded` import health · Shell/Chamfer ceilings · Tier B evidence at `classify_solids` ·
       offline Tier B census of generator outputs · direct tests for the WP-E headline claims ·
@@ -463,11 +563,37 @@ ellipse contagion also disables OverConstrained detection for that sketch (the h
       (accepted, now recorded):** a projected edge that SPLITS an existing closed profile
       moves both region ids and a downstream non-empty `regionId` fails loudly — the
       house-correct outcome.
-- [ ] **P3 FE — NOT STARTED (user-ordered stop):** sketch `project` tool (key `j`), CMD map +
-      `CadClient` + `types.ts` DTOs for the three commands above, mock box-outline honesty +
-      named refusals, `PROJECTION_STALE` badge + first-ellipse hint (incl. "OverConstrained
-      detection goes dark"), Update/Detach UI, `e2e/project-edges.spec.ts`. The coverage row
-      records `frontendTest`/`playwrightTest` as empty until this lands.
+- [x] **P2b (2026-09-02 evening, commit B):** `SketchSessionDto.projections` provenance on
+      `enter_sketch`/`get_sketch` + TS `SketchSession.projections` + `frontendProjections` re-key —
+      without it the FE could not tell a projected entity from a sketch-on-face locked one after a
+      reload.
+- [x] **P3 FE LANDED (2026-09-03, commit C):** IPC lane — `CadClient.projectToSketch /
+      updateProjection / detachProjection` (append-only), `types.ts` DTOs, backend→frontend entity
+      re-key (`frontendProjectedEntities`), honest mock (seed box faces/edges project; everything
+      else refuses `unsupportedCurve` with a MOCK LIMIT message; fills `projections`). Tool — sketch
+      tool `project` on `j` (registered `toolbarHidden`: keyboard + banner, no toolbar slot — the
+      toolbar contract stays frozen; `keymapContract.ts` gains the `j` line citing the 2026-09-01
+      decision), body faces/edges picked through `engine.probePick` behind a `projectActive` gate
+      (same shape as trim/fillet), picks accumulate/toggle and mirror into `selectionStore`, Enter
+      sends one batch per (body, mode) with `anchor.worldPoint` on every source, Esc clears then
+      leaves. Re-hydration after project/update/detach = an idempotent `enterSketch` (keeps the B1
+      watermark, reseeds the id-map; the camera is NOT re-aimed). `ProjectionBanner` (child of
+      `SketchChromeBar`, like `ConstraintMenu` — the shell mount order is a frozen contract) shows
+      whenever the open sketch holds projections (Detach must stay reachable — deviation from the
+      stale-only brief, accepted), re-tints on `PROJECTION_STALE`, Update/Detach through queued
+      `sketchService` mutations. Marker: `--color-sketch-projected` (both theme blocks) →
+      `palette.sketchProjected()` → `matProjected` in `SketchObject` (precedence hover > angleRef >
+      projected > referenceLocked > construction > state), `refreshColors` wired. First projected
+      ellipse → one-time "OverConstrained detection is off" hint. `ProjectToSketchRequest.snapshotId`
+      optional, defaulted to the transport head (`PrepareEdgeOpRequest` precedent). **Orchestrator
+      addition:** the `PROJECTION_STALE` diagnostic now carries `evidence {sketchId, entityIds}`
+      (Rust) so the banner attributes the verdict to the OPEN sketch and counts from evidence, never
+      by parsing the message (fallback only); pinned in `project_edges.rs`. Coverage row →
+      `exposed`, 4 frontend tests + `e2e/project-edges.spec.ts`. **Seams recorded:** no timeline-row
+      diagnostic badge exists anywhere (inspector/repair panel only) — not added; Update cannot go
+      stale in the mock lane (bodies never move) so the stale banner variant is proven by the Rust
+      real-worker test only; `platform.toolHost.report()` no-ops for an unregistered id (why the
+      hidden registration matters).
 - [ ] **WP-P gate — NOT RUN; NOTHING COMMITTED.** The tree holds P1+P2 (worker+protocol+Rust+
       one manifest). Owed at resume: orchestrator-run full L3 over the combined tree (ctest
       164 expected · cargo workspace · vitest · e2e both projects · kernelbench · fmt/clippy/

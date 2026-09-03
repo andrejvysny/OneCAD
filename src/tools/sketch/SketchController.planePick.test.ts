@@ -44,6 +44,7 @@ function makeEngineMock(hit: () => PickablePlane | null) {
     setDatumHover: vi.fn(),
     enterSketch: vi.fn(),
     exitSketch: vi.fn(),
+    setSketchProjectedIds: vi.fn(),
     setSketchDrawingActive: vi.fn(),
     setSketchPreview: vi.fn(),
     moveChip: vi.fn(),

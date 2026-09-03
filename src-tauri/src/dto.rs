@@ -1183,6 +1183,16 @@ pub struct PrepareOffsetFaceDto {
 /// (`absent` | `kindMismatch` | `unsupportedCurve` | `trimmedTiltedArc` |
 /// `degenerate` | `faceNotPlanar`) — Rust displays that vocabulary, it does not
 /// enumerate it.
+///
+/// Two codes are Rust-minted and never cross the wire, because they are answers
+/// only Rust can give — it owns the provenance map the worker never sees:
+///
+/// * `alreadyProjected` — `projectToSketch` on a source this sketch already
+///   holds a provenance row for. Projecting it twice would give one source two
+///   runs no later update could tell apart.
+/// * `topologyChanged` — `updateProjection` on a source whose committed run no
+///   longer lines up with the run just emitted for it, or whose shared corner two
+///   sources stopped agreeing about. The rows stay stale and untouched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectionRefusalDto {

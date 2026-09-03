@@ -44,7 +44,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tokio::sync::{watch, Mutex};
 
-use onecad_core::regen::{Outcome, RegenDirective, RegenRequest, RegenScheduler};
+use onecad_core::regen::{CancelToken, Outcome, RegenDirective, RegenRequest, RegenScheduler};
 
 use crate::document_runtime::{DocumentRuntime, RegenReport};
 use crate::dto::DocumentProjection;
@@ -108,8 +108,14 @@ pub type RegenStartEmitter = Arc<dyn Fn() + Send + Sync>;
 /// `ElementId`s, and probing before the re-bind would report a freshly-republished
 /// projection as stale purely because its source had not been re-bound yet.
 ///
+/// It takes the job's [`CancelToken`] and is SKIPPED outright when that has
+/// already fired: a superseding regen is queued, its own publish will re-probe,
+/// and paying for this one's worker round-trips would only delay it. Same
+/// best-effort gate as [`mint_rollback_checkpoint`].
+///
 /// Every test harness passes the no-op ([`regen_driver_with_emitter`]).
-pub type RegenPostPublish = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub type RegenPostPublish =
+    Arc<dyn Fn(CancelToken) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Builds the app-layer regen driver over an explicit completion [`RegenEmitter`]
 /// (plan "app layer runs the executor"), with NO start sink — the shape every
@@ -133,7 +139,7 @@ pub fn regen_driver_with_emitter(
         runtime,
         emit,
         Arc::new(|| {}),
-        Arc::new(|| Box::pin(async {})),
+        Arc::new(|_| Box::pin(async {})),
         autosave_tick,
     )
 }
@@ -221,8 +227,13 @@ pub fn regen_driver_with_started(
                 drop(guard);
                 // AFTER the re-bind, and with the lock released: the WP-P
                 // projection staleness pass. It is the last thing a publish owes
-                // and the first that must not hold anything up.
-                post_publish().await;
+                // and the first that must not hold anything up — so a job that
+                // has already been superseded skips it entirely and lets the
+                // queued regen's own publish re-probe (the `mint_rollback_
+                // checkpoint` gate, for the same reason).
+                if !cancel.is_cancelled() {
+                    post_publish(cancel.clone()).await;
+                }
             }
             // HISTORY-HARDEN H8: a published ROLLBACK is the one completion worth a
             // free checkpoint (see `mint_rollback_checkpoint`).
@@ -307,12 +318,12 @@ fn make_regen_driver(
     // whether any sketch's projected geometry has stopped matching its source. It
     // does a worker round-trip per AFFECTED sketch — none at all when no source
     // body's signature moved — and runs entirely with the runtime lock released.
-    let post_publish: RegenPostPublish = Arc::new(move || {
+    let post_publish: RegenPostPublish = Arc::new(move |cancel: CancelToken| {
         let state = publish_app.state::<AppState>();
         let runtime = state.runtime.clone();
         let projector = state.face_projection();
         Box::pin(async move {
-            sketch_projection::refresh_projection_staleness(&runtime, &projector).await;
+            sketch_projection::refresh_projection_staleness(&runtime, &projector, &cancel).await;
         })
     });
     regen_driver_with_started(runtime, emit, on_started, post_publish, autosave_tick)

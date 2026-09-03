@@ -95,6 +95,11 @@ export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
   { key: "m", action: tool("mirror"), scope: "sketch" },
   { key: "f", action: tool("sketchFillet"), scope: "sketch" },
   { key: "o", shift: true, action: tool("sketchOffset"), scope: "sketch" },
+  // Project body edges into the sketch (WP-P). `j` is free in BOTH tables; it is
+  // declared sketch-scoped only, so model mode reaches it through the ordinary
+  // cross-mode fallback (which `activateTool`'s SKETCH_ONLY turns into "enter a
+  // sketch with Project armed") rather than needing a model row of its own.
+  { key: "j", action: tool("project"), scope: "sketch" },
   // X flips construction geometry: with a sketch selection it flips those
   // entities, with none it toggles the sticky construction draw mode.
   // Sketch-scoped only — NOT a `tool` action, so the cross-mode fallback never

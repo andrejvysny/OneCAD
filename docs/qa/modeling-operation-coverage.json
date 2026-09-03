@@ -362,13 +362,13 @@
       "supportStatus": "supported",
       "cppTest": "worker/tests/test_edge_projector.cpp",
       "rustRealWorkerTest": "src-tauri/tests/project_edges.rs",
-      "frontendTest": "",
-      "playwrightTest": "",
+      "frontendTest": "src/tools/sketch/SketchController.project.test.ts; src/tools/sketch/projectTool.test.ts; src/features/sketch/projectionStale.test.ts; src/ipc/mockClient.projection.test.ts",
+      "playwrightTest": "e2e/project-edges.spec.ts",
       "corpusCase": "",
       "kernelbenchSuite": "",
-      "ciJob": "worker-8-0-1; rust-8-0-1",
-      "notes": "A protocol verb, not a KnownOperation — declared in nonOperationRows. Projects picked body edges (or a face's whole boundary) into a sketch plane as referenceLocked geometry pinned by Fixed. Snapshot-FENCED, unlike ProjectFaceBoundary: the projectedHash it mints is the baseline every later staleness check compares against. A trimmed tilted circular edge and a GeomAbs_Ellipse source are refused BY NAME (the wire Ellipse has no angular extent). update_projection re-binds its sources through the §7.5 ladder first, so a source the ladder cannot AutoBind stays absent and the projection stays PROJECTION_STALE rather than re-binding to a guess. No frontend lane yet — left empty rather than cited falsely.",
-      "uiExposure": "hidden"
+      "ciJob": "worker-8-0-1; rust-8-0-1; frontend; e2e-chromium; e2e-webkit",
+      "notes": "A protocol verb, not a KnownOperation — declared in nonOperationRows. Projects picked body edges (or a face's whole boundary) into a sketch plane as referenceLocked geometry pinned by Fixed. Snapshot-FENCED, unlike ProjectFaceBoundary: the projectedHash it mints is the baseline every later staleness check compares against. A trimmed tilted circular edge and a GeomAbs_Ellipse source are refused BY NAME (the wire Ellipse has no angular extent). update_projection re-binds its sources through the §7.5 ladder first, so a source the ladder cannot AutoBind stays absent and the projection stays PROJECTION_STALE rather than re-binding to a guess. Frontend lane (WP-P P3, 2026-09-03): sketch tool `project` on `j` (registered toolbarHidden — keyboard + the projection banner, no toolbar slot), body picks via the viewport picker while the session is open, re-hydration through the idempotent enter_sketch; the banner's Update/Detach and the PROJECTION_STALE verdict read the diagnostic's evidence {sketchId, entityIds}. The mock lane projects only the seed box's faces/edges and refuses the rest by name; Update cannot go stale in the mock (bodies never move), so the stale variant is proven by the Rust real-worker test only.",
+      "uiExposure": "exposed"
     },
     {
       "operation": "Timeline",

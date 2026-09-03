@@ -87,6 +87,7 @@ describe("SketchController — sketch on a datum plane", () => {
       probePick: vi.fn(() => null),
       enterSketch: vi.fn(),
       exitSketch: vi.fn(),
+      setSketchProjectedIds: vi.fn(),
       setSketchDrawingActive: vi.fn(),
       setSketchPreview: vi.fn(),
       moveChip: vi.fn(),

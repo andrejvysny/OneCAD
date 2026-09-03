@@ -270,7 +270,9 @@ fn region_triangle_area(region: &onecad_lib::dto::SketchRegionDto) -> f64 {
     let triangles = region.preview_triangles.as_ref().expect("region fill");
     triangles
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|triangle| {
             let point = |index: u32| {
                 let offset = index as usize * 2;

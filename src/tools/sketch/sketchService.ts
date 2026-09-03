@@ -1100,3 +1100,82 @@ async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<voi
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
 }
+
+// ── Projected body geometry (WP-P; SCHEMA §7.6 `ProjectToSketchPlane`) ────────
+
+/**
+ * Re-read the open sketch from the backend and republish it to store + engine.
+ *
+ * Every projection verb needs this, for a reason that is easy to miss: a freshly
+ * projected entity's BACKEND uuid is not in the sketch id-map yet, so the
+ * `entities` a `projectToSketch` returns can legitimately be EMPTY on the real
+ * lane. Re-entering the sketch is what reseeds that map (`seedIdMapFromWire`) —
+ * `enter_sketch` is idempotent for the already-open sketch, so it keeps the
+ * squash watermark and mints nothing.
+ *
+ * Written like the other write-backs here (fenced on `sessionGeneration`), and
+ * it deliberately does NOT touch the camera: `engine.enterSketch` re-aims and
+ * re-saves the restore view, which a mid-session refresh must never do.
+ */
+export async function rehydrateSketchSession(
+  client: CadClient,
+  sketchId: string,
+): Promise<SketchSession | null> {
+  const gen = sketchStore.getState().sessionGeneration;
+  let session: SketchSession;
+  try {
+    session = await client.enterSketch(sketchId);
+  } catch (e) {
+    if (sessionSuperseded(gen)) return null;
+    const msg = e instanceof Error ? e.message : String(e);
+    viewportStore
+      .getState()
+      .setStatusHint(`Sketch refresh failed: ${msg}`, { severity: "error", sticky: true });
+    return null;
+  }
+  if (sessionSuperseded(gen)) return null;
+  sketchStore.getState().setSession(session);
+  sketchStore.getState().setConflicting(session.conflicting ?? []);
+  sketchStore.getState().setEntityStates(session.entityStates ?? {});
+  const engine = getViewportEngine();
+  engine?.updateSketchSession(session.plane, session.entities, session.status, session.constraints, {
+    entityStates: session.entityStates ?? {},
+  });
+  engine?.setSketchProjectedIds(Object.keys(session.projections ?? {}));
+  documentStore.getState().setSketchSolve(sketchId, session.dof, docSketchStatus(session.status));
+  viewportStore.setState({ dofBadge: session.dof });
+  return session;
+}
+
+/** Re-cut every projected source in `sketchId` against the current model, then
+ *  re-hydrate. Queued with every other session mutation so it cannot interleave
+ *  with a drawing commit. */
+export function updateProjection(client: CadClient, sketchId: string): Promise<void> {
+  return enqueueSketchMutation(async () => {
+    const result = await client.updateProjection(sketchId);
+    await rehydrateSketchSession(client, sketchId);
+    const refused = result.refusals.length;
+    viewportStore.getState().setStatusHint(
+      refused === 0
+        ? "Projected geometry updated"
+        : `Projected geometry updated; ${refused} source${refused === 1 ? "" : "s"} refused: ${result.refusals[0].message}`,
+      // `viewportStore` has no `warning` rung; a refused source is reported loudly.
+      refused === 0 ? { severity: "info" as const } : { severity: "error" as const, sticky: true },
+    );
+  });
+}
+
+/** Unlock every projection in `sketchId` (the geometry STAYS, it stops tracking
+ *  its source), then re-hydrate. */
+export function detachProjection(client: CadClient, sketchId: string): Promise<void> {
+  return enqueueSketchMutation(async () => {
+    const result = await client.detachProjection(sketchId);
+    await rehydrateSketchSession(client, sketchId);
+    const n = result.entityIds.length;
+    viewportStore
+      .getState()
+      .setStatusHint(`Detached ${n} projected ${n === 1 ? "entity" : "entities"} — the geometry is yours now`, {
+        severity: "info",
+      });
+  });
+}

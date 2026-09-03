@@ -179,6 +179,13 @@
      cool so it reads as "belongs to the model, not to you". */
   --color-sketch-reference: #6b7a8f;
 
+  /* Body geometry PROJECTED into a sketch (`SketchSession.projections`, WP-P):
+     locked like host-face reference geometry, but it points at a source that can
+     still move — so it gets its own teal-slate, one step warmer and more
+     saturated than `--color-sketch-reference`, and stays distinct from the
+     transient hover cyan and the centroid teal (both markers, never strokes). */
+  --color-sketch-projected: #3d8b9c;
+
   /* ---- Sketch mode chrome ---- */
   --color-sketch-chrome: #e9f1fd;
   --color-sketch-chrome-border: #cbdcf7;
@@ -417,6 +424,7 @@
 
   /* ---- Sketch reference geometry ---- */
   --color-sketch-reference: #8b9bb0;
+  --color-sketch-projected: #6cb6c6;
 
   /* ---- Sketch mode chrome ---- */
   --color-sketch-chrome: #1f2a3d;

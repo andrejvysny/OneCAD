@@ -60,12 +60,13 @@ verifiers OK · kernelbench T0 compare + full e2e: see the TODO.md row (running 
 ## How to resume
 
 1. Run the `handoff` skill with "resume"; read the plan file's Run log (bottom) and TODO.md
-   § KERNEL HARDENING § Now checkboxes.
-2. If commits A/B are not yet on `master`: the carve tooling is in the session scratchpad
-   (`carve.py`, `stage_commit_a.sh` — index-only, never touches the worktree); the plan's
-   Design § A gives the hunk ownership. Verify `git diff HEAD` is EMPTY after commit B.
-3. Then P3 FE (brief drafted in the scratchpad `p3_brief.md`, design in the plan § B) → full L3
-   → commit C → push. Then WP-B (plan § D, probes first), WP-F (plan § E).
+   § KERNEL HARDENING § Now checkboxes. Commits A `bd4b6c5`, B `da01b3f` are pushed; commit C
+   (WP-P P3 + the Rust fix round + hygiene) is the last close-out commit — check `git log`.
+2. Then WP-B (plan § D — probes P-B1..P-B4 first; the SCHEMA draft `wpb_schema_draft.md` and the
+   probe brief `wpb_probes_brief.md` were drafted in the 2026-09-03 session scratchpad and may be
+   gone — the plan § D carries the same design), then WP-F (plan § E; `wpf_design_draft.md`).
+3. CI: re-run status of run 33683904198's failed jobs; `linux-worker` needs the self-hosted runner
+   back; `tauri-composition` needs the OCCT build cached or the timeout raised.
 
 ## Open questions
 
@@ -79,7 +80,7 @@ verifiers OK · kernelbench T0 compare + full e2e: see the TODO.md row (running 
 
 ---
 
-# Handoff — DAILY DRIVER v2, paused mid-WP-P by user order
+# Handoff — DAILY DRIVER v2, paused mid-WP-P by user order (SUPERSEDED for WP-P: P1+P2 are commit `da01b3f`, P3 is commit C — see the KERNEL HARDENING handoff above and TODO.md § WP-P)
 
 Session 23 · 2026-09-02
 

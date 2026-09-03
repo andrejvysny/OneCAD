@@ -73,7 +73,16 @@ export type SketchTool =
   /** 2D corner fillet: round the corner two lines share (WP-C T2b). */
   | "sketchFillet"
   /** 2D parallel offset of a connected chain (WP-C T2b). */
-  | "sketchOffset";
+  | "sketchOffset"
+  /**
+   * Project body edges / face outlines into THIS sketch as locked reference
+   * geometry (WP-P; SCHEMA §7.6 `ProjectToSketchPlane`).
+   *
+   * Keyboard-only (`J`) and deliberately absent from `SKETCH_TOOL_DESCRIPTORS`:
+   * the floating toolbar is a FROZEN contract, and adding a button there is a
+   * separate recorded decision. See `SketchController`'s project-pick phase.
+   */
+  | "project";
 
 export type Tool = ModelTool | SketchTool;
 

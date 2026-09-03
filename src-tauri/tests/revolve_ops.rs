@@ -230,7 +230,7 @@ fn region_area_centroid_u(region: &SketchRegionDto) -> (f64, f64) {
     };
     let mut area = 0.0f64;
     let mut moment_u = 0.0f64;
-    for tri in t.indices.chunks_exact(3) {
+    for tri in t.indices.as_chunks::<3>().0 {
         let [a, b, c] = [point(tri[0]), point(tri[1]), point(tri[2])];
         let tri_area = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5;
         area += tri_area;

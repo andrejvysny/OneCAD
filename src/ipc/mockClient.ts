@@ -43,6 +43,12 @@ import type {
   PrepareEdgeOpResult,
   AnalyzeEdgeOpRangeRequest,
   AnalyzeEdgeOpRangeResult,
+  ProjectToSketchRequest,
+  ProjectToSketchResult,
+  ProjectedEntity,
+  ProjectedSource,
+  ProjectionRefusal,
+  DetachProjectionResult,
   PromotedElement,
   SketchAttachTarget,
   SketchPlane,
@@ -57,6 +63,7 @@ import type {
   ResolveRefRequest,
   ResolveRefResult,
   Rgba,
+  SketchConstraint,
   SketchConstraintType,
   SketchEntity,
   SketchSession,
@@ -79,6 +86,9 @@ import type { FaceColor } from "./mockMeshes";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { TopoIndex } from "@/viewport/mesh/faceRangeIndex";
 import {
+  BOX_EDGE_PAIRS,
+  BOX_SIZE,
+  boxCorners,
   concatMesh1,
   makeBoredCylinderMesh,
   makeBoxMesh,
@@ -87,11 +97,19 @@ import {
   makeRevolveBodyMesh,
   placeComponentGhostMesh,
   transformMesh1,
+  type BoxCornerKey,
 } from "./mockMeshes";
 import { placementMatrix } from "@/tools/preview/patternPreview";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
-import { lookupMockFace, mockElementHash } from "./mockFaceGeometry";
+import {
+  lookupMockFace,
+  mockElementHash,
+  mockProjectedContent,
+  worldToPlaneUv,
+  type MockFaceGeometry,
+} from "./mockFaceGeometry";
+import { frontendConstraintsFromDto, frontendEntitiesFromDto } from "./sketchWireMap";
 import {
   cylinderMetricsFromMesh,
   edgeMetricsFromMesh,
@@ -2464,6 +2482,275 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
 //    client uses). Commit routes into the local document model above. ──────────
 const lane = createLocalSolverLane({ commit: commitAndEmit, latencyMs: () => mockLatency });
 
+// ── Body-edge projection into a sketch (WP-P), mock lane ────────────────────
+//
+// `lane`'s sketch sessions carry no `projections` field of their own (F-WP8
+// owns entities/constraints only), so this module keeps the provenance rows
+// beside it, keyed by frontend sketchId — merged into `getSketch`/`enterSketch`
+// on read, exactly like the real client re-keys `dto.projections` on every read.
+//
+// MOCK LIMIT (documented, not silently guessed): there is no kernel here, so
+// only the seed BOX (`body1`) resolves — its six analytic faces via
+// `lookupMockFace` (face outline) and its twelve edges via `BOX_EDGE_PAIRS`
+// (single-edge). Everything else (the cylinder's curved side, any synthesized
+// body, an unresolvable pick) refuses `unsupportedCurve` rather than
+// fabricating geometry.
+const sketchProjections = new Map<string, Record<string, ProjectedSource>>();
+let nextProjectionSeq = 1;
+
+/** World point → this plane's origin + u·xAxis + v·yAxis — the exact inverse of
+ *  `worldToPlaneUv` (both bases are orthonormal, so a round trip is exact). */
+function planeUvToWorld(plane: SketchPlane, uv: [number, number]): [number, number, number] {
+  return [
+    plane.origin[0] + uv[0] * plane.xAxis[0] + uv[1] * plane.yAxis[0],
+    plane.origin[1] + uv[0] * plane.xAxis[1] + uv[1] * plane.yAxis[1],
+    plane.origin[2] + uv[0] * plane.xAxis[2] + uv[1] * plane.yAxis[2],
+  ];
+}
+
+/** Re-express a `lookupMockFace` boundary (authored in the FACE's own plane) in
+ *  the TARGET sketch's plane — round-tripping through world space. A
+ *  `projectToSketch` target sketch is an arbitrary existing sketch, not
+ *  necessarily the face's own frame (unlike sketch-on-face, whose sketch plane
+ *  IS the face plane and needs no reprojection). */
+function reprojectFaceBoundary(geometry: MockFaceGeometry, targetPlane: SketchPlane): MockFaceGeometry["boundary"] {
+  const toTarget = (uv: [number, number]): [number, number] =>
+    worldToPlaneUv(targetPlane, planeUvToWorld(geometry.plane, uv));
+  if (geometry.boundary.kind === "polygon") {
+    return { kind: "polygon", corners: geometry.boundary.corners.map(toTarget) };
+  }
+  return { kind: "circle", center: toTarget(geometry.boundary.center), radius: geometry.boundary.radius };
+}
+
+/** One edge of the mock box (`body1`), world-space endpoints — `BOX_EDGE_PAIRS`
+ *  is the same table `makeBoxMesh` renders `e:0..e:11` from, so a picked edge id
+ *  and its rendered wire can never drift apart. */
+function boxEdgeWorldPoints(topoKey: string): [[number, number, number], [number, number, number]] | null {
+  const m = /^e:(\d+)$/.exec(topoKey);
+  if (!m) return null;
+  const pair = BOX_EDGE_PAIRS[Number(m[1])];
+  if (!pair) return null;
+  const corners = boxCorners(BOX_SIZE);
+  return [corners[pair[0] as BoxCornerKey], corners[pair[1] as BoxCornerKey]];
+}
+
+/** Build ONE locked reference Line (+ its two Fixed-pinned endpoints) from two
+ *  already target-plane-projected (u,v) points — the open-edge sibling of
+ *  `mockProjectedContent`'s closed-ring polygon case. */
+function mockProjectedEdgeContent(
+  a: [number, number],
+  b: [number, number],
+  idPrefix: string,
+): { entities: SketchEntity[]; constraints: SketchConstraint[] } {
+  const wireEntities: Record<string, unknown>[] = [
+    { id: `${idPrefix}_p0`, type: "Point", at: a, referenceLocked: true },
+    { id: `${idPrefix}_p1`, type: "Point", at: b, referenceLocked: true },
+    { id: `${idPrefix}_e0`, type: "Line", p0Ref: `${idPrefix}_p0`, p1Ref: `${idPrefix}_p1`, referenceLocked: true },
+  ];
+  const wireConstraints: Record<string, unknown>[] = [
+    { id: `${idPrefix}_c0`, type: "Fixed", entities: [`${idPrefix}_p0`] },
+    { id: `${idPrefix}_c1`, type: "Fixed", entities: [`${idPrefix}_p1`] },
+  ];
+  return {
+    entities: frontendEntitiesFromDto(wireEntities),
+    constraints: frontendConstraintsFromDto(wireConstraints, wireEntities),
+  };
+}
+
+/** Deterministic 16-lowercase-hex mock `projectedHash`, over the entity's own
+ *  projected (u,v) geometry — two FNV-1a-32 passes (`mockElementHash`) with
+ *  different seeds, concatenated, mirroring how `mockElementHash` itself mints
+ *  mock ElementIds. */
+function mockProjectionHash(entity: SketchEntity): string {
+  const key =
+    entity.type === "Circle"
+      ? `C:${entity.center};${entity.radius}`
+      : `L:${entity.p0};${entity.p1}`;
+  return `${mockElementHash(key)}${mockElementHash(`${key}#b`)}`;
+}
+
+/** One source's resolution: either projected content ready to merge in, or a
+ *  refusal to report. Never both. */
+type MockProjectionOutcome =
+  | { ok: true; entities: SketchEntity[]; constraints: SketchConstraint[]; dtoEntities: ProjectedEntity[] }
+  | { ok: false; refusal: ProjectionRefusal };
+
+/** Resolve ONE projection source against the mock's analytic geometry. */
+function resolveMockProjectionSource(
+  source: { bodyId: string; topoKey: string },
+  mode: "edges" | "faceOutline",
+  targetPlane: SketchPlane,
+  idPrefix: string,
+): MockProjectionOutcome {
+  const elementId = `el_${mockElementHash(`${source.bodyId}#${source.topoKey}`)}`;
+  const refuse = (message: string): MockProjectionOutcome => ({
+    ok: false,
+    refusal: {
+      bodyId: source.bodyId,
+      elementId,
+      topoKey: source.topoKey,
+      code: "unsupportedCurve",
+      message,
+    },
+  });
+
+  if (mode === "faceOutline") {
+    const found = lookupMockFace(source.bodyId, undefined, source.topoKey);
+    if (found.kind !== "planar") {
+      return refuse("MOCK LIMIT: only box faces/edges project in the mock (needs the OCCT worker)");
+    }
+    const boundary = reprojectFaceBoundary(found.geometry, targetPlane);
+    const { entities, constraints } = mockProjectedContent({ plane: targetPlane, boundary }, idPrefix);
+    const curves = entities.filter((e) => e.type === "Line" || e.type === "Circle");
+    const dtoEntities: ProjectedEntity[] = curves.map((e) => ({
+      entityId: e.id,
+      type: e.type,
+      sourceBodyId: source.bodyId,
+      sourceElementId: elementId,
+      projectedHash: mockProjectionHash(e),
+    }));
+    return { ok: true, entities, constraints, dtoEntities };
+  }
+
+  // mode === "edges"
+  const pts = source.bodyId === "body1" ? boxEdgeWorldPoints(source.topoKey) : null;
+  if (!pts) {
+    return refuse("MOCK LIMIT: only box faces/edges project in the mock (needs the OCCT worker)");
+  }
+  const a = worldToPlaneUv(targetPlane, pts[0]);
+  const b = worldToPlaneUv(targetPlane, pts[1]);
+  const { entities, constraints } = mockProjectedEdgeContent(a, b, idPrefix);
+  const line = entities.find((e) => e.type === "Line");
+  if (!line) return refuse("MOCK LIMIT: degenerate edge");
+  return {
+    ok: true,
+    entities,
+    constraints,
+    dtoEntities: [
+      {
+        entityId: line.id,
+        type: "Line",
+        sourceBodyId: source.bodyId,
+        sourceElementId: elementId,
+        projectedHash: mockProjectionHash(line),
+      },
+    ],
+  };
+}
+
+/** `projectToSketch` (SCHEMA §7.6 `ProjectToSketchPlane`), mock lane. Merges
+ *  every resolvable source's locked reference geometry into the existing
+ *  session via the shared lane's `sketchUpsert` (the only writer of a lane
+ *  session), then records the provenance rows this module keeps. */
+async function mockProjectToSketch(req: ProjectToSketchRequest): Promise<ProjectToSketchResult> {
+  await wait(MESH_LATENCY_MS);
+  const session = lane.peekSession(req.sketchId) ?? (await enterSketchWithHydration(req.sketchId));
+  const rows = { ...(sketchProjections.get(req.sketchId) ?? {}) };
+  const addedEntities: SketchEntity[] = [];
+  const addedConstraints: SketchConstraint[] = [];
+  const dtoEntities: ProjectedEntity[] = [];
+  const refusals: ProjectionRefusal[] = [];
+  for (const source of req.sources) {
+    const outcome = resolveMockProjectionSource(
+      source,
+      req.mode,
+      session.plane,
+      `proj_${nextProjectionSeq++}`,
+    );
+    if (!outcome.ok) {
+      refusals.push(outcome.refusal);
+      continue;
+    }
+    addedEntities.push(...outcome.entities);
+    addedConstraints.push(...outcome.constraints);
+    dtoEntities.push(...outcome.dtoEntities);
+    outcome.dtoEntities.forEach((e, i) => {
+      rows[e.entityId] = {
+        sourceBodyId: e.sourceBodyId,
+        sourceElementId: e.sourceElementId,
+        sourceKind: req.mode === "edges" ? "edge" : "face",
+        sourceOrdinal: i,
+        projectedHash: e.projectedHash,
+      };
+    });
+  }
+  if (addedEntities.length > 0) {
+    await lane.sketchUpsert(
+      req.sketchId,
+      [...session.entities, ...addedEntities],
+      [...session.constraints, ...addedConstraints],
+    );
+    sketchProjections.set(req.sketchId, rows);
+  }
+  return {
+    sketchId: req.sketchId,
+    snapshotId: req.snapshotId ?? mockRevision,
+    entities: dtoEntities,
+    pointCount: 0,
+    refusals,
+  };
+}
+
+/** `updateProjection` (WP-P), mock lane. Mock bodies never move, so this
+ *  re-reports the CURRENT recorded rows verbatim — same ids, same hashes — the
+ *  honest answer to "did anything change?" when nothing in the mock document
+ *  can move a projected source. */
+async function mockUpdateProjection(sketchId: string): Promise<ProjectToSketchResult> {
+  await wait(MESH_LATENCY_MS);
+  const session = lane.peekSession(sketchId) ?? (await enterSketchWithHydration(sketchId));
+  const rows = sketchProjections.get(sketchId) ?? {};
+  const entities: ProjectedEntity[] = [];
+  for (const [entityId, row] of Object.entries(rows)) {
+    const entity = session.entities.find((e) => e.id === entityId);
+    entities.push({
+      entityId,
+      type: entity?.type ?? "Line",
+      sourceBodyId: row.sourceBodyId,
+      sourceElementId: row.sourceElementId,
+      projectedHash: row.projectedHash,
+    });
+  }
+  return { sketchId, snapshotId: mockRevision, entities, pointCount: 0, refusals: [] };
+}
+
+/** `detachProjection` (WP-P), mock lane. Unlocks the targeted entities and
+ *  drops the `Fixed` pins on their endpoints, in one `sketchUpsert`.
+ *
+ *  MOCK LIMIT: a projected point shared by two still-locked curves (a box
+ *  corner) is unpinned the moment EITHER curve detaches — the real backend only
+ *  frees a point once every curve holding it has let go (see `detach_projection`
+ *  doc comment). Reproducing that needs the point-ownership graph the real
+ *  `sketch::projection` module tracks; the mock has no such graph. */
+async function mockDetachProjection(
+  sketchId: string,
+  entityIds?: string[],
+): Promise<DetachProjectionResult> {
+  await wait(MESH_LATENCY_MS);
+  const session = lane.peekSession(sketchId) ?? (await enterSketchWithHydration(sketchId));
+  const rows = sketchProjections.get(sketchId) ?? {};
+  const targets = (entityIds && entityIds.length > 0 ? entityIds : Object.keys(rows)).filter(
+    (id) => id in rows,
+  );
+  const remaining = Object.keys(rows).length - targets.length;
+  if (targets.length === 0) {
+    return { sketchId, entityIds: [], releasedConstraints: 0, remaining: Object.keys(rows).length };
+  }
+  const targetSet = new Set(targets);
+  const nextEntities = session.entities.map((e) =>
+    targetSet.has(e.id) ? { ...e, referenceLocked: false } : e,
+  );
+  let releasedConstraints = 0;
+  const nextConstraints = session.constraints.filter((c) => {
+    if (c.type !== "Fixed" || !c.entities.some((id) => targetSet.has(id))) return true;
+    releasedConstraints += 1;
+    return false;
+  });
+  for (const id of targets) delete rows[id];
+  sketchProjections.set(sketchId, rows);
+  await lane.sketchUpsert(sketchId, nextEntities, nextConstraints);
+  return { sketchId, entityIds: targets, releasedConstraints, remaining };
+}
+
 /** A deterministic 60×40 rectangle used to hydrate a re-entered document sketch,
  *  so a reopened persisted sketch shows real geometry (parity with the real client
  *  reading the backend's stored entities) instead of a silent empty session. */
@@ -2496,7 +2783,8 @@ async function enterSketchWithHydration(target: EnterSketchTarget): Promise<Sket
   if (typeof target !== "string" && "newOnDatum" in target) {
     mockAttachSketchToDatum(session.sketchId, target.newOnDatum.datumId);
   }
-  return session;
+  const projections = sketchProjections.get(session.sketchId);
+  return projections ? { ...session, projections } : session;
 }
 
 /**
@@ -2527,6 +2815,7 @@ async function mockSetSketchDimension(
 /** Test seam: forget all sketch state so a fresh sketch starts empty. */
 export function resetMockSketches(): void {
   lane.resetSketches();
+  sketchProjections.clear();
 }
 
 /** Test seam: forget the whole mock document (bodies, features, undo, sessions). */
@@ -3647,7 +3936,10 @@ export const mockClient: CadClient = {
   async getSketch(sketchId: string): Promise<SketchSession> {
     await wait(MESH_LATENCY_MS);
     const peeked = lane.peekSession(sketchId);
-    if (peeked) return peeked;
+    if (peeked) {
+      const projections = sketchProjections.get(sketchId);
+      return projections ? { ...peeked, projections } : peeked;
+    }
     if (documentStore.getState().sketches[sketchId]) {
       const entities = seededSketchRectangle();
       const { dof, status } = solveDof(entities, []);
@@ -3680,6 +3972,7 @@ export const mockClient: CadClient = {
   async deleteSketch(id: string): Promise<void> {
     documentStore.getState().removeSketch(id);
     lane.dropSession(id);
+    sketchProjections.delete(id);
     // A deleted sketch no longer references its host datum — otherwise the
     // orphan-cleanup path (SketchController leaving mid-enter) would leave a
     // phantom blocker that makes the datum permanently undeletable.
@@ -3689,6 +3982,9 @@ export const mockClient: CadClient = {
   beginGesture: lane.beginGesture,
   solveDrag: lane.solveDrag,
   endGesture: lane.endGesture,
+  projectToSketch: mockProjectToSketch,
+  updateProjection: mockUpdateProjection,
+  detachProjection: mockDetachProjection,
   beginPreview: lane.beginPreview,
   updatePreview: lane.updatePreview,
   endPreview: lane.endPreview,

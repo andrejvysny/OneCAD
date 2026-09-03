@@ -2494,7 +2494,7 @@ pub async fn project_to_sketch(
     // ── Locked: presence, the gesture refusal, the plane, and the promotion ──
     // The promotion is worker IO under the lock, exactly as `promote_selection`
     // and `promote_prepared_edges` already do it; the PROJECTION below is not.
-    let (plane, promoted, projection) = {
+    let (plane, already, promoted, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -2508,12 +2508,17 @@ pub async fn project_to_sketch(
                 diagnostics: Vec::new(),
             });
         }
-        let plane = rt.sketch_snapshot(sketch, "projectToSketch")?.plane;
+        let existing = rt.sketch_snapshot(sketch, "projectToSketch")?;
         let mut promoted = Vec::new();
         for (body, group) in group_picks_by_body(&picks) {
             promoted.extend(rt.promote_selection(snapshot, body, group).await?);
         }
-        (plane, promoted, rt.projection())
+        (
+            existing.plane,
+            existing.projections,
+            promoted,
+            rt.projection(),
+        )
     };
     // The AppHandle comes from the set-once `AppState` slot, never a command
     // parameter: it is generic over the runtime, and taking it here would pin this
@@ -2524,6 +2529,7 @@ pub async fn project_to_sketch(
     }
 
     let mut wire_sources = Vec::with_capacity(picks.len());
+    let mut minted_refusals: Vec<wire::ProjectionRefusal> = Vec::new();
     for (body, key, _) in &picks {
         let body_wire = wire::body_id_wire(*body);
         let hit = promoted
@@ -2535,6 +2541,27 @@ pub async fn project_to_sketch(
                     key.as_str()
                 ))
             })?;
+        // A source this sketch has already projected is REFUSED, not projected
+        // again: a second coincident outline would give one source two provenance
+        // runs, and no later update could tell which rows belong to which
+        // (WP-P F15). Per-source, so the rest of the batch still lands.
+        if already
+            .values()
+            .any(|row| row.source_body == *body && row.source_element_id.as_str() == hit.element_id)
+        {
+            minted_refusals.push(wire::ProjectionRefusal {
+                body_id: body_wire,
+                element_id: hit.element_id.clone(),
+                topo_key: key.as_str().to_string(),
+                code: sketch_projection::ALREADY_PROJECTED.to_string(),
+                message: format!(
+                    "{} is already projected into this sketch — update or detach the existing \
+                     geometry instead of projecting it a second time",
+                    hit.element_id
+                ),
+            });
+            continue;
+        }
         wire_sources.push(wire::ProjectionSource {
             body: *body,
             address: wire::FaceAddress::ElementId(hit.element_id.as_str()),
@@ -2542,6 +2569,17 @@ pub async fn project_to_sketch(
                 "face" => wire::ProjectionSourceKind::Face,
                 _ => wire::ProjectionSourceKind::Edge,
             },
+        });
+    }
+    if wire_sources.is_empty() {
+        // Every pick was already projected: there is nothing to ask the kernel,
+        // and an empty `sources` array is not a legal §7.6 request.
+        return Ok(crate::dto::ProjectToSketchDto {
+            sketch_id: sketch.to_string(),
+            snapshot_id,
+            entities: Vec::new(),
+            point_count: 0,
+            refusals: refusal_dtos(minted_refusals),
         });
     }
 
@@ -2594,10 +2632,14 @@ pub async fn project_to_sketch(
         rt.clear_projection_staleness(sketch);
         (outcome, rt.projection())
     };
+    // The Rust-minted `alreadyProjected` refusals sit in the same list as the
+    // worker's: both answer "this ONE source did not come through, here is why".
+    let mut refusals = minted_refusals;
+    refusals.extend(result.refusals);
     tracing::info!(
         "project_to_sketch: sketch={sketch} entities={} points={point_count} refusals={}",
         dtos.len(),
-        result.refusals.len()
+        refusals.len()
     );
     // The AppHandle comes from the set-once `AppState` slot, never a command
     // parameter: it is generic over the runtime, and taking it here would pin this
@@ -2616,7 +2658,7 @@ pub async fn project_to_sketch(
         snapshot_id,
         entities: dtos,
         point_count,
-        refusals: refusal_dtos(result.refusals),
+        refusals: refusal_dtos(refusals),
     })
 }
 
@@ -2658,7 +2700,7 @@ pub async fn update_projection(
     sketch_id: String,
 ) -> Result<crate::dto::ProjectToSketchDto, ApiError> {
     let sketch_key = parse_sketch_id(&sketch_id)?;
-    let (sketch, snapshot) = {
+    let (sketch, snapshot, rebind) = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
@@ -2674,15 +2716,24 @@ pub async fn update_projection(
         }
         let sketch = rt.sketch_snapshot(sketch_key, "updateProjection")?;
         let snapshot = rt.head_snapshot_id().unwrap_or(SnapshotId(0));
-        // The sources are snapshot-scoped in the WORKER even though the
-        // `ElementId`s are Rust-owned: a regen renumbers sub-shapes, so a source
-        // promoted two edits ago names nothing until the §7.5 ladder re-binds it.
-        // Only an AutoBind binds; anything else stays absent and comes back as a
-        // per-source refusal rather than a guess.
-        let (bound, unresolved) = rt.rebind_projection_sources(sketch_key).await;
-        tracing::debug!("update_projection: rebind bound={bound} unresolved={unresolved}");
-        (sketch, snapshot)
+        (sketch, snapshot, rt.projection_rebind_ticket(sketch_key))
     };
+    // ── Unlocked: the §7.5 re-bind ──────────────────────────────────────────
+    // The sources are snapshot-scoped in the WORKER even though the `ElementId`s
+    // are Rust-owned: a regen renumbers sub-shapes, so a source promoted two
+    // edits ago names nothing until the ladder re-binds it. Only an AutoBind
+    // binds; anything else stays absent and comes back as a per-source refusal
+    // rather than a guess. It is worker IO and mutates nothing here, so it runs
+    // with the runtime lock RELEASED (WP-P F7).
+    if let Some((engine, head, pending)) = rebind {
+        let (bound, unresolved) = DocumentRuntime::rebind_entries_with(&engine, head, &pending)
+            .await
+            .unwrap_or((0, pending.len()));
+        tracing::debug!("update_projection: rebind bound={bound} unresolved={unresolved}");
+    }
+    // The rows read here are the ones the plan is built against; the fenced
+    // commit below refuses if they moved (WP-P F12).
+    let committed_rows = sketch.projections.clone();
     if sketch.projections.is_empty() {
         return Ok(crate::dto::ProjectToSketchDto {
             sketch_id,
@@ -2746,6 +2797,21 @@ pub async fn update_projection(
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("updateProjection".into()))?;
+        // Read-modify-write on the provenance map: the plan names entity ids and
+        // ordinals read before the (unlocked) worker round-trips, and a concurrent
+        // `project_to_sketch` / `detach_projection` / undo would have renumbered
+        // them. The snapshot fence cannot see that — a sketch edit does not move
+        // the head — so the rows themselves are the fence (WP-P F12).
+        if rt
+            .sketch_snapshot(sketch_key, "updateProjection")?
+            .projections
+            != committed_rows
+        {
+            return Err(ApiError::OpFailed {
+                message: "updateProjection: projections changed while updating — retry".into(),
+                diagnostics: Vec::new(),
+            });
+        }
         let outcome = rt.apply_sketch_edit_fenced(snapshot, sketch_key, plan.ops)?;
         rt.clear_projection_staleness(sketch_key);
         (outcome, rt.projection())

@@ -127,6 +127,11 @@ export const SKETCH_TOOL_DESCRIPTORS: readonly SketchToolDescriptor[] = [
   // operation one dimension down, and the two live in different toolbars.
   { tool: "sketchFillet", scope: "sketch", icon: "fillet", label: "Fillet", shortcut: "F", group: "sketch.edit", priority: 440 },
   { tool: "sketchOffset", scope: "sketch", icon: "offset", label: "Offset", shortcut: "⇧O", group: "sketch.edit", priority: 450 },
+  // Project body edges into the sketch (WP-P). `toolbarHidden`, so it is a real
+  // registration — its `J` shortcut resolves, `⌘K` finds it and the active-tool
+  // mirror stays honest — WITHOUT taking a slot in the frozen toolbar contract.
+  // Giving it a button is a separate, recorded product decision.
+  { tool: "project", scope: "sketch", icon: "projectPlaceholder", label: "Project edges", shortcut: "J", group: "sketch.edit", priority: 460, toolbarHidden: true },
 ];
 
 export const MODELING_TOOL_DESCRIPTORS: readonly ModelingToolDescriptor[] = [

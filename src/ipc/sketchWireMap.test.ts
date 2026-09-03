@@ -14,6 +14,7 @@ import {
   frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
+  frontendProjectedEntities,
   frontendProjections,
   frontendSolvedCurves,
   frontendSolvedPositions,
@@ -1184,5 +1185,30 @@ describe("frontendProjections (WP-P provenance re-key)", () => {
   it("keeps an absent map absent (Rust omits the key when empty)", () => {
     expect(frontendProjections(undefined, undefined)).toBeUndefined();
     expect(frontendProjections(createIdMap("sk", "XY"), null)).toBeUndefined();
+  });
+});
+
+describe("frontendProjectedEntities (WP-P project_to_sketch / update_projection re-key)", () => {
+  const projected = {
+    entityId: "uuid-l1",
+    type: "Line" as const,
+    sourceBodyId: "body_11111111-1111-1111-1111-111111111111",
+    sourceElementId: "el-7",
+    projectedHash: "0123456789abcdef",
+  };
+
+  it("re-keys a backend entity uuid to its frontend id through an entered map", () => {
+    const map = createIdMap("sk-backend", "XY");
+    map.entity.set("l1", "uuid-l1");
+    expect(frontendProjectedEntities(map, [projected])).toEqual([{ ...projected, entityId: "l1" }]);
+  });
+
+  it("passes through without an id-map (never-entered sketch: frontend id == uuid)", () => {
+    expect(frontendProjectedEntities(undefined, [projected])).toEqual([projected]);
+  });
+
+  it("drops an entity uuid the id-map does not (yet) know about", () => {
+    const map = createIdMap("sk-backend", "XY");
+    expect(frontendProjectedEntities(map, [projected])).toEqual([]);
   });
 });

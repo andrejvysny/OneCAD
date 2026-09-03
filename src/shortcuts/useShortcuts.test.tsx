@@ -841,12 +841,12 @@ describe("useShortcuts — contributed chords", () => {
       scope.registerCommand({
         id: contributionId<CommandId>(VENDOR, "com.example.foo.command.inspect"),
         title: "Inspect",
-        defaultShortcut: { key: "j" },
+        defaultShortcut: { key: "q" },
         execute,
       }),
     );
 
-    press("j");
+    press("q");
 
     expect(execute).toHaveBeenCalledOnce();
   });
@@ -858,7 +858,7 @@ describe("useShortcuts — contributed chords", () => {
       scope.registerTool({
         id,
         title: "Inspect",
-        defaultShortcut: { key: "j" },
+        defaultShortcut: { key: "q" },
         activate,
         deactivate: () => {},
       }),
@@ -867,7 +867,7 @@ describe("useShortcuts — contributed chords", () => {
     // Crossing an owner boundary awaits the outgoing tool's `deactivate` first,
     // so activation lands on a microtask.
     await act(async () => {
-      press("j");
+      press("q");
       await flush();
     });
 
@@ -900,18 +900,18 @@ describe("useShortcuts — contributed chords", () => {
     platform.createScope(VENDOR).registerCommand({
       id: contributionId<CommandId>(VENDOR, "com.example.foo.command.a"),
       title: "A",
-      defaultShortcut: { key: "j" },
+      defaultShortcut: { key: "q" },
       execute: first,
     });
     platform.createScope(other).registerCommand({
       id: contributionId<CommandId>(other, "com.example.bar.command.b"),
       title: "B",
-      defaultShortcut: { key: "j" },
+      defaultShortcut: { key: "q" },
       execute: second,
     });
     renderWithPlatform(<Harness />, { platform });
 
-    press("j");
+    press("q");
 
     // Picking one by load order is exactly what must not happen.
     expect(first).not.toHaveBeenCalled();
@@ -924,23 +924,23 @@ describe("useShortcuts — contributed chords", () => {
       scope.registerCommand({
         id: contributionId<CommandId>(VENDOR, "com.example.foo.command.sketchOnly"),
         title: "Sketch only",
-        defaultShortcut: { key: "j" },
+        defaultShortcut: { key: "q" },
         scopes: [ModelingScopes.Sketch],
         execute,
       }),
     );
 
-    press("j"); // model mode
+    press("q"); // model mode
     expect(execute).not.toHaveBeenCalled();
 
     act(() => toolStore.getState().setMode("sketch"));
-    press("j");
+    press("q");
     expect(execute).toHaveBeenCalledOnce();
   });
 
   it("leaves a chord nobody claims alone", () => {
     withContribution(() => {});
-    const ev = press("j");
+    const ev = press("q");
     expect(ev.defaultPrevented).toBe(false);
   });
 });

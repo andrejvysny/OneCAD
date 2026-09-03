@@ -60,6 +60,28 @@ async function measure(page: Page): Promise<Standoff> {
   };
 }
 
+/**
+ * `measure` once the badge has STOPPED MOVING. The camera-settled signal fires
+ * when the camera parameters are stable; `HtmlOverlayDriver` re-positions the
+ * badge on the NEXT engine frame, so a single read right after settle can pair
+ * the new line projection with the badge's previous box. Under load (the full
+ * run, CI) that lag produced a deterministic 586.1996 px delta on a 1280×720
+ * viewport while the spec passed in isolation (2026-09-02/03). Two consecutive
+ * reads agreeing within 0.5 px is the frame-stable witness.
+ */
+async function measureStable(page: Page): Promise<Standoff> {
+  let prev = await measure(page);
+  for (let i = 0; i < 40; i++) {
+    await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => r())));
+    const next = await measure(page);
+    if (Math.abs(next.centre - prev.centre) < 0.5 && Math.abs(next.lineLenPx - prev.lineLenPx) < 0.5) {
+      return next;
+    }
+    prev = next;
+  }
+  throw new Error("constraint badge never settled after 40 frames");
+}
+
 test("a constraint glyph keeps the same screen standoff after zooming in", async ({ page }) => {
   // Defaults, not whatever a previous test persisted (settings carry the chip
   // preference this spec needs on, and the input-device routing the wheel uses).
@@ -76,7 +98,7 @@ test("a constraint glyph keeps the same screen standoff after zooming in", async
   await page.keyboard.press("Escape");
   await expect(page.locator("[data-testid^='constraint-badge-']")).toHaveCount(1);
 
-  const before = await measure(page);
+  const before = await measureStable(page);
   expect(before.nearEdge).toBeGreaterThanOrEqual(15.5); // ≥ the 16px corridor
 
   const box = await page.locator(CANVAS).boundingBox();
@@ -85,7 +107,7 @@ test("a constraint glyph keeps the same screen standoff after zooming in", async
   await page.mouse.wheel(0, -600);
   await waitForCameraSettled(page);
 
-  const after = await measure(page);
+  const after = await measureStable(page);
   // The camera really moved: the same line is at least 1.5x longer on screen.
   expect(after.lineLenPx / before.lineLenPx).toBeGreaterThan(1.5);
   // …and the badge did not follow it. (Pre-fix this delta measured ~69px.)

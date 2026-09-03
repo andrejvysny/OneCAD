@@ -38,6 +38,7 @@ function makeEngineMock() {
     setSketchAnglePreview: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
+    setSketchProjectedIds: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
     getCameraDistance: vi.fn(() => 260),
     invalidate: vi.fn(),

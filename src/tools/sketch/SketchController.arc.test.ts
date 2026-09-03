@@ -64,6 +64,7 @@ function makeEngineMock() {
     setSketchAnglePreview: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
+    setSketchProjectedIds: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
     planePixelWorld: vi.fn(() => 1),
     // Isotropic 1px-per-unit metric: matches `planePixelWorld: 1` above, so a

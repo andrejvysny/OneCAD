@@ -17,6 +17,7 @@ import type { CadClient } from "@/ipc/client";
 import type {
   CurveParams,
   EnterSketchTarget,
+  ProjectionRefusal,
   GestureTarget,
   SketchConstraint,
   SketchConstraintType,
@@ -41,6 +42,17 @@ import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { applySketchSolveResult } from "./solveResult";
 import { promoteOne } from "@/ipc/promote";
+import { errorKind } from "@/ipc/apiError";
+import {
+  projectHint,
+  projectInit,
+  projectPickId,
+  projectRequests,
+  projectSummary,
+  projectToggle,
+  type ProjectPick,
+  type ProjectState,
+} from "./projectTool";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { buildSnapCache, computeSnapDecision, type SnapCandidateCache } from "./snapEngine";
 import {
@@ -101,6 +113,7 @@ import {
   flushSketchMutations,
   lockedEntityIds,
   offsetSketchChain,
+  rehydrateSketchSession,
   rejectConflictHint,
   trimEntity,
   LOCKED_GEOMETRY_HINT,
@@ -467,6 +480,17 @@ export class SketchController {
   // hover highlight + prompt only churn on an actual change, and so every
   // teardown path (`endPlanePick`) can drop them.
   private faceHover: FacePickTarget | null = null;
+  // Project-edges tool (WP-P): the accumulated body picks, and a re-entrancy
+  // guard so a second Enter cannot fire a second batch while the first is out.
+  private projectActive = false;
+  private projectState: ProjectState = projectInit();
+  private projectBusy = false;
+  // The composite id of the body sub-shape hovered while PROJECT-picking. Held
+  // for the same reason `faceHover` is: churn only on an actual change.
+  private projectHoverId: string | null = null;
+  // One-shot per SESSION: the projected-ellipse warning (see
+  // `maybeHintProjectedEllipse`). Reset wherever the session is.
+  private projectEllipseHinted = false;
 
   private downX = 0;
   private downY = 0;
@@ -839,6 +863,11 @@ export class SketchController {
       session.constraints,
       session.entityStates ?? {},
     );
+    // WP-P: a REUSED SketchObject (sketch→sketch switch) still holds the previous
+    // sketch's projected ids, so this is passed unconditionally — an empty list
+    // is the honest reset for a sketch with no projections.
+    this.deps.engine.setSketchProjectedIds(Object.keys(session.projections ?? {}));
+    this.projectEllipseHinted = false;
     viewportStore.getState().setProjection("ortho");
 
     this.selectMachine(toolStore.getState().sketchTool);
@@ -1206,6 +1235,153 @@ export class SketchController {
     sketchStore.getState().setSession(null);
   }
 
+  // ── Project edges (WP-P; SCHEMA §7.6 `ProjectToSketchPlane`) ─────────────
+
+  /** Publish the armed tool's status line (pick count included). */
+  private updateProjectHint(): void {
+    viewportStore.getState().setStatusHint(projectHint(this.projectState), { sticky: true });
+  }
+
+  /**
+   * Hover (or un-hover) one body sub-shape while project-picking.
+   *
+   * Routed through `selectionStore.setHover` for exactly the reason
+   * `setFaceHover` documents: ViewportRoot already drives the highlight layer
+   * from that store, and a second writer would be clobbered by the next
+   * selection event.
+   */
+  private setProjectHover(pick: ProjectPick | null): void {
+    const id = pick ? projectPickId(pick) : null;
+    if (this.projectHoverId === id) return;
+    this.projectHoverId = id;
+    const sel = selectionStore.getState();
+    if (!pick) {
+      sel.setHover(null);
+      return;
+    }
+    sel.setHover({
+      kind: pick.kind,
+      id: topoRefId(pick.bodyId, pick.topoKey),
+      bodyId: pick.bodyId,
+      topoKey: pick.topoKey,
+      elementId: pick.elementId,
+      anchor: { worldPoint: pick.worldPoint },
+    });
+  }
+
+  /** A click while Project is armed: toggle the body sub-shape under the cursor. */
+  private handleProjectClick(clientX: number, clientY: number): void {
+    const pick = projectPickFrom(this.deps.engine.probePick(clientX, clientY));
+    if (!pick) {
+      viewportStore
+        .getState()
+        .setStatusHint("Project — nothing pickable there; click a body edge or face", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    this.projectState = projectToggle(this.projectState, pick);
+    this.refreshProjectSelection();
+    this.updateProjectHint();
+  }
+
+  /** Mirror the held picks into the model selection, which is what tints them. */
+  private refreshProjectSelection(): void {
+    selectionStore.getState().set(
+      this.projectState.picks.map((p) => ({
+        kind: p.kind,
+        id: topoRefId(p.bodyId, p.topoKey),
+        bodyId: p.bodyId,
+        topoKey: p.topoKey,
+        elementId: p.elementId,
+        anchor: { worldPoint: p.worldPoint },
+      })),
+    );
+  }
+
+  /** Reverse everything the tool borrowed (idempotent): picks, hover, and the
+   *  model selection, which goes back to naming the sketch being edited. */
+  private endProjectTool(): void {
+    this.projectState = projectInit();
+    this.setProjectHover(null);
+    const sketchId = sketchStore.getState().session?.sketchId ?? null;
+    selectionStore.getState().set(sketchId ? [{ kind: "sketch", id: sketchId }] : []);
+  }
+
+  /**
+   * Enter with picks held: send one `projectToSketch` per (body, mode) group,
+   * re-hydrate the session, and report the batch in ONE line.
+   *
+   * Errors-as-values: a `stalePreview` means the head moved under the picks, so
+   * the honest answer is "pick again" rather than a retry against topology the
+   * user never looked at.
+   */
+  private async commitProjection(): Promise<void> {
+    const session = sketchStore.getState().session;
+    if (!session || this.projectBusy || this.projectState.picks.length === 0) return;
+    const requests = projectRequests(this.projectState, session.sketchId);
+    const sent = this.projectState.picks.length;
+    this.projectBusy = true;
+    try {
+      const refusals: ProjectionRefusal[] = [];
+      for (const req of requests) {
+        const result = await this.deps.client.projectToSketch(req);
+        refusals.push(...result.refusals);
+      }
+      this.projectState = projectInit();
+      if (this.disposed) return;
+      const refreshed = await rehydrateSketchSession(this.deps.client, session.sketchId);
+      if (this.disposed) return;
+      // Disarm BEFORE the hint: `selectMachine` publishes Select's own (empty)
+      // hint, which would wipe the answer if it ran after it.
+      this.disarmProject();
+      const summary = projectSummary(sent, refusals);
+      viewportStore
+        .getState()
+        .setStatusHint(summary.message, { severity: summary.severity, sticky: refusals.length > 0 });
+      this.maybeHintProjectedEllipse(refreshed);
+    } catch (e) {
+      if (this.disposed) return;
+      const stale = errorKind(e) === "stalePreview";
+      if (!stale) logError("sketch", "projectToSketch FAILED", { sketchId: session.sketchId, error: e });
+      this.disarmProject();
+      viewportStore.getState().setStatusHint(
+        stale
+          ? "The model changed while picking — pick again"
+          : `Project failed: ${sketchErr(e)}`,
+        { severity: "error", sticky: true },
+      );
+    } finally {
+      this.projectBusy = false;
+    }
+  }
+
+  /** Back to Select after a batch: `selectMachine` runs `endProjectTool`, which
+   *  drops the picks and hands the model selection back to the sketch. */
+  private disarmProject(): void {
+    if (toolStore.getState().mode === "sketch") toolStore.getState().setTool("select");
+  }
+
+  /**
+   * One-shot warning the first time a session carries a projected ELLIPSE: the
+   * solver never diagnoses an ellipse-bearing sketch, so its OverConstrained
+   * detection is off for the rest of this session and the user has to be told
+   * once rather than silently trusting a badge that stopped answering.
+   */
+  private maybeHintProjectedEllipse(session: SketchSession | null): void {
+    if (this.projectEllipseHinted || !session) return;
+    const projected = new Set(Object.keys(session.projections ?? {}));
+    if (!session.entities.some((e) => projected.has(e.id) && e.type === "Ellipse")) return;
+    this.projectEllipseHinted = true;
+    viewportStore
+      .getState()
+      .setStatusHint("Projected ellipse: OverConstrained detection is off for this sketch", {
+        severity: "error",
+        sticky: true,
+      });
+  }
+
   private selectMachine(tool: string): void {
     if (this.planePicking) return; // no drawing tool while picking a plane
     // Leaving the dimension tool tears down any in-flight chip/pick.
@@ -1232,6 +1408,9 @@ export class SketchController {
     ) {
       this.endSketchEditTool();
     }
+    // Leaving Project drops the accumulated body picks and gives the model
+    // selection back to the sketch (the tool borrows it to tint its picks).
+    if (this.projectActive && tool !== "project") this.endProjectTool();
 
     // LIVE_TOOL_MACHINES, not TOOL_MACHINES: the `withLiveDims` decorator is
     // transparent with no locks and no quantum (it passes the event through by
@@ -1251,6 +1430,7 @@ export class SketchController {
     this.mirrorActive = tool === "mirror";
     this.filletActive = tool === "sketchFillet";
     this.offsetActive = tool === "sketchOffset";
+    this.projectActive = tool === "project";
     // The dimension tool owns the pointer (no orbit) so clicks pick entities.
     this.deps.engine.setSketchDrawingActive(!!m || this.dimensionActive);
     this.deps.engine.setSketchPreview([]);
@@ -1293,6 +1473,11 @@ export class SketchController {
         toolChipStore.getState().setValue(v);
       });
       this.updateFilletHint();
+      return;
+    }
+    if (this.projectActive) {
+      this.projectState = projectInit();
+      this.updateProjectHint();
       return;
     }
     if (this.offsetActive) {
@@ -1701,6 +1886,20 @@ export class SketchController {
       this.setFaceHover(facePickFrom(this.deps.engine.probePick(e.clientX, e.clientY)));
       return;
     }
+    // Project-edges (WP-P) owns the pointer over BODY geometry, not over the
+    // sketch: the whole gesture is "point at the model". Same click-tool
+    // bookkeeping as the sketch-editing tools below — an LMB-held move past
+    // DRAG_PX is an orbit, and `wasClick` must reject it.
+    if (this.projectActive) {
+      if ((e.buttons & 1) !== 0) {
+        const far =
+          Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
+        if (this.downButton === 0 && far) this.moved = true;
+        return;
+      }
+      this.setProjectHover(projectPickFrom(this.deps.engine.probePick(e.clientX, e.clientY)));
+      return;
+    }
     if (this.selectActive) {
       this.onSelectPointerMove(e);
       return;
@@ -1852,6 +2051,10 @@ export class SketchController {
       }
       const face = facePickFrom(this.deps.engine.probePick(e.clientX, e.clientY));
       if (face) void this.confirmFacePick(face);
+      return;
+    }
+    if (this.projectActive) {
+      this.handleProjectClick(e.clientX, e.clientY);
       return;
     }
     if (this.dimensionActive) {
@@ -3644,6 +3847,25 @@ export class SketchController {
       e.preventDefault();
       return;
     }
+    if (e.key === "Escape" && this.projectActive && this.projectState.picks.length > 0) {
+      // Drop the half-made pick set here; the SECOND Esc falls through to the
+      // global ladder and leaves the tool (the Fillet rung order).
+      this.projectState = projectInit();
+      this.refreshProjectSelection();
+      this.setProjectHover(null);
+      this.updateProjectHint();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "Enter" && this.projectActive && this.projectState.picks.length > 0) {
+      // Enter COMMITS the batch. Claimed here (capture phase) so the global
+      // `finishSketch` shortcut never ends the sketch out from under a pick set.
+      void this.commitProjection();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
     if (e.key === "Escape" && this.dimensionActive && (this.dimState.ready || this.dimState.pending)) {
       // Cancel the in-flight dimension here; don't let the global Esc ladder run.
       this.cancelDimension();
@@ -3780,6 +4002,21 @@ function mergeCurves(
 /** A raw engine pick → a {@link FacePickTarget}, or null when it is not a face.
  *  Typed structurally so the controller never imports Three.js (`worldPos` is a
  *  `THREE.Vector3` on the engine side). */
+/** A `PickHit` → the project tool's own pick shape. Accepts BOTH kinds — a face
+ *  projects as its whole outline, an edge as itself (SCHEMA §7.6 modes). */
+function projectPickFrom(
+  hit: { bodyId: string; kind: string; topoKey: string; elementId?: string; worldPos: { x: number; y: number; z: number } } | null,
+): ProjectPick | null {
+  if (!hit || (hit.kind !== "face" && hit.kind !== "edge")) return null;
+  return {
+    bodyId: hit.bodyId,
+    kind: hit.kind,
+    topoKey: hit.topoKey,
+    elementId: hit.elementId,
+    worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z],
+  };
+}
+
 function facePickFrom(
   hit: { bodyId: string; kind: string; topoKey: string; elementId?: string; worldPos: { x: number; y: number; z: number } } | null,
 ): FacePickTarget | null {

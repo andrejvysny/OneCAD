@@ -303,6 +303,10 @@ export class SketchObject {
   private hovered = new Set<string>();
   /** The chain segment a live angle chip is measured against, or null. */
   private angleRefId: string | null = null;
+  /** Entity ids carrying projected-body provenance (`SketchSession.projections`,
+   *  WP-P). Projected geometry IS `referenceLocked`, so without its own set it
+   *  would be indistinguishable from a host-face boundary. */
+  private projectedIds = new Set<string>();
 
   // Shared line materials, by state.
   private readonly matUnder: LineMaterial;
@@ -312,6 +316,7 @@ export class SketchObject {
   private readonly matHover: LineMaterial;
   private readonly matConstruction: LineMaterial;
   private readonly matReference: LineMaterial;
+  private readonly matProjected: LineMaterial;
   private readonly matAngleRef: LineMaterial;
   private readonly matPreview: LineMaterial;
   private readonly matTrimGhost: LineMaterial;
@@ -471,6 +476,10 @@ export class SketchObject {
     // geometry, whereas reference geometry IS real (it bounds regions) — it just
     // is not YOURS to move. Colour carries the difference, not the stroke.
     this.matReference = mk(palette.sketchReference());
+    // SOLID for the same reason `matReference` is — projected geometry is real
+    // geometry that bounds regions. Its own colour is what says the shape came
+    // from a body whose next edit can move it (the `PROJECTION_STALE` path).
+    this.matProjected = mk(palette.sketchProjected());
     this.matAngleRef = mk(palette.sketchAngleRef());
     this.matPreview = mk(palette.sketchUnder(), { linewidth: PREVIEW_WIDTH, transparent: true, opacity: 0.9 });
     this.matTrimGhost = mk(palette.destructive(), { linewidth: TRIM_GHOST_WIDTH, transparent: true, opacity: 0.95 });
@@ -493,6 +502,7 @@ export class SketchObject {
       this.matHover,
       this.matConstruction,
       this.matReference,
+      this.matProjected,
       this.matAngleRef,
       this.matPreview,
       this.matTrimGhost,
@@ -528,6 +538,7 @@ export class SketchObject {
     this.matHover.color.copy(palette.hover3d());
     this.matConstruction.color.copy(palette.sketchConstruction());
     this.matReference.color.copy(palette.sketchReference());
+    this.matProjected.color.copy(palette.sketchProjected());
     this.matAngleRef.color.copy(palette.sketchAngleRef());
     this.matPreview.color.copy(palette.sketchUnder());
     this.matTrimGhost.color.copy(palette.destructive());
@@ -786,6 +797,22 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
+  /**
+   * REPLACE the set of entities drawn as projected body geometry (WP-P).
+   *
+   * Same no-churn discipline as `setEntityStates`: an equal set keeps every
+   * Line2 in place, because a session republish hands this the same ids on
+   * every solve write-back.
+   */
+  setProjectedIds(ids: Iterable<string>): void {
+    const next = new Set(ids);
+    const cur = this.projectedIds;
+    if (cur.size === next.size && [...next].every((id) => cur.has(id))) return;
+    this.projectedIds = next;
+    this.rebuildEntities();
+    this.deps.invalidate();
+  }
+
   private statusMaterial(): LineMaterial {
     switch (this.status) {
       case "FullyConstrained":
@@ -855,11 +882,13 @@ export class SketchObject {
         ? this.matHover
         : this.angleRefId === e.id
           ? this.matAngleRef
-          : e.referenceLocked
-            ? this.matReference
-            : e.construction
-              ? this.matConstruction
-              : this.stateMaterial(e.id);
+          : this.projectedIds.has(e.id)
+            ? this.matProjected
+            : e.referenceLocked
+              ? this.matReference
+              : e.construction
+                ? this.matConstruction
+                : this.stateMaterial(e.id);
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }

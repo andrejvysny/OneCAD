@@ -1,0 +1,5 @@
+# OneCAD: the codebase is 4-space / 100-col / pointer-left and is NOT clang-format managed.
+# A PostToolUse hook runs bare clang-format on edited C++; this file makes that a no-op so
+# an edit never reflows unrelated lines (recorded decision 2026-09-02, TODO.md § KERNEL HARDENING).
+DisableFormat: true
+SortIncludes: Never

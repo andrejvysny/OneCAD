@@ -1,0 +1,2 @@
+- [Frontend gotchas](frontend-gotchas.md) — engine test doubles, the five places a new tool must be registered, toolbarHidden, StatusSeverity has no "warning"
+- [Projection seams](projection-seams.md) — PROJECTION_STALE has no evidence, feature rows have no sketch id, why every projection verb re-enters the sketch

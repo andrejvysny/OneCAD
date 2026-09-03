@@ -1404,6 +1404,13 @@ export class ViewportEngine {
     this.sketch?.setEntityStates(states);
   }
 
+  /** REPLACE the set of sketch entities drawn as PROJECTED body geometry
+   *  (`SketchSession.projections`, WP-P). Passed on every session (re)hydration,
+   *  so an empty iterable is the honest reset for a sketch with no projections. */
+  setSketchProjectedIds(ids: Iterable<string>): void {
+    this.sketch?.setProjectedIds(ids);
+  }
+
   /** Endpoint/midpoint/centroid AFFORDANCE — full opacity per tier while that
    *  tier is relevant (hover, selection, or a point-relevant tool), dim/hidden
    *  otherwise. See `SketchObject.setPointAffordance` for the per-tier rules. */

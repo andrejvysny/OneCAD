@@ -254,11 +254,13 @@ impl DocumentSession {
     ///   exact for entities, constraints and positions regardless of the forward
     ///   ops (the net command's inverse never depends on a diff);
     /// * redo replays the net `SketchEdit`, whose ops full-replace the sketch body
-    ///   (remove every prior entity — cascading its constraints — then re-add the
-    ///   final entities and constraints in order), reconstructing the final sketch
-    ///   exactly. A full replace via existing variants is chosen over a minimal
-    ///   diff because it guarantees an order-exact redo without fragile per-field
-    ///   diffing (the brief's blessed "remove-all + re-add" alternative).
+    ///   (unlock the prior projected geometry so the remove is legal, remove every
+    ///   prior entity — cascading its constraints — then re-add the final
+    ///   entities and constraints in order and re-issue every final provenance
+    ///   row), reconstructing the final sketch exactly. A full replace via
+    ///   existing variants is chosen over a minimal diff because it guarantees an
+    ///   order-exact redo without fragile per-field diffing (the brief's blessed
+    ///   "remove-all + re-add" alternative). See [`squash_redo_ops`].
     ///
     /// A net-zero session (final sketch == `prior`, or the sketch no longer
     /// exists) pops the granular steps and pushes nothing. `count == 0` is a no-op
@@ -294,24 +296,18 @@ impl DocumentSession {
             // Sketch deleted mid-session (unexpected): leave the granular steps.
             return;
         };
+        // The provenance map is part of the net result: a session that only
+        // projected, updated or detached geometry leaves entities and constraints
+        // in place and changes nothing BUT `projections`, and calling that
+        // net-zero would drop the session from the undo stack entirely (WP-P F5).
         let net_zero = final_sketch.entities() == prior.entities()
-            && final_sketch.constraints() == prior.constraints();
+            && final_sketch.constraints() == prior.constraints()
+            && final_sketch.projections == prior.projections;
         if net_zero {
             self.undo.squash(count, None);
             return;
         }
-        let mut ops: Vec<SketchEditOp> = Vec::new();
-        for e in prior.entities() {
-            ops.push(SketchEditOp::RemoveEntity { entity: e.id() });
-        }
-        for e in final_sketch.entities() {
-            ops.push(SketchEditOp::AddEntity { entity: e.clone() });
-        }
-        for c in final_sketch.constraints() {
-            ops.push(SketchEditOp::AddConstraint {
-                constraint: c.clone(),
-            });
-        }
+        let ops = squash_redo_ops(&prior, final_sketch);
         let edit = AppliedEdit {
             forward: EditCommand::SketchEdit { sketch, ops },
             inverse: Inverse::RestoreSketch {
@@ -2787,6 +2783,85 @@ fn want_body(r: &InputRef) -> Result<BodyId, DomainError> {
     }
 }
 
+/// The redo command for a squashed sketch session: full-replace `prior`'s body
+/// with `final_sketch`'s, in ONE batch (WP-P F5).
+///
+/// Order is load-bearing. The unlock prefix comes first because the reference
+/// lock refuses `RemoveEntity`, so a session that started with projected geometry
+/// could otherwise never be redone at all. The provenance rows come last because
+/// `AddEntity` carries the entity's `referenceLocked` flag but NOT its row, and a
+/// redo that restored the geometry without the row would leave the user with
+/// locked curves that no longer track — or can be updated from — anything.
+///
+/// Only geometry [`is_projected_geometry`] permits is unlocked: the prefix must
+/// not become a way around the guard `apply_sketch_ops` enforces.
+fn squash_redo_ops(prior: &Sketch, final_sketch: &Sketch) -> Vec<SketchEditOp> {
+    let mut ops: Vec<SketchEditOp> = Vec::new();
+    for e in prior.entities() {
+        if e.is_reference_locked() && is_projected_geometry(prior, e.id()) {
+            ops.push(SketchEditOp::SetEntityReferenceLocked {
+                entity: e.id(),
+                locked: false,
+            });
+        }
+    }
+    for e in prior.entities() {
+        ops.push(SketchEditOp::RemoveEntity { entity: e.id() });
+    }
+    for e in final_sketch.entities() {
+        ops.push(SketchEditOp::AddEntity { entity: e.clone() });
+    }
+    for c in final_sketch.constraints() {
+        ops.push(SketchEditOp::AddConstraint {
+            constraint: c.clone(),
+        });
+    }
+    for (entity, source) in &final_sketch.projections {
+        ops.push(SketchEditOp::SetEntityProjection {
+            entity: *entity,
+            source: Some(source.clone()),
+        });
+    }
+    ops
+}
+
+/// Whether `entity` is part of `sketch`'s PROJECTED reference geometry: a curve
+/// with a provenance row, or a point one of those curves is built from.
+///
+/// The points carry no row of their own — the merge that closes an outline gives
+/// a shared corner no single source — so they have to be recognised through the
+/// curves that name them, or a detach could never free them.
+fn is_projected_geometry(sketch: &Sketch, entity: crate::ids::EntityId) -> bool {
+    sketch.projections.contains_key(&entity)
+        || sketch.projections.keys().any(|owner| {
+            sketch
+                .get_entity(*owner)
+                .is_some_and(|e| e.referenced_entities().contains(&entity))
+        })
+}
+
+/// The unlock guard (WP-P F11): `SetEntityReferenceLocked { locked: false }` is
+/// legal only for geometry the sketch holds as PROJECTED reference geometry.
+///
+/// `sketch_upsert` takes a `Vec<SketchEditOp>` straight from the frontend, so
+/// without this the one named exit from the lock is an exit for ANY locked
+/// entity — including a sketch-on-face's host boundary, which carries no
+/// provenance row and exists precisely so the profile cannot be dragged off the
+/// face it was authored against.
+///
+/// Judged against `prior`, the sketch as it was at the START of the batch,
+/// because a detach clears the provenance row and unlocks in ONE transaction and
+/// an update unlocks, moves and re-locks in another.
+fn guard_unlock(prior: &Sketch, entity: crate::ids::EntityId) -> Result<(), DomainError> {
+    if is_projected_geometry(prior, entity) {
+        return Ok(());
+    }
+    Err(DomainError::Validation(format!(
+        "entity {entity} is reference-locked host geometry, not a projection — only a projected \
+         entity (or a point one is built from) can be unlocked"
+    )))
+}
+
 /// Applies a batch of sketch edits to a copy of `prior`, preserving entity /
 /// constraint order (SetDimension/SetEntityPositions mutate in place). Validation
 /// (dup id / dangling ref) runs on the rebuilt sketch via its `add_*` API.
@@ -2803,6 +2878,7 @@ fn want_body(r: &InputRef) -> Result<BodyId, DomainError> {
 /// the named exit from the lock (WP-P detach). Everything else stays absolute, so
 /// unlocking is always an explicit, undoable step and never a side effect. Ops
 /// apply IN ORDER, so a batch may unlock and then edit within one transaction.
+/// The exit is SCOPED by [`guard_unlock`] — only projected geometry may take it.
 fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, DomainError> {
     let mut entities: Vec<SketchEntity> = prior.entities().to_vec();
     let mut constraints: Vec<Constraint> = prior.constraints().to_vec();
@@ -2875,6 +2951,9 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
                 *e = entity_with_construction(e, *construction);
             }
             SketchEditOp::SetEntityReferenceLocked { entity, locked } => {
+                if !*locked {
+                    guard_unlock(prior, *entity)?;
+                }
                 let e = entities
                     .iter_mut()
                     .find(|e| e.id() == *entity)
@@ -3548,7 +3627,11 @@ mod tests {
     /// unlock and then edit in the same transaction (ops apply in order).
     #[test]
     fn the_unlock_op_is_the_only_way_out_of_reference_locked() {
-        let s = locked_sketch();
+        // The exit is scoped to PROJECTED geometry (F11), so the circle carries a
+        // provenance row — exactly what a detach unlocks.
+        let mut s = locked_sketch();
+        s.projections
+            .insert(eid(3), projected_source("aaaaaaaaaaaaaaaa"));
 
         // Unlock alone — the flag flips, nothing else moves.
         let unlocked = apply_sketch_ops(
@@ -3598,6 +3681,61 @@ mod tests {
             ],
         )
         .is_err());
+    }
+
+    /// WP-P F11: the exit from the lock is SCOPED. `sketch_upsert` takes ops
+    /// straight from the frontend, so an unlock that any locked entity could take
+    /// would let the host boundary of a sketch-on-face be dragged off its face.
+    #[test]
+    fn the_unlock_op_refuses_geometry_that_is_not_projected() {
+        let s = locked_sketch(); // locked host geometry, NO provenance rows
+        let unlock = |entity| {
+            apply_sketch_ops(
+                &s,
+                &[SketchEditOp::SetEntityReferenceLocked {
+                    entity,
+                    locked: false,
+                }],
+            )
+        };
+        for entity in [eid(3), eid(1)] {
+            let err = unlock(entity).expect_err("unlocking host geometry is refused");
+            assert!(
+                matches!(&err, DomainError::Validation(m) if m.contains("not a projection")),
+                "got {err:?}"
+            );
+        }
+
+        // The SAME entity, once it is projected: allowed — and so is the point it
+        // is built from, which carries no row of its own (the merge gives a shared
+        // corner no single source).
+        let mut projected = s.clone();
+        projected
+            .projections
+            .insert(eid(3), projected_source("aaaaaaaaaaaaaaaa"));
+        for entity in [eid(3), eid(1)] {
+            assert!(
+                apply_sketch_ops(
+                    &projected,
+                    &[SketchEditOp::SetEntityReferenceLocked {
+                        entity,
+                        locked: false,
+                    }],
+                )
+                .is_ok(),
+                "projected geometry and its points stay unlockable ({entity})"
+            );
+        }
+
+        // Re-LOCKING is never guarded: an update unlocks, moves and re-locks.
+        assert!(apply_sketch_ops(
+            &s,
+            &[SketchEditOp::SetEntityReferenceLocked {
+                entity: eid(2),
+                locked: true,
+            }],
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3803,6 +3941,153 @@ mod tests {
             .unwrap(),
             wire,
             "serialization is byte-stable against the documented shape"
+        );
+    }
+
+    /// WP-P F5: a squashed sketch session redoes into the same sketch it undid
+    /// from — provenance rows and reference locks included — and a session that
+    /// STARTED with projected locked geometry replays at all.
+    #[test]
+    fn squash_redo_restores_projections_and_replays_over_locked_geometry() {
+        use crate::document::Document;
+        use crate::ids::DocumentId;
+
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        session
+            .apply(EditCommand::AddSketch {
+                sketch: base_sketch(),
+            })
+            .unwrap();
+        let prior = session.document().sketch(sid()).unwrap().clone();
+        let watermark = session.undo_depth();
+
+        // One session step that PROJECTS: two locked points, a locked line, and
+        // the provenance row that makes the line a projection.
+        let (p0, p1, line) = (eid(60), eid(61), eid(62));
+        session
+            .apply(EditCommand::SketchEdit {
+                sketch: sid(),
+                ops: vec![
+                    SketchEditOp::AddEntity {
+                        entity: SketchEntity::point(p0, Vec2::new_unchecked(0.0, 0.0), false, true),
+                    },
+                    SketchEditOp::AddEntity {
+                        entity: SketchEntity::point(p1, Vec2::new_unchecked(9.0, 0.0), false, true),
+                    },
+                    SketchEditOp::AddEntity {
+                        entity: SketchEntity::line(line, p0, p1, false).with_reference_locked(true),
+                    },
+                    SketchEditOp::SetEntityProjection {
+                        entity: line,
+                        source: Some(projected_source("aaaaaaaaaaaaaaaa")),
+                    },
+                ],
+            })
+            .unwrap();
+        let count = session.undo_depth() - watermark;
+        session.squash_sketch_session(sid(), prior, count);
+
+        assert!(session.undo().is_some(), "undo the whole session");
+        assert!(
+            session
+                .document()
+                .sketch(sid())
+                .unwrap()
+                .projections
+                .is_empty(),
+            "undo restores the pre-session sketch verbatim"
+        );
+
+        session
+            .redo()
+            .expect("the net sketch edit replays")
+            .expect("a step to redo");
+        let redone = session.document().sketch(sid()).unwrap().clone();
+        assert_eq!(
+            redone
+                .projections
+                .get(&line)
+                .map(|s| s.projected_hash.as_str()),
+            Some("aaaaaaaaaaaaaaaa"),
+            "the redo restores the provenance ROW, not just the geometry"
+        );
+        assert!(
+            redone.get_entity(line).unwrap().is_reference_locked(),
+            "…and the lock that goes with it"
+        );
+
+        // A SECOND session, this time starting FROM projected locked geometry: the
+        // redo's remove-all prelude has to unlock it or the replay is refused.
+        let watermark = session.undo_depth();
+        session
+            .apply(EditCommand::SketchEdit {
+                sketch: sid(),
+                ops: vec![SketchEditOp::AddEntity {
+                    entity: SketchEntity::point(
+                        eid(63),
+                        Vec2::new_unchecked(4.0, 4.0),
+                        false,
+                        false,
+                    ),
+                }],
+            })
+            .unwrap();
+        let count = session.undo_depth() - watermark;
+        session.squash_sketch_session(sid(), redone, count);
+        assert!(session.undo().is_some());
+        session
+            .redo()
+            .expect("a session over prior locked geometry redoes without error")
+            .expect("a step to redo");
+        let redone = session.document().sketch(sid()).unwrap();
+        assert!(
+            redone.get_entity(eid(63)).is_some(),
+            "the session's own edit"
+        );
+        assert!(
+            redone.projections.contains_key(&line),
+            "the pre-existing projection survives the replay"
+        );
+        assert!(redone.get_entity(line).unwrap().is_reference_locked());
+    }
+
+    /// A session that only moved the provenance map is NOT net-zero: squashing it
+    /// away would drop an `update_projection` / `detach_projection` out of the
+    /// undo stack entirely (WP-P F5).
+    #[test]
+    fn a_projection_only_session_is_not_net_zero() {
+        use crate::document::Document;
+        use crate::ids::DocumentId;
+
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        let mut seeded = base_sketch();
+        seeded.projections.insert(eid(3), projected_source("aaaa"));
+        session
+            .apply(EditCommand::AddSketch { sketch: seeded })
+            .unwrap();
+        let prior = session.document().sketch(sid()).unwrap().clone();
+        let watermark = session.undo_depth();
+        session
+            .apply(EditCommand::SketchEdit {
+                sketch: sid(),
+                ops: vec![SketchEditOp::SetEntityProjection {
+                    entity: eid(3),
+                    source: None,
+                }],
+            })
+            .unwrap();
+        let count = session.undo_depth() - watermark;
+        session.squash_sketch_session(sid(), prior, count);
+        assert_eq!(session.undo_depth(), watermark + 1, "one squashed step");
+        assert!(session.undo().is_some());
+        assert!(
+            session
+                .document()
+                .sketch(sid())
+                .unwrap()
+                .projections
+                .contains_key(&eid(3)),
+            "the detach is undoable — it was not squashed away as net-zero"
         );
     }
 

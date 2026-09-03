@@ -2,49 +2,37 @@
 
 Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
 
-## NOW — KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
+## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
-Last verified: 2026-09-02 12:41 — `master`, DIRTY: two uncommitted programs interleaved
-(this one + Session 23's WP-P; see HANDOFF.md § Session 24 for the split). No commits this session.
+Last verified: 2026-09-03 10:30 — `master`; commits A `bd4b6c5` (kernel hardening WP-C/D/A/E) and
+B `da01b3f` (WP-P worker+Rust+P2b) PUSHED; commit C (WP-P P3 frontend + the WP-P Rust fix round +
+hygiene) staged for commit after the final cargo re-run — see TODO.md § KERNEL HARDENING § Now.
 
-- **Changed by this program:** worker `ops/{OpCommon.cpp,.h,BooleanOp,ExtrudeOp,RevolveOp,MirrorOp,
-  HoleOp,TransformOp,PatternOp,ComponentOp}.cpp`, `kernel/validation/{ShapeAudit.cpp,.h,
-  GeometryPrecision.cpp}`, `elementmap/{ElementMapPartition.cpp,.h,Ladder.cpp,Scoring.cpp,.h}`,
-  `kernel/elementmap/ElementMap.h`, `session/ElementIdentity.cpp`; tests
-  `test_extrude_boolean_modes.cpp` (new), `test_commit_tier_validation.cpp` (new, unbuilt),
-  `test_wp6_ladder.cpp`, `test_wp5_partition_history.cpp`, `test_preview_op.cpp`,
-  `test_revolve_boolean_modes.cpp`, fixtures `resolve_refs`/`executeplan_needsrepair`
-  (`scoringVersion` 4), `worker/tests/CMakeLists.txt` (two add_test blocks appended);
-  protocol `SCHEMA.md` (§7.2, §7.3 Extrude/Boolean/Revolve/Mirror, §9, §10, §14 ×3),
-  `fixtures/extrude_add_disjoint_refusal.ndjson` (new), `fixtures/publication_refusal.ndjson`;
-  Rust `regen/planner.rs` (`edited_from` claims 0), tests `hole_ops.rs`, `topology_rebind.rs`,
-  `face_color_reopen.rs`, `step_export_attributes.rs`; FE `PreviewMesh.ts`,
-  `ModelToolController.ts` (symmetric head), `ExtrudeChipControls.tsx` (ThroughAll gate),
-  two FE tests; ledger `TODO.md`, this file, `HANDOFF.md`.
-- **Gate measured BEFORE WP-E was written (main thread):** ctest **166/166** ·
-  `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **93 targets / 1471 / 0** ·
-  vitest **311 files / 5502 passed / 78 skipped** · tsc/clippy/fmt/hex/hygiene/verifiers clean ·
-  Playwright chromium targeted 2/2 · full `bun run e2e` **in flight: 295 passed / 0 failed**
-  (chromium done, webkit running) — log `scratchpad/e2e_gate.log` · sidecar restaged (pre-WP-E).
-- **WP-E BUILT, FIXED, REVIEWED, GATED (evening session, plan
-  `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`):** did not compile as written
-  (missing include); fix-round for cancel propagation + `stage_boolean()` non-destructive
-  auxiliary BOPs; **ruling D3b** — Tier B only where NEW geometry is published, Tier A kept for
-  isometries (TransformBody, unfused Mirror/Pattern children) and `generator` components after
-  `test_component_ops` ran > 5 min in `BOPAlgo_CheckerSI` on a modeled thread face; protocol
-  audit `approve` after 4 blockers + code fixes (cancel on 5 pre-existing Tier B sites,
-  non-destructive `PrepareOffsetFace`/`ExportGeometry`, prose, 2 cross-track fixtures);
-  adversarial review 4 HIGH fixed red-first (edge-extrema crosses-axis classifier, 0.01 mm
-  anchor-decisive threshold, fallback lane drops `editedFrom: 0`, h6a pins WHICH corner);
-  SG90 ingest regression fixed (Boolean ceiling from the worse input). ctest 168/168. Full
-  cargo / vitest / e2e in flight — rows in TODO.md § KERNEL HARDENING. **Also landed: WP-P P2b**
-  (`SketchSessionDto.projections` provenance) so P3 can survive a reload.
-- **Key decisions:** non-touching Add / empty Cut REFUSE by name (never split / silent delete);
-  Symmetric distance is the TOTAL; ThroughAll needs a target; resolverVersion 4 = signed
-  `outward` + sub-shape anchor + anchor-decisive tie-break (relative anchor REJECTED — see
-  HANDOFF dead-ends); every committed NewBody is Tier B (WP-E, unverified); no dynamic workflows.
-- **Blockers:** none technical. `document_runtime.rs` is under concurrent WP-P edit — the redo
-  claim and the `finish_sketch` reorder wait for coordination.
+- **Kernel hardening WP-C/D/A/E:** landed, protocol-audited (`approve`), adversarially reviewed
+  (4 HIGH fixed red-first), gated, committed, pushed. Ruling D3b: Tier B where NEW geometry is
+  published; Tier A for isometries and `generator` components; ImportStep on the import health
+  policy. Open: Rust `policyVersions.resolverVersion` stays 1 vs worker `scoringVersion` 4
+  (v3-minted checkpoint partitions under v4 scoring); does repair rewrite the frozen anchor;
+  `describe(shape, body)` O(E²) map rebuild; offline Tier B census of generator outputs; WP-E.2
+  items (§14 "Deferred").
+- **WP-P project edges:** complete end to end. The late adversarial review of the Rust half found
+  a BLOCKER (positional `sourceOrdinal` re-association) — fixed with per-source run guards
+  (count / ordinal set / permutation incl. reversed walk → `topologyChanged`, rows stay stale),
+  shared-corner claim conflicts, `SketchId`-keyed staleness, row-hash + count fencing, cancel-aware
+  post-publish probe, unlocked rebind, RMW fence on update, squash-preserved provenance, scoped
+  unlock, strict wire parse, `alreadyProjected`. Frontend: `j` tool, projected marker, banner
+  with Update/Detach, honest mock, e2e. Follow-ups in TODO.md (partial detach → source
+  un-updatable by design; plain sketch-on-face redo still refused — pre-existing).
+- **Gate for commit C (2026-09-03):** cargo 93 / 1485 / 0 · ctest 168/168 · vitest 315 / 5544 / 78 ·
+  e2e 516 / 0 · clippy on 1.97 AND 1.98 · fmt/hex/verifiers/hygiene clean.
+- **CI:** GitHub stable moved to Rust 1.98 (new lint, fixed); two CI-only e2e reds
+  (`constraint-badge-standoff` — a measurement race now fixed in the spec; `sketch-snap-composition
+  :172` webkit — passes locally, re-running); `tauri-composition` times out building OCCT;
+  `linux-worker` self-hosted runner offline (the run had to be cancelled by hand to re-run jobs).
+- **Next (plan § D/E):** WP-B region identity by anchor + robust detection + honest solve (probes
+  P-B1..P-B4 first; briefs drafted in the session scratchpad) → WP-F chamfer reference face.
+  User-run gates unchanged (19-row checklist, Tauri smoke incl. project edges, dirty vendor STEP,
+  WP-X dogfood with the default parts).
 
 ## NOW — DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
 
@@ -95,21 +83,12 @@ Last verified: 2026-09-02 12:41 — `master`, DIRTY: two uncommitted programs in
   (`cf8f35ac…`); fixture `hole_threaded.ndjson` with the identical-matcher trick.
   Combined tip gate: ctest 161/161 · cargo 92/1433/0 · vitest 5500/0 · e2e **514/0** ·
   kernelbench 136 unchanged.
-- **WP-P project edges — PAUSED at the user's order, two of three packages landed,
-  UNCOMMITTED:** P1 worker (`EdgeProjector` + snapshot-fenced `ProjectToSketchPlane`,
-  SCHEMA §7.6/§8/§14, fixture rounds A–L, ctest **164/164**, cross-process byte-identical
-  transcripts) and P2 Rust (`Sketch.projections` provenance, B2 unlock + provenance
-  `SketchEditOp`s, `project_to_sketch` / `update_projection` / `detach_projection` commands,
-  ordered `RegenPostPublish` staleness → `PROJECTION_STALE`, §7.5 re-bind before update,
-  real-worker `project_edges` **3/3** — re-verified by the orchestrator on the final tree,
-  `cargo --workspace` 1469/0, coverage 32 rows) are green by their own package gates.
-  **Owed to close WP-P:** the FE package (P3 — `project` tool on `j`, CMD/DTOs per
-  `TODO.md` § WP-P2 record, mock honesty, stale badge + first-ellipse hint, e2e), an
-  adversarial review of the staleness/re-bind half, the orchestrator-run FULL L3 over the
-  combined tree, and the commit. `TODO.md` § "WP-P project edges" holds every decision,
-  deviation, found defect (incl. two pre-existing: `squash_sketch_session` vs
-  reference-locked sketches; worker IO under the runtime lock in the promotion/rebind
-  precedents) and the accepted region-split consequence.
+- **WP-P project edges — COMPLETE pending the commit-C gate (2026-09-03):** P1 worker + P2 Rust +
+  P2b provenance DTO are on `master` as `da01b3f`; P3 FE (tool `j`, projected marker, stale
+  banner with Update/Detach, honest mock, e2e) plus the `PROJECTION_STALE` evidence and the
+  coverage row are in the tree for commit C (full L3 running). Adversarial review of the Rust
+  staleness/re-bind half is running (it was owed before commit B — process deviation recorded).
+  Full record: TODO.md § "WP-P project edges".
 - **Session flake/infra notes:** one Opus subagent hit the account's monthly spend limit
   mid-run (429) and recovered on retry; `linux-worker` CI stayed queued all day (self-hosted
   runner offline) and `tauri-composition` cancels at its 95-min timeout building OCCT.

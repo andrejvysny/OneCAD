@@ -6,6 +6,7 @@ import { useViewportStore } from "@/stores/viewportStore";
 import { useDocumentStore } from "@/stores/documentStore";
 import { runAction } from "@/shortcuts/useShortcuts";
 import { SketchErrorPulse } from "./SketchErrorPulse";
+import { ProjectionBanner } from "./ProjectionBanner";
 
 /**
  * Sketch chrome row (prototype 1c), shown only in sketch mode, second row of
@@ -81,6 +82,7 @@ export function SketchChromeBar() {
   const dof = sketch?.dof ?? 0;
 
   return (
+    <>
     <div className="flex h-[38px] items-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
       <SketchErrorPulse />
       <Icon
@@ -118,5 +120,10 @@ export function SketchChromeBar() {
         Finish sketch
       </Button>
     </div>
+    {/* Second chrome row, present only while the open sketch holds projected
+        body geometry (WP-P). A plain child, not a contribution — see its own
+        doc comment for why. */}
+    <ProjectionBanner />
+    </>
   );
 }

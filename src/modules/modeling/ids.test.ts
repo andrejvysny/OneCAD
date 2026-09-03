@@ -20,9 +20,11 @@ describe("modeling id maps", () => {
     // toolbar-only opt-out, so the toolbar CONTRACT is a subset of the id map.
     const visibleModel = MODEL_TOOL_DESCRIPTORS.filter((d) => !d.toolbarHidden).map((d) => d.tool);
     expect(visibleModel.sort()).toEqual(contractTools(MODEL_TOOLS_CONTRACT).sort());
-    expect(Object.keys(ModelingSketchTools).sort()).toEqual(
-      contractTools(SKETCH_TOOLS_CONTRACT).sort(),
-    );
+    // The sketch side reads the SAME opt-out (it used to compare the raw id map,
+    // which only agreed while no sketch tool was hidden — Project-edges is the
+    // first one that is, WP-P).
+    const visibleSketch = SKETCH_TOOL_DESCRIPTORS.filter((d) => !d.toolbarHidden).map((d) => d.tool);
+    expect(visibleSketch.sort()).toEqual(contractTools(SKETCH_TOOLS_CONTRACT).sort());
   });
 
   it("agree with the descriptor tables", () => {

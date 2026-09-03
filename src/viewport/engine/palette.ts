@@ -34,6 +34,7 @@ export type TokenName =
   | "--color-ink"
   | "--color-ink-5"
   | "--color-sketch-reference"
+  | "--color-sketch-projected"
   | "--color-accent"
   | "--color-sel-bg"
   | "--color-sel-text"
@@ -74,6 +75,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-ink": "rgb(27, 29, 33)",
     "--color-ink-5": "rgb(138, 145, 156)",
     "--color-sketch-reference": "rgb(107, 122, 143)",
+    "--color-sketch-projected": "rgb(61, 139, 156)",
     "--color-accent": "rgb(46, 111, 224)",
     "--color-sel-bg": "rgb(225, 235, 251)",
     "--color-sel-text": "rgb(29, 79, 168)",
@@ -111,6 +113,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-ink": "rgb(232, 234, 237)",
     "--color-ink-5": "rgb(127, 135, 145)",
     "--color-sketch-reference": "rgb(139, 155, 176)",
+    "--color-sketch-projected": "rgb(108, 182, 198)",
     "--color-accent": "rgb(77, 139, 240)",
     "--color-sel-bg": "rgb(29, 49, 87)",
     "--color-sel-text": "rgb(156, 194, 255)",
@@ -240,6 +243,9 @@ export const palette = {
   sketchConstruction: () => tokenColor("--color-ink-5"),
   /** Host-face reference geometry (`referenceLocked`) — SOLID, recessive. */
   sketchReference: () => tokenColor("--color-sketch-reference"),
+  /** Body geometry PROJECTED into the sketch (`SketchSession.projections`) —
+   *  locked like reference geometry, but its source can still move. */
+  sketchProjected: () => tokenColor("--color-sketch-projected"),
   /** Conflicting / over-constrained geometry. */
   sketchConflict: () => tokenColor("--color-warn"),
   /** Sketch plane tint quad + sketch canvas background. */

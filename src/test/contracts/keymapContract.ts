@@ -16,6 +16,14 @@
  * gains ⇧X = `toggleSection`. ⇧X was free in BOTH tables; sketch mode's plain
  * `x` (construction) is untouched, and neither action is a `tool`, so the
  * cross-mode fallback cannot carry either one into the other mode.
+ *
+ * AMENDED 2026-09-01 (Project edges WP, a deliberate PRODUCT change, not a probe
+ * fix — the recorded decision "Project edges (sketch) `j`" in TODO.md § DAILY
+ * DRIVER v2 2026-09-01): the sketch table gains `j` = the `project` tool. `j`
+ * was free in BOTH tables and nothing existing moved. It is a `tool` action and
+ * deliberately NOT in `NO_CROSS_MODE`, so a model-mode `j` still falls through
+ * to it — `activateTool` lists `project` in SKETCH_ONLY, so that press enters a
+ * sketch with the tool armed, exactly like `l` or `c`.
  */
 import type { KeyBinding } from "@/shortcuts/keymap";
 import type { Tool } from "@/stores/toolStore";
@@ -59,6 +67,7 @@ export const SKETCH_KEYS_CONTRACT: readonly KeyBinding[] = [
   { key: "m", action: { type: "tool", tool: "mirror" } },
   { key: "f", action: { type: "tool", tool: "sketchFillet" } },
   { key: "o", shift: true, action: { type: "tool", tool: "sketchOffset" } },
+  { key: "j", action: { type: "tool", tool: "project" } },
   { key: "x", action: { type: "toggleConstruction" } },
   { key: "Delete", action: { type: "deleteSketchSelection" } },
   { key: "Backspace", action: { type: "deleteSketchSelection" } },

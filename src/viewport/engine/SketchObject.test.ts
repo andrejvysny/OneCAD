@@ -206,6 +206,52 @@ describe("SketchObject — per-entity constrained state (SCHEMA §7.4)", () => {
     obj.dispose();
   });
 
+  it("PROJECTED geometry outranks referenceLocked and the solver state (WP-P)", () => {
+    // Projected geometry IS `referenceLocked`, so the two colors would be
+    // indistinguishable without its own rung — and the whole point of the marker
+    // is telling a host-face boundary apart from geometry cut off a body that
+    // can still move underneath it.
+    const { obj, root } = build([seg("host", true), seg("proj", true)]);
+    obj.setEntityStates({ host: "fullyConstrained", proj: "fullyConstrained" });
+    obj.setProjectedIds(["proj"]);
+    const colors = colorsOf(root, ["host", "proj"]);
+    expect(colors.get("proj")).toBe(palette.sketchProjected().getHex());
+    expect(colors.get("host")).toBe(palette.sketchReference().getHex());
+    expect(colors.get("proj")).not.toBe(colors.get("host"));
+    obj.dispose();
+  });
+
+  it("hover and the angle reference still outrank PROJECTED", () => {
+    const { obj, root } = build([seg("hov", true), seg("ang", true), seg("proj", true)]);
+    obj.setProjectedIds(["hov", "ang", "proj"]);
+    obj.setHover(["hov"]);
+    obj.setAngleReference("ang");
+    const colors = colorsOf(root, ["hov", "ang", "proj"]);
+    expect(colors.get("hov")).toBe(palette.hover3d().getHex());
+    expect(colors.get("ang")).toBe(palette.sketchAngleRef().getHex());
+    expect(colors.get("proj")).toBe(palette.sketchProjected().getHex());
+    obj.dispose();
+  });
+
+  it("REPLACES the projected set, and an equal set rebuilds nothing", () => {
+    const root = new THREE.Object3D();
+    const invalidate = vi.fn();
+    const obj = new SketchObject({ sketchRoot: root, invalidate });
+    obj.setSession(IDENTITY_PLANE, [seg("a", true)], "UnderConstrained");
+    obj.setProjectedIds(["a"]);
+    const built = entityLines(root)[0];
+    invalidate.mockClear();
+
+    obj.setProjectedIds(["a"]); // a session republish hands back the same ids
+    expect(entityLines(root)[0]).toBe(built);
+    expect(invalidate).not.toHaveBeenCalled();
+
+    obj.setProjectedIds([]); // detached — back to plain locked reference geometry
+    expect(colorsOf(root, ["a"]).get("a")).toBe(palette.sketchReference().getHex());
+    expect(invalidate).toHaveBeenCalled();
+    obj.dispose();
+  });
+
   it("selection still HALOS rather than replacing a per-entity color", () => {
     const { obj, root } = build([seg("a")]);
     obj.setEntityStates({ a: "conflicting" });

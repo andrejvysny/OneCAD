@@ -54,6 +54,9 @@ import type {
   AnalyzeEdgeOpRangeResult,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
+  ProjectToSketchRequest,
+  ProjectToSketchResult,
+  DetachProjectionResult,
   PromotedElement,
   SketchPlane,
   PromotePick,
@@ -758,6 +761,35 @@ export interface CadClient {
    * range.
    */
   analyzeEdgeOpRange(req: AnalyzeEdgeOpRangeRequest): Promise<AnalyzeEdgeOpRangeResult>;
+
+  // ── Body-edge projection into a sketch (SCHEMA §7.6 `ProjectToSketchPlane`,
+  //    WP-P; Rust `project_to_sketch` / `update_projection` / `detach_projection`) ─
+
+  /**
+   * Projects picked body edges (or a picked face's whole boundary) into an
+   * EXISTING sketch as locked reference geometry (SCHEMA §7.6
+   * `ProjectToSketchPlane`). Snapshot-fenced like `promoteSelection` — a stale
+   * `snapshotId` is refused rather than answered against different topology.
+   *
+   * A per-source REFUSAL rides inside the result (`refusals[]`), never as a
+   * rejection — one dead pick in a batch must not void the rest.
+   */
+  projectToSketch(req: ProjectToSketchRequest): Promise<ProjectToSketchResult>;
+
+  /**
+   * Re-runs the projection for a sketch's already-projected sources and
+   * replaces the entities whose geometry actually moved, in one undoable edit.
+   * A source whose re-projection came back a different shape (or gone) is
+   * reported as a `topologyChanged` refusal, not guessed at.
+   */
+  updateProjection(sketchId: string): Promise<ProjectToSketchResult>;
+
+  /**
+   * Unlocks previously projected entities and drops the `Fixed` pins that held
+   * them, in one undoable transaction. `entityIds` selects a subset; omitted
+   * detaches every projection the sketch has.
+   */
+  detachProjection(sketchId: string, entityIds?: string[]): Promise<DetachProjectionResult>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

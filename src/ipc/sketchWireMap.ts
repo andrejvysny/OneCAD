@@ -42,6 +42,7 @@ import type {
   SketchConstraintType,
   SketchEntity,
   ProjectedSource,
+  ProjectedEntity,
   SketchEntityStates,
   SketchPlaneKind,
 } from "./types";
@@ -1363,6 +1364,32 @@ export function frontendProjections(
   for (const [uuid, source] of Object.entries(dto)) {
     const id = byUuid.get(uuid);
     if (id) out[id] = source;
+  }
+  return out;
+}
+
+/**
+ * Re-key freshly-projected entities (`ProjectToSketchDto.entities` /
+ * `DetachProjectionDto`-adjacent `project_to_sketch` / `update_projection`
+ * results, WP-P) from backend ENTITY uuids to frontend ids. Same drop-unknown
+ * rule as `frontendProjections`: a uuid the id-map does not (yet) know about is
+ * dropped rather than guessed at — it becomes known the next time the sketch is
+ * hydrated (`enterSketch`/`getSketch` reseeds `map.entity` from the wire), which
+ * is also when `frontendProjections` starts reporting its provenance row.
+ * Without an id-map (a sketch that has never been entered) the frontend ids ARE
+ * the backend uuids, so the array passes through unchanged.
+ */
+export function frontendProjectedEntities(
+  map: SketchIdMap | undefined,
+  entities: ProjectedEntity[],
+): ProjectedEntity[] {
+  if (!map) return [...entities];
+  const byUuid = new Map<string, string>();
+  for (const [frontendId, uuid] of map.entity) if (!byUuid.has(uuid)) byUuid.set(uuid, frontendId);
+  const out: ProjectedEntity[] = [];
+  for (const entity of entities) {
+    const id = byUuid.get(entity.entityId);
+    if (id) out.push({ ...entity, entityId: id });
   }
   return out;
 }

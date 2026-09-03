@@ -266,6 +266,79 @@ export interface ProjectedSource {
   projectedHash: string;
 }
 
+// ── Body-edge projection into a sketch (SCHEMA §7.6 `ProjectToSketchPlane`,
+//    WP-P; Rust commands `project_to_sketch` / `update_projection` /
+//    `detach_projection`, `src-tauri/src/api/mod.rs`) ─────────────────────────
+
+/** Whether a pick projects as its own edge, or as the whole boundary of a
+ *  picked planar face. */
+export type ProjectionMode = "edges" | "faceOutline";
+
+/** SCHEMA §7.6 `ProjectToSketchPlane` refusal reasons. The first six are worker
+ *  codes; `topologyChanged` is Rust-minted (`update_projection` re-projection). */
+export type ProjectionRefusalCode =
+  | "absent"
+  | "kindMismatch"
+  | "unsupportedCurve"
+  | "trimmedTiltedArc"
+  | "degenerate"
+  | "faceNotPlanar"
+  | "topologyChanged";
+
+/** One source to project — a body sub-shape addressed by `topoKey`, plus the
+ *  optional anchor evidence the resolution ladder rebinds with. */
+export interface ProjectionSource {
+  bodyId: string;
+  topoKey: string;
+  anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
+}
+
+export interface ProjectToSketchRequest {
+  /** Head the picks were taken from. OMITTED ⇒ the transport's own current
+   *  snapshot, exactly like {@link PrepareEdgeOpRequest} — the frontend holds no
+   *  snapshot id of its own, and the backend fences the pick either way. */
+  snapshotId?: number;
+  sketchId: string;
+  mode: ProjectionMode;
+  sources: ProjectionSource[];
+}
+
+/** One source the projection declined (SCHEMA §7.6 `refusals[]`). An answer,
+ *  not an error — the call still succeeds with the other sources projected. */
+export interface ProjectionRefusal {
+  bodyId: string;
+  elementId: string;
+  topoKey: string;
+  code: ProjectionRefusalCode | string;
+  message: string;
+}
+
+/** One projected curve as committed into the sketch. */
+export interface ProjectedEntity {
+  entityId: string;
+  type: "Line" | "Circle" | "Arc" | "Ellipse" | string;
+  sourceBodyId: string;
+  sourceElementId: string;
+  projectedHash: string;
+}
+
+/** `projectToSketch` / `updateProjection` result. */
+export interface ProjectToSketchResult {
+  sketchId: string;
+  snapshotId: number;
+  entities: ProjectedEntity[];
+  pointCount: number;
+  refusals: ProjectionRefusal[];
+}
+
+/** `detachProjection` result. */
+export interface DetachProjectionResult {
+  sketchId: string;
+  entityIds: string[];
+  releasedConstraints: number;
+  remaining: number;
+}
+
 /** Full authoritative sketch, returned by `enterSketch`. */
 export interface SketchSession {
   sketchId: string;
@@ -2191,6 +2264,15 @@ export interface OperationDiagnostic {
   reasonCode?: string;
   evidence?: Record<string, unknown>;
 }
+
+/**
+ * Rust-minted diagnostic `code` for a sketch whose projected geometry no longer
+ * matches the bodies it was cut from (WP-P; `document_runtime.rs`
+ * `PROJECTION_STALE_CODE`). It rides as a WARNING on the SKETCH's own timeline
+ * step and carries NO `evidence` — the affected entity ids stay Rust-side and
+ * only the human-readable `message` (which opens with the count) crosses.
+ */
+export const PROJECTION_STALE_CODE = "PROJECTION_STALE";
 
 /**
  * An exact L2 preview result (NEW_SPEC §15 "Replace preview with exact result").

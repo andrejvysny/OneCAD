@@ -166,7 +166,7 @@ fn fill_area(t: &PreviewTrianglesDto) -> f64 {
         let k = i as usize * 2;
         (t.positions[k], t.positions[k + 1])
     };
-    for tri in t.indices.chunks_exact(3) {
+    for tri in t.indices.as_chunks::<3>().0 {
         let (ax, ay) = p(tri[0]);
         let (bx, by) = p(tri[1]);
         let (cx, cy) = p(tri[2]);
@@ -179,7 +179,7 @@ fn fill_area(t: &PreviewTrianglesDto) -> f64 {
 /// producer added internally (bridges) must NOT show up here.
 fn boundary_edge_count(t: &PreviewTrianglesDto) -> usize {
     let mut uses: HashMap<(u32, u32), usize> = HashMap::new();
-    for tri in t.indices.chunks_exact(3) {
+    for tri in t.indices.as_chunks::<3>().0 {
         for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
             *uses.entry(if a < b { (a, b) } else { (b, a) }).or_insert(0) += 1;
         }

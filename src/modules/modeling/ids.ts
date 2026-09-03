@@ -53,6 +53,9 @@ export const ModelingSketchTools = {
   mirror: "onecad.modeling.tool.sketch.mirror",
   sketchFillet: "onecad.modeling.tool.sketch.sketchFillet",
   sketchOffset: "onecad.modeling.tool.sketch.sketchOffset",
+  // Keyboard-only (WP-P): it has an id because `SketchTool` is exhaustive here,
+  // but no `SKETCH_TOOL_DESCRIPTORS` row, so it registers no toolbar button.
+  project: "onecad.modeling.tool.sketch.project",
 } as const satisfies Record<SketchTool, string>;
 
 /**

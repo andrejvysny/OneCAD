@@ -42,6 +42,9 @@ const SKETCH_ONLY: ReadonlySet<Tool> = new Set([
   // mode with them armed like every other sketch tool.
   "sketchFillet",
   "sketchOffset",
+  // Projecting body geometry INTO a sketch needs a sketch to project into, so a
+  // model-mode press enters sketch mode with it armed like every draw tool.
+  "project",
 ]);
 
 const MODEL_ONLY: ReadonlySet<Tool> = new Set([

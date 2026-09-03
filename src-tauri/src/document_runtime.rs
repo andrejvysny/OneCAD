@@ -495,14 +495,20 @@ pub struct DocumentRuntime {
     /// back to the unfiltered `substitute_variables` result.
     unresolved_variables: BTreeMap<usize, UnresolvedVariable>,
     /// Sketches whose projected geometry no longer matches its source, keyed by
-    /// the sketch's TIMELINE STEP so it merges through the same
+    /// the SKETCH and rendered through the same
     /// [`step_diagnostics`](Self::step_diagnostics) point `EXPR_UNRESOLVED` uses
     /// (WP-P B4).
+    ///
+    /// **Keyed by sketch, not by timeline index** (WP-P F4). A step index is a
+    /// position, and every rollback, re-order, insert or delete moves it: keyed
+    /// that way a verdict silently re-attaches itself to whatever op now sits at
+    /// that row. The sketch id is the thing the verdict is actually about, and a
+    /// sketch whose record has been deleted simply never renders it.
     ///
     /// Written ONLY by [`adopt_projection_staleness`](Self::adopt_projection_staleness),
     /// from an UNLOCKED post-publish re-projection — never from `finish_regen`,
     /// which holds the single-writer lock and must not do worker IO.
-    projection_stale: BTreeMap<usize, ProjectionStale>,
+    projection_stale: BTreeMap<SketchId, ProjectionStale>,
     /// The source-body geometry signatures each sketch's projections were last
     /// checked against. A publish that leaves every source body's signature
     /// unchanged skips the re-projection entirely, so the check costs nothing on
@@ -3012,14 +3018,24 @@ impl DocumentRuntime {
         // republish clear it. It is a WARNING — the projected geometry is still
         // exactly what it was, it has simply stopped agreeing with its source, and
         // the user decides whether to update or detach.
-        if let Some(item) = self.projection_stale.get(&index) {
+        if let Some(item) = self
+            .sketch_at_step(index)
+            .and_then(|sketch| self.projection_stale.get(&sketch))
+        {
             out.push(onecad_core::regen::Diagnostic {
                 severity: onecad_core::regen::Severity::Warning,
                 code: PROJECTION_STALE_CODE.to_string(),
                 message: item.message.clone(),
                 stage: None,
                 reason_code: Some(PROJECTION_STALE_CODE.to_string()),
-                evidence: None,
+                // The frontend attributes the verdict to the OPEN sketch and counts
+                // the stale entities from here — never by parsing `message`. Entity
+                // ids are backend uuids (the frontend re-keys them like every other
+                // per-entity map).
+                evidence: Some(serde_json::json!({
+                    "sketchId": item.sketch.to_string(),
+                    "entityIds": item.entities.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+                })),
             });
         }
         out
@@ -3105,20 +3121,37 @@ impl DocumentRuntime {
         let Some(sketch) = self.session.document().sketches.get(&probe.sketch) else {
             return false;
         };
+        // The snapshot fence alone does not cover the ROWS: `project_to_sketch`,
+        // `update_projection` and `detach_projection` all rewrite the provenance
+        // map without publishing, so a verdict computed against the rows as they
+        // were is about geometry that no longer exists — or silently ignores rows
+        // that have since appeared. Either way the count-and-hash comparison sends
+        // it back to the next publish (WP-P F8).
+        let rows_moved = sketch.projections.len() != probe.sources.len()
+            || probe.sources.iter().any(|(entity, source)| {
+                sketch
+                    .projections
+                    .get(entity)
+                    .map(|row| &row.projected_hash)
+                    != Some(&source.projected_hash)
+            });
+        if rows_moved {
+            return false;
+        }
+        // No timeline record yet (an unfinished sketch) — nowhere to hang the
+        // diagnostic, so recording the signature would silence the check until
+        // some unrelated body moved. Re-probe next publish (WP-P F9).
+        if self.sketch_step_index(probe.sketch).is_none() {
+            return false;
+        }
         let stale: Vec<EntityId> = stale
             .into_iter()
             .filter(|e| sketch.projections.contains_key(e))
             .collect();
         self.projection_checked
             .insert(probe.sketch, probe.signatures.clone());
-        let Some(index) = self.sketch_step_index(probe.sketch) else {
-            // No timeline record yet (an unfinished sketch) — nowhere to hang the
-            // diagnostic. The signature is still recorded, so the next real edit
-            // re-probes.
-            return true;
-        };
         if stale.is_empty() {
-            self.projection_stale.remove(&index);
+            self.projection_stale.remove(&probe.sketch);
             return true;
         }
         let message = format!(
@@ -3133,7 +3166,7 @@ impl DocumentRuntime {
             if stale.len() == 1 { "matches" } else { "match" },
         );
         self.projection_stale.insert(
-            index,
+            probe.sketch,
             ProjectionStale {
                 sketch: probe.sketch,
                 entities: stale,
@@ -3148,9 +3181,7 @@ impl DocumentRuntime {
     /// `detach_projection`).
     pub fn clear_projection_staleness(&mut self, sketch: SketchId) {
         self.projection_checked.remove(&sketch);
-        if let Some(index) = self.sketch_step_index(sketch) {
-            self.projection_stale.remove(&index);
-        }
+        self.projection_stale.remove(&sketch);
     }
 
     /// The stale-projection verdict for a sketch, if the last completed check
@@ -3158,8 +3189,7 @@ impl DocumentRuntime {
     #[must_use]
     pub fn projection_stale_entities(&self, sketch: SketchId) -> Vec<EntityId> {
         self.projection_stale
-            .values()
-            .find(|item| item.sketch == sketch)
+            .get(&sketch)
             .map(|item| item.entities.clone())
             .unwrap_or_default()
     }
@@ -3169,6 +3199,16 @@ impl DocumentRuntime {
         self.session.document().timeline.records().iter().position(
             |r| matches!(&r.op, Operation::Known(KnownOperation::Sketch(p)) if p.sketch == sketch),
         )
+    }
+
+    /// The sketch whose own `Sketch` record sits at `index`, if any — the inverse
+    /// of [`sketch_step_index`](Self::sketch_step_index), used to render a
+    /// per-sketch verdict onto the step the frontend shows it on.
+    fn sketch_at_step(&self, index: usize) -> Option<SketchId> {
+        match &self.session.document().timeline.records().get(index)?.op {
+            Operation::Known(KnownOperation::Sketch(p)) => Some(p.sketch),
+            _ => None,
+        }
     }
 
     /// Applies a sketch edit that is only valid against the snapshot the picks
@@ -4055,20 +4095,19 @@ impl DocumentRuntime {
     /// reported as unresolved rather than raised — the caller's next publish
     /// retries.
     ///
-    /// Worker IO, and it takes the runtime lock like the DI-4 re-bind it shares a
-    /// ladder with. The EXPENSIVE half of a projection refresh — the projection
-    /// itself — stays unlocked.
-    pub async fn rebind_projection_sources(&self, sketch: SketchId) -> (usize, usize) {
-        let Some(snapshot) = self.head_snapshot_id() else {
-            return (0, 0);
-        };
+    /// The ladder round-trip is WORKER IO, so it is handed out as a ticket rather
+    /// than driven here: the caller captures this under the runtime lock, drives
+    /// [`rebind_entries_with`](Self::rebind_entries_with) with the lock RELEASED,
+    /// and re-locks afterwards (WP-P F7). Nothing in this runtime is mutated by
+    /// the drive — the binding lives in the worker's partition — so there is no
+    /// state to fence on re-entry.
+    ///
+    /// `None` when there is no head yet, or nothing to re-bind.
+    #[must_use]
+    pub fn projection_rebind_ticket(&self, sketch: SketchId) -> Option<ProjectionRebind> {
+        let snapshot = self.head_snapshot_id()?;
         let pending = self.projection_source_entries(sketch);
-        if pending.is_empty() {
-            return (0, 0);
-        }
-        self.rebind_entries(snapshot, &pending)
-            .await
-            .unwrap_or((0, pending.len()))
+        (!pending.is_empty()).then(|| (self.engine.clone(), snapshot, pending))
     }
 
     /// Resolves `pending` through the §7.5 ladder against `snapshot` and installs
@@ -4076,6 +4115,17 @@ impl DocumentRuntime {
     /// answered), which the caller distinguishes from "the ladder said no".
     async fn rebind_entries(
         &self,
+        snapshot: SnapshotId,
+        pending: &[(ElementId, ElementEntry)],
+    ) -> Result<(usize, usize), ()> {
+        Self::rebind_entries_with(&self.engine, snapshot, pending).await
+    }
+
+    /// [`rebind_entries`](Self::rebind_entries) against an engine handle instead
+    /// of `&self`, so a caller holding only a cloned `Arc` can drive the ladder
+    /// with the runtime lock released (WP-P F7).
+    pub(crate) async fn rebind_entries_with(
+        engine: &Arc<dyn GeometryEngine>,
         snapshot: SnapshotId,
         pending: &[(ElementId, ElementEntry)],
     ) -> Result<(usize, usize), ()> {
@@ -4109,8 +4159,7 @@ impl DocumentRuntime {
                 },
             })
             .collect();
-        let resolutions = match self
-            .engine
+        let resolutions = match engine
             .resolve_refs(ResolveRequest {
                 snapshot_id: snapshot,
                 refs,
@@ -4158,8 +4207,7 @@ impl DocumentRuntime {
         }
         let bound = bindings.len();
         if !bindings.is_empty() {
-            if let Err(err) = self
-                .engine
+            if let Err(err) = engine
                 .bind_element_ids(BindElementIdsRequest {
                     snapshot_id: snapshot,
                     bindings,
@@ -4638,6 +4686,16 @@ pub struct ProjectionStale {
     /// The user-facing reason, merged into the sketch step's diagnostics.
     pub message: String,
 }
+
+/// One sketch's §7.5 source re-bind, captured under the runtime lock and driven
+/// with it RELEASED (WP-P F7): the engine handle, the head to resolve against,
+/// and the persisted entries to put through the ladder. See
+/// [`DocumentRuntime::projection_rebind_ticket`].
+pub type ProjectionRebind = (
+    Arc<dyn GeometryEngine>,
+    SnapshotId,
+    Vec<(ElementId, ElementEntry)>,
+);
 
 /// One sketch's projection re-check request (WP-P B4).
 ///

@@ -148,9 +148,11 @@ fn published<'a>(
 
 const EXTRUDE_BASE: u128 = 0xB01;
 const EXTRUDE_PROJ: u128 = 0xB03;
+const EXTRUDE_CUT: u128 = 0xB05;
 
 const SID_BASE: u128 = 0xB10;
 const SID_PROJ: u128 = 0xB11;
+const SID_NOTCH: u128 = 0xB12;
 
 /// The base rect's width dimension — edited later to widen the box.
 const WIDTH_DIM: u128 = 0x2000 + 0x40 + 10;
@@ -287,6 +289,50 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
     )
 }
 
+/// A fully-pinned axis-aligned rectangle `[x0,x1] × [y0,y1]` — the notch profile
+/// the blocker case cuts with. Four points shared by four lines is already a
+/// closed loop to the region finder (the same shape a projection produces), and
+/// four `Fixed` pins make it fully constrained without a dimension to edit.
+fn pinned_rect(sid: SketchId, base: u128, x0: f64, y0: f64, x1: f64, y1: f64) -> Sketch {
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let mut sk = Sketch::on_world_plane(sid, "Notch", WorldPlane::XY);
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    for (i, (x, y)) in corners.iter().enumerate() {
+        sk.add_entity(SketchEntity::point(
+            e(i as u128),
+            Vec2::new_unchecked(*x, *y),
+            false,
+            false,
+        ))
+        .unwrap();
+    }
+    for i in 0..4u128 {
+        sk.add_entity(SketchEntity::line(e(0x10 + i), e(i), e((i + 1) % 4), false))
+            .unwrap();
+    }
+    for (i, (x, y)) in corners.iter().enumerate() {
+        sk.add_constraint(Constraint::Fixed {
+            id: c(i as u128),
+            point: e(i as u128),
+            point_position: CurvePosition::Arbitrary,
+            at: Vec2::new_unchecked(*x, *y),
+        })
+        .unwrap();
+    }
+    sk
+}
+
+/// The same extrude, as a CUT into `target`.
+fn cut_record(rec: u128, sketch: SketchId, dist: f64, target: BodyId) -> OperationRecord {
+    let mut record = extrude_record(rec, sketch, dist);
+    if let Operation::Known(KnownOperation::Extrude(params)) = &mut record.op {
+        params.boolean_mode = BooleanMode::Cut;
+        params.target_body = Some(target);
+    }
+    record
+}
+
 // ── MESH1 helpers (exact for a planar-faced box) ─────────────────────────────
 
 const SEC_POSITIONS: u32 = 1;
@@ -294,6 +340,10 @@ const SEC_INDICES: u32 = 3;
 const SEC_FACE_RANGES: u32 = 4;
 const SEC_FACE_ID_OFFS: u32 = 5;
 const SEC_FACE_ID_CHARS: u32 = 6;
+const SEC_EDGE_RANGES: u32 = 7;
+const SEC_EDGE_POSITIONS: u32 = 8;
+const SEC_EDGE_ID_OFFS: u32 = 9;
+const SEC_EDGE_ID_CHARS: u32 = 10;
 
 fn vertex(blob: &[u8], pbase: usize, i: usize) -> [f64; 3] {
     let o = pbase + i * 12;
@@ -397,6 +447,49 @@ fn side_face_pick(view: &MeshHeaderView, blob: &[u8]) -> String {
         }
     }
     keys[best.expect("at least one face").0].clone()
+}
+
+/// The `TopoKey` of the TOP cap edge that runs along X — one edge, so
+/// `mode:"edges"` has exactly one straight curve to answer with.
+fn top_x_edge_pick(view: &MeshHeaderView, blob: &[u8]) -> String {
+    assert!(view.has_edges(), "MESH1 must carry edges for an edge pick");
+    let ranges = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let positions = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let keys = id_table(
+        view,
+        blob,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let (rbase, pbase) = (ranges.offset as usize, positions.offset as usize);
+    let mut best: Option<(usize, f64)> = None;
+    for edge in 0..view.edge_count as usize {
+        let first = u32_le(blob, rbase + edge * 8) as usize;
+        let count = u32_le(blob, rbase + edge * 8 + 4) as usize;
+        if count == 0 {
+            continue;
+        }
+        let (mut lo, mut hi, mut sz) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], 0.0);
+        for point in first..first + count {
+            let v = vertex(blob, pbase, point);
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(v[axis]);
+                hi[axis] = hi[axis].max(v[axis]);
+            }
+            sz += v[2];
+        }
+        let spans = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        // Along X, and at the top: `sz / count` is the mean Z.
+        if spans[0] <= spans[1] || spans[0] <= spans[2] {
+            continue;
+        }
+        let z = sz / count as f64;
+        if best.is_none_or(|(_, bz)| z > bz) {
+            best = Some((edge, z));
+        }
+    }
+    keys[best.expect("a top X-parallel edge").0].clone()
 }
 
 async fn body_mesh(rt: &mut DocumentRuntime, body: BodyId) -> Arc<Vec<u8>> {
@@ -637,7 +730,12 @@ async fn projected_edges_bound_a_region_go_stale_update_and_detach() {
 
     // ── The staleness probe raises PROJECTION_STALE on the sketch's step ─────
     let projector = state().face_projection();
-    onecad_lib::sketch_projection::refresh_projection_staleness(&runtime, &projector).await;
+    onecad_lib::sketch_projection::refresh_projection_staleness(
+        &runtime,
+        &projector,
+        &CancelToken::new(),
+    )
+    .await;
     {
         let guard = runtime.lock().await;
         let rt = guard.as_ref().unwrap();
@@ -664,6 +762,21 @@ async fn projected_edges_bound_a_region_go_stale_update_and_detach() {
         assert!(
             codes.iter().any(|c| c == PROJECTION_STALE_CODE),
             "the sketch step must carry a PROJECTION_STALE diagnostic, got {codes:?}"
+        );
+        // The diagnostic carries structured evidence: which sketch, which entities.
+        let evidence = rt
+            .projection()
+            .features
+            .iter()
+            .flat_map(|f| f.diagnostics.iter())
+            .find(|d| d.code == PROJECTION_STALE_CODE)
+            .and_then(|d| d.evidence.clone())
+            .expect("PROJECTION_STALE carries evidence");
+        assert_eq!(evidence["sketchId"], serde_json::json!(proj.to_string()));
+        assert_eq!(
+            evidence["entityIds"].as_array().map(|a| a.len()),
+            Some(3),
+            "evidence names the three stale entities, got {evidence}"
         );
     }
 
@@ -826,31 +939,144 @@ async fn a_side_face_sketch_sees_the_top_cap_edge_on() {
     .await
     .expect("projectToSketch onto the side-face sketch");
 
-    // Whatever the worker decides for the two edge-on-collapsing edges (a chord
-    // line or a `degenerate` refusal), the batch answers rather than failing, and
-    // the surviving lines are expressed in the side face's UV.
+    // The worker's `faceOutline` rules make this exact, not "whatever comes
+    // back" (`EdgeProjector::projectFaceOutline` + `appendPrimitives`):
+    //
+    //  * the cap's two Y-parallel edges project to POINTS on this plane, and a
+    //    degenerate BOUNDARY edge is SKIPPED rather than refused (half an outline
+    //    does not close, so only a NAMED refusal fails the source);
+    //  * the two X-parallel ones project onto the SAME segment, and `lineExists`
+    //    suppresses the coincident duplicate within the source's own run.
+    //
+    // One Line over two merged points, and nothing refused.
     assert!(
-        !dto.entities.is_empty() || !dto.refusals.is_empty(),
+        dto.refusals.is_empty(),
+        "an edge-on planar cap is answered, not refused: {:?}",
+        dto.refusals
+    );
+    assert!(
+        !dto.entities.is_empty(),
         "the call must produce an ANSWER, not an empty response"
     );
+    assert_eq!(
+        dto.entities.len(),
+        1,
+        "the cap collapses to ONE chord line on this plane, got {:?}",
+        dto.entities
+    );
+    assert_eq!(dto.point_count, 2, "…over its two merged endpoints");
     assert!(
         dto.entities.iter().all(|e| e.entity_type == "Line"),
         "a planar cap's straight edges stay Lines in any basis, got {:?}",
         dto.entities
     );
-    for refusal in &dto.refusals {
-        assert!(
-            matches!(
-                refusal.code.as_str(),
-                "degenerate"
-                    | "absent"
-                    | "kindMismatch"
-                    | "unsupportedCurve"
-                    | "trimmedTiltedArc"
-                    | "faceNotPlanar"
-            ),
-            "refusal codes are the closed §7.6 set, got {refusal:?}"
+}
+
+/// `mode:"edges"` on a SINGLE picked edge: one Line, two points, one provenance
+/// row at ordinal 0. A one-row run is the shape the F1/F2 run guards can never
+/// fire on, which is why it is pinned separately from the `faceOutline` cases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_single_projected_edge_is_one_line_at_ordinal_zero() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    require_verb(&bin);
+    let wm = spawn_worker(bin).await;
+    let app_state = app_state_over(&wm);
+    let (engine, meshes, solver) = app_state.make_backend();
+    let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+
+    let base = SketchId(Uuid::from_u128(SID_BASE));
+    let proj = SketchId(Uuid::from_u128(SID_PROJ));
+    build_box(&mut rt, base).await;
+    let report = regen_all(&mut rt).await;
+    let _ = published(&report, "base box");
+    let snapshot = SnapshotId(report.snapshot_id);
+    let body = BodyId(Uuid::from_u128(EXTRUDE_BASE));
+
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("box MESH1 validates");
+    let edge_key = top_x_edge_pick(&view, &mesh);
+
+    let mut target = Sketch::new(
+        proj,
+        "Projected",
+        SketchAttachment::World {
+            plane: WorldPlane::XY,
+        },
+    );
+    target.plane = onecad_core::sketch::SketchPlane::xy();
+    rt.apply(EditCommand::AddSketch { sketch: target })
+        .expect("AddSketch");
+
+    let app = tauri::test::mock_app();
+    *app_state.runtime.lock().await = Some(rt);
+    app.manage(app_state);
+    let handle = app.handle().clone();
+    let state = || handle.state::<AppState>();
+    let runtime = state().runtime.clone();
+
+    let source = || {
+        vec![serde_json::from_value(serde_json::json!({
+            "bodyId": body_id_wire(body),
+            "topoKey": edge_key,
+        }))
+        .unwrap()]
+    };
+    let dto = onecad_lib::api::project_to_sketch(
+        state(),
+        snapshot.0,
+        proj.to_string(),
+        "edges".into(),
+        source(),
+    )
+    .await
+    .expect("projectToSketch(edges) on one box edge");
+
+    assert!(dto.refusals.is_empty(), "{:?}", dto.refusals);
+    assert_eq!(dto.entities.len(), 1, "one edge is one curve");
+    assert_eq!(dto.entities[0].entity_type, "Line");
+    assert_eq!(dto.point_count, 2, "a segment has two ends");
+    {
+        let guard = runtime.lock().await;
+        let sketch = guard.as_ref().unwrap().sketch_snapshot(proj, "t").unwrap();
+        assert_eq!(sketch.projections.len(), 1);
+        let row = sketch.projections.values().next().unwrap();
+        assert_eq!(
+            row.source_ordinal, 0,
+            "the only entity of a one-edge run sits at ordinal 0"
         );
+        assert_eq!(
+            row.source_kind,
+            onecad_core::document::refs::ElementKind::Edge,
+            "the KIND is persisted so an update re-requests it in `edges` mode"
+        );
+    }
+
+    // WP-P F15: the same source again is REFUSED, not projected a second time —
+    // two provenance runs for one element could never be told apart afterwards.
+    let again = onecad_lib::api::project_to_sketch(
+        state(),
+        snapshot.0,
+        proj.to_string(),
+        "edges".into(),
+        source(),
+    )
+    .await
+    .expect("the second call ANSWERS; it does not error");
+    assert!(again.entities.is_empty(), "{:?}", again.entities);
+    assert_eq!(again.refusals.len(), 1);
+    assert_eq!(again.refusals[0].code, "alreadyProjected");
+    {
+        let guard = runtime.lock().await;
+        let sketch = guard.as_ref().unwrap().sketch_snapshot(proj, "t").unwrap();
+        assert_eq!(
+            sketch.projections.len(),
+            1,
+            "the refused re-projection committed NOTHING"
+        );
+        assert_eq!(sketch.entities().len(), 3, "…not one extra point or line");
     }
 }
 
@@ -984,5 +1210,221 @@ async fn projection_is_refused_mid_gesture_and_against_a_moved_head() {
             "…not even the points, got {:?}",
             sketch.entities()
         );
+    }
+}
+
+/// **The blocker case (WP-P F1).** A projected face outline whose boundary SPLITS
+/// must never be re-associated positionally.
+///
+/// Four rows are committed from the box's top cap. A through-slot then notches
+/// one wall, so the cap's `y = 0` edge becomes two segments and the notch adds
+/// three more: the run the ordinals were frozen against is gone, and ordinal 1 of
+/// the new run is a DIFFERENT physical edge from ordinal 1 of the old one.
+///
+/// Positional matching would have rewritten each committed line from whatever now
+/// occupies its ordinal — a silent wrong bind with no refusal to explain it, the
+/// H5-B class this whole migration exists to remove. Instead the SOURCE is refused
+/// once, nothing is applied, and every row stays stale with its old geometry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_split_face_boundary_refuses_the_source_instead_of_re_associating() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    require_verb(&bin);
+    let wm = spawn_worker(bin).await;
+    let app_state = app_state_over(&wm);
+    let (engine, meshes, solver) = app_state.make_backend();
+    let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+
+    let base = SketchId(Uuid::from_u128(SID_BASE));
+    let proj = SketchId(Uuid::from_u128(SID_PROJ));
+    let notch = SketchId(Uuid::from_u128(SID_NOTCH));
+    build_box(&mut rt, base).await;
+    let report = regen_all(&mut rt).await;
+    let _ = published(&report, "base box");
+    let snapshot = SnapshotId(report.snapshot_id);
+    let body = BodyId(Uuid::from_u128(EXTRUDE_BASE));
+
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("box MESH1 validates");
+    let top_key = top_face_pick(&view, &mesh);
+
+    let mut target = Sketch::new(
+        proj,
+        "Projected",
+        SketchAttachment::World {
+            plane: WorldPlane::XY,
+        },
+    );
+    target.plane = onecad_core::sketch::SketchPlane::xy();
+    rt.apply(EditCommand::AddSketch { sketch: target })
+        .expect("AddSketch");
+
+    let app = tauri::test::mock_app();
+    *app_state.runtime.lock().await = Some(rt);
+    app.manage(app_state);
+    let handle = app.handle().clone();
+    let state = || handle.state::<AppState>();
+    let runtime = state().runtime.clone();
+
+    // The anchor is load-bearing: without a world point the ladder cannot tell the
+    // top cap from the bottom one after the cut, and the source would come back
+    // `absent` — a different (also correct) refusal that would not exercise F1.
+    let top_face = ElementQuery::query_element_by_topo_key(&wm, snapshot, body, &top_key)
+        .await
+        .expect("QueryElement(top face)")
+        .expect("the picked cap resolves");
+    let anchor = serde_json::json!({ "worldPoint": top_face.center });
+
+    let dto = onecad_lib::api::project_to_sketch(
+        state(),
+        snapshot.0,
+        proj.to_string(),
+        "faceOutline".into(),
+        vec![serde_json::from_value(serde_json::json!({
+            "bodyId": body_id_wire(body),
+            "topoKey": top_key,
+            "anchor": anchor,
+        }))
+        .unwrap()],
+    )
+    .await
+    .expect("projectToSketch(faceOutline) on the box top face");
+    assert_eq!(dto.entities.len(), 4, "a rectangle's outline is four lines");
+    assert!(dto.refusals.is_empty(), "{:?}", dto.refusals);
+    let projected_ids: Vec<EntityId> = dto
+        .entities
+        .iter()
+        .map(|e| e.entity_id.parse().expect("entity id"))
+        .collect();
+
+    // The projected sketch needs its own timeline record for the warning to have a
+    // step to land on.
+    let before: Vec<[f64; 2]> = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        rt.finish_sketch(proj).await.expect("finishSketch(proj)");
+        point_uvs(&rt.sketch_snapshot(proj, "t").unwrap())
+    };
+
+    // ── Notch ONE wall with a through-slot: the cap's y = 0 edge splits ──────
+    {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().unwrap();
+        rt.apply(EditCommand::AddSketch {
+            sketch: pinned_rect(notch, 0x3000, 10.0, -5.0, 20.0, 5.0),
+        })
+        .expect("AddSketch(notch)");
+        rt.finish_sketch(notch).await.expect("finishSketch(notch)");
+        add_op(rt, cut_record(EXTRUDE_CUT, notch, 25.0, body));
+        let report = regen_all(rt).await;
+        let _ = published(&report, "notched box");
+    }
+
+    // ── Every row is stale, matching hashes included ─────────────────────────
+    let projector = state().face_projection();
+    onecad_lib::sketch_projection::refresh_projection_staleness(
+        &runtime,
+        &projector,
+        &CancelToken::new(),
+    )
+    .await;
+    {
+        let guard = runtime.lock().await;
+        let rt = guard.as_ref().unwrap();
+        let stale = rt.projection_stale_entities(proj);
+        assert_eq!(
+            stale.len(),
+            4,
+            "a re-numbered run is stale WHOLESALE — not just the rows whose hash \
+             happened to move (got {stale:?})"
+        );
+        assert!(stale.iter().all(|e| projected_ids.contains(e)));
+    }
+
+    // ── update_projection refuses the SOURCE and applies nothing ─────────────
+    let updated = onecad_lib::api::update_projection(state(), proj.to_string())
+        .await
+        .expect("updateProjection answers; it does not error");
+    assert!(
+        updated.entities.is_empty(),
+        "not one row may be rewritten from a re-numbered run, got {:?}",
+        updated.entities
+    );
+    assert_eq!(
+        updated.refusals.len(),
+        1,
+        "ONE refusal for the source, not one per row: {:?}",
+        updated.refusals
+    );
+    assert_eq!(updated.refusals[0].code, "topologyChanged");
+    assert!(
+        updated.refusals[0]
+            .message
+            .contains("4 edges were projected"),
+        "the refusal names the source and the counts, got {:?}",
+        updated.refusals[0]
+    );
+
+    {
+        let guard = runtime.lock().await;
+        let rt = guard.as_ref().unwrap();
+        let sketch = rt.sketch_snapshot(proj, "t").unwrap();
+        assert_eq!(
+            point_uvs(&sketch),
+            before,
+            "a refused update leaves the OLD geometry exactly where it was"
+        );
+        assert_eq!(sketch.projections.len(), 4, "…and every provenance row");
+        assert!(
+            sketch
+                .entities()
+                .iter()
+                .all(SketchEntity::is_reference_locked),
+            "…still reference-locked"
+        );
+        assert_eq!(
+            rt.projection_stale_entities(proj).len(),
+            4,
+            "a refused update does NOT clear the warning — nothing was fixed"
+        );
+        assert!(
+            rt.projection()
+                .features
+                .iter()
+                .flat_map(|f| f.diagnostics.iter())
+                .any(|d| d.code == PROJECTION_STALE_CODE),
+            "the PROJECTION_STALE diagnostic is still on the sketch's step"
+        );
+    }
+
+    // ── detach_projection with an EXPLICIT subset ────────────────────────────
+    let keep: Vec<EntityId> = projected_ids[2..].to_vec();
+    let dropped: Vec<String> = projected_ids[..2].iter().map(ToString::to_string).collect();
+    let detached =
+        onecad_lib::api::detach_projection(state(), proj.to_string(), Some(dropped.clone()))
+            .await
+            .expect("detachProjection(subset)");
+    assert_eq!(detached.entity_ids, dropped, "only the named ids");
+    assert_eq!(detached.remaining, 2, "the other two stay projected");
+    {
+        let guard = runtime.lock().await;
+        let sketch = guard.as_ref().unwrap().sketch_snapshot(proj, "t").unwrap();
+        assert_eq!(sketch.projections.len(), 2);
+        for id in &projected_ids[..2] {
+            assert!(!sketch.projections.contains_key(id));
+            assert!(
+                !sketch.get_entity(*id).unwrap().is_reference_locked(),
+                "a detached line is ordinary editable geometry"
+            );
+        }
+        for id in &keep {
+            assert!(sketch.projections.contains_key(id));
+            assert!(
+                sketch.get_entity(*id).unwrap().is_reference_locked(),
+                "the rows that were NOT named keep their lock"
+            );
+        }
     }
 }

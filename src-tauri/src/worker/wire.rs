@@ -3166,6 +3166,46 @@ fn projection_str(value: &Value, field: &str) -> Result<String, String> {
         .ok_or_else(|| format!("ProjectToSketchPlane: {field} must be a non-empty string"))
 }
 
+/// One of the response's optional array fields. ABSENT is an empty list (a call
+/// with no refusals legitimately omits `refusals`); present but not an array is a
+/// protocol break, not a reason to silently read zero entities out of it and
+/// commit an empty projection as if the kernel had answered (WP-P F13).
+fn projection_array<'a>(result: &'a Value, field: &str) -> Result<&'a [Value], String> {
+    match result.get(field) {
+        None => Ok(&[]),
+        Some(Value::Array(items)) => Ok(items.as_slice()),
+        Some(other) => Err(format!(
+            "ProjectToSketchPlane: {field} must be an array when present, got {}",
+            match other {
+                Value::Null => "null",
+                Value::Bool(_) => "a bool",
+                Value::Number(_) => "a number",
+                Value::String(_) => "a string",
+                _ => "an object",
+            }
+        )),
+    }
+}
+
+/// The entity's `projectedHash`: EXACTLY 16 lowercase hex chars (SCHEMA §7.6).
+///
+/// It is the staleness baseline, compared for equality forever after, so a hash
+/// in some other shape — truncated, upper-case, a placeholder — would install a
+/// baseline that either never matches (a permanent false warning) or matches too
+/// much. Loud here beats silent later (WP-P F14).
+fn projection_hash(entity: &Value) -> Result<String, String> {
+    let hash = projection_str(entity, "projectedHash")?;
+    let well_formed =
+        hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !well_formed {
+        return Err(format!(
+            "ProjectToSketchPlane: projectedHash {hash:?} must be exactly 16 lowercase hex \
+             chars (SCHEMA §7.6)"
+        ));
+    }
+    Ok(hash)
+}
+
 /// Parses a `ProjectToSketchPlane` result against the `sources` that produced it.
 ///
 /// The request is an input because two persisted fields are Rust's to decide, not
@@ -3198,14 +3238,7 @@ pub fn parse_project_to_sketch_plane(
     };
     let mut runs: BTreeMap<(BodyId, String), u32> = BTreeMap::new();
     let mut points = Vec::new();
-    for (i, p) in result
-        .get("points")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
+    for (i, p) in projection_array(result, "points")?.iter().enumerate() {
         let at = p
             .get("at")
             .and_then(Value::as_array)
@@ -3226,12 +3259,7 @@ pub fn parse_project_to_sketch_plane(
 
     let mut entities = Vec::new();
     let mut entity_sources = Vec::new();
-    for e in result
-        .get("entities")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-    {
+    for e in projection_array(result, "entities")? {
         let kind = e
             .get("type")
             .and_then(Value::as_str)
@@ -3291,17 +3319,12 @@ pub fn parse_project_to_sketch_plane(
             source_element_id: ElementId::new(element),
             source_kind,
             source_ordinal,
-            projected_hash: projection_str(e, "projectedHash")?,
+            projected_hash: projection_hash(e)?,
         });
     }
 
     let mut refusals = Vec::new();
-    for r in result
-        .get("refusals")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-    {
+    for r in projection_array(result, "refusals")? {
         let text = |field: &str| -> String {
             r.get(field)
                 .and_then(Value::as_str)
@@ -8897,6 +8920,73 @@ mod project_to_sketch_plane_tests {
             &wpp_sources("el_a", ProjectionSourceKind::Edge)
         )
         .is_err());
+    }
+
+    /// WP-P F13: an ABSENT array field is an empty list, but a field that is
+    /// present in some other shape is a protocol break. Reading zero entities out
+    /// of `"entities": {}` would commit an empty projection as if the kernel had
+    /// answered it, and the `projectedHash` baseline would never be written.
+    #[test]
+    fn a_non_array_points_entities_or_refusals_field_is_a_protocol_error() {
+        let sources = || wpp_sources("el_a", ProjectionSourceKind::Edge);
+        // Absent is fine: an empty answer with nothing refused.
+        let parsed = parse_project_to_sketch_plane(&json!({}), &sources())
+            .expect("an omitted array field is an empty list");
+        assert!(parsed.geometry.points.is_empty() && parsed.refusals.is_empty());
+
+        for (field, value) in [
+            ("points", json!({})),
+            ("points", json!(null)),
+            ("entities", json!("nope")),
+            ("refusals", json!(3)),
+        ] {
+            let mut result = json!({});
+            result[field] = value.clone();
+            let err = parse_project_to_sketch_plane(&result, &sources())
+                .expect_err("a non-array array field must not parse");
+            assert!(
+                err.contains(field) && err.contains("must be an array"),
+                "{field} = {value} produced the wrong error: {err}"
+            );
+        }
+    }
+
+    /// WP-P F14: `projectedHash` is the staleness baseline, compared for equality
+    /// forever after, so a hash in any other shape is refused rather than stored.
+    #[test]
+    fn a_malformed_projected_hash_is_refused() {
+        let body = body_id_wire(wpp_body());
+        let with_hash = |hash: Value| {
+            json!({
+                "points": [{"ref": "p0", "at": [0.0, 0.0]}, {"ref": "p1", "at": [1.0, 0.0]}],
+                "entities": [{
+                    "type": "Line", "p0Ref": "p0", "p1Ref": "p1",
+                    "sourceRef": {"bodyId": body, "elementId": "el_a", "topoKey": ""},
+                    "projectedHash": hash
+                }],
+                "refusals": []
+            })
+        };
+        let sources = || wpp_sources("el_a", ProjectionSourceKind::Edge);
+        assert!(
+            parse_project_to_sketch_plane(&with_hash(json!("9f2c4d1e77a0b355")), &sources())
+                .is_ok(),
+            "16 lowercase hex chars is the contract"
+        );
+        for bad in [
+            json!("9F2C4D1E77A0B355"),  // upper case
+            json!("9f2c4d1e77a0b35"),   // 15 chars
+            json!("9f2c4d1e77a0b3555"), // 17 chars
+            json!("9f2c4d1e77a0b35z"),  // not hex
+            json!(""),                  // empty
+        ] {
+            let err = parse_project_to_sketch_plane(&with_hash(bad.clone()), &sources())
+                .expect_err("a malformed projectedHash must not parse");
+            assert!(
+                err.contains("projectedHash"),
+                "{bad} produced the wrong error: {err}"
+            );
+        }
     }
 
     /// An unknown `mode` token is refused at the command boundary, never
