@@ -60,8 +60,8 @@ verifiers OK · kernelbench T0 compare + full e2e: see the TODO.md row (running 
 ## How to resume
 
 1. Run the `handoff` skill with "resume"; read the plan file's Run log (bottom) and TODO.md
-   § KERNEL HARDENING § Now checkboxes. Commits A `bd4b6c5`, B `da01b3f`, C `78daecb`, D (WP-B)
-   are pushed — check `git log`.
+   § KERNEL HARDENING § Now checkboxes. Commits A `bd4b6c5`, B `da01b3f`, C `78daecb`, D `b4bbcb9`
+   (WP-B) are pushed — check `git log`.
 2. Next: WP-F chamfer reference face (plan § E — probe first: box, asymmetric chamfer d1=4/d2=1,
    upstream hole reorders face ordinals → the legs mirror today; typed `referenceFaces[]`
    parallel to `edges[]`, `adjacentFaces` on `QueryElement`, legacy rule per D10). Then WP-H/I/J

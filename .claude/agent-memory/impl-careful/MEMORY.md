@@ -1,2 +1,3 @@
 - [Frontend gotchas](frontend-gotchas.md) — engine test doubles, the five places a new tool must be registered, toolbarHidden, StatusSeverity has no "warning"
 - [Projection seams](projection-seams.md) — PROJECTION_STALE has no evidence, feature rows have no sketch id, why every projection verb re-enters the sketch
+- [Core record gotchas](core-record-gotchas.md) — inputs re-derived on deserialize, ~65 SketchRegionRef literals, accept only NEW insta snaps by hand

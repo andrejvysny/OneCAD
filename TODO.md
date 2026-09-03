@@ -356,8 +356,8 @@ attribution question arose.
       — boxed, re-run) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **93 / 1496 / 0** · tsc
       clean · vitest **317 files / 5566 / 78 skipped** · hex 0 · coverage 32/9/16/19 · contracts
       39/18 · negative controls OK · kernelbench **136 rows unchanged** + semantics OK · `bun run
-      e2e` **518 passed / 0 failed** (30.1 min; sorted-md5 identical before/after). Commit D = this
-      commit, pushed. Recorded follow-ups: fragment sample memory ceiling (8192 × 1025 samples worst
+      e2e` **518 passed / 0 failed** (30.1 min; sorted-md5 identical before/after). Commit D `b4bbcb9`,
+      pushed. Recorded follow-ups: fragment sample memory ceiling (8192 × 1025 samples worst
       case), degenerate warning dropped on a FAILED profile, `SketchRegions` has no diagnostics
       channel, zero-minor-radius ellipse still refuses.
 - [ ] WP-F (plan § E): chamfer `referenceFaces` typed refs + `adjacentFaces` on QueryElement →

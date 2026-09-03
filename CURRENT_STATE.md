@@ -5,7 +5,7 @@ Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: fiv
 ## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
 Last verified: 2026-09-03 14:40 — `master`; commits A `bd4b6c5`, B `da01b3f`, C `78daecb` and D
-(WP-B) on origin — see TODO.md § KERNEL HARDENING § Now.
+`b4bbcb9` (WP-B) on origin — see TODO.md § KERNEL HARDENING § Now.
 
 - **Kernel hardening WP-C/D/A/E:** landed, protocol-audited (`approve`), adversarially reviewed
   (4 HIGH fixed red-first), gated, committed, pushed. Ruling D3b: Tier B where NEW geometry is
