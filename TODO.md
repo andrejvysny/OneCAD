@@ -33,10 +33,64 @@
             caller-stack ring under `?vpdebug` only, and the assertion prints the callers that fired
             inside the idle window.
       - [x] A5 gate (L2, main thread): tsc clean · vitest **318 / 5604 / 78 skipped** (twice, exit 0) ·
-            the five touched specs on chromium + webkit **54 / 0** (2.8 min) · hex 0.
-- [ ] Phase B — WP-G five fillet acceptance probes (scratchpad build, no tracked edits), verdict here.
+            the five touched specs on chromium + webkit **54 / 0** (2.8 min) · hex 0. Committed as
+            `dafa656` and pushed. **CI run 33912517696:** every hosted lane green including
+            **e2e-chromium** (the four chromium reds are closed on CI); **e2e-webkit 261 / 1 failed
+            (22.0 min)** — a NEW red, `sketch-snap-composition.spec.ts:172` (snap hint expected hidden
+            after a synthetic `pointerleave`, still visible at 8 s). Not reproduced locally: webkit
+            **10/10** (35 s). Cause hypothesis under check: the spec dispatches the synthetic leave on the
+            canvas PARENT while `SketchController` listens on the canvas and `pointerleave` does not
+            bubble — REFUTED on reading: the listener is on `deps.container`, the canvas parent, so the
+            synthetic leave does reach it. Named cause: headless WebKit can dispatch the queued
+            `pointermove(2,2)` AFTER the synthetic `pointerleave`, and the late move re-shows the hint.
+            Fixed in the spec by ordering only: one rendered frame (`waitForRenderedFrame`) after the
+            move before the leave is dispatched (input events dispatch before rAF); no assertion widened.
+            Measured after the fix: webkit + chromium **10/10**. Committed as a follow-up `fix(e2e)`.
+            `tauri-composition` and `linux-worker` as known.
+- [x] Phase B — WP-G five fillet acceptance probes, MEASURED on the shipped kernel (probe built out of
+      tree against `worker/build/libworker_core.a`; source + results in the session scratchpad
+      `wpg/`; drives `FilletBuilder::build → accept_result → validate_result`, the exact object
+      `execute_fillet` constructs; constants `BlendEvidence.cpp:33-36` 1e-9 / 1e-9 / 1e-9 / 1e-14):
+      1. Ø20 boss on a Ø40 shaft (cyl–cyl tee), r=2 — **REFUSED `FILLET_SEMANTIC_CHECK_FAILED`**,
+         section residual **1.97e-3** vs allowed 2.0e-9 (~1e6×), tangency 1.2e-5; bare OCCT builds it.
+      2. Ø20 cylinder cut by a 30° plane, r=1 on the elliptical rim — **REFUSED**, residual **2.87e-3**
+         vs 1.0e-9; bare OCCT builds it.
+      3. Frustum r10/r5/h10 on a box, r=1 on the cone–box rim — accepted, residual 2.2e-16 (KPart torus).
+      4. Crossing 4 mm ribs, r=1 on a rib top edge into the valence-5 corner — accepted, residual 0.
+      5. Ø20 boss top circle next to the seam, r=1 — accepted by the builder (2.2e-16); the FULL op path
+         returned `NeedsRepair` from the ladder on the probe's ref — flagged, not diagnosed.
+      5b. The periodic seam edge itself — OCCT `Contour()==0`, `FILLET_CONTOUR_INVALID`; correct refusal.
+      **Verdict:** the audit's `fillet-chamfer-1` is CONFIRMED for walked/approximated blends: the gate is
+      a clean analytic-vs-walked discriminator (1e-16 vs 1e-3, no continuum), so every boss-on-cylinder
+      and oblique-rim fillet a daily-driver part needs refuses today. WP-G go/no-go: user decision at
+      session end (plan S4).
 - [ ] Phase C — WP-I component mates: I0 probes red-first → SCHEMA + protocol audit → I2a worker ∥ I2b
       Rust → I3 FE → adversarial review → full L3 → commit → push.
+      - [x] I0 probes MEASURED RED on the shipped kernel (impl-critical, measured output; ctest 176 → 177):
+            a1 coincident seat after the plane moves 3 mm — seat stays at z=13 on a z=10 plane, no
+            `matePlacement` (`test_component_mate_reseat.cpp:455`); a2 target rebuilt with the reversed
+            parametric axis, identical volume — component spins 180° silently, `needsRepair=0` (`:532`);
+            a3 seat 20 mm outside the face's x-extent — published silently (`:567`); b real worker
+            `component_ops.rs:1992` plate 5→8 mm — seat z stays 5, want 8; c `test_gear_referenceability.cpp:217`
+            — a tooth flank binds through `Session::bind_element_ids` and `QueryElement` reports it present
+            (bore/cap positive controls pass; the existing `gear_body_op_ids` guard is wired only into
+            `AcquireElementIds`, which mints nothing); d worker `test_component_generators.cpp:176` — iso4762
+            `length = 1e6` mm builds in 1.3 ms (`kMaxProfileLengthMm` exists at `ComponentOp.cpp:401` but
+            only on the `profile` path), Rust `record.rs:5682` — `teeth = 100000` validates Ok.
+            e (history-rung orientation) GREEN, not reproduced: both mate rungs re-derive the face from the
+            body shape, so no neutral history instance reaches `classify_shape`.
+      - [x] I1 SCHEMA hunk written (§7.2 `planStep.mateResolved`; §7.3 `mate` coincident projection,
+            seat-on-face, `targetAxis`/`targetSidedness` + the `d < −0.5` reversal band, generator bounds;
+            §7.3 Gear referenceability enforced with caps in the allow-list; §7.5 `sidedness`; §9
+            `mateAxisReversed` / `mateSeatOffFace` + candidate `label`; §14 entry) and protocol-audited
+            BEFORE code: **approve_with_changes**, six edits applied — item `refId` is `<opId>.input0`
+            (Rust parses only `.input<N>`); bore threshold = ROOT radius with a parallel-axis rule so
+            `offsetHole` stays referenceable; `AcquireElementIds` unchanged (mints nothing) and Bind
+            carries `bindingIndex`; the generator-bounds bullet was missing from §7.3 (scoped to
+            `iso4762`, turns bound for simplified/modeled only); `MATE_AXIS_ADOPTED` is Rust-side and the
+            adoption moves the planner hash so it commits inside `finish_regen`; refused gear faces leave
+            the ladder's candidate pool so `no-candidates` stays a ladder outcome.
+      - [ ] I2a worker ∥ I2b Rust in flight (briefs in the session scratchpad `briefs/`).
 - [ ] Delete the stray untracked `src-tauri/.claude/` — `rm` DENIED by the permission mode again this
       session; user runs `rm -rf src-tauri/.claude` by hand.
 

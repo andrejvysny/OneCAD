@@ -12,6 +12,7 @@ import {
   selectSketchTool,
   setSnapPref,
 } from "./helpers";
+import { waitForRenderedFrame } from "./modelToolHelpers";
 
 /*
  * Snap COMPOSITION and persistence, through the real browser (SNAP P2/P3).
@@ -182,6 +183,12 @@ test("a projection failure makes a click INERT rather than reusing the last poin
   // Leave the viewport: the transient feedback must go, and the armed gesture
   // must NOT be cancelled by it.
   await page.mouse.move(2, 2);
+  // ORDERING: headless WebKit can dispatch the queued pointermove to (2,2) AFTER
+  // the synthetic pointerleave below, and that late move re-shows the hint
+  // (red once on CI webkit, 261/262, never reproduced locally in 10 runs).
+  // Input events are dispatched before a rAF callback, so one rendered frame
+  // after the move guarantees the move has been processed first.
+  await waitForRenderedFrame(page);
   await page.evaluate(() => {
     document.querySelector("canvas")?.parentElement?.dispatchEvent(new PointerEvent("pointerleave"));
   });
