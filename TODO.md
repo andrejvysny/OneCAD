@@ -360,8 +360,78 @@ attribution question arose.
       pushed. Recorded follow-ups: fragment sample memory ceiling (8192 × 1025 samples worst
       case), degenerate warning dropped on a FAILED profile, `SketchRegions` has no diagnostics
       channel, zero-minor-radius ellipse still refuses.
-- [ ] WP-F (plan § E): chamfer `referenceFaces` typed refs + `adjacentFaces` on QueryElement →
-      L3 → commit E. Then WP-H/I/J (next plan).
+- [ ] **WP-F (plan § E) — STARTED 2026-09-03, handed off mid-flight:**
+      - [x] T5.0 probe **RED on `e781272`, measured** (`worker/tests/test_chamfer_reference_face.cpp`,
+            registered as `chamfer_reference_face`, built in `worker/build-t50`): 40×20×10 box, chamfer
+            `radius`=4 / `distance2`=1 on the top-front edge — plain box puts the 4 mm leg on the
+            FRONT wall (front=f:2 < top=f:6; chamfer face y∈[0,1] z∈[6,10]); a Ø6 Hole in the −X wall
+            (blind OR through) reorders the map (top=f:4 < front=f:5) and the 4 mm leg moves to the
+            TOP face (y∈[0,4] z∈[9,10]) with volume (−80 mm³ in every run), face count and the removed
+            wedge identical — nothing downstream can see it. +X-wall and bottom holes do NOT reorder.
+            The distance-angle form (`AddDA`) shares `reference_face` and the same defect (uncovered by
+            the probe); `test_wp6_ops.cpp:214-244` recomputes the ordinal rule and must move WITH the fix.
+      - [x] T5.1a (session 27, 2026-09-03 evening) SCHEMA draft REWRITTEN per the four rulings +
+            the user decision that `adjacentFaces` rides `PrepareEdgeOp` (per-edge `contour` +
+            `adjacentFaces`), not `QueryElement`; `referenceFaces` = `{edgeId, faceId}` pairs, one
+            per contour, the paired edge IS the seed (the old seed `contour.front()` was itself
+            ordinal-derived); refusals `CHAMFER_REFERENCE_FACE_NOT_ADJACENT|MISSING|CONFLICT`;
+            §9 op-built `legacyReferenceFace` + optional `seedEdgeId`, repair = CREATE on the
+            empty slot. Fixtures `chamfer_reference_face.ndjson` (PrepareEdgeOp adjacency, typed
+            pair accepted, pair survives the ordinal-permuting -Y end-wall hole, NOT_ADJACENT +
+            MISSING refusals) and `chamfer_reference_face_legacy_needsrepair.ndjson` (no-edit ok,
+            `editedFrom` 1 → needsRepair, `editedFrom` 2 → ok, AddDA shares, equal-leg control)
+            registered as `canonical_*`; both RED on the shipped worker at exactly the first
+            new-behaviour round (every earlier round passes — box ordinals f:3 -X wall / f:6 top /
+            e:10 edge measured 2026-09-03 with an OCW1 driver; a -Y end-wall hole reorders to top
+            f:5 < wall f:6, edge e:13). Rust `ndjson_fixtures_parse_into_message_types` ok.
+      - [x] T5.1b protocol audit second pass: **approve_with_changes** — 4 blockers (BL-1 partial
+            repair dead-end → an uncovered contour halts `needsRepair`, `_MISSING` dropped; BL-2
+            frozen candidates are stale ordinals → Rust re-derives live via `PrepareEdgeOp`;
+            BL-3 non-v1 records key pairs per edge; BL-4 `InputPath::ChamferReferenceFace{index,
+            edgeId}`) + 6 must-fix, all applied to SCHEMA + fixture 1 round C; re-verification
+            owed at G4 for the §14 sign-off. First pass was REJECT (pre-code; design
+            decisions ruled — see HANDOFF § How to resume):** positional `<opId>.input<N+i>` refIds,
+            ownership gate must accept face primaries in reference slots, one face per CONTOUR keyed
+            by seed edge (`{edgeId, faceId}` pairs), strict `stepIndex > editedFrom` legacy predicate,
+            `adjacentFaces` sorted+deduped, §9 `legacyReferenceFace`, anchored face refs, `Vec::is_empty`
+            serde, `severity` on the refusal. Rewrite the draft → re-audit → then code.
+      - [x] T5.2 worker LANDED + T5.2b fix round in flight (adversarial review of the worker half:
+            BLOCKER — legacy gate on the per-plan `post_upstream_edit` fires on every open and
+            vanishes on REDO/timeline previews → RULED: no legacy ordinal rule in any lane, an
+            asymmetric chamfer without a pair halts `needsRepair` until repaired; M4 kind-mismatch
+            halt, L6 no TopoKey pair matching, L7 CREATE appends, L9 map hoist). T5.3 Rust LANDED
+            + T5.3b (ladder-pass candidate re-derivation, append CREATE, every-lane halt tests).
+            T5.4 FE running. T5.2b LANDED, main-thread ctest **176/176** + hygiene clean;
+            `chamfer_angle_distance.ndjson` asymmetric rounds gained `f:1` pairs (pair-less
+            asymmetric chamfers now halt by ruling — §14 records it).
+      - [x] T5.4 FE LANDED + T5.4b (FE-half adversarial review: HIGH-1 measured — a scalar re-edit of a
+            legacy record silently authored `adjacentFaces[0]` of the current head, the removed guess
+            re-introduced → pairs authored only when the edit INTRODUCES asymmetry; HIGH-2 repair anchored
+            the face ref at the seed-edge midpoint → face centre both sides; M3 flip seeded from the
+            stored pair; M4 flip+✓ same-turn race; L5/6/7). T5.3c (Rust-half review: HIGH-1 repair
+            command skipped validation → validates; HIGH-2 index-keyed create → keyed by `edge_id`,
+            append; M1 refuse an update that strips pairs; M2 repaired ref intent-stamped; M3 slot base
+            parity; candidates `worldPos` = face centres).
+      - [x] **G4 gate (commit E tree, main thread, chain `scratchpad/g4.sh`, suites alone):** ctest
+            **176/176** · hygiene clean · sidecar restaged · fmt · clippy **1.97.0 + 1.98.0** · cargo
+            `--workspace` **94 targets / 1523 passed / 0 failed / 0 worker skips** · tsc · vitest
+            **318 files / 5604 passed / 78 skipped** · hex 0 · coverage 32 rows / contracts 39 rows /
+            negative controls OK · kernelbench T0 **136 rows unchanged** + semantics OK · e2e
+            **524 passed / 0 failed** (30.2 min, both projects, retries 0; `find src e2e | sort | md5`
+            identical before/after). Protocol audit third pass: **approve_with_changes → applied**
+            (§14 records a SECOND behaviour change: a kind/body-mismatched tracked id now halts for
+            Fillet too; §7.3 strip-refusal + `EditOperationInput` entry path; §7.6 contour wording;
+            §9 pick address / dropped unmeasurable candidate) + the §14 sign-off line. Post-gate,
+            pre-commit deltas (targeted re-runs): `set_chamfer_reference_face` index-panic on a
+            ref-starved hand-edited record → `get_mut`-or-push + refusal (edit_session **79/79**, fmt,
+            clippy core clean); three stale comments (worker ×2, fixture, FE); worker rebuilt +
+            chamfer/wp6/canonical/interop ctest subset re-run + restaged.
+      - [ ] (superseded brief text follows) T5.2 worker (`FilletChamferOp.cpp` typed face resolution + adjacency +
+            `CHAMFER_REFERENCE_FACE_NOT_ADJACENT`, legacy rule on `editedFrom`, QueryElement
+            `adjacentFaces`) · T5.3 Rust (`ChamferParams.reference_faces`, inputs, hash, validate,
+            `ElementInfoDto.adjacentFaces`, real-worker test) · T5.4 FE (promote `adjacentFaces[0]`
+            at authoring; flip chip swaps the ref; mock refuses asymmetric by name) · adversarial
+            review · full L3 · commit E · push. Then WP-H/I/J (next plan).
 - [ ] Owed user-run gates unchanged (19-row checklist, Tauri smoke, dirty vendor STEP, WP-X
       dogfood with the default parts).
 

@@ -313,6 +313,7 @@ fn repair_reason_token(item: &RepairItem) -> &'static str {
         RepairReason::NoCandidates => "no-candidates",
         RepairReason::LowConfidence => "low-confidence",
         RepairReason::OrdinalPermutation => "ordinal-permutation",
+        RepairReason::LegacyReferenceFace => "legacyReferenceFace",
         RepairReason::Unknown => "unknown",
     }
 }

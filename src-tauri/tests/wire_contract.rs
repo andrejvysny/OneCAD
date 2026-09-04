@@ -1535,6 +1535,8 @@ async fn chamfer_reaches_the_worker() {
                 angle_deg: None,
                 edge_ids: vec![edge_el],
                 edges: vec![edge_ref],
+                reference_faces: Vec::new(),
+                reference_face_refs: Vec::new(),
                 chain_tangent_edges: false,
                 tangent_closure_version: None,
                 extra: Default::default(),

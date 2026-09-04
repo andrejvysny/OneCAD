@@ -4,45 +4,45 @@ Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: fiv
 
 ## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
-Last verified: 2026-09-03 14:40 — `master`; commits A `bd4b6c5`, B `da01b3f`, C `78daecb` and D
-`b4bbcb9` (WP-B) on origin — see TODO.md § KERNEL HARDENING § Now.
+Last verified: 2026-09-03 14:45 — `master` == origin/master at `e781272` (A `bd4b6c5` · B `da01b3f`
+· C `78daecb` · D `b4bbcb9` · chore `e781272`). DIRTY: `protocol/SCHEMA.md` (WP-F draft, audit
+pending), `TODO.md`, untracked `worker/tests/test_chamfer_reference_face.cpp` + modified
+`worker/tests/CMakeLists.txt` (WP-F probe, mid-flight, unmeasured).
 
-- **Kernel hardening WP-C/D/A/E:** landed, protocol-audited (`approve`), adversarially reviewed
-  (4 HIGH fixed red-first), gated, committed, pushed. Ruling D3b: Tier B where NEW geometry is
-  published; Tier A for isometries and `generator` components; ImportStep on the import health
-  policy. Open: Rust `policyVersions.resolverVersion` stays 1 vs worker `scoringVersion` 4
-  (v3-minted checkpoint partitions under v4 scoring); does repair rewrite the frozen anchor;
-  `describe(shape, body)` O(E²) map rebuild; offline Tier B census of generator outputs; WP-E.2
-  items (§14 "Deferred").
-- **WP-P project edges:** complete end to end. The late adversarial review of the Rust half found
-  a BLOCKER (positional `sourceOrdinal` re-association) — fixed with per-source run guards
-  (count / ordinal set / permutation incl. reversed walk → `topologyChanged`, rows stay stale),
-  shared-corner claim conflicts, `SketchId`-keyed staleness, row-hash + count fencing, cancel-aware
-  post-publish probe, unlocked rebind, RMW fence on update, squash-preserved provenance, scoped
-  unlock, strict wire parse, `alreadyProjected`. Frontend: `j` tool, projected marker, banner
-  with Update/Detach, honest mock, e2e. Follow-ups in TODO.md (partial detach → source
-  un-updatable by design; plain sketch-on-face redo still refused — pre-existing).
-- **Gate for commit C (2026-09-03):** cargo 93 / 1485 / 0 · ctest 168/168 · vitest 315 / 5544 / 78 ·
-  e2e 516 / 0 · clippy on 1.97 AND 1.98 · fmt/hex/verifiers/hygiene clean.
-- **CI:** GitHub stable moved to Rust 1.98 (new lint, fixed); two CI-only e2e reds
-  (`constraint-badge-standoff` — a measurement race now fixed in the spec; `sketch-snap-composition
-  :172` webkit — passes locally, re-running); `tauri-composition` times out building OCCT;
-  `linux-worker` self-hosted runner offline (the run had to be cancelled by hand to re-run jobs).
-- **WP-B region identity by anchor + robust detection + solve residual — LANDED (commit D,
-  2026-09-03):** `profile.regionAnchor` (set once at pick, never re-derived, hash-neutral when
-  absent) with the exact-id → anchor-cell → refuse ladder and the `REGION_REBOUND_BY_ANCHOR`
-  warning (now visible in the inspector + a history-row badge); chord-tolerance fragment sampling,
-  bbox pair cull, degenerate-entity drop at the graph's 1e-6 coincidence (the adversarial review
-  caught a 1e-3 threshold that DELETED a hole — fixed red-first); `maxResidual` reporting only;
-  `finish_sketch` commits the record before regions (with the outcome still forwarded on a
-  refusal). Probes: P-B1/P-B3/P-B5/P-B6/P-B7 red → green; P-B2 red at 0.8 mm clearance → green;
-  P-B4 not reproduced. Protocol audit `approve` (two passes + re-verification); adversarial
-  review 1 BLOCKER + 3 HIGH + 4 MEDIUM fixed. Follow-ups in TODO.md (H2 plausibility bound,
-  1024-sample clamp signal, `maxResidual` has no consumer yet, harness matchers).
-- **Next (plan § E):** WP-F chamfer reference face as a typed ref (design draft
-  `wpf_design_draft.md` in the 2026-09-03 scratchpad; plan § E is authoritative). Then WP-H/I/J
-  (next plan). User-run gates unchanged (19-row checklist, Tauri smoke incl. project edges +
-  region anchor, dirty vendor STEP, WP-X dogfood with the default parts).
+- **Landed and gated this session:** kernel hardening WP-C/D/A/E (commit A) · WP-P project edges
+  worker+Rust+P2b (B) · WP-P frontend + Rust fix round + hygiene (C) · WP-B region identity by
+  anchor, chord-tolerance detection, solve residual (D).
+- **Last full gate (commit D tree, suites alone, main thread):** ctest **173/173** · hygiene
+  clean · sidecar restaged `40f73299…` · fmt · clippy **1.97.0 + 1.98.0** · cargo `--workspace`
+  **93 / 1496 / 0** · tsc · vitest **317 / 5566 / 78 skipped** · hex 0 · verifiers OK ·
+  kernelbench **136 unchanged** · e2e **518 / 0** (30.1 min).
+- **Key rulings:** D3b Tier B only where NEW geometry is published (isometries + `generator`
+  components Tier A; ImportStep on the import policy) · `maxResidual` reporting only, no gate ·
+  anchor rebind = intended semantics with a visible warning · degenerate threshold = the
+  detector's coincidence tolerance · two commits carved from one gated tree, recorded as such ·
+  adversarial review BEFORE commit (memory `adversarial-review-before-commit`).
+- **Session 27 (2026-09-03/04, plan `resume-check-what-virtual-globe.md`) — WP-F LANDED in all three
+  tracks, gated, commit E pending the e2e count.** Rulings this session: `adjacentFaces` rides
+  `PrepareEdgeOp` (per-edge `contour` + `adjacentFaces`), not `QueryElement`; `referenceFaces` =
+  `{edgeId, faceId}` pairs, one per contour, the paired edge is the seed; **the legacy ordinal rule is
+  REMOVED in every lane** (a per-plan `editedFrom` gate was tried and rejected: every open lane sets it,
+  REDO/timeline previews omit it) — a pair-less asymmetric chamfer halts `needsRepair` with the op-built
+  §9 `legacyReferenceFace` item until repaired (one pick per legacy contour on first open = the
+  migration path); repair = CREATE keyed by `edge_id`, candidates re-derived live on the head (ladder
+  pass on the stored edge ref → `PrepareEdgeOp{bodyId, topoKey}`), face-centre anchors everywhere.
+  Reviews: protocol audit reject → approve_with_changes (4 blockers applied) → third pass running;
+  adversarial reviews of the worker (BLOCKER: the editedFrom gate), Rust (2 HIGH: repair skipped
+  validation, index-keyed create) and FE (2 HIGH: legacy re-edit re-authored the ordinal guess; repair
+  anchor on the edge) halves — all fixed red-first. G4 (measured, main thread): ctest 176/176 · cargo 94/1523/0 ·
+  vitest 318/5604/78 · kernelbench 136 unchanged · e2e **524/0** (30.2 min). Protocol audit third pass
+  approve_with_changes → applied + signed off in §14. Subagents stalled repeatedly on a
+  stream watchdog; resumed via SendMessage each time (memory note written).
+- **WP-F (in flight):** SCHEMA draft written and protocol-audited → REJECT with four design
+  decisions (now ruled; HANDOFF § How to resume); probe `chamfer_reference_face` RED, measured
+  (front/top legs mirror after a −X-wall hole reorders face ordinals; volume identical).
+- **CI:** run 33756153082 (b4bbcb9) in progress at handoff; hosted lanes green on C; self-hosted
+  `linux-worker` offline; `tauri-composition` OCCT-build timeout.
+- **Blockers:** none technical.
 
 ## NOW — DAILY DRIVER v2 (2026-09-01, plan `~/.claude/plans/act-as-senior-software-abstract-eclipse.md`)
 

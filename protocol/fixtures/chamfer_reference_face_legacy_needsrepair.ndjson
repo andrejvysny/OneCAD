@@ -1,0 +1,75 @@
+# CANONICAL §7.3 / §9 fixture — LEGACY asymmetric Chamfer records (no `referenceFaces`)
+# under kernel-hardening WP-F (2026-09-03).
+#
+# A record written before WP-F carries `distance2` (or `angleDeg`) and no pair. Its
+# reference face used to be the ordinal-derived legacy choice, which is exactly what
+# mirrored the legs silently (see chamfer_reference_face.ndjson). Under this build
+# there is NO legacy rule: the step halts as `needsRepair` with the op-built reason
+# `legacyReferenceFace`, `seedEdgeId`, and the edge's two adjacent faces as a
+# deliberate tie — the user picks once, Rust CREATES the pair, and the record is
+# typed from then on. The rule this file pins is that the halt is the SAME in every
+# lane, because the lanes differ only in the `editedFrom` claim and a per-plan gate
+# was tried and rejected (REDO and timeline previews omit the claim, so a gated rule
+# would have silently replayed the ordinal choice against a permuted face map):
+#   * no edit context at all (round 1) — the open / undo / redo / preview lanes;
+#   * an UPSTREAM edit (`editedFrom` 1 < step 2, round 2);
+#   * an edit OF THE CHAMFER ITSELF (`editedFrom` 2 == step 2, round 3);
+#   * the distance-angle form (round 4) shares the reference face and the halt;
+#   * an EQUAL-LEG chamfer has no reference face and is untouched by all of this
+#     (round 5, the negative control).
+# Same box, same edge (e:10, adjacent f:3 -X wall / f:6 top) as
+# chamfer_reference_face.ndjson; head never moves (every round is discarded).
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_chamfer_reference_face_legacy","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":70,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":70,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":70,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":70,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":70,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":70,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"e:10","elementId":"el_edge","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"e:10","elementId":"el_edge","kind":"edge"}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# ROUND 1 — no edit context (open / undo / redo / preview lanes): the halt. The body
+# is untouched and the head does not move (`DiscardPrepared` below; the runtime
+# would publish the prefix through step 1 and surface the item).
+{"send":{"v":1,"t":"req","id":6,"verb":"ExecutePlan","args":{"jobId":71,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+{"expect":{"v":1,"t":"event","id":6,"event":"planStep","stepIndex":2,"jobId":71,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op2.input1","elementId":"","ladderFailed":"descriptor","reason":"legacyReferenceFace","scoringVersion":4,"seedEdgeId":"el_edge","candidates":[{"topoKey":"f:3","score":0.5,"margin":0.0,"worldPos":[-20.0,20.0,5.0]},{"topoKey":"f:6","score":0.5,"margin":0.0,"worldPos":[-10.0,20.0,10.0]}],"anchor":{"worldPoint":[-20.0,20.0,10.0]},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":71,"result":{"planPrepared":true,"preparedSnapshotId":2,"lastValidStep":null,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":2,"status":"needsRepair","refCount":1}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"DiscardPrepared","args":{"jobId":71}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":71,"result":{"discarded":true}}}
+# ROUND 2 — an upstream edit (`editedFrom` 1 < step 2): the SAME halt — one §9 item
+# per contour on the EMPTY pair slot `op2.input1`, the seed edge named, both adjacent
+# faces offered at a deliberate tie (0.5 / 0.5, margin 0).
+{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":72,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}],"editedFrom":1}}}
+{"expect":{"v":1,"t":"event","id":8,"event":"planStep","stepIndex":2,"jobId":72,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op2.input1","elementId":"","ladderFailed":"descriptor","reason":"legacyReferenceFace","scoringVersion":4,"seedEdgeId":"el_edge","candidates":[{"topoKey":"f:3","score":0.5,"margin":0.0,"worldPos":[-20.0,20.0,5.0]},{"topoKey":"f:6","score":0.5,"margin":0.0,"worldPos":[-10.0,20.0,10.0]}],"anchor":{"worldPoint":[-20.0,20.0,10.0]},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":72,"result":{"planPrepared":true,"preparedSnapshotId":3,"lastValidStep":null,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":2,"status":"needsRepair","refCount":1}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"DiscardPrepared","args":{"jobId":72}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":72,"result":{"discarded":true}}}
+# ROUND 3 — the chamfer ITSELF was edited (`editedFrom` 2 == step 2): still the same
+# halt — the claim is irrelevant to this rule.
+{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":73,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}],"editedFrom":2}}}
+{"expect":{"v":1,"t":"event","id":10,"event":"planStep","stepIndex":2,"jobId":73,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op2.input1","elementId":"","ladderFailed":"descriptor","reason":"legacyReferenceFace","scoringVersion":4,"seedEdgeId":"el_edge","candidates":[{"topoKey":"f:3","score":0.5,"margin":0.0,"worldPos":[-20.0,20.0,5.0]},{"topoKey":"f:6","score":0.5,"margin":0.0,"worldPos":[-10.0,20.0,10.0]}],"anchor":{"worldPoint":[-20.0,20.0,10.0]},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":73,"result":{"planPrepared":true,"preparedSnapshotId":4,"lastValidStep":null,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":2,"status":"needsRepair","refCount":1}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"DiscardPrepared","args":{"jobId":73}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":73,"result":{"discarded":true}}}
+# ROUND 4 — the distance-angle form (`angleDeg`) shares the reference face and the halt.
+{"send":{"v":1,"t":"req","id":12,"verb":"ExecutePlan","args":{"jobId":74,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"angleDeg":30.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}],"editedFrom":1}}}
+{"expect":{"v":1,"t":"event","id":12,"event":"planStep","stepIndex":2,"jobId":74,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op2.input1","reason":"legacyReferenceFace","seedEdgeId":"el_edge","candidates":[{"topoKey":"f:3"},{"topoKey":"f:6"}]}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":74,"result":{"planPrepared":true,"preparedSnapshotId":5,"lastValidStep":null,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":2,"status":"needsRepair","refCount":1}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"DiscardPrepared","args":{"jobId":74}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":74,"result":{"discarded":true}}}
+# ROUND 5 — NEGATIVE CONTROL: an equal-leg chamfer has no reference face; the same
+# upstream edit changes nothing.
+{"send":{"v":1,"t":"req","id":14,"verb":"ExecutePlan","args":{"jobId":75,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}}],"params":{"mode":"Chamfer","radius":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}],"editedFrom":1}}}
+{"expect":{"v":1,"t":"event","id":14,"event":"planStep","stepIndex":2,"jobId":75,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"removed":["el_edge"]},"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":75,"result":{"planPrepared":true,"preparedSnapshotId":6,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"DiscardPrepared","args":{"jobId":75}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"jobId":75,"result":{"discarded":true}}}
+# THE HEAD NEVER MOVED.
+{"send":{"v":1,"t":"req","id":16,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":17,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"result":{"goodbye":true}}}

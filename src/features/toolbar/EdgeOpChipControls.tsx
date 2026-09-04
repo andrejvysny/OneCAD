@@ -238,6 +238,33 @@ export function ChamferAngleField({
   );
 }
 
+/**
+ * The [Flip reference] control (SCHEMA §7.3 `referenceFaces`, kernel-hardening
+ * WP-F). An ASYMMETRIC chamfer measures `radius` on ONE of the edge's two adjacent
+ * faces; before WP-F which one was an ordinal accident that an upstream edit could
+ * silently mirror. The face is now persisted, and this is the control that says
+ * "the other one" — one press swaps every contour's pair to its other adjacent
+ * face.
+ *
+ * Rendered only when the controller has resolved that there IS another face to
+ * flip to (`showChamferFlip`): a seam or free edge has a single adjacent face, and
+ * offering a flip there would promise a change that cannot happen.
+ */
+export function ChamferFlipButton({ onFlip }: { onFlip: () => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="chip-chamfer-flip"
+      aria-label="Flip reference"
+      title="Measure the first distance on the other adjacent face"
+      onClick={onFlip}
+      className="pointer-events-auto rounded-full border border-border bg-surface px-2 py-1 text-[11.5px] font-medium text-ink-2 shadow-popover hover:bg-hover-2"
+    >
+      Flip reference
+    </button>
+  );
+}
+
 export interface EdgeOpOverflowProps {
   edgeOp: EdgeOpKind;
   onEdgeOp: (edgeOp: EdgeOpKind) => void;
@@ -246,6 +273,9 @@ export interface EdgeOpOverflowProps {
   /** The chamfer angle in DEGREES (`null` = the distance-angle mode is off). */
   chamferAngleDeg: number | null;
   onChamferAngle: (angleDeg: number | null) => void;
+  /** Whether the chamfer's reference face can be flipped (see {@link ChamferFlipButton}). */
+  showChamferFlip?: boolean;
+  onChamferFlip?: () => void;
   onConfirm?: () => void;
 }
 
@@ -278,6 +308,9 @@ export function EdgeOpOverflow(props: EdgeOpOverflowProps): React.ReactElement {
             onValue={props.onChamferAngle}
             onConfirm={props.onConfirm}
           />
+          {props.showChamferFlip && props.onChamferFlip && (
+            <ChamferFlipButton onFlip={props.onChamferFlip} />
+          )}
         </>
       )}
     </ChipOverflow>

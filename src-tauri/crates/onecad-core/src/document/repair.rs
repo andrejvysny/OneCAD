@@ -24,6 +24,12 @@ pub enum LadderLevel {
     /// OCCT history gave no / an ambiguous mapping.
     History,
     /// Descriptor + anchor matching was ambiguous / low-confidence.
+    ///
+    /// Also the level an OP-BUILT item carries when **no ladder ran at all**
+    /// (SCHEMA §9): `ladderFailed` is a closed enum with nowhere to say "not
+    /// applicable", so [`RepairReason::LegacyReferenceFace`] — a policy halt on an
+    /// EMPTY slot, not a failed rebind — reports the last level and lets the
+    /// `reason` token be the discriminator.
     Descriptor,
 }
 
@@ -57,6 +63,25 @@ pub enum RepairReason {
     /// Left alone the ref would re-resolve *cleanly* to the WRONG body — the exact
     /// silent mis-bind (H5-B) this stack exists to eliminate.
     OrdinalPermutation,
+    /// **Worker-emitted but OP-BUILT, never a ladder outcome** (SCHEMA §9,
+    /// kernel-hardening WP-F 2026-09-03). An asymmetric Chamfer that carries no
+    /// `referenceFaces` pair for a contour used to measure `radius` on the adjacent
+    /// face with the smaller SNAPSHOT-SCOPED ordinal — so an upstream edit that
+    /// reordered the face map silently mirrored the chamfer's legs. That fallback is
+    /// GONE: an uncovered contour now halts with one such item in EVERY lane,
+    /// regardless of §7.2 `editedFrom` (gating it on the edit claim made the guard
+    /// fire on open and vanish on redo). `ref_id` names the EMPTY slot the pair will
+    /// occupy,
+    /// `element_id` is absent, [`seed_edge_id`](RepairItem::seed_edge_id) names the
+    /// contour edge the pair is keyed by, and the two candidates are that edge's
+    /// adjacent faces at a deliberate tie (`score` 0.5, `margin` 0.0 — the user MUST
+    /// choose). Repair is a CREATE, not a rebind.
+    ///
+    /// The wire token is camelCase (`"legacyReferenceFace"`), unlike the kebab-case
+    /// ladder outcomes — SCHEMA §9 names it that way, so the variant is renamed
+    /// rather than left to the derived kebab-case rule.
+    #[serde(rename = "legacyReferenceFace")]
+    LegacyReferenceFace,
 }
 
 impl<'de> Deserialize<'de> for RepairReason {
@@ -66,6 +91,7 @@ impl<'de> Deserialize<'de> for RepairReason {
             "no-candidates" => Self::NoCandidates,
             "low-confidence" => Self::LowConfidence,
             "ordinal-permutation" => Self::OrdinalPermutation,
+            "legacyReferenceFace" => Self::LegacyReferenceFace,
             _ => Self::Unknown,
         })
     }
@@ -195,6 +221,15 @@ pub struct RepairItem {
     /// wire, so pre-VF-B6 documents and worker-published items stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal_anchor: Option<OrdinalAnchor>,
+    /// The contour edge a [`RepairReason::LegacyReferenceFace`] repair must pair the
+    /// chosen face with (SCHEMA §9 `seedEdgeId`, kernel-hardening WP-F).
+    ///
+    /// The item names an EMPTY slot, so there is no stored ref to read the edge off:
+    /// without this the repair could not key the `{edgeId, faceId}` pair it creates.
+    /// `None` on every other reason, and skipped on the wire, so pre-WP-F documents
+    /// and worker-published items stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_edge_id: Option<ElementId>,
 }
 
 /// `skip_serializing_if` predicate for a `false` flag (keeps the wire byte-stable).
@@ -460,6 +495,7 @@ mod tests {
             scoring_version: None,
             seeded: false,
             ordinal_anchor: None,
+            seed_edge_id: None,
         }
     }
 
@@ -580,6 +616,7 @@ mod tests {
                     },
                 ],
             }),
+            seed_edge_id: None,
             ..seeded_item(2, "op_2.input0")
         };
         let v = serde_json::to_value(&anchored).unwrap();
@@ -607,6 +644,7 @@ mod tests {
                     key: [1, 2, 3, 4, 5],
                 }],
             }),
+            seed_edge_id: None,
             ..seeded_item(step, refid)
         };
         let mut r = RepairState::new();

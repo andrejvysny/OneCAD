@@ -41,9 +41,16 @@
 {"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":31,"documentRevision":1,"workerEpoch":4}}}
 {"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":31,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
 # One vertical box edge, given a Rust-minted durable identity — the rung the
-# frontend uses once an edge has been promoted.
-{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"e:1","elementId":"el_edge_v","kind":"edge"}]}}}
-{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"e:1","elementId":"el_edge_v","kind":"edge"}]}}}
+# frontend uses once an edge has been promoted — and one of its two adjacent faces
+# (f:1, the x = 0 wall — this box spans x ∈ [-10, 0], so it is the +X face), because
+# since kernel-hardening WP-F (2026-09-04) every
+# ASYMMETRIC chamfer must name the face `radius` is measured on as a persisted
+# `referenceFaces` pair with the face's ref in `inputs[1]`; a pair-less asymmetric
+# record halts `needsRepair` (see chamfer_reference_face_legacy_needsrepair.ndjson).
+# f:1 is the face the pre-WP-F smaller-ordinal chooser picked for e:1, so every
+# geometry number test_wp6_ops.cpp pins for these rounds is unchanged.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"e:1","elementId":"el_edge_v","kind":"edge"},{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_ref","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"e:1","elementId":"el_edge_v","kind":"edge"},{"bodyId":"body_op1","topoKey":"f:1","elementId":"el_face_ref","kind":"face"}]}}}
 # HEAD BEFORE. Every round below is compared against this.
 {"send":{"v":1,"t":"req","id":5,"verb":"GetWorkerHead","args":{}}}
 {"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
@@ -55,19 +62,20 @@
 {"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":32,"result":{"planPrepared":true,"preparedSnapshotId":2,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
 {"send":{"v":1,"t":"req","id":7,"verb":"DiscardPrepared","args":{"jobId":32}}}
 {"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":32,"result":{"discarded":true}}}
-# ROUND 2 — TWO-DISTANCE, also unchanged by this wave. Same delta shape: the mode
-# fields select the geometry, never the identity bookkeeping.
-{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":33,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}}],"params":{"mode":"Chamfer","radius":1.0,"distance2":2.5,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+# ROUND 2 — TWO-DISTANCE, now carrying its `referenceFaces` pair (WP-F). Same delta
+# shape as round 1: the mode fields and the pair select the geometry, never the
+# identity bookkeeping.
+{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":33,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_ref","kind":"face"},"anchor":{"worldPoint":[0,5,5]}}],"params":{"mode":"Chamfer","radius":1.0,"distance2":2.5,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge_v","faceId":"el_face_ref"}]}}]}}}
 {"expect":{"v":1,"t":"event","id":8,"event":"planStep","stepIndex":2,"jobId":33,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"removed":["el_edge_v"]},"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
 {"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":33,"result":{"planPrepared":true,"preparedSnapshotId":3,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
 {"send":{"v":1,"t":"req","id":9,"verb":"DiscardPrepared","args":{"jobId":33}}}
 {"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":33,"result":{"discarded":true}}}
-# ROUND 3 — DISTANCE-ANGLE at 45°. Byte-for-byte the round-1 params plus one field,
-# and the matcher below is byte-for-byte the round-1 matcher: same `bodyEvents`, same
+# ROUND 3 — DISTANCE-ANGLE at 45°. The round-1 params plus `angleDeg` and (WP-F) the
+# pair + face ref, and the matcher below is byte-for-byte the round-1 matcher: same `bodyEvents`, same
 # `elementMapDelta`, same step result. On this 90° dihedral it is also the same SOLID
 # as round 1 — that identity is asserted numerically in test_wp6_ops.cpp, because a
 # quantized geometry signature is evidence a reader cannot check by hand.
-{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":34,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}}],"params":{"mode":"Chamfer","radius":1.0,"angleDeg":45.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":34,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_ref","kind":"face"},"anchor":{"worldPoint":[0,5,5]}}],"params":{"mode":"Chamfer","radius":1.0,"angleDeg":45.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge_v","faceId":"el_face_ref"}]}}]}}}
 {"expect":{"v":1,"t":"event","id":10,"event":"planStep","stepIndex":2,"jobId":34,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"removed":["el_edge_v"]},"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
 {"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":34,"result":{"planPrepared":true,"preparedSnapshotId":4,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
 {"send":{"v":1,"t":"req","id":11,"verb":"DiscardPrepared","args":{"jobId":34}}}
@@ -94,7 +102,7 @@
 {"expect":{"v":1,"t":"resp","id":18,"ok":true,"jobId":37,"result":{"discarded":true}}}
 # THE SESSION SURVIVED ALL THREE REFUSALS: a legal distance-angle chamfer still runs
 # on the same head, and this one is ACCEPTED — so the mode commits, not just prepares.
-{"send":{"v":1,"t":"req","id":19,"verb":"ExecutePlan","args":{"jobId":38,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}}],"params":{"mode":"Chamfer","radius":1.0,"angleDeg":60.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1"}}]}}}
+{"send":{"v":1,"t":"req","id":19,"verb":"ExecutePlan","args":{"jobId":38,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge_v","kind":"edge"},"anchor":{"worldPoint":[0,0,5]}},{"primary":{"bodyId":"body_op1","elementId":"el_face_ref","kind":"face"},"anchor":{"worldPoint":[0,5,5]}}],"params":{"mode":"Chamfer","radius":1.0,"angleDeg":60.0,"edgeIds":["el_edge_v"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge_v","faceId":"el_face_ref"}]}}]}}}
 {"expect":{"v":1,"t":"event","id":19,"event":"planStep","stepIndex":2,"jobId":38,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"removed":["el_edge_v"]},"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
 {"expect":{"v":1,"t":"resp","id":19,"ok":true,"jobId":38,"result":{"planPrepared":true,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
 {"send":{"v":1,"t":"req","id":20,"verb":"AcceptPrepared","args":{"jobId":38,"documentRevision":2,"workerEpoch":4}}}

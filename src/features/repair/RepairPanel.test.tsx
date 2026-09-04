@@ -9,10 +9,14 @@ import { renderWithPlatform } from "@/test/renderWithPlatform";
 import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import type { NeedsRepairEvent } from "@/ipc/types";
 
-const oneItem = (opId: string, refId: string): NeedsRepairEvent => ({
+const oneItem = (
+  opId: string,
+  refId: string,
+  over: Partial<NeedsRepairEvent["items"][number]> = {},
+): NeedsRepairEvent => ({
   revision: 7,
   snapshotId: 700,
-  items: [{ opId, refId, reason: "ambiguous", scoringVersion: 1, candidateCount: 2 }],
+  items: [{ opId, refId, reason: "ambiguous", scoringVersion: 1, candidateCount: 2, ...over }],
 });
 
 function openRepair(opId: string, refId: string): void {
@@ -49,6 +53,25 @@ describe("RepairPanel (inspector repair state)", () => {
     await screen.findByText("91%");
     expect(screen.getByText(/2 candidates/)).toBeInTheDocument();
     expect(screen.getAllByTestId(/^repair-candidate-f3\.input0-/)).toHaveLength(2);
+  });
+
+  it("names the CHAMFER reference face for a `legacyReferenceFace` item (SCHEMA §9)", () => {
+    // WP-F: the reason token is op-built, not a ladder outcome, and the panel is
+    // generic over `reason` — so an unnamed token would have rendered the raw
+    // camelCase string at the user. It must state what the choice actually is.
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      repairStore.getState().applyEvent(
+        oneItem("f3", "f3.input1", {
+          reason: "legacyReferenceFace",
+          seedEdgeId: "el_e0",
+          candidateCount: 2,
+        }),
+      );
+      repairStore.getState().openPanel();
+    });
+    expect(screen.getByText(/Chamfer reference face was never recorded/i)).toBeInTheDocument();
+    expect(screen.queryByText("legacyReferenceFace")).toBeNull();
   });
 
   it("falls back to an opId prefix when the feature is not in the projection", () => {

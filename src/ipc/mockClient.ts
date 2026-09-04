@@ -104,6 +104,7 @@ import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import {
   lookupMockFace,
+  mockAdjacentFaces,
   mockElementHash,
   mockProjectedContent,
   worldToPlaneUv,
@@ -1426,6 +1427,7 @@ function mutateOp(op: OperationOp): {
 
 /** Commit an op: push undo, mutate, bump revision, build the result. */
 function commitOp(op: OperationOp): ApplyOperationResult {
+  enforceChamferReferenceFaces(op);
   // BEFORE the snapshot: an op that rewrites a seed body in place needs that
   // body's pre-op mesh captured, or undo reads as a deletion (see the helper).
   materializeOpTargets(op);
@@ -1591,6 +1593,28 @@ function noopResult(): ApplyOperationResult {
     features: mockFeatures.map(cloneFeature),
     terminal: "noop",
   };
+}
+
+/**
+ * Mirror core's SCHEMA §7.3 refusal (WP-F): an ASYMMETRIC chamfer must name the
+ * face `radius` is measured on, and an equal-leg one may not name any.
+ *
+ * The mock lane is not merely a stand-in here — a mock that accepted a pair-less
+ * asymmetric chamfer would let the frontend store a LEGACY-shaped record that the
+ * real backend rejects outright, and every spec built on it would certify a
+ * commit path the Tauri lane cannot run.
+ */
+function enforceChamferReferenceFaces(op: OperationOp): void {
+  if (op.opType !== "Chamfer") return;
+  const p = op.params;
+  const asymmetric = p.distance2 !== undefined || p.angleDeg !== undefined;
+  const pairs = p.referenceFaces ?? [];
+  if (asymmetric && pairs.length === 0) {
+    throw new Error("referenceFaces required for an asymmetric chamfer (SCHEMA §7.3)");
+  }
+  if (!asymmetric && pairs.length > 0) {
+    throw new Error("an equal-leg Chamfer has no reference face and may not carry referenceFaces");
+  }
 }
 
 /** Commit one op through the local model + emit its document-changed (the lane's
@@ -3736,6 +3760,25 @@ export const mockClient: CadClient = {
     };
   },
 
+  /**
+   * `PrepareEdgeOp` (SCHEMA §7.6), mock lane.
+   *
+   * MOCK LIMIT — the IDENTITY closure: with no kernel there is no tangency
+   * analysis, so every pick is its own tangent CONTOUR. `contour` is therefore the
+   * pick's rank among the picks sorted by edge ordinal, which is exactly what §7.6
+   * defines it as ("contour k is seeded by the k-th smallest picked edge ordinal")
+   * for a body whose edges are all creases — the seed box.
+   *
+   * `adjacentFaces` IS real where the mock can derive it: the seed box's twelve
+   * edges and six faces come from the same tables `makeBoxMesh` renders, so
+   * `mockAdjacentFaces` reports the true pair, face-ordinal ascending. For every
+   * other body the list is OMITTED rather than fabricated — the frontend then
+   * refuses an asymmetric chamfer with a stated reason instead of committing one
+   * that silently falls back to the ordinal reference face.
+   *
+   * The cross-body REFUSAL is real for the same reason it is in `prepareOffsetFace`:
+   * it is a fact about the PICKS, which the mock can see.
+   */
   async prepareEdgeOp(req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult> {
     await wait(MESH_LATENCY_MS);
     const snapshotId = req.snapshotId ?? mockRevision;
@@ -3752,16 +3795,34 @@ export const mockClient: CadClient = {
         },
       };
     }
+    const bodyId = bodies[0] ?? "";
+    // Contour rank = position in the picks sorted by edge ORDINAL (SCHEMA §7.6),
+    // de-duplicated. A key with no `e:<n>` ordinal sorts last, deterministically.
+    const ordinalOf = (key: string): number => {
+      const m = /^e:(\d+)$/.exec(key);
+      return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+    };
+    const keys = [...new Set(req.pickedEdges.map((p) => p.topoKey ?? p.elementId ?? ""))];
+    const contourOf = new Map(
+      [...keys].sort((a, b) => ordinalOf(a) - ordinalOf(b)).map((key, i) => [key, i]),
+    );
     return {
       snapshotId,
-      targetBodyId: bodies[0] ?? "",
-      edges: req.pickedEdges.map((p) => ({
-        topoKey: p.topoKey ?? p.elementId ?? "",
-        picked: true,
-        elementId: p.elementId ?? `el_mock_${(p.topoKey ?? "edge").replace(":", "_")}`,
-        bodyId: bodies[0] ?? "",
-        kind: "edge" as const,
-      })),
+      targetBodyId: bodyId,
+      edges: req.pickedEdges.map((p) => {
+        const topoKey = p.topoKey ?? p.elementId ?? "";
+        const adjacentFaces = mockAdjacentFaces(bodyId, topoKey);
+        return {
+          topoKey,
+          picked: true,
+          elementId: p.elementId ?? `el_mock_${topoKey.replace(":", "_")}`,
+          bodyId,
+          kind: "edge" as const,
+          contour: contourOf.get(topoKey) ?? 0,
+          // Omitted, never guessed, for a body the mock cannot describe.
+          ...(adjacentFaces.length > 0 ? { adjacentFaces } : {}),
+        };
+      }),
       refusal: null,
     };
   },

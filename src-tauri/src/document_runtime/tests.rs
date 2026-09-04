@@ -103,6 +103,10 @@ struct FakeBackend {
     /// crash during the DI-4 re-bind pass. A `Mutex` so a test can flip it back
     /// mid-run and prove the pass retries after a transient failure.
     resolve_fails: Mutex<bool>,
+    /// The outcome `resolve_refs` echoes for EVERY requested ref. `None` keeps the
+    /// historical `Ok(vec![])`, so every existing test is untouched; the WP-F seed-edge
+    /// re-bind (SCHEMA §9) sets it, because that dry run is stage 1 of the answer.
+    resolve_outcome: Mutex<Option<onecad_core::regen::ResolveOutcome>>,
     /// CHANGED curve members every `solve_drag`/`end_gesture` echoes (SCHEMA §7.4
     /// `curves`). Set by a test to model a solver that reshaped a curve — the
     /// channel `positions` cannot carry.
@@ -124,6 +128,7 @@ impl Default for FakeBackend {
             partial_acquire: false,
             bind_fails: false,
             resolve_fails: Mutex::new(false),
+            resolve_outcome: Mutex::new(None),
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(FakeState::default()),
         }
@@ -438,13 +443,25 @@ impl GeometryEngine for FakeBackend {
         }
         Ok(())
     }
-    async fn resolve_refs(&self, _r: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
+    async fn resolve_refs(&self, r: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
         if *self.resolve_fails.lock().unwrap() {
             return Err(EngineError::Protocol {
                 message: "fake transport failure".into(),
             });
         }
-        Ok(vec![])
+        let Some(outcome) = self.resolve_outcome.lock().unwrap().clone() else {
+            return Ok(vec![]);
+        };
+        Ok(r.refs
+            .into_iter()
+            .map(|one| RefResolution {
+                ref_id: one.ref_id,
+                outcome: outcome.clone(),
+                snapshot_id: r.snapshot_id,
+                revision: 0,
+                body_id: None,
+            })
+            .collect())
     }
     async fn cancel(&self, _j: JobId) -> Result<(), EngineError> {
         Ok(())
@@ -2969,6 +2986,7 @@ async fn needs_repair_items_name_the_operated_body() {
         ui_label: String::new(),
         seeded: false,
         ordinal_anchor: None,
+        seed_edge_id: None,
     };
     rt.regen.repair.set_step(0, vec![item(0, "op.input0")]);
     rt.regen.repair.set_step(1, vec![item(1, "op.input1")]);
@@ -4152,5 +4170,633 @@ async fn projection_staleness_is_keyed_by_sketch_and_fenced_on_the_rows() {
     assert!(
         !rt.adopt_projection_staleness(&probe(head, "aaaaaaaaaaaaaaaa"), vec![line]),
         "the rows moved under the probe; the next publish re-probes"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel-hardening WP-F — the SCHEMA §9 `legacyReferenceFace` dry run
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A `FaceBoundaryProjection` that answers exactly one `PrepareEdgeOp` and
+/// records what it was asked. Every other verb of the seam is unreachable here.
+struct FakeFaces {
+    answer: crate::dto::PrepareEdgeOpDto,
+    asked: Mutex<Option<(u64, String, bool)>>,
+}
+
+#[async_trait]
+impl crate::worker::FaceBoundaryProjection for FakeFaces {
+    async fn project_face_boundary_frame(
+        &self,
+        _s: SnapshotId,
+        _b: BodyId,
+        _a: crate::worker::wire::FaceAddress<'_>,
+    ) -> Result<Option<onecad_core::sketch::FaceFrame>, EngineError> {
+        unreachable!("the legacyReferenceFace dry run only calls PrepareEdgeOp")
+    }
+    async fn project_face_boundary(
+        &self,
+        _s: SnapshotId,
+        _b: BodyId,
+        _a: crate::worker::wire::FaceAddress<'_>,
+        _p: &onecad_core::sketch::SketchPlane,
+        _scope: crate::worker::wire::ProjectionScope,
+    ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError> {
+        unreachable!("the legacyReferenceFace dry run only calls PrepareEdgeOp")
+    }
+    async fn project_to_sketch_plane(
+        &self,
+        _s: SnapshotId,
+        _id: SketchId,
+        _p: &onecad_core::sketch::SketchPlane,
+        _m: crate::worker::wire::ProjectionMode,
+        _src: &[crate::worker::wire::ProjectionSource<'_>],
+    ) -> Result<crate::worker::wire::ProjectToSketchPlaneResult, EngineError> {
+        unreachable!("the legacyReferenceFace dry run only calls PrepareEdgeOp")
+    }
+    async fn prepare_offset_face(
+        &self,
+        _s: SnapshotId,
+        _picks: &[crate::worker::wire::OffsetFacePick<'_>],
+        _chain: bool,
+        _d: onecad_core::document::record::OffsetDistanceType,
+    ) -> Result<crate::dto::PrepareOffsetFaceDto, EngineError> {
+        unreachable!("the legacyReferenceFace dry run only calls PrepareEdgeOp")
+    }
+    async fn prepare_edge_op(
+        &self,
+        snapshot: SnapshotId,
+        mode: crate::worker::wire::EdgeOpMode,
+        picks: &[crate::worker::wire::EdgeOpPick<'_>],
+        chain_tangent_edges: bool,
+    ) -> Result<crate::dto::PrepareEdgeOpDto, EngineError> {
+        assert!(
+            matches!(mode, crate::worker::wire::EdgeOpMode::Chamfer),
+            "the re-derivation asks in the mode the halted op ran in"
+        );
+        // SCHEMA §9: the seed edge is addressed by the `{bodyId, topoKey}` the
+        // LADDER answered with, not by its id — the id is not bound on the head.
+        let address = match picks[0].address {
+            crate::worker::wire::FaceAddress::TopoKey(key) => format!("topoKey:{key}"),
+            crate::worker::wire::FaceAddress::ElementId(id) => format!("elementId:{id}"),
+        };
+        *self.asked.lock().unwrap() = Some((snapshot.0, address, chain_tangent_edges));
+        Ok(self.answer.clone())
+    }
+    async fn analyze_edge_op_range(
+        &self,
+        _s: SnapshotId,
+        _m: crate::worker::wire::EdgeOpMode,
+        _picks: &[crate::worker::wire::EdgeOpPick<'_>],
+        _chain: bool,
+        _r: crate::worker::wire::EdgeOpRangeRequest,
+    ) -> Result<crate::dto::EdgeOpRangeDto, EngineError> {
+        unreachable!("the legacyReferenceFace dry run only calls PrepareEdgeOp")
+    }
+}
+
+/// The lean refId-only request shape: an `ElementRef` with no evidence at all.
+fn empty_element_ref() -> ElementRef {
+    ElementRef {
+        primary: None,
+        intent: None,
+        anchor: None,
+        extra: Default::default(),
+    }
+}
+
+/// An `ElementQuery` that measures the two adjacent faces the WP-F repair offers.
+/// Every other verb is unreachable here.
+struct FakeElements {
+    /// `topoKey → (center, area)`.
+    faces: HashMap<String, ([f64; 3], f64)>,
+}
+
+#[async_trait]
+impl crate::worker::ElementQuery for FakeElements {
+    async fn query_element(
+        &self,
+        _s: SnapshotId,
+        _b: BodyId,
+        _e: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        unreachable!("the repair measures candidates by topoKey")
+    }
+    async fn query_element_by_topo_key(
+        &self,
+        _s: SnapshotId,
+        body: BodyId,
+        topo_key: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        Ok(self
+            .faces
+            .get(topo_key)
+            .map(|(center, area)| crate::dto::ElementInfoDto {
+                element_id: String::new(),
+                topo_key: topo_key.to_string(),
+                body_id: body.to_string(),
+                kind: "face".into(),
+                surface_type: 0,
+                curve_type: -1,
+                center: *center,
+                normal: [0.0, 0.0, 1.0],
+                has_normal: true,
+                size: 0.0,
+                magnitude: *area,
+            }))
+    }
+    async fn query_mass_properties(
+        &self,
+        _b: BodyId,
+        _l: String,
+    ) -> Result<crate::dto::MassPropertiesDto, EngineError> {
+        unreachable!("the repair measures candidates by topoKey")
+    }
+    async fn classify_element(
+        &self,
+        _b: BodyId,
+        _e: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
+        unreachable!("the repair measures candidates by topoKey")
+    }
+    async fn classify_element_by_topo_key(
+        &self,
+        _b: BodyId,
+        _k: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
+        unreachable!("the repair measures candidates by topoKey")
+    }
+    async fn query_body_topology(
+        &self,
+        _b: BodyId,
+        _l: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError> {
+        unreachable!("the repair measures candidates by topoKey")
+    }
+}
+
+/// The two faces every WP-F fixture below offers, measured: the −X wall (400 mm²,
+/// centre (−20, 20, 5)) and the top (800 mm², centre (−10, 20, 10)).
+fn fake_elements() -> FakeElements {
+    FakeElements {
+        faces: HashMap::from([
+            ("f:5".to_string(), ([-20.0, 20.0, 5.0], 400.0)),
+            ("f:6".to_string(), ([-10.0, 20.0, 10.0], 800.0)),
+        ]),
+    }
+}
+
+/// The seam bundle the runtime's repair path takes.
+fn repair_seams<'a>(
+    faces: &'a FakeFaces,
+    elements: &'a FakeElements,
+) -> crate::document_runtime::RepairSeams<'a> {
+    crate::document_runtime::RepairSeams { faces, elements }
+}
+
+fn edge_evidence(topo_key: &str, adjacent: Option<Vec<&str>>) -> crate::dto::EdgeOpEvidenceDto {
+    crate::dto::EdgeOpEvidenceDto {
+        topo_key: topo_key.into(),
+        picked: true,
+        element_id: None,
+        body_id: None,
+        kind: None,
+        anchor: None,
+        descriptor: None,
+        contour: Some(0),
+        adjacent_faces: adjacent.map(|a| a.into_iter().map(str::to_owned).collect()),
+    }
+}
+
+/// A LEGACY asymmetric chamfer (`distance2`, no `referenceFaces`) plus the §9
+/// item its post-edit regen halts with.
+/// The fixture with the seed edge re-binding CLEANLY on the head — an `autoBind`
+/// echoing its head TopoKey, which is SCHEMA §9 stage 1 of the answer.
+fn legacy_chamfer_runtime(
+    faces_answer: crate::dto::PrepareEdgeOpDto,
+) -> (DocumentRuntime, RecordId, BodyId, FakeFaces) {
+    legacy_chamfer_runtime_with_seed_outcome(
+        faces_answer,
+        Some(onecad_core::regen::ResolveOutcome::AutoBind {
+            element_id: ElementId::new(""),
+            score: 0.99,
+            margin: 0.4,
+            topo_key: Some(TopoKey::new("e:13")),
+        }),
+    )
+}
+
+/// `seed_outcome` is what the §10 ladder answers for the chamfer's stored typed
+/// EDGE ref — stage 1 of the SCHEMA §9 re-derivation. `None` models an engine that
+/// answers nothing at all.
+fn legacy_chamfer_runtime_with_seed_outcome(
+    faces_answer: crate::dto::PrepareEdgeOpDto,
+    seed_outcome: Option<onecad_core::regen::ResolveOutcome>,
+) -> (DocumentRuntime, RecordId, BodyId, FakeFaces) {
+    use onecad_core::document::record::ChamferParams;
+    use onecad_core::document::repair::{LadderLevel, RepairCandidate, RepairItem, RepairReason};
+
+    let record_id = RecordId(Uuid::from_u128(0xC4A));
+    let body = BodyId(Uuid::from_u128(0xB0F));
+    let edge = ElementId::new("el_edge");
+    let anchor = Vec3::new_unchecked(-20.0, 20.0, 10.0);
+    let op = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+        radius: Scalar::new(4.0),
+        distance2: Some(Scalar::new(1.0)),
+        angle_deg: None,
+        edge_ids: vec![edge.clone()],
+        edges: vec![ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: edge.clone(),
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(AnchorIntent {
+                world_point: anchor,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }],
+        reference_faces: Vec::new(),
+        reference_face_refs: Vec::new(),
+        chain_tangent_edges: true,
+        tangent_closure_version: Some(1),
+        extra: Default::default(),
+    }));
+    let mut record = OperationRecord::new(record_id, 0, "Chamfer", op);
+    record.outputs = vec![body];
+
+    let backend = Arc::new(FakeBackend::new());
+    *backend.resolve_outcome.lock().unwrap() = seed_outcome;
+    let mut rt = runtime_with(backend);
+    // Both the timeline and the repair state are REGEN products; seed the mirror
+    // directly so the dry-run derivation is tested without standing up a worker.
+    rt.regen.timeline = Timeline::from_records(vec![record]);
+    rt.regen.repair.set_step(
+        0,
+        vec![RepairItem {
+            step_index: 0,
+            // N = 1 edge ref, 0 pairs ⇒ the pair the repair creates lands on slot 1.
+            ref_id: format!("{record_id}.input1"),
+            element_id: None,
+            ladder_failed: LadderLevel::Descriptor,
+            reason: RepairReason::LegacyReferenceFace,
+            candidates: vec![RepairCandidate {
+                // Ordinals of the SCRATCH predecessor the halted plan ran on —
+                // §7.5 forbids promoting these, so the dry run must not echo them.
+                topo_key: TopoKey::new("f:99"),
+                score: 0.5,
+                margin: 0.0,
+                world_pos: anchor,
+                summary: String::new(),
+                extra: Default::default(),
+            }],
+            scoring_version: Some(4),
+            anchor: Some(AnchorIntent {
+                world_point: anchor,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            ui_label: "Chamfer 1".into(),
+            seeded: false,
+            ordinal_anchor: None,
+            seed_edge_id: Some(edge),
+        }],
+    );
+    let faces = FakeFaces {
+        answer: faces_answer,
+        asked: Mutex::new(None),
+    };
+    (rt, record_id, body, faces)
+}
+
+/// SCHEMA §9: the dry run for a `legacyReferenceFace` refId runs NO ladder and
+/// reuses NONE of the item's published candidates (their TopoKeys are ordinals of
+/// a discarded scratch state). It re-derives them LIVE from the seed edge's
+/// `PrepareEdgeOp` `adjacentFaces`, at a deliberate tie, and echoes the body the
+/// client must promote against.
+#[tokio::test]
+async fn a_legacy_reference_face_ref_is_answered_from_a_live_prepare_edge_op() {
+    let answer = crate::dto::PrepareEdgeOpDto {
+        snapshot_id: 7,
+        target_body_id: "body_1".into(),
+        edges: vec![
+            edge_evidence("e:13", Some(vec!["f:5", "f:6"])),
+            crate::dto::EdgeOpEvidenceDto {
+                picked: false,
+                ..edge_evidence("e:14", Some(vec!["f:1", "f:2"]))
+            },
+        ],
+        refusal: None,
+    };
+    let (rt, record_id, body, faces) = legacy_chamfer_runtime(answer);
+    let ref_id = format!("{record_id}.input1");
+
+    let out = rt
+        .resolve_refs_with(
+            ResolveRequest {
+                snapshot_id: SnapshotId(7),
+                refs: vec![onecad_core::regen::ResolveRef {
+                    ref_id: ref_id.clone(),
+                    element: empty_element_ref(),
+                }],
+            },
+            Some(repair_seams(&faces, &fake_elements())),
+        )
+        .await
+        .expect("the dry run answers locally");
+
+    // SCHEMA §9 stage 2: the seam was driven with the `{bodyId, topoKey}` the
+    // LADDER answered for the seed edge — never with `el_edge`, whose binding died
+    // with the halted step — and with the record's own closure flag.
+    assert_eq!(
+        *faces.asked.lock().unwrap(),
+        Some((7, "topoKey:e:13".to_string(), true))
+    );
+
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].ref_id, ref_id);
+    assert_eq!(out[0].snapshot_id, SnapshotId(7));
+    assert_eq!(
+        out[0].body_id,
+        Some(body),
+        "the client promotes against the chamfer's own body"
+    );
+    let onecad_core::regen::ResolveOutcome::NeedsRepair(item) = &out[0].outcome else {
+        panic!("a legacy reference face is NeedsRepair, never a bind: {out:?}")
+    };
+    assert_eq!(
+        item.reason,
+        onecad_core::document::repair::RepairReason::LegacyReferenceFace,
+        "the reason tells the client this is a CREATE, not a rebind"
+    );
+    assert_eq!(
+        item.seed_edge_id.as_ref().map(|e| e.as_str()),
+        Some("el_edge"),
+        "the pair's key rides back verbatim"
+    );
+    assert!(item.element_id.is_none(), "the slot is empty");
+    let keys: Vec<&str> = item
+        .candidates
+        .iter()
+        .map(|c| c.topo_key.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["f:5", "f:6"],
+        "the LIVE adjacency of the picked edge, in list order — never the item's \
+         stale scratch ordinals"
+    );
+    assert!(
+        item.candidates
+            .iter()
+            .all(|c| c.score == 0.5 && c.margin == 0.0),
+        "a deliberate tie: the user MUST choose"
+    );
+    // Each candidate is highlighted — and the ref the repair creates is anchored —
+    // at the FACE's own centre. The seed EDGE's anchor lies on BOTH faces, so using
+    // it would stack the two candidates on one point and leave the created ref with
+    // an anchor that can never separate them again.
+    let positions: Vec<[f64; 3]> = item
+        .candidates
+        .iter()
+        .map(|c| [c.world_pos.x, c.world_pos.y, c.world_pos.z])
+        .collect();
+    assert_eq!(
+        positions,
+        vec![[-20.0, 20.0, 5.0], [-10.0, 20.0, 10.0]],
+        "each candidate sits at its own face centre, not at the seed edge's anchor"
+    );
+    let summaries: Vec<&str> = item.candidates.iter().map(|c| c.summary.as_str()).collect();
+    assert_eq!(
+        summaries,
+        vec!["planar face, area~400mm2", "planar face, area~800mm2"],
+        "the summary reads exactly like a worker-built candidate's"
+    );
+}
+
+/// A candidate the head cannot MEASURE is dropped, never guessed at: the panel
+/// highlights candidates by `worldPos`, so one without a real position is a choice
+/// the user cannot tell from its twin.
+#[tokio::test]
+async fn an_unmeasurable_candidate_is_dropped_rather_than_guessed() {
+    let answer = crate::dto::PrepareEdgeOpDto {
+        snapshot_id: 7,
+        target_body_id: "body_1".into(),
+        // `f:99` is not in the fake's face table — the head cannot measure it.
+        edges: vec![edge_evidence("e:13", Some(vec!["f:6", "f:99"]))],
+        refusal: None,
+    };
+    let (rt, record_id, _, faces) = legacy_chamfer_runtime(answer);
+    let out = rt
+        .resolve_refs_with(
+            ResolveRequest {
+                snapshot_id: SnapshotId(7),
+                refs: vec![onecad_core::regen::ResolveRef {
+                    ref_id: format!("{record_id}.input1"),
+                    element: empty_element_ref(),
+                }],
+            },
+            Some(repair_seams(&faces, &fake_elements())),
+        )
+        .await
+        .expect("an unmeasurable candidate is not a failure");
+    let onecad_core::regen::ResolveOutcome::NeedsRepair(item) = &out[0].outcome else {
+        panic!("still NeedsRepair: {out:?}")
+    };
+    let keys: Vec<&str> = item
+        .candidates
+        .iter()
+        .map(|c| c.topo_key.as_str())
+        .collect();
+    assert_eq!(keys, vec!["f:6"], "only the measurable face is offered");
+}
+
+/// SCHEMA §9 stage 1 gate: a seed edge the LADDER cannot confidently bind on the
+/// head — it is itself `NeedsRepair`, or gone — is `no-candidates`, and the
+/// adjacency handshake is never even asked.
+///
+/// Its own repair comes first. Guessing an edge here would offer the reference
+/// faces of the WRONG contour, which is the silent mis-bind this stack exists to
+/// eliminate.
+#[tokio::test]
+async fn a_seed_edge_the_ladder_cannot_bind_yields_no_candidates_without_asking() {
+    use onecad_core::document::repair::{LadderLevel, RepairItem, RepairReason};
+
+    let answer = crate::dto::PrepareEdgeOpDto {
+        snapshot_id: 7,
+        target_body_id: "body_1".into(),
+        edges: vec![edge_evidence("e:13", Some(vec!["f:5", "f:6"]))],
+        refusal: None,
+    };
+    let unresolvable = onecad_core::regen::ResolveOutcome::NeedsRepair(RepairItem {
+        step_index: 0,
+        ref_id: String::new(),
+        element_id: None,
+        ladder_failed: LadderLevel::Descriptor,
+        reason: RepairReason::Ambiguous,
+        candidates: Vec::new(),
+        scoring_version: Some(4),
+        anchor: None,
+        ui_label: String::new(),
+        seeded: false,
+        ordinal_anchor: None,
+        seed_edge_id: None,
+    });
+    let (rt, record_id, _, faces) =
+        legacy_chamfer_runtime_with_seed_outcome(answer, Some(unresolvable));
+
+    let out = rt
+        .resolve_refs_with(
+            ResolveRequest {
+                snapshot_id: SnapshotId(7),
+                refs: vec![onecad_core::regen::ResolveRef {
+                    ref_id: format!("{record_id}.input1"),
+                    element: empty_element_ref(),
+                }],
+            },
+            Some(repair_seams(&faces, &fake_elements())),
+        )
+        .await
+        .expect("an unbindable seed edge is an answer, not a failure");
+    let onecad_core::regen::ResolveOutcome::NeedsRepair(item) = &out[0].outcome else {
+        panic!("still NeedsRepair: {out:?}")
+    };
+    assert_eq!(
+        item.reason,
+        onecad_core::document::repair::RepairReason::NoCandidates
+    );
+    assert!(item.candidates.is_empty(), "no stale ordinals leak out");
+    assert!(
+        faces.asked.lock().unwrap().is_none(),
+        "with no head address for the seed edge there is nothing to ask PrepareEdgeOp"
+    );
+}
+
+/// A seed edge the head no longer has: `PrepareEdgeOp` answers a REFUSAL (an
+/// empty closure is a successful answer, §7.6), so the dry run reports
+/// `no-candidates` rather than offering the stale ones.
+#[tokio::test]
+async fn a_legacy_reference_face_ref_whose_seed_edge_is_gone_has_no_candidates() {
+    let answer = crate::dto::PrepareEdgeOpDto {
+        snapshot_id: 7,
+        target_body_id: String::new(),
+        edges: Vec::new(),
+        refusal: Some(crate::dto::EdgeOpRefusalDto {
+            code: "unsupportedEdge".into(),
+            message: "gone".into(),
+            edges: Vec::new(),
+        }),
+    };
+    let (rt, record_id, _, faces) = legacy_chamfer_runtime(answer);
+    let out = rt
+        .resolve_refs_with(
+            ResolveRequest {
+                snapshot_id: SnapshotId(7),
+                refs: vec![onecad_core::regen::ResolveRef {
+                    ref_id: format!("{record_id}.input1"),
+                    element: empty_element_ref(),
+                }],
+            },
+            Some(repair_seams(&faces, &fake_elements())),
+        )
+        .await
+        .expect("a refusal is an answer");
+    let onecad_core::regen::ResolveOutcome::NeedsRepair(item) = &out[0].outcome else {
+        panic!("still NeedsRepair: {out:?}")
+    };
+    assert_eq!(
+        item.reason,
+        onecad_core::document::repair::RepairReason::NoCandidates
+    );
+    assert!(item.candidates.is_empty(), "no stale ordinals leak out");
+}
+
+/// A MIXED batch: one `legacyReferenceFace` refId answered locally, one ordinary
+/// ref forwarded to the engine. The caller zips answers to requests, so ORDER is
+/// part of the contract — the locally-answered ref must land back at its own index.
+#[tokio::test]
+async fn a_mixed_resolve_batch_keeps_every_answer_at_its_own_index() {
+    let answer = crate::dto::PrepareEdgeOpDto {
+        snapshot_id: 7,
+        target_body_id: "body_1".into(),
+        edges: vec![edge_evidence("e:13", Some(vec!["f:5", "f:6"]))],
+        refusal: None,
+    };
+    let (rt, record_id, _, faces) = legacy_chamfer_runtime(answer);
+    let legacy = format!("{record_id}.input1");
+    let ordinary = "some_other_op.input0".to_string();
+
+    let out = rt
+        .resolve_refs_with(
+            ResolveRequest {
+                snapshot_id: SnapshotId(7),
+                refs: vec![
+                    // index 0: an ORDINARY ref the engine answers…
+                    onecad_core::regen::ResolveRef {
+                        ref_id: ordinary.clone(),
+                        element: empty_element_ref(),
+                    },
+                    // …index 1: the legacy pair slot, answered locally.
+                    onecad_core::regen::ResolveRef {
+                        ref_id: legacy.clone(),
+                        element: empty_element_ref(),
+                    },
+                ],
+            },
+            Some(repair_seams(&faces, &fake_elements())),
+        )
+        .await
+        .expect("a mixed batch is answered whole");
+
+    assert_eq!(out.len(), 2, "one answer per requested ref");
+    assert_eq!(
+        out.iter().map(|r| r.ref_id.clone()).collect::<Vec<_>>(),
+        vec![ordinary, legacy],
+        "the locally-answered ref is spliced back at ITS OWN index"
+    );
+    // The engine's echo for the ordinary ref (the fixture's `autoBind`) is
+    // untouched, and only the legacy slot took the op-built path.
+    assert!(matches!(
+        out[0].outcome,
+        onecad_core::regen::ResolveOutcome::AutoBind { .. }
+    ));
+    let onecad_core::regen::ResolveOutcome::NeedsRepair(item) = &out[1].outcome else {
+        panic!("the legacy slot is NeedsRepair: {out:?}")
+    };
+    assert_eq!(
+        item.reason,
+        onecad_core::document::repair::RepairReason::LegacyReferenceFace
+    );
+    assert_eq!(item.candidates.len(), 2);
+}
+
+/// The empty pair slot has no stored ref, so `repair_candidate_body` falls back to
+/// the record's operated body — without it the repair panel could not promote the
+/// face the user picks.
+#[test]
+fn a_legacy_reference_face_slot_still_names_the_operated_body() {
+    let answer = crate::dto::PrepareEdgeOpDto {
+        snapshot_id: 7,
+        target_body_id: "body_1".into(),
+        edges: vec![edge_evidence("e:13", Some(vec!["f:5", "f:6"]))],
+        refusal: None,
+    };
+    let (rt, record_id, body, _) = legacy_chamfer_runtime(answer);
+    assert!(
+        rt.stored_input_ref(&format!("{record_id}.input1"))
+            .is_none(),
+        "the pair slot is empty until the repair creates it"
+    );
+    assert_eq!(
+        rt.repair_candidate_body(&format!("{record_id}.input1")),
+        Some(body.to_string())
     );
 }

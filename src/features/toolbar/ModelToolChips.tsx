@@ -448,6 +448,7 @@ export function ModelToolChips() {
   const valueError = useToolChipStore((s) => s.valueError);
   const distance2 = useToolChipStore((s) => s.distance2);
   const chamferAngleDeg = useToolChipStore((s) => s.chamferAngleDeg);
+  const showChamferFlip = useToolChipStore((s) => s.showChamferFlip);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
@@ -594,6 +595,8 @@ export function ModelToolChips() {
       onDistance2={(v) => toolChipStore.getState().onDistance2?.(v)}
       chamferAngleDeg={chamferAngleDeg}
       onChamferAngle={(v) => toolChipStore.getState().onChamferAngle?.(v)}
+      showChamferFlip={showChamferFlip}
+      onChamferFlip={() => toolChipStore.getState().onChamferFlip?.()}
       onConfirm={() => toolChipStore.getState().onConfirm?.()}
     />
   ) : null;

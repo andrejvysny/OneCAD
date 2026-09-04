@@ -203,6 +203,94 @@ describe("previewOps OP_BUILDERS mirror their commit call sites", () => {
     ).toThrow(/not both/);
   });
 
+
+  // ── reference faces (SCHEMA §7.3, kernel-hardening WP-F) ───────────────────
+
+  /** An asymmetric chamfer draft with ONE pair, in the §7.3 slot order: the edge
+   *  input first, then the pair's FACE input. */
+  const typedChamferSession = (over: Record<string, unknown> = {}) =>
+    session({
+      opType: "Chamfer",
+      inputs: [
+        { primary: { bodyId: "body1", elementId: "el_e1", kind: "edge" } },
+        {
+          primary: { bodyId: "body1", elementId: "el_f7", kind: "face" },
+          anchor: { worldPoint: [7, 8, 9] },
+        },
+      ],
+      latestParams: {
+        mode: "Chamfer",
+        radius: 4,
+        distance2: 1,
+        edgeIds: ["el_e1"],
+        referenceFaces: [{ edgeId: "el_e1", faceId: "el_f7" }],
+        ...over,
+      },
+    });
+
+  it("a typed Chamfer's PREVIEW op is the op the commit sends — same pairs, same slots", () => {
+    // The fresh-author commit MATERIALIZES the preview session
+    // (`localSolver.endPreview(…, true)` runs this very builder), so anything this
+    // lane drops is something the committed record never had. WP-F: that includes
+    // the reference faces, without which core refuses the record outright.
+    const op = buildPreviewOp(typedChamferSession());
+    if (op.opType !== "Chamfer") throw new Error("expected Chamfer");
+    expect(op.params.referenceFaces).toEqual([{ edgeId: "el_e1", faceId: "el_f7" }]);
+    // Slot order: the edge ref, THEN the face ref (`inputs[N + i]`).
+    expect(op.inputs?.map((r) => [r.primary.kind, r.primary.elementId])).toEqual([
+      ["edge", "el_e1"],
+      ["face", "el_f7"],
+    ]);
+    // And it is byte-identical to the op the commit call site would build.
+    expect(buildPreviewOp(typedChamferSession())).toEqual(op);
+  });
+
+  it("REFUSES referenceFaces on a Fillet, on an equal-leg chamfer, or off `edgeIds`", () => {
+    const filletDraft = typedChamferSession();
+    filletDraft.opType = "Fillet";
+    (filletDraft.latestParams as Record<string, unknown>).mode = "Fillet";
+    expect(() => buildPreviewOp(filletDraft)).toThrow(/Chamfer-only/);
+
+    const equalLeg = typedChamferSession();
+    delete (equalLeg.latestParams as Record<string, unknown>).distance2;
+    expect(() => buildPreviewOp(equalLeg)).toThrow(/equal-leg/);
+
+    expect(() =>
+      buildPreviewOp(typedChamferSession({ referenceFaces: [{ edgeId: "el_OTHER", faceId: "el_f7" }] })),
+    ).toThrow(/not in edgeIds/);
+
+    expect(() =>
+      buildPreviewOp(
+        typedChamferSession({
+          edgeIds: ["el_e1", "el_e2"],
+          referenceFaces: [
+            { edgeId: "el_e1", faceId: "el_f7" },
+            { edgeId: "el_e1", faceId: "el_f9" },
+          ],
+        }),
+      ),
+    ).toThrow(/one pair per contour/);
+  });
+
+  it("REFUSES a pair whose face slot is missing, mis-typed, or anchorless", () => {
+    // The anchor is not decoration: SCHEMA §7.3 makes it non-optional because two
+    // congruent faces tie without it and the ref is NeedsRepair on every replay.
+    const noFaceSlot = typedChamferSession();
+    noFaceSlot.inputs = noFaceSlot.inputs!.slice(0, 1);
+    expect(() => buildPreviewOp(noFaceSlot)).toThrow(/one face input per referenceFaces pair/);
+
+    const anchorless = typedChamferSession();
+    anchorless.inputs![1] = { primary: { bodyId: "body1", elementId: "el_f7", kind: "face" } };
+    expect(() => buildPreviewOp(anchorless)).toThrow(/carrying an anchor/);
+
+    const wrongFace = typedChamferSession();
+    wrongFace.inputs![1] = {
+      primary: { bodyId: "body1", elementId: "el_OTHER", kind: "face" },
+      anchor: { worldPoint: [7, 8, 9] },
+    };
+    expect(() => buildPreviewOp(wrongFace)).toThrow(/matching referenceFaces/);
+  });
+
   it("Shell matches commitShell's op", () => {
     // commitShell:
     //   const bodyId = faces[0]?.bodyId;

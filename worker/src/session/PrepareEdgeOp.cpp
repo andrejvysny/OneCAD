@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -64,10 +65,24 @@ json prepared_result(std::uint64_t snapshot, const std::string &target,
   std::set_difference(contours.closure_ordinals.begin(),
                       contours.closure_ordinals.end(), picked.begin(), picked.end(),
                       std::back_inserter(extra));
+  // SCHEMA §7.6 `contour`: the 0-based index of the tangent contour an edge
+  // belongs to. `analyze_edge_contours` reports contours in SEED order and the
+  // seeds here are `picks.ordinals`, which `resolve_edge_picks` already sorted and
+  // de-duplicated — so contour `k` is the one seeded by the k-th smallest picked
+  // ordinal, a pure function of the pick set on this snapshot.
+  std::map<int, int> contour_of;
+  for (std::size_t index = 0; index < contours.contours.size(); ++index)
+    for (const int ordinal : contours.contours[index])
+      contour_of.emplace(ordinal, static_cast<int>(index));
+  // One traversal of the body for the WHOLE closure, not one per edge.
+  const EdgeEvidenceMaps maps(body);
   json edges = json::array();
-  for (const int ordinal : contours.closure_ordinals)
+  for (const int ordinal : contours.closure_ordinals) {
+    const auto found = contour_of.find(ordinal);
     edges.push_back(edge_evidence_entry(
-        body, ordinal, std::binary_search(picked.begin(), picked.end(), ordinal)));
+        maps, ordinal, std::binary_search(picked.begin(), picked.end(), ordinal),
+        found == contour_of.end() ? 0 : found->second));
+  }
   if (!chain && !extra.empty())
     return response(snapshot, target, json::array(),
                     refusal("chainMismatch",

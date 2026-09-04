@@ -1,3 +1,5 @@
-- [Frontend gotchas](frontend-gotchas.md) — engine test doubles, the five places a new tool must be registered, toolbarHidden, StatusSeverity has no "warning"
+- [Frontend gotchas](frontend-gotchas.md) — engine test doubles, five places to register a tool, statusHint is an object, beginPreview freezes inputs[], mock box adjacency
 - [Projection seams](projection-seams.md) — PROJECTION_STALE has no evidence, feature rows have no sketch id, why every projection verb re-enters the sketch
 - [Core record gotchas](core-record-gotchas.md) — inputs re-derived on deserialize, ~65 SketchRegionRef literals, accept only NEW insta snaps by hand
+- [Edge-op authoring seams](edge-op-authoring-seams.md) — the four seams a fillet/chamfer param must cross, core-serde vs OCW1, re-edit is a whole-op replace
+- [Rust lane gotchas](repo_rust_lane_gotchas.md) — params-field fan-out, RepairReason's hand-written Deserialize, runtime facets, editedFrom lanes, GProp normals

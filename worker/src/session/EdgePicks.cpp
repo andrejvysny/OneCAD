@@ -3,7 +3,9 @@
 #include <algorithm>
 
 #include <TopExp.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 
@@ -72,19 +74,54 @@ ResolvedEdgePicks resolve_edge_picks(const BodyStore &bodies,
   return result;
 }
 
-json edge_evidence_entry(const TopoDS_Shape &body, int ordinal, bool picked) {
-  TopTools_IndexedMapOfShape edges;
+EdgeEvidenceMaps::EdgeEvidenceMaps(const TopoDS_Shape &body) {
   TopExp::MapShapes(body, TopAbs_EDGE, edges);
-  const TopoDS_Edge edge = TopoDS::Edge(edges(ordinal));
+  TopExp::MapShapesAndAncestors(body, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  TopExp::MapShapes(body, TopAbs_FACE, faces);
+}
+
+std::vector<int> adjacent_face_ordinals(
+    const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces,
+    const TopTools_IndexedMapOfShape &face_map, const TopoDS_Edge &edge) {
+  const int index = edge_faces.FindIndex(edge);
+  if (index == 0)
+    return {};
+  std::vector<int> ordinals;
+  for (TopTools_ListOfShape::Iterator it(edge_faces(index)); it.More();
+       it.Next()) {
+    const int ordinal = face_map.FindIndex(it.Value());
+    if (ordinal > 0)
+      ordinals.push_back(ordinal);
+  }
+  std::sort(ordinals.begin(), ordinals.end());
+  ordinals.erase(std::unique(ordinals.begin(), ordinals.end()), ordinals.end());
+  return ordinals;
+}
+
+std::vector<int> adjacent_face_ordinals(const TopoDS_Shape &body,
+                                        const TopoDS_Edge &edge) {
+  const EdgeEvidenceMaps maps(body);
+  return adjacent_face_ordinals(maps.edge_faces, maps.faces, edge);
+}
+
+json edge_evidence_entry(const EdgeEvidenceMaps &maps, int ordinal, bool picked,
+                         int contour) {
+  const TopoDS_Edge edge = TopoDS::Edge(maps.edges(ordinal));
   const em::km::ElementDescriptor descriptor =
       em::ElementMapPartition::describe(edge);
+  json adjacent = json::array();
+  for (const int face_ordinal :
+       adjacent_face_ordinals(maps.edge_faces, maps.faces, edge))
+    adjacent.push_back("f:" + std::to_string(face_ordinal));
   return {{"topoKey", "e:" + std::to_string(ordinal)},
           {"picked", picked},
           {"anchor",
            {{"worldPoint", {descriptor.center.X(), descriptor.center.Y(),
                              descriptor.center.Z()}}}},
           {"descriptor",
-           em::ElementMapPartition::descriptor_to_json(descriptor)}};
+           em::ElementMapPartition::descriptor_to_json(descriptor)},
+          {"contour", contour},
+          {"adjacentFaces", std::move(adjacent)}};
 }
 
 } // namespace onecad::session

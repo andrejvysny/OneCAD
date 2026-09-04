@@ -162,21 +162,31 @@ function deriveOperatedBody(item: NeedsRepairItem): string | null {
 /**
  * The `InputPath` that writes the slot a repair item names, or `null` when that
  * slot is not element-addressable. Fetches the op's stored params only for the
- * one opType that needs them (Extrude — its ToFace slots are conditional; see
- * `inputPathFor`), so the common repair path stays a single round trip.
+ * opTypes that need them, so the common repair path stays a single round trip:
+ *
+ *  - **Extrude** — its ToFace slots are conditional, so slot 0 could be either
+ *    direction's target face.
+ *  - **Chamfer** — SCHEMA §7.3 (WP-F) puts one reference-FACE slot per
+ *    `referenceFaces` pair AFTER the `edgeIds.length` edge slots, and only
+ *    `edgeIds` says where that boundary is. `seedEdgeId` (set only on a
+ *    `legacyReferenceFace` item) is echoed back verbatim: it is the contour edge
+ *    the CREATED pair is keyed by, and core refuses a create without it.
+ *
+ * See `inputPathFor` for both slot tables.
  */
 export async function repairInputPath(
   item: NeedsRepairItem,
 ): Promise<ReturnType<typeof inputPathFor>> {
   const opType = documentStore.getState().features.find((f) => f.id === item.opId)?.opType;
   const index = parseRefId(item.refId)?.index ?? 0;
-  if (opType !== "Extrude") return inputPathFor(opType, index);
+  if (opType !== "Extrude" && opType !== "Chamfer") return inputPathFor(opType, index);
   try {
     const params = await createClient().getOperationParams(item.opId);
-    return inputPathFor(opType, index, params);
+    return inputPathFor(opType, index, params, item.seedEdgeId);
   } catch {
-    // Without the params the ToFace slot cannot be told apart from its twin, and
-    // guessing would rebind the wrong direction's target face.
+    // Without the params neither slot can be identified: an Extrude ToFace slot
+    // cannot be told apart from its twin, and a Chamfer's trailing face slot cannot
+    // be told apart from an edge slot. Guessing rebinds the wrong input.
     return null;
   }
 }
@@ -230,13 +240,28 @@ export async function rebindCandidate(
       anchor: { worldPoint: candidate.worldPos },
     }, snapshotId);
     if (!promoted) return false;
+    // A CHAMFER reference-face pair (SCHEMA §7.3/§9, WP-F) needs an anchor that is
+    // an INTERIOR point of the chosen face. A candidate's `worldPos` is DISPLAY
+    // evidence (the worker item and the Rust re-derivation put the face centre there
+    // today, but an older item carried the seed EDGE's anchor, which lies on BOTH
+    // adjacent faces and would tie the resolver's anchor rung between them on every
+    // replay — exactly the ambiguity §7.3 makes the anchor non-optional to prevent).
+    // Read the face centre live instead, and only fall back to `worldPos` when the query cannot
+    // answer (an anchorless ref is refused by core, so a wrong-but-present anchor
+    // is still the better failure than none).
+    const worldPoint =
+      path.path === "chamferReferenceFace"
+        ? (await client
+            .elementInfo(promoted.bodyId, promoted.elementId, candidate.topoKey)
+            .catch(() => null))?.center ?? candidate.worldPos
+        : candidate.worldPos;
     // The candidate's TopoKey decides `primary.kind` — a hole/shell slot binds a
     // FACE, and mislabelling it as an edge would poison the descriptor rung.
     const ref = elementRefOfKind(
       promoted.bodyId,
       promoted.elementId,
       elementKindOfTopoKey(candidate.topoKey),
-      candidate.worldPos,
+      worldPoint,
     );
     const res = await client.applyEditCommand(rebindInputCommand(item.opId, path, ref));
     // A rebind that resolved to a failure must not report the reference repaired,

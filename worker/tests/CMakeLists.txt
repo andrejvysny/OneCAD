@@ -929,6 +929,27 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/region_anchor_rebind.ndjson
 )
+# Kernel-hardening WP-F — a Chamfer's reference face is a PERSISTED typed ref
+# (`referenceFaces` pairs, face refs in the trailing inputs[] slots): the §7.6
+# `PrepareEdgeOp` contour + adjacency handshake, a typed pair accepted and still
+# resolving across an ordinal-permuting upstream hole, the NOT_ADJACENT refusal by
+# name with the head untouched, and an uncovered contour halting `needsRepair`.
+add_test(
+    NAME canonical_chamfer_reference_face
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/chamfer_reference_face.ndjson
+)
+# Kernel-hardening WP-F — LEGACY asymmetric chamfer records (no pair) halt
+# `needsRepair` with the op-built §9 reason `legacyReferenceFace` + `seedEdgeId` +
+# the two adjacent faces tied, in EVERY lane (no `editedFrom`, `editedFrom` 1,
+# `editedFrom` 2, and the `angleDeg` form); an equal-leg record is untouched.
+add_test(
+    NAME canonical_chamfer_reference_face_legacy_needsrepair
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/chamfer_reference_face_legacy_needsrepair.ndjson
+)
 # Kernel-hardening WP-B — §7.4 `maxResidual`, REPORTING ONLY. Rounds 1 and 2 are the
 # load-bearing pair (0.0 on a well-conditioned dimensioned rectangle, non-zero on the
 # contradictory Distance 10/20 pair), rounds 3 and 4 carry the field onto BOTH
@@ -978,3 +999,12 @@ add_test(NAME region_containment COMMAND test_region_containment)
 add_executable(test_solver_residual test_solver_residual.cpp)
 target_link_libraries(test_solver_residual PRIVATE worker_core)
 add_test(NAME solver_residual COMMAND test_solver_residual)
+
+# WP-F probe — an ASYMMETRIC chamfer must keep its long leg on the same PHYSICAL
+# face across an upstream edit. `reference_face` picks the adjacent face with the
+# smaller snapshot-scoped face ordinal, so a feature that reorders the face map
+# mirrors the two legs; volume, mass and face count are all blind to the swap, so
+# the chamfer face's own bounding box is the signature.
+add_executable(test_chamfer_reference_face test_chamfer_reference_face.cpp)
+target_link_libraries(test_chamfer_reference_face PRIVATE worker_core)
+add_test(NAME chamfer_reference_face COMMAND test_chamfer_reference_face)

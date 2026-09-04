@@ -47,6 +47,26 @@ void check_near(double got, double want, double tol, const std::string& msg) {
     }
 }
 
+// The sub-shape of `kind` whose descriptor centre is nearest (cx,cy,cz).
+TopoDS_Shape subshape_by_center(const TopoDS_Shape& shape, TopAbs_ShapeEnum kind, double cx,
+                                double cy, double cz) {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, kind, map);
+    TopoDS_Shape best;
+    double best_d2 = -1.0;
+    for (int i = 1; i <= map.Extent(); ++i) {
+        const km::ElementDescriptor d = em::ElementMapPartition::describe(map(i));
+        const double dx = d.center.X() - cx, dy = d.center.Y() - cy, dz = d.center.Z() - cz;
+        const double d2 = dx * dx + dy * dy + dz * dz;
+        if (best_d2 < 0.0 || d2 < best_d2) { best_d2 = d2; best = map(i); }
+    }
+    return best;
+}
+
+TopoDS_Shape face_by_center(const TopoDS_Shape& shape, double cx, double cy, double cz) {
+    return subshape_by_center(shape, TopAbs_FACE, cx, cy, cz);
+}
+
 TopoDS_Shape edge_by_center(const TopoDS_Shape& shape, double cx, double cy, double cz) {
     TopTools_IndexedMapOfShape edges;
     TopExp::MapShapes(shape, TopAbs_EDGE, edges);
@@ -72,6 +92,17 @@ json edge_input(const std::string& body_id, const std::string& elem_id, const To
                 {"intent", {{"kind", "edge"},
                             {"descriptor", em::ElementMapPartition::descriptor_to_json(
                                                em::ElementMapPartition::describe(edge))}}},
+                {"anchor", {{"worldPoint", {ax, ay, az}}}}};
+}
+
+// A FACE input ref, the shape a Chamfer's `referenceFaces` pair lowers into
+// `inputs[N + i]` (SCHEMA §7.3, kernel-hardening WP-F).
+json face_input(const std::string& body_id, const std::string& elem_id, const TopoDS_Shape& face,
+                double ax, double ay, double az) {
+    return json{{"primary", {{"bodyId", body_id}, {"elementId", elem_id}, {"kind", "face"}}},
+                {"intent", {{"kind", "face"},
+                            {"descriptor", em::ElementMapPartition::descriptor_to_json(
+                                               em::ElementMapPartition::describe(face))}}},
                 {"anchor", {{"worldPoint", {ax, ay, az}}}}};
 }
 
@@ -146,12 +177,44 @@ struct ChamferRun {
     std::string error_message;
 };
 
+// THE PAIR'S FACE SELECTOR. Since kernel-hardening WP-F an asymmetric chamfer has
+// exactly ONE source for the face `radius` is measured on — the persisted
+// `params.referenceFaces` pair — and a record without one HALTS (pinned below and
+// in test_chamfer_reference_face.cpp). The ordinal chooser this helper reproduces
+// is GONE from the op.
+//
+// It survives HERE, as a test-local selector, for one reason: the analytic
+// expectations below (the removed wedge's centroid) are stated relative to WHICH
+// adjacent face carries `radius`, so authoring the pair on the face the pre-WP-F
+// rule happened to choose keeps every number in this file unchanged and makes the
+// diff a pure change of MECHANISM. Recomputed from OCCT rather than assumed, so
+// the expectation states the rule and not one build's happenstance face order.
+bool reference_face_is_x0(const TopoDS_Shape& box, const TopoDS_Shape& edge) {
+    TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+    TopExp::MapShapesAndAncestors(box, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+    TopTools_IndexedMapOfShape face_map;
+    TopExp::MapShapes(box, TopAbs_FACE, face_map);
+    const TopTools_ListOfShape& faces = edge_faces(edge_faces.FindIndex(edge));
+    TopoDS_Shape best;
+    int best_ordinal = 0;
+    for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
+        const int ord = face_map.FindIndex(it.Value());
+        if (ord > 0 && (best_ordinal == 0 || ord < best_ordinal)) {
+            best_ordinal = ord;
+            best = it.Value();
+        }
+    }
+    // The x==0 face's centre is (0,5,5); the y==0 face's is (5,0,5).
+    return em::ElementMapPartition::describe(best).center.X() < 1e-9;
+}
+
 // Run one chamfer on the (0,0) vertical edge of a 10 mm box. `mode_params` carries
 // `radius` plus whichever mode field is under test (none / `distance2` / `angleDeg`),
 // so a case reads as "which SHAPE of params did I hand it". The measurements are
 // taken unconditionally: on a refusal they are the UNTOUCHED box, which is what
 // "recoverable, session intact" means.
-ChamferRun run_chamfer(const json& mode_params, const std::string& op_id) {
+ChamferRun run_chamfer(const json& mode_params, const std::string& op_id,
+                       bool author_pair = true) {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();  // [0,10]^3
     BodyStore bodies;
     bodies.create("body_1", "op0", box);
@@ -160,8 +223,20 @@ ChamferRun run_chamfer(const json& mode_params, const std::string& op_id) {
     const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
     json params = json{{"mode", "Chamfer"}, {"edgeIds", json::array({"e:x"})}};
     params.update(mode_params);
+    json inputs = json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)});
+    // An ASYMMETRIC chamfer REQUIRES a `referenceFaces` pair (SCHEMA §7.3): there
+    // is no ordinal fallback, so a pair-less record halts `needsRepair`. The face
+    // ref rides `inputs[N + i]` with N = `edgeIds.length` = 1. `author_pair` false
+    // is how the halt itself is exercised.
+    if (author_pair && (mode_params.contains("distance2") || mode_params.contains("angleDeg"))) {
+        const bool x0 = reference_face_is_x0(box, edge);
+        const TopoDS_Shape face = x0 ? face_by_center(box, 0, 5, 5) : face_by_center(box, 5, 0, 5);
+        inputs.push_back(face_input("body_1", "el_ref", face, x0 ? 0.0 : 5.0, x0 ? 5.0 : 0.0, 5.0));
+        params["referenceFaces"] =
+            json::array({json{{"edgeId", "el_e"}, {"faceId", "el_ref"}}});
+    }
     json op = {{"opType", "Chamfer"}, {"opId", op_id},
-               {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
+               {"inputs", inputs},
                {"params", params}};
 
     Ctx c;
@@ -184,32 +259,8 @@ ChamferRun run_two_distance_chamfer(double d1, double d2) {
     return run_chamfer(json{{"radius", d1}, {"distance2", d2}}, "opc2");
 }
 
-// Whether the SCHEMA §7.3 reference face (the adjacent face with the SMALLER
-// resolved face ordinal — the same 1-based `TopExp::MapShapes` index a TopoKey
-// "f:N" is built from) of the box's (0,0) vertical edge is the x==0 plane.
-// Recomputed HERE from OCCT rather than assumed, so the expectation below states
-// the RULE and not one build's happenstance face order.
-bool reference_face_is_x0(const TopoDS_Shape& box, const TopoDS_Shape& edge) {
-    TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
-    TopExp::MapShapesAndAncestors(box, TopAbs_EDGE, TopAbs_FACE, edge_faces);
-    TopTools_IndexedMapOfShape face_map;
-    TopExp::MapShapes(box, TopAbs_FACE, face_map);
-    const TopTools_ListOfShape& faces = edge_faces(edge_faces.FindIndex(edge));
-    TopoDS_Shape best;
-    int best_ordinal = 0;
-    for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
-        const int ord = face_map.FindIndex(it.Value());
-        if (ord > 0 && (best_ordinal == 0 || ord < best_ordinal)) {
-            best_ordinal = ord;
-            best = it.Value();
-        }
-    }
-    // The x==0 face's centre is (0,5,5); the y==0 face's is (5,0,5).
-    return em::ElementMapPartition::describe(best).center.X() < 1e-9;
-}
-
 // --- Asymmetric legs remove the EXACT analytic wedge d1·d2/2·L, with `radius`
-//     landing on the deterministic reference face. ---
+//     landing on the face the `referenceFaces` PAIR names (WP-F). ---
 void test_chamfer_two_distance() {
     const double d1 = 1.0, d2 = 2.5, len = 10.0;
     const ChamferRun r = run_two_distance_chamfer(d1, d2);
@@ -235,15 +286,28 @@ void test_chamfer_two_distance() {
     const double rem_cy = (ref_x0 ? d1 : d2) / 3.0;
     const double kept = 1000.0 - removed;
     check_near(r.centre.X(), (1000.0 * 5.0 - removed * rem_cx) / kept, 1e-6,
-               "chamfer2: centroid X matches `radius` on the smaller face ordinal");
+               "chamfer2: centroid X matches `radius` on the PAIRED reference face");
     check_near(r.centre.Y(), (1000.0 * 5.0 - removed * rem_cy) / kept, 1e-6,
                "chamfer2: centroid Y matches `distance2` on the other face");
     std::fprintf(stderr, "chamfer2: reference face is %s, centroid (%.6f, %.6f)\n",
                  ref_x0 ? "x==0" : "y==0", r.centre.X(), r.centre.Y());
 }
 
-// --- The reference-face rule is a pure function of the predecessor shape: the
-//     same document replayed twice produces an IDENTICAL geometry signature. ---
+// --- …and the SAME record WITHOUT the pair does not fall back to an ordinal: it
+//     halts `needsRepair`, on the direct executor lane with no edit context at
+//     all. This is the assertion that keeps the deleted chooser deleted. ---
+void test_chamfer_two_distance_without_pair_halts() {
+    const ChamferRun r = run_chamfer(json{{"radius", 1.0}, {"distance2", 2.5}}, "opc2n",
+                                     /*author_pair=*/false);
+    check(!r.ok, "chamfer2 no pair: NOT a clean success");
+    check(r.error_code.empty(),
+          "chamfer2 no pair: the halt is STATE, not an error (got '" + r.error_code + "')");
+    check_near(r.volume, 1000.0, 1e-9, "chamfer2 no pair: the box is UNTOUCHED");
+    check(r.faces == 6, "chamfer2 no pair: no face was added");
+}
+
+// --- The pair is a pure function of the RECORD, so the same document replayed
+//     twice produces an IDENTICAL geometry signature. ---
 void test_chamfer_two_distance_reference_face_is_deterministic() {
     const ChamferRun a = run_two_distance_chamfer(1.0, 2.5);
     const ChamferRun b = run_two_distance_chamfer(1.0, 2.5);
@@ -717,6 +781,7 @@ int main() {
     test_chamfer_edge();
     test_chamfer_two_distance();
     test_chamfer_two_distance_reference_face_is_deterministic();
+    test_chamfer_two_distance_without_pair_halts();
     test_chamfer_angle_distance();
     test_chamfer_angle_45_is_equal_leg();
     test_chamfer_angle_refusals();

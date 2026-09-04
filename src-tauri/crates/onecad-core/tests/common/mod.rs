@@ -200,6 +200,8 @@ pub fn op_chamfer() -> Operation {
         angle_deg: None,
         edge_ids: vec![elem_e14()],
         edges: vec![],
+        reference_faces: Vec::new(),
+        reference_face_refs: Vec::new(),
         chain_tangent_edges: true,
         tangent_closure_version: None,
         extra: Default::default(),

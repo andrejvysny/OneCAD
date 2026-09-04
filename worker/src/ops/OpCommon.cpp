@@ -278,10 +278,26 @@ std::vector<json> operation_ref_ownership_repairs(const json& op, const std::str
     if (type == "Fillet" || type == "Chamfer") {
         std::string target_id;
         if (!op.contains("inputs") || !op["inputs"].is_array()) return out;
+        // SCHEMA §7.3 (2026-09-03, WP-F): a Chamfer's `referenceFaces` face refs
+        // ride the TRAILING `inputs[]` slots — index >= `params.edgeIds.length` —
+        // so a FACE primary is legal there, and only there. A Chamfer whose
+        // `edgeIds` is missing or not an array has NO trailing slots: the base
+        // stays at `npos` so every face primary is refused. Defaulting it to 0
+        // instead would accept a face in EVERY slot of exactly the malformed
+        // records this gate exists to catch.
+        std::size_t face_slot_base = std::string::npos;
+        if (type == "Chamfer" && params.contains("edgeIds") && params["edgeIds"].is_array()) {
+            face_slot_base = params["edgeIds"].size();
+        }
         for (std::size_t i = 0; i < op["inputs"].size(); ++i) {
             const json& input = op["inputs"][i];
             const json* primary = primary_of(&input);
             const std::string ref_id = op_id + ".input" + std::to_string(i);
+            if (i >= face_slot_base && primary != nullptr &&
+                read_str(*primary, "kind") == "face") {
+                append_face_ownership_repair(out, &input, ref_id, target_id, "Chamfer");
+                continue;
+            }
             if (primary == nullptr || read_str(*primary, "kind") != "edge") {
                 out.push_back(ownership_repair(
                     input, ref_id, type + " requires every typed edge ref to carry an edge primary"));

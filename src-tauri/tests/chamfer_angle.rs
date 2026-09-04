@@ -35,8 +35,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use onecad_core::document::record::{
-    BooleanMode, ChamferParams, ExtrudeMode, ExtrudeParams, KnownOperation, Operation,
-    OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
+    BooleanMode, ChamferParams, ChamferReferenceFace, ExtrudeMode, ExtrudeParams, KnownOperation,
+    Operation, OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -55,9 +55,10 @@ use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, World
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_lib::worker::manager::SupervisorConfig;
-use onecad_lib::worker::wire::sketch_wire;
+use onecad_lib::worker::wire::{sketch_wire, EdgeOpMode, EdgeOpPick, FaceAddress};
 use onecad_lib::worker::{
-    resolve_worker_path, MeshProvider, PreviewEngine, SolverEngine, WorkerManager,
+    resolve_worker_path, ElementQuery, FaceBoundaryProjection, MeshProvider, PreviewEngine,
+    SolverEngine, WorkerManager,
 };
 
 use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
@@ -311,12 +312,27 @@ fn anchored_ref(body: BodyId, element: &ElementId, kind: ElementKind, at: Vec3) 
 fn chamfer_record(
     rec: u128,
     body: BodyId,
-    edge: &ElementId,
-    at: Vec3,
+    // The picked edge and its world anchor travel together — one pick.
+    (edge, at): (&ElementId, Vec3),
     radius: f64,
     distance2: Option<f64>,
     angle_deg: Option<f64>,
+    reference: Option<(&ElementId, Vec3)>,
 ) -> OperationRecord {
+    // SCHEMA §7.3 (kernel-hardening WP-F): an ASYMMETRIC chamfer must name the
+    // adjacent face `radius` is measured on. Every case in this file pairs the
+    // edge with `adjacentFaces[0]` — the face the pre-WP-F smaller-ordinal rule
+    // chose — so every analytic volume below is unchanged by the field's arrival.
+    let (reference_faces, reference_face_refs) = match reference {
+        Some((face, face_at)) if distance2.is_some() || angle_deg.is_some() => (
+            vec![ChamferReferenceFace {
+                edge_id: edge.clone(),
+                face_id: face.clone(),
+            }],
+            vec![anchored_ref(body, face, ElementKind::Face, face_at)],
+        ),
+        _ => (Vec::new(), Vec::new()),
+    };
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
         0,
@@ -327,6 +343,8 @@ fn chamfer_record(
             angle_deg: angle_deg.map(Scalar::new),
             edge_ids: vec![edge.clone()],
             edges: vec![anchored_ref(body, edge, ElementKind::Edge, at)],
+            reference_faces,
+            reference_face_refs,
             chain_tangent_edges: false,
             tangent_closure_version: None,
             extra: Default::default(),
@@ -494,6 +512,17 @@ struct Stock {
     body: BodyId,
     edge: ElementId,
     anchor: Vec3,
+    /// `adjacentFaces[0]` of the picked edge, promoted — the SCHEMA §7.3
+    /// `referenceFaces` partner every asymmetric case here uses. It is the legacy
+    /// smaller-ordinal face, so naming it explicitly moves no geometry.
+    ref_face: ElementId,
+    ref_anchor: Vec3,
+}
+
+impl Stock {
+    fn reference(&self) -> Option<(&ElementId, Vec3)> {
+        Some((&self.ref_face, self.ref_anchor))
+    }
 }
 
 /// Builds the 10 mm cube on a fresh worker, verifies it is the sharp 6-face solid
@@ -552,12 +581,60 @@ async fn stock_box(bin: PathBuf) -> Stock {
     assert_eq!(promoted[0].topo_key, topo_key);
     assert_eq!(promoted[0].kind, "edge");
 
+    let edge = ElementId::new(&promoted[0].element_id);
+
+    // SCHEMA §7.6 (WP-F): the edge's adjacent faces, face-ordinal ascending.
+    // `adjacentFaces[0]` is the legacy smaller-ordinal reference face.
+    let prepared = wm
+        .prepare_edge_op(
+            snapshot,
+            EdgeOpMode::Chamfer,
+            &[EdgeOpPick {
+                body: Some(body),
+                address: FaceAddress::ElementId(edge.as_str()),
+            }],
+            false,
+        )
+        .await
+        .expect("PrepareEdgeOp on the promoted edge");
+    let adjacent = prepared.edges[0]
+        .adjacent_faces
+        .clone()
+        .expect("SCHEMA §7.6 `adjacentFaces` on every accepted edge");
+    let ref_key = adjacent[0].clone();
+    let ref_info = wm
+        .query_element_by_topo_key(snapshot, body, &ref_key)
+        .await
+        .expect("QueryElement by topoKey")
+        .expect("the adjacent face resolves on its own snapshot");
+    let ref_anchor =
+        Vec3::new_unchecked(ref_info.center[0], ref_info.center[1], ref_info.center[2]);
+    let promoted_face = rt
+        .promote_selection(
+            snapshot,
+            body,
+            vec![(
+                TopoKey::new(ref_key),
+                Some(AnchorIntent {
+                    world_point: ref_anchor,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("promote the reference face: {error}"));
+
     Stock {
         wm,
         rt,
         body,
-        edge: ElementId::new(&promoted[0].element_id),
+        edge,
         anchor,
+        ref_face: ElementId::new(&promoted_face[0].element_id),
+        ref_anchor,
     }
 }
 
@@ -565,18 +642,16 @@ async fn stock_box(bin: PathBuf) -> Stock {
 /// returns the measured `(volume, face_count)` of the committed body.
 async fn commit_chamfer(bin: PathBuf, radius: f64, angle_deg: Option<f64>) -> (f64, u32) {
     let mut stock = stock_box(bin).await;
-    add_op(
-        &mut stock.rt,
-        chamfer_record(
-            OP_TAIL,
-            stock.body,
-            &stock.edge,
-            stock.anchor,
-            radius,
-            None,
-            angle_deg,
-        ),
+    let record = chamfer_record(
+        OP_TAIL,
+        stock.body,
+        (&stock.edge, stock.anchor),
+        radius,
+        None,
+        angle_deg,
+        stock.reference(),
     );
+    add_op(&mut stock.rt, record);
     let report = regen_all(&mut stock.rt).await;
     let snapshot = published(&report, "chamfer commit");
     assert_eq!(
@@ -691,11 +766,11 @@ async fn preview_equals_commit_for_angle_mode() {
     let candidate = chamfer_record(
         OP_TAIL,
         stock.body,
-        &stock.edge,
-        stock.anchor,
+        (&stock.edge, stock.anchor),
         1.0,
         None,
         Some(60.0),
+        stock.reference(),
     );
 
     let preview = stock
@@ -787,11 +862,11 @@ async fn chamfer_angle_and_distance2_refused_by_core_before_the_worker() {
             record: chamfer_record(
                 OP_TAIL,
                 stock.body,
-                &stock.edge,
-                stock.anchor,
+                (&stock.edge, stock.anchor),
                 1.0,
                 Some(2.5),
                 Some(45.0),
+                stock.reference(),
             ),
             at_cursor: true,
         })
@@ -845,11 +920,11 @@ async fn chamfer_angle_out_of_range_is_recoverable_op_failed() {
     let flat = chamfer_record(
         OP_TAIL,
         stock.body,
-        &stock.edge,
-        stock.anchor,
+        (&stock.edge, stock.anchor),
         1.0,
         None,
         Some(180.0),
+        stock.reference(),
     );
 
     // (a) The authoring path. `ChamferParams::validate` bounds `angleDeg` to the
@@ -918,11 +993,11 @@ async fn chamfer_angle_out_of_range_is_recoverable_op_failed() {
             chamfer_record(
                 OP_TAIL,
                 stock.body,
-                &stock.edge,
-                stock.anchor,
+                (&stock.edge, stock.anchor),
                 1.0,
                 None,
                 Some(60.0),
+                stock.reference(),
             )
             .op,
             "op_after_refusal".into(),

@@ -381,6 +381,34 @@ pub enum InputPath {
         /// Index of the edge to rebind.
         index: usize,
     },
+    /// A Chamfer reference-face pair at `index` (into `referenceFaces` /
+    /// `referenceFaceRefs`) — the trailing `inputs[N + index]` slots of the op's
+    /// `inputs[]` array, `N = edgeIds.len()` (SCHEMA §7.3 slot order, §9 repair).
+    ///
+    /// Writes the WHOLE typed [`ElementRef`], evidence included, and mirrors its
+    /// element id into `referenceFaces[index].faceId` (the same dual-field
+    /// discipline Fillet edges and OffsetFace faces use).
+    ///
+    /// **The pair is addressed by its `edge_id`, not by `index`** (SCHEMA §7.3:
+    /// "array order carries no meaning"). An `edge_id` that already has a pair
+    /// REBINDS it — only the face moves; one that does not CREATES the pair, which
+    /// is the SCHEMA §9 `legacyReferenceFace` repair on a slot no stored ref
+    /// occupies yet. Either way `edge_id` must be an entry of `edgeIds`.
+    ///
+    /// `index` is INFORMATIONAL: it is the `i` of the item's `refId`
+    /// (`<opId>.input<N+i>`), which numbers the slot the pair would occupy *if the
+    /// uncovered contours were answered in order*. Keying on it instead dead-ended
+    /// a multi-contour repair answered out of order, and let two picks on one edge
+    /// append a duplicate. It is still honoured as a positional fallback when the
+    /// caller supplies no `edge_id` at all — sound only for a rebind.
+    ChamferReferenceFace {
+        /// The `i` of the item's `refId`. Informational; the `edge_id` decides.
+        index: usize,
+        /// The contour edge this pair is keyed by (the §9 item's `seedEdgeId`).
+        /// REQUIRED to create; omitted, `index` names an existing pair to rebind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_id: Option<ElementId>,
+    },
     /// A boolean op's target body (`params.targetBodyId`).
     BooleanTarget,
     /// A boolean op's tool body (`params.toolBodyId`).

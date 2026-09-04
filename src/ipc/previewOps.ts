@@ -45,6 +45,7 @@ import type {
   BooleanParams,
   ComponentParamValue,
   ExtrudeParams,
+  ChamferReferenceFace,
   FeatureBooleanMode,
   FilletParams,
   GearParams,
@@ -278,13 +279,37 @@ function edgeOpBuilder(kind: "Fillet" | "Chamfer"): PreviewOpBuilder {
     const edgeIds = stringList(s.latestParams.edgeIds, `${kind} edgeIds`);
     if (edgeIds.length === 0) throw new Error(`${kind} requires at least one edge`);
     const inputs = [...(s.inputs ?? [])];
-    if (inputs.length !== edgeIds.length) {
+    // SCHEMA §7.3 slot order (kernel-hardening WP-F): the `N` edge refs FIRST, then
+    // one reference-FACE ref per `referenceFaces` pair. Read the pairs before the
+    // arity check so a typed chamfer's trailing face slots are expected, not
+    // rejected as surplus inputs.
+    const referenceFaces = chamferReferenceFaces(kind, s.latestParams, edgeIds);
+    const expected = edgeIds.length + referenceFaces.length;
+    if (inputs.length !== expected) {
       throw new Error(
-        `${kind} requires one edge input per edgeId (${inputs.length} inputs for ${edgeIds.length} edgeIds)`,
+        `${kind} requires one edge input per edgeId${
+          referenceFaces.length > 0 ? " plus one face input per referenceFaces pair" : ""
+        } (${inputs.length} inputs for ${expected} slots)`,
       );
     }
-    if (inputs.some((r) => r.primary.kind !== "edge" || !r.primary.bodyId)) {
+    const edgeSlots = inputs.slice(0, edgeIds.length);
+    const faceSlots = inputs.slice(edgeIds.length);
+    if (edgeSlots.some((r) => r.primary.kind !== "edge" || !r.primary.bodyId)) {
       throw new Error(`${kind} edge inputs must each carry an edge bodyId`);
+    }
+    if (
+      faceSlots.some(
+        (r, i) =>
+          r.primary.kind !== "face" ||
+          !r.primary.bodyId ||
+          r.primary.elementId !== referenceFaces[i].faceId ||
+          !r.anchor?.worldPoint,
+      )
+    ) {
+      throw new Error(
+        `${kind} reference-face inputs must each be a face on the operated body, ` +
+          `matching referenceFaces[i].faceId and carrying an anchor (SCHEMA §7.3)`,
+      );
     }
     const params: FilletParams = {
       mode: kind,
@@ -320,8 +345,58 @@ function edgeOpBuilder(kind: "Fillet" | "Chamfer"): PreviewOpBuilder {
       }
       params.angleDeg = a;
     }
+    // SCHEMA §7.3: the pairs exist only for an ASYMMETRIC chamfer. Core refuses an
+    // equal-leg record that names a reference face, so a draft that still carries
+    // stale pairs after the mode was cleared is refused HERE rather than sent.
+    if (referenceFaces.length > 0) {
+      if (params.distance2 === undefined && params.angleDeg === undefined) {
+        throw new Error(
+          "an equal-leg Chamfer has no reference face and may not carry referenceFaces (SCHEMA §7.3)",
+        );
+      }
+      params.referenceFaces = referenceFaces;
+    }
     return { opType: kind, opId: s.opId, featureId: s.editFeatureId, inputs, params };
   };
+}
+
+/**
+ * The draft's SCHEMA §7.3 `referenceFaces` pairs, structurally validated (WP-F).
+ *
+ * Chamfer-only, one pair per tangent CONTOUR keyed by an edge of `edgeIds`, no
+ * duplicate key. Everything core refuses by name is refused here too, so an
+ * invalid draft fails the preview loudly instead of reaching the backend — and,
+ * because the SAME builder produces the committed op, the preview and the commit
+ * cannot disagree about which face carries `radius`.
+ */
+function chamferReferenceFaces(
+  kind: "Fillet" | "Chamfer",
+  params: PreviewParams,
+  edgeIds: string[],
+): ChamferReferenceFace[] {
+  const raw = params.referenceFaces;
+  if (raw === undefined || raw === null) return [];
+  if (kind !== "Chamfer") throw new Error("referenceFaces is Chamfer-only (SCHEMA §7.3)");
+  if (!Array.isArray(raw)) throw new Error("Chamfer referenceFaces must be an array");
+  const seen = new Set<string>();
+  return raw.map((entry, i) => {
+    const pair = entry as { edgeId?: unknown; faceId?: unknown };
+    const edgeId = typeof pair.edgeId === "string" ? pair.edgeId : "";
+    const faceId = typeof pair.faceId === "string" ? pair.faceId : "";
+    if (!edgeId || !faceId) {
+      throw new Error(`Chamfer referenceFaces[${i}] needs both an edgeId and a faceId`);
+    }
+    if (!edgeIds.includes(edgeId)) {
+      throw new Error(`Chamfer referenceFaces[${i}] keys edge ${edgeId} which is not in edgeIds`);
+    }
+    if (seen.has(edgeId)) {
+      throw new Error(
+        `Chamfer referenceFaces[${i}] repeats edge ${edgeId} (SCHEMA §7.3: one pair per contour)`,
+      );
+    }
+    seen.add(edgeId);
+    return { edgeId, faceId };
+  });
 }
 
 // ── Shell ────────────────────────────────────────────────────────────────────

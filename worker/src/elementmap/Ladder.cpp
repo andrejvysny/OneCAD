@@ -94,6 +94,8 @@ std::string curve_type_name(GeomAbs_CurveType t) {
     }
 }
 
+}  // namespace
+
 std::string candidate_summary(km::ElementKind kind, const km::ElementDescriptor& d) {
     char buf[96];
     if (kind == km::ElementKind::Face) {
@@ -108,6 +110,8 @@ std::string candidate_summary(km::ElementKind kind, const km::ElementDescriptor&
     }
     return std::string(buf);
 }
+
+namespace {
 
 // The enumerated candidate pool for one element kind of a body.
 struct CandidatePool {

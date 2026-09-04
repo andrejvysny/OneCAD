@@ -376,6 +376,8 @@ fn chamfer_record(
             angle_deg: None,
             edge_ids: vec![edge.clone()],
             edges: vec![anchored_ref(body, edge, ElementKind::Edge, at)],
+            reference_faces: Vec::new(),
+            reference_face_refs: Vec::new(),
             chain_tangent_edges: false,
             tangent_closure_version: None,
             extra: Default::default(),

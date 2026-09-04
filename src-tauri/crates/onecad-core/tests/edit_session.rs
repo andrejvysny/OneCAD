@@ -15,7 +15,7 @@ use onecad_core::document::body::BodyMeta;
 use onecad_core::document::datum::DatumPlane;
 use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
-    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ComponentSourceRef,
+    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ChamferReferenceFace, ComponentSourceRef,
     DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams, FrozenPlacement, HoleParams,
     HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord,
     PlaceComponentParams, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
@@ -1040,6 +1040,8 @@ fn chamfer_op(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64) -> Operati
         angle_deg: None,
         edge_ids: edge_ids.iter().map(|e| ElementId::new(*e)).collect(),
         edges,
+        reference_faces: Vec::new(),
+        reference_face_refs: Vec::new(),
         chain_tangent_edges: true,
         tangent_closure_version: None,
         extra: Default::default(),
@@ -1524,7 +1526,41 @@ fn chamfer_op_d2(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64, d2: f64
         unreachable!("chamfer_op builds a Chamfer")
     };
     p.distance2 = Some(s(d2));
+    add_reference_face(&mut p);
     Operation::Known(KnownOperation::Chamfer(p))
+}
+
+/// Gives an asymmetric chamfer the SCHEMA §7.3 `referenceFaces` pair its
+/// authoring now requires (kernel-hardening WP-F): one pair on the first edge,
+/// naming a face on the same body, with the anchor the rule demands.
+fn add_reference_face(p: &mut ChamferParams) {
+    let body = p
+        .edges
+        .first()
+        .and_then(|e| e.primary.as_ref())
+        .map_or_else(BX, |primary| primary.body);
+    let face = ElementId::new("f_ref");
+    p.reference_faces = vec![ChamferReferenceFace {
+        edge_id: p.edge_ids[0].clone(),
+        face_id: face.clone(),
+    }];
+    p.reference_face_refs = vec![ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: face,
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }];
 }
 
 /// The stored `distance2` of a record's op (`None` for an equal-leg chamfer).
@@ -1713,6 +1749,7 @@ fn chamfer_op_angle(
         unreachable!("chamfer_op builds a Chamfer")
     };
     p.angle_deg = Some(s(angle));
+    add_reference_face(&mut p);
     Operation::Known(KnownOperation::Chamfer(p))
 }
 
@@ -3393,5 +3430,714 @@ fn an_empty_stack_reverts_nothing() {
     assert!(
         sess.redo().unwrap().is_none(),
         "redo is ignored mid-transaction"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel-hardening WP-F — Chamfer `referenceFaces` (SCHEMA §7.3 / §9)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The typed FACE ref a reference-face pair must carry: FACE primary on the
+/// operated body, plus the anchor SCHEMA §7.3 makes non-optional.
+fn reference_face_ref(body: BodyId, el: &str) -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new(el),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(4.0, 5.0, 6.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }
+}
+
+/// An asymmetric chamfer on `el`, with whatever pairs the caller wants.
+fn chamfer_op_with_pairs(
+    el: &str,
+    pairs: Vec<ChamferReferenceFace>,
+    refs: Vec<ElementRef>,
+) -> Operation {
+    let Operation::Known(KnownOperation::Chamfer(mut p)) =
+        chamfer_op(&[el], vec![edge_ref(BX(), el)], 4.0)
+    else {
+        unreachable!("chamfer_op builds a Chamfer")
+    };
+    p.distance2 = Some(s(1.0));
+    p.reference_faces = pairs;
+    p.reference_face_refs = refs;
+    Operation::Known(KnownOperation::Chamfer(p))
+}
+
+/// SCHEMA §7.3: an asymmetric chamfer authored at ADD must name its reference
+/// faces. The legacy shape (asymmetric, no pairs) may only ARRIVE from an older
+/// document, never from this session.
+#[test]
+fn adding_an_asymmetric_chamfer_without_reference_faces_is_refused() {
+    let mut sess = fillet_doc("e1");
+    let err = sess
+        .apply(EditCommand::AddOperation {
+            record: record(
+                rid(2),
+                "Chamfer",
+                chamfer_op_with_pairs("e1", Vec::new(), Vec::new()),
+                vec![BX()],
+            ),
+            at_cursor: false,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("referenceFaces"),
+        "refused by name: {err}"
+    );
+    // …and an EQUAL-LEG chamfer still needs none.
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(3),
+            "Chamfer",
+            chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 1.0),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("an equal-leg chamfer has no reference face");
+}
+
+/// The pair's key must be one of the chamfer's own edges, must not repeat, and
+/// the typed ref must mirror it exactly (id, FACE kind, anchor, operated body).
+#[test]
+fn a_chamfer_reference_face_pair_is_structurally_validated() {
+    let case = |pairs: Vec<ChamferReferenceFace>, refs: Vec<ElementRef>| {
+        let mut sess = fillet_doc("e1");
+        sess.apply(EditCommand::AddOperation {
+            record: record(
+                rid(2),
+                "Chamfer",
+                chamfer_op_with_pairs("e1", pairs, refs),
+                vec![BX()],
+            ),
+            at_cursor: false,
+        })
+    };
+    let pair = |edge: &str, face: &str| ChamferReferenceFace {
+        edge_id: ElementId::new(edge),
+        face_id: ElementId::new(face),
+    };
+
+    // The happy path.
+    case(vec![pair("e1", "f1")], vec![reference_face_ref(BX(), "f1")])
+        .expect("one pair on the chamfer's own edge, mirrored by its typed ref");
+
+    // An edge that is not in `edgeIds`.
+    let err = case(vec![pair("e9", "f1")], vec![reference_face_ref(BX(), "f1")]).unwrap_err();
+    assert!(err.to_string().contains("not in edgeIds"), "{err}");
+
+    // Two pairs keyed by the SAME edge (SCHEMA: one per contour).
+    let err = case(
+        vec![pair("e1", "f1"), pair("e1", "f2")],
+        vec![
+            reference_face_ref(BX(), "f1"),
+            reference_face_ref(BX(), "f2"),
+        ],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("repeats edge"), "{err}");
+
+    // Lockstep: a pair with no typed ref.
+    let err = case(vec![pair("e1", "f1")], Vec::new()).unwrap_err();
+    assert!(err.to_string().contains("length mismatch"), "{err}");
+
+    // The typed ref must name the SAME face.
+    let err = case(vec![pair("e1", "f1")], vec![reference_face_ref(BX(), "f2")]).unwrap_err();
+    assert!(
+        err.to_string().contains("referenceFaces[0].faceId"),
+        "{err}"
+    );
+
+    // …must be a FACE…
+    let err = case(vec![pair("e1", "f1")], vec![edge_ref(BX(), "f1")]).unwrap_err();
+    assert!(err.to_string().contains("FACE primary"), "{err}");
+
+    // …must carry an anchor (two congruent faces would tie forever without one)…
+    let mut anchorless = reference_face_ref(BX(), "f1");
+    anchorless.anchor = None;
+    let err = case(vec![pair("e1", "f1")], vec![anchorless]).unwrap_err();
+    assert!(err.to_string().contains("requires an anchor"), "{err}");
+
+    // …and must sit on the body the edges operate on.
+    let err = case(
+        vec![pair("e1", "f1")],
+        vec![reference_face_ref(BodyId(u(0xDEAD)), "f1")],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("operated body"), "{err}");
+}
+
+/// An EQUAL-LEG chamfer has no reference face at all, so it may not carry a pair —
+/// a stale pair left by clearing `distance2` would resurrect on the next edit that
+/// re-introduces the asymmetry, exactly like the `cb*`/`cs*` blocks on a Hole.
+#[test]
+fn an_equal_leg_chamfer_may_not_carry_reference_faces() {
+    let mut sess = fillet_doc("e1");
+    let Operation::Known(KnownOperation::Chamfer(mut p)) =
+        chamfer_op_with_pairs("e1", Vec::new(), Vec::new())
+    else {
+        unreachable!()
+    };
+    p.distance2 = None;
+    p.reference_faces = vec![ChamferReferenceFace {
+        edge_id: ElementId::new("e1"),
+        face_id: ElementId::new("f1"),
+    }];
+    p.reference_face_refs = vec![reference_face_ref(BX(), "f1")];
+    let err = sess
+        .apply(EditCommand::AddOperation {
+            record: record(
+                rid(2),
+                "Chamfer",
+                Operation::Known(KnownOperation::Chamfer(p)),
+                vec![BX()],
+            ),
+            at_cursor: false,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("equal-leg"),
+        "refused by name: {err}"
+    );
+}
+
+/// A Fillet has no typed home for either field, so a payload naming one would ride
+/// `extra` verbatim and resurrect on the next Fillet→Chamfer flip. Refused BY NAME,
+/// the same bar `distance2`/`angleDeg` already meet.
+#[test]
+fn a_fillet_may_not_carry_chamfer_reference_faces() {
+    for key in ["referenceFaces", "referenceFaceRefs"] {
+        let mut sess = fillet_doc("e1");
+        let Operation::Known(KnownOperation::Fillet(mut p)) =
+            fillet_op(&["e1"], vec![edge_ref(BX(), "e1")])
+        else {
+            unreachable!()
+        };
+        p.extra.insert(key.into(), serde_json::json!([]));
+        let err = sess
+            .apply(EditCommand::UpdateOperationParams {
+                record: rid(1),
+                op: Operation::Known(KnownOperation::Fillet(p)),
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(key) && err.to_string().contains("Chamfer-only"),
+            "Fillet carrying {key}: {err}"
+        );
+    }
+}
+
+/// The REQUIRED rule is about the DELTA, not the record: a scalar edit on a LEGACY
+/// asymmetric record (authored before WP-F, no pairs) stays allowed — that record is
+/// repaired through the §9 `legacyReferenceFace` flow, and refusing to edit it would
+/// strand it. An edit that INTRODUCES the asymmetry, or moves `edgeIds`, must author
+/// the pairs.
+#[test]
+fn only_an_edit_that_introduces_the_asymmetry_must_author_the_pairs() {
+    // A legacy record reaches the session through the document, not a command.
+    let legacy = |el: &str| {
+        let mut doc = Document::new(DocumentId(u(0x5D)));
+        doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+        let Operation::Known(KnownOperation::Chamfer(mut p)) =
+            chamfer_op(&[el], vec![edge_ref(BX(), el)], 4.0)
+        else {
+            unreachable!()
+        };
+        p.distance2 = Some(s(1.0));
+        doc.timeline = Timeline::from_records(vec![record(
+            rid(1),
+            "Chamfer",
+            Operation::Known(KnownOperation::Chamfer(p)),
+            vec![BX()],
+        )]);
+        DocumentSession::new(doc)
+    };
+
+    // A scalar edit that keeps the (empty) pairs is allowed.
+    let mut sess = legacy("e1");
+    let Operation::Known(KnownOperation::Chamfer(mut scalar)) =
+        chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 6.0)
+    else {
+        unreachable!()
+    };
+    scalar.distance2 = Some(s(1.0));
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: Operation::Known(KnownOperation::Chamfer(scalar)),
+    })
+    .expect("a legacy asymmetric record stays editable on its scalars");
+
+    // Moving `edgeIds` re-authors the closure, so the pairs become required.
+    let mut sess = legacy("e1");
+    let Operation::Known(KnownOperation::Chamfer(mut moved)) =
+        chamfer_op(&["e2"], vec![edge_ref(BX(), "e2")], 4.0)
+    else {
+        unreachable!()
+    };
+    moved.distance2 = Some(s(1.0));
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: Operation::Known(KnownOperation::Chamfer(moved)),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("referenceFaces"), "{err}");
+
+    // An equal-leg chamfer that BECOMES asymmetric must author them too.
+    let mut sess = fillet_doc("e1");
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 1.0),
+    })
+    .expect("Fillet → equal-leg Chamfer");
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: chamfer_op_with_pairs("e1", Vec::new(), Vec::new()),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("referenceFaces"), "{err}");
+}
+
+/// SCHEMA §9 repair: `InputPath::ChamferReferenceFace` at the slot PAST the last
+/// pair CREATES one, keyed by the item's `seedEdgeId`, in a single undoable step;
+/// at an existing index it REBINDS. Everything else is refused by name.
+#[test]
+fn the_chamfer_reference_face_input_path_creates_then_rebinds() {
+    let mut sess = fillet_doc("e1");
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(2),
+            "Chamfer",
+            chamfer_op_with_pairs("e1", Vec::new(), Vec::new()),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect_err("an asymmetric chamfer needs pairs at ADD");
+
+    // The legacy record the repair flow actually meets.
+    let mut doc = Document::new(DocumentId(u(0x5D)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    let Operation::Known(KnownOperation::Chamfer(mut p)) =
+        chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 4.0)
+    else {
+        unreachable!()
+    };
+    p.distance2 = Some(s(1.0));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Chamfer",
+        Operation::Known(KnownOperation::Chamfer(p)),
+        vec![BX()],
+    )]);
+    let mut sess = DocumentSession::new(doc);
+
+    let pairs_of =
+        |sess: &DocumentSession| match &sess.document().timeline.record_by_id(rid(1)).unwrap().op {
+            Operation::Known(KnownOperation::Chamfer(p)) => {
+                (p.reference_faces.clone(), p.reference_face_refs.len())
+            }
+            _ => unreachable!(),
+        };
+
+    // A create without the seed edge is refused — the pair would have no key.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ChamferReferenceFace {
+                index: 0,
+                edge_id: None,
+            },
+            reference: InputRef::Element(reference_face_ref(BX(), "f1")),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("contour edge id"), "{err}");
+
+    // …and one keyed by an edge this chamfer does not carry.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ChamferReferenceFace {
+                index: 0,
+                edge_id: Some(ElementId::new("e9")),
+            },
+            reference: InputRef::Element(reference_face_ref(BX(), "f1")),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("not one of this chamfer"), "{err}");
+
+    // The CREATE — one undo step writing both the pair and the typed ref.
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::ChamferReferenceFace {
+            index: 0,
+            edge_id: Some(ElementId::new("e1")),
+        },
+        reference: InputRef::Element(reference_face_ref(BX(), "f1")),
+    })
+    .expect("the §9 repair creates the pair on the empty slot");
+    let (pairs, refs) = pairs_of(&sess);
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].edge_id, ElementId::new("e1"));
+    assert_eq!(pairs[0].face_id, ElementId::new("f1"));
+    assert_eq!(refs, 1);
+
+    // A REBIND of the same slot moves only the face.
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::ChamferReferenceFace {
+            index: 0,
+            edge_id: Some(ElementId::new("e1")),
+        },
+        reference: InputRef::Element(reference_face_ref(BX(), "f2")),
+    })
+    .expect("rebinding the pair's face");
+    let (pairs, _) = pairs_of(&sess);
+    assert_eq!(pairs[0].face_id, ElementId::new("f2"));
+    assert_eq!(
+        pairs[0].edge_id,
+        ElementId::new("e1"),
+        "the key never moves"
+    );
+
+    // An edge this chamfer does not carry is refused whatever the index says.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ChamferReferenceFace {
+                index: 0,
+                edge_id: Some(ElementId::new("e9")),
+            },
+            reference: InputRef::Element(reference_face_ref(BX(), "f3")),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("not one of this chamfer"), "{err}");
+
+    // THE INDEX IS INFORMATIONAL. A second answer on the SAME edge with a wildly
+    // wrong index still REBINDS that edge's pair — it never appends a duplicate,
+    // which is what the positional reading did (and which then made every later
+    // `UpdateOperationParams` on the record fail validation).
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::ChamferReferenceFace {
+            index: 7,
+            edge_id: Some(ElementId::new("e1")),
+        },
+        reference: InputRef::Element(reference_face_ref(BX(), "f3")),
+    })
+    .expect("the edge_id decides, not the index");
+    let (pairs, refs) = pairs_of(&sess);
+    assert_eq!(
+        (pairs.len(), refs),
+        (1, 1),
+        "one contour, one pair — never a duplicate"
+    );
+    assert_eq!(pairs[0].face_id, ElementId::new("f3"));
+    sess.undo().expect("undo the index-mismatched rebind");
+
+    // One undo takes the whole rebind back — the pair and its typed ref together.
+    sess.undo().expect("undo the rebind");
+    let (pairs, refs) = pairs_of(&sess);
+    assert_eq!(pairs[0].face_id, ElementId::new("f1"));
+    assert_eq!(refs, 1);
+    sess.undo().expect("undo the create");
+    let (pairs, refs) = pairs_of(&sess);
+    assert!(pairs.is_empty() && refs == 0, "the create is one undo step");
+}
+
+/// A chamfer record's `(referenceFaces, referenceFaceRefs.len())`.
+fn chamfer_pairs(sess: &DocumentSession) -> (Vec<ChamferReferenceFace>, usize) {
+    match &sess.document().timeline.record_by_id(rid(1)).unwrap().op {
+        Operation::Known(KnownOperation::Chamfer(p)) => {
+            (p.reference_faces.clone(), p.reference_face_refs.len())
+        }
+        other => panic!("expected a Chamfer, got {other:?}"),
+    }
+}
+
+/// **HIGH-1 (measured).** `EditOperationInput` used to run only the Shell lockstep,
+/// so a reference-face re-pick could write params `ChamferParams::validate` rejects
+/// — and every later `UpdateOperationParams` on that record was then refused. The
+/// edit succeeded and SOFT-BRICKED the feature. Both measured inputs are refused at
+/// the command now, leaving the record exactly as it was.
+#[test]
+fn a_reference_face_repair_may_not_write_a_record_the_session_cannot_edit() {
+    let legacy = || {
+        let mut doc = Document::new(DocumentId(u(0x5D)));
+        doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+        let Operation::Known(KnownOperation::Chamfer(mut p)) =
+            chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 4.0)
+        else {
+            unreachable!()
+        };
+        p.distance2 = Some(s(1.0));
+        doc.timeline = Timeline::from_records(vec![record(
+            rid(1),
+            "Chamfer",
+            Operation::Known(KnownOperation::Chamfer(p)),
+            vec![BX()],
+        )]);
+        DocumentSession::new(doc)
+    };
+    let create = |sess: &mut DocumentSession, face: ElementRef| {
+        sess.apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ChamferReferenceFace {
+                index: 0,
+                edge_id: Some(ElementId::new("e1")),
+            },
+            reference: InputRef::Element(face),
+        })
+    };
+
+    // (a) An ANCHORLESS face ref. Without the anchor two congruent faces tie on
+    // every replay, so §7.3 makes it non-optional — and the record would be
+    // unwritable from here on.
+    let mut sess = legacy();
+    let mut anchorless = reference_face_ref(BX(), "f1");
+    anchorless.anchor = None;
+    let err = create(&mut sess, anchorless).unwrap_err();
+    assert!(err.to_string().contains("requires an anchor"), "{err}");
+    let (pairs, refs) = chamfer_pairs(&sess);
+    assert!(
+        pairs.is_empty() && refs == 0,
+        "a refused repair writes NOTHING"
+    );
+
+    // (b) TWO creates on one edge. The second is now a rebind (the edge is the
+    // key), so the duplicate that used to survive serde cannot be written at all.
+    let mut sess = legacy();
+    create(&mut sess, reference_face_ref(BX(), "f1")).expect("the first pick creates");
+    create(&mut sess, reference_face_ref(BX(), "f2")).expect("the second re-picks");
+    let (pairs, refs) = chamfer_pairs(&sess);
+    assert_eq!((pairs.len(), refs), (1, 1), "one contour, one pair");
+    assert_eq!(pairs[0].face_id, ElementId::new("f2"), "the last pick wins");
+
+    // …and the record is still EDITABLE, which is the property that was lost.
+    let Operation::Known(KnownOperation::Chamfer(mut edited)) = sess
+        .document()
+        .timeline
+        .record_by_id(rid(1))
+        .unwrap()
+        .op
+        .clone()
+    else {
+        unreachable!()
+    };
+    edited.radius = s(6.0);
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: Operation::Known(KnownOperation::Chamfer(edited)),
+    })
+    .expect("a repaired record accepts an ordinary scalar edit");
+}
+
+/// **HIGH-2.** A three-contour record halts with one item per contour, and the user
+/// may answer them in ANY order: the pair is keyed by its edge, so the item's slot
+/// index — which numbers the pairs only if they are answered in order — never
+/// refuses a later pick. Each pick converges one contour.
+#[test]
+fn a_three_contour_record_converges_when_repaired_out_of_order() {
+    let mut doc = Document::new(DocumentId(u(0x5D)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    let Operation::Known(KnownOperation::Chamfer(mut p)) = chamfer_op(
+        &["eA", "eB", "eC"],
+        vec![
+            edge_ref(BX(), "eA"),
+            edge_ref(BX(), "eB"),
+            edge_ref(BX(), "eC"),
+        ],
+        4.0,
+    ) else {
+        unreachable!()
+    };
+    p.distance2 = Some(s(1.0));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Chamfer",
+        Operation::Known(KnownOperation::Chamfer(p)),
+        vec![BX()],
+    )]);
+    let mut sess = DocumentSession::new(doc);
+
+    // The worker numbered the three items input3 / input4 / input5 (N = 3 edges,
+    // 0 pairs). Answer the LAST one first, then the first, then the middle.
+    for (index, edge, face) in [(2usize, "eC", "fC"), (0, "eA", "fA"), (1, "eB", "fB")] {
+        sess.apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ChamferReferenceFace {
+                index,
+                edge_id: Some(ElementId::new(edge)),
+            },
+            reference: InputRef::Element(reference_face_ref(BX(), face)),
+        })
+        .unwrap_or_else(|e| panic!("answering contour {edge} at slot {index}: {e}"));
+    }
+    let (pairs, refs) = chamfer_pairs(&sess);
+    assert_eq!((pairs.len(), refs), (3, 3), "all three contours converged");
+    let mut got: Vec<(String, String)> = pairs
+        .iter()
+        .map(|p| {
+            (
+                p.edge_id.as_str().to_string(),
+                p.face_id.as_str().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("eA".to_string(), "fA".to_string()),
+            ("eB".to_string(), "fB".to_string()),
+            ("eC".to_string(), "fC".to_string()),
+        ],
+        "each pick landed on ITS OWN contour, whatever the slot index said"
+    );
+}
+
+/// **MEDIUM-1.** Clearing the pairs while the record stays asymmetric is a silent
+/// regression to the legacy shape — the geometry does not move now, and the next
+/// regen halts forever after. Refused by name. Clearing them TOGETHER with the
+/// asymmetry stays legal.
+#[test]
+fn an_update_may_not_silently_clear_the_reference_faces() {
+    let mut sess = fillet_doc("e1");
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(2),
+            "Chamfer",
+            chamfer_op_with_pairs(
+                "e1",
+                vec![ChamferReferenceFace {
+                    edge_id: ElementId::new("e1"),
+                    face_id: ElementId::new("f1"),
+                }],
+                vec![reference_face_ref(BX(), "f1")],
+            ),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("a typed asymmetric chamfer");
+
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(2),
+            op: chamfer_op_with_pairs("e1", Vec::new(), Vec::new()),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("clearing referenceFaces"),
+        "refused by name: {err}"
+    );
+
+    // Clearing the asymmetry WITH them is the legal path.
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(2),
+        op: chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 1.0),
+    })
+    .expect("an equal-leg chamfer has no reference face and must not carry one");
+}
+
+/// The §7.3 slot table: a Chamfer's `inputs[]` is its edges, then one FACE ref per
+/// pair. `element_refs_mut` is the descriptor-stamping view and MUST agree with the
+/// wire's array or a stamped ref would never reach the ladder.
+#[test]
+fn chamfer_element_refs_are_edges_then_reference_faces() {
+    let mut op = chamfer_op_with_pairs(
+        "e1",
+        vec![ChamferReferenceFace {
+            edge_id: ElementId::new("e1"),
+            face_id: ElementId::new("f1"),
+        }],
+        vec![reference_face_ref(BX(), "f1")],
+    );
+    let Operation::Known(known) = &mut op else {
+        unreachable!()
+    };
+    let kinds: Vec<(String, ElementKind)> = known
+        .element_refs_mut()
+        .into_iter()
+        .map(|r| {
+            let primary = r.primary.as_ref().expect("primary");
+            (primary.element.as_str().to_string(), primary.kind)
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("e1".to_string(), ElementKind::Edge),
+            ("f1".to_string(), ElementKind::Face),
+        ]
+    );
+}
+
+/// A hand-edited document may carry MORE `referenceFaces` pairs than typed
+/// `referenceFaceRefs` (load never validates). A repair pick on such a record must
+/// not index past the refs: the write is refused by the lockstep validation, never
+/// a panic, and the record is left exactly as loaded.
+#[test]
+fn a_reference_face_repair_on_a_ref_starved_record_is_refused_not_a_panic() {
+    let mut doc = Document::new(DocumentId(u(0x5E)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    let Operation::Known(KnownOperation::Chamfer(mut p)) = chamfer_op(
+        &["e1", "e2"],
+        vec![edge_ref(BX(), "e1"), edge_ref(BX(), "e2")],
+        4.0,
+    ) else {
+        unreachable!()
+    };
+    p.distance2 = Some(s(1.0));
+    // Two pairs, ZERO typed refs — the shape a hand edit (or a partial write) leaves.
+    p.reference_faces = vec![
+        ChamferReferenceFace {
+            edge_id: ElementId::new("e1"),
+            face_id: ElementId::new("f1"),
+        },
+        ChamferReferenceFace {
+            edge_id: ElementId::new("e2"),
+            face_id: ElementId::new("f2"),
+        },
+    ];
+    p.reference_face_refs.clear();
+    let loaded = Operation::Known(KnownOperation::Chamfer(p));
+    doc.timeline =
+        Timeline::from_records(vec![record(rid(1), "Chamfer", loaded.clone(), vec![BX()])]);
+    let mut sess = DocumentSession::new(doc);
+
+    // Rebind the SECOND pair (index 1 > refs.len() == 0): this used to index out of bounds.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ChamferReferenceFace {
+                index: 1,
+                edge_id: Some(ElementId::new("e2")),
+            },
+            reference: InputRef::Element(reference_face_ref(BX(), "f2")),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("referenceFace"),
+        "the lockstep validation names the field: {err}"
+    );
+    assert_eq!(
+        sess.document().timeline.record_by_id(rid(1)).unwrap().op,
+        loaded,
+        "a refused repair leaves the loaded record untouched"
     );
 }

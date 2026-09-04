@@ -677,7 +677,7 @@ impl DocumentSession {
         validate_shell_lockstep(&record.op)?;
         // SCHEMA §7.3: `distance2`/`angleDeg` are Chamfer-only, in range, and
         // mutually exclusive (all entry paths).
-        validate_edge_op_distances(&record.op)?;
+        validate_edge_op_distances(&record.op, None)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&record.op)?;
         // TransformBody params must be a well-formed rigid motion (all entry paths).
@@ -789,7 +789,7 @@ impl DocumentSession {
         validate_shell_lockstep(&op)?;
         // SCHEMA §7.3: `distance2`/`angleDeg` are Chamfer-only, in range, and
         // mutually exclusive (all entry paths).
-        validate_edge_op_distances(&op)?;
+        validate_edge_op_distances(&op, Some(&prior.op))?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&op)?;
         // TransformBody params must be a well-formed rigid motion (all entry paths).
@@ -917,6 +917,15 @@ impl DocumentSession {
         let mut nr = prior.clone();
         set_input(&mut nr.op, path, reference)?;
         validate_shell_lockstep(&nr.op)?;
+        // A re-pick must leave a record the session can still WRITE. Without this
+        // an `EditOperationInput` could land params that
+        // [`ChamferParams::validate`] rejects — an anchorless reference-face ref,
+        // or two pairs keyed by one edge — and every later
+        // `UpdateOperationParams` on that record would then be refused: the edit
+        // succeeds and soft-bricks the feature. The prior op is passed so the
+        // REQUIRED-pairs rule stays a judgement about the DELTA (a repair on a
+        // legacy record introduces no asymmetry).
+        validate_edge_op_distances(&nr.op, Some(&prior.op))?;
         nr.inputs = nr.op.derive_inputs();
 
         let mut recs = self.document.timeline.records().to_vec();
@@ -1956,16 +1965,27 @@ fn validate_shell_lockstep(op: &Operation) -> Result<(), DomainError> {
 /// * a **Chamfer**'s `distance2`, when present, must be a positive finite length,
 ///   its `angleDeg` must be strictly between 0 and 180 degrees, and the two may not
 ///   both be present ([`ChamferParams::validate`]);
-/// * a **Fillet** must not carry `distance2` or `angleDeg` at all. `FilletParams`
-///   has no typed field for either, so a payload that names one would otherwise land
-///   in the `extra` flatten and round-trip VERBATIM — a second leg silently
-///   persisted on an op the worker will never read it for, and (worse) resurrected
-///   by a later Fillet→Chamfer flip as if the user had authored it.
+/// * a **Fillet** must not carry `distance2`, `angleDeg`, `referenceFaces` or
+///   `referenceFaceRefs` at all. `FilletParams` has no typed field for any of them,
+///   so a payload that names one would otherwise land in the `extra` flatten and
+///   round-trip VERBATIM — a second leg (or a reference face) silently persisted on
+///   an op the worker will never read it for, and (worse) resurrected by a later
+///   Fillet→Chamfer flip as if the user had authored it;
+/// * an ASYMMETRIC Chamfer this command AUTHORS must name its reference faces
+///   (SCHEMA §7.3, kernel-hardening WP-F). "Authors" is the whole point of `prior`:
+///   at ADD (`prior` `None`) every asymmetric record needs the pairs, and at UPDATE
+///   only an edit that INTRODUCES the asymmetry (from an equal-leg chamfer or from a
+///   Fillet) or moves `edge_ids` does — a scalar edit on a record that already lacks
+///   the field keeps it lacking, because that record is LEGACY and is repaired
+///   through the §9 `legacyReferenceFace` flow, not by refusing to edit it.
 ///
 /// Non-edge and opaque ops are trivially valid. Enforced here rather than at
 /// deserialize time for the same single-writer reason as [`validate_import_step`]:
 /// a document authored by another build still opens and round-trips.
-fn validate_edge_op_distances(op: &Operation) -> Result<(), DomainError> {
+fn validate_edge_op_distances(
+    op: &Operation,
+    prior: Option<&Operation>,
+) -> Result<(), DomainError> {
     let closure_version = match op {
         Operation::Known(KnownOperation::Fillet(p)) => p.tangent_closure_version,
         Operation::Known(KnownOperation::Chamfer(p)) => p.tangent_closure_version,
@@ -1978,7 +1998,8 @@ fn validate_edge_op_distances(op: &Operation) -> Result<(), DomainError> {
     }
     match op {
         Operation::Known(KnownOperation::Chamfer(p)) => {
-            p.validate().map_err(DomainError::Validation)
+            p.validate().map_err(DomainError::Validation)?;
+            validate_chamfer_reference_faces_required(p, prior)
         }
         Operation::Known(KnownOperation::Fillet(p)) if p.extra.contains_key("distance2") => {
             Err(DomainError::Validation(
@@ -1990,8 +2011,71 @@ fn validate_edge_op_distances(op: &Operation) -> Result<(), DomainError> {
                 "angleDeg is Chamfer-only (SCHEMA §7.3); a Fillet may not carry it".into(),
             ))
         }
+        Operation::Known(KnownOperation::Fillet(p)) if p.extra.contains_key("referenceFaces") => {
+            Err(DomainError::Validation(
+                "referenceFaces is Chamfer-only (SCHEMA §7.3); a Fillet may not carry it".into(),
+            ))
+        }
+        Operation::Known(KnownOperation::Fillet(p))
+            if p.extra.contains_key("referenceFaceRefs") =>
+        {
+            Err(DomainError::Validation(
+                "referenceFaceRefs is Chamfer-only (SCHEMA §7.3); a Fillet may not carry it".into(),
+            ))
+        }
         _ => Ok(()),
     }
+}
+
+/// The SCHEMA §7.3 REQUIRED rule for `referenceFaces`: an asymmetric Chamfer this
+/// command authors — a fresh record, or an update that INTRODUCES the asymmetry or
+/// moves `edge_ids` — must name the face each contour measures `radius` on.
+///
+/// A record that merely CARRIES the asymmetry and no pairs is legacy: the worker
+/// halts it `legacyReferenceFace` (§9) on every lane, and the user answers with one
+/// pick. Refusing a scalar edit on such a record would strand it uneditable while it
+/// waits for that pick, so the predicate is deliberately about the DELTA — with one
+/// exception, below: an edit may not CLEAR pairs the record already has.
+fn validate_chamfer_reference_faces_required(
+    p: &crate::document::record::ChamferParams,
+    prior: Option<&Operation>,
+) -> Result<(), DomainError> {
+    if !p.is_asymmetric() || !p.reference_faces.is_empty() {
+        return Ok(());
+    }
+    // CLEARING the pairs while the record stays asymmetric is a silent regression
+    // to the legacy shape: the geometry does not move now, and the very next regen
+    // halts `legacyReferenceFace` forever after. The user gets no say and no error,
+    // so refuse by name. Clearing them TOGETHER with the asymmetry is the legal
+    // path (an equal-leg chamfer has no reference face and must not carry one).
+    if let Some(Operation::Known(KnownOperation::Chamfer(before))) = prior {
+        if !before.reference_faces.is_empty() {
+            return Err(DomainError::Validation(
+                "clearing referenceFaces on an asymmetric Chamfer would silently drop the \
+                 persisted reference face (SCHEMA §7.3): keep the pairs, or clear \
+                 distance2/angleDeg with them"
+                    .into(),
+            ));
+        }
+    }
+    let introduces = match prior {
+        // ADD: every asymmetric record is new.
+        None => true,
+        Some(Operation::Known(KnownOperation::Chamfer(before))) => {
+            !before.is_asymmetric() || before.edge_ids != p.edge_ids
+        }
+        // A Fillet→Chamfer flip that lands asymmetric authors the asymmetry.
+        Some(_) => true,
+    };
+    if !introduces {
+        return Ok(());
+    }
+    Err(DomainError::Validation(
+        "an asymmetric Chamfer (distance2/angleDeg) must name its reference faces \
+         (SCHEMA §7.3 `referenceFaces`): author one {edgeId, faceId} pair per tangent \
+         contour, promoted from that edge's PrepareEdgeOp adjacentFaces"
+            .into(),
+    ))
 }
 
 /// Validates an [`KnownOperation::ImportStep`] record's params (sha256 shape,
@@ -2337,6 +2421,7 @@ fn gate_item(
         ui_label: label.to_string(),
         seeded: true,
         ordinal_anchor: None,
+        seed_edge_id: None,
     }
 }
 
@@ -2581,6 +2666,9 @@ fn set_input(
                 want_element(reference)?,
             )?;
         }
+        (InputPath::ChamferReferenceFace { index, edge_id }, KnownOperation::Chamfer(p)) => {
+            set_chamfer_reference_face(p, *index, edge_id.as_ref(), want_element(reference)?)?;
+        }
         (InputPath::BooleanTarget, KnownOperation::Boolean(p)) => {
             p.target_body = want_body(reference)?;
         }
@@ -2690,6 +2778,92 @@ fn set_fillet_edge(
         edge_ids.push(element);
     } else {
         edge_ids[index] = element;
+    }
+    Ok(())
+}
+
+/// Sets — or CREATES — the Chamfer reference-face pair at `index`, keeping the
+/// typed `reference_face_refs` ref and the bare `referenceFaces[index].faceId`
+/// consistent (SCHEMA §7.3 / §9; see
+/// [`InputPath::ChamferReferenceFace`](crate::edit::command::InputPath::ChamferReferenceFace)).
+///
+/// `index >= reference_faces.len()` is the SCHEMA §9 `legacyReferenceFace` repair:
+/// no stored ref occupies that slot, so the command CREATES the pair and must be
+/// told which contour edge to key it by.
+///
+/// A create APPENDS whatever the index says. The item's `i = referenceFaces.length
+/// + k` numbers the slot the pair would occupy *if the uncovered contours were
+/// repaired in order*, so it is informational, not an address: repairing a
+/// three-contour record's items out of order would otherwise refuse the second pick
+/// as "out of range" and dead-end the very convergence the per-contour item exists
+/// for. The `edge_id` is the real key, and it is validated against `edgeIds`.
+fn set_chamfer_reference_face(
+    p: &mut crate::document::record::ChamferParams,
+    index: usize,
+    edge_id: Option<&crate::ids::ElementId>,
+    reference: ElementRef,
+) -> Result<(), DomainError> {
+    use crate::document::record::ChamferReferenceFace;
+
+    // Same bar as `set_fillet_edge`: an explicit re-pick must carry an explicit id,
+    // or the slot the user just chose BY HAND would fall back through to the ladder.
+    let face = reference
+        .primary
+        .as_ref()
+        .map(|primary| primary.element.clone())
+        .ok_or_else(|| {
+            DomainError::InvalidReference(
+                "a chamfer reference-face ref must carry a primary element id".into(),
+            )
+        })?;
+    // THE PAIR IS KEYED BY ITS EDGE, never by its position (SCHEMA §7.3: "array
+    // order carries no meaning"). `index` is what the §9 item's `refId` numbered —
+    // the slot the pair WOULD occupy if the uncovered contours were repaired in
+    // order — so it is informational. Keying on it instead dead-ended the very
+    // convergence the per-contour item exists for: answering a three-contour
+    // record's items out of order refused the second pick as "keyed by a different
+    // edge", and answering twice on one edge appended a DUPLICATE that only
+    // surfaced later, as a record no `UpdateOperationParams` would accept.
+    let edge = match edge_id {
+        Some(edge) => edge,
+        // No key supplied: fall back to the positional reading, which is sound
+        // only for a REBIND of an existing pair.
+        None => {
+            let existing = p.reference_faces.get(index).ok_or_else(|| {
+                DomainError::InvalidReference(
+                    "creating a chamfer reference-face pair requires the contour edge id \
+                     (SCHEMA §9 `seedEdgeId`)"
+                        .into(),
+                )
+            })?;
+            &existing.edge_id.clone()
+        }
+    };
+    if !p.edge_ids.contains(edge) {
+        return Err(DomainError::InvalidReference(format!(
+            "chamfer reference-face edge {edge} is not one of this chamfer's edgeIds"
+        )));
+    }
+    match p.reference_faces.iter().position(|f| f.edge_id == *edge) {
+        // REBIND: this contour already has a pick; only the face moves.
+        Some(at) => {
+            p.reference_faces[at].face_id = face;
+            // A hand-edited document may carry more pairs than typed refs (load never
+            // validates); never index past the refs — write the slot when it exists,
+            // otherwise append and let the lockstep validation below refuse the record.
+            match p.reference_face_refs.get_mut(at) {
+                Some(slot) => *slot = reference,
+                None => p.reference_face_refs.push(reference),
+            }
+        }
+        // CREATE: the §9 repair on an empty slot.
+        None => {
+            p.reference_faces.push(ChamferReferenceFace {
+                edge_id: edge.clone(),
+                face_id: face,
+            });
+            p.reference_face_refs.push(reference);
+        }
     }
     Ok(())
 }
@@ -4291,6 +4465,8 @@ mod tests {
                     angle_deg: None,
                     edge_ids: edge_ids.clone(),
                     edges: vec![shell_face("e1", ElementKind::Edge), foreign.clone()],
+                    reference_faces: Vec::new(),
+                    reference_face_refs: Vec::new(),
                     chain_tangent_edges: false,
                     tangent_closure_version: None,
                     extra: Default::default(),

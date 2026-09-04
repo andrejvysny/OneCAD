@@ -1350,6 +1350,20 @@ pub struct EdgeOpEvidenceDto {
     pub anchor: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<serde_json::Value>,
+    /// The 0-based index of the tangent CONTOUR this edge belongs to (SCHEMA §7.6,
+    /// kernel-hardening WP-F). Ordinal-derived and therefore NOT stable across an
+    /// edit: a client groups this snapshot's picks by it to know how many
+    /// `referenceFaces` pairs a Chamfer needs, and MUST NOT persist it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contour: Option<u32>,
+    /// The edge's adjacent faces on THIS snapshot as TopoKeys, face-ordinal
+    /// ascending and `IsSame`-deduplicated (SCHEMA §7.6). One entry for a seam or
+    /// free edge, two for a manifold edge. The frontend promotes one entry per
+    /// contour to author a Chamfer `referenceFaces` pair; `adjacentFaces[0]` of a
+    /// contour's first listed edge is the legacy smaller-ordinal face, so a default
+    /// pick reproduces the pre-WP-F geometry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjacent_faces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1611,6 +1625,12 @@ pub struct ResolveRefDto {
     /// Ranked candidates (needsRepair), sorted by score descending.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<ResolveCandidateDto>,
+    /// The contour edge a `legacyReferenceFace` repair must pair the chosen face
+    /// with (SCHEMA §9 `seedEdgeId`). The panel echoes it back verbatim as the
+    /// `edgeId` of the `EditOperationInput` that CREATES the pair — the slot has no
+    /// stored ref to read it off. `None` on every other outcome and reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_edge_id: Option<String>,
 }
 
 impl ResolveRefDto {
@@ -1645,6 +1665,7 @@ impl ResolveRefDto {
             ui_label: None,
             anchor: None,
             candidates: Vec::new(),
+            seed_edge_id: None,
         };
         match r.outcome {
             ResolveOutcome::AutoBind {
@@ -1674,6 +1695,10 @@ impl ResolveRefDto {
                     .as_ref()
                     .and_then(|a| serde_json::to_value(a).ok()),
                 candidates: item.candidates.into_iter().map(candidate_dto).collect(),
+                seed_edge_id: item
+                    .seed_edge_id
+                    .map(|id| id.as_str().to_string())
+                    .filter(|id| !id.is_empty()),
                 ..base(r.ref_id, "needsRepair")
             },
         }
@@ -1697,6 +1722,9 @@ fn repair_reason_str(r: onecad_core::document::repair::RepairReason) -> &'static
         // VF-B6 (Rust-seeded) and the forward-compat fallback. The repair UI renders
         // `reason` as an opaque string, so both flow through without a frontend change.
         RepairReason::OrdinalPermutation => "ordinal-permutation",
+        // WP-F, op-built (SCHEMA §9). camelCase, unlike the kebab-case ladder
+        // outcomes — the token is normative, not a rendering choice.
+        RepairReason::LegacyReferenceFace => "legacyReferenceFace",
         RepairReason::Unknown => "unknown",
     }
 }
@@ -1783,7 +1811,8 @@ pub struct NeedsRepairItemDto {
     pub op_id: String,
     /// The op-input ref identity (SCHEMA §9 `refId`, e.g. `"op_5.input0"`).
     pub ref_id: String,
-    /// `ambiguous` | `no-candidates` | `low-confidence` (SCHEMA §9 `reason`).
+    /// `ambiguous` | `no-candidates` | `low-confidence` | `ordinal-permutation` |
+    /// `legacyReferenceFace` (SCHEMA §9 `reason`).
     pub reason: String,
     /// The `resolverVersion` the candidate scores were computed under (SCHEMA §9).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1802,6 +1831,13 @@ pub struct NeedsRepairItemDto {
     /// back to its single-body/selection derivation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_id: Option<String>,
+    /// The contour edge a `legacyReferenceFace` repair must pair the chosen face
+    /// with (SCHEMA §9 `seedEdgeId`, kernel-hardening WP-F). The item names an EMPTY
+    /// slot, so the frontend cannot read the edge off a stored ref — it echoes this
+    /// back verbatim as the `InputPath::ChamferReferenceFace { edgeId }` of the
+    /// `EditOperationInput` that creates the pair. `None` on every other reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_edge_id: Option<String>,
 }
 
 /// The `needs-repair` event payload (`{revision, items}`). Emitted after **every**
@@ -1850,6 +1886,13 @@ pub fn needs_repair_item_dto(
         scoring_version: item.scoring_version,
         candidate_count: item.candidates.len(),
         body_id,
+        // Empty and absent are the same thing (SCHEMA §9); the frontend never sees
+        // `""` masquerading as an id.
+        seed_edge_id: item
+            .seed_edge_id
+            .as_ref()
+            .map(|id| id.as_str().to_string())
+            .filter(|id| !id.is_empty()),
     }
 }
 
@@ -2443,6 +2486,8 @@ mod tests {
             angle_deg: None,
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
+            reference_faces: Vec::new(),
+            reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
             extra: Default::default(),
@@ -2604,6 +2649,8 @@ mod tests {
                 angle_deg: angle.map(Scalar::new),
                 edge_ids: vec![ElementId::new("e:14")],
                 edges: vec![],
+                reference_faces: Vec::new(),
+                reference_face_refs: Vec::new(),
                 chain_tangent_edges: true,
                 tangent_closure_version: None,
                 extra: Default::default(),
@@ -3097,6 +3144,7 @@ mod tests {
             ui_label: "Fillet edge".into(),
             seeded: false,
             ordinal_anchor: None,
+            seed_edge_id: None,
         };
         let dto = ResolveRefDto::from_resolution(
             RefResolution {
@@ -3146,6 +3194,7 @@ mod tests {
             ui_label: String::new(),
             seeded: false,
             ordinal_anchor: None,
+            seed_edge_id: None,
         };
         let dto = needs_repair_item_dto("rec-1".into(), Some("body-7".into()), &item);
         let v = serde_json::to_value(&dto).unwrap();

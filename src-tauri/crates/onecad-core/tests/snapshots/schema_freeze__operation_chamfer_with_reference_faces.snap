@@ -1,0 +1,97 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ed8",
+  "recordSchemaVersion": 1,
+  "stepIndex": 24,
+  "name": "Chamfer typed",
+  "opType": "Chamfer",
+  "params": {
+    "chainTangentEdges": true,
+    "distance2": {
+      "value": 1.0
+    },
+    "edgeIds": [
+      "e:14"
+    ],
+    "radius": {
+      "value": 1.0
+    },
+    "referenceFaceRefs": [
+      {
+        "anchor": {
+          "adjacencyHint": "d41d8cd98f00b204",
+          "localFrame": {
+            "origin": [
+              12.0,
+              3.5,
+              0.0
+            ],
+            "x": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "y": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "z": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "surfaceUv": [
+            0.25,
+            0.75
+          ],
+          "worldPoint": [
+            12.0,
+            3.5,
+            0.0
+          ]
+        },
+        "intent": {
+          "descriptor": {
+            "areaQ": 120000,
+            "surfaceType": "plane"
+          },
+          "kind": "face",
+          "version": 1
+        },
+        "primary": {
+          "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+          "elementId": "el_face_1",
+          "kind": "face"
+        }
+      }
+    ],
+    "referenceFaces": [
+      {
+        "edgeId": "e:14",
+        "faceId": "el_face_1"
+      }
+    ]
+  },
+  "inputs": {
+    "bodies": [],
+    "sketches": [],
+    "elements": [
+      "e:14"
+    ]
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

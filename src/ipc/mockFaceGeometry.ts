@@ -25,7 +25,7 @@
  */
 import type { SketchConstraint, SketchEntity, SketchPlane } from "./types";
 import { frontendConstraintsFromDto, frontendEntitiesFromDto } from "./sketchWireMap";
-import { BOX_FACES, BOX_SIZE, boxCorners, type BoxCornerKey } from "./mockMeshes";
+import { BOX_EDGE_PAIRS, BOX_FACES, BOX_SIZE, boxCorners, type BoxCornerKey } from "./mockMeshes";
 
 /** Small deterministic hash for mock ElementIds (FNV-1a-32 hex).
  *
@@ -200,6 +200,32 @@ export function lookupMockFace(
     return faceIdsFor(shape).includes(faceId) ? { kind: "nonPlanar", faceId } : { kind: "unknown" };
   }
   return { kind: "planar", faceId, geometry };
+}
+
+/**
+ * The faces adjacent to one mock EDGE, as TopoKeys sorted by face ordinal ASCENDING
+ * — the mock's answer to SCHEMA §7.6 `adjacentFaces` (kernel-hardening WP-F).
+ *
+ * Derived, not invented: an edge is adjacent to exactly the faces whose corner ring
+ * contains BOTH of its endpoints, and both tables (`BOX_EDGE_PAIRS`, `BOX_FACES`)
+ * are the same ones `makeBoxMesh` renders from, so the answer describes the box the
+ * viewport is actually drawing. Every box edge is manifold, so this returns two
+ * entries; the ordering is `BOX_FACES` order, which IS the `f:<k>` ordinal order.
+ *
+ * `[]` for anything that is not a seed-box edge — the cylinder's caps meet its
+ * curved side across a seam this module deliberately does not describe, and a
+ * synthesized body has no analytic entry at all. A caller must treat an empty list
+ * as "not known", never as "no adjacency": fabricating a face here is exactly the
+ * silent wrong bind WP-F exists to remove.
+ */
+export function mockAdjacentFaces(bodyId: string, edgeTopoKey: string): string[] {
+  if (shapeForBody(bodyId) !== "box") return [];
+  const m = /^e:(\d+)$/.exec(edgeTopoKey);
+  const pair = m ? BOX_EDGE_PAIRS[Number(m[1])] : undefined;
+  if (!pair) return [];
+  return BOX_FACES.filter(
+    (face) => face.corners.includes(pair[0]) && face.corners.includes(pair[1]),
+  ).map((face) => face.id);
 }
 
 // ── The projected boundary, in the shape the REAL DTO carries ────────────────

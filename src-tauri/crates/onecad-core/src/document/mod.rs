@@ -424,6 +424,7 @@ mod tests {
                 scoring_version: None,
                 seeded: false,
                 ordinal_anchor: None,
+                seed_edge_id: None,
             }],
         );
 

@@ -1504,12 +1504,19 @@ chamfer distance).
 // DEGREES. Mutually exclusive with `distance2`.)
 { "mode": "Chamfer", "radius": 1.0, "angleDeg": 30.0, "edgeIds": ["el_…14"],
   "chainTangentEdges": true, "tangentClosureVersion": 1 }
+// Chamfer params (asymmetric with a PERSISTED reference face, kernel-hardening WP-F
+// 2026-09-03 — optional + skip-none; ONE pair per tangent CONTOUR, keyed by an
+// edge of that contour; the face's semantic ref rides inputs[] AFTER the edge refs)
+{ "mode": "Chamfer", "radius": 4.0, "distance2": 1.0, "edgeIds": ["el_…14"],
+  "referenceFaces": [ { "edgeId": "el_…14", "faceId": "el_…f7" } ],
+  "chainTangentEdges": true, "tangentClosureVersion": 1 }
 ```
 
 `edgeIds` entries are TopoKeys (snapshot-scoped) or `ElementId`s; the worker
 resolves each through the ladder ([§10](#10-resolution-ladder)). The `inputs[]`
 array carries the corresponding semantic refs (one per edge) supplying descriptor
-+ anchor evidence.
++ anchor evidence — and, on a Chamfer carrying `referenceFaces`, one FACE ref per
+pair AFTER the `edgeIds.length` edge refs (slot order below).
 
 Fresh records store the full OCCT-authoritative contour closure returned by
 `PrepareEdgeOp`, use Rust-minted `ElementId`s in `edgeIds`, and carry
@@ -1523,9 +1530,9 @@ version. `chainTangentEdges:false` means exact picks; authoring refuses
 `chainMismatch` when OCCT would expand beyond them.
 
 - `distance2` (Chamfer only, optional, skip-none): asymmetric two-distance
-  chamfer — `radius` is the distance on the FIRST adjacent face of each edge
-  (the reference face the worker derives deterministically: the adjacent face
-  with the smaller resolved face ordinal), `distance2` on the other
+  chamfer — `radius` is the distance on the REFERENCE FACE of each contour (the
+  face named by that contour's `referenceFaces` pair — see below; a contour
+  without a pair halts `needsRepair`, never guesses), `distance2` on the other
   (`BRepFilletAPI_MakeChamfer` two-distance form). Absent ⇒ equal-leg,
   byte-identical to every existing document. A Fillet MUST NOT carry it.
   **Type-flip interaction (FILLET-CHAMFER-UNIFY W3)**: the sanctioned
@@ -1533,18 +1540,115 @@ version. `chainTangentEdges:false` means exact picks; authoring refuses
   a Chamfer carrying `distance2` is NOT flippable to Fillet (the edit is
   rejected with the standard allow-list reason) until `distance2` is cleared.
 - `angleDeg` (Chamfer only, optional, skip-none): distance-angle chamfer —
-  `radius` is the distance measured on the reference face (the SAME deterministic
-  face `distance2` uses: the adjacent face with the smaller resolved face
-  ordinal), and `angleDeg` is the angle between the chamfer face and THAT
+  `radius` is the distance measured on the reference face (the SAME face
+  `distance2` uses: the contour's `referenceFaces` pair; no pair ⇒ the same
+  `needsRepair` halt), and `angleDeg` is the angle between the chamfer face and THAT
   reference face, measured in the material, in DEGREES
   (`BRepFilletAPI_MakeChamfer::AddDA`, which takes radians — the worker
   converts). On a 90° dihedral this makes `angleDeg: 45` exactly equal-leg and
-  the far leg `radius · tan(angleDeg)`. The reference face is derived from the
-  frozen-closure seed edge of each contour (closure runs first). Absent ⇒
+  the far leg `radius · tan(angleDeg)`. The reference face is measured at the
+  contour's seed edge — the paired edge (closure runs first). Absent ⇒
   unchanged. `angleDeg` and `distance2` are MUTUALLY EXCLUSIVE: a params object
   carrying both is refused by name, never resolved by precedence. A Fillet MUST
   NOT carry it. A Chamfer carrying it is NOT flippable to Fillet (same
   field-identity precondition `distance2` carries).
+- `referenceFaces` (Chamfer only, optional, skip-none; kernel-hardening WP-F,
+  2026-09-03): the PERSISTED answer to "which adjacent face is `radius` measured
+  on". An array of `{ "edgeId": ElementId, "faceId": ElementId }` pairs, **exactly
+  one per tangent CONTOUR** of the frozen closure, keyed by ANY edge of that
+  contour (`edgeId` MUST be an entry of `edgeIds`; duplicate `edgeId`s are refused
+  at authoring). Array order carries no meaning. `faceId` is the Rust-minted id of
+  a face the frontend promoted through §7.5 from the
+  [`PrepareEdgeOp`](#prepareedgeop) `adjacentFaces` list of that edge.
+  **Slot order is NORMATIVE:** the `inputs[]` array carries the edge refs first
+  (`inputs[0..N)`, `N = edgeIds.length`, unchanged) and then one face ref per pair
+  in `referenceFaces` order (`inputs[N + i]`); a face ref's `refId` is therefore the
+  positional `<opId>.input<N+i>` every other typed ref uses. A face ref MUST carry
+  the same evidence an edge ref carries (`primary` with `kind:"face"` on the SAME
+  body, frozen `intent.descriptor`, and an `anchor` — without the anchor two
+  congruent faces tie and the ref is `NeedsRepair` on every replay). That evidence
+  MUST is enforced at AUTHORING by `EditSession`'s edge-op validation
+  (`src-tauri/crates/onecad-core/src/edit/session.rs` `validate_edge_op_distances`
+  / `validate_fillet_lockstep`, the same functions that refuse `distance2` on a
+  Fillet); the worker accepts whatever evidence a ref carries and simply binds it
+  through the ladder, so a fixture may send a bound `elementId` alone. The worker
+  resolves each face ref through the §10 ladder exactly like an edge ref; a face
+  the ladder cannot bind is a §9 `NeedsRepair` item for that ref (never a guess,
+  never the ordinal rule).
+  **Worker rules after resolution** (each refused by name as a top-level
+  `OP_FAILED` step with ONE `diagnostics[]` entry `{ severity:"error", code, message,
+  stage:"resolve", evidence:{ chamfer:{ … } } }`, the head untouched). A contour
+  WITHOUT a pair is never a refusal: it halts `needsRepair` with the op-built §9
+  `legacyReferenceFace` item described under the legacy rule below (a partially
+  repaired multi-contour record therefore converges one pick at a time instead of
+  dead-ending in `OP_FAILED`):
+  - the pair's edge MUST resolve to an edge of the closure and the face MUST be
+    adjacent to it (`TopExp::MapShapesAndAncestors` edge → faces on the
+    PREDECESSOR shape); else `CHAMFER_REFERENCE_FACE_NOT_ADJACENT`, evidence
+    `{ chamfer: { edge: "<edge ElementId>", face: "<face ElementId>" } }`;
+  - two pairs on one contour MUST resolve to the SAME face (`IsSame`); else
+    `CHAMFER_REFERENCE_FACE_CONFLICT`, evidence
+    `{ chamfer: { edge: "<edgeId of the second pair>", face: "<its faceId>" } }`.
+  **The paired edge IS the contour's seed**: the kernel measures `radius` on the
+  resolved face at the paired edge (`Add(d1, d2, edge, face)` / `AddDA`), so the
+  seed no longer depends on any ordinal. REQUIRED on NEW records whenever
+  `distance2` or `angleDeg` is present (`AddOperation`, and an
+  `UpdateOperationParams` that INTRODUCES the asymmetry or changes `edgeIds`,
+  including a Fillet→Chamfer flip that lands on an asymmetric chamfer — the same
+  command MUST author the pairs) — enforced at the same authoring point named
+  above (`validate_edge_op_distances`, the ADD, UPDATE and `EditOperationInput` entry
+  paths); a scalar edit on a record that lacks the field keeps it lacking (repaired
+  via §9, below). An edit MUST NOT CLEAR pairs a record already carries while it stays
+  asymmetric — that is a silent regression to the legacy shape, so it is refused by
+  name; clearing them TOGETHER with `distance2`/`angleDeg` is the legal path. Load/save
+  never validates. An equal-leg chamfer has no reference face and MUST NOT carry the
+  field: Rust refuses it at authoring, and a worker that nevertheless receives it on
+  an equal-leg Chamfer IGNORES it entirely (no adjacency, coverage or agreement
+  check), exactly as it ignores `distance2` on a Fillet. A Fillet MUST NOT carry it
+  (Rust refuses at authoring; the worker ignores it on a Fillet, and the ownership
+  gate accepts a face primary only in a Chamfer's trailing slots `≥ N` — a Chamfer
+  whose `edgeIds` is missing or not an array has no trailing slots and every face
+  primary is refused).
+  **Legacy rule (asymmetric records WITHOUT the field) — there is none.** The
+  historical choice (the adjacent face with the smaller resolved face ordinal,
+  measured at the contour's smallest-ordinal edge) is what mirrored the legs
+  silently (measured 2026-09-03: a Ø6 hole in an end wall of a 40×20×10 box
+  reorders the face map and moves the 4 mm leg from the wall to the top face;
+  volume, face count and the removed wedge are identical), and no evidence of the
+  intended face was ever persisted, so a worker at this build id MUST NOT apply it
+  in any lane: an asymmetric Chamfer halts `needsRepair` for EVERY contour without a
+  pair — a pre-WP-F record on its first regen under this build (open, import,
+  recovery, undo/redo, a preview, an edit), and a partially typed record on the
+  contours still missing a pick — independent of `editedFrom`. (A per-plan gate was
+  tried and rejected 2026-09-04: `ToEnd(0)` lanes all claim `editedFrom: 0`, while
+  `RevertToEnd` and `RegenToStep` omit the claim, so a record that halted after an
+  upstream hole would have silently replayed the ordinal rule against the permuted
+  map on REDO or a timeline scrub. Deterministic `NeedsRepair` beats a silent wrong
+  bind.) The user answers each halt with one pick and the record gains the typed
+  ref for good; a document whose asymmetric chamfers were saved before this build
+  therefore reopens with one repair item per such contour — the recorded migration
+  path. Item shape, one per uncovered contour in contour order: `refId`
+  `<opId>.input<N+i>` — the slot the created pair will occupy, `i =
+  referenceFaces.length + k` with `k` the item's index among the uncovered
+  contours (informational: Rust APPENDS a created pair whatever `i` says, so
+  repairing out of order converges) — `reason: "legacyReferenceFace"`,
+  `elementId: ""` (a reader MUST treat `""` and an absent `elementId` alike),
+  `ladderFailed: "descriptor"` (the closed level enum; the `reason` token is the
+  discriminator — no ladder ran), `seedEdgeId` = the ElementId of the contour's
+  smallest-ordinal edge (the edge the repair pairs the chosen face with), `anchor`
+  = that edge's anchor, `candidates` = that edge's adjacent faces (ordinal order,
+  `score` 0.5 each, `margin` 0.0 — a deliberate tie: the user MUST choose; a free
+  edge yields no candidates), `uiLabel` naming the chamfer. Rust repairs such an
+  item by CREATING the pair (`EditOperationInput` on the empty slot — see §9); the
+  record then carries the typed ref and never halts for that contour again. Absent
+  ⇒ hash-neutral (frozen serde form); present ⇒ a regen input in the planner hash.
+  **Records without `tangentClosureVersion: 1`.** A non-v1 chamfer has no frozen
+  closure and executes seed-only, one reference face per resolved EDGE (see
+  `tangentClosureVersion` above — re-edit MUST NOT add the field). On such a record
+  `referenceFaces` is keyed per EDGE: exactly one pair per `edgeIds` entry, and the
+  `legacyReferenceFace` halt (every lane, as above) emits one item per uncovered `edgeIds` entry with
+  `seedEdgeId` = that edge and `refId` `<opId>.input<N+i>` numbered as above.
+  Authoring MUST NOT add `tangentClosureVersion` while adding pairs.
 
 Fillet execution is constant-radius only. `radius` MUST be finite and at least
 `1e-3` mm. The worker MUST NOT clamp it or retry with a different radius. OCCT
@@ -3399,14 +3503,34 @@ head change between preparation and promotion rejects the whole command.
   "targetBodyId": "body_3",
   "edges": [
     { "topoKey": "e:4", "picked": true,
-      "anchor": { "worldPoint": [1.0, 2.0, 3.0] }, "descriptor": { } },
+      "anchor": { "worldPoint": [1.0, 2.0, 3.0] }, "descriptor": { },
+      "contour": 0, "adjacentFaces": ["f:3", "f:6"] },
     { "topoKey": "e:5", "picked": false,
-      "anchor": { "worldPoint": [2.0, 2.0, 3.0] }, "descriptor": { } }
+      "anchor": { "worldPoint": [2.0, 2.0, 3.0] }, "descriptor": { },
+      "contour": 0, "adjacentFaces": ["f:5", "f:6"] }
   ],
   "refusal": null }
 ```
 
 - Each pick uses exactly one address: `{bodyId,topoKey}` or `{elementId}`.
+- **`contour` + `adjacentFaces` (additive, kernel-hardening WP-F, 2026-09-03; on
+  every accepted `edges[]` entry).** `contour` is the 0-based index of the tangent
+  contour the edge belongs to: contour `k` is the one seeded by the `k`-th smallest
+  PICKED edge ordinal on THIS snapshot that no earlier contour already covers (picks
+  are sorted and de-duplicated before the closure analysis, and a pick already inside
+  a previous contour's closure adds no new index). It is ordinal-derived and therefore NOT stable across an
+  edit — a client MUST NOT persist it; a Chamfer's `referenceFaces` are keyed by
+  `edgeId`, never by contour index (one pair per distinct `contour` value at
+  authoring time). `adjacentFaces` is the edge's adjacent faces on this snapshot as
+  TopoKeys, sorted by face ordinal ASCENDING and de-duplicated by `IsSame` — one
+  entry for a seam edge (its lateral face is adjacent on both sides), NONE for a
+  free edge, two for a manifold edge, every adjacent face (ascending) for a
+  non-manifold edge. The frontend promotes ONE entry of ONE edge per
+  contour through [`AcquireElementIds`](#acquireelementids) to author a Chamfer
+  `referenceFaces` pair; `adjacentFaces[0]` of a contour's first listed edge is the
+  legacy smaller-ordinal face, so a default pick moves nothing. Rust forwards both
+  fields to the frontend verbatim (`contour` unsigned, `adjacentFaces` an array of
+  strings — a malformed entry fails the parse like any structural field).
 - Refusals are successful answers with empty closure: `crossBody`,
   `unsupportedEdge`, or `chainMismatch`; they carry `{code,message,edges}`.
 - Missing/stale `snapshotId` refuses; identical head + request gives a
@@ -4112,7 +4236,9 @@ STATE (see [§8](#8-error-taxonomy)).
   "ladderFailed": "descriptor",          // "history" | "descriptor"
   "reason": "ambiguous",                 // "ambiguous" | "no-candidates" | "low-confidence"
                                          //   | "ordinal-permutation" (Rust-seeded only)
+                                         //   | "legacyReferenceFace" (op-built, Chamfer only)
   "scoringVersion": 4,                   // = resolverVersion the scores were computed under
+  "seedEdgeId": "el_…e14",               // OPTIONAL — only with reason "legacyReferenceFace"
   "candidates": [
     {
       "topoKey": "f:31",
@@ -4142,8 +4268,45 @@ STATE (see [§8](#8-error-taxonomy)).
   equal the `policyVersions.resolverVersion` Rust pinned in §7.2 — that axis gates
   checkpoint-cache compatibility. When the two differ, this field wins for
   interpreting the numbers in THIS payload.
-- `reason`: the four tokens above. `ambiguous` / `no-candidates` / `low-confidence`
-  are ladder outcomes a **worker** may emit. **`ordinal-permutation` is
+- `reason`: the five tokens above. `ambiguous` / `no-candidates` / `low-confidence`
+  are ladder outcomes a **worker** may emit. **`legacyReferenceFace` is
+  worker-emitted but OP-BUILT, not a ladder outcome** (kernel-hardening WP-F,
+  2026-09-03): a Chamfer carrying `distance2`/`angleDeg` without
+  [`referenceFaces`](#73-op-payload-schemas-vertical-slice) halts with one such
+  item per contour once an upstream edit makes its ordinal-derived reference face
+  untrustworthy. The item's `refId` names an EMPTY slot (`<opId>.input<N+i>`), its
+  `elementId` is `""`, `ladderFailed` is `"descriptor"` (closed enum; no ladder ran),
+  `seedEdgeId` carries the contour edge the repair must pair the chosen face with,
+  and `candidates[]` are exactly that edge's adjacent faces at a deliberate tie
+  (`score` 0.5, `margin` 0.0). The item's own `candidates[]` are DISPLAY evidence
+  only: their TopoKeys are ordinals of the scratch predecessor the halted plan ran
+  on and MUST NOT be promoted (§7.5 forbids ordinal reuse across snapshots). Repair
+  is a CREATE, not a rebind — no stored ref exists at the slot, so `stored_input_ref`
+  hydration does not apply. Rust answers the `ResolveRefs` dry-run for such a
+  `refId` by re-deriving the candidates LIVE on the echoed head snapshot. The halted
+  step never committed, so the seed edge's binding on the scratch state died with
+  it and `seedEdgeId` is NOT addressable on the head by id (measured 2026-09-04:
+  `PrepareEdgeOp{ pickedEdges:[{ elementId }] }` answers `REF_UNRESOLVED`). Rust
+  therefore first resolves the seed edge on the head through the §10 ladder from
+  the record's own stored typed edge ref (`edges[i]` where
+  `edgeIds[i] == seedEdgeId`; a `ResolveRefs` dry-run), and only an `autoBind` /
+  `unchanged` outcome yields a head TopoKey; it then calls
+  `PrepareEdgeOp{ snapshotId, mode:"Chamfer", pickedEdges:[{ bodyId, topoKey }],
+  chainTangentEdges }` (or `{ elementId }` when the outcome was `unchanged` and the
+  stored id still binds — §7.6 accepts either address) and takes `adjacentFaces` of
+  the picked entry, scored 0.5 / margin 0.0 in list order with each candidate's
+  `worldPos`/`summary` measured by `QueryElement` on the same head (a face the head
+  cannot measure is DROPPED, never guessed), echoing `{ snapshotId, revision, bodyId }`
+  per §7.5. A
+  seed edge the ladder cannot bind on the head (it is itself `NeedsRepair`, or gone)
+  ⇒ `no-candidates` — the edge's own repair comes first. No new wire field is
+  needed for this. The client promotes the chosen TopoKey against that echoed
+  snapshot and sends `EditOperationInput` with
+  `InputPath::ChamferReferenceFace { index, edgeId }` — `index` the `i` of the
+  item's `refId`, `edgeId` the item's `seedEdgeId` verbatim — and the promoted
+  face's typed `ElementRef` as the payload; Rust writes the pair
+  `{ edgeId, faceId }` plus the typed ref in one undo step and refuses the command
+  when `edgeId` is not an entry of `edgeIds`. **`ordinal-permutation` is
   Rust-seeded only** (VF-B6): it marks a reference standing on an N-body op's
   ordinal child `body_<opId>:<k>` whose [§7.2 `rankKey`](#72-regen--executeplan)
   evidence shows the ordinals permuted under a parametric edit — the ref would
@@ -4586,6 +4749,77 @@ sign-off) once fixtures exist.
   governs solid-count publication only). New fixture `hole_threaded.ndjson`; no
   existing fixture shape moves, **no fixture bump**. `protocolVersion` stays 1;
   no handshake axis or worker fingerprint moves.
+
+- **2026-09-03 — Chamfer reference face as a persisted typed ref (kernel-hardening
+  WP-F).** [§7.3](#73-op-payload-schemas-vertical-slice) Chamfer: additive
+  `referenceFaces[]` — `{edgeId, faceId}` pairs, ONE per tangent contour, keyed by
+  an edge of the contour; the face refs ride `inputs[]` AFTER the edge refs in the
+  positional `<opId>.input<N+i>` slots and resolve through the §10 ladder; the
+  paired edge becomes the contour's seed; adjacency, coverage and agreement are
+  enforced by name (`CHAMFER_REFERENCE_FACE_NOT_ADJACENT` / `_CONFLICT`, top-level
+  `OP_FAILED`, `stage:"resolve"`, `evidence.chamfer`; an UNCOVERED contour is never
+  a refusal — it halts `needsRepair` so a per-pick repair converges);
+  REQUIRED on new asymmetric records; the legacy smaller-ordinal rule is REMOVED —
+  an asymmetric record halts `needsRepair` for every contour without a pair, in
+  every lane, with the new [§9](#9-needsrepair-payload) op-built reason
+  `legacyReferenceFace` (+ optional `seedEdgeId`; repair is a CREATE on the empty
+  slot; one repair item per legacy chamfer contour on the first open under this
+  build is the recorded migration path — a per-plan `editedFrom` gate was tried and
+  rejected because REDO and timeline previews omit the claim). [§7.6](#prepareedgeop)
+  `PrepareEdgeOp`: every accepted `edges[]` entry gains `contour` and
+  `adjacentFaces` (TopoKeys, face-ordinal ascending, `IsSame`-deduplicated). The
+  ownership gate accepts a face primary in a Chamfer's trailing slots `≥ N`.
+  Non-v1 records (no `tangentClosureVersion`) key the pairs per EDGE.
+  *Reason (measured red-first 2026-09-03, `worker/tests/test_chamfer_reference_face.cpp`
+  on `e781272`):* the reference face was the adjacent face with the smaller
+  SNAPSHOT-SCOPED ordinal, so an upstream feature that reordered the face map
+  mirrored the chamfer's legs — a 40×20×10 box, `radius` 4 / `distance2` 1 on a
+  top edge, plus a Ø6 hole in a wall the chamfer never touches: the 4 mm leg moved
+  from the wall (y∈[0,1], z∈[6,10]) to the top (y∈[0,4], z∈[9,10]) with the removed
+  volume (80 mm³), the face count and every existing check identical (finding
+  fillet-chamfer-0); `AddDA` shares the defect. The contour seed itself
+  (`contour.front()`, the smallest edge ordinal) was ordinal-derived, which is why
+  the pair is keyed by an edge and not by position. *Fixtures:*
+  `chamfer_reference_face.ndjson` (`PrepareEdgeOp` adjacency sorted; a typed pair
+  accepted in its slot; the pair still resolving after an ordinal-permuting upstream
+  hole; the `NOT_ADJACENT` refusal with the head untouched; an uncovered second
+  contour halting `needsRepair` on slot `input3`) and
+  `chamfer_reference_face_legacy_needsrepair.ndjson` (legacy record: halts with
+  `legacyReferenceFace` + `seedEdgeId` + the two adjacent-face candidates with no
+  edit context, with `editedFrom` 1 and with `editedFrom` 2 alike, for `distance2`
+  and for `angleDeg`; an equal-leg record is untouched). The pre-existing
+  `chamfer_angle_distance.ndjson` (2026-08-24) authored its asymmetric rounds
+  without a pair and was UPDATED to carry one (`f:1`, the face the removed chooser
+  picked, so its geometry numbers in `test_wp6_ops.cpp` are unchanged) — the FIRST of
+  the two deliberate behaviour changes of this entry: a pair-less asymmetric Chamfer
+  used to succeed and now halts. The SECOND applies to Fillet as well: an edge or face
+  ref whose `elementId` the partition tracks on a DIFFERENT body or as a DIFFERENT kind
+  is now §9 state (`no-candidates`, `ladderFailed:"descriptor"`) instead of falling
+  through to the descriptor rung, where it could re-bind an element the record never
+  named (a face slot carrying an edge id; a ref resolving against a body it never
+  named). A tracked-but-mismatched id is a record defect, and the identity spine's rule
+  applies: deterministic `NeedsRepair` beats a silent wrong bind; the geometry (which physical face carries the 4 mm leg) is pinned in
+  ctest, the `IsSame` de-duplication on a cylinder seam in ctest too. All §7.3 params
+  fields and the §9 fields are additive and optional; the two §7.6 response fields
+  are REQUIRED on every accepted entry of a worker at this build id (app and worker
+  deploy lockstep, §13). No existing fixture shape moves, no fixture bump;
+  `protocolVersion` stays 1; no handshake axis and no worker fingerprint moves.
+  Cross-track sign-off recorded 2026-09-04 — protocol-auditor: schema-vs-code review
+  (read-only), `approve` after every filed change was applied (three passes: the first
+  rejected the per-`edgeIds` form, the `<opId>.referenceFaces[i]` refId grammar, the
+  `editedFrom ≤ step` predicate and the `QueryElement` placement of the adjacency
+  list; the second, after the worker's adversarial review, removed the per-plan
+  `editedFrom` gate in every lane; the third re-verified schema-vs-code on the landed
+  diff and pinned the second behaviour change above). Fixtures replay green in BOTH
+  lanes: `canonical_chamfer_reference_face` (26 expectations),
+  `canonical_chamfer_reference_face_legacy_needsrepair` (25) and the updated
+  `canonical_chamfer_angle_distance` (30) under `worker_harness`, plus the Rust
+  real-worker lane (`src-tauri/tests/chamfer_reference.rs`, `chamfer_angle.rs`,
+  `topology_rebind.rs`) and the worker probe `chamfer_reference_face`.
+  `scripts/check-worker-stdout-hygiene.sh` clean; `onecad-protocol` and the Dispatcher
+  untouched, so no frame, handshake, `protocolVersion` or worker-fingerprint axis
+  moves. Worker + Rust gates re-verified by the orchestrator (ctest and `cargo test
+  --workspace` counts in the TODO.md § KERNEL HARDENING gate row).
 
 - **2026-09-03 — Region identity by anchor + robust detection + solve residual
   (kernel-hardening WP-B).** [§7.3](#73-op-payload-schemas-vertical-slice) Extrude /

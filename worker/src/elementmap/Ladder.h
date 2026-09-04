@@ -122,6 +122,12 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                                                        const std::vector<LadderRef>& refs,
                                                        const LadderEditContext& edit = {});
 
+// The one-line human summary the ladder puts on every `candidates[]` entry
+// ("planar face, area~800mm2"). Exposed so an OP-BUILT §9 item (the Chamfer
+// `legacyReferenceFace` halt, SCHEMA §9) offers its candidates in the SAME style
+// the ladder's own items use — a repair UI must not have to tell them apart.
+std::string candidate_summary(km::ElementKind kind, const km::ElementDescriptor& d);
+
 // Build a LadderRef from one op input JSON object ({primary, intent, anchor},
 // SCHEMA §7.3). `ref_id` names it. `kind_hint` is the resolved element kind. The
 // frozen intent.descriptor is parsed when present (structured object); a string

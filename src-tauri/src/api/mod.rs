@@ -3501,12 +3501,21 @@ pub async fn resolve_refs(
             })
             .collect(),
     };
+    // The SCHEMA §9 `legacyReferenceFace` answer re-derives its candidates through
+    // `PrepareEdgeOp` (see `DocumentRuntime::resolve_refs_with`); that seam lives
+    // beside the runtime, not on it, so it is handed in here.
+    let faces = state.face_projection();
+    let elements = state.element_query();
+    let seams = crate::document_runtime::RepairSeams {
+        faces: faces.as_ref(),
+        elements: elements.as_ref(),
+    };
     let results = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("resolveRefs".into()))?;
-        let resolutions = rt.resolve_refs(req).await?;
+        let resolutions = rt.resolve_refs_with(req, Some(seams)).await?;
         // `revision` stays RUST-OWNED (decision D4): the repair store keys candidates
         // on `(revision, snapshotId)` from the same projection the `needs-repair`
         // events carry, and the engine's own `documentRevision` is an advisory stamp

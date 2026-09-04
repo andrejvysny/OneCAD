@@ -58,7 +58,9 @@ use onecad_core::document::repair::RepairItem;
 use onecad_core::document::variables::{Variable, VariableTable};
 use onecad_core::document::Document;
 use onecad_core::edit::session::{empty_outcome, merge_outcome, DocumentSession};
-use onecad_core::edit::{CommandOutcome, EditCommand, SketchEditOp, UndoOutcome};
+use onecad_core::edit::{
+    CommandOutcome, EditCommand, InputPath, InputRef, SketchEditOp, UndoOutcome,
+};
 use onecad_core::error::DomainError;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
 use onecad_core::ids::{
@@ -71,7 +73,7 @@ use onecad_core::io::container::{
 };
 use onecad_core::io::imports::{ImportBlob, ImportBlobs, MAX_IMPORT_BLOB_BYTES};
 use onecad_core::io::IoError;
-use onecad_core::math::Vec2;
+use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     mint_element_ids, AcquireRequest, BindElementIdsRequest, CancelToken, CheckpointArtifacts,
     CheckpointStore, ElementBinding, EngineError, GeometryEngine, InMemoryCheckpointStore, Lod,
@@ -642,6 +644,82 @@ fn title_for_path(path: &Path) -> String {
         .unwrap_or_else(|| "Document".to_string())
 }
 
+/// A repair candidate's human summary for a FACE, in the SAME shape the worker's
+/// ladder mints (`elementmap/Ladder.cpp` `candidate_summary`) — the panel shows the
+/// two side by side, so a Rust-built candidate must not read differently from a
+/// worker-built one.
+fn face_candidate_summary(info: &crate::dto::ElementInfoDto) -> String {
+    // OCCT `GeomAbs_SurfaceType` ordinals, mirroring `surface_type_name`.
+    let surface = match info.surface_type {
+        0 => "planar",
+        1 => "cylindrical",
+        2 => "conical",
+        3 => "spherical",
+        4 => "toroidal",
+        _ => "curved",
+    };
+    format!("{surface} face, area~{:.0}mm2", info.magnitude)
+}
+
+/// The two read-only worker seams a SCHEMA §9 `legacyReferenceFace` answer needs,
+/// handed in together because neither is any use alone: `faces` runs the adjacency
+/// handshake, `elements` measures each candidate face so the panel can highlight it
+/// where it actually IS. Both live on `AppState` beside the runtime, not on it.
+#[derive(Clone, Copy)]
+pub struct RepairSeams<'a> {
+    pub faces: &'a dyn crate::worker::FaceBoundaryProjection,
+    pub elements: &'a dyn crate::worker::ElementQuery,
+}
+
+/// An OWNED `PrepareEdgeOp` pick address (SCHEMA §7.6 accepts exactly one of the
+/// two forms). Owned because the address is produced by an awaited ladder call and
+/// then handed to a second one, which `wire::FaceAddress<'a>`'s borrow cannot span.
+enum EdgeAddress {
+    TopoKey(String),
+    ElementId(String),
+}
+
+impl EdgeAddress {
+    fn as_wire(&self) -> wire::FaceAddress<'_> {
+        match self {
+            Self::TopoKey(key) => wire::FaceAddress::TopoKey(key),
+            Self::ElementId(id) => wire::FaceAddress::ElementId(id),
+        }
+    }
+}
+
+/// Everything a SCHEMA §9 `legacyReferenceFace` item needs to be answered LIVE
+/// (kernel-hardening WP-F) — read off the record + the repair item under the
+/// runtime lock, before the `PrepareEdgeOp` round trip.
+#[derive(Debug, Clone)]
+struct LegacyReferenceFaceSeed {
+    /// The empty pair slot the item names (`<opId>.input<N+i>`).
+    ref_id: String,
+    /// The chamfer's timeline step.
+    step_index: usize,
+    /// The body the chamfer operates on — what the client promotes against.
+    body: BodyId,
+    /// The contour edge the created pair is keyed by (SCHEMA §9 `seedEdgeId`).
+    seed_edge: ElementId,
+    /// The seed edge's OWN op-input slot (`<opId>.input<i>`, `i` its index in
+    /// `edgeIds`) and the typed ref stored there. The seed edge is NOT addressable
+    /// on the head by id — the halted step never committed, so the binding it
+    /// resolved on the scratch state died with it — so SCHEMA §9 re-derives through
+    /// the §10 ladder from THIS evidence first, and addresses `PrepareEdgeOp` by the
+    /// `{bodyId, topoKey}` the ladder answers with.
+    seed_edge_ref_id: String,
+    seed_edge_ref: ElementRef,
+    /// The chamfer's own closure flag, echoed into the `PrepareEdgeOp` request so
+    /// the re-derivation sees the SAME closure the halted step ran on.
+    chain_tangent_edges: bool,
+    /// The seed edge's selection intent, for highlighting.
+    anchor: Option<AnchorIntent>,
+    /// The item's UI label, carried through unchanged.
+    ui_label: String,
+    /// The `resolverVersion` the halted step's scores were computed under.
+    scoring_version: Option<u32>,
+}
+
 impl DocumentRuntime {
     /// A fresh blank document ("Untitled").
     #[must_use]
@@ -1010,6 +1088,30 @@ impl DocumentRuntime {
                 }
                 EditCommand::UpdateOperationParams { record, op }
             }
+            // The SCHEMA §9 `legacyReferenceFace` repair CREATES a ref rather than
+            // rebinding one, so nothing upstream ever stamped it: without this the
+            // reference face would be the LEAST-evidenced ref in the document —
+            // anchor only — exactly where two congruent faces tie on every replay.
+            // Scoped to that one path on purpose; the other `InputPath`s rebind refs
+            // whose evidence the repair panel already carries.
+            EditCommand::EditOperationInput {
+                record,
+                path: path @ InputPath::ChamferReferenceFace { .. },
+                reference,
+            } => {
+                let reference = match reference {
+                    InputRef::Element(mut element) => {
+                        self.stamp_intent(&mut element);
+                        InputRef::Element(element)
+                    }
+                    other => other,
+                };
+                EditCommand::EditOperationInput {
+                    record,
+                    path,
+                    reference,
+                }
+            }
             other => other,
         }
     }
@@ -1018,25 +1120,32 @@ impl DocumentRuntime {
     /// cache. See [`hydrate_ref_intents`](Self::hydrate_ref_intents) for the rules.
     fn stamp_intents(&self, op: &mut KnownOperation) {
         for reference in op.element_refs_mut() {
-            if reference.intent.is_some() {
-                continue;
-            }
-            let Some(primary) = reference.primary.as_ref() else {
-                continue;
-            };
-            let Some((kind, descriptor)) = self.promoted_evidence(&primary.element) else {
-                continue;
-            };
-            reference.intent = Some(IntentQuery {
-                // The descriptor policy axis the evidence was computed under — the
-                // same `descriptorVersion` every plan is compiled with, so a future
-                // bump invalidates stored intents through one knob (SCHEMA §6/§13).
-                version: PolicyVersions::default().descriptor,
-                kind,
-                descriptor,
-                extra: Default::default(),
-            });
+            self.stamp_intent(reference);
         }
+    }
+
+    /// Fills ONE unstamped ref's `intent` from the promotion cache. An already
+    /// stamped ref, a ref with no primary, and an element the cache has no
+    /// descriptor for are all left exactly as they are (H5 fill-iff-None).
+    fn stamp_intent(&self, reference: &mut ElementRef) {
+        if reference.intent.is_some() {
+            return;
+        }
+        let Some(primary) = reference.primary.as_ref() else {
+            return;
+        };
+        let Some((kind, descriptor)) = self.promoted_evidence(&primary.element) else {
+            return;
+        };
+        reference.intent = Some(IntentQuery {
+            // The descriptor policy axis the evidence was computed under — the
+            // same `descriptorVersion` every plan is compiled with, so a future
+            // bump invalidates stored intents through one knob (SCHEMA §6/§13).
+            version: PolicyVersions::default().descriptor,
+            kind,
+            descriptor,
+            extra: Default::default(),
+        });
     }
 
     /// The newest worker-authored `(kind, descriptor)` the promotion cache holds for
@@ -3988,20 +4097,101 @@ impl DocumentRuntime {
     /// [`EngineError`] on a worker failure.
     pub async fn resolve_refs(
         &self,
-        mut req: ResolveRequest,
+        req: ResolveRequest,
+    ) -> Result<Vec<RefResolution>, EngineError> {
+        self.resolve_refs_with(req, None).await
+    }
+
+    /// [`resolve_refs`](Self::resolve_refs) with the `PrepareEdgeOp` seam the SCHEMA
+    /// §9 `legacyReferenceFace` answer needs.
+    ///
+    /// Such an item names an **empty** slot — the Chamfer reference-face pair the
+    /// repair is about to CREATE — so there is no stored ref to hydrate and no
+    /// ladder to run. Its published `candidates[]` are DISPLAY evidence only: their
+    /// TopoKeys are ordinals of the scratch predecessor the halted plan ran on, and
+    /// §7.5 forbids promoting an ordinal across snapshots. The candidates are
+    /// therefore re-derived LIVE on the echoed head, from the seed edge's
+    /// `PrepareEdgeOp` `adjacentFaces`, at a deliberate tie (0.5 / margin 0) — the
+    /// user MUST choose.
+    ///
+    /// `faces` is the same [`FaceBoundaryProjection`] the `prepare_edge_op` command
+    /// drives (the app holds it beside the runtime rather than on it). Without it
+    /// the item is answered with its reason intact and NO candidates rather than
+    /// with the forbidden stale ones.
+    ///
+    /// # Errors
+    /// [`EngineError`] on a worker failure.
+    pub async fn resolve_refs_with(
+        &self,
+        req: ResolveRequest,
+        seams: Option<RepairSeams<'_>>,
     ) -> Result<Vec<RefResolution>, EngineError> {
         // Candidate TopoKeys are ordinals into one snapshot. Unlike a generic
         // advisory read, this response can be promoted, so never enumerate a
         // newer head under the caller's older snapshot provenance.
         self.gate_stale_pick(req.snapshot_id)?;
-        for r in &mut req.refs {
+        let snapshot = req.snapshot_id;
+        // Order is part of the contract (the caller zips answers to requests), so
+        // the locally-answered refs are spliced back at their own index.
+        let mut local: Vec<(usize, RefResolution)> = Vec::new();
+        let mut forwarded: Vec<(usize, ResolveRef)> = Vec::new();
+        for (i, mut r) in req.refs.into_iter().enumerate() {
             if element_ref_is_empty(&r.element) {
                 if let Some(stored) = self.stored_input_ref(&r.ref_id) {
                     r.element = stored;
+                } else if let Some(seed) = self.legacy_reference_face_seed(&r.ref_id) {
+                    local.push((
+                        i,
+                        self.resolve_legacy_reference_face(snapshot, &seed, seams)
+                            .await?,
+                    ));
+                    continue;
                 }
             }
+            forwarded.push((i, r));
         }
-        self.engine.resolve_refs(req).await
+        // Nothing answered locally ⇒ exactly the pre-WP-F path, engine answer and
+        // all. Only a mixed batch needs re-splicing (and the length check that
+        // makes the splice sound).
+        if local.is_empty() {
+            return self
+                .engine
+                .resolve_refs(ResolveRequest {
+                    snapshot_id: snapshot,
+                    refs: forwarded.into_iter().map(|(_, r)| r).collect(),
+                })
+                .await;
+        }
+        let mut out: Vec<Option<RefResolution>> = Vec::new();
+        out.resize_with(local.len() + forwarded.len(), || None);
+        for (i, resolution) in local {
+            out[i] = Some(resolution);
+        }
+        if !forwarded.is_empty() {
+            let indices: Vec<usize> = forwarded.iter().map(|(i, _)| *i).collect();
+            let answers = self
+                .engine
+                .resolve_refs(ResolveRequest {
+                    snapshot_id: snapshot,
+                    refs: forwarded.into_iter().map(|(_, r)| r).collect(),
+                })
+                .await?;
+            // The engine answers one resolution per requested ref, validated on the
+            // way in; a short/long answer is a protocol break, not a slot to guess at.
+            if answers.len() != indices.len() {
+                return Err(EngineError::Protocol {
+                    message: format!(
+                        "ResolveRefs answered {} resolutions for {} refs",
+                        answers.len(),
+                        indices.len()
+                    ),
+                });
+            }
+            for (i, resolution) in indices.into_iter().zip(answers) {
+                out[i] = Some(resolution);
+            }
+        }
+        Ok(out.into_iter().flatten().collect())
     }
 
     /// Whether a DI-4 re-bind pass is still owed: this session has not attempted one
@@ -4278,11 +4468,240 @@ impl DocumentRuntime {
 
     /// The stored ref body's identity is the body used by repair candidate
     /// enumeration. It accompanies the snapshot/revision provenance to the UI.
+    ///
+    /// A SCHEMA §9 `legacyReferenceFace` item names an EMPTY slot, so it has no
+    /// stored ref to read a body off; the record's own operated body answers
+    /// instead. Without that fallback the repair panel could not promote the face
+    /// the user picks — the whole point of the item.
     #[must_use]
     pub fn repair_candidate_body(&self, ref_id: &str) -> Option<String> {
-        self.stored_input_ref(ref_id)
+        if let Some(body) = self
+            .stored_input_ref(ref_id)
             .and_then(|reference| reference.primary)
             .map(|primary| primary.body.to_string())
+        {
+            return Some(body);
+        }
+        self.record_for_ref_id(ref_id)
+            .and_then(|record| self.operated_body(record))
+            .map(|body| body.to_string())
+    }
+
+    /// The timeline record a repair `refId` (`<recordId>.input<k>`) names.
+    fn record_for_ref_id(&self, ref_id: &str) -> Option<&OperationRecord> {
+        let (record_id, _) = parse_input_ref_id(ref_id)?;
+        self.regen
+            .timeline
+            .records()
+            .iter()
+            .find(|r| r.record_id == record_id)
+    }
+
+    /// The body a record OPERATES ON — its first declared input body, else its
+    /// first output. The same derivation [`needs_repair_items`](Self::needs_repair_items)
+    /// hands the repair panel.
+    fn operated_body(&self, record: &OperationRecord) -> Option<BodyId> {
+        record
+            .op
+            .derive_inputs()
+            .bodies
+            .first()
+            .copied()
+            .or_else(|| record.outputs.first().copied())
+    }
+
+    /// The SCHEMA §9 `legacyReferenceFace` item standing at `ref_id`, when the
+    /// current repair state holds one for a Chamfer record that still carries a seed
+    /// edge id (kernel-hardening WP-F).
+    ///
+    /// `None` for every other ref — including a legacy item whose record has since
+    /// been deleted or type-flipped — so the caller falls through to the ladder.
+    fn legacy_reference_face_seed(&self, ref_id: &str) -> Option<LegacyReferenceFaceSeed> {
+        let item = self
+            .regen
+            .repair
+            .items()
+            .iter()
+            .find(|item| item.ref_id == ref_id)?;
+        if item.reason != onecad_core::document::repair::RepairReason::LegacyReferenceFace {
+            return None;
+        }
+        let seed_edge = item.seed_edge_id.clone()?;
+        let record = self.record_for_ref_id(ref_id)?;
+        let Operation::Known(KnownOperation::Chamfer(p)) = &record.op else {
+            return None;
+        };
+        // The seed edge's own slot: `edgeIds[i] == seedEdgeId` ⇒ `<opId>.input<i>`
+        // (SCHEMA §7.3 slot order — the edge refs come first). Its typed ref is the
+        // evidence the §10 ladder re-binds the edge from.
+        let seed_index = p.edge_ids.iter().position(|id| *id == seed_edge)?;
+        let seed_edge_ref = p.edges.get(seed_index)?.clone();
+        Some(LegacyReferenceFaceSeed {
+            ref_id: ref_id.to_string(),
+            step_index: item.step_index,
+            body: self.operated_body(record)?,
+            chain_tangent_edges: p.chain_tangent_edges,
+            // The seed edge's own anchor — it sits on the boundary of BOTH adjacent
+            // faces, so it is an honest highlight position for either candidate, and
+            // it costs no round trip.
+            anchor: seed_edge_ref.anchor.clone().or_else(|| item.anchor.clone()),
+            seed_edge_ref_id: format!("{}.input{seed_index}", record.record_id),
+            seed_edge_ref,
+            ui_label: item.ui_label.clone(),
+            scoring_version: item.scoring_version,
+            seed_edge,
+        })
+    }
+
+    /// Re-derives a SCHEMA §9 `legacyReferenceFace` item's candidates LIVE on the
+    /// echoed head — see [`resolve_refs_with`](Self::resolve_refs_with) for why the
+    /// published ones must not be reused.
+    async fn resolve_legacy_reference_face(
+        &self,
+        snapshot: SnapshotId,
+        seed: &LegacyReferenceFaceSeed,
+        seams: Option<RepairSeams<'_>>,
+    ) -> Result<RefResolution, EngineError> {
+        use onecad_core::document::repair::{LadderLevel, RepairCandidate, RepairReason};
+
+        let mut candidates: Vec<RepairCandidate> = Vec::new();
+        let mut reason = RepairReason::LegacyReferenceFace;
+        if let Some(seams) = seams {
+            // STAGE 1 — re-bind the SEED EDGE on the head through the §10 ladder.
+            // Its id is not addressable here: the halted step never committed, so
+            // the binding it resolved on the scratch state died with it and
+            // `PrepareEdgeOp{elementId}` answers `REF_UNRESOLVED` (SCHEMA §9,
+            // measured 2026-09-04). The record's own stored typed ref IS the
+            // evidence the ladder needs, and this is the same dry run every other
+            // ref takes.
+            let bound = self
+                .engine
+                .resolve_refs(ResolveRequest {
+                    snapshot_id: snapshot,
+                    refs: vec![ResolveRef {
+                        ref_id: seed.seed_edge_ref_id.clone(),
+                        element: seed.seed_edge_ref.clone(),
+                    }],
+                })
+                .await?;
+            // Only a CONFIDENT bind yields an address. A seed edge that is itself
+            // `NeedsRepair` — or gone — is `no-candidates`: its own repair comes
+            // first, and guessing which edge the user meant here would pick the
+            // reference face of the wrong contour.
+            let address = match bound.first().map(|b| &b.outcome) {
+                Some(ResolveOutcome::AutoBind {
+                    topo_key: Some(key),
+                    ..
+                }) => Some(EdgeAddress::TopoKey(key.as_str().to_string())),
+                // An `unchanged` outcome — and an `autoBind` the worker echoed no
+                // topoKey for — means the stored id still binds, so the id itself
+                // is the address (§7.6 accepts either form).
+                Some(ResolveOutcome::AutoBind { element_id, .. })
+                    if !element_id.as_str().is_empty() =>
+                {
+                    Some(EdgeAddress::ElementId(element_id.as_str().to_string()))
+                }
+                Some(ResolveOutcome::Unchanged {
+                    element_id: Some(id),
+                }) if !id.as_str().is_empty() => {
+                    Some(EdgeAddress::ElementId(id.as_str().to_string()))
+                }
+                _ => None,
+            };
+
+            // STAGE 2 — the adjacency handshake on that address.
+            let prepared = match &address {
+                None => None,
+                Some(address) => {
+                    let answer = seams
+                        .faces
+                        .prepare_edge_op(
+                            snapshot,
+                            wire::EdgeOpMode::Chamfer,
+                            &[wire::EdgeOpPick {
+                                body: Some(seed.body),
+                                address: address.as_wire(),
+                            }],
+                            seed.chain_tangent_edges,
+                        )
+                        .await;
+                    // A seed edge the head no longer HAS is `no-candidates`, not an
+                    // error: `PrepareEdgeOp` reports it as a recoverable
+                    // `REF_UNRESOLVED`, and the honest answer to "which faces may I
+                    // pick" is "none". Every other engine failure is a real failure.
+                    match answer {
+                        Ok(prepared) => Some(prepared),
+                        Err(EngineError::OpFailed {
+                            code: onecad_core::regen::OpFailureCode::RefUnresolved,
+                            ..
+                        }) => None,
+                        Err(other) => return Err(other),
+                    }
+                }
+            };
+            // A refusal is a successful answer with an empty closure (§7.6): the
+            // seed edge is no longer chamferable, so there is nothing to offer.
+            // Same for a closure that does not contain the pick.
+            let entry = prepared.as_ref().and_then(|prepared| {
+                prepared
+                    .refusal
+                    .is_none()
+                    .then(|| prepared.edges.iter().find(|e| e.picked))
+                    .flatten()
+            });
+            let adjacent = entry
+                .and_then(|e| e.adjacent_faces.clone())
+                .unwrap_or_default();
+            // MEASURE each candidate on the head. The panel highlights a candidate
+            // at its `world_pos` and anchors the ref it creates there, so the seed
+            // EDGE's anchor is the one point that must NOT be used: it lies on BOTH
+            // adjacent faces, so it would highlight the two candidates on top of
+            // each other AND anchor the created ref where the anchor rung can never
+            // separate them again. The face's own centre is what distinguishes them.
+            for key in &adjacent {
+                let info = seams
+                    .elements
+                    .query_element_by_topo_key(snapshot, seed.body, key)
+                    .await?;
+                // A candidate we cannot measure is DROPPED, never guessed at: an
+                // unhighlightable candidate the user cannot tell from its twin is
+                // worse than one fewer choice.
+                let Some(info) = info else { continue };
+                candidates.push(RepairCandidate {
+                    topo_key: TopoKey::new(key.clone()),
+                    // A deliberate tie: SCHEMA §9 says the user MUST choose, so
+                    // neither face may score high enough to auto-bind.
+                    score: 0.5,
+                    margin: 0.0,
+                    world_pos: Vec3::new_unchecked(info.center[0], info.center[1], info.center[2]),
+                    summary: face_candidate_summary(&info),
+                    extra: Default::default(),
+                });
+            }
+            if candidates.is_empty() {
+                reason = RepairReason::NoCandidates;
+            }
+        }
+        Ok(RefResolution {
+            ref_id: seed.ref_id.clone(),
+            outcome: ResolveOutcome::NeedsRepair(RepairItem {
+                step_index: seed.step_index,
+                ref_id: seed.ref_id.clone(),
+                element_id: None,
+                ladder_failed: LadderLevel::Descriptor,
+                reason,
+                candidates,
+                scoring_version: seed.scoring_version,
+                anchor: seed.anchor.clone(),
+                ui_label: seed.ui_label.clone(),
+                seeded: false,
+                ordinal_anchor: None,
+                seed_edge_id: Some(seed.seed_edge.clone()),
+            }),
+            snapshot_id: snapshot,
+            revision: self.projection().revision,
+            body_id: Some(seed.body),
+        })
     }
 
     /// The STORED [`ElementRef`] at the op-input slot a repair `refId`
@@ -5272,7 +5691,24 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
             _ => None,
         },
         KnownOperation::Fillet(p) => p.edges.get(index),
-        KnownOperation::Chamfer(p) => p.edges.get(index),
+        // `inputs[0..N)` are the edge refs, then one FACE ref per `referenceFaces`
+        // pair — the SCHEMA §7.3 slot table (WP-F). `N` must be the SAME quantity
+        // `wire::edge_input_refs` emits, which is `edges.len()` once the typed refs
+        // exist and `edge_ids.len()` on a legacy bare-id record; using `edge_ids`
+        // unconditionally would misplace every face slot if the two ever diverged.
+        KnownOperation::Chamfer(p) => {
+            let edge_slots = if p.edges.is_empty() {
+                p.edge_ids.len()
+            } else {
+                p.edges.len()
+            };
+            match p.edges.get(index) {
+                Some(edge) => Some(edge),
+                None => index
+                    .checked_sub(edge_slots)
+                    .and_then(|i| p.reference_face_refs.get(i)),
+            }
+        }
         KnownOperation::Shell(p) => p.faces.get(index),
         // `inputs[0]` is the host body ref (no element), `inputs[1]` the host face.
         KnownOperation::Hole(p) => (index == 1).then_some(&p.face),

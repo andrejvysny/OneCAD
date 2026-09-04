@@ -275,6 +275,7 @@ fn lower_operation(
 ) -> Value {
     let (op_type, mut params) = split_operation(operation, wire_form(operation));
     strip_sketch_host_face(operation, &mut params);
+    strip_chamfer_reference_face_refs(operation, &mut params);
     to_wire_body_form(&mut params);
     lift_profile_to_params(&mut params);
     inject_import_path(operation, &mut params);
@@ -342,6 +343,26 @@ fn strip_sketch_host_face(operation: &Operation, params: &mut Value) {
     }
     if let Some(map) = params.as_object_mut() {
         map.remove("hostFace");
+    }
+}
+
+/// Drops the document-only `referenceFaceRefs` key from `Chamfer` op params
+/// (SCHEMA §7.3, kernel-hardening WP-F).
+///
+/// Same shape as [`strip_sketch_host_face`]: the RECORD keeps the typed
+/// [`ElementRef`]s beside the bare `{edgeId, faceId}` pairs (the dual-field
+/// discipline every other typed slot uses), but §7.3 gives the wire exactly ONE
+/// channel for that evidence — `inputs[N + i]`, lowered by
+/// [`wire_op_inputs`] — and `params.referenceFaces` carries only the bare ids.
+/// Emitting the typed refs inside `params` too would put a second, unread copy of
+/// the same evidence in every plan frame. Rust remains the sole hash authority:
+/// the planner hashes the CORE params, so this omission cannot move a hash.
+fn strip_chamfer_reference_face_refs(operation: &Operation, params: &mut Value) {
+    if !matches!(operation, Operation::Known(KnownOperation::Chamfer(_))) {
+        return;
+    }
+    if let Some(map) = params.as_object_mut() {
+        map.remove("referenceFaceRefs");
     }
 }
 
@@ -557,8 +578,14 @@ fn wire_op_inputs(
         Operation::Known(KnownOperation::Fillet(p)) => {
             edge_input_refs(&p.edges, &p.edge_ids, &inputs.bodies)
         }
+        // Chamfer: the `N` edge refs, then one FACE ref per `referenceFaces` pair
+        // in pair order — the NORMATIVE §7.3 slot table (kernel-hardening WP-F), so
+        // a pair's face ref is addressable as `<opId>.input<N+i>`. Mirrored by
+        // `KnownOperation::element_refs_mut` and `document_runtime::element_ref_input`.
         Operation::Known(KnownOperation::Chamfer(p)) => {
-            edge_input_refs(&p.edges, &p.edge_ids, &inputs.bodies)
+            let mut refs = edge_input_refs(&p.edges, &p.edge_ids, &inputs.bodies);
+            refs.extend(p.reference_face_refs.iter().map(element_ref_wire));
+            refs
         }
         Operation::Known(KnownOperation::Boolean(p)) => {
             vec![body_input_ref(p.target_body), body_input_ref(p.tool_body)]
@@ -919,6 +946,17 @@ fn parse_needs_repair(v: Option<&Value>, step: usize) -> Result<Vec<RepairItem>,
                 .is_some_and(|a| a.is_null() || a.get("worldPoint").is_none());
             if anchorless {
                 map.remove("anchor");
+            }
+            // SCHEMA §9: a reader MUST treat `elementId: ""` and an ABSENT
+            // `elementId` alike. The op-built `legacyReferenceFace` item names an
+            // EMPTY slot and renders `""`, which serde would otherwise hand every
+            // consumer as `Some("")` — a "last-known id" that is not an id. Normalize
+            // once, here, so no DTO, no test and no frontend has to know the encoding.
+            if map
+                .get("elementId")
+                .is_some_and(|id| id.as_str().is_some_and(str::is_empty))
+            {
+                map.remove("elementId");
             }
         }
         out.push(serde_json::from_value(obj).map_err(|e| format!("needsRepair parse: {e}"))?);
@@ -3434,6 +3472,36 @@ fn parse_edge_op_evidence(v: &Value) -> Result<crate::dto::EdgeOpEvidenceDto, St
         .and_then(Value::as_str)
         .filter(|key| !key.is_empty())
         .ok_or_else(|| "PrepareEdgeOp: edge is missing `topoKey`".to_string())?;
+    // SCHEMA §7.6 `contour` / `adjacentFaces` (kernel-hardening WP-F): additive and
+    // absent from an older worker, but STRICT when present — a malformed entry is a
+    // parse failure like any other structural field, never a silently dropped one.
+    // The frontend keys a Chamfer's reference-face pick off this list, so a truncated
+    // read would offer the user the wrong faces.
+    let contour = match v.get("contour").filter(|value| !value.is_null()) {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    "PrepareEdgeOp: `contour` must be an unsigned integer".to_string()
+                })?,
+        ),
+    };
+    let adjacent_faces = match v.get("adjacentFaces").filter(|value| !value.is_null()) {
+        None => None,
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(str::to_owned).ok_or_else(|| {
+                        "PrepareEdgeOp: `adjacentFaces` entries must be strings".to_string()
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(_) => return Err("PrepareEdgeOp: `adjacentFaces` must be an array".into()),
+    };
     Ok(crate::dto::EdgeOpEvidenceDto {
         topo_key: topo_key.to_string(),
         picked: v.get("picked").and_then(Value::as_bool).unwrap_or(false),
@@ -3445,6 +3513,8 @@ fn parse_edge_op_evidence(v: &Value) -> Result<crate::dto::EdgeOpEvidenceDto, St
             .get("descriptor")
             .filter(|value| !value.is_null())
             .cloned(),
+        contour,
+        adjacent_faces,
     })
 }
 
@@ -7058,6 +7128,8 @@ mod body_wire_tests {
                 angle_deg: angle.map(Scalar::new),
                 edge_ids: vec![ElementId::new("e:14")],
                 edges: vec![],
+                reference_faces: Vec::new(),
+                reference_face_refs: Vec::new(),
                 chain_tangent_edges: true,
                 tangent_closure_version: None,
                 extra: Default::default(),
@@ -7102,6 +7174,8 @@ mod body_wire_tests {
             angle_deg: Some(Scalar::new(30.0)),
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
+            reference_faces: Vec::new(),
+            reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
             extra: Default::default(),
@@ -7351,6 +7425,8 @@ mod body_wire_tests {
                     angle_deg: None,
                     edge_ids: vec![ElementId::new("e:16")],
                     edges: vec![edge_ref(edge_body, "e:16")],
+                    reference_faces: Vec::new(),
+                    reference_face_refs: Vec::new(),
                     chain_tangent_edges: true,
                     tangent_closure_version: None,
                     extra: Default::default(),
@@ -7981,6 +8057,139 @@ mod body_wire_tests {
 // ─────────────────────────────────────────────────────────────────────────────
 // PrepareEdgeOp codec
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Chamfer `referenceFaces` lowering (SCHEMA §7.3, kernel-hardening WP-F)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod chamfer_reference_face_wire_tests {
+    use super::*;
+    use onecad_core::document::record::{ChamferParams, ChamferReferenceFace, DeterminismSettings};
+    use onecad_core::document::refs::{
+        AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef,
+    };
+    use onecad_core::document::variables::Scalar;
+    use onecad_core::ids::RecordId;
+
+    fn body() -> BodyId {
+        BodyId(Uuid::from_u128(0xB0))
+    }
+
+    fn typed_ref(el: &str, kind: ElementKind, point: [f64; 3]) -> ElementRef {
+        ElementRef {
+            primary: Some(PrimaryRef {
+                body: body(),
+                element: ElementId::new(el),
+                kind,
+                extra: Default::default(),
+            }),
+            intent: Some(IntentQuery {
+                version: 1,
+                kind,
+                descriptor: json!({ "shapeType": 4 }),
+                extra: Default::default(),
+            }),
+            anchor: Some(AnchorIntent {
+                world_point: onecad_core::math::Vec3::new_unchecked(point[0], point[1], point[2]),
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }
+    }
+
+    /// The whole §7.3 contract for a typed asymmetric chamfer, in one frame:
+    ///
+    /// * `params.referenceFaces` carries the BARE `{edgeId, faceId}` pairs;
+    /// * `params.referenceFaceRefs` is STRIPPED — the typed evidence has exactly one
+    ///   wire channel, and it is `inputs[]`;
+    /// * `inputs[]` is the `N` edge refs, then one FACE ref per pair, so the pair's
+    ///   ref is addressable as `<opId>.input<N+i>`.
+    #[test]
+    fn a_typed_asymmetric_chamfer_lowers_pairs_in_params_and_face_refs_in_slots() {
+        let op = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+            radius: Scalar::new(4.0),
+            distance2: Some(Scalar::new(1.0)),
+            angle_deg: None,
+            edge_ids: vec![ElementId::new("el_edge")],
+            edges: vec![typed_ref("el_edge", ElementKind::Edge, [-20.0, 20.0, 10.0])],
+            reference_faces: vec![ChamferReferenceFace {
+                edge_id: ElementId::new("el_edge"),
+                face_id: ElementId::new("el_top"),
+            }],
+            reference_face_refs: vec![typed_ref("el_top", ElementKind::Face, [-10.0, 20.0, 10.0])],
+            chain_tangent_edges: true,
+            tangent_closure_version: Some(1),
+            extra: Default::default(),
+        }));
+        let inputs = op.derive_inputs();
+        let w = wire_op(&PlannedOp {
+            record_id: RecordId(Uuid::from_u128(0xE0)),
+            step_index: 2,
+            operation: op,
+            inputs,
+            determinism: DeterminismSettings::default(),
+        });
+
+        assert_eq!(
+            w["params"]["referenceFaces"],
+            json!([{ "edgeId": "el_edge", "faceId": "el_top" }]),
+            "params carry the bare pairs — got {w}"
+        );
+        assert!(
+            w["params"].get("referenceFaceRefs").is_none(),
+            "the typed refs are document-only; inputs[] is the wire channel — got {w}"
+        );
+
+        let slots = w["inputs"].as_array().expect("inputs[] is an array");
+        assert_eq!(slots.len(), 2, "N edge refs then one face ref — got {w}");
+        assert_eq!(slots[0]["primary"]["elementId"], json!("el_edge"));
+        assert_eq!(slots[0]["primary"]["kind"], json!("edge"));
+        // Slot 1 = `<opId>.input1` — the refId a §9 repair names for pair 0.
+        assert_eq!(slots[1]["primary"]["elementId"], json!("el_top"));
+        assert_eq!(slots[1]["primary"]["kind"], json!("face"));
+        assert_eq!(
+            slots[1]["primary"]["bodyId"],
+            json!(body_id_wire(body())),
+            "the face ref rides the same body the edges operate on"
+        );
+        assert_eq!(
+            slots[1]["anchor"]["worldPoint"],
+            json!([-10.0, 20.0, 10.0]),
+            "the anchor SCHEMA §7.3 makes non-optional reaches the ladder"
+        );
+    }
+
+    /// A LEGACY asymmetric chamfer (no pairs) lowers byte-identically to before
+    /// WP-F: no `referenceFaces` key, no trailing slot.
+    #[test]
+    fn a_chamfer_without_pairs_lowers_unchanged() {
+        let op = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+            radius: Scalar::new(4.0),
+            distance2: Some(Scalar::new(1.0)),
+            angle_deg: None,
+            edge_ids: vec![ElementId::new("el_edge")],
+            edges: vec![typed_ref("el_edge", ElementKind::Edge, [-20.0, 20.0, 10.0])],
+            reference_faces: Vec::new(),
+            reference_face_refs: Vec::new(),
+            chain_tangent_edges: true,
+            tangent_closure_version: Some(1),
+            extra: Default::default(),
+        }));
+        let inputs = op.derive_inputs();
+        let w = wire_op(&PlannedOp {
+            record_id: RecordId(Uuid::from_u128(0xE0)),
+            step_index: 2,
+            operation: op,
+            inputs,
+            determinism: DeterminismSettings::default(),
+        });
+        assert!(w["params"].get("referenceFaces").is_none(), "got {w}");
+        assert_eq!(w["inputs"].as_array().expect("array").len(), 1);
+    }
+}
+
 #[cfg(test)]
 mod prepare_edge_op_tests {
     use super::*;
@@ -8059,6 +8268,69 @@ mod prepare_edge_op_tests {
             "snapshotId": 1, "targetBodyId": "body_1", "edges": [{ "picked": true }]
         }))
         .is_err());
+    }
+
+    /// SCHEMA §7.6 `contour` + `adjacentFaces` (kernel-hardening WP-F): forwarded
+    /// verbatim when present, absent on an older worker, and STRICT — a malformed
+    /// entry fails the parse rather than reaching the frontend truncated, because a
+    /// Chamfer's reference-face pick is authored straight off this list.
+    #[test]
+    fn parses_contour_and_adjacent_faces_when_present() {
+        let parsed = parse_prepare_edge_op(&json!({
+            "snapshotId": 1,
+            "targetBodyId": "body_1",
+            "edges": [
+                { "topoKey": "e:10", "picked": true, "contour": 0,
+                  "adjacentFaces": ["f:3", "f:6"] },
+                { "topoKey": "e:12", "picked": true, "contour": 1,
+                  "adjacentFaces": ["f:4", "f:6"] }
+            ]
+        }))
+        .expect("accepted closure");
+        assert_eq!(parsed.edges[0].contour, Some(0));
+        assert_eq!(
+            parsed.edges[0].adjacent_faces.as_deref(),
+            Some(["f:3".to_string(), "f:6".to_string()].as_slice())
+        );
+        assert_eq!(parsed.edges[1].contour, Some(1));
+    }
+
+    #[test]
+    fn an_older_worker_omitting_the_adjacency_fields_still_parses() {
+        let parsed = parse_prepare_edge_op(&json!({
+            "snapshotId": 1,
+            "targetBodyId": "body_1",
+            "edges": [{ "topoKey": "e:10", "picked": true }]
+        }))
+        .expect("accepted closure");
+        assert_eq!(parsed.edges[0].contour, None);
+        assert_eq!(parsed.edges[0].adjacent_faces, None);
+    }
+
+    #[test]
+    fn rejects_malformed_contour_and_adjacent_faces() {
+        let edge = |extra: Value| {
+            let mut e = json!({ "topoKey": "e:10", "picked": true });
+            for (k, v) in extra.as_object().expect("object") {
+                e[k] = v.clone();
+            }
+            parse_prepare_edge_op(&json!({
+                "snapshotId": 1, "targetBodyId": "body_1", "edges": [e]
+            }))
+        };
+        assert!(edge(json!({ "contour": "0" })).is_err(), "contour string");
+        assert!(edge(json!({ "contour": -1 })).is_err(), "contour negative");
+        assert!(edge(json!({ "contour": 1.5 })).is_err(), "contour float");
+        assert!(
+            edge(json!({ "adjacentFaces": "f:3" })).is_err(),
+            "adjacentFaces must be an array"
+        );
+        assert!(
+            edge(json!({ "adjacentFaces": ["f:3", 6] })).is_err(),
+            "adjacentFaces entries must be strings"
+        );
+        // An empty list is structurally fine (the worker decides what it means).
+        assert!(edge(json!({ "adjacentFaces": [] })).is_ok());
     }
 }
 

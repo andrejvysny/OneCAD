@@ -16,8 +16,8 @@ use uuid::Uuid;
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementIndex;
 use onecad_core::document::record::{
-    FilletParams, HoleParams, HoleType, KnownOperation, Operation, OperationRecord,
-    HOLE_RESULT_POLICY_VERSION,
+    ChamferParams, ChamferReferenceFace, FilletParams, HoleParams, HoleType, KnownOperation,
+    Operation, OperationRecord, HOLE_RESULT_POLICY_VERSION,
 };
 use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef, SketchRegionRef,
@@ -911,5 +911,118 @@ fn a_detached_placement_hashes_as_the_literal_it_was_bound_to() {
     assert_eq!(
         history_prefix_hash(std::slice::from_ref(&detach(bound))),
         history_prefix_hash(std::slice::from_ref(&detach(literal)))
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel-hardening WP-F — the optional Chamfer `referenceFaces` (SCHEMA §7.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An asymmetric chamfer on one edge, optionally naming the adjacent face its
+/// `radius` is measured on.
+fn chamfer_with_reference_face(face: Option<&str>) -> OperationRecord {
+    let body = BodyId(Uuid::from_u128(0xB0));
+    let edge = ElementId::new("el_edge");
+    let edge_ref = ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: edge.clone(),
+            kind: ElementKind::Edge,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(-20.0, 20.0, 10.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    };
+    let face_ref = |id: &str| ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new(id),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(-10.0, 20.0, 10.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    };
+    let op = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+        radius: Scalar::new(4.0),
+        distance2: Some(Scalar::new(1.0)),
+        angle_deg: None,
+        edge_ids: vec![edge.clone()],
+        edges: vec![edge_ref],
+        reference_faces: face
+            .map(|id| {
+                vec![ChamferReferenceFace {
+                    edge_id: edge,
+                    face_id: ElementId::new(id),
+                }]
+            })
+            .unwrap_or_default(),
+        reference_face_refs: face.map(|id| vec![face_ref(id)]).unwrap_or_default(),
+        chain_tangent_edges: true,
+        tangent_closure_version: Some(1),
+        extra: Default::default(),
+    }));
+    OperationRecord::new(rid(0xF00), 0, "Chamfer", op)
+}
+
+/// A PRESENT reference face is a regen INPUT — it decides which adjacent face
+/// carries the `radius` leg — so two records differing only in it MUST
+/// fingerprint differently. Were it stripped, re-picking the reference face
+/// would silently reuse the checkpoint built from the OTHER face.
+#[test]
+fn a_present_chamfer_reference_face_moves_the_planner_hash() {
+    let none = chamfer_with_reference_face(None);
+    let top = chamfer_with_reference_face(Some("el_top"));
+    let wall = chamfer_with_reference_face(Some("el_wall"));
+
+    assert_ne!(
+        history_prefix_hash(std::slice::from_ref(&none)),
+        history_prefix_hash(std::slice::from_ref(&top)),
+        "naming a reference face changes which face the radius leg lands on"
+    );
+    assert_ne!(
+        history_prefix_hash(std::slice::from_ref(&top)),
+        history_prefix_hash(std::slice::from_ref(&wall)),
+        "moving the reference face changes the geometry"
+    );
+}
+
+/// …and an ABSENT one is hash-NEUTRAL: it emits no key, so every pre-WP-F
+/// document replays byte-identically and keeps its checkpoints. The golden
+/// literal is the fence — dropping `skip_serializing_if` on either
+/// `referenceFaces` or `referenceFaceRefs` would move it.
+#[test]
+fn an_absent_chamfer_reference_face_is_hash_neutral_and_golden() {
+    let none = chamfer_with_reference_face(None);
+    let json = serde_json::to_value(&none).expect("serialize");
+    assert!(
+        json["params"].get("referenceFaces").is_none(),
+        "an absent pair list must emit NO key, got {json}"
+    );
+    assert!(
+        json["params"].get("referenceFaceRefs").is_none(),
+        "an absent typed-ref list must emit NO key, got {json}"
+    );
+    // The pre-field on-disk form parses back to the same record, hence the same
+    // fingerprint.
+    let legacy: OperationRecord = serde_json::from_value(json).expect("parse");
+    assert_eq!(none, legacy, "the pre-field on-disk form round-trips");
+    assert_eq!(
+        history_prefix_hash(std::slice::from_ref(&none)).to_string(),
+        "c5afaf1a0b9947025cf986f9a917dc51a01a9a99230c458d2eb6db39750d320b"
     );
 }

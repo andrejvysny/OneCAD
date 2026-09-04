@@ -923,7 +923,10 @@ export interface NeedsRepairItem {
   opId: string;
   /** The op-input ref identity (SCHEMA §9 `refId`, e.g. `"op_5.input0"`). */
   refId: string;
-  /** `ambiguous` | `no-candidates` | `low-confidence`. */
+  /**
+   * `ambiguous` | `no-candidates` | `low-confidence` | `ordinal-permutation` |
+   * `legacyReferenceFace`.
+   */
   reason: string;
   /** The `resolverVersion` the candidate scores were computed under. */
   scoringVersion?: number;
@@ -938,6 +941,14 @@ export interface NeedsRepairItem {
    * single-body / selection derivation.
    */
   bodyId?: string;
+  /**
+   * The contour edge a `legacyReferenceFace` repair must pair the chosen face with
+   * (SCHEMA §9 `seedEdgeId`, kernel-hardening WP-F). The item names an EMPTY slot,
+   * so there is no stored ref to read the edge off — echo this back verbatim as the
+   * `InputPath.chamferReferenceFace` `edgeId` of the `EditOperationInput` that
+   * creates the pair. Absent on every other reason.
+   */
+  seedEdgeId?: string;
 }
 
 /**
@@ -1007,7 +1018,10 @@ export interface ResolveRefResult {
   margin?: number;
   /** `history` | `descriptor` (needsRepair). */
   ladderFailed?: string;
-  /** `ambiguous` | `no-candidates` | `low-confidence` (needsRepair). */
+  /**
+   * `ambiguous` | `no-candidates` | `low-confidence` | `ordinal-permutation` |
+   * `legacyReferenceFace` (needsRepair).
+   */
   reason?: string;
   scoringVersion?: number;
   uiLabel?: string;
@@ -1015,6 +1029,13 @@ export interface ResolveRefResult {
   anchor?: unknown;
   /** Ranked candidates (needsRepair), sorted by score descending. */
   candidates: ResolveCandidate[];
+  /**
+   * The contour edge a `legacyReferenceFace` repair must pair the chosen face with
+   * (SCHEMA §9 `seedEdgeId`). Echo it back verbatim as the `edgeId` of the
+   * `InputPath.chamferReferenceFace` `EditOperationInput` that CREATES the pair —
+   * the slot has no stored ref to read it off. Absent on every other reason.
+   */
+  seedEdgeId?: string;
 }
 
 /**
@@ -1378,9 +1399,36 @@ export interface FilletParams {
   angleDeg?: number;
   /** TopoKeys (snapshot-scoped) or ElementIds; resolved through the ladder. */
   edgeIds: string[];
+  /**
+   * CHAMFER-ONLY reference faces (SCHEMA §7.3 `referenceFaces`, kernel-hardening
+   * WP-F): the persisted answer to "which adjacent face is `radius` measured on",
+   * ONE pair per tangent CONTOUR of the prepared closure, keyed by an edge of that
+   * contour (`edgeId` MUST be an entry of {@link FilletParams.edgeIds}, and may not
+   * repeat). REQUIRED on a new asymmetric chamfer and on an update that introduces
+   * the asymmetry or moves `edgeIds`; an equal-leg chamfer MUST NOT carry it (core
+   * refuses both by name).
+   *
+   * The face's TYPED ref is not stored here: it rides the op's `inputs[]` AFTER the
+   * `edgeIds.length` edge refs, in this array's order, so a pair's face ref is
+   * addressable as `<opId>.input<N+i>` (`tauriCommandMap.filletParams` marshals the
+   * two into the core `referenceFaces` / `referenceFaceRefs` lockstep pair).
+   */
+  referenceFaces?: ChamferReferenceFace[];
   chainTangentEdges?: boolean;
   /** Present only on freshly prepared records; absence preserves legacy seed-only execution. */
   tangentClosureVersion?: 1;
+}
+
+/**
+ * One SCHEMA §7.3 `referenceFaces` pair (Rust `ChamferReferenceFace`): the face an
+ * asymmetric chamfer measures `radius` on, keyed by an edge of the contour it
+ * applies to. Both ids are Rust-minted ElementIds.
+ */
+export interface ChamferReferenceFace {
+  /** An edge of the contour this reference face applies to. */
+  edgeId: string;
+  /** The adjacent face `radius` is measured on. */
+  faceId: string;
 }
 
 /** Standalone body-body boolean op params (SCHEMA §7.3 BooleanParams). */
@@ -1699,6 +1747,26 @@ export interface EdgeOpEvidence {
   anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
   /** Opaque worker-owned descriptor. */
   descriptor?: unknown;
+  /**
+   * 0-based index of the tangent CONTOUR this edge belongs to (SCHEMA §7.6,
+   * kernel-hardening WP-F). Ordinal-derived and NOT stable across an edit: group
+   * this snapshot's picks by it to know how many Chamfer `referenceFaces` pairs to
+   * author, and never persist it. Absent on an older worker.
+   */
+  contour?: number;
+  /**
+   * The edge's adjacent faces on THIS snapshot as TopoKeys, face-ordinal ascending
+   * and `IsSame`-deduplicated (SCHEMA §7.6): NONE for a free edge, one entry for a
+   * seam edge (its lateral face is adjacent on both sides), two for a manifold
+   * edge, and every adjacent face for a non-manifold one. Promote ONE entry of ONE
+   * edge per contour to author a Chamfer `referenceFaces` pair;
+   * `adjacentFaces[0]` of a contour's first listed edge is the legacy
+   * smaller-ordinal face, so a default pick moves nothing. An EMPTY list is a real
+   * answer ("this edge has no face to measure on"), an ABSENT one means an older
+   * worker — a client must treat both as "cannot author a pair", never as a licence
+   * to pick a face itself.
+   */
+  adjacentFaces?: string[];
 }
 
 export interface EdgeOpRefusal {

@@ -46,7 +46,7 @@ Two specific traps that make a green run a lie:
 
 Pause for the user only when the work genuinely requires them: a destructive or irreversible action, a real scope change, a gate only a human can run, or input only they can provide. If you hit one, ask and end the turn rather than ending on a promise.
 
-Gates the user must run (record as owed in `TODO.md`, don't fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (There is no 3MF export verb yet — the worker exports STEP/STL/OBJ; a "3MF opens in a slicer" gate is owed to WP-J, not to today.)
+Gates the user must run (record as owed in `TODO.md`, don't fake them): the autosave manual checklist, the merged-stack Tauri smoke, and "does the exported STEP open coloured in another CAD". (3MF is a RUST-side writer — `onecad-core/src/io/threemf.rs` + `src-tauri/src/export_threemf.rs`, W4 — while the worker exports STEP/STL/OBJ; "3MF opens in a slicer" is a real user-run gate, owed alongside the STEP one and only meaningful once WP-J makes the writers honest.)
 
 Before ending a turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done, do that work now with tool calls.
 
@@ -334,7 +334,7 @@ Five lanes plus the oracle. The coverage manifest is **enforced, not aspirationa
 | Frontend unit | Vitest 4 (jsdom), colocated `*.test.ts(x)` | Stores, controllers, viewport engine, IPC marshalling — against `mockClient` or `@tauri-apps/api/mocks` `mockIPC` (which exercises the real tauriClient) |
 | Playwright | `e2e/`, chromium + webkit | Real Vite app, real WebGL, **mock backend**; port 4177; `retries: 0` is policy |
 | Rust integration | `cargo test --workspace` | Real worker over OCW1 via `WorkerManager` / `DocumentRuntime` (`m2_gate.rs`, `corpus_executor.rs`), stub chaos drills (`worker_chaos.rs`), persistence/autosave; `tauri::test::mock_app` for command tests |
-| Worker CTest | `ctest --test-dir worker/build` | 168 targets (2026-09-02; count drifts upward — read it off `ctest -N`, never off this file): in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim, `parity_*` gates vs `corpus/expected-values/` |
+| Worker CTest | `ctest --test-dir worker/build` | 176 targets (2026-09-04; count drifts upward — read it off `ctest -N`, never off this file): in-process `worker_core` exes, NDJSON harness fixtures (`worker_harness --worker … --fixture …`), `canonical_*` replay of Rust-authored `protocol/fixtures/` verbatim, `parity_*` gates vs `corpus/expected-values/` |
 | WDIO | `e2e-tauri/`, CI `tauri-composition` | Real bundled `.app`: real Tauri IPC and real worker; one composition spec (sketch→extrude→fillet→undo→save/reopen) |
 
 Conventions:

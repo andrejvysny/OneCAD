@@ -1,6 +1,6 @@
 ---
 name: frontend-gotchas
-description: OneCAD frontend implementation gotchas — engine test doubles, frozen contracts vs new tools, status-hint severities, engine bridge vs deps.engine
+description: OneCAD frontend implementation gotchas — engine test doubles, frozen contracts vs new tools, status-hint shape, preview-session frozen inputs, mock box adjacency
 metadata:
   type: project
 ---
@@ -39,3 +39,29 @@ CLAUDE.md and none is derivable without running the suite.
   `src/test/contracts/shellContract.ts`. To avoid that, mount new chrome as a
   plain child of an existing registered panel — the documented precedent is
   `ConstraintMenu`/`SketchErrorPulse` inside `SketchChromeBar`.
+- `beginPreview` FREEZES a draft's `inputs[]`; only `params` flow through
+  `updatePreview`. Any edit that changes the op's input SLOTS (e.g. a chamfer
+  gaining a reference-face ref) must `closePreviewSessions()` + re-open, or the
+  committed op — built by `buildPreviewOp` from the session's frozen inputs at
+  `endPreview(…, true)` — will not match the previewed params.
+- Adding an `await` on the FRESH-commit path of `ModelToolController` breaks the
+  preview-epoch specs (`edgePrepare`, `edgeShellPreview`), which assume a ✓
+  commits in the same turn after one `await flush()`. Gate any new await behind
+  the narrow condition that needs it.
+- `viewportStore.statusHint` is `{message, severity, sticky}`, not a string —
+  assert on `hint?.message`.
+- The mock lane CAN answer edge→face adjacency for the seed box (`body1`):
+  `BOX_EDGE_PAIRS` + `BOX_FACES` in `mockMeshes.ts` are the same tables
+  `makeBoxMesh` renders, so `mockFaceGeometry.mockAdjacentFaces` derives it. Any
+  other body has no analytic topology — omit the field, never fabricate one.
+- `mockClient.applyEditCommand`'s `editOperationInput` arm is a structural NO-OP
+  (revision bump only): it does not update `featureParams`, so an input rebind is
+  not observable through `getOperationParams` in the mock lane.
+- A repair candidate's `worldPos` is the anchor of the thing the ITEM is about,
+  not of the candidate. For an item naming an empty slot (a chamfer reference
+  face) it is the seed EDGE's point, which sits on both adjacent faces — read
+  `elementInfo(...).center` for the face instead before building the ref.
+- `vitest run --reporter=basic` does not exist in this repo's Vitest 4 setup, and
+  `console.log` from a test is swallowed. To get a value out of a test, write it
+  to a file with `node:fs` under an env-var guard.
+

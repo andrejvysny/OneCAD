@@ -55,6 +55,13 @@ function reasonText(reason: string): string {
       // VF-B6: the split children of an N-body op changed geometric order, so
       // `:<k>` names a different solid than this reference was authored against.
       return "Split pieces swapped order — this may point at a different body";
+    case "legacyReferenceFace":
+      // WP-F (SCHEMA §7.3/§9): this chamfer's two legs used to land on whichever
+      // adjacent face had the smaller ordinal, and an upstream edit has just
+      // reordered them — so which face carries the first distance is no longer
+      // trustworthy. The two candidates ARE the edge's two adjacent faces, and
+      // picking one persists the choice for good.
+      return "Chamfer reference face was never recorded — choose which face the first distance is measured on";
     default:
       // Unknown tokens (a newer build's reason) fall through verbatim rather than
       // being swallowed — the panel is deliberately generic over `reason`.

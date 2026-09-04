@@ -290,6 +290,8 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 angle_deg: None,
                 edge_ids: edges.into_iter().map(ElementId::new).collect(),
                 edges: vec![],
+                reference_faces: Vec::new(),
+                reference_face_refs: Vec::new(),
                 chain_tangent_edges: chain,
                 tangent_closure_version: None,
                 extra,

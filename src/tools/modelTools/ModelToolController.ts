@@ -19,6 +19,7 @@ import type {
   ApplyOperationResult,
   AxisRef,
   BooleanOperation,
+  ChamferReferenceFace,
   FeatureRecord,
   FilletParams,
   GearParams,
@@ -45,9 +46,16 @@ import type {
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickHit } from "@/viewport/engine/Picker";
 import { getDatumVisuals } from "@/modules/modeling/datumViewport";
-import { bareBodyId, buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
+import {
+  bareBodyId,
+  buildAddDatumPlane,
+  elementRefOfKind,
+  rebindInputCommand,
+  updateScalarParamsCommand,
+  type WireElementRef,
+} from "@/ipc/tauriCommandMap";
 import { mintUuid } from "@/ipc/sketchWireMap";
-import { promoteOne } from "@/ipc/promote";
+import { promoteOne, stalePickHint, STALE_PICK_HINT } from "@/ipc/promote";
 import { classifyRegen, failureReason, keepsRecord } from "@/ipc/regenOutcome";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { setSketchVisible } from "@/features/tree/treeActions";
@@ -271,6 +279,41 @@ function storedOptionalScalar(v: unknown): number | null {
   if (v === undefined || v === null) return null;
   const n = storedScalar(v);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * A stored `referenceFaces` array (SCHEMA §7.3, WP-F) from `getOperationParams`,
+ * or `[]` when the record carries none (the LEGACY form every pre-WP-F asymmetric
+ * chamfer has). Entries missing either id are dropped rather than half-read.
+ */
+function storedChamferReferenceFaces(
+  stored: Record<string, unknown> | undefined,
+): ChamferReferenceFace[] {
+  const raw = stored?.referenceFaces;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const pair = entry as { edgeId?: unknown; faceId?: unknown };
+    return typeof pair.edgeId === "string" && typeof pair.faceId === "string"
+      ? [{ edgeId: pair.edgeId, faceId: pair.faceId }]
+      : [];
+  });
+}
+
+/** A stored array of strings (`edgeIds`), or `[]`. */
+function storedStringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/** The body a stored fillet/chamfer OPERATES on — the first typed edge ref's
+ *  `primary.bodyId`. Absent on a legacy bare-`edgeIds` record. */
+function storedEdgeRefBodyId(stored: Record<string, unknown> | undefined): string | undefined {
+  const edges = stored?.edges;
+  if (!Array.isArray(edges)) return undefined;
+  for (const edge of edges) {
+    const primary = (edge as { primary?: { bodyId?: unknown } })?.primary;
+    if (primary && typeof primary.bodyId === "string" && primary.bodyId) return primary.bodyId;
+  }
+  return undefined;
 }
 
 /** A stored `[x,y,z]`, or null when it is not three finite numbers. */
@@ -650,6 +693,67 @@ export class ModelToolController {
 
   // Edge-op (fillet / chamfer) context.
   private filletEdges: EntityRef[] = [];
+  /**
+   * The armed (or re-edited) closure with its SCHEMA §7.6 adjacency evidence
+   * (kernel-hardening WP-F). ONE source for both authoring paths: a fresh arm fills
+   * it from `prepareEdgeOp`'s answer, a re-edit re-runs the same verb against the
+   * record's stored edge ids — so the contour grouping and the face lists cannot
+   * differ between them.
+   *
+   * `contour` is ordinal-derived and NEVER persisted; it only decides how many
+   * `referenceFaces` pairs the chamfer needs. `adjacentFaces` are this snapshot's
+   * TopoKeys, face-ordinal ascending, so `[0]` is the legacy smaller-ordinal face
+   * and a default pick reproduces the pre-WP-F geometry.
+   */
+  private filletClosure: {
+    edgeId: string;
+    bodyId: string;
+    contour: number | null;
+    adjacentFaces: string[];
+  }[] = [];
+  /**
+   * Which entry of each contour's `adjacentFaces` the arm measures `radius` on:
+   * `false` = `[0]` (the legacy face), `true` = `[1]`. One flag for the whole arm —
+   * the [Flip reference] control is a single "the other one", not a per-contour
+   * editor.
+   */
+  private chamferFlipped = false;
+  /**
+   * The arm's authored SCHEMA §7.3 pairs and their typed FACE refs, in the SAME
+   * order (the refs become the op's trailing `inputs[N + i]` slots). `null` when
+   * the chamfer is equal-leg, is a Fillet, is a re-edit, or could not be resolved.
+   */
+  private chamferPairs: { pairs: ChamferReferenceFace[]; inputs: SemanticRef[] } | null = null;
+  /**
+   * Why the arm needs reference-face pairs but has none — the reason a ✓ refuses.
+   * Never fabricate a face: an asymmetric chamfer with no pairs is refused by core
+   * anyway, and committing one that silently fell back to the ordinal rule is the
+   * exact defect WP-F removes.
+   */
+  private chamferPairsError: string | null = null;
+  /** Promotion cache for the arm, keyed `${bodyId}#${faceTopoKey}` — one promote
+   *  per (contour, face) however often the user flips back and forth. */
+  private readonly chamferFaceRefs = new Map<string, SemanticRef>();
+  /**
+   * The tail of the serialized reference-face resolution chain. The ✓ awaits it:
+   * the chip's Enter applies the second leg and confirms in the SAME turn, and the
+   * committed op is built from the preview session's FROZEN `inputs[]`, so
+   * committing ahead of the reopen would send an op with no face slots.
+   */
+  private chamferSync: Promise<void> = Promise.resolve();
+  /**
+   * RE-EDIT only: whether the record's stored reference face could be matched to
+   * one of its seed edge's adjacent faces on the current head.
+   *
+   *  - `none` — the record carries no pairs. It is LEGACY: there is nothing to
+   *    flip, and its migration path is the §9 `legacyReferenceFace` repair, where
+   *    the user chooses, not this control.
+   *  - `unknown` — it carries one, but the face is neither adjacent face here, so
+   *    "the other one" has no meaning and a flip would guess.
+   *  - `bound` — matched, and {@link chamferFlipped} says which side it sits on, so
+   *    the first press really does move it.
+   */
+  private chamferReeditFlip: "none" | "unknown" | "bound" = "none";
   private filletDownX = 0;
   private filletDownY = 0;
   /**
@@ -3092,6 +3196,10 @@ export class ModelToolController {
         onDistance2: (v) => this.onEdgeOpDistance2(v),
         chamferAngleDeg: this.fillet.angleDeg,
         onChamferAngle: (v) => this.onEdgeOpChamferAngle(v),
+        // WP-F: hidden until the arm is an asymmetric chamfer whose contours each
+        // report a SECOND adjacent face — `pushChamferFlipToChip` resolves that.
+        showChamferFlip: false,
+        onChamferFlip: () => this.onChamferFlip(),
         anchorAxisFrom: degraded ? undefined : this.filletAnchor,
       },
     );
@@ -3163,6 +3271,17 @@ export class ModelToolController {
           anchor,
         };
       });
+      // SCHEMA §7.6 `contour` / `adjacentFaces` (WP-F), parallel to `filletEdges` —
+      // built in the SAME map pass order so index `i` describes edge `i`. Absent on
+      // an older worker: `contour` then falls back to "one contour per edge" (the
+      // seed-only shape) and an empty `adjacentFaces` makes a typed chamfer refuse
+      // rather than fall back to the ordinal rule this WP exists to remove.
+      this.filletClosure = res.edges.map((edge) => ({
+        edgeId: edge.elementId ?? "",
+        bodyId,
+        contour: edge.contour ?? null,
+        adjacentFaces: edge.adjacentFaces ?? [],
+      }));
       this.filletPreparedRevision = documentStore.getState().revision;
       this.filletPreparedSnapshot = res.snapshotId;
       // Fire-and-forget, deliberately NOT awaited: the analysis runs real OCCT
@@ -3399,13 +3518,33 @@ export class ModelToolController {
     // previewing an existing feature double-applies it (the rule `armShell` states
     // for its own re-edit). The flip there is chip + record only.
     if (!this.filletEditFeatureId) {
-      void this.openEdgeOpPreview(gen).then(() => {
-        // The reopen re-raises the ARMED trailing floor; a flip DURING a drag has to
-        // get the drag floor back or the value stops tracking the pointer.
-        if (wasDragging && this.dragging === "fillet") {
-          this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS);
-        }
-      });
+      const reopen = (): Promise<void> =>
+        this.openEdgeOpPreview(gen).then(() => {
+          // The reopen re-raises the ARMED trailing floor; a flip DURING a drag has to
+          // get the drag floor back or the value stops tracking the pointer.
+          if (wasDragging && this.dragging === "fillet") {
+            this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS);
+          }
+        });
+      // WP-F: a flip to Fillet DROPS the reference-face pairs (a Fillet may not
+      // carry them) and a flip back to an already-asymmetric Chamfer re-authors
+      // them — either way `inputs[]` moves, so the pairs are resolved BEFORE the
+      // session is re-opened, not patched into it afterwards.
+      //
+      // An EQUAL-LEG flip has no pairs on either side of it, and that path stays
+      // SYNCHRONOUS on purpose: two flips inside one unresolved `beginPreview` must
+      // issue their `beginPreview` calls in program order for the `armGen` fence to
+      // supersede the right one (`edgeOpDirection` pins it).
+      if (!this.chamferNeedsReferenceFaces() && this.chamferPairs === null) {
+        this.pushChamferFlipToChip();
+        void reopen();
+      } else {
+        void this.resolveChamferReferenceFaces(gen).then(() => {
+          if (gen !== this.armGen) return undefined;
+          this.pushChamferFlipToChip();
+          return reopen();
+        });
+      }
       // A DELIBERATE flip (a chip segment) is worth re-measuring; a mid-drag auto
       // flip is not, per the note above.
       if (!wasDragging && this.filletPreparedSnapshot !== null) {
@@ -3472,9 +3611,20 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  /** The typed per-edge refs — SAME array, SAME order as {@link edgeOpPreviewParams}. */
+  /**
+   * The op's typed `inputs[]` — SAME array, SAME order as
+   * {@link edgeOpPreviewParams}.
+   *
+   * NORMATIVE slot order (SCHEMA §7.3, kernel-hardening WP-F): the `N` edge refs
+   * first, then one reference-FACE ref per `referenceFaces` pair IN PAIR ORDER, so
+   * pair `i`'s face is addressable as `<opId>.input<N+i>`. The two halves are
+   * derived from the same two fields `edgeOpParams` reads, so they cannot drift.
+   */
   private edgeOpInputs(): SemanticRef[] {
-    return this.filletEdges.map((e) => this.semanticRefFor(e));
+    return [
+      ...this.filletEdges.map((e) => this.semanticRefFor(e)),
+      ...(this.chamferPairs?.inputs ?? []),
+    ];
   }
 
   /**
@@ -3504,12 +3654,445 @@ export class ModelToolController {
     } else if (this.edgeOpKind === "Chamfer" && this.fillet.distance2 !== null) {
       params.distance2 = this.fillet.distance2;
     }
+    // SCHEMA §7.3 `referenceFaces` (WP-F). Gated on the SAME asymmetry the two
+    // fields above express: an equal-leg chamfer has no reference face and core
+    // refuses one that names one, so the pairs ride only when a mode key does.
+    if (this.chamferPairs && (params.distance2 !== undefined || params.angleDeg !== undefined)) {
+      params.referenceFaces = this.chamferPairs.pairs;
+    }
     return params;
   }
 
   /** The same params as a lane {@link PreviewParams} (which carries an index signature). */
   private edgeOpPreviewParams(radius = this.fillet.radius): PreviewParams {
     return { ...this.edgeOpParams(radius) };
+  }
+
+
+  // ── Chamfer reference faces (SCHEMA §7.3 `referenceFaces`, WP-F) ────────────
+
+  /** Forget everything the arm knew about its reference faces (every cancel /
+   *  commit / re-arm path clears `filletEdges` and therefore lands here). */
+  private resetChamferReferenceState(): void {
+    this.filletClosure = [];
+    this.chamferPairs = null;
+    this.chamferPairsError = null;
+    this.chamferFlipped = false;
+    this.chamferReeditFlip = "none";
+    this.chamferFaceRefs.clear();
+  }
+
+  /**
+   * One entry per tangent CONTOUR of the prepared closure, in contour order.
+   *
+   * The SEED is the contour's FIRST LISTED edge (SCHEMA §7.6 lists the closure in
+   * contour-seeded order), and it is what the pair is keyed by — never the contour
+   * INDEX, which is ordinal-derived and unstable across an edit. An older worker
+   * sends no `contour`; the record is then seed-only and §7.3 keys the pairs per
+   * EDGE, which is exactly what "each edge is its own contour" produces.
+   */
+  private chamferContours(): { edgeId: string; bodyId: string; adjacentFaces: string[] }[] {
+    const byContour = new Map<number, { edgeId: string; bodyId: string; adjacentFaces: string[] }>();
+    this.filletClosure.forEach((edge, i) => {
+      const key = edge.contour ?? i;
+      if (!byContour.has(key)) {
+        byContour.set(key, {
+          edgeId: edge.edgeId,
+          bodyId: edge.bodyId,
+          adjacentFaces: edge.adjacentFaces,
+        });
+      }
+    });
+    return [...byContour.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  }
+
+  /** True when the armed op measures its two legs on DIFFERENT faces — the only
+   *  shape that has a reference face at all (SCHEMA §7.3). */
+  private chamferIsAsymmetric(): boolean {
+    return (
+      this.edgeOpKind === "Chamfer" &&
+      (this.fillet.distance2 !== null || this.fillet.angleDeg !== null)
+    );
+  }
+
+  /** True while a FRESH arm must AUTHOR pairs. A re-edit writes them through the
+   *  record instead (`commitEdgeOpEdit` / `flipStoredChamferReferenceFaces`). */
+  private chamferNeedsReferenceFaces(): boolean {
+    return (
+      !this.filletEditFeatureId && this.chamferIsAsymmetric() && this.filletClosure.length > 0
+    );
+  }
+
+  /** Identity of the currently authored pair set — what a change of `inputs[]`
+   *  looks like, so a params-only edit re-sends instead of re-opening the lane. */
+  private chamferPairsKey(): string {
+    return (this.chamferPairs?.pairs ?? []).map((p) => `${p.edgeId}>${p.faceId}`).join("|");
+  }
+
+  /**
+   * Promote ONE adjacent face and build its typed ref, cached for the arm.
+   *
+   * The anchor is the face's own CENTRE (`elementInfo.center`), never the picked
+   * edge's midpoint: that point lies on BOTH adjacent faces, so it would tie the
+   * resolver's anchor rung between them on every replay — the exact ambiguity
+   * SCHEMA §7.3 makes the anchor non-optional to prevent.
+   */
+  private async promoteChamferReferenceFace(
+    bodyId: string,
+    faceTopoKey: string,
+  ): Promise<SemanticRef | null> {
+    const cacheKey = `${bodyId}#${faceTopoKey}`;
+    const cached = this.chamferFaceRefs.get(cacheKey);
+    if (cached) return cached;
+    const snapshotId = this.filletPreparedSnapshot ?? undefined;
+    // `promoteOne` publishes the stale-pick hint itself on every refusal.
+    const promoted = await promoteOne(this.client, bodyId, { topoKey: faceTopoKey }, snapshotId);
+    if (!promoted) return null;
+    const info = await this.client
+      .elementInfo(bodyId, promoted.elementId, faceTopoKey)
+      .catch(() => null);
+    if (!info) {
+      stalePickHint();
+      return null;
+    }
+    const ref: SemanticRef = {
+      primary: {
+        bodyId: bareBodyId(promoted.bodyId || bodyId),
+        elementId: promoted.elementId,
+        kind: "face",
+      },
+      anchor: { worldPoint: info.center },
+    };
+    this.chamferFaceRefs.set(cacheKey, ref);
+    return ref;
+  }
+
+  /**
+   * Resolve the arm's `referenceFaces` pairs against the FSM (SCHEMA §7.3).
+   *
+   * One pair per contour, keyed by the contour's first listed edge, bound to that
+   * edge's `adjacentFaces[0]` (the legacy smaller-ordinal face — a default pick
+   * moves nothing) or `[1]` once flipped. A contour with no adjacency evidence
+   * cannot be answered honestly, so the arm records WHY and the ✓ refuses; nothing
+   * here ever invents a face.
+   */
+  private async resolveChamferReferenceFaces(gen: number): Promise<void> {
+    if (!this.chamferNeedsReferenceFaces()) {
+      this.chamferPairs = null;
+      this.chamferPairsError = null;
+      return;
+    }
+    const pairs: ChamferReferenceFace[] = [];
+    const inputs: SemanticRef[] = [];
+    for (const contour of this.chamferContours()) {
+      const { bodyId, edgeId } = contour;
+      const faceTopoKey =
+        contour.adjacentFaces[this.chamferFlipped ? 1 : 0] ?? contour.adjacentFaces[0];
+      if (!bodyId || !edgeId || !faceTopoKey) {
+        this.chamferPairs = null;
+        // Deliberately NEUTRAL wording: an empty `adjacentFaces` is a real answer on
+        // the real lane too (a genuinely free edge, SCHEMA §7.6), so the user must
+        // be told what to do about their model, not about the backend. The mock's
+        // own gap is stated where it exists, in `mockClient.prepareEdgeOp`.
+        this.chamferPairsError =
+          "this edge has no adjacent faces to measure the first distance on — pick another edge";
+        return;
+      }
+      const ref = await this.promoteChamferReferenceFace(bodyId, faceTopoKey);
+      if (gen !== this.armGen) return;
+      if (!ref?.primary.elementId) {
+        this.chamferPairs = null;
+        this.chamferPairsError = STALE_PICK_HINT;
+        return;
+      }
+      pairs.push({ edgeId, faceId: ref.primary.elementId });
+      inputs.push(ref);
+    }
+    this.chamferPairs = { pairs, inputs };
+    this.chamferPairsError = null;
+  }
+
+  /**
+   * Bring the pairs in line with the FSM and, when the op's `inputs[]` MOVED,
+   * re-open the preview session.
+   *
+   * `beginPreview` freezes `inputs`, so a pair that appears (or disappears) with
+   * the asymmetry cannot be pushed through `updatePreview` — the session has to be
+   * re-opened or the previewed op would stop being the op the ✓ commits. A change
+   * that leaves the pair set alone (typing a different second distance) is an
+   * ordinary params push, exactly as before.
+   */
+  private syncChamferReferenceFaces(): Promise<void> {
+    // SERIALIZED. Two edits in flight would race each other's session close/reopen
+    // and could leave the lane holding a session built for the wrong `inputs[]`.
+    const next = this.chamferSync.then(() => this.runChamferSync());
+    this.chamferSync = next.catch(() => undefined);
+    return next;
+  }
+
+  private async runChamferSync(): Promise<void> {
+    const gen = this.armGen;
+    const before = this.chamferPairsKey();
+    await this.resolveChamferReferenceFaces(gen);
+    if (gen !== this.armGen) return;
+    this.pushChamferFlipToChip();
+    if (this.chamferPairsKey() === before || this.filletEditFeatureId) {
+      this.sendPreview();
+      this.updateDebug();
+      return;
+    }
+    this.closePreviewSessions();
+    await this.openEdgeOpPreview(gen);
+  }
+
+  /** Offer [Flip reference] only when there IS another face to flip to: an
+   *  asymmetric chamfer whose every contour seed reports two adjacent faces. */
+  private pushChamferFlipToChip(): void {
+    const contours = this.chamferContours();
+    toolChipStore
+      .getState()
+      .setChamferFlip(
+        this.chamferIsAsymmetric() &&
+          contours.length > 0 &&
+          contours.every((c) => c.adjacentFaces.length > 1) &&
+          // On a RE-EDIT the control is offered only once the record's stored face
+          // has been matched to a side: a legacy record has no pair to flip (§9
+          // repair is its path), and an unmatched one would be flipped by guess.
+          (!this.filletEditFeatureId || this.chamferReeditFlip === "bound"),
+      );
+  }
+
+  /**
+   * [Flip reference]: measure `radius` on the OTHER adjacent face of every contour.
+   *
+   * A FRESH arm re-resolves the pairs and re-previews. A RE-EDIT has no preview
+   * session (PreviewOp runs against the current head and would double-apply the
+   * feature), so it writes the record directly — ONE `EditOperationInput` per pair,
+   * which is one undo step each; there is no batched multi-slot rebind command in
+   * the `EditCommand` vocabulary to collapse them into.
+   */
+  private onChamferFlip(): void {
+    this.chamferFlipped = !this.chamferFlipped;
+    if (this.filletEditFeatureId) {
+      void this.flipStoredChamferReferenceFaces(this.filletEditFeatureId);
+      return;
+    }
+    void this.syncChamferReferenceFaces();
+  }
+
+  /**
+   * Whether the record being re-edited was ALREADY an asymmetric Chamfer — i.e.
+   * this edit does not INTRODUCE the asymmetry, so SCHEMA §7.3 does not require it
+   * to author `referenceFaces` (a legacy record stays legacy and is repaired
+   * through §9 instead of being made uneditable).
+   */
+  private editedRecordWasAsymmetricChamfer(): boolean {
+    // Read off the STORED PARAMS, not the projection's `opType`: a record carrying
+    // `distance2`/`angleDeg` is necessarily a Chamfer (core refuses a Fillet that
+    // carries either, at every entry path), and the projection's `opType` is absent
+    // on a legacy payload — where falling through to "introduces" would author an
+    // ordinal-derived pair on exactly the record that must not get one.
+    const stored = this.filletStoredParams;
+    return (
+      storedOptionalScalar(stored?.distance2) !== null ||
+      storedOptionalScalar(stored?.angleDeg) !== null
+    );
+  }
+
+  /**
+   * Flip a COMMITTED chamfer's reference faces (SCHEMA §7.3 / §9).
+   *
+   * ONE `EditOperationInput{ chamferReferenceFace }` per pair. Each is its own undo
+   * step: `EditCommand` has no batched multi-slot rebind, and inventing one would
+   * be a protocol change this WP does not own. The loop STOPS at the first refusal
+   * rather than pushing on — a half-flipped record is confusing, and the steps
+   * already applied stay undoable individually.
+   */
+  private async flipStoredChamferReferenceFaces(featureId: string): Promise<void> {
+    const pairs = storedChamferReferenceFaces(this.filletStoredParams);
+    const contours = this.chamferContours();
+    if (pairs.length === 0 || contours.length === 0) {
+      viewportStore.getState().setStatusHint(
+        "Chamfer reference face is unavailable — reopen this feature",
+        { severity: "error", sticky: true },
+      );
+      return;
+    }
+    let failure: string | null = null;
+    for (const [index, pair] of pairs.entries()) {
+      const contour = contours.find((c) => c.edgeId === pair.edgeId);
+      const faceTopoKey =
+        contour?.adjacentFaces[this.chamferFlipped ? 1 : 0] ?? contour?.adjacentFaces[0];
+      if (!contour || !faceTopoKey) {
+        failure = "this edge reports no second adjacent face to flip to";
+        break;
+      }
+      const ref = await this.promoteChamferReferenceFace(contour.bodyId, faceTopoKey);
+      if (!ref?.primary.elementId) {
+        failure = STALE_PICK_HINT;
+        break;
+      }
+      try {
+        const res = await this.client.applyEditCommand(
+          rebindInputCommand(
+            featureId,
+            // `edgeId` is optional on a REBIND, but sending it makes core check that
+            // this slot really is the contour we think it is (it refuses a mismatch).
+            { path: "chamferReferenceFace", index, edgeId: pair.edgeId },
+            elementRefOfKind(
+              ref.primary.bodyId,
+              ref.primary.elementId,
+              "face",
+              ref.anchor?.worldPoint,
+            ),
+          ),
+        );
+        const settled = this.settleScalarEdit(res);
+        if (settled.failure !== null) {
+          failure = settled.failure;
+          break;
+        }
+      } catch (e) {
+        failure = errMessage(e);
+        break;
+      }
+    }
+    // Re-read the record: the next flip has to see the faceIds this one wrote.
+    this.filletStoredParams =
+      (await this.deps.client.getOperationParams(featureId).catch(() => undefined)) ??
+      this.filletStoredParams;
+    viewportStore.getState().setStatusHint(
+      failure === null ? "Chamfer reference face flipped" : `Flip failed: ${failure}`,
+      failure === null ? { sticky: true } : { severity: "error", sticky: true },
+    );
+    this.updateDebug();
+  }
+
+  /**
+   * Re-derive a COMMITTED edge op's closure adjacency (SCHEMA §7.6), so a re-edit
+   * can offer [Flip reference] and can AUTHOR pairs when it introduces the
+   * asymmetry.
+   *
+   * `prepareEdgeOp` is re-run against the record's own stored edge ElementIds with
+   * its own `chainTangentEdges` — the same handshake the fresh arm used, so both
+   * paths group contours identically. A refusal (or an older worker) simply leaves
+   * the closure unknown: the flip control stays hidden and an edit that would
+   * introduce the asymmetry refuses with a reason instead of guessing a face.
+   */
+  private async loadEdgeOpEditClosure(
+    gen: number,
+    kind: EdgeOpKind,
+    stored: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const edgeIds = storedStringList(stored?.edgeIds);
+    const bodyId = storedEdgeRefBodyId(stored);
+    if (edgeIds.length === 0 || !bodyId) return;
+    let res: PrepareEdgeOpResult;
+    try {
+      res = await this.client.prepareEdgeOp({
+        mode: kind,
+        pickedEdges: edgeIds.map((elementId) => ({ bodyId, elementId })),
+        chainTangentEdges: stored?.chainTangentEdges !== false,
+      });
+    } catch (error) {
+      traceWarn(kind.toLowerCase(), `${kind} re-edit closure unavailable: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen || res.refusal) return;
+    this.filletPreparedSnapshot = res.snapshotId;
+    this.filletClosure = res.edges.map((edge) => ({
+      edgeId: edge.elementId ?? "",
+      bodyId: edge.bodyId ?? bodyId,
+      contour: edge.contour ?? null,
+      adjacentFaces: edge.adjacentFaces ?? [],
+    }));
+    await this.seedChamferFlipFromRecord(gen, stored);
+    if (gen !== this.armGen) return;
+    this.pushChamferFlipToChip();
+    this.updateDebug();
+  }
+
+  /**
+   * Work out which SIDE the record's stored reference face sits on, so [Flip
+   * reference] means "the other one" rather than "whichever is first here".
+   *
+   * Without this the flag would restart at `false` on every re-arm, and a chamfer
+   * committed on `adjacentFaces[1]` would "flip" to the face it already names —
+   * reporting success while changing nothing. Both adjacent faces are promoted once
+   * (the arm's cache serves every later press) and compared to the stored `faceId`.
+   *
+   * A stored face that matches NEITHER leaves the control hidden: the record points
+   * somewhere this head does not offer, and guessing a side would rebind the pair to
+   * a face the user never picked.
+   */
+  private async seedChamferFlipFromRecord(
+    gen: number,
+    stored: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const pairs = storedChamferReferenceFaces(stored);
+    this.chamferReeditFlip = "none";
+    this.chamferFlipped = false;
+    if (pairs.length === 0) return;
+    // One contour decides the side for the whole arm — the flip is a single "the
+    // other one", and a record whose contours disagreed was not authored here.
+    const contour = this.chamferContours().find((c) =>
+      pairs.some((pair) => pair.edgeId === c.edgeId),
+    );
+    const pair = contour && pairs.find((p) => p.edgeId === contour.edgeId);
+    if (!contour || !pair || contour.adjacentFaces.length < 2) {
+      this.chamferReeditFlip = "unknown";
+      return;
+    }
+    const sides = await Promise.all(
+      [0, 1].map((i) => this.promoteChamferReferenceFace(contour.bodyId, contour.adjacentFaces[i])),
+    );
+    if (gen !== this.armGen) return;
+    const side = sides.findIndex((ref) => ref?.primary.elementId === pair.faceId);
+    if (side < 0) {
+      this.chamferReeditFlip = "unknown";
+      viewportStore.getState().setStatusHint(
+        "This chamfer's reference face is not one of the edge's current faces — repair it from the reference panel",
+        { severity: "error", sticky: true },
+      );
+      return;
+    }
+    this.chamferReeditFlip = "bound";
+    this.chamferFlipped = side === 1;
+  }
+
+  /**
+   * AUTHOR the `referenceFaces` + `referenceFaceRefs` a re-edit that INTRODUCES the
+   * asymmetry must carry (SCHEMA §7.3, WP-F), or `null` when no face can be named
+   * honestly.
+   *
+   * Called ONLY on that edit. A record that merely CARRIES the asymmetry is left
+   * alone: a typed one keeps its own pairs (they ride the merge base verbatim, so
+   * omitting the keys preserves the user's choice — and Rust refuses an update that
+   * strips them), and a LEGACY one keeps none, because picking
+   * `adjacentFaces[0]` of today's head for it would silently persist the very
+   * ordinal guess this work package removes. Its migration path is the §9
+   * `legacyReferenceFace` repair, where the user chooses.
+   */
+  private async authorChamferReferenceFaces(): Promise<{
+    pairs: ChamferReferenceFace[];
+    refs: WireElementRef[];
+  } | null> {
+    const contours = this.chamferContours();
+    if (contours.length === 0) return null;
+    const pairs: ChamferReferenceFace[] = [];
+    const refs: WireElementRef[] = [];
+    for (const contour of contours) {
+      const faceTopoKey =
+        contour.adjacentFaces[this.chamferFlipped ? 1 : 0] ?? contour.adjacentFaces[0];
+      if (!contour.edgeId || !contour.bodyId || !faceTopoKey) return null;
+      const ref = await this.promoteChamferReferenceFace(contour.bodyId, faceTopoKey);
+      if (!ref?.primary.elementId) return null;
+      pairs.push({ edgeId: contour.edgeId, faceId: ref.primary.elementId });
+      refs.push(
+        elementRefOfKind(ref.primary.bodyId, ref.primary.elementId, "face", ref.anchor?.worldPoint),
+      );
+    }
+    return { pairs, refs };
   }
 
   private onFilletChip(v: number): void {
@@ -3534,7 +4117,12 @@ export class ModelToolController {
   private onEdgeOpDistance2(distance2: number | null): void {
     this.fillet = filletStep(this.fillet, { kind: "setDistance2", distance2 }).state;
     this.pushChamferModeToChip();
-    this.sendPreview();
+    // …but the SECOND leg is also what makes the chamfer asymmetric, and an
+    // asymmetric chamfer must name its reference face (SCHEMA §7.3, WP-F). The sync
+    // re-sends the params when the pair set is unchanged and re-opens the lane when
+    // it moved — `beginPreview` froze `inputs[]`, so a pair that just appeared
+    // cannot reach the session any other way.
+    void this.syncChamferReferenceFaces();
   }
 
   /**
@@ -3545,7 +4133,8 @@ export class ModelToolController {
   private onEdgeOpChamferAngle(angleDeg: number | null): void {
     this.fillet = filletStep(this.fillet, { kind: "setAngleDeg", angleDeg }).state;
     this.pushChamferModeToChip();
-    this.sendPreview();
+    // The angle mode is asymmetric too — same reference-face rule (see above).
+    void this.syncChamferReferenceFaces();
   }
 
   /**
@@ -8004,6 +8593,33 @@ export class ModelToolController {
       });
       return;
     }
+    // SCHEMA §7.3 (WP-F): an asymmetric chamfer MUST name the face `radius` is
+    // measured on. The second leg and the ✓ can arrive in the SAME turn (the chip's
+    // Enter applies the value and then confirms), so wait for the in-flight
+    // resolution — and the preview-session reopen it forces — before judging it.
+    if (this.chamferNeedsReferenceFaces()) {
+      // ALWAYS wait, not just when the pairs are missing: a [Flip reference] press
+      // in the same turn as the ✓ leaves the OLD pairs in place while the resolution
+      // — and the preview-session reopen it forces — is still in flight, so a
+      // commit that raced it would `updatePreview` a session the reopen is about to
+      // close and then time out waiting for an exact answer that can never arrive.
+      // Every OTHER edge-op commit stays synchronous to the turn it was confirmed
+      // in, which is what the preview-epoch specs pin — hence the gate.
+      const armGenAtConfirm = this.armGen;
+      await this.chamferSync;
+      if (armGenAtConfirm !== this.armGen || this.fillet.phase !== "armed") return;
+    }
+    // If the pairs could not be authored — no adjacency evidence, or a refused
+    // promotion — the ✓ refuses WITH THE REASON. Committing anyway would either be
+    // rejected by core or, worse, fall back to the ordinal reference face this work
+    // package exists to remove.
+    if (this.chamferNeedsReferenceFaces() && !this.chamferPairs) {
+      viewportStore.getState().setStatusHint(
+        `Cannot confirm ${kind}: ${this.chamferPairsError ?? "the reference face is unresolved"}`,
+        { severity: "error", sticky: true },
+      );
+      return;
+    }
     if (this.previewFailure) {
       traceWarn(
         kind.toLowerCase(),
@@ -8032,10 +8648,13 @@ export class ModelToolController {
     if (outcome.kind === "failed") {
       this.fillet = filletStep(this.fillet, { kind: "commitFailed" }).state; // → armed
       toolStore.setState({ phase: "armed" });
+      await this.openEdgeOpPreview(this.armGen); // re-arm the preview (work kept)
+      // Published AFTER the re-arm, deliberately: the reopen (and anything it
+      // drives) is the last writer otherwise, and the user would be left looking at
+      // an arm hint with no trace of why their ✓ did nothing.
       viewportStore
         .getState()
         .setStatusHint(`${kind} failed: ${outcome.reason}`, { severity: "error", sticky: true });
-      await this.openEdgeOpPreview(this.armGen); // re-arm the preview (work kept)
       this.updateDebug();
       return;
     }
@@ -8045,6 +8664,7 @@ export class ModelToolController {
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     this.filletEdges = [];
+    this.resetChamferReferenceState();
     this.filletPreparedRevision = null;
     this.resetToSelect(
       `${kind === "Chamfer" ? "Chamfered" : "Filleted"} ${edgeCount} edge${edgeCount > 1 ? "s" : ""}`,
@@ -8096,6 +8716,38 @@ export class ModelToolController {
       const angleDeg = kind === "Chamfer" ? this.fillet.angleDeg : null;
       if (angleDeg === null) delete base.angleDeg;
       else patch.angleDeg = { value: angleDeg };
+      // SCHEMA §7.3 `referenceFaces` (WP-F). The pairs live or die with the
+      // ASYMMETRY, in the SAME command that changes it — core refuses a Fillet or an
+      // equal-leg chamfer that names a reference face, and refuses an update that
+      // INTRODUCES the asymmetry without one.
+      if (distance2 === null && angleDeg === null) {
+        // Back to equal-leg (or flipped to Fillet): the patch cannot delete a key,
+        // so both must leave the BASE, exactly as the mode scalars above do.
+        delete base.referenceFaces;
+        delete base.referenceFaceRefs;
+      } else if (!this.editedRecordWasAsymmetricChamfer()) {
+        // This edit INTRODUCES the asymmetry (the record was equal-leg, or a
+        // Fillet), which is exactly when SCHEMA §7.3 requires it to name the
+        // reference face — so author the pairs in THIS command.
+        const referenceFaces = await this.authorChamferReferenceFaces();
+        if (!referenceFaces) {
+          // No face could be named. Refusing is the honest outcome: sending it
+          // would be rejected by core, and picking one anyway would be the ordinal
+          // guess WP-F removes.
+          throw new Error(
+            "an asymmetric Chamfer must name its reference face (SCHEMA §7.3) and " +
+              "this edge reports no adjacent faces to measure the first distance on",
+          );
+        }
+        patch.referenceFaces = referenceFaces.pairs;
+        patch.referenceFaceRefs = referenceFaces.refs;
+      }
+      // else: the record was ALREADY an asymmetric chamfer, so this edit does not
+      // introduce anything. NEITHER key is patched — a typed record's own pairs
+      // ride the merge base verbatim (Rust refuses an update that strips them), and
+      // a LEGACY one stays legacy rather than gaining an ordinal-derived pair the
+      // user never chose (SCHEMA §7.3: "a scalar edit on a record that lacks the
+      // field keeps it lacking"; §9 repair is its migration path).
       const res = await this.client.applyEditCommand(
         updateScalarParamsCommand(editFeatureId, kind, base, patch),
       );
@@ -8107,6 +8759,7 @@ export class ModelToolController {
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     this.filletEdges = [];
+    this.resetChamferReferenceState();
     this.filletPreparedRevision = null;
     if (failure !== null) {
       this.resetToSelect(`${kind} failed: ${failure}`, { severity: "error", sticky: true });
@@ -8161,6 +8814,7 @@ export class ModelToolController {
     this.cancelFillet();
     this.filletStoredParams = stored; // set AFTER the tool-change cancel
     this.filletEdges = [];
+    this.resetChamferReferenceState();
     this.filletPreparedRevision = null;
     this.filletEditFeatureId = featureId;
     // edgeCount 1 keeps the FSM out of its bail path (a re-edit has no picks yet).
@@ -8218,8 +8872,14 @@ export class ModelToolController {
         onDistance2: (v) => this.onEdgeOpDistance2(v),
         chamferAngleDeg: this.fillet.angleDeg,
         onChamferAngle: (v) => this.onEdgeOpChamferAngle(v),
+        showChamferFlip: false,
+        onChamferFlip: () => this.onChamferFlip(),
       },
     );
+    // WP-F: the record's closure adjacency, so a re-edit can offer [Flip reference]
+    // and can author pairs if this edit introduces the asymmetry. Deliberately NOT
+    // awaited — it is one worker round trip and the chip must open on this frame.
+    void this.loadEdgeOpEditClosure(this.armGen, kind, stored);
     this.updateDebug();
   }
 
@@ -8800,6 +9460,12 @@ export class ModelToolController {
       // The CHAMFER angle in DEGREES (`null` = the distance-angle mode is off).
       // Exclusive with the second leg above, which is what e2e asserts.
       edgeOpAngleDeg: this.fillet.angleDeg,
+      // The SCHEMA §7.3 `referenceFaces` pairs the arm will commit (WP-F), plus the
+      // reason it has none when it needs them. Neither has any other readout: the
+      // chip shows a [Flip reference] button, not the face it names.
+      edgeOpReferenceFaces: this.chamferPairs?.pairs ?? null,
+      edgeOpReferenceFaceError: this.chamferPairsError,
+      edgeOpReferenceFlipped: this.chamferFlipped,
       shellPhase: this.shell.phase,
       // OffsetFace (SCHEMA §7.3). `offsetFaceCount` is the FROZEN CLOSURE, not the
       // picks — the difference between the two is the whole point of the
@@ -9170,6 +9836,7 @@ export class ModelToolController {
     this.engine.hideValueHandle();
     this.fillet = filletInit(); // carries edgeOp back to "Fillet"
     this.filletEdges = [];
+    this.resetChamferReferenceState();
     this.filletPreparedRevision = null;
     this.filletPreparedSnapshot = null;
     this.filletRange = null;

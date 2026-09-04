@@ -134,6 +134,20 @@ interface WireFilletParams {
    * / the M4b dual-edge rule). Optional so a legacy/bare-id fillet still marshals.
    */
   edges?: WireElementRef[];
+  /**
+   * Rust `ChamferParams::reference_faces` (SCHEMA §7.3, kernel-hardening WP-F) —
+   * the bare `{edgeId, faceId}` pairs. Skip-empty on the Rust side, so an
+   * equal-leg chamfer (and every Fillet) must marshal WITHOUT the key.
+   */
+  referenceFaces?: { edgeId: string; faceId: string }[];
+  /**
+   * Rust `ChamferParams::reference_face_refs` — the typed home of each pair's FACE,
+   * in LOCKSTEP with {@link WireFilletParams.referenceFaces} (same length, same
+   * element id at each index, a `face` primary on the operated body, and an anchor
+   * core requires). Document-only: `worker::wire::lower_operation` strips it before
+   * the OCW1 frame, where the face refs ride `inputs[N + i]` instead.
+   */
+  referenceFaceRefs?: WireElementRef[];
   chainTangentEdges: boolean;
   tangentClosureVersion?: 1;
 }
@@ -340,6 +354,16 @@ interface WireOperationRecord {
  */
 export type WireInputPath =
   | { path: "filletEdges"; index: number }
+  /**
+   * A Chamfer reference-face pair (SCHEMA §7.3 slot order / §9 repair,
+   * kernel-hardening WP-F). `index` indexes `referenceFaces` / `referenceFaceRefs`,
+   * i.e. the trailing `inputs[N + index]` slots with `N = edgeIds.length`.
+   * `index === referenceFaces.length` CREATES the pair — the `legacyReferenceFace`
+   * repair — and core then REQUIRES `edgeId` (the item's `seedEdgeId`, which must
+   * be an entry of `edgeIds`). On a rebind `edgeId` is optional and, when present,
+   * must equal the stored pair's.
+   */
+  | { path: "chamferReferenceFace"; index: number; edgeId?: string }
   | { path: "shellOpenFaces"; index: number }
   | { path: "holeFace" }
   | { path: "revolveAxis" }
@@ -545,6 +569,36 @@ function filletParams(p: FilletParams, inputs?: SemanticRef[]): WireFilletParams
   if (edgeInputs.length === edgeIds.length && edgeInputs.every((r) => r.primary.bodyId)) {
     wire.edges = edgeIds.map((id, i) =>
       edgeElementRef(edgeInputs[i].primary.bodyId, id, edgeInputs[i].anchor?.worldPoint),
+    );
+  }
+  // SCHEMA §7.3 `referenceFaces` (kernel-hardening WP-F). The SAME dual-field rule
+  // `edgeIds`/`edges` carry, one level out: the bare pairs and their typed FACE refs
+  // are written together or not at all (core refuses a length mismatch by name), and
+  // the typed refs are synthesized from the op's TRAILING face inputs — `inputs[N+i]`,
+  // the normative slot the wire lowers them to — never from the pairs alone.
+  // Gated on an ASYMMETRIC chamfer for the same reason `distance2` is gated on
+  // `mode`: an equal-leg chamfer has no reference face, and core refuses one that
+  // names one, so a caller that leaves stale pairs on a params object it has just
+  // re-typed marshals a plain equal-leg cut rather than a record core must reject.
+  const pairs =
+    wire.distance2 !== undefined || wire.angleDeg !== undefined ? p.referenceFaces ?? [] : [];
+  const faceInputs = (inputs ?? []).filter((r) => r.primary.kind === "face");
+  if (
+    pairs.length > 0 &&
+    faceInputs.length === pairs.length &&
+    faceInputs.every(
+      (r, i) =>
+        r.primary.bodyId && r.primary.elementId === pairs[i].faceId && r.anchor?.worldPoint,
+    )
+  ) {
+    wire.referenceFaces = pairs.map((pair) => ({ edgeId: pair.edgeId, faceId: pair.faceId }));
+    wire.referenceFaceRefs = pairs.map((pair, i) =>
+      elementRefOfKind(
+        faceInputs[i].primary.bodyId,
+        pair.faceId,
+        "face",
+        faceInputs[i].anchor?.worldPoint,
+      ),
     );
   }
   return wire;
@@ -1201,13 +1255,15 @@ export function inputPathFor(
   opType: string | undefined,
   slotIndex: number,
   params?: Record<string, unknown>,
+  seedEdgeId?: string,
 ): WireInputPath | null {
   if (!opType || slotIndex < 0 || !Number.isInteger(slotIndex)) return null;
   switch (opType) {
     // `inputs[k]` = `edges[k]` (typed) / `edgeIds[k]` (bare) — the core writes both.
     case "Fillet":
-    case "Chamfer":
       return { path: "filletEdges", index: slotIndex };
+    case "Chamfer":
+      return chamferSlotPath(slotIndex, params, seedEdgeId);
     // `inputs[k]` = `faces[k]` (typed) / `openFaces[k]` (bare). New records carry
     // both; the core updates both in lockstep. Legacy bare-only records retain
     // this path for repair compatibility.
@@ -1236,6 +1292,35 @@ export function inputPathFor(
     default:
       return null;
   }
+}
+
+/**
+ * The Chamfer slot at `slotIndex`, mirroring the NORMATIVE SCHEMA §7.3 table the
+ * Rust `wire_op_inputs` Chamfer arm builds: the `N` edge refs (`N =
+ * edgeIds.length`), then one reference-FACE ref per `referenceFaces` pair.
+ *
+ * REFUSES without the op's stored params. `N` is knowable only from `edgeIds`, so
+ * a guess would send `filletEdges{k}` for a trailing face slot — a well-formed
+ * command that overwrites a DIFFERENT input than the user clicked (the H9 class
+ * this table exists to prevent). Extrude refuses on the same grounds.
+ *
+ * `index === referenceFaces.length` is the SCHEMA §9 `legacyReferenceFace` CREATE:
+ * no stored ref occupies the slot, so core requires the contour edge id and the
+ * caller passes the item's `seedEdgeId` through verbatim.
+ */
+function chamferSlotPath(
+  slotIndex: number,
+  params?: Record<string, unknown>,
+  seedEdgeId?: string,
+): WireInputPath | null {
+  if (!params) return null;
+  const edgeIds = params.edgeIds;
+  if (!Array.isArray(edgeIds)) return null;
+  if (slotIndex < edgeIds.length) return { path: "filletEdges", index: slotIndex };
+  const index = slotIndex - edgeIds.length;
+  return seedEdgeId === undefined
+    ? { path: "chamferReferenceFace", index }
+    : { path: "chamferReferenceFace", index, edgeId: seedEdgeId };
 }
 
 /**

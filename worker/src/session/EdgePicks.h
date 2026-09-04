@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "elementmap/ElementMapPartition.h"
@@ -44,9 +47,39 @@ ResolvedEdgePicks resolve_edge_picks(const BodyStore &bodies,
                                      const elementmap::ElementMapPartition &part,
                                      const nlohmann::json &values);
 
+// The shape maps one `PrepareEdgeOp` answer needs, built ONCE per body. Building
+// them per edge instead turns a closure of n edges into n full shape traversals.
+struct EdgeEvidenceMaps {
+  TopTools_IndexedMapOfShape edges;
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopTools_IndexedMapOfShape faces;
+  explicit EdgeEvidenceMaps(const TopoDS_Shape &body);
+};
+
+// The 1-based face ordinals adjacent to `edge`, ASCENDING and de-duplicated
+// (SCHEMA §7.6 `adjacentFaces`, §7.3 `referenceFaces` candidates).
+//
+// `TopTools_IndexedMapOfShape::FindIndex` identifies faces by `IsSame`, so a SEAM
+// edge — bounded on both sides by ONE lateral face, e.g. a cylinder's seam — maps
+// both ancestor entries onto the same ordinal and yields a single entry. A free
+// edge yields none, a manifold edge two. Shared by `PrepareEdgeOp` (the handshake
+// the frontend picks from) and `FilletChamferOp` (the candidates a
+// `legacyReferenceFace` repair offers) so the two can never disagree about which
+// faces a chamfer may measure `radius` on.
+std::vector<int>
+adjacent_face_ordinals(const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces,
+                       const TopTools_IndexedMapOfShape &face_map,
+                       const TopoDS_Edge &edge);
+
+// Convenience form for a caller with a single edge to ask about; builds the two
+// maps itself.
+std::vector<int> adjacent_face_ordinals(const TopoDS_Shape &body,
+                                        const TopoDS_Edge &edge);
+
 // One `edges[]` entry of the `PrepareEdgeOp` result: snapshot-scoped TopoKey,
-// pick flag, anchor and descriptor EVIDENCE. Mints nothing.
-nlohmann::json edge_evidence_entry(const TopoDS_Shape &body, int ordinal,
-                                   bool picked);
+// pick flag, anchor and descriptor EVIDENCE, plus the §7.6 `contour` index and
+// `adjacentFaces` list. Mints nothing.
+nlohmann::json edge_evidence_entry(const EdgeEvidenceMaps &maps, int ordinal,
+                                   bool picked, int contour);
 
 } // namespace onecad::session

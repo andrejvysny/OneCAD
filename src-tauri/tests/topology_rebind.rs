@@ -33,8 +33,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use onecad_core::document::record::{
-    BooleanMode, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation,
-    Operation, OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
+    BooleanMode, ChamferParams, ChamferReferenceFace, ExtrudeMode, ExtrudeParams, FilletParams,
+    KnownOperation, Operation, OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -55,7 +55,7 @@ use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, World
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_lib::worker::manager::{SupervisorConfig, WorkerState};
-use onecad_lib::worker::wire::sketch_wire;
+use onecad_lib::worker::wire::{sketch_wire, EdgeOpMode, EdgeOpPick, FaceAddress};
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
 use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
@@ -793,9 +793,21 @@ struct FilletedBox {
     /// Volume of the SHARP box, measured before the fillet op is added. The edge-op
     /// swap proof compares REMOVED volume (`base_vol - vol`), not absolutes.
     base_vol: f64,
+    /// `adjacentFaces[0]` of the picked edge on the SHARP box, promoted — the
+    /// SCHEMA §7.3 `referenceFaces` partner an asymmetric chamfer on this edge
+    /// needs (kernel-hardening WP-F). It is the face the pre-WP-F smaller-ordinal
+    /// rule chose, so naming it explicitly moves no measured number. Picked here
+    /// because the edge is CONSUMED by the fillet, so it is addressable only on the
+    /// sharp box.
+    ref_face: ElementId,
+    ref_anchor: Vec3,
 }
 
-async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> FilletedBox {
+async fn build_filleted_box(
+    rt: &mut DocumentRuntime,
+    wm: &WorkerManager,
+    sid: SketchId,
+) -> FilletedBox {
     let sketch = single_rect(sid, 0.0, 0.0, 40.0, 20.0);
     add_op(rt, sketch_record(&sketch));
     add_op(rt, extrude_record(sid, "", 25.0));
@@ -825,6 +837,54 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
     let edge_el = ElementId::new(promoted[0].element_id.clone());
     assert!(edge_el.as_str().starts_with("el_"), "Rust-minted edge id");
 
+    // SCHEMA §7.6 (WP-F): the picked edge's adjacent faces on the SHARP box, and
+    // `adjacentFaces[0]` promoted as this setup's reference face. The fillet CONSUMES
+    // the edge, so this is the only moment it is addressable.
+    let prepared = onecad_lib::worker::FaceBoundaryProjection::prepare_edge_op(
+        wm,
+        snap_id,
+        EdgeOpMode::Chamfer,
+        &[EdgeOpPick {
+            body: Some(body),
+            address: FaceAddress::ElementId(edge_el.as_str()),
+        }],
+        false,
+    )
+    .await
+    .expect("PrepareEdgeOp on the sharp box");
+    let ref_key = prepared.edges[0]
+        .adjacent_faces
+        .clone()
+        .expect("SCHEMA §7.6 `adjacentFaces` on every accepted edge")[0]
+        .clone();
+    let ref_info =
+        onecad_lib::worker::ElementQuery::query_element_by_topo_key(wm, snap_id, body, &ref_key)
+            .await
+            .expect("QueryElement by topoKey")
+            .expect("the adjacent face resolves on its own snapshot");
+    let ref_anchor =
+        Vec3::new_unchecked(ref_info.center[0], ref_info.center[1], ref_info.center[2]);
+    let ref_face = ElementId::new(
+        rt.promote_selection(
+            snap_id,
+            body,
+            vec![(
+                TopoKey::new(ref_key),
+                Some(AnchorIntent {
+                    world_point: ref_anchor,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .expect("promote the reference face")[0]
+            .element_id
+            .clone(),
+    );
+
     add_op(rt, fillet_record(body, edge_el.clone(), edge_anchor, 2.0));
     let fil_report = regen_all(rt).await;
     let fil_snap = published(&fil_report, "H5-B fillet").clone();
@@ -846,6 +906,8 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
         vol,
         faces: fview.face_count,
         base_vol,
+        ref_face,
+        ref_anchor,
     }
 }
 
@@ -888,7 +950,7 @@ async fn h6a_flagship_edit_lane_fillet_survives_and_reopens_clean() {
     let mut rt = runtime_over(&wm);
     let sid = SketchId(Uuid::from_u128(0x6A));
 
-    let setup = build_filleted_box(&mut rt, sid).await;
+    let setup = build_filleted_box(&mut rt, &wm, sid).await;
     assert!(
         setup.filleted,
         "H6a precondition: the fillet APPLIES on the clean box (faces {})",
@@ -1155,7 +1217,7 @@ async fn h5b_fillet_survives_small_edit() {
     let mut rt = runtime_over(&wm);
     let sid = SketchId(Uuid::from_u128(0x5B));
 
-    let setup = build_filleted_box(&mut rt, sid).await;
+    let setup = build_filleted_box(&mut rt, &wm, sid).await;
     assert!(
         setup.filleted,
         "H5-B precondition: the fillet APPLIES on the clean box (faces {} > 6)",
@@ -1327,7 +1389,7 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
     let mut rt = runtime_over(&wm);
     let sid = SketchId(Uuid::from_u128(0x60));
 
-    let setup = build_filleted_box(&mut rt, sid).await;
+    let setup = build_filleted_box(&mut rt, &wm, sid).await;
     assert!(
         setup.filleted,
         "precondition: the fillet applies on the clean box"
@@ -1364,6 +1426,8 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
             }),
             extra: Default::default(),
         }],
+        reference_faces: Vec::new(),
+        reference_face_refs: Vec::new(),
         chain_tangent_edges: false,
         tangent_closure_version: None,
         extra: Default::default(),
@@ -1438,7 +1502,43 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
 
 /// The chamfer record the FE's unified edge tool emits for `setup`'s edge, with
 /// an optional second leg (SCHEMA §7.3, 2026-08-03).
-fn chamfer_op_on(setup: &FilletedBox, radius: f64, distance2: Option<f64>) -> Operation {
+fn chamfer_op_on(
+    setup: &FilletedBox,
+    radius: f64,
+    distance2: Option<f64>,
+    reference: Option<(&ElementId, Vec3)>,
+) -> Operation {
+    // SCHEMA §7.3 (kernel-hardening WP-F): an ASYMMETRIC chamfer must name the
+    // adjacent face `radius` is measured on; an EQUAL-LEG one has no reference face
+    // and may not carry the field. The wedge `d1·d2/2·L` is symmetric in the legs,
+    // so WHICH of the two adjacent faces is named changes no number asserted here —
+    // only that the choice is now persisted instead of ordinal-derived.
+    let (reference_faces, reference_face_refs) = match (distance2, reference) {
+        (Some(_), Some((face, face_at))) => (
+            vec![ChamferReferenceFace {
+                edge_id: setup.edge_el.clone(),
+                face_id: face.clone(),
+            }],
+            vec![ElementRef {
+                primary: Some(PrimaryRef {
+                    body: setup.body,
+                    element: face.clone(),
+                    kind: ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: Some(AnchorIntent {
+                    world_point: face_at,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+                extra: Default::default(),
+            }],
+        ),
+        _ => (Vec::new(), Vec::new()),
+    };
     Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: Scalar::new(radius),
         distance2: distance2.map(Scalar::new),
@@ -1461,6 +1561,8 @@ fn chamfer_op_on(setup: &FilletedBox, radius: f64, distance2: Option<f64>) -> Op
             }),
             extra: Default::default(),
         }],
+        reference_faces,
+        reference_face_refs,
         chain_tangent_edges: false,
         tangent_closure_version: None,
         extra: Default::default(),
@@ -1495,8 +1597,11 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
     let mut rt = runtime_over(&wm);
     let sid = SketchId(Uuid::from_u128(0x61));
 
-    let setup = build_filleted_box(&mut rt, sid).await;
+    let setup = build_filleted_box(&mut rt, &wm, sid).await;
     assert!(setup.filleted, "precondition: the fillet applies");
+
+    let reference = Some((&setup.ref_face, setup.ref_anchor));
+
     // `build_filleted_box` extrudes a 40×20 rect 25 mm, so the picked vertical
     // edge — and therefore every chamfer swept along it — is 25 mm long.
     const EDGE_LEN: f64 = 25.0;
@@ -1509,7 +1614,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
     // this direction of the swap is open (unlike the reverse, gated below).
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(FILLET_REC)),
-        op: chamfer_op_on(&setup, 2.0, Some(5.0)),
+        op: chamfer_op_on(&setup, 2.0, Some(5.0), reference),
     })
     .expect("Fillet → two-distance Chamfer is accepted");
     let report = regen_all(&mut rt).await;
@@ -1546,7 +1651,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
     // face (d1·d2/2 is symmetric in the legs), so the CENTROID is asserted too.
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(FILLET_REC)),
-        op: chamfer_op_on(&setup, 2.0, Some(5.0)),
+        op: chamfer_op_on(&setup, 2.0, Some(5.0), reference),
     })
     .expect("re-authoring the same params dirties the step");
     let _ = published(&regen_all(&mut rt).await, "two-distance chamfer replay");
@@ -1560,7 +1665,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
     // (3) The SECOND LEG is re-editable on its own (the chip's `d2` field).
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(FILLET_REC)),
-        op: chamfer_op_on(&setup, 2.0, Some(7.0)),
+        op: chamfer_op_on(&setup, 2.0, Some(7.0), reference),
     })
     .expect("editing distance2 alone is a plain params edit");
     let _ = published(&regen_all(&mut rt).await, "distance2 re-edit");
@@ -1593,7 +1698,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
     // is back — and NOW the plain W3 swap goes through and regenerates a fillet.
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(FILLET_REC)),
-        op: chamfer_op_on(&setup, 2.0, None),
+        op: chamfer_op_on(&setup, 2.0, None, reference),
     })
     .expect("clearing distance2 is a plain params edit");
     let _ = published(&regen_all(&mut rt).await, "distance2 cleared").clone();
@@ -1666,7 +1771,7 @@ async fn h5b_destructive_edit_is_deterministic_needs_repair() {
     let mut rt = runtime_over(&wm);
     let sid = SketchId(Uuid::from_u128(0x5C));
 
-    let setup = build_filleted_box(&mut rt, sid).await;
+    let setup = build_filleted_box(&mut rt, &wm, sid).await;
     assert!(
         setup.filleted,
         "precondition: fillet applies on the clean box"
@@ -2776,7 +2881,7 @@ async fn h5_benign_large_edit_measures_the_ladder() {
     let mut rt = runtime_over(&wm);
     let sid = SketchId(Uuid::from_u128(0x5003));
 
-    let setup = build_filleted_box(&mut rt, sid).await;
+    let setup = build_filleted_box(&mut rt, &wm, sid).await;
     assert!(
         setup.filleted,
         "precondition: the fillet applies at depth 25"

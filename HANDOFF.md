@@ -1,3 +1,233 @@
+# Handoff — KERNEL HARDENING: WP-F chamfer reference face LANDED (commit E), next program = WP-I/H/J (plan drafted, under review)
+
+Session 27 · 2026-09-03/04 · plan `~/.claude/plans/resume-check-what-virtual-globe.md` (Run log at the bottom) · next plan `~/.claude/plans/kernel-hardening-p1-wp-hij.md` (DRAFT)
+
+> Read the Run log first — every task, ruling, measured count and deviation of this session. `TODO.md`
+> § KERNEL HARDENING § WP-F is the gate ledger. Commit E (`feat(kernel): chamfer reference face …`) is the
+> only commit of this session; check `git log` for its hash and whether it is on origin.
+
+## Goal
+
+Close the last P1 package of the kernel-hardening program that could be finished in one session: an
+asymmetric chamfer's reference face becomes a persisted typed ref, and the ordinal-derived rule that
+silently mirrored the legs is gone. Then draft the next program (WP-I/H/J).
+
+## What happened (and why it matters)
+
+- **Design decisions that changed the audited draft.** (1) The adjacency list rides `PrepareEdgeOp`
+  (per-edge `contour` + `adjacentFaces`), not `QueryElement` — the FE has no contour knowledge, the
+  handshake already computes contours (user decision). (2) Pairs `{edgeId, faceId}`, one per tangent
+  contour, keyed by an edge — and **the paired edge is the contour's seed**, because the old seed
+  `contour.front()` was itself the smallest ordinal. (3) **No legacy ordinal rule in any lane.** The first
+  design gated the legacy rule on the per-plan `editedFrom` claim; the worker-half adversarial review
+  measured that every open lane sets it (so every old document halted) while REDO and timeline previews
+  omit it (so a halted record silently replayed the ordinal rule against the permuted map). Ruling: a
+  pair-less asymmetric chamfer halts `needsRepair` with the op-built §9 `legacyReferenceFace` item
+  (+ `seedEdgeId`, both adjacent faces at a deliberate 0.5/0.5 tie) until repaired — one pick per legacy
+  contour on the first open under this build is the migration path; `chamfer_angle_distance.ndjson`
+  (2026-08-24) gained its pairs (the one deliberate behaviour change, recorded in §14).
+- **Repair recipe.** The item's candidates are DISPLAY only (scratch-state ordinals). Rust re-derives live:
+  ladder pass on the record's stored typed EDGE ref (the halted step's binding died with it, so the
+  `seedEdgeId` is not addressable on the head by id — measured) → `PrepareEdgeOp{bodyId, topoKey}` →
+  candidates with face-centre `worldPos`; the create is keyed by `edge_id` (append), validated like every
+  other command, and the created ref is intent-stamped; a face ref's anchor is the FACE CENTRE (the edge
+  midpoint lies on both faces and ties).
+- **Reviews earned their cost again:** worker half — BLOCKER (the gate above) + a kind-mismatched id binding
+  silently through descriptor evidence; Rust half — the repair command skipped `ChamferParams::validate`
+  (anchor-less ref / duplicate pair accepted, later edits refused) and an index-keyed create dead-ended
+  out-of-order repairs; FE half — a scalar re-edit of a legacy record re-authored the ordinal guess
+  (measured), and the repair anchored on the edge. All fixed red-first with regression tests.
+- **Infra:** every long subagent stalled repeatedly on a "stream watchdog" (no progress 600 s); resuming
+  the same agent via `SendMessage` kept its context and converged every time — memory note
+  `subagent-watchdog-stalls-resume`. Ask agents for small tool calls and a scratch findings file.
+- **CLAUDE.md drift fixed:** 3MF is a Rust-side writer (W4) — the "3MF opens in a slicer" user gate is real;
+  ctest count 176.
+
+## Dead-ends / rulings (do not re-litigate)
+
+- `CHAMFER_REFERENCE_FACE_MISSING` as a refusal: REJECTED (a partially repaired multi-contour record would
+  dead-end in `OP_FAILED`); an uncovered contour halts `needsRepair` instead.
+- Any per-plan gate (`editedFrom`, `post_upstream_edit`) for the legacy rule: REJECTED (see above).
+- Answering `ResolveRefs` from the item's frozen candidates: REJECTED (ordinals of a discarded scratch state).
+- `ladderFailed` stays `"descriptor"` on the op-built item (closed Rust enum); `reason` is the discriminator.
+- The planner hash is positional over the pairs (SCHEMA says order carries no meaning) — Rust only appends;
+  recorded, not changed.
+- `derive_inputs` does not see the reference faces (dependency graph) — recorded follow-up.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; read the Run log; `git log -1` (commit E) and `git status`.
+2. If commit E is not on origin: the G4 row in TODO.md must show the e2e count before pushing.
+3. Next program: `~/.claude/plans/kernel-hardening-p1-wp-hij.md` — a DRAFT with five user decisions listed
+   (order I→H→J, the concentric sign representation, refuse-vs-warn on empty export bodies, bounds
+   numbers, WP-G still deferred). An adversarial plan review was run at the end of session 27 — its
+   findings are recorded in the plan file's "Plan review" section (or in the Run log if the session ended
+   first). Start with the probes (I0/H0/J0), protocol audit before code, ≤2 implementers, adversarial
+   review BEFORE each commit.
+4. Gate recipe: `scratchpad`'s `g4.sh` is gone with the session; the sequence is in CLAUDE.md § Gate ladder
+   (L3) — run suites alone, tee everything, `find src e2e -type f | sort | xargs md5 -q | md5 -q` before
+   and after e2e.
+
+## Open questions
+
+- The five WP-I/H/J decisions above (user).
+- `hydrate_ref_intents` now stamps `ChamferReferenceFace` repairs only — other `EditOperationInput` rebinds
+  are still un-stamped (pre-existing; the WP-A "does repair rewrite the frozen anchor" question).
+- User-run gates still owed: 19-row `MANUAL_RELEASE_GATES.md`, Tauri smoke (now incl. project edges,
+  region anchor, warning badge, chamfer flip + legacy repair), dirty vendor STEP for G4, WP-X dogfood.
+
+## Pointers
+
+- Tasks → TODO.md § KERNEL HARDENING § WP-F · Snapshot → CURRENT_STATE.md § NOW · Plan + Run log →
+  `~/.claude/plans/resume-check-what-virtual-globe.md` · Next plan → `kernel-hardening-p1-wp-hij.md`.
+
+---
+
+# Handoff — CLOSE-OUT + KERNEL HARDENING: WP-B landed, WP-F started (probe + protocol audit in flight when the session ended)
+
+Session 26 · 2026-09-03 · plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`
+
+> Read the plan's **Run log** (bottom) for every task, measured count and deviation of this
+> session; TODO.md § KERNEL HARDENING (top) is the gate ledger. **Five commits landed and are
+> on origin:** A `bd4b6c5` (kernel hardening WP-C/D/A/E), B `da01b3f` (WP-P worker + Rust +
+> P2b), C `78daecb` (WP-P frontend + WP-P Rust fix round + hygiene), D `b4bbcb9` (WP-B), and
+> the chore `e781272` (subagent repo notes + ledger hashes). The tree holds ONLY the WP-F start:
+> `protocol/SCHEMA.md` (WP-F draft, under audit), `TODO.md` (this note), and the untracked
+> red-first probe `worker/tests/test_chamfer_reference_face.cpp` (written by an implementer that
+> was still running — see "How to resume").
+
+## Goal
+
+Make the modeling kernel correct and robust enough for daily-driver parts, risk-first.
+This session closed out two interleaved uncommitted programs (kernel hardening + WP-P project
+edges), then executed WP-B (region identity by anchor) and opened WP-F (chamfer reference face).
+
+## What happened (and why it matters)
+
+- **Close-out.** WP-E was built for the first time (it did not compile), fix-rounded, protocol-
+  audited (`approve`, 4 blockers), adversarially reviewed (4 HIGH fixed red-first), and gated;
+  the Tier B scope was narrowed by ruling D3b after a 5-minute `BOPAlgo_CheckerSI` stall on a
+  modeled thread face (isometries and `generator` components stay Tier A). The SG90 vendor
+  ingest regression the gate found was fixed (Boolean ceiling from the worse input). Two commits
+  were carved from one gated tree with an index-only script; commit A compiled in isolation.
+- **WP-P finished.** P3 frontend (`j` tool, projected marker, stale banner). The owed adversarial
+  review of the Rust half was run LATE (after commit B) and found a BLOCKER — positional
+  `sourceOrdinal` re-association could rewrite a projected entity from a different edge — fixed
+  in commit C with per-source run guards (count / ordinal set / permutation incl. reversed
+  walk), shared-corner conflicts, SketchId-keyed staleness, unlocked rebind, RMW fence, squash
+  provenance, scoped unlock, strict wire parse. **Lesson recorded in memory
+  `adversarial-review-before-commit`: never commit an identity/regen/wire package before its
+  review.**
+- **WP-B landed (commit D).** `profile.regionAnchor` (set once at pick from the largest fill
+  triangle, never re-derived, hash-neutral when absent) with the exact-id → anchor-cell → refuse
+  ladder and the `REGION_REBOUND_BY_ANCHOR` warning (visible in the inspector + a history-row
+  badge); chord-tolerance sampling, bbox pair cull, degenerate drop at the graph's 1e-6
+  coincidence (the review caught a 1e-3 threshold that DELETED a hole — 8000 mm³ published where
+  the user drew 7000 — fixed red-first); `maxResidual` REPORTING ONLY (a mixed mm/radian gate
+  would have false-rejected angle constraints); `finish_sketch` commits the record before regions
+  and still forwards the outcome on a refusal; `worker_harness` gained the per-expect tolerance
+  matcher the fixtures README documented but never had. Probes P-B1/3/5/6/7 red→green, P-B2 red
+  at 0.8 mm clearance → green, P-B4 not reproduced. Gate: ctest 173/173 · cargo 93/1496/0 ·
+  vitest 317/5566/78 · e2e 518/0 · kernelbench 136 unchanged · clippy on 1.97 AND 1.98.
+- **CI.** GitHub's stable moved to Rust 1.98 (new lints fixed twice — `chunks_exact_to_as_chunks`,
+  `result_large_err`); run clippy on the newest stable before pushing (CLAUDE.md says so now).
+  Two CI-only e2e reds were runner races (one hardened in the spec). `tauri-composition` times out
+  building OCCT; `linux-worker` self-hosted runner offline (a run had to be cancelled by hand to
+  re-run jobs). CI for commit D (`33756153082`) was in progress at handoff.
+
+## Dead-ends / rulings (do not re-litigate)
+
+- Tier B gate on `maxResidual`: REJECTED (mixed dimensions; contradictory systems already `Diverged`).
+- Rust `policyVersions.resolverVersion` bump: NOT done (needs both `engine.rs` and
+  `MemoryCheckpointStore::save`'s literal; open item: v3-minted checkpoint partitions under v4).
+- Anchor binding the cell containing the pick after a boundary crosses it: INTENDED semantics with
+  the warning as the signal (follow-up: persist the pick-time cell area for a plausibility bound).
+- Degenerate threshold: the detector's coincidence tolerance, never the authoring resolution.
+- A partial detach of a projected face outline leaves the source un-updatable by design (run
+  guard); a plain sketch-on-face redo is still refused (pre-existing).
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; re-read CLAUDE.md, MEMORY.md, the plan file (Run log).
+2. **WP-F state:** the plan § E and the SCHEMA draft (uncommitted `protocol/SCHEMA.md` hunks:
+   §7.3 `referenceFaces[]` bullet + example, §7.5 `QueryElement.adjacentFaces`, §14 entry marked
+   "sign-off: PENDING") are the design. Two subagents were mid-flight and their results were NOT
+   received at handoff time but ARRIVED before the session closed: (a) the red-first probe
+   `worker/tests/test_chamfer_reference_face.cpp` + its `add_test` registration — **RED,
+   measured** (a −X-wall hole reorders the face map and mirrors the 4 mm / 1 mm legs with volume,
+   face count and removed wedge identical; details in TODO.md § Now); commit it with WP-F;
+   (b) the protocol audit of the SCHEMA draft — re-run
+   `protocol-auditor` — **its first pass ARRIVED after this handoff: verdict REJECT of the draft
+   text, design decisions below are now RULED (orchestrator) and must be written into the SCHEMA
+   draft before code:**
+   - **B1 refId form:** face refs are appended to `inputs[]` after the edge refs and addressed
+     POSITIONALLY as `<opId>.input<N+i>` (`N = edgeIds.length`) — the only grammar
+     `parse_input_ref_id` (`document_runtime.rs:5239`) and the worker's minting understand;
+     mirrors OffsetFace's slot table. Needs a `Chamfer` arm in `element_ref_input`,
+     `element_refs_mut`, `wire_op_inputs` and a new `InputPath::ChamferReferenceFace{index}`.
+   - **B2 ownership gate:** `OpCommon.cpp:278-289`'s Fillet/Chamfer arm refuses any non-edge
+     primary today (measured: `op2.input1` NeedsRepair "requires every typed edge ref to carry an
+     edge primary") — it must accept a FACE primary in the reference-face slots (same body).
+   - **B3 cardinality:** one reference face per CONTOUR, keyed by the contour's seed edge:
+     `referenceFaces: [{ "edgeId": "el_…", "faceId": "el_…" }]` (order-independent) — NOT one per
+     `edgeIds` entry (`enforce_frozen_closure` collapses and re-orders `edgeIds` to seeds;
+     `edgeIds` order carries no meaning).
+   - **B4 legacy predicate:** strict `stepIndex > editedFrom` (`OpContext::post_upstream_edit`,
+     already plumbed) — at `stepIndex == editedFrom` the chamfer IS the edited op and its refs
+     are fresh; state that a legacy asymmetric chamfer halts regen (`needsRepair`) at its step
+     after ANY upstream edit until re-picked.
+   - Must-fix details: `adjacentFaces` sorted by `TopExp::MapShapes` face ordinal ASCENDING and
+     de-duplicated by `IsSame` (seam edge → one entry; example must read `["f:3","f:6"]`);
+     `QueryElement`'s elementId branch needs the `BodyRecord` plumbed (`ElementIdentity.cpp:191`);
+     §9 gains the WORKER-emitted `reason: "legacyReferenceFace"` (built by the op, not the ladder);
+     the legacy repair is a CREATE (no slot to rebind) — `EditOperationInput` may grow
+     `reference_faces` from empty and the repair UI sources candidates from
+     `QueryElement(edge).adjacentFaces`; reference-face refs MUST carry an anchor (the face
+     descriptor `center`) or congruent-twin faces tie; serde form `skip_serializing_if =
+     "Vec::is_empty"` (array, like `edges`); Fillet-must-not-carry-it enforced in
+     `validate_edge_op_distances` via `extra`; the refusal diagnostic needs `severity:"error"`;
+     "required" rule = on `AddOperation` with `distance2`/`angleDeg`, and on
+     `UpdateOperationParams` that INTRODUCES the asymmetry or changes `edgeIds` — a scalar edit on
+     a legacy record stays legacy (repaired via §9), load/save never validates; Fillet→Chamfer
+     flip producing asymmetry must author the refs in the same command; §14 must mark the two
+     fixtures as OWED and cite the measured mirror once the probe records it.
+   - Fixture recipes (from the audit): `chamfer_reference_face.ndjson` pins `adjacentFaces` sorted
+     + deduped, promotion of the NON-smaller-ordinal face, the face ref accepted in its
+     `inputs[]` slot, identical `elementMapDelta`/`geometry` signature across an ordinal-permuting
+     upstream op, and the `NOT_ADJACENT` refusal; `…_legacy_needsrepair.ndjson` pins no-edit
+     success, `editedFrom < stepIndex` → needsRepair with refId + `legacyReferenceFace`, and
+     `editedFrom == stepIndex` → still succeeds.
+   Then T5.2 worker → T5.3 Rust → T5.4 FE → adversarial review → full L3 → commit E → push.
+3. Gate recipe (suites alone, main thread; ~50 min): `cmake --build worker/build --parallel 12`
+   → `ctest --test-dir worker/build` → `scripts/check-worker-stdout-hygiene.sh` →
+   `ONECAD_OCCT_ROOT=$HOME/.onecad-occt/8.0.1 scripts/build-worker.sh Release` → from
+   `src-tauri`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+   AND `cargo +1.98.0 clippy …` (toolchain installed; use a scratch `CARGO_TARGET_DIR`),
+   `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test
+   --workspace --no-fail-fast` → `bunx tsc --noEmit` → `bun run test` → hex grep → the three
+   QA verifiers → kernelbench T0 `run`/`report`/`compare`/`semantic-compare` → `bun run e2e`
+   (both projects; snapshot `find src e2e … | sort | xargs md5 -q | md5 -q` before/after).
+4. Subagent build dirs `worker/build-t43`, `-t44`, `-t50` are gitignored scratch — delete freely.
+   Subagent memories under `.claude/agent-memory/` are TRACKED (committed in `e781272`).
+
+## Open questions
+
+- WP-F `refId` naming for the face refs in `inputs[]` — pending the audit.
+- Whether repair rewrites the frozen `intent.anchor` (WP-A residual); resolver-axis bump.
+- WP-H/I/J need their own plan after WP-F (probes listed in the audit plan
+  `act-as-senior-cad-glimmering-wreath.md`).
+- User-run gates still owed: 19-row `MANUAL_RELEASE_GATES.md`, Tauri smoke (now incl. project
+  edges + region anchor + warning badge), dirty vendor STEP for G4, WP-X dogfood with the
+  default parts (NEMA17 mount on Rollco 20×20, SG90 bracket).
+
+## Pointers
+
+- Tasks → TODO.md § KERNEL HARDENING § Now · Snapshot → CURRENT_STATE.md § NOW ·
+  Plan + Run log → `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md` ·
+  WP-F design draft (may be gone) → session scratchpad `wpf_design_draft.md`; plan § E is authoritative.
+
+---
+
 # Handoff — KERNEL HARDENING (WP-C/WP-D/WP-A/WP-E landed, gated, reviewed; commit A carved from the combined tree)
 
 Session 25 · 2026-09-02 (evening) · plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`

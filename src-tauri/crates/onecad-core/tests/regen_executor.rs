@@ -102,6 +102,7 @@ fn symmetric_repair_item(step: usize, ref_id: &str) -> RepairItem {
         scoring_version: None,
         seeded: false,
         ordinal_anchor: None,
+        seed_edge_id: None,
     }
 }
 

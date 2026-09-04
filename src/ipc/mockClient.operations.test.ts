@@ -320,6 +320,23 @@ describe("mockClient operations", () => {
 
   // ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ──────────────
 
+  /**
+   * The op-shaped extras an ASYMMETRIC chamfer must carry (SCHEMA §7.3, WP-F): one
+   * `{edgeId, faceId}` pair plus the pair's FACE ref in the trailing `inputs` slot.
+   * The mock refuses a pair-less asymmetric chamfer exactly as core does, so these
+   * value-text cases have to author a well-formed record.
+   */
+  const withReferenceFace = {
+    inputs: [
+      { primary: { bodyId: "body1", elementId: "el_e", kind: "edge" as const } },
+      {
+        primary: { bodyId: "body1", elementId: "el_f", kind: "face" as const },
+        anchor: { worldPoint: [1, 2, 3] as [number, number, number] },
+      },
+    ],
+    referenceFaces: [{ edgeId: "el_e", faceId: "el_f" }],
+  };
+
   /** A committed equal-leg Chamfer, and its record id. */
   async function commitChamfer(radius = 1): Promise<string> {
     const created = await mockClient.applyOperation({
@@ -333,8 +350,14 @@ describe("mockClient operations", () => {
   it("a two-distance chamfer's row reads `d1×d2` (mirrors dto.rs feature_value_text)", async () => {
     const res = await mockClient.applyOperation({
       opType: "Chamfer",
-      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
-      params: { mode: "Chamfer", radius: 1, distance2: 2.5, edgeIds: ["el_e"] },
+      inputs: withReferenceFace.inputs,
+      params: {
+        mode: "Chamfer",
+        radius: 1,
+        distance2: 2.5,
+        edgeIds: ["el_e"],
+        referenceFaces: withReferenceFace.referenceFaces,
+      },
     });
     const row = res.features.find((f) => f.opType === "Chamfer")!;
     expect(row.valueText).toBe("1.0×2.5 mm");
@@ -385,8 +408,14 @@ describe("mockClient operations", () => {
   it("a distance-angle chamfer's row reads `d1 mm ∠a°` (mirrors dto.rs feature_value_text)", async () => {
     const res = await mockClient.applyOperation({
       opType: "Chamfer",
-      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
-      params: { mode: "Chamfer", radius: 1, angleDeg: 30, edgeIds: ["el_e"] },
+      inputs: withReferenceFace.inputs,
+      params: {
+        mode: "Chamfer",
+        radius: 1,
+        angleDeg: 30,
+        edgeIds: ["el_e"],
+        referenceFaces: withReferenceFace.referenceFaces,
+      },
     });
     const row = res.features.find((f) => f.opType === "Chamfer")!;
     // Byte-identical to the Rust string pinned by

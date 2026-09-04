@@ -197,6 +197,85 @@ describe("filletParams — R-WP2.1 dual edge rule (AddOperation from UI selectio
     expect(both.angleDeg).toEqual({ value: 30 });
     expect("distance2" in both).toBe(false);
   });
+
+  // ── reference faces (SCHEMA §7.3, kernel-hardening WP-F) ───────────────────
+
+  const BODY = "22222222-2222-4222-8222-222222222222";
+
+  /** An asymmetric two-edge chamfer with ONE reference-face pair, in slot order:
+   *  the two EDGE inputs, then the pair's FACE input (`inputs[N + i]`). */
+  const typedChamfer = (): OperationOp => ({
+    opType: "Chamfer",
+    inputs: [
+      { primary: { bodyId: `body_${BODY}`, kind: "edge" }, anchor: { worldPoint: [1, 2, 3] } },
+      { primary: { bodyId: BODY, kind: "edge" }, anchor: { worldPoint: [4, 5, 6] } },
+      {
+        primary: { bodyId: BODY, elementId: "el_f7", kind: "face" },
+        anchor: { worldPoint: [7, 8, 9] },
+      },
+    ],
+    params: {
+      mode: "Chamfer",
+      radius: 4,
+      distance2: 1,
+      edgeIds: ["el_e1", "el_e2"],
+      referenceFaces: [{ edgeId: "el_e1", faceId: "el_f7" }],
+      chainTangentEdges: true,
+      tangentClosureVersion: 1,
+    },
+  });
+
+  it("emits `referenceFaces` + typed `referenceFaceRefs` in lockstep, faces AFTER edges", () => {
+    const p = addedParams(typedChamfer());
+    expect(p.referenceFaces).toEqual([{ edgeId: "el_e1", faceId: "el_f7" }]);
+    const refs = p.referenceFaceRefs as WireElementRef[];
+    expect(refs).toHaveLength(1);
+    // A FACE primary on the operated body (bare uuid), element id == the pair's
+    // faceId, and the anchor core makes non-optional — without it two congruent
+    // faces tie and the ref is NeedsRepair on every replay.
+    expect(refs[0].primary).toEqual({ bodyId: BODY, elementId: "el_f7", kind: "face" });
+    expect(refs[0].anchor).toEqual({ worldPoint: [7, 8, 9] });
+    // The EDGE refs are untouched and still lockstep with `edgeIds`: the face input
+    // must not be mistaken for an edge, or slot N would rewrite edge N.
+    const edges = p.edges as WireElementRef[];
+    expect(edges.map((e) => e.primary?.elementId)).toEqual(["el_e1", "el_e2"]);
+  });
+
+  it("DROPS the pairs from an equal-leg Chamfer — it has no reference face", () => {
+    const op = typedChamfer();
+    delete (op.params as unknown as Record<string, unknown>).distance2;
+    const p = addedParams(op);
+    expect("referenceFaces" in p).toBe(false);
+    expect("referenceFaceRefs" in p).toBe(false);
+  });
+
+  it("DROPS the pairs from a Fillet — `referenceFaces` is Chamfer-only", () => {
+    const op = typedChamfer();
+    op.opType = "Fillet";
+    (op.params as unknown as Record<string, unknown>).mode = "Fillet";
+    const p = addedParams(op);
+    expect("referenceFaces" in p).toBe(false);
+    expect("referenceFaceRefs" in p).toBe(false);
+  });
+
+  it("emits NEITHER key when the face inputs are missing or do not match the pairs", () => {
+    // Core refuses `referenceFaces` without `referenceFaceRefs` (and a length
+    // mismatch) by name, so a half-authored chamfer must not marshal one of them.
+    const noFace = typedChamfer();
+    noFace.inputs = noFace.inputs!.slice(0, 2);
+    expect("referenceFaces" in addedParams(noFace)).toBe(false);
+
+    const mismatched = typedChamfer();
+    mismatched.inputs![2] = {
+      primary: { bodyId: BODY, elementId: "el_OTHER", kind: "face" },
+      anchor: { worldPoint: [7, 8, 9] },
+    };
+    expect("referenceFaces" in addedParams(mismatched)).toBe(false);
+
+    const anchorless = typedChamfer();
+    anchorless.inputs![2] = { primary: { bodyId: BODY, elementId: "el_f7", kind: "face" } };
+    expect("referenceFaces" in addedParams(anchorless)).toBe(false);
+  });
 });
 
 describe("updateScalarParamsCommand — re-edit deep-merge (Findings 3+4)", () => {
@@ -1135,10 +1214,29 @@ describe("inputPathFor mirrors the Rust wire_op_inputs slot table", () => {
       listShaped: true,
     },
     {
-      name: "chamfer: same table as fillet",
+      // Equal-leg / legacy chamfer: the edge table, exactly as Fillet's.
+      name: "chamfer without referenceFaces: same table as fillet",
       opType: "Chamfer",
       rustSlots: ["edge"],
+      params: { edgeIds: ["el_e1"] },
       paths: [{ path: "filletEdges", index: 0 }],
+      listShaped: true,
+    },
+    {
+      // SCHEMA §7.3 (WP-F): the `N` edge refs, THEN one face ref per pair. Slot 2
+      // is `<opId>.input2` — the refId a §9 repair names for pair 0.
+      name: "chamfer with referenceFaces: N edge slots, then one face slot per pair",
+      opType: "Chamfer",
+      rustSlots: ["edge", "edge", "face"],
+      params: {
+        edgeIds: ["el_e1", "el_e2"],
+        referenceFaces: [{ edgeId: "el_e1", faceId: "el_f7" }],
+      },
+      paths: [
+        { path: "filletEdges", index: 0 },
+        { path: "filletEdges", index: 1 },
+        { path: "chamferReferenceFace", index: 0 },
+      ],
       listShaped: true,
     },
     {
@@ -1289,6 +1387,39 @@ describe("inputPathFor mirrors the Rust wire_op_inputs slot table", () => {
     // would rebind a different face than the one the user clicked.
     expect(inputPathFor("OffsetFace", 0)).toBeNull();
     expect(inputPathFor("OffsetFace", 1)).toBeNull();
+  });
+
+  it("a Chamfer with NO stored params refuses rather than guessing where the edges end", () => {
+    // Without `edgeIds` there is no boundary between the edge slots and the
+    // trailing reference-FACE slots (SCHEMA §7.3, WP-F), so slot k could be either.
+    // Guessing `filletEdges{k}` would write a face ref into an EDGE slot — the H9
+    // silent mis-repair this table exists to prevent.
+    expect(inputPathFor("Chamfer", 0)).toBeNull();
+    expect(inputPathFor("Chamfer", 0, { edgeIds: "nope" })).toBeNull();
+    // A Fillet has no trailing slots at all, so it still answers without params.
+    expect(inputPathFor("Fillet", 0)).toEqual({ path: "filletEdges", index: 0 });
+  });
+
+  it("a legacyReferenceFace repair CREATES the pair, keyed by the item's seedEdgeId", () => {
+    // SCHEMA §9: the refId names an EMPTY slot (`index === referenceFaces.length`),
+    // and core refuses a create whose `edgeId` is not one of the chamfer's edgeIds —
+    // so the seed edge is echoed back verbatim rather than re-derived.
+    const params = { edgeIds: ["el_e1", "el_e2"], referenceFaces: [] };
+    expect(inputPathFor("Chamfer", 2, params, "el_e1")).toEqual({
+      path: "chamferReferenceFace",
+      index: 0,
+      edgeId: "el_e1",
+    });
+    expect(inputPathFor("Chamfer", 3, params, "el_e2")).toEqual({
+      path: "chamferReferenceFace",
+      index: 1,
+      edgeId: "el_e2",
+    });
+    // No seed edge (a REBIND of an existing pair): the key is omitted, and core
+    // then leaves the stored pair's own edge in place.
+    expect(
+      inputPathFor("Chamfer", 2, { edgeIds: ["el_e1", "el_e2"], referenceFaces: [] }),
+    ).toEqual({ path: "chamferReferenceFace", index: 0 });
   });
 
   it("an Extrude with NO stored params refuses rather than guessing a direction", () => {

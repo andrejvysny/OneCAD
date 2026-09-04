@@ -1,0 +1,108 @@
+# CANONICAL §7.3 fixture — Chamfer `referenceFaces` (kernel-hardening WP-F, 2026-09-03):
+# the face an asymmetric chamfer measures `radius` on is a PERSISTED typed ref, not
+# "the adjacent face with the smaller snapshot-scoped ordinal".
+#
+# WHY THIS FIXTURE EXISTS (the defect was measured red-first on `e781272` by
+# worker/tests/test_chamfer_reference_face.cpp on ITS OWN box and edge; the
+# ordinals below were measured directly on THIS model, 2026-09-03, OCCT 8.0.1): a
+# Ø6 hole in the -Y end wall reorders `TopExp::MapShapes` — the +Z top face and the
+# -X wall swap ordinal order — so the legacy rule moves the 4 mm leg from the wall
+# to the top with the removed volume (80 mm³), the face count and every existing
+# check identical. Which PHYSICAL face carries the 4 mm leg is a number, and numbers are
+# pinned in ctest (the house split); what this file pins is the PROTOCOL a Rust or
+# frontend reader branches on.
+#
+# THE BOX. Sketch (0,0)-(40,0)-(40,20)-(0,20) on the XY frame (sketch u → world +Y,
+# v → world -X), extruded 10: world x ∈ [-20, 0], y ∈ [0, 40], z ∈ [0, 10]. Face
+# ordinals on the plain box, measured 2026-09-03 (OCCT 8.0.1): f:1 +X wall, f:2 +Y
+# end wall, f:3 -X wall, f:4 -Y end wall, f:5 bottom, f:6 top. The chamfered edge is
+# e:10 — top ∩ -X wall, centre (-20, 20, 10) — whose adjacent faces are f:3 and f:6;
+# the legacy rule therefore measured `radius` on the -X WALL. e:12 is top ∩ -Y end
+# wall (centre (-10, 0, 10)); it meets e:10 at a 90° corner, so the two are two
+# CONTOURS. After the -Y end-wall hole (round D) the order is f:5 top < f:6 -X wall
+# and the same edge is e:13: exactly the reorder that mirrored the legs.
+#
+# EVERY REFUSED ROUND RUNS AGAINST THE SAME HEAD (`DiscardPrepared` after each), and
+# `GetWorkerHead` re-asserts the head after the refusals. `preparedSnapshotId`
+# climbs across discarded rounds (a monotonic scratch counter — see
+# chamfer_angle_distance.ndjson), which is why the accepted round D lands on
+# snapshot 5, not 2.
+#
+# NOT pinned here, pinned in ctest: the geometry of every round; `IsSame`
+# de-duplication of `adjacentFaces` on a cylinder seam edge (a box has none);
+# `CHAMFER_REFERENCE_FACE_CONFLICT` (needs two pairs on one TANGENT chain); the
+# descriptor rung for a face ref (every face ref here is a bound id, so it binds on
+# the identity rung — the evidence MUST is an authoring rule, §7.3).
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_chamfer_reference_face","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The subject: the 40×20×10 box.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":60,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":60,"payload":{"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":60,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":60,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":60,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":60,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# Rust-minted durable identities for the edge, its two adjacent faces, the -Y end
+# wall the hole goes into, the bottom (the NOT_ADJACENT decoy) and a second-contour edge.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"e:10","elementId":"el_edge","kind":"edge"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_wall","kind":"face"},{"bodyId":"body_op1","topoKey":"f:4","elementId":"el_end","kind":"face"},{"bodyId":"body_op1","topoKey":"f:5","elementId":"el_bottom","kind":"face"},{"bodyId":"body_op1","topoKey":"e:12","elementId":"el_edge2","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"e:10","elementId":"el_edge","kind":"edge"},{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op1","topoKey":"f:3","elementId":"el_wall","kind":"face"},{"bodyId":"body_op1","topoKey":"f:4","elementId":"el_end","kind":"face"},{"bodyId":"body_op1","topoKey":"f:5","elementId":"el_bottom","kind":"face"},{"bodyId":"body_op1","topoKey":"e:12","elementId":"el_edge2","kind":"edge"}]}}}
+# HEAD BEFORE. Every refused round below is compared against this.
+{"send":{"v":1,"t":"req","id":5,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# THE HANDSHAKE (§7.6): every accepted edge reports its contour and its adjacent faces
+# as TopoKeys, face-ordinal ASCENDING. `adjacentFaces[0]` is the legacy smaller-ordinal
+# face — the -X wall here — so a frontend default pick reproduces yesterday's geometry.
+{"send":{"v":1,"t":"req","id":6,"verb":"PrepareEdgeOp","args":{"snapshotId":1,"mode":"Chamfer","pickedEdges":[{"elementId":"el_edge"}],"chainTangentEdges":true}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"snapshotId":1,"targetBodyId":"body_op1","edges":[{"topoKey":"e:10","picked":true,"contour":0,"adjacentFaces":["f:3","f:6"]}],"refusal":null}}}
+# Two picks that meet at a corner are two CONTOURS: one `referenceFaces` pair each.
+{"send":{"v":1,"t":"req","id":7,"verb":"PrepareEdgeOp","args":{"snapshotId":1,"mode":"Chamfer","pickedEdges":[{"elementId":"el_edge"},{"elementId":"el_edge2"}],"chainTangentEdges":true}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"snapshotId":1,"targetBodyId":"body_op1","edges":[{"topoKey":"e:10","picked":true,"contour":0,"adjacentFaces":["f:3","f:6"]},{"topoKey":"e:12","picked":true,"contour":1,"adjacentFaces":["f:4","f:6"]}],"refusal":null}}}
+# ROUND A — the typed pair. The face ref rides inputs[1] (N = 1 edge ref, so the
+# pair's slot is `op2.input1`) and names the TOP — the face the legacy rule would NOT
+# have chosen. Same `bodyEvents` / `elementMapDelta` as an equal-leg chamfer: the
+# pair selects the geometry, never the identity bookkeeping.
+{"send":{"v":1,"t":"req","id":8,"verb":"ExecutePlan","args":{"jobId":61,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}},{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"},"anchor":{"worldPoint":[-10,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge","faceId":"el_top"}]}}]}}}
+{"expect":{"v":1,"t":"event","id":8,"event":"planStep","stepIndex":2,"jobId":61,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"removed":["el_edge"]},"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":61,"result":{"planPrepared":true,"preparedSnapshotId":2,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"DiscardPrepared","args":{"jobId":61}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":61,"result":{"discarded":true}}}
+# ROUND B — a face that is NOT adjacent to the paired edge (the bottom) is refused BY
+# NAME, top-level `OP_FAILED`, `stage:"resolve"`, both ids in the evidence. Never the
+# ordinal rule, never the nearest face.
+{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":62,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}},{"primary":{"bodyId":"body_op1","elementId":"el_bottom","kind":"face"},"anchor":{"worldPoint":[-10,20,0]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge","faceId":"el_bottom"}]}}]}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":62,"result":{"planPrepared":true,"preparedSnapshotId":3,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":2,"status":"opFailed","message":"$present","diagnostics":[{"severity":"error","code":"CHAMFER_REFERENCE_FACE_NOT_ADJACENT","message":"$present","stage":"resolve","evidence":{"chamfer":{"edge":"el_edge","face":"el_bottom"}}}]}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"DiscardPrepared","args":{"jobId":62}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":62,"result":{"discarded":true}}}
+# ROUND C — two contours, one pair: the UNCOVERED contour is never a refusal. It halts
+# `needsRepair` with the op-built §9 `legacyReferenceFace` item on the slot the
+# created pair will occupy — N = 2 edge refs, 1 existing pair, so `op2.input3` — naming
+# the contour's seed edge and its two adjacent faces (f:4 -Y end wall, f:6 top) at a
+# deliberate tie. A partially typed record converges one pick at a time.
+{"send":{"v":1,"t":"req","id":12,"verb":"ExecutePlan","args":{"jobId":63,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":2,"ops":[{"opType":"Chamfer","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}},{"primary":{"bodyId":"body_op1","elementId":"el_edge2","kind":"edge"},"anchor":{"worldPoint":[-10,0,10]}},{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"},"anchor":{"worldPoint":[-10,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge","el_edge2"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge","faceId":"el_top"}]}}]}}}
+{"expect":{"v":1,"t":"event","id":12,"event":"planStep","stepIndex":2,"jobId":63,"payload":{"bodyEvents":[],"needsRepair":[{"refId":"op2.input3","elementId":"","ladderFailed":"descriptor","reason":"legacyReferenceFace","scoringVersion":4,"seedEdgeId":"el_edge2","candidates":[{"topoKey":"f:4","score":0.5,"margin":0.0,"worldPos":[-10.0,0.0,5.0]},{"topoKey":"f:6","score":0.5,"margin":0.0,"worldPos":[-10.0,20.0,10.0]}],"anchor":{"worldPoint":[-10.0,0.0,10.0]},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":63,"result":{"planPrepared":true,"preparedSnapshotId":4,"lastValidStep":null,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":2,"status":"needsRepair","refCount":1}],"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"DiscardPrepared","args":{"jobId":63}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":63,"result":{"discarded":true}}}
+# THE HEAD SURVIVED THE REFUSAL AND THE HALT, field for field.
+{"send":{"v":1,"t":"req","id":14,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+# ROUND D — THE REORDER. A Ø6 hole in the -Y end wall (disjoint from both chamfered
+# faces) is inserted BEFORE the chamfer; it reorders the face map (top f:5 < -X wall
+# f:6, edge e:13). The typed pair still resolves — through the partition's history
+# rebind, not through any ordinal — and the chamfer commits. ctest pins that the 4 mm
+# leg is on the TOP in this round AND in round A.
+{"send":{"v":1,"t":"req","id":15,"verb":"ExecutePlan","args":{"jobId":64,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Hole","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_end","kind":"face"}}],"params":{"targetBodyId":"body_op1","face":{"primary":{"bodyId":"body_op1","elementId":"el_end","kind":"face"}},"point":[-10.0,0.0,5.0],"holeType":"simple","diameter":6.0,"depth":10.0}},{"opType":"Chamfer","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_edge","kind":"edge"},"anchor":{"worldPoint":[-20,20,10]}},{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"},"anchor":{"worldPoint":[-10,20,10]}}],"params":{"mode":"Chamfer","radius":4.0,"distance2":1.0,"edgeIds":["el_edge"],"chainTangentEdges":true,"tangentClosureVersion":1,"targetBodyId":"body_op1","referenceFaces":[{"edgeId":"el_edge","faceId":"el_top"}]}}]}}}
+{"expect":{"v":1,"t":"event","id":15,"event":"planStep","stepIndex":2,"jobId":64,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"event","id":15,"event":"planStep","stepIndex":3,"jobId":64,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"elementMapDelta":{"removed":["el_edge"]},"needsRepair":[],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"jobId":64,"result":{"planPrepared":true,"preparedSnapshotId":5,"lastValidStep":3,"stoppedReason":"completed","perStepResults":[{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]},{"stepIndex":3,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":16,"verb":"AcceptPrepared","args":{"jobId":64,"documentRevision":2,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"jobId":64,"result":{"accepted":true,"snapshotId":5,"documentRevision":2}}}
+# The reference face is still there on the committed head; the chamfer CONSUMED its
+# edge (the same fact `elementMapDelta.removed` reported).
+{"send":{"v":1,"t":"req","id":17,"verb":"QueryElement","args":{"snapshotId":5,"elementId":"el_top"}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"result":{"elementId":"el_top","bodyId":"body_op1","kind":"face","present":true}}}
+{"send":{"v":1,"t":"req","id":18,"verb":"QueryElement","args":{"snapshotId":5,"elementId":"el_edge"}}}
+{"expect":{"v":1,"t":"resp","id":18,"ok":true,"result":{"present":false}}}
+{"send":{"v":1,"t":"req","id":19,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":19,"ok":true,"result":{"goodbye":true}}}

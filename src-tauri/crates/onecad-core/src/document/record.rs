@@ -350,7 +350,15 @@ impl KnownOperation {
     pub fn element_refs_mut(&mut self) -> Vec<&mut ElementRef> {
         match self {
             KnownOperation::Fillet(p) => p.edges.iter_mut().collect(),
-            KnownOperation::Chamfer(p) => p.edges.iter_mut().collect(),
+            // NORMATIVE slot order (SCHEMA §7.3): the `N` edge refs, then one
+            // reference-FACE ref per `referenceFaces` pair in pair order.
+            // `wire::wire_op_inputs` and `document_runtime::element_ref_input`
+            // mirror this table; a divergence is a silent mis-repair (H9).
+            KnownOperation::Chamfer(p) => p
+                .edges
+                .iter_mut()
+                .chain(p.reference_face_refs.iter_mut())
+                .collect(),
             KnownOperation::Shell(p) => p.faces.iter_mut().collect(),
             // The two ToFace gates mirror `wire_op_inputs` exactly: a `target_face`
             // left over from a mode the op no longer runs in is NOT lowered, so
@@ -1416,12 +1424,14 @@ pub struct FilletParams {
 pub struct ChamferParams {
     pub radius: Scalar,
     /// Distance on the NON-reference adjacent face. Absent ⇒ equal-leg (`radius`
-    /// on both faces). See [`ChamferParams::validate`] and SCHEMA §7.3 for the
-    /// deterministic reference-face rule the worker applies.
+    /// on both faces). See [`ChamferParams::validate`] and SCHEMA §7.3 for which
+    /// adjacent face is the reference: the one named by this contour's
+    /// [`reference_faces`](Self::reference_faces) pair. There is no fallback — a
+    /// contour with no pair HALTS `needsRepair` (the ordinal rule that used to
+    /// stand in is gone, WP-F review 2026-09-04).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance2: Option<Scalar>,
-    /// Angle in DEGREES between the chamfer face and the deterministic reference
-    /// face (the adjacent face with the smaller resolved face ordinal — the same
+    /// Angle in DEGREES between the chamfer face and the reference face (the SAME
     /// face `radius` is measured on, and the same rule `distance2` uses for its
     /// NON-reference partner), measured in the material. On a 90° dihedral,
     /// `angleDeg` 45 is the equal-leg chamfer. Absent ⇒ this is not a
@@ -1431,12 +1441,51 @@ pub struct ChamferParams {
     pub edge_ids: Vec<ElementId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<ElementRef>,
+    /// The PERSISTED answer to "which adjacent face is `radius` measured on"
+    /// (SCHEMA §7.3 `referenceFaces`, kernel-hardening WP-F 2026-09-03): one
+    /// `{edgeId, faceId}` pair per tangent CONTOUR of the frozen closure, keyed by
+    /// any edge of that contour. On a record with no `tangent_closure_version`
+    /// there is no frozen closure, so the pairs are keyed per EDGE — one per
+    /// `edge_ids` entry. Array order carries no meaning; the `edge_id` is the key.
+    ///
+    /// Empty is the LEGACY form, and it HALTS: an uncovered contour raises the
+    /// SCHEMA §9 `legacyReferenceFace` item in EVERY lane — no `editedFrom` gate,
+    /// no ordinal fallback — and the repair CREATES the pair. Skip-none, so every
+    /// pre-WP-F document still serializes byte-identically and the planner hash is
+    /// unmoved while the field is absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_faces: Vec<ChamferReferenceFace>,
+    /// The typed home for each [`reference_faces`](Self::reference_faces) pair's
+    /// FACE — same index, same element id — carrying the descriptor + anchor
+    /// evidence the worker's ladder scores. The same dual-field discipline
+    /// `edge_ids`/`edges` use, enforced by [`ChamferParams::validate`].
+    ///
+    /// **Document-only.** The WIRE never carries this inside `params`: the face
+    /// refs ride `inputs[N + i]` after the `N` edge refs (SCHEMA §7.3 slot order),
+    /// so `worker::wire::lower_operation` strips the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_face_refs: Vec<ElementRef>,
     #[serde(default = "default_true")]
     pub chain_tangent_edges: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_closure_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
+}
+
+/// One SCHEMA §7.3 `referenceFaces` pair: the face an asymmetric chamfer measures
+/// `radius` on, keyed by an edge of the contour it applies to.
+///
+/// `edge_id` MUST be an entry of [`ChamferParams::edge_ids`] and MUST NOT repeat
+/// (both refused at authoring); `face_id` is the Rust-minted id of a face the
+/// frontend promoted from that edge's `PrepareEdgeOp` `adjacentFaces` list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChamferReferenceFace {
+    /// An edge of the contour this reference face applies to.
+    pub edge_id: ElementId,
+    /// The adjacent face `radius` is measured on.
+    pub face_id: ElementId,
 }
 
 impl ChamferParams {
@@ -1453,11 +1502,21 @@ impl ChamferParams {
     /// either endpoint is a degenerate chamfer face (coplanar with the reference
     /// face, or folded back onto it) rather than a shape the kernel can build. The
     /// bound is deliberately LOOSE — whether a given angle actually fits the local
-    /// dihedral is the worker's to decide, as a RECOVERABLE `OP_FAILED`.
     ///
     /// `radius` itself is deliberately NOT range-checked here: the "too small"
     /// floor is the worker's `kMinValue` (1e-3) and is a RECOVERABLE `OP_FAILED`,
     /// not a rejected edit — moving it would change behaviour this WP does not own.
+    ///
+    /// SCHEMA §7.3 `referenceFaces` structure (kernel-hardening WP-F): every pair's
+    /// `edgeId` is an entry of `edge_ids` and appears at most once, an EQUAL-LEG
+    /// chamfer carries no pairs at all (it has no reference face for one to name),
+    /// and `reference_face_refs` stays in lockstep with the pairs — same length,
+    /// same element id at each index, a FACE primary carrying an anchor, on the
+    /// same body the edges operate on. The anchor is not optional here: without it
+    /// two congruent faces tie and the ref is `NeedsRepair` on every replay.
+    ///
+    /// Whether a pair is REQUIRED is not decided here — that needs the prior record
+    /// (see `edit::session::validate_edge_op_distances`).
     pub fn validate(&self) -> Result<(), String> {
         if let Some(d2) = self.distance2.as_ref() {
             if self.angle_deg.is_some() {
@@ -1480,6 +1539,98 @@ impl ChamferParams {
                     "Chamfer angleDeg must be a finite angle strictly between 0 and 180 degrees (got {})",
                     angle.value
                 ));
+            }
+        }
+        self.validate_reference_faces()
+    }
+
+    /// True when this chamfer measures its two legs on DIFFERENT faces — the only
+    /// shape that has a reference face at all (SCHEMA §7.3).
+    #[must_use]
+    pub fn is_asymmetric(&self) -> bool {
+        self.distance2.is_some() || self.angle_deg.is_some()
+    }
+
+    /// The SCHEMA §7.3 `referenceFaces` structural rules — see
+    /// [`validate`](Self::validate) for the list and why each one is here.
+    fn validate_reference_faces(&self) -> Result<(), String> {
+        if !self.is_asymmetric() && !self.reference_faces.is_empty() {
+            return Err(
+                "an equal-leg Chamfer has no reference face and may not carry \
+                 referenceFaces (SCHEMA §7.3): set distance2 or angleDeg, or clear the pairs"
+                    .to_string(),
+            );
+        }
+        if self.reference_faces.is_empty() && !self.reference_face_refs.is_empty() {
+            return Err(
+                "Chamfer referenceFaceRefs without referenceFaces (SCHEMA §7.3): the typed \
+                 refs and the pairs are written together or not at all"
+                    .to_string(),
+            );
+        }
+        for (i, pair) in self.reference_faces.iter().enumerate() {
+            if !self.edge_ids.contains(&pair.edge_id) {
+                return Err(format!(
+                    "Chamfer referenceFaces[{i}] keys edge {} which is not in edgeIds (SCHEMA §7.3)",
+                    pair.edge_id
+                ));
+            }
+            if self.reference_faces[..i]
+                .iter()
+                .any(|earlier| earlier.edge_id == pair.edge_id)
+            {
+                return Err(format!(
+                    "Chamfer referenceFaces[{i}] repeats edge {} (SCHEMA §7.3: one pair per contour)",
+                    pair.edge_id
+                ));
+            }
+        }
+        if self.reference_faces.is_empty() {
+            return Ok(());
+        }
+        if self.reference_face_refs.len() != self.reference_faces.len() {
+            return Err(format!(
+                "Chamfer referenceFaceRefs ({}) and referenceFaces ({}) length mismatch",
+                self.reference_face_refs.len(),
+                self.reference_faces.len()
+            ));
+        }
+        // The body the edges operate on; a legacy record with no typed edges has
+        // none, and the face refs then only have to agree with each other.
+        let mut target_body = self
+            .edges
+            .iter()
+            .find_map(|e| e.primary.as_ref().map(|primary| primary.body));
+        for (i, r) in self.reference_face_refs.iter().enumerate() {
+            let primary = r.primary.as_ref().ok_or_else(|| {
+                format!("Chamfer referenceFaceRefs[{i}]: typed ref requires a FACE primary")
+            })?;
+            if primary.kind != ElementKind::Face {
+                return Err(format!(
+                    "Chamfer referenceFaceRefs[{i}]: typed ref requires a FACE primary"
+                ));
+            }
+            if primary.element != self.reference_faces[i].face_id {
+                return Err(format!(
+                    "Chamfer referenceFaceRefs[{i}]: typed ref element {} != referenceFaces[{i}].faceId {}",
+                    primary.element, self.reference_faces[i].face_id
+                ));
+            }
+            if r.anchor.is_none() {
+                return Err(format!(
+                    "Chamfer referenceFaceRefs[{i}]: a reference face ref requires an anchor \
+                     (SCHEMA §7.3 — without one two congruent faces tie on every replay)"
+                ));
+            }
+            match target_body {
+                Some(target) if primary.body != target => {
+                    return Err(format!(
+                        "Chamfer referenceFaceRefs[{i}]: typed ref body {} != operated body {target}",
+                        primary.body
+                    ));
+                }
+                Some(_) => {}
+                None => target_body = Some(primary.body),
             }
         }
         Ok(())
@@ -5588,6 +5739,8 @@ mod tests {
             angle_deg: angle_deg.map(Scalar::new),
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
+            reference_faces: Vec::new(),
+            reference_face_refs: Vec::new(),
             chain_tangent_edges: true,
             tangent_closure_version: None,
             extra: Extra::new(),

@@ -181,3 +181,49 @@ describe("mockClient analyzeEdgeOpRange", () => {
     expect(range.probesUsed).toBe(0);
   });
 });
+
+describe("mockClient prepareEdgeOp — SCHEMA §7.6 contour + adjacentFaces (WP-F)", () => {
+  it("reports the seed box's TRUE adjacent faces, face-ordinal ascending", async () => {
+    // `e:0` runs "000"→"100": the two faces whose corner rings hold both ends are
+    // `f:3` (−Y) and `f:5` (−Z). Both come from the same tables `makeBoxMesh`
+    // renders, so this describes the box the viewport is actually drawing.
+    const res = await mockClient.prepareEdgeOp({
+      mode: "Chamfer",
+      chainTangentEdges: true,
+      pickedEdges: [{ bodyId: "body1", topoKey: "e:0" }],
+    });
+    expect(res.refusal).toBeNull();
+    expect(res.edges[0].adjacentFaces).toEqual(["f:3", "f:5"]);
+    expect(res.edges[0].contour).toBe(0);
+  });
+
+  it("ranks `contour` by picked edge ORDINAL, not by pick order", async () => {
+    // SCHEMA §7.6: contour k is seeded by the k-th SMALLEST picked edge ordinal.
+    // The mock has no tangency analysis, so every pick is its own contour — which
+    // is the honest answer for a box, whose edges are all creases.
+    const res = await mockClient.prepareEdgeOp({
+      mode: "Chamfer",
+      chainTangentEdges: true,
+      pickedEdges: [
+        { bodyId: "body1", topoKey: "e:7" },
+        { bodyId: "body1", topoKey: "e:2" },
+      ],
+    });
+    expect(res.edges.map((e) => [e.topoKey, e.contour])).toEqual([
+      ["e:7", 1],
+      ["e:2", 0],
+    ]);
+  });
+
+  it("OMITS `adjacentFaces` for a body it cannot describe — never fabricates one", async () => {
+    // MOCK LIMIT stated as absence: a synthesized body has no analytic topology
+    // here, and inventing a face would be the silent wrong bind WP-F removes.
+    const res = await mockClient.prepareEdgeOp({
+      mode: "Chamfer",
+      chainTangentEdges: true,
+      pickedEdges: [{ bodyId: "body-synthesized", topoKey: "e:0" }],
+    });
+    expect(res.edges[0].adjacentFaces).toBeUndefined();
+    expect(res.edges[0].contour).toBe(0);
+  });
+});

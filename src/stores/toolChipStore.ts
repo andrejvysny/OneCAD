@@ -178,6 +178,15 @@ export interface EdgeOpChipOpts extends ChipAnchorOpts {
   chamferAngleDeg?: number | null;
   /** The chamfer angle was typed or cleared. */
   onChamferAngle?: (angleDeg: number | null) => void;
+  /**
+   * Whether the [Flip reference] control is offered (SCHEMA §7.3 `referenceFaces`,
+   * kernel-hardening WP-F). Only an ASYMMETRIC chamfer has a reference face, and
+   * only an edge with TWO adjacent faces has another one to flip to — the
+   * controller resolves both and pushes the answer with `setChamferFlip`.
+   */
+  showChamferFlip?: boolean;
+  /** Swap every contour's reference face to the other adjacent face. */
+  onChamferFlip?: () => void;
 }
 
 /**
@@ -434,6 +443,12 @@ export interface ToolChipState {
    * did not type visibly empties. Rendered only while `edgeOp === "Chamfer"`.
    */
   chamferAngleDeg: number | null;
+  /**
+   * Whether the [Flip reference] control renders (WP-F). See
+   * {@link EdgeOpChipOpts.showChamferFlip} — it is `false` for every op that is
+   * not an asymmetric chamfer with a second adjacent face to flip to.
+   */
+  showChamferFlip: boolean;
   /** How the armed offset reads its distance (SCHEMA §7.3 `distanceType`). */
   distanceType: OffsetDistanceType;
   /** Which distance types the armed offset's segment group offers. */
@@ -553,6 +568,7 @@ export interface ToolChipState {
   onEdgeOp: ((edgeOp: EdgeOpKind) => void) | null;
   /** Second chamfer distance typed / cleared (armed edge-op cluster). */
   onDistance2: ((distance2: number | null) => void) | null;
+  onChamferFlip: (() => void) | null;
   /** Chamfer angle typed / cleared (armed edge-op cluster). */
   onChamferAngle: ((angleDeg: number | null) => void) | null;
   /** Axis-reset pressed (revolve chip). */
@@ -760,6 +776,9 @@ export interface ToolChipState {
   setDistance2(distance2: number | null): void;
   /** Update just the chamfer angle in DEGREES (`null` = the mode is off). */
   setChamferAngle(chamferAngleDeg: number | null): void;
+  /** Show/hide the [Flip reference] control (WP-F) — resolved asynchronously by
+   *  the controller once the closure's adjacency is known. */
+  setChamferFlip(showChamferFlip: boolean): void;
   /** Route a typed character to the primary numeric field (see `primaryEntry`). */
   beginPrimaryEntry(seed: string): void;
   /** Restate what the armed operation will produce (see `resultSummary`). */
@@ -804,6 +823,8 @@ const CLEARED = {
   distance2: null as number | null,
   onDistance2: null as ((distance2: number | null) => void) | null,
   chamferAngleDeg: null as number | null,
+  showChamferFlip: false,
+  onChamferFlip: null,
   onChamferAngle: null as ((angleDeg: number | null) => void) | null,
   showEdgeOpSegments: false,
   onEdgeOp: null,
@@ -935,6 +956,8 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
       onDistance2: opts?.onDistance2 ?? null,
       chamferAngleDeg: opts?.chamferAngleDeg ?? null,
       onChamferAngle: opts?.onChamferAngle ?? null,
+      showChamferFlip: opts?.showChamferFlip ?? false,
+      onChamferFlip: opts?.onChamferFlip ?? null,
       ...resolveChipAnchor(opts),
     });
   },
@@ -1187,6 +1210,9 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
   },
   setDistance2(distance2) {
     set({ distance2 });
+  },
+  setChamferFlip(showChamferFlip) {
+    set({ showChamferFlip });
   },
   setChamferAngle(chamferAngleDeg) {
     set({ chamferAngleDeg });

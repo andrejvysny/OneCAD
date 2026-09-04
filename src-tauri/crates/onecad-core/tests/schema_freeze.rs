@@ -14,8 +14,8 @@ mod common;
 
 use common::*;
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, OffsetDistanceType, Operation,
-    OperationRecord,
+    BooleanMode, ChamferReferenceFace, ExtrudeMode, ExtrudeParams, KnownOperation,
+    OffsetDistanceType, Operation, OperationRecord,
 };
 use onecad_core::document::refs::AxisRef;
 use onecad_core::document::variables::Scalar;
@@ -677,4 +677,25 @@ fn revolve_with_a_region_anchor_is_snapshot_locked() {
     };
     p.profile.as_mut().expect("profile").region_anchor = Some([12.0, 8.0]);
     insta::assert_json_snapshot!("operation_revolve_with_region_anchor", rec);
+}
+
+/// A typed ASYMMETRIC Chamfer (kernel-hardening WP-F, SCHEMA §7.3): `distance2`
+/// plus one `referenceFaces` pair and its typed `referenceFaceRefs` twin.
+///
+/// The ABSENT case needs no new snapshot: `operation_chamfer` already pins it,
+/// and the fact that it does NOT move when these two fields are added is the
+/// byte-identity guarantee for every pre-WP-F document.
+#[test]
+fn chamfer_with_reference_faces_is_snapshot_locked() {
+    let mut rec = record(24, "Chamfer typed", op_chamfer());
+    let Operation::Known(KnownOperation::Chamfer(p)) = &mut rec.op else {
+        panic!("expected a Chamfer")
+    };
+    p.distance2 = Some(Scalar::new(1.0));
+    p.reference_faces = vec![ChamferReferenceFace {
+        edge_id: elem_e14(),
+        face_id: ElementId::new("el_face_1"),
+    }];
+    p.reference_face_refs = vec![face_ref()];
+    insta::assert_json_snapshot!("operation_chamfer_with_reference_faces", rec);
 }
