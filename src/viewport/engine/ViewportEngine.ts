@@ -763,8 +763,25 @@ export class ViewportEngine {
 
   invalidate(): void {
     if (this.disposed) return;
+    if (this.debug) this.recordInvalidateCaller();
     this.dirty = true;
     this.scheduleFrame();
+  }
+
+  /**
+   * `?vpdebug` only: keep the last few `invalidate()` call stacks on
+   * `window.__vpInvalidates` so an on-demand-rendering assertion that fails
+   * (a frame in an idle window — `section-view.spec.ts` "renders zero frames",
+   * red once on a loaded CI runner and never reproduced locally in 30 runs) can
+   * NAME the caller instead of leaving a bare frame count. Never on in
+   * production: `Error().stack` per call is far too costly for drag-frequency
+   * paths, which is exactly why this sits behind the debug flag.
+   */
+  private recordInvalidateCaller(): void {
+    const w = window as unknown as { __vpInvalidates?: Array<{ at: number; stack: string }> };
+    const ring = (w.__vpInvalidates ??= []);
+    ring.push({ at: performance.now(), stack: new Error().stack ?? "" });
+    if (ring.length > 8) ring.splice(0, ring.length - 8);
   }
 
   private scheduleFrame(): void {

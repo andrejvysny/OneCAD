@@ -3,8 +3,8 @@
 Session 27 · 2026-09-03/04 · plan `~/.claude/plans/resume-check-what-virtual-globe.md` (Run log at the bottom) · next plan `~/.claude/plans/kernel-hardening-p1-wp-hij.md` (DRAFT)
 
 > Read the Run log first — every task, ruling, measured count and deviation of this session. `TODO.md`
-> § KERNEL HARDENING § WP-F is the gate ledger. Commit E **`daa37e3`** (`feat(kernel): chamfer reference face …`) is the
-> only commit of this session and is on origin/master (CI run pending at handoff).
+> § KERNEL HARDENING § WP-F is the gate ledger. Commit E **`daa37e3`** (`feat(kernel): chamfer reference face …`) plus the ledger chore
+> `888c15c` are on origin/master (CI runs 33889838491 / 33889893842 queued at handoff).
 
 ## Goal
 
@@ -60,11 +60,16 @@ silently mirrored the legs is gone. Then draft the next program (WP-I/H/J).
 2. Check CI for `daa37e3` (hosted lanes; `tauri-composition` times out on the OCCT build, `linux-worker`
    self-hosted is offline — both known). Delete the stray untracked `src-tauri/.claude/` (a deletion was
    denied by the permission mode this session, so it is still there).
-3. Next program: `~/.claude/plans/kernel-hardening-p1-wp-hij.md` — a DRAFT with five user decisions listed
-   (order I→H→J, the concentric sign representation, refuse-vs-warn on empty export bodies, bounds
-   numbers, WP-G still deferred). An adversarial plan review was run at the end of session 27 — its
-   findings are recorded in the plan file's "Plan review" section (or in the Run log if the session ended
-   first). Start with the probes (I0/H0/J0), protocol audit before code, ≤2 implementers, adversarial
+3. Next program: `~/.claude/plans/kernel-hardening-p1-wp-hij.md` — REVIEWED (an adversarial plan review
+   found four wrong premises and they are folded in: the worker never reads `baseCheckpoint` and the fence
+   compares against the HEAD hash, so restore goes into a `restored_base_` slot with a fourth fence case;
+   a status thread alone would remove the only wedged-worker kill, so `GetWorkerHead` gains `inflight` and
+   Rust a per-verb wall deadline; the v4 `outward` normal is radial, so the concentric sign comes from the
+   face's axial UV range + explicit `axisSign`; `Session::head()` already exists — no shadow copy; plus a
+   LIVE bug: the Dispatcher's serialization fallback ships the original binary tail). It is BLOCKED on 8
+   user decisions listed in its § Decisions (order I→H→J, `axisSign`, face-level export refusal,
+   wedged-op deadline, `baseCheckpoint` truth, optional `snapshotId` on readers, bounds numbers, WP-G).
+   Once answered: I0/H0/J0 probes red-first, protocol audit before code, ≤2 implementers, adversarial
    review BEFORE each commit.
 4. Gate recipe: `scratchpad`'s `g4.sh` is gone with the session; the sequence is in CLAUDE.md § Gate ladder
    (L3) — run suites alone, tee everything, `find src e2e -type f | sort | xargs md5 -q | md5 -q` before

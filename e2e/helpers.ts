@@ -42,8 +42,13 @@ async function bootEditor(page: Page, path: string): Promise<void> {
     await page.getByRole("button", { name: "New project" }).click();
   }
   // The editor shell (and thus the viewport canvas) only mounts after the mock
-  // newDocument() resolves and appStore flips screen → editor.
-  await expect(page.locator(`${CANVAS} canvas`)).toBeVisible();
+  // newDocument() resolves and appStore flips screen → editor. The canvas is a
+  // real WebGL2 context: under SwiftShader on a loaded CI runner (measured: a
+  // 46-minute chromium lane) context creation alone can exceed the global 8 s
+  // expect budget, so this ONE mount wait gets its own — 20 s, leaving the 45 s
+  // test budget room for the interaction that follows. No other assertion is
+  // widened.
+  await expect(page.locator(`${CANVAS} canvas`)).toBeVisible({ timeout: 20_000 });
 }
 
 /** Start screen → new document → live editor with a ready WebGL engine. */

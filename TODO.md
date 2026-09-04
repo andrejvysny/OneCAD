@@ -2,6 +2,44 @@
 
 ## KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
 
+### Now (2026-09-04, session 28 — plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
+- [x] The 8 WP-I/H/J decisions answered (plan § Decisions; two `reviewer-critical` passes folded in:
+      `axisSign` DROPPED, gear caps referenceable by spec amendment, bounds revised to
+      `teeth ≤ 400` / `sampleCount ≤ 256` / `height ≤ 1000` / fastener `length ≤ 1000` and
+      `length/pitch ≤ 500` turns; wedged deadline 180/60/30 s since the last progress frame;
+      `baseCheckpoint` made true to §7.2; `snapshotId` optional on readers; face-level export refusal).
+- [ ] Phase A — CI triage of commit E (run 33889838491): e2e-chromium **4 failed / 258 passed (46.3 min)**,
+      e2e-webkit **1 failed / 261 passed (20.3 min)**; every other hosted lane green; `tauri-composition`
+      OCCT-build timeout and `linux-worker` offline are known. Rows below as measured.
+      - [x] A1 webkit `chamfer-reference-face.spec.ts:84` — the spec polled the INTENT flag
+            (`chamferFlipped`, set synchronously at `ModelToolController.ts:3875`) then read the pairs
+            once; the pairs are re-resolved after an awaited round-trip (`:3801→:3811`) and
+            `updateDebug()` publishes both on any tick between. Fixed: null-tolerant poll on the
+            pair's `faceId`, then the flag + `edgeOpReferenceFaceError === null` asserted.
+      - [x] A2 chromium `constraint-apply.spec.ts:57`, `live-dim-circle.spec.ts:24` — canvas not
+            visible in the global 8 s expect budget (SwiftShader WebGL2 on a 2×-slow runner). Fixed:
+            the single mount wait in `helpers.ts bootEditor` gets 20 s; nothing else widened.
+      - [x] A3 chromium `filletChamfer.spec.ts:181` (direction-driven arm typed Fillet) — REPRODUCED
+            1-in-10 locally under a full vitest run; `fe-logs.json` showed the edge-op FSM never left
+            `armed`: the press landed beside a handle whose hit-region had not been rendered (the
+            helper's own WebKit note, now true for Chromium under load). Fixed in
+            `e2e/modelToolHelpers.ts dragEdgeOpHandle`: `waitForRenderedFrame` (engine `invalidate()`
+            + `__vpFrames` advance) before the handle scan, and a named `filletPhase === "dragging"`
+            assertion after the first move step. Re-measured under the same load: **10/10**.
+      - [x] A4 chromium `section-view.spec.ts:277` (idle 9 frames vs 8) — NOT reproduced: 20/20 calm
+            + 10/10 under vitest load (the section layer reconciles inside the frame; `meshSync`
+            retry and `requestAutoFit` guards hold). Named as load with no culprit; to make the NEXT
+            red self-explaining, `ViewportEngine.invalidate()` keeps an 8-deep `__vpInvalidates`
+            caller-stack ring under `?vpdebug` only, and the assertion prints the callers that fired
+            inside the idle window.
+      - [x] A5 gate (L2, main thread): tsc clean · vitest **318 / 5604 / 78 skipped** (twice, exit 0) ·
+            the five touched specs on chromium + webkit **54 / 0** (2.8 min) · hex 0.
+- [ ] Phase B — WP-G five fillet acceptance probes (scratchpad build, no tracked edits), verdict here.
+- [ ] Phase C — WP-I component mates: I0 probes red-first → SCHEMA + protocol audit → I2a worker ∥ I2b
+      Rust → I3 FE → adversarial review → full L3 → commit → push.
+- [ ] Delete the stray untracked `src-tauri/.claude/` — `rm` DENIED by the permission mode again this
+      session; user runs `rm -rf src-tauri/.claude` by hand.
+
 Program from the modeling-kernel correctness audit (plan file holds the full findings ledger:
 19 verified, 14 code-confirmed, ~130 unverified routed to red-first probes; the audit workflow
 itself hit the monthly spend limit at 318 agents — **no further dynamic workflows; Fable is the
@@ -360,7 +398,7 @@ attribution question arose.
       pushed. Recorded follow-ups: fragment sample memory ceiling (8192 × 1025 samples worst
       case), degenerate warning dropped on a FAILED profile, `SketchRegions` has no diagnostics
       channel, zero-minor-radius ellipse still refuses.
-- [ ] **WP-F (plan § E) — STARTED 2026-09-03, handed off mid-flight:**
+- [x] **WP-F (plan § E) — COMPLETE, commit E `daa37e3` (2026-09-04); detail rows below:**
       - [x] T5.0 probe **RED on `e781272`, measured** (`worker/tests/test_chamfer_reference_face.cpp`,
             registered as `chamfer_reference_face`, built in `worker/build-t50`): 40×20×10 box, chamfer
             `radius`=4 / `distance2`=1 on the top-front edge — plain box puts the 4 mm leg on the

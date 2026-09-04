@@ -4,9 +4,12 @@ Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: fiv
 
 ## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
-Last verified: 2026-09-04 17:25 — `master` == origin/master at **`daa37e3`** (commit E, WP-F; before it
-A `bd4b6c5` · B `da01b3f` · C `78daecb` · D `b4bbcb9` · chore `e781272`). Tree clean except the
-untracked, unwanted `src-tauri/.claude/` (a subagent memory dir — delete it; never commit it).
+Last verified: 2026-09-04 20:06 — `master` == origin/master at **`888c15c`** (ledger chore on top of commit
+E **`daa37e3`**, WP-F; before it A `bd4b6c5` · B `da01b3f` · C `78daecb` · D `b4bbcb9` · chore `e781272`).
+Tree clean except the untracked, unwanted `src-tauri/.claude/` (a subagent memory dir — delete it;
+never commit it). CI: runs 33889838491 (E) and 33889893842 (chore) queued at handoff.
+**Blockers:** none technical — the next program (WP-I/H/J) is blocked on 8 user decisions
+(`~/.claude/plans/kernel-hardening-p1-wp-hij.md` § Decisions).
 
 - **Landed and gated this session:** kernel hardening WP-C/D/A/E (commit A) · WP-P project edges
   worker+Rust+P2b (B) · WP-P frontend + Rust fix round + hygiene (C) · WP-B region identity by

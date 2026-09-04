@@ -102,7 +102,20 @@ test("second leg → default pair → flip → commit: the record carries the fl
   await expect(flip).toBeVisible();
   await flip.click();
 
-  await expect.poll(async () => (await toolPhases(page))?.edgeOpReferenceFlipped).toBe(true);
+  // Poll the RESULT, not the intent: `chamferFlipped` flips synchronously on the
+  // click while the pairs are re-resolved after an awaited client round-trip, and
+  // the debug surface publishes both on any tick in between (measured on CI
+  // webkit: flag true, pair still the default). `armedPairs` is transiently null
+  // while that round-trip is in flight, so the poll must tolerate it.
+  await expect
+    .poll(async () => (await armedPairs(page))?.[0]?.faceId ?? null)
+    .not.toBe(defaultPair.faceId);
+  const phases = (await toolPhases(page)) as {
+    edgeOpReferenceFlipped?: boolean;
+    edgeOpReferenceFaceError?: string | null;
+  } | null;
+  expect(phases?.edgeOpReferenceFlipped).toBe(true);
+  expect(phases?.edgeOpReferenceFaceError ?? null).toBeNull();
   const flippedPair = (await armedPairs(page))![0];
   // SAME contour (keyed by the same edge), DIFFERENT face.
   expect(flippedPair.edgeId).toBe(defaultPair.edgeId);

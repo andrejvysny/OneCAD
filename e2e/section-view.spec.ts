@@ -286,8 +286,22 @@ test("an idle section view renders zero frames", async ({ page }) => {
   // reconcile runs INSIDE a frame, it must never request one).
   await page.waitForTimeout(400);
   const before = await frames(page);
+  const t0 = await page.evaluate(() => performance.now());
   await page.waitForTimeout(800);
-  expect(await frames(page)).toBe(before);
+  const after = await frames(page);
+  // A stray frame here was red ONCE on a loaded CI runner (9 vs 8) and never
+  // reproduced locally (20 calm + 10 loaded runs) — so on failure, name the
+  // `invalidate()` caller(s) that fired inside the idle window (`?vpdebug`
+  // ring, see `ViewportEngine.recordInvalidateCaller`).
+  const culprits = await page.evaluate(
+    (since) =>
+      ((window as unknown as { __vpInvalidates?: Array<{ at: number; stack: string }> })
+        .__vpInvalidates ?? [])
+        .filter((e) => e.at >= since)
+        .map((e) => e.stack.split("\n").slice(1, 6).join(" <- ")),
+    t0,
+  );
+  expect(after, `stray frame(s) in the idle window; invalidate() callers: ${culprits.join(" || ") || "none recorded"}`).toBe(before);
 });
 
 /*

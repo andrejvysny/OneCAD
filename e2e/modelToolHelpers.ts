@@ -130,11 +130,45 @@ export async function dragBy(page: Page, dx: number, dy: number): Promise<void> 
  */
 export async function dragEdgeOpHandle(page: Page, dx: number, dy: number): Promise<void> {
   await page.waitForTimeout(300);
+  // Chromium DOES need it under load: `filletChamfer.spec.ts` "direction-driven"
+  // went red on a 46-minute CI lane and reproduced 1-in-10 locally under a full
+  // vitest run — the FSM never left `armed`, i.e. the press landed beside a
+  // handle whose hit-region had not been rendered yet. Force ONE frame through
+  // the engine's own on-demand path and wait for it before scanning, so the
+  // matrices the raycast reads are the ones the pointer handler will read.
+  await waitForRenderedFrame(page);
   const h = await findExtrudeHandle(page);
   await page.mouse.move(h.x, h.y);
   await page.mouse.down();
-  await page.mouse.move(h.x + dx, h.y + dy, { steps: 4 });
+  await page.mouse.move(h.x + dx * 0.25, h.y + dy * 0.25, { steps: 2 });
+  // A press that misses is an inert no-op with NO error (the chip value simply
+  // never moves), so fail HERE by name rather than at the caller's assertion.
+  await expect
+    .poll(async () => (await toolPhases(page))?.filletPhase, {
+      message: "edge-op drag: the press did not take (filletPhase never reached 'dragging') — handle hit-region lagged the store",
+    })
+    .toBe("dragging");
+  await page.mouse.move(h.x + dx, h.y + dy, { steps: 3 });
   await page.mouse.up();
+}
+
+/**
+ * Schedule one on-demand frame via the engine (`?vpdebug` handle) and wait
+ * until the `__vpFrames` counter advances past it — after this the scene's
+ * world matrices match what the next pointer event will raycast against.
+ */
+export async function waitForRenderedFrame(page: Page): Promise<void> {
+  const before = await page.evaluate(() => {
+    const w = window as unknown as { __vpFrames?: number; __vpEngine?: { invalidate(): void } };
+    w.__vpEngine?.invalidate();
+    return w.__vpFrames ?? 0;
+  });
+  await expect
+    .poll(
+      () => page.evaluate(() => (window as unknown as { __vpFrames?: number }).__vpFrames ?? 0),
+      { message: "no frame rendered after invalidate() — is the spec booted with ?vpdebug?" },
+    )
+    .toBeGreaterThan(before);
 }
 
 /**
