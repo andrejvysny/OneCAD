@@ -3,8 +3,8 @@
 Session 27 · 2026-09-03/04 · plan `~/.claude/plans/resume-check-what-virtual-globe.md` (Run log at the bottom) · next plan `~/.claude/plans/kernel-hardening-p1-wp-hij.md` (DRAFT)
 
 > Read the Run log first — every task, ruling, measured count and deviation of this session. `TODO.md`
-> § KERNEL HARDENING § WP-F is the gate ledger. Commit E (`feat(kernel): chamfer reference face …`) is the
-> only commit of this session; check `git log` for its hash and whether it is on origin.
+> § KERNEL HARDENING § WP-F is the gate ledger. Commit E **`daa37e3`** (`feat(kernel): chamfer reference face …`) is the
+> only commit of this session and is on origin/master (CI run pending at handoff).
 
 ## Goal
 
@@ -57,7 +57,9 @@ silently mirrored the legs is gone. Then draft the next program (WP-I/H/J).
 ## How to resume
 
 1. Run the `handoff` skill with "resume"; read the Run log; `git log -1` (commit E) and `git status`.
-2. If commit E is not on origin: the G4 row in TODO.md must show the e2e count before pushing.
+2. Check CI for `daa37e3` (hosted lanes; `tauri-composition` times out on the OCCT build, `linux-worker`
+   self-hosted is offline — both known). Delete the stray untracked `src-tauri/.claude/` (a deletion was
+   denied by the permission mode this session, so it is still there).
 3. Next program: `~/.claude/plans/kernel-hardening-p1-wp-hij.md` — a DRAFT with five user decisions listed
    (order I→H→J, the concentric sign representation, refuse-vs-warn on empty export bodies, bounds
    numbers, WP-G still deferred). An adversarial plan review was run at the end of session 27 — its

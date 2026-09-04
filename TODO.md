@@ -426,6 +426,7 @@ attribution question arose.
             ref-starved hand-edited record → `get_mut`-or-push + refusal (edit_session **79/79**, fmt,
             clippy core clean); three stale comments (worker ×2, fixture, FE); worker rebuilt +
             chamfer/wp6/canonical/interop ctest subset re-run + restaged.
+      - [x] **Commit E `daa37e3` pushed** (67 files, +9359/−312) — master == origin; CI pending.
       - [ ] (superseded brief text follows) T5.2 worker (`FilletChamferOp.cpp` typed face resolution + adjacency +
             `CHAMFER_REFERENCE_FACE_NOT_ADJACENT`, legacy rule on `editedFrom`, QueryElement
             `adjacentFaces`) · T5.3 Rust (`ChamferParams.reference_faces`, inputs, hash, validate,

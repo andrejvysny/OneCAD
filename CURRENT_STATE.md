@@ -4,10 +4,9 @@ Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: fiv
 
 ## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
-Last verified: 2026-09-03 14:45 — `master` == origin/master at `e781272` (A `bd4b6c5` · B `da01b3f`
-· C `78daecb` · D `b4bbcb9` · chore `e781272`). DIRTY: `protocol/SCHEMA.md` (WP-F draft, audit
-pending), `TODO.md`, untracked `worker/tests/test_chamfer_reference_face.cpp` + modified
-`worker/tests/CMakeLists.txt` (WP-F probe, mid-flight, unmeasured).
+Last verified: 2026-09-04 17:25 — `master` == origin/master at **`daa37e3`** (commit E, WP-F; before it
+A `bd4b6c5` · B `da01b3f` · C `78daecb` · D `b4bbcb9` · chore `e781272`). Tree clean except the
+untracked, unwanted `src-tauri/.claude/` (a subagent memory dir — delete it; never commit it).
 
 - **Landed and gated this session:** kernel hardening WP-C/D/A/E (commit A) · WP-P project edges
   worker+Rust+P2b (B) · WP-P frontend + Rust fix round + hygiene (C) · WP-B region identity by
@@ -22,7 +21,7 @@ pending), `TODO.md`, untracked `worker/tests/test_chamfer_reference_face.cpp` + 
   detector's coincidence tolerance · two commits carved from one gated tree, recorded as such ·
   adversarial review BEFORE commit (memory `adversarial-review-before-commit`).
 - **Session 27 (2026-09-03/04, plan `resume-check-what-virtual-globe.md`) — WP-F LANDED in all three
-  tracks, gated, commit E pending the e2e count.** Rulings this session: `adjacentFaces` rides
+  tracks, gated, **commit E `daa37e3` pushed** (master == origin).** Rulings this session: `adjacentFaces` rides
   `PrepareEdgeOp` (per-edge `contour` + `adjacentFaces`), not `QueryElement`; `referenceFaces` =
   `{edgeId, faceId}` pairs, one per contour, the paired edge is the seed; **the legacy ordinal rule is
   REMOVED in every lane** (a per-plan `editedFrom` gate was tried and rejected: every open lane sets it,
