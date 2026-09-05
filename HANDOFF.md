@@ -1,3 +1,48 @@
+# Handoff — KERNEL HARDENING P1: WP-I component mates gated (session 28), WP-H next
+
+Session 28 · 2026-09-04 · plan `~/.claude/plans/act-as-senior-software-delightful-nova.md` (decisions, design, review record) · TODO.md § KERNEL HARDENING § "Now (2026-09-04, session 28)" is the ledger.
+
+> Commits this session: `dafa656` (Phase A e2e fixes), `3997872` (snap-composition ordering), and the
+> WP-I gate commit (see `git log -1`; if the tree is still dirty, the gate was interrupted — re-run
+> `scratchpad/g3/g3.sh` steps in order and commit only when every count matches TODO.md).
+
+## What happened
+
+- Plan built with two `reviewer-critical` passes before approval; the reviewed WP-I design was
+  replaced where it was wrong (the "UV-range canonical axis" is the parametric axis; partition tags
+  cannot exist; `axisSign` would be a second sign bit).
+- Every claim in TODO.md is a measured count from a main-thread or agent run; agent counts are
+  marked as such and were re-run by the orchestrator at the gate.
+- Subagents: two implementers in parallel (worker critical, Rust careful) + one FE standard, each
+  resumed by `SendMessage` for the fix rounds (context retained); protocol-auditor before and after
+  code; adversarial-reviewer on the assembled diff. Briefs live in the session scratchpad `briefs/`.
+
+## Rulings (do not re-litigate)
+
+- `flipped` is the ONLY mate orientation bit; frozen `targetAxis` is evidence adopted on the first
+  regen (the client sends none); a reversal HALTS with two labeled choices, never re-signs.
+- Seat-on-face applies to coincident seats only (a concentric seat is on the axis).
+- Gear caps are referenceable; the classifier is plan-derived and geometric (no partition state);
+  a tracked id on a refused element halts without the ladder (never repointed).
+- Bounds are authoring-sanity + cost bounds: `teeth ≤ 400`, `sampleCount ≤ 256`, `height ≤ 1000`,
+  fastener `length ≤ 1000` and ≤ 500 turns (simplified/modeled only).
+
+## How to resume
+
+1. `git status`; if the WP-I commit exists, check its CI (`gh run list --limit 3`); `tauri-composition`
+   OCCT-build timeout and offline `linux-worker` are known.
+2. Ask the user the WP-G go/no-go (Phase B numbers in TODO.md), then WP-H per
+   `kernel-hardening-p1-wp-hij.md` + decisions 4–6 in the session-28 plan (wedged deadline since the
+   last progress frame, `baseCheckpoint` true to §7.2, optional `snapshotId`).
+3. Owed follow-ups recorded in TODO.md § WP-I: concentric axial extent; `PreviewOp` gear map for a
+   gear its own plan creates; `gear_body_info` fails open on an unknown recipe; `all_variant_commands`
+   asserts 22 of 23; `RepairReason` tokens in four places; the "Gear failed" transient hint shows the
+   raw message; `parseOperationDiagnostics` regression test exists.
+4. User-run gates unchanged: 19-row checklist, Tauri smoke, STEP coloured, 3MF slicer, dogfood parts;
+   delete `src-tauri/.claude/` by hand.
+
+---
+
 # Handoff — KERNEL HARDENING: WP-F chamfer reference face LANDED (commit E), next program = WP-I/H/J (plan drafted, under review)
 
 Session 27 · 2026-09-03/04 · plan `~/.claude/plans/resume-check-what-virtual-globe.md` (Run log at the bottom) · next plan `~/.claude/plans/kernel-hardening-p1-wp-hij.md` (DRAFT)

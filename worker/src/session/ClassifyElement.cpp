@@ -5,8 +5,12 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <Geom_Surface.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -18,6 +22,7 @@
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "kernel/topology/CoplanarFacePatch.h"
@@ -65,6 +70,7 @@ std::string curve_type_name(GeomAbs_CurveType t) {
 struct SeedLookup {
     bool present = false;
     TopoDS_Shape shape;
+    TopoDS_Shape body_shape;  // the owning body — SCHEMA §7.5 `sidedness` needs the instance
 };
 
 SeedLookup resolve_seed(const BodyStore& bodies, const em::ElementMapPartition& part,
@@ -90,6 +96,7 @@ SeedLookup resolve_seed(const BodyStore& bodies, const em::ElementMapPartition& 
 
     out.present = true;
     out.shape = sub;
+    out.body_shape = rec->geom;
     return out;
 }
 
@@ -119,6 +126,42 @@ json classify_face(const TopoDS_Face& face, json& out) {
                             {"radius", cyl.Radius()}};
     }
     return out;
+}
+
+// The point the §10 v4 `outward` evaluation uses for a FACE: its UV-box centre
+// on the underlying surface. Recomputed here (rather than read off the
+// descriptor's `center`, which is an area centroid and sits ON the axis for a
+// full cylinder) so `sidedness` measures `outward` and `radial` at the SAME
+// point, as SCHEMA §7.5 requires.
+bool face_uv_centre(const TopoDS_Face& face, gp_Pnt& out) {
+    try {
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (surface.IsNull()) return false;
+        double umin = 0.0, umax = 0.0, vmin = 0.0, vmax = 0.0;
+        BRepTools::UVBounds(face, umin, umax, vmin, vmax);
+        out = surface->Value(0.5 * (umin + umax), 0.5 * (vmin + vmax));
+        return true;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// SCHEMA §7.5 `sidedness`: `outward · radial > 0` ⇒ the solid lies INSIDE the
+// cylinder (a boss or shaft — `"pin"`), else outside it (`"hole"`). Empty when
+// it cannot be measured, which is an ABSENT key, never a guessed side.
+std::string cylinder_sidedness(const TopoDS_Face& face, const TopoDS_Shape& body_shape,
+                               const gp_Ax1& axis) {
+    const em::km::ElementDescriptor d = em::ElementMapPartition::describe(face, body_shape);
+    if (!d.hasOutward) return {};
+    gp_Pnt at;
+    if (!face_uv_centre(face, at)) return {};
+    // `radial` runs from the evaluation point's projection on the axis LINE to
+    // the point itself.
+    const gp_Vec to_point(axis.Location(), at);
+    const gp_Vec along(axis.Direction());
+    const gp_Vec radial = to_point - along * to_point.Dot(along);
+    if (radial.Magnitude() <= 1e-9) return {};
+    return gp_Vec(d.outward).Dot(radial) > 0.0 ? "pin" : "hole";
 }
 
 json classify_edge(const TopoDS_Edge& edge, json& out) {
@@ -164,6 +207,18 @@ json classify_shape(const TopoDS_Shape& shape) {
     return out;
 }
 
+json classify_shape_in_body(const TopoDS_Shape& shape, const TopoDS_Shape& body_shape) {
+    json out = classify_shape(shape);
+    if (shape.IsNull() || body_shape.IsNull() || shape.ShapeType() != TopAbs_FACE) return out;
+    if (!out.contains("frame") || out.value("surfaceType", std::string()) != "cylinder") return out;
+    const TopoDS_Face face = TopoDS::Face(shape);
+    BRepAdaptor_Surface surface(face, true);
+    if (surface.GetType() != GeomAbs_Cylinder) return out;
+    const std::string sidedness = cylinder_sidedness(face, body_shape, surface.Cylinder().Axis());
+    if (!sidedness.empty()) out["frame"]["sidedness"] = sidedness;
+    return out;
+}
+
 Envelope handle_classify_element(Session& session, const Envelope& req) {
     const json& args = req.args;
     const BodyStore bodies = session.bodies_copy();
@@ -174,7 +229,7 @@ Envelope handle_classify_element(Session& session, const Envelope& req) {
         return Envelope::ok_response(req.id, json{{"present", false}});
     }
 
-    json out = classify_shape(seed.shape);
+    json out = classify_shape_in_body(seed.shape, seed.body_shape);
     out["present"] = true;
     return Envelope::ok_response(req.id, std::move(out));
 }

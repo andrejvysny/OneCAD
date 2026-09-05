@@ -31,6 +31,7 @@
 // would move every pinned digest.
 //
 // No test framework (matches the surrounding style): exit code == failure count.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -168,7 +169,12 @@ TopoDS_Shape make_gear(double s) {
   spec.involute.module = 0.1 * s;
   spec.involute.numTeeth = 12;
   spec.sampleCount = 12;
-  spec.height = 0.5 * s;
+  // CLAMPED to the SCHEMA §7.3 height bound (`≤ 1000` mm, kernel-hardening
+  // WP-I): at the top scale `0.5 * s` would be 5000 mm, which `build_gear_solid`
+  // now refuses BY NAME as out of range. The clamp keeps this row a SCALE
+  // measurement — the tooth profile, which is what the micro-edge and
+  // sliver-face metrics read, still scales with `s`.
+  spec.height = std::min(0.5 * s, 1000.0);
   const onecad::ops::gear::GearBuildResult result =
       onecad::ops::gear::build_gear_solid(spec, gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)));
   return result.ok ? result.shape : TopoDS_Shape();

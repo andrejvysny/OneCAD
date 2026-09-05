@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>  // std::abort
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -31,6 +32,7 @@
 #include "ops/RevolveOp.h"
 #include "ops/ShellOp.h"
 #include "protocol/Limits.h"
+#include "session/ClassifyElement.h"
 #include "session/Signatures.h"
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
@@ -93,9 +95,92 @@ json missing_body_repair(const em::LadderRef& ref, const std::string& body_id) {
 // that does not resolve ⇒ NeedsRepair (appended to `needs_repair`) and the caller
 // stops before running the op (prepare m−1). Replaces the interim primary.topoKey
 // shortcut (D3 — the field is gone). Body/region refs (no sub-element) are skipped.
+// SCHEMA §7.3 gear referenceability (WP-I): the gear info for `body_id`, from
+// the map the fence cloned (a gear body this plan INHERITED) or from the plan
+// itself (one this plan CREATES). `nullopt` ⇒ an ordinary body, no filtering.
+std::optional<ops::GearBodyInfo> gear_info_for(const ScratchJob& job, const std::string& body_id,
+                                               const TopoDS_Shape& body_shape) {
+    const auto tracked = job.gear_bodies.find(body_id);
+    if (tracked != job.gear_bodies.end()) return tracked->second;
+    return ops::gear_body_info(job.plan, body_id, body_shape);
+}
+
+// The step diagnostic that rides a gear-referenceability halt, in the SAME
+// evidence shape `BindElementIds` uses (SCHEMA §7.3): a FACE reports its
+// `surfaceType`, an EDGE or VERTEX reports `kind` in its place. `topo_key` and
+// the geometry field are empty when the ref never named a concrete sub-element
+// (the descriptor rung, where nothing was bound to inspect).
+json gear_element_diagnostic(const std::string& body_id, const ops::GearBodyInfo& info,
+                             const std::string& element_id, em::km::ElementKind kind,
+                             const std::string& topo_key, const std::string& surface_type) {
+    const bool is_face = kind == em::km::ElementKind::Face;
+    const std::string noun = em::ElementMapPartition::kind_name(kind);
+    json evidence = {{"bodyId", body_id}, {"topoKey", topo_key}, {"gearOpId", info.gear_op_id}};
+    if (is_face) {
+        evidence["surfaceType"] = surface_type;
+    } else {
+        evidence["kind"] = noun;
+    }
+    const std::string article = (noun == "edge") ? "an " : "a ";
+    const std::string message =
+        "ref " + element_id + " names " + article + noun + " of gear body " + body_id +
+        " that is not referenceable (only the two caps, a bore below the root radius, and the "
+        "edges and vertices whose every adjacent face is one of those, carry identity a "
+        "tooth-count edit preserves)";
+    return json{{"severity", "warning"},
+                {"code", "REF_UNRESOLVED"},
+                {"message", message},
+                {"stage", "input-resolution"},
+                {"reasonCode", "GEAR_FACE_NOT_REFERENCEABLE"},
+                {"evidence", std::move(evidence)}};
+}
+
+// A §9 item for a STORED id that tracks a gear sub-element the §7.3 rule refuses.
+// It is a RECORD DEFECT, not a resolution problem, so it halts here with an
+// EMPTY candidate list rather than going to the ladder: the narrowed pool would
+// otherwise be free to auto-bind the id to a cap or a bore, silently REPOINTING
+// a tooth reference at different geometry — the wrong bind §10 exists to
+// prevent, arrived at from the other direction. The partition entry is left
+// exactly as it was; only the user's repair may move it.
+json refused_gear_element_repair(const em::LadderRef& ref, const std::string& noun) {
+    return json{{"refId", ref.ref_id},
+                {"elementId", ref.element_id},
+                {"ladderFailed", "descriptor"},
+                {"reason", "no-candidates"},
+                {"scoringVersion", em::kResolverVersion},
+                {"candidates", json::array()},
+                {"anchor", ref.anchor_json.is_null() ? json::object() : ref.anchor_json},
+                {"uiLabel", "stored reference names a gear " + noun +
+                                " that is not referenceable; re-pick it on a cap, a bore, or an "
+                                "edge whose every adjacent face is one of those"}};
+}
+
+// True when the ALREADY-TRACKED entry for `element_id` binds a gear sub-element
+// the §7.3 rule refuses — a binding that predates this build (nothing can mint
+// one now). The caller then halts on the item above; it must NOT hand the ref to
+// the ladder, because a narrowed pool that auto-binds would repoint the id.
+bool tracked_binding_is_refused_gear_element(const ScratchJob& job, const std::string& body_id,
+                                             const std::string& element_id,
+                                             std::vector<json>& diagnostics) {
+    const BodyRecord* rec = job.bodies.get(body_id);
+    if (rec == nullptr) return false;
+    const em::PartitionEntry* entry = job.partition.find(element_id);
+    if (entry == nullptr || entry->body_id != body_id) return false;
+    const std::optional<ops::GearBodyInfo> gear = gear_info_for(job, body_id, rec->geom);
+    if (!gear) return false;
+    const TopoDS_Shape shape =
+        em::ElementMapPartition::shape_for_topokey(rec->geom, entry->topo_key);
+    if (shape.IsNull()) return false;
+    if (ops::gear_element_referenceable(*gear, rec->geom, shape)) return false;
+    diagnostics.push_back(gear_element_diagnostic(
+        body_id, *gear, element_id, entry->kind, entry->topo_key,
+        classify_shape(shape).value("surfaceType", std::string("other"))));
+    return true;
+}
+
 void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_id,
                         const em::LadderEditContext& edit, em::ElementMapDelta& delta,
-                        std::vector<json>& needs_repair) {
+                        std::vector<json>& needs_repair, std::vector<json>& diagnostics) {
     if (!op.contains("inputs") || !op["inputs"].is_array()) return;
 
     // Group sub-element refs by owning body (assignment/scoring is per-body pool).
@@ -111,7 +196,17 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
             r.kind != em::km::ElementKind::Vertex) {
             continue;
         }
-        if (job.partition.contains(r.element_id)) continue;  // already tracked
+        // Tracked rung. WP-I: a tracked entry that binds a REFUSED gear
+        // sub-element is a record defect — halt on it directly and leave the
+        // entry alone. Sending it to the (narrowed) ladder instead would let an
+        // AutoBind repoint the stored id at a cap or a bore.
+        if (job.partition.contains(r.element_id)) {
+            if (tracked_binding_is_refused_gear_element(job, bid, r.element_id, diagnostics)) {
+                needs_repair.push_back(refused_gear_element_repair(
+                    r, em::ElementMapPartition::kind_name(r.kind)));
+            }
+            continue;
+        }
         by_body[bid].push_back(std::move(r));
     }
 
@@ -121,8 +216,27 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
             for (const em::LadderRef& r : refs) needs_repair.push_back(missing_body_repair(r, bid));
             continue;
         }
+        // SCHEMA §7.3 (WP-I): on a gear body the refused faces are REMOVED FROM
+        // THE CANDIDATE POOL before the §10 ladder runs, so a stored ref that
+        // names one halts with the ladder's own `no-candidates` — never a bind,
+        // and never a synthesized op-built item either.
+        const std::optional<ops::GearBodyInfo> gear = gear_info_for(job, bid, rec->geom);
+        em::CandidateFilter admissible;
+        if (gear) {
+            const ops::GearBodyInfo info = *gear;
+            const TopoDS_Shape body_shape = rec->geom;
+            // ONE adjacency map for the whole pool: the edge/vertex rule needs a
+            // sub-element's adjacent faces, and rebuilding that per candidate is
+            // O(candidates x body size) — on a 400-tooth gear (the §7.3 bound,
+            // itself a COST bound) that is thousands of traversals per step.
+            const auto adjacency = std::make_shared<ops::GearAdjacency>(body_shape);
+            admissible = [info, body_shape, adjacency](const TopoDS_Shape& candidate) {
+                return ops::gear_element_referenceable(info, body_shape, candidate,
+                                                       adjacency.get());
+            };
+        }
         const std::vector<em::LadderResolution> resolutions =
-            em::resolve_descriptor_stage(rec->geom, bid, refs, edit);
+            em::resolve_descriptor_stage(rec->geom, bid, refs, edit, admissible);
         for (std::size_t k = 0; k < resolutions.size(); ++k) {
             const em::LadderResolution& res = resolutions[k];
             if (res.outcome == em::LadderOutcome::AutoBind && !res.bound_shape.IsNull()) {
@@ -131,6 +245,15 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
                                                          res.bound_shape, rec->geom, std::move(anchor)));
             } else {
                 needs_repair.push_back(res.to_needs_repair_json());
+                // Say WHY a ref on a gear body could not bind: the pool it was
+                // scored against excludes tooth geometry by rule.
+                if (gear && (refs[k].kind == em::km::ElementKind::Face ||
+                             refs[k].kind == em::km::ElementKind::Edge ||
+                             refs[k].kind == em::km::ElementKind::Vertex)) {
+                    diagnostics.push_back(gear_element_diagnostic(bid, *gear, refs[k].element_id,
+                                                                  refs[k].kind, std::string(),
+                                                                  std::string()));
+                }
             }
         }
     }
@@ -177,7 +300,8 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
                     std::uint64_t step_index, const std::vector<BodyEvent>& events,
                     const json& element_map_delta, const json& needs_repair, const json& signatures,
                     const json& diagnostics,
-                    const std::optional<json>& mate_placement = std::nullopt) {
+                    const std::optional<json>& mate_placement = std::nullopt,
+                    const std::optional<json>& mate_resolved = std::nullopt) {
     json body_events = json::array();
     for (const auto& e : events) {
         json be = {{"kind", e.kind}, {"bodyId", e.body_id}};
@@ -200,6 +324,10 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
     // step that actually reseated a mate — absence keeps every other step
     // byte-identical to the pre-WP-3.1 wire.
     if (mate_placement) payload["matePlacement"] = *mate_placement;
+    // Kernel-hardening WP-I (SCHEMA §7.2, additive): the resolved cylindrical
+    // mate's axis (and sidedness when measurable) on EVERY such step, seat
+    // moved or not — absence keeps every other step byte-identical.
+    if (mate_resolved) payload["mateResolved"] = *mate_resolved;
     Envelope ev = Envelope::event(req_id, "planStep", step_index, std::move(payload));
     ev.stamp.job_id = job_id;
     if (ctx.emit) ctx.emit(ev);
@@ -343,6 +471,7 @@ void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
     }
     for (auto& diag : outcome.diagnostics) result.diagnostics.push_back(std::move(diag));
     if (outcome.mate_placement) result.mate_placement = std::move(outcome.mate_placement);
+    if (outcome.mate_resolved) result.mate_resolved = std::move(outcome.mate_resolved);
     if (outcome.status == ops::OpOutcome::Status::Ok) {
         // A step that PUBLISHED geometry stays Ok even when it ALSO carries
         // NeedsRepair evidence (Component Library P3 WP-3.1: a mated
@@ -506,7 +635,7 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     if (result.needs_repair.empty()) {
         resolve_input_refs(job, op, op_id,
                            em::LadderEditContext{post_edit, job.from_zero_replay}, result.delta,
-                           result.needs_repair);
+                           result.needs_repair, result.diagnostics);
     }
     if (result.needs_repair.empty()) {
         ops::OpOutcome outcome =
@@ -605,7 +734,7 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
                            candidate.delta.to_json(), candidate.needs_repair,
                            signatures_json(job.bodies, candidate.body_events,
                                            candidate.ref_bindings),
-                           diagnostics, candidate.mate_placement);
+                           diagnostics, candidate.mate_placement, candidate.mate_resolved);
             StepResult r;
             r.step_index = step_index;
             r.status = "ok";
@@ -716,7 +845,13 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     job.plan_document_revision = doc_rev;  // D4: adopted as head documentRevision at accept
     job.bodies = std::move(fence.cloned_bodies);
     job.partition = std::move(fence.cloned_partition);
+    job.gear_bodies = std::move(fence.cloned_gear_bodies);
     job.prepared_snapshot_id = fence.prepared_snapshot_id;
+    // SCHEMA §7.3 gear referenceability (WP-I): the plan itself is what makes a
+    // body a gear body (`body_<opId>` names a `Gear` op — D1), so the step-input
+    // resolution below needs it. Stored, not re-derived: an accept rebuilds the
+    // session's map from exactly this object.
+    job.plan = json{{"ops", ops}};
     // OPTIONAL `editedFrom` (SCHEMA §7.2). Absence = "no edit context" = no claim;
     // a non-integer is treated as absent rather than as an error, per §4's
     // tolerate-unknown/ignore-malformed-optional reader rule. See §10 for what it

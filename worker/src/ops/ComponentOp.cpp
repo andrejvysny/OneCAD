@@ -10,11 +10,16 @@
 #include <string>
 #include <vector>
 
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
+#include <TopAbs_State.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
@@ -184,6 +189,72 @@ json mate_unresolved_repair(const std::string& ref_id, const std::string& elemen
                {"uiLabel", ui_label}};
 }
 
+// A `[x, y, z]` array of plain numbers. False when absent or malformed — the
+// caller then simply skips the check that needed it (never a guessed vector).
+bool read_vec3_array(const json& o, const char* key, std::array<double, 3>& out) {
+    if (!o.is_object() || !o.contains(key) || !o[key].is_array() || o[key].size() != 3) return false;
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (!o[key][i].is_number()) return false;
+        out[i] = o[key][i].get<double>();
+    }
+    return true;
+}
+
+// SCHEMA §9: the two OP-BUILT items `PlaceComponent` raises on a mate whose
+// target RESOLVED but whose seat this build refuses to move to
+// (`mateAxisReversed` / `mateSeatOffFace`, kernel-hardening WP-I). Both ride an
+// `Ok` step exactly like `mate_unresolved_repair` above — the component
+// publishes at its frozen `placement` — and both report `ladderFailed`
+// `"descriptor"` because the ladder itself RESOLVED; what halted is this op.
+json mate_op_built_item(const std::string& ref_id, const std::string& element_id,
+                        const char* reason, json candidates, const std::string& ui_label) {
+    return json{{"refId", ref_id},
+                {"elementId", element_id},
+                {"ladderFailed", "descriptor"},
+                {"reason", reason},
+                {"scoringVersion", em::kResolverVersion},
+                {"candidates", std::move(candidates)},
+                {"anchor", json::object()},
+                {"uiLabel", ui_label}};
+}
+
+// One §9 candidate ON the resolved face, in the same shape the ladder's own
+// items use (`Ladder.cpp::to_needs_repair_json`) down to the `summary` wording,
+// so a repair UI cannot tell an op-built item apart from a ladder one. `label`
+// is the WP-I addition: the CHOICE this candidate stands for (absent when the
+// item offers no choice).
+json mate_face_candidate(const TopoDS_Shape& body_shape, const TopoDS_Shape& face,
+                         const std::array<double, 3>& world_pos, double score, double margin,
+                         const char* label) {
+    const em::km::ElementDescriptor d = em::ElementMapPartition::describe(face, body_shape);
+    json candidate = {
+        {"topoKey", em::ElementMapPartition::topokey_for_shape(body_shape, face,
+                                                              em::km::ElementKind::Face)},
+        {"score", score},
+        {"margin", margin},
+        {"worldPos", {world_pos[0], world_pos[1], world_pos[2]}},
+        {"summary", em::candidate_summary(em::km::ElementKind::Face, d)},
+        {"featureContributions", json::object()}};
+    if (label != nullptr) candidate["label"] = label;
+    return candidate;
+}
+
+// The point of `face` nearest `p` — the `mateSeatOffFace` candidate's
+// `worldPos`, i.e. where the seat would have to move to lie on the face. Falls
+// back to `p` itself if OCCT cannot measure it (evidence, never a refusal).
+std::array<double, 3> nearest_point_on_face(const TopoDS_Face& face, const gp_Pnt& p) {
+    try {
+        BRepExtrema_DistShapeShape dist(face, BRepBuilderAPI_MakeVertex(p).Vertex());
+        if (dist.IsDone() && dist.NbSolution() > 0) {
+            const gp_Pnt near = dist.PointOnShape1(1);
+            return {near.X(), near.Y(), near.Z()};
+        }
+    } catch (const Standard_Failure&) {
+        // fall through to the seat itself
+    }
+    return {p.X(), p.Y(), p.Z()};
+}
+
 // The candidate placement a resolved mate recomputed, paired with the
 // already-solved `gp_Trsf` (avoids re-parsing the JSON a second time).
 struct MateReseat {
@@ -208,9 +279,19 @@ struct MateReseat {
 // NeedsRepair item to `needs_repair_out` (never a hard `OP_FAILED`: a
 // component with a broken mate still publishes at its last-good spot,
 // spec's "never drop it, never silently move it").
+//
+// KERNEL-HARDENING WP-I adds two more `nullopt` halts on a target that DID
+// resolve, both appending an op-built §9 item and both leaving the frozen
+// placement standing: `mateAxisReversed` (the resolved axis is anti-parallel
+// to the frozen `mate.targetAxis`, or the sidedness flipped) and
+// `mateSeatOffFace` (the solved seat lies outside the resolved face's own
+// boundary). `mate_resolved_out` receives SCHEMA §7.2 `planStep.mateResolved`
+// on every resolved CYLINDRICAL target, halt or not — it is the evidence Rust
+// adopts once into a record authored before this build.
 std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, const json& frozen,
                                               const std::string& op_id,
-                                              std::vector<json>& needs_repair_out) {
+                                              std::vector<json>& needs_repair_out,
+                                              std::optional<json>& mate_resolved_out) {
     if (!mate.contains("target") || !mate["target"].is_object()) return std::nullopt;
     const json& target_ref_json = mate["target"];
     // `<opId>.input0` — NOT a real wire input anymore (P3 WP-3.1 removed
@@ -260,16 +341,93 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
         bound = res[0].bound_shape;
     }
 
-    // `classify_shape` nests the seatable geometry under its own `frame` key
-    // (sibling of `kind`/`surfaceType`) — `solve_mate_placement` wants that
+    // `classify_shape_in_body` nests the seatable geometry under its own `frame`
+    // key (sibling of `kind`/`surfaceType`) — `solve_mate_placement` wants that
     // nested object directly. Absent (e.g. a non-planar/non-cylindrical
-    // face) ⇒ an empty object, which every `read_vec3` call below fails on,
-    // same as any other unresolvable frame.
-    const json classify_result = session::classify_shape(bound);
+    // face) ⇒ an empty object, which every vector read below fails on,
+    // same as any other unresolvable frame. The `_in_body` form is what adds
+    // SCHEMA §7.5 `sidedness` (the reversal check's second discriminator); it
+    // needs the face's instance in its body, which this path has.
+    const json classify_result = session::classify_shape_in_body(bound, target_rec->geom);
     const json frame = classify_result.contains("frame") ? classify_result["frame"] : json::object();
     const std::string snap_kind = read_str(mate, "kind");
     const bool flipped =
         mate.contains("flipped") && mate["flipped"].is_boolean() && mate["flipped"].get<bool>();
+
+    // SCHEMA §7.2 `planStep.mateResolved`: the resolved CYLINDRICAL target's
+    // axis, plus its sidedness when measurable — emitted on EVERY such step,
+    // independent of whether the seat moved and independent of the halts below,
+    // because it is what Rust adopts ONCE into a record that carries no frozen
+    // `mate.targetAxis`. Cylinder faces and circle edges only: a planar target
+    // has no axis to freeze.
+    const bool concentric_kind =
+        snap_kind == "concentric" || snap_kind == "concentricAndCoincident";
+    const bool cylindrical_target =
+        classify_result.value("surfaceType", std::string()) == "cylinder" ||
+        classify_result.value("curveType", std::string()) == "circle";
+    std::array<double, 3> resolved_axis{0.0, 0.0, 0.0};
+    const bool has_resolved_axis =
+        concentric_kind && cylindrical_target && read_vec3_array(frame, "axis", resolved_axis);
+    if (has_resolved_axis) {
+        json resolved = json{{"axis", {resolved_axis[0], resolved_axis[1], resolved_axis[2]}}};
+        if (frame.contains("sidedness") && frame["sidedness"].is_string()) {
+            resolved["sidedness"] = frame["sidedness"];
+        }
+        mate_resolved_out = std::move(resolved);
+    }
+
+    // SCHEMA §7.3 `mate.targetAxis` / `mate.targetSidedness`, both FROZEN at
+    // authoring and both absent on a pre-WP-I record ⇒ no check at all. A
+    // resolved axis in the anti-parallel band (`d < -0.5`) is the only signature
+    // a REBUILD-REVERSED cylindrical surface leaves, and a sidedness that no
+    // longer matches means a hole became a pin: either halts with the frozen
+    // placement standing, never a silent 180° spin.
+    std::array<double, 3> frozen_axis{0.0, 0.0, 0.0};
+    if (has_resolved_axis && read_vec3_array(mate, "targetAxis", frozen_axis)) {
+        const gp_Vec resolved_v(resolved_axis[0], resolved_axis[1], resolved_axis[2]);
+        const gp_Vec frozen_v(frozen_axis[0], frozen_axis[1], frozen_axis[2]);
+        const std::string frozen_sidedness = read_str(mate, "targetSidedness");
+        const std::string resolved_sidedness =
+            (frame.contains("sidedness") && frame["sidedness"].is_string())
+                ? frame["sidedness"].get<std::string>()
+                : std::string();
+        const bool axis_measurable =
+            resolved_v.Magnitude() > 1e-9 && frozen_v.Magnitude() > 1e-9;
+        const double d = axis_measurable
+                             ? gp_Dir(resolved_v).Dot(gp_Dir(frozen_v))
+                             : 1.0;
+        const bool sidedness_changed = !frozen_sidedness.empty() &&
+                                       !resolved_sidedness.empty() &&
+                                       frozen_sidedness != resolved_sidedness;
+        if (d < -0.5 || sidedness_changed) {
+            // Two candidates on the SAME face at a deliberate tie: the choice is
+            // the user's, and `flipped` — rewritten by the §9 repair — stays the
+            // only persisted orientation bit.
+            std::array<double, 3> centre{0.0, 0.0, 0.0};
+            if (bound.ShapeType() == TopAbs_FACE) {
+                const gp_Pnt c =
+                    em::ElementMapPartition::describe(bound, target_rec->geom).center;
+                centre = {c.X(), c.Y(), c.Z()};
+            }
+            json candidates = json::array(
+                {mate_face_candidate(target_rec->geom, bound, centre, 0.5, 0.0,
+                                     "Keep the component's direction"),
+                 mate_face_candidate(target_rec->geom, bound, centre, 0.5, 0.0,
+                                     "Follow the reversed axis")});
+            json item = mate_op_built_item(
+                ref_id, ref.element_id, "mateAxisReversed", std::move(candidates),
+                "the mate target's axis came back reversed — keep the component's direction or "
+                "follow the reversed axis");
+            item["resolvedAxis"] = {resolved_axis[0], resolved_axis[1], resolved_axis[2]};
+            item["frozenAxis"] = {frozen_axis[0], frozen_axis[1], frozen_axis[2]};
+            // OPTIONAL, only when it was MEASURED (SCHEMA §9): the repair
+            // re-freezes `mate.targetSidedness` from it, and an absent value
+            // means "keep the stored one", never "clear it".
+            if (!resolved_sidedness.empty()) item["resolvedSidedness"] = resolved_sidedness;
+            needs_repair_out.push_back(std::move(item));
+            return std::nullopt;
+        }
+    }
 
     // Seat anchor: the component's OWN current frozen translate stands in for
     // the live cursor a fresh interactive placement would use (see
@@ -306,16 +464,20 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
     // walk the component down the axis a frame-length per tick. Transforming
     // the frame's local origin by the frozen placement recovers the seat, and
     // makes a re-seat that changed nothing an exact fixed point.
-    if (frozen_ok && self_frame.is_object()) {
-        std::array<double, 3> local{0.0, 0.0, 0.0};
-        if (self_frame.contains("origin") && self_frame["origin"].is_array() &&
-            self_frame["origin"].size() == 3) {
-            for (std::size_t i = 0; i < 3; ++i) {
-                const json& v = self_frame["origin"][i];
-                if (v.is_number()) local[i] = v.get<double>();
-            }
+    // The attachment's COMPONENT-LOCAL origin: (0,0,0) without a self frame, so
+    // the seat point below is `placement.translate` for a pre-WP-F1.1 record.
+    std::array<double, 3> attachment_local{0.0, 0.0, 0.0};
+    if (self_frame.is_object() && self_frame.contains("origin") &&
+        self_frame["origin"].is_array() && self_frame["origin"].size() == 3) {
+        for (std::size_t i = 0; i < 3; ++i) {
+            const json& v = self_frame["origin"][i];
+            if (v.is_number()) attachment_local[i] = v.get<double>();
         }
-        const gp_Pnt seat_point = gp_Pnt(local[0], local[1], local[2]).Transformed(frozen_trsf);
+    }
+    if (frozen_ok && self_frame.is_object()) {
+        const gp_Pnt seat_point =
+            gp_Pnt(attachment_local[0], attachment_local[1], attachment_local[2])
+                .Transformed(frozen_trsf);
         seat_anchor = {seat_point.X(), seat_point.Y(), seat_point.Z()};
     }
 
@@ -334,6 +496,48 @@ std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, 
         // a parse failure here is an internal defect, not a repair signal.
         // Treat as "did not move": the frozen placement stands.
         return std::nullopt;
+    }
+
+    // SCHEMA §7.3 "Seat on the face" (WP-I): the SOLVED seat — where the
+    // attachment lands, not where the body origin lands — is classified against
+    // the resolved face at the face's OWN tolerance. `ON`/`IN` seat; `OUT` (the
+    // target shrank past the seat) halts with the op-built `mateSeatOffFace`
+    // item and the frozen placement standing. Checked BEFORE the re-seat
+    // epsilon, because a seat that never moved can still be off the face.
+    //
+    // COINCIDENT kind only (SCHEMA §7.3 "Seat on the face (coincident kind
+    // only)"), and that is a geometric fact rather than a policy: a coincident
+    // seat lies ON its plane by construction, so classifying it measures the
+    // face's own BOUNDARY. A concentric seat lies on the target's AXIS — one
+    // radius away from the cylindrical face — so the same classification at
+    // `BRep_Tool::Tolerance(face)` would report `OUT` for every healthy
+    // concentric mate (measured 2026-09-04: the shipped
+    // `test_component_mate_reseat` re-seat cases all went red under it). Whether
+    // a concentric seat still lies within the face's AXIAL extent is a recorded
+    // follow-up; it needs a frozen axial datum the record does not carry.
+    if (snap_kind == "coincident" && bound.ShapeType() == TopAbs_FACE &&
+        classify_result.value("surfaceType", std::string()) == "plane") {
+        const TopoDS_Face target_face = TopoDS::Face(bound);
+        const gp_Pnt seat_point =
+            gp_Pnt(attachment_local[0], attachment_local[1], attachment_local[2])
+                .Transformed(candidate_trsf);
+        TopAbs_State state = TopAbs_UNKNOWN;
+        try {
+            BRepClass_FaceClassifier classifier(target_face, seat_point,
+                                                BRep_Tool::Tolerance(target_face));
+            state = classifier.State();
+        } catch (const Standard_Failure&) {
+            state = TopAbs_UNKNOWN;  // unmeasurable ⇒ no claim, the seat stands
+        }
+        if (state == TopAbs_OUT) {
+            json candidates = json::array({mate_face_candidate(
+                target_rec->geom, bound, nearest_point_on_face(target_face, seat_point), 1.0, 1.0,
+                nullptr)});
+            needs_repair_out.push_back(mate_op_built_item(
+                ref_id, ref.element_id, "mateSeatOffFace", std::move(candidates),
+                "mate seat lies outside the resolved face — move or re-mate the component"));
+            return std::nullopt;
+        }
     }
 
     const gp_XYZ dt = frozen_trsf.TranslationPart() - candidate_trsf.TranslationPart();
@@ -380,6 +584,27 @@ OpOutcome profile_refusal(const char* reason_code, const std::string& message) {
                                    {"message", message},
                                    {"stage", "build"},
                                    {"reasonCode", reason_code}});
+    return failure;
+}
+
+// SCHEMA §7.3 "Generator bounds" (kernel-hardening WP-I): a PREFLIGHT refusal,
+// raised before any geometry is built, that names the offending parameter and
+// carries the range it left as `evidence` so the client can point at the field.
+// Same recoverable `OP_FAILED` shape as `profile_refusal` — the top-level §8
+// code taxonomy is closed and never grows a value for a new refusal reason.
+OpOutcome generator_bounds_refusal(const GeneratorBoundViolation& violation) {
+    OpOutcome failure = OpOutcome::fail("OP_FAILED", violation.message);
+    failure.diagnostics.push_back(
+        {{"severity", "error"},
+         {"code", "OP_FAILED"},
+         {"message", violation.message},
+         {"stage", "build"},
+         {"reasonCode", "GENERATOR_PARAM_OUT_OF_RANGE"},
+         {"evidence",
+          {{"param", violation.param},
+           {"value", violation.value},
+           {"min", violation.min},
+           {"max", violation.max}}}});
     return failure;
 }
 
@@ -677,9 +902,18 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
                                                     "' — known values: cosmetic, simplified, modeled");
         }
 
-        const GeneratorRequest req{op_label,      thread,        length_mm,
-                                   length_given,  thread_detail, std::move(text_params)};
+        const GeneratorRequest req{op_label,      thread,        length_mm,   length_given,
+                                   thread_detail, std::move(text_params), ctx.cancel};
+        // WP-I: the bounds preflight runs BEFORE `build_component`, so an absurd
+        // free param is refused by name rather than built (SCHEMA §7.3).
+        if (const std::optional<GeneratorBoundViolation> violation =
+                generator_bounds_violation(generator_id, req)) {
+            return generator_bounds_refusal(*violation);
+        }
         if (!build_component(generator_id, req, solid, err)) {
+            // A cutter that stopped on the cancel token reports `false` with a
+            // message; the token is the authority on which outcome that is.
+            if (ctx.cancel != nullptr && ctx.cancel->cancelled()) return OpOutcome::cancelled();
             return OpOutcome::fail("OP_FAILED", err);
         }
     }
@@ -704,9 +938,11 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     // detach) — this branch simply never fires there.
     std::vector<json> mate_repairs;
     std::optional<json> mate_placement_echo;
+    std::optional<json> mate_resolved_echo;
     if (params.contains("mate") && params["mate"].is_object()) {
         if (const std::optional<MateReseat> reseated =
-                resolve_mate_reseat(ctx, params["mate"], params["placement"], op_id, mate_repairs)) {
+                resolve_mate_reseat(ctx, params["mate"], params["placement"], op_id, mate_repairs,
+                                    mate_resolved_echo)) {
             trsf = reseated->trsf;
             mate_placement_echo = reseated->placement;
         }
@@ -752,6 +988,7 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     out.body_ids.push_back(bid);
     for (json& r : mate_repairs) out.needs_repair.push_back(std::move(r));
     if (mate_placement_echo) out.mate_placement = std::move(*mate_placement_echo);
+    if (mate_resolved_echo) out.mate_resolved = std::move(*mate_resolved_echo);
     return out;
 }
 

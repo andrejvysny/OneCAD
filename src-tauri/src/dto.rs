@@ -1053,6 +1053,17 @@ pub struct ClassifyElementFrameDto {
     pub axis: Option<[f64; 3]>,
     /// Cylinder or circle radius. `None` for plane/line frames.
     pub radius: Option<f64>,
+    /// Whether the solid lies INSIDE the cylinder (`pin` — a boss or shaft) or
+    /// outside it (`hole` — a bore); SCHEMA §7.5 `sidedness`, kernel-hardening
+    /// WP-I. Cylinder FACE frames only.
+    ///
+    /// `None` whenever the worker did not measure it: it needs the face's
+    /// INSTANCE in its body (a history list hands back neutral orientation), so
+    /// a classify without body context legitimately answers nothing. It is also
+    /// `None` on every plane/circle/line frame and on a pre-WP-I worker — absent
+    /// means "not measured", never "neither".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidedness: Option<String>,
 }
 
 /// One body's exact kernel mass properties from `QueryMassProperties`
@@ -1570,6 +1581,12 @@ pub struct ResolveCandidateDto {
     /// Candidate centre in world coords — a geometric hint for highlighting.
     pub world_pos: [f64; 3],
     pub summary: String,
+    /// The CHOICE this candidate stands for on an OP-BUILT item whose candidates
+    /// are geometrically identical (SCHEMA §9 `label`, kernel-hardening WP-I) —
+    /// a `mateAxisReversed` item's two same-face rows are told apart by this and
+    /// nothing else. `None` on every ladder-produced candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Per-feature score contributions (SCHEMA §9 `featureContributions`), when the
     /// worker carried them (rides in the candidate's `extra`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1631,6 +1648,22 @@ pub struct ResolveRefDto {
     /// stored ref to read it off. `None` on every other outcome and reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed_edge_id: Option<String>,
+    /// The target's CURRENT parametric axis on a `mateAxisReversed` item (SCHEMA
+    /// §9 `resolvedAxis`, kernel-hardening WP-I) — the value the panel echoes
+    /// back on `repairMateAxis`, whichever branch the user picks. `None` on
+    /// every other reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_axis: Option<[f64; 3]>,
+    /// The axis the record had frozen (SCHEMA §9 `frozenAxis`, WP-I), so the
+    /// panel can show what changed. `None` on every other reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_axis: Option<[f64; 3]>,
+    /// The target's CURRENT sidedness (SCHEMA §9 `resolvedSidedness`, WP-I),
+    /// `pin` | `hole`, when the worker could measure it. `None` on every other
+    /// reason AND when it was not measured — the repair then keeps the record's
+    /// stored sidedness rather than clearing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_sidedness: Option<String>,
 }
 
 impl ResolveRefDto {
@@ -1666,6 +1699,9 @@ impl ResolveRefDto {
             anchor: None,
             candidates: Vec::new(),
             seed_edge_id: None,
+            resolved_axis: None,
+            frozen_axis: None,
+            resolved_sidedness: None,
         };
         match r.outcome {
             ResolveOutcome::AutoBind {
@@ -1699,6 +1735,9 @@ impl ResolveRefDto {
                     .seed_edge_id
                     .map(|id| id.as_str().to_string())
                     .filter(|id| !id.is_empty()),
+                resolved_axis: item.resolved_axis.map(Into::into),
+                frozen_axis: item.frozen_axis.map(Into::into),
+                resolved_sidedness: item.resolved_sidedness.map(mate_sidedness_str),
                 ..base(r.ref_id, "needsRepair")
             },
         }
@@ -1725,6 +1764,10 @@ fn repair_reason_str(r: onecad_core::document::repair::RepairReason) -> &'static
         // WP-F, op-built (SCHEMA §9). camelCase, unlike the kebab-case ladder
         // outcomes — the token is normative, not a rendering choice.
         RepairReason::LegacyReferenceFace => "legacyReferenceFace",
+        // WP-I, op-built by `PlaceComponent` (SCHEMA §9). camelCase for the same
+        // reason `legacyReferenceFace` is: the token is normative.
+        RepairReason::MateAxisReversed => "mateAxisReversed",
+        RepairReason::MateSeatOffFace => "mateSeatOffFace",
         RepairReason::Unknown => "unknown",
     }
 }
@@ -1736,6 +1779,7 @@ fn candidate_dto(c: onecad_core::document::repair::RepairCandidate) -> ResolveCa
         margin: c.margin,
         world_pos: [c.world_pos.x, c.world_pos.y, c.world_pos.z],
         summary: c.summary,
+        label: c.label,
         feature_contributions: c.extra.get("featureContributions").cloned(),
     }
 }
@@ -1804,7 +1848,9 @@ pub struct RegenFinished {
 /// One entry in the `needs-repair` event — a **lean** summary of a step left in
 /// NeedsRepair (SCHEMA §9). The repair panel fetches the full candidate evidence via
 /// `resolveRefs` on demand, so this carries only what the banner/badge needs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// `Eq` is deliberately absent: WP-I's `resolvedAxis`/`frozenAxis` are `f64`
+// triples, and no caller compares these DTOs for total equality.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NeedsRepairItemDto {
     /// The op record id (`RecordId`) of the step needing repair.
@@ -1838,12 +1884,29 @@ pub struct NeedsRepairItemDto {
     /// `EditOperationInput` that creates the pair. `None` on every other reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed_edge_id: Option<String>,
+    /// The target's CURRENT parametric axis on a `mateAxisReversed` item (SCHEMA
+    /// §9 `resolvedAxis`, kernel-hardening WP-I). The panel echoes it back
+    /// verbatim as `repairMateAxis`'s `resolvedAxis`, which re-freezes
+    /// `mate.targetAxis` — so without it the repair has nothing to write.
+    /// `None` on every other reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_axis: Option<[f64; 3]>,
+    /// The axis the record had frozen (SCHEMA §9 `frozenAxis`, WP-I) — evidence
+    /// for the panel, never an input to the repair. `None` on every other reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_axis: Option<[f64; 3]>,
+    /// The target's CURRENT sidedness (SCHEMA §9 `resolvedSidedness`, WP-I),
+    /// echoed back verbatim as `repairMateAxis`'s `resolvedSidedness`. `None`
+    /// when unmeasured, in which case the repair KEEPS the stored sidedness —
+    /// it is never cleared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_sidedness: Option<String>,
 }
 
 /// The `needs-repair` event payload (`{revision, items}`). Emitted after **every**
 /// published regen; an EMPTY `items` means repairs cleared, so the frontend can drop
 /// the banner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NeedsRepairEvent {
     pub revision: u64,
@@ -1893,6 +1956,18 @@ pub fn needs_repair_item_dto(
             .as_ref()
             .map(|id| id.as_str().to_string())
             .filter(|id| !id.is_empty()),
+        resolved_axis: item.resolved_axis.map(Into::into),
+        frozen_axis: item.frozen_axis.map(Into::into),
+        resolved_sidedness: item.resolved_sidedness.map(mate_sidedness_str),
+    }
+}
+
+/// The SCHEMA §7.5 / §9 wire token for a cylinder's sidedness.
+fn mate_sidedness_str(s: onecad_core::document::record::MateSidedness) -> String {
+    use onecad_core::document::record::MateSidedness;
+    match s {
+        MateSidedness::Pin => "pin".into(),
+        MateSidedness::Hole => "hole".into(),
     }
 }
 
@@ -3128,6 +3203,7 @@ mod tests {
                     margin: 0.0,
                     world_pos: Vec3::new_unchecked(12.0, 3.5, 0.0),
                     summary: "planar face".into(),
+                    label: None,
                     extra,
                 },
                 RepairCandidate {
@@ -3136,6 +3212,7 @@ mod tests {
                     margin: 0.0,
                     world_pos: Vec3::new_unchecked(12.0, -3.5, 0.0),
                     summary: "planar face".into(),
+                    label: None,
                     extra: Default::default(),
                 },
             ],
@@ -3145,6 +3222,9 @@ mod tests {
             seeded: false,
             ordinal_anchor: None,
             seed_edge_id: None,
+            resolved_axis: None,
+            frozen_axis: None,
+            resolved_sidedness: None,
         };
         let dto = ResolveRefDto::from_resolution(
             RefResolution {
@@ -3195,6 +3275,9 @@ mod tests {
             seeded: false,
             ordinal_anchor: None,
             seed_edge_id: None,
+            resolved_axis: None,
+            frozen_axis: None,
+            resolved_sidedness: None,
         };
         let dto = needs_repair_item_dto("rec-1".into(), Some("body-7".into()), &item);
         let v = serde_json::to_value(&dto).unwrap();
@@ -3213,6 +3296,73 @@ mod tests {
         assert!(
             v.get("bodyId").is_none(),
             "bodyId must be skipped when absent: {v}"
+        );
+    }
+
+    /// WP-I: the §9 op-built `mateAxisReversed` evidence crosses the projection
+    /// DTOs intact — the panel echoes `resolvedAxis`/`resolvedSidedness` straight
+    /// back as `repairMateAxis` arguments, so a dropped key is a repair that
+    /// cannot re-freeze anything. Every field is absent on an ordinary item.
+    #[test]
+    fn mate_axis_reversed_evidence_crosses_both_repair_dtos() {
+        use onecad_core::document::record::MateSidedness;
+        use onecad_core::document::repair::{
+            LadderLevel, RepairCandidate, RepairItem, RepairReason,
+        };
+        use onecad_core::math::Vec3;
+        let item = RepairItem {
+            step_index: 4,
+            ref_id: "op_4.input0".into(),
+            element_id: Some(onecad_core::ids::ElementId::new("el_hole")),
+            ladder_failed: LadderLevel::Descriptor,
+            reason: RepairReason::MateAxisReversed,
+            candidates: vec![RepairCandidate {
+                topo_key: onecad_core::ids::TopoKey::new("f:12"),
+                score: 0.5,
+                margin: 0.0,
+                world_pos: Vec3::new_unchecked(1.0, 2.0, 3.0),
+                summary: "cylindrical face".into(),
+                label: Some("Keep the component's direction".into()),
+                extra: Default::default(),
+            }],
+            scoring_version: Some(4),
+            anchor: None,
+            ui_label: "Screw 1".into(),
+            seeded: false,
+            ordinal_anchor: None,
+            seed_edge_id: None,
+            resolved_axis: Some(Vec3::new_unchecked(0.0, 0.0, -1.0)),
+            frozen_axis: Some(Vec3::new_unchecked(0.0, 0.0, 1.0)),
+            resolved_sidedness: Some(MateSidedness::Hole),
+        };
+
+        let lean =
+            serde_json::to_value(needs_repair_item_dto("rec-9".into(), None, &item)).unwrap();
+        assert_eq!(lean["reason"], "mateAxisReversed");
+        assert_eq!(lean["resolvedAxis"], serde_json::json!([0.0, 0.0, -1.0]));
+        assert_eq!(lean["frozenAxis"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(lean["resolvedSidedness"], "hole");
+
+        let full = serde_json::to_value(ResolveRefDto::from_resolution(
+            onecad_core::regen::RefResolution {
+                ref_id: "op_4.input0".into(),
+                outcome: onecad_core::regen::ResolveOutcome::NeedsRepair(item),
+                snapshot_id: onecad_core::ids::SnapshotId(9),
+                revision: 3,
+                body_id: None,
+            },
+            9,
+            3,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(full["reason"], "mateAxisReversed");
+        assert_eq!(full["resolvedAxis"], serde_json::json!([0.0, 0.0, -1.0]));
+        assert_eq!(full["frozenAxis"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(full["resolvedSidedness"], "hole");
+        assert_eq!(
+            full["candidates"][0]["label"],
+            "Keep the component's direction"
         );
     }
 

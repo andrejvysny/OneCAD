@@ -19,6 +19,11 @@ them (`cargo insta accept`) will silently move a frozen file-format snapshot.
   NOT equal its own serde round-trip, and its history-prefix hash differs. Re-mint
   with `OperationRecord::new(rec.record_id, step, name, rec.op)` after any params
   mutation that adds a sketch/body/element dependency.
+- Regex-substituting a struct literal is as dangerous as a line-offset script:
+  a non-greedy `ComponentMate \{.*?extra: Extra::new\(\),` match lands on the
+  NESTED `PrimaryRef`'s `extra`, not the outer struct's, and the result still
+  compiles nowhere obvious. Anchor by exact line number after reading the site,
+  and always `git diff --stat` for unexpected deletions before running the gate.
 - Adding one field to `SketchRegionRef` required editing ~65 struct literals
   across `crates/onecad-core/{src,tests}`, `crates/onecad-regen/tests`,
   `src-tauri/src` and `src-tauri/tests` — there is no shared fixture; each test

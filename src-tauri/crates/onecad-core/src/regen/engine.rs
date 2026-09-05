@@ -398,6 +398,18 @@ pub struct PlanStepEvent {
     // Boxed: `PlanEvent`'s variants are size-balanced (clippy
     // `large_enum_variant`) and a reseat is rare — most steps carry `None`.
     pub mate_placement: Option<Box<crate::document::record::FrozenPlacement>>,
+    /// Kernel-hardening WP-I (SCHEMA §7.2 `mateResolved`, §7.3 `mate`). Present
+    /// on EVERY `PlaceComponent` step whose mate resolved `AutoBind` against a
+    /// CYLINDRICAL target — independent of whether the seat moved, so it is
+    /// emitted alongside, never instead of,
+    /// [`mate_placement`](Self::mate_placement).
+    ///
+    /// Rust ADOPTS it into `mate.targetAxis` / `mate.targetSidedness` exactly
+    /// once, and only for a record that carries no `targetAxis` yet — the
+    /// migration path for documents authored before this build. A record that
+    /// already carries one is never rewritten by regen; only the §9
+    /// `mateAxisReversed` repair re-freezes it.
+    pub mate_resolved: Option<crate::document::record::MateResolved>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

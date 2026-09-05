@@ -82,6 +82,30 @@ pub enum RepairReason {
     /// rather than left to the derived kebab-case rule.
     #[serde(rename = "legacyReferenceFace")]
     LegacyReferenceFace,
+    /// **Worker-emitted but OP-BUILT by `PlaceComponent`, never a ladder outcome**
+    /// (SCHEMA §9 + §7.3 `mate`, kernel-hardening WP-I 2026-09-04). The resolved
+    /// target's parametric axis is ANTI-PARALLEL to the
+    /// [`target_axis`](crate::document::record::ComponentMate::target_axis) frozen
+    /// at authoring (`resolvedAxis · targetAxis < −0.5`), or its sidedness no
+    /// longer matches — the only signature a rebuilt-from-the-other-side
+    /// cylindrical face leaves. The component publishes at its frozen
+    /// `placement` rather than spinning 180° silently.
+    ///
+    /// Carries [`resolved_axis`](RepairItem::resolved_axis) /
+    /// [`frozen_axis`](RepairItem::frozen_axis) and exactly TWO candidates on the
+    /// SAME face at a deliberate tie, distinguished only by their
+    /// [`label`](RepairCandidate::label). Repair is NOT a rebind: the client
+    /// sends [`EditCommand::RepairMateAxis`](crate::edit::command::EditCommand::RepairMateAxis).
+    #[serde(rename = "mateAxisReversed")]
+    MateAxisReversed,
+    /// **Worker-emitted but OP-BUILT by `PlaceComponent`** (SCHEMA §9 + §7.3
+    /// `mate`, kernel-hardening WP-I). The solved seat classifies `OUT` against
+    /// the resolved face — the target shrank past it — so the component publishes
+    /// at its frozen `placement`. It carries the resolved face as its single
+    /// candidate and has NO repair command: the fix is to move or re-mate the
+    /// component, and the item's `ui_label` says so.
+    #[serde(rename = "mateSeatOffFace")]
+    MateSeatOffFace,
 }
 
 impl<'de> Deserialize<'de> for RepairReason {
@@ -92,6 +116,8 @@ impl<'de> Deserialize<'de> for RepairReason {
             "low-confidence" => Self::LowConfidence,
             "ordinal-permutation" => Self::OrdinalPermutation,
             "legacyReferenceFace" => Self::LegacyReferenceFace,
+            "mateAxisReversed" => Self::MateAxisReversed,
+            "mateSeatOffFace" => Self::MateSeatOffFace,
             _ => Self::Unknown,
         })
     }
@@ -172,6 +198,17 @@ pub struct RepairCandidate {
     pub world_pos: Vec3,
     /// Human-readable summary (e.g. `"planar face, area≈120mm²"`).
     pub summary: String,
+    /// The CHOICE this candidate stands for, on an OP-BUILT item whose candidates
+    /// are not distinguishable geometrically (SCHEMA §9 `label`,
+    /// kernel-hardening WP-I). A [`RepairReason::MateAxisReversed`] item carries
+    /// two candidates on the SAME face at the same point and the same score —
+    /// `"Keep the component's direction"` and `"Follow the reversed axis"` — so
+    /// without this the panel would render two identical rows.
+    ///
+    /// `None` on every ladder-produced candidate, and skipped on the wire, so
+    /// pre-WP-I documents and worker-published items stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Unknown keys (e.g. `featureContributions`), preserved verbatim.
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
@@ -230,6 +267,33 @@ pub struct RepairItem {
     /// and worker-published items stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_edge_id: Option<ElementId>,
+    /// The target's CURRENT parametric axis on a [`RepairReason::MateAxisReversed`]
+    /// item (SCHEMA §9 `resolvedAxis`, kernel-hardening WP-I) — what the repair
+    /// re-freezes `mate.targetAxis` to, whichever branch the user picks.
+    ///
+    /// **Typed, not `extra`**: [`RepairItem`] has no catch-all flatten, so an
+    /// untyped key here would be DROPPED on the way in and the repair would have
+    /// nothing to re-freeze. `None` on every other reason, and skipped on the
+    /// wire, so pre-WP-I documents stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_axis: Option<Vec3>,
+    /// The axis the record had FROZEN, echoed back so the panel can show the user
+    /// what changed (SCHEMA §9 `frozenAxis`, WP-I). Same typing reason and same
+    /// wire discipline as [`resolved_axis`](Self::resolved_axis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_axis: Option<Vec3>,
+    /// The target's CURRENT sidedness on a [`RepairReason::MateAxisReversed`]
+    /// item, when the worker could measure it (SCHEMA §9 `resolvedSidedness`,
+    /// kernel-hardening WP-I) — what the repair re-freezes
+    /// `mate.targetSidedness` to. ABSENT means "not measured", and the repair
+    /// then KEEPS the record's stored sidedness rather than clearing it: a hole
+    /// that became a pin is a different feature, and disarming that check
+    /// silently is exactly the failure this item exists to prevent.
+    ///
+    /// Typed for the same reason [`resolved_axis`](Self::resolved_axis) is:
+    /// [`RepairItem`] has no catch-all flatten, so an untyped key is dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_sidedness: Option<crate::document::record::MateSidedness>,
 }
 
 /// `skip_serializing_if` predicate for a `false` flag (keeps the wire byte-stable).
@@ -488,6 +552,7 @@ mod tests {
                 margin: 0.0,
                 world_pos: Vec3::new_unchecked(12.0, 3.5, 0.0),
                 summary: "planar face".into(),
+                label: None,
                 extra: Default::default(),
             }],
             anchor: None,
@@ -496,6 +561,9 @@ mod tests {
             seeded: false,
             ordinal_anchor: None,
             seed_edge_id: None,
+            resolved_axis: None,
+            frozen_axis: None,
+            resolved_sidedness: None,
         }
     }
 
@@ -591,6 +659,63 @@ mod tests {
         v["reason"] = serde_json::json!("something-new");
         let back: RepairItem = serde_json::from_value(v).expect("item still parses");
         assert_eq!(back.reason, RepairReason::Unknown);
+    }
+
+    /// WP-I: the two op-built `PlaceComponent` reasons are camelCase on the wire
+    /// (SCHEMA §9), and the item's typed `resolvedAxis`/`frozenAxis` plus the
+    /// candidate's `label` are absent — key and all — on every other item, so
+    /// pre-WP-I documents rewrite byte-identically.
+    #[test]
+    fn mate_reasons_round_trip_and_carry_typed_axis_evidence() {
+        let from = |tok: &str| -> RepairReason {
+            serde_json::from_value(serde_json::json!(tok)).expect("never an error")
+        };
+        assert_eq!(from("mateAxisReversed"), RepairReason::MateAxisReversed);
+        assert_eq!(from("mateSeatOffFace"), RepairReason::MateSeatOffFace);
+        // Adding tokens must not have taught the reader to accept junk.
+        assert_eq!(from("mateAxisReversed "), RepairReason::Unknown);
+        assert_eq!(
+            serde_json::to_value(RepairReason::MateAxisReversed).unwrap(),
+            serde_json::json!("mateAxisReversed")
+        );
+        assert_eq!(
+            serde_json::to_value(RepairReason::MateSeatOffFace).unwrap(),
+            serde_json::json!("mateSeatOffFace")
+        );
+
+        let plain = serde_json::to_value(item(1, "op_1.input0")).unwrap();
+        assert!(
+            plain.get("resolvedAxis").is_none()
+                && plain.get("frozenAxis").is_none()
+                && plain.get("resolvedSidedness").is_none()
+        );
+        assert!(plain["candidates"][0].get("label").is_none());
+
+        // The worker's shape for the item, read through the typed reader: an
+        // untyped key would be DROPPED here (`RepairItem` has no extra-flatten),
+        // which is the whole reason these are typed fields.
+        let mut wire = plain;
+        wire["reason"] = serde_json::json!("mateAxisReversed");
+        wire["resolvedAxis"] = serde_json::json!([0.0, 0.0, -1.0]);
+        wire["frozenAxis"] = serde_json::json!([0.0, 0.0, 1.0]);
+        wire["resolvedSidedness"] = serde_json::json!("hole");
+        wire["candidates"][0]["label"] = serde_json::json!("Keep the component's direction");
+        let back: RepairItem = serde_json::from_value(wire.clone()).expect("item parses");
+        assert_eq!(back.reason, RepairReason::MateAxisReversed);
+        assert_eq!(
+            back.resolved_axis,
+            Some(Vec3::new_unchecked(0.0, 0.0, -1.0))
+        );
+        assert_eq!(back.frozen_axis, Some(Vec3::new_unchecked(0.0, 0.0, 1.0)));
+        assert_eq!(
+            back.resolved_sidedness,
+            Some(crate::document::record::MateSidedness::Hole)
+        );
+        assert_eq!(
+            back.candidates[0].label.as_deref(),
+            Some("Keep the component's direction")
+        );
+        assert_eq!(serde_json::to_value(&back).unwrap(), wire);
     }
 
     #[test]

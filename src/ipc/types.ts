@@ -662,6 +662,17 @@ export interface ClassifyFrame {
   axis: [number, number, number] | null;
   /** Cylinder or circle radius. `null` for plane/line frames. */
   radius: number | null;
+  /**
+   * Whether the solid lies INSIDE the cylinder (`pin` — a boss or shaft) or
+   * outside it (`hole` — a bore); SCHEMA §7.5 `sidedness`, kernel-hardening
+   * WP-I. Cylinder FACE frames only.
+   *
+   * Absent whenever the backend did not measure it — it needs the face's
+   * instance in its body — and on every plane/circle/line frame. Absent means
+   * "not measured", never "neither", so branch on `=== "pin"` / `=== "hole"`
+   * and treat the missing case as unknown.
+   */
+  sidedness?: "pin" | "hole";
 }
 
 /**
@@ -949,6 +960,27 @@ export interface NeedsRepairItem {
    * creates the pair. Absent on every other reason.
    */
   seedEdgeId?: string;
+  /**
+   * The target's CURRENT parametric axis on a `mateAxisReversed` item (SCHEMA §9
+   * `resolvedAxis`, kernel-hardening WP-I). Echo it back verbatim as
+   * `repairMateAxis`'s `resolvedAxis`: both repair branches re-freeze
+   * `mate.targetAxis` to it, which is what makes the next regen a fixed point.
+   * Absent on every other reason.
+   */
+  resolvedAxis?: [number, number, number];
+  /**
+   * The axis the record had FROZEN (SCHEMA §9 `frozenAxis`, WP-I) — evidence to
+   * show the user what changed, never an input to the repair. Absent on every
+   * other reason.
+   */
+  frozenAxis?: [number, number, number];
+  /**
+   * The target's CURRENT sidedness (SCHEMA §9 `resolvedSidedness`, WP-I) — `pin`
+   * or `hole`, present only when the worker could measure it. Echo it back as
+   * `repairMateAxis`'s `resolvedSidedness`; omitting it KEEPS the record's stored
+   * sidedness rather than clearing it.
+   */
+  resolvedSidedness?: "pin" | "hole";
 }
 
 /**
@@ -984,6 +1016,15 @@ export interface ResolveCandidate {
   /** Candidate centre in world coords — a geometric hint for highlighting. */
   worldPos: [number, number, number];
   summary: string;
+  /**
+   * The CHOICE this candidate stands for, on an OP-BUILT item whose candidates are
+   * geometrically identical (SCHEMA §9 `label`, kernel-hardening WP-I). A
+   * `mateAxisReversed` item carries two rows on the SAME face at the same point and
+   * the same score — `"Keep the component's direction"` and `"Follow the reversed
+   * axis"` — so this is the only thing that tells them apart. Absent on every
+   * ladder-produced candidate.
+   */
+  label?: string;
   /** Per-feature score contributions (opaque; SCHEMA §9). */
   featureContributions?: unknown;
   /**
@@ -1036,6 +1077,24 @@ export interface ResolveRefResult {
    * the slot has no stored ref to read it off. Absent on every other reason.
    */
   seedEdgeId?: string;
+  /**
+   * The target's CURRENT parametric axis on a `mateAxisReversed` item (SCHEMA §9
+   * `resolvedAxis`, kernel-hardening WP-I) — what `repairMateAxis` re-freezes
+   * `mate.targetAxis` to. Absent on every other reason.
+   */
+  resolvedAxis?: [number, number, number];
+  /**
+   * The axis the record had frozen (SCHEMA §9 `frozenAxis`, WP-I). Evidence for
+   * the panel only. Absent on every other reason.
+   */
+  frozenAxis?: [number, number, number];
+  /**
+   * The target's CURRENT sidedness (SCHEMA §9 `resolvedSidedness`, WP-I) — `pin`
+   * or `hole`, present only when the worker could measure it. Echo it back as
+   * `repairMateAxis`'s `resolvedSidedness`; omitting it KEEPS the record's stored
+   * sidedness rather than clearing it.
+   */
+  resolvedSidedness?: "pin" | "hole";
 }
 
 /**

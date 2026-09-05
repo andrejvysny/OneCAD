@@ -26,9 +26,12 @@
 #define ONECAD_OPS_COMPONENTGENERATORS_H
 
 #include <map>
+#include <optional>
 #include <string>
 
 #include <TopoDS_Shape.hxx>
+
+#include "util/Cancel.h"
 
 namespace onecad::ops {
 
@@ -60,7 +63,37 @@ struct GeneratorRequest {
     bool length_given;
     ThreadDetail detail;
     std::map<std::string, std::string> text_params;
+    /// Cooperative cancel, polled per thread RING while the simplified cutter
+    /// accumulates its tool compound (kernel-hardening WP-I). Null ⇒ no cancel
+    /// lane, which is what every in-process test uses.
+    const onecad::CancelToken* cancel = nullptr;
 };
+
+/// A generator free param outside the bounds SCHEMA §7.3 sets for it
+/// (kernel-hardening WP-I). The worker refuses BY NAME with the offending value
+/// before any geometry is built; the op layer turns this into an `OP_FAILED`
+/// whose `detail.diagnostics[0]` carries `reasonCode`
+/// `GENERATOR_PARAM_OUT_OF_RANGE` and `evidence {param, value, min, max}`.
+struct GeneratorBoundViolation {
+    std::string param;   ///< "length" | "turns"
+    double value = 0.0;
+    double min = 0.0;
+    double max = 0.0;
+    std::string message;  ///< human-facing, names the parameter and the value
+};
+
+/// The WP-I bounds preflight for `generator_id`'s free params. `nullopt` ⇒ in
+/// range (or a family that reads none — today only `iso4762` reads `length`, so
+/// every other id answers `nullopt` and its own dispatch failure stands).
+///
+/// Two bounds, both from SCHEMA §7.3: `length ∈ (0, 1000]` mm, and — only for
+/// the `simplified` / `modeled` details, the two that actually cut thread rings
+/// — `floor(length / pitch) ≤ 500` turns, `pitch` being the family TABLE's value
+/// for the size rather than a wire param. An unknown thread designation is NOT
+/// a bound violation: the builder's own by-name refusal (which lists the known
+/// sizes) is the better message, so this returns `nullopt` and lets it run.
+std::optional<GeneratorBoundViolation> generator_bounds_violation(const std::string& generator_id,
+                                                                  const GeneratorRequest& req);
 
 /// Builds `generator_id`'s solid for `req`. Never throws: every failure —
 /// unknown generator, unknown thread designation, OCCT refusal — comes back

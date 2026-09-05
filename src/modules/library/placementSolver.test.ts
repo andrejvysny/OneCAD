@@ -107,10 +107,12 @@ describe("attachmentAccepts", () => {
 });
 
 describe("solveCandidatePlacement", () => {
-  it("coincident: seats at the pick point, local +Z aligned to the target normal", () => {
+  it("coincident: seats the pick PROJECTED onto the target plane, local +Z aligned to the target normal", () => {
+    // WP-I: parity with the worker's coincident seat — the pick (1,2,3) is off
+    // the plane at z=5, and the seat lands on the plane at (1,2,5).
     const frame: ClassifyFrame = { origin: [5, 5, 5], normal: [0, 0, 1], axis: null, radius: null };
     const placement = solveCandidatePlacement("coincident", frame, [1, 2, 3], false);
-    expect(placement.translate).toEqual([1, 2, 3]);
+    expect(placement.translate).toEqual([1, 2, 5]);
     expect(approxEqual(rotateZ(placement.rotate.axis, placement.rotate.angleDeg), [0, 0, 1])).toBe(
       true,
     );
@@ -201,14 +203,15 @@ describe("solveCandidatePlacement with an attachment frame", () => {
 
   it("offset origin: the ATTACHMENT point lands on the seat, not the model origin", () => {
     // A component whose mate point sits 10mm up its own local +Z, seated on a
-    // +Z plane at (1,2,3): the body must sit 10mm BELOW the pick, at (1,2,-7).
-    // Before WP-F1.1 it seated at (1,2,3) — the whole defect this closes.
+    // +Z plane at z=5: the pick (1,2,3) projects onto the plane at (1,2,5)
+    // (WP-I), and the body must sit 10mm BELOW that, at (1,2,-5).
+    // Before WP-F1.1 it seated at the raw pick — the whole defect this closes.
     const frame: ClassifyFrame = { origin: [5, 5, 5], normal: [0, 0, 1], axis: null, radius: null };
     const selfFrame = { origin: [0, 0, 10] as const, z: [0, 0, 1] as const, x: [1, 0, 0] as const };
     const p = solveCandidatePlacement("coincident", frame, [1, 2, 3], false, selfFrame);
-    expect(approxEqual(p.translate, [1, 2, -7])).toBe(true);
+    expect(approxEqual(p.translate, [1, 2, -5])).toBe(true);
     expect(p.rotate.angleDeg).toBe(0);
-    expect(approxEqual(applyPlacement(p, [0, 0, 10]), [1, 2, 3])).toBe(true);
+    expect(approxEqual(applyPlacement(p, [0, 0, 10]), [1, 2, 5])).toBe(true);
   });
 
   it("rotated frame z: the attachment axis aligns to the target axis", () => {
@@ -230,8 +233,9 @@ describe("solveCandidatePlacement with an attachment frame", () => {
     const selfFrame = { origin: [1, 2, 3] as const, z: [0, 0, 1] as const, x: [0, 1, 0] as const };
     const p = solveCandidatePlacement("coincident", frame, [4, 5, 6], false, selfFrame);
     // The two invariants that define the mate: the attachment point is ON the
-    // seat, and the attachment's own +Z is ALONG the target normal.
-    expect(approxEqual(applyPlacement(p, [1, 2, 3]), [4, 5, 6])).toBe(true);
+    // seat, and the attachment's own +Z is ALONG the target normal. WP-I: the
+    // seat is the pick (4,5,6) PROJECTED onto the y=0 target plane, at (4,0,6).
+    expect(approxEqual(applyPlacement(p, [1, 2, 3]), [4, 0, 6])).toBe(true);
     expect(approxEqual(applyRotation(p, [0, 0, 1]), [0, 1, 0])).toBe(true);
     // …and the roll is the one the frame asked for, not an arbitrary one.
     expect(approxEqual(applyRotation(p, [0, 1, 0]), [1, 0, 0])).toBe(true);

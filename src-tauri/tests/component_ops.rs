@@ -458,6 +458,8 @@ async fn place_component_mate_reseats_on_the_first_regen_when_authored_off_axis(
         kind: MateKind::Concentric,
         self_frame: None,
         flipped: false,
+        target_axis: None,
+        target_sidedness: None,
         extra: Default::default(),
     });
     params.placement.translate[0] = Scalar::new(shank_origin[0]);
@@ -524,6 +526,8 @@ async fn place_component_with_an_unresolvable_mate_still_publishes_at_its_frozen
         kind: MateKind::Concentric,
         self_frame: None,
         flipped: false,
+        target_axis: None,
+        target_sidedness: None,
         extra: Default::default(),
     });
     // A recognizable frozen placement — proves it's the FROZEN one that
@@ -1792,4 +1796,640 @@ async fn a_profile_component_survives_save_and_reopen_with_no_library() {
     );
 
     wm2.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-I I0(b) probe / design I1: a coincident-mated fastener follows its plate
+// when the plate's THICKNESS changes.
+//
+// `solve_mate_placement`'s coincident branch (`ComponentMateSolver.cpp:234-241`)
+// seats at `seat_anchor` — the component's own frozen placement — and never
+// reads `frame.origin`. So a target plane that moved along its own normal leaves
+// the screw exactly where it was: floating above the plate, or buried in it,
+// with no repair item and no visible complaint.
+//
+// The measurement is the SEAT, never the volume: the defect is a pure placement
+// error and every volume in this scenario is invariant under it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A closed 40×20 rectangle with no interior loop — the plate this probe
+/// thickens. Same shape as [`stock_profile_sketch`] minus its bore.
+fn plate_profile_sketch(
+    sid: onecad_core::ids::SketchId,
+    base: u128,
+) -> onecad_core::sketch::Sketch {
+    use onecad_core::ids::EntityId;
+    use onecad_core::math::Vec2;
+    use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Plate profile", WorldPlane::XY);
+    let point = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .expect("point");
+    };
+    point(&mut sk, e(0), 0.0, 0.0);
+    point(&mut sk, e(1), 40.0, 0.0);
+    point(&mut sk, e(2), 40.0, 20.0);
+    point(&mut sk, e(3), 0.0, 20.0);
+    for (l, a, b) in [(0x10, 0, 1), (0x11, 1, 2), (0x12, 2, 3), (0x13, 3, 0)] {
+        sk.add_entity(SketchEntity::line(e(l), e(a), e(b), false))
+            .expect("line");
+    }
+    sk
+}
+
+/// The plate's UPPER planar face: the one whose descriptor normal is along Z
+/// and whose bbox centre sits at the top of the extrusion. `ElementInfoDto::
+/// normal` is the un-oriented surface normal, so both caps report `(0,0,1)` and
+/// the height is what tells them apart. Returns `(topoKey, center)`; `center`
+/// lies ON the plane, which makes it a usable anchor for the promotion.
+async fn find_top_planar_face(
+    wm: &WorkerManager,
+    snapshot: onecad_core::ids::SnapshotId,
+    body: BodyId,
+    top_z: f64,
+) -> (String, [f64; 3]) {
+    for i in 1..=8 {
+        let key = format!("f:{i}");
+        let Some(info) = ElementQuery::query_element_by_topo_key(wm, snapshot, body, &key)
+            .await
+            .expect("QueryElement by topoKey")
+        else {
+            continue;
+        };
+        if !info.has_normal || info.normal[2].abs() < 0.999 {
+            continue;
+        }
+        if (info.center[2] - top_z).abs() < 1e-6 {
+            return (key, info.center);
+        }
+    }
+    panic!("no planar face with a Z normal at z={top_z} found on {body:?} within f:1..=8");
+}
+
+/// The `placement.translate.z` a record currently carries — the derived
+/// writeback `sync_mate_placements` performs when a mate re-seats, and the
+/// number this probe measures.
+fn record_translate_z(rt: &DocumentRuntime, record: RecordId) -> f64 {
+    let params = rt
+        .operation_params(record)
+        .expect("the mated record still exists");
+    let t = params["placement"]["translate"]
+        .as_array()
+        .expect("translate is an array");
+    t[2]["value"]
+        .as_f64()
+        .or_else(|| t[2].as_f64())
+        .expect("translate.z reads as a number")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coincident_mated_screw_follows_plate_thickness_change() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    const BASE: u128 = 0xB10B00;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let extrude_record = RecordId(Uuid::from_u128(BASE + 1));
+    let mate_record = RecordId(Uuid::from_u128(BASE + 3));
+
+    // ── 1. A 5 mm plate. ────────────────────────────────────────────────────
+    add_op(
+        &mut rt,
+        stock_sketch_record(BASE, &plate_profile_sketch(sid, BASE + 0x1000)),
+    );
+    add_op(&mut rt, stock_extrude_record(BASE + 1, sid, 5.0));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "the 5 mm plate");
+    assert_eq!(snap1.bodies.len(), 1, "the plate document has one body");
+    let plate_body = snap1.bodies[0].body;
+
+    let (top_key, top_center) = find_top_planar_face(&wm, snap1.id, plate_body, 5.0).await;
+    let anchor = AnchorIntent {
+        world_point: Vec3::new_unchecked(top_center[0], top_center[1], top_center[2]),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let element_id = promote(&mut rt, snap1.id, plate_body, &top_key, &anchor).await;
+
+    // ── 2. An ISO 4762 M6 seated ON that face, coincident. The frozen
+    //    placement IS the solved seat, so the first regen is a no-op and any
+    //    later move is attributable to the thickness edit alone. ─────────────
+    let mut mated = place_component_record(BASE + 3);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: plate_body,
+                element: element_id,
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(anchor),
+            extra: Default::default(),
+        },
+        kind: MateKind::Coincident,
+        self_frame: None,
+        flipped: false,
+        target_axis: None,
+        target_sidedness: None,
+        extra: Default::default(),
+    });
+    params.placement.translate[0] = Scalar::new(top_center[0]);
+    params.placement.translate[1] = Scalar::new(top_center[1]);
+    params.placement.translate[2] = Scalar::new(5.0);
+    add_op(&mut rt, mated);
+
+    let report2 = regen_all(&mut rt).await;
+    let snap2 = published(&report2, "the mated screw on the 5 mm plate");
+    assert_eq!(snap2.bodies.len(), 2, "plate + mated screw");
+    assert_eq!(
+        snap2.repair_summary.needs_repair_count, 0,
+        "the freshly authored mate resolves cleanly"
+    );
+    let seated_z = record_translate_z(&rt, mate_record);
+    assert!(
+        (seated_z - 5.0).abs() < 1e-3,
+        "setup: the screw starts seated on the 5 mm plate's top face, got z={seated_z}"
+    );
+
+    // ── 3. Thicken the plate 5 → 8 mm. The top face moves +3 mm along its own
+    //    normal; the screw must move with it. ────────────────────────────────
+    let Operation::Known(KnownOperation::Extrude(mut thicker)) =
+        stock_extrude_record(BASE + 1, sid, 8.0).op
+    else {
+        unreachable!()
+    };
+    thicker.distance = Scalar::new(8.0);
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: extrude_record,
+        op: Operation::Known(KnownOperation::Extrude(thicker)),
+    })
+    .expect("UpdateOperationParams(Extrude 5 → 8)");
+
+    let report3 = regen_all(&mut rt).await;
+    let snap3 = published(&report3, "the mated screw on the 8 mm plate");
+    assert_eq!(snap3.bodies.len(), 2, "plate + mated screw after the edit");
+
+    let moved_z = record_translate_z(&rt, mate_record);
+    eprintln!(
+        "[I0-b] plate 5 → 8 mm | seat z before = {seated_z}, after = {moved_z}, want 8.0 \
+         (needsRepair = {})",
+        snap3.repair_summary.needs_repair_count
+    );
+    assert!(
+        (moved_z - 8.0).abs() < 1e-3,
+        "a coincident mate must follow its target plane along the plane's own normal: seat z = \
+         {moved_z}, want 8.0 (the plate's new top face); the screw is left {} mm off",
+        8.0 - moved_z
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-I: the §7.2 `mateResolved` adoption, its fence, and the §9
+// `mateAxisReversed` repair — all on the REAL worker.
+//
+// The other real-worker mate tests are coincident or unresolvable, and neither
+// emits `mateResolved` (it rides only a resolved CYLINDRICAL target), so none of
+// this path had real-worker coverage: the adoption, the claim that the regen
+// right after it does not trip the fence, the op-built §9 item, and the repair
+// that makes the next regen a fixed point.
+//
+// The reversal lever is MEASURED, not assumed: extruding the same profile with a
+// NEGATIVE distance rebuilds the identical bore (same Ø, same axis line, same
+// volume) with its parametric axis pointing the other way — exactly the
+// "re-authored from the other side" signature §7.3 describes, and the test
+// asserts the reversal with `ClassifyElement` before it asserts anything else.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A 20×20 plate profile CENTRED on the sketch origin with a concentric Ø6
+/// bore — the M6 clearance hole this test mates a screw into. Centred so the
+/// bore's axis is the world Z axis, which makes the reversal a pure sign flip.
+fn bored_plate_sketch(sid: onecad_core::ids::SketchId, base: u128) -> onecad_core::sketch::Sketch {
+    use onecad_core::ids::EntityId;
+    use onecad_core::math::Vec2;
+    use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
+
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Bored plate", WorldPlane::XY);
+    let point = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .expect("point");
+    };
+    point(&mut sk, e(0), -10.0, -10.0);
+    point(&mut sk, e(1), 10.0, -10.0);
+    point(&mut sk, e(2), 10.0, 10.0);
+    point(&mut sk, e(3), -10.0, 10.0);
+    for (l, a, b) in [(0x10, 0, 1), (0x11, 1, 2), (0x12, 2, 3), (0x13, 3, 0)] {
+        sk.add_entity(SketchEntity::line(e(l), e(a), e(b), false))
+            .expect("line");
+    }
+    point(&mut sk, e(0x20), 0.0, 0.0);
+    sk.add_entity(SketchEntity::circle(e(0x21), e(0x20), 3.0, false).expect("finite radius"))
+        .expect("bore circle");
+    sk
+}
+
+/// The bore's CURRENT parametric axis, straight off `ClassifyElement` — the
+/// quantity the whole reversal story is about, so the test reads it rather than
+/// assuming what an extrude sign does.
+async fn bore_axis(wm: &WorkerManager, body: BodyId, key: &str) -> [f64; 3] {
+    ElementQuery::classify_element_by_topo_key(wm, body, key)
+        .await
+        .expect("ClassifyElement")
+        .and_then(|dto| dto.frame.and_then(|f| f.axis))
+        .unwrap_or_else(|| panic!("no cylinder axis on {body:?} {key}"))
+}
+
+/// How many `MATE_AXIS_ADOPTED` diagnostics the projection currently carries.
+fn adoption_notices(rt: &DocumentRuntime) -> usize {
+    rt.projection()
+        .features
+        .iter()
+        .flat_map(|f| f.diagnostics.iter())
+        .filter(|d| d.code == "MATE_AXIS_ADOPTED")
+        .count()
+}
+
+/// The world direction the component's own local +Z maps to, derived from the
+/// record's frozen `placement.rotate` (Rodrigues about the stored axis) — the
+/// ONE quantity a `keepWorldDirection` repair promises to preserve.
+fn mapped_local_z(rt: &DocumentRuntime, record: RecordId) -> [f64; 3] {
+    let params = rt.operation_params(record).expect("the record exists");
+    let rot = &params["placement"]["rotate"];
+    let num = |v: &serde_json::Value| v.as_f64().or_else(|| v["value"].as_f64()).unwrap_or(0.0);
+    let a = rot["axis"].as_array().expect("rotate.axis");
+    let (ax, ay, az) = (num(&a[0]), num(&a[1]), num(&a[2]));
+    let len = (ax * ax + ay * ay + az * az).sqrt();
+    let theta = num(&rot["angleDeg"]).to_radians();
+    if len < 1e-12 || theta.abs() < 1e-12 {
+        return [0.0, 0.0, 1.0];
+    }
+    let (kx, ky, kz) = (ax / len, ay / len, az / len);
+    // Rodrigues on v = (0,0,1): v cosθ + (k × v) sinθ + k (k·v)(1 − cosθ).
+    let (c, s) = (theta.cos(), theta.sin());
+    let cross = [ky - 0.0, -kx, 0.0]; // k × (0,0,1)
+    [
+        cross[0] * s + kx * kz * (1.0 - c),
+        cross[1] * s + ky * kz * (1.0 - c),
+        c + kz * kz * (1.0 - c),
+    ]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_concentric_mate_adopts_its_axis_then_repairs_a_reversal() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    const BASE: u128 = 0xC0FFEE;
+    let sid = onecad_core::ids::SketchId(Uuid::from_u128(BASE + 2));
+    let extrude_record = RecordId(Uuid::from_u128(BASE + 1));
+    let mate_record = RecordId(Uuid::from_u128(BASE + 3));
+
+    // ── 1. A 5 mm plate with a Ø6 through-bore. ─────────────────────────────
+    add_op(
+        &mut rt,
+        stock_sketch_record(BASE, &bored_plate_sketch(sid, BASE + 0x1000)),
+    );
+    add_op(&mut rt, stock_extrude_record(BASE + 1, sid, 5.0));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "the bored plate");
+    let plate = snap1.bodies[0].body;
+
+    let (bore_key, bore_origin, bore_surface_point) = find_cylindrical_face(&wm, plate, 3.0).await;
+    let axis_before = bore_axis(&wm, plate, &bore_key).await;
+    let anchor = AnchorIntent {
+        // A point a real pick would land on: on the bore wall, at mid-depth.
+        world_point: Vec3::new_unchecked(bore_surface_point[0], bore_surface_point[1], 2.5),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let element_id = promote(&mut rt, snap1.id, plate, &bore_key, &anchor).await;
+
+    // ── 2. An M6 SHCS, CONCENTRIC to that bore. ─────────────────────────────
+    let mut mated = place_component_record(BASE + 3);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: plate,
+                element: element_id,
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(anchor),
+            extra: Default::default(),
+        },
+        kind: MateKind::Concentric,
+        self_frame: None,
+        flipped: false,
+        // Authored with NO frozen evidence — a document written before this
+        // build. The §7.2 writeback is what backfills it.
+        target_axis: None,
+        target_sidedness: None,
+        extra: Default::default(),
+    });
+    params.placement.translate[0] = Scalar::new(bore_origin[0]);
+    params.placement.translate[1] = Scalar::new(bore_origin[1]);
+    params.placement.translate[2] = Scalar::new(5.0);
+    add_op(&mut rt, mated);
+
+    let report2 = regen_all(&mut rt).await;
+    published(&report2, "the mated screw");
+    let adopted = rt.operation_params(mate_record).expect("mated record")["mate"]["targetAxis"]
+        .as_array()
+        .map(|a| {
+            [
+                a[0].as_f64().unwrap(),
+                a[1].as_f64().unwrap(),
+                a[2].as_f64().unwrap(),
+            ]
+        });
+    eprintln!("[I2b] bore axis measured = {axis_before:?}, adopted mate.targetAxis = {adopted:?}");
+    let adopted = adopted.expect(
+        "the first regen under this build ADOPTS the §7.2 mateResolved evidence onto a record \
+         that carried none",
+    );
+    assert!(
+        dot(adopted, axis_before) > 0.999,
+        "the adopted axis IS the target's measured parametric axis: {adopted:?} vs {axis_before:?}"
+    );
+    assert_eq!(
+        adoption_notices(&rt),
+        1,
+        "the adoption is reported once, as the MATE_AXIS_ADOPTED info diagnostic"
+    );
+    let z_before = mapped_local_z(&rt, mate_record);
+
+    // ── 3. The fence: a regen right after the adoption, with NO edit. The
+    //    adoption moved this op's planner hash, and it rode inside the same
+    //    finish_regen that recomputes the prefix hashes — so this must PUBLISH,
+    //    adopt nothing more, and leave every step Ok. ─────────────────────────
+    let report3 = regen_all(&mut rt).await;
+    assert!(
+        matches!(report3.outcome, Outcome::Published(_)),
+        "the regen right after an adoption must publish, never report Superseded: {:?}",
+        report3.outcome
+    );
+    let snap3 = published(&report3, "the re-regen after adoption");
+    assert!(
+        snap3
+            .step_states
+            .iter()
+            .all(|(_, st)| matches!(st, onecad_core::history::StepState::Valid)),
+        "every step stays Valid after the adoption: {:?}",
+        snap3.step_states
+    );
+    assert_eq!(
+        snap3.repair_summary.needs_repair_count, 0,
+        "and nothing needs repair"
+    );
+    assert_eq!(
+        adoption_notices(&rt),
+        0,
+        "the notice is ONE-SHOT: it rides the ADOPTING regen's projection only"
+    );
+    assert_eq!(
+        rt.operation_params(mate_record).expect("mated record")["mate"]["targetAxis"],
+        serde_json::json!(adopted),
+        "the SECOND regen adopts nothing — a record that carries a targetAxis is never rewritten"
+    );
+
+    // ── 4. Rebuild the bore from the other side. A NEGATIVE extrude distance
+    //    builds the identical bore (same Ø, same axis LINE, same volume) with
+    //    its parametric axis reversed — measured, not assumed. ───────────────
+    let Operation::Known(KnownOperation::Extrude(mut reversed)) =
+        stock_extrude_record(BASE + 1, sid, -5.0).op
+    else {
+        unreachable!()
+    };
+    reversed.distance = Scalar::new(-5.0);
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: extrude_record,
+        op: Operation::Known(KnownOperation::Extrude(reversed)),
+    })
+    .expect("UpdateOperationParams(Extrude +5 → −5)");
+
+    let report4 = regen_all(&mut rt).await;
+    let snap4 = published(&report4, "the reversed plate");
+    let plate4 = snap4
+        .bodies
+        .iter()
+        .map(|b| b.body)
+        .find(|b| *b == plate)
+        .expect("the plate keeps its identity across a parametric edit");
+    let (rev_key, _, _) = find_cylindrical_face(&wm, plate4, 3.0).await;
+    let axis_after = bore_axis(&wm, plate4, &rev_key).await;
+    eprintln!("[I2b] bore axis after the rebuild = {axis_after:?} (was {axis_before:?})");
+    assert!(
+        dot(axis_after, axis_before) < -0.999,
+        "setup: the rebuilt bore's parametric axis must be ANTI-PARALLEL to the frozen one, \
+         got {axis_after:?} vs {axis_before:?}"
+    );
+
+    // The step is Ok — the component publishes at its frozen placement — and
+    // the halt is reported as ONE op-built §9 item, never a silent 180° spin.
+    let items: Vec<_> = rt
+        .repair_items()
+        .iter()
+        .filter(|i| i.reason == onecad_core::document::repair::RepairReason::MateAxisReversed)
+        .cloned()
+        .collect();
+    eprintln!(
+        "[I2b] repair items = {} (mateAxisReversed = {}), needsRepair = {}",
+        rt.repair_items().len(),
+        items.len(),
+        snap4.repair_summary.needs_repair_count
+    );
+    assert_eq!(
+        items.len(),
+        1,
+        "exactly one mateAxisReversed item: {:?}",
+        rt.repair_items()
+    );
+    let item = &items[0];
+    assert_eq!(
+        item.ref_id,
+        format!("{mate_record}.input0"),
+        "the item addresses the mate's own op-input slot"
+    );
+    assert_eq!(
+        item.candidates.len(),
+        2,
+        "two candidates on the SAME face, told apart only by their label"
+    );
+    assert_eq!(
+        item.candidates
+            .iter()
+            .map(|c| c.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "Keep the component's direction".to_string(),
+            "Follow the reversed axis".to_string()
+        ],
+        "the two SCHEMA §9 labels, in order"
+    );
+    assert_eq!(
+        item.candidates[0].topo_key, item.candidates[1].topo_key,
+        "both candidates name the same resolved face"
+    );
+    let resolved = item.resolved_axis.expect("the item carries resolvedAxis");
+    let frozen = item.frozen_axis.expect("the item carries frozenAxis");
+    assert!(
+        dot(
+            [resolved.x, resolved.y, resolved.z],
+            [frozen.x, frozen.y, frozen.z]
+        ) < -0.5,
+        "resolvedAxis {resolved:?} is anti-parallel to frozenAxis {frozen:?}"
+    );
+
+    // ── 5. THE PANEL'S OWN PATH. `RepairPanel` never reads the runtime's
+    //    repair items directly — it re-fetches each row through `resolveRefs`
+    //    with the bare `refId`. That must answer from the stored item: the
+    //    ladder resolving cleanly is this item's PREMISE, so a forwarded refId
+    //    comes back `autoBind` with no candidates and the panel renders
+    //    "nothing to choose from" over a repair that is sitting right there.
+    let dto = {
+        let resolved_refs = rt
+            .resolve_refs(onecad_core::regen::ResolveRequest {
+                snapshot_id: snap4.id,
+                refs: vec![onecad_core::regen::ResolveRef {
+                    ref_id: item.ref_id.clone(),
+                    // Bare `refId`, exactly as the panel sends it.
+                    element: ElementRef {
+                        primary: None,
+                        intent: None,
+                        anchor: None,
+                        extra: Default::default(),
+                    },
+                }],
+            })
+            .await
+            .expect("resolveRefs answers the mate item");
+        assert_eq!(resolved_refs.len(), 1);
+        // Built exactly as the `resolve_refs` command builds it, `body_id`
+        // derivation included — the panel reads THIS shape, not the raw
+        // resolution.
+        let resolution = resolved_refs.into_iter().next().unwrap();
+        let body_id = rt.repair_candidate_body(&resolution.ref_id);
+        let echoed_snapshot = resolution.snapshot_id.0;
+        onecad_lib::dto::ResolveRefDto::from_resolution(
+            resolution,
+            echoed_snapshot,
+            rt.projection().revision,
+            body_id,
+        )
+    };
+    eprintln!(
+        "[I2b] resolveRefs → outcome={:?} reason={:?} candidates={} labels={:?}          resolvedAxis={:?} resolvedSidedness={:?}",
+        dto.outcome,
+        dto.reason,
+        dto.candidates.len(),
+        dto.candidates
+            .iter()
+            .map(|c| c.label.clone())
+            .collect::<Vec<_>>(),
+        dto.resolved_axis,
+        dto.resolved_sidedness
+    );
+    assert_eq!(
+        dto.outcome, "needsRepair",
+        "never autoBind: the panel needs the choice"
+    );
+    assert_eq!(dto.reason.as_deref(), Some("mateAxisReversed"));
+    assert_eq!(
+        dto.candidates
+            .iter()
+            .map(|c| c.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "Keep the component's direction".to_string(),
+            "Follow the reversed axis".to_string()
+        ],
+        "both labelled choices reach the panel"
+    );
+    let panel_axis = dto
+        .resolved_axis
+        .expect("the panel gets resolvedAxis to echo back");
+    assert!(
+        dto.frozen_axis.is_some() && dto.body_id.is_some(),
+        "…plus frozenAxis to explain the change and the §7.5 bodyId echo: {dto:?}"
+    );
+
+    // ── 6. The repair, driven from the DTO the panel actually holds. ────────
+    rt.apply(EditCommand::RepairMateAxis {
+        record: mate_record,
+        keep_world_direction: true,
+        resolved_axis: Vec3::new(panel_axis[0], panel_axis[1], panel_axis[2])
+            .expect("a finite echoed axis"),
+        resolved_sidedness: match dto.resolved_sidedness.as_deref() {
+            Some("pin") => Some(onecad_core::document::record::MateSidedness::Pin),
+            Some("hole") => Some(onecad_core::document::record::MateSidedness::Hole),
+            _ => None,
+        },
+    })
+    .expect("RepairMateAxis applies as an ordinary validated edit");
+
+    let report5 = regen_all(&mut rt).await;
+    let snap5 = published(&report5, "the repaired mate");
+    eprintln!(
+        "[I2b] after repair: needsRepair = {}, items = {}",
+        snap5.repair_summary.needs_repair_count,
+        rt.repair_items().len()
+    );
+    assert_eq!(
+        snap5.repair_summary.needs_repair_count, 0,
+        "the repair makes the next regen a FIXED POINT — the item must not come back"
+    );
+    assert!(
+        rt.repair_items().is_empty(),
+        "and the live repair state is clear: {:?}",
+        rt.repair_items()
+    );
+    let z_after = mapped_local_z(&rt, mate_record);
+    eprintln!("[I2b] mapped local +Z: before = {z_before:?}, after repair = {z_after:?}");
+    assert!(
+        dot(z_after, z_before) > 0.999,
+        "keepWorldDirection means the component's mapped local +Z is UNCHANGED: {z_after:?} \
+         vs {z_before:?} before the reversal"
+    );
+
+    wm.shutdown().await;
 }

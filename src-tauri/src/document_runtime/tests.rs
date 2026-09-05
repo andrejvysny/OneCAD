@@ -111,6 +111,10 @@ struct FakeBackend {
     /// `curves`). Set by a test to model a solver that reshaped a curve — the
     /// channel `positions` cannot carry.
     echo_curves: Mutex<std::collections::BTreeMap<String, crate::dto::CurveParamsDto>>,
+    /// The SCHEMA §7.2 `mateResolved` echo every step carries (WP-I). `None`
+    /// keeps every pre-existing test's payload byte-identical; a mate test sets
+    /// it to model a worker that resolved a cylindrical target.
+    mate_resolved: Mutex<Option<onecad_core::document::record::MateResolved>>,
     state: Mutex<FakeState>,
 }
 
@@ -130,6 +134,7 @@ impl Default for FakeBackend {
             resolve_fails: Mutex::new(false),
             resolve_outcome: Mutex::new(None),
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
+            mate_resolved: Mutex::new(None),
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -200,6 +205,11 @@ impl FakeBackend {
     /// [`Self::fetch_mesh`]'s bytes so a test can tell which lane served a mesh.
     fn inline_bytes(body: BodyId) -> Vec<u8> {
         format!("MESH1-INLINE:{body}").into_bytes()
+    }
+
+    /// Re-points the SCHEMA §7.2 `mateResolved` echo every later step carries.
+    fn set_mate_resolved(&self, r: Option<onecad_core::document::record::MateResolved>) {
+        *self.mate_resolved.lock().unwrap() = r;
     }
 
     /// Re-points the descriptor every later `acquire_element_ids` echoes.
@@ -299,6 +309,7 @@ impl GeometryEngine for FakeBackend {
                     signatures: sigs(step),
                     diagnostics: vec![],
                     mate_placement: None,
+                    mate_resolved: *self.mate_resolved.lock().unwrap(),
                 }));
                 per_step.push(StepResult {
                     step_index: step,
@@ -598,6 +609,67 @@ impl SolverEngine for FakeBackend {
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// A `PlaceComponent` record carrying a CONCENTRIC mate, optionally already
+/// frozen at `target_axis` (WP-I adoption fixtures).
+fn mated_component_record(seed: u128, target_axis: Option<Vec3>) -> OperationRecord {
+    use onecad_core::document::record::{
+        ComponentMate, ComponentSourceRef, FrozenPlacement, MateKind, MateSidedness,
+        PlaceComponentParams,
+    };
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "onecad.std.iso4762".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: format!("sha256:{}", "0".repeat(64)),
+        params: Default::default(),
+        source: ComponentSourceRef::Generator {
+            generator_id: "iso4762".to_string(),
+            generator_version: 1,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        mate: Some(ComponentMate {
+            self_attachment: "shankAxis".to_string(),
+            target: ElementRef {
+                primary: Some(PrimaryRef {
+                    body: BodyId(Uuid::from_u128(0xB0D1)),
+                    element: ElementId::new("el_target"),
+                    kind: ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Default::default(),
+            },
+            kind: MateKind::Concentric,
+            flipped: false,
+            self_frame: None,
+            target_axis,
+            target_sidedness: target_axis.map(|_| MateSidedness::Pin),
+            extra: Default::default(),
+        }),
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Place Component", op)
+}
+
+/// The mate the runtime's authoritative record currently carries.
+fn mate_of(rt: &DocumentRuntime, seed: u128) -> onecad_core::document::record::ComponentMate {
+    let rec = rt
+        .session
+        .document()
+        .timeline
+        .record_by_id(RecordId(Uuid::from_u128(seed)))
+        .expect("the record exists");
+    let Operation::Known(KnownOperation::PlaceComponent(p)) = &rec.op else {
+        panic!("not a PlaceComponent")
+    };
+    p.mate.clone().expect("the record carries a mate")
+}
 
 fn extrude_record(seed: u128, distance: f64) -> OperationRecord {
     let op = Operation::Known(KnownOperation::Extrude(ExtrudeParams {
@@ -960,6 +1032,152 @@ async fn superseded_regen_never_seeds_the_mesh_cache() {
         assert_eq!(*bytes, FakeBackend::inline_bytes(body));
     }
     assert_eq!(backend.mesh_fetches(), 0);
+}
+
+// ── WP-I: the SCHEMA §7.2 `mateResolved` adoption ────────────────────────────
+
+/// The migration path: the FIRST regen under this build freezes the target's
+/// axis/sidedness onto a record that has none, reports it with the Rust-side
+/// `MATE_AXIS_ADOPTED` info diagnostic, and never touches it again.
+#[tokio::test]
+async fn mate_resolved_is_adopted_exactly_once_and_reported() {
+    use onecad_core::document::record::{MateResolved, MateSidedness};
+    let backend = Arc::new(FakeBackend::new());
+    backend.set_mate_resolved(Some(MateResolved {
+        axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        sidedness: Some(MateSidedness::Hole),
+    }));
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(EditCommand::AddOperation {
+        record: mated_component_record(0xA108, None),
+        at_cursor: true,
+    })
+    .unwrap();
+    assert_eq!(
+        mate_of(&rt, 0xA108).target_axis,
+        None,
+        "setup: nothing frozen"
+    );
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+    let mate = mate_of(&rt, 0xA108);
+    assert_eq!(
+        mate.target_axis,
+        Some(Vec3::new_unchecked(0.0, 0.0, 1.0)),
+        "the first regen under this build freezes the axis"
+    );
+    assert_eq!(mate.target_sidedness, Some(MateSidedness::Hole));
+
+    // …and says so, as INFO: nothing is wrong and nothing needs doing.
+    assert_eq!(adoption_notices(&rt), 1, "reported exactly once");
+    let feature = rt
+        .projection()
+        .features
+        .into_iter()
+        .find(|f| f.id == RecordId(Uuid::from_u128(0xA108)).to_string())
+        .expect("the component's row");
+    let adopted = feature
+        .diagnostics
+        .iter()
+        .find(|d| d.code == crate::document_runtime::MATE_AXIS_ADOPTED_CODE)
+        .expect("the adoption is reported");
+    assert!(matches!(
+        adopted.severity,
+        onecad_core::regen::Severity::Info
+    ));
+    assert!(
+        adopted.message.contains("Place Component"),
+        "the message names the record: {}",
+        adopted.message
+    );
+
+    // A SECOND regen must not rewrite the frozen evidence, even though the
+    // worker keeps echoing a DIFFERENT axis — frozen evidence is what the
+    // reversal check is judged against, so regen may never move it.
+    backend.set_mate_resolved(Some(MateResolved {
+        axis: Vec3::new_unchecked(0.0, 0.0, -1.0),
+        sidedness: Some(MateSidedness::Pin),
+    }));
+    let again = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(again.outcome, Outcome::Published(_)),
+        "the regen right after an adoption must PUBLISH, never report Superseded: \
+         the adoption moves this op's planner hash, and it rides inside the same \
+         finish_regen commit as the `matePlacement` writeback precisely so that \
+         it takes no revision bump and strands no later prepare: {:?}",
+        again.outcome
+    );
+    assert!(
+        rt.projection()
+            .features
+            .iter()
+            .all(|f| f.status == crate::dto::FeatureStatus::Ok),
+        "…and leaves no step dirty or errored behind it"
+    );
+    let mate = mate_of(&rt, 0xA108);
+    assert_eq!(
+        mate.target_axis,
+        Some(Vec3::new_unchecked(0.0, 0.0, 1.0)),
+        "the frozen axis is never rewritten by a later regen"
+    );
+    assert_eq!(mate.target_sidedness, Some(MateSidedness::Hole));
+    // …and the notice is ONE-SHOT: it belongs to the projection of the regen
+    // that adopted, not to every projection thereafter.
+    assert_eq!(
+        adoption_notices(&rt),
+        0,
+        "the migration notice does not survive into the NEXT regen's projection"
+    );
+}
+
+/// How many `MATE_AXIS_ADOPTED` diagnostics the projection currently carries.
+fn adoption_notices(rt: &DocumentRuntime) -> usize {
+    rt.projection()
+        .features
+        .iter()
+        .flat_map(|f| f.diagnostics.iter())
+        .filter(|d| d.code == crate::document_runtime::MATE_AXIS_ADOPTED_CODE)
+        .count()
+}
+
+/// A record authored (or repaired) WITH a frozen axis is left entirely alone —
+/// including its sidedness, and including when the worker echoes something else.
+#[tokio::test]
+async fn a_record_that_already_carries_a_target_axis_is_never_rewritten() {
+    use onecad_core::document::record::{MateResolved, MateSidedness};
+    let backend = Arc::new(FakeBackend::new());
+    backend.set_mate_resolved(Some(MateResolved {
+        axis: Vec3::new_unchecked(1.0, 0.0, 0.0),
+        sidedness: Some(MateSidedness::Hole),
+    }));
+    let mut rt = runtime_with(backend);
+    let frozen = Vec3::new_unchecked(0.0, 0.0, 1.0);
+    rt.apply(EditCommand::AddOperation {
+        record: mated_component_record(0xA109, Some(frozen)),
+        at_cursor: true,
+    })
+    .unwrap();
+
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+
+    let mate = mate_of(&rt, 0xA109);
+    assert_eq!(mate.target_axis, Some(frozen));
+    assert_eq!(
+        mate.target_sidedness,
+        Some(MateSidedness::Pin),
+        "a record with an axis but a different sidedness is left alone too"
+    );
+    assert_eq!(
+        adoption_notices(&rt),
+        0,
+        "nothing was adopted, so nothing is reported"
+    );
 }
 
 #[tokio::test]
@@ -2945,6 +3163,150 @@ async fn resolve_refs_hydrates_a_refid_only_request_from_the_stored_ref() {
     assert!(rt.stored_input_ref(&format!("{rec}.input9")).is_none());
 }
 
+/// WP-I: a `mateAxisReversed` refId is answered from the STORED item and never
+/// forwarded to the worker.
+///
+/// The regression this pins is not a performance one. The ladder resolving
+/// cleanly is this item's own PREMISE — what halted is the ORIENTATION the
+/// resolved face implies — so a forwarded refId comes back `autoBind` with no
+/// candidates, and the panel, which re-fetches every row through `resolveRefs`,
+/// renders "no candidates to choose from" over a repair that is right there.
+/// The fake worker below is rigged to answer exactly that `autoBind`; the local
+/// answer must win.
+#[tokio::test]
+async fn a_mate_axis_reversed_ref_is_answered_locally_never_from_the_ladder() {
+    use onecad_core::document::record::MateSidedness;
+    use onecad_core::document::repair::{LadderLevel, RepairCandidate, RepairItem, RepairReason};
+
+    let backend = Arc::new(FakeBackend::new());
+    // What the worker WOULD say if this ref reached it — and what the panel used
+    // to render as "nothing to choose from".
+    *backend.resolve_outcome.lock().unwrap() = Some(ResolveOutcome::AutoBind {
+        element_id: ElementId::new("el_target"),
+        score: 1.0,
+        margin: 1.0,
+        topo_key: Some(TopoKey::new("f:5")),
+    });
+    let mut rt = runtime_with(backend);
+    rt.apply(EditCommand::AddOperation {
+        record: mated_component_record(0xA10A, Some(Vec3::new_unchecked(0.0, 0.0, 1.0))),
+        at_cursor: true,
+    })
+    .unwrap();
+    let head = match rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await
+        .outcome
+    {
+        Outcome::Published(snap) => snap.id,
+        other => panic!("expected Published, got {other:?}"),
+    };
+
+    let record = RecordId(Uuid::from_u128(0xA10A));
+    let ref_id = format!("{record}.input0");
+    let candidate = |label: &str| RepairCandidate {
+        topo_key: TopoKey::new("f:5"),
+        score: 0.5,
+        margin: 0.0,
+        world_pos: Vec3::new_unchecked(0.0, 0.0, -2.5),
+        summary: "cylindrical face".into(),
+        label: Some(label.into()),
+        extra: Default::default(),
+    };
+    rt.regen.repair.set_step(
+        0,
+        vec![RepairItem {
+            step_index: 0,
+            ref_id: ref_id.clone(),
+            element_id: Some(ElementId::new("el_target")),
+            ladder_failed: LadderLevel::Descriptor,
+            reason: RepairReason::MateAxisReversed,
+            candidates: vec![
+                candidate("Keep the component's direction"),
+                candidate("Follow the reversed axis"),
+            ],
+            scoring_version: Some(4),
+            anchor: None,
+            ui_label: "the mate target's axis came back reversed".into(),
+            seeded: false,
+            ordinal_anchor: None,
+            seed_edge_id: None,
+            resolved_axis: Some(Vec3::new_unchecked(0.0, 0.0, -1.0)),
+            frozen_axis: Some(Vec3::new_unchecked(0.0, 0.0, 1.0)),
+            resolved_sidedness: Some(MateSidedness::Hole),
+        }],
+    );
+
+    let answers = rt
+        .resolve_refs(ResolveRequest {
+            snapshot_id: head,
+            refs: vec![ResolveRef {
+                ref_id: ref_id.clone(),
+                element: ElementRef {
+                    primary: None,
+                    intent: None,
+                    anchor: None,
+                    extra: Default::default(),
+                },
+            }],
+        })
+        .await
+        .expect("resolveRefs answers");
+    assert_eq!(answers.len(), 1);
+    let ResolveOutcome::NeedsRepair(item) = &answers[0].outcome else {
+        panic!(
+            "the local answer must win over the worker's autoBind: {:?}",
+            answers[0].outcome
+        )
+    };
+    assert_eq!(item.reason, RepairReason::MateAxisReversed);
+    assert_eq!(
+        item.candidates
+            .iter()
+            .map(|c| c.label.clone().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "Keep the component's direction".to_string(),
+            "Follow the reversed axis".to_string()
+        ],
+        "both labelled choices survive to the panel"
+    );
+    assert_eq!(
+        item.resolved_axis,
+        Some(Vec3::new_unchecked(0.0, 0.0, -1.0))
+    );
+    assert_eq!(item.frozen_axis, Some(Vec3::new_unchecked(0.0, 0.0, 1.0)));
+    assert_eq!(item.resolved_sidedness, Some(MateSidedness::Hole));
+    assert!(
+        answers[0].body_id.is_some(),
+        "the §7.5 bodyId echo the panel keys candidates by"
+    );
+
+    // A ref on the SAME record that is NOT one of the op-built mate items still
+    // goes to the ladder — the short-circuit is per-item, never per-record.
+    rt.regen.repair.clear_from(0);
+    let ladder = rt
+        .resolve_refs(ResolveRequest {
+            snapshot_id: head,
+            refs: vec![ResolveRef {
+                ref_id,
+                element: ElementRef {
+                    primary: None,
+                    intent: None,
+                    anchor: None,
+                    extra: Default::default(),
+                },
+            }],
+        })
+        .await
+        .expect("resolveRefs answers");
+    assert!(
+        matches!(ladder[0].outcome, ResolveOutcome::AutoBind { .. }),
+        "with no mate item standing, the ref is forwarded as before: {:?}",
+        ladder[0].outcome
+    );
+}
+
 /// H9: every `needs-repair` item names the body its step OPERATES ON.
 ///
 /// Without it the frontend had to guess, and refused outright in a multi-body
@@ -2987,6 +3349,9 @@ async fn needs_repair_items_name_the_operated_body() {
         seeded: false,
         ordinal_anchor: None,
         seed_edge_id: None,
+        resolved_axis: None,
+        frozen_axis: None,
+        resolved_sidedness: None,
     };
     rt.regen.repair.set_step(0, vec![item(0, "op.input0")]);
     rt.regen.repair.set_step(1, vec![item(1, "op.input1")]);
@@ -4454,6 +4819,7 @@ fn legacy_chamfer_runtime_with_seed_outcome(
                 margin: 0.0,
                 world_pos: anchor,
                 summary: String::new(),
+                label: None,
                 extra: Default::default(),
             }],
             scoring_version: Some(4),
@@ -4468,6 +4834,9 @@ fn legacy_chamfer_runtime_with_seed_outcome(
             seeded: false,
             ordinal_anchor: None,
             seed_edge_id: Some(edge),
+            resolved_axis: None,
+            frozen_axis: None,
+            resolved_sidedness: None,
         }],
     );
     let faces = FakeFaces {
@@ -4649,6 +5018,9 @@ async fn a_seed_edge_the_ladder_cannot_bind_yields_no_candidates_without_asking(
         seeded: false,
         ordinal_anchor: None,
         seed_edge_id: None,
+        resolved_axis: None,
+        frozen_axis: None,
+        resolved_sidedness: None,
     });
     let (rt, record_id, _, faces) =
         legacy_chamfer_runtime_with_seed_outcome(answer, Some(unresolvable));

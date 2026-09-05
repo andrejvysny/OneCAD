@@ -45,7 +45,9 @@
             `pointermove(2,2)` AFTER the synthetic `pointerleave`, and the late move re-shows the hint.
             Fixed in the spec by ordering only: one rendered frame (`waitForRenderedFrame`) after the
             move before the leave is dispatched (input events dispatch before rAF); no assertion widened.
-            Measured after the fix: webkit + chromium **10/10**. Committed as a follow-up `fix(e2e)`.
+            Measured after the fix: webkit + chromium **10/10**. Committed as the follow-up `fix(e2e)`
+            `3997872`, pushed; **CI run 33916792882: e2e-webkit GREEN** (261+1 / 0), rust/worker/frontend
+            green; chromium pending at the time of writing.
             `tauri-composition` and `linux-worker` as known.
 - [x] Phase B — WP-G five fillet acceptance probes, MEASURED on the shipped kernel (probe built out of
       tree against `worker/build/libworker_core.a`; source + results in the session scratchpad
@@ -66,6 +68,15 @@
       session end (plan S4).
 - [ ] Phase C — WP-I component mates: I0 probes red-first → SCHEMA + protocol audit → I2a worker ∥ I2b
       Rust → I3 FE → adversarial review → full L3 → commit → push.
+      - [x] **Gate — WP-I (2026-09-04 late evening, main thread, suites run ALONE, teed to the session
+            scratchpad `g3/`):** worker rebuilt + sidecar restaged sha `0455afd8c83254c3b…` (hygiene clean)
+            · ctest **179 / 179** (51.8 s; count read off `ctest -N`) · fmt clean · clippy **1.97.0 +
+            1.98.1** `-D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **94 targets /
+            1539 passed / 0 failed / 0 skips** · tsc clean · vitest **318 files / 5618 passed / 78 skipped**
+            · hex 0 · coverage 32/9/16/19 · contracts 39/18 · negative controls OK · kernelbench
+            `fillet/foundation:t0` both backends **136 rows unchanged** + semantics OK (0 regressions,
+            0 replay-unstable) · e2e both projects `retries: 0` **524 / 0** (36.3 min; `src`+`e2e`
+            md5 `b46aa2b6…` identical before and after). FULL L3 GREEN.
       - [x] I0 probes MEASURED RED on the shipped kernel (impl-critical, measured output; ctest 176 → 177):
             a1 coincident seat after the plane moves 3 mm — seat stays at z=13 on a z=10 plane, no
             `matePlacement` (`test_component_mate_reseat.cpp:455`); a2 target rebuilt with the reversed
@@ -90,7 +101,114 @@
             `iso4762`, turns bound for simplified/modeled only); `MATE_AXIS_ADOPTED` is Rust-side and the
             adoption moves the planner hash so it commits inside `finish_regen`; refused gear faces leave
             the ladder's candidate pool so `no-candidates` stays a ladder outcome.
-      - [ ] I2a worker ∥ I2b Rust in flight (briefs in the session scratchpad `briefs/`).
+      - [x] I2b Rust LANDED (impl-careful, measured by the agent; orchestrator re-runs at the gate):
+            `ComponentMate.target_axis/target_sidedness` (hash-neutral), `MateResolved` + adoption ONCE
+            inside `finish_regen` beside `matePlacement` with the Rust-side `MATE_AXIS_ADOPTED` info,
+            `RepairReason::MateAxisReversed/MateSeatOffFace` + candidate `label` + typed
+            `resolvedAxis/frozenAxis/resolvedSidedness`, `EditCommand::RepairMateAxis` (one undo step,
+            refuses coincident/non-component) + Tauri `repair_mate_axis` + `CMD.repairMateAxis` +
+            honest mock, bounds (`teeth ≤ 400`, `sampleCount ≤ 256`, `height ≤ 1000`, generator
+            `length ∈ (0, 1000]` on both param maps; turns bound worker-side). Agent counts: fmt/clippy
+            clean · `cargo test -p onecad-core` green (385 + suites) · app lib 415/0 · tsc · `vitest
+            src/ipc` 911/0 · real-worker `component_ops` 15/0 (seat z 5 → 8). Deviations: the client
+            authors no axis — adoption on the first regen is the ONE freezing path (SCHEMA reworded);
+            `NeedsRepairItemDto`/`NeedsRepairEvent` dropped `Eq`. Follow-ups: `all_variant_commands`
+            still asserts 22 of 23 `EditCommand` variants (snapshot would move); `RepairReason` tokens
+            enumerated in four places with no drift gate. Fix round (orchestrator review): two message
+            literals with embedded indentation runs rewritten; NEW real-worker test
+            `component_ops.rs::a_concentric_mate_adopts_its_axis_then_repairs_a_reversal` — adoption on
+            the first regen (`targetAxis` = the `ClassifyElement` axis, one `MATE_AXIS_ADOPTED`), a
+            no-edit re-regen `Published` with zero re-adoption (the fence-after-adoption proof), a
+            negative extrude distance as the measured reversal lever (axis `−Z → +Z`, same volume
+            1858.628), one `mateAxisReversed` item with both labels, `RepairMateAxis{keep}` converging
+            with the mapped local +Z unchanged; negative control measured (`keep=false` fails). Agent
+            counts: real-worker `component_ops` **16/0**. Last pass: `MATE_AXIS_ADOPTED` is ONE-SHOT
+            (cleared at the top of `sync_mate_evidence` inside the committed `finish_regen` branch; a
+            superseded prepare leaves the standing notice); §7.5 `sidedness` plumbed through
+            `wire.rs` (closed set, unknown → absent) → `ClassifyElementFrameDto` → `types.ts`
+            (`"pin" | "hole"`, absent = not measured); mock leaves it absent. Agent counts: app lib
+            416/0, core green, `vitest src/ipc` 916/0, tsc clean, real-worker 16/0.
+      - [x] I2a worker LANDED (impl-critical, agent-measured; orchestrator re-runs at the gate): coincident
+            projection; seat-on-face (COINCIDENT ONLY — a concentric seat is on the axis, one radius off
+            the face; spec amended); `classify_shape_in_body` = the one `sidedness` producer for the verb
+            and the re-seat; `mateResolved` echo; `mateAxisReversed` / `mateSeatOffFace` op-built items;
+            gear + generator bounds with `evidence {param, value, min, max}` and per-tooth / per-ring
+            cancel polling; gear referenceability as a plan-derived `gear_bodies_` map on the session
+            (rebuilt at AcceptPrepared, carried by checkpoints, cloned at fence, cleared on open/reset) +
+            `stage_binding` refusal + a Ladder `CandidateFilter` on the plan-step pool (verified live:
+            the pool held only the two caps and the bore). Fixtures `place_component_mate_reseat.ndjson`
+            + `gear_face_refusal.ndjson` registered. Agent counts: **ctest 179/179**, hygiene clean,
+            targeted 17/17. Test re-expressions (recorded decisions): `test_component_mate_solver.cpp`
+            three TS-parity coincident cases re-pinned to the projected seat (FE solver changed in
+            lockstep); `test_micro_topology_census.cpp` gear height clamped to the 1000 mm bound at
+            scale 10000. Follow-ups recorded: `gear_body_info` fails open for a non-involute recipe (none
+            exists); the tracked-rung fall-through reports a legacy refused-face re-bind as
+            `delta.added`; a concentric seat's axial extent is unchecked (needs a frozen datum). Follow-up
+            LANDED: the rule extended to gear EDGES and VERTICES (referenceable iff every adjacent face
+            is; `GearAdjacency` built once per body, shared by the plan-step filter via `shared_ptr`;
+            `evidence.kind` for non-faces) at both sites; probe `test_edges_and_vertices_follow_their_
+            neighbourhood` (tooth edge `e:9` + tooth vertex refused at Bind; bore rim `e:128` + its
+            vertex bound); fixture leg for a tooth-edge refusal + a bore-rim bind; plan-step edge pool
+            measured live = the two bore rims + the bore seam. Agent counts: **ctest 179/179**, hygiene
+            clean. Cheap gates re-run by the orchestrator on the assembled tree: fmt clean · hex 0 ·
+            hygiene clean · coverage/contracts verifiers OK · tsc clean.
+      - [x] I4 reviews (fresh contexts, parallel): **protocol-auditor after-landing schema-vs-code =
+            `approve_with_changes`** — six SCHEMA-text edits (no code): §14 "applied at Acquire…" and
+            "pitch radius" contradictions, §7.5 radial-direction sentence inverted vs the code, §14
+            "frozen at authoring" vs the adoption path, the reversal-leg fixture claim overstated
+            (leg ends in `DiscardPrepared`), the per-ring cancel poll unmentioned — all applied;
+            auditor MEASURED ctest 179/179, `ONECAD_REQUIRE_WORKER=1 cargo test --workspace`
+            **1538 / 0 / 0 skipped**, fingerprint `0a6a1dce34181289` unchanged, hygiene clean.
+            **adversarial-reviewer = defective as written** — HIGH: the `mateAxisReversed` repair was
+            UNREACHABLE in the real stack (`resolveRefs` on `<opId>.input0` hydrated the stored target,
+            which auto-binds → no candidates; the panel test used a fake refId); MEDIUM: plan-step
+            gear rung had zero coverage; a tracked tooth id sent through the narrowed ladder could be
+            REPOINTED at a cap/bore; `gear_face_referenceable` rebuilt the body face map per call;
+            strict `<` at the root radius with no band; LOW: §14 contradictions, height-bound rationale
+            + a "Gear " prefix on pre-WP-I messages, repair choice routed by row index, adoption notice
+            overclaiming the past. Fix round dispatched to the three context-holding agents (Rust:
+            local `resolve_refs` answer from the stored item + test, notice wording; worker: plan-step
+            probe + fixture leg, halt-without-ladder for a tracked refused id, adjacency hoist, root
+            band = authoring resolution, message wording; FE: real refId + honest mock item, route on
+            `label`). SCHEMA §7.3/§14 already carry the band and the no-repoint rule. FE fix round LANDED:
+            `MATE_AXIS_KEEP_LABEL`/`MATE_AXIS_FOLLOW_LABEL` constants in `operationDiagnostics.ts`, the
+            panel routes on the label; the mock gains `setMockMateAxisItem` and `mockResolveRefs`
+            answers a seeded mate item in the real DTO shape; panel tests use `pc1.input0` and assert
+            the call payload for BOTH rows. Agent counts: tsc clean, `vitest src/features src/ipc`
+            102 files / 1759, hex 0. Rust fix round LANDED: `document_runtime.rs::resolve_mate_repair`
+            answers a `mateAxisReversed`/`mateSeatOffFace` refId LOCALLY from the standing item
+            (candidates verbatim — they came from the published head and the repair promotes nothing,
+            unlike `legacyReferenceFace`) before any hydration, with the §7.5 echo; unit negative control
+            (FakeBackend rigged to AutoBind, the local answer wins; cleared state forwards); the
+            real-worker test now goes through the panel's own `resolve_refs` path and drives the repair
+            from the DTO; adoption notice reworded. Agent counts: fmt/clippy clean, core green, app lib
+            417/0, `vitest src/ipc` 916/0, real-worker 16/0 (`resolveRefs → needsRepair, 2 candidates,
+            both labels, resolvedAxis + resolvedSidedness`). Worker fix round LANDED: three
+            `execute_candidate_op` probes (descriptor rung on a stored tooth edge → halt + diagnostic,
+            no bind; bore-rim control resolves and runs; tracked tooth id → `refused_gear_element_repair`
+            halt with EMPTY candidates, partition entry unchanged `f:3 → f:3`) + two fixture legs;
+            `GearAdjacency` owns the face map + per-face verdict memo (O(1) per candidate); bore rule
+            `radius < root − 1e-3 mm` pinned at r = 5.0 / 17.0 referenceable, 17.4995 / 17.5 / 22.0
+            refused (root 17.5); `build_gear_solid` error text restored verbatim; height bound comment
+            corrected. Agent counts: **ctest 179/179**, targeted 16/16, hygiene clean. Recorded:
+            the plan-step halt reason on a narrowed pool is the ladder's `ambiguous`, pinned as
+            `$present` with `ladderFailed: "descriptor"`; the ctest asserts every offered candidate is
+            itself referenceable.
+      - [x] I3 FE LANDED (impl-standard, agent-measured): `placementSolver.ts` coincident projection in
+            lockstep with the worker (3 solver tests re-pinned — their fixtures asserted the off-plane
+            pick as the seat, the defect itself); `gearMachine.ts` REFUSES above `teeth 400` /
+            `sampleCount 256` / `height 1000` with an edit-scoped error hint (was a clamp — the chip
+            could author `teeth = 100000`); `operationDiagnostics.ts` gains `diagnosticHint` for
+            `GEAR_FACE_NOT_REFERENCEABLE` / `GEAR_PARAM_OUT_OF_RANGE` / `GENERATOR_PARAM_OUT_OF_RANGE`
+            AND a pre-existing gap closed — `parseOperationDiagnostics` dropped the wire's `reasonCode`
+            entirely; `RepairPanel` renders `mateAxisReversed` (two labeled same-face candidates →
+            `historyActions.repairMateAxisChoice` → `client.repairMateAxis`, errors-as-values) and
+            `mateSeatOffFace` (informational, `uiLabel`), bypassing the `InputPath` slot gate for these
+            two op-built reasons. Agent counts: vitest 149 files / 2596 (one pre-existing timing flake
+            in `ModelToolController.wave2.test.ts` under load, green alone — re-measured alone at the
+            gate), tsc clean, hex 0. Follow-up: the transient "Gear failed: …" status hint on a
+            preflight `OP_FAILED` still shows the raw backend message (`PreviewCommitOutcome` carries no
+            diagnostics).
 - [ ] Delete the stray untracked `src-tauri/.claude/` — `rm` DENIED by the permission mode again this
       session; user runs `rm -rf src-tauri/.claude` by hand.
 

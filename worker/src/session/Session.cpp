@@ -5,6 +5,8 @@
 #include <cctype>
 #include <utility>
 
+#include "ops/GearOp.h"
+#include "session/ClassifyElement.h"
 #include "session/HistoryHash.h"
 #include "util/Log.h"
 
@@ -21,6 +23,42 @@ ErrorInfo protocol_error(std::string message, nlohmann::json detail) {
 ErrorInfo bind_error(std::string code, std::string message, std::size_t index) {
     return ErrorInfo{std::move(code), "BindElementIds: " + std::move(message), false,
                      nlohmann::json{{"bindingIndex", index}}};
+}
+
+// SCHEMA §7.3: the gear-referenceability refusal. Same `REF_UNRESOLVED` class
+// (and same `detail.bindingIndex`) as every other Bind refusal, plus the
+// structured evidence that says WHICH sub-element of WHICH gear was refused.
+//
+// A FACE refusal reports its `surfaceType`; an EDGE or VERTEX refusal reports
+// `kind` in its place, because what decided it is the NEIGHBOURHOOD, not the
+// element's own geometry.
+ErrorInfo gear_bind_refusal(const ElementBindingInput& binding, const std::string& gear_op_id,
+                            const TopoDS_Shape& shape, std::size_t index) {
+    const bool is_face = !shape.IsNull() && shape.ShapeType() == TopAbs_FACE;
+    nlohmann::json evidence = {{"bodyId", binding.body_id},
+                               {"topoKey", binding.topo_key},
+                               {"gearOpId", gear_op_id}};
+    std::string message;
+    if (is_face) {
+        const std::string surface_type =
+            classify_shape(shape).value("surfaceType", std::string("other"));
+        evidence["surfaceType"] = surface_type;
+        message = "gear face " + binding.topo_key + " of " + binding.body_id +
+                  " is not referenceable (surfaceType '" + surface_type +
+                  "'): only the two caps and a bore below the root radius carry identity a "
+                  "tooth-count edit preserves";
+    } else {
+        evidence["kind"] = binding.kind;
+        message = "gear " + binding.kind + " " + binding.topo_key + " of " + binding.body_id +
+                  " is not referenceable: an edge or vertex carries identity a tooth-count edit "
+                  "preserves only where EVERY adjacent face does";
+    }
+    ErrorInfo error = bind_error("REF_UNRESOLVED", std::move(message), index);
+    (*error.detail)["diagnostics"] = nlohmann::json::array({nlohmann::json{
+        {"code", "REF_UNRESOLVED"},
+        {"reasonCode", "GEAR_FACE_NOT_REFERENCEABLE"},
+        {"evidence", std::move(evidence)}}});
+    return error;
 }
 
 bool valid_element_id(const std::string& id) {
@@ -55,6 +93,7 @@ const elementmap::PartitionEntry* binding_at(
 
 std::optional<ErrorInfo> stage_binding(const BodyStore& bodies,
                                        elementmap::ElementMapPartition& staged,
+                                       const std::map<std::string, ops::GearBodyInfo>& gear_bodies,
                                        const ElementBindingInput& binding, std::size_t index) {
     if (binding.body_id.empty() || !valid_element_id(binding.element_id))
         return bind_error("PROTOCOL_ERROR", "malformed bodyId or elementId", index);
@@ -66,6 +105,18 @@ std::optional<ErrorInfo> stage_binding(const BodyStore& bodies,
     const TopoDS_Shape shape = elementmap::ElementMapPartition::shape_for_topokey(
         body->geom, binding.topo_key);
     if (shape.IsNull()) return bind_error("REF_UNRESOLVED", "topoKey not found", index);
+
+    // SCHEMA §7.3 gear referenceability (kernel-hardening WP-I). This is the MINT
+    // — `AcquireElementIds` mints nothing and passes the pick through unchanged,
+    // so the by-name refusal a client sees at pick time is the Bind that follows.
+    // Nothing is staged and the head is untouched. Faces, edges and vertices all
+    // go through the one classifier; a single Bind classifies ONE shape, so the
+    // throwaway adjacency map it builds is the right trade here.
+    if (const auto gear = gear_bodies.find(binding.body_id);
+        gear != gear_bodies.end() &&
+        !ops::gear_element_referenceable(gear->second, body->geom, shape)) {
+        return gear_bind_refusal(binding, gear->second.gear_op_id, shape, index);
+    }
 
     const auto kind = elementmap::ElementMapPartition::kind_from_name(binding.kind);
     const auto* by_id = staged.find(binding.element_id);
@@ -93,6 +144,7 @@ void Session::open(std::string document_id, std::uint64_t document_revision,
     mode_ = std::move(mode);
     bodies_ = BodyStore{};
     partition_ = elementmap::ElementMapPartition{};
+    gear_bodies_.clear();
     sketches_.clear();
     scratch_.reset();
     snapshot_counter_ = 0;
@@ -116,6 +168,7 @@ std::uint64_t Session::reset() {
     history_prefix_hash_ = kEmptyPrefixHash;
     bodies_ = BodyStore{};
     partition_ = elementmap::ElementMapPartition{};
+    gear_bodies_.clear();
     sketches_.clear();
     scratch_.reset();
     snapshot_counter_ = 0;
@@ -238,9 +291,11 @@ FenceOutcome Session::fence_and_clone(std::uint64_t job_id,
     if (from_zero) {
         out.cloned_bodies = BodyStore{};                          // empty base (D5)
         out.cloned_partition = elementmap::ElementMapPartition{};  // empty base (D5)
+        out.cloned_gear_bodies.clear();                            // empty base (D5)
     } else {
         out.cloned_bodies = bodies_;        // value copy of the live head
         out.cloned_partition = partition_;  // value copy of the live head
+        out.cloned_gear_bodies = gear_bodies_;
     }
     out.prepared_snapshot_id = ++snapshot_counter_;
     return out;
@@ -286,6 +341,10 @@ AcceptOutcome Session::accept_prepared(std::uint64_t job_id,
     // intra-plan only — the solver lane owns sketch authoring; not republished here.)
     bodies_ = std::move(scratch_->bodies);
     partition_ = std::move(scratch_->partition);
+    // SCHEMA §7.3 (WP-I): the gear-body map is PLAN-DERIVED, so it is rebuilt
+    // here from the ACCEPTED plan against the freshly published bodies — no
+    // per-body state to persist, and every replay reproduces it exactly.
+    gear_bodies_ = ops::gear_body_infos(scratch_->plan, bodies_);
     history_prefix_hash_ = scratch_->history_prefix_hash;  // opaque; never recomputed
     snapshot_id_ = scratch_->prepared_snapshot_id;
     // D4: ADOPT the accepted plan's documentRevision as the head (Rust-owned edit
@@ -308,6 +367,11 @@ BodyStore Session::bodies_copy() const {
 elementmap::ElementMapPartition Session::partition_copy() const {
     std::lock_guard<std::mutex> lk(mu_);
     return partition_;  // value copy
+}
+
+std::map<std::string, ops::GearBodyInfo> Session::gear_bodies_copy() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return gear_bodies_;  // value copy
 }
 
 std::uint64_t Session::current_snapshot_id() const {
@@ -343,7 +407,7 @@ BindElementsOutcome Session::bind_element_ids(
     }
     elementmap::ElementMapPartition staged = partition_;
     for (std::size_t i = 0; i < bindings.size(); ++i) {
-        if (auto error = stage_binding(bodies_, staged, bindings[i], i)) {
+        if (auto error = stage_binding(bodies_, staged, gear_bodies_, bindings[i], i)) {
             out.error = std::move(*error);
             WLOG_DEBUG(
                 "ref_identity verb=BindElementIds requested=%llu head=%llu batch=%zu "
@@ -377,7 +441,7 @@ bool Session::discard_prepared(std::uint64_t /*job_id*/) {
 
 CheckpointState Session::save_checkpoint(std::uint64_t step) {
     std::lock_guard<std::mutex> lk(mu_);
-    CheckpointState st{bodies_, partition_, history_prefix_hash_};
+    CheckpointState st{bodies_, partition_, history_prefix_hash_, gear_bodies_};
     checkpoints_[step] = st;  // supersede any earlier checkpoint at this step
     return st;
 }
@@ -401,6 +465,7 @@ RestoreOutcome Session::restore_checkpoint(std::uint64_t step, const std::string
     // Install the checkpoint state as the head (bump snapshotId, set the opaque hash).
     bodies_ = st.bodies;
     partition_ = st.partition;
+    gear_bodies_ = st.gear_bodies;
     history_prefix_hash_ = st.history_prefix_hash;
     snapshot_id_ = ++snapshot_counter_;
     out.restored = true;

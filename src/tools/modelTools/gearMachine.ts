@@ -52,6 +52,16 @@ export const DEFAULT_GEAR_OFFSET_HOLE_OFFSET = 10;
 
 /** Teeth below this cannot form a valid involute gear (the worker refuses too). */
 export const GEAR_MIN_TEETH = 3;
+/**
+ * Teeth above this are refused, never clamped (SCHEMA §7.3 / kernel-hardening
+ * WP-I) — the worker enforces the same ceiling, and clamping a typed value the
+ * user can see (e.g. 4000 → 400) reads as the tool silently rewriting them.
+ */
+export const GEAR_MAX_TEETH = 400;
+/** Spline sample count ceiling (SCHEMA §7.3, WP-I) — refused, never clamped. */
+export const GEAR_MAX_SAMPLE_COUNT = 256;
+/** Gear height ceiling (SCHEMA §7.3, WP-I) — refused, never clamped. */
+export const GEAR_MAX_HEIGHT = 1000;
 
 export interface GearFsm {
   phase: GearPhase;
@@ -120,6 +130,13 @@ export type GearEvent =
 export interface GearStep {
   state: GearFsm;
   effect: ToolEffect;
+  /**
+   * An edit-scoped refusal message (WP-I) — set when the event named a value
+   * outside the authorable domain and the state was left UNCHANGED rather than
+   * clamped into range. The controller surfaces this as a transient status hint;
+   * absent on every accepted edit.
+   */
+  hint?: string;
 }
 
 export function gearInit(): GearFsm {
@@ -214,6 +231,13 @@ export function gearStep(s: GearFsm, e: GearEvent): GearStep {
 
     case "setTeeth": {
       if (!editable(s)) return { state: s, effect: "none" };
+      if (Number.isFinite(e.teeth) && Math.round(e.teeth) > GEAR_MAX_TEETH) {
+        return {
+          state: s,
+          effect: "none",
+          hint: `Gear: teeth must be ≤ ${GEAR_MAX_TEETH}`,
+        };
+      }
       const teeth = Number.isFinite(e.teeth)
         ? Math.max(GEAR_MIN_TEETH, Math.round(e.teeth))
         : s.teeth;
@@ -226,6 +250,13 @@ export function gearStep(s: GearFsm, e: GearEvent): GearStep {
 
     case "setHeight":
       if (!editable(s)) return { state: s, effect: "none" };
+      if (Number.isFinite(e.height) && e.height > GEAR_MAX_HEIGHT) {
+        return {
+          state: s,
+          effect: "none",
+          hint: `Gear: height must be ≤ ${GEAR_MAX_HEIGHT}`,
+        };
+      }
       return { state: { ...s, height: dim(e.height, s.height) }, effect: "update" };
 
     case "setPressureAngle": {
@@ -270,6 +301,13 @@ export function gearStep(s: GearFsm, e: GearEvent): GearStep {
 
     case "setSampleCount": {
       if (!editable(s)) return { state: s, effect: "none" };
+      if (Number.isFinite(e.sampleCount) && Math.round(e.sampleCount) > GEAR_MAX_SAMPLE_COUNT) {
+        return {
+          state: s,
+          effect: "none",
+          hint: `Gear: sample count must be ≤ ${GEAR_MAX_SAMPLE_COUNT}`,
+        };
+      }
       const n = Number.isFinite(e.sampleCount)
         ? Math.max(2, Math.round(e.sampleCount))
         : s.sampleCount;

@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use onecad_core::document::body::{BodyHealth, BodyLifecycleEvent};
 use onecad_core::document::record::{
-    ExtrudeMode, FrozenPlacement, KnownOperation, OffsetDistanceType, Operation,
+    ExtrudeMode, FrozenPlacement, KnownOperation, MateResolved, OffsetDistanceType, Operation,
 };
 use onecad_core::document::refs::{AnchorIntent, AxisRef, ElementKind, ElementRef};
 use onecad_core::document::repair::RepairItem;
@@ -783,6 +783,7 @@ pub fn parse_plan_step(payload: &Value, envelope_step: usize) -> Result<PlanStep
         signatures: parse_signatures(payload.get("signatures")),
         diagnostics: parse_diagnostics(payload.get("diagnostics")),
         mate_placement: parse_mate_placement(payload.get("matePlacement")),
+        mate_resolved: parse_mate_resolved(payload.get("mateResolved")),
     })
 }
 
@@ -794,6 +795,18 @@ pub fn parse_plan_step(payload: &Value, envelope_step: usize) -> Result<PlanStep
 /// `PROTOCOL_ERROR` that tears down an otherwise valid regen step.
 fn parse_mate_placement(v: Option<&Value>) -> Option<Box<FrozenPlacement>> {
     serde_json::from_value(v?.clone()).ok().map(Box::new)
+}
+
+/// SCHEMA §7.2 `mateResolved` (kernel-hardening WP-I) — OPTIONAL, present on a
+/// `PlaceComponent` step whose mate resolved against a CYLINDRICAL target,
+/// whether or not the seat moved.
+///
+/// **Deliberately infallible, same reasoning as `parse_mate_placement`**: this
+/// is derived identity EVIDENCE, not execution input. A malformed payload means
+/// "no evidence this step" (dropped, the record keeps whatever it had), never a
+/// `PROTOCOL_ERROR` that tears down an otherwise valid regen step.
+fn parse_mate_resolved(v: Option<&Value>) -> Option<MateResolved> {
+    serde_json::from_value(v?.clone()).ok()
 }
 
 fn parse_body_events(v: Option<&Value>) -> Result<Vec<BodyLifecycleEvent>, String> {
@@ -2660,6 +2673,15 @@ pub fn parse_classify_element(result: &Value) -> Option<crate::dto::ClassifyElem
             normal: vec3(f, "normal"),
             axis: vec3(f, "axis"),
             radius: f.get("radius").and_then(Value::as_f64),
+            // WP-I (SCHEMA §7.5). OPTIONAL and closed: an absent key and a token
+            // this build does not know are the SAME answer — "not measured" —
+            // and both drop to `None`. Echoing an unknown token would put a
+            // value the UI has no branch for in front of the user.
+            sidedness: f
+                .get("sidedness")
+                .and_then(Value::as_str)
+                .filter(|s| *s == "pin" || *s == "hole")
+                .map(str::to_string),
         });
     Some(crate::dto::ClassifyElementDto {
         kind: str_at("kind"),
@@ -8187,6 +8209,70 @@ mod chamfer_reference_face_wire_tests {
         });
         assert!(w["params"].get("referenceFaces").is_none(), "got {w}");
         assert_eq!(w["inputs"].as_array().expect("array").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod classify_element_tests {
+    use super::*;
+
+    /// SCHEMA §7.5 (kernel-hardening WP-I): a cylinder FACE frame may carry
+    /// `sidedness`. It is OPTIONAL and CLOSED — absent, and a token this build
+    /// does not know, are the same answer ("not measured") and both read as
+    /// `None`, so a newer worker can never put a value the UI has no branch for
+    /// in front of the user. Every pre-WP-I payload parses exactly as before.
+    #[test]
+    fn cylinder_sidedness_is_optional_closed_and_round_trips() {
+        let frame = |extra: Value| {
+            let mut f = json!({
+                "origin": [10.0, 5.0, 0.0],
+                "axis": [0.0, 0.0, 1.0],
+                "radius": 3.0
+            });
+            if let (Some(obj), Some(add)) = (f.as_object_mut(), extra.as_object()) {
+                for (k, v) in add {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            json!({ "present": true, "kind": "face", "surfaceType": "cylinder", "frame": f })
+        };
+
+        let hole = parse_classify_element(&frame(json!({ "sidedness": "hole" })))
+            .expect("present ⇒ a DTO");
+        assert_eq!(
+            hole.frame.as_ref().unwrap().sidedness.as_deref(),
+            Some("hole")
+        );
+        // …and it reaches the frontend under the SCHEMA's own key.
+        let wire = serde_json::to_value(&hole).unwrap();
+        assert_eq!(wire["frame"]["sidedness"], "hole");
+
+        let pin = parse_classify_element(&frame(json!({ "sidedness": "pin" }))).unwrap();
+        assert_eq!(pin.frame.unwrap().sidedness.as_deref(), Some("pin"));
+
+        // Absent (a pre-WP-I worker), a token from a later build, and a
+        // non-string all mean "not measured" — and the key is then omitted
+        // entirely rather than sent as null.
+        for payload in [
+            json!({}),
+            json!({ "sidedness": "chirality-from-2027" }),
+            json!({ "sidedness": 7 }),
+        ] {
+            let dto = parse_classify_element(&frame(payload.clone())).unwrap();
+            assert_eq!(
+                dto.frame.as_ref().unwrap().sidedness,
+                None,
+                "unmeasured for {payload}"
+            );
+            let wire = serde_json::to_value(&dto).unwrap();
+            assert!(
+                wire["frame"].get("sidedness").is_none(),
+                "absent means the key is skipped, never null: {wire}"
+            );
+            // The rest of the frame is untouched by the new field.
+            assert_eq!(wire["frame"]["radius"], 3.0);
+            assert_eq!(wire["frame"]["axis"], json!([0.0, 0.0, 1.0]));
+        }
     }
 }
 

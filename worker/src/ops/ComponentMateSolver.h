@@ -42,6 +42,15 @@ namespace onecad::ops {
 // entirely either way — spec's hole-rim snap seats at the hole's own
 // origin by construction.)
 //
+// KERNEL-HARDENING WP-I (SCHEMA §7.3 "Coincident seat"): a `coincident` seat is
+// the anchor PROJECTED onto the resolved plane along its normal, so
+// `frame.origin` is REQUIRED there (a frame without one is malformed ⇒
+// `nullopt`). `concentric` already projected onto the axis line and is
+// unchanged. `placementSolver.ts` took the SAME change in the same work
+// package, so the two stay in lockstep; the projection is the identity at pick
+// time (the cursor hit point is already on the plane) and only bites on the
+// regen lane, whose frozen anchor may have left the plane since.
+//
 // `self_frame` is the component's OWN local seating basis, `mate.selfFrame`
 // verbatim (SCHEMA §7.3; Component Library WP-F1.1): `{origin:[x,y,z],
 // z:[x,y,z], x:[x,y,z]}`, already orthonormal (Rust's manifest parse

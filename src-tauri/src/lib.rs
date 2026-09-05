@@ -485,6 +485,7 @@ pub fn run() {
             api::check_recovery,
             api::recover_document,
             api::apply_edit_command,
+            api::repair_mate_axis,
             api::get_operation_params,
             api::feature_dependencies,
             api::undo,

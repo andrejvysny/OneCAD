@@ -20,6 +20,9 @@ import {
   DEFAULT_GEAR_AXLE_HOLE_DIAMETER,
   DEFAULT_GEAR_MODULE,
   DEFAULT_GEAR_TEETH,
+  GEAR_MAX_HEIGHT,
+  GEAR_MAX_SAMPLE_COUNT,
+  GEAR_MAX_TEETH,
   GEAR_MIN_TEETH,
   gearFsmFromParams,
   gearInit,
@@ -162,6 +165,31 @@ describe("gearMachine editing guards", () => {
 
   it("keeps sampleCount at or above the interpolator's minimum", () => {
     expect(run([{ kind: "setSampleCount", sampleCount: 0 }], armedOnFace()).sampleCount).toBe(2);
+  });
+
+  // WP-I: refuse-never-clamp. Above the bound the value is left UNCHANGED and
+  // the step names the bound in `hint` — never silently rewritten.
+  it("refuses teeth above the worker's ceiling instead of clamping it", () => {
+    const armed = armedOnFace();
+    const step = gearStep(armed, { kind: "setTeeth", teeth: GEAR_MAX_TEETH + 1 });
+    expect(step.state.teeth).toBe(armed.teeth);
+    expect(step.effect).toBe("none");
+    expect(step.hint).toMatch(new RegExp(String(GEAR_MAX_TEETH)));
+    expect(run([{ kind: "setTeeth", teeth: GEAR_MAX_TEETH }], armed).teeth).toBe(GEAR_MAX_TEETH);
+  });
+
+  it("refuses a height above the ceiling instead of clamping it", () => {
+    const armed = armedOnFace();
+    const step = gearStep(armed, { kind: "setHeight", height: GEAR_MAX_HEIGHT + 1 });
+    expect(step.state.height).toBe(armed.height);
+    expect(step.hint).toMatch(new RegExp(String(GEAR_MAX_HEIGHT)));
+  });
+
+  it("refuses a sampleCount above the ceiling instead of clamping it", () => {
+    const armed = armedOnFace();
+    const step = gearStep(armed, { kind: "setSampleCount", sampleCount: GEAR_MAX_SAMPLE_COUNT + 1 });
+    expect(step.state.sampleCount).toBe(armed.sampleCount);
+    expect(step.hint).toMatch(new RegExp(String(GEAR_MAX_SAMPLE_COUNT)));
   });
 });
 

@@ -58,6 +58,15 @@ AxisAngle rotation_from_local_z_to(const Vec3& to) {
     return AxisAngle{axis, angle_deg};
 }
 
+// The point of `point` projected onto the plane `(origin, unit_normal)` along
+// that normal (kernel-hardening WP-I, SCHEMA §7.3 "Coincident seat"). `normal`
+// must already be unit length.
+Vec3 project_point_onto_plane(const Vec3& point, const Vec3& origin, const Vec3& normal) {
+    const Vec3 rel{point[0] - origin[0], point[1] - origin[1], point[2] - origin[2]};
+    const double d = vdot(rel, normal);
+    return {point[0] - normal[0] * d, point[1] - normal[1] * d, point[2] - normal[2] * d};
+}
+
 // Ports `projectPointOntoLine` (placementSolver.ts:80-85). `direction` must
 // already be non-degenerate (checked by the caller before this is reached).
 Vec3 project_point_onto_line(const Vec3& point, const Vec3& origin, const Vec3& direction) {
@@ -232,13 +241,21 @@ std::optional<nlohmann::json> solve_mate_placement(const std::string& snap_kind,
     // `pickWorldPos` → `seat_anchor` (see header for what stands in for the
     // cursor during a regen re-seat).
     if (snap_kind == "coincident") {
-        Vec3 raw_normal;
+        Vec3 raw_normal, origin;
         if (!read_vec3(frame, "normal", raw_normal)) return std::nullopt;
+        // WP-I (SCHEMA §7.3 "Coincident seat"): `frame.origin` is REQUIRED on a
+        // coincident frame — the seat is the attachment's current world position
+        // PROJECTED onto the resolved plane along its normal, so a plane that
+        // moved along its own normal (a plate that got thicker) carries the
+        // component with it. A frame without an origin is malformed, and that is
+        // the caller's not-a-guess path, never a fall back to the raw anchor.
+        if (!read_vec3(frame, "origin", origin)) return std::nullopt;
         const std::optional<Vec3> normal = vnormalize(raw_normal);
         if (!normal) return std::nullopt;
+        const Vec3 seat = project_point_onto_plane(seat_anchor, origin, *normal);
         const Vec3 direction = flipped ? vneg(*normal) : *normal;
         const AxisAngle aa = rotation_from_local_z_to(direction);
-        return seated(seat_anchor, aa, self_frame);
+        return seated(seat, aa, self_frame);
     }
     if (snap_kind == "concentric" || snap_kind == "concentricAndCoincident") {
         Vec3 raw_axis, origin;

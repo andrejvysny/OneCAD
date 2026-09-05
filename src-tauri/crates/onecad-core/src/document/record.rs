@@ -2574,6 +2574,14 @@ fn is_direction(v: &Vec3) -> bool {
     v.is_finite() && (v.x != 0.0 || v.y != 0.0 || v.z != 0.0)
 }
 
+/// SCHEMA §7.3 `Gear` upper bounds (kernel-hardening WP-I) — cost bounds the
+/// worker also refuses by name (`GEAR_PARAM_OUT_OF_RANGE`).
+const GEAR_MAX_TEETH: u32 = 400;
+/// See [`GEAR_MAX_TEETH`].
+const GEAR_MAX_SAMPLE_COUNT: u32 = 256;
+/// See [`GEAR_MAX_TEETH`].
+const GEAR_MAX_HEIGHT_MM: f64 = 1000.0;
+
 impl InvoluteExternalParams {
     /// # Errors
     /// Returns a human-facing reason when any dimension is outside its domain.
@@ -2584,8 +2592,25 @@ impl InvoluteExternalParams {
                 self.teeth
             ));
         }
+        // WP-I upper bounds (SCHEMA §7.3 "Bounds"). These are COST bounds, not
+        // geometric ones: one B-spline is fitted per flank and the bore cut runs
+        // against `2·teeth` such faces, so `(400, 1024)` is jointly a liveness
+        // kill while either value alone is harmless. Refused here because
+        // authoring is the cheap place to stop it.
+        if self.teeth > GEAR_MAX_TEETH {
+            return Err(format!(
+                "Gear teeth must be at most {GEAR_MAX_TEETH} (got {})",
+                self.teeth
+            ));
+        }
         positive("Gear module", self.module.value)?;
         positive("Gear height", self.height.value)?;
+        if self.height.value > GEAR_MAX_HEIGHT_MM {
+            return Err(format!(
+                "Gear height must be at most {GEAR_MAX_HEIGHT_MM} mm (got {})",
+                self.height.value
+            ));
+        }
         let alpha = self.pressure_angle_deg.value;
         if !(alpha > 0.0 && alpha < 90.0) {
             return Err(format!(
@@ -2595,6 +2620,12 @@ impl InvoluteExternalParams {
         if self.sample_count < 2 {
             return Err(format!(
                 "Gear sampleCount must be at least 2 (got {})",
+                self.sample_count
+            ));
+        }
+        if self.sample_count > GEAR_MAX_SAMPLE_COUNT {
+            return Err(format!(
+                "Gear sampleCount must be at most {GEAR_MAX_SAMPLE_COUNT} (got {})",
                 self.sample_count
             ));
         }
@@ -3096,6 +3127,47 @@ pub const PROFILE_LENGTH_PARAM: &str = "length";
 /// Upper bound on a profile extrusion's length, in millimetres.
 const PROFILE_MAX_LENGTH_MM: f64 = 1e5;
 
+/// Upper bound on a GENERATOR component's `length` param, in millimetres
+/// (SCHEMA §7.3 `PlaceComponent` "Generator bounds", kernel-hardening WP-I).
+///
+/// Two orders of magnitude tighter than [`PROFILE_MAX_LENGTH_MM`] because the
+/// two lengths cost different things: a profile is one prism of a fixed face,
+/// while a generated screw cuts one thread ring per pitch along its whole shank
+/// — measured 2026-09-04, a 1 000 000 mm M6 built in 1.3 ms and a 1000 mm M2
+/// would cut 2500 rings.
+const GENERATOR_MAX_LENGTH_MM: f64 = 1000.0;
+
+/// The `params` key a generator family reads as its shank length, in
+/// millimetres. Today only `iso4762` reads it (the NEMA families read none);
+/// the bound is applied wherever the key is PRESENT and numeric, so a family
+/// that ignores it can still never author an absurd value.
+pub const GENERATOR_LENGTH_PARAM: &str = "length";
+
+/// Refuses an out-of-range `length` in a generator component's param map
+/// (SCHEMA §7.3, WP-I). `where_label` names the map in the message
+/// (`params` / `source.params`).
+///
+/// The generator param map is UNTYPED, so this is a bound on what is present,
+/// never a required-key check: the worker stays the backstop, and it alone owns
+/// the `length / pitch ≤ 500` turns bound (the pitch table is a worker table,
+/// not a core one).
+fn validate_generator_length(
+    params: &BTreeMap<String, ComponentParamValue>,
+    op_name: &str,
+    where_label: &str,
+) -> Result<(), String> {
+    let Some(ComponentParamValue::Number(length)) = params.get(GENERATOR_LENGTH_PARAM) else {
+        return Ok(());
+    };
+    if !length.is_finite() || *length <= 0.0 || *length > GENERATOR_MAX_LENGTH_MM {
+        return Err(format!(
+            "{op_name} {where_label}.{GENERATOR_LENGTH_PARAM} must be finite and in \
+             (0, {GENERATOR_MAX_LENGTH_MM}] mm (got {length})"
+        ));
+    }
+    Ok(())
+}
+
 /// The baked-blob pointer an `embedded` / `document` / `profile` component
 /// source carries: everything the regen path needs, with the provenance
 /// differences stripped.
@@ -3158,6 +3230,50 @@ pub enum MateKind {
     ConcentricAndCoincident,
 }
 
+impl MateKind {
+    /// True for the two kinds that seat against a CYLINDRICAL target — the only
+    /// ones [`ComponentMate::target_axis`] is defined for (SCHEMA §7.3, WP-I).
+    #[must_use]
+    pub fn is_concentric(self) -> bool {
+        matches!(self, Self::Concentric | Self::ConcentricAndCoincident)
+    }
+}
+
+/// Which side of a cylindrical face the solid lies on (SCHEMA §7.5
+/// `ClassifyElement` `frame.sidedness`, kernel-hardening WP-I).
+///
+/// Frozen into a concentric mate as [`ComponentMate::target_sidedness`]: a hole
+/// that was re-authored as a pin is a DIFFERENT feature, and the mate halts
+/// rather than seating a fastener into a boss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MateSidedness {
+    /// The solid is INSIDE the cylinder — a boss or a shaft.
+    Pin,
+    /// The solid is OUTSIDE the cylinder — a bore.
+    Hole,
+}
+
+/// The SCHEMA §7.2 `planStep.mateResolved` echo (kernel-hardening WP-I): the
+/// target axis and sidedness a `PlaceComponent` step's mate actually resolved
+/// against on THIS regen.
+///
+/// Derived evidence, never execution input — the same class of value as
+/// [`FrozenPlacement`] on the `matePlacement` echo. Rust ADOPTS it into
+/// [`ComponentMate::target_axis`] / [`ComponentMate::target_sidedness`] exactly
+/// once, and only for a record that carries no `target_axis` yet (a document
+/// authored before this build); a record that already carries one is never
+/// rewritten by regen.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MateResolved {
+    /// The resolved face's parametric axis (unit, world).
+    pub axis: Vec3,
+    /// The resolved sidedness, absent when it could not be measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidedness: Option<MateSidedness>,
+}
+
 /// The component-local basis a mate seats FROM, FROZEN into the record at
 /// authoring out of the package's `[attachments].<key>.frame` (spec §2.1;
 /// Component Library WP-F1.1).
@@ -3204,6 +3320,28 @@ pub struct ComponentMate {
     /// written before WP-F1.1 loads and re-seats byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_frame: Option<MateFrame>,
+    /// The target's SCHEMA §7.5 `frame.axis` (unit, world) FROZEN at authoring
+    /// — the evidence a re-seat compares against (kernel-hardening WP-I).
+    ///
+    /// Absent on planar targets and on every record written before this build
+    /// (hash-neutral when absent, the [`self_frame`](Self::self_frame)
+    /// precedent); the §7.2 `mateResolved` writeback backfills it once. On
+    /// re-seat the worker computes `d = resolvedAxis · targetAxis`: `d ≥ −0.5`
+    /// seats exactly as before, `d < −0.5` — the anti-parallel band, the only
+    /// signature a REBUILD-REVERSED surface leaves — publishes at the frozen
+    /// `placement` and halts with the §9 op-built item `mateAxisReversed`.
+    ///
+    /// A cylindrical face has no intrinsic axial sign, so this is EVIDENCE, not
+    /// a rule — the same principle as a §9 `anchor.worldPoint`. `flipped` stays
+    /// the only orientation BIT; a second persisted sign would give one
+    /// orientation two encodings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_axis: Option<Vec3>,
+    /// The target's SCHEMA §7.5 `sidedness` frozen at authoring (WP-I). A
+    /// sidedness that no longer matches the resolved one raises the same
+    /// `mateAxisReversed` item: a hole that became a pin is a different feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_sidedness: Option<MateSidedness>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -3343,6 +3481,18 @@ impl PlaceComponentParams {
             }
         }
         validate_component_source(&self.source, "PlaceComponent")?;
+        // WP-I generator bounds: the free-override map and the resolved
+        // generator map are both authored here, and either can reach the worker
+        // as the shank length. Checked on both so an absurd value is refused at
+        // the cheap end rather than discovered as a liveness stall at regen.
+        if let ComponentSourceRef::Generator {
+            params: source_params,
+            ..
+        } = &self.source
+        {
+            validate_generator_length(&self.params, "PlaceComponent", "params")?;
+            validate_generator_length(source_params, "PlaceComponent", "source.params")?;
+        }
         if let Some(mate) = &self.mate {
             if mate.self_attachment.trim().is_empty() {
                 return Err("PlaceComponent mate.selfAttachment must not be empty".into());
@@ -3354,6 +3504,14 @@ impl PlaceComponentParams {
                             "PlaceComponent mate.selfFrame.{field} must be finite"
                         ));
                     }
+                }
+            }
+            // WP-I: the frozen target axis is a DIRECTION — a zero or non-finite
+            // one cannot be dotted against the resolved axis, so the anti-parallel
+            // test would silently never fire.
+            if let Some(axis) = &mate.target_axis {
+                if !is_direction(axis) {
+                    return Err("PlaceComponent mate.targetAxis must be finite and non-zero".into());
                 }
             }
         }
@@ -5309,6 +5467,8 @@ mod tests {
             kind: MateKind::Concentric,
             flipped: false,
             self_frame: None,
+            target_axis: None,
+            target_sidedness: None,
             extra: Extra::new(),
         });
         let op = Operation::Known(KnownOperation::PlaceComponent(mated));
@@ -5375,9 +5535,152 @@ mod tests {
             kind: MateKind::Coincident,
             flipped: false,
             self_frame: None,
+            target_axis: None,
+            target_sidedness: None,
             extra: Extra::new(),
         });
         assert!(bad_mate.validate().is_err());
+    }
+
+    /// WP-I: `mate.targetAxis` / `mate.targetSidedness` are additive and
+    /// OPTIONAL, and this pins the HASH-NEUTRAL half — a mate without them must
+    /// serialize with neither key, so every document written before WP-I is
+    /// byte-identical on rewrite and its planner line (which is the serialized
+    /// `params`) does not move. The `selfFrame` precedent, one build later.
+    #[test]
+    fn mate_target_axis_round_trips_and_is_absent_when_unset() {
+        let mut bare = place_component_params();
+        bare.mate = Some(ComponentMate {
+            self_attachment: "shank_axis".to_string(),
+            target: ElementRef {
+                primary: None,
+                intent: None,
+                anchor: None,
+                extra: Extra::new(),
+            },
+            kind: MateKind::Concentric,
+            flipped: false,
+            self_frame: None,
+            target_axis: None,
+            target_sidedness: None,
+            extra: Extra::new(),
+        });
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert!(
+            bare_json["mate"].get("targetAxis").is_none()
+                && bare_json["mate"].get("targetSidedness").is_none(),
+            "unset evidence must not even emit the keys: {bare_json}"
+        );
+        // Byte-identical to what a pre-WP-I build wrote for the same record.
+        let pre_wp_i = serde_json::json!({
+            "selfAttachment": "shank_axis",
+            "target": {},
+            "kind": "concentric",
+            "flipped": false,
+        });
+        assert_eq!(
+            serde_json::to_string(&bare_json["mate"]).unwrap(),
+            serde_json::to_string(&pre_wp_i).unwrap(),
+            "a mate without the WP-I evidence must serialize exactly as before"
+        );
+        // …and that older form still reads back as the same record.
+        assert_eq!(
+            serde_json::from_value::<ComponentMate>(pre_wp_i).unwrap(),
+            bare.mate.clone().unwrap()
+        );
+
+        let mut frozen = bare.clone();
+        let mate = frozen.mate.as_mut().unwrap();
+        mate.target_axis = Some(Vec3::new_unchecked(0.0, 0.0, 1.0));
+        mate.target_sidedness = Some(MateSidedness::Hole);
+        let json = serde_json::to_value(&frozen).unwrap();
+        assert_eq!(
+            json["mate"]["targetAxis"],
+            serde_json::json!([0.0, 0.0, 1.0])
+        );
+        assert_eq!(json["mate"]["targetSidedness"], serde_json::json!("hole"));
+        assert_eq!(
+            serde_json::from_value::<PlaceComponentParams>(json).unwrap(),
+            frozen
+        );
+        frozen.validate().expect("a unit target axis validates");
+    }
+
+    /// WP-I: the frozen axis is a DIRECTION. A zero one cannot be dotted against
+    /// the resolved axis, so the anti-parallel test would silently never fire —
+    /// refuse it at authoring rather than disarm the guard.
+    #[test]
+    fn place_component_refuses_a_degenerate_target_axis() {
+        let mut params = place_component_params();
+        params.mate = Some(ComponentMate {
+            self_attachment: "shank_axis".to_string(),
+            target: ElementRef {
+                primary: None,
+                intent: None,
+                anchor: None,
+                extra: Extra::new(),
+            },
+            kind: MateKind::Concentric,
+            flipped: false,
+            self_frame: None,
+            target_axis: Some(Vec3::new_unchecked(0.0, 0.0, 0.0)),
+            target_sidedness: None,
+            extra: Extra::new(),
+        });
+        let err = params.validate().expect_err("a zero axis must be refused");
+        assert!(err.contains("targetAxis"), "message names the field: {err}");
+
+        params.mate.as_mut().unwrap().target_axis = Some(Vec3::new_unchecked(0.0, f64::NAN, 1.0));
+        assert!(
+            params.validate().is_err(),
+            "a non-finite axis must be refused too"
+        );
+    }
+
+    /// WP-I generator bounds (SCHEMA §7.3): a `length` outside `(0, 1000]` mm is
+    /// refused at authoring on BOTH maps that can carry it — measured 2026-09-04,
+    /// a 1 000 000 mm M6 built in 1.3 ms and nothing downstream complained.
+    #[test]
+    fn place_component_refuses_an_absurd_generator_length() {
+        let with_length = |op_level: Option<f64>, source_level: Option<f64>| {
+            let mut p = place_component_params();
+            if let Some(l) = op_level {
+                p.params.insert(
+                    GENERATOR_LENGTH_PARAM.to_string(),
+                    ComponentParamValue::Number(l),
+                );
+            }
+            if let (Some(l), ComponentSourceRef::Generator { params, .. }) =
+                (source_level, &mut p.source)
+            {
+                params.insert(
+                    GENERATOR_LENGTH_PARAM.to_string(),
+                    ComponentParamValue::Number(l),
+                );
+            }
+            p
+        };
+        with_length(Some(30.0), Some(30.0))
+            .validate()
+            .expect("an ordinary M6×30 validates");
+        for (op_level, source_level) in [
+            (Some(1_000_000.0), None),
+            (None, Some(1_000_000.0)),
+            (Some(0.0), None),
+            (None, Some(-5.0)),
+        ] {
+            let err = with_length(op_level, source_level)
+                .validate()
+                .expect_err("an out-of-range generator length must be refused");
+            assert!(
+                err.contains("length") && err.contains("1000"),
+                "message names the param and the bound: {err}"
+            );
+        }
+        // Exactly at the bound is legal — the bound is inclusive above.
+        with_length(Some(1000.0), Some(1000.0))
+            .validate()
+            .expect("length = 1000 mm is the last legal value");
     }
 
     /// WP-F1.1: `mate.selfFrame` is additive and OPTIONAL. What this pins is
@@ -5402,6 +5705,8 @@ mod tests {
             kind: MateKind::Concentric,
             flipped: false,
             self_frame,
+            target_axis: None,
+            target_sidedness: None,
             extra: Extra::new(),
         };
 
@@ -5456,6 +5761,8 @@ mod tests {
                 z: Vec3::new_unchecked(0.0, 0.0, 1.0),
                 x: Vec3::new_unchecked(1.0, 0.0, 0.0),
             }),
+            target_axis: None,
+            target_sidedness: None,
             extra: Extra::new(),
         });
         assert!(params.validate().is_err());
@@ -5666,6 +5973,34 @@ mod tests {
                 "expected a refusal for an out-of-domain dimension"
             );
         }
+    }
+
+    /// WP-I I0(d) probe / design I3: [`InvoluteExternalParams::validate`] has
+    /// LOWER bounds only, so a fat-fingered `teeth` or `sampleCount` reaches the
+    /// worker and asks OCCT for hundreds of thousands of B-spline flanks plus a
+    /// boolean bore cut against them. The bounds are `teeth ∈ [3, 400]` and
+    /// `sampleCount ∈ [2, 256]`; a refusal here is the cheap place to stop it.
+    #[test]
+    fn gear_validate_refuses_absurd_teeth_and_samples() {
+        let mut absurd_teeth = gear_params();
+        absurd_teeth.involute_external.as_mut().unwrap().teeth = 100_000;
+        assert!(
+            absurd_teeth.validate().is_err(),
+            "teeth = 100000 must be refused at authoring, got {:?}",
+            absurd_teeth.validate()
+        );
+
+        let mut absurd_samples = gear_params();
+        absurd_samples
+            .involute_external
+            .as_mut()
+            .unwrap()
+            .sample_count = 100_000;
+        assert!(
+            absurd_samples.validate().is_err(),
+            "sampleCount = 100000 must be refused at authoring, got {:?}",
+            absurd_samples.validate()
+        );
     }
 
     #[test]

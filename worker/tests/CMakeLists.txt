@@ -428,6 +428,14 @@ add_test(NAME component_mate_reseat COMMAND test_component_mate_reseat)
 #     the `ExportGeometry` verb that bakes them — export a published body, place
 #     the bytes back, and pin every refusal (2 solids, wrong/absent format pin,
 #     unmaterialized blob, unknown codec/kind). In-process, real OCCT. ---
+# --- WP-I I0(c): gear referenceability through the REAL mint
+#     (`Session::bind_element_ids`), not the advisory `AcquireElementIds`
+#     refusal — a tooth flank must not become a persistent ElementId; the bore
+#     and the end caps must (SCHEMA §7.3 allow-list). In-process, real OCCT. ---
+add_executable(test_gear_referenceability test_gear_referenceability.cpp)
+target_link_libraries(test_gear_referenceability PRIVATE worker_core)
+add_test(NAME gear_referenceability COMMAND test_gear_referenceability)
+
 add_executable(test_component_blob_source test_component_blob_source.cpp)
 target_link_libraries(test_component_blob_source PRIVATE worker_core)
 add_test(NAME component_blob_source COMMAND test_component_blob_source)
@@ -949,6 +957,31 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/chamfer_reference_face_legacy_needsrepair.ndjson
+)
+# Kernel-hardening WP-I — a mated component RE-SEATS on the resolved geometry: a
+# coincident seat PROJECTED onto the resolved plane (a 5 -> 8 mm plate carries its
+# screw, `matePlacement` z +3 exactly), the op-built §9 `mateAxisReversed` halt
+# with its two labelled same-face candidates plus `resolvedAxis`/`frozenAxis`/
+# `resolvedSidedness` and the §7.2 `mateResolved` echo beside it, and the
+# `mateSeatOffFace` halt with the nearest point of the face as its candidate. The
+# GEOMETRIC reversal (the same hole rebuilt from the other end) is pinned in
+# test_component_mate_reseat.cpp; this file pins the wire contract.
+add_test(
+    NAME canonical_place_component_mate_reseat
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/place_component_mate_reseat.ndjson
+)
+# Kernel-hardening WP-I — §7.3 gear referenceability ENFORCED: `AcquireElementIds`
+# unchanged (it mints nothing), `BindElementIds` on a tooth flank refused by name
+# with `REF_UNRESOLVED` + `bindingIndex` + the `GEAR_FACE_NOT_REFERENCEABLE`
+# diagnostic, nothing minted and the head identical field for field either side;
+# the axle bore and an end cap are the positive controls and still bind.
+add_test(
+    NAME canonical_gear_face_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/gear_face_refusal.ndjson
 )
 # Kernel-hardening WP-B — §7.4 `maxResidual`, REPORTING ONLY. Rounds 1 and 2 are the
 # load-bearing pair (0.0 on a well-conditioned dimensioned rectangle, non-zero on the

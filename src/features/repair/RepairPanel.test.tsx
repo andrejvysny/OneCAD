@@ -2,7 +2,8 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 import { screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { repairStore } from "@/stores/repairStore";
-import { mockClient } from "@/ipc/mockClient";
+import { mockClient, setMockMateAxisItem } from "@/ipc/mockClient";
+import { MATE_AXIS_FOLLOW_LABEL, MATE_AXIS_KEEP_LABEL } from "@/ipc/operationDiagnostics";
 import { documentStore } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
 import { renderWithPlatform } from "@/test/renderWithPlatform";
@@ -72,6 +73,87 @@ describe("RepairPanel (inspector repair state)", () => {
     });
     expect(screen.getByText(/Chamfer reference face was never recorded/i)).toBeInTheDocument();
     expect(screen.queryByText("legacyReferenceFace")).toBeNull();
+  });
+
+  it("renders `mateAxisReversed` candidates by `label` and calls repairMateAxis with the LABEL, not row order (WP-I)", async () => {
+    // Real refId shape (SCHEMA §9: `<opId>.input0`) and the real `resolveRefs`
+    // path — `setMockMateAxisItem` seeds the item the real backend would raise,
+    // so this exercises the same DTO shape Rust derives, not a hand-rolled stub.
+    setMockMateAxisItem("pc1", { resolvedAxis: [0, 0, -1], resolvedSidedness: "pin" });
+    const repairMateAxis = vi.spyOn(mockClient, "repairMateAxis").mockResolvedValue({
+      revision: 8,
+      features: [],
+      changedBodies: [],
+      removedBodies: [],
+    } as unknown as Awaited<ReturnType<typeof mockClient.repairMateAxis>>);
+
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      repairStore.getState().applyEvent(
+        oneItem("pc1", "pc1.input0", {
+          reason: "mateAxisReversed",
+          resolvedAxis: [0, 0, -1],
+          resolvedSidedness: "pin",
+        }),
+      );
+      repairStore.getState().openPanel();
+    });
+    expect(screen.getByText(/axis may have reversed/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("repair-item-head-pc1.input0"));
+    await screen.findByText(MATE_AXIS_FOLLOW_LABEL);
+    // Both rows carry the same score, so the sort is only stable, not a promise
+    // of order — pick the FOLLOW row by its label and confirm the call routed
+    // on the label (`keepWorldDirection: false`), not on which row it landed in.
+    fireEvent.click(screen.getByText(MATE_AXIS_FOLLOW_LABEL));
+
+    await waitFor(() => expect(repairMateAxis).toHaveBeenCalledWith("pc1", false, [0, 0, -1], "pin"));
+    repairMateAxis.mockRestore();
+  });
+
+  it("calls repairMateAxis with keepWorldDirection:true for the KEEP label", async () => {
+    setMockMateAxisItem("pc1", { resolvedAxis: [1, 0, 0] });
+    const repairMateAxis = vi.spyOn(mockClient, "repairMateAxis").mockResolvedValue({
+      revision: 8,
+      features: [],
+      changedBodies: [],
+      removedBodies: [],
+    } as unknown as Awaited<ReturnType<typeof mockClient.repairMateAxis>>);
+
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      repairStore.getState().applyEvent(
+        oneItem("pc1", "pc1.input0", { reason: "mateAxisReversed", resolvedAxis: [1, 0, 0] }),
+      );
+      repairStore.getState().openPanel();
+    });
+    fireEvent.click(screen.getByTestId("repair-item-head-pc1.input0"));
+    await screen.findByText(MATE_AXIS_KEEP_LABEL);
+    fireEvent.click(screen.getByText(MATE_AXIS_KEEP_LABEL));
+
+    await waitFor(() =>
+      expect(repairMateAxis).toHaveBeenCalledWith("pc1", true, [1, 0, 0], undefined),
+    );
+    repairMateAxis.mockRestore();
+  });
+
+  it("renders `mateSeatOffFace` as informational only, with no action (WP-I)", async () => {
+    setMockMateAxisItem("pc1", {
+      reason: "mateSeatOffFace",
+      uiLabel: "The mate's seat is no longer on the target face",
+    });
+
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      repairStore.getState().applyEvent(oneItem("pc1", "pc1.input0", { reason: "mateSeatOffFace" }));
+      repairStore.getState().openPanel();
+    });
+    expect(screen.getByText(/seat moved off the target face/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("repair-item-head-pc1.input0"));
+    await screen.findByTestId("repair-info-pc1.input0");
+    expect(screen.getByText("The mate's seat is no longer on the target face")).toBeInTheDocument();
+    expect(screen.queryByTestId(/^repair-candidate-pc1\.input0-/)).toBeNull();
   });
 
   it("falls back to an opId prefix when the feature is not in the projection", () => {

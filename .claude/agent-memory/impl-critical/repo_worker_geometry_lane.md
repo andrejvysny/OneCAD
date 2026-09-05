@@ -1,6 +1,6 @@
 ---
 name: repo-worker-geometry-lane
-description: Composing multi-op worker probes in-process — the direct op-executor lane, the non-standard XY sketch frame, un-oriented descriptor normals, and which upstream feature reorders a box's face map
+description: Composing worker probes in-process — the direct op-executor lane, the Session/mint lane, the non-standard XY sketch frame, un-oriented descriptor normals, and which upstream feature reorders a box's face map
 metadata:
   type: project
 ---
@@ -47,3 +47,49 @@ conventions below are non-obvious enough to cost a build cycle each.
   redo. Use it only for the SCHEMA §10 descriptor tie-veto it was built for; never to decide whether a
   record may still use a legacy fallback (WP-F review, 2026-09-04 — the chamfer ordinal rule was deleted
   outright instead).
+
+- SESSION lane (needed when the probe must go through the REAL mint or a wire verb handler;
+  pattern `test_element_identity_gate.cpp`): `session.open(...)` → `fence_and_clone(jobId, rev,
+  epoch, session::kEmptyPrefixHash)` (that constant lives in `session/HistoryHash.h`, NOT
+  `Session.h`) → fill a `ScratchJob` from the fence → run the op executor against
+  `job.bodies`/`job.partition` so publish-time per-body state rides along → `store_prepared(std::
+  move(job))` → `accept_prepared`. Then call `handle_bind_element_ids` / `handle_query_element`
+  directly with `Envelope::request(...)`. Name the bind helper anything but `bind` — ADL picks up
+  `std::bind` and the call fails to convert to `Envelope`.
+- `AcquireElementIds` mints NOTHING (`ElementIdentity.cpp:136-163` returns an empty `elementId`;
+  Rust mints it). The mint that installs a durable binding is `Session::bind_element_ids` →
+  `stage_binding`. A refusal wired only into `AcquireElementIds` is ADVISORY — `BindElementIds` on
+  the same topoKey still succeeds. (Fixed for gear faces by WP-I 2026-09-04: `stage_binding` now
+  consults `Session::gear_bodies_` and refuses a tooth face `REF_UNRESOLVED` /
+  `GEAR_FACE_NOT_REFERENCEABLE`; Acquire stays a pass-through by design.)
+- `session::classify_shape(shape)` (`session/ClassifyElement.h`) runs the ClassifyElement
+  classification on a bare shape in-process. Cheapest way to locate a face by GEOMETRY instead of
+  a topokey ordinal in a probe: `{surfaceType, frame:{origin,normal}}` for a plane,
+  `{origin,axis,radius}` for a cylinder; a gear's involute flanks come back `surfaceType:"other"`.
+  Its plane normal FOLDS `face.Orientation()`, so a box's top face reads +Z and its bottom -Z —
+  unlike `ElementMapPartition::describe`, which is un-oriented.
+- A `Gear` op with `axleHole:true` + `axleHoleDiameter` gives a bore face to reference; m=2 z=20
+  gives root radius 17.5 and bore radius 5, so `radius < rootRadius` separates bore from tip.
+- To test the PLAN-STEP ref rung in-process (the `CandidateFilter` / tracked-entry lane), call
+  `session::execute_candidate_op(job, op, opId, lastSketch, cancel)` on a hand-filled `ScratchJob`
+  — no Envelope, no HandlerContext. Assert a successful bind on `result.delta.added`, NOT on the
+  surviving partition: a Fillet CONSUMES the edge it rounds, so the id it just minted appears in
+  `delta.removed` in the same step.
+- SCHEMA §7.3 gear referenceability covers EDGES and VERTICES too: one is referenceable iff EVERY
+  adjacent face is (`ops::gear_element_referenceable`; reuse one `ops::GearAdjacency` per pool —
+  building it per candidate is O(candidates x body size)). Bind evidence carries `surfaceType` for a
+  face and `kind` for an edge/vertex. The bore threshold is `radius < rootRadius - 1e-3` (one
+  authoring resolution) — an exact compare would decide a root-land cylinder by float luck.
+- `ScratchJob` carries `plan` (`{"ops":[...]}`, set by `handle_execute_plan`) and `gear_bodies`
+  (the head's map, fence-cloned). SCHEMA §7.3 gear referenceability is PLAN-derived, so a probe
+  that fills a `ScratchJob` by hand must set `job.plan` or no body is treated as a gear body.
+- `session::classify_shape_in_body(shape, body)` is the ONE producer of §7.5 `frame.sidedness`
+  (`pin`/`hole`) — it needs the face's instance in its body; the bare `classify_shape` omits the key.
+- `elementmap::resolve_descriptor_stage` takes an optional trailing `CandidateFilter`
+  (`bool(const TopoDS_Shape&)`) applied while the pool is ENUMERATED, so a rejected sub-shape is
+  neither scored nor reported. Excluding faces does NOT renumber TopoKeys (they stay body ordinals).
+- `build_gear_solid` bounds (SCHEMA §7.3): teeth ∈ [3,400], sampleCount ∈ [2,256], height ≤ 1000 mm.
+  Any harness that sweeps a gear by scale must clamp height (`test_micro_topology_census` does).
+- Rust side: `ElementInfoDto::normal` (`query_element_by_topo_key`) is the UN-oriented normal, so
+  both caps of an extrusion report `(0,0,1)` — discriminate by `center[2]`. `center` is the bbox
+  centre, which for a PLANAR face lies on the plane, so it is a usable ladder anchor.

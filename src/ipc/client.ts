@@ -706,6 +706,31 @@ export interface CadClient {
   detachComponent(recordId: string): Promise<ApplyOperationResult>;
 
   /**
+   * The SCHEMA §9 `mateAxisReversed` repair (kernel-hardening WP-I): re-freezes a
+   * concentric component mate's orientation evidence.
+   *
+   * NOT a rebind — the ladder already resolved. What is undecidable is the SIGN of
+   * the resolved cylinder's axis, so the user answers one question and this writes
+   * the answer: `keepWorldDirection` toggles the record's `mate.flipped` so the
+   * component keeps pointing where it points today; `false` follows the target's
+   * new axis. BOTH branches re-freeze `mate.targetAxis` to `resolvedAxis` (and
+   * `mate.targetSidedness` to `resolvedSidedness` when it is supplied), which is
+   * what makes the next regen a fixed point instead of re-raising the item.
+   *
+   * `resolvedAxis` and `resolvedSidedness` are echoed verbatim from the repair
+   * item's own fields (SCHEMA §9); the item omits `resolvedSidedness` when the
+   * worker could not measure it, and omitting it here LEAVES the record's frozen
+   * sidedness alone rather than clearing it. Refused server-side unless the record is a placed component
+   * with a concentric mate.
+   */
+  repairMateAxis(
+    recordId: string,
+    keepWorldDirection: boolean,
+    resolvedAxis: [number, number, number],
+    resolvedSidedness?: "pin" | "hole",
+  ): Promise<ApplyOperationResult>;
+
+  /**
    * Applies free-parameter overrides to an already-placed component instance
    * (spec §3.1 `params`; Component Library WP-2.3). Every requested key must
    * be declared `role: "free"` on the component's `[parameters]` signature

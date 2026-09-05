@@ -2,7 +2,44 @@
 
 Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
 
-## NOW — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
+## NOW — KERNEL HARDENING P1: WP-I component mates (2026-09-04, session 28, plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
+
+Last verified: 2026-09-04 23:20 — `master` == origin/master at **`3997872`** (Phase A e2e fixes:
+`dafa656` + `3997872`; CI: every hosted lane green on both, e2e-chromium green on `dafa656`,
+e2e-webkit green on `3997872`). The WP-I tree is UNCOMMITTED and mid-gate (all suites green so far,
+e2e running). Stray `src-tauri/.claude/` still present — `rm` denied by the permission mode twice;
+user deletes by hand.
+
+- **Session 28 decisions (user):** focus Kernel P1 I → H → J; CI reds triaged first in a separate
+  commit; one WP to a gated commit; WP-G probes run now, go/no-go at session end; `axisSign` DROPPED
+  (`flipped` is the only sign bit, frozen `targetAxis` is the evidence); gear caps referenceable
+  (spec amendment); bounds `teeth ≤ 400` / `sampleCount ≤ 256` / `height ≤ 1000` / fastener
+  `length ≤ 1000` and `length/pitch ≤ 500` turns; WP-H wedged deadline 180/60/30 s since the last
+  progress frame; `baseCheckpoint` made true to §7.2; `snapshotId` optional on readers; face-level
+  export refusal.
+- **Phase A (landed, pushed):** the five commit-E CI reds named and fixed without widening an
+  assertion (result-poll for the chamfer flip, 20 s canvas mount wait, rendered-frame drag press,
+  `?vpdebug` invalidate-caller ring, pointerleave ordering); one new webkit red on `dafa656`
+  (`sketch-snap-composition:172`) named and fixed in `3997872`, green on CI.
+- **Phase B (measured, not fixed):** WP-G fillet probes on the shipped kernel — cyl–cyl tee and
+  oblique elliptical rim REFUSED by our 1e-9 section gate at ~1e-3 residual while OCCT builds both;
+  cone rim, valence-5 corner, near-seam edge accept at 1e-16; the seam edge itself is OCCT's own
+  refusal. Verdict: `fillet-chamfer-1` CONFIRMED for walked blends — WP-G go/no-go owed to the user.
+- **Phase C WP-I (in the tree):** coincident seat projected onto the resolved plane; seat-on-face
+  check (coincident only); frozen `targetAxis`/`targetSidedness` adopted ONCE on the first regen
+  (`mateResolved` writeback, one-shot `MATE_AXIS_ADOPTED`); anti-parallel reversal band ⇒ frozen
+  placement + §9 `mateAxisReversed` (two labeled same-face candidates) with `RepairMateAxis`
+  rewriting `flipped`; `mateSeatOffFace`; §7.5 `sidedness`; gear referenceability ENFORCED (plan-
+  derived classifier: caps, parallel bores below root − 1e-3, edges/vertices by neighbourhood) at
+  `BindElementIds` and the plan-step pool, a tracked refused id halts WITHOUT the ladder; gear +
+  generator bounds with per-tooth/per-ring cancel; FE gear chip refuses instead of clamping; repair
+  panel routes on the label. Reviews: protocol audit before code (approve_with_changes, 6 edits) and
+  after landing (approve_with_changes, 6 SCHEMA-text edits); adversarial review (defective → HIGH
+  unreachable repair + 4 MEDIUM fixed red-first). Gate so far: ctest 179/179 · cargo 94/1539/0 ·
+  vitest 318/5618/78 · clippy 1.97 + 1.98.1 · kernelbench 136 unchanged; e2e running.
+- **Next:** e2e result → commit `feat(kernel): component mates …` → push → WP-G decision → WP-H.
+
+## PREVIOUS — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
 Last verified: 2026-09-04 20:06 — `master` == origin/master at **`888c15c`** (ledger chore on top of commit
 E **`daa37e3`**, WP-F; before it A `bd4b6c5` · B `da01b3f` · C `78daecb` · D `b4bbcb9` · chore `e781272`).

@@ -5715,7 +5715,13 @@ export class ModelToolController {
 
   private onGearEvent(e: GearEvent): void {
     const before = this.gear;
-    this.gear = gearStep(this.gear, e).state;
+    const step = gearStep(this.gear, e);
+    this.gear = step.state;
+    // WP-I: refuse-never-clamp. The reducer leaves the value UNCHANGED and names
+    // the bound here instead of silently rewriting what the user typed.
+    if (step.hint) {
+      viewportStore.getState().setStatusHint(step.hint, { severity: "error" });
+    }
     if (this.gear === before) return;
     this.showGearChip();
     this.sendPreview();

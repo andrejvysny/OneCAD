@@ -4,23 +4,29 @@
 // round trip — mirrors `test_component_ops.cpp`'s and
 // `test_cross_body_element_ref.cpp`'s own shape). No framework: exit code ==
 // failure count.
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <string>
 
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
 #include "ops/ComponentOp.h"
 #include "ops/OpTypes.h"
+#include "ops/TransformOp.h"
 #include "session/BodyStore.h"
+#include "session/ClassifyElement.h"
 #include "util/Cancel.h"
 
 using nlohmann::json;
@@ -311,6 +317,321 @@ void test_reseat_honors_a_non_identity_self_frame() {
     }
 }
 
+// ═══ WP-I I0 probes ═══════════════════════════════════════════════════════════
+// RED-FIRST by construction: each of the four cases below asserts the CORRECT
+// behaviour the WP-I design specifies, against the SHIPPED solver. They are
+// expected to fail until I2a lands; the failure line IS the measurement.
+
+constexpr double kPi = 3.14159265358979323846;
+
+// A plate: x∈[0,w], y∈[0,d], z∈[0,h].
+TopoDS_Shape plate(double w, double d, double h) {
+    return BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), w, d, h).Shape();
+}
+
+// The planar face of `body` whose classify-frame normal points along `want`.
+// `frame_out` receives that face's `session::classify_shape` frame VERBATIM —
+// the same object `resolve_mate_reseat` hands the solver, so the probe measures
+// against the production frame rather than a re-derived one.
+TopoDS_Shape planar_face_with_normal(const TopoDS_Shape& body, const std::array<double, 3>& want,
+                                     json& frame_out) {
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faces;
+    TopExp::MapShapes(body, TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const json c = onecad::session::classify_shape(faces(i));
+        if (!c.contains("frame") || !c["frame"].contains("normal")) continue;
+        const json& n = c["frame"]["normal"];
+        const double dot = n[0].get<double>() * want[0] + n[1].get<double>() * want[1] +
+                           n[2].get<double>() * want[2];
+        if (dot > 0.999) {
+            frame_out = c["frame"];
+            return faces(i);
+        }
+    }
+    return TopoDS_Shape();
+}
+
+// The first cylindrical face of `body` — the lateral face of a bare cylinder,
+// found by classification rather than by a hardcoded ordinal, because the
+// reversed-axis rebuild in `test_concentric_axis_reversal_is_not_silent` must
+// not depend on `BRepPrimAPI_MakeCylinder`'s face order being axis-invariant.
+TopoDS_Shape cylindrical_face_of(const TopoDS_Shape& body) {
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faces;
+    TopExp::MapShapes(body, TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        if (em::ElementMapPartition::describe(faces(i)).surfaceType == GeomAbs_Cylinder) {
+            return faces(i);
+        }
+    }
+    return TopoDS_Shape();
+}
+
+std::array<double, 3> translate_of(const json& placement) {
+    std::array<double, 3> t{0.0, 0.0, 0.0};
+    if (placement.contains("translate") && placement["translate"].is_array() &&
+        placement["translate"].size() == 3) {
+        for (std::size_t i = 0; i < 3; ++i) {
+            const json& v = placement["translate"][i];
+            if (v.is_number()) t[i] = v.get<double>();
+        }
+    }
+    return t;
+}
+
+// The placement the component ACTUALLY publishes at: the re-seated one when the
+// solve moved it past the epsilon, otherwise the frozen one that still stands.
+// Reading only `mate_placement` would let a defect that produces NO re-seat at
+// all read as "nothing to check".
+json effective_placement(const ops::OpOutcome& oc, const json& frozen) {
+    return oc.mate_placement ? *oc.mate_placement : frozen;
+}
+
+// The world direction the component's local +Z lands on under `placement` —
+// the solver's own orientation convention (ComponentMateSolver.h), so this is
+// the seat's axis/normal direction expressed as a measurable vector.
+std::array<double, 3> mapped_local_z(const json& placement) {
+    gp_Trsf rot;
+    if (placement.contains("rotate") && placement["rotate"].is_object()) {
+        const json& r = placement["rotate"];
+        const double angle_deg =
+            (r.contains("angleDeg") && r["angleDeg"].is_number()) ? r["angleDeg"].get<double>() : 0.0;
+        if (angle_deg != 0.0 && r.contains("axis") && r["axis"].is_array() &&
+            r["axis"].size() == 3) {
+            const json& a = r["axis"];
+            rot.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0),
+                                   gp_Dir(a[0].get<double>(), a[1].get<double>(),
+                                          a[2].get<double>())),
+                            angle_deg * kPi / 180.0);
+        }
+    }
+    const gp_Dir z = gp_Dir(0.0, 0.0, 1.0).Transformed(rot);
+    return {z.X(), z.Y(), z.Z()};
+}
+
+double signed_distance_to_plane(const std::array<double, 3>& p, const json& frame) {
+    const json& o = frame["origin"];
+    const json& n = frame["normal"];
+    return (p[0] - o[0].get<double>()) * n[0].get<double>() +
+           (p[1] - o[1].get<double>()) * n[1].get<double>() +
+           (p[2] - o[2].get<double>()) * n[2].get<double>();
+}
+
+// ── I0(a1) / design I1: a coincident mate must seat ON the resolved plane. ────
+// The plate was authored 3 mm thicker; the thickness edit moved its top face
+// DOWN along the face's own normal. `solve_mate_placement`'s coincident branch
+// never reads `frame.origin`, so the seat is the frozen anchor verbatim and the
+// screw is left floating 3 mm above the plate — silently, with no repair item.
+void test_coincident_reseat_follows_plane_along_normal() {
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    const TopoDS_Shape box = plate(40.0, 20.0, 10.0);  // top plane at z = 10
+    bodies.create("plate", "op_plate", box);
+    json top_frame;
+    const TopoDS_Shape top = planar_face_with_normal(box, {0.0, 0.0, 1.0}, top_frame);
+    check(!top.IsNull(), "I0(a1) fixture: the plate's +Z top face classifies with a plane frame");
+    if (top.IsNull()) return;
+    part.mint("plate", "el_top", km::ElementKind::Face, top, box, json::object());
+
+    // Frozen 3 mm ABOVE the plane, laterally at the face centre.
+    const json frozen = frozen_placement(20.0, 10.0, 13.0);
+    const json mate = component_mate("plate", "el_top", "face", "coincident");
+    const json op = place_component_op("opi1", frozen, mate);
+
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opi1");
+
+    check(oc.status == ops::OpOutcome::Status::Ok, "I0(a1): Ok");
+    check(oc.needs_repair.empty(), "I0(a1): the target resolves — no NeedsRepair");
+    const std::array<double, 3> seat = translate_of(effective_placement(oc, frozen));
+    const double d = signed_distance_to_plane(seat, top_frame);
+    std::fprintf(stderr,
+                 "  [I0-a1] plane origin z=%.6f normal=(%.3f,%.3f,%.3f) seat=(%.6f,%.6f,%.6f) "
+                 "matePlacement=%s signedDistance=%.6f\n",
+                 top_frame["origin"][2].get<double>(), top_frame["normal"][0].get<double>(),
+                 top_frame["normal"][1].get<double>(), top_frame["normal"][2].get<double>(), seat[0],
+                 seat[1], seat[2], oc.mate_placement ? "echoed" : "absent", d);
+    check_near(d, 0.0, 1e-6,
+               "I0(a1): the solved seat lies ON the resolved plane — a target plane that moved "
+               "along its own normal carries the component with it");
+    check(bodies.get("body_opi1") != nullptr, "I0(a1): body published");
+}
+
+// ── I0(a2) / design I2: a rebuilt target whose cylinder axis came back
+// REVERSED must not silently spin the component 180°. Same occupied volume,
+// same element id, same frozen anchor — only `gp_Cylinder::Axis()`'s parametric
+// direction differs, and `direction = flipped ? -axis : axis` follows it. ─────
+void test_concentric_axis_reversal_is_not_silent() {
+    const json frozen = frozen_placement(0.0, 0.0, 5.0);  // on the axis, mid-height, both passes
+    const json mate = component_mate("plate", "el_hole", "face", "concentric");
+
+    // Pass 1 — the cylinder as authored: axis +Z from the origin, z∈[0,10].
+    std::array<double, 3> z_forward{0.0, 0.0, 0.0};
+    std::array<double, 3> axis_forward{0.0, 0.0, 0.0};
+    {
+        BodyStore bodies;
+        em::ElementMapPartition part;
+        const TopoDS_Shape cyl =
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), 3.0, 10.0)
+                .Shape();
+        bodies.create("plate", "op_plate", cyl);
+        const TopoDS_Shape face = cylindrical_face_of(cyl);
+        check(!face.IsNull(), "I0(a2) fixture: the forward cylinder has a lateral face");
+        if (face.IsNull()) return;
+        part.mint("plate", "el_hole", km::ElementKind::Face, face, cyl, json::object());
+        const json frame = onecad::session::classify_shape(face)["frame"];
+        for (std::size_t i = 0; i < 3; ++i) axis_forward[i] = frame["axis"][i].get<double>();
+        Ctx c;
+        ops::OpContext ctx = c.make(bodies, part);
+        const ops::OpOutcome oc =
+            ops::execute_place_component(ctx, place_component_op("opi2a", frozen, mate), "opi2a");
+        check(oc.status == ops::OpOutcome::Status::Ok, "I0(a2) pass 1: Ok");
+        z_forward = mapped_local_z(effective_placement(oc, frozen));
+    }
+
+    // Pass 2 — the SAME occupied volume rebuilt from the other end, so the
+    // parametric axis comes back anti-parallel. The frozen anchor still sits on
+    // the axis inside the face's own extent, so the mate still resolves.
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    const TopoDS_Shape cyl =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0.0, 0.0, 10.0), gp_Dir(0.0, 0.0, -1.0)), 3.0, 10.0)
+            .Shape();
+    bodies.create("plate", "op_plate", cyl);
+    const TopoDS_Shape face = cylindrical_face_of(cyl);
+    check(!face.IsNull(), "I0(a2) fixture: the reversed cylinder has a lateral face");
+    if (face.IsNull()) return;
+    part.mint("plate", "el_hole", km::ElementKind::Face, face, cyl, json::object());
+    const json frame = onecad::session::classify_shape(face)["frame"];
+    std::array<double, 3> axis_reversed{0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < 3; ++i) axis_reversed[i] = frame["axis"][i].get<double>();
+
+    // The evidence a record authored against pass 1's geometry would carry
+    // (design I2's frozen `targetAxis`). Unknown to the shipped worker, which
+    // ignores it — that is exactly why this probe is red today.
+    json reversed_mate = mate;
+    reversed_mate["targetAxis"] = {axis_forward[0], axis_forward[1], axis_forward[2]};
+
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_place_component(
+        ctx, place_component_op("opi2b", frozen, reversed_mate), "opi2b");
+    check(oc.status == ops::OpOutcome::Status::Ok, "I0(a2) pass 2: Ok");
+    const std::array<double, 3> z_reversed = mapped_local_z(effective_placement(oc, frozen));
+    const double dot = z_forward[0] * z_reversed[0] + z_forward[1] * z_reversed[1] +
+                       z_forward[2] * z_reversed[2];
+    std::fprintf(stderr,
+                 "  [I0-a2] frame axis fwd=(%.1f,%.1f,%.1f) rev=(%.1f,%.1f,%.1f) | seat local+Z "
+                 "fwd=(%.3f,%.3f,%.3f) rev=(%.3f,%.3f,%.3f) dot=%.3f needsRepair=%zu\n",
+                 axis_forward[0], axis_forward[1], axis_forward[2], axis_reversed[0],
+                 axis_reversed[1], axis_reversed[2], z_forward[0], z_forward[1], z_forward[2],
+                 z_reversed[0], z_reversed[1], z_reversed[2], dot, oc.needs_repair.size());
+    // Either answer is acceptable AFTER the fix: keep the world direction the
+    // component had, or halt for repair. Today it does neither — it flips.
+    check(dot > 0.999 || !oc.needs_repair.empty(),
+          "I0(a2): a target rebuilt with a reversed parametric axis must NOT silently spin the "
+          "component 180° — keep the world direction, or raise a repair item");
+}
+
+// ── I0(a3) / design I1c: a seat that no longer lies on the resolved face is a
+// repair, not a silent publish. The plate shrank laterally past the seat. ────
+void test_coincident_seat_off_face_is_flagged() {
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    const TopoDS_Shape box = plate(40.0, 20.0, 10.0);
+    bodies.create("plate", "op_plate", box);
+    json top_frame;
+    const TopoDS_Shape top = planar_face_with_normal(box, {0.0, 0.0, 1.0}, top_frame);
+    check(!top.IsNull(), "I0(a3) fixture: the plate's +Z top face classifies");
+    if (top.IsNull()) return;
+    part.mint("plate", "el_top", km::ElementKind::Face, top, box, json::object());
+
+    // ON the plane (so the I1 projection is a no-op and this case isolates the
+    // boundary check), but 20 mm past the face's own x extent of [0, 40].
+    const json frozen = frozen_placement(60.0, 10.0, 10.0);
+    const json mate = component_mate("plate", "el_top", "face", "coincident");
+
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc =
+        ops::execute_place_component(ctx, place_component_op("opi3", frozen, mate), "opi3");
+
+    check(oc.status == ops::OpOutcome::Status::Ok, "I0(a3): Ok — a recoverable STATE");
+    const std::array<double, 3> seat = translate_of(effective_placement(oc, frozen));
+    std::fprintf(stderr,
+                 "  [I0-a3] face x extent=[0,40] seat=(%.3f,%.3f,%.3f) signedDistance=%.6f "
+                 "needsRepair=%zu\n",
+                 seat[0], seat[1], seat[2], signed_distance_to_plane(seat, top_frame),
+                 oc.needs_repair.size());
+    check(!oc.needs_repair.empty(),
+          "I0(a3): a seat outside the resolved face's own boundary is flagged for repair, never "
+          "published silently at the frozen placement");
+    check(bodies.get("body_opi3") != nullptr,
+          "I0(a3): the body still publishes at the frozen placement (SCHEMA §7.3 invariant)");
+}
+
+// ── I0(e): orientation provenance across the OCCT-history rung. An upstream
+// `TransformBody` rebinds `el_top` through `ElementMapPartition::apply_history`
+// (ladder level 1). `classify_shape` folds `face.Orientation()`, and history
+// lists hand back NEUTRAL instances — if the mate ever saw such an instance the
+// seat normal would invert. This case MAY already be green; it is a provenance
+// measurement, not a predicted defect. ───────────────────────────────────────
+void test_coincident_normal_sign_after_history_rung() {
+    BodyStore bodies;
+    em::ElementMapPartition part;
+    const TopoDS_Shape box = plate(40.0, 20.0, 10.0);
+    bodies.create("plate", "op_plate", box);
+    json before_frame;
+    const TopoDS_Shape top = planar_face_with_normal(box, {0.0, 0.0, 1.0}, before_frame);
+    check(!top.IsNull(), "I0(e) fixture: the plate's +Z top face classifies");
+    if (top.IsNull()) return;
+    part.mint("plate", "el_top", km::ElementKind::Face, top, box, json::object());
+
+    // The upstream edit: the cheapest op that actually runs `apply_history` +
+    // `apply_rigid_motion` on a tracked entry.
+    Ctx c0;
+    ops::OpContext ctx0 = c0.make(bodies, part);
+    const json xf = json{{"opType", "TransformBody"},
+                         {"opId", "opi4xf"},
+                         {"params",
+                          {{"targets", json::array({"plate"})},
+                           {"translate", {0.0, 0.0, 7.0}},
+                           {"copy", false}}}};
+    const ops::OpOutcome moved = ops::execute_transform_body(ctx0, xf, "opi4xf");
+    check(moved.status == ops::OpOutcome::Status::Ok, "I0(e) fixture: the upstream move applied");
+    check(moved.needs_repair.empty(), "I0(e) fixture: history rebound el_top, no NeedsRepair");
+
+    const onecad::session::BodyRecord* rec = bodies.get("plate");
+    check(rec != nullptr, "I0(e) fixture: the plate survives the move");
+    if (rec == nullptr) return;
+    json after_frame;
+    planar_face_with_normal(rec->geom, {0.0, 0.0, 1.0}, after_frame);
+
+    // Seated on the MOVED top plane (z = 17), at the face centre.
+    const json frozen = frozen_placement(20.0, 10.0, 17.0);
+    const json mate = component_mate("plate", "el_top", "face", "coincident");
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc =
+        ops::execute_place_component(ctx, place_component_op("opi4", frozen, mate), "opi4");
+
+    check(oc.status == ops::OpOutcome::Status::Ok, "I0(e): Ok");
+    check(oc.needs_repair.empty(), "I0(e): the history-rebound target resolves");
+    const std::array<double, 3> z = mapped_local_z(effective_placement(oc, frozen));
+    std::fprintf(stderr,
+                 "  [I0-e] plane normal before=(%.1f,%.1f,%.1f) after=(%.1f,%.1f,%.1f) seat "
+                 "local+Z=(%.3f,%.3f,%.3f)\n",
+                 before_frame["normal"][0].get<double>(), before_frame["normal"][1].get<double>(),
+                 before_frame["normal"][2].get<double>(),
+                 after_frame.is_null() ? 0.0 : after_frame["normal"][0].get<double>(),
+                 after_frame.is_null() ? 0.0 : after_frame["normal"][1].get<double>(),
+                 after_frame.is_null() ? 0.0 : after_frame["normal"][2].get<double>(), z[0], z[1],
+                 z[2]);
+    check(z[2] > 0.999,
+          "I0(e): the seat's local +Z follows the face's OUTWARD normal in the body (+Z), never "
+          "the reverse a neutral history instance would give");
+}
+
 }  // namespace
 
 int main() {
@@ -320,6 +641,11 @@ int main() {
     test_needs_repair_on_vanished_target_body();
     test_cross_body_target_never_substituted();
     test_reseat_honors_a_non_identity_self_frame();
+    // WP-I I0 probes (expected RED until I2a lands).
+    test_coincident_reseat_follows_plane_along_normal();
+    test_concentric_axis_reversal_is_not_silent();
+    test_coincident_seat_off_face_is_flagged();
+    test_coincident_normal_sign_after_history_rung();
     if (g_failures == 0) std::fprintf(stderr, "component_mate_reseat: OK\n");
     return g_failures;
 }

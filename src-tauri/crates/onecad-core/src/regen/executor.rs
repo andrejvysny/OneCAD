@@ -261,6 +261,12 @@ struct Scratch {
     /// `last_valid` gate as `buffered` — a step beyond the last valid one
     /// never reaches the accepted timeline (Invariant 6).
     mate_placement_by_step: BTreeMap<usize, Box<crate::document::record::FrozenPlacement>>,
+    /// Kernel-hardening WP-I: per-step SCHEMA §7.2 `mateResolved` echoes, present
+    /// for every `PlaceComponent` step whose mate resolved against a cylindrical
+    /// target. Applied at the terminal under the same `last_valid` gate as
+    /// `mate_placement_by_step`, and ADOPTED only into a record that carries no
+    /// `targetAxis` yet.
+    mate_resolved_by_step: BTreeMap<usize, crate::document::record::MateResolved>,
 }
 
 impl Scratch {
@@ -274,6 +280,7 @@ impl Scratch {
             repair_by_step: BTreeMap::new(),
             diagnostics_by_step: BTreeMap::new(),
             mate_placement_by_step: BTreeMap::new(),
+            mate_resolved_by_step: BTreeMap::new(),
         }
     }
 
@@ -303,6 +310,9 @@ impl Scratch {
         }
         if let Some(placement) = event.mate_placement {
             self.mate_placement_by_step.insert(step, placement);
+        }
+        if let Some(resolved) = event.mate_resolved {
+            self.mate_resolved_by_step.insert(step, resolved);
         }
     }
 
@@ -770,6 +780,16 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 session
                     .timeline
                     .set_place_component_placement(step, (**placement).clone());
+            }
+            // WP-I: the same gate, the same derived-writeback treatment, for the
+            // §7.2 `mateResolved` evidence. `adopt_place_component_mate_evidence`
+            // refuses a record that already carries a `targetAxis`, so this can
+            // only ever run ONCE per record — regen never rewrites frozen
+            // evidence, and only the §9 repair re-freezes it.
+            for (&step, resolved) in scratch.mate_resolved_by_step.range(..=cutoff) {
+                session
+                    .timeline
+                    .adopt_place_component_mate_evidence(step, *resolved);
             }
         }
         // A seeded step was deliberately EXCLUDED from the plan (the caller's

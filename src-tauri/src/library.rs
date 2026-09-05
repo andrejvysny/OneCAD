@@ -268,6 +268,11 @@ fn component_mate_from_input(
         },
         kind: input.kind,
         flipped: input.flipped,
+        // WP-I: the frozen axis/sidedness are BACKFILLED by the §7.2
+        // `mateResolved` writeback on this record's first regen — the pick
+        // evidence this builder reads carries neither.
+        target_axis: None,
+        target_sidedness: None,
         extra: Default::default(),
     }
 }
@@ -2822,6 +2827,8 @@ generator_version = 1
             kind: onecad_core::document::record::MateKind::Concentric,
             flipped: false,
             self_frame: None,
+            target_axis: None,
+            target_sidedness: None,
             extra: Default::default(),
         });
         rt.apply(EditCommand::UpdateOperationParams {

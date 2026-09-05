@@ -15,6 +15,7 @@
 // that asks the table what the table says proves nothing. This is spec §6.5's
 // "spot-check harness asserting key dimensions per size against a reference
 // source", and it is why a typo in a row fails here rather than shipping.
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -148,6 +149,37 @@ void test_known_generator_ids_covers_the_seed_catalog() {
     }
 }
 
+// ── WP-I I0(d) probe / design I3: an absurd `source.params.length` is refused
+// BY NAME, not built. `read_profile_length` fences the `profile` source kind at
+// `kMaxProfileLengthMm`, but the GENERATOR path (`ComponentOp.cpp:645-671`) only
+// checks finite-and-positive, so an M6 socket cap a KILOMETRE long builds
+// happily. RED today: it succeeds. ──────────────────────────────────────────
+void test_absurd_generator_length_is_refused_by_name() {
+    double v = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const ops::OpOutcome oc = place("glen", sized_source("iso4762", "M6", 1.0e6), v);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    std::string reason;
+    for (const json& d : oc.diagnostics) {
+        if (d.contains("reasonCode") && d["reasonCode"].is_string()) {
+            reason = d["reasonCode"].get<std::string>();
+        }
+    }
+    std::fprintf(stderr,
+                 "  [I0-d] iso4762 M6 length=1e6 mm → status=%s errorCode='%s' reasonCode='%s' "
+                 "volume=%.1f build=%.1f ms\n",
+                 oc.status == ops::OpOutcome::Status::Ok ? "Ok" : "Failed", oc.error_code.c_str(),
+                 reason.c_str(), v, ms);
+    check(oc.status != ops::OpOutcome::Status::Ok,
+          "I0(d): a 1e6 mm generator length is REFUSED, never built");
+    check(reason == "GENERATOR_PARAM_OUT_OF_RANGE",
+          "I0(d): the refusal names the offending parameter "
+          "(reasonCode GENERATOR_PARAM_OUT_OF_RANGE)");
+    check(v == 0.0, "I0(d): a refused length publishes no body");
+}
+
 }  // namespace
 
 int main() {
@@ -155,6 +187,7 @@ int main() {
     test_unknown_thread_lists_the_known_sizes();
     test_every_seeded_size_builds();
     test_known_generator_ids_covers_the_seed_catalog();
+    test_absurd_generator_length_is_refused_by_name();
     if (g_failures == 0) std::fprintf(stderr, "test_component_generators: all checks passed\n");
     return g_failures;
 }

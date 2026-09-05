@@ -621,6 +621,32 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
   that resolves `NeedsRepair` (target vanished/ambiguous) never populates
   this field; the component publishes at its last frozen `placement`
   instead, per the "never drop it, never silently move it" rule.
+- **`mateResolved` (OPTIONAL, kernel-hardening WP-I, 2026-09-04).** Present on a
+  `PlaceComponent` step whose `params.mate` resolved `AutoBind` against a
+  CYLINDRICAL target (`kind` `concentric` / `concentricAndCoincident`), on every
+  such step — independent of whether the seat moved:
+  `{ "axis": [0, 0, 1], "sidedness": "hole" }`. `axis` is the resolved target's
+  parametric axis (§7.5 `ClassifyElement` `frame.axis`, unit, world — a cylinder
+  face's, or a circular edge's); `sidedness`
+  is the §7.5 value, or absent when it could not be measured. Emitted
+  INDEPENDENTLY of `matePlacement` (which appears only when the seat moved). Rust
+  ADOPTS both into the record's `mate.targetAxis` / `mate.targetSidedness` ONCE,
+  only when the record carries NO `targetAxis` (a document authored before this
+  build; a record that has `targetAxis` but no `targetSidedness` is left alone),
+  as a derived writeback through the same path as `matePlacement`. Because
+  `params` is part of the canonical planner line, the adoption MOVES that op's
+  planner hash and every prefix hash after it; it therefore commits inside the
+  same `finish_regen` that recomputes the prefix hashes, exactly as the
+  `matePlacement` writeback of `placement` already does, so the next
+  `expectedBaseHash` fence sees no drift. Rust reports the adoption with the
+  RUST-SIDE (non-wire) `info` diagnostic `MATE_AXIS_ADOPTED` on the projection —
+  the one freezing path for every mate (a new placement's first regen, or a
+  pre-WP-I record's first regen under this build). A record that already
+  carries `targetAxis` is never rewritten by regen; only the §9 repair re-freezes
+  it. Absent on planar targets and on every step that is not a `PlaceComponent`
+  with a resolved mate. For a document that carries such a mate the `planStep`
+  payload of that step therefore changes shape under this build (one added
+  optional key); for every other document the wire is byte-identical.
 
 `diagnostics[]` is additive structured evidence. Required fields are
 `severity` (`"info" | "warning" | "error"`), `code` (≤128 bytes), and
@@ -1809,16 +1835,60 @@ placement. Added 2026-08-14 (Gear Generator G1).
   element, so `apply_history` is not involved. Never `modified`; a `Gear` op
   has no target body to modify.
 - **Referenceability is deliberately narrow.** Only the minted body's root id,
-  the placement input, and (when the corresponding parameter is on) the BORE
-  cylindrical faces carry referenceable identity. **Tooth flanks, tips, roots
-  and fillets are NOT referenceable and MUST NOT be promoted**: their count and
-  identity change with `teeth`, so a descriptor bound to "tooth 7's flank"
-  is the silent-wrong-bind scenario §10's ladder exists to prevent. The worker
-  refuses such a promotion by name rather than minting an id that will
-  mis-resolve after the next parameter edit. A parameter edit that changes
-  tooth count is an ordinary param edit (record identity preserved); downstream
-  refs bound to the placement or a bore survive, and refs to anything else on
-  the gear were never allowed to exist.
+  the placement input, the BORE cylindrical faces (when the corresponding
+  parameter is on) and the two planar CAPS carry referenceable identity. **Tooth
+  flanks, tips, roots and fillets are NOT referenceable and MUST NOT be
+  promoted**: their count and identity change with `teeth`, so a descriptor bound
+  to "tooth 7's flank" is the silent-wrong-bind scenario §10's ladder exists to
+  prevent. The worker refuses such a promotion by name rather than minting an id
+  that will mis-resolve after the next parameter edit. A parameter edit that
+  changes tooth count is an ordinary param edit (record identity preserved);
+  downstream refs bound to the placement, a bore or a cap survive, and refs to
+  anything else on the gear were never allowed to exist.
+  - *Caps (amended 2026-09-04, kernel-hardening WP-I).* A cap's IDENTITY does not
+    depend on `teeth` — there are always exactly two — only its boundary wire and
+    area do, so a `teeth` edit moves the cap's §10 descriptor: a small edit
+    auto-binds the SAME cap (the opposite cap is separated by `outward`, a wide
+    margin), a large one is `NeedsRepair`; never a wrong cap. Refusing caps would
+    forbid a sketch or a Hole on the hub face, which the tooth-identity rule was
+    never about.
+  - *The classifier is plan-derived and geometric (2026-09-04).* A body is a gear
+    body when `body_<opId>` names a `Gear` op of the plan (decision D1 makes the
+    mapping total; no per-body state to persist). On such a body a face is
+    referenceable iff it is planar with its normal parallel to the gear axis (a
+    cap), or cylindrical with its axis PARALLEL to the gear axis and of radius
+    below the ROOT radius by at least the authoring resolution (`rootDiameter /
+    2 − 1e-3 mm`, the same quantity the op's own bore-validity gate already uses;
+    the band keeps the gear's own root-land cylinders, which sit exactly at the
+    root radius, out of the allow-list on every build) — which covers `axleHole`,
+    `offsetHole` (a parallel cylinder at a radial offset) and a counterbore, and
+    excludes the root and tip cylinders and every flank; every other face — tooth
+    geometry, a fillet, a hub chamfer — is refused. The rule is applied at the
+    two paths that MINT or BIND an id on a gear body: `BindElementIds` (the mint;
+    `AcquireElementIds` mints nothing and passes the pick through unchanged, so
+    the by-name refusal a client sees at pick time is the Bind that follows it)
+    and the §7.2 plan-step input resolution, where refused elements are REMOVED
+    FROM THE CANDIDATE POOL before the §10 ladder runs — so a stored ref that
+    names one halts with the ladder's own genuine outcome (`no-candidates` when
+    nothing survives; `ambiguous` or `low-confidence` when the caps and bore
+    survive and cannot match a tooth descriptor; `ladderFailed` `"descriptor"`)
+    and the diagnostic below beside it, never a bind. The rule extends to EDGES
+    and VERTICES of a gear body: one is referenceable iff EVERY face adjacent to
+    it is — a bore rim, a bore–cap circle and a cap–counterbore circle stay
+    referenceable; every edge of the tooth profile (the cap's outer boundary
+    included) and every vertex on it is refused, with `evidence.kind`
+    (`"edge"` | `"vertex"`) in place of `surfaceType`. A gear body SPLIT by a
+    downstream op is no longer `body_<gearOpId>` and leaves the rule (recorded
+    limit); a `PreviewOp` consults the head's gear map (a preview never mints a
+    durable id).
+  - *Refusal shape.* `BindElementIds`: terminal `resp` `ok:false`, `error.code`
+    `REF_UNRESOLVED` (the class Bind already uses for an unknown body or
+    TopoKey), `detail.bindingIndex` as on every Bind refusal, and
+    `detail.diagnostics[0]` `{ "code": "REF_UNRESOLVED", "reasonCode":
+    "GEAR_FACE_NOT_REFERENCEABLE", "evidence": { "bodyId", "topoKey",
+    "gearOpId", "surfaceType" } }`; the head is untouched and nothing is minted.
+    In an `ExecutePlan` the same `reasonCode` rides the halted step's
+    `diagnostics[]` beside the §9 item.
 - **Publication: `single_solid_policy("Gear", TierB)`** — the FULL audit,
   including self-interference via `BRepAlgoAPI_Check`. A generated profile is
   exactly where a bad parameter combination produces a plausible-looking but
@@ -1829,6 +1899,16 @@ placement. Added 2026-08-14 (Gear Generator G1).
   valid tooth depth, a bore that reaches the tooth roots, a flank that will not
   interpolate at the requested `sampleCount`, or a profile that will not close.
   A stale/unresolvable placement ref is `NeedsRepair`, never `Err`.
+- **Bounds (kernel-hardening WP-I, 2026-09-04).** `teeth ∈ [3, 400]`,
+  `sampleCount ∈ [2, 256]`, `height ≤ 1000` mm. Rust refuses at authoring; the
+  worker refuses by name as a preflight `OP_FAILED` with
+  `detail.diagnostics[0].reasonCode` `GEAR_PARAM_OUT_OF_RANGE` and
+  `evidence: { "param", "value", "min", "max" }` (documented here in §7.3 prose,
+  not the §7.2 publication table — the `HOLE_THREAD_DETAIL_*` precedent). The
+  upper bounds are COST bounds: one B-spline is fitted per flank and the bore cut
+  runs against `2·teeth` such faces, so `(400, 1024)` is jointly a liveness kill
+  while each value alone is harmless. The gear build polls the cancel token once
+  per tooth; the bore boolean itself remains uninterruptible (recorded).
 - **`helixAngleDeg` ≠ 0 and `doubleHelix` = true are `UNSUPPORTED`** in this
   version (§8) — helical and herringbone gears need the Frenet sweep
   infrastructure scheduled for a later phase. The fields are present and
@@ -2279,6 +2359,7 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
             "target": { "primary": {"bodyId":"body_1","elementId":"el_…","kind":"face"},
                         "anchor": {"worldPoint":[10,5,0]} },
             "kind": "concentric", "flipped": false,
+            "targetAxis": [0, 0, 1], "targetSidedness": "hole",          // optional (WP-I)
             "selfFrame": { "origin":[0,0,10], "z":[0,0,1], "x":[1,0,0] } },   // optional
   "placement": { "translate": [10.0, 5.0, 0.0],
                  "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0.0 } } }
@@ -2408,6 +2489,73 @@ OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
   the generic `resolve_input_refs` pre-flight treats an unresolved input as
   blocking, which would publish ZERO bodies for a component whose target was
   deleted — the opposite of the rule above.
+  - **Coincident seat (kernel-hardening WP-I, 2026-09-04).** The seat is the
+    attachment point's current world position PROJECTED onto the resolved plane
+    along its normal (`frame.origin` is therefore REQUIRED on a coincident frame;
+    a frame without it is malformed ⇒ the unresolvable path above, never a
+    guess). `flipped` still picks the side. So a target plane that moves along
+    its own normal — a plate that gets thicker — moves the component with it.
+    *Measured red-first 2026-09-04 (`worker/tests/test_component_mate_reseat.cpp`,
+    `src-tauri/tests/component_ops.rs`):* the seat used to be the attachment
+    point VERBATIM, so a 5 → 8 mm plate left its coincident-mated screw 3 mm in
+    the air with no diagnostic (finding component-gear-0).
+  - **Seat on the face (coincident kind only).** After a COINCIDENT seat is
+    solved it is classified against the resolved planar face with
+    `BRepClass_FaceClassifier` at the face's own tolerance
+    (`BRep_Tool::Tolerance(face)`); `ON` and `IN` seat, `OUT` (the target shrank
+    past the seat) halts with the §9 op-built item `mateSeatOffFace` — the
+    component publishes at its frozen `placement`, as for every other mate halt.
+    A concentric seat lies ON THE AXIS, one radius away from the cylindrical
+    face, so no face classification applies to it; whether its axial position
+    still lies within the face's extent is a recorded follow-up (it needs a
+    frozen axial datum the record does not carry).
+  - **`mate.targetAxis` / `mate.targetSidedness` (OPTIONAL, concentric kinds).**
+    `targetAxis` is the target's §7.5 `frame.axis` (unit, world) FROZEN into the
+    record; `targetSidedness` is the §7.5 `sidedness` frozen beside it. The
+    client sends NEITHER at placement (the placement gesture carries no axis):
+    both are written ONCE by the §7.2 `mateResolved` adoption on the first regen
+    that resolves the mate — which for a freshly authored mate is the regen the
+    placement commit itself triggers, against the same head the pick classified.
+    Absent on planar targets and on every record written before this build
+    (hash-neutral when absent, the `selfFrame` precedent); a pre-WP-I record is
+    backfilled by the same adoption on its first regen under this build. On re-seat the worker computes
+    `d = resolvedAxis · targetAxis`: `d ≥ −0.5` ⇒ seat exactly as before
+    (`direction = flipped ? −axis : axis`; the parametric axis follows a rigid
+    motion of the target, which is the mate's promise); `d < −0.5` — the
+    anti-parallel band, the only signature a REBUILD-REVERSED surface leaves — ⇒
+    the component publishes at its frozen `placement` and the step carries the §9
+    op-built item `mateAxisReversed`. A `targetSidedness` that no longer matches
+    the resolved `sidedness` raises the same item (a hole that became a pin is a
+    different feature). `flipped` stays the ONLY orientation bit: the repair
+    rewrites it and re-freezes `targetAxis`; there is no second persisted sign.
+    *Why halt, not re-sign:* a cylindrical face has no intrinsic axial sign — the
+    parametric axis of the same physical hole reverses when the feature that
+    builds it is re-authored from the other side, and nothing on the face can
+    tell that apart from a 180° rigid turn of the target. The frozen world axis is
+    the same principle as the §9 `anchor.worldPoint`: evidence, not a rule.
+    *Recorded limit:* detection is guaranteed only while the target has not been
+    rigidly re-oriented by more than 60° since `targetAxis` was frozen or repaired;
+    a target mirrored IN PLACE reverses both discriminators and halts (a handedness
+    change deserves a confirmation). *Measured red-first 2026-09-04:* the same
+    hole rebuilt with `gp_Ax2(origin, −Z)`, identical volume, identical element id,
+    spun the mated component 180° with zero repair items (finding component-gear-5).
+- **Generator bounds (kernel-hardening WP-I, 2026-09-04).** For a `generator`
+  source whose family reads a `length` param — today only `iso4762`
+  (`known_generator_ids()`; the NEMA families read none) — `length` MUST be a
+  finite value in `(0, 1000]` mm, and when `detail` is `simplified` or `modeled`
+  (the two that cut thread rings; `cosmetic` cuts none) the ring count
+  `floor(length / pitch)` MUST be ≤ 500, `pitch` being the family table's value
+  for the size (not a wire param). Rust refuses the length bound at authoring
+  when the param is present (the generator param map is untyped, so the worker
+  is the backstop); the worker refuses both by name as a preflight `OP_FAILED`
+  with `detail.diagnostics[0].reasonCode` `GENERATOR_PARAM_OUT_OF_RANGE` and
+  `evidence: { "param": "length" | "turns", "value", "min", "max" }`, before any
+  geometry is built. The ring construction polls the cancel token once per ring
+  (a new cancellation point: the generator lane can now answer `CANCELLED`
+  during construction); the single boolean that cuts the rings remains
+  uninterruptible. *Measured red-first 2026-09-04
+  (`worker/tests/test_component_generators.cpp`):* a 1 000 000 mm M6 screw
+  built in 1.3 ms; a 1000 mm M2 with pitch 0.4 would cut 2500 rings.
 - `mate.selfFrame` is **optional** (Component Library WP-F1.1, spec §2.1/§5) —
   the component-LOCAL basis `selfAttachment` seats from, frozen into the record
   at authoring out of the package's `[attachments].<key>.frame`. Three plain
@@ -3078,7 +3226,8 @@ fence, prepare, accept, discard, or mint anything.
   "frame": { "origin": [10.0, 5.0, 0.0], "normal": [0.0, 0.0, 1.0] } }
 // result — a cylindrical face
 { "present": true, "kind": "face", "surfaceType": "cylinder",
-  "frame": { "origin": [10.0, 5.0, 0.0], "axis": [0.0, 0.0, 1.0], "radius": 3.0 } }
+  "frame": { "origin": [10.0, 5.0, 0.0], "axis": [0.0, 0.0, 1.0], "radius": 3.0,
+             "sidedness": "hole" } }                                  // sidedness optional (WP-I)
 // result — a circular edge (a hole rim)
 { "present": true, "kind": "edge", "curveType": "circle",
   "frame": { "origin": [10.0, 5.0, 0.0], "axis": [0.0, 0.0, 1.0], "radius": 3.0 } }
@@ -3095,6 +3244,19 @@ fence, prepare, accept, discard, or mint anything.
   face, an ellipse edge, `kind: "other"`). A plane frame carries `normal`; a
   cylinder/circle/line frame carries `axis` (never both on the same frame).
   `radius` is present only for cylinder and circle frames.
+- `sidedness` ∈ `pin` | `hole` (OPTIONAL, kernel-hardening WP-I, 2026-09-04;
+  cylinder FACE frames only): whether the solid lies inside the cylinder (`pin`,
+  a boss or shaft) or outside it (`hole`). Measured with the §10 v4 `outward`
+  evaluation against the face's instance in its body: `outward · radial > 0` ⇒
+  `pin`, the radial direction pointing FROM the evaluation point's projection
+  on the axis line TO the evaluation point (so a solid boss reads `pin`, a bore
+  reads `hole`). It needs the face's INSTANCE in its body
+  (history lists hand back neutral orientation), so a caller that classifies a
+  bare shape cannot produce it: the verb handler and the re-seat path both
+  classify with the body at hand, through one shared function. Absent when the
+  body context is unavailable. `axis` is the surface's PARAMETRIC axis (`gp_Cylinder::Axis()`), deliberately NOT
+  orientation-normalized — a cylindrical face has no intrinsic axial sign; §7.3
+  `mate.targetAxis` freezes this value as evidence.
 - A stale or absent reference resolves `{ "present": false }` — an ANSWER,
   not an error, matching `ProjectFaceBoundary`'s convention.
 - Distinct from `QueryElement`'s descriptor: that one's `normal` is a face's
@@ -4237,14 +4399,19 @@ STATE (see [§8](#8-error-taxonomy)).
   "reason": "ambiguous",                 // "ambiguous" | "no-candidates" | "low-confidence"
                                          //   | "ordinal-permutation" (Rust-seeded only)
                                          //   | "legacyReferenceFace" (op-built, Chamfer only)
+                                         //   | "mateAxisReversed" | "mateSeatOffFace" (op-built, PlaceComponent only)
   "scoringVersion": 4,                   // = resolverVersion the scores were computed under
   "seedEdgeId": "el_…e14",               // OPTIONAL — only with reason "legacyReferenceFace"
+  "resolvedAxis": [0, 0, -1],            // OPTIONAL — only with reason "mateAxisReversed"
+  "frozenAxis": [0, 0, 1],               // OPTIONAL — only with reason "mateAxisReversed"
+  "resolvedSidedness": "hole",           // OPTIONAL — only with reason "mateAxisReversed", when measured
   "candidates": [
     {
       "topoKey": "f:31",
       "score": 0.91,                     // normalized [0,1], versioned (§10)
       "margin": 0.00,                    // score1 − score2
       "worldPos": [12.0, 3.5, 0.0],
+      "label": "Keep the component's direction",   // OPTIONAL — op-built items only
       "summary": "planar face, area≈120mm²",
       "featureContributions": { "surfaceType": 0.2, "area": 0.25, "normal": 0.2,
                                 "adjacency": 0.15, "anchor": 0.11 }
@@ -4311,6 +4478,30 @@ STATE (see [§8](#8-error-taxonomy)).
   ordinal child `body_<opId>:<k>` whose [§7.2 `rankKey`](#72-regen--executeplan)
   evidence shows the ordinals permuted under a parametric edit — the ref would
   otherwise re-resolve cleanly to the WRONG solid. A worker MUST NOT emit it.
+  **`mateAxisReversed` and `mateSeatOffFace` are worker-emitted, OP-BUILT by
+  `PlaceComponent`** (kernel-hardening WP-I, 2026-09-04; §7.3 `mate`). Both ride
+  an `Ok` step exactly like the existing unresolved-mate item (the component
+  publishes at its frozen `placement`), `ladderFailed` is `"descriptor"` (closed
+  enum; the ladder itself resolved), `refId` is `<opId>.input0` — the slot the
+  worker already addresses the mate ref by (`element_refs_mut` returns
+  `mate.target` at index 0, the same id the existing unresolved-mate item uses;
+  Rust's repair path parses only `.input<N>`), `elementId` is the resolved
+  target's id. `RepairItem` has no catch-all for unknown keys, so `resolvedAxis`
+  / `frozenAxis` are TYPED optional fields on the Rust reader. `mateAxisReversed` carries `resolvedAxis` and
+  `frozenAxis` and exactly TWO candidates on the SAME resolved face — its TopoKey,
+  its centre as `worldPos` (identical on both), a deliberate tie (`score` 0.5,
+  `margin` 0.0) — that differ only in `label`: `"Keep the component's direction"` first, `"Follow the
+  reversed axis"` second, plus `resolvedSidedness` when it was measured. Repair
+  is NOT a rebind: the client sends `RepairMateAxis { record,
+  keepWorldDirection, resolvedAxis, resolvedSidedness? }` (the last two copied
+  from the item) — `true` toggles `mate.flipped`, both values re-freeze
+  `mate.targetAxis` to `resolvedAxis` and, when `resolvedSidedness` is present,
+  `mate.targetSidedness` to it (absent ⇒ the stored sidedness is kept, never
+  cleared) — one undo step, validated like every edit; the next regen is then a
+  fixed point. `mateSeatOffFace` carries the
+  resolved face as its single candidate (`score` 1.0, `margin` 1.0, `worldPos` the
+  nearest point of the face to the seat) and has NO repair command: the fix is to
+  move or re-mate the component, and the item says so in `uiLabel`.
   **Readers MUST tolerate an unknown `reason` token** rather than failing the
   payload; a Rust reader degrades an unrecognized token to an opaque `unknown` so an
   older release can still open a document written by a newer one.
@@ -4749,6 +4940,75 @@ sign-off) once fixtures exist.
   governs solid-count publication only). New fixture `hole_threaded.ndjson`; no
   existing fixture shape moves, **no fixture bump**. `protocolVersion` stays 1;
   no handshake axis or worker fingerprint moves.
+
+- **2026-09-04 — Component mates re-seat on the resolved geometry; gear
+  referenceability enforced; generator bounds (kernel-hardening WP-I).**
+  [§7.3](#73-op-payload-schemas-vertical-slice) `PlaceComponent.mate`: a
+  coincident seat is PROJECTED onto the resolved plane along its normal
+  (`frame.origin` becomes REQUIRED on a coincident frame); a solved seat outside
+  the resolved face halts the new op-built §9 item `mateSeatOffFace`; additive
+  optional `targetAxis` / `targetSidedness` (frozen by the §7.2 adoption on the
+  mate's first regen — the client sends neither — hash-neutral when absent) and the re-seat rule `resolvedAxis · targetAxis < −0.5` ⇒ frozen
+  placement + the op-built §9 item `mateAxisReversed` (two same-face candidates at
+  a tie, `label`ed; repair `RepairMateAxis { keepWorldDirection }` rewrites
+  `flipped` and re-freezes the axis — `flipped` stays the only orientation bit; a
+  second persisted sign was proposed and rejected because one orientation would
+  then have two encodings). [§7.2](#72-regen--executeplan) additive
+  `planStep.mateResolved { axis, sidedness }` on every resolved cylindrical mate,
+  adopted ONCE by Rust into records that carry no `targetAxis`
+  (`MATE_AXIS_ADOPTED` info) — the migration path for documents authored before
+  this build. [§7.5](#classifyelement) `ClassifyElement` cylinder frames gain
+  optional `sidedness` (`pin` | `hole`, the §10 v4 `outward` evaluation).
+  [§7.3](#73-op-payload-schemas-vertical-slice) `Gear`: the referenceability
+  promise is now ENFORCED — a plan-derived geometric classifier (caps: planar ∥
+  axis; bores: cylinders PARALLEL to the axis below the ROOT radius; edges and
+  vertices iff every adjacent face is referenceable) applied at `BindElementIds`
+  (the mint) and in the plan-step candidate pool (`AcquireElementIds` mints
+  nothing and is unchanged), refusing `REF_UNRESOLVED` / `reasonCode`
+  `GEAR_FACE_NOT_REFERENCEABLE`; the two planar CAPS join the allow-list
+  (amendment, reasons in §7.3); a stored ref on a refused element halts
+  `needsRepair` — a tracked id that names one is a record defect and halts
+  WITHOUT re-running the ladder (it must never be repointed at a cap or bore) —
+  the one deliberate behaviour change of this entry, since nothing refused such
+  a promotion before (measured 2026-09-04:
+  `worker/tests/test_gear_referenceability.cpp`, a flank bound through
+  `BindElementIds` and reported present; the `gear_body_op_ids` helper existed
+  and was called from nowhere). Bounds `teeth ∈ [3, 400]`, `sampleCount ∈ [2, 256]`,
+  gear `height ≤ 1000` (`GEAR_PARAM_OUT_OF_RANGE`) and, for `generator`
+  components, `length ∈ (0, 1000]` mm with `length / pitch ≤ 500` turns
+  (`GENERATOR_PARAM_OUT_OF_RANGE`), both `OP_FAILED` preflight refusals with the
+  offending value in `evidence` (the generator bounds are a new §7.3
+  `PlaceComponent` bullet: `iso4762` is the only family that reads `length`, the
+  turns bound applies to `simplified`/`modeled` detail only, `pitch` is
+  table-derived); the gear build polls the cancel token per tooth and the thread
+  ring construction per ring — two NEW cancellation points, so a `PlaceComponent`
+  or `Gear` step can now end `CANCELLED` mid-construction (the bore and thread
+  booleans themselves stay uninterruptible — WP-K). Gear referenceability fires at
+  `BindElementIds` and in the plan-step candidate pool; `AcquireElementIds`
+  mints nothing and is unchanged. A document carrying a resolved cylindrical
+  mate sees one added optional key on that step's `planStep` under this build. *Reasons (measured
+  red-first 2026-09-04, `test_component_mate_reseat.cpp`, `component_ops.rs`,
+  `test_component_generators.cpp`, `record.rs`):* a coincident-mated screw stayed 3
+  mm in the air after a 5 → 8 mm plate edit (component-gear-0); the same hole
+  rebuilt with a reversed parametric axis spun the component 180° with no item
+  (component-gear-5); a seat 20 mm past the face's edge published silently; a
+  1 000 000 mm M6 screw built in 1.3 ms; `teeth = 100000` validated. *Fixtures:*
+  `place_component_mate_reseat.ndjson` (plane move follows by an exact +3; reversal
+  halts with the two labeled candidates, `resolvedSidedness`, and the body still
+  `created` on the halted step; off-face halts with its single candidate) and
+  `gear_face_refusal.ndjson` (tooth FACE and tooth EDGE Bind refused by name with
+  `GetWorkerHead` identical either side; bore, cap and bore-rim edge bound; a
+  plan-step ref on tooth geometry halting without a bind). All new fields are additive and optional; no
+  existing fixture shape moves, **no fixture bump**; `protocolVersion` stays 1;
+  no handshake axis and no worker fingerprint moves. Cross-track sign-off:
+  protocol-auditor BEFORE-code review 2026-09-04, `approve_with_changes` — six
+  edits applied (the item `refId` is `<opId>.input0`, the bore threshold is the
+  root radius with a parallel-axis rule that keeps `offsetHole`, Acquire is
+  unchanged and Bind carries `bindingIndex`, the generator bounds bullet was
+  missing from §7.3, `MATE_AXIS_ADOPTED` is Rust-side and the adoption moves the
+  planner hash inside `finish_regen`, refused gear faces leave the ladder's
+  candidate pool so `no-candidates` stays a ladder outcome); the after-landing
+  schema-vs-code pass is recorded in TODO.md § KERNEL HARDENING § WP-I.
 
 - **2026-09-03 — Chamfer reference face as a persisted typed ref (kernel-hardening
   WP-F).** [§7.3](#73-op-payload-schemas-vertical-slice) Chamfer: additive

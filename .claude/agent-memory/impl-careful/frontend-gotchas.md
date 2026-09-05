@@ -63,5 +63,13 @@ CLAUDE.md and none is derivable without running the suite.
   `elementInfo(...).center` for the face instead before building the ref.
 - `vitest run --reporter=basic` does not exist in this repo's Vitest 4 setup, and
   `console.log` from a test is swallowed. To get a value out of a test, write it
-  to a file with `node:fs` under an env-var guard.
+  to a file with `node:fs` under an env-var guard (or `expect(value).toBe(1)` and
+  read the diff).
+- `resetMockDocument()` does NOT reset the zustand `documentStore`, so
+  `mockClient.getProjection()` still returns the PREVIOUS test's features while
+  `nextFeatureId` has restarted — a "diff the projection before/after" trick to
+  find a newly committed record's id silently finds nothing from the second test
+  onwards. Read the id off the `ApplyOperationResult`'s own `features` instead.
+- `tsconfig`'s lib target predates `Array.prototype.at`: `.at(-1)` type-errors
+  (TS2550) even though vitest runs it fine. Use `rows[rows.length - 1]`.
 

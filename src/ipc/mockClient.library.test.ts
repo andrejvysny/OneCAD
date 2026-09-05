@@ -145,6 +145,73 @@ describe("mockClient.pickComponentFiles — no native dialog on this lane (WP-C2
   });
 });
 
+describe("mockClient.repairMateAxis — the SCHEMA §9 mateAxisReversed repair (WP-I)", () => {
+  /** Places an M6 SHCS with a mate of `kind`, returning its record id. */
+  async function placeMated(
+    kind: "concentric" | "coincident",
+  ): Promise<string> {
+    setLibraryFlag(true);
+    const res = await mockClient.placeComponent(
+      "onecad.std.iso4762",
+      "1.0.0",
+      [0, 0, 0],
+      undefined,
+      undefined,
+      {
+        selfAttachment: "shankAxis",
+        targetBodyId: MOCK_DEMO_BORE_BODY_ID,
+        targetTopoKey: "f:1",
+        targetKind: "face",
+        kind,
+        flipped: false,
+        anchorWorldPoint: [80, 0, 0],
+      },
+    );
+    // The NEWEST PlaceComponent row of the commit's own feature list — never a
+    // diff against `getProjection()`, whose zustand store is not reset between
+    // tests and so still carries the previous test's (identically numbered) row.
+    const rows = (res.features ?? []).filter((f) => f.opType === "PlaceComponent");
+    const placed = rows[rows.length - 1];
+    expect(placed).toBeTruthy();
+    return placed.id;
+  }
+
+  it("toggles `flipped` on keep-direction and re-freezes the axis and sidedness", async () => {
+    const record = await placeMated("concentric");
+    await mockClient.repairMateAxis(record, true, [0, 0, -1], "pin");
+    const mate = (await mockClient.getOperationParams(record)).mate as Record<string, unknown>;
+    expect(mate.flipped).toBe(true);
+    expect(mate.targetAxis).toEqual([0, 0, -1]);
+    expect(mate.targetSidedness).toBe("pin");
+  });
+
+  it("leaves `flipped` alone when following the axis, and keeps an unmeasured sidedness", async () => {
+    const record = await placeMated("concentric");
+    await mockClient.repairMateAxis(record, false, [0, 0, -1], "hole");
+    await mockClient.repairMateAxis(record, false, [1, 0, 0]);
+    const mate = (await mockClient.getOperationParams(record)).mate as Record<string, unknown>;
+    expect(mate.flipped).toBe(false);
+    expect(mate.targetAxis).toEqual([1, 0, 0]);
+    // Absent evidence NEVER clears the stored sidedness — the pin/hole check
+    // must not be silently disarmed by a repair that could not measure it.
+    expect(mate.targetSidedness).toBe("hole");
+  });
+
+  it("mirrors the backend's refusals rather than staying green on a rejected call", async () => {
+    const coincident = await placeMated("coincident");
+    await expect(mockClient.repairMateAxis(coincident, true, [0, 0, -1])).rejects.toThrow(
+      /concentric/,
+    );
+    await expect(mockClient.repairMateAxis("op_nope", true, [0, 0, -1])).rejects.toThrow(
+      /no params/,
+    );
+    const concentric = await placeMated("concentric");
+    await expect(
+      mockClient.repairMateAxis(concentric, true, [0, Number.NaN, 0]),
+    ).rejects.toThrow(/finite/);
+  });
+});
+
 describe("mockClient project templates — the built-in starters", () => {
   it("offers nothing without the flag (there is no seeded root on this lane)", async () => {
     setLibraryFlag(false);

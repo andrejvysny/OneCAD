@@ -19,7 +19,9 @@
 //! after it become [`StepState::Dirty`] and are no longer editable
 //! ([`Timeline::is_editable`]).
 
-use crate::document::record::{FrozenPlacement, KnownOperation, Operation, OperationRecord};
+use crate::document::record::{
+    FrozenPlacement, KnownOperation, MateResolved, Operation, OperationRecord,
+};
 use crate::error::DomainError;
 use crate::ids::{BodyId, RecordId};
 
@@ -269,6 +271,40 @@ impl Timeline {
             return false;
         }
         params.placement = placement;
+        true
+    }
+
+    /// ADOPTS the SCHEMA §7.2 `mateResolved` evidence onto the `PlaceComponent`
+    /// record at `index` (kernel-hardening WP-I). Regen provenance sync, not an
+    /// edit — same shape as
+    /// [`set_place_component_placement`](Self::set_place_component_placement).
+    ///
+    /// **Writes exactly once per record.** A mate that already carries a
+    /// `target_axis` is left ENTIRELY alone (including one that has an axis but
+    /// no sidedness): the frozen axis is the evidence a re-seat is judged
+    /// against, so a regen that rewrote it would erase the very difference the
+    /// §9 `mateAxisReversed` item exists to report. Only the repair re-freezes
+    /// it. No-op (`false`) if `index` is out of range, the record there is not a
+    /// `PlaceComponent`, it carries no mate, or the mate already has an axis.
+    pub fn adopt_place_component_mate_evidence(
+        &mut self,
+        index: usize,
+        resolved: MateResolved,
+    ) -> bool {
+        let Some(rec) = self.records.get_mut(index) else {
+            return false;
+        };
+        let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut rec.op else {
+            return false;
+        };
+        let Some(mate) = params.mate.as_mut() else {
+            return false;
+        };
+        if mate.target_axis.is_some() {
+            return false;
+        }
+        mate.target_axis = Some(resolved.axis);
+        mate.target_sidedness = resolved.sidedness;
         true
     }
 

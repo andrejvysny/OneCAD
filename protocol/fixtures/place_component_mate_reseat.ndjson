@@ -1,0 +1,100 @@
+# CANONICAL §7.2/§7.3/§9 fixture — a mated component RE-SEATS ON THE RESOLVED
+# GEOMETRY, and halts by name when it cannot (kernel-hardening WP-I, 2026-09-04).
+#
+# Four legs, one document:
+#
+#   1. COINCIDENT, unmoved. The screw is seated ON the 5 mm plate's top plane, so
+#      the re-seat is a fixed point: the step carries NO `matePlacement`.
+#   2. COINCIDENT, plate 3 mm thicker. Re-planning the plate at 8 mm moves its top
+#      face along its OWN NORMAL, and the seat follows: `matePlacement.translate`
+#      z is 8, exactly +3. That number is a PLANE-TO-PLANE distance between two
+#      faces the extrude placed at exactly z=0 and z=5 / z=8 — not a measurement —
+#      which is why it may be pinned here at all (the same rule
+#      `place_component_profile.ndjson`'s `lengthMm` follows). Before this build
+#      the seat was the frozen anchor VERBATIM, so the screw stayed 3 mm in the
+#      air with no diagnostic (measured red-first, finding component-gear-0,
+#      `worker/tests/test_component_mate_reseat.cpp` I0(a1)).
+#   3. CONCENTRIC with a REVERSED axis. The record's frozen `mate.targetAxis` is
+#      +Z while the resolved face's parametric axis is −Z: `d = −1 < −0.5`, the
+#      anti-parallel band, so the component publishes at its FROZEN `placement`
+#      and the step carries the op-built §9 item `mateAxisReversed` with its two
+#      same-face, deliberately tied, LABELLED candidates. A cylindrical face has
+#      no intrinsic axial sign, so this is a halt, never a re-sign.
+#      The GEOMETRIC half — the same hole physically rebuilt from the other end,
+#      identical volume and identical element id, coming back anti-parallel — is
+#      pinned in `test_component_mate_reseat.cpp` I0(a2), which can build both
+#      cylinders. What this file pins is the WIRE CONTRACT a Rust or frontend
+#      repair UI branches on. Same contract/geometry split as the other component
+#      fixtures.
+#   4. COINCIDENT, seat off the face. The screw is seated 60 mm along +X while the
+#      plate's own extent stops at x = 0: the solved seat classifies `OUT` against
+#      the resolved face, so the step carries `mateSeatOffFace` — one candidate,
+#      the resolved face, `worldPos` the nearest point of that face to the seat
+#      (x = 0 exactly, a face boundary the sketch placed there). No repair command
+#      exists for it: the fix is to move or re-mate, and `uiLabel` says so.
+#
+# `planStep.mateResolved` also rides leg 3 — it is emitted on EVERY step whose
+# mate resolved against a cylindrical target, halt or not, because it is what
+# Rust adopts once into a record authored before this build.
+#
+# GEOMETRY. `plane:{kind:"XY"}` maps sketch u to world +Y and v to world −X
+# (`worker/src/sketch/Sketch.h`), so the u∈[0,40] v∈[0,20] rectangle is a plate at
+# world x∈[−20,0], y∈[0,40] and the circle at sketch (0,−100) is a Ø6 cylinder on
+# the world Z line through (100,0). Every coordinate below follows from that; no
+# measured float appears in this file.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_place_component_mate_reseat","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+# The plate (5 mm) and the cylinder, one plan.
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":80,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":5.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"Sketch","opId":"op2","stepIndex":2,"params":{"sketchId":"sk2","plane":{"kind":"XY"},"entities":[{"id":"c1","type":"Circle","center":[0,-100],"radius":3.0}],"constraints":[]}},{"opType":"Extrude","opId":"op3","stepIndex":3,"inputs":[{"primary":{"bodyId":"","elementId":"sk2.region.r0","kind":"face"}}],"params":{"sketchId":"sk2","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":2,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":3,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op3"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":80,"result":{"planPrepared":true,"lastValidStep":3,"stoppedReason":"completed","historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":80,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":80,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# The two mate targets: the plate's top plane and the cylinder's lateral face.
+{"send":{"v":1,"t":"req","id":4,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op3","topoKey":"f:1","elementId":"el_hole","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"bound":[{"bodyId":"body_op1","topoKey":"f:6","elementId":"el_top","kind":"face"},{"bodyId":"body_op3","topoKey":"f:1","elementId":"el_hole","kind":"face"}]}}}
+# The target frames the legs below re-seat against, stated once (§7.5): the top
+# plane at z=5 with an outward +Z normal, and the cylinder whose PARAMETRIC axis
+# is -Z with the solid INSIDE it (`sidedness":"pin"`).
+{"send":{"v":1,"t":"req","id":5,"verb":"ClassifyElement","args":{"elementId":"el_top"}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"present":true,"kind":"face","surfaceType":"plane","frame":{"origin":[0.0,0.0,5.0],"normal":[0.0,0.0,1.0]}}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"ClassifyElement","args":{"elementId":"el_hole"}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"present":true,"kind":"face","surfaceType":"cylinder","frame":{"origin":[100.0,0.0,0.0],"axis":[0.0,0.0,-1.0],"radius":3.0,"sidedness":"pin"}}}}
+# LEG 1 — coincident, already ON the plane: a fixed point, no `matePlacement`.
+{"send":{"v":1,"t":"req","id":7,"verb":"ExecutePlan","args":{"jobId":81,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],"targetStep":4,"ops":[{"opType":"PlaceComponent","opId":"op4","stepIndex":4,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[-10.0,20.0,5.0]},"mate":{"selfAttachment":"shankAxis","target":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"kind":"coincident","flipped":false}}}]}}}
+{"expect":{"v":1,"t":"event","id":7,"event":"planStep","stepIndex":4,"jobId":81,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op4"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"jobId":81,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"DiscardPrepared","args":{"jobId":81}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"jobId":81,"result":{"discarded":true}}}
+# LEG 2 — the plate is re-planned 3 mm THICKER; the seat follows the plane along
+# its own normal, and the echo says so exactly.
+{"send":{"v":1,"t":"req","id":9,"verb":"ExecutePlan","args":{"jobId":82,"documentRevision":3,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222"],"targetStep":4,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":8.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"PlaceComponent","opId":"op4","stepIndex":4,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[-10.0,20.0,5.0]},"mate":{"selfAttachment":"shankAxis","target":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"kind":"coincident","flipped":false}}}]}}}
+{"expect":{"v":1,"t":"event","id":9,"event":"planStep","stepIndex":0,"jobId":82}}
+{"expect":{"v":1,"t":"event","id":9,"event":"planStep","stepIndex":1,"jobId":82,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"event","id":9,"event":"planStep","stepIndex":4,"jobId":82,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op4"}],"needsRepair":[],"matePlacement":{"translate":[-10.0,20.0,8.0]}}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"jobId":82,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"DiscardPrepared","args":{"jobId":82}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"jobId":82,"result":{"discarded":true}}}
+# LEG 3 — the record's frozen axis is +Z, the resolved one is -Z: the halt, with
+# the two labelled choices and `mateResolved` beside them. The body still
+# publishes, at the FROZEN placement.
+{"send":{"v":1,"t":"req","id":11,"verb":"ExecutePlan","args":{"jobId":83,"documentRevision":4,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["3333333333333333333333333333333333333333333333333333333333333333"],"targetStep":4,"ops":[{"opType":"PlaceComponent","opId":"op5","stepIndex":4,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[100.0,0.0,5.0]},"mate":{"selfAttachment":"shankAxis","target":{"primary":{"bodyId":"body_op3","elementId":"el_hole","kind":"face"}},"kind":"concentric","flipped":false,"targetAxis":[0.0,0.0,1.0],"targetSidedness":"pin"}}}]}}}
+{"expect":{"v":1,"t":"event","id":11,"event":"planStep","stepIndex":4,"jobId":83,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op5"}],"mateResolved":{"axis":[0.0,0.0,-1.0],"sidedness":"pin"},"needsRepair":[{"refId":"op5.input0","elementId":"el_hole","ladderFailed":"descriptor","reason":"mateAxisReversed","scoringVersion":4,"resolvedAxis":[0.0,0.0,-1.0],"frozenAxis":[0.0,0.0,1.0],"resolvedSidedness":"pin","candidates":[{"topoKey":"f:1","score":0.5,"margin":0.0,"worldPos":"$any","summary":"$present","label":"Keep the component's direction"},{"topoKey":"f:1","score":0.5,"margin":0.0,"worldPos":"$any","summary":"$present","label":"Follow the reversed axis"}],"anchor":{},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"jobId":83,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"DiscardPrepared","args":{"jobId":83}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":83,"result":{"discarded":true}}}
+# LEG 4 — the seat is 60 mm along +X and the plate stops at x = 0: `OUT`.
+{"send":{"v":1,"t":"req","id":13,"verb":"ExecutePlan","args":{"jobId":84,"documentRevision":5,"workerEpoch":4,"expectedBaseHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","prefixHashes":["4444444444444444444444444444444444444444444444444444444444444444"],"targetStep":4,"ops":[{"opType":"PlaceComponent","opId":"op6","stepIndex":4,"inputs":[],"params":{"componentId":"onecad.std.iso4762","componentVersion":"1.0.0","componentRevision":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source":{"kind":"generator","generatorId":"iso4762","generatorVersion":1,"params":{"thread":"M6","length":20.0}},"placement":{"translate":[60.0,20.0,5.0]},"mate":{"selfAttachment":"shankAxis","target":{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"}},"kind":"coincident","flipped":false}}}]}}}
+{"expect":{"v":1,"t":"event","id":13,"event":"planStep","stepIndex":4,"jobId":84,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op6"}],"needsRepair":[{"refId":"op6.input0","elementId":"el_top","ladderFailed":"descriptor","reason":"mateSeatOffFace","scoringVersion":4,"candidates":[{"topoKey":"f:6","score":1.0,"margin":1.0,"worldPos":[0.0,20.0,5.0],"summary":"$present"}],"anchor":{},"uiLabel":"$present"}]}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"jobId":84,"result":{"planPrepared":true,"lastValidStep":4,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"DiscardPrepared","args":{"jobId":84}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":84,"result":{"discarded":true}}}
+# The head moved exactly once in this file — at the only AcceptPrepared.
+{"send":{"v":1,"t":"req","id":15,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}}
+{"send":{"v":1,"t":"req","id":16,"verb":"CloseSession","args":{}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"sessionClosed":true}}}

@@ -61,7 +61,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::document::body::{BodyMeta, BodyRegistry};
 use crate::document::datum::{resolve_datum, DatumContext, DatumKind, DatumPlane};
 use crate::document::modules::{ModuleId, ModuleState};
-use crate::document::record::{KnownOperation, Operation, OperationRecord};
+use crate::document::record::{KnownOperation, MateSidedness, Operation, OperationRecord};
 use crate::document::refs::{ElementKind, ElementRef};
 use crate::document::repair::{LadderLevel, RepairItem, RepairReason};
 use crate::document::variables::{Scalar, Variable, VariableTable};
@@ -69,7 +69,7 @@ use crate::document::Document;
 use crate::error::DomainError;
 use crate::history::{DependencyGraph, DirtyRange, Timeline};
 use crate::ids::{BodyId, ElementId, RecordId, SketchId};
-use crate::math::Vec2;
+use crate::math::{Vec2, Vec3};
 use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchError};
 
 use super::command::{EditCommand, InputPath, InputRef, SketchEditOp, VisibilityTarget};
@@ -416,6 +416,56 @@ impl DocumentSession {
         changed
     }
 
+    /// ADOPTS the SCHEMA §7.2 `mateResolved` evidence from the regen scratch's
+    /// timeline onto the document's authoritative one (kernel-hardening WP-I) —
+    /// the same DERIVED, no-undo writeback as
+    /// [`sync_mate_placements`](Self::sync_mate_placements), matched by
+    /// `RecordId` for the same reason, and running in the same
+    /// `finish_regen` commit so the prefix hashes this moves are recomputed
+    /// together with the `placement` writeback's.
+    ///
+    /// Returns the records that actually adopted — the callers turn each into
+    /// the `MATE_AXIS_ADOPTED` info diagnostic. Empty on every regen after the
+    /// first for a given record: the document-side guard here and the
+    /// scratch-side one in
+    /// [`Timeline::adopt_place_component_mate_evidence`](crate::history::Timeline::adopt_place_component_mate_evidence)
+    /// both refuse a mate that already carries a `target_axis`.
+    pub fn sync_mate_evidence(
+        &mut self,
+        regen_timeline: &Timeline,
+        executed: &BTreeSet<RecordId>,
+    ) -> Vec<RecordId> {
+        let mut adopted = Vec::new();
+        for &id in executed {
+            let Some(regen_rec) = regen_timeline.record_by_id(id) else {
+                continue;
+            };
+            let Operation::Known(KnownOperation::PlaceComponent(regen_params)) = &regen_rec.op
+            else {
+                continue;
+            };
+            let Some(regen_mate) = regen_params.mate.as_ref() else {
+                continue;
+            };
+            let Some(axis) = regen_mate.target_axis else {
+                continue; // the scratch adopted nothing for this record.
+            };
+            let Some(index) = self.document.timeline.index_of(id) else {
+                continue;
+            };
+            if self.document.timeline.adopt_place_component_mate_evidence(
+                index,
+                crate::document::record::MateResolved {
+                    axis,
+                    sidedness: regen_mate.target_sidedness,
+                },
+            ) {
+                adopted.push(id);
+            }
+        }
+        adopted
+    }
+
     /// Syncs the RESOLVED value of every expression-driven [`Scalar`] from the
     /// regen mirror's effective records onto the document's authoritative ones
     /// (WP-VE.1) — a DERIVED, no-undo writeback, right beside
@@ -613,6 +663,17 @@ impl DocumentSession {
                 path,
                 reference,
             } => self.edit_operation_input(*record, path, reference),
+            EditCommand::RepairMateAxis {
+                record,
+                keep_world_direction,
+                resolved_axis,
+                resolved_sidedness,
+            } => self.repair_mate_axis(
+                *record,
+                *keep_world_direction,
+                *resolved_axis,
+                *resolved_sidedness,
+            ),
             EditCommand::RemoveOperation { record } => self.remove_operation(*record),
             EditCommand::SetRollback { cursor } => self.set_rollback(*cursor),
             EditCommand::SetOperationSuppression {
@@ -846,6 +907,61 @@ impl DocumentSession {
             },
         );
         Ok(self.dirty_record_outcome(index, inverse))
+    }
+
+    /// The SCHEMA §9 `mateAxisReversed` repair (kernel-hardening WP-I): rewrites
+    /// one `PlaceComponent` record's mate orientation evidence.
+    ///
+    /// Refuses anything that is not a `PlaceComponent` carrying a CONCENTRIC
+    /// mate: a coincident mate seats on a plane's normal and has no axis to
+    /// reverse, so accepting one would write evidence the re-seat never reads.
+    ///
+    /// Delegated to [`update_operation_params`](Self::update_operation_params)
+    /// once the new params are built, so the repair takes exactly the same
+    /// validation, dirty cascade, temporal check and single undo entry as any
+    /// other params edit — the repair path must not be a second, laxer writer.
+    fn repair_mate_axis(
+        &mut self,
+        id: RecordId,
+        keep_world_direction: bool,
+        resolved_axis: Vec3,
+        resolved_sidedness: Option<MateSidedness>,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        let record = self
+            .document
+            .timeline
+            .record_by_id(id)
+            .ok_or(DomainError::RecordNotFound(id))?;
+        let Operation::Known(KnownOperation::PlaceComponent(params)) = &record.op else {
+            return Err(DomainError::Validation(format!(
+                "RepairMateAxis: record {id} is not a PlaceComponent"
+            )));
+        };
+        let mut params = params.clone();
+        let Some(mate) = params.mate.as_mut() else {
+            return Err(DomainError::Validation(format!(
+                "RepairMateAxis: PlaceComponent {id} has no mate"
+            )));
+        };
+        if !mate.kind.is_concentric() {
+            return Err(DomainError::Validation(format!(
+                "RepairMateAxis: PlaceComponent {id} has a {:?} mate — only a \
+                 concentric mate has a target axis to re-freeze",
+                mate.kind
+            )));
+        }
+        if keep_world_direction {
+            // `flipped` is the ONLY orientation bit: absorbing the axis reversal
+            // into it is what keeps the component pointing where it points now.
+            mate.flipped = !mate.flipped;
+        }
+        mate.target_axis = Some(resolved_axis);
+        // Absent evidence LEAVES the frozen sidedness alone — the client may not
+        // have it, and clearing it would silently disarm the pin/hole check.
+        if resolved_sidedness.is_some() {
+            mate.target_sidedness = resolved_sidedness;
+        }
+        self.update_operation_params(id, Operation::Known(KnownOperation::PlaceComponent(params)))
     }
 
     /// Seeds the SCHEMA §7.3 `TransformBody` edit-safety gate for the record at
@@ -2422,6 +2538,9 @@ fn gate_item(
         seeded: true,
         ordinal_anchor: None,
         seed_edge_id: None,
+        resolved_axis: None,
+        frozen_axis: None,
+        resolved_sidedness: None,
     }
 }
 

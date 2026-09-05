@@ -25,6 +25,15 @@ Related mechanics worth knowing:
   `Serialize`. Three more places enumerate the reasons: `dto::repair_reason_str`,
   `crates/onecad-regen/src/main.rs::repair_reason_token`, and the TS
   `NeedsRepairItem.reason` doc.
+- Adding a FIELD to `RepairItem`/`RepairCandidate` costs ~11 struct-literal sites
+  across `onecad-core` (src + `tests/regen_executor.rs`), `src/dto.rs`,
+  `src/document_runtime.rs` and `src/document_runtime/tests.rs`. `NeedsRepairItemDto`
+  and `NeedsRepairEvent` had to DROP `Eq` (kept `PartialEq`) once a field was an
+  `f64` triple; nothing compares them for total equality.
+- `crates/onecad-core/tests/edit_session.rs::all_variant_commands()` is a
+  hand-built list ending in `assert_eq!(count, 22, "all 22 EditCommand variants
+  covered")`. Adding an `EditCommand` variant does NOT fail it — update the list
+  and the number by hand, or the coverage claim quietly becomes false.
 - `DocumentRuntime` holds only `GeometryEngine` + `MeshProvider` + `SolverEngine`.
   The other worker facets (`FaceBoundaryProjection`, `ElementQuery`, …) live on
   `AppState` and are reached by the `#[tauri::command]` wrappers, so a runtime

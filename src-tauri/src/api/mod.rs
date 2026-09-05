@@ -32,7 +32,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use onecad_core::document::modules::{ModuleId, ModuleState};
-use onecad_core::document::record::Operation;
+use onecad_core::document::record::{MateSidedness, Operation};
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::document::variables::{Scalar, Unit, Variable, VariableTable};
 use onecad_core::edit::{EditCommand, SketchEditOp};
@@ -1077,6 +1077,59 @@ pub async fn apply_edit_command(
     }
     state.note_mutation();
     Ok(projection)
+}
+
+/// The SCHEMA §9 `mateAxisReversed` repair (`CadClient.repairMateAxis`;
+/// kernel-hardening WP-I).
+///
+/// Its own command rather than a raw `apply_edit_command` because the panel sends
+/// evidence it read off the repair ITEM (`resolvedAxis`, `resolvedSidedness`) in
+/// wire form, and this is where those are parsed and refused — the same
+/// boundary-validation split every other component command uses.
+///
+/// `keep_world_direction` = the user chose "keep the component's direction"
+/// (`mate.flipped` is toggled to absorb the axis reversal); `false` = "follow the
+/// reversed axis". Both branches re-freeze `mate.targetAxis`, so the next regen is
+/// a fixed point.
+#[tauri::command]
+#[tracing::instrument(skip(state, app), err(Display))]
+pub async fn repair_mate_axis(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    record_id: String,
+    keep_world_direction: bool,
+    resolved_axis: [f64; 3],
+    resolved_sidedness: Option<String>,
+) -> Result<DocumentProjection, ApiError> {
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+    let axis = onecad_core::math::Vec3::new(resolved_axis[0], resolved_axis[1], resolved_axis[2])
+        .ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "repairMateAxis: resolvedAxis {resolved_axis:?} has a non-finite component"
+        ))
+    })?;
+    let sidedness = match resolved_sidedness.as_deref() {
+        None => None,
+        Some("pin") => Some(MateSidedness::Pin),
+        Some("hole") => Some(MateSidedness::Hole),
+        Some(other) => {
+            return Err(ApiError::InvalidCommand(format!(
+                "repairMateAxis: resolvedSidedness must be `pin` or `hole` (got {other:?})"
+            )))
+        }
+    };
+    apply_edit_command(
+        state,
+        app,
+        EditCommand::RepairMateAxis {
+            record,
+            keep_world_direction,
+            resolved_axis: axis,
+            resolved_sidedness: sidedness,
+        },
+    )
+    .await
 }
 
 /// One-line `EditCommand` digest for tracing: the serde `cmd` tag plus the ids

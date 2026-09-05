@@ -19,6 +19,7 @@
 // NeedsRepair — never a guess (false positive is strictly worse than false negative).
 #pragma once
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -117,10 +118,22 @@ struct LadderResolution {
 //
 // `edit` carries the EDIT-SCOPED tie veto (SCHEMA §10, resolverVersion 2). Its
 // default — no edit context — reproduces the resolverVersion-1 policy exactly.
+//
+// `admissible` (OPTIONAL, kernel-hardening WP-I) is a per-candidate
+// ADMISSIBILITY predicate applied while the pool is ENUMERATED: a sub-shape it
+// rejects is not a candidate at all, so a ref that could only have matched it
+// halts with the genuine ladder outcome `no-candidates` rather than a
+// synthesized item. SCHEMA §7.3's gear referenceability is its only caller —
+// refused tooth faces leave the pool before scoring, which is what keeps
+// "a stored ref on a tooth flank halts" a LADDER outcome. An empty function
+// (the default) admits everything and is byte-identical to the pre-WP-I pool.
+using CandidateFilter = std::function<bool(const TopoDS_Shape&)>;
+
 std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_shape,
                                                        const std::string& body_id,
                                                        const std::vector<LadderRef>& refs,
-                                                       const LadderEditContext& edit = {});
+                                                       const LadderEditContext& edit = {},
+                                                       const CandidateFilter& admissible = {});
 
 // The one-line human summary the ladder puts on every `candidates[]` entry
 // ("planar face, area~800mm2"). Exposed so an OP-BUILT §9 item (the Chamfer

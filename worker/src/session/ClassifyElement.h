@@ -38,4 +38,16 @@ protocol::Envelope handle_classify_element(Session& session, const protocol::Env
 // verb — the caller already has a concrete shape in hand.
 nlohmann::json classify_shape(const TopoDS_Shape& shape);
 
+// `classify_shape` PLUS the SCHEMA §7.5 optional `frame.sidedness`
+// (`"pin"` | `"hole"`) a CYLINDRICAL FACE carries (kernel-hardening WP-I).
+//
+// THE one sidedness producer: both callers that hold a body go through it —
+// the `ClassifyElement` verb handler and `ComponentOp.cpp`'s mate re-seat.
+// It needs the face's INSTANCE in `body_shape` because the measurement is the
+// §10 v4 `outward` evaluation, and history lists hand back NEUTRAL orientation;
+// a caller with only a bare shape must keep using `classify_shape`, which
+// simply omits the key. `sidedness` is also absent when it cannot be measured
+// (no outward evidence, or an evaluation point on the axis).
+nlohmann::json classify_shape_in_body(const TopoDS_Shape& shape, const TopoDS_Shape& body_shape);
+
 }  // namespace onecad::session

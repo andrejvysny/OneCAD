@@ -425,6 +425,9 @@ mod tests {
                 seeded: false,
                 ordinal_anchor: None,
                 seed_edge_id: None,
+                resolved_axis: None,
+                frozen_axis: None,
+                resolved_sidedness: None,
             }],
         );
 

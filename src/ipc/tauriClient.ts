@@ -224,6 +224,7 @@ const CMD = {
   componentUpgradeAvailable: "component_upgrade_available",
   setComponentParams: "set_component_params",
   detachComponent: "detach_component",
+  repairMateAxis: "repair_mate_axis",
   prepareOffsetFace: "prepare_offset_face",
   prepareEdgeOp: "prepare_edge_op",
   analyzeEdgeOpRange: "analyze_edge_op_range",
@@ -2033,6 +2034,23 @@ export function createTauriClient(): CadClient {
     return applyEdit(CMD.detachComponent, { recordId }, "DetachComponent", { recordId });
   }
 
+  /* WP-I: the SCHEMA §9 `mateAxisReversed` repair. A params edit on an EXISTING
+     record, so it correlates on that `recordId` like every other component edit —
+     the halted mate only stops halting once the regen it triggers publishes. */
+  async function repairMateAxis(
+    recordId: string,
+    keepWorldDirection: boolean,
+    resolvedAxis: [number, number, number],
+    resolvedSidedness?: "pin" | "hole",
+  ): Promise<ApplyOperationResult> {
+    return applyEdit(
+      CMD.repairMateAxis,
+      { recordId, keepWorldDirection, resolvedAxis, resolvedSidedness },
+      "RepairMateAxis",
+      { recordId },
+    );
+  }
+
   /**
    * `PrepareOffsetFace` (SCHEMA §7.6) — the read-only OffsetFace authoring
    * handshake. Snapshot-FENCED, unlike the advisory §7.5 reads: the closure it
@@ -2456,6 +2474,7 @@ export function createTauriClient(): CadClient {
     componentUpgradeAvailable,
     setComponentParams,
     detachComponent,
+    repairMateAxis,
     prepareOffsetFace,
     prepareEdgeOp,
     analyzeEdgeOpRange,

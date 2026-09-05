@@ -120,7 +120,8 @@ struct CandidatePool {
     std::vector<km::ElementDescriptor> descriptors;
 };
 
-CandidatePool enumerate_candidates(const TopoDS_Shape& body_shape, km::ElementKind kind) {
+CandidatePool enumerate_candidates(const TopoDS_Shape& body_shape, km::ElementKind kind,
+                                   const CandidateFilter& admissible) {
     CandidatePool pool;
     const TopAbs_ShapeEnum type = topabs_of(kind);
     if (body_shape.IsNull() || type == TopAbs_SHAPE) return pool;
@@ -128,6 +129,10 @@ CandidatePool enumerate_candidates(const TopoDS_Shape& body_shape, km::ElementKi
     TopExp::MapShapes(body_shape, type, map);
     const char prefix = topokey_prefix(kind);
     for (int i = 1; i <= map.Extent(); ++i) {
+        // WP-I: an INADMISSIBLE sub-shape never enters the pool, so it can be
+        // neither scored nor reported as a candidate. TopoKeys keep their body
+        // ordinals — the index is the body's, not the pool's.
+        if (admissible && !admissible(map(i))) continue;
         pool.shapes.push_back(map(i));
         pool.topo_keys.push_back(std::string(1, prefix) + ":" + std::to_string(i));
         pool.descriptors.push_back(ElementMapPartition::describe(map(i), body_shape));
@@ -166,7 +171,8 @@ nlohmann::json LadderResolution::to_needs_repair_json() const {
 std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_shape,
                                                        const std::string& body_id,
                                                        const std::vector<LadderRef>& refs,
-                                                       const LadderEditContext& edit) {
+                                                       const LadderEditContext& edit,
+                                                       const CandidateFilter& admissible) {
     (void)body_id;  // evidence label only
     std::vector<LadderResolution> out(refs.size());
     const double body_diag = body_diagonal(body_shape);
@@ -176,7 +182,7 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
     for (std::size_t i = 0; i < refs.size(); ++i) by_kind[refs[i].kind].push_back(i);
 
     for (const auto& [kind, idxs] : by_kind) {
-        const CandidatePool pool = enumerate_candidates(body_shape, kind);
+        const CandidatePool pool = enumerate_candidates(body_shape, kind, admissible);
         const int c = static_cast<int>(pool.shapes.size());
         const int n = static_cast<int>(idxs.size());
 

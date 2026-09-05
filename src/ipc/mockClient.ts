@@ -79,7 +79,8 @@ import type { ResolvedTable } from "./expr";
 import { evaluateAtSite, renameReference, resolveVariableTable } from "./expr";
 import { BackendError } from "./apiError";
 import type { WireEditCommand } from "./tauriCommandMap";
-import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
+import { bareBodyId, parseRefId, wireParamsOf } from "./tauriCommandMap";
+import { MATE_AXIS_FOLLOW_LABEL, MATE_AXIS_KEEP_LABEL } from "./operationDiagnostics";
 import { holeValueText } from "@/tools/modelTools/holeMachine";
 import { offsetFaceValue } from "@/tools/preview/faceOffset";
 import type { FaceColor } from "./mockMeshes";
@@ -1947,9 +1948,88 @@ function commitPlaceComponent(
   };
 }
 
+/**
+ * WP-I `mateAxisReversed`/`mateSeatOffFace` repair items, by `PlaceComponent`
+ * recordId (the mock has no kernel and can never DETECT a mate reversal on its
+ * own, so a test seeds the item the real backend would have raised — this is
+ * what lets `resolveRefs("<opId>.input0")` answer the SAME DTO shape Rust
+ * derives locally from the stored item, instead of a test hand-rolling one).
+ */
+interface MockMateAxisItem {
+  /** Defaults to `"mateAxisReversed"`. */
+  reason?: "mateAxisReversed" | "mateSeatOffFace";
+  /** Required for `mateAxisReversed`; ignored (may be omitted) for `mateSeatOffFace`. */
+  resolvedAxis?: [number, number, number];
+  frozenAxis?: [number, number, number];
+  resolvedSidedness?: "pin" | "hole";
+  uiLabel?: string;
+}
+const mockMateAxisItems = new Map<string, MockMateAxisItem>();
+
+/** Test seam: seed (or clear, with `null`) a mate repair item for `opId`. */
+export function setMockMateAxisItem(opId: string, item: MockMateAxisItem | null): void {
+  if (item) mockMateAxisItems.set(opId, item);
+  else mockMateAxisItems.delete(opId);
+}
+
 /** Canned repair candidates for a ref (deterministic; descending score). */
 function mockResolveRefs(refs: ResolveRefRequest[]): ResolveRefResult[] {
   return refs.map((r) => {
+    const parsed = parseRefId(r.refId);
+    const mateItem = parsed ? mockMateAxisItems.get(parsed.opId) : undefined;
+    if (mateItem) {
+      const reason = mateItem.reason ?? "mateAxisReversed";
+      const candidates: ResolveCandidate[] =
+        reason === "mateAxisReversed"
+          ? // Both rows share a TopoKey and score (SCHEMA §9) — `label` is the
+            // only thing telling them apart, exactly as the real ladder answers
+            // this item.
+            [
+              {
+                topoKey: "f:mate",
+                score: 0.5,
+                margin: 0,
+                worldPos: [0, 0, 0],
+                summary: "target face",
+                label: MATE_AXIS_KEEP_LABEL,
+              },
+              {
+                topoKey: "f:mate",
+                score: 0.5,
+                margin: 0,
+                worldPos: [0, 0, 0],
+                summary: "target face",
+                label: MATE_AXIS_FOLLOW_LABEL,
+              },
+            ]
+          : [
+              {
+                topoKey: "f:mate",
+                score: 0.5,
+                margin: 0,
+                worldPos: [0, 0, 0],
+                summary: "target face",
+              },
+            ];
+      return {
+        snapshotId: r.snapshotId ?? 0,
+        revision: r.revision ?? 0,
+        refId: r.refId,
+        bodyId: r.primary?.bodyId,
+        outcome: "needsRepair",
+        reason,
+        scoringVersion: 1,
+        uiLabel:
+          mateItem.uiLabel ??
+          (reason === "mateAxisReversed"
+            ? "This mate's axis may have reversed"
+            : "This mate's seat moved off the target face"),
+        resolvedAxis: mateItem.resolvedAxis,
+        frozenAxis: mateItem.frozenAxis,
+        resolvedSidedness: mateItem.resolvedSidedness,
+        candidates,
+      };
+    }
     const h = mockElementHash(r.refId);
     const candidates: ResolveCandidate[] = [
       {
@@ -2852,6 +2932,7 @@ export function resetMockDocument(): void {
     featureParams.set(id, { ...params });
   }
   featureTouched.clear();
+  mockMateAxisItems.clear();
   lane.resetPreview();
   mockFeatures = MOCK_BASE_FEATURES.map(cloneFeature);
   mockAppliedOps = MOCK_BASE_FEATURES.length;
@@ -3689,6 +3770,72 @@ export const mockClient: CadClient = {
 
   async detachComponent(): Promise<ApplyOperationResult> {
     throw new Error("detachComponent: the mock lane has no placed components yet (WP-1.4/1.5)");
+  },
+
+  /**
+   * WP-I: the §9 `mateAxisReversed` repair, honestly. `commitPlaceComponent`
+   * stores a REAL `mate` on this lane, so the record this rewrites is the same
+   * one `getOperationParams` reads back — a panel test can assert the toggle and
+   * the re-frozen axis for real instead of against a stub.
+   *
+   * What is NOT simulated: the mock has no kernel, so no mate ever REVERSES here
+   * and the repair is never raised by the lane itself. The refusals are mirrored
+   * exactly (`repair_mate_axis` + `DocumentSession::repair_mate_axis`) so the
+   * mock cannot stay green on a call the real backend rejects.
+   */
+  async repairMateAxis(
+    recordId: string,
+    keepWorldDirection: boolean,
+    resolvedAxis: [number, number, number],
+    resolvedSidedness?: "pin" | "hole",
+  ): Promise<ApplyOperationResult> {
+    await wait();
+    const stored = featureParams.get(recordId);
+    if (!stored) {
+      throw new Error(`repairMateAxis: no params for record ${recordId}`);
+    }
+    const mate = stored.mate as Record<string, unknown> | undefined;
+    if (!mate) {
+      throw new Error(`repairMateAxis: PlaceComponent ${recordId} has no mate`);
+    }
+    if (mate.kind !== "concentric" && mate.kind !== "concentricAndCoincident") {
+      throw new Error(
+        `repairMateAxis: PlaceComponent ${recordId} has a ${String(mate.kind)} mate — only a concentric mate has a target axis to re-freeze`,
+      );
+    }
+    if (!resolvedAxis.every((n) => Number.isFinite(n))) {
+      throw new Error(`repairMateAxis: resolvedAxis [${resolvedAxis.join(", ")}] must be finite`);
+    }
+    featureParams.set(recordId, {
+      ...stored,
+      mate: {
+        ...mate,
+        // `flipped` is the ONLY orientation bit — keeping the world direction
+        // means absorbing the axis reversal into it.
+        flipped: keepWorldDirection ? !mate.flipped : mate.flipped,
+        targetAxis: resolvedAxis,
+        // Absent evidence LEAVES the frozen sidedness alone, exactly as Rust does.
+        ...(resolvedSidedness ? { targetSidedness: resolvedSidedness } : {}),
+      },
+    });
+
+    mockRevision += 1;
+    const doc = documentStore.getState();
+    doc.applyChange({
+      revision: mockRevision,
+      features: mockFeatures.map(cloneFeature),
+      bodies: doc.bodies,
+      dirty: true,
+      appliedOps: mockAppliedOps,
+    });
+    // The mock's synthetic mesh does not depend on the mate, so nothing moves.
+    return withCursor({
+      revision: mockRevision,
+      changedBodies: [],
+      removedBodies: [],
+      features: mockFeatures.map(cloneFeature),
+      terminal: "noop",
+    });
   },
 
   // Deterministic mock promotion (Invariant 1: same pick → same id).

@@ -1,0 +1,131 @@
+# CANONICAL §7.3 fixture — GEAR REFERENCEABILITY is ENFORCED (kernel-hardening
+# WP-I, 2026-09-04).
+#
+# A gear's tooth flanks, tips, roots and fillets are NOT referenceable: their
+# count and identity change with `teeth`, so an id bound to "tooth 7's flank"
+# mis-resolves after the next parameter edit — the silent wrong bind §10's ladder
+# exists to prevent. Before this build NOTHING refused such a promotion
+# (`gear_body_op_ids` existed and was called from nowhere); measured red-first in
+# `worker/tests/test_gear_referenceability.cpp`, where a flank bound through
+# `BindElementIds` and reported `present:true`.
+#
+# WHAT THIS FILE PINS
+#
+#   * `AcquireElementIds` is UNCHANGED and answers the flank pick normally. It
+#     MINTS NOTHING (`elementId` comes back empty — Rust mints the id), so there
+#     is nothing there to refuse; the by-name refusal a client sees at pick time
+#     is the `BindElementIds` that follows. Pinned as a NEGATIVE: a future build
+#     that starts erroring here would break the pick lane.
+#   * `BindElementIds` on the flank is a terminal `ok:false` with `error.code`
+#     `REF_UNRESOLVED` (the class Bind already uses for an unknown body or
+#     TopoKey), `detail.bindingIndex` as on every Bind refusal, and
+#     `detail.diagnostics[0]` naming the reason and the evidence.
+#   * The head is IDENTICAL field for field either side of the refused bind —
+#     nothing was minted and no snapshot moved.
+#   * The two positive controls bind: the axle BORE (a cylinder coaxial with the
+#     gear and below the root radius) and an end CAP (planar, normal along the
+#     axis). A cap's identity does not depend on `teeth` — there are always
+#     exactly two — so refusing them would forbid a sketch or a Hole on the hub
+#     face, which the tooth-identity rule was never about (§7.3 amendment).
+#   * The PLAN-STEP rung, which the Bind legs above do not reach at all: a stored
+#     ref naming a tooth halts `needsRepair` with a GENUINE ladder outcome and the
+#     diagnostic beside it (the refused sub-elements left the §10 candidate pool
+#     before scoring), while the same op on the bore rim resolves and runs.
+#   * An EDGE or a VERTEX is referenceable iff EVERY face adjacent to it is. The
+#     final two legs pin both directions: an involute edge on a cap's outer
+#     boundary is refused (the cap binds, but that edge is shared with a flank),
+#     and the bore rim circle binds. An edge/vertex refusal carries `kind` in the
+#     evidence where a face refusal carries `surfaceType`.
+#
+# The gear: m=2, z=20, 5 mm thick on an explicit +Z frame at the origin, with a
+# Ø10 axle bore. Reference Ø40, root Ø35 (root radius 17.5), tip Ø44 — so the
+# bore at r=5 clears the rule and every tooth face fails it. `f:3` (a flank),
+# `f:4` (a cap) and `f:123` (the bore) are this build's ordinals for that gear,
+# located by CLASSIFICATION in `test_gear_referenceability.cpp` and pinned here
+# the way every other fixture pins a TopoKey. No measured float appears below.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_gear_face_refusal","documentRevision":0,"workerEpoch":4,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":80,"documentRevision":1,"workerEpoch":4,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"targetStep":0,"ops":[{"opType":"Gear","opId":"opgear","stepIndex":0,"inputs":[],"params":{"recipe":"involuteExternal","placement":{"frame":{"origin":[0.0,0.0,0.0],"axis":[0.0,0.0,1.0],"xDir":[1.0,0.0,0.0]},"point":[0.0,0.0,0.0]},"involuteExternal":{"teeth":20,"module":2.0,"height":5.0,"pressureAngleDeg":20.0,"shift":0.0,"helixAngleDeg":0.0,"doubleHelix":false,"propertiesFromTool":false,"undercut":false,"backlash":0.0,"clearance":0.25,"head":0.0,"sampleCount":12,"axleHole":true,"axleHoleDiameter":10.0}}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_opgear"}],"needsRepair":[]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":80,"result":{"planPrepared":true,"lastValidStep":0,"stoppedReason":"completed","historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":80,"documentRevision":1,"workerEpoch":4}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":80,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+# HEAD BEFORE the refused bind.
+{"send":{"v":1,"t":"req","id":4,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+# The pick lane is UNCHANGED: Acquire answers the flank, minting nothing.
+{"send":{"v":1,"t":"req","id":5,"verb":"AcquireElementIds","args":{"snapshotId":1,"bodyId":"body_opgear","picks":[{"topoKey":"f:3"}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"ids":[{"topoKey":"f:3","kind":"face","bodyId":"body_opgear","elementId":"","descriptor":"$any"}]}}}
+# The MINT refuses it, by name, with the evidence.
+{"send":{"v":1,"t":"req","id":6,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_opgear","topoKey":"f:3","elementId":"el_flank","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":false,"error":{"code":"REF_UNRESOLVED","retriable":false,"message":"$present","detail":{"bindingIndex":0,"diagnostics":[{"code":"REF_UNRESOLVED","reasonCode":"GEAR_FACE_NOT_REFERENCEABLE","evidence":{"bodyId":"body_opgear","topoKey":"f:3","gearOpId":"opgear","surfaceType":"other"}}]}}}}
+# Nothing was minted: the id the refused bind named does not exist.
+{"send":{"v":1,"t":"req","id":7,"verb":"QueryElement","args":{"snapshotId":1,"elementId":"el_flank"}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"elementId":"el_flank","present":false}}}
+# …and the head did not move: field for field the head from id 4.
+{"send":{"v":1,"t":"req","id":8,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+# POSITIVE CONTROLS — the bore and a cap DO bind, in one batch, and both resolve.
+{"send":{"v":1,"t":"req","id":9,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_opgear","topoKey":"f:123","elementId":"el_bore","kind":"face"},{"bodyId":"body_opgear","topoKey":"f:4","elementId":"el_cap","kind":"face"}]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"bound":[{"bodyId":"body_opgear","topoKey":"f:123","elementId":"el_bore","kind":"face"},{"bodyId":"body_opgear","topoKey":"f:4","elementId":"el_cap","kind":"face"}]}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"QueryElement","args":{"snapshotId":1,"elementId":"el_bore"}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"elementId":"el_bore","bodyId":"body_opgear","topoKey":"f:123","kind":"face","present":true}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"QueryElement","args":{"snapshotId":1,"elementId":"el_cap"}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"elementId":"el_cap","bodyId":"body_opgear","topoKey":"f:4","kind":"face","present":true}}}
+# The bore really is the Ø10 axle bore and the cap really is planar (§7.5), so the
+# two ordinals above are the faces the allow-list is about — not a lucky index.
+{"send":{"v":1,"t":"req","id":12,"verb":"ClassifyElement","args":{"elementId":"el_bore"}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"present":true,"kind":"face","surfaceType":"cylinder","frame":{"origin":"$any","axis":[0.0,0.0,1.0],"radius":5.0,"sidedness":"hole"}}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"ClassifyElement","args":{"elementId":"el_cap"}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"present":true,"kind":"face","surfaceType":"plane","frame":{"origin":"$any","normal":"$any"}}}}
+# EDGES AND VERTICES follow their NEIGHBOURHOOD (§7.3): referenceable iff EVERY
+# adjacent face is. `e:9` is an involute curve on a cap's OUTER boundary — the cap
+# itself binds (id 9 above), but this edge is shared with a tooth flank, so it is
+# refused. Its `evidence` carries `kind` where a face refusal carries
+# `surfaceType`: what decided it is the neighbourhood, not the edge's own curve.
+{"send":{"v":1,"t":"req","id":20,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_opgear","topoKey":"e:9","elementId":"el_tooth_edge","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":20,"ok":false,"error":{"code":"REF_UNRESOLVED","retriable":false,"message":"$present","detail":{"bindingIndex":0,"diagnostics":[{"code":"REF_UNRESOLVED","reasonCode":"GEAR_FACE_NOT_REFERENCEABLE","evidence":{"bodyId":"body_opgear","topoKey":"e:9","gearOpId":"opgear","kind":"edge"}}]}}}}
+{"send":{"v":1,"t":"req","id":21,"verb":"QueryElement","args":{"snapshotId":1,"elementId":"el_tooth_edge"}}}
+{"expect":{"v":1,"t":"resp","id":21,"ok":true,"result":{"elementId":"el_tooth_edge","present":false}}}
+# …and the head still has not moved: field for field the head from id 4.
+{"send":{"v":1,"t":"req","id":22,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":22,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+# POSITIVE CONTROL — the BORE RIM circle (`e:128`) binds: every face around it is
+# on the allow-list (the bore cylinder and a cap), and a Ø10 rim is exactly what a
+# downstream Hole or sketch reference wants.
+{"send":{"v":1,"t":"req","id":23,"verb":"BindElementIds","args":{"snapshotId":1,"bindings":[{"bodyId":"body_opgear","topoKey":"e:128","elementId":"el_bore_rim","kind":"edge"}]}}}
+{"expect":{"v":1,"t":"resp","id":23,"ok":true,"result":{"bound":[{"bodyId":"body_opgear","topoKey":"e:128","elementId":"el_bore_rim","kind":"edge"}]}}}
+{"send":{"v":1,"t":"req","id":24,"verb":"QueryElement","args":{"snapshotId":1,"elementId":"el_bore_rim"}}}
+{"expect":{"v":1,"t":"resp","id":24,"ok":true,"result":{"elementId":"el_bore_rim","bodyId":"body_opgear","topoKey":"e:128","kind":"edge","present":true}}}
+{"send":{"v":1,"t":"req","id":25,"verb":"ClassifyElement","args":{"elementId":"el_bore_rim"}}}
+{"expect":{"v":1,"t":"resp","id":25,"ok":true,"result":{"present":true,"kind":"edge","curveType":"circle","frame":{"origin":"$any","axis":"$any","radius":5.0}}}}
+# THE PLAN-STEP RUNG. Everything above is `BindElementIds`; the §7.3 rule also
+# runs where a STORED ref resolves inside an `ExecutePlan` — and there it works
+# by REMOVING refused faces and edges from the §10 candidate pool BEFORE the
+# ladder scores it, so a document written before this build halts with a genuine
+# ladder outcome (never a bind, and never a synthesized item) plus the same
+# `reasonCode` on the step. The anchor is out at radius 21, on the teeth.
+{"send":{"v":1,"t":"req","id":30,"verb":"ExecutePlan","args":{"jobId":91,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","prefixHashes":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"targetStep":1,"ops":[{"opType":"Fillet","opId":"optooth","stepIndex":1,"inputs":[{"primary":{"bodyId":"body_opgear","elementId":"el_stored_tooth","kind":"edge"},"anchor":{"worldPoint":[21.0,0.0,0.0]}}],"params":{"mode":"Fillet","radius":0.2,"edgeIds":["el_stored_tooth"],"chainTangentEdges":false,"targetBodyId":"body_opgear"}}]}}}
+{"expect":{"v":1,"t":"event","id":30,"event":"planStep","stepIndex":1,"jobId":91,"payload":{"bodyEvents":[],"elementMapDelta":{"added":[],"relabeled":[],"removed":[]},"needsRepair":[{"refId":"optooth.input0","elementId":"el_stored_tooth","ladderFailed":"descriptor","reason":"$present","scoringVersion":4}],"diagnostics":[{"severity":"warning","code":"REF_UNRESOLVED","stage":"input-resolution","reasonCode":"GEAR_FACE_NOT_REFERENCEABLE","message":"$present","evidence":{"bodyId":"body_opgear","gearOpId":"opgear","kind":"edge","topoKey":""}}]}}}
+{"expect":{"v":1,"t":"resp","id":30,"ok":true,"jobId":91,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"needsRepair","perStepResults":[{"stepIndex":1,"status":"needsRepair","refCount":1}]}}}
+{"send":{"v":1,"t":"req","id":31,"verb":"DiscardPrepared","args":{"jobId":91}}}
+{"expect":{"v":1,"t":"resp","id":31,"ok":true,"jobId":91,"result":{"discarded":true}}}
+# POSITIVE CONTROL — the SAME op on the BORE RIM resolves and runs. The anchor is
+# on the z=0 rim circle a quarter turn from the bore's seam, so the ladder has a
+# margin to bind on. What is pinned is `added` — the ref RESOLVED to e:128, the
+# very edge the refused legs could never reach — plus the `modified` body event
+# that says the op then ran. `removed` is deliberately NOT pinned: a Fillet
+# CONSUMES the edge it rounds (§10), so this step also drops the `el_bore_rim`
+# the bind leg above installed on the same edge, and pinning that would couple
+# this leg to the file's earlier legs for no contract gain.
+{"send":{"v":1,"t":"req","id":32,"verb":"ExecutePlan","args":{"jobId":92,"documentRevision":2,"workerEpoch":4,"expectedBaseHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","prefixHashes":["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],"targetStep":1,"ops":[{"opType":"Fillet","opId":"opgood","stepIndex":1,"inputs":[{"primary":{"bodyId":"body_opgear","elementId":"el_stored_rim","kind":"edge"},"anchor":{"worldPoint":[0.0,5.0,0.0]}}],"params":{"mode":"Fillet","radius":0.2,"edgeIds":["el_stored_rim"],"chainTangentEdges":false,"targetBodyId":"body_opgear"}}]}}}
+{"expect":{"v":1,"t":"event","id":32,"event":"planStep","stepIndex":1,"jobId":92,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_opgear"}],"elementMapDelta":{"added":[{"bodyId":"body_opgear","elementId":"el_stored_rim","kind":"edge","topoKey":"e:128"}]},"needsRepair":[],"diagnostics":[]}}}
+{"expect":{"v":1,"t":"resp","id":32,"ok":true,"jobId":92,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":33,"verb":"DiscardPrepared","args":{"jobId":92}}}
+{"expect":{"v":1,"t":"resp","id":33,"ok":true,"jobId":92,"result":{"discarded":true}}}
+# The head is STILL the one from id 4: two plans ran, both discarded, nothing minted.
+{"send":{"v":1,"t":"req","id":34,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":34,"ok":true,"result":{"documentRevision":1,"workerEpoch":4,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"CloseSession","args":{}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"result":{"sessionClosed":true}}}

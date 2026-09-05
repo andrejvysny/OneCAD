@@ -354,7 +354,22 @@ export function solveCandidatePlacement(
     if (!frame.normal) throw new Error("placementSolver: coincident snap requires a plane normal");
     const normal = normalize(frame.normal);
     const direction: Vec3 = flipped ? [-normal[0], -normal[1], -normal[2]] : normal;
-    return seated(pickWorldPos, rotationFromLocalZTo(direction), selfFrame);
+    // WP-I: project the pick onto the target plane — parity with the worker's
+    // coincident seat. Identity at pick time (the cursor is already on the
+    // plane), but keeps the seat correct once `frame.origin` moves without a
+    // fresh classify (e.g. a replayed/edited mate).
+    const rel: Vec3 = [
+      pickWorldPos[0] - frame.origin[0],
+      pickWorldPos[1] - frame.origin[1],
+      pickWorldPos[2] - frame.origin[2],
+    ];
+    const off = dot(rel, normal);
+    const seat: Vec3 = [
+      pickWorldPos[0] - off * normal[0],
+      pickWorldPos[1] - off * normal[1],
+      pickWorldPos[2] - off * normal[2],
+    ];
+    return seated(seat, rotationFromLocalZTo(direction), selfFrame);
   }
   if (!frame.axis) throw new Error(`placementSolver: ${snapKind} snap requires an axis`);
   const axisDir = normalize(frame.axis);

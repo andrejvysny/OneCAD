@@ -55,6 +55,14 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
+// SCHEMA §7.3 "Generator bounds" (kernel-hardening WP-I). Both are COST bounds
+// on a free param the wire carries untyped: a screw a kilometre long is a unit
+// slip, and `length / pitch` is the ring count the simplified/modeled cutters
+// pay for (measured 2026-09-04: a 1 000 000 mm M6 built in 1.3 ms at cosmetic
+// detail, and a 1000 mm M2 at pitch 0.4 would cut 2500 rings).
+constexpr double kMaxGeneratorLengthMm = 1000.0;
+constexpr double kMaxGeneratorThreadTurns = 500.0;
+
 // One boolean, with the determinism/cancel arguments every generator uses
 // identically (single-threaded, no occtOptions, no cancel token — a generator
 // is a handful of primitives, not a user-scale regen step).
@@ -94,7 +102,8 @@ bool fuse_head_and_shank(const std::string& op_label, const std::string& thread,
 // its own independent failure point.
 bool cut_simplified_thread(const std::string& op_label, const TopoDS_Shape& blank,
                            double shank_radius_mm, double length_mm, double thread_length_mm,
-                           double pitch_mm, TopoDS_Shape& solid_out, std::string& err) {
+                           double pitch_mm, const onecad::CancelToken* cancel,
+                           TopoDS_Shape& solid_out, std::string& err) {
     const int n = static_cast<int>(std::floor(thread_length_mm / pitch_mm));
     if (n <= 0) {
         // Threaded run too short for even one groove at this pitch — cosmetic blank stands.
@@ -110,6 +119,14 @@ bool cut_simplified_thread(const std::string& op_label, const TopoDS_Shape& blan
         cb.MakeCompound(rings);
         const gp_Ax1 revol_axis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
         for (int i = 0; i < n; ++i) {
+            // WP-I: one cooperative poll per RING. The single boolean that
+            // consumes the accumulated compound stays uninterruptible (recorded
+            // limit, SCHEMA §7.3), but ring construction is the part whose cost
+            // scales with `length / pitch`.
+            if (cancel != nullptr && cancel->cancelled()) {
+                err = op_label + ": cancelled while building simplified thread rings";
+                return false;
+            }
             const double z = -length_mm + (static_cast<double>(i) + 0.5) * pitch_mm;
             BRepBuilderAPI_MakePolygon poly;
             poly.Add(gp_Pnt(shank_radius_mm - groove_depth, 0.0, z));
@@ -257,15 +274,15 @@ bool cut_modeled_thread(const std::string& op_label, const TopoDS_Shape& blank,
 // family, the standard's `b` for a partially-threaded one.
 bool apply_thread_detail(const std::string& op_label, const TopoDS_Shape& blank,
                          double shank_diameter_mm, double length_mm, double thread_length_mm,
-                         double pitch_mm, ThreadDetail detail, TopoDS_Shape& solid_out,
-                         std::string& err) {
+                         double pitch_mm, ThreadDetail detail, const onecad::CancelToken* cancel,
+                         TopoDS_Shape& solid_out, std::string& err) {
     switch (detail) {
         case ThreadDetail::Cosmetic:
             solid_out = blank;
             return true;
         case ThreadDetail::Simplified:
             return cut_simplified_thread(op_label, blank, shank_diameter_mm / 2.0, length_mm,
-                                         thread_length_mm, pitch_mm, solid_out, err);
+                                         thread_length_mm, pitch_mm, cancel, solid_out, err);
         case ThreadDetail::Modeled:
             return cut_modeled_thread(op_label, blank, shank_diameter_mm / 2.0, length_mm,
                                       thread_length_mm, pitch_mm, solid_out, err);
@@ -305,7 +322,8 @@ bool build_socket_cap(const GeneratorRequest& req, TopoDS_Shape& out, std::strin
             return false;
         }
         return apply_thread_detail(req.op_label, blank, size->shank_diameter_mm, req.length_mm,
-                                   req.length_mm, size->pitch_mm, req.detail, out, err);
+                                   req.length_mm, size->pitch_mm, req.detail, req.cancel, out,
+                                   err);
     } catch (const Standard_Failure& f) {
         err = req.op_label + ": " + req.thread + " socket cap build raised: " +
               (f.GetMessageString() ? f.GetMessageString() : "OCCT");
@@ -333,6 +351,51 @@ bool parse_thread_detail(const std::string& s, ThreadDetail& out) {
 
 std::string known_generator_ids() {
     return "iso4762";
+}
+
+std::optional<GeneratorBoundViolation> generator_bounds_violation(const std::string& generator_id,
+                                                                  const GeneratorRequest& req) {
+    // SCHEMA §7.3 "Generator bounds": today `iso4762` is the only family that
+    // reads `length` at all (the NEMA families read none), so it is the only one
+    // with a bound to check. A family added later declares its own here.
+    if (generator_id != "iso4762") return std::nullopt;
+
+    if (!std::isfinite(req.length_mm) || req.length_mm <= 0.0 ||
+        req.length_mm > kMaxGeneratorLengthMm) {
+        GeneratorBoundViolation v;
+        v.param = "length";
+        v.value = req.length_mm;
+        v.min = 0.0;
+        v.max = kMaxGeneratorLengthMm;
+        v.message = req.op_label + ": source.params.length " + std::to_string(req.length_mm) +
+                    " mm is outside the supported range (0, " +
+                    std::to_string(static_cast<int>(kMaxGeneratorLengthMm)) + "] mm";
+        return v;
+    }
+
+    // The turns bound is a COST bound on the thread cutters, so it applies only
+    // to the two details that cut rings — `cosmetic` cuts none.
+    if (req.detail == ThreadDetail::Cosmetic) return std::nullopt;
+    const auto& table = ft::iso4762_table();
+    const auto row = table.find(req.thread);
+    // An unknown designation is the BUILDER's refusal to make (it lists the
+    // known sizes); a bounds check that swallowed it would be a worse message.
+    if (row == table.end() || !(row->second.pitch_mm > 0.0)) return std::nullopt;
+    const double turns = std::floor(req.length_mm / row->second.pitch_mm);
+    if (turns > kMaxGeneratorThreadTurns) {
+        GeneratorBoundViolation v;
+        v.param = "turns";
+        v.value = turns;
+        v.min = 0.0;
+        v.max = kMaxGeneratorThreadTurns;
+        v.message = req.op_label + ": " + req.thread + " at length " +
+                    std::to_string(req.length_mm) + " mm would cut " +
+                    std::to_string(static_cast<long long>(turns)) + " thread rings at pitch " +
+                    std::to_string(row->second.pitch_mm) + " mm (limit " +
+                    std::to_string(static_cast<int>(kMaxGeneratorThreadTurns)) + ")";
+        return v;
+    }
+    return std::nullopt;
 }
 
 bool build_component(const std::string& generator_id, const GeneratorRequest& req,

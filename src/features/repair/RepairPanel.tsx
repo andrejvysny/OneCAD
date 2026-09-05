@@ -8,10 +8,12 @@ import { createClient } from "@/ipc/client";
 import {
   rebindCandidate,
   repairInputPath,
+  repairMateAxisChoice,
   REPAIR_NOT_REBINDABLE,
 } from "@/features/inspector/historyActions";
 import type { NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
 import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
+import { MATE_AXIS_KEEP_LABEL } from "@/ipc/operationDiagnostics";
 
 type CandidateLoad =
   | { status: "loading" }
@@ -26,6 +28,8 @@ type CandidateLoad =
       snapshotId: number;
       revision: number;
       bodyId?: string;
+      /** SCHEMA §9 `uiLabel` (WP-I) — the informational text for `mateSeatOffFace`. */
+      uiLabel?: string;
     };
 
 function loadKey(revision: number, snapshotId: number, refId: string): string {
@@ -62,6 +66,16 @@ function reasonText(reason: string): string {
       // trustworthy. The two candidates ARE the edge's two adjacent faces, and
       // picking one persists the choice for good.
       return "Chamfer reference face was never recorded — choose which face the first distance is measured on";
+    case "mateAxisReversed":
+      // WP-I (SCHEMA §9): a cylindrical mate's target has no intrinsic axial
+      // sign, so a re-authored target can flip it with nothing on the face to
+      // tell that apart from a rigid 180° turn — the two op-built candidates
+      // (`candidate.label`) are the two ways to answer that, not a rebind.
+      return "This mate's axis may have reversed — choose which direction the component should follow";
+    case "mateSeatOffFace":
+      // WP-I: informational only — the worker could not re-seat the mate on the
+      // target face at all, so there is nothing to pick, only to read.
+      return "This mate's seat moved off the target face";
     default:
       // Unknown tokens (a newer build's reason) fall through verbatim rather than
       // being swallowed — the panel is deliberately generic over `reason`.
@@ -112,9 +126,13 @@ export function RepairPanel() {
     const cached = loads[key];
     if (next && (!cached || cached.status === "not-rebindable")) {
       setLoads((s) => ({ ...s, [key]: { status: "loading" } }));
-      // Resolve the slot's InputPath FIRST: with no path there is nothing a click
-      // could do, so the candidate fetch would only offer a doomed affordance.
-      repairInputPath(item)
+      // WP-I: `mateAxisReversed`/`mateSeatOffFace` items name a `PlaceComponent`
+      // record, which has no `InputPath` slot table (it is not an
+      // `EditOperationInput` rebind at all — `mateAxisReversed`'s action is
+      // `repairMateAxis`, and `mateSeatOffFace` has no action). Skip the
+      // InputPath gate that would otherwise call these "not rebindable".
+      const isMateItem = item.reason === "mateAxisReversed" || item.reason === "mateSeatOffFace";
+      (isMateItem ? Promise.resolve(true) : repairInputPath(item))
         .then(async (path) => {
           if (!isCurrentRepair(item.refId, eventRevision, eventSnapshotId)) return;
           if (!path) {
@@ -147,6 +165,7 @@ export function RepairPanel() {
               snapshotId: r.snapshotId,
               revision: r.revision,
               bodyId: r.bodyId,
+              uiLabel: r.uiLabel,
             },
           }));
         })
@@ -168,7 +187,15 @@ export function RepairPanel() {
     if (!isCurrentRepair(item.refId, load.revision, load.snapshotId)) return;
     setBusyRefId(item.refId);
     try {
-      await rebindCandidate(item, candidate, load.snapshotId);
+      // WP-I: `mateAxisReversed` is not a rebind — the two candidates are the two
+      // ANSWERS to one question, told apart only by `candidate.label` (both rows
+      // share a TopoKey and score, so a stable sort over equal scores is not a
+      // promise of row order — route on the label, never the click's row index).
+      if (item.reason === "mateAxisReversed") {
+        await repairMateAxisChoice(item, candidate.label === MATE_AXIS_KEEP_LABEL);
+      } else {
+        await rebindCandidate(item, candidate, load.snapshotId);
+      }
     } finally {
       setBusyRefId(null);
       repairStore.getState().setHoveredWorldPos(null);
@@ -267,10 +294,25 @@ export function RepairPanel() {
                       {REPAIR_NOT_REBINDABLE}
                     </div>
                   )}
-                  {load?.status === "ready" && load.candidates.length === 0 && (
-                    <div className="text-[11.5px] text-ink-5">No candidates to choose from.</div>
+                  {/* WP-I: `mateSeatOffFace` is informational only — the worker
+                    * could not re-seat the mate at all, so there is one candidate
+                    * and no action, just the `uiLabel` (or the candidate's own
+                    * summary as a fallback) telling the user what happened. */}
+                  {load?.status === "ready" && item.reason === "mateSeatOffFace" && (
+                    <div
+                      data-testid={`repair-info-${item.refId}`}
+                      className="text-[11.5px] text-ink-5"
+                    >
+                      {load.uiLabel ?? load.candidates[0]?.summary ?? reasonText(item.reason)}
+                    </div>
                   )}
                   {load?.status === "ready" &&
+                    item.reason !== "mateSeatOffFace" &&
+                    load.candidates.length === 0 && (
+                      <div className="text-[11.5px] text-ink-5">No candidates to choose from.</div>
+                    )}
+                  {load?.status === "ready" &&
+                    item.reason !== "mateSeatOffFace" &&
                     load.candidates.map((c, i) => (
                       <CandidateRow
                         key={`${c.topoKey}-${i}`}
@@ -319,7 +361,10 @@ function CandidateRow({
       )}
     >
       <span className="flex-1">
-        <span className="block text-[12px] text-ink-2">{candidate.summary}</span>
+        {/* WP-I: an op-built item (e.g. `mateAxisReversed`) carries two
+          * candidates that are geometrically identical — `label` is the only
+          * thing that tells them apart, and takes priority over `summary`. */}
+        <span className="block text-[12px] text-ink-2">{candidate.label ?? candidate.summary}</span>
         <span className="mt-1 block h-[4px] w-full overflow-hidden rounded-full bg-well">
           <span className="block h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
         </span>

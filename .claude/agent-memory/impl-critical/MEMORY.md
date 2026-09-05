@@ -6,4 +6,4 @@
 - [Worker op diagnostics](repo_worker_diagnostics.md) — Ok-step warnings ride the planStep event, never a failed step; sketch UV lift + build_profile_face arg order
 - [Protocol fixtures + harness](repo_protocol_fixtures.md) — what worker_harness really implements vs the README, no standalone tolerance line, auto-run lanes
 - [Sketch solver residual](repo_sketch_solver_residual.md) — maxConstraintResidual, the two exact-solve wire sites, why EndGesture measures from the sketch
-- [Worker geometry lane](repo_worker_geometry_lane.md) — direct op-executor probes, non-standard XY sketch frame, un-oriented descriptor normals, which hole reorders a box's face map
+- [Worker probe lanes](repo_worker_geometry_lane.md) — direct op-executor + Session/mint lanes, AcquireElementIds mints nothing, classify_shape by geometry, XY sketch frame, un-oriented normals

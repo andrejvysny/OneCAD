@@ -281,3 +281,43 @@ export async function rebindCandidate(
     return false;
   }
 }
+
+/**
+ * Answer a `mateAxisReversed` repair item (SCHEMA §9, kernel-hardening WP-I) —
+ * NOT a rebind: the item's two candidates are the two ANSWERS to one question
+ * ("keep the component's direction" vs "follow the reversed axis"), so picking
+ * one calls `repairMateAxis` directly instead of `EditOperationInput`.
+ *
+ * `item.resolvedAxis`/`item.resolvedSidedness` are echoed back verbatim — see
+ * their doc comments on `NeedsRepairItem`. Errors-as-values, like every other
+ * repair action here: never rethrow.
+ */
+export async function repairMateAxisChoice(
+  item: NeedsRepairItem,
+  keepWorldDirection: boolean,
+): Promise<boolean> {
+  if (!item.resolvedAxis) {
+    errorHint("Repair failed: this item has no resolved axis to re-freeze");
+    return false;
+  }
+  try {
+    const res = await createClient().repairMateAxis(
+      item.opId,
+      keepWorldDirection,
+      item.resolvedAxis,
+      item.resolvedSidedness,
+    );
+    const outcome = classifyRegen(res);
+    if (keepsRecord(outcome)) applyEditResult(res);
+    const reason = failureReason(outcome);
+    if (reason !== null) {
+      errorHint(`Repair failed: ${reason}`);
+      return false;
+    }
+    hint(outcome.kind === "needsRepair" ? "Mate axis repaired — more remain" : "Mate axis repaired");
+    return true;
+  } catch (e) {
+    errorHint(`Repair failed: ${errMessage(e)}`);
+    return false;
+  }
+}

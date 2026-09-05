@@ -35,6 +35,20 @@ namespace geom = onecad::kernel::geometry;
 // (1e-3 mm); it is no longer restated here.
 constexpr double kPi = 3.14159265358979323846;
 
+// SCHEMA §7.3 gear bounds (kernel-hardening WP-I). `teeth` and `sampleCount` are
+// COST bounds: one B-spline is fitted per flank and the bore cut runs against
+// `2·teeth` such faces, so `(400, 1024)` is jointly a liveness kill while each
+// value alone is harmless. `height` is NOT a cost bound — extruding a profile is
+// O(1) in its length — it is an AUTHORING SANITY bound, a product decision that a
+// gear taller than a metre is a unit slip rather than a part. The lower bounds
+// restate limits the sampler and this builder already enforced, so each parameter
+// ends up with a single closed interval.
+constexpr int kMinTeeth = 3;
+constexpr int kMaxTeeth = 400;
+constexpr int kMinSampleCount = 2;
+constexpr int kMaxSampleCount = 256;
+constexpr double kMaxHeightMm = 1000.0;
+
 std::string occt_reason(const Standard_Failure& f) {
   const char* what = f.what();
   return (what && *what) ? what : "OCCT";
@@ -49,8 +63,38 @@ gp_Pnt local_point(const kg::Point2d& p, double angle) {
 
 }  // namespace
 
-GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame) {
+GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame,
+                                 const onecad::CancelToken* cancel) {
   GearBuildResult out;
+
+  // --- 0. Bounds preflight (SCHEMA §7.3, kernel-hardening WP-I) -----------
+  // BEFORE any geometry, and before the sampler: these are cost bounds, so a
+  // value outside them must never reach a builder. Rust refuses the same three
+  // at authoring; the worker is an INDEPENDENT trust boundary, so it re-checks.
+  const auto out_of_range = [&out](const char* param, double value, double min_v,
+                                   double max_v, std::string message) {
+    out.error = std::move(message);
+    out.out_of_range = GearParamBound{param, value, min_v, max_v};
+    return out;
+  };
+  if (spec.involute.numTeeth < kMinTeeth || spec.involute.numTeeth > kMaxTeeth) {
+    return out_of_range("teeth", static_cast<double>(spec.involute.numTeeth), kMinTeeth, kMaxTeeth,
+                        "Gear teeth must be between " + std::to_string(kMinTeeth) + " and " +
+                            std::to_string(kMaxTeeth) + " (got " +
+                            std::to_string(spec.involute.numTeeth) + ")");
+  }
+  if (spec.sampleCount > kMaxSampleCount) {
+    return out_of_range("sampleCount", static_cast<double>(spec.sampleCount), kMinSampleCount,
+                        kMaxSampleCount,
+                        "Gear sampleCount must be at most " + std::to_string(kMaxSampleCount) +
+                            " (got " + std::to_string(spec.sampleCount) + ")");
+  }
+  if (spec.height > kMaxHeightMm) {
+    return out_of_range("height", spec.height, 0.0, kMaxHeightMm,
+                        "Gear height must be at most " +
+                            std::to_string(static_cast<int>(kMaxHeightMm)) + " mm (got " +
+                            std::to_string(spec.height) + ")");
+  }
 
   // The gear is built from a spec, not measured from an existing shape, and
   // `authoring_resolution()` is scale-independent in v1 (GeometryPrecision.h), so
@@ -60,12 +104,16 @@ GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame)
   // A chord a thousandth of that is a duplicated point, not a segment.
   const double degenerate_chord = min_value * 1e-3;
 
-  if (spec.sampleCount < 2) {
+  if (spec.sampleCount < kMinSampleCount) {
+    // Wording unchanged (it predates WP-I); the bound evidence is additive.
     out.error = "sampleCount must be at least 2 (got " + std::to_string(spec.sampleCount) + ")";
+    out.out_of_range = GearParamBound{"sampleCount", static_cast<double>(spec.sampleCount),
+                                      kMinSampleCount, kMaxSampleCount};
     return out;
   }
   if (!(spec.height > min_value)) {
     out.error = "height must be greater than 1e-3 mm";
+    out.out_of_range = GearParamBound{"height", spec.height, min_value, kMaxHeightMm};
     return out;
   }
 
@@ -127,6 +175,13 @@ GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame)
     BRepBuilderAPI_MakeWire wire;
 
     for (int k = 0; k < z; ++k) {
+      // WP-I: one cooperative poll per TOOTH — the loop whose cost scales with
+      // `teeth · sampleCount`. The bore boolean below stays uninterruptible.
+      if (cancel != nullptr && cancel->cancelled()) {
+        out.cancelled = true;
+        out.error = "gear build cancelled";
+        return out;
+      }
       const double angle = static_cast<double>(k) * phipart;
       // The wrap-around join must reuse angle 0 EXACTLY (see GearTool.h):
       // z·(2π/z) does not round-trip to 0 in binary floating point.

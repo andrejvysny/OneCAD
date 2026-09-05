@@ -86,6 +86,7 @@ fn symmetric_repair_item(step: usize, ref_id: &str) -> RepairItem {
                 margin: 0.0,
                 world_pos: Vec3::new_unchecked(12.0, 3.5, 0.0),
                 summary: "left twin".into(),
+                label: None,
                 extra: Default::default(),
             },
             RepairCandidate {
@@ -94,6 +95,7 @@ fn symmetric_repair_item(step: usize, ref_id: &str) -> RepairItem {
                 margin: 0.0,
                 world_pos: Vec3::new_unchecked(12.0, -3.5, 0.0),
                 summary: "right twin".into(),
+                label: None,
                 extra: Default::default(),
             },
         ],
@@ -103,6 +105,9 @@ fn symmetric_repair_item(step: usize, ref_id: &str) -> RepairItem {
         seeded: false,
         ordinal_anchor: None,
         seed_edge_id: None,
+        resolved_axis: None,
+        frozen_axis: None,
+        resolved_sidedness: None,
     }
 }
 

@@ -517,6 +517,24 @@ pub struct DocumentRuntime {
     /// from an UNLOCKED post-publish re-projection — never from `finish_regen`,
     /// which holds the single-writer lock and must not do worker IO.
     projection_stale: BTreeMap<SketchId, ProjectionStale>,
+    /// Records whose component mate ADOPTED the SCHEMA §7.2 `mateResolved`
+    /// evidence in the LAST COMMITTED regen (kernel-hardening WP-I), with the
+    /// message each renders as the `MATE_AXIS_ADOPTED` info diagnostic.
+    ///
+    /// One-shot: cleared and repopulated by every committed
+    /// [`sync_mate_evidence`](Self::sync_mate_evidence), so the migration notice
+    /// appears on the adopting regen's projection and on no later one. An
+    /// adoption cannot recur for the same record anyway — the guard is
+    /// `target_axis.is_none()` on both timelines — so a notice that persisted
+    /// would be reporting an event that had already passed.
+    ///
+    /// Keyed by `RecordId`, not by timeline index, for the same reason
+    /// [`projection_stale`](Self::projection_stale) is keyed by sketch: an index
+    /// is a position, and a rollback or delete would re-attach the notice to
+    /// whatever op now sits at that row. Written ONLY by
+    /// [`sync_mate_evidence`](Self::sync_mate_evidence), inside the same
+    /// `finish_regen` commit that performs the adoption.
+    mate_axis_adopted: BTreeMap<RecordId, String>,
     /// The source-body geometry signatures each sketch's projections were last
     /// checked against. A publish that leaves every source body's signature
     /// unchanged skips the re-projection entirely, so the check costs nothing on
@@ -827,6 +845,7 @@ impl DocumentRuntime {
             cached_meshes: HashMap::new(),
             preview_png: None,
             projection_stale: BTreeMap::new(),
+            mate_axis_adopted: BTreeMap::new(),
             projection_checked: BTreeMap::new(),
             latest_snapshot: None,
             // No snapshot yet; `prepare_checkpoint` refuses before the first publish
@@ -1699,6 +1718,13 @@ impl DocumentRuntime {
                 // is derived data the same way `outputs` is — write it back
                 // onto the document's own record right beside it.
                 self.sync_mate_placements(&executed);
+                // WP-I: and the mate's ORIENTATION evidence, adopted once per
+                // record. It rides here, not on some later unlocked pass,
+                // because `mate` is part of the canonical planner line: the
+                // adoption MOVES this op's planner hash and every prefix hash
+                // after it, and only inside this commit are those recomputed
+                // together — exactly as the `matePlacement` writeback above.
+                self.sync_mate_evidence(&executed);
                 // WP-VE.1: likewise for an expression-driven `Scalar` — its
                 // `value` IS the last evaluated number, and this regen just
                 // evaluated it.
@@ -2033,6 +2059,44 @@ impl DocumentRuntime {
     fn sync_mate_placements(&mut self, executed: &BTreeSet<RecordId>) {
         self.session
             .sync_mate_placements(&self.regen.timeline, executed);
+    }
+
+    /// Kernel-hardening WP-I (SCHEMA §7.2 `mateResolved`): adopts the mate
+    /// orientation evidence from `self.regen.timeline` onto the document's own
+    /// record — the same derived-writeback treatment
+    /// [`sync_mate_placements`](Self::sync_mate_placements) gives `placement`,
+    /// right beside it — and notes each adoption for the `MATE_AXIS_ADOPTED`
+    /// info diagnostic.
+    ///
+    /// Runs at most once per record: both timelines refuse a mate that already
+    /// carries a `target_axis`.
+    fn sync_mate_evidence(&mut self, executed: &BTreeSet<RecordId>) {
+        // ONE-SHOT: the notice belongs to the projection of the regen that
+        // ADOPTED, and to no later one. Cleared here rather than at some other
+        // point in the commit so it can never drift from the write below —
+        // and only on a COMMITTED regen, so a superseded prepare leaves the
+        // adopting regen's notice standing.
+        self.mate_axis_adopted.clear();
+        let adopted = self
+            .session
+            .sync_mate_evidence(&self.regen.timeline, executed);
+        for record in adopted {
+            let label = self
+                .session
+                .document()
+                .timeline
+                .record_by_id(record)
+                .map_or_else(|| record.to_string(), |rec| rec.name.clone());
+            self.mate_axis_adopted.insert(
+                record,
+                format!(
+                    "`{label}` mate: the target's axis and sidedness were recorded \
+                     from this regen as the reference (first build that freezes \
+                     them); a reversal AFTER this point is reported instead of \
+                     silently followed"
+                ),
+            );
+        }
     }
 
     /// WP-VE.1: writes each executed record's RESOLVED expression-driven scalar
@@ -3153,6 +3217,26 @@ impl DocumentRuntime {
                 })),
             });
         }
+        // WP-I, merged on top for the same reason: the adoption is a RUST-SIDE
+        // migration notice about the DOCUMENT (this build froze the mate's axis
+        // evidence for the first time), not a worker verdict about a terminal.
+        // INFO, not a warning: nothing is wrong and nothing needs doing.
+        if let Some(message) = self
+            .session
+            .document()
+            .timeline
+            .record(index)
+            .and_then(|rec| self.mate_axis_adopted.get(&rec.record_id))
+        {
+            out.push(onecad_core::regen::Diagnostic {
+                severity: onecad_core::regen::Severity::Info,
+                code: MATE_AXIS_ADOPTED_CODE.to_string(),
+                message: message.clone(),
+                stage: None,
+                reason_code: Some(MATE_AXIS_ADOPTED_CODE.to_string()),
+                evidence: None,
+            });
+        }
         out
     }
 
@@ -4136,6 +4220,18 @@ impl DocumentRuntime {
         let mut local: Vec<(usize, RefResolution)> = Vec::new();
         let mut forwarded: Vec<(usize, ResolveRef)> = Vec::new();
         for (i, mut r) in req.refs.into_iter().enumerate() {
+            // WP-I: the two op-built `PlaceComponent` items are answered LOCALLY
+            // and UNCONDITIONALLY — never forwarded, hydrated ref or not.
+            // Forwarding one is not merely wasteful, it is WRONG: the ladder
+            // resolving cleanly is the item's own premise (what halted is the
+            // ORIENTATION the resolved face implies), so the worker answers
+            // `autoBind` with no candidates and the panel renders "nothing to
+            // choose from" over a repair that is sitting right there. Same
+            // reasoning as the `legacyReferenceFace` seed below.
+            if let Some(answer) = self.resolve_mate_repair(snapshot, &r.ref_id) {
+                local.push((i, answer));
+                continue;
+            }
             if element_ref_is_empty(&r.element) {
                 if let Some(stored) = self.stored_input_ref(&r.ref_id) {
                     r.element = stored;
@@ -4510,6 +4606,47 @@ impl DocumentRuntime {
             .or_else(|| record.outputs.first().copied())
     }
 
+    /// Answers a SCHEMA §9 op-built `PlaceComponent` item (`mateAxisReversed` /
+    /// `mateSeatOffFace`) from the LAST regen's own published item, with no
+    /// worker traffic (kernel-hardening WP-I).
+    ///
+    /// **Echoing the published candidates is correct here, unlike for
+    /// `legacyReferenceFace`.** That item's candidates are ordinals of a
+    /// discarded scratch state and its repair PROMOTES the chosen TopoKey, so
+    /// they had to be re-derived live. These ones came from the step that just
+    /// ran on the published head, and the repair promotes nothing at all:
+    /// `RepairMateAxis` carries an AXIS, not an element address. The candidates
+    /// exist only so the panel can render the two choices, which is exactly what
+    /// their `label`s are for.
+    ///
+    /// `None` for every other ref — including a mate item whose record has since
+    /// been deleted — so the caller falls through to the ladder.
+    fn resolve_mate_repair(&self, snapshot: SnapshotId, ref_id: &str) -> Option<RefResolution> {
+        use onecad_core::document::repair::RepairReason;
+        let item = self
+            .regen
+            .repair
+            .items()
+            .iter()
+            .find(|item| item.ref_id == ref_id)?;
+        if !matches!(
+            item.reason,
+            RepairReason::MateAxisReversed | RepairReason::MateSeatOffFace
+        ) {
+            return None;
+        }
+        let record = self.record_for_ref_id(ref_id)?;
+        Some(RefResolution {
+            ref_id: ref_id.to_string(),
+            outcome: ResolveOutcome::NeedsRepair(item.clone()),
+            snapshot_id: snapshot,
+            revision: self.projection().revision,
+            // The mate's TARGET body — the one the candidate TopoKeys are scoped
+            // to — which is `PlaceComponent`'s only declared input body.
+            body_id: self.operated_body(record),
+        })
+    }
+
     /// The SCHEMA §9 `legacyReferenceFace` item standing at `ref_id`, when the
     /// current repair state holds one for a Chamfer record that still carries a seed
     /// edge id (kernel-hardening WP-F).
@@ -4675,6 +4812,7 @@ impl DocumentRuntime {
                     margin: 0.0,
                     world_pos: Vec3::new_unchecked(info.center[0], info.center[1], info.center[2]),
                     summary: face_candidate_summary(&info),
+                    label: None,
                     extra: Default::default(),
                 });
             }
@@ -4697,6 +4835,9 @@ impl DocumentRuntime {
                 seeded: false,
                 ordinal_anchor: None,
                 seed_edge_id: Some(seed.seed_edge.clone()),
+                resolved_axis: None,
+                frozen_axis: None,
+                resolved_sidedness: None,
             }),
             snapshot_id: snapshot,
             revision: self.projection().revision,
@@ -5125,6 +5266,12 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
 /// projection-only — it never crosses the OCW1 wire, so it adds nothing to the
 /// SCHEMA §8 taxonomy the worker speaks.
 pub const PROJECTION_STALE_CODE: &str = "PROJECTION_STALE";
+
+/// The diagnostic `code` for the one-time adoption of a component mate's SCHEMA
+/// §7.2 `mateResolved` evidence (kernel-hardening WP-I). Rust-minted and
+/// projection-only — it never crosses the OCW1 wire, so it adds nothing to the
+/// SCHEMA §8 taxonomy the worker speaks.
+pub const MATE_AXIS_ADOPTED_CODE: &str = "MATE_AXIS_ADOPTED";
 
 /// A `finish_sketch` failure that may have happened AFTER the sketch's timeline
 /// record was committed (the regions call is the one refusable step and it runs

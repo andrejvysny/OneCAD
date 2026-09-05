@@ -33,6 +33,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,7 @@
 #include <gp_Ax2.hxx>
 
 #include "kernel/gear/InvoluteMath.h"
+#include "util/Cancel.h"
 
 namespace onecad::ops::gear {
 
@@ -70,11 +72,31 @@ struct GearComputed {
   double angularBacklashDeg = 0.0;
 };
 
+/// A gear parameter outside the bounds SCHEMA §7.3 sets for it
+/// (kernel-hardening WP-I): the offending name, its value, and the range it
+/// left. Set ALONGSIDE `error` so the op layer can attach `reasonCode`
+/// `GEAR_PARAM_OUT_OF_RANGE` and `evidence {param, value, min, max}` without
+/// re-parsing the message. The bounds are COST bounds — one B-spline is fitted
+/// per flank and the bore cut runs against `2·teeth` such faces, so
+/// `(teeth 400, sampleCount 1024)` is jointly a liveness kill while each value
+/// alone is harmless.
+struct GearParamBound {
+  std::string param;  ///< "teeth" | "sampleCount" | "height"
+  double value = 0.0;
+  double min = 0.0;
+  double max = 0.0;
+};
+
 struct GearBuildResult {
   bool ok = false;
   /// Populated on failure. A recoverable, human-facing reason naming the
   /// parameter at fault where one is identifiable — never a bare OCCT string.
   std::string error;
+  /// Set when `error` is a BOUNDS refusal (WP-I). Absent for every other
+  /// failure, including the in-range ones whose wording is unchanged.
+  std::optional<GearParamBound> out_of_range;
+  /// Set when the build stopped on the cancel token rather than failing.
+  bool cancelled = false;
   TopoDS_Shape shape;
   GearComputed computed;
 };
@@ -83,10 +105,16 @@ struct GearBuildResult {
 /// `frame.Direction()`, its centre is `frame.Location()`, and the body runs
 /// from that point along the axis for `height`.
 ///
-/// Every failure path is a graded refusal — an invalid parameter combination,
-/// a sampler domain error, a spline that will not interpolate, a wire that
-/// will not close, a boolean that fails. None of them returns a partial or
-/// null shape as though it were a result.
-GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame);
+/// Every failure path is a graded refusal — an out-of-range parameter, an
+/// invalid parameter combination, a sampler domain error, a spline that will
+/// not interpolate, a wire that will not close, a boolean that fails. None of
+/// them returns a partial or null shape as though it were a result.
+///
+/// `cancel` (optional) is polled ONCE PER TOOTH while the profile wire is
+/// assembled — the part whose cost scales with `teeth · sampleCount`. The bore
+/// boolean itself stays uninterruptible (recorded limit, SCHEMA §7.3). A
+/// cancelled build returns `ok=false`, `cancelled=true` and an empty shape.
+GearBuildResult build_gear_solid(const GearBuildSpec& spec, const gp_Ax2& frame,
+                                 const onecad::CancelToken* cancel = nullptr);
 
 }  // namespace onecad::ops::gear

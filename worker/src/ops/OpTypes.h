@@ -86,6 +86,15 @@ struct OpOutcome {
     // did not move (the common no-op case) and a `mate` that fell to
     // NeedsRepair (the frozen `placement` stands unchanged there).
     std::optional<nlohmann::json> mate_placement;
+    // Kernel-hardening WP-I (SCHEMA §7.2 `planStep.mateResolved`): set on EVERY
+    // `PlaceComponent` step whose `mate` resolved AutoBind against a CYLINDRICAL
+    // target (a cylinder face or a circle edge, mate kinds `concentric` /
+    // `concentricAndCoincident`) — `{axis, sidedness?}`, independent of whether
+    // the seat moved, so it is emitted alongside `mate_placement` and also on
+    // ticks that produce none. Absent on planar targets and on every other op:
+    // it is the evidence Rust adopts ONCE into a record that carries no frozen
+    // `mate.targetAxis`.
+    std::optional<nlohmann::json> mate_resolved;
 
     static OpOutcome ok() { return OpOutcome{}; }
     static OpOutcome fail(std::string code, std::string msg) {

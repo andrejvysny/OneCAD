@@ -314,6 +314,8 @@ fn repair_reason_token(item: &RepairItem) -> &'static str {
         RepairReason::LowConfidence => "low-confidence",
         RepairReason::OrdinalPermutation => "ordinal-permutation",
         RepairReason::LegacyReferenceFace => "legacyReferenceFace",
+        RepairReason::MateAxisReversed => "mateAxisReversed",
+        RepairReason::MateSeatOffFace => "mateSeatOffFace",
         RepairReason::Unknown => "unknown",
     }
 }

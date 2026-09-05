@@ -30,8 +30,11 @@
 #include <utility>
 #include <vector>
 
+#include <map>
+
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
+#include "ops/GearOp.h"
 #include "session/BodyStore.h"
 
 namespace onecad::session {
@@ -75,12 +78,26 @@ struct ScratchJob {
     // (D5) and so mis-flagged the shipped edit lane.
     bool from_zero_replay = false;
 
+    // The plan itself, `{ "ops": [...] }` — the shape `ops::gear_body_op_ids` and
+    // `ops::gear_body_infos` read (kernel-hardening WP-I). Carried here because
+    // SCHEMA §7.3's gear referenceability classifier is PLAN-DERIVED: a body is a
+    // gear body when `body_<opId>` names a `Gear` op of this plan (D1 makes the
+    // mapping total), so there is no per-body state to persist and the map is
+    // rebuilt on every replay. Empty ⇒ no body is treated as a gear body.
+    nlohmann::json plan = nlohmann::json::object();
+
     // The scratch body state (clone of live at fence time, mutated by ops).
     BodyStore bodies;
 
     // The scratch element-map partition (clone of live at fence time; rebound by
     // each op's OCCT history).
     elementmap::ElementMapPartition partition;
+
+    // SCHEMA §7.3 gear referenceability (WP-I): the session's gear-body map at
+    // fence time, i.e. the gear bodies this plan INHERITED. `plan` above covers
+    // the gear bodies this plan CREATES; a plan-step ref can name either, so
+    // both are consulted. Empty for a from-0 plan (D5 clones an empty base).
+    std::map<std::string, ops::GearBodyInfo> gear_bodies;
 
     // Sketches materialized by this plan's Sketch ops — raw Sketch op params keyed
     // by sketchId, in materialization order (a later op reads its profile from

@@ -15,11 +15,11 @@ use onecad_core::document::body::BodyMeta;
 use onecad_core::document::datum::DatumPlane;
 use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
-    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ChamferReferenceFace, ComponentSourceRef,
-    DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams, FrozenPlacement, HoleParams,
-    HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord,
-    PlaceComponentParams, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
-    HOLE_RESULT_POLICY_VERSION,
+    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ChamferReferenceFace, ComponentMate,
+    ComponentSourceRef, DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams,
+    FrozenPlacement, HoleParams, HoleType, KnownOperation, MateKind, MateSidedness,
+    OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord, PlaceComponentParams,
+    RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef, HOLE_RESULT_POLICY_VERSION,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -1514,6 +1514,168 @@ fn place_component_cannot_swap_to_an_unrelated_op_type() {
     assert!(
         err.to_string().contains("opType"),
         "PlaceComponent→Fillet: {err}"
+    );
+}
+
+// ── WP-I: the SCHEMA §9 `mateAxisReversed` repair ────────────────────────────
+
+/// A `PlaceComponent` doc whose record carries a mate of `kind`, frozen at
+/// `target_axis`/`flipped`.
+fn mated_component_doc(
+    kind: MateKind,
+    target_axis: Option<Vec3>,
+    flipped: bool,
+) -> DocumentSession {
+    let mut sess = place_component_doc();
+    let Operation::Known(KnownOperation::PlaceComponent(mut params)) = place_component_op() else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: BX(),
+                element: ElementId::new("el_target"),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        },
+        kind,
+        flipped,
+        self_frame: None,
+        target_axis,
+        target_sidedness: Some(MateSidedness::Hole),
+        extra: Default::default(),
+    });
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: Operation::Known(KnownOperation::PlaceComponent(params)),
+    })
+    .expect("author the mate");
+    sess
+}
+
+fn mate_of(sess: &DocumentSession) -> ComponentMate {
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    let Operation::Known(KnownOperation::PlaceComponent(p)) = &rec.op else {
+        panic!("not a PlaceComponent")
+    };
+    p.mate.clone().expect("the record carries a mate")
+}
+
+/// SCHEMA §9: `keepWorldDirection` toggles `flipped` — the ONE orientation bit —
+/// and BOTH branches re-freeze `targetAxis` to the resolved value, which is what
+/// makes the next regen a fixed point instead of re-raising the item.
+#[test]
+fn repair_mate_axis_rewrites_flipped_and_refreezes_the_axis() {
+    let resolved = Vec3::new_unchecked(0.0, 0.0, -1.0);
+    let frozen = Vec3::new_unchecked(0.0, 0.0, 1.0);
+
+    let mut keep = mated_component_doc(MateKind::Concentric, Some(frozen), false);
+    keep.apply(EditCommand::RepairMateAxis {
+        record: rid(1),
+        keep_world_direction: true,
+        resolved_axis: resolved,
+        resolved_sidedness: Some(MateSidedness::Pin),
+    })
+    .expect("keep-direction repair applies");
+    let mate = mate_of(&keep);
+    assert!(mate.flipped, "keeping the direction absorbs the reversal");
+    assert_eq!(mate.target_axis, Some(resolved), "the axis is re-frozen");
+    assert_eq!(mate.target_sidedness, Some(MateSidedness::Pin));
+
+    let mut follow = mated_component_doc(MateKind::ConcentricAndCoincident, Some(frozen), false);
+    follow
+        .apply(EditCommand::RepairMateAxis {
+            record: rid(1),
+            keep_world_direction: false,
+            resolved_axis: resolved,
+            resolved_sidedness: None,
+        })
+        .expect("follow-the-axis repair applies");
+    let mate = mate_of(&follow);
+    assert!(!mate.flipped, "following the axis leaves `flipped` alone");
+    assert_eq!(mate.target_axis, Some(resolved));
+    assert_eq!(
+        mate.target_sidedness,
+        Some(MateSidedness::Hole),
+        "absent evidence LEAVES the frozen sidedness alone rather than clearing it"
+    );
+}
+
+/// One undo step, like every other edit: the repair is a params rewrite, not a
+/// derived writeback, so undo must restore the mate exactly.
+#[test]
+fn repair_mate_axis_is_one_undo_step() {
+    let frozen = Vec3::new_unchecked(0.0, 0.0, 1.0);
+    let mut sess = mated_component_doc(MateKind::Concentric, Some(frozen), false);
+    let before = mate_of(&sess);
+    sess.apply(EditCommand::RepairMateAxis {
+        record: rid(1),
+        keep_world_direction: true,
+        resolved_axis: Vec3::new_unchecked(0.0, 0.0, -1.0),
+        resolved_sidedness: Some(MateSidedness::Pin),
+    })
+    .expect("repair applies");
+    assert_ne!(mate_of(&sess), before);
+    sess.undo().expect("undo");
+    assert_eq!(mate_of(&sess), before, "one undo restores the whole mate");
+    sess.redo().expect("redo");
+    assert!(mate_of(&sess).flipped);
+}
+
+/// A coincident mate seats on a PLANE's normal and has no axis to reverse, and a
+/// non-component record has no mate at all. Both are refused by name — writing
+/// evidence the re-seat never reads is worse than refusing.
+#[test]
+fn repair_mate_axis_refuses_a_coincident_mate_and_a_non_component_record() {
+    let mut coincident = mated_component_doc(MateKind::Coincident, None, false);
+    let err = coincident
+        .apply(EditCommand::RepairMateAxis {
+            record: rid(1),
+            keep_world_direction: true,
+            resolved_axis: Vec3::new_unchecked(0.0, 0.0, -1.0),
+            resolved_sidedness: None,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("concentric"),
+        "coincident refusal names the reason: {err}"
+    );
+    assert!(
+        !mate_of(&coincident).flipped && mate_of(&coincident).target_axis.is_none(),
+        "a rejected repair writes nothing"
+    );
+
+    let mut bare = place_component_doc();
+    let err = bare
+        .apply(EditCommand::RepairMateAxis {
+            record: rid(1),
+            keep_world_direction: true,
+            resolved_axis: Vec3::new_unchecked(0.0, 0.0, -1.0),
+            resolved_sidedness: None,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("no mate"),
+        "a component with no mate is refused: {err}"
+    );
+
+    let mut fillet = fillet_doc("e1");
+    let err = fillet
+        .apply(EditCommand::RepairMateAxis {
+            record: rid(1),
+            keep_world_direction: true,
+            resolved_axis: Vec3::new_unchecked(0.0, 0.0, -1.0),
+            resolved_sidedness: None,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not a PlaceComponent"),
+        "a non-component record is refused: {err}"
     );
 }
 

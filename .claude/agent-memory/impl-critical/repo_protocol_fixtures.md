@@ -29,3 +29,8 @@ ways that look like a worker bug.
   is not expected to replay them.
 - Rounds that need a nonzero solved double belong in a worker test, not the fixture: the house
   split is "the contract in the fixture, the numbers in `worker/tests/test_*.cpp`".
+- The harness binary is `worker/build/tools/harness/worker_harness`, NOT `worker/build/worker_harness`.
+  Run one by hand: `worker_harness --worker worker/build/onecad-worker --fixture <path>`; on a
+  mismatch it prints the matcher AND the raw response, which is the cheapest way to discover a
+  verb's actual result shape (expect a wrong value on purpose to dump it).
+- `CloseSession` answers `{"sessionClosed":true}`, not `{"sessionOpen":false}`.

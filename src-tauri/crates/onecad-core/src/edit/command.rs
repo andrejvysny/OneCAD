@@ -31,13 +31,13 @@ use serde::{Deserialize, Serialize};
 use crate::document::body::BodyMeta;
 use crate::document::datum::DatumPlane;
 use crate::document::modules::{ModuleId, ModuleState};
-use crate::document::record::{Operation, OperationRecord};
+use crate::document::record::{MateSidedness, Operation, OperationRecord};
 use crate::document::refs::{AxisRef, ElementRef, SketchRegionRef};
 use crate::document::variables::{Scalar, Variable};
 use crate::ids::{
     BodyId, ConstraintId, DatumPlaneId, ElementId, EntityId, RecordId, SketchId, VariableId,
 };
-use crate::math::Vec2;
+use crate::math::{Vec2, Vec3};
 use crate::sketch::{
     Constraint, ProjectedSource, Sketch, SketchAttachment, SketchEntity, SketchPlane,
 };
@@ -73,6 +73,39 @@ pub enum EditCommand {
         path: InputPath,
         /// The new reference (see [`InputRef`]).
         reference: InputRef,
+    },
+    /// Re-freeze a component mate's orientation evidence — the SCHEMA §9
+    /// `mateAxisReversed` repair (kernel-hardening WP-I).
+    ///
+    /// **Not a rebind.** The ladder already resolved; what is wrong is the
+    /// ORIENTATION the resolved face implies, and a cylindrical face carries no
+    /// intrinsic axial sign to decide it. So the user answers one question —
+    /// keep the direction the component points in today, or follow the target's
+    /// new axis — and this command writes that answer into the record:
+    /// `keep_world_direction` toggles `mate.flipped` (the only orientation bit
+    /// there has ever been; a second persisted sign would give one orientation
+    /// two encodings), and BOTH branches re-freeze `mate.target_axis` to
+    /// `resolved_axis` so the next regen is a fixed point.
+    ///
+    /// One undo step, validated like every other edit.
+    RepairMateAxis {
+        /// The `PlaceComponent` record whose mate halted.
+        record: RecordId,
+        /// `true` keeps the component pointing where it points today (the mate's
+        /// `flipped` bit is toggled to absorb the axis flip); `false` follows the
+        /// target's reversed axis and leaves `flipped` alone.
+        keep_world_direction: bool,
+        /// The target's CURRENT parametric axis — the §9 item's `resolvedAxis`,
+        /// echoed back by the client. Re-frozen into `mate.target_axis` on both
+        /// branches.
+        resolved_axis: Vec3,
+        /// The target's current sidedness — the §9 item's `resolvedSidedness`,
+        /// echoed back by the client. Present only when the worker could measure
+        /// it; `None` LEAVES the record's existing `mate.target_sidedness`
+        /// untouched rather than clearing it, because clearing would silently
+        /// disarm the pin/hole check this item exists to raise.
+        #[serde(default)]
+        resolved_sidedness: Option<MateSidedness>,
     },
     /// Remove an op from the timeline (C++ `RemoveOperationCommand`).
     RemoveOperation {
@@ -253,6 +286,7 @@ impl EditCommand {
             Self::AddOperation { .. } => "Add Operation",
             Self::UpdateOperationParams { .. } => "Update Operation",
             Self::EditOperationInput { .. } => "Re-profile Operation",
+            Self::RepairMateAxis { .. } => "Repair Mate Axis",
             Self::RemoveOperation { .. } => "Remove Operation",
             Self::SetRollback { .. } => "Rollback",
             Self::SetOperationSuppression { .. } => "Toggle Suppression",

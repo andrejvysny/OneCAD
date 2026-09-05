@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "ops/GearOp.h"
 #include "protocol/Envelope.h"
 #include "session/BodyStore.h"
 #include "session/ScratchJob.h"
@@ -56,6 +57,7 @@ struct FenceOutcome {
     nlohmann::json idempotent_result;                // when IdempotentPrepared
     BodyStore cloned_bodies;                         // when Ok
     elementmap::ElementMapPartition cloned_partition;  // when Ok
+    std::map<std::string, ops::GearBodyInfo> cloned_gear_bodies;  // when Ok (WP-I)
     std::uint64_t prepared_snapshot_id = 0;          // when Ok
 };
 
@@ -77,6 +79,11 @@ struct CheckpointState {
     BodyStore bodies;
     elementmap::ElementMapPartition partition;
     std::string history_prefix_hash;
+    // SCHEMA §7.3 gear referenceability (WP-I): the plan-derived gear-body map
+    // of the head this checkpoint froze. It rides the checkpoint for the same
+    // reason the partition does — a restore that dropped it would let a tooth
+    // face become bindable until the next publish.
+    std::map<std::string, ops::GearBodyInfo> gear_bodies;
 };
 
 // Outcome of RestoreCheckpoint.
@@ -172,6 +179,8 @@ public:
     // `published_state_at` so the snapshot fence and both stores are one read.
     BodyStore bodies_copy() const;
     elementmap::ElementMapPartition partition_copy() const;
+    // SCHEMA §7.3 gear referenceability (WP-I): the live head's gear-body map.
+    std::map<std::string, ops::GearBodyInfo> gear_bodies_copy() const;
     std::uint64_t current_snapshot_id() const;
 
     // Atomically fence an optional snapshot claim and copy bodies + partition.
@@ -213,6 +222,10 @@ private:
 
     BodyStore bodies_;                          // live published bodies (real TopoDS_Shape)
     elementmap::ElementMapPartition partition_; // live published element-map partition
+    // SCHEMA §7.3 gear referenceability (WP-I): body id → gear info for every
+    // live gear body, rebuilt at each AcceptPrepared from the ACCEPTED plan.
+    // `BindElementIds` consults it to refuse a tooth face by name.
+    std::map<std::string, ops::GearBodyInfo> gear_bodies_;
     SketchStore sketches_;                      // self-locked, shared with solver lane
     std::optional<ScratchJob> scratch_;         // the single prepared job
     std::uint64_t snapshot_counter_ = 0;        // monotonic prepared-snapshot ids
