@@ -149,6 +149,7 @@ void Session::open(std::string document_id, std::uint64_t document_revision,
     scratch_.reset();
     snapshot_counter_ = 0;
     checkpoints_.clear();
+    restored_base_.reset();  // §7.2: a fresh document holds no pending base
 }
 
 void Session::close() {
@@ -173,6 +174,7 @@ std::uint64_t Session::reset() {
     scratch_.reset();
     snapshot_counter_ = 0;
     checkpoints_.clear();  // in-session cache dropped on restart (Invariant 7 replay)
+    restored_base_.reset();  // §7.2: ResetSession clears the pending base too
     worker_epoch_ += 1;  // Rust echoes the new epoch in subsequent requests.
     return worker_epoch_;
 }
@@ -199,6 +201,7 @@ WorkerHead Session::head() const {
     h.snapshot_id = snapshot_id_;
     h.history_prefix_hash = history_prefix_hash_;
     h.has_scratch = scratch_.has_value();
+    h.has_restored_base = restored_base_.has_value();
     return h;
 }
 
@@ -207,10 +210,16 @@ bool Session::has_scratch() const {
     return scratch_.has_value();
 }
 
+bool Session::has_restored_base() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return restored_base_.has_value();
+}
+
 FenceOutcome Session::fence_and_clone(std::uint64_t job_id,
                                       std::uint64_t /*document_revision*/,  // D4: advisory, not fenced
                                       std::uint64_t worker_epoch,
-                                      const std::string& expected_base_hash) {
+                                      const std::string& expected_base_hash,
+                                      const BaseCheckpointRef* base) {
     std::lock_guard<std::mutex> lk(mu_);
     FenceOutcome out;
 
@@ -250,14 +259,72 @@ FenceOutcome Session::fence_and_clone(std::uint64_t job_id,
         return out;
     }
 
+    // WP-H, the FOURTH fence case (SCHEMA §7.2 `baseCheckpoint`): the plan names
+    // the checkpoint a preceding RestoreCheckpoint parked in the restored-base
+    // slot. `expectedBaseHash` is then fenced against THAT base's hash — not the
+    // head's, which is deliberately still the pre-restore head — and the scratch is
+    // cloned from the base. The slot is KEPT until `accept_prepared` publishes the
+    // scratch wholesale (so `hasScratch` and `hasRestoredBase` are both true in
+    // between); a rejection here is a failed prepare and leaves the slot alone, for
+    // the next plan to decide.
+    if (base != nullptr) {
+        // A present `baseCheckpoint` MUST name a checkpoint. An empty id inside a
+        // FENCE would bind whatever happens to sit at that step — "matches
+        // anything" is the opposite of what a fence is for.
+        if (base->checkpoint_id.empty()) {
+            out.status = FenceOutcome::Status::Error;
+            out.error = protocol_error(
+                "ExecutePlan: baseCheckpoint requires a non-empty checkpointId",
+                nlohmann::json{{"requestedStepIndex", base->step_index}});
+            return out;
+        }
+        const bool id_matches =
+            restored_base_.has_value() && restored_base_->checkpoint_id == base->checkpoint_id;
+        if (!restored_base_.has_value() || restored_base_->step != base->step_index ||
+            !id_matches) {
+            out.status = FenceOutcome::Status::Error;
+            out.error = protocol_error(
+                "ExecutePlan: baseCheckpoint " + base->checkpoint_id +
+                    " is not the restored base",
+                nlohmann::json{
+                    {"requestedCheckpointId", base->checkpoint_id},
+                    {"requestedStepIndex", base->step_index},
+                    {"hasRestoredBase", restored_base_.has_value()},
+                    {"restoredCheckpointId", restored_base_.has_value()
+                                                 ? nlohmann::json(restored_base_->checkpoint_id)
+                                                 : nlohmann::json(nullptr)},
+                    {"restoredStepIndex", restored_base_.has_value()
+                                              ? nlohmann::json(restored_base_->step)
+                                              : nlohmann::json(nullptr)}});
+            return out;
+        }
+        if (expected_base_hash != restored_base_->history_prefix_hash) {
+            out.status = FenceOutcome::Status::Error;
+            out.error = protocol_error(
+                "ExecutePlan: expectedBaseHash mismatch against the restored base",
+                nlohmann::json{{"expected", expected_base_hash},
+                               {"actual", restored_base_->history_prefix_hash}});
+            return out;
+        }
+        out.status = FenceOutcome::Status::Ok;
+        out.cloned_bodies = restored_base_->state.bodies;          // value copy of the base
+        out.cloned_partition = restored_base_->state.partition;    // value copy of the base
+        out.cloned_gear_bodies = restored_base_->state.gear_bodies;
+        out.prepared_snapshot_id = ++snapshot_counter_;
+        return out;
+    }
+
+    // No `baseCheckpoint`: DROP any pending restored base before this plan is
+    // fenced (§7.2), so an abandoned restore can never leak into a later plan.
+    // Rejections above are failed prepares and deliberately reach neither this
+    // line nor the fence below.
+    restored_base_.reset();
+
     // Fencing: expectedBaseHash must equal the head's historyPrefixHash — EXCEPT for
     // a from-0 plan (D5). A from-0 plan is one with NO base checkpoint AND
-    // expectedBaseHash == the empty-prefix anchor (kEmptyPrefixHash).
-    //
-    // `ExecutePlan` does not read `baseCheckpoint` — a restore is a SEPARATE verb
-    // (io/Checkpoint.cpp `RestoreCheckpoint`, which Rust calls before the plan) —
-    // so "no base checkpoint" is not something this function can observe and a
-    // from-0 plan is identified here purely by its empty-anchor expectedBaseHash.
+    // expectedBaseHash == the empty-prefix anchor (kEmptyPrefixHash) — and with the
+    // `baseCheckpoint` case handled above, "no base checkpoint" is now something
+    // this function OBSERVES rather than infers.
     // (An earlier comment claimed checkpoints were UNSUPPORTED in V1. They are not:
     // they are plumbed end to end, and a plan whose restore failed arrives here as
     // an ordinary from-0 plan carrying `checkpointFallbackReplay` — see §7.2.)
@@ -355,6 +422,16 @@ AcceptOutcome Session::accept_prepared(std::uint64_t job_id,
     out.ok = true;
     out.snapshot_id = snapshot_id_;
     out.document_revision = document_revision_;
+    // WP-H (§7.2): the publish above replaced the head wholesale, so the restored
+    // base THIS plan was built on has done its job. It is dropped only if the slot
+    // still holds that same checkpoint — a restore that landed after this plan was
+    // prepared belongs to the NEXT plan (§7.1 lifetime). A plan that used no base
+    // found the slot already empty at fence time.
+    if (scratch_->from_restored_base && restored_base_.has_value() &&
+        restored_base_->step == scratch_->base_checkpoint_step &&
+        restored_base_->checkpoint_id == scratch_->base_checkpoint_id) {
+        restored_base_.reset();
+    }
     scratch_.reset();
     return out;
 }
@@ -446,9 +523,11 @@ CheckpointState Session::save_checkpoint(std::uint64_t step) {
     return st;
 }
 
-RestoreOutcome Session::restore_checkpoint(std::uint64_t step, const std::string& expected_hash) {
+RestoreOutcome Session::restore_checkpoint(std::uint64_t step, const std::string& expected_hash,
+                                           const std::string& checkpoint_id) {
     std::lock_guard<std::mutex> lk(mu_);
     RestoreOutcome out;
+    out.snapshot_id = snapshot_id_;  // WP-H: the head, unchanged, on every path
     auto it = checkpoints_.find(step);
     if (it == checkpoints_.end()) {
         out.restored = false;  // absent (e.g. post-restart) ⇒ Rust replays from 0
@@ -462,15 +541,53 @@ RestoreOutcome Session::restore_checkpoint(std::uint64_t step, const std::string
         out.drift_detected = true;
         return out;
     }
-    // Install the checkpoint state as the head (bump snapshotId, set the opaque hash).
-    bodies_ = st.bodies;
-    partition_ = st.partition;
-    gear_bodies_ = st.gear_bodies;
-    history_prefix_hash_ = st.history_prefix_hash;
-    snapshot_id_ = ++snapshot_counter_;
+    // WP-H (§7.7): install into the RESTORED-BASE SLOT, not the head. `bodies_`,
+    // `partition_`, `gear_bodies_`, `history_prefix_hash_` and `snapshot_id_` are
+    // all left exactly as they were, so an unfenced Tessellate or export between
+    // this restore and the plan that consumes it still serves the head — the
+    // rolled-back geometry is reachable only through `baseCheckpoint` (§7.2).
+    // A superseding restore replaces the slot; the plan names which one it wants.
+    restored_base_ = RestoredBase{st, checkpoint_id, step, st.history_prefix_hash};
     out.restored = true;
-    out.snapshot_id = snapshot_id_;
     return out;
+}
+
+std::optional<protocol::Envelope> stale_snapshot_fence(const Session& session,
+                                                       const protocol::Envelope& req,
+                                                       const char* verb) {
+    // SCHEMA §7.6/§7.8 (WP-H): the fence is OPTIONAL. ABSENT ⇒ the live head and a
+    // request byte-identical to every pre-WP-H one. PRESENT and different ⇒
+    // STALE_PREVIEW, in the shape `PrepareOffsetFace` established (structured code
+    // + {requested, head} detail, so Rust never has to sniff the message text).
+    //
+    // PRESENT but MALFORMED (a float, a negative, a string, a null) ⇒
+    // PROTOCOL_ERROR. §4's tolerate-malformed-optional rule does NOT apply inside
+    // a fence: treating it as absent would silently UNFENCE a write, which is the
+    // one outcome the caller was asking this verb to prevent.
+    if (!req.args.is_object() || !req.args.contains("snapshotId")) return std::nullopt;
+    if (!req.args["snapshotId"].is_number_unsigned()) {
+        return protocol::Envelope::error_response(
+            req.id,
+            ErrorInfo{"PROTOCOL_ERROR",
+                      std::string(verb) + ": snapshotId must be a u64 when present",
+                      /*retriable=*/false,
+                      nlohmann::json{{"snapshotId", req.args["snapshotId"]}}});
+    }
+    const std::uint64_t requested = req.args["snapshotId"].get<std::uint64_t>();
+    // Reading the head here and copying the bodies a few lines later in the caller
+    // is not a TOCTOU: the only writer of the head is `AcceptPrepared`, and it —
+    // like every verb fenced by this helper — runs on the KERNEL lane, which is
+    // single-threaded by construction (Dispatcher.h). The status thread never
+    // publishes and the solver lane never touches the head.
+    const std::uint64_t head = session.current_snapshot_id();
+    if (requested == head) return std::nullopt;
+    return protocol::Envelope::error_response(
+        req.id,
+        ErrorInfo{"STALE_PREVIEW",
+                  std::string(verb) + ": request is against snapshot " +
+                      std::to_string(requested) + "; head is " + std::to_string(head),
+                  /*retriable=*/false,
+                  nlohmann::json{{"requested", requested}, {"head", head}}});
 }
 
 }  // namespace onecad::session

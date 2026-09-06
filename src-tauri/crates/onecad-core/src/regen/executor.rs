@@ -439,7 +439,14 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         let edited_from = request.edited_from;
         let had_checkpoint = request.base_checkpoint.is_some();
 
-        match self
+        // SCHEMA §7.2 Rust-side guarantee (WP-H): armed for the whole dispatch
+        // window and disarmed on every NORMAL return below — each of which has
+        // already accepted or discarded — so it fires ONLY when this future is
+        // dropped mid-flight. Both attempts share `job`, so one guard covers the
+        // F12 replay-from-0 retry too.
+        let mut guard = DiscardOnDrop::armed(&self.engine, job);
+
+        let outcome = match self
             .run_attempt(request, session, gate, cancel, publisher, had_checkpoint)
             .await
         {
@@ -467,6 +474,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                     // as a PLAN, which is exactly why the worker cannot infer it.
                     .as_checkpoint_fallback_replay();
                 if from_zero.start_step().is_none() {
+                    guard.disarm(); // the failed attempt prepared nothing to discard
                     return Outcome::NoOp;
                 }
                 match self
@@ -480,7 +488,9 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                     }),
                 }
             }
-        }
+        };
+        guard.disarm();
+        outcome
     }
 
     /// One attempt at driving a plan. Returns [`AttemptOutcome::RetryFromZero`]
@@ -903,6 +913,58 @@ impl<E: GeometryEngine> RegenExecutor<E> {
 
 /// The bounded-drain backstop for the cancel path (review F8).
 const DRAIN_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The SCHEMA §7.2 Rust-side `DiscardPrepared` guarantee (kernel-hardening WP-H).
+///
+/// Every ordinary terminal already accepts or discards, but a DROPPED driver —
+/// a cancelled task, a superseded edit, a panic — resolves nothing: the worker
+/// finishes the plan it was already running and installs the scratch, and because
+/// a worker holds at most one prepared job, every later `ExecutePlan` is refused
+/// for the rest of the session (measured red-first 2026-09-05,
+/// `dropped_prepared_future_does_not_strand_scratch`).
+///
+/// The guard borrows the executor's engine, so it costs nothing to arm and cannot
+/// outlive the run it guards. The discard it issues on drop is DETACHED — `Drop`
+/// cannot await — and best-effort: it lands on the worker's kernel lane behind the
+/// `ExecutePlan` still in flight, which is exactly when the scratch exists.
+///
+/// **It is armed BEFORE dispatch, deliberately.** A drop in the window between
+/// arming and the first frame issues a `DiscardPrepared` for a job the worker
+/// never prepared, which the worker answers `discarded: true` having found
+/// nothing (`Session::discard_prepared` returns false for an unknown jobId; the
+/// verb is idempotent by §7.2's "session unchanged"). Arming later — at the first
+/// `planStep`, say — would trade that harmless no-op for a real hole: the window
+/// it closes is precisely the one where the request is already ON THE WIRE but no
+/// step has come back, which is where a cancelled task most often lands. A
+/// spurious discard costs one round trip; a missed one costs the session.
+struct DiscardOnDrop<'a, E: GeometryEngine> {
+    engine: &'a E,
+    job: JobId,
+    armed: bool,
+}
+
+impl<'a, E: GeometryEngine> DiscardOnDrop<'a, E> {
+    fn armed(engine: &'a E, job: JobId) -> Self {
+        Self {
+            engine,
+            job,
+            armed: true,
+        }
+    }
+
+    /// Disarms: the run reached a terminal that already settled the scratch.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<E: GeometryEngine> Drop for DiscardOnDrop<'_, E> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.engine.discard_prepared_detached(self.job);
+        }
+    }
+}
 
 /// The result of one drive attempt (see [`RegenExecutor::run_attempt`]).
 enum AttemptOutcome {

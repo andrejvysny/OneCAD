@@ -160,12 +160,37 @@ pub async fn resolve_face_colors(
     omitted
 }
 
+/// The head snapshot a §7.8 writer should be fenced on (WP-H), or `None` for an
+/// unfenced live-head export.
+///
+/// [`SnapshotId(0)`](SnapshotId) is the CLEAR publish's "no worker snapshot"
+/// sentinel — Rust published a body-less snapshot without an `AcceptPrepared`, so
+/// there is no worker head to name and fencing on the zero would refuse every
+/// export. Skipped here for exactly the reason
+/// `DocumentRuntime::gate_stale_pick` skips it.
+#[must_use]
+pub fn export_fence(rt: &DocumentRuntime) -> Option<SnapshotId> {
+    rt.head_snapshot_id().filter(|s| *s != SnapshotId(0))
+}
+
 /// Exports bodies to a mesh/BREP file on disk. `path` is the target file, `bodies`
 /// the body ids to write. Object-safe so the app can store it as a trait object.
 ///
 /// One trait for all three formats (M5a widened the M4 STEP-only seam): a document
 /// has exactly one worker, so a single `Arc<dyn GeometryExporter>` routes every
 /// export to it.
+///
+/// Every writer takes an OPTIONAL `snapshot` — the WP-H writer fence (SCHEMA
+/// §7.6/§7.8). `Some(head)` says "write THIS snapshot": a worker whose head has
+/// moved refuses `STALE_PREVIEW` with **nothing written**, so a stale export never
+/// leaves a half-truthful file on disk. That refusal is surfaced to the caller as
+/// the `stalePreview` [`ApiError`](crate::error::ApiError) kind and is **never
+/// retried at the fresh head**: every writer's arguments were derived from the
+/// snapshot it named — `ExportStep`'s `faceColors` are TopoKeys resolved against
+/// it, `ExportGeometry`'s single-solid invariant was checked on it — so only the
+/// command layer can re-derive them. `None` is the unfenced live-head export,
+/// byte-identical to the pre-WP-H request — used where the caller has no snapshot
+/// to name.
 #[async_trait]
 pub trait GeometryExporter: Send + Sync {
     /// Writes `bodies` to `path` as STEP using the `schema` (e.g. `"AP242DIS"`),
@@ -179,6 +204,7 @@ pub trait GeometryExporter: Send + Sync {
         bodies: &[BodyId],
         schema: &str,
         attributes: &StepExportAttributes,
+        snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError>;
 
     /// Writes `bodies` to `path` as STL (binary when `binary`, else ASCII), meshed
@@ -192,14 +218,20 @@ pub trait GeometryExporter: Send + Sync {
         bodies: &[BodyId],
         binary: bool,
         lod: &str,
+        snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError>;
 
     /// Writes `bodies` to `path` as ASCII OBJ, meshed at `lod` (SCHEMA §7.8).
     ///
     /// # Errors
     /// [`EngineError`] on a disconnected worker or a worker-side export failure.
-    async fn export_obj(&self, path: &str, bodies: &[BodyId], lod: &str)
-        -> Result<(), EngineError>;
+    async fn export_obj(
+        &self,
+        path: &str,
+        bodies: &[BodyId],
+        lod: &str,
+        snapshot: Option<SnapshotId>,
+    ) -> Result<(), EngineError>;
 
     /// Bakes `bodies` into a §7.3 REPLAY codec (`"brep"` / `"xbf"`) at `path`
     /// (SCHEMA §7.8 `ExportGeometry`), reporting the codec + format version the
@@ -219,6 +251,7 @@ pub trait GeometryExporter: Send + Sync {
         bodies: &[BodyId],
         codec: &str,
         union_solids: bool,
+        snapshot: Option<SnapshotId>,
     ) -> Result<BakedGeometry, EngineError>;
 
     /// `ExtractPrismProfile` (SCHEMA §7.8) — decides whether `body` is a prism
@@ -254,11 +287,12 @@ impl GeometryExporter for WorkerManager {
         bodies: &[BodyId],
         schema: &str,
         attributes: &StepExportAttributes,
+        snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError> {
         // Inherent `WorkerManager::export_step` (SCHEMA §7.8 passthrough) wins path
         // resolution over this trait method; it returns the bytes written, which the
         // app command does not surface.
-        WorkerManager::export_step(self, path, bodies, schema, attributes)
+        WorkerManager::export_step(self, path, bodies, schema, attributes, snapshot)
             .await
             .map(|_bytes_written| ())
     }
@@ -269,8 +303,9 @@ impl GeometryExporter for WorkerManager {
         bodies: &[BodyId],
         binary: bool,
         lod: &str,
+        snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError> {
-        WorkerManager::export_stl(self, path, bodies, binary, lod)
+        WorkerManager::export_stl(self, path, bodies, binary, lod, snapshot)
             .await
             .map(|_written| ())
     }
@@ -280,8 +315,9 @@ impl GeometryExporter for WorkerManager {
         path: &str,
         bodies: &[BodyId],
         lod: &str,
+        snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError> {
-        WorkerManager::export_obj(self, path, bodies, lod)
+        WorkerManager::export_obj(self, path, bodies, lod, snapshot)
             .await
             .map(|_bytes_written| ())
     }
@@ -292,8 +328,9 @@ impl GeometryExporter for WorkerManager {
         bodies: &[BodyId],
         codec: &str,
         union_solids: bool,
+        snapshot: Option<SnapshotId>,
     ) -> Result<BakedGeometry, EngineError> {
-        WorkerManager::export_geometry(self, path, bodies, codec, union_solids).await
+        WorkerManager::export_geometry(self, path, bodies, codec, union_solids, snapshot).await
     }
 
     async fn extract_prism_profile(
@@ -315,6 +352,7 @@ impl GeometryExporter for PendingBackend {
         _bodies: &[BodyId],
         _schema: &str,
         _attributes: &StepExportAttributes,
+        _snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError> {
         Err(not_ready("STEP"))
     }
@@ -325,6 +363,7 @@ impl GeometryExporter for PendingBackend {
         _bodies: &[BodyId],
         _binary: bool,
         _lod: &str,
+        _snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError> {
         Err(not_ready("STL"))
     }
@@ -334,6 +373,7 @@ impl GeometryExporter for PendingBackend {
         _path: &str,
         _bodies: &[BodyId],
         _lod: &str,
+        _snapshot: Option<SnapshotId>,
     ) -> Result<(), EngineError> {
         Err(not_ready("OBJ"))
     }
@@ -344,6 +384,7 @@ impl GeometryExporter for PendingBackend {
         _bodies: &[BodyId],
         _codec: &str,
         _union_solids: bool,
+        _snapshot: Option<SnapshotId>,
     ) -> Result<BakedGeometry, EngineError> {
         Err(not_ready("component geometry"))
     }

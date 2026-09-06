@@ -25,6 +25,10 @@ diagnostics silently rewrites the user-visible failure message.
 - A test that asserts an Ok-step diagnostic must capture `HandlerContext::emit`
   (`HandlerContext ctx{tok, [](int){}, [&](Envelope& f){ ... }}`); the event payload is in
   `Envelope::result`, the name in `event_name`, the step in `step_index`.
+- The ONE exception (WP-H, 2026-09-05): the `ARTIFACT_TESSELLATE_FAILED` warning is appended
+  to `job.per_step.back().diagnostics` AFTER every planStep has been emitted, so it reaches
+  Rust in the terminal's `perStepResults[last].diagnostics` and NOT in any `planStep` event.
+  Assert it on the terminal resp, not on a captured emit.
 - `PreviewOp` reaches ops via `execute_candidate_op`, so preview and commit share every op
   executor and therefore `ops::build_profile_face` — a resolution change is automatically
   identical in both lanes; there is nothing extra to wire.

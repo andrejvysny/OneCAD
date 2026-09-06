@@ -1,0 +1,51 @@
+# CANONICAL cross-track fixture (SCHEMA §13) — the OPTIONAL reader snapshot fence
+# added by kernel-hardening WP-H (§7.6 Tessellate, §7.8 Export*).
+#
+# Three rounds per verb, and the ORDER is the contract:
+#   * `snapshotId` == the head          -> answered exactly as before;
+#   * `snapshotId` != the head          -> `STALE_PREVIEW`, head untouched, and for
+#                                          a writer NOTHING is written;
+#   * `snapshotId` ABSENT               -> the pre-WP-H live-head path, byte-identical.
+#   * `snapshotId` present but MALFORMED (a string, a float, a negative) ->
+#                                          `PROTOCOL_ERROR`. §4's tolerate-malformed
+#                                          rule does NOT apply inside a fence: reading
+#                                          it as absent would silently UNFENCE a write
+#                                          (adversarial review 2026-09-05).
+# Rust's mesh cache sends the snapshot it is meshing FOR and, on `STALE_PREVIEW`,
+# re-reads the head once and re-issues (it never blanks the cache on a stale answer).
+#
+# What this file CANNOT assert: that the refused export left no file on disk — the
+# harness only sees frames. That half is pinned by the `restored_base` ctest
+# (worker/tests/test_restored_base.cpp), which calls the export handler in-process
+# and stats the path.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_fence","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":70,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"params":{"sketchId":"sk1","distance":25.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":70}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":70,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":70,"result":{"planPrepared":true,"preparedSnapshotId":1,"stoppedReason":"completed"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":70,"documentRevision":1,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":70,"result":{"accepted":true,"snapshotId":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"Tessellate","args":{"bodyIds":"all","lod":"coarse","includeEdges":true,"snapshotId":1}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"meshes":[{"bodyId":"body_op1","format":"MESH1","lod":"coarse","snapshotId":1,"bin":"mesh:body_op1","sha256":"$present","triangleCount":"$present"}]}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"Tessellate","args":{"bodyIds":"all","lod":"coarse","includeEdges":true,"snapshotId":99}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"Tessellate","args":{"bodyIds":"all","lod":"coarse","includeEdges":true}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"meshes":[{"bodyId":"body_op1","format":"MESH1","snapshotId":1}]}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"ExportStl","args":{"path":"/tmp/onecad_fixture_stale_fence.stl","bodyIds":["body_op1"],"binary":true,"lod":"coarse","snapshotId":99}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"ExportObj","args":{"path":"/tmp/onecad_fixture_stale_fence.obj","bodyIds":["body_op1"],"lod":"coarse","snapshotId":99}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"ExportGeometry","args":{"path":"/tmp/onecad_fixture_stale_fence.brep","bodyIds":["body_op1"],"codec":"brep","union":false,"snapshotId":99}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"ExportStep","args":{"path":"/tmp/onecad_fixture_stale_fence.step","bodyIds":["body_op1"],"schema":"AP214IS","snapshotId":99}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"ExportStl","args":{"path":"/tmp/onecad_fixture_stale_fence.stl","bodyIds":["body_op1"],"binary":true,"lod":"coarse","snapshotId":1}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"written":true}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"Tessellate","args":{"bodyIds":"all","lod":"coarse","snapshotId":"1"}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":false,"error":{"code":"PROTOCOL_ERROR","retriable":false}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"ExportStl","args":{"path":"/tmp/onecad_fixture_malformed_fence.stl","bodyIds":["body_op1"],"binary":true,"lod":"coarse","snapshotId":1.5}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":false,"error":{"code":"PROTOCOL_ERROR","retriable":false}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"goodbye":true}}}

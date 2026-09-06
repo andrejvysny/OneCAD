@@ -746,6 +746,7 @@ async fn m2_gate_full_slice() {
             &[body],
             "AP214IS",
             &Default::default(),
+            None, // unfenced live-head export (SCHEMA §7.8)
         )
         .await
         .expect("STEP 7: ExportStep");

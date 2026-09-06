@@ -905,6 +905,12 @@ impl GeometryEngine for AdoptingEngine {
     async fn discard_prepared(&self, job_id: JobId) -> Result<(), EngineError> {
         self.inner.discard_prepared(job_id).await
     }
+    /// Forwarded, not defaulted: this wrapper is what the regen path actually
+    /// holds, so swallowing the §7.2 Drop guarantee here would silently disable it
+    /// (`AdoptingEngine` adds body-id adoption, never lifecycle policy).
+    fn discard_prepared_detached(&self, job_id: JobId) {
+        self.inner.discard_prepared_detached(job_id);
+    }
     async fn get_worker_head(&self) -> Result<WorkerHead, EngineError> {
         self.inner.get_worker_head().await
     }

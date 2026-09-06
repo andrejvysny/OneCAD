@@ -55,11 +55,11 @@ pub use checkpoint::{
 pub use engine::{
     mint_element_ids, AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector,
     Diagnostic, ElementBinding, ElementMapDelta, ElementMapEntry, EngineError, Fencing,
-    GeometryEngine, MeshHandle, OpFailureCode, OpenSessionRequest, Pick, PlanArtifacts, PlanEvent,
-    PlanPrepared, PlanRequest, PlanStepEvent, PlannedOp, PolicyVersions, PreparedMeshRef,
-    RefResolution, ResolveOutcome, ResolveRef, ResolveRequest, RestoreRequest, SessionMode,
-    Severity, Signature, StepResult, StepSignatures, StepStatus, StoppedReason, TessellateRequest,
-    TessellateResult, TessellateSpec, WorkerElementEvidence, WorkerHead,
+    GeometryEngine, InflightJob, MeshHandle, OpFailureCode, OpenSessionRequest, Pick,
+    PlanArtifacts, PlanEvent, PlanPrepared, PlanRequest, PlanStepEvent, PlannedOp, PolicyVersions,
+    PreparedMeshRef, RefResolution, ResolveOutcome, ResolveRef, ResolveRequest, RestoreRequest,
+    SessionMode, Severity, Signature, StepResult, StepSignatures, StepStatus, StoppedReason,
+    TessellateRequest, TessellateResult, TessellateSpec, WorkerElementEvidence, WorkerHead,
 };
 pub use executor::{CancelToken, MeshSink, Outcome, RegenExecutor, RegenSession, RevisionGate};
 pub use planner::{

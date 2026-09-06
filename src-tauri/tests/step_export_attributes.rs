@@ -652,6 +652,7 @@ async fn an_authored_name_and_face_colour_survive_reopen_and_step_export() {
         &bodies,
         "AP242DIS",
         &attributes,
+        None, // unfenced live-head export (SCHEMA §7.8)
     )
     .await
     .expect("ExportStep");
@@ -767,6 +768,7 @@ async fn an_unresolvable_authored_face_colour_is_omitted_from_the_export() {
         &bodies,
         "AP242DIS",
         &attributes,
+        None, // unfenced live-head export (SCHEMA §7.8)
     )
     .await
     .expect("ExportStep still succeeds");
@@ -785,6 +787,7 @@ async fn an_unresolvable_authored_face_colour_is_omitted_from_the_export() {
 
 /// A document with nothing authored produces the pre-DI-5 request unchanged, so the
 /// new fields are genuinely additive rather than "always present, sometimes empty".
+/// The WP-H `snapshotId` fence is held to the same rule: absent unless asked for.
 #[test]
 fn an_attribute_less_export_emits_the_pre_di5_args() {
     let args = onecad_lib::worker::wire::export_step_args(
@@ -792,11 +795,25 @@ fn an_attribute_less_export_emits_the_pre_di5_args() {
         &[BodyId(Uuid::from_u128(1))],
         "AP242DIS",
         &StepExportAttributes::default(),
+        None,
     );
     let obj = args.as_object().expect("args is an object");
     assert_eq!(
         obj.keys().collect::<Vec<_>>(),
         vec!["bodyIds", "path", "schema"],
-        "no empty bodyNames/bodyColors/faceColors may be emitted"
+        "no empty bodyNames/bodyColors/faceColors/snapshotId may be emitted"
+    );
+
+    let fenced = onecad_lib::worker::wire::export_step_args(
+        "/tmp/x.step",
+        &[BodyId(Uuid::from_u128(1))],
+        "AP242DIS",
+        &StepExportAttributes::default(),
+        Some(onecad_core::ids::SnapshotId(5012)),
+    );
+    assert_eq!(
+        fenced.get("snapshotId").and_then(serde_json::Value::as_u64),
+        Some(5012),
+        "a fenced export names the snapshot it is writing (SCHEMA §7.8)"
     );
 }

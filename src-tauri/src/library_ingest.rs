@@ -834,8 +834,22 @@ async fn save_embedded(
     let scratch = scratch_dir(&part.id)?;
     let geometry_path = scratch.join("geometry.xbf");
     let exporter: Arc<dyn GeometryExporter> = Arc::new(worker.clone());
+    // WP-H fence (SCHEMA §7.8): the head the fuse above published is the one this
+    // package is baked from. A head that moved in between would vendor geometry
+    // nothing verified — refused, with no file written.
+    let fence = runtime
+        .lock()
+        .await
+        .as_ref()
+        .and_then(crate::export::export_fence);
     let baked = exporter
-        .export_geometry(&geometry_path.to_string_lossy(), &[body], "xbf", false)
+        .export_geometry(
+            &geometry_path.to_string_lossy(),
+            &[body],
+            "xbf",
+            false,
+            fence,
+        )
         .await
         .map_err(ApiError::from);
     let saved = match baked {

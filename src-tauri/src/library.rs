@@ -1086,6 +1086,10 @@ async fn replay_and_bake(
         &[*body],
         "xbf",
         false,
+        // WP-H fence (SCHEMA §7.8): the bake writes the head the regen above just
+        // published. A head that moved under it would bake a component out of
+        // geometry the caller never validated — refused, not silently written.
+        crate::export::export_fence(&rt),
     )
     .await?;
     if baked.solid_count != 1 {
@@ -1776,7 +1780,10 @@ pub async fn save_as_component_at(
     // Freeze the document under the runtime lock, write it outside — the same
     // split `save_document` uses, for the same reason (serialization must not
     // block an edit).
-    let (payload, variable_names) = {
+    // `fence` is read in the SAME lock acquisition that validated `body` against the
+    // head, so the bake below names the snapshot this component was checked on
+    // (WP-H, SCHEMA §7.8) — a head that moves before the bake is a refusal.
+    let (payload, variable_names, fence) = {
         let mut guard = runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -1787,12 +1794,14 @@ pub async fn save_as_component_at(
             )));
         }
         let variable_names: Vec<String> = rt.variables().iter().map(|v| v.name.clone()).collect();
+        let fence = crate::export::export_fence(rt);
         (
             rt.build_save_payload(
                 crate::api::save_meta(),
                 crate::document_runtime::SaveCaches::none(),
             ),
             variable_names,
+            fence,
         )
     };
 
@@ -1831,6 +1840,7 @@ pub async fn save_as_component_at(
             &[body],
             "xbf",
             union_solids,
+            fence,
         )
         .await?;
     if baked.solid_count != 1 {

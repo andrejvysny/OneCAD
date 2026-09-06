@@ -1,9 +1,15 @@
 // test_wp6_checkpoint.cpp — M5a checkpoints (SaveCheckpoint / RestoreCheckpoint,
 // SCHEMA §7.7). Build + publish a box at step 1, SaveCheckpoint(1) → artifacts +
 // signatures + BinTools blobs in the resp tail. Then MUTATE the head (a second regen
-// producing a different body), RestoreCheckpoint(1) → the head rolls back to the box,
-// and its geometry signature is IDENTICAL to the checkpoint's (BinTools round-trips
-// exactly; determinism). An absent step ⇒ restored:false (Rust would replay from 0).
+// producing a different body) and RestoreCheckpoint(1).
+//
+// Since kernel-hardening WP-H the restore installs the checkpoint into the
+// RESTORED-BASE SLOT and the head is left ALONE — that is the point of the slot
+// (§7.7): an unfenced reader between the restore and the plan that names it in
+// `baseCheckpoint` must still see the head. So what this file asserts of the
+// restore is `restored:true`, no drift, an UNCHANGED head, and `hasRestoredBase`;
+// the base's contents and the plan that consumes them are test_restored_base.cpp.
+// An absent step ⇒ restored:false (Rust would replay from 0).
 // No framework: exit code == failure count.
 #include <cstdio>
 #include <string>
@@ -87,8 +93,9 @@ int main() {
     build_box(s, 20, 20, 20);  // s head is now the big box (from-0 replace)
     check(onecad::session::geometry_signature(s.bodies_copy()) == big_sig, "checkpoint: head mutated");
 
-    // Restore the step-1 checkpoint: the head rolls back to the ORIGINAL box.
+    // Restore the step-1 checkpoint: it is parked as a BASE and the head stays put.
     const std::string ckpt_hash = save.result.value("historyPrefixHash", std::string(""));
+    const std::uint64_t head_before = s.current_snapshot_id();
     Envelope restore = onecad::io::handle_restore_checkpoint(
         s, Envelope::request(3, "RestoreCheckpoint",
                              json{{"stepIndex", 1}, {"expectedHistoryPrefixHash", ckpt_hash},
@@ -96,8 +103,14 @@ int main() {
     check(restore.ok.value_or(false), "checkpoint: RestoreCheckpoint ok");
     check(restore.result.value("restored", false), "checkpoint: restored true");
     check(!restore.result.value("driftDetected", true), "checkpoint: no drift");
-    check(onecad::session::geometry_signature(s.bodies_copy()) == box_sig,
-          "checkpoint: restored head signature IDENTICAL to the checkpoint (BinTools round-trip)");
+    check(restore.result.value("snapshotId", std::uint64_t{0}) == head_before,
+          "checkpoint (WP-H): the result echoes the UNCHANGED head snapshotId");
+    check(s.current_snapshot_id() == head_before,
+          "checkpoint (WP-H): a restore does not move the head snapshotId");
+    check(onecad::session::geometry_signature(s.bodies_copy()) == big_sig,
+          "checkpoint (WP-H): the head still serves ITS OWN geometry after a restore");
+    check(s.head().has_restored_base,
+          "checkpoint (WP-H): the checkpoint is pending in the restored-base slot");
 
     // Absent step ⇒ restored:false (Rust replays from 0).
     Envelope absent = onecad::io::handle_restore_checkpoint(

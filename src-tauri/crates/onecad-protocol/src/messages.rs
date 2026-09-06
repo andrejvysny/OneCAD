@@ -406,6 +406,33 @@ pub struct WorkerHeadResult {
     /// 64-bit hex history-prefix hash.
     pub history_prefix_hash: String,
     pub has_scratch: bool,
+    /// A `RestoreCheckpoint` result is parked in the restored-base slot, waiting
+    /// for the plan that names it (SCHEMA §7.1, kernel-hardening WP-H). Additive:
+    /// `#[serde(default)]` so a producer that predates the field still decodes.
+    #[serde(default)]
+    pub has_restored_base: bool,
+    /// The kernel-lane job in flight when this was answered (§7.1, WP-H), or
+    /// `null` for an idle lane. Additive and omitted when `None`, so a request/
+    /// response pair from a producer without it is byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight: Option<InflightResult>,
+}
+
+/// `GetWorkerHead.result.inflight` (SCHEMA §7.1, WP-H).
+///
+/// `age_ms` runs from the dequeue; `since_progress_ms` from the last non-terminal
+/// frame the job emitted, and equals `age_ms` while it has emitted none. `job_id`
+/// is OMITTED for a verb that carries none — absence is "no job id", which a `0`
+/// would misreport as job zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InflightResult {
+    pub verb: String,
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<u64>,
+    pub age_ms: u64,
+    pub since_progress_ms: u64,
 }
 
 // ---------------------------------------------------------------------------

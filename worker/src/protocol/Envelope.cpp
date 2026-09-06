@@ -99,6 +99,23 @@ void reject_non_finite(const json& j) {
     }
 }
 
+// Recursively replace every non-finite float with `null` (producer sanitiser).
+void sanitize_non_finite_in_place(json& j) {
+    switch (j.type()) {
+        case json::value_t::number_float:
+            if (!std::isfinite(j.get<double>())) j = nullptr;
+            break;
+        case json::value_t::array:
+            for (auto& e : j) sanitize_non_finite_in_place(e);
+            break;
+        case json::value_t::object:
+            for (auto& e : j.items()) sanitize_non_finite_in_place(e.value());
+            break;
+        default:
+            break;
+    }
+}
+
 // Emit the §2/§3 worker-frame stamp onto `j`.
 void write_stamp(json& j, const Stamp& s) {
     j["documentRevision"] = s.document_revision;
@@ -109,6 +126,8 @@ void write_stamp(json& j, const Stamp& s) {
 }
 
 }  // namespace
+
+void sanitize_non_finite(json& j) { sanitize_non_finite_in_place(j); }
 
 std::string serialize(const Envelope& env) {
     json j;

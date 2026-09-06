@@ -1462,6 +1462,11 @@ pub fn parse_open_session(result: &Value, epoch: WorkerEpoch) -> WorkerHead {
         snapshot_id: SnapshotId(u64_at(head, "snapshotId")),
         history_prefix_hash: HistoryPrefixHash::empty(),
         has_scratch: false,
+        // A freshly opened session holds neither a scratch nor a restored base, and
+        // the handshake answer carries no `inflight` (§7.1 reports it on
+        // `GetWorkerHead` only).
+        has_restored_base: false,
+        inflight: None,
     }
 }
 
@@ -1498,7 +1503,38 @@ pub fn parse_worker_head(result: &Value) -> WorkerHead {
             .get("hasScratch")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        // Both WP-H fields are ADDITIVE and a producer MAY omit them (SCHEMA §7.1):
+        // an absent `hasRestoredBase` reads `false`, an absent or `null` `inflight`
+        // reads `None` — which is also how an idle lane reads, and the supervisor's
+        // wedge check is simply skipped either way (tolerant reader).
+        has_restored_base: result
+            .get("hasRestoredBase")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        inflight: parse_inflight(result.get("inflight")),
     }
+}
+
+/// Parses `GetWorkerHead.result.inflight` (SCHEMA §7.1, WP-H). A malformed entry
+/// is treated as absent by §4's tolerate-malformed-optional rule: `verb` is what
+/// selects the wedge deadline, so an entry without one carries no decision.
+fn parse_inflight(value: Option<&Value>) -> Option<onecad_core::regen::InflightJob> {
+    let obj = value?.as_object()?;
+    let verb = obj.get("verb").and_then(Value::as_str)?.to_string();
+    let age_ms = obj.get("ageMs").and_then(Value::as_u64).unwrap_or(0);
+    Some(onecad_core::regen::InflightJob {
+        verb,
+        id: obj.get("id").and_then(Value::as_u64).unwrap_or(0),
+        // OMITTED for a verb that carries none — never coerced to job zero.
+        job_id: obj.get("jobId").and_then(Value::as_u64),
+        age_ms,
+        // §7.1: equals `ageMs` while the job has emitted no non-terminal frame, so
+        // a producer that omits the key must not read as "just made progress".
+        since_progress_ms: obj
+            .get("sinceProgressMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(age_ms),
+    })
 }
 
 /// Parses an `AcceptPrepared` result (SCHEMA §7.2).
@@ -1521,13 +1557,36 @@ pub fn parse_accept(result: &Value) -> AcceptResult {
 }
 
 /// `Tessellate.args` (SCHEMA §7.6).
+///
+/// `snapshotId` is the OPTIONAL WP-H reader fence and follows the same omission
+/// rule as every other optional key here: absent means "the live head" and makes
+/// the request byte-identical to the pre-WP-H one, so a `null` is never spelled
+/// out. Present, it is the head this caller is meshing FOR — a worker whose head
+/// has moved refuses `STALE_PREVIEW` rather than serving geometry from a snapshot
+/// the caller never asked about.
 #[must_use]
 pub fn tessellate_args(req: &TessellateRequest) -> Value {
     let bodies = match &req.bodies {
         BodySelector::All => json!("all"),
         BodySelector::Ids(ids) => json!(ids.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>()),
     };
-    json!({ "bodyIds": bodies, "lod": lod_str(req.lod), "includeEdges": req.include_edges })
+    let mut args =
+        json!({ "bodyIds": bodies, "lod": lod_str(req.lod), "includeEdges": req.include_edges });
+    if let Some(snapshot) = req.snapshot_id {
+        args["snapshotId"] = json!(snapshot.0);
+    }
+    args
+}
+
+/// Adds the OPTIONAL WP-H reader fence to a §7.8 writer's args (SCHEMA §7.6
+/// `Tessellate` rule, applied verbatim to `ExportGeometry` / `ExportStep` /
+/// `ExportStl` / `ExportObj`). Omitted when `None`, so an unfenced export is the
+/// exact request it was before the field existed.
+fn with_snapshot_fence(mut args: Value, snapshot: Option<SnapshotId>) -> Value {
+    if let Some(snapshot) = snapshot {
+        args["snapshotId"] = json!(snapshot.0);
+    }
+    args
 }
 
 /// `ExportStep.args` (SCHEMA §7.8).
@@ -1541,6 +1600,7 @@ pub fn export_step_args(
     bodies: &[BodyId],
     schema: &str,
     attributes: &crate::export::StepExportAttributes,
+    snapshot: Option<SnapshotId>,
 ) -> Value {
     let mut args = json!({
         "path": path,
@@ -1557,28 +1617,45 @@ pub fn export_step_args(
     if !attributes.face_colors.is_empty() {
         obj.insert("faceColors".into(), json!(attributes.face_colors));
     }
-    args
+    with_snapshot_fence(args, snapshot)
 }
 
-/// `ExportStl.args` (SCHEMA §7.8): `{path, bodyIds, binary, lod}`.
+/// `ExportStl.args` (SCHEMA §7.8): `{path, bodyIds, binary, lod, snapshotId?}`.
 #[must_use]
-pub fn export_stl_args(path: &str, bodies: &[BodyId], binary: bool, lod: &str) -> Value {
-    json!({
-        "path": path,
-        "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
-        "binary": binary,
-        "lod": lod,
-    })
+pub fn export_stl_args(
+    path: &str,
+    bodies: &[BodyId],
+    binary: bool,
+    lod: &str,
+    snapshot: Option<SnapshotId>,
+) -> Value {
+    with_snapshot_fence(
+        json!({
+            "path": path,
+            "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
+            "binary": binary,
+            "lod": lod,
+        }),
+        snapshot,
+    )
 }
 
-/// `ExportObj.args` (SCHEMA §7.8): `{path, bodyIds, lod}`.
+/// `ExportObj.args` (SCHEMA §7.8): `{path, bodyIds, lod, snapshotId?}`.
 #[must_use]
-pub fn export_obj_args(path: &str, bodies: &[BodyId], lod: &str) -> Value {
-    json!({
-        "path": path,
-        "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
-        "lod": lod,
-    })
+pub fn export_obj_args(
+    path: &str,
+    bodies: &[BodyId],
+    lod: &str,
+    snapshot: Option<SnapshotId>,
+) -> Value {
+    with_snapshot_fence(
+        json!({
+            "path": path,
+            "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
+            "lod": lod,
+        }),
+        snapshot,
+    )
 }
 
 /// `ExportGeometry.args` (SCHEMA §7.8): `{path, bodyIds, codec, union}`.
@@ -1597,13 +1674,17 @@ pub fn export_geometry_args(
     bodies: &[BodyId],
     codec: &str,
     union_solids: bool,
+    snapshot: Option<SnapshotId>,
 ) -> Value {
-    json!({
-        "path": path,
-        "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
-        "codec": codec,
-        "union": union_solids,
-    })
+    with_snapshot_fence(
+        json!({
+            "path": path,
+            "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
+            "codec": codec,
+            "union": union_solids,
+        }),
+        snapshot,
+    )
 }
 
 /// `ExtractPrismProfile.args` (SCHEMA §7.8): `{snapshotId, bodyId, path?,
@@ -5307,6 +5388,46 @@ mod tests {
         assert!(parse_plan_step(&json!({"stepIndex": 3}), 2).is_err());
     }
 
+    /// SCHEMA §3.4 serialization fallback (kernel-hardening WP-H): when an `event`
+    /// envelope cannot be serialized, the worker substitutes an event of the SAME
+    /// kind whose payload is the documented minimum — `stepIndex`, a `status` of
+    /// `"Failed"`, and one `EVENT_SERIALIZATION_FAILED` error diagnostic.
+    ///
+    /// This asserts the reader half of that contract byte for byte, because the
+    /// whole point of the substitute's shape is what it AVOIDS: a payload this
+    /// parser rejected would surface as `PROTOCOL_ERROR`, which tears the worker
+    /// down and replays the document, instead of as one failed step. `status` is a
+    /// key this parser has never read — the substitute carries it for a human
+    /// reading the frame — so it must be ignored rather than tripping anything.
+    #[test]
+    fn plan_step_accepts_the_schema_34_serialization_fallback_payload() {
+        let payload = json!({
+            "stepIndex": 4,
+            "status": "Failed",
+            "diagnostics": [ {
+                "severity": "error",
+                "code": "EVENT_SERIALIZATION_FAILED",
+                "message": "non-finite float (NaN/Inf) rejected in envelope"
+            } ]
+        });
+        let step = parse_plan_step(&payload, 4).expect(
+            "the §3.4 substitute event must parse as a FAILED STEP, never as a PROTOCOL_ERROR",
+        );
+        assert_eq!(step.step_index, 4);
+        assert_eq!(step.diagnostics.len(), 1, "one diagnostic survives");
+        assert_eq!(step.diagnostics[0].code, "EVENT_SERIALIZATION_FAILED");
+        assert!(matches!(step.diagnostics[0].severity, Severity::Error));
+        assert_eq!(
+            step.diagnostics[0].message,
+            "non-finite float (NaN/Inf) rejected in envelope"
+        );
+        // The substitute carries none of the step's real evidence — that is what
+        // "the step failed" MEANS here — so nothing must be invented for it.
+        assert!(step.body_events.is_empty());
+        assert!(step.element_map_delta.added.is_empty());
+        assert!(step.needs_repair.is_empty());
+    }
+
     #[test]
     fn needs_repair_injects_step_index_and_keeps_scoring_version() {
         let payload = json!({
@@ -5320,6 +5441,134 @@ mod tests {
         assert_eq!(step.needs_repair.len(), 1);
         assert_eq!(step.needs_repair[0].step_index, 5);
         assert_eq!(step.needs_repair[0].scoring_version, Some(1));
+    }
+
+    /// SCHEMA §7.6/§7.8: the WP-H reader/writer fence is OPTIONAL, and "optional"
+    /// means the key is ABSENT — not `null`.
+    ///
+    /// The worker refuses a PRESENT but malformed `snapshotId` (a `null` included)
+    /// with `PROTOCOL_ERROR`, which is fatal: it restarts the worker and replays the
+    /// document. So an unfenced request that serialised `"snapshotId": null` would
+    /// turn every plain `Tessellate` or export into a worker restart. This pins the
+    /// omission for all five builders at once, plus the exact `serde_json` shape a
+    /// regression would take (`Value::Null` is a KEY that exists).
+    #[test]
+    fn an_unfenced_reader_omits_the_snapshot_key_entirely() {
+        use crate::export::StepExportAttributes;
+
+        let body = BodyId(Uuid::from_u128(0x10));
+        let attrs = StepExportAttributes::default();
+        let unfenced = [
+            (
+                "Tessellate",
+                tessellate_args(&TessellateRequest {
+                    bodies: BodySelector::Ids(vec![body]),
+                    lod: Lod::Coarse,
+                    include_edges: true,
+                    snapshot_id: None,
+                }),
+            ),
+            (
+                "ExportStep",
+                export_step_args("/tmp/x.step", &[body], "AP242DIS", &attrs, None),
+            ),
+            (
+                "ExportStl",
+                export_stl_args("/tmp/x.stl", &[body], true, "fine", None),
+            ),
+            (
+                "ExportObj",
+                export_obj_args("/tmp/x.obj", &[body], "fine", None),
+            ),
+            (
+                "ExportGeometry",
+                export_geometry_args("/tmp/x.brep", &[body], "brep", false, None),
+            ),
+        ];
+        for (verb, args) in &unfenced {
+            let obj = args.as_object().expect("args is an object");
+            assert!(
+                !obj.contains_key("snapshotId"),
+                "{verb} unfenced must OMIT snapshotId (a present-but-null fence is a \
+                 PROTOCOL_ERROR and restarts the worker), got {args}"
+            );
+        }
+
+        // …and present, as a bare number, the moment a fence is given.
+        let fenced = [
+            tessellate_args(&TessellateRequest {
+                bodies: BodySelector::Ids(vec![body]),
+                lod: Lod::Coarse,
+                include_edges: true,
+                snapshot_id: Some(SnapshotId(5012)),
+            }),
+            export_step_args(
+                "/tmp/x.step",
+                &[body],
+                "AP242DIS",
+                &attrs,
+                Some(SnapshotId(5012)),
+            ),
+            export_stl_args("/tmp/x.stl", &[body], true, "fine", Some(SnapshotId(5012))),
+            export_obj_args("/tmp/x.obj", &[body], "fine", Some(SnapshotId(5012))),
+            export_geometry_args(
+                "/tmp/x.brep",
+                &[body],
+                "brep",
+                false,
+                Some(SnapshotId(5012)),
+            ),
+        ];
+        for args in &fenced {
+            assert_eq!(
+                args.get("snapshotId"),
+                Some(&json!(5012)),
+                "a fenced request names the snapshot as a bare u64, got {args}"
+            );
+        }
+    }
+
+    /// SCHEMA §7.2: a present `baseCheckpoint` must carry a NON-EMPTY
+    /// `checkpointId` — the worker refuses an empty one, and Rust would then
+    /// re-plan from 0 for a checkpoint that was perfectly usable.
+    ///
+    /// The ids are minted `ckpt_<n>` by `InMemoryCheckpointStore::save` and carried
+    /// through `CheckpointMeta` → `CheckpointRef`, so this pins the wire end of that
+    /// chain: whatever the planner selected reaches the worker as a non-empty string
+    /// alongside its `stepIndex`.
+    #[test]
+    fn base_checkpoint_always_names_a_non_empty_checkpoint_id() {
+        use onecad_core::regen::{CheckpointId, CheckpointRef, PlanArtifacts, PolicyVersions};
+
+        let mut req = PlanRequest {
+            job_id: JobId(Uuid::from_u128(1)),
+            document_revision: DocumentRevision(3),
+            worker_epoch: WorkerEpoch(1),
+            expected_base_hash: HistoryPrefixHash::new("aa".to_string()),
+            prefix_hashes: vec![],
+            policy_versions: PolicyVersions::default(),
+            target_step: 2,
+            ops: vec![],
+            base_checkpoint: None,
+            base_checkpoint_artifacts: None,
+            edited_from: None,
+            checkpoint_fallback_replay: false,
+            artifacts: PlanArtifacts::default(),
+        };
+        // No checkpoint ⇒ the key is absent, exactly as before WP-H.
+        assert!(execute_plan_args(&req).get("baseCheckpoint").is_none());
+
+        req.base_checkpoint = Some(CheckpointRef {
+            step_index: 1,
+            checkpoint_id: CheckpointId::new("ckpt_1"),
+        });
+        let base = execute_plan_args(&req)["baseCheckpoint"].clone();
+        assert_eq!(base["stepIndex"], json!(1));
+        assert_eq!(base["checkpointId"], json!("ckpt_1"));
+        assert!(
+            !base["checkpointId"].as_str().unwrap_or("").is_empty(),
+            "an empty checkpointId is refused by the worker, got {base}"
+        );
     }
 
     #[test]

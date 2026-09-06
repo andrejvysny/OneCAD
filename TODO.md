@@ -66,7 +66,149 @@
       a clean analytic-vs-walked discriminator (1e-16 vs 1e-3, no continuum), so every boss-on-cylinder
       and oblique-rim fillet a daily-driver part needs refuses today. WP-G go/no-go: user decision at
       session end (plan S4).
-- [ ] Phase C — WP-I component mates: I0 probes red-first → SCHEMA + protocol audit → I2a worker ∥ I2b
+- [ ] **WP-G APPROVED by the user (2026-09-05, after the Phase B numbers), queued AFTER WP-H** —
+      tolerance-adaptive section budget with `warning` above analytic precision, valence-≥4 by name,
+      range-probe remnant floor, chamfer parity; kernelbench m1 must stay unchanged.
+- [ ] **WP-H STARTED (2026-09-05)** — H0 probes red-first (impl-critical) → H1 SCHEMA + protocol
+      audit → H2a worker → H2b Rust (dependent) → adversarial review → L3 → commit `kh-H` → push.
+      - [x] H0 probes MEASURED RED on the shipped code (agent-measured; ctest 179 → 181): (a)
+            `worker_chaos.rs:772` a 4 s op streaming `progress` under the 10×-scaled ping rule
+            (200/500 ms/2) killed at 1195 ms — "worker hung (ping timeout) → SIGKILL"; the stub's
+            read loop is single-threaded so pings go unanswered mid-op (the shipped shape; new stub
+            hooks `ONECAD_STUB_SLOW_ON` / `_SLOW_MS`); (b) `restore_fencing.rs:255` (NEW real-worker
+            target) — restore bumped `snapshotId` 2 → 3 and an unfenced `Tessellate` answered the
+            rolled-back 25 mm box, not the 60 mm head; (c) `worker_chaos.rs:835` — a prepared future
+            dropped at 300 ms leaves `hasScratch=true` after 1 s grace; (d)
+            `test_dispatcher_fallback.cpp:177/190/198` — fallback resp `binLen=8` with no `bin`
+            table, an unserialisable event became a terminal `resp`, and id 2 got TWO terminals; (e)
+            `test_executor_hazards.cpp:130/134` — cancel raised on the last `planStep` still stored
+            the scratch behind `ok:true`; (f) `attach_tessellate` UNPROBED — no pathological body made
+            `tessellate_body` throw (it returns `ok:false`); needs a test injection point (H2a).
+            `checkpoints.rs` 6/6 and the infinite-hang drill stay GREEN. fmt/clippy clean.
+      - [x] H1 SCHEMA hunk written (§7.1 status thread + `inflight`/`hasRestoredBase`; §7.2
+            `baseCheckpoint` consumed as the fourth fence case + restored-base lifetime; §7.2
+            `ARTIFACT_TESSELLATE_FAILED`; §7.6/§7.8 optional `snapshotId` → `STALE_PREVIEW`; §7.7
+            restore into a restored-base slot, head untouched; §3.4 serialization fallback keeps the
+            kind and drops the tail; DiscardPrepared Drop guard + late-cancel terminal; §8 wedged-op
+            rule; §14) and protocol-audited BEFORE code: **approve_with_changes** — B1 the substitute
+            event payload must carry `stepIndex` + `status:"Failed"` (Rust `parse_plan_step` demands
+            it), B2 `EVENT_SERIALIZATION_FAILED` is a diagnostic `code` not a `reasonCode`, B3 the 100 ms
+            promise is "dequeue → write attempt, given a drained stdout", B4 credit-blocked time counts
+            as progress, B5 a wedge kill is an abnormal exit (restart + replay, feeds the crash
+            breaker, distinct `Wedged` death), C1 the restored-base lifetime in one place, C2 the
+            cancelled terminal is the existing `CANCELLED` error resp, C3 the timeout ladder incl.
+            `AnalyzeEdgeOpRange` 10 s; omission-legal note for the two new keys — all applied.
+      - [x] H2a worker LANDED (impl-critical, agent-measured; orchestrator re-runs at the gate): Dispatcher
+            status loop serving `GetWorkerHead` with `inflight {verb, id, jobId?, ageMs, sinceProgressMs}`
+            (measured 0 ms round trip while a 2 s `Debug.Busy` held the kernel lane; `sinceProgressMs`
+            restarts on any non-terminal frame); `Session::restored_base_` slot + `BaseCheckpointRef`
+            + the fourth fence case (restore keeps the head; `AcceptPrepared` drops the slot only when
+            it still holds the consumed checkpoint; a plan without `baseCheckpoint` drops it before
+            fencing; unknown id `PROTOCOL_ERROR`); `stale_snapshot_fence` on `Tessellate` + the four
+            writers; §3.4 fallback keeps the kind and drops the tail (`binLen 0`; event substitute
+            `{stepIndex, status:"Failed", diagnostics}`; one terminal per id); producer-side
+            `sanitize_non_finite`; late-cancel re-check before `store_prepared` (existing `CANCELLED`
+            terminal, nothing stored); guarded `attach_tessellate` → `ARTIFACT_TESSELLATE_FAILED`
+            warning with the in-band `artifacts.tessellate.__testThrow` hook (proven red-first by
+            reverting the guard). Fixtures `restore_checkpoint_base.ndjson` +
+            `reader_snapshot_fence.ndjson` registered; new ctests `status_thread`, `fallback_payload`,
+            `restored_base`. Agent counts: **ctest 186/186**, hygiene clean, `onecad-protocol`
+            fixture parse 1/0. Test re-expressions (recorded): `test_wp6_checkpoint.cpp` asserts the
+            head UNTOUCHED + `hasRestoredBase` (was "head rolls back"); the pipelined determinism
+            transcript `check_project_to_sketch_plane_frames.sh` excludes `GetWorkerHead` (status lane
+            reorders + wall-clock `ageMs`) and drains via `Debug.Busy {durationMs:0}`. Follow-ups: a
+            dropped unserialisable `progress` frame leaves a `seq` gap (spec-legal); `bind_element_ids`
+            holds `mu_` across per-binding shape work (bounded); no credit-blocked wait exists yet
+            (the "credit counts as progress" rule is documented at `inflight_note_progress`).
+      - [x] H2b Rust LANDED (impl-careful, agent-measured; orchestrator re-runs at the gate):
+            `SupervisorConfig` wedge deadlines 180 / 60 / 30 s + `wedge_deadline(verb)`, `wedged_inflight`
+            on every answered ping → `Death::Wedged{verb, age_ms, since_progress_ms}` → SIGKILL + the
+            existing restart (a dead transport already feeds the crash breaker); `parse_worker_head`
+            reads `inflight`/`hasRestoredBase` tolerantly; `TessellateRequest.snapshot_id` +
+            `tessellate_args` and the four export builders emit `snapshotId`; `fetch_mesh_fenced` with
+            ONE re-read-and-retry, cache never blanked; `export_fence(rt)` on the four writers
+            (`stalePreview` via the existing `OpFailed{code: StalePreview}` → `ApiError`);
+            `DiscardOnDrop` guard on `RegenExecutor::run` + `GeometryEngine::discard_prepared_detached`
+            (tokio::spawn in `WorkerManager`); stub = reader/kernel/status threads mirroring
+            `inflight`, hooks `DEAF_ON`, `PROGRESS_EVERY_MS`, `STALE_ON`/`STALE_TIMES`, `IGNORE_DISCARD`
+            (`HANG_ON` now blocks the kernel lane only). Drills measured: wedge
+            "inflight ExecutePlan 2092ms, 2092ms since progress → SIGKILL"; deaf → ping timeout; 20 s op
+            with progress every 2 s under a 5 s budget → Published, no restart; 3 s silent op → Published;
+            restore slot `snapshotId 1 → 1`, `hasRestoredBase false → true → false` after the plan;
+            restore probe `bboxMaxZ 60 → 60`. Agent counts: fmt/clippy clean, core green,
+            `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **95 targets / 1546 / 0 / 0 skips**,
+            `worker_chaos` 19/19, `checkpoints` 7/7, `restore_fencing` 1/1. Follow-ups: the stub does
+            not enforce the `snapshotId` fence itself (only `STALE_ON`); `WorkerManager::tessellate`
+            (the GeometryEngine stub) ignores `snapshot_id`; the two internal `ExportGeometry` bake
+            lanes are now fenced (a bake during an in-flight regen refuses instead of writing).
+      - [x] H3 protocol-auditor AFTER-landing schema-vs-code = **approve_with_changes** (measured by the
+            auditor: ctest 186/186 incl. both new canonical fixtures; `worker_chaos` 19/19, `checkpoints`
+            7/7, `restore_fencing` 1/1; fingerprint unchanged; hygiene clean): A the §3.4 "surfaces as a
+            failed step" over-claim (Rust reads no `status`; the true guarantee is a well-formed step
+            with one error diagnostic) — SCHEMA corrected; B no Rust test pinned the substitute payload
+            → Rust fix round; C `worker_lifetime.rs:330` went VACUOUS (`HANG_ON=GetWorkerHead` no longer
+            hangs; confirmed by running the harness) → `DEAF_ON`, Rust fix round; D the writer retry
+            re-issued `ExportStep` at head N+1 with `faceColors` resolved against N → `ExportStep`
+            excluded from the retry (SCHEMA §7.6 + Rust fix round); E §14 omissions (determinism
+            transcript, `sanitize_non_finite`, stub hooks + `HANG_ON` meaning) — added; F sign-off
+            recorded. Minor: fallback default branch drops a `chunk` silently (no emitter yet);
+            `__testThrow` missing from `PlanExecutor.h`'s hook list; `DiscardOnDrop` armed before
+            dispatch (harmless).
+      - [x] H3 adversarial-reviewer = **defective as written** (measured: the five WP-H drills 5/5,
+            `checkpoints` 7/7 + `restore_fencing` 1/1 on the real worker; the C++ half unexecuted by the
+            reviewer — no rebuild to avoid clobbering the sidecar): HIGH-1 the event substitute turned a
+            LOST `planStep` into an ACCEPTED step (no `bodyEvents`/`elementMapDelta`, terminal still `Ok`
+            → Rust publishes a snapshot missing a body; the old loud `OP_FAILED` was better) — RULED: the
+            step is reported `Failed` in `perStepResults`, the plan stops there, nothing past it prepared
+            (SCHEMA §3.4 amended; worker fix round); HIGH-2 the fenced-writer retry bakes exactly the
+            geometry the fence refuses (`library.rs:1086` / `library_ingest.rs:834` promise "refused,
+            not silently written") — RULED: only Tessellate retries, all four writers surface
+            `stalePreview` (SCHEMA §7.6; Rust fix round); MEDIUM-3 the real worker emits no `progress`
+            frames, so the wedge deadline is a wall clock for every single-verb job (recorded limit in
+            §8; WP-K owes the progress frames); MEDIUM-4 the 100 ms promise is not structural through
+            the two `mu_` holders (base clone, bind batch — recorded limit in §7.1); MEDIUM-5 the
+            detached discard is unordered against the next plan (one-scratch `PROTOCOL_ERROR`) — RULED:
+            a new plan waits (bounded) for a pending discard (Rust fix round + drill); LOW-6 a malformed
+            `snapshotId` silently unfenced a write → `PROTOCOL_ERROR` (worker fix round + fixture leg);
+            LOW-7 an empty `checkpointId` bound any base at that step → refused (worker); LOW-8
+            `status_loop` ignored `shutdown_requested_` (worker). Fix rounds dispatched to both
+            context-holding agents; the C++ half is re-run by the orchestrator at the gate.
+      - [x] H2a fix round LANDED (agent-measured **ctest 186/186**, hygiene clean, fixture legs parse):
+            `stamp_and_write` reports "went out verbatim" → `HandlerContext::last_emit_substituted` →
+            `PlanExecutor` rolls the step back (`rollback_candidate` against a pre-step snapshot) and
+            reports `status: "opFailed"` + `stoppedReason: "opFailed"` with the
+            `EVENT_SERIALIZATION_FAILED` diagnostic (`stage: "wire"`), nothing past it prepared — proven
+            red-first (branch disabled → `completed`, `lastValidStep 1`, the body reached the head);
+            malformed `snapshotId` (string/float/negative/`null`) → `PROTOCOL_ERROR` (+ two fixture
+            legs); empty `checkpointId` refused, `accept_prepared` exact-id match; `status_loop` honours
+            `shutdown_requested_` (`in_fd_` atomic, closed once); `__testThrow` documented; chunk-drop
+            hazard commented. Recorded: the wire enum is `opFailed` (SCHEMA §3.4 corrected from
+            "Failed"); a substituted `needsRepair` event is left as is; the reviewer's non-UTF-8 trigger
+            is already loud via `type_error.316` → `OP_FAILED` before the event is built.
+      - [x] H2b fix round LANDED (agent-measured against the rebuilt worker): three `wire.rs` unit
+            tests (the §3.4 substitute parses as a step with one error diagnostic and invents no
+            events; all five builders OMIT `snapshotId` when unfenced; `baseCheckpoint.checkpointId`
+            non-empty); `fenced_request` → `fenced_write` (NO retry for any writer, `stalePreview`
+            surfaced; only `fetch_mesh` re-reads once); pending-discard registry + 5 s
+            `DISCARD_ORDERING_BUDGET` awaited in `stream_plan`; `worker_lifetime.rs` → `DEAF_ON` with an
+            elapsed-time force-kill assertion (negative check: the old `HANG_ON` variant self-exited in
+            12 ms — vacuous, confirmed); stub mirrors the one-scratch rule; new drills
+            `stale_snapshot_writers_surface_without_retrying`,
+            `a_fresh_plan_waits_for_the_abandoned_prepares_discard`; drill (a) retimed 6000/500/2 s
+            (the 20 s version starved `convergence_drill_kill_mid_plan_repeatedly` under full-workspace
+            parallelism — recorded as load-sensitive). Agent counts: fmt/clippy clean, app lib 422/0,
+            `checkpoints` 7/7, `restore_fencing` 1/1, `worker_chaos` 21/21, `worker_lifetime` 5/5,
+            `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **95 / 1553 / 0 / 0 skips**.
+      - [x] **Gate — WP-H (2026-09-05 morning, main thread, suites run ALONE, teed to the session
+            scratchpad `g3/`):** worker rebuilt + sidecar restaged sha `5b1984b0db4e49509…` (hygiene clean)
+            · ctest **186 / 186** (52.9 s; count read off `ctest -N`) · fmt clean · clippy **1.97.0 +
+            1.98.1** `-D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **95 targets /
+            1553 passed / 0 failed / 0 skips** · tsc clean · vitest **318 files / 5618 passed / 78 skipped**
+            · hex 0 · coverage 32/9/16/19 · contracts 39/18 · negative controls OK · kernelbench
+            `fillet/foundation:t0` both backends **136 rows unchanged** + semantics OK (0 regressions,
+            0 replay-unstable) · e2e both projects `retries: 0` **524 / 0** (29.4 min; src+e2e md5
+            `b46aa2b6…` identical before/after and to the WP-I gate tree — no FE change). FULL L3 GREEN.
+- [x] Phase C — WP-I component mates: I0 probes red-first → SCHEMA + protocol audit → I2a worker ∥ I2b
       Rust → I3 FE → adversarial review → full L3 → commit → push.
       - [x] **Gate — WP-I (2026-09-04 late evening, main thread, suites run ALONE, teed to the session
             scratchpad `g3/`):** worker rebuilt + sidecar restaged sha `0455afd8c83254c3b…` (hygiene clean)
@@ -76,7 +218,10 @@
             · hex 0 · coverage 32/9/16/19 · contracts 39/18 · negative controls OK · kernelbench
             `fillet/foundation:t0` both backends **136 rows unchanged** + semantics OK (0 regressions,
             0 replay-unstable) · e2e both projects `retries: 0` **524 / 0** (36.3 min; `src`+`e2e`
-            md5 `b46aa2b6…` identical before and after). FULL L3 GREEN.
+            md5 `b46aa2b6…` identical before and after). FULL L3 GREEN. **Committed as `4555993`**
+            (76 files, +6044 / −112) and pushed; master == origin. **CI run 33938945918: every hosted
+            lane GREEN incl. e2e-chromium AND e2e-webkit**; `tauri-composition` cancelled (known
+            OCCT-build timeout); `linux-worker` queued (self-hosted offline).
       - [x] I0 probes MEASURED RED on the shipped kernel (impl-critical, measured output; ctest 176 → 177):
             a1 coincident seat after the plane moves 3 mm — seat stays at z=13 on a z=10 plane, no
             `matePlacement` (`test_component_mate_reseat.cpp:455`); a2 target rebuilt with the reversed

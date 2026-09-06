@@ -369,6 +369,8 @@ impl GeometryEngine for FakeBackend {
             snapshot_id: SnapshotId(0),
             history_prefix_hash: HistoryPrefixHash::empty(),
             has_scratch: false,
+            has_restored_base: false,
+            inflight: None,
         })
     }
     async fn close_session(&self, _d: DocumentId, _e: WorkerEpoch) -> Result<(), EngineError> {
@@ -384,6 +386,8 @@ impl GeometryEngine for FakeBackend {
             snapshot_id: SnapshotId(0),
             history_prefix_hash: HistoryPrefixHash::empty(),
             has_scratch: false,
+            has_restored_base: false,
+            inflight: None,
         })
     }
     async fn tessellate(&self, _r: TessellateRequest) -> Result<TessellateResult, EngineError> {

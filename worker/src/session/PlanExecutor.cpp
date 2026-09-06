@@ -12,7 +12,10 @@
 #include <vector>
 
 #include <map>
+#include <stdexcept>
 #include <utility>
+
+#include <Standard_Failure.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
@@ -296,7 +299,10 @@ json signatures_json(const BodyStore& bodies, const std::vector<BodyEvent>& even
                 {"referencedBinding", referenced_binding_signature(bindings)}};
 }
 
-void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job_id,
+// Returns TRUE when the event went out VERBATIM. False means the Dispatcher had
+// to send the §3.4 substitute, which carries none of this step's `bodyEvents` or
+// `elementMapDelta` — the caller must then fail the step (SCHEMA §3.4/§7.2).
+bool emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job_id,
                     std::uint64_t step_index, const std::vector<BodyEvent>& events,
                     const json& element_map_delta, const json& needs_repair, const json& signatures,
                     const json& diagnostics,
@@ -328,9 +334,18 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
     // mate's axis (and sidedness when measurable) on EVERY such step, seat
     // moved or not — absence keeps every other step byte-identical.
     if (mate_resolved) payload["mateResolved"] = *mate_resolved;
+    // §4/§3.4 (WP-H): sanitise at the PRODUCER. A degenerate measurement (an
+    // evidence number over a zero-area face, a ratio with a vanishing denominator)
+    // must not reach the encoder as NaN/±Inf: there it would fail serialization and
+    // cost the step its whole planStep, where `null` says "not measured" and every
+    // other field survives. The encoder's rejection stays the backstop for a bug.
+    protocol::sanitize_non_finite(payload);
     Envelope ev = Envelope::event(req_id, "planStep", step_index, std::move(payload));
     ev.stamp.job_id = job_id;
     if (ctx.emit) ctx.emit(ev);
+    // No reporter (an in-process driver, or a lane that streams nothing) reads as
+    // "went out verbatim": those callers own the frame and nothing was replaced.
+    return !(ctx.last_emit_substituted && ctx.last_emit_substituted());
 }
 
 json fail_diagnostic(const std::string& code, const std::string& message) {
@@ -708,6 +723,17 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
         }
         if (ctx.cancel.cancelled()) { res.status = ExecStatus::Cancelled; return res; }
 
+        // SCHEMA §3.4/§7.2 (WP-H): a step's `bodyEvents` and `elementMapDelta`
+        // reach Rust through its `planStep` event and NOWHERE else, so a step
+        // whose event had to be replaced by the §3.4 substitute cannot be
+        // reported Ok — Rust would publish a snapshot whose lineage it never
+        // received. Undoing such a step needs a pre-step copy, and only a lane
+        // that can actually substitute needs it (an in-process driver owns its
+        // frames and never replaces one), so the copy is taken only there.
+        const bool can_substitute = static_cast<bool>(ctx.last_emit_substituted);
+        CandidateSnapshot pre_step;
+        if (can_substitute) pre_step = snapshot_candidate(job, last_sketch_id);
+
         CandidateResult candidate;
 
         if (op_id.find("__fail") != std::string::npos) {
@@ -730,11 +756,41 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
         const json diagnostics = candidate_diagnostics(candidate);
 
         if (candidate.status == CandidateResult::Status::Ok) {
-            emit_plan_step(ctx, req_id, job_id, step_index, candidate.body_events,
-                           candidate.delta.to_json(), candidate.needs_repair,
-                           signatures_json(job.bodies, candidate.body_events,
-                                           candidate.ref_bindings),
-                           diagnostics, candidate.mate_placement, candidate.mate_resolved);
+            const bool verbatim =
+                emit_plan_step(ctx, req_id, job_id, step_index, candidate.body_events,
+                               candidate.delta.to_json(), candidate.needs_repair,
+                               signatures_json(job.bodies, candidate.body_events,
+                                               candidate.ref_bindings),
+                               diagnostics, candidate.mate_placement, candidate.mate_resolved);
+            if (!verbatim) {
+                // The step RAN, but its evidence never left the process. Undo it
+                // and end the plan here, exactly as a failed op does: prepare
+                // m−1, report this step failed with the §3.4 diagnostic, execute
+                // nothing after it. (A NeedsRepair step needs no such rule: it
+                // already stops the plan, publishes nothing of its own, and its
+                // outcome rides `perStepResults`, not the event.)
+                WLOG_ERROR(
+                    "ExecutePlan job %llu step %llu: planStep was substituted (§3.4); failing the "
+                    "step and stopping the plan",
+                    static_cast<unsigned long long>(job_id),
+                    static_cast<unsigned long long>(step_index));
+                rollback_candidate(job, last_sketch_id, candidate, std::move(pre_step));
+                const std::string message =
+                    "planStep event could not be serialized; this step's bodyEvents and "
+                    "elementMapDelta never reached the caller";
+                StepResult r;
+                r.step_index = step_index;
+                r.status = "opFailed";
+                r.message = message;
+                r.diagnostics = json::array({json{{"severity", "error"},
+                                                  {"code", "EVENT_SERIALIZATION_FAILED"},
+                                                  {"stage", "wire"},
+                                                  {"message", message}}});
+                job.per_step.push_back(std::move(r));
+                job.stopped_reason = "opFailed";
+                job.last_valid_step = last_ok_step;  // prepare m−1 (Invariant 6)
+                return res;
+            }
             StepResult r;
             r.step_index = step_index;
             r.status = "ok";
@@ -789,6 +845,19 @@ json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& r
     const json& t = artifacts["tessellate"];
     const std::string lod = t.value("lod", std::string("coarse"));
     const bool include_edges = t.value("includeEdges", true);
+    // Test hook, house style (cf. the `__crash` / `__slow` / `__fail` op ids in
+    // execute_ops): force the artifact attachment to throw. It exists because NO
+    // pathological body makes `tess::tessellate_body` throw — it returns ok=false —
+    // so without it the §7.2 ARTIFACT_TESSELLATE_FAILED guard could not be shown red
+    // (see test_executor_hazards.cpp). Rust never sends this key.
+    const bool test_throw = t.is_object() && t.value("__testThrow", false);
+    auto throw_if_hooked = [test_throw](const char* where) {
+        if (test_throw) {
+            throw std::runtime_error(std::string("__testThrow: forced tessellation artifact "
+                                                 "failure (") +
+                                     where + ")");
+        }
+    };
     json meshes = json::array();
     for (const auto& [bid, rec] : job.bodies.all()) {
         tess::BodyMesh bm = tess::tessellate_body(rec.geom, bid, lod, include_edges, &job.partition,
@@ -808,8 +877,35 @@ json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& r
         meshes.push_back(tess::mesh_handle_json(
             bid, section, lod, bm.blob.size(), bm.triangle_count,
             hashing::sha256_hex(bm.blob.data(), bm.blob.size()), job.prepared_snapshot_id));
+        throw_if_hooked("after a partial attach");  // exercises the tail cleanup
     }
+    throw_if_hooked("no attachable body");
     return json{{"meshes", std::move(meshes)}};
+}
+
+// SCHEMA §7.2 `ARTIFACT_TESSELLATE_FAILED`: the artifact is advisory, so a failure
+// is recorded as a WARNING on the last executed step and the plan still prepares.
+// The partially built tail is dropped with it — the surviving `mesh:*` sections
+// would otherwise be bytes no result references (§5.1: the tail is addressed by
+// the table only). Rust reads "no mesh attached" as "not cached" and calls
+// Tessellate later.
+void note_artifact_failure(ScratchJob& job, const std::string& what, Envelope& resp) {
+    WLOG_WARN("ExecutePlan job %llu: tessellate artifact failed (%s); preparing without it",
+              static_cast<unsigned long long>(job.job_id), what.c_str());
+    resp.out_bin.clear();
+    resp.bin.clear();
+    if (job.per_step.empty()) {
+        // A base-only prepare has no step to carry the warning; the stderr line
+        // above is the whole record, and the plan still prepares.
+        return;
+    }
+    json& diagnostics = job.per_step.back().diagnostics;
+    if (!diagnostics.is_array()) diagnostics = json::array();
+    if (diagnostics.size() >= 64) return;  // the §7.2 per-step diagnostic budget
+    diagnostics.push_back(json{{"severity", "warning"},
+                               {"code", "ARTIFACT_TESSELLATE_FAILED"},
+                               {"stage", "artifact"},
+                               {"message", what.size() <= 4096 ? what : what.substr(0, 4096)}});
 }
 
 }  // namespace
@@ -827,7 +923,20 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     const json artifacts =
         (args.contains("artifacts") && args["artifacts"].is_object()) ? args["artifacts"] : json::object();
 
-    FenceOutcome fence = session.fence_and_clone(job_id, doc_rev, epoch, expected_base_hash);
+    // OPTIONAL `baseCheckpoint` (SCHEMA §7.2, WP-H): the plan's claim on the
+    // restored-base slot. Read with the same tolerate-malformed rule as
+    // `editedFrom` (§4) — a non-object is treated as absent, and absent means
+    // "fence against the head / from 0" AND drops any pending restored base.
+    std::optional<BaseCheckpointRef> base;
+    if (args.contains("baseCheckpoint") && args["baseCheckpoint"].is_object()) {
+        BaseCheckpointRef ref;
+        ref.step_index = read_u64(args["baseCheckpoint"], "stepIndex");
+        ref.checkpoint_id = get_str(args["baseCheckpoint"], "checkpointId");
+        base = std::move(ref);
+    }
+
+    FenceOutcome fence = session.fence_and_clone(job_id, doc_rev, epoch, expected_base_hash,
+                                                 base.has_value() ? &*base : nullptr);
     if (fence.status == FenceOutcome::Status::Error) {
         Envelope r = Envelope::error_response(req.id, fence.error);
         r.stamp.job_id = job_id;
@@ -847,6 +956,13 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     job.partition = std::move(fence.cloned_partition);
     job.gear_bodies = std::move(fence.cloned_gear_bodies);
     job.prepared_snapshot_id = fence.prepared_snapshot_id;
+    // The fence only returns Ok for a `baseCheckpoint` plan when the slot MATCHED,
+    // so recording the claim here is recording what was actually consumed (§7.2).
+    if (base.has_value()) {
+        job.from_restored_base = true;
+        job.base_checkpoint_id = base->checkpoint_id;
+        job.base_checkpoint_step = base->step_index;
+    }
     // SCHEMA §7.3 gear referenceability (WP-I): the plan itself is what makes a
     // body a gear body (`body_<opId>` names a `Gear` op — D1), so the step-input
     // resolution below needs it. Stored, not re-derived: an accept rebuilds the
@@ -900,6 +1016,25 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
         job.history_prefix_hash = expected_base_hash;  // base-only prepare (or missing tokens)
     }
 
+    // The tessellation artifact is ADVISORY (SCHEMA §7.2 ARTIFACT_TESSELLATE_FAILED,
+    // WP-H): it is attached HERE, before `perStepResults` is serialized, so that a
+    // failure can ride as a warning on the last step instead of failing the whole
+    // prepared plan. Before WP-H this ran outside any try/catch after the result was
+    // built, so one throwing body cost the user a plan that had already succeeded.
+    Envelope r = Envelope::ok_response(req.id, json::object());
+    r.stamp.job_id = job_id;
+    json tess;
+    try {
+        tess = attach_tessellate(job, artifacts, r);
+    } catch (const Standard_Failure& f) {
+        const char* msg = f.GetMessageString();  // OCCT 7.9/8.0 common accessor
+        note_artifact_failure(job, (msg && *msg) ? msg : "Standard_Failure", r);
+        tess = json();
+    } catch (const std::exception& ex) {
+        note_artifact_failure(job, ex.what(), r);
+        tess = json();
+    }
+
     json per_step = json::array();
     for (const StepResult& ps : job.per_step) {
         json e = {{"stepIndex", ps.step_index}, {"status", ps.status}};
@@ -922,11 +1057,6 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
         {"historyPrefixHash", job.history_prefix_hash},
     };
 
-    // Build the terminal resp first (so tessellation can attach binary sections),
-    // then cache the JSON result for idempotent re-return.
-    Envelope r = Envelope::ok_response(req.id, result);
-    r.stamp.job_id = job_id;
-
     // Cache the PlanPrepared JSON for idempotent re-return WITHOUT the tessellate
     // artifacts: the artifact bytes ride in THIS resp's binary tail only, so a
     // re-sent jobId (which returns the cached JSON with no bin) must not reference
@@ -934,10 +1064,23 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     // preparedSnapshotId/historyPrefixHash/perStepResults — meshes are re-fetchable
     // via Tessellate. The artifact reference is attached to the live resp only.
     job.prepared_result = result;
-    json tess = attach_tessellate(job, artifacts, r);
-    if (!tess.is_null()) {
-        result["artifacts"] = json{{"tessellate", tess}};
-        r.result = std::move(result);  // live resp references the inlined sections
+    if (!tess.is_null()) result["artifacts"] = json{{"tessellate", tess}};
+    r.result = std::move(result);  // the live resp references the inlined sections
+
+    // LATE CANCEL (SCHEMA §7.2/§8, WP-H). The op loop polls the token per step, so a
+    // cancel raised AFTER the last step — while the terminal was being assembled —
+    // used to be ignored: the scratch was stored behind an ok:true PlanPrepared that
+    // Rust, having cancelled, never accepted or discarded, and every later
+    // ExecutePlan was refused until restart (finding session-executor-4). Re-check
+    // here, at the last instant before the scratch is installed, and end with the
+    // EXISTING cancelled terminal: nothing stored, session untouched.
+    if (ctx.cancel.cancelled()) {
+        WLOG_WARN("ExecutePlan job %llu cancelled before store_prepared; nothing stored",
+                  static_cast<unsigned long long>(job_id));
+        Envelope cancelled = Envelope::error_response(
+            req.id, ErrorInfo{"CANCELLED", "plan cancelled", /*retriable=*/false});
+        cancelled.stamp.job_id = job_id;
+        return cancelled;
     }
 
     session.store_prepared(std::move(job));

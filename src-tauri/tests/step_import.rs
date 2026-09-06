@@ -396,6 +396,7 @@ async fn export_fixture(bin: &std::path::Path, path: &std::path::Path, dist_a: f
             &[a, b],
             "AP214IS",
             &Default::default(),
+            None, // fixture builder: unfenced live-head export (SCHEMA §7.8)
         )
         .await
         .expect("ExportStep the fixture");

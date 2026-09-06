@@ -645,6 +645,28 @@ pub struct AcceptResult {
     pub document_revision: crate::ids::DocumentRevision,
 }
 
+/// The kernel-lane job a worker was executing when it answered `GetWorkerHead`
+/// (SCHEMA §7.1 `inflight`, kernel-hardening WP-H). Solver-lane jobs are never
+/// reported here — they have their own 250 ms Rust timeout.
+///
+/// `age_ms` runs from the moment the worker dequeued the job; `since_progress_ms`
+/// from the last NON-terminal frame it emitted (`progress` / `event` / `chunk`),
+/// and equals `age_ms` while it has emitted none. The supervisor's wedge deadline
+/// (§8) is measured against `since_progress_ms`, which is what lets a legitimately
+/// long op that streams progress live while a deadlocked one dies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InflightJob {
+    /// The verb being executed (`"ExecutePlan"`, `"Tessellate"`, …).
+    pub verb: String,
+    /// The OCW1 request id.
+    pub id: u64,
+    /// The plan's `jobId`, present on the plan verbs only (§7.1 OMITS the key
+    /// otherwise — absence is "no job id", never job zero).
+    pub job_id: Option<u64>,
+    pub age_ms: u64,
+    pub since_progress_ms: u64,
+}
+
 /// Worker head, for reconciliation after a suspected desync (SCHEMA §7.1
 /// `GetWorkerHead`; also the `OpenSession` result head).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,6 +676,14 @@ pub struct WorkerHead {
     pub snapshot_id: SnapshotId,
     pub history_prefix_hash: HistoryPrefixHash,
     pub has_scratch: bool,
+    /// A `RestoreCheckpoint` result is parked in the worker's restored-base slot,
+    /// waiting for the `ExecutePlan` that names it in `baseCheckpoint` (SCHEMA
+    /// §7.1/§7.2, WP-H). Additive: a producer that omits the key reads `false`.
+    pub has_restored_base: bool,
+    /// The kernel-lane job in flight when the probe was answered (§7.1, WP-H).
+    /// `None` for an idle lane **and** for a worker that omits the key entirely
+    /// (an older producer) — the supervisor's wedge check is skipped either way.
+    pub inflight: Option<InflightJob>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -675,6 +705,10 @@ pub struct TessellateRequest {
     pub bodies: BodySelector,
     pub lod: Lod,
     pub include_edges: bool,
+    /// OPTIONAL snapshot fence (SCHEMA §7.6, WP-H): the head this request is
+    /// meshing FOR. Absent ⇒ the live head, byte-identical to a pre-WP-H request;
+    /// present and ≠ the worker's head ⇒ `STALE_PREVIEW` with nothing meshed.
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// A produced mesh handle (SCHEMA §7.6 result element). The core holds the
@@ -957,6 +991,21 @@ pub trait GeometryEngine: Send + Sync {
     /// `DiscardPrepared` (SCHEMA §7.2) — drops the scratch job state; the session
     /// is unchanged.
     async fn discard_prepared(&self, job_id: JobId) -> Result<(), EngineError>;
+
+    /// Issues `DiscardPrepared` for `job_id` from a **detached** task — the
+    /// Rust-side guarantee of SCHEMA §7.2: a prepared regen whose driver is
+    /// DROPPED before it reaches `AcceptPrepared`/`DiscardPrepared` (a cancelled
+    /// task, a superseded edit, a panic) must not strand a scratch, or every later
+    /// `ExecutePlan` is refused for the rest of the session.
+    ///
+    /// Called from [`Drop`], so it is SYNCHRONOUS and must neither await nor
+    /// block: the transport-owning implementation spawns the round trip and
+    /// forgets it (best-effort, logged). The default does nothing — an engine with
+    /// no runtime to spawn onto (the in-memory test fakes) has no scratch to
+    /// strand either.
+    fn discard_prepared_detached(&self, job_id: JobId) {
+        let _ = job_id;
+    }
 
     /// `GetWorkerHead` (SCHEMA §7.1) — reconciliation probe (no side effects).
     async fn get_worker_head(&self) -> Result<WorkerHead, EngineError>;

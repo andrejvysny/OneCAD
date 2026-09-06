@@ -652,7 +652,7 @@ pub async fn export_step_file(
             None => return Ok(None), // dialog cancelled
         },
     };
-    let (bodies, snapshot, mut attributes, pending) = {
+    let (bodies, snapshot, fence, mut attributes, pending) = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
@@ -661,6 +661,7 @@ pub async fn export_step_file(
         (
             rt.head_body_ids(),
             rt.head_snapshot_id(),
+            crate::export::export_fence(rt),
             attributes,
             pending,
         )
@@ -675,7 +676,7 @@ pub async fn export_step_file(
 
     let exporter = state.exporter();
     exporter
-        .export_step(&target, &bodies, "AP242DIS", &attributes)
+        .export_step(&target, &bodies, "AP242DIS", &attributes, fence)
         .await?;
     Ok(Some(target))
 }
@@ -697,10 +698,10 @@ pub async fn export_stl_file(
             None => return Ok(None), // dialog cancelled
         },
     };
-    let bodies = head_bodies(&state).await?;
+    let (bodies, fence) = head_bodies(&state).await?;
     state
         .exporter()
-        .export_stl(&target, &bodies, /*binary=*/ true, "fine")
+        .export_stl(&target, &bodies, /*binary=*/ true, "fine", fence)
         .await?;
     Ok(Some(target))
 }
@@ -722,10 +723,10 @@ pub async fn export_obj_file(
             None => return Ok(None), // dialog cancelled
         },
     };
-    let bodies = head_bodies(&state).await?;
+    let (bodies, fence) = head_bodies(&state).await?;
     state
         .exporter()
-        .export_obj(&target, &bodies, "fine")
+        .export_obj(&target, &bodies, "fine", fence)
         .await?;
     Ok(Some(target))
 }
@@ -811,12 +812,17 @@ pub async fn export_3mf_file(
 }
 
 /// The body ids at head for an export command (locks the runtime briefly).
-async fn head_bodies(state: &State<'_, AppState>) -> Result<Vec<BodyId>, ApiError> {
+/// The head's body ids plus the snapshot a §7.8 writer is fenced on (WP-H) —
+/// read together under ONE lock so the export cannot name a snapshot from a
+/// different head than the bodies it is writing.
+async fn head_bodies(
+    state: &State<'_, AppState>,
+) -> Result<(Vec<BodyId>, Option<SnapshotId>), ApiError> {
     let guard = state.runtime.lock().await;
     let rt = guard
         .as_ref()
         .ok_or_else(|| ApiError::NoDocument("export".into()))?;
-    Ok(rt.head_body_ids())
+    Ok((rt.head_body_ids(), crate::export::export_fence(rt)))
 }
 
 /// Closes the open document, dropping its runtime + caches. Clears the document's

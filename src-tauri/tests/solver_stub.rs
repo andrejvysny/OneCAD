@@ -40,6 +40,12 @@ fn fast_config(binary: PathBuf) -> SupervisorConfig {
         ping_interval: Duration::from_millis(200),
         ping_timeout: Duration::from_millis(500),
         max_missed_pings: 2,
+        // The §8 wedged-op deadlines are the production ones here: these drills are
+        // about connect/retire/solver behaviour, and a small deadline would only add
+        // a way for them to die of something they are not testing.
+        wedge_deadline_execute_plan: Duration::from_secs(180),
+        wedge_deadline_readers: Duration::from_secs(60),
+        wedge_deadline_default: Duration::from_secs(30),
         backoff: vec![Duration::from_millis(10)],
         max_rapid_deaths: 3,
         healthy_threshold: Duration::from_millis(300),

@@ -4,3 +4,4 @@
 - [Edge-op authoring seams](edge-op-authoring-seams.md) — the four seams a fillet/chamfer param must cross, core-serde vs OCW1, re-edit is a whole-op replace
 - [Rust lane gotchas](repo_rust_lane_gotchas.md) — params/RepairItem field fan-out, RepairReason's hand-written Deserialize, the stale `count == 22` variant list, GProp normals
 - [Fillet acceptance gate](fillet-acceptance-gate.md) — 1e-9 section/tangency gate refuses walked blends by ~1e6x; analytic blends measure 1e-16; how to probe it
+- [Supervisor + stub lanes](repo_supervisor_and_stub_lanes.md) — SupervisorConfig/WorkerHead fan-out, GeometryEngine default+forward rule, no tokio `rt` in core, stub's three threads

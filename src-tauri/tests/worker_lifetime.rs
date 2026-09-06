@@ -59,6 +59,12 @@ fn fast_config(binary: PathBuf, envs: Vec<(String, String)>) -> SupervisorConfig
         ping_interval: Duration::from_millis(100),
         ping_timeout: Duration::from_millis(500),
         max_missed_pings: 2,
+        // The §8 wedged-op deadlines are the production ones here: these drills are
+        // about connect/retire/solver behaviour, and a small deadline would only add
+        // a way for them to die of something they are not testing.
+        wedge_deadline_execute_plan: Duration::from_secs(180),
+        wedge_deadline_readers: Duration::from_secs(60),
+        wedge_deadline_default: Duration::from_secs(30),
         backoff: vec![
             Duration::from_millis(10),
             Duration::from_millis(20),
@@ -321,12 +327,21 @@ async fn retire_during_backoff_cancels_the_pending_reconnect() {
 // Retire with a ping outstanding — the run-loop path
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `HANG_ON GetWorkerHead` wedges the stub inside the liveness ping and, because the
-/// stub is single-threaded, its `Shutdown` frame is never answered either. So this
-/// drill covers both halves of the run-loop contract: the select arm must win against
-/// an in-flight ping, and the graceful window must fall through to a force-kill. A
-/// generous `ping_timeout` keeps the supervisor's own SIGKILL out of the picture, so
-/// what completes the teardown can only be the retirement.
+/// `DEAF_ON GetWorkerHead` parks the stub's READER thread on the first liveness
+/// ping, so from then on it answers nothing at all — not the ping, and not the
+/// `Shutdown` the retirement sends. This drill covers both halves of the run-loop
+/// contract: the retire select arm must win against an in-flight ping, and the
+/// graceful window must fall through to a force-kill. A generous `ping_timeout`
+/// keeps the supervisor's own SIGKILL out of the picture, so what completes the
+/// teardown can only be the retirement.
+///
+/// It used to use `HANG_ON GetWorkerHead`, which became VACUOUS when the stub grew
+/// its status lane (WP-H): `HANG_ON` now wedges the KERNEL lane, `GetWorkerHead` is
+/// answered off the status lane, and the stub therefore answered `Shutdown` and
+/// exited 0 — the test passed through the GRACEFUL path while claiming to prove the
+/// force-kill one. The elapsed-time assertion below is what makes that impossible to
+/// regress: only a child that never self-exits can make the teardown outlive
+/// `RETIRE_GRACE`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retire_with_a_hung_ping_outstanding_force_kills_the_child() {
     let Some(bin) = stub_binary() else {
@@ -334,7 +349,7 @@ async fn retire_with_a_hung_ping_outstanding_force_kills_the_child() {
     };
     let mut config = fast_config(
         bin,
-        vec![("ONECAD_STUB_HANG_ON".into(), "GetWorkerHead".into())],
+        vec![("ONECAD_STUB_DEAF_ON".into(), "GetWorkerHead".into())],
     );
     config.ping_interval = Duration::from_millis(50);
     config.ping_timeout = Duration::from_secs(30);
@@ -342,15 +357,32 @@ async fn retire_with_a_hung_ping_outstanding_force_kills_the_child() {
     assert!(wm.wait_ready(Duration::from_secs(3)).await);
     let epoch_before = wm.epoch().0;
     let mut life = wm.subscribe();
-    // Give the ticker time to fire a ping that will now hang forever.
+    // Give the ticker time to fire a ping that will now go unanswered forever.
     tokio::time::sleep(Duration::from_millis(200)).await;
     drain(&mut life);
 
+    let retired_at = Instant::now();
     wm.retire();
     assert!(
         wm.wait_torn_down(Duration::from_secs(3)).await,
         "the graceful window must fall through to SIGKILL — the stub can never answer \
-         Shutdown while it is wedged in the ping"
+         Shutdown while its reader is parked"
+    );
+    // THE force-kill proof. `terminate_child` waits `RETIRE_GRACE` (500 ms) for the
+    // self-exit a graceful `Shutdown` produces and only then SIGKILLs, so a teardown
+    // that outlives the grace window can only have gone through the kill. A stub
+    // that answered `Shutdown` would be reaped in single-digit milliseconds — which
+    // is exactly what the vacuous version measured.
+    let teardown = retired_at.elapsed();
+    eprintln!(
+        "retire-force-kill drill: teardown took {} ms",
+        teardown.as_millis()
+    );
+    assert!(
+        teardown >= Duration::from_millis(450),
+        "teardown finished in {} ms — the child self-exited, so this drill never \
+         reached the force-kill path it claims to cover",
+        teardown.as_millis()
     );
     // Longer than RETIRE_GRACE (500 ms) so the force-kill has landed.
     let seen = collect_for(&mut life, Duration::from_millis(1200)).await;

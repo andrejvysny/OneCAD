@@ -59,6 +59,13 @@ fn fast_config(binary: PathBuf, envs: Vec<(String, String)>) -> SupervisorConfig
         ping_interval: Duration::from_millis(100),
         ping_timeout: Duration::from_millis(500),
         max_missed_pings: 2,
+        // The §8 wedged-op deadlines, scaled down like everything else here: a job
+        // that has emitted nothing for 2 s is wedged for the purposes of these
+        // drills. Every stub handler answers in microseconds, so only a hook can
+        // reach this; the drills that need a different budget set their own.
+        wedge_deadline_execute_plan: Duration::from_millis(2000),
+        wedge_deadline_readers: Duration::from_millis(2000),
+        wedge_deadline_default: Duration::from_millis(2000),
         backoff: vec![
             Duration::from_millis(10),
             Duration::from_millis(20),
@@ -327,11 +334,47 @@ async fn crash_on_execute_plan_never_publishes_partial() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Chaos: hung worker → ping timeout → SIGKILL → restart
+// Chaos: a WEDGED op (deadline) vs an UNRESPONSIVE process (ping rule) — SCHEMA §8
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Collects the restart reasons announced within `budget`, stopping at the first
+/// one containing `wanted` (so a passing drill does not wait out the budget). The
+/// whole list comes back either way, because WHICH death was reported is the thing
+/// under test: a wedge reported as a ping timeout sends a reader looking for a dead
+/// process instead of a deadlocked kernel call.
+async fn restart_reasons(
+    life: &mut tokio::sync::broadcast::Receiver<WorkerLifecycle>,
+    budget: Duration,
+    wanted: &str,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut reasons = Vec::new();
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), life.recv()).await {
+            Ok(Ok(WorkerLifecycle::Restarting { reason, .. })) => {
+                let hit = reason.contains(wanted);
+                reasons.push(reason);
+                if hit {
+                    break;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => break,
+            Err(_) => {} // no event this slice; keep waiting out the budget
+        }
+    }
+    reasons
+}
+
+/// WP-H drill (c): an op that WEDGES — the stub's kernel lane never returns —
+/// while the PROCESS stays responsive, its status thread answering every
+/// `GetWorkerHead` and reporting the stuck job in `inflight`.
+///
+/// The ping rule cannot see this: every ping is answered. What kills it is the §8
+/// wall deadline on `inflight.sinceProgressMs`, and the death must be its OWN
+/// reason naming the verb and both measured ages.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hang_on_execute_plan_ping_timeout_sigkill_restart() {
+async fn hang_on_execute_plan_dies_by_the_wedge_deadline() {
     let Some(bin) = stub_binary() else {
         return;
     };
@@ -343,26 +386,63 @@ async fn hang_on_execute_plan_ping_timeout_sigkill_restart() {
     assert!(wm.wait_ready(Duration::from_secs(3)).await);
 
     let tl = one_extrude_timeline();
+    let started = std::time::Instant::now();
+    let outcome = drive(&wm, &tl, 0, 1).await;
+    assert!(
+        matches!(outcome, Outcome::EngineFailed(EngineError::Crashed { .. })),
+        "a wedge SIGKILL is an abnormal exit: the plan fails as Crashed, got {outcome:?}"
+    );
+    let reasons = restart_reasons(&mut life, Duration::from_secs(5), "wedged").await;
+    eprintln!(
+        "wedge drill: resolved in {} ms; restarts={reasons:?}",
+        started.elapsed().as_millis()
+    );
+    let wedge = reasons
+        .iter()
+        .find(|r| r.contains("wedged"))
+        .unwrap_or_else(|| panic!("a wedged op must announce a WEDGE restart, got {reasons:?}"));
+    assert!(
+        wedge.contains("ExecutePlan"),
+        "the wedge reason must name the verb that stopped moving: {wedge}"
+    );
+    assert!(
+        wedge.contains("since progress"),
+        "the wedge reason must carry the measured ages: {wedge}"
+    );
+    assert!(
+        !wedge.contains("ping timeout"),
+        "a wedge is a DISTINCT death, never reported as a ping timeout: {wedge}"
+    );
+}
+
+/// WP-H drill (d), the other half of the same rule: a process answering NOTHING —
+/// the stub's READER thread itself is parked, so not even the status lane sees a
+/// frame — is still killed by the 5 s × 2 ping rule. The wedge deadline did not
+/// replace that rule; it sits behind it, for the case where the process is alive
+/// and the OP is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresponsive_process_still_dies_by_missed_pings() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+    let wm = WorkerManager::spawn(fast_config(
+        bin,
+        vec![("ONECAD_STUB_DEAF_ON".into(), "ExecutePlan".into())],
+    ));
+    let mut life = wm.subscribe();
+    assert!(wm.wait_ready(Duration::from_secs(3)).await);
+
+    let tl = one_extrude_timeline();
     let outcome = drive(&wm, &tl, 0, 1).await;
     assert!(
         matches!(outcome, Outcome::EngineFailed(EngineError::Crashed { .. })),
         "hung plan resolves via SIGKILL → Crashed: {outcome:?}"
     );
-    // A ping-timeout restart must have been announced.
-    let mut saw_ping_restart = false;
-    for _ in 0..32 {
-        match tokio::time::timeout(Duration::from_millis(200), life.recv()).await {
-            Ok(Ok(WorkerLifecycle::Restarting { reason, .. })) if reason.contains("hung") => {
-                saw_ping_restart = true;
-                break;
-            }
-            Ok(Ok(_)) => {}
-            _ => break,
-        }
-    }
+    let reasons = restart_reasons(&mut life, Duration::from_secs(5), "hung").await;
+    eprintln!("deaf drill: restarts={reasons:?}");
     assert!(
-        saw_ping_restart,
-        "hung worker → ping timeout → SIGKILL restart"
+        reasons.iter().any(|r| r.contains("ping timeout")),
+        "a worker answering nothing → ping timeout → SIGKILL restart, got {reasons:?}"
     );
 }
 
@@ -748,4 +828,465 @@ async fn fetch_mesh_gapped_or_overlapping_chunks_are_rejected() {
             "a {mode} mesh stream must be rejected (F5), got {res:?}"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-H drill (a): a SLOW but LIVE op must not be SIGKILLed by the liveness rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A long-running op that is still ALIVE — the worker answers its status lane, and
+/// the job streams `progress` frames the whole time — must be allowed to finish.
+///
+/// This is the drill that H0 measured RED: with the ping serialised behind the
+/// kernel job, a 4 s op was SIGKILLed at ~1.2 s and its plan resolved
+/// `EngineFailed(Crashed)` (finding session-executor-1). Two independent things
+/// make it green, and the numbers are chosen so BOTH must hold:
+///
+/// * the status lane answers every ping, so `missed` never climbs — otherwise the
+///   ping rule kills at ~1.2 s;
+/// * the wedge deadline is measured from the last progress frame, not from the
+///   job's start, so a 6 s op that reports every 500 ms never approaches its 2 s
+///   budget — otherwise the wedge rule kills at ~2 s. `ageMs` would be 6 000.
+///
+/// The op is THREE times its own wedge budget and the cadence a QUARTER of it:
+/// enough headroom that CPU contention cannot flip the result, and short enough
+/// that this drill does not hold a worker (and a `wait_ready` queue) for the whole
+/// run of its neighbours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_op_streaming_progress_is_not_killed() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+    let mut config = fast_config(
+        bin,
+        vec![
+            ("ONECAD_STUB_SLOW_ON".into(), "ExecutePlan".into()),
+            ("ONECAD_STUB_SLOW_MS".into(), "6000".into()),
+            ("ONECAD_STUB_PROGRESS_EVERY_MS".into(), "500".into()),
+        ],
+    );
+    config.ping_interval = Duration::from_millis(200);
+    config.ping_timeout = Duration::from_millis(500);
+    config.max_missed_pings = 2;
+    // Four times the progress cadence and three times SHORTER than the op: the op
+    // survives only because progress resets the clock.
+    config.wedge_deadline_execute_plan = Duration::from_secs(2);
+    let wm = WorkerManager::spawn(config);
+    let mut life = wm.subscribe();
+    assert!(wm.wait_ready(Duration::from_secs(3)).await);
+
+    let tl = one_extrude_timeline();
+    let started = std::time::Instant::now();
+    let outcome = drive(&wm, &tl, 0, 1).await;
+    let elapsed = started.elapsed();
+
+    let mut restarts: Vec<String> = Vec::new();
+    while let Ok(ev) = life.try_recv() {
+        if let WorkerLifecycle::Restarting { reason, .. } = ev {
+            restarts.push(reason);
+        }
+    }
+    eprintln!(
+        "slow-op drill: op budget 6000 ms, progress every 500 ms, ping budget ~1200 ms, \
+         wedge budget 2000 ms; resolved in {} ms as {outcome:?}; restarts={restarts:?}",
+        elapsed.as_millis()
+    );
+
+    assert!(
+        restarts.is_empty(),
+        "a worker that is answering AND streaming progress was restarted: {restarts:?} after \
+         {} ms",
+        elapsed.as_millis()
+    );
+    match outcome {
+        Outcome::Published(snap) => assert_eq!(snap.bodies.len(), 1, "the slow plan published"),
+        other => panic!(
+            "a 6000 ms op that reports progress must complete, not die at a liveness budget; \
+             got {other:?} after {} ms",
+            elapsed.as_millis()
+        ),
+    }
+}
+
+/// WP-H drill (b): a SILENT op inside its deadline survives too.
+///
+/// The complement of the drill above and of the wedge drill: this op emits nothing
+/// at all, so `sinceProgressMs` climbs with `ageMs` exactly as a wedged job's does
+/// — the ONLY thing separating it from the SIGKILLed one is that it finishes
+/// first. Without it, "the wedge rule kills silent ops" would pass just as well as
+/// "the wedge rule kills silent ops that overrun".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_silent_op_within_deadline_survives() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+    let mut config = fast_config(
+        bin,
+        vec![
+            ("ONECAD_STUB_SLOW_ON".into(), "ExecutePlan".into()),
+            ("ONECAD_STUB_SLOW_MS".into(), "3000".into()),
+            // 0 = silent: the op still takes its full time, emitting nothing.
+            ("ONECAD_STUB_PROGRESS_EVERY_MS".into(), "0".into()),
+        ],
+    );
+    config.ping_interval = Duration::from_millis(200);
+    config.ping_timeout = Duration::from_millis(500);
+    config.max_missed_pings = 2;
+    config.wedge_deadline_execute_plan = Duration::from_secs(5);
+    let wm = WorkerManager::spawn(config);
+    let mut life = wm.subscribe();
+    assert!(wm.wait_ready(Duration::from_secs(3)).await);
+
+    let tl = one_extrude_timeline();
+    let started = std::time::Instant::now();
+    let outcome = drive(&wm, &tl, 0, 1).await;
+    let elapsed = started.elapsed();
+
+    let mut restarts: Vec<String> = Vec::new();
+    while let Ok(ev) = life.try_recv() {
+        if let WorkerLifecycle::Restarting { reason, .. } = ev {
+            restarts.push(reason);
+        }
+    }
+    eprintln!(
+        "silent-op drill: 3000 ms silent op under a 5000 ms wedge budget; resolved in {} ms as \
+         {outcome:?}; restarts={restarts:?}",
+        elapsed.as_millis()
+    );
+    assert!(
+        restarts.is_empty(),
+        "a silent op INSIDE its deadline must not be killed: {restarts:?}"
+    );
+    assert!(
+        matches!(outcome, Outcome::Published(_)),
+        "the silent plan must publish, got {outcome:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-H drill (f): the reader snapshot fence retries the head exactly once
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// SCHEMA §7.6: a `Tessellate` that names a `snapshotId` the worker no longer has
+/// at head is refused `STALE_PREVIEW`. Rust re-reads the head ONCE and re-issues,
+/// so a mesh request that merely lost a race is invisible to the caller — but it
+/// does NOT loop: a second refusal is surfaced, and the mesh cache (which only
+/// ever `put`s on an `Ok`) keeps whatever it already had rather than blanking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_snapshot_tessellate_retries_once_then_surfaces() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+    let body = onecad_core::ids::BodyId(Uuid::from_u128(0x10));
+
+    // ONE stale answer: absorbed by the re-read, the caller gets its mesh.
+    let wm = WorkerManager::spawn(fast_config(
+        bin.clone(),
+        vec![
+            ("ONECAD_STUB_STALE_ON".into(), "Tessellate".into()),
+            ("ONECAD_STUB_STALE_TIMES".into(), "1".into()),
+        ],
+    ));
+    assert!(wm.wait_ready(Duration::from_secs(3)).await);
+    let bytes = wm
+        .fetch_mesh(body, Lod::Coarse, onecad_core::ids::SnapshotId(7))
+        .await
+        .expect("one STALE_PREVIEW must be absorbed by the single head re-read");
+    assert!(
+        onecad_protocol::mesh::validate_mesh_blob(&bytes).is_ok(),
+        "the retry serves a real MESH1 blob"
+    );
+    wm.shutdown().await;
+
+    // TWO stale answers: the retry is spent, so the refusal reaches the caller as
+    // the stalePreview op failure (there is no dedicated EngineError variant).
+    let wm2 = WorkerManager::spawn(fast_config(
+        bin,
+        vec![
+            ("ONECAD_STUB_STALE_ON".into(), "Tessellate".into()),
+            ("ONECAD_STUB_STALE_TIMES".into(), "2".into()),
+        ],
+    ));
+    assert!(wm2.wait_ready(Duration::from_secs(3)).await);
+    let err = wm2
+        .fetch_mesh(body, Lod::Coarse, onecad_core::ids::SnapshotId(7))
+        .await
+        .expect_err("a SECOND stale answer must surface, not retry again");
+    assert!(
+        matches!(
+            err,
+            EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::StalePreview,
+                ..
+            }
+        ),
+        "the surfaced error must be the stalePreview op failure, got {err:?}"
+    );
+    wm2.shutdown().await;
+}
+
+/// The WRITER half of the same fence, and the asymmetry is the point: SCHEMA §7.8
+/// refuses a stale write with NOTHING written, and Rust surfaces that refusal on
+/// the FIRST answer instead of re-issuing at the fresh head.
+///
+/// A retry would be a silent correctness hole, not a convenience. Each writer's
+/// arguments were derived from the snapshot it named — `ExportStep`'s `faceColors`
+/// are TopoKeys resolved against that snapshot, `ExportGeometry`'s single-solid
+/// invariant was verified on it — so re-issuing them at head N+1 writes a file
+/// whose contents were never checked against what it claims to be. Only the
+/// command layer can re-derive them, so only the command layer may retry.
+///
+/// Both halves run with `STALE_TIMES=1`, which is what makes them discriminating:
+/// a retry would find the hook spent and SUCCEED, so `Ok` here means the retry
+/// came back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_snapshot_writers_surface_without_retrying() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("scratch dir");
+    let body = onecad_core::ids::BodyId(Uuid::from_u128(0x10));
+    let fence = Some(onecad_core::ids::SnapshotId(7));
+
+    // ExportGeometry: a verb the stub really serves, so a retry would return Ok.
+    let wm = WorkerManager::spawn(fast_config(
+        bin.clone(),
+        vec![
+            ("ONECAD_STUB_STALE_ON".into(), "ExportGeometry".into()),
+            ("ONECAD_STUB_STALE_TIMES".into(), "1".into()),
+        ],
+    ));
+    assert!(wm.wait_ready(Duration::from_secs(3)).await);
+    let path = tmp.path().join("bake.xbf");
+    let err =
+        WorkerManager::export_geometry(&wm, &path.to_string_lossy(), &[body], "brep", false, fence)
+            .await
+            .expect_err("a stale ExportGeometry must surface, not silently bake the new head");
+    assert!(
+        matches!(
+            err,
+            EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::StalePreview,
+                ..
+            }
+        ),
+        "the writer must surface stalePreview on the FIRST refusal (an Ok here means it \
+         retried at the fresh head), got {err:?}"
+    );
+    assert!(
+        !path.exists(),
+        "a refused export writes NOTHING (SCHEMA §7.8)"
+    );
+    wm.shutdown().await;
+
+    // ExportStl: the stub does not implement the verb at all, so a retry would come
+    // back as PROTOCOL_ERROR rather than stalePreview — a second, independent way to
+    // see the retry that must not happen.
+    let wm2 = WorkerManager::spawn(fast_config(
+        bin,
+        vec![
+            ("ONECAD_STUB_STALE_ON".into(), "ExportStl".into()),
+            ("ONECAD_STUB_STALE_TIMES".into(), "1".into()),
+        ],
+    ));
+    assert!(wm2.wait_ready(Duration::from_secs(3)).await);
+    let stl = tmp.path().join("out.stl");
+    let err = WorkerManager::export_stl(&wm2, &stl.to_string_lossy(), &[body], true, "fine", fence)
+        .await
+        .expect_err("a stale ExportStl must surface");
+    assert!(
+        matches!(
+            err,
+            EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::StalePreview,
+                ..
+            }
+        ),
+        "the FIRST refusal must reach the caller as stalePreview (a PROTOCOL_ERROR here \
+         would mean a second request was sent), got {err:?}"
+    );
+    assert!(!stl.exists(), "a refused export writes NOTHING");
+    wm2.shutdown().await;
+}
+
+/// SCHEMA §7.2: a worker holds AT MOST ONE prepared job, so the `DiscardPrepared`
+/// the Drop guard detaches must reach it before the plan that replaces the
+/// abandoned one — otherwise that plan is refused `PROTOCOL_ERROR` by the
+/// one-scratch rule, and an ordinary regen (no checkpoint) does not re-plan on a
+/// refusal, so the user's edit simply fails.
+///
+/// `tokio::spawn` orders nothing by itself, which is why this drill issues the
+/// fresh plan IMMEDIATELY after the drop — no sleep, no polling — and asserts it
+/// publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_plan_waits_for_the_abandoned_prepares_discard() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+    let mut config = fast_config(
+        bin,
+        vec![
+            ("ONECAD_STUB_SLOW_ON".into(), "ExecutePlan".into()),
+            ("ONECAD_STUB_SLOW_MS".into(), "600".into()),
+        ],
+    );
+    // Liveness must not interfere: a SIGKILL would clear the scratch for us and the
+    // drill would prove nothing.
+    config.ping_interval = Duration::from_secs(60);
+    let wm = WorkerManager::spawn(config);
+    assert!(wm.wait_ready(Duration::from_secs(3)).await);
+
+    let tl = one_extrude_timeline();
+    {
+        let plan = plan_request(&tl, 0, 1);
+        let engine = AdoptingEngine::new(Arc::new(wm.clone()), HashSet::new());
+        let executor = RegenExecutor::new(engine);
+        let mut session = RegenSession {
+            timeline: tl.clone(),
+            ..Default::default()
+        };
+        let publisher = SnapshotPublisher::new();
+        let cancel = CancelToken::new();
+        let gate = move || (DocumentRevision(0), WorkerEpoch(1));
+        let run = executor.run(plan, &mut session, &gate, &cancel, &publisher);
+        tokio::select! {
+            outcome = run => panic!("the 600 ms plan must still be in flight: {outcome:?}"),
+            () = tokio::time::sleep(Duration::from_millis(150)) => {}
+        }
+    } // dropped: the guard's DiscardPrepared is now a detached task
+
+    // No settling window on purpose — the ordering must come from the dispatch gate.
+    let started = std::time::Instant::now();
+    let outcome = drive(&wm, &tl, 1, 1).await;
+    let label = match &outcome {
+        Outcome::Published(_) => "Published".to_string(),
+        Outcome::EngineFailed(e) => format!("EngineFailed({e})"),
+        other => format!("{other:?}"),
+    };
+    eprintln!(
+        "discard-ordering drill: fresh plan resolved in {} ms as {label}",
+        started.elapsed().as_millis()
+    );
+    match outcome {
+        Outcome::Published(snap) => assert_eq!(snap.bodies.len(), 1, "the fresh plan published"),
+        Outcome::EngineFailed(err) => panic!(
+            "the fresh plan overtook the abandoned prepare's DiscardPrepared and was refused: \
+             {err}"
+        ),
+        other => panic!("the fresh plan must publish, got {other:?}"),
+    }
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-H drill (e): a dropped prepared-regen future must not strand a scratch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dropping the executor future mid-`ExecutePlan` (a cancelled/superseded regen, a
+/// dropped `PreparedRegen::drive`) leaves the worker to finish the plan and install
+/// the scratch regardless. Measured red-first: without a `Drop`-driven
+/// `DiscardPrepared` the scratch is stranded and the worker head reports
+/// `hasScratch: true` for the rest of the session, refusing every later
+/// `ExecutePlan` (SCHEMA §7.2 Rust-side guarantee, finding session-executor-4).
+/// `RegenExecutor::run` now holds a guard that issues the discard from a detached
+/// task when — and only when — its future is dropped mid-flight.
+///
+/// The load-bearing assertion is the SUBJECT run's `hasScratch == false`. It is
+/// kept honest by a CONTROL run first: the same abandoned plan against a stub that
+/// answers `DiscardPrepared` but keeps the scratch anyway — a worker with no
+/// Rust-side guarantee — where `hasScratch` must be TRUE. That control is what
+/// proves the plan really prepared and that a stranded scratch is observable at
+/// all; polling for it on the subject run cannot work, because with the guard in
+/// place the scratch exists only between the prepare and the `DiscardPrepared`
+/// queued directly behind it on the kernel lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_prepared_future_does_not_strand_scratch() {
+    let Some(bin) = stub_binary() else {
+        return;
+    };
+
+    /// Spawns a worker, drives one regen, DROPS the future 300 ms into the 1500 ms
+    /// plan, waits out the plan plus a grace window for the discard, and reports
+    /// the head's `hasScratch`.
+    async fn abandon_a_prepare(
+        bin: PathBuf,
+        extra: Vec<(String, String)>,
+    ) -> (WorkerManager, bool) {
+        let mut envs = vec![
+            ("ONECAD_STUB_SLOW_ON".to_string(), "ExecutePlan".to_string()),
+            ("ONECAD_STUB_SLOW_MS".to_string(), "1500".to_string()),
+        ];
+        envs.extend(extra);
+        let mut config = fast_config(bin, envs);
+        // A long ping interval: this drill is about the DROP, not about liveness — a
+        // SIGKILL would take the stranded scratch with it and make it vacuous.
+        config.ping_interval = Duration::from_secs(60);
+        let wm = WorkerManager::spawn(config);
+        assert!(wm.wait_ready(Duration::from_secs(3)).await);
+
+        let tl = one_extrude_timeline();
+        // Drive the regen exactly as `drive()` does, then DROP the future in flight.
+        {
+            let plan = plan_request(&tl, 0, 1);
+            let engine = AdoptingEngine::new(Arc::new(wm.clone()), HashSet::new());
+            let executor = RegenExecutor::new(engine);
+            let mut session = RegenSession {
+                timeline: tl.clone(),
+                ..Default::default()
+            };
+            let publisher = SnapshotPublisher::new();
+            let cancel = CancelToken::new();
+            let gate = move || (DocumentRevision(0), WorkerEpoch(1));
+            let run = executor.run(plan, &mut session, &gate, &cancel, &publisher);
+            tokio::select! {
+                outcome = run => panic!("the 1500 ms plan must still be in flight: {outcome:?}"),
+                () = tokio::time::sleep(Duration::from_millis(300)) => {}
+            }
+        } // the future is dropped here
+
+        // The worker finishes the abandoned plan regardless (1500 ms from dispatch),
+        // installs the scratch, and only then serves whatever is queued behind it.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let head = wm
+            .get_worker_head()
+            .await
+            .expect("head readable after the drop");
+        (wm, head.has_scratch)
+    }
+
+    // CONTROL: the worker keeps the scratch whatever Rust says. The abandoned plan
+    // must be visible as a stranded scratch — otherwise the subject assertion below
+    // would pass even if the plan had never prepared.
+    let (control, control_scratch) = abandon_a_prepare(
+        bin.clone(),
+        vec![("ONECAD_STUB_IGNORE_DISCARD".into(), "1".into())],
+    )
+    .await;
+    eprintln!("dropped-future control: hasScratch={control_scratch} (expected true)");
+    assert!(
+        control_scratch,
+        "drill precondition: the abandoned plan must actually prepare and be observable as a \
+         stranded scratch (else the assertion below is vacuous)"
+    );
+    control.shutdown().await;
+
+    // SUBJECT: the same abandonment against a worker that honours DiscardPrepared.
+    let (wm, scratch) = abandon_a_prepare(bin, Vec::new()).await;
+    eprintln!("dropped-future subject: hasScratch={scratch} (expected false)");
+    assert!(
+        !scratch,
+        "a dropped prepared regen left the worker scratch installed (hasScratch=true) — no \
+         DiscardPrepared was issued, so the worker holds a prepared job for the rest of the \
+         session"
+    );
+
+    // Companion: a fresh regen must still be accepted. The stub mirrors the §7.2
+    // one-scratch rule, so a scratch that had survived the drop is exactly what
+    // would refuse this plan — the same way the real worker refuses it.
+    let tl = one_extrude_timeline();
+    let outcome = drive(&wm, &tl, 1, 1).await;
+    assert!(
+        matches!(outcome, Outcome::Published(_)),
+        "a fresh regen after an abandoned one must be accepted, got {outcome:?}"
+    );
 }

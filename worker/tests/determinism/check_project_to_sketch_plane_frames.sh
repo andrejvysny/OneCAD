@@ -18,6 +18,16 @@
 # pull it through, and the `Shutdown` line is dropped because EOF on stdin is
 # already a clean shutdown.
 #
+# `GetWorkerHead` is dropped from the replayed stream and is NOT the drain verb
+# (kernel-hardening WP-H, SCHEMA §7.1): it is now answered from the worker's
+# STATUS thread, so in a PIPELINED stream like this one its response overtakes the
+# kernel lane at a position that varies per run, and its `inflight.ageMs` is a
+# wall-clock reading. Either alone makes a byte-compare meaningless, and neither
+# has anything to do with what this gate proves. `Debug.Busy` with `durationMs: 0`
+# takes its place as the drain: kernel lane (so the stream is FIFO again), one
+# frame per request, deterministic body, no session side effects. The head echoes
+# themselves stay asserted by the sequential `canonical_project_to_sketch_plane`.
+#
 # NO DIGEST LITERAL is pinned here or in the fixture, deliberately. The transcript
 # carries `projectedHash` values computed from OCCT doubles, and libm differs
 # between macOS and Linux; a frozen digest would gate the platform rather than the
@@ -35,14 +45,15 @@ trap 'rm -rf "${work}"' EXIT
 
 # Every `send` envelope, in order, minus Shutdown.
 sed -n 's/^{"send"://p' "${FIXTURE}" | sed 's/}$//' \
-    | grep -v '"verb":"Shutdown"' > "${work}/requests.ndjson"
+    | grep -v '"verb":"Shutdown"' \
+    | grep -v '"verb":"GetWorkerHead"' > "${work}/requests.ndjson"
 
 if [ ! -s "${work}/requests.ndjson" ]; then
     echo "project-frames: extracted no requests from ${FIXTURE} — refusing to pass vacuously"
     exit 1
 fi
 for _ in 1 2 3 4 5 6 7 8 9; do
-    echo '{"v":1,"t":"req","id":900,"verb":"GetWorkerHead","args":{}}' >> "${work}/requests.ndjson"
+    echo '{"v":1,"t":"req","id":900,"verb":"Debug.Busy","args":{"durationMs":0}}' >> "${work}/requests.ndjson"
 done
 
 for run in 1 2; do

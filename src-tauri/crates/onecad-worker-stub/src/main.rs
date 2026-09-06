@@ -3,13 +3,41 @@
 //! It implements the handshake and the lifecycle verbs the protocol tests need
 //! (Hello unsolicited, Shutdown, OpenSession/CloseSession, GetWorkerHead) and
 //! replies to any unknown verb with a well-framed `PROTOCOL_ERROR` terminal
-//! `resp` (SCHEMA §8 well-framed-illegal sub-case). It is intentionally
-//! synchronous (blocking stdin/stdout) — the wire bytes are identical to a real
-//! worker's, and blocking IO keeps the chaos hooks trivially deterministic.
+//! `resp` (SCHEMA §8 well-framed-illegal sub-case). IO is blocking — the wire
+//! bytes are identical to a real worker's, and blocking IO keeps the chaos hooks
+//! trivially deterministic.
+//!
+//! ## Lanes (kernel-hardening WP-H)
+//!
+//! The stub mirrors the real worker's thread shape, because the supervisor's
+//! liveness rules are ABOUT that shape and a single-threaded fake cannot express
+//! them: a READER thread parses frames and routes them, a KERNEL thread runs every
+//! modelling verb, and a STATUS thread answers `GetWorkerHead` (SCHEMA §7.1) so a
+//! long kernel job never delays the ping. The `GetWorkerHead` answer carries the
+//! additive `inflight` + `hasRestoredBase` fields with the worker's field names
+//! exactly, so a Rust wedge decision made against the stub is the decision it
+//! would make against OCCT.
+//!
+//! `StubState` and stdout live behind ONE mutex, taken for the duration of a
+//! handler. That is what keeps `seq` monotonic in the same order the bytes hit the
+//! pipe (SCHEMA §2) across three writers — the real worker gets the same property
+//! from its single `write_mu_`. The chaos sleeps happen OUTSIDE that lock, which is
+//! the whole point: a hung kernel job must not be able to gag the status lane.
 //!
 //! Chaos hooks (env vars), for the client's crash/hang/garbage drills:
 //! - `ONECAD_STUB_CRASH_ON=<verb>` — `abort()` when that verb arrives.
-//! - `ONECAD_STUB_HANG_ON=<verb>`  — sleep forever when that verb arrives.
+//! - `ONECAD_STUB_HANG_ON=<verb>`  — sleep forever on the KERNEL lane when that
+//!   verb arrives. The process stays responsive (the status thread keeps answering
+//!   `GetWorkerHead`, reporting the wedged job in `inflight`), so this is the
+//!   WEDGED-OP drill: it must die by the §8 wall deadline, not by the ping rule.
+//! - `ONECAD_STUB_IGNORE_DISCARD=1` — answer `DiscardPrepared` with
+//!   `discarded: true` but KEEP the scratch. The control half of the dropped-prepare
+//!   drill: it reproduces a worker with no Rust-side Drop guarantee, so the drill can
+//!   show that a stranded scratch is observable at all before asserting there is none.
+//! - `ONECAD_STUB_DEAF_ON=<verb>` — stop answering EVERYTHING when that verb
+//!   arrives: the READER thread parks, so nothing is routed to either lane and the
+//!   ping goes unanswered. The unresponsive-PROCESS drill, which the 5 s × 2 ping
+//!   rule must still kill.
 //! - `ONECAD_STUB_GARBAGE=1`       — emit one invalid-magic frame at startup
 //!   (drives the client's `BadMagic` path), then continue.
 //! - `ONECAD_STUB_CRASH_COUNTDOWN=<file>` — the R-WP11 convergence drill: the file
@@ -33,6 +61,19 @@
 //! - `ONECAD_STUB_CRASH_ON_OP=<substr>` — `abort()` mid-plan when an op's `opId`
 //!   contains `<substr>` (the F3 poison test: crash one specific plan's op so its
 //!   crashing-op key poisons while a different plan still runs).
+//! - `ONECAD_STUB_SLOW_ON=<verb>` + `ONECAD_STUB_SLOW_MS=<ms>` — a SLOW but LIVE
+//!   op (WP-H): the verb takes `<ms>` on the kernel lane, streaming `progress`
+//!   frames (SCHEMA §3.3) while it works, then replies normally. Distinct from
+//!   `HANG_ON`, which never finishes.
+//! - `ONECAD_STUB_PROGRESS_EVERY_MS=<ms>` — the `SLOW_ON` progress cadence
+//!   (default 200 ms). **`0` means SILENT**: the op still takes its full time but
+//!   emits no `progress` at all, so `sinceProgressMs` climbs with `ageMs` — the
+//!   difference between an op the wedge rule must spare and one it must kill.
+//! - `ONECAD_STUB_STALE_ON=<verb>` + `ONECAD_STUB_STALE_TIMES=<n>` — answer the
+//!   first `<n>` requests for that verb with a `STALE_PREVIEW` error resp (SCHEMA
+//!   §7.6 shape: `detail {requested, head}`), then behave normally. Drives Rust's
+//!   re-read-the-head-once rule: `n = 1` must be invisible to the caller, `n = 2`
+//!   must surface.
 //!
 //! Beyond the lifecycle verbs, the stub speaks a minimal `ExecutePlan`
 //! (one `planStep` per op minting `body_<opId>`, terminal `PlanPrepared` echoing
@@ -49,21 +90,29 @@
 //! head token advances (the epoch fence still applies). The one divergence from the
 //! real worker (which requires `OpenSession`): when a plan arrives before any
 //! `OpenSession` (the chaos drills), the stub adopts that first plan's epoch + base
-//! hash as the fencing baseline and fences every plan thereafter.
+//! hash as the fencing baseline and fences every plan thereafter. It also mirrors the
+//! ONE-SCRATCH rule (§7.2): a second `ExecutePlan` with a different `jobId` while one
+//! is prepared is a `PROTOCOL_ERROR`, and a re-sent same `jobId` re-returns the cached
+//! `PlanPrepared` — without that, every drill about ordering a `DiscardPrepared` ahead
+//! of the next plan is vacuously green.
 //!
 //! Logs go to stderr only; stdout carries frames exclusively (SCHEMA §1).
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
 use onecad_protocol::framing::{read_frame_blocking, write_frame_blocking, MAGIC_BYTES};
 use onecad_protocol::messages::{
     BinSection, ChunkFrame, ChunkKind, CloseSessionResult, ErrorCode, ErrorObject, EventFrame,
-    Frame, HelloFrame, HelloLimits, HelloResult, OcctInfo, OpenSessionArgs, OpenSessionResult,
-    ReqFrame, RespFrame, ShutdownResult, Stamp, WorkerHeadBrief, WorkerHeadResult,
-    PROTOCOL_VERSION,
+    Frame, HelloFrame, HelloLimits, HelloResult, InflightResult, OcctInfo, OpenSessionArgs,
+    OpenSessionResult, ProgressFrame, ReqFrame, RespFrame, ShutdownResult, Stamp, WorkerHeadBrief,
+    WorkerHeadResult, PROTOCOL_VERSION,
 };
 use onecad_protocol::ProtocolError;
 
@@ -81,6 +130,9 @@ struct Prepared {
     history_prefix_hash: String,
     /// The plan's Rust-owned documentRevision, ADOPTED as the head on accept (D4).
     plan_document_revision: u64,
+    /// The terminal `PlanPrepared` result, cached for the §7.2 idempotency rule:
+    /// a re-sent SAME `jobId` while prepared re-returns this verbatim.
+    result: Value,
 }
 
 /// One stub sketch on the solver lane (SCHEMA §7.4): point positions + a deterministic
@@ -180,6 +232,32 @@ impl StubState {
     }
 }
 
+/// `StubState` + stdout behind ONE mutex (see the lane note in the module docs):
+/// every writer stamps its `seq` and writes its bytes while holding it, so the
+/// three lanes cannot produce a `seq` order that differs from the byte order.
+struct StubCore {
+    out: std::io::Stdout,
+    state: StubState,
+}
+
+/// The kernel-lane job in flight, mirroring the worker's `Dispatcher::Inflight`
+/// FIELD FOR FIELD (SCHEMA §7.1) — a Rust wedge decision taken against the stub
+/// must be the decision it would take against the real worker.
+struct InflightRec {
+    verb: String,
+    id: u64,
+    job_id: Option<u64>,
+    started: Instant,
+    /// The last NON-TERMINAL frame this job emitted; == `started` until it emits
+    /// one, which is what makes `sinceProgressMs == ageMs` for a silent op.
+    last_progress: Instant,
+}
+
+/// Shared handle to the in-flight record. Deliberately NOT inside [`StubCore`]:
+/// the status thread must be able to read it while the kernel thread is parked in
+/// a chaos sleep holding nothing.
+type InflightCell = Arc<Mutex<Option<InflightRec>>>;
+
 fn main() {
     let code = run();
     std::process::exit(code);
@@ -187,14 +265,17 @@ fn main() {
 
 fn run() -> i32 {
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
     let mut reader = stdin.lock();
-    let mut writer = stdout.lock();
-    let mut state = StubState::new();
+    let core = Arc::new(Mutex::new(StubCore {
+        out: std::io::stdout(),
+        state: StubState::new(),
+    }));
+    let inflight: InflightCell = Arc::new(Mutex::new(None));
 
     // Chaos: emit one invalid-magic frame before anything else.
     if env_flag("ONECAD_STUB_GARBAGE") {
-        if let Err(err) = emit_garbage(&mut writer) {
+        let mut guard = core.lock().unwrap();
+        if let Err(err) = emit_garbage(&mut guard.out) {
             eprintln!("stub: failed to emit garbage: {err}");
             return 1;
         }
@@ -207,12 +288,15 @@ fn run() -> i32 {
         std::thread::sleep(delay);
     }
 
-    // Unsolicited hello (SCHEMA §6): seq 0.
-    let hello_seq = state.next_seq();
-    debug_assert_eq!(hello_seq, 0);
-    if let Err(err) = write_hello(&mut writer, hello_seq) {
-        eprintln!("stub: failed to write hello: {err}");
-        return 1;
+    // Unsolicited hello (SCHEMA §6): seq 0, written before any lane starts.
+    {
+        let mut guard = core.lock().unwrap();
+        let hello_seq = guard.state.next_seq();
+        debug_assert_eq!(hello_seq, 0);
+        if let Err(err) = write_hello(&mut guard.out, hello_seq) {
+            eprintln!("stub: failed to write hello: {err}");
+            return 1;
+        }
     }
 
     // Chaos: connect-then-die immediately after the hello (F2 rapid-death cap).
@@ -221,8 +305,40 @@ fn run() -> i32 {
         return 0;
     }
 
+    let (kernel_tx, kernel_rx) = channel::<ReqFrame>();
+    let (status_tx, status_rx) = channel::<ReqFrame>();
+    let kernel = std::thread::spawn({
+        let core = core.clone();
+        let inflight = inflight.clone();
+        move || kernel_loop(&core, &inflight, &kernel_rx)
+    });
+    let status = std::thread::spawn({
+        let core = core.clone();
+        let inflight = inflight.clone();
+        move || status_loop(&core, &inflight, &status_rx)
+    });
+
+    let exit = reader_loop(&mut reader, &kernel_tx, &status_tx);
+
+    // Drop the senders so both lanes drain and return, then join: a frame already
+    // queued must still be answered before the process goes away.
+    drop(kernel_tx);
+    drop(status_tx);
+    let _ = kernel.join();
+    let _ = status.join();
+    exit
+}
+
+/// Parses frames and ROUTES them: `GetWorkerHead` to the status lane, every other
+/// request to the kernel lane. Nothing is executed here, which is what lets the
+/// status lane answer while a kernel job runs.
+fn reader_loop<R: std::io::Read>(
+    reader: &mut R,
+    kernel: &Sender<ReqFrame>,
+    status: &Sender<ReqFrame>,
+) -> i32 {
     loop {
-        let raw = match read_frame_blocking(&mut reader) {
+        let raw = match read_frame_blocking(reader) {
             Ok(Some(raw)) => raw,
             Ok(None) => {
                 eprintln!("stub: stdin closed; exiting");
@@ -250,13 +366,28 @@ fn run() -> i32 {
 
         match frame {
             Frame::Req(req) => {
-                if let Some(code) = handle_req(&mut writer, &mut state, req) {
-                    return code;
+                // Chaos: an UNRESPONSIVE PROCESS. Parking the reader means nothing
+                // reaches either lane — not even the liveness ping — which is the
+                // one condition the 5 s x 2 ping rule is still there to catch.
+                if env_matches("ONECAD_STUB_DEAF_ON", &req.verb) {
+                    eprintln!("stub: DEAF_ON {} -> answering nothing, ever", req.verb);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
+                    }
+                }
+                let lane = if req.verb == "GetWorkerHead" {
+                    status
+                } else {
+                    kernel
+                };
+                if lane.send(req).is_err() {
+                    eprintln!("stub: lane gone; exiting");
+                    return 0;
                 }
             }
             Frame::Cancel(c) => {
-                // Synchronous stub: the target request already completed, so a
-                // cancel is a no-op (SCHEMA §3.5).
+                // The stub answers every request on the lane that owns it, so by the
+                // time a cancel could matter the terminal is already out (SCHEMA §3.5).
                 eprintln!("stub: cancel for id {} (no-op)", c.id);
             }
             Frame::Credit(_) => {
@@ -269,20 +400,198 @@ fn run() -> i32 {
     }
 }
 
-/// Handle one request. Returns `Some(exit_code)` if the process should exit.
-fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) -> Option<i32> {
-    // Chaos hooks fire BEFORE any reply (SCHEMA-agnostic test hooks).
+/// The modelling lane. Chaos sleeps run BEFORE the core lock is taken, so a hung
+/// or slow job never gags the status lane — the property the wedged-op drills
+/// exist to measure.
+fn kernel_loop(core: &Mutex<StubCore>, inflight: &InflightCell, rx: &Receiver<ReqFrame>) {
+    while let Ok(req) = rx.recv() {
+        {
+            let now = Instant::now();
+            *inflight.lock().unwrap() = Some(InflightRec {
+                verb: req.verb.clone(),
+                id: req.id,
+                // Numbers only (SCHEMA §7.1): a verb without a numeric `jobId`
+                // reports the key as ABSENT rather than as job zero.
+                job_id: req.args.get("jobId").and_then(Value::as_u64),
+                started: now,
+                last_progress: now,
+            });
+        }
+        let exit = run_kernel_job(core, inflight, req);
+        *inflight.lock().unwrap() = None;
+        if let Some(code) = exit {
+            // The terminal frame was already written and flushed by the handler.
+            std::process::exit(code);
+        }
+    }
+}
+
+/// One kernel job: the chaos hooks, then the handler.
+fn run_kernel_job(core: &Mutex<StubCore>, inflight: &InflightCell, req: ReqFrame) -> Option<i32> {
     if env_matches("ONECAD_STUB_CRASH_ON", &req.verb) {
         eprintln!("stub: CRASH_ON {} -> abort()", req.verb);
         std::process::abort();
     }
     if env_matches("ONECAD_STUB_HANG_ON", &req.verb) {
-        eprintln!("stub: HANG_ON {} -> sleeping forever", req.verb);
+        eprintln!(
+            "stub: HANG_ON {} -> wedging the kernel lane forever (status lane stays live)",
+            req.verb
+        );
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
+    if env_matches("ONECAD_STUB_SLOW_ON", &req.verb) {
+        if let Some(code) = run_slow_hook(core, inflight, &req) {
+            return Some(code);
+        }
+    }
+    if let Some(result) = stale_preview_hook(core, &req) {
+        if let Err(err) = result {
+            eprintln!("stub: write error for STALE_PREVIEW {}: {err}", req.verb);
+            return Some(0);
+        }
+        return None;
+    }
+    let mut guard = core.lock().unwrap();
+    let StubCore { out, state } = &mut *guard;
+    handle_req(out, state, req)
+}
 
+/// `SLOW_ON`: hold the lane for `SLOW_MS`, emitting a `progress` frame every
+/// `PROGRESS_EVERY_MS` (0 = silent). Each emitted frame notes progress against the
+/// in-flight record, exactly as the worker's `inflight_note_progress` does.
+fn run_slow_hook(core: &Mutex<StubCore>, inflight: &InflightCell, req: &ReqFrame) -> Option<i32> {
+    let total = env_millis("ONECAD_STUB_SLOW_MS").unwrap_or(std::time::Duration::from_secs(1));
+    // `0` is meaningful here (SILENT), so this cannot go through `env_millis`,
+    // which treats 0 as "unset".
+    let cadence = std::env::var("ONECAD_STUB_PROGRESS_EVERY_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(200);
+    eprintln!(
+        "stub: SLOW_ON {} -> answering in {total:?} (progress every {cadence} ms; 0 = silent)",
+        req.verb
+    );
+    let started = Instant::now();
+    if cadence == 0 {
+        std::thread::sleep(total);
+        return None;
+    }
+    let tick = std::time::Duration::from_millis(cadence);
+    while started.elapsed() < total {
+        std::thread::sleep(tick.min(total - started.elapsed()));
+        let elapsed = started.elapsed();
+        let fraction = (elapsed.as_secs_f64() / total.as_secs_f64()).min(1.0);
+        let written = {
+            let mut guard = core.lock().unwrap();
+            let StubCore { out, state } = &mut *guard;
+            let stamp = state.stamp();
+            write_progress(out, req.id, "executing", fraction, stamp)
+        };
+        if let Err(err) = written {
+            eprintln!("stub: failed to write progress: {err}");
+            return Some(1);
+        }
+        if let Some(rec) = inflight.lock().unwrap().as_mut() {
+            rec.last_progress = Instant::now();
+        }
+    }
+    None
+}
+
+/// How many times `STALE_ON` has already fired (process-wide, like every other
+/// counter-shaped hook here).
+static STALE_FIRED: AtomicU64 = AtomicU64::new(0);
+
+/// `STALE_ON`/`STALE_TIMES`: refuse the first N requests for a verb with the
+/// §7.6 `STALE_PREVIEW` shape the real worker emits — a structured code plus
+/// `detail {requested, head}`, so Rust never has to read the message text.
+/// `None` ⇒ the hook did not fire and the handler runs normally.
+fn stale_preview_hook(core: &Mutex<StubCore>, req: &ReqFrame) -> Option<Result<(), ProtocolError>> {
+    if !env_matches("ONECAD_STUB_STALE_ON", &req.verb) {
+        return None;
+    }
+    let times = std::env::var("ONECAD_STUB_STALE_TIMES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1);
+    if STALE_FIRED.fetch_add(1, Ordering::SeqCst) >= times {
+        return None;
+    }
+    let mut guard = core.lock().unwrap();
+    let StubCore { out, state } = &mut *guard;
+    let requested = req.args.get("snapshotId").and_then(Value::as_u64);
+    let head = state.snapshot_id;
+    let stamp = state.stamp();
+    eprintln!(
+        "stub: STALE_ON {} -> STALE_PREVIEW (requested {requested:?}, head {head})",
+        req.verb
+    );
+    Some(write_resp_err(
+        out,
+        req.id,
+        stamp,
+        ErrorObject {
+            code: ErrorCode::StalePreview,
+            message: format!(
+                "{}: request is against snapshot {}; head is {head}",
+                req.verb,
+                requested.unwrap_or(0)
+            ),
+            detail: Some(json!({ "requested": requested, "head": head })),
+            retriable: false,
+        },
+    ))
+}
+
+/// The liveness lane (SCHEMA §7.1). It answers `GetWorkerHead` and nothing else,
+/// takes only the core lock, and touches no chaos hook — so it keeps answering
+/// while the kernel lane is wedged, which is what lets Rust tell a slow op from a
+/// dead process.
+fn status_loop(core: &Mutex<StubCore>, inflight: &InflightCell, rx: &Receiver<ReqFrame>) {
+    while let Ok(req) = rx.recv() {
+        let snapshot = inflight.lock().unwrap().as_ref().map(|rec| {
+            let now = Instant::now();
+            InflightResult {
+                verb: rec.verb.clone(),
+                id: rec.id,
+                job_id: rec.job_id,
+                age_ms: now.duration_since(rec.started).as_millis() as u64,
+                since_progress_ms: now.duration_since(rec.last_progress).as_millis() as u64,
+            }
+        });
+        let mut guard = core.lock().unwrap();
+        let StubCore { out, state } = &mut *guard;
+        let stamp = state.stamp();
+        let result = write_resp_ok(
+            out,
+            req.id,
+            stamp,
+            &WorkerHeadResult {
+                document_revision: state.document_revision,
+                worker_epoch: state.worker_epoch,
+                snapshot_id: state.snapshot_id,
+                history_prefix_hash: state.history_prefix_hash.clone(),
+                has_scratch: !state.prepared.is_empty(),
+                // The stub owns no checkpoint slot, so this is always false — the
+                // field is mirrored so its ABSENCE is never what a Rust reader is
+                // being tested against.
+                has_restored_base: false,
+                inflight: snapshot,
+            },
+        );
+        if let Err(err) = result {
+            eprintln!("stub: write error for GetWorkerHead: {err}");
+            return;
+        }
+    }
+}
+
+/// Handle one KERNEL-lane request. Returns `Some(exit_code)` if the process should
+/// exit. The chaos hooks fire in [`run_kernel_job`], BEFORE the core lock this is
+/// called under — a handler must never be able to hold the status lane hostage.
+fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) -> Option<i32> {
     let result: Result<(), ProtocolError> = match req.verb.as_str() {
         "Shutdown" => {
             let stamp = state.stamp();
@@ -303,21 +612,6 @@ fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) ->
                 stamp,
                 &CloseSessionResult {
                     session_closed: true,
-                },
-            )
-        }
-        "GetWorkerHead" => {
-            let stamp = state.stamp();
-            write_resp_ok(
-                writer,
-                req.id,
-                stamp,
-                &WorkerHeadResult {
-                    document_revision: state.document_revision,
-                    worker_epoch: state.worker_epoch,
-                    snapshot_id: state.snapshot_id,
-                    history_prefix_hash: state.history_prefix_hash.clone(),
-                    has_scratch: !state.prepared.is_empty(),
                 },
             )
         }
@@ -684,6 +978,33 @@ fn handle_execute_plan<W: Write>(
     // (above) is unchanged; on accept the head is replaced wholesale. Incremental
     // plans (nonzero expectedBaseHash) keep the strict head-hash fence. Mirrors the
     // real worker's Session::fence_and_clone.
+    // One scratch at a time (SCHEMA §7.2, mirroring `Session::fence_and_clone`): a
+    // re-sent SAME jobId is idempotent (re-return the cached PlanPrepared), a
+    // DIFFERENT jobId is a PROTOCOL_ERROR. Without this the stub silently accepts a
+    // second prepare, and every Rust drill about ORDERING a `DiscardPrepared`
+    // against the next plan is vacuously green.
+    if let Some(p) = state.prepared.first() {
+        if Some(p.job_id) == job_id {
+            let result = p.result.clone();
+            let stamp = state.stamp_job(job_id);
+            return write_resp_value(writer, req.id, stamp, result, &[], &[]);
+        }
+        let prepared_job = p.job_id;
+        let stamp = state.stamp_job(job_id);
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::ProtocolError,
+                message: "ExecutePlan: a plan is already prepared; accept or discard it first"
+                    .into(),
+                detail: Some(json!({ "preparedJobId": prepared_job, "requestedJobId": job_id })),
+                retriable: false,
+            },
+        );
+    }
+
     let from_zero = expected_base == EMPTY_PREFIX_HASH && args.get("baseCheckpoint").is_none();
     if !from_zero && expected_base != state.history_prefix_hash {
         let stamp = state.stamp_job(job_id);
@@ -752,14 +1073,6 @@ fn handle_execute_plan<W: Write>(
         .and_then(Value::as_str)
         .unwrap_or(&expected_base)
         .to_string();
-    if let Some(j) = job_id {
-        state.prepared.push(Prepared {
-            job_id: j,
-            prepared_snapshot_id: prepared_snapshot,
-            history_prefix_hash: echo.clone(),
-            plan_document_revision: plan_revision,
-        });
-    }
     let result = json!({
         "planPrepared": true,
         "preparedSnapshotId": prepared_snapshot,
@@ -768,6 +1081,15 @@ fn handle_execute_plan<W: Write>(
         "perStepResults": per_step,
         "historyPrefixHash": echo,
     });
+    if let Some(j) = job_id {
+        state.prepared.push(Prepared {
+            job_id: j,
+            prepared_snapshot_id: prepared_snapshot,
+            history_prefix_hash: echo.clone(),
+            plan_document_revision: plan_revision,
+            result: result.clone(),
+        });
+    }
     let stamp = state.stamp_job(job_id);
     write_resp_value(writer, req.id, stamp, result, &[], &[])
 }
@@ -823,7 +1145,15 @@ fn handle_discard_prepared<W: Write>(
     state: &mut StubState,
     req: &ReqFrame,
 ) -> Result<(), ProtocolError> {
-    if let Some(j) = req.args.get("jobId").and_then(Value::as_u64) {
+    // Chaos: answer `discarded: true` and keep the scratch anyway. The CONTROL half
+    // of the dropped-prepare drill — it is what a worker looked like before Rust's
+    // §7.2 Drop guarantee existed, and it is the only way to show that the drill's
+    // observation (`hasScratch` at the head) can see a stranded scratch at all. With
+    // the guard working, the real scratch lives for microseconds between the
+    // prepare and the discard queued behind it, far too short to poll for.
+    if env_flag("ONECAD_STUB_IGNORE_DISCARD") {
+        eprintln!("stub: IGNORE_DISCARD -> answering ok but KEEPING the scratch");
+    } else if let Some(j) = req.args.get("jobId").and_then(Value::as_u64) {
         state.prepared.retain(|p| p.job_id != j);
     }
     let stamp = state.stamp();
@@ -1422,6 +1752,29 @@ fn crash_countdown() {
 }
 
 /// Write one non-terminal `event` frame (SCHEMA §3.4).
+/// Write a non-terminal `progress` frame (SCHEMA §3.3) for an in-flight request.
+fn write_progress<W: Write>(
+    writer: &mut W,
+    id: u64,
+    phase: &str,
+    fraction: f64,
+    stamp: Stamp,
+) -> Result<(), ProtocolError> {
+    let frame = Frame::Progress(ProgressFrame {
+        v: PROTOCOL_VERSION,
+        id,
+        phase: phase.to_string(),
+        fraction: Some(fraction),
+        message: None,
+        document_revision: stamp.document_revision,
+        worker_epoch: stamp.worker_epoch,
+        snapshot_id: stamp.snapshot_id,
+        job_id: stamp.job_id,
+        seq: stamp.seq,
+    });
+    write_frame(writer, &frame)
+}
+
 fn write_event<W: Write>(
     writer: &mut W,
     id: u64,

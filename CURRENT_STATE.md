@@ -37,7 +37,21 @@ user deletes by hand.
   after landing (approve_with_changes, 6 SCHEMA-text edits); adversarial review (defective → HIGH
   unreachable repair + 4 MEDIUM fixed red-first). Gate so far: ctest 179/179 · cargo 94/1539/0 ·
   vitest 318/5618/78 · clippy 1.97 + 1.98.1 · kernelbench 136 unchanged; e2e running.
-- **Next:** e2e result → commit `feat(kernel): component mates …` → push → WP-G decision → WP-H.
+- **WP-I COMMITTED `4555993`** (76 files, +6044 / −112), pushed, master == origin; e2e **524 / 0**
+  (36.3 min, checksum identical) closed the gate. CI queued at the time of writing.
+- **CI on `4555993`:** every hosted lane green including both e2e lanes.
+- **User rulings 2026-09-05:** WP-G APPROVED, queued after WP-H; WP-H started in this session.
+- **WP-H (in the tree, mid-gate):** H0 probes measured RED; H1 SCHEMA hunk audited before code
+  (approve_with_changes, applied) and after landing (approve_with_changes, applied); H2a worker
+  (status loop + `inflight`, restored-base slot + fourth fence case, reader fences, kind-preserving
+  fallback that now FAILS the substituted step, late cancel, artifact guard) and H2b Rust (wedge
+  deadline + `Death::Wedged`, discard-on-drop with ordering, fenced Tessellate with one retry,
+  writers surface `stalePreview`, stub three-thread mirror + hooks) landed; adversarial review
+  (defective → two HIGH + six others fixed red-first). Gate so far: ctest 186/186 · cargo
+  95/1553/0 · clippy 1.97 + 1.98.1 · vitest 318/5618/78 · kernelbench 136 unchanged · hex/verifiers/
+  hygiene clean; e2e running. Recorded limits: no real-worker `progress` frames yet (single-verb
+  jobs see a wall-clock deadline — WP-K); the 100 ms status promise excludes the two `mu_` holders.
+- **Next:** e2e result → commit `kh-H` → push → WP-G (approved) → WP-J.
 
 ## PREVIOUS — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 

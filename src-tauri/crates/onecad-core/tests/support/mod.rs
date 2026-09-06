@@ -499,6 +499,8 @@ impl GeometryEngine for FakeEngine {
             snapshot_id: SnapshotId(0),
             history_prefix_hash: HistoryPrefixHash::empty(),
             has_scratch: false,
+            has_restored_base: false,
+            inflight: None,
         })
     }
 
@@ -527,6 +529,8 @@ impl GeometryEngine for FakeEngine {
             snapshot_id: SnapshotId(0),
             history_prefix_hash: HistoryPrefixHash::empty(),
             has_scratch: false,
+            has_restored_base: false,
+            inflight: None,
         })
     }
 

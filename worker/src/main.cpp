@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unistd.h>
 
@@ -158,14 +159,32 @@ Envelope handle_reset_session(Session& session, const Envelope& req) {
         req.id, nlohmann::json{{"reset", true}, {"workerEpoch", new_epoch}});
 }
 
-Envelope handle_get_worker_head(Session& session, const Envelope& req) {
+// GetWorkerHead (SCHEMA §7.1) — the reconciliation probe AND the §8 liveness
+// ping, which is why the Dispatcher routes it to its STATUS thread: it must
+// answer inside 100 ms while the kernel lane is mid-op. Everything it reads is a
+// scalar — the session's head under `mu_` plus the dispatcher's in-flight record
+// — and it touches no `TopoDS_Shape`, which is what makes that promise keepable.
+Envelope handle_get_worker_head(Session& session, const Envelope& req,
+                                const std::optional<Dispatcher::Inflight>& inflight) {
     const WorkerHead head = session.head();
+    nlohmann::json in = nlohmann::json(nullptr);  // §7.1: `null` when the lane is idle
+    if (inflight.has_value()) {
+        in = nlohmann::json{{"verb", inflight->verb},
+                            {"id", inflight->id},
+                            {"ageMs", inflight->age_ms},
+                            {"sinceProgressMs", inflight->since_progress_ms}};
+        // `jobId` is OMITTED when the verb carries none (§7.1) — absence is "no
+        // job id", which a 0 would misreport as job zero.
+        if (inflight->job_id.has_value()) in["jobId"] = *inflight->job_id;
+    }
     nlohmann::json result = {
         {"documentRevision", head.document_revision},
         {"workerEpoch", head.worker_epoch},
         {"snapshotId", head.snapshot_id},
         {"historyPrefixHash", head.history_prefix_hash},
         {"hasScratch", head.has_scratch},
+        {"hasRestoredBase", head.has_restored_base},  // WP-H, additive
+        {"inflight", std::move(in)},                  // WP-H, additive
     };
     return Envelope::ok_response(req.id, std::move(result));
 }
@@ -174,6 +193,12 @@ Envelope handle_get_worker_head(Session& session, const Envelope& req) {
 // blobs are inlined in the resp binary tail (§5.2 permits inline ≤ chunkSize); the
 // result references each by bin section name + carries totalBytes + sha256.
 Envelope handle_tessellate(Session& session, const Envelope& req) {
+    // OPTIONAL snapshot fence (SCHEMA §7.6, WP-H): refuse BEFORE meshing anything
+    // when the caller names a snapshot that is no longer the head. Absent ⇒ the
+    // live head, byte-identical to every pre-WP-H request.
+    if (auto stale = onecad::session::stale_snapshot_fence(session, req, "Tessellate")) {
+        return *stale;
+    }
     const nlohmann::json& args = req.args;
     const std::string lod = args.value("lod", std::string("coarse"));
     const bool include_edges = args.value("includeEdges", true);
@@ -255,10 +280,14 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return handle_reset_session(session, r);
         });
-    dispatcher.register_verb(
+    // §7.1 (WP-H): the STATUS thread, not the kernel lane. A `GetWorkerHead`
+    // queued behind a large STEP import used to read as a hung worker and get the
+    // process SIGKILLed by the §8 ping rule (finding session-executor-1).
+    dispatcher.register_status_verb(
         "GetWorkerHead",
-        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
-            return handle_get_worker_head(session, r);
+        [&session, &dispatcher](const Envelope& r, const std::vector<std::uint8_t>&,
+                                HandlerContext&) {
+            return handle_get_worker_head(session, r, dispatcher.inflight_snapshot());
         });
     // --- W-WP4: transactional regen (kernel lane, single-writer) ---
     dispatcher.register_verb(

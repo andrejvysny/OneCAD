@@ -278,6 +278,7 @@ async fn export_fixture(
         &bodies,
         "AP214IS",
         &Default::default(),
+        None, // fixture builder: unfenced live-head export (SCHEMA §7.8)
     )
     .await;
     written.expect("ExportStep the fixture");

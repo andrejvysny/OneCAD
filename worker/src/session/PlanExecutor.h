@@ -24,6 +24,13 @@
 //   * opId contains "__slow"        → sleep ~500 ms in 10 ms slices, polling the
 //                                     cancel token (proves solver-lane liveness +
 //                                     cooperative cancellation).
+//   * args.artifacts.tessellate.__testThrow → the inline tessellation artifact
+//                                     throws (WP-H). The only way to exercise the
+//                                     §7.2 ARTIFACT_TESSELLATE_FAILED guard: no
+//                                     pathological body makes `tessellate_body`
+//                                     throw — it returns ok=false. Keyed on the
+//                                     ARTIFACT, not an opId, because that is what
+//                                     the guard wraps.
 #pragma once
 
 #include "ops/OpTypes.h"

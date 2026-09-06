@@ -212,6 +212,38 @@ results (see [§7.2](#72-regen--executeplan)).
 }
 ```
 
+**Serialization fallback (kernel-hardening WP-H, 2026-09-05).** A producer MUST
+NOT hand the encoder a value §4 forbids (`NaN`/`±Infinity` — sanitise at the
+producer). When an envelope nevertheless fails to serialize, the frame KIND is
+preserved: a terminal `resp` becomes an error `resp` (`OP_FAILED`, "response
+serialization failed") carrying the original stamp and **no binary tail**
+(`binLen` 0, no `bin` table — the previous fallback shipped the unserialisable
+response's tail behind a JSON envelope with no `bin` table, a live wire-fidelity
+defect measured red-first 2026-09-05); a non-terminal `event` becomes an `event`
+of the SAME `event` kind, `id`, `jobId` and `stepIndex` whose `payload` is
+exactly `{ "stepIndex": <the envelope's stepIndex>, "status": "Failed",
+"diagnostics": [ { "severity": "error", "code": "EVENT_SERIALIZATION_FAILED",
+"message": "…" } ] }` — the minimum a `planStep` reader requires (Rust
+`parse_plan_step` demands `stepIndex` and cross-checks it; the real `planStep`
+payload carries no `status` key and Rust reads none — the step's Ok/Failed
+verdict comes from the terminal's `perStepResults`, so the substitute's
+`status` is informational) — so Rust parses it as a WELL-FORMED step carrying
+one error-severity diagnostic, never as a `PROTOCOL_ERROR`. A substituted
+`planStep` carries none of the step's `bodyEvents` or `elementMapDelta`, so
+the worker MUST roll that step back and report it with the EXISTING §7.2
+enum value `status: "opFailed"` in the terminal's `perStepResults` (same
+diagnostic, `stage: "wire"`), stop the plan there (`stoppedReason: "opFailed"`,
+`lastValidStep` = the step before) and prepare nothing past it — Rust never
+publishes a snapshot whose lineage it did not receive (the pre-WP-H fallback
+was loud by accident; this keeps it loud by rule). A substituted `needsRepair`
+event is left as is: that step already stops the plan and publishes nothing,
+and its outcome rides `perStepResults`. The request's terminal
+`resp` still follows (an event is never turned into a terminal; `planStep` is the only
+event kind the worker emits today, and a new kind MUST define its own minimal
+substitute payload here); a `progress` frame that fails to serialize is dropped
+(§3.3: informational). `EVENT_SERIALIZATION_FAILED` is a diagnostic `code`
+(open, unknown = opaque), not a publication `reasonCode`.
+
 ### 3.5 `cancel` (Rust → worker)
 
 ```json
@@ -449,15 +481,54 @@ new epoch in subsequent requests), keeps the process alive.
 ```
 
 #### GetWorkerHead
-Reconciliation probe after a suspected desync (no side effects).
+Reconciliation probe after a suspected desync (no side effects). It is ALSO the
+liveness probe (§8), which is why it is answered from a dedicated **status
+thread** (kernel-hardening WP-H, 2026-09-05): the worker answers it without
+waiting for the kernel lane, so a long-running op — a large STEP import, a fine
+tessellation, a Tier B check on a B-spline face — no longer reads as a hung
+worker. The status thread is an implementation detail with NO wire
+representation (§5.1's two lanes are unchanged); what the wire promises is the
+response below within **100 ms from dequeue to the write attempt, given a
+drained stdout** (the single frame writer is a mutex; a bulk frame blocked on
+a pipe Rust is not draining holds it, which is Rust's own backpressure) **and
+outside the two short session-mutex holders** (the base clone at the start of a
+plan and a `BindElementIds` batch, both bounded by model size — a recorded
+limit, not a promise of 100 ms through them), while any kernel-lane job is in
+flight, and the two additive fields that let Rust
+tell a slow op from a wedged one. A producer MAY omit both new keys (the stub
+did before it mirrored them): absent `inflight` reads as `null`, absent
+`hasRestoredBase` as `false`.
 
 ```json
 // req.args
 {}
 // result
 { "documentRevision": 17, "workerEpoch": 3, "snapshotId": 5012,
-  "historyPrefixHash": "7f1a…", "hasScratch": false }
+  "historyPrefixHash": "7f1a…", "hasScratch": false,
+  "hasRestoredBase": false,                                   // WP-H, additive
+  "inflight": { "verb": "ExecutePlan", "id": 42, "jobId": 88,  // WP-H, additive
+                "ageMs": 12034, "sinceProgressMs": 340 } }      //   | null
 ```
+
+- `inflight` (additive, WP-H): the KERNEL-lane job being executed when the probe
+  was answered, or `null`. `ageMs` is measured from the moment the job was
+  dequeued; `sinceProgressMs` from the last NON-terminal frame that job emitted
+  (`progress`, `event` or `chunk`) and equals `ageMs` while it has emitted none.
+  Solver-lane jobs (§7.4) are never reported here — they have their own 250 ms
+  Rust timeout. The status thread reads only the session's scalar head
+  (`documentRevision`, `workerEpoch`, `snapshotId`, `historyPrefixHash`,
+  `hasScratch`, `hasRestoredBase`) under the session mutex and the dispatcher's
+  own bookkeeping; it never touches a shape. `hasRestoredBase` (additive, WP-H)
+  is true while a [`RestoreCheckpoint`](#restorecheckpoint) result is waiting
+  for the plan that names it (§7.2 `baseCheckpoint`). Its whole lifetime, in one
+  place: set by `RestoreCheckpoint`; **survives** `DiscardPrepared` and a failed
+  prepare; dropped at `AcceptPrepared` of the plan that used it; dropped by any
+  plan WITHOUT `baseCheckpoint` before that plan is fenced; cleared by
+  `OpenSession` / `ResetSession`. Between `store_prepared` and `AcceptPrepared`
+  of a `baseCheckpoint` plan `hasScratch` and `hasRestoredBase` are BOTH true.
+  Time a job spends blocked on bulk credit (§5.3) is Rust's wait, not the
+  worker's: it counts as progress, so `sinceProgressMs` restarts when credit
+  arrives and a credit-starved sender can never read as wedged.
 
 ### 7.2 Regen — ExecutePlan
 
@@ -535,8 +606,24 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   not timeline step index. On `PlanPrepared` the worker echoes the token for its
   **last executed op** (or `expectedBaseHash` when only the base is valid) as
   `historyPrefixHash`; Rust verifies that echo (mismatch ⇒ `PROTOCOL_ERROR`).
-- `baseCheckpoint`: optional; if present the worker restores it as the base
-  instead of replaying from empty.
+- `baseCheckpoint`: optional. When present it names the checkpoint a preceding
+  [`RestoreCheckpoint`](#restorecheckpoint) installed into the worker's
+  **restored-base slot** (kernel-hardening WP-H, 2026-09-05 — the slot is
+  distinct from the head AND from the scratch; a restore no longer touches the
+  head). The worker CONSUMES the field — the fourth fence case: `expectedBaseHash`
+  is compared against the restored base's `historyPrefixHash` (not the head's),
+  the scratch is cloned from that base, and `AcceptPrepared` then replaces the
+  head wholesale as for a from-0 plan (D5), dropping the base. A plan that
+  names a `checkpointId` the slot does not hold — or an EMPTY `checkpointId`,
+  which binds nothing — ⇒ `PROTOCOL_ERROR` (Rust re-plans from 0 with
+  `checkpointFallbackReplay`, the existing Invariant-7 fallback). A plan WITHOUT `baseCheckpoint` — from-0 or incremental against
+  the head — DROPS any pending restored base before it is fenced, so an
+  abandoned restore can never leak into a later plan. `DiscardPrepared` and a
+  failed prepare leave the base in place (the next plan decides); `OpenSession`
+  / `ResetSession` clear it. Before WP-H the worker ignored this field and a
+  restore was installed into the LIVE head, which let an unfenced `Tessellate`
+  or export serve rolled-back geometry between the restore and the plan
+  (finding session-executor-2, measured red-first 2026-09-05).
 - `ops`: the ordered op slice; each op is executed on the **exact snapshot
   produced by its predecessor** (Invariant 3).
 - **`editedFrom` (OPTIONAL) — the edit-context declaration.** The timeline step
@@ -664,6 +751,7 @@ unknown code as an opaque warning):
 |---|---|
 | `REGION_REBOUND_BY_ANCHOR` | the op's stored `regionId` matched no cell after an edit moved a crossing; the op bound the unique cell containing `regionAnchor` instead (§7.3 "Region anchor"). `stage` is `"profile"`. Evidence `{ "region": { "from": "<stale regionId>", "to": "<bound regionId>", "anchor": [u, v] } }`. The params are unchanged; the warning repeats on every regen until the user re-picks. |
 | `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) only — `SketchRegions` (§7.4) has no diagnostics channel and stays silent about it. |
+| `ARTIFACT_TESSELLATE_FAILED` | the plan prepared but the `artifacts.tessellate` attachment for this step threw (kernel-hardening WP-H, 2026-09-05): the step is `Ok`, the scratch is stored, and the mesh is simply not attached — Rust treats it as "not cached" and fetches it through `Tessellate` later. `stage` is `"artifact"`; the message carries the kernel's text. Before WP-H an artifact failure failed the whole prepared plan. |
 
 **`diagnostics[].reasonCode` — the machine-readable publication-refusal reason.**
 `code` answers *which taxonomy bucket*; `reasonCode` answers *which policy branch
@@ -950,6 +1038,17 @@ Drops the scratch job state; session unchanged.
 // result
 { "discarded": true }
 ```
+
+- **Rust-side guarantee (kernel-hardening WP-H, 2026-09-05):** a prepared regen
+  whose driver is DROPPED before it reaches `AcceptPrepared`/`DiscardPrepared`
+  (a cancelled task, a superseded edit, a panic) issues `DiscardPrepared` from a
+  detached task, so a scratch is never stranded and the next `ExecutePlan` is
+  never refused for it. **Worker-side, the late-cancel rule:** a `cancel`
+  observed after the last step ran but before the scratch is stored ends the
+  plan with the EXISTING cancelled terminal — an error `resp` `ok:false`,
+  `error.code "CANCELLED"`, no `planPrepared` key — and NOTHING stored (before
+  WP-H the scratch was stored behind an `ok:true` terminal and every later
+  `ExecutePlan` refused until restart — finding session-executor-4).
 
 #### Double-`ExecutePlan` while prepared (idempotency rule)
 
@@ -3341,7 +3440,8 @@ Produces MESH1 meshes; large meshes stream on the bulk lane
 
 ```json
 // req.args
-{ "bodyIds": "all", "lod": "coarse", "includeEdges": true }
+{ "bodyIds": "all", "lod": "coarse", "includeEdges": true,
+  "snapshotId": 5012 }                       // OPTIONAL (WP-H) — fence against the head
        // bodyIds: "all" | ["body_1","body_3"];  lod: "coarse"|"medium"|"fine"
 // result
 { "meshes": [
@@ -3353,6 +3453,23 @@ Produces MESH1 meshes; large meshes stream on the bulk lane
 Meshes label faces/edges with snapshot-scoped TopoKeys (`"f:22"`) and persistent
 `ElementId`s where already minted. Meshing parallelism never affects IDs
 (Invariant 5).
+
+- **`snapshotId` (OPTIONAL, kernel-hardening WP-H, 2026-09-05)** — on
+  `Tessellate` and on the §7.8 writers `ExportGeometry`, `ExportStep`,
+  `ExportStl`, `ExportObj`. Absent ⇒ the live head, byte-identical to every
+  pre-WP-H request. Present and ≠ the head's `snapshotId` ⇒ `STALE_PREVIEW`
+  (§8; head untouched, NOTHING written — a stale export never leaves a file).
+  Rust's mesh cache sends the `snapshotId` it is meshing FOR; on `STALE_PREVIEW`
+  it re-reads the head once (`GetWorkerHead`) and re-issues, and never blanks
+  the cache on a stale answer. That re-issue is for `Tessellate` ONLY (a mesh is
+  a liveness artifact of whatever the head is). The four WRITERS are never
+  re-issued: a stale answer is surfaced as `stalePreview` and the caller decides
+  — a bake or an export of a head that moved under the caller is geometry the
+  caller never validated (`ExportStep`'s `faceColors` are even keyed by
+  snapshot-scoped TopoKeys), so it is refused, not silently written. A present
+  but MALFORMED `snapshotId` (not an unsigned integer) is `PROTOCOL_ERROR`
+  (malformed args), never a silent unfenced write. `QueryMassProperties` and `ClassifyElement` stay
+  unfenced live queries by recorded design (§7.5).
 
 #### GetBodies
 Returns BREP blobs (OCCT `BinTools`) for the given bodies; streams on bulk lane.
@@ -3952,15 +4069,22 @@ Normative consequences:
   from 0 and produces the identical head (Invariant 7).
 
 #### RestoreCheckpoint
-Restores a checkpoint as base state; verifies the envelope signature and reports
-drift.
+Installs a checkpoint into the worker's **restored-base slot** (kernel-hardening
+WP-H, 2026-09-05) for the `ExecutePlan` that names it in `baseCheckpoint`
+(§7.2); verifies the envelope signature and reports drift. **The head is
+untouched**: `snapshotId`, `historyPrefixHash` and the published bodies do not
+change, so an unfenced reader between the restore and the plan still sees the
+head, never the rolled-back state. `GetWorkerHead.hasRestoredBase` reports the
+pending base. (Before WP-H the restore was installed into the live head and the
+result's `snapshotId` was the NEW head; the field now echoes the UNCHANGED head
+— the one deliberate result-semantics change of the entry.)
 
 ```json
 // req.args
 { "checkpointId": "ckpt_9", "expectedHistoryPrefixHash": "9c4d…" }
 // bin/streams: the artifact blobs Rust supplies back
 // result
-{ "restored": true, "snapshotId": 5015, "driftDetected": false,
+{ "restored": true, "snapshotId": 5012, "driftDetected": false,   // snapshotId = the UNCHANGED head
   "driftDetail": null }   // when driftDetected: { signature: "geometry"|"bodyLifecycle"|"referencedBinding", expected, actual }
 ```
 
@@ -4013,7 +4137,7 @@ Bakes live bodies into one of the **§7.3 replay codecs** — the byte forms
 ```json
 // req.args
 { "path": "/tmp/onecad/bake_ef56.brep", "bodyIds": ["body_3"], "codec": "brep",
-  "union": false }
+  "union": false, "snapshotId": 5012 }        // snapshotId OPTIONAL (WP-H, §7.6 Tessellate)
 // result
 { "written": true, "bytes": 91234, "codec": "brep", "format": 4, "solidCount": 1 }
 ```
@@ -4240,7 +4364,8 @@ the part this verb exists for.
   "schema": "AP242DIS",
   "bodyNames":  { "body_3": "Bracket" },
   "bodyColors": { "body_3": [20, 40, 60, 255] },
-  "faceColors": { "body_3": { "f:5": [200, 30, 30, 255] } }
+  "faceColors": { "body_3": { "f:5": [200, 30, 30, 255] } },
+  "snapshotId": 5012                          // OPTIONAL (WP-H, §7.6 Tessellate)
 }
 // result
 { "written": true, "bytes": 40211,
@@ -4296,7 +4421,8 @@ the file actually carries.
 
 ```json
 // req.args
-{ "path": "/tmp/onecad/out.stl", "bodyIds": ["body_3"], "binary": true, "lod": "fine" }
+{ "path": "/tmp/onecad/out.stl", "bodyIds": ["body_3"], "binary": true, "lod": "fine",
+  "snapshotId": 5012 }                        // OPTIONAL (WP-H, §7.6 Tessellate)
 // result
 { "written": true, "bytes": 120344, "triangleCount": 4012 }
 ```
@@ -4305,7 +4431,8 @@ the file actually carries.
 
 ```json
 // req.args
-{ "path": "/tmp/onecad/out.obj", "bodyIds": ["body_3"], "lod": "fine" }
+{ "path": "/tmp/onecad/out.obj", "bodyIds": ["body_3"], "lod": "fine",
+  "snapshotId": 5012 }                        // OPTIONAL (WP-H, §7.6 Tessellate)
 // result
 { "written": true, "bytes": 98211 }
 ```
@@ -4349,7 +4476,7 @@ where an unknown value is ignorable.
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
 | Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
-| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`) | `STALE_PREVIEW` | none — head untouched | caller re-picks / re-previews against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
+| Stale snapshot on a fenced read (`PreviewOp`, `PrepareEdgeOp`, `AnalyzeEdgeOpRange`, `PrepareOffsetFace`, `ProjectToSketchPlane`, `ExtractPrismProfile`; and, when the OPTIONAL `snapshotId` is sent, `Tessellate`, `ExportGeometry`, `ExportStep`, `ExportStl`, `ExportObj`) | `STALE_PREVIEW` | none — head untouched, nothing written | caller re-picks / re-previews / re-reads the head once and re-issues against the fresh head snapshot ([§7.6](#76-geometry), [§7.8](#78-io)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
 | Worker crash / abnormal exit | *(no frame)* | fatal | **restart + replay** from last checkpoint/head; crash **circuit breaker** on repeated `(historyPrefixHash, opId, occtFingerprint)` |
@@ -4371,7 +4498,35 @@ where an unknown value is ignorable.
   keeps the gesture; the frontend keeps its 120 Hz preview.
 - `Tessellate`: **30 s**. On timeout Rust cancels the request and may retry at a
   coarser LOD.
-- Hung worker: ping every **5 s**, ×2 misses → `SIGKILL` → restart.
+- Hung worker: ping (`GetWorkerHead`) every **5 s**, ×2 misses → `SIGKILL` →
+  restart. Since kernel-hardening WP-H (2026-09-05) the ping is answered from
+  the worker's status thread, so a missed ping means the PROCESS is unresponsive,
+  not that an op is long.
+- **Wedged op** (WP-H): Rust reads `GetWorkerHead.inflight` on every ping and
+  `SIGKILL`s + restarts when `sinceProgressMs` exceeds the verb's wall deadline —
+  `ExecutePlan` **180 s**, `Tessellate` and the `Export*` writers **60 s**, every
+  other kernel-lane verb **30 s** — measured since the job's last progress /
+  event / chunk frame (its start when it emitted none), so a legitimately long
+  op that streams progress is never killed, and a genuinely deadlocked OCCT call
+  always is. Recorded limit at this build: the worker emits non-terminal frames
+  only as `planStep` events, so for every single-verb job (`Tessellate`, the
+  writers, `SaveCheckpoint`, `BindElementIds`, …) `sinceProgressMs == ageMs`
+  and the deadline is a plain wall clock; a multi-step `ExecutePlan` restarts
+  its clock at every step. Emitting `progress` from the long OCCT phases
+  (STEP transfer, meshing) is WP-K's job. A wedge kill is an abnormal exit for every rule in this section:
+  restart + replay from the head, the in-flight plan fails to Rust as a worker
+  crash (the document stays at its last published head), and the in-flight
+  `(historyPrefixHash, opId, occtFingerprint)` feeds the crash circuit breaker
+  exactly as a crash does, so a deterministic hang trips the breaker instead of
+  looping. The death is a DISTINCT reason (`Wedged`, naming the verb and both
+  ages — exit codes and deaths are protocol signals), never reported as a ping
+  timeout. Rust-side ordering rule for the `Drop` guard's `DiscardPrepared`
+  (§7.2): a new `ExecutePlan` waits (bounded) for any pending detached discard
+  before it is sent, so the one-scratch rule never refuses the plan that
+  follows a dropped one. Per-verb REQUEST timeouts — `SolveDrag` 250 ms, `Tessellate` 30 s,
+  `AnalyzeEdgeOpRange` **10 s** (a liveness abort that returns an error to the
+  caller) — are policy and unchanged; the wedge deadline is the process-level
+  backstop behind all of them.
 
 **`OP_FAILED`, `REF_UNRESOLVED`, `GEOMETRY_INVALID`, `UNSUPPORTED`, and
 `STALE_PREVIEW` are *recoverable*: the worker's active session is untouched (all
@@ -4940,6 +5095,81 @@ sign-off) once fixtures exist.
   governs solid-count publication only). New fixture `hole_threaded.ndjson`; no
   existing fixture shape moves, **no fixture bump**. `protocolVersion` stays 1;
   no handshake axis or worker fingerprint moves.
+
+- **2026-09-05 — Worker liveness, restore fencing, executor hazards
+  (kernel-hardening WP-H).** [§7.1](#getworkerhead) `GetWorkerHead` is answered
+  from a dedicated status thread (internal, no lane) within 100 ms while a
+  kernel-lane job runs, and gains additive `inflight { verb, id, jobId, ageMs,
+  sinceProgressMs } | null` and `hasRestoredBase`. [§8](#8-error-taxonomy)
+  wedged-op rule: Rust `SIGKILL`s when `sinceProgressMs` exceeds 180 s
+  (`ExecutePlan`) / 60 s (`Tessellate`, `Export*`) / 30 s (other), measured since
+  the last progress/event/chunk frame; the 5 s × 2 ping rule stays for a process
+  that answers nothing. [§7.7](#restorecheckpoint) `RestoreCheckpoint` installs
+  into a restored-base slot and leaves the head untouched (its result
+  `snapshotId` now echoes the unchanged head — the one result-semantics change);
+  [§7.2](#72-regen--executeplan) `ExecutePlan` CONSUMES `baseCheckpoint` (the
+  fourth fence case: `expectedBaseHash` against the base's hash; a plan without
+  it drops the base; an unknown base is `PROTOCOL_ERROR` and Rust re-plans from
+  0). [§7.6](#tessellate) `Tessellate` and [§7.8](#78-io) `ExportGeometry` /
+  `ExportStep` / `ExportStl` / `ExportObj` accept an OPTIONAL `snapshotId`
+  (absent = live head, byte-identical) and refuse `STALE_PREVIEW` on mismatch
+  with nothing written; Rust's mesh cache re-reads the head once and re-issues.
+  [§3.4](#34-event-worker--rust-non-terminal) serialization fallback keeps the
+  frame kind (an unserialisable event becomes a same-kind event carrying one
+  `EVENT_SERIALIZATION_FAILED` diagnostic, never a terminal) and DROPS the binary
+  tail (`binLen` 0 — the old fallback shipped the tail behind an envelope with no
+  `bin` table). [§7.2](#72-regen--executeplan) `ARTIFACT_TESSELLATE_FAILED`
+  warning (an artifact failure no longer fails a prepared plan); late-cancel
+  rule (nothing stored); Rust `Drop` guard issues `DiscardPrepared` for a dropped
+  prepared regen. *Reasons (measured red-first 2026-09-05, `worker_chaos.rs`, `restore_fencing.rs`,
+  `test_dispatcher_fallback.cpp`, `test_executor_hazards.cpp`):* a 4 s op
+  streaming `progress` under the 10×-scaled ping rule was `SIGKILL`ed at 1.2 s
+  (session-executor-1); a restore bumped `snapshotId` 2 → 3 and an unfenced
+  `Tessellate` answered the rolled-back 25 mm box instead of the 60 mm head
+  (session-executor-2); a prepared future dropped 300 ms into a plan left
+  `hasScratch: true` (session-executor-4); the fallback error frame carried an
+  8-byte tail with no `bin` table, turned an unserialisable event into a
+  terminal and left the request with TWO terminals (session-executor-3); a
+  cancel raised on the last `planStep` still stored the scratch behind
+  `ok:true` (session-executor-4). The `attach_tessellate` try/catch could not be
+  shown red — `tessellate_body` returns `ok:false` rather than throwing on every
+  pathological body tried — and lands as a guard with a test injection point. *Fixtures:*
+  `restore_checkpoint_base.ndjson` (head unchanged after a restore; a plan
+  without `baseCheckpoint` drops the base; an incremental plan against the base
+  fences on the base hash and publishes) and `reader_snapshot_fence.ndjson`
+  (`Tessellate` with a stale `snapshotId` refuses `STALE_PREVIEW` and with none
+  serves the head; `ExportStl` stale leaves no file); the status-thread latency,
+  the late-cancel rule and the fallback are worker ctests (the NDJSON harness is
+  sequential). Rust-side: `TessellateRequest` and the export request structs
+  gain an optional `snapshotId`; `WorkerHeadResult` in `onecad-worker-stub`
+  mirrors `inflight` and `hasRestoredBase` (the stub is a wire producer both
+  the chaos lane and CTest depend on — it now runs reader / kernel / status
+  threads, `HANG_ON` blocks its kernel lane only, and `DEAF_ON`, `SLOW_ON` /
+  `SLOW_MS` / `PROGRESS_EVERY_MS`, `STALE_ON` / `STALE_TIMES`, `IGNORE_DISCARD`
+  are new hooks); `Death::Wedged` is a new supervisor death reason. The worker
+  also sanitises non-finite numbers at the `planStep` producer
+  (`sanitize_non_finite`, a `null` in place of the value). One observable
+  ordering effect: a PIPELINED client that interleaves `GetWorkerHead` with
+  kernel-lane requests now receives the head response ahead of the kernel
+  lane's — legal under §5.1 (no cross-verb FIFO is promised), and the
+  projection-determinism transcript (`check_project_to_sketch_plane_frames.sh`)
+  therefore excludes `GetWorkerHead` from its byte-compared stream and drains
+  through `Debug.Busy {durationMs: 0}` instead. All new fields are additive and optional; no existing fixture
+  shape moves, **no fixture bump**; `protocolVersion` stays 1; no handshake axis
+  and no worker fingerprint moves. Cross-track sign-off: protocol-auditor
+  BEFORE-code review 2026-09-05, `approve_with_changes` (five blocking edits —
+  the substitute event payload must carry `stepIndex`, `EVENT_SERIALIZATION_FAILED`
+  is a diagnostic `code` not a `reasonCode`, the 100 ms promise is qualified to a
+  drained stdout, credit-blocked time counts as progress, a wedge kill is an
+  abnormal exit feeding the crash breaker with a distinct `Wedged` death — plus
+  the restored-base lifetime in one place, the existing `CANCELLED` terminal for
+  a late cancel and the 10 s `AnalyzeEdgeOpRange` row; all applied); AFTER-landing
+  schema-vs-code review 2026-09-05, `approve_with_changes` (the "failed step"
+  over-claim corrected, a Rust `parse_plan_step` test for the substitute, the
+  `worker_lifetime` hang test moved to `DEAF_ON`, `ExportStep` excluded from the
+  writer retry; both fixtures replayed green in both lanes, ctest 186/186, the
+  three Rust targets 19/19 · 7/7 · 1/1, fingerprint unchanged; the landed
+  counts are in TODO.md § KERNEL HARDENING § WP-H).
 
 - **2026-09-04 — Component mates re-seat on the resolved geometry; gear
   referenceability enforced; generator bounds (kernel-hardening WP-I).**

@@ -1,4 +1,11 @@
-# Handoff — KERNEL HARDENING P1: WP-I component mates gated (session 28), WP-H next
+# Handoff — KERNEL HARDENING P1: WP-I committed (`4555993`), WP-H gated in session 28, WP-G approved next, then WP-J
+
+> Session 28 continued into 2026-09-05: WP-H landed through the same discipline (H0 probes red-first
+> → SCHEMA audited before code → worker ∥ Rust implementers → after-landing audit ∥ adversarial review
+> → fix rounds → L3). Its gate row and every ruling are in TODO.md § "WP-H STARTED"; the commit is the
+> one after `4555993` on master (`git log -2`). WP-G is user-approved and queued next; WP-J after it.
+> The earlier section below describes the WP-I half of the session.
+
 
 Session 28 · 2026-09-04 · plan `~/.claude/plans/act-as-senior-software-delightful-nova.md` (decisions, design, review record) · TODO.md § KERNEL HARDENING § "Now (2026-09-04, session 28)" is the ledger.
 

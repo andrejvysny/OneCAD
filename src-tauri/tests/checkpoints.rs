@@ -33,7 +33,10 @@ use onecad_core::edit::EditCommand;
 use onecad_core::ids::{ConstraintId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::regen::{CancelToken, GeometryEngine, ModelSnapshot, Outcome, RegenRequest};
+use onecad_core::regen::{
+    CancelToken, CheckpointId, CheckpointRef, GeometryEngine, Lod, ModelSnapshot, Outcome,
+    RegenRequest, RestoreRequest,
+};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
@@ -317,6 +320,146 @@ fn assert_no_checkpoint_entries(path: &Path, what: &str) {
         "{what}: container must carry no checkpoint cache (in-session-only policy), got {found:?} \
          in {names:?}"
     );
+}
+
+/// `(vertexCount, bboxMaxZ)` off a MESH1 header (mesh_format.md §2: `vertexCount`
+/// at 0x08, `bboxMaxZ` as an f32 at 0x34, all little-endian).
+fn mesh_max_z(blob: &[u8]) -> f32 {
+    assert!(
+        blob.len() >= 64,
+        "MESH1 header is 64 bytes, got {}",
+        blob.len()
+    );
+    f32::from_le_bytes(blob[0x34..0x38].try_into().unwrap())
+}
+
+/// SCHEMA §7.7 (kernel-hardening WP-H): a `RestoreCheckpoint` installs its state
+/// into the worker's RESTORED-BASE SLOT and leaves the head alone. The whole
+/// lifetime of that slot, in one test:
+///
+///   * after the restore the head's `snapshotId` has NOT moved, `hasRestoredBase`
+///     is true, and a reader still sees the head's geometry — before WP-H the
+///     restore rolled the live head back, so a mesh request between the restore and
+///     the plan served rolled-back geometry Rust did not believe was current
+///     (finding session-executor-2);
+///   * after the incremental plan that consumes the base is accepted, the slot is
+///     empty and the head has moved to the plan's snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_leaves_head_untouched_until_the_plan() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // ── box A at head, then a checkpoint of it (step 1 = the extrude) ──────────
+    build_prefix(&mut rt);
+    let report = regen(&mut rt, 0).await;
+    let snap = published(&report, "box A");
+    assert_eq!(snap.bodies.len(), 1, "box A is one body");
+    let body = snap.bodies[0].body;
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(
+        rt.checkpoint_count(),
+        1,
+        "a checkpoint was taken at the head"
+    );
+
+    let head_before = wm.get_worker_head().await.expect("head before the restore");
+    assert!(
+        !head_before.has_restored_base,
+        "no restore has happened yet, so the slot must be empty"
+    );
+    let mesh_before = wm
+        .fetch_mesh(body, Lod::Coarse, head_before.snapshot_id)
+        .await
+        .expect("Tessellate the head");
+    assert!(
+        (mesh_max_z(&mesh_before) - 25.0).abs() < 0.01,
+        "sanity: box A is 25 mm tall, got bboxMaxZ={}",
+        mesh_max_z(&mesh_before)
+    );
+
+    // ── the restore, and NOTHING else: no plan consumes it yet ─────────────────
+    let artifacts = wm
+        .save_checkpoint(1)
+        .await
+        .expect("SaveCheckpoint at the box-A head");
+    let restore = wm
+        .restore_checkpoint(RestoreRequest {
+            checkpoint: CheckpointRef {
+                step_index: 1,
+                checkpoint_id: CheckpointId::new("wp_h_slot_1"),
+            },
+            expected_history_prefix_hash: artifacts.history_prefix_hash.clone(),
+            worker_epoch: wm.epoch(),
+            artifacts: Some(artifacts),
+        })
+        .await
+        .expect("RestoreCheckpoint");
+    assert!(
+        restore.restored && !restore.drift_detected,
+        "precondition: the checkpoint must restore cleanly, got {restore:?}"
+    );
+
+    let head_after = wm.get_worker_head().await.expect("head after the restore");
+    eprintln!(
+        "restore slot: head snapshotId {} -> {} (restore echoed {}), hasRestoredBase {} -> {}",
+        head_before.snapshot_id.0,
+        head_after.snapshot_id.0,
+        restore.snapshot_id.0,
+        head_before.has_restored_base,
+        head_after.has_restored_base
+    );
+    assert_eq!(
+        head_after.snapshot_id, head_before.snapshot_id,
+        "a restore installs a BASE; only AcceptPrepared moves the head"
+    );
+    assert_eq!(
+        restore.snapshot_id, head_before.snapshot_id,
+        "the restore result echoes the UNCHANGED head (SCHEMA §7.7, WP-H)"
+    );
+    assert!(
+        head_after.has_restored_base,
+        "the restored base is pending until the plan that names it"
+    );
+    let mesh_after = wm
+        .fetch_mesh(body, Lod::Coarse, head_after.snapshot_id)
+        .await
+        .expect("Tessellate right after the restore");
+    assert!(
+        (mesh_max_z(&mesh_after) - mesh_max_z(&mesh_before)).abs() < 0.01,
+        "a reader between the restore and the plan still sees the HEAD: bboxMaxZ {} vs {}",
+        mesh_max_z(&mesh_after),
+        mesh_max_z(&mesh_before)
+    );
+
+    // ── the incremental plan consumes the base; the accept publishes it ────────
+    build_suffix(&mut rt);
+    let inc = regen(&mut rt, 2).await;
+    assert!(
+        rt.last_regen_used_checkpoint(),
+        "the incremental regen must take the RestoreCheckpoint + baseCheckpoint path"
+    );
+    let (_sig, bodies) = head_geometry(&inc, "incremental over the restored base");
+    assert_eq!(bodies, 2, "box A + box B");
+
+    let head_published = wm.get_worker_head().await.expect("head after the accept");
+    eprintln!(
+        "after the plan: head snapshotId {}, hasRestoredBase {}",
+        head_published.snapshot_id.0, head_published.has_restored_base
+    );
+    assert!(
+        !head_published.has_restored_base,
+        "AcceptPrepared of the plan that used the base drops the slot"
+    );
+    assert_ne!(
+        head_published.snapshot_id, head_before.snapshot_id,
+        "the head moved at the accept, not at the restore"
+    );
+
+    wm.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

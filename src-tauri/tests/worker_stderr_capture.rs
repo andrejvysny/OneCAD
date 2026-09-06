@@ -102,6 +102,9 @@ fn dying_stub_config(binary: PathBuf) -> SupervisorConfig {
         ping_interval: Duration::from_millis(100),
         ping_timeout: Duration::from_millis(500),
         max_missed_pings: 2,
+        wedge_deadline_execute_plan: Duration::from_secs(180),
+        wedge_deadline_readers: Duration::from_secs(60),
+        wedge_deadline_default: Duration::from_secs(30),
         backoff: vec![Duration::from_millis(10)],
         // One strike: the flap budget ends the supervisor quickly instead of
         // respawning the dying stub for the whole test timeout.

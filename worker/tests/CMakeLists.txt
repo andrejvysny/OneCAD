@@ -167,6 +167,25 @@ foreach(_t executeplan_cancel executeplan_crash concurrent_lanes executeplan_det
     add_test(NAME ${_t} COMMAND test_${_t} $<TARGET_FILE:onecad-worker>)
 endforeach()
 
+# Kernel-hardening WP-H: the Dispatcher serialization fallback (wire fidelity +
+# frame kind) and the PlanExecutor hazards (late cancel strands a scratch, a
+# throwing tessellation artifact fails the whole plan). `fallback_payload` pins
+# what the two substitute frames SAY (§3.4) and the producer-side NaN sanitiser;
+# `restored_base` pins the §7.7 restored-base slot, the §7.2 `baseCheckpoint`
+# fence case and the §7.6 OPTIONAL reader fence (incl. "a refused export writes
+# no file", which the sequential NDJSON harness cannot assert).
+foreach(_t dispatcher_fallback executor_hazards fallback_payload restored_base)
+    add_executable(test_${_t} test_${_t}.cpp)
+    target_link_libraries(test_${_t} PRIVATE worker_core)
+    add_test(NAME ${_t} COMMAND test_${_t})
+endforeach()
+
+# The §7.1 status thread needs the REAL worker binary for half of its proof (the
+# production GetWorkerHead result shape while `Debug.Busy` holds the kernel lane).
+add_executable(test_status_thread test_status_thread.cpp)
+target_link_libraries(test_status_thread PRIVATE worker_core)
+add_test(NAME status_thread COMMAND test_status_thread $<TARGET_FILE:onecad-worker>)
+
 # --- W-WP5: real OCCT op numerics + ElementMap V2 history + MESH1 (in-process) ---
 foreach(_t wp5_plan wp5_partition_history wp5_mesh1)
     add_executable(test_${_t} test_${_t}.cpp)
@@ -624,6 +643,22 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/execute_plan_checkpoint_fallback.ndjson
+)
+# Kernel-hardening WP-H (SCHEMA §7.1/§7.2/§7.6/§7.7/§7.8): the restored-base slot
+# + the fourth fence case, and the OPTIONAL reader snapshot fence. See each
+# fixture header for what the sequential harness can and cannot assert (the
+# "a refused export leaves no file" half is the `restored_base` ctest above).
+add_test(
+    NAME canonical_restore_checkpoint_base
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/restore_checkpoint_base.ndjson
+)
+add_test(
+    NAME canonical_reader_snapshot_fence
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/reader_snapshot_fence.ndjson
 )
 add_test(
     NAME canonical_bind_element_ids

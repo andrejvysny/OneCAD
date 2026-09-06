@@ -47,6 +47,15 @@ struct WorkerHead {
     std::uint64_t snapshot_id = 0;
     std::string history_prefix_hash;
     bool has_scratch = false;
+    // WP-H: a RestoreCheckpoint result is parked in the restored-base slot,
+    // waiting for the ExecutePlan that names it in `baseCheckpoint` (§7.2).
+    bool has_restored_base = false;
+};
+
+// SCHEMA §7.2 `baseCheckpoint` — a plan's claim on the restored-base slot.
+struct BaseCheckpointRef {
+    std::uint64_t step_index = 0;
+    std::string checkpoint_id;
 };
 
 // Outcome of fence-and-clone at ExecutePlan entry.
@@ -90,8 +99,24 @@ struct CheckpointState {
 struct RestoreOutcome {
     bool restored = false;          // false ⇒ no such in-session checkpoint (replay-from-0)
     bool drift_detected = false;    // stored hash != expected (staleness)
-    std::uint64_t snapshot_id = 0;
+    std::uint64_t snapshot_id = 0;  // WP-H: the UNCHANGED head (a restore never moves it)
     std::string stored_hash;        // the checkpoint's history-prefix hash
+};
+
+// The restored-base slot (SCHEMA §7.7 / §7.2, kernel-hardening WP-H): a
+// checkpoint a `RestoreCheckpoint` parked for the plan that names it. It is
+// distinct from the head AND from the scratch, which is the whole point — a
+// restore no longer rolls the head back under an unfenced reader.
+//
+// Lifetime, in one place (§7.1): set by `restore_checkpoint`; SURVIVES
+// `DiscardPrepared` and a failed prepare; dropped at `accept_prepared` of the
+// plan that used it; dropped by any plan WITHOUT `baseCheckpoint` before that
+// plan is fenced; cleared by `open()` / `reset()`.
+struct RestoredBase {
+    CheckpointState state;
+    std::string checkpoint_id;   // as the RESTORE request named it (Rust-owned id)
+    std::uint64_t step = 0;      // the checkpoint's step index
+    std::string history_prefix_hash;  // == state.history_prefix_hash; the fence value
 };
 
 // Immutable published-state copy for snapshot-fenced read-only handlers. All
@@ -159,9 +184,15 @@ public:
     // cloned from an EMPTY base (full replay + wholesale publish at accept), so
     // sequential regens keep working after the head token advances. Incremental plans
     // (expectedBaseHash != the empty anchor) keep the strict head-hash fence.
+    //
+    // WP-H adds the FOURTH fence case: a plan carrying §7.2 `baseCheckpoint`
+    // (`base` non-null) fences `expected_base_hash` against the RESTORED BASE's
+    // hash instead of the head's and clones the scratch from that base. A plan
+    // WITHOUT it drops any pending restored base before it is fenced.
     FenceOutcome fence_and_clone(std::uint64_t job_id, std::uint64_t document_revision,
                                  std::uint64_t worker_epoch,
-                                 const std::string& expected_base_hash);
+                                 const std::string& expected_base_hash,
+                                 const BaseCheckpointRef* base = nullptr);
 
     // Install the finished scratch as the (single) prepared job. `mu_`-guarded.
     void store_prepared(ScratchJob job);
@@ -205,10 +236,17 @@ public:
     // the saved state (bodies + partition + hash) so the caller can serialize it for
     // Rust-side persistence. A later save at the same step supersedes.
     CheckpointState save_checkpoint(std::uint64_t step);
-    // Restore the in-session checkpoint at `step` as the head (bumps snapshotId, sets
-    // historyPrefixHash). `restored=false` when absent (⇒ Rust replays from 0);
-    // `drift_detected=true` when the stored hash != `expected_hash` (staleness).
-    RestoreOutcome restore_checkpoint(std::uint64_t step, const std::string& expected_hash);
+    // Install the in-session checkpoint at `step` into the RESTORED-BASE SLOT
+    // (WP-H). The head is untouched — `snapshot_id`, `history_prefix_hash` and the
+    // published bodies do not move, and `out.snapshot_id` echoes the unchanged
+    // head — so an unfenced reader between the restore and the plan still sees the
+    // head. `restored=false` when absent (⇒ Rust replays from 0);
+    // `drift_detected=true` when the stored hash != `expected_hash` (staleness);
+    // in both of those cases the slot is left exactly as it was.
+    RestoreOutcome restore_checkpoint(std::uint64_t step, const std::string& expected_hash,
+                                      const std::string& checkpoint_id = std::string());
+
+    bool has_restored_base() const;
 
 private:
     mutable std::mutex mu_;
@@ -230,6 +268,20 @@ private:
     std::optional<ScratchJob> scratch_;         // the single prepared job
     std::uint64_t snapshot_counter_ = 0;        // monotonic prepared-snapshot ids
     std::map<std::uint64_t, CheckpointState> checkpoints_;  // step → retained head (§7.7)
+    // WP-H restored-base slot (§7.2/§7.7). Guarded by `mu_` like the head; read by
+    // the status thread through `head()`/`has_restored_base()` (a bool, no shape).
+    std::optional<RestoredBase> restored_base_;
 };
+
+// The OPTIONAL reader fence shared by `Tessellate` and the §7.8 writers
+// (SCHEMA §7.6, kernel-hardening WP-H). Returns an error `resp` when
+// `req.args.snapshotId` is present and does not equal the head's; nullopt when
+// it is absent (the pre-WP-H live-head path, byte-identical) or matches.
+//
+// Callers MUST apply it before opening a file or building a mesh: §7.6 promises
+// a stale read leaves the head untouched and writes NOTHING.
+std::optional<protocol::Envelope> stale_snapshot_fence(const Session& session,
+                                                       const protocol::Envelope& req,
+                                                       const char* verb);
 
 }  // namespace onecad::session

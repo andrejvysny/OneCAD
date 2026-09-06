@@ -109,13 +109,21 @@ Envelope handle_restore_checkpoint(session::Session& session, const Envelope& re
                                         json{{"headEpoch", head.worker_epoch}, {"reqEpoch", worker_epoch}}});
     }
 
-    const session::RestoreOutcome out = session.restore_checkpoint(step, expected_hash);
+    // WP-H (§7.7): the checkpoint goes into the restored-base slot, not the head.
+    // `checkpointId` is Rust-owned and opaque here; it is retained so the
+    // `ExecutePlan` that names it in `baseCheckpoint` (§7.2) can be matched
+    // against THIS restore rather than against whatever was restored last.
+    const std::string checkpoint_id = get_str(args, "checkpointId");
+    const session::RestoreOutcome out =
+        session.restore_checkpoint(step, expected_hash, checkpoint_id);
     json drift_detail = json();  // null unless drift
     if (out.drift_detected) {
         drift_detail = json{{"signature", "geometry"},
                             {"expected", expected_hash},
                             {"actual", out.stored_hash}};
     }
+    // `snapshotId` echoes the UNCHANGED head (WP-H — the one deliberate
+    // result-semantics change of the entry; it used to be the NEW head).
     return Envelope::ok_response(
         req.id, json{{"restored", out.restored},
                      {"snapshotId", out.snapshot_id},

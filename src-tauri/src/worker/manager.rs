@@ -35,7 +35,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -56,9 +56,9 @@ use onecad_core::ids::{
 };
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector, CheckpointArtifacts,
-    EngineError, Fencing, GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest,
-    RefResolution, ResolveRequest, RestoreRequest, RestoreResult, SessionMode, TessellateRequest,
-    TessellateResult, WorkerElementEvidence, WorkerHead,
+    EngineError, Fencing, GeometryEngine, Lod, OpFailureCode, OpenSessionRequest, PlanEvent,
+    PlanRequest, RefResolution, ResolveRequest, RestoreRequest, RestoreResult, SessionMode,
+    TessellateRequest, TessellateResult, WorkerElementEvidence, WorkerHead,
 };
 use onecad_core::sketch::Sketch;
 
@@ -115,6 +115,16 @@ pub struct SupervisorConfig {
     pub ping_interval: Duration,
     pub ping_timeout: Duration,
     pub max_missed_pings: u32,
+    /// Wedged-op wall deadline for `ExecutePlan` (SCHEMA §8, WP-H): the worker is
+    /// `SIGKILL`ed when `GetWorkerHead.inflight.sinceProgressMs` exceeds it. A plan
+    /// that streams `planStep`/`progress` frames resets the clock on every one, so
+    /// this only fires on a kernel that has genuinely stopped moving.
+    pub wedge_deadline_execute_plan: Duration,
+    /// The same deadline for the READER verbs — `Tessellate` and the four
+    /// `Export*` writers (§8: 60 s).
+    pub wedge_deadline_readers: Duration,
+    /// The same deadline for every other kernel-lane verb (§8: 30 s).
+    pub wedge_deadline_default: Duration,
     /// Backoff delays between failed *start* attempts.
     pub backoff: Vec<Duration>,
     /// Strike budget for the unified flap counter (failed *starts* + **rapid
@@ -133,7 +143,8 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Production supervision policy (SCHEMA §8: ping 5 s ×2, backoff 0.5/1/2 s).
+    /// Production supervision policy (SCHEMA §8: ping 5 s ×2, backoff 0.5/1/2 s,
+    /// wedged-op deadlines 180 s `ExecutePlan` / 60 s readers / 30 s other).
     #[must_use]
     pub fn production(binary: PathBuf) -> Self {
         Self {
@@ -142,6 +153,9 @@ impl SupervisorConfig {
             ping_interval: Duration::from_secs(5),
             ping_timeout: Duration::from_secs(5),
             max_missed_pings: 2,
+            wedge_deadline_execute_plan: Duration::from_secs(180),
+            wedge_deadline_readers: Duration::from_secs(60),
+            wedge_deadline_default: Duration::from_secs(30),
             backoff: vec![
                 Duration::from_millis(500),
                 Duration::from_secs(1),
@@ -151,6 +165,20 @@ impl SupervisorConfig {
             healthy_threshold: Duration::from_secs(5),
             poison_threshold: 3,
             auto_open_session: true,
+        }
+    }
+
+    /// The §8 wedged-op wall deadline for `verb`. The reader bucket is exactly the
+    /// set the SCHEMA names — `Tessellate` plus the four `Export*` writers — and
+    /// everything else on the kernel lane takes the default.
+    #[must_use]
+    fn wedge_deadline(&self, verb: &str) -> Duration {
+        match verb {
+            "ExecutePlan" => self.wedge_deadline_execute_plan,
+            "Tessellate" | "ExportGeometry" | "ExportStep" | "ExportStl" | "ExportObj" => {
+                self.wedge_deadline_readers
+            }
+            _ => self.wedge_deadline_default,
         }
     }
 }
@@ -181,7 +209,23 @@ struct Shared {
     /// observe that a retirement actually tore the process down rather than merely
     /// latching a flag.
     torn_down: AtomicBool,
+    /// How many DETACHED `DiscardPrepared` round trips (the §7.2 Drop guarantee)
+    /// have not settled yet. A worker holds AT MOST ONE prepared job, so an
+    /// `ExecutePlan` that overtakes the discard of the job it is replacing is
+    /// refused `PROTOCOL_ERROR` by that rule — and Rust only retries a refused plan
+    /// when it carried a checkpoint. [`Shared::await_pending_discards`] is what
+    /// keeps the two in order.
+    pending_discards: AtomicUsize,
+    /// Notified every time [`Shared::pending_discards`] reaches zero.
+    discard_settled: Notify,
 }
+
+/// How long a new plan waits for an outstanding detached discard before going
+/// anyway. Bounded on purpose: the discard is BEST EFFORT (a dead worker never
+/// answers it), and a plan that waited forever on one would turn the Drop
+/// guarantee into a way to hang the app. Two orders of magnitude above the
+/// round trip it is ordering against, and far below any human-visible stall.
+const DISCARD_ORDERING_BUDGET: Duration = Duration::from_secs(5);
 
 /// Cap on live poison entries. The map is per-Rust-process and unbounded by
 /// nature (every distinct `(prefix hash, op, fingerprint)` a session ever crashes
@@ -268,6 +312,66 @@ impl Shared {
 
     fn is_retired(&self) -> bool {
         self.retired.load(Ordering::SeqCst)
+    }
+
+    /// Registers a detached `DiscardPrepared` (the §7.2 Drop guarantee). Called
+    /// from `Drop`, before the task is spawned, so the count is already raised when
+    /// the very next `ExecutePlan` looks — a raise inside the spawned task would
+    /// lose exactly the race this exists to close.
+    fn discard_started(&self) {
+        self.pending_discards.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Marks one detached discard settled (whatever its outcome — an unanswerable
+    /// discard must not pin a plan for longer than the budget below).
+    fn discard_settled(&self) {
+        if self.pending_discards.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.discard_settled.notify_waiters();
+        }
+    }
+
+    /// Waits for every outstanding detached discard, up to
+    /// [`DISCARD_ORDERING_BUDGET`], then proceeds regardless.
+    ///
+    /// A worker holds at most one prepared job (SCHEMA §7.2 idempotency rule), so a
+    /// new plan that reaches it BEFORE the discard of the abandoned one is refused
+    /// `PROTOCOL_ERROR` — and Rust re-plans only for a checkpoint plan, so an
+    /// ordinary regen would simply fail. `tokio::spawn` gives no ordering by
+    /// itself; this does.
+    ///
+    /// Timing out is not a failure: the discard is best-effort by construction (a
+    /// worker that died with the drop never answers it), and a plan blocked forever
+    /// on one would make the Drop guarantee a way to hang the app.
+    async fn await_pending_discards(&self) {
+        if self.pending_discards.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let started = tokio::time::Instant::now();
+        let deadline = started + DISCARD_ORDERING_BUDGET;
+        loop {
+            // Register BEFORE re-reading the counter: a discard that settles in
+            // between then wakes this future instead of being missed.
+            let notified = self.discard_settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.pending_discards.load(Ordering::SeqCst) == 0 {
+                tracing::debug!(
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    "plan dispatch waited for the abandoned prepare's DiscardPrepared"
+                );
+                return;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline || tokio::time::timeout_at(deadline, notified).await.is_err() {
+                tracing::warn!(
+                    pending = self.pending_discards.load(Ordering::SeqCst),
+                    budget_ms = DISCARD_ORDERING_BUDGET.as_millis() as u64,
+                    "a detached DiscardPrepared did not settle within its budget — \
+                     dispatching the plan anyway"
+                );
+                return;
+            }
+        }
     }
 
     /// Latches retirement; `true` only on the transition (so `retire` is idempotent).
@@ -460,6 +564,8 @@ impl WorkerManager {
             retired: AtomicBool::new(false),
             retire_signal: Notify::new(),
             torn_down: AtomicBool::new(false),
+            pending_discards: AtomicUsize::new(0),
+            discard_settled: Notify::new(),
         });
         tokio::spawn(supervise(shared.clone()));
         Self { shared }
@@ -517,6 +623,60 @@ impl WorkerManager {
         }
     }
 
+    /// One snapshot-fenced §7.8 WRITER round trip. **No retry**: a `STALE_PREVIEW`
+    /// is surfaced to the caller on the first refusal.
+    ///
+    /// That asymmetry with [`MeshProvider::fetch_mesh`] is the point. A mesh is a
+    /// view of the head and re-reading it against a moved head answers the same
+    /// question about newer geometry. A WRITE is not: every writer here was handed
+    /// arguments derived from a specific snapshot, and re-issuing them at a
+    /// different one produces a file whose contents were never checked against what
+    /// it claims to be.
+    ///
+    /// * `ExportStep` carries `faceColors` keyed by TopoKeys resolved against the
+    ///   snapshot the command read (`api::export_step_file`); at head N+1 those keys
+    ///   address different faces, so a silent retry paints a real face the wrong
+    ///   colour — the exact H5-B class of failure this stack refuses to make.
+    /// * `ExportGeometry` bakes a Component Library package whose single-solid
+    ///   invariant the caller verified on the snapshot it named (`library.rs`,
+    ///   `library_ingest.rs`): a retry vendors geometry nobody validated.
+    /// * `ExportStl` / `ExportObj` write the file the user asked for, of the
+    ///   document they were looking at.
+    ///
+    /// Surfacing `stalePreview` hands the decision back to the command layer, which
+    /// is the only place that can re-derive the arguments for the new head.
+    ///
+    /// An UNFENCED call (`snapshot` `None`) is byte-identical to the pre-WP-H
+    /// request and can never be refused this way — the worker only refuses a fence
+    /// it was given.
+    async fn fenced_write<F>(
+        &self,
+        verb: &str,
+        snapshot: Option<SnapshotId>,
+        build: F,
+    ) -> Result<Value, EngineError>
+    where
+        F: FnOnce(Option<SnapshotId>) -> Value,
+    {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(verb, build(snapshot))
+            .await
+            .map_err(protocol_err)?;
+        let result = ok_result(resp);
+        if let Err(err) = &result {
+            if is_stale_preview(err) {
+                tracing::debug!(
+                    verb,
+                    requested = snapshot.map(|s| s.0),
+                    "fenced writer refused STALE_PREVIEW — surfaced, never retried \
+                     (its arguments belong to the snapshot it named)"
+                );
+            }
+        }
+        result
+    }
+
     /// `ExportGeometry` verb passthrough (SCHEMA §7.8) — bakes live bodies into a
     /// §7.3 replay codec at `path`. `codec` is `"brep"` or `"xbf"`.
     ///
@@ -537,14 +697,13 @@ impl WorkerManager {
         bodies: &[BodyId],
         codec: &str,
         union_solids: bool,
+        snapshot: Option<SnapshotId>,
     ) -> Result<crate::worker::BakedGeometry, EngineError> {
-        let client = self.client_or_err()?;
-        let args = wire::export_geometry_args(path, bodies, codec, union_solids);
-        let resp = client
-            .request("ExportGeometry", args)
-            .await
-            .map_err(protocol_err)?;
-        let result = ok_result(resp)?;
+        let result = self
+            .fenced_write("ExportGeometry", snapshot, |fence| {
+                wire::export_geometry_args(path, bodies, codec, union_solids, fence)
+            })
+            .await?;
         Ok(crate::worker::BakedGeometry {
             codec: result
                 .get("codec")
@@ -617,14 +776,13 @@ impl WorkerManager {
         bodies: &[BodyId],
         schema: &str,
         attributes: &crate::export::StepExportAttributes,
+        snapshot: Option<SnapshotId>,
     ) -> Result<u64, EngineError> {
-        let client = self.client_or_err()?;
-        let args = wire::export_step_args(path, bodies, schema, attributes);
-        let resp = client
-            .request("ExportStep", args)
-            .await
-            .map_err(protocol_err)?;
-        ok_result(resp).map(|r| r.get("bytes").and_then(Value::as_u64).unwrap_or(0))
+        self.fenced_write("ExportStep", snapshot, |fence| {
+            wire::export_step_args(path, bodies, schema, attributes, fence)
+        })
+        .await
+        .map(|r| r.get("bytes").and_then(Value::as_u64).unwrap_or(0))
     }
 
     /// `ExportStl` verb passthrough (SCHEMA §7.8). Returns bytes written.
@@ -637,14 +795,13 @@ impl WorkerManager {
         bodies: &[BodyId],
         binary: bool,
         lod: &str,
+        snapshot: Option<SnapshotId>,
     ) -> Result<u64, EngineError> {
-        let client = self.client_or_err()?;
-        let args = wire::export_stl_args(path, bodies, binary, lod);
-        let resp = client
-            .request("ExportStl", args)
-            .await
-            .map_err(protocol_err)?;
-        ok_result(resp).map(|r| r.get("bytes").and_then(Value::as_u64).unwrap_or(0))
+        self.fenced_write("ExportStl", snapshot, |fence| {
+            wire::export_stl_args(path, bodies, binary, lod, fence)
+        })
+        .await
+        .map(|r| r.get("bytes").and_then(Value::as_u64).unwrap_or(0))
     }
 
     /// `ExportObj` verb passthrough (SCHEMA §7.8). Returns bytes written.
@@ -656,14 +813,13 @@ impl WorkerManager {
         path: &str,
         bodies: &[BodyId],
         lod: &str,
+        snapshot: Option<SnapshotId>,
     ) -> Result<u64, EngineError> {
-        let client = self.client_or_err()?;
-        let args = wire::export_obj_args(path, bodies, lod);
-        let resp = client
-            .request("ExportObj", args)
-            .await
-            .map_err(protocol_err)?;
-        ok_result(resp).map(|r| r.get("bytes").and_then(Value::as_u64).unwrap_or(0))
+        self.fenced_write("ExportObj", snapshot, |fence| {
+            wire::export_obj_args(path, bodies, lod, fence)
+        })
+        .await
+        .map(|r| r.get("bytes").and_then(Value::as_u64).unwrap_or(0))
     }
 
     /// Graceful `Shutdown` (SCHEMA §7.1): ask the worker to flush + exit 0.
@@ -780,6 +936,16 @@ enum Death {
     Exited,
     /// Killed after `max_missed_pings` (hung).
     PingTimeout,
+    /// Killed because a kernel-lane job stopped making progress (SCHEMA §8 wedged
+    /// op, WP-H). DISTINCT from [`PingTimeout`](Self::PingTimeout): the process was
+    /// answering — its status thread kept serving `GetWorkerHead` — but the op it
+    /// was running had not emitted a frame within the verb's wall deadline. Both
+    /// ages are carried so the death reason can name what was measured.
+    Wedged {
+        verb: String,
+        age_ms: u64,
+        since_progress_ms: u64,
+    },
     /// [`WorkerManager::retire`] latched — terminal, NOT a restart trigger.
     Retired,
 }
@@ -876,15 +1042,27 @@ async fn supervise_loop(shared: &Shared) {
                 // Torn down: drop the connection and bump the epoch (fencing).
                 *shared.conn.write().unwrap() = None;
                 let new_epoch = shared.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                let reason = match death {
-                    Death::Exited => "worker exited/crashed",
-                    Death::PingTimeout => "worker hung (ping timeout) → SIGKILL",
+                let reason: String = match &death {
+                    Death::Exited => "worker exited/crashed".into(),
+                    Death::PingTimeout => "worker hung (ping timeout) → SIGKILL".into(),
+                    // SCHEMA §8: a wedge kill is its OWN reason, never reported as a
+                    // ping timeout — the process was answering. It names the verb and
+                    // both ages so the log says what was measured, not just that
+                    // something died.
+                    Death::Wedged {
+                        verb,
+                        age_ms,
+                        since_progress_ms,
+                    } => format!(
+                        "worker wedged (inflight {verb} {age_ms}ms, {since_progress_ms}ms since \
+                         progress) → SIGKILL"
+                    ),
                     Death::Retired => unreachable!("handled above"),
                 };
                 shared.set_state(WorkerState::Restarting);
                 shared.emit(WorkerLifecycle::Restarting {
                     epoch: new_epoch,
-                    reason: reason.into(),
+                    reason: reason.clone(),
                 });
                 // Defer the restart hook to the NEXT Ready (F6): a replay enqueued now
                 // would race `conn == None`. If the flap budget is exhausted below we
@@ -1106,8 +1284,28 @@ async fn auto_open_session(shared: &Shared, client: &ProtocolClient) -> Result<(
     Ok(())
 }
 
+/// The §8 wedge decision for one answered ping: `Some(job)` when the in-flight
+/// kernel job has gone longer than its verb's wall deadline WITHOUT emitting a
+/// non-terminal frame.
+///
+/// Three ways this returns `None`, all deliberate: an idle lane; a worker that
+/// omits `inflight` entirely (an older producer — a tolerant reader must not kill
+/// a process it cannot measure); and a job still inside its deadline. Note it is
+/// `sinceProgressMs`, never `ageMs`, that is compared: a legitimately long op that
+/// streams progress resets that clock on every frame and can never be killed here,
+/// which is the whole point of the field (a 4 s op streaming `progress` was
+/// `SIGKILL`ed at 1.2 s by the ping rule alone — finding session-executor-1).
+fn wedged_inflight(
+    shared: &Shared,
+    result: Option<&Value>,
+) -> Option<onecad_core::regen::InflightJob> {
+    let inflight = wire::parse_worker_head(result?).inflight?;
+    let deadline = shared.config.wedge_deadline(&inflight.verb);
+    (Duration::from_millis(inflight.since_progress_ms) > deadline).then_some(inflight)
+}
+
 /// Runs while the worker lives: ping on an interval, watch for exit; `SIGKILL` on
-/// `max_missed_pings` (SCHEMA §8 hung worker).
+/// `max_missed_pings` (SCHEMA §8 hung worker) or on a wedged op (§8, WP-H).
 async fn run_until_death(
     shared: &Shared,
     client: &ProtocolClient,
@@ -1140,7 +1338,31 @@ async fn run_until_death(
                     pinged = ping => pinged,
                 };
                 match pinged {
-                    Ok(resp) if resp.ok => missed = 0,
+                    Ok(resp) if resp.ok => {
+                        missed = 0;
+                        // SCHEMA §8 wedged op (WP-H). The WORKER's `inflight` is
+                        // authoritative — it is measured from the dequeue and from the
+                        // last non-terminal frame IT emitted, which is the only clock
+                        // that knows about bulk-credit waits and about frames Rust has
+                        // not drained yet — so it is READ here, never re-derived. An
+                        // answered ping means the PROCESS is fine; this is the separate
+                        // question of whether the op it is running still moves.
+                        if let Some(wedged) = wedged_inflight(shared, resp.result.as_ref()) {
+                            tracing::error!(
+                                verb = %wedged.verb,
+                                ageMs = wedged.age_ms,
+                                sinceProgressMs = wedged.since_progress_ms,
+                                "worker wedged past its op deadline — SIGKILL"
+                            );
+                            let _ = child.start_kill();
+                            let _ = child.wait().await;
+                            return Death::Wedged {
+                                verb: wedged.verb,
+                                age_ms: wedged.age_ms,
+                                since_progress_ms: wedged.since_progress_ms,
+                            };
+                        }
+                    }
                     _ => {
                         missed += 1;
                         tracing::debug!(missed, max = shared.config.max_missed_pings, "worker ping missed");
@@ -1245,6 +1467,38 @@ impl GeometryEngine for WorkerManager {
         ok_result(resp).map(|_| ())
     }
 
+    /// The SCHEMA §7.2 Rust-side guarantee (WP-H), from `Drop`. It cannot await, so
+    /// the round trip is spawned and forgotten; the outcome only reaches the log.
+    ///
+    /// Ordering is what makes this work rather than race: `DiscardPrepared` is a
+    /// KERNEL-lane verb, so it queues behind the `ExecutePlan` that is still
+    /// running and is served after that plan stores its scratch — which is exactly
+    /// the moment there is something to discard.
+    fn discard_prepared_detached(&self, job_id: JobId) {
+        // Registered HERE, synchronously, not inside the task: the plan that
+        // replaces this one may be dispatched before the executor is even polled,
+        // and it must find a pending discard to wait for (see
+        // `Shared::await_pending_discards`).
+        self.shared.discard_started();
+        let me = self.clone();
+        tokio::spawn(async move {
+            match me.discard_prepared(job_id).await {
+                Ok(()) => tracing::debug!(
+                    job = %job_id.0,
+                    "dropped prepared regen — DiscardPrepared issued"
+                ),
+                // Best-effort by construction: a worker that died with the drop has
+                // no scratch left to strand, and there is no caller to tell.
+                Err(err) => tracing::warn!(
+                    job = %job_id.0,
+                    error = %err,
+                    "dropped prepared regen — DiscardPrepared failed"
+                ),
+            }
+            me.shared.discard_settled();
+        });
+    }
+
     async fn get_worker_head(&self) -> Result<WorkerHead, EngineError> {
         let client = self.client_or_err()?;
         let resp = client
@@ -1283,12 +1537,20 @@ impl GeometryEngine for WorkerManager {
     }
 
     async fn restore_checkpoint(&self, req: RestoreRequest) -> Result<RestoreResult, EngineError> {
-        // RestoreCheckpoint (SCHEMA §7.7): the worker rolls its in-session head back to
-        // the checkpoint step (the geometry never re-crosses the wire — the OCW1 request
-        // path carries no binary; a worker that no longer retains the step reports
-        // `restored:false`). Rust reconstructs the base registry/element index from the
-        // stored artifacts (review F3), so the executor seeds its scratch from the
-        // immutable checkpoint, not live state.
+        // RestoreCheckpoint (SCHEMA §7.7): the worker installs the checkpoint into its
+        // RESTORED-BASE SLOT and leaves the head alone (kernel-hardening WP-H) — the
+        // `ExecutePlan` that names it in `baseCheckpoint` is what publishes it. The
+        // geometry never re-crosses the wire (the OCW1 request path carries no binary);
+        // a worker that no longer retains the step reports `restored:false`. Rust
+        // reconstructs the base registry/element index from the stored artifacts
+        // (review F3), so the executor seeds its scratch from the immutable checkpoint,
+        // not live state.
+        //
+        // The result's `snapshotId` is now the UNCHANGED head, not a new one. Audited
+        // (WP-H): nothing on this side ever read it as "the snapshot the restore
+        // produced" — `RestoreResult::snapshot_id` is carried for reporting only, and
+        // the executor consumes `restored` / `drift_detected` / the two reconstructed
+        // bases. The field therefore needs no adjustment, only this note.
         let client = self.client_or_err()?;
         let args = wire::restore_checkpoint_args(&req);
         let resp = client
@@ -1514,6 +1776,15 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
             .await;
         return;
     };
+
+    // SCHEMA §7.2: a worker holds at most one prepared job. If the regen this plan
+    // replaces was ABANDONED (its future dropped), its `DiscardPrepared` is in a
+    // detached task and `tokio::spawn` orders nothing — an `ExecutePlan` that
+    // overtakes it is refused, and an ordinary regen does not re-plan on a refusal.
+    // Wait for it, bounded. AFTER the connection check so the honest
+    // "not connected" still wins, and before the request is built so the ordering
+    // is on the wire, not just in intent.
+    shared.await_pending_discards().await;
 
     let mut events = client.subscribe();
     let inflight = match client
@@ -2274,17 +2545,51 @@ impl crate::worker::WorkerReadiness for WorkerManager {
 
 #[async_trait]
 impl MeshProvider for WorkerManager {
+    /// SCHEMA §7.6 (WP-H): the request is FENCED on `snapshot` — the head the mesh
+    /// cache is meshing FOR — so a worker whose head has moved refuses rather than
+    /// serving bytes for a snapshot nobody asked about. On `STALE_PREVIEW` the head
+    /// is re-read ONCE and the mesh re-fetched against it; a second stale answer is
+    /// surfaced as an error, and the caller's cache keeps whatever it already had —
+    /// `MeshCache` only ever `put`s on an `Ok`, so a stale answer can never blank a
+    /// live mesh.
     async fn fetch_mesh(
         &self,
         body: BodyId,
         lod: Lod,
-        _snapshot: SnapshotId,
+        snapshot: SnapshotId,
+    ) -> Result<Vec<u8>, EngineError> {
+        match self.fetch_mesh_fenced(body, lod, Some(snapshot)).await {
+            Err(err) if is_stale_preview(&err) => {
+                let fresh = GeometryEngine::get_worker_head(self).await?.snapshot_id;
+                tracing::debug!(
+                    requested = snapshot.0,
+                    head = fresh.0,
+                    "Tessellate refused STALE_PREVIEW — re-reading the head once"
+                );
+                self.fetch_mesh_fenced(body, lod, Some(fresh)).await
+            }
+            other => other,
+        }
+    }
+}
+
+impl WorkerManager {
+    /// One `Tessellate` round trip at a fixed fence, including the bulk-chunk
+    /// assembly. Split out of [`MeshProvider::fetch_mesh`] so the WP-H
+    /// re-read-once retry re-runs the WHOLE request — chunk lane included — rather
+    /// than trying to resume a stream the worker never started.
+    async fn fetch_mesh_fenced(
+        &self,
+        body: BodyId,
+        lod: Lod,
+        snapshot: Option<SnapshotId>,
     ) -> Result<Vec<u8>, EngineError> {
         let client = self.client_or_err()?;
         let req = TessellateRequest {
             bodies: BodySelector::Ids(vec![body]),
             lod,
             include_edges: true,
+            snapshot_id: snapshot,
         };
         let mut events = client.subscribe();
         let inflight = client
@@ -2392,6 +2697,20 @@ fn assemble_mesh(
 // ─────────────────────────────────────────────────────────────────────────────
 // Small helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether `err` is the worker's `STALE_PREVIEW` refusal (SCHEMA §8). There is no
+/// dedicated [`EngineError`] variant: the taxonomy folds it into `OpFailed` under
+/// [`OpFailureCode::StalePreview`], which is also what `ApiError` renders as the
+/// `stalePreview` kind.
+fn is_stale_preview(err: &EngineError) -> bool {
+    matches!(
+        err,
+        EngineError::OpFailed {
+            code: OpFailureCode::StalePreview,
+            ..
+        }
+    )
+}
 
 fn not_connected() -> EngineError {
     EngineError::NotConnected {
@@ -2651,6 +2970,9 @@ mod poison_tests {
                 ping_interval: Duration::from_secs(5),
                 ping_timeout: Duration::from_secs(5),
                 max_missed_pings: 2,
+                wedge_deadline_execute_plan: Duration::from_secs(180),
+                wedge_deadline_readers: Duration::from_secs(60),
+                wedge_deadline_default: Duration::from_secs(30),
                 backoff: Vec::new(),
                 max_rapid_deaths: 3,
                 healthy_threshold: Duration::from_secs(5),
@@ -2668,6 +2990,8 @@ mod poison_tests {
             retired: AtomicBool::new(false),
             retire_signal: Notify::new(),
             torn_down: AtomicBool::new(false),
+            pending_discards: AtomicUsize::new(0),
+            discard_settled: Notify::new(),
         })
     }
 
@@ -2874,5 +3198,52 @@ mod poison_tests {
         assert!(plan_op_keys(&plan(&["h0", "h1"]), "").is_empty());
         let s = shared(1);
         assert!(s.plan_circuit_open(&[]).is_none());
+    }
+
+    /// The ordering primitive behind the §7.2 Drop guarantee (WP-H). A worker holds
+    /// at most one prepared job, so an `ExecutePlan` that overtakes the detached
+    /// `DiscardPrepared` of the job it replaces is refused — and `tokio::spawn`
+    /// orders nothing on its own.
+    ///
+    /// Tested at this level on purpose: end to end the stub cannot show it red,
+    /// because its single kernel lane serves frames in the order Rust writes them
+    /// and the discard is spawned first, so the wire order is already correct
+    /// there. What CAN regress is this gate, and these two cases are what it
+    /// promises — never block when there is nothing to wait for, always block until
+    /// the discard settles.
+    #[tokio::test]
+    async fn await_pending_discards_is_a_no_op_when_nothing_is_pending() {
+        let s = shared(1);
+        // Must not merely be fast — must not yield to a timer at all, or every plan
+        // dispatch pays for a guarantee that is not in play.
+        tokio::time::timeout(Duration::from_millis(50), s.await_pending_discards())
+            .await
+            .expect("an idle gate must return immediately");
+    }
+
+    #[tokio::test]
+    async fn await_pending_discards_blocks_until_the_discard_settles() {
+        let s = shared(1);
+        s.discard_started();
+        // Still pending: the gate must hold.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), s.await_pending_discards())
+                .await
+                .is_err(),
+            "a plan must not be dispatched while an abandoned prepare's discard is \
+             still in flight"
+        );
+        // Settling wakes it — including a waiter that registered before the notify.
+        let settler = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                s.discard_settled();
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), s.await_pending_discards())
+            .await
+            .expect("the gate must release once the discard settles");
+        settler.await.unwrap();
     }
 }

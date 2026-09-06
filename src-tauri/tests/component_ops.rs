@@ -574,6 +574,9 @@ async fn bake_body(wm: &WorkerManager, body: BodyId) -> (Vec<u8>, String, u32) {
         &[body],
         "brep",
         false,
+        // Unfenced (SCHEMA §7.8): this bakes whatever is at head, exactly as it
+        // did before the WP-H fence existed.
+        None,
     )
     .await
     .expect("ExportGeometry");

@@ -94,6 +94,9 @@ bool collect_meshes(const json& args, const session::BodyStore& bodies, const st
 }  // namespace
 
 Envelope handle_export_stl(session::Session& session, const Envelope& req) {
+    // OPTIONAL snapshot fence (SCHEMA §7.6/§7.8, WP-H): refuse BEFORE any file is
+    // opened — a stale export must never leave a file behind.
+    if (auto stale = session::stale_snapshot_fence(session, req, "ExportStl")) return *stale;
     const json& args = req.args;
     const std::string path = get_str(args, "path");
     if (path.empty()) return fail(req.id, "ExportStl: empty path");
@@ -169,6 +172,9 @@ Envelope handle_export_stl(session::Session& session, const Envelope& req) {
 }
 
 Envelope handle_export_obj(session::Session& session, const Envelope& req) {
+    // OPTIONAL snapshot fence (SCHEMA §7.6/§7.8, WP-H): refuse BEFORE any file is
+    // opened — a stale export must never leave a file behind.
+    if (auto stale = session::stale_snapshot_fence(session, req, "ExportObj")) return *stale;
     const json& args = req.args;
     const std::string path = get_str(args, "path");
     if (path.empty()) return fail(req.id, "ExportObj: empty path");

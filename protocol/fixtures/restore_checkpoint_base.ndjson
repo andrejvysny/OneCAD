@@ -1,0 +1,76 @@
+# CANONICAL cross-track fixture (SCHEMA §13) — the RESTORED-BASE slot and the
+# fourth fence case, kernel-hardening WP-H (§7.7 RestoreCheckpoint, §7.2
+# `baseCheckpoint`, §7.1 `hasRestoredBase`).
+#
+# The head is built twice (box A, then box B replacing it) and box A is
+# checkpointed in between, so the base and the head hold DIFFERENT geometry and
+# DIFFERENT tokens — which is what makes each round below say something:
+#
+#   * a restore reports `restored:true` and echoes the UNCHANGED head snapshotId;
+#     the GetWorkerHead after it is identical to the one before it EXCEPT for
+#     `hasRestoredBase`. Before WP-H the restore rolled the live head back and an
+#     unfenced reader served the rolled-back geometry (finding session-executor-2);
+#   * a plan naming a checkpointId the slot does not hold is `PROTOCOL_ERROR` and
+#     that FAILED prepare leaves the base in place (Rust re-plans from 0 with
+#     `checkpointFallbackReplay`);
+#   * a plan naming the slot fences `expectedBaseHash` against the BASE's token
+#     (the head's token would NOT pass here), clones the scratch from the base and
+#     publishes at AcceptPrepared — the Tessellate that follows shows both the
+#     base's body and the plan's own new one, which is the whole claim;
+#   * a plan WITHOUT `baseCheckpoint` DROPS a pending base before it is fenced.
+#
+# `hasScratch` and `hasRestoredBase` are read together throughout: between
+# store_prepared and AcceptPrepared of a baseCheckpoint plan both are true.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_base","documentRevision":0,"workerEpoch":3,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":80,"documentRevision":1,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"opA0","stepIndex":0,"params":{"sketchId":"skA","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[40,0]},{"id":"e2","type":"Line","p0":[40,0],"p1":[40,20]},{"id":"e3","type":"Line","p0":[40,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"opA1","stepIndex":1,"params":{"sketchId":"skA","distance":25.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":80}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":80,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_opA1"}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":80,"result":{"planPrepared":true,"preparedSnapshotId":1,"stoppedReason":"completed","historyPrefixHash":"2222222222222222222222222222222222222222222222222222222222222222"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":80,"documentRevision":1,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":80,"result":{"accepted":true,"snapshotId":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"SaveCheckpoint","args":{"stepIndex":1}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"checkpointId":"ckpt_1","stepIndex":1,"historyPrefixHash":"2222222222222222222222222222222222222222222222222222222222222222"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"ExecutePlan","args":{"jobId":81,"documentRevision":2,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["3333333333333333333333333333333333333333333333333333333333333333","4444444444444444444444444444444444444444444444444444444444444444"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"opB0","stepIndex":0,"params":{"sketchId":"skB","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[60,0]},{"id":"e2","type":"Line","p0":[60,0],"p1":[60,60]},{"id":"e3","type":"Line","p0":[60,60],"p1":[0,60]},{"id":"e4","type":"Line","p0":[0,60],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"opB1","stepIndex":1,"params":{"sketchId":"skB","distance":60.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":0,"jobId":81}}
+{"expect":{"v":1,"t":"event","id":5,"event":"planStep","stepIndex":1,"jobId":81,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_opB1"}]}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":81,"result":{"planPrepared":true,"preparedSnapshotId":2}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"AcceptPrepared","args":{"jobId":81,"documentRevision":2,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"jobId":81,"result":{"accepted":true,"snapshotId":2}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"documentRevision":2,"workerEpoch":3,"snapshotId":2,"historyPrefixHash":"4444444444444444444444444444444444444444444444444444444444444444","hasScratch":false,"hasRestoredBase":false,"inflight":null}}}
+{"send":{"v":1,"t":"req","id":8,"verb":"RestoreCheckpoint","args":{"checkpointId":"ckpt_1","stepIndex":1,"expectedHistoryPrefixHash":"2222222222222222222222222222222222222222222222222222222222222222","workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"restored":true,"snapshotId":2,"driftDetected":false,"driftDetail":null}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"documentRevision":2,"workerEpoch":3,"snapshotId":2,"historyPrefixHash":"4444444444444444444444444444444444444444444444444444444444444444","hasScratch":false,"hasRestoredBase":true}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"ExecutePlan","args":{"jobId":82,"documentRevision":3,"workerEpoch":3,"expectedBaseHash":"2222222222222222222222222222222222222222222222222222222222222222","prefixHashes":[],"targetStep":1,"ops":[],"baseCheckpoint":{"stepIndex":1,"checkpointId":"ckpt_unknown"}}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":false,"jobId":82,"error":{"code":"PROTOCOL_ERROR","retriable":false,"detail":{"requestedCheckpointId":"ckpt_unknown","hasRestoredBase":true,"restoredCheckpointId":"ckpt_1"}}}}
+{"send":{"v":1,"t":"req","id":11,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"snapshotId":2,"historyPrefixHash":"4444444444444444444444444444444444444444444444444444444444444444","hasScratch":false,"hasRestoredBase":true}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"ExecutePlan","args":{"jobId":83,"documentRevision":3,"workerEpoch":3,"expectedBaseHash":"2222222222222222222222222222222222222222222222222222222222222222","prefixHashes":["5555555555555555555555555555555555555555555555555555555555555555","6666666666666666666666666666666666666666666666666666666666666666"],"targetStep":3,"ops":[{"opType":"Sketch","opId":"opC0","stepIndex":2,"params":{"sketchId":"skC","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[10,0]},{"id":"e2","type":"Line","p0":[10,0],"p1":[10,10]},{"id":"e3","type":"Line","p0":[10,10],"p1":[0,10]},{"id":"e4","type":"Line","p0":[0,10],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"opC1","stepIndex":3,"params":{"sketchId":"skC","distance":5.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}],"baseCheckpoint":{"stepIndex":1,"checkpointId":"ckpt_1"}}}}
+{"expect":{"v":1,"t":"event","id":12,"event":"planStep","stepIndex":2,"jobId":83}}
+{"expect":{"v":1,"t":"event","id":12,"event":"planStep","stepIndex":3,"jobId":83,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_opC1"}]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"jobId":83,"result":{"planPrepared":true,"preparedSnapshotId":3,"stoppedReason":"completed","historyPrefixHash":"6666666666666666666666666666666666666666666666666666666666666666"}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"snapshotId":2,"historyPrefixHash":"4444444444444444444444444444444444444444444444444444444444444444","hasScratch":true,"hasRestoredBase":true}}}
+{"send":{"v":1,"t":"req","id":14,"verb":"AcceptPrepared","args":{"jobId":83,"documentRevision":3,"workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":14,"ok":true,"jobId":83,"result":{"accepted":true,"snapshotId":3}}}
+{"send":{"v":1,"t":"req","id":15,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":15,"ok":true,"result":{"documentRevision":3,"workerEpoch":3,"snapshotId":3,"historyPrefixHash":"6666666666666666666666666666666666666666666666666666666666666666","hasScratch":false,"hasRestoredBase":false}}}
+{"send":{"v":1,"t":"req","id":16,"verb":"Tessellate","args":{"bodyIds":"all","lod":"coarse","includeEdges":true}}}
+{"expect":{"v":1,"t":"resp","id":16,"ok":true,"result":{"meshes":[{"bodyId":"body_opA1","format":"MESH1","snapshotId":3},{"bodyId":"body_opC1","format":"MESH1","snapshotId":3}]}}}
+{"send":{"v":1,"t":"req","id":17,"verb":"RestoreCheckpoint","args":{"checkpointId":"ckpt_1","stepIndex":1,"expectedHistoryPrefixHash":"2222222222222222222222222222222222222222222222222222222222222222","workerEpoch":3}}}
+{"expect":{"v":1,"t":"resp","id":17,"ok":true,"result":{"restored":true,"snapshotId":3,"driftDetected":false}}}
+{"send":{"v":1,"t":"req","id":18,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":18,"ok":true,"result":{"snapshotId":3,"hasRestoredBase":true}}}
+{"send":{"v":1,"t":"req","id":19,"verb":"ExecutePlan","args":{"jobId":85,"documentRevision":4,"workerEpoch":3,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["7777777777777777777777777777777777777777777777777777777777777777","8888888888888888888888888888888888888888888888888888888888888888"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"opD0","stepIndex":0,"params":{"sketchId":"skD","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[8,0]},{"id":"e2","type":"Line","p0":[8,0],"p1":[8,8]},{"id":"e3","type":"Line","p0":[8,8],"p1":[0,8]},{"id":"e4","type":"Line","p0":[0,8],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"opD1","stepIndex":1,"params":{"sketchId":"skD","distance":8.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":19,"event":"planStep","stepIndex":0,"jobId":85}}
+{"expect":{"v":1,"t":"event","id":19,"event":"planStep","stepIndex":1,"jobId":85,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_opD1"}]}}}
+{"expect":{"v":1,"t":"resp","id":19,"ok":true,"jobId":85,"result":{"planPrepared":true,"preparedSnapshotId":4}}}
+{"send":{"v":1,"t":"req","id":20,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":20,"ok":true,"result":{"snapshotId":3,"historyPrefixHash":"6666666666666666666666666666666666666666666666666666666666666666","hasScratch":true,"hasRestoredBase":false}}}
+{"send":{"v":1,"t":"req","id":21,"verb":"DiscardPrepared","args":{"jobId":85}}}
+{"expect":{"v":1,"t":"resp","id":21,"ok":true,"jobId":85,"result":{"discarded":true}}}
+{"send":{"v":1,"t":"req","id":22,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":22,"ok":true,"result":{"goodbye":true}}}

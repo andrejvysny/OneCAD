@@ -78,6 +78,16 @@ struct ScratchJob {
     // (D5) and so mis-flagged the shipped edit lane.
     bool from_zero_replay = false;
 
+    // SCHEMA §7.2 `baseCheckpoint` (kernel-hardening WP-H): set when this scratch
+    // was cloned from the RESTORED-BASE SLOT rather than from the head or from
+    // empty, plus the checkpoint it named. `accept_prepared` drops the slot only
+    // when it still holds THAT checkpoint — an unconditional drop would throw away
+    // a base parked by a restore that arrived after this plan was prepared, which
+    // the §7.1 lifetime says belongs to the NEXT plan.
+    bool from_restored_base = false;
+    std::string base_checkpoint_id;
+    std::uint64_t base_checkpoint_step = 0;
+
     // The plan itself, `{ "ops": [...] }` — the shape `ops::gear_body_op_ids` and
     // `ops::gear_body_infos` read (kernel-hardening WP-I). Carried here because
     // SCHEMA §7.3's gear referenceability classifier is PLAN-DERIVED: a body is a

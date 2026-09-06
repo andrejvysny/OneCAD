@@ -114,6 +114,14 @@ struct Envelope {
 // Serialize to a compact JSON string. Throws EnvelopeError on any NaN/Inf float.
 std::string serialize(const Envelope& env);
 
+// PRODUCER-side sanitiser for §4's "no NaN/±Infinity on the wire" rule
+// (kernel-hardening WP-H): replace every non-finite float in `j` with `null`
+// IN PLACE. A producer that may compute a degenerate double (an op's evidence
+// numbers) calls this before handing the value to an envelope, so the encoder's
+// `EnvelopeError` — and the §3.4 fallback behind it — stays a last resort for a
+// bug rather than the routine path for a degenerate measurement.
+void sanitize_non_finite(nlohmann::json& j);
+
 // Parse a JSON envelope string. Throws EnvelopeError on malformed input.
 Envelope parse(const std::string& json_text);
 
