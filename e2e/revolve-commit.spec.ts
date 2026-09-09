@@ -112,6 +112,11 @@ test("Revolve guidance: an empty-state banner before any pick, an axis-hint chip
   page,
 }) => {
   await openEditorDebug(page);
+  // ORDERING: the empty-state banner is an engine overlay item, so arming
+  // Revolve before the engine has settled leaves nothing to show it on (red
+  // once on CI webkit, 261/262; never reproduced locally in 10 runs). Wait for
+  // the settled engine exactly as the sketch flows below already do.
+  await waitForCameraSettled(page);
 
   // Nothing selected, no sketch in the seeded document yet — the empty-state
   // banner is the only in-viewport feedback (StatusBar carries the rest).
