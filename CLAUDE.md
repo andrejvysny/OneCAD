@@ -35,7 +35,7 @@ Before running a command that changes system state, check that the evidence supp
 
 **Never report a gate you did not run.** Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.
 
-Numbers go in reports as measured counts (`ctest 136/136`, `cargo test --workspace 1305 passed / 0 failed`), never as "all green". A subagent's claim that a gate passed is **not** evidence — re-run it yourself on the main thread before it goes in `TODO.md`. This is the house rule that produced the `eba2614` gate record and it is not negotiable.
+Numbers go in reports as measured counts (`ctest 136/136`, `cargo test --workspace 1305 passed / 0 failed`), never as "all green". A subagent's claim that a gate passed is **not** evidence — re-run it yourself on the main thread before it goes in `TODO.md`. This is the house rule that produced the `eba2614` gate record and it is not negotiable. An Astra derivation (`/codex-astra`) is evidence for a design, never for a gate.
 
 Two specific traps that make a green run a lie:
 
@@ -60,6 +60,7 @@ Delegate independent subtasks to subagents and keep working while they run. Inte
 - Risky work packages (identity, protocol, regen, fencing, viewport) → an independent `adversarial-reviewer` on a fresh context. Self-critique is weaker than a fresh reader.
 - Gate runs → `gate-verifier`, which reports measured output only.
 - Anything touching `protocol/SCHEMA.md` or the OCW1/MESH1 boundary → `protocol-auditor` before the change lands.
+- Math-, geometry-, or numerical-policy-dominant questions (tolerance derivation, blend continuity, sweep/loft framing, identity scoring, solver conditioning, robust predicates) → recommend `/codex-astra derive` before the design and `/codex-astra break` after the derivation or the kernel diff. Opt-in only: GPT-6 Astra runs on a ChatGPT Plus limit, one prompt-only packet per question, never repo exploration. Skill: `.claude/skills/codex-astra/SKILL.md`; accepted derivations live in `docs/design/astra/` and are the provenance citation for any number derived from them.
 
 Maximum three implementation agents in parallel; every diff is orchestrator-reviewed and every gate orchestrator-re-verified. Subagents cannot review their own work.
 
