@@ -8,3 +8,5 @@
 - [Sketch solver residual](repo_sketch_solver_residual.md) — maxConstraintResidual, the two exact-solve wire sites, why EndGesture measures from the sketch
 - [Worker probe lanes](repo_worker_geometry_lane.md) — direct op-executor + Session/mint lanes, AcquireElementIds mints nothing, classify_shape by geometry, XY sketch frame, un-oriented normals
 - [Worker liveness probes](repo_worker_liveness_probes.md) — single-threaded stub, in-process Dispatcher/PlanExecutor drivers, MESH1 header offsets, restore keyed on stepIndex
+- [Fillet acceptance envelope](repo_fillet_acceptance.md) — two blend classes, curvature-derived residual, remnant floor, which kernelbench rows may move
+- [OCW1 driver for fixtures](repo_ocw1_driver.md) — harness --repl desyncs on ExecutePlan; frame the worker directly, plus the param names that bite
