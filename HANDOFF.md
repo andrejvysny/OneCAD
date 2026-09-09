@@ -1,10 +1,83 @@
-# Handoff — KERNEL HARDENING P1: WP-I committed (`4555993`), WP-H gated in session 28, WP-G approved next, then WP-J
+# Handoff — KERNEL HARDENING P1: WP-I `4555993` + WP-H `d2f34e8` committed; WP-G in the tree, gate owed; then WP-J
 
-> Session 28 continued into 2026-09-05: WP-H landed through the same discipline (H0 probes red-first
-> → SCHEMA audited before code → worker ∥ Rust implementers → after-landing audit ∥ adversarial review
-> → fix rounds → L3). Its gate row and every ruling are in TODO.md § "WP-H STARTED"; the commit is the
-> one after `4555993` on master (`git log -2`). WP-G is user-approved and queued next; WP-J after it.
-> The earlier section below describes the WP-I half of the session.
+Session 28 · 2026-09-04 → 2026-09-06 · plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`
+
+> Read TODO.md § KERNEL HARDENING § "Now (2026-09-06 16:45, END of session 28)" first — its first
+> checkbox IS the next action (the owed L3 + commit for WP-G, with the exact command list and the
+> path-scoped `git add`). CURRENT_STATE.md § NOW lists the dirty files and the counts measured so far.
+
+## Goal
+
+Make the modeling kernel correct and robust for daily-driver parts, risk-first (kernel-hardening P1).
+This session closed WP-I (component mates), WP-H (worker liveness / restore fencing / executor
+hazards) and implemented WP-G (fillet acceptance envelope); WP-J (export/import honesty) is next.
+
+## What happened (session 28)
+
+- **Discipline that held for all three packages:** red-first probes measured on the shipped code →
+  SCHEMA hunk audited BEFORE code → ≤ 2 implementers (worker critical ∥ Rust careful, FE standard) →
+  after-landing protocol audit ∥ fresh-context adversarial review → fix rounds through the SAME
+  agents (`SendMessage`, context retained) → L3 on the main thread, suites alone → commit by path.
+  Every adversarial review found real defects (WP-I: an unreachable repair path; WP-H: a lost step
+  silently accepted, a writer retry baking what the fence refuses; WP-G: a whole-body remnant scan,
+  a per-result budget, exact B-spline blends widened by seven orders).
+- **WP-I** (`4555993`): coincident seat projected onto the resolved plane; frozen `targetAxis`
+  adopted on the first regen; anti-parallel reversal halts with two labeled choices and
+  `RepairMateAxis` rewrites `flipped` (the only sign bit — `axisSign` rejected); gear referenceability
+  enforced by a plan-derived geometric classifier at Bind + the ladder pool (caps referenceable by
+  spec amendment; edges/vertices by neighbourhood); bounds `teeth ≤ 400`, `sampleCount ≤ 256`,
+  `height ≤ 1000`, fastener `length ≤ 1000` + 500 turns.
+- **WP-H** (`d2f34e8`): status thread answering `GetWorkerHead` with `inflight` (0 ms under a 2 s
+  job); wedge deadline 180/60/30 s on `sinceProgressMs` with a distinct `Wedged` death; restore into
+  a restored-base slot consumed by `baseCheckpoint` (fourth fence case, head untouched); optional
+  `snapshotId` on Tessellate + writers (Tessellate retries once, writers surface `stalePreview`);
+  kind-preserving serialization fallback that FAILS the substituted step (`opFailed`); late cancel
+  stores nothing; artifact failure = warning; Drop guard with ordered discard.
+- **WP-G** (in the tree): see CURRENT_STATE.md. Key ruling: the draft positional multiplier
+  `kApproxFactor` was measured unsatisfiable (curvature-derived residual) and replaced by a fit bound
+  + radius-relative section bound + tangency factor, applied EXACT-FIRST per contour — so exact
+  geometry keeps its exact budget and kernelbench m1 is byte-identical.
+- **CI reds named and fixed (all timing/ordering, no assertion widened):** five on commit E, one
+  webkit snap-hint ordering, one webkit revolve ordering (in the tree).
+
+## Dead-ends / rulings (do not re-litigate)
+
+- `axisSign` beside `flipped`: REJECTED (two encodings of one orientation).
+- Partition tags for gear tooth faces: IMPOSSIBLE (entries are on-demand, Rust-minted, erased on
+  split) — the classifier is plan-derived geometry.
+- Near-end re-seat for concentric-only mates (I1b): DROPPED (no frozen datum; bistable tie).
+- `kApproxFactor · tol` budgets: WITHDRAWN (measured 39×/247× under a `k ≤ 8` cap).
+- A class-only rule for approximated blends: WRONG (m1's cylinder–cylinder B-spline blends are exact
+  to 6e-16) — exact-first is normative.
+- Writer retry on `STALE_PREVIEW`: REMOVED for all four writers (bakes what the fence refuses).
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; `git status` must show the WP-G footprint in
+   CURRENT_STATE.md and nothing else (plus the stray `src-tauri/.claude/`).
+2. Do TODO.md's first checkbox: the full L3 on the assembled tree, then commit + push + CI.
+3. Then WP-J per `~/.claude/plans/kernel-hardening-p1-wp-hij.md` § WP-J with decision 3 (face-level
+   export refusal), same discipline; the reviewed plan's H/J facts may have drifted by line number.
+4. Agent briefs for reuse live only in the session scratchpad (gone); the pattern is in this file's
+   "What happened" — GOAL / CONTEXT with file:line / DESIGN / CONSTRAINTS / VERIFY / REPORT.
+
+## Open questions
+
+- None blocking. User-run gates owed: 19-row checklist, Tauri smoke, STEP coloured, 3MF slicer
+  (meaningful after WP-J), dogfood parts; delete `src-tauri/.claude/` by hand.
+
+## Pointers
+
+- Tasks → TODO.md § KERNEL HARDENING · Snapshot → CURRENT_STATE.md § NOW · Plan + review record →
+  `~/.claude/plans/act-as-senior-software-delightful-nova.md` · H/J design →
+  `~/.claude/plans/kernel-hardening-p1-wp-hij.md`.
+
+---
+
+> (Earlier session-28 mid-point note, kept for its trail.) WP-H landed through the same discipline
+> (H0 probes red-first → SCHEMA audited before code → worker ∥ Rust implementers → after-landing
+> audit ∥ adversarial review → fix rounds → L3). WP-G was user-approved and queued next; WP-J after it.
+> The section below describes the WP-I half of the session.
 
 
 Session 28 · 2026-09-04 · plan `~/.claude/plans/act-as-senior-software-delightful-nova.md` (decisions, design, review record) · TODO.md § KERNEL HARDENING § "Now (2026-09-04, session 28)" is the ledger.

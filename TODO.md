@@ -2,7 +2,32 @@
 
 ## KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
 
-### Now (2026-09-04, session 28 — plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
+### Now (2026-09-06 16:45, END of session 28 — plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
+- [ ] **NEXT ACTION — run the owed L3 on WP-G before push.** WP-G COMMITTED UNGATED at `ab71f02`
+      on the user's instruction (2026-09-09); `8602b45` carries the revolve-commit e2e ordering fix;
+      `9962895` + `f2350e2` add `/codex-astra` (GPT-6 Astra derive/break/verify, `.claude/skills/codex-astra/`)
+      and the CLAUDE.md model-roles section. Nothing pushed. The gate recipe below is unchanged.
+- [ ] (superseded by the row above, kept for the recipe) gate WP-G (was UNCOMMITTED: 18 modified + 8 new files,
+      see CURRENT_STATE.md). Run the full L3 on the main thread, suites ALONE, per CLAUDE.md § Gate
+      ladder: `scripts/build-worker.sh Release` (restage) · `ctest --test-dir worker/build` (expect
+      **191**, read off `ctest -N`) · `cargo fmt --all --check` · `cargo clippy --workspace --all-targets
+      -- -D warnings` on 1.97.0 AND `cargo +1.98.1 clippy …` (scratch `CARGO_TARGET_DIR`) ·
+      `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test
+      --workspace` (expect 96 targets incl. the new `fillet_blend_class`; 0 skips) · `bunx tsc --noEmit`
+      · `bun run test` · hex grep · `verify-modeling-*.mjs` + `check-worker-stdout-hygiene.sh` ·
+      kernelbench `fillet/foundation:t0` AND `fillet/matrix:m1` compare (both "rows unchanged"; the
+      recipe is in `.github/workflows/ci.yml` "T0 campaign" + `scripts/kernelbench-manifest.mjs
+      compare`) · `bun run e2e` both projects `retries: 0` with `find src e2e -type f | sort | xargs
+      md5 -q | md5 -q` before/after. Record counts here, then commit `feat(kernel): fillet acceptance
+      envelope …` (stage by PATH: `worker protocol src-tauri/tests e2e .claude/agent-memory TODO.md
+      CURRENT_STATE.md HANDOFF.md` — NEVER `src-tauri/.claude/`), push, check CI.
+- [ ] Delete the stray untracked `src-tauri/.claude/` by hand (`rm -rf src-tauri/.claude` — the
+      permission mode denied the agent twice).
+- [ ] Then WP-J (export/import honesty) per `~/.claude/plans/kernel-hardening-p1-wp-hij.md` § WP-J with
+      decision 3 (FACE-level refusal `EXPORT_FACE_UNMESHED`): J0 probes red-first → SCHEMA §7.8 + audit →
+      J2 worker ∥ Rust (3MF bit-pattern weld) → FE hints → adversarial review → L3 → commit.
+- [ ] Owed user-run gates unchanged: 19-row `MANUAL_RELEASE_GATES.md`, Tauri smoke, "STEP opens
+      coloured", "3MF opens in a slicer" (meaningful after WP-J), dogfood parts.
 - [x] The 8 WP-I/H/J decisions answered (plan § Decisions; two `reviewer-critical` passes folded in:
       `axisSign` DROPPED, gear caps referenceable by spec amendment, bounds revised to
       `teeth ≤ 400` / `sampleCount ≤ 256` / `height ≤ 1000` / fastener `length ≤ 1000` and
@@ -208,6 +233,146 @@
             `fillet/foundation:t0` both backends **136 rows unchanged** + semantics OK (0 regressions,
             0 replay-unstable) · e2e both projects `retries: 0` **524 / 0** (29.4 min; src+e2e md5
             `b46aa2b6…` identical before/after and to the WP-I gate tree — no FE change). FULL L3 GREEN.
+            **Committed as `d2f34e8`** (62 files, +5454 / −265) and pushed; master == origin.
+            **CI run 34002553498:** every hosted lane green incl. e2e-chromium; **e2e-webkit 261 / 1
+            (20.1 min)** — a NEW red, `revolve-commit.spec.ts:111` (`revolve-empty-hint` not visible in
+            8 s after clicking Revolve straight after `openEditorDebug`). Not reproduced locally
+            (webkit **10/10**, 44 s). Named cause: the banner is an engine overlay item and the arm
+            preceded the settled engine on the slow lane — the same click-before-ready class as the
+            other four webkit reds this session. Fixed by ordering only (`waitForCameraSettled` before
+            the click, as the sketch flows in the same spec already do); **10/10** on webkit + chromium
+            after the fix; rides the WP-G commit. `tauri-composition` cancelled (known).
+- [ ] **WP-G STARTED (2026-09-06)** — design + task breakdown in the session scratchpad
+      `briefs/wpg-design.md` (tolerance-adaptive budget for APPROXIMATED blends classified by surface
+      type, `FILLET_BLEND_APPROXIMATED` warning, `FILLET_BLEND_TOO_COARSE` ceiling, range-analyzer
+      remnant floor, chamfer ceiling/partial refusal, kernelbench t0 unchanged + m1 flips recorded).
+      G0 probe → G1 SCHEMA + audit → G2 worker (factor measured first) → G3 Rust/FE → review → L3.
+      - [x] G0 `worker/tests/test_fillet_acceptance_envelope.cpp` registered (ctest 186 → **187**),
+            measured RED on cases 1–2 ("op path must publish Ok for an approximated blend, got
+            Failed/GEOMETRY_INVALID: measured fillet section radius differs from requested radius"),
+            green on the cone rim, valence-5 corner, boss top edge (via `FilletBuilder`) and the seam
+            (`FILLET_CONTOUR_INVALID`). Gap found: `FilletChamferOp::publish_result` forwards no
+            success-path builder diagnostics — G2 wires it. Case 5's op-path `NeedsRepair` on the
+            probe's ref is a separate ticket.
+      - [x] G1 SCHEMA hunk (§7.3 two blend classes / two budgets with the exact evaluation order,
+            `kApproxFactor ≤ 8` normative, ceiling `min(r/100, 0.05)` → `FILLET_BLEND_TOO_COARSE`,
+            tangency capped at 1e-2 rad, scope = fillet publication only (shared limit functions
+            untouched — OffsetFace/recognizer/reconstruction consume them); range-analyzer remnant
+            probe = NON-success with §7.6 `remnantFloorHit`/`remnantFloorMeasure`; chamfer ceiling +
+            `CHAMFER_INVALID_RESULT`; §7.2 `FILLET_BLEND_APPROXIMATED` row; op-specific reasonCodes
+            catalogued; §14) protocol-audited BEFORE code: **approve_with_changes**, six blocking
+            edits (B1 scope, B2 the remnant rule had no wire home and broke §7.6's interval invariants,
+            B3 ordering + constant `res` + uncapped tangency, B4 the Fillet `distance2` claim was
+            already true, B5 catalogue, B6 the kernelbench narrative was wrong — the six m1
+            characterization rows fail in raw OCCT too; the warning's evidence moves digests without a
+            verdict flip; `SemanticValidation.cpp` hard-codes 1e-9 gates and must become class-aware)
+            — all applied. `kApproxFactor` awaits G2's measurement (`KAPPROX_NORM` placeholder).
+      - [x] G2 measurement (agent, scratch program, OCCT 8.0.1 arm64): approximated blend faces carry
+            `BRep_Tool` tolerances **5.06e-5 / 1.16e-5 mm** (1.0e-4 / 6.3e-5 incl. sub-shapes) against
+            section residuals **1.97e-3 / 2.87e-3 mm** — 39× and 247× the tolerance — because
+            `maximum_profile_error` is `|1/κmax − r|`, a CURVATURE-derived quantity that scales as
+            `tol/h²`; G1 errors 1.24e-5 / 4.94e-6 rad = 0.49 / 0.42 of `tol/r`; analytic faces read 1e-7
+            / residual 2.2e-16. The draft budget `max(k·tol, res)` was unsatisfiable under its own `k ≤ 8`
+            cap (the 1e-3 floor alone refused both). **Ruling (SCHEMA §7.3 rewritten):** for approximated
+            contours (1) `tol > res` ⇒ `FILLET_BLEND_TOO_COARSE`; (2) section residual ≤
+            `min(r · kRelSection 0.01, kSectionCeiling 0.05 mm)` else `FILLET_BLEND_TOO_COARSE` (margins
+            10× / 3.5×); (3) G1 ≤ `min(max(1e-9, kTangencyFactor 4 · tol / r), 1e-2 rad)` else
+            `FILLET_SEMANTIC_CHECK_FAILED` (8× margin). Analytic unchanged. Three normative constants.
+      - [x] G2 worker LANDED (impl-critical, agent-measured; orchestrator re-runs at the gate): the three
+            normative constants in `BlendEvidence.h` with the measurement; `classify_blend_face`
+            (unwrap trimmed → `GeomAdaptor_Surface::GetType()`), `tol` over faces + sub-shapes;
+            `validate_result` in the SCHEMA's order as a NEW branch (shared limit functions untouched);
+            `FILLET_BLEND_APPROXIMATED` on the success path with `blendEvidence` (+ class keys) and the
+            `publish_result` forwarding gap closed; refusals carry `semantics.refusal_code`; range
+            analyzer: a remnant probe (face area < res², edge < res) is a `Refusal` with diagnostic
+            `FILLET_REMNANT_FLOOR`/`CHAMFER_REMNANT_FLOOR`, §7.6 optional `remnantFloorHit`/
+            `remnantFloorMeasure`, `bestKnownMax` drops one bisection step on every fixture (e.g. box
+            one-edge 9.99925 → 9.9985, leaving 1.5e-3 mm) — new ctest `fillet_remnant_floor` (20×4.0002×10
+            bar, 7.0e-4 mm remnant at r=1.99975, max 1.999; the builder still SUCCEEDS at the rejected
+            radius); chamfer output-tolerance ceiling + `CHAMFER_INVALID_RESULT` on genuine partial
+            results (`NbSurf(IC) <= 0` / a contour with no generated face; `!IsDone()` stays `OP_FAILED`
+            like Fillet — the `edge_op_failure` safety contract pins it); kernelbench
+            `SemanticValidation.cpp` four gates class-aware as `max(exact, adaptive)` (`constantRadius`
+            deliberately exact — a law comparison). Fixture `fillet_approximated_blend.ndjson`. Agent
+            counts: **ctest 189/189**, `cargo --workspace` 1553/0, hygiene clean, **t0 136 unchanged**,
+            **m1 336 records / 0 gating failures / 330 pass / 6 characterization — 92 rows moved,
+            ALL `normalizedDigest` only, ALL `matrix.cylinder-cylinder.*` pass rows (the approximated
+            family, both backends: d030/d060/d090/d120/d150 × 18 + d170 × 2), because the warning now
+            rides their `diagnostics` and the validators' `allowed*` widened; the d178 characterization
+            pair and all 242 analytic rows byte-identical** — digests to be re-recorded at the gate with
+            this reason. Test re-expressions (recorded): `test_fillet_range.cpp` pins moved by the
+            remnant floor (each carries the measured leftover); one stale cross-reference in
+            `analyze_edge_op_range.ndjson`'s comment. Deviation: the warning emitted BOTH key
+            vocabularies — SCHEMA §7.2 now names ONE (the `blendEvidence` keys); code to drop the aliases
+            in the fix round. FE hint for the warning: optional (generic rendering) — recorded follow-up.
+      - [x] G protocol-auditor AFTER-landing = **approve_with_changes** (measured by the auditor: the six
+            fillet/range ctests 6/6, hygiene clean, fingerprint unchanged; the three constants, the
+            evaluation order, the `tol` definition, the refusal codes and the SCOPE claim all match):
+            B1 the code still emitted BOTH key vocabularies → aliases deleted, `approximatedContours` /
+            `approximatedBlendFaces` counts named, ONE vocabulary in §7.2/§7.3 (fix round); B2 the §7.6
+            result block never gained `remnantFloorHit`/`remnantFloorMeasure` and its example values
+            were stale (9.99925/10.0 → 9.9985/9.99925), the tier sentence contradicted the remnant
+            rule, and a remnant-bounded run left `limitingEntities` empty → SCHEMA fixed, closure
+            populated (fix round); B3 the warning is per STEP with counts → said so; B4 the chamfer
+            `!IsDone()` split → sentence added; §14: measured kernelbench paragraph, the fixture pinned
+            two tolerance-derived numbers literally (Linux-lane risk) → `$any`, the "measured pins in the
+            envelope test" claim was false → pins added (fix round), the §7.6 fields stop at the wire
+            (no DTO, no consumer) → stated. Rust-lane gap: no test asserted the warning survives to
+            `Diagnostic` → G3 real-worker test (impl-standard) in flight.
+      - [x] G adversarial-reviewer = **defective as written** (measured: ctest 189/189, t0 136 unchanged,
+            m1 0 gating failures, a scratch box-on-box repro, the m1 d030 record inspected): BLOCKER-1
+            `find_remnant` scanned the WHOLE result — a pre-existing 5e-4 mm step edge 25 mm from the
+            fillet made every probe a Refusal (58/58, `confidence: none`) — RULED: scan only faces the
+            probe GENERATED/MODIFIED + their edges, ctest with the pre-existing sliver; HIGH-2 the
+            budget was per RESULT (an analytic contour beside an approximated one judged at 0.02 mm) —
+            RULED: classification/measurement/budget per CONTOUR; HIGH-3 the class widened EXACT
+            geometry — m1 `cylinder-cylinder.d030` has B-spline blends at residual 6e-16 yet got
+            `allowedProfileError 1.52e-3` + a user-visible warning ("no continuum" was false for that
+            family) — RULED: EXACT-FIRST — every contour is measured against the exact budgets first;
+            only an approximated contour that FAILS them falls to the adaptive budget + warning; HIGH-4
+            the raw-OCCT oracle in `SemanticValidation.cpp` lost 7 orders of detection on 92 rows —
+            same exact-first rule there; MEDIUM-5/6 the §7.6 fields had no fixture pin and the two
+            remnant diagnostic codes were undocumented → fixture leg + §7.6 catalogue; MEDIUM-7 chamfer
+            ceiling/partial refusal had zero coverage → ctests; MEDIUM-8 `tol` included edges/vertices
+            shared with the supports (coarse input inflated it 2×) → faces only; MEDIUM-9 fixture
+            literal tolerance pins → `$any` (round 1); LOW-10 seven `-Wmissing-field-initializers`;
+            LOW-11 the unwrap is redundant (revolution/extrusion/offset classify approximated — harmless
+            under exact-first); LOW-12 no `TOO_COARSE` test + a vacuous analytic assertion → pure-function
+            budget test + direct evidence assertion. SCHEMA §7.3/§7.6/§14 amended; fix round 2
+            dispatched to the worker agent. Expected: the 92 m1 digest moves vanish under exact-first.
+      - [x] G3 Rust real-worker test LANDED (`src-tauri/tests/fillet_blend_class.rs`, agent-measured
+            2/2, fmt/clippy clean): the Ø40 shaft + Ø20 boss tee (the fixture's own geometry, tangent
+            pair `e:1`+`e:4` promoted by TopoKey, chain-tangent fillet r=2) publishes with ONE
+            `FILLET_BLEND_APPROXIMATED` whose evidence reads `blendSurfaceClass: approximated`,
+            `maximumSectionRadiusError 1.97e-3` ≤ `allowedSectionRadiusError 0.02`,
+            `maximumTangencyRadians 1.24e-5` ≤ `allowedTangencyRadians`; the 40×20×10 box edge fillet
+            carries none.
+      - [x] G2 fix rounds 1 + 2 LANDED (agent-measured; orchestrator re-ran the fillet ctests — see the
+            handoff line): per-contour `FilletContourEvidence` + `judge_contour_evidence` pure verdict
+            with EXACT-FIRST (aggregate fast path, then per contour; the warning gated on
+            `adaptive_budget_used`); `tol` = the blend face's own tolerance; `touched_faces()` scopes the
+            remnant scan to generated/modified faces + their edges (the reviewer's sliver scenario now
+            61 / 83 successes, `bestKnownMax` 24.9985, the 1e-3 probe succeeds); `remnant_evidence()`
+            fills `limitingEntities` from the requested closure (`[{kind: edge, topoKey: e:1}]`, was
+            `[]`); alias keys gone, counts `approximatedContours`/`approximatedBlendFaces`; fixture
+            `$any` pins; `analyze_edge_op_range.ndjson` pins `remnantFloorHit` + measure; new ctests
+            `fillet_budget_decision` (six branches incl. rule ORDER) and `chamfer_publication_ceiling`;
+            envelope test asserts the MEASURED pins (case 1 residual 1.9710e-3 / G1 1.2367e-5 / tol
+            5.06e-5; case 2 2.8743e-3 / 4.9401e-6 / 1.16e-5; tangency margins 8.2× / 9.4×) and a
+            two-contour case 6 (`approximatedContours == 1`, the analytic rim judged exact). Agent
+            counts: **ctest 191/191**, `cargo --workspace` **1555/0**, hygiene clean, **t0 136 unchanged,
+            m1 336 rows UNCHANGED** (0 gating failures; `grep -c FILLET_BLEND_APPROXIMATED` over m1 = 0)
+            — NO baseline re-record needed. NOT constructible (recorded, not faked): a chamfer the
+            ceiling refuses (OCCT never publishes above 2× the input tolerance — the ceiling's own
+            slope; the test pins the derived ceiling equals Fillet's and the measured 2× headroom) and a
+            chamfer partial result (every oversized chamfer is `!IsDone()`). Incident: a scripted edit
+            corrupted `FilletSemanticChecks.cpp`; restored with `git checkout -- <that file>` and
+            rewritten — one-file scope, verified by 191/191 + unchanged digests.
+      - [ ] **OWED (next session):** full L3 on the assembled tree (build+restage · ctest 191 · fmt ·
+            clippy 1.97+1.98.1 · cargo --workspace with the worker · tsc · vitest · hex · verifiers ·
+            hygiene · kernelbench t0 + m1 compare · e2e both projects — `scratchpad/g3/g3.sh` recipe is
+            gone with the session, the sequence is in CLAUDE.md § Gate ladder) → commit `kh-G` → push →
+            CI. The `e2e/revolve-commit.spec.ts` ordering fix rides the same commit. Then WP-J.
 - [x] Phase C — WP-I component mates: I0 probes red-first → SCHEMA + protocol audit → I2a worker ∥ I2b
       Rust → I3 FE → adversarial review → full L3 → commit → push.
       - [x] **Gate — WP-I (2026-09-04 late evening, main thread, suites run ALONE, teed to the session

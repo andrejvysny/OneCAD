@@ -2,13 +2,24 @@
 
 Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
 
-## NOW — KERNEL HARDENING P1: WP-I component mates (2026-09-04, session 28, plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
+## NOW — KERNEL HARDENING P1: WP-G in the tree, gate owed (2026-09-06, end of session 28, plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
 
-Last verified: 2026-09-04 23:20 — `master` == origin/master at **`3997872`** (Phase A e2e fixes:
-`dafa656` + `3997872`; CI: every hosted lane green on both, e2e-chromium green on `dafa656`,
-e2e-webkit green on `3997872`). The WP-I tree is UNCOMMITTED and mid-gate (all suites green so far,
-e2e running). Stray `src-tauri/.claude/` still present — `rm` denied by the permission mode twice;
-user deletes by hand.
+Last verified: 2026-09-06 16:45 — `master` == origin/master at **`d2f34e8`** (WP-H). Commits this
+session: `dafa656` · `3997872` (e2e fixes) · `4555993` (WP-I) · `d2f34e8` (WP-H). CI on `d2f34e8`:
+every hosted lane green except e2e-webkit's one red (`revolve-commit.spec.ts:111`, fixed by ordering
+in the tree, 10/10 locally). **Tree DIRTY with WP-G (uncommitted):** 18 modified files (worker fillet
+kernel `BlendEvidence`/`FilletSemanticChecks`/`FilletBuilder`/`FilletRangeAnalyzer`,
+`AnalyzeEdgeOpRange.cpp`, `FilletChamferOp.cpp`, `SemanticValidation.cpp`, `test_fillet_range.cpp`,
+`worker/tests/CMakeLists.txt`, `protocol/SCHEMA.md` +210, `protocol/fixtures/analyze_edge_op_range.ndjson`,
+`e2e/revolve-commit.spec.ts`, ledgers, agent notes) + 8 new (`protocol/fixtures/fillet_approximated_blend.ndjson`,
+`worker/tests/test_fillet_{acceptance_envelope,remnant_floor,budget_decision}.cpp`,
+`test_chamfer_publication_ceiling.cpp`, `src-tauri/tests/fillet_blend_class.rs`, agent notes) — and the
+stray `src-tauri/.claude/` (never commit; `rm` denied twice).
+- **Build/test at handoff:** agent-measured ctest **191/191**, `ONECAD_REQUIRE_WORKER=1 cargo test
+  --workspace` **1555/0**, hygiene clean, kernelbench **t0 136 unchanged + m1 336 unchanged**; the
+  orchestrator re-ran the 26 fillet/chamfer/range ctests **26/26**, `ctest -N` = 191, hygiene clean.
+  Full L3 (clippy, tsc, vitest, verifiers, kernelbench, e2e) NOT yet run on the assembled tree — OWED.
+- **Blockers:** none technical.
 
 - **Session 28 decisions (user):** focus Kernel P1 I → H → J; CI reds triaged first in a separate
   commit; one WP to a gated commit; WP-G probes run now, go/no-go at session end; `axisSign` DROPPED
@@ -51,7 +62,20 @@ user deletes by hand.
   95/1553/0 · clippy 1.97 + 1.98.1 · vitest 318/5618/78 · kernelbench 136 unchanged · hex/verifiers/
   hygiene clean; e2e running. Recorded limits: no real-worker `progress` frames yet (single-verb
   jobs see a wall-clock deadline — WP-K); the 100 ms status promise excludes the two `mu_` holders.
-- **Next:** e2e result → commit `kh-H` → push → WP-G (approved) → WP-J.
+- **WP-H COMMITTED `d2f34e8`** (62 files, +5454 / −265), pushed, master == origin; e2e **524 / 0**
+  (29.4 min) closed the gate.
+- **WP-G LANDED in the tree (2026-09-06):** two blend classes with EXACT-FIRST per-contour budgets
+  (every contour measured against the 1e-9 budgets first; only an approximated contour that fails
+  them falls to `tol ≤ res` + section ≤ `min(r·1 %, 0.05 mm)` + G1 ≤ `4·tol/r`, publishing with ONE
+  `FILLET_BLEND_APPROXIMATED` warning; `FILLET_BLEND_TOO_COARSE` above), range-analyzer remnant floor
+  scoped to generated/modified faces (§7.6 `remnantFloorHit`/`remnantFloorMeasure`), chamfer
+  tolerance ceiling + `CHAMFER_INVALID_RESULT`, kernelbench validators exact-first. Reviews: protocol
+  audit before code (approve_with_changes, 6 edits) and after landing (approve_with_changes, 4 + §14);
+  adversarial (defective → BLOCKER whole-body remnant scan + 3 HIGH: per-result budget, class
+  widening exact B-spline blends, oracle widened — all fixed red-first; exact-first eliminated all 92
+  m1 digest moves). Design rulings: the draft `kApproxFactor` positional multiplier was measured
+  unsatisfiable (the residual is curvature-derived, 39×/247× the face tolerance) and replaced.
+- **Next:** L3 gate → commit `kh-G` → push → CI → delete `src-tauri/.claude/` → WP-J.
 
 ## PREVIOUS — CLOSE-OUT + KERNEL HARDENING (2026-09-03, plan `~/.claude/plans/act-as-senior-cad-whimsical-sedgewick.md`)
 
