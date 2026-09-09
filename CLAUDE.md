@@ -66,6 +66,29 @@ Maximum three implementation agents in parallel; every diff is orchestrator-revi
 
 Establish a checkpoint interval at the start of a long run and verify against the specification at each one, using a fresh-context verifier rather than re-reading your own reasoning.
 
+### Model roles
+
+Two frontier models, two roles. Never let both implement the same feature; give them different jobs.
+
+- **Fable 5.1 (Claude Max) — principal implementation engineer and orchestrator.** Owns the session, the plan, every brief, every diff review, and every gate. Owns everything whose difficulty is repository-scale state rather than mathematics: the Rust runtime (`DocumentRuntime`, worker supervision, fencing, checkpoints, cancellation, undo, persistence, library ingestion), cross-language protocol updates, C++ op integration against OCCT, the React/Zustand/Three.js frontend, CI and test infrastructure, refactors and migrations, architecture work, profiling and its fixes, regression-test expansion.
+- **GPT-6 Astra (ChatGPT Plus, via `/codex-astra`) — research scientist and algorithm architect, then adversarial reviewer.** Owns the mathematics before code and the attack after it: tolerance derivation and epsilon scaling laws, robust predicates, fillet feasibility and G0/G1/G2 blend budgets, curve/curve and region intersection, sweep framing (Frenet, rotation-minimising, fixed-normal), loft correspondence and seam placement, helical and thread geometry, PlaneGCS conditioning, topology-identity scoring theory, numerical optimisation, property and invariant test design, and adversarial review of kernel, identity, and numerical work. Astra never explores the repository and never writes code; Fable writes the packet, verifies the numbers, and implements.
+- **Subagents (Opus 5, Sonnet 5, Haiku 4.5)** stay as the Delegation section routes them: implementation to `implementer` / `impl-*`, search to `scout` / Explore, reviews to `adversarial-reviewer` / `reviewer-critical`, gates to `gate-verifier`. An Astra `break` is an additional fresh-context review for math-critical packages, not a replacement for the local adversarial reviewer.
+
+Routing rule for a work package: if the deliverable is a formula, invariant, predicate, frame, correspondence rule, or scoring function, Astra derives first and Fable implements; if it is code across layers, Fable implements and Astra breaks only when the package is kernel-, identity-, or numerically critical. Everything else is Fable alone. Inside `worker/src/kernel` expect the balance to tilt toward Astra design plus Fable integration; everywhere else expect Fable with rare Astra reviews.
+
+Effort:
+
+| Work | Fable | Astra |
+|---|---|---|
+| Small frontend or config fix | `medium` | not used |
+| Normal feature, single layer | `high` | not used |
+| Cross-layer feature, kernel integration, migration | `high` / `xhigh` | `break` at `xhigh` if critical |
+| Kernel hardening implementation | `xhigh` | `derive` at `xhigh` before, `break` at `xhigh` after |
+| New geometry algorithm or tolerance policy | `xhigh` (implement) | `derive` at `xhigh`; `max` only with explicit approval |
+| Hardest root cause with no repro | `max` | `verify` at `high` on the suspected derivation |
+
+Astra runs on rate-limited Plus windows: one prompt-only packet per question, one `derive` and one `break` per work package, never a fan-out. The report that motivated this split assumed API pricing and a 1 M context; the CLI exposes 272 K and no per-token cost, so the constraint is the number of calls, not their length.
+
 ### Communication
 
 Terse shorthand is fine between tool calls. The final summary is different: it is for a reader who did not see any of it.
