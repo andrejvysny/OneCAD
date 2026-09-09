@@ -2,7 +2,31 @@
 
 Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
 
-## NOW — KERNEL HARDENING P1: WP-G in the tree, gate owed (2026-09-06, end of session 28, plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
+## NOW — KERNEL HARDENING P1: WP-G GATED (2026-09-09, session 29, plan `~/.claude/plans/act-as-senior-software-cached-charm.md`)
+
+Last verified: 2026-09-09 21:15 — `master` at **`86e8b60`**, **6 ahead of origin/master** (`d2f34e8`).
+WP-G was committed UNGATED at `ab71f02` on the user's instruction; the owed **full L3 has now been
+run on the main thread against `86e8b60` and is GREEN** — the measured counts are the gate row at the
+top of `TODO.md` § KERNEL HARDENING. Headline: ctest **191/191** · `ONECAD_REQUIRE_WORKER=1 cargo
+test --workspace` **96 targets / 1555 / 0 / 0 skips** · vitest **318 / 5618 / 78** · clippy 1.97.0 +
+1.98.1 · kernelbench **t0 136 unchanged** and **m1 336 unchanged** (both semantics OK, 0 regressions,
+0 replay-unstable) · e2e **524 / 0** (30.3 min, `src`+`e2e` md5 identical before/after).
+Sidecar restaged sha `ec30553c87b610ec8…`, fingerprint `0a6a1dce34181289` unchanged.
+- **Next:** push the six commits, check CI, then WP-J (export/import honesty) per the session-29 plan.
+- **Owed, unchanged:** the 19-row `docs/qa/MANUAL_RELEASE_GATES.md` checklist, the merged-stack Tauri
+  smoke, "STEP opens coloured", "3MF opens in a slicer" (meaningful only after WP-J), dogfood parts.
+  Delete the stray untracked `src-tauri/.claude/` by hand.
+- **Re-triage owed:** `docs/qa/modeling-residuals-v1.json` **MC-R9** is pinned to
+  `e2e/revolve-commit.spec.ts:111` and closes "only on a measured root cause". The WP-H CI triage
+  produced exactly that root cause for that spec and line (an engine-overlay banner armed before the
+  engine settled) and `8602b45` fixes it by ordering; the spec passed on both projects in this gate.
+  MC-R9 looks closable with evidence — decide and record it.
+- **Session-29 program (user-chosen after a full state review):** WP-J → WP-X dogfood → re-plan →
+  WP-A2 feature origin, with three cheap oracle riders (m1 into CI + a Linux baseline; a semantic
+  contracts verifier; a `boolean/foundation` kernelbench suite). Full reasoning, evidence and the
+  two corrected designs are in `~/.claude/plans/act-as-senior-software-cached-charm.md`.
+
+## PREVIOUS — KERNEL HARDENING P1: WP-G in the tree, gate owed (2026-09-06, end of session 28, plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
 
 Last verified: 2026-09-06 16:45 — `master` == origin/master at **`d2f34e8`** (WP-H). Commits this
 session: `dafa656` · `3997872` (e2e fixes) · `4555993` (WP-I) · `d2f34e8` (WP-H). CI on `d2f34e8`:

@@ -3,10 +3,30 @@
 ## KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
 
 ### Now (2026-09-06 16:45, END of session 28 — plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
-- [ ] **NEXT ACTION — run the owed L3 on WP-G before push.** WP-G COMMITTED UNGATED at `ab71f02`
-      on the user's instruction (2026-09-09); `8602b45` carries the revolve-commit e2e ordering fix;
-      `9962895` + `f2350e2` add `/codex-astra` (GPT-6 Astra derive/break/verify, `.claude/skills/codex-astra/`)
-      and the CLAUDE.md model-roles section. Nothing pushed. The gate recipe below is unchanged.
+- [x] **Gate — WP-G (2026-09-09, main thread, suites run ALONE, teed to the session scratchpad):**
+      worker rebuilt + sidecar restaged sha `ec30553c87b610ec8…` (fingerprint `0a6a1dce34181289`
+      unchanged), stdout hygiene clean · ctest **191 / 191** (62.6 s; count read off `ctest -N`) ·
+      `cargo fmt --all --check` clean · clippy `-D warnings` clean on **1.97.0** AND **1.98.1**
+      (scratch `CARGO_TARGET_DIR`) · `ONECAD_WORKER_PATH=… ONECAD_REQUIRE_WORKER=1 cargo test
+      --workspace` **96 targets / 1555 passed / 0 failed / 0 ignored** (worker-backed targets
+      confirmed non-vacuous: `fillet_blend_class` 2, `worker_chaos` 21, `topology_rebind` 16,
+      `wire_contract` 19, `breadth_ops` 11, `checkpoints` 7, `restore_fencing` 1, `m2_gate` 2,
+      `real_worker_smoke` 5) · `bunx tsc --noEmit` clean · vitest **318 files / 5618 passed /
+      78 skipped** · hex **0** · coverage **32 / 9 / 16 / 19** · contracts **39 / 18** · verifier
+      negative controls OK · kernelbench `fillet/foundation:t0` both backends **136 rows unchanged**
+      + semantics OK (136 records, 0 fail / 128 pass / 8 characterization, 0 regressions,
+      0 replay-unstable) · kernelbench `fillet/matrix:m1` both backends **336 rows unchanged**
+      + semantics OK (336 records, 0 fail / 330 pass / 6 characterization, 0 regressions,
+      0 replay-unstable; `grep -c FILLET_BLEND_APPROXIMATED` over `results.jsonl` = **0**, so the
+      exact-first ruling holds on the analytic matrix and no digest moved) · e2e both projects
+      `retries: 0` **524 / 0** (30.3 min; `src`+`e2e` md5 `33a87751133cc10f99a7da685b2779d2`
+      identical before and after). **FULL L3 GREEN** on the tree at `86e8b60`.
+- [ ] **NEXT ACTION — push and check CI.** WP-G was COMMITTED UNGATED at `ab71f02` on the user's
+      instruction (2026-09-09) and the gate above closes it after the fact; `8602b45` carries the
+      revolve-commit e2e ordering fix; `9962895` + `f2350e2` add `/codex-astra` (GPT-6 Astra
+      derive/break/verify, `.claude/skills/codex-astra/`) and the CLAUDE.md model-roles section;
+      `dcc919e` + `86e8b60` are agent-memory and ledger chores. Six commits unpushed; the push
+      carries all of them.
 - [ ] (superseded by the row above, kept for the recipe) gate WP-G (was UNCOMMITTED: 18 modified + 8 new files,
       see CURRENT_STATE.md). Run the full L3 on the main thread, suites ALONE, per CLAUDE.md § Gate
       ladder: `scripts/build-worker.sh Release` (restage) · `ctest --test-dir worker/build` (expect
