@@ -12,7 +12,19 @@ test --workspace` **96 targets / 1555 / 0 / 0 skips** · vitest **318 / 5618 / 7
 1.98.1 · kernelbench **t0 136 unchanged** and **m1 336 unchanged** (both semantics OK, 0 regressions,
 0 replay-unstable) · e2e **524 / 0** (30.3 min, `src`+`e2e` md5 identical before/after).
 Sidecar restaged sha `ec30553c87b610ec8…`, fingerprint `0a6a1dce34181289` unchanged.
-- **Next:** push the six commits, check CI, then WP-J (export/import honesty) per the session-29 plan.
+- **Pushed:** seven commits `d2f34e8..1490d07`; `master` == `origin/master`. Tree clean apart from the
+  untracked `src-tauri/.claude/`.
+- **CI run `34393727159` — TWO REDS, neither reproduced locally, triage owed (the next action):**
+  `frontend` 1 failed / 5617 passed / 78 skipped (`InspectorPanel.test.tsx:499`, `applyEditCommand`
+  never called inside a `settleUntil` poll; locally 29/29 alone in 3.5 s and green in the full run)
+  and `rust-8.0.1` `worker_chaos` 20/1 (`convergence_drill_kill_mid_plan_repeatedly`,
+  `worker_chaos.rs:623` "the document must converge after 25 kills"; locally ok in 0.97 s alone and
+  green in the full workspace run — and this drill is already recorded load-sensitive). Every other
+  hosted lane green **including both e2e lanes**; `linux-worker` and `tauri-composition` had not
+  reported when CI was set aside. Both reds have the timing-under-load shape, which is a hypothesis,
+  not a finding.
+- **Next:** triage those two, then WP-J (export/import honesty) per the session-29 plan.
+- **Blockers:** none technical.
 - **Owed, unchanged:** the 19-row `docs/qa/MANUAL_RELEASE_GATES.md` checklist, the merged-stack Tauri
   smoke, "STEP opens coloured", "3MF opens in a slicer" (meaningful only after WP-J), dogfood parts.
   Delete the stray untracked `src-tauri/.claude/` by hand.

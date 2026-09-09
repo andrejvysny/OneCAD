@@ -1,3 +1,155 @@
+# Handoff — WP-G GATED and PUSHED (`1490d07`); next program planned: WP-J → dogfood → WP-A2
+
+Session 29 · 2026-09-09 · plan `~/.claude/plans/act-as-senior-software-cached-charm.md`
+
+> Read `TODO.md` § KERNEL HARDENING § "Now" first — the WP-G gate row is measured and checked, and
+> the first unchecked box is the CI triage below. `CURRENT_STATE.md` § NOW is the snapshot.
+
+## Goal
+
+Two things this session: close the owed WP-G L3 gate, and answer the standing question of what the
+kernel-hardening program does next. Both are done. The second produced a full plan grounded in a
+fresh read of the shipped code rather than in the 2026-09-02 audit's prose, and it corrected two of
+that audit's premises.
+
+## What happened
+
+**1. The owed WP-G gate ran and is GREEN.** WP-G had been committed UNGATED at `ab71f02` by a
+concurrent session, so the gate ran against `86e8b60` (HEAD) rather than a dirty tree — there was
+nothing to stage. Every rung measured on the main thread, suites run alone; the full row with counts
+is at the top of `TODO.md`. Headline: ctest **191/191** · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace` **96 targets / 1555 / 0 / 0 skips** · vitest **318 / 5618 / 78** · clippy clean on
+1.97.0 **and** 1.98.1 · kernelbench **t0 136 unchanged** and **m1 336 unchanged** · e2e **524 / 0**
+(30.3 min, `src`+`e2e` md5 identical before and after). Sidecar restaged `ec30553c87b610ec8…`,
+fingerprint `0a6a1dce34181289` unchanged.
+
+The worker-backed targets were checked for non-vacuity rather than trusting the zero-skip count:
+`fillet_blend_class` 2, `worker_chaos` 21, `topology_rebind` 16, `wire_contract` 19, `breadth_ops`
+11, `checkpoints` 7, `restore_fencing` 1, `m2_gate` 2, `real_worker_smoke` 5.
+
+**The m1 result is the one that matters beyond the gate:** `grep -c FILLET_BLEND_APPROXIMATED` over
+`results.jsonl` is **0**. That is empirical confirmation of WP-G's exact-first ruling — the adaptive
+budget never fires on the analytic matrix, so no digest moved and no user-visible warning appeared on
+geometry that was already exact. The adversarial review's HIGH-3 finding is closed by measurement.
+
+Ledgers recorded as `1490d07`; seven commits pushed (`d2f34e8..1490d07`), master == origin.
+
+**2. CI run `34393727159` has two reds, both unreproduced locally.** Named, not diagnosed — the
+triage is the next session's first task:
+
+- `frontend` → `bun run test`: **1 failed / 5617 passed / 78 skipped**.
+  `src/features/inspector/InspectorPanel.test.tsx:499` *"commits an inline value edit as ONE params
+  patch on the stored op"* — `AssertionError: expected "applyEditCommand" to be called at least
+  once`, inside a `settleUntil` poll. Locally the file passes **29/29 in 3.5 s** alone and passed in
+  the full 318-file run.
+- `rust-8.0.1` → `cargo test --workspace`: `worker_chaos` **20 passed / 1 failed**.
+  `convergence_drill_kill_mid_plan_repeatedly` panicked at `tests/worker_chaos.rs:623` — *"the
+  document must converge after 25 kills"*. Locally the test passes alone in **0.97 s** and passed in
+  the full workspace run. Note this drill is **already recorded as load-sensitive** in `TODO.md`
+  (the WP-H fix round retimed it to 6000/500/2 s after the 20 s version starved it under
+  full-workspace parallelism).
+
+Both are the timing-under-load shape the Phase A triage handled for the e2e lanes. **Do not assume
+that.** The house rule applies here specifically: a signal that pattern-matches a known failure may
+have a different cause, and this repo has a recorded history of exactly that. `linux-worker` and
+`tauri-composition` had not reported when the user asked to set CI aside.
+
+**3. The next program is planned, reviewed and written up** in
+`~/.claude/plans/act-as-senior-software-cached-charm.md`. Sequence: **WP-J export/import honesty →
+WP-X dogfood (user-run) → re-plan → WP-A2 feature origin**, with three cheap oracle riders that can
+ride any gate. User decisions behind it: identity spine next, oracle investment yes, dogfood before
+the next program is finalised so real failures set the order.
+
+## Findings that change previously written designs
+
+- **`EXPORT_FACE_UNMESHED` cannot be an `error.code`.** SCHEMA §8 states the top-level taxonomy is
+  closed (`protocol/SCHEMA.md:4610-4614`) and `onecad-protocol/src/messages.rs:76-96` is a plain
+  `Deserialize` enum with **no `#[serde(other)]`** — an unknown code fails the whole `RespFrame`, and
+  §8 makes that fatal: tear down and restart the worker. The refusal must ride
+  `detail.diagnostics[].reasonCode` on an `OP_FAILED` (or `REF_UNRESOLVED`) envelope. That road is
+  already plumbed end to end by WP-I.
+- **WP-A2's discriminator cannot live on `PartitionEntry`.** `mint` has two call sites
+  (`PlanExecutor.cpp:247`, `Session.cpp:129`) and both mint at *reference* time, not creation time;
+  and the ladder's candidates are raw sub-shapes from `TopExp::MapShapes` (`Ladder.cpp:123-141`) that
+  have no entry at all, because `PlanExecutor.cpp:206-212` routes already-tracked refs down the
+  tracked rung. The authority must be a per-body, per-sub-shape origin map; the entry field is an
+  echo.
+- **A bare `opId` does not close the teleport residual**, and SCHEMA §10:4926-4934 currently claims it
+  will. Congruent twins on a box share one Extrude op, and the repo's own probes
+  (`vfm5_teleport_…`, `h5_congruent_twin_never_silently_binds`) are exactly that geometry, so an
+  opId gate is inert on them. It closes the *different-feature* twin, which is the majority of real
+  teleports. Same-op twins need a generator key (the sketch entity id) — scoped as **WP-A3**.
+- **Call it `origin`, not `lineage`** — "lineage" already means body create/modify/delete lineage in
+  this codebase.
+
+## Verified state that contradicts the docs (all measured this session)
+
+- **The "incremental regen" machinery is unreachable in normal use.** `planner.rs:528` hard-codes
+  `start_step = 0` whenever no checkpoint qualifies; `planner.rs:492` is `let _ = graph;`;
+  checkpoints are **never persisted** (`document_runtime.rs:2269-2275`) so every reopen replays from
+  0; and the worker starts every ordinary regen with an **empty** element-map partition
+  (`PlanExecutor.cpp:985`). `take_checkpoint_at_head`, which three docs name as the mint site, has
+  **zero production callers**.
+- **The contracts manifest is shape-verified only.** `verify-modeling-contracts.mjs` checks fields
+  and enums, never a stated value against code — which is how
+  `docs/qa/modeling-operation-contracts.json` came to say Extrude/NewBody and Revolve/NewBody are
+  "Tier A" while `ExtrudeOp.cpp:1259` and `RevolveOp.cpp:442` publish at Tier B. The manifest is the
+  stale side; fix the rows, not the kernel.
+- **`boolean/foundation` is a kernelbench suite the CLI cannot dispatch.** Both Boolean coverage rows
+  claim it plus a `linux-kernelbench` ciJob; `cli.rs:74-78` knows only `fillet/foundation:t0` and
+  `fillet/matrix:m1`. The real Boolean evidence is the `kernelbench_case_v2` ctest in a different
+  job. Everything else for a boolean campaign already exists, including the C++ runner half.
+- **`fillet/matrix:m1` is not in CI at all**, and its 336 baseline rows are `darwin-arm64` only —
+  zero Linux rows, while `bench/robustness/baselines/README.md:41-42` claims the suite is 120 rows.
+- **The worker emits no `progress` frames anywhere.** `MsgType::Progress` is never constructed. WP-H's
+  wedge deadline (`manager.rs:1299-1305`, 30/60/180 s on `since_progress_ms`) is therefore a wall
+  clock for every single-verb job, and its own doc comment assumes a streaming producer that does not
+  exist. A legitimately slow op is killed as wedged. This is the strongest candidate to pull forward.
+
+## Dead-ends / rulings (do not re-litigate)
+
+- Making the app author a `sourceCodec: "step"` record to light the `ImportOp` diagnostic lane:
+  REJECTED — it abandons the converted-primary replay policy `imports.rs:353-366` enforces
+  deliberately. Surface the `InspectStep` (Lane A) diagnostics through the import record instead.
+- Unlink-on-failure for partial export files: REJECTED — `std::ios::trunc` destroys the previous good
+  file when the stream opens, so only temp-then-rename saves it. `onecad_core::io::durable_write`
+  already exists (`onecad-core/src/io/mod.rs:204-218`).
+- Flattening located shapes for STEP colour export: **conditional on the probe.** OCCT 8.0.1 may
+  already handle it; do not implement a fix for a bug that is not there.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; read `CURRENT_STATE.md` § NOW and `TODO.md` § "Now".
+2. **Triage the two CI reds** (details above). Both are unreproduced locally; reproduce under load
+   before naming a cause, and never widen an assertion to go green.
+3. Then **WP-J** per `~/.claude/plans/act-as-senior-software-cached-charm.md` § Step 1 — it carries
+   the corrected refusal mechanism, a ten-probe J0 list with predicted RED signatures, the SCHEMA
+   hunk, and the note that the Rust half is not optional (`manager.rs:773-824` and
+   `export.rs:297-322` discard every counter the worker produces).
+4. The three oracle riders (m1 into CI + a Linux baseline; a semantic contracts verifier;
+   `boolean/foundation:b1`) are independent and can ride any gate.
+
+## Open questions
+
+- Nothing blocking. User-run gates still owed: the 19-row `docs/qa/MANUAL_RELEASE_GATES.md`
+  checklist, the merged-stack Tauri smoke, "STEP opens coloured", "3MF opens in a slicer"
+  (meaningful only after WP-J), and the WP-X dogfood parts.
+- `docs/qa/modeling-residuals-v1.json` **MC-R9** looks closable: it is pinned to
+  `e2e/revolve-commit.spec.ts:111` and closes "only on a measured root cause", which the WP-H triage
+  produced and `8602b45` fixed by ordering. Decide and record it.
+- Housekeeping the permission mode blocked three times: `rm -rf src-tauri/.claude` (a subagent memory
+  directory one level too deep; its two files are a strict subset of the repo-root
+  `.claude/agent-memory/impl-careful/` copies, so nothing is lost), plus
+  `~/.claude/plans/act-as-senior-software-cached-charm.md.head` and `.tail`. A `.gitignore` line for
+  nested `.claude/` would stop the first recurring.
+
+## Pointers
+
+- Tasks → `TODO.md` § KERNEL HARDENING · Snapshot → `CURRENT_STATE.md` § NOW ·
+  Plan, evidence and both corrected designs → `~/.claude/plans/act-as-senior-software-cached-charm.md`.
+
+---
+
 # Handoff — KERNEL HARDENING P1: WP-I `4555993` + WP-H `d2f34e8` committed; WP-G in the tree, gate owed; then WP-J
 
 Session 28 · 2026-09-04 → 2026-09-06 · plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`

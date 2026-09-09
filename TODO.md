@@ -21,12 +21,41 @@
       exact-first ruling holds on the analytic matrix and no digest moved) · e2e both projects
       `retries: 0` **524 / 0** (30.3 min; `src`+`e2e` md5 `33a87751133cc10f99a7da685b2779d2`
       identical before and after). **FULL L3 GREEN** on the tree at `86e8b60`.
-- [ ] **NEXT ACTION — push and check CI.** WP-G was COMMITTED UNGATED at `ab71f02` on the user's
-      instruction (2026-09-09) and the gate above closes it after the fact; `8602b45` carries the
-      revolve-commit e2e ordering fix; `9962895` + `f2350e2` add `/codex-astra` (GPT-6 Astra
-      derive/break/verify, `.claude/skills/codex-astra/`) and the CLAUDE.md model-roles section;
-      `dcc919e` + `86e8b60` are agent-memory and ledger chores. Six commits unpushed; the push
-      carries all of them.
+- [x] **Pushed.** Seven commits `d2f34e8..1490d07`, master == origin/master. WP-G was COMMITTED
+      UNGATED at `ab71f02` on the user's instruction (2026-09-09) and the gate above closes it after
+      the fact; `8602b45` carries the revolve-commit e2e ordering fix; `9962895` + `f2350e2` add
+      `/codex-astra` (GPT-6 Astra derive/break/verify, `.claude/skills/codex-astra/`) and the
+      CLAUDE.md model-roles section; `dcc919e` + `86e8b60` + `1490d07` are agent-memory and ledger
+      chores.
+- [ ] **NEXT ACTION — triage the two CI reds on run `34393727159`.** Both suites were GREEN in the
+      local L3 above and neither red reproduces locally. Named, not diagnosed:
+      - `frontend` → `bun run test`: **1 failed / 5617 passed / 78 skipped**.
+        `src/features/inspector/InspectorPanel.test.tsx:499` ("commits an inline value edit as ONE
+        params patch on the stored op") — `AssertionError: expected "applyEditCommand" to be called
+        at least once`, raised inside a `settleUntil` poll. Measured locally after the CI red: the
+        file alone **29/29 in 3.5 s**, and it passed inside the full 318-file run.
+      - `rust-8.0.1` → `cargo test --workspace`: `worker_chaos` **20 passed / 1 failed**.
+        `convergence_drill_kill_mid_plan_repeatedly` panicked at `tests/worker_chaos.rs:623` — "the
+        document must converge after 25 kills". Measured locally after the CI red: **ok in 0.97 s**
+        alone, and it passed inside the full workspace run. This drill is ALREADY recorded as
+        load-sensitive in this file (the WP-H fix round retimed it to 6000/500/2 s after the 20 s
+        version starved it under full-workspace parallelism).
+      Both have the timing-under-load shape Phase A handled for the e2e lanes — **do not assume
+      that**: reproduce under load and name a measured cause before changing anything, and never
+      widen an assertion to go green. `linux-worker` and `tauri-composition` had not reported when
+      CI was set aside; every other hosted lane was green, including **both e2e lanes**.
+- [ ] Session-29 program after the triage (plan `~/.claude/plans/act-as-senior-software-cached-charm.md`,
+      user-approved): **WP-J export/import honesty → WP-X dogfood (user-run) → re-plan → WP-A2
+      feature origin**, with three independent oracle riders (m1 into CI + a Linux baseline; a
+      semantic contracts verifier; a `boolean/foundation:b1` kernelbench suite). The plan carries the
+      corrected WP-J refusal mechanism (a new `error.code` would restart the worker — the name rides
+      `detail.diagnostics[].reasonCode`), a ten-probe J0 list with predicted RED signatures, and the
+      two corrections to WP-A2's design (the discriminator cannot live on `PartitionEntry`; a bare
+      `opId` closes the different-feature twin but not the same-op twin, which becomes WP-A3).
+- [ ] Re-triage `docs/qa/modeling-residuals-v1.json` **MC-R9** — pinned to
+      `e2e/revolve-commit.spec.ts:111`, closes "only on a measured root cause". The WP-H triage
+      produced that cause and `8602b45` fixed it by ordering; the spec passed on both projects in
+      this gate. Looks closable with evidence.
 - [ ] (superseded by the row above, kept for the recipe) gate WP-G (was UNCOMMITTED: 18 modified + 8 new files,
       see CURRENT_STATE.md). Run the full L3 on the main thread, suites ALONE, per CLAUDE.md § Gate
       ladder: `scripts/build-worker.sh Release` (restage) · `ctest --test-dir worker/build` (expect
