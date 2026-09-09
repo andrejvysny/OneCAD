@@ -67,6 +67,12 @@ void report(const char *label, const kf::FilletRangeResult &result) {
       result.proven_upper_bound, result.transitions.size(),
       result.monotonic_observed ? 1 : 0, result.budget_exhausted ? 1 : 0,
       result.cancelled ? 1 : 0);
+  if (result.remnant_floor_hit) {
+    std::fprintf(stderr,
+                 "      remnantFloor kind=%s value=%.17g radius=%.17g\n",
+                 result.remnant_floor_kind.c_str(), result.remnant_floor_value,
+                 result.remnant_floor_radius);
+  }
   for (const kf::RangeTransition &transition : result.transitions) {
     std::fprintf(stderr, "      transition [%.17g -> %.17g] %s -> %s\n",
                  transition.lower, transition.upper,
@@ -231,23 +237,43 @@ void test_single_box_edge() {
   // 10 mm-wide faces and rolls R onto EACH of them independently; nothing on the
   // far side is competing for that material, so the blend stays valid until R
   // consumes a whole adjacent face at R = 10. The frontier is therefore the face
-  // WIDTH, and the search brackets it to [9.99925, 10.0] — a 7.5e-4 mm gap,
+  // WIDTH, and the search brackets it to [9.9985, 9.99925] — a 7.5e-4 mm gap,
   // deliberately just under `authoring_resolution()` (1e-3 mm), which is where
-  // `widest_interval` stops refining. 9.99925 is the last bisection midpoint
-  // below 10 and 10.0 is the first refusal above it.
-  pin(result.best_known_max, 9.99925, 1.0e-9, "box/one-edge best_known_max");
-  pin(result.proven_upper_bound, 10.0, 1.0e-9,
+  // `widest_interval` stops refining.
+  //
+  // RE-PINNED 2026-09-06 (SCHEMA §7.6 remnant floor, kernel-hardening WP-G,
+  // finding fillet-chamfer-2). These were 9.99925 / 10.0 / 9.99925. R = 9.99925
+  // still BUILDS and still passes Tier B, but the result carries a 7.5e-4 mm
+  // edge — measured, see the `remnantFloor` line this test prints — which is
+  // below the 1e-3 mm authoring resolution and is exactly the sub-resolution
+  // remnant `bestKnownMax` used to steer onto. It is now a NON-success, so the
+  // reported max is the last CLEAN probe (9.9985, which leaves a 1.5e-3 mm
+  // edge) and 9.99925 becomes the proven upper bound.
+  pin(result.best_known_max, 9.9985, 1.0e-9, "box/one-edge best_known_max");
+  pin(result.proven_upper_bound, 9.99925, 1.0e-9,
       "box/one-edge proven_upper_bound");
-  pin(result.contiguous_success_max, 9.99925, 1.0e-9,
+  pin(result.contiguous_success_max, 9.9985, 1.0e-9,
       "box/one-edge contiguous_success_max");
+  check(result.remnant_floor_hit && result.remnant_floor_kind == "edge",
+        "box/one-edge: the remnant floor was hit, on an edge");
+  pin(result.remnant_floor_radius, 9.99925, 1.0e-9,
+      "box/one-edge remnant_floor_radius");
+  check(result.remnant_floor_value < 1.0e-3,
+        "box/one-edge: the remnant measure is below the authoring resolution");
 
-  // The definition, made executable: the reported max builds and the reported
-  // proven upper bound does not — asserted against `FilletBuilder` directly, not
-  // through the analyzer that produced them.
+  // The definition, made executable: the reported max builds cleanly, and the
+  // reported proven upper bound is a non-success — asserted against
+  // `FilletBuilder` directly, not through the analyzer that produced them.
+  //
+  // A remnant probe is the one non-success `FilletBuilder` alone cannot see: it
+  // BUILDS and publishes, and only the resolution floor rejects it. So the
+  // upper-bound half of the cross-check is a disjunction, and the remnant branch
+  // is the one this fixture takes.
   check(kf::FilletBuilder(body, edges, result.best_known_max).build().ok,
         "box/one-edge cross-check: FilletBuilder succeeds at best_known_max");
-  check(!kf::FilletBuilder(body, edges, result.proven_upper_bound).build().ok,
-        "box/one-edge cross-check: FilletBuilder refuses at proven_upper_bound");
+  check(!kf::FilletBuilder(body, edges, result.proven_upper_bound).build().ok ||
+            result.remnant_floor_radius == result.proven_upper_bound,
+        "box/one-edge cross-check: proven_upper_bound is a refusal or a remnant");
 
   check(!result.limiting.empty(),
         "box/one-edge: the bounding refusal named something");
@@ -280,9 +306,12 @@ void test_four_box_edges() {
   // it: the frontier halves from 10 mm to 5 mm. That is the interaction the
   // single-edge fixture cannot show, and it is the reason a per-edge formula
   // cannot answer this question for a selection. Bracketed to
-  // [4.99975, 5.0005], again a 7.5e-4 mm gap at the refinement floor.
-  pin(result.best_known_max, 4.99975, 1.0e-9, "box/four-edges best_known_max");
-  pin(result.proven_upper_bound, 5.0005, 1.0e-9,
+  // [4.999, 4.99975], again a 7.5e-4 mm gap at the refinement floor.
+  //
+  // RE-PINNED 2026-09-06 (WP-G remnant floor, was 4.99975 / 5.0005): 4.99975
+  // builds but leaves a 5e-4 mm edge, below the authoring resolution.
+  pin(result.best_known_max, 4.999, 1.0e-9, "box/four-edges best_known_max");
+  pin(result.proven_upper_bound, 4.99975, 1.0e-9,
       "box/four-edges proven_upper_bound");
 }
 
@@ -308,9 +337,12 @@ void test_rib_edge() {
   // at R = 1. The frontier is the rib WIDTH, an order below anything the box
   // itself allows and two orders above the authoring floor — which is the case
   // a fixed UI clamp gets wrong in both directions. Bracketed to
-  // [0.99925, 1.0].
-  pin(result.best_known_max, 0.99925, 1.0e-9, "rib/narrow-edge best_known_max");
-  pin(result.proven_upper_bound, 1.0, 1.0e-9,
+  // [0.9985, 0.99925].
+  //
+  // RE-PINNED 2026-09-06 (WP-G remnant floor, was 0.99925 / 1.0): 0.99925
+  // builds but leaves a 7.5e-4 mm edge, below the authoring resolution.
+  pin(result.best_known_max, 0.9985, 1.0e-9, "rib/narrow-edge best_known_max");
+  pin(result.proven_upper_bound, 0.99925, 1.0e-9,
       "rib/narrow-edge proven_upper_bound");
 }
 
@@ -328,12 +360,14 @@ void test_chamfer_edge() {
         "box/chamfer: the result reports the mode it was asked for");
   // DERIVATION. An equal-leg chamfer of distance d on the same edge cuts d back
   // along each adjacent 10 mm face, so it too survives until it consumes a whole
-  // face at d = 10 and lands on the same [9.99925, 10.0] bracket as the fillet.
+  // face at d = 10 and lands on the same [9.9985, 9.99925] bracket as the
+  // fillet — including the WP-G remnant floor, which rejects d = 9.99925 for
+  // the same 7.5e-4 mm leftover edge (re-pinned 2026-09-06, was 9.99925 / 10.0).
   // The agreement is a property of THIS fixture (two equal, orthogonal, 10 mm
   // faces), not a general rule — the two oracles are different builders and the
   // rib fixture is where they would be expected to part.
-  pin(result.best_known_max, 9.99925, 1.0e-9, "box/chamfer best_known_max");
-  pin(result.proven_upper_bound, 10.0, 1.0e-9, "box/chamfer proven_upper_bound");
+  pin(result.best_known_max, 9.9985, 1.0e-9, "box/chamfer best_known_max");
+  pin(result.proven_upper_bound, 9.99925, 1.0e-9, "box/chamfer proven_upper_bound");
 }
 
 // ── Budget exhaustion ───────────────────────────────────────────────────────

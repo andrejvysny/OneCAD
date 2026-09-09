@@ -38,7 +38,35 @@ nlohmann::json blend_evidence_json(const FilletSemanticResult &semantics) {
           {"allowedSectionRadiusError", semantics.allowed_profile_error},
           {"minimumSectionRadius", blend.minimum_section_radius},
           {"maximumSectionRadius", blend.maximum_section_radius},
-          {"coordinateMagnitude", blend.coordinate_magnitude}};
+          {"coordinateMagnitude", blend.coordinate_magnitude},
+          // SCHEMA §7.3 (WP-G): the class facts ride BOTH paths, so a refusal
+          // and a published warning speak one vocabulary.
+          {"blendSurfaceClass",
+           blend_surface_class_name(semantics.evidence.surface_class)},
+          {"approximationTolerance",
+           semantics.evidence.approximation_tolerance},
+          {"maxContourVertexValence", semantics.max_contour_vertex_valence}};
+}
+
+// SCHEMA §7.2 `FILLET_BLEND_APPROXIMATED`, emitted ONCE per step (not per
+// contour). The evidence IS the `blendEvidence` object, flat, plus the two
+// counts — ONE vocabulary, no aliases: a reader that already parses a refusal's
+// `blendEvidence` parses this with the same code.
+diagnostics::OperationDiagnostic
+approximated_blend_warning(const FilletSemanticResult &semantics) {
+  diagnostics::OperationDiagnostic diagnostic;
+  diagnostic.severity = "warning";
+  diagnostic.code = "FILLET_BLEND_APPROXIMATED";
+  diagnostic.stage = "publication";
+  diagnostic.message =
+      "Fillet blend is approximated (walked), not an exact analytic surface; "
+      "published inside its tolerance-adaptive budget";
+  diagnostic.evidence = blend_evidence_json(semantics);
+  diagnostic.evidence["approximatedContours"] =
+      semantics.approximated_contour_count;
+  diagnostic.evidence["approximatedBlendFaces"] =
+      semantics.evidence.approximated_face_count;
+  return diagnostic;
 }
 
 } // namespace
@@ -152,8 +180,8 @@ FilletBuildResult FilletBuilder::accept_result() {
       *builder_, analysis_, body_, shape, requested_, radius_);
   if (!semantics.ok) {
     FilletBuildResult failure = fail_with_diagnostic(
-        "GEOMETRY_INVALID", semantics.message,
-        "FILLET_SEMANTIC_CHECK_FAILED", output_audit);
+        "GEOMETRY_INVALID", semantics.message, semantics.refusal_code,
+        output_audit);
     if (!failure.diagnostics.empty())
       failure.diagnostics.front().evidence["blendEvidence"] =
           blend_evidence_json(semantics);
@@ -168,6 +196,13 @@ FilletBuildResult FilletBuilder::accept_result() {
   result.input_audit = input_audit_;
   result.output_audit = output_audit;
   result.fillet_evidence = semantics.evidence;
+  // The success path carries diagnostics from this build: an approximated blend
+  // published inside its budget is information the user is owed.
+  // Only a contour that NEEDED the adaptive budget warns: an approximated blend
+  // that met the exact budgets is exact, and saying otherwise would train users
+  // to ignore the warning (SCHEMA §7.3 "exact first").
+  if (semantics.adaptive_budget_used)
+    result.diagnostics.push_back(approximated_blend_warning(semantics));
   return result;
 }
 

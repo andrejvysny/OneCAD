@@ -54,6 +54,43 @@ double tangency_limit(double radius, double magnitude) {
          magnitude * kConditioning / std::max(radius, 1.0e-9);
 }
 
+namespace kf = onecad::kernel::fillet;
+
+/// SCHEMA §7.3 "Two blend classes, two budgets" (WP-G). Every limit above is an
+/// EXACT one, measured on analytic (KPart) blends. An approximated blend is a
+/// fitted surface whose section residual is curvature-derived and lands three to
+/// four orders above them, so a blend the kernel now PUBLISHES would read here
+/// as a validation-block failure unless the validator knows the same two classes
+/// the acceptance envelope does.
+///
+/// EXACT FIRST, exactly as the kernel does it: a measurement inside the exact
+/// limit is judged by the exact limit and REPORTS it, whatever the blend's
+/// representation. OCCT produces B-spline blends that are exact to machine
+/// precision — the `matrix.cylinder-cylinder` family measures 6e-16 — and
+/// widening their limit would both weaken the oracle and move their digests for
+/// no reason. Only a measurement OUTSIDE the exact limit, on an approximated
+/// blend, is re-judged against the adaptive one, and even then the reported
+/// limit can only grow.
+double approximated_section_limit(double radius) {
+  return std::min(std::abs(radius) * kf::kRelSection, kf::kSectionCeiling);
+}
+
+double approximated_tangency_limit(double radius, double tolerance) {
+  return std::min(std::max(kf::kTangencyRadians,
+                           kf::kTangencyFactor * tolerance /
+                               std::max(std::abs(radius), 1.0e-9)),
+                  kf::kTangencyBudgetCeiling);
+}
+
+/// The limit to judge AND report `measured` against: `exact` unless `measured`
+/// is outside it AND the blend is approximated.
+double effective_limit(double measured, double exact, bool approximated,
+                       double adaptive) {
+  if (measured <= exact || !approximated)
+    return exact;
+  return std::max(exact, adaptive);
+}
+
 double volume(const TopoDS_Shape &shape) {
   if (shape.IsNull())
     return 0.0;
@@ -233,16 +270,35 @@ struct Evidence {
   std::pair<int, int> remote;
   double before = 0.0;
   double after = 0.0;
+  /// The same classification the acceptance envelope makes, over the SAME
+  /// builder-generated faces, so the benchmark and the kernel cannot disagree
+  /// about what class a blend is.
+  kf::BlendSurfaceClass blend_class = kf::BlendSurfaceClass::Analytic;
+  double approximation_tolerance = 0.0;
+
+  bool approximated() const {
+    return blend_class == kf::BlendSurfaceClass::Approximated;
+  }
 };
 
 Evidence gather(const GeneratedGeometry &geometry, const AdapterResult &adapter,
                 double effective_radius) {
-  return {cylinder_evidence(adapter.output, effective_radius),
-          tangency_evidence(adapter.output, effective_radius),
-          blend_evidence(adapter.output, adapter.blend_faces, adapter.support_faces,
-                         effective_radius),
-          remote_supports(geometry, adapter.output), volume(geometry.shape),
-          volume(adapter.output)};
+  Evidence out{cylinder_evidence(adapter.output, effective_radius),
+               tangency_evidence(adapter.output, effective_radius),
+               blend_evidence(adapter.output, adapter.blend_faces,
+                              adapter.support_faces, effective_radius),
+               remote_supports(geometry, adapter.output), volume(geometry.shape),
+               volume(adapter.output),
+               kf::BlendSurfaceClass::Analytic,
+               0.0};
+  for (const TopoDS_Face &face : adapter.blend_faces) {
+    if (kf::classify_blend_face(face) != kf::BlendSurfaceClass::Approximated)
+      continue;
+    out.blend_class = kf::BlendSurfaceClass::Approximated;
+    out.approximation_tolerance =
+        std::max(out.approximation_tolerance, kf::blend_face_tolerance(face));
+  }
+  return out;
 }
 
 /// Largest tolerance carried by any vertex, edge or face in an audit.
@@ -315,17 +371,26 @@ json simple_validator(const std::string &kind, const json &spec,
     return validator(kind, required, adapter.generated_face_count > 0 ? "pass" : "fail",
                      json::array({metric("generatedFaceCount", adapter.generated_face_count)}));
   if (kind == "cylindricalRadius") {
-    const double limit = std::max(1.0e-8, effective_radius * 1.0e-8);
+    const double exact = std::max(1.0e-8, effective_radius * 1.0e-8);
+    const double limit = effective_limit(
+        evidence.radius.maximum_error, exact, evidence.approximated(),
+        approximated_section_limit(effective_radius));
     return validator(kind, required,
                      evidence.radius.cylinders > 0 &&
                              evidence.radius.maximum_error <= limit ? "pass" : "fail",
                      json::array({metric("cylinderCount", evidence.radius.cylinders),
                                   metric("maximumRadiusError", evidence.radius.maximum_error)}));
   }
-  if (kind == "g1BoundaryTangency")
+  if (kind == "g1BoundaryTangency") {
+    const double exact = 1.0e-7;
+    const double limit = effective_limit(
+        evidence.tangency.maximum_error, exact, evidence.approximated(),
+        approximated_tangency_limit(effective_radius,
+                                    evidence.approximation_tolerance));
     return validator(kind, required,
                      evidence.tangency.pairs >= 2 &&
-                             evidence.tangency.maximum_error <= 1.0e-7 ? "pass" : "fail");
+                             evidence.tangency.maximum_error <= limit ? "pass" : "fail");
+  }
   if (kind == "materialChange") {
     const bool decrease = spec.value("direction", "decrease") == "decrease";
     const bool pass = decrease ? evidence.after < evidence.before :
@@ -360,8 +425,12 @@ json blend_validator(const std::string &kind, const json &spec,
     if (evidence.blend.boundaries < 2)
       return validator(kind, required, "notApplicable",
                        json::array({metric("boundaryCount", evidence.blend.boundaries)}));
-    const double allowed = tangency_limit(effective_radius,
-                                          evidence.blend.coordinate_magnitude);
+    const double exact = tangency_limit(effective_radius,
+                                        evidence.blend.coordinate_magnitude);
+    const double allowed = effective_limit(
+        evidence.blend.maximum_tangency_radians, exact, evidence.approximated(),
+        approximated_tangency_limit(effective_radius,
+                                    evidence.approximation_tolerance));
     const bool pass = evidence.blend.maximum_tangency_radians <= allowed;
     return validator(kind, required, pass ? "pass" : "fail",
                      json::array({metric("boundaryCount", evidence.blend.boundaries),
@@ -374,8 +443,11 @@ json blend_validator(const std::string &kind, const json &spec,
   if (evidence.blend.samples == 0)
     return validator(kind, required, "notApplicable",
                      json::array({metric("sampleCount", 0)}));
-  const double limit =
+  const double exact_section =
       section_limit(effective_radius, evidence.blend.coordinate_magnitude);
+  const double limit = effective_limit(
+      evidence.blend.maximum_profile_error, exact_section,
+      evidence.approximated(), approximated_section_limit(effective_radius));
   const bool pass = evidence.blend.maximum_profile_error <= limit;
   return validator(kind, required, pass ? "pass" : "fail",
                    json::array({metric("sampleCount", evidence.blend.samples),

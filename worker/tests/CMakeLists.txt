@@ -291,6 +291,14 @@ foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterizat
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# WP-G: the fillet-acceptance envelope (SCHEMA §7.3 amendment, in progress).
+# Promoted from the wpg scratchpad probe into a tracked, asserting ctest —
+# measured RED on cases 1-2 (approximated blends) until the kernel change
+# lands; cases 3/4/5/5b already pass.
+add_executable(test_fillet_acceptance_envelope test_fillet_acceptance_envelope.cpp)
+target_link_libraries(test_fillet_acceptance_envelope PRIVATE worker_core)
+add_test(NAME fillet_acceptance_envelope COMMAND test_fillet_acceptance_envelope)
+
 # WP4 kernel half: `FilletRangeAnalyzer`. Brackets the feasible radius/distance
 # range by running REAL builds as the oracle, ports kernelbench's staged search,
 # and pins the measured bounds per fixture. Also carries the probe-cost
@@ -298,6 +306,31 @@ endforeach()
 add_executable(test_fillet_range test_fillet_range.cpp)
 target_link_libraries(test_fillet_range PRIVATE worker_core)
 add_test(NAME fillet_range COMMAND test_fillet_range)
+
+# WP-G: SCHEMA §7.3 "Chamfer parity" — Chamfer now publishes under Fillet's
+# output-tolerance ceiling. Asserts the two ops derive the SAME number and pins
+# the headroom OCCT actually uses; a refusing case is not constructible (see the
+# file header for the measurements that establish that).
+add_executable(test_chamfer_publication_ceiling test_chamfer_publication_ceiling.cpp)
+target_link_libraries(test_chamfer_publication_ceiling PRIVATE worker_core)
+add_test(NAME chamfer_publication_ceiling COMMAND test_chamfer_publication_ceiling)
+
+# WP-G: SCHEMA §7.3 acceptance as a PURE decision. Injects contour evidence
+# directly so every branch is covered — including the two OCCT cannot be asked
+# to produce on demand (a fit coarser than the authoring resolution, a 1 %
+# curvature error) and the normative ORDER of the three rules.
+add_executable(test_fillet_budget_decision test_fillet_budget_decision.cpp)
+target_link_libraries(test_fillet_budget_decision PRIVATE worker_core)
+add_test(NAME fillet_budget_decision COMMAND test_fillet_budget_decision)
+
+# WP-G: SCHEMA §7.6 remnant floor. A probe that BUILDS and publishes but leaves
+# sub-resolution topology is a NON-success, so `bestKnownMax` stops steering
+# onto it (finding fillet-chamfer-2). Contract assertions plus an independent
+# re-measurement of the smallest face/edge; the pinned numbers live in
+# `test_fillet_range`.
+add_executable(test_fillet_remnant_floor test_fillet_remnant_floor.cpp)
+target_link_libraries(test_fillet_remnant_floor PRIVATE worker_core)
+add_test(NAME fillet_remnant_floor COMMAND test_fillet_remnant_floor)
 
 # WP3 C1: the ANALYTIC blend proof. A real fillet is Proved, a cylinder at the
 # wrong axis distance is Failed, and a B-spline that the production sampler
@@ -745,6 +778,17 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/analyze_edge_op_range.ndjson
+)
+# SCHEMA §7.3 "Two blend classes, two budgets" + §7.2 `FILLET_BLEND_APPROXIMATED`
+# (kernel-hardening WP-G). One session, one radius, two bodies: a cylinder/
+# cylinder tee seam publishes WITH the warning and an analytic box edge publishes
+# silent. The budget numbers are literal (they are the SCHEMA's constants); the
+# OCCT measurements are `$any` and pinned in `test_fillet_acceptance_envelope`.
+add_test(
+    NAME canonical_fillet_approximated_blend
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/fillet_approximated_blend.ndjson
 )
 # SCHEMA §7.3 Chamfer `angleDeg` (WP6 item 1) — and the first canonical fixture to
 # drive a Chamfer at all, so it covers equal-leg and two-distance too. Pins the

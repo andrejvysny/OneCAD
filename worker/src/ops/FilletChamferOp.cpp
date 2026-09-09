@@ -186,16 +186,24 @@ EdgeResolution resolve_edges(OpContext& ctx, const json& op, const std::string& 
     return result;
 }
 
+// `advisories` collects the diagnostics of a SUCCESSFUL build (WP-G: the
+// `FILLET_BLEND_APPROXIMATED` warning). Before this they were dropped on the
+// floor — only the failure branch forwarded them — so a published approximated
+// blend told the user nothing.
 std::optional<OpOutcome> build_fillet(
     OpContext& ctx, const TopoDS_Shape& target_shape,
     std::vector<kernel::fillet::ResolvedEdge> edges, double radius,
-    std::unique_ptr<kernel::fillet::FilletBuilder>& builder, TopoDS_Shape& result) {
+    std::unique_ptr<kernel::fillet::FilletBuilder>& builder, TopoDS_Shape& result,
+    std::vector<json>& advisories) {
     builder = std::make_unique<kernel::fillet::FilletBuilder>(target_shape, std::move(edges),
                                                               radius);
     kernel::fillet::FilletBuildResult built = builder->build(ctx.cancel);
     if (built.cancelled) return OpOutcome::cancelled();
     if (built.ok) {
         result = std::move(built.shape);
+        for (const auto& diagnostic : built.diagnostics) {
+            advisories.push_back(diagnostic.to_json());
+        }
         return std::nullopt;
     }
     OpOutcome failure = OpOutcome::fail(built.error_code, built.message);
@@ -205,13 +213,62 @@ std::optional<OpOutcome> build_fillet(
     return failure;
 }
 
-std::optional<OpOutcome> validate_chamfer(const TopoDS_Shape& result,
+// SCHEMA §7.3 "Chamfer parity" (WP-G): the same output-tolerance ceiling Fillet
+// publishes under. `precision_of(input).input_tolerance` is the same three-way
+// face/edge/vertex max the fillet builder takes off its input audit, so the two
+// ops grow their ceiling from the same base.
+std::optional<OpOutcome> validate_chamfer(const TopoDS_Shape& input,
+                                          const TopoDS_Shape& result,
                                           kernel::validation::PublicationTier tier,
                                           const onecad::CancelToken* cancel) {
-    const kernel::validation::PublicationDecision decision = publication_decision(
-        result, kernel::validation::single_solid_policy("Chamfer", tier), cancel);
+    kernel::validation::PublicationPolicy policy =
+        kernel::validation::single_solid_policy("Chamfer", tier);
+    const kernel::validation::GeometryPrecisionContext precision =
+        kernel::validation::precision_of(input);
+    policy.maximum_tolerance =
+        precision.tolerance_ceiling(precision.input_tolerance, 2.0, 1.0e-6);
+    const kernel::validation::PublicationDecision decision =
+        publication_decision(result, policy, cancel);
     if (cancel && cancel->cancelled()) return OpOutcome::cancelled();
     if (!decision.publishable()) return publication_refusal(decision, "publication");
+    return std::nullopt;
+}
+
+// SCHEMA §7.3 "Chamfer parity" (WP-G): refuse an OCCT PARTIAL result by name
+// INSTEAD OF PUBLISHING IT. `BRepFilletAPI_MakeChamfer` exposes no
+// `NbSurfaces()`; `NbSurf(contour)` is the per-contour equivalent and a contour
+// with no surface — or none whose edges generated a face — is precisely the
+// partial result Fillet already refuses.
+//
+// A `!IsDone()` build is NOT this: it produced nothing to publish, and Fillet
+// codes that same condition `OP_FAILED` rather than `GEOMETRY_INVALID`
+// (`FilletBuilder::build`, which reserves `GEOMETRY_INVALID` for a result that
+// exists and fails audit). Parity means matching that, so the caller's existing
+// not-done branch is left alone.
+std::optional<OpOutcome> chamfer_partial_result(BRepFilletAPI_MakeChamfer& chamfer) {
+    const auto refuse = [](const char* detail) {
+        OpOutcome out = OpOutcome::fail("GEOMETRY_INVALID", detail);
+        out.diagnostics.push_back(json{{"severity", "error"},
+                                       {"code", "GEOMETRY_INVALID"},
+                                       {"message", detail},
+                                       {"stage", "publication"},
+                                       {"reasonCode", "CHAMFER_INVALID_RESULT"}});
+        return out;
+    };
+    for (int contour = 1; contour <= chamfer.NbContours(); ++contour) {
+        if (chamfer.NbSurf(contour) <= 0)
+            return refuse("Chamfer produced only a partial result");
+        bool generated_face = false;
+        for (int i = 1; i <= chamfer.NbEdges(contour) && !generated_face; ++i) {
+            for (const TopoDS_Shape& generated : chamfer.Generated(chamfer.Edge(contour, i))) {
+                if (generated.ShapeType() == TopAbs_FACE) {
+                    generated_face = true;
+                    break;
+                }
+            }
+        }
+        if (!generated_face) return refuse("Chamfer produced only a partial result");
+    }
     return std::nullopt;
 }
 
@@ -264,9 +321,10 @@ std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
     if (added == 0) return OpOutcome::fail("OP_FAILED", "No valid edges for chamfer");
     chamfer->Build();
     if (!chamfer->IsDone()) return OpOutcome::fail("OP_FAILED", "Chamfer operation failed");
+    if (std::optional<OpOutcome> partial = chamfer_partial_result(*chamfer)) return partial;
     result = chamfer->Shape();
     builder = chamfer;
-    return validate_chamfer(result, validation_tier, cancel);
+    return validate_chamfer(target_shape, result, validation_tier, cancel);
 }
 
 // ── SCHEMA §7.3 `referenceFaces` (kernel-hardening WP-F, 2026-09-03) ─────────
@@ -759,8 +817,17 @@ std::optional<OpOutcome> bind_reference_faces(OpContext& ctx, const json& op,
 OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
                          const std::string& op_id, const TopoDS_Shape& result,
                          const std::unique_ptr<kernel::fillet::FilletBuilder>& fillet_builder,
-                         const std::shared_ptr<BRepBuilderAPI_MakeShape>& builder) {
+                         const std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
+                         std::vector<json>& advisories) {
     OpOutcome out;
+    // The step is Ok, so these ride `planStep` (`OpOutcome::diagnostics` ->
+    // `merge_outcome` -> `emit_plan_step`). They are only ever attached HERE,
+    // on the success path — appending an advisory to a Failed outcome would
+    // overwrite the user-visible failure message.
+    for (json& advisory : advisories) {
+        out.diagnostics.push_back(std::move(advisory));
+    }
+    advisories.clear();
     ctx.bodies.create(target_id, op_id, result);
     if (fillet_builder) {
         ctx.partition.apply_history(target_id, result, fillet_builder->history(), out.delta,
@@ -828,12 +895,14 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
     TopoDS_Shape result;
     std::shared_ptr<BRepBuilderAPI_MakeShape> builder;
     std::unique_ptr<kernel::fillet::FilletBuilder> fillet_builder;
+    std::vector<json> advisories;
     try {
         std::optional<OpOutcome> failure = mode == Mode::Fillet
                                                ? build_fillet(
                                                      ctx, target->geom,
                                                      std::move(resolved.fillet_edges),
-                                                     values.radius, fillet_builder, result)
+                                                     values.radius, fillet_builder, result,
+                                                     advisories)
                                                : build_chamfer(
                                                      target->geom, resolved.edges,
                                                      seed_reference_faces, values.radius,
@@ -851,7 +920,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
         return OpOutcome::fail("OP_FAILED", std::string(name) + " operation failed");
     }
 
-    return publish_result(ctx, target_id, op_id, result, fillet_builder, builder);
+    return publish_result(ctx, target_id, op_id, result, fillet_builder, builder, advisories);
 }
 
 }  // namespace

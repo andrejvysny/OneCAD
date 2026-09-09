@@ -5,11 +5,17 @@
 #include <cmath>
 #include <utility>
 
+#include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 
 #include "kernel/fillet/FilletBuilder.h"
@@ -99,6 +105,124 @@ LimitingEvidence fillet_evidence(double value, const FilletBuildResult &built,
   evidence.element_ids =
       contour_element_ids(built.analysis, evidence.contour_index, edges);
   return evidence;
+}
+
+// SCHEMA §7.6 remnant floor (WP-G). A blend that BUILDS and passes Tier B can
+// still leave a face or an edge below the authoring resolution — a 0.5 µm
+// sliver the publication policy's micro-topology counters do not catch at this
+// tier. Steering `bestKnownMax` onto such a radius offers the user a value that
+// produces garbage, so the probe is a NON-success (finding fillet-chamfer-2).
+//
+// Faces are measured by AREA against `res²` and edges by LENGTH against `res`,
+// exactly as the rule is written, and ONLY over the faces the probe generated
+// or modified (see `touched_faces`). Degenerate edges are excluded: they carry
+// zero length by construction and are legal topology (a sphere pole), so
+// counting them would call every spherical result a remnant.
+struct RemnantFinding {
+  bool hit = false;
+  std::string kind;
+  double value = 0.0;
+};
+
+// A remnant probe has no OCCT diagnostic to quote — OCCT was HAPPY with it, and
+// the refusal is entirely OneCAD's resolution floor. Its attribution is
+// therefore the REQUESTED closure itself: those are the edges whose blend left
+// the sub-resolution leftover, and without them a remnant-bounded run reports
+// `limitingEntities: []` and tells the user nothing about which edge to change.
+LimitingEvidence remnant_evidence(double value, const char *code,
+                                  const std::vector<ResolvedEdge> &edges) {
+  LimitingEvidence evidence;
+  evidence.probe_value = value;
+  evidence.diagnostic_code = code;
+  for (const ResolvedEdge &edge : edges) {
+    if (!edge.topo_key.empty())
+      evidence.edge_topo_keys.push_back(edge.topo_key);
+    if (!edge.element_id.empty())
+      evidence.element_ids.push_back(edge.element_id);
+  }
+  return evidence;
+}
+
+// The faces this probe GENERATED or MODIFIED, filtered to the output. Scanning
+// the whole result instead is a defect, not a shortcut: a body that already
+// carries a sub-resolution edge — an imported sliver, a near-coincident
+// boolean's leftover 25 mm away — would make EVERY probe a non-success and the
+// verb would report `confidence: none` on geometry whose range is perfectly
+// well defined (measured: a box fused to a box 5e-4 mm taller, 58 probes, 0
+// successes). A pre-existing sliver is the INPUT's property; only what the
+// blend itself left behind can bound the blend's range.
+std::vector<TopoDS_Face> touched_faces(BRepBuilderAPI_MakeShape &builder,
+                                       const TopoDS_Shape &input,
+                                       const TopoDS_Shape &output,
+                                       const std::vector<ResolvedEdge> &edges) {
+  std::vector<TopoDS_Face> faces;
+  if (input.IsNull() || output.IsNull())
+    return faces;
+  TopTools_IndexedMapOfShape output_faces;
+  TopExp::MapShapes(output, TopAbs_FACE, output_faces);
+  const auto keep = [&](const TopoDS_Shape &candidate) {
+    if (candidate.IsNull() || candidate.ShapeType() != TopAbs_FACE ||
+        output_faces.FindIndex(candidate) == 0)
+      return;
+    for (const TopoDS_Face &known : faces) {
+      if (known.IsSame(candidate))
+        return;
+    }
+    faces.push_back(TopoDS::Face(candidate));
+  };
+  TopTools_IndexedDataMapOfShapeListOfShape input_edge_faces;
+  TopExp::MapShapesAndAncestors(input, TopAbs_EDGE, TopAbs_FACE,
+                                input_edge_faces);
+  for (const ResolvedEdge &requested : edges) {
+    for (const TopoDS_Shape &generated : builder.Generated(requested.edge))
+      keep(generated);
+    const int index = input_edge_faces.FindIndex(requested.edge);
+    if (index == 0)
+      continue;
+    for (const TopoDS_Shape &support : input_edge_faces(index)) {
+      for (const TopoDS_Shape &modified : builder.Modified(support))
+        keep(modified);
+      keep(support);
+    }
+  }
+  return faces;
+}
+
+RemnantFinding find_remnant(const std::vector<TopoDS_Face> &faces,
+                            double resolution) {
+  RemnantFinding out;
+  if (faces.empty() || !(resolution > 0.0))
+    return out;
+  const double area_floor = resolution * resolution;
+  double smallest_area = -1.0;
+  for (const TopoDS_Face &face : faces) {
+    GProp_GProps properties;
+    BRepGProp::SurfaceProperties(face, properties);
+    const double area = properties.Mass();
+    if (area < area_floor && (smallest_area < 0.0 || area < smallest_area))
+      smallest_area = area;
+  }
+  if (smallest_area >= 0.0)
+    return {true, "face", smallest_area};
+
+  TopTools_IndexedMapOfShape edges;
+  for (const TopoDS_Face &face : faces)
+    TopExp::MapShapes(face, TopAbs_EDGE, edges);
+  double smallest_length = -1.0;
+  for (int i = 1; i <= edges.Extent(); ++i) {
+    const TopoDS_Edge edge = TopoDS::Edge(edges(i));
+    if (BRep_Tool::Degenerated(edge))
+      continue;
+    GProp_GProps properties;
+    BRepGProp::LinearProperties(edge, properties);
+    const double length = properties.Mass();
+    if (length < resolution &&
+        (smallest_length < 0.0 || length < smallest_length))
+      smallest_length = length;
+  }
+  if (smallest_length >= 0.0)
+    return {true, "edge", smallest_length};
+  return out;
 }
 
 } // namespace
@@ -207,15 +331,25 @@ FilletRangeAnalyzer::probe_fillet(double value) {
     const FilletBuildResult built = builder.build(cancel_);
     if (built.cancelled)
       return std::nullopt;
-    if (built.ok)
-      return Observation{ProbeClassification::Success, {}};
+    if (built.ok) {
+      const RemnantFinding remnant = find_remnant(
+          touched_faces(builder.history(), body_, built.shape, edges_),
+          precision_);
+      if (!remnant.hit)
+        return Observation{ProbeClassification::Success, {}, false, std::string(), 0.0};
+      return Observation{ProbeClassification::Refusal,
+                         remnant_evidence(value, "FILLET_REMNANT_FLOOR", edges_),
+                         true, remnant.kind, remnant.value};
+    }
     return Observation{ProbeClassification::Refusal,
-                       fillet_evidence(value, built, edges_)};
+                       fillet_evidence(value, built, edges_), false,
+                       std::string(), 0.0};
   } catch (...) {
     LimitingEvidence evidence;
     evidence.probe_value = value;
     evidence.diagnostic_code = "FILLET_PROBE_THREW";
-    return Observation{ProbeClassification::Invalid, std::move(evidence)};
+    return Observation{ProbeClassification::Invalid, std::move(evidence), false,
+                       std::string(), 0.0};
   }
 }
 
@@ -235,7 +369,8 @@ FilletRangeAnalyzer::probe_chamfer(double value) {
   evidence.probe_value = value;
   if (!valid_constant_radius(value)) {
     evidence.diagnostic_code = "CHAMFER_DISTANCE_INVALID";
-    return Observation{ProbeClassification::Refusal, std::move(evidence)};
+    return Observation{ProbeClassification::Refusal, std::move(evidence), false,
+                       std::string(), 0.0};
   }
   try {
     TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
@@ -252,12 +387,14 @@ FilletRangeAnalyzer::probe_chamfer(double value) {
     }
     if (added == 0) {
       evidence.diagnostic_code = "CHAMFER_NO_VALID_EDGES";
-      return Observation{ProbeClassification::Refusal, std::move(evidence)};
+      return Observation{ProbeClassification::Refusal, std::move(evidence), false,
+                       std::string(), 0.0};
     }
     chamfer.Build();
     if (!chamfer.IsDone()) {
       evidence.diagnostic_code = "CHAMFER_BUILD_FAILED";
-      return Observation{ProbeClassification::Refusal, std::move(evidence)};
+      return Observation{ProbeClassification::Refusal, std::move(evidence), false,
+                       std::string(), 0.0};
     }
     const validation::PublicationDecision decision =
         validation::evaluate_publication_policy(
@@ -269,12 +406,21 @@ FilletRangeAnalyzer::probe_chamfer(double value) {
       evidence.diagnostic_code = decision.reason_code.empty()
                                      ? std::string("CHAMFER_NOT_PUBLISHABLE")
                                      : decision.reason_code;
-      return Observation{ProbeClassification::Refusal, std::move(evidence)};
+      return Observation{ProbeClassification::Refusal, std::move(evidence), false,
+                       std::string(), 0.0};
     }
-    return Observation{ProbeClassification::Success, {}};
+    const RemnantFinding remnant = find_remnant(
+        touched_faces(chamfer, body_, chamfer.Shape(), edges_), precision_);
+    if (remnant.hit) {
+      return Observation{ProbeClassification::Refusal,
+                         remnant_evidence(value, "CHAMFER_REMNANT_FLOOR", edges_),
+                         true, remnant.kind, remnant.value};
+    }
+    return Observation{ProbeClassification::Success, {}, false, std::string(), 0.0};
   } catch (...) {
     evidence.diagnostic_code = "CHAMFER_PROBE_THREW";
-    return Observation{ProbeClassification::Invalid, std::move(evidence)};
+    return Observation{ProbeClassification::Invalid, std::move(evidence), false,
+                       std::string(), 0.0};
   }
 }
 
@@ -427,6 +573,18 @@ FilletRangeResult FilletRangeAnalyzer::summarize() const {
     result.has_proven_upper_bound = true;
     result.proven_upper_bound = value;
     result.limiting = observation.evidence;
+    break;
+  }
+
+  // `values_` is sorted ascending, so the first remnant probe is the one at the
+  // smallest radius — the value at which clean geometry stopped being available.
+  for (const auto &[value, observation] : values_) {
+    if (!observation.remnant)
+      continue;
+    result.remnant_floor_hit = true;
+    result.remnant_floor_kind = observation.remnant_kind;
+    result.remnant_floor_value = observation.remnant_value;
+    result.remnant_floor_radius = value;
     break;
   }
 

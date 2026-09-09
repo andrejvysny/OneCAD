@@ -751,6 +751,7 @@ unknown code as an opaque warning):
 |---|---|
 | `REGION_REBOUND_BY_ANCHOR` | the op's stored `regionId` matched no cell after an edit moved a crossing; the op bound the unique cell containing `regionAnchor` instead (§7.3 "Region anchor"). `stage` is `"profile"`. Evidence `{ "region": { "from": "<stale regionId>", "to": "<bound regionId>", "anchor": [u, v] } }`. The params are unchanged; the warning repeats on every regen until the user re-picks. |
 | `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) only — `SketchRegions` (§7.4) has no diagnostics channel and stays silent about it. |
+| `FILLET_BLEND_APPROXIMATED` | an approximated (walked) fillet blend published inside its fit bound + radius-relative section budget (kernel-hardening WP-G, 2026-09-06; §7.3 Fillet "Two blend classes"). `stage` is `"publication"`. Evidence is the `blendEvidence` object with the failure path's existing keys — `maximumSectionRadiusError`, `allowedSectionRadiusError`, `maximumTangencyRadians`, `allowedTangencyRadians` — plus `blendSurfaceClass`, `approximationTolerance`, `maxContourVertexValence` and the two counts `approximatedContours`, `approximatedBlendFaces`; ONE vocabulary, no aliases; emitted ONCE per step. The op published; the warning repeats on every regen because the geometry is what it is. |
 | `ARTIFACT_TESSELLATE_FAILED` | the plan prepared but the `artifacts.tessellate` attachment for this step threw (kernel-hardening WP-H, 2026-09-05): the step is `Ok`, the scratch is stored, and the mesh is simply not attached — Rust treats it as "not cached" and fetches it through `Tessellate` later. `stage` is `"artifact"`; the message carries the kernel's text. Before WP-H an artifact failure failed the whole prepared plan. |
 
 **`diagnostics[].reasonCode` — the machine-readable publication-refusal reason.**
@@ -768,6 +769,11 @@ the field missing. The values below are 1:1 with the branches of the worker's
 `evaluate_publication_policy`; each ships with top-level `GEOMETRY_INVALID` unless
 the op re-labels the refusal by name (the recoverable disjoint-result codes above),
 in which case the `reasonCode` is unchanged and only `code`/top-level differ.
+Op-specific reason codes exist OUTSIDE that policy set and are catalogued in
+their op's §7.3 prose: Fillet's `FILLET_RADIUS_INVALID`, `FILLET_CONTOUR_INVALID`,
+`FILLET_INVALID_RESULT`, `FILLET_SEMANTIC_CHECK_FAILED`, `FILLET_BLEND_TOO_COARSE`
+(WP-G) and Chamfer's `CHAMFER_INVALID_RESULT` (WP-G); they ride the same
+`reasonCode` slot with the same reader rules.
 
 | `reasonCode` | Refused because |
 |---|---|
@@ -1784,6 +1790,116 @@ then independently measures builder-history-derived blend faces inside the actua
 result: at least two measurable support boundaries, interior curvature samples,
 section radius within the scale/conditioning budget, and G1 tangency within its
 angular budget. Missing evidence is UNKNOWN and therefore refused.
+
+- **Two blend classes, two budgets (kernel-hardening WP-G, 2026-09-06).** Every
+  builder-generated blend face is classified by its surface type after
+  unwrapping a trimmed surface: plane / cylinder / cone / sphere / torus ⇒
+  **analytic** (OCCT's KPart blends, exact by construction); B-spline / Bézier /
+  other ⇒ **approximated** (OCCT walked the blend and fitted a surface within
+  its own approximation tolerance). A contour is approximated iff any of its
+  blend faces is. Evidence gains `blendSurfaceClass` (`"analytic"` |
+  `"approximated"`), `approximationTolerance` (the largest `BRep_Tool` tolerance
+  OCCT assigned to the approximated blend FACES themselves — never their edges
+  or vertices, which are shared with the support faces and would let a coarse
+  input inflate the number; 0 for analytic) and `maxContourVertexValence`.
+  Classification, measurement and budget are all PER CONTOUR: each contour is
+  judged on its own blend faces, so an analytic contour beside an approximated
+  one in the same op is never judged by the other's budget.
+  - EVERY contour is measured against the EXACT budgets first: section radius
+    within `max(1e-9, |r|·1e-9) + coordinateMagnitude·1e-14`, tangency within
+    `1e-9 rad` (+ conditioning). A contour that passes them publishes with NO
+    warning whatever its representation — a B-spline blend that is exact to
+    machine precision (OCCT produces them: the kernelbench cylinder–cylinder
+    family measures 6e-16 on B-spline faces) is exact, and the class must never
+    widen a budget that the geometry already meets. An ANALYTIC contour that
+    fails them refuses exactly as before. Nothing here changes for exact
+    geometry.
+  - Only an APPROXIMATED contour that FAILS the exact budgets proceeds to the
+    adaptive budget below, which follows what the measured quantities ARE,
+    evaluated in this exact order with `tol` = `approximationTolerance` (faces
+    only, as defined above) and `res` = the authoring resolution (the CONSTANT
+    1e-3 mm, `GeometryPrecisionContext::authoring_resolution()`). The section
+    residual is CURVATURE-derived (`|1/κmax − r|`, a second derivative of the
+    fitted surface) and scales as `tol / h²`, not as `tol` — measured on OCCT
+    8.0.1 the residual is 39× and 247× the face tolerance while the surfaces
+    sit within 5e-5 mm of the exact blend — so no positional multiplier can
+    describe it; the honest budgets are one positional bound on the fit and one
+    radius-relative bound on the section:
+    1. `tol > res` refuses `FILLET_BLEND_TOO_COARSE` (top-level
+       `GEOMETRY_INVALID`): OCCT fitted the blend coarser than the authoring
+       resolution — not a fillet for any print or machining purpose.
+    2. `profileBudget = min(|r| · kRelSection, kSectionCeiling)` with the
+       NORMATIVE constants `kRelSection = 0.01` (1 % of the radius) and
+       `kSectionCeiling = 0.05 mm`; a section residual above it refuses
+       `FILLET_BLEND_TOO_COARSE` — the surface's curvature says it is not a
+       fillet of that radius. (Measured margins 10× and 3.5× on the two probe
+       cases; a B-spline blend's curvature wobble of 0.1–0.3 % is invisible to
+       printing or machining, a 1 % wobble is not.)
+    3. `tangencyBudget = min(max(1e-9, kTangencyFactor · tol / |r|), 1e-2 rad)`
+       with `kTangencyFactor = 4` (measured G1 errors are 0.49 and 0.42 of
+       `tol/|r|`, so the factor carries an 8× margin); a boundary G1 error above
+       it refuses `FILLET_SEMANTIC_CHECK_FAILED`.
+    These three constants are normative kernel constants of this section; a
+    change to any of them is a §14 entry with a new measurement.
+    A step whose contours are all inside their budgets PUBLISHES; when at
+    least one contour needed the adaptive budget the step carries ONE `warning`
+    `FILLET_BLEND_APPROXIMATED` (`stage: "publication"`, once per step, not
+    per contour; a step whose approximated contours all met the exact budgets
+    carries none) whose evidence is the existing `blendEvidence`
+    object (the same keys the failure path already emits —
+    `maximumSectionRadiusError`, `allowedSectionRadiusError`,
+    `maximumTangencyRadians`, `allowedTangencyRadians` — plus the new
+    `blendSurfaceClass`, `approximationTolerance`, `maxContourVertexValence`,
+    and the two COUNTS `approximatedContours`, `approximatedBlendFaces`);
+    `blendEvidence` therefore rides the SUCCESS path too from this build, and
+    a refusal's `blendEvidence` carries the same class keys. The
+    warning repeats on every regen and never clears by itself — the geometry is
+    what it is; it is information, not an action.
+  - SCOPE: the adaptive budget applies to FILLET PUBLICATION only, as a NEW call
+    site. `fillet_section_radius_limit` / `fillet_tangency_limit` keep their
+    exact form for every other consumer — the OffsetFace blend, blend
+    recognition and reconstruction — none of which widens.
+  - Vertex valence is EVIDENCE, not a refusal: a valence-5 rib corner rounds at
+    residual 0 on this kernel (measured 2026-09-04); an end OCCT cannot contour
+    keeps its own `FILLET_CONTOUR_INVALID`.
+  *Reason (measured red-first 2026-09-04 on the shipped kernel, probe
+  `worker/tests/test_fillet_acceptance_envelope.cpp`):* a Ø20 boss on a Ø40
+  shaft (r = 2) and a Ø20 cylinder cut by a 30° plane (r = 1) were REFUSED at
+  section residuals 1.97e-3 and 2.87e-3 mm against allowances of 2.0e-9 and
+  1.0e-9 — six orders of magnitude, no continuum with the analytic cases at
+  2.2e-16 — while bare `BRepFilletAPI_MakeFillet` built both; every
+  boss-on-cylinder and oblique-rim fillet a daily-driver part needs refused
+  (finding fillet-chamfer-1). The 1e-9 gate was an analytic-vs-walked
+  discriminator, not a quality gate.
+- **Range analyzer remnant floor (WP-G).** A probe of `AnalyzeEdgeOpRange`
+  (§7.6) whose built result carries a face of area below `res²` or an edge
+  shorter than `res` (the 1e-3 mm authoring resolution) is classified as a
+  NON-success (`remnant`), exactly like any other non-success probe: it never
+  advances `bestKnownMax`, never joins a `feasibleInterval`, and is the
+  `provenUpperBound` candidate the existing rule already names — so every §7.6
+  invariant (`feasibleIntervals[last].upper == bestKnownMax`,
+  `provenUpperBound` = the smallest non-success above it) holds unchanged. The
+  §7.6 result gains the OPTIONAL top-level `remnantFloorHit: true` and
+  `remnantFloorMeasure: { "kind": "face" | "edge", "value": <mm² | mm>,
+  "radius": <the probe> }` when any probe was so classified (finding
+  fillet-chamfer-2: the clamp used to steer onto 0.5 µm remnant faces Tier B
+  does not catch). Because `AnalyzeEdgeOpRange` classifies with the tier a
+  commit uses, the two-class fillet budget above moves its bounds too: an
+  approximated blend inside its budget is now a success probe.
+- **Chamfer parity (WP-G).** Chamfer commits at Tier B with the same output
+  tolerance ceiling as Fillet (`max(0.001 mm, 2 × inputMaxTolerance +
+  0.000001 mm)`) and refuses an OCCT partial result by name
+  (`CHAMFER_INVALID_RESULT`, top-level `GEOMETRY_INVALID`) instead of publishing
+  it — a "partial result" being a build that reports done but has a contour
+  with no blend surface (`NbSurf` 0) or with edges that generated no face; a
+  build that is NOT done stays the plain `OP_FAILED` refusal, exactly as
+  Fillet's does (`GEOMETRY_INVALID` is reserved for a result that exists and
+  fails audit). (A `distance2` or `angleDeg` on a FILLET record was already refused at
+  authoring — unchanged.)
+  The three constants replace the draft's single `kApproxFactor`: the draft
+  formula `max(k · tol, res)` was measured unsatisfiable under its own `k ≤ 8`
+  cap (the residual is curvature-derived), which is exactly what the cap was
+  for — the measurement, not the constant, moved.
 
 Before publication, Fillet rejects null/invalid/non-single-solid/non-positive
 results, self-interference, OCCT partial results, and `BadShape`. Shape audit
@@ -3821,9 +3937,11 @@ What radii (or chamfer distances) will this edge selection ACTUALLY take?
 Read-only, snapshot-fenced, and — unlike every other verb in §7.5/§7.6 — it runs
 real geometry: one probe is one `FilletBuilder` (or one equal-leg
 `BRepFilletAPI_MakeChamfer`) at one value, classified by the same **authoritative
-publication tier** a commit uses, never the TierA preview downgrade. Nothing is
-extrapolated and no formula is applied; every number below is backed by a build
-that ran. Added 2026-08-20.
+publication tier** a commit uses, never the TierA preview downgrade — and, since
+kernel-hardening WP-G (2026-09-06), by the remnant floor: a probe that passes
+the tier but leaves a sub-resolution face or edge is a non-success (see the
+result block below). Nothing is extrapolated and no formula is applied; every
+number below is backed by a build that ran. Added 2026-08-20.
 
 It mints nothing, creates no scratch, publishes no snapshot, emits no
 `bodyEvents` and carries no bin tail. `GetWorkerHead` is identical before and
@@ -3847,9 +3965,10 @@ no bound at all.
   "edges": [ "e:4" ],               // ordinal-ordered TopoKeys of the analysed closure
   "searchedRange": { "min": 0.001, "max": 17.32 },
   "lowerBound": 0.001,              // SMALLEST proven-feasible value, or null
-  "bestKnownMax": 9.99925,          // LARGEST proven-feasible value, or null
-  "provenUpperBound": 10.0,         // smallest proven-INfeasible value ABOVE bestKnownMax, or null
-  "feasibleIntervals": [ { "lower": 0.001, "upper": 9.99925 } ],
+  "bestKnownMax": 9.9985,           // LARGEST proven-feasible value, or null (WP-G: the remnant floor
+                                    //   moved the 10 mm box from 9.99925 to 9.9985 — see below)
+  "provenUpperBound": 9.99925,      // smallest proven-INfeasible value ABOVE bestKnownMax, or null
+  "feasibleIntervals": [ { "lower": 0.001, "upper": 9.9985 } ],
   "intervalsTruncated": false,
   "limitingEntities": [ { "topoKey": "e:4", "kind": "edge" } ],
   "confidence": "bracketed",
@@ -3857,8 +3976,32 @@ no bound at all.
   "probesUsed": 71,
   "budgetExhausted": false,
   "stoppedReason": "converged",     // converged | budgetExhausted | deadline
-  "refusal": null }
+  "refusal": null,
+  "remnantFloorHit": true,          // OPTIONAL (WP-G, 2026-09-06): some probe BUILT but left a face
+  "remnantFloorMeasure": {          //   below res² or an edge below res (1e-3 mm) and was
+    "kind": "edge",                 //   classified a non-success; absent ⇒ no probe did
+    "value": 7.5e-4, "radius": 9.99925 } }
 ```
+
+- **Remnant floor (kernel-hardening WP-G, 2026-09-06).** A probe whose result
+  BUILDS and passes the publication tier but carries a face of area below
+  `res²` or an edge shorter than `res` (the 1e-3 mm authoring resolution) is a
+  NON-success — it never advances `bestKnownMax`, never joins a
+  `feasibleInterval`, and is the `provenUpperBound` candidate the rule below
+  already names, so every invariant here holds unchanged; the two optional
+  fields above report it. Such a probe's `limitingEntities` contribution is the
+  requested closure (the same `edges[]`), since the remnant is a consequence of
+  the whole contour, not of one entity (finding fillet-chamfer-2: the clamp used
+  to steer onto 0.5 µm remnant faces Tier B does not catch). The scan covers
+  ONLY the faces the probe GENERATED or MODIFIED and their edges — a
+  sub-resolution edge that already existed in the input (an imported sliver, a
+  near-coincident boolean's leftover) is the input's property and never makes a
+  probe a non-success. The remnant probe's `limitingEvidence.diagnosticCode` is
+  `FILLET_REMNANT_FLOOR` (`CHAMFER_REMNANT_FLOOR` in Chamfer mode), catalogued
+  beside `FILLET_PROBE_THREW`. The two result fields stop at the wire for now —
+  `EdgeOpRangeDto` does not carry them and no consumer reads them; a later
+  entry adds them when a consumer exists. The `analyze_edge_op_range.ndjson`
+  fixture pins both on the 10 mm box (the remnant is an edge, `$any` measure).
 
 **The normative invariant.** `lowerBound ≤ bestKnownMax < provenUpperBound`
 whenever all three are non-null.
@@ -5095,6 +5238,59 @@ sign-off) once fixtures exist.
   governs solid-count publication only). New fixture `hole_threaded.ndjson`; no
   existing fixture shape moves, **no fixture bump**. `protocolVersion` stays 1;
   no handshake axis or worker fingerprint moves.
+
+- **2026-09-06 — Fillet acceptance envelope: approximated blends accepted
+  under a fit bound plus a radius-relative section budget, with a warning;
+  range-analyzer remnant floor; chamfer parity (kernel-hardening WP-G).**
+  [§7.3](#73-op-payload-schemas-vertical-slice) Fillet: blend faces are
+  classified analytic / approximated by surface type; analytic contours keep
+  the exact 1e-9 budgets; approximated contours publish when the fit is within
+  the authoring resolution, the section residual within `min(r · 1 %, 0.05 mm)`
+  and the G1 error within `4 · tol / r` (capped 1e-2 rad), and carry the new
+  [§7.2](#72-regen--executeplan) `warning` `FILLET_BLEND_APPROXIMATED`; a fit
+  coarser than the authoring resolution or a section residual above
+  `min(r · 1 %, 0.05 mm)` is the new refusal `FILLET_BLEND_TOO_COARSE`; evidence gains `blendSurfaceClass`,
+  `approximationTolerance`, `maxContourVertexValence`; `AnalyzeEdgeOpRange`
+  reports `remnantFloorHit` and never advances `bestKnownMax` onto a
+  sub-resolution remnant; Chamfer gains the Fillet tolerance ceiling and
+  `CHAMFER_INVALID_RESULT`; the §7.6 `AnalyzeEdgeOpRange` result gains optional
+  `remnantFloorHit` / `remnantFloorMeasure` and a remnant probe is a
+  non-success. Constants `kRelSection = 0.01`, `kSectionCeiling = 0.05 mm`,
+  `kTangencyFactor = 4` (measured 2026-09-06 on OCCT 8.0.1: the approximated
+  blend faces of the two probe cases carry `BRep_Tool` tolerances 5.06e-5 /
+  1.16e-5 mm (1.0e-4 / 6.3e-5 with their sub-shapes) against section residuals
+  1.97e-3 / 2.87e-3 mm — 39× and 247× the tolerance, because the residual is
+  curvature-derived — and G1 errors 1.24e-5 / 4.94e-6 rad = 0.49 / 0.42 of
+  `tol/r`; the draft's positional multiplier `max(k·tol, res)` with `k ≤ 8` was
+  therefore unsatisfiable and replaced by a fit bound + a radius-relative
+  section bound). The adaptive budget is a new call
+  site in fillet publication only; the shared limit functions used by
+  OffsetFace, blend recognition and reconstruction are untouched. *Fixture:*
+  `fillet_approximated_blend.ndjson` (a Ø20 boss on a Ø40 shaft filleted r = 2
+  publishes with the warning and `$present` evidence; the same radius on a box
+  edge publishes with none; the two tolerance-derived numbers
+  `approximationTolerance` and `allowedTangencyRadians` are `$any`, the
+  tolerance-independent `allowedProfileError` 0.02 is literal). Kernelbench,
+  MEASURED 2026-09-06 (first pass, before the exact-first rule): `fillet/
+  foundation:t0` 136 rows unchanged; `fillet/matrix:m1` 336 records, 0 gating
+  failures, 330 pass / 6 characterization (unchanged verdicts — the six fail in
+  raw OCCT too); 92 `matrix.cylinder-cylinder.*` rows moved by `normalizedDigest`
+  only because the class alone widened their budgets and emitted the warning —
+  which the adversarial review showed to be WRONG for that family (its B-spline
+  blends measure 6e-16, machine-exact). The exact-first rule above closes it:
+  an exact blend keeps its exact budget and no warning, so the final m1 count
+  of moved rows is recorded in TODO.md § WP-G from the gate run (expected: the
+  analytic 242 and the exact B-spline family byte-identical). The
+  digests are re-recorded with that reason in TODO.md § WP-G (the manifest
+  carries no reason field). The kernelbench semantic validator
+  (`worker/src/benchmark/SemanticValidation.cpp`) had hard-coded exact gates
+  independent of the fillet limits; four are now class-aware as
+  `max(exact, adaptive)` with the same constants (`constantRadius` stays exact —
+  a law comparison). The §7.6 `remnantFloorHit` / `remnantFloorMeasure` fields
+  stop at the wire (no Rust DTO, no consumer yet). All new fields are additive; no existing
+  fixture shape moves, **no fixture bump**; `protocolVersion` stays 1; no
+  handshake axis and no worker fingerprint moves. Cross-track sign-off:
+  protocol-auditor BEFORE-code review recorded below once complete.
 
 - **2026-09-05 — Worker liveness, restore fencing, executor hazards
   (kernel-hardening WP-H).** [§7.1](#getworkerhead) `GetWorkerHead` is answered

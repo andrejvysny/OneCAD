@@ -8,7 +8,9 @@
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAdaptor_Surface.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <NCollection_IndexedDataMap.hxx>
 #include <NCollection_List.hxx>
@@ -20,6 +22,7 @@
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
@@ -31,9 +34,6 @@ using EdgeFaces = NCollection_IndexedDataMap<
     TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>;
 
 constexpr double kNormalTolerance = 1.0e-9;
-constexpr double kTangencyRadians = 1.0e-9;
-constexpr double kSectionRelative = 1.0e-9;
-constexpr double kConditioning = 1.0e-14;
 
 bool contains_face(const std::vector<TopoDS_Face> &faces,
                    const TopoDS_Shape &candidate) {
@@ -141,6 +141,42 @@ void sample_face(const TopoDS_Face &face, double radius, int uv_grid,
 
 } // namespace
 
+const char *blend_surface_class_name(BlendSurfaceClass value) {
+  return value == BlendSurfaceClass::Approximated ? "approximated" : "analytic";
+}
+
+BlendSurfaceClass classify_blend_face(const TopoDS_Face &face) {
+  if (face.IsNull())
+    return BlendSurfaceClass::Approximated;
+  TopLoc_Location location;
+  Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+  // A trimmed surface is a WINDOW onto its basis, not a different surface, so
+  // the class comes from the basis.
+  while (!surface.IsNull()) {
+    const Handle(Geom_RectangularTrimmedSurface) trimmed =
+        Handle(Geom_RectangularTrimmedSurface)::DownCast(surface);
+    if (trimmed.IsNull())
+      break;
+    surface = trimmed->BasisSurface();
+  }
+  if (surface.IsNull())
+    return BlendSurfaceClass::Approximated;
+  switch (GeomAdaptor_Surface(surface).GetType()) {
+  case GeomAbs_Plane:
+  case GeomAbs_Cylinder:
+  case GeomAbs_Cone:
+  case GeomAbs_Sphere:
+  case GeomAbs_Torus:
+    return BlendSurfaceClass::Analytic;
+  default:
+    return BlendSurfaceClass::Approximated;
+  }
+}
+
+double blend_face_tolerance(const TopoDS_Face &face) {
+  return face.IsNull() ? 0.0 : BRep_Tool::Tolerance(face);
+}
+
 double fillet_section_radius_limit(double radius, double coordinate_magnitude) {
   return std::max(1.0e-9, std::abs(radius) * kSectionRelative) +
          coordinate_magnitude * kConditioning;
@@ -185,6 +221,82 @@ BlendEvidence measure_blend_evidence(
   return out;
 }
 
+namespace {
+
+// Class + tolerance over one face list. SCHEMA §7.3: approximated iff ANY blend
+// face is; the tolerance is the max over the APPROXIMATED faces only.
+void classify_blend_faces(const std::vector<TopoDS_Face> &blend_faces,
+                          BlendSurfaceClass &surface_class,
+                          double &approximation_tolerance,
+                          int &approximated_face_count) {
+  for (const TopoDS_Face &face : blend_faces) {
+    if (classify_blend_face(face) != BlendSurfaceClass::Approximated)
+      continue;
+    surface_class = BlendSurfaceClass::Approximated;
+    ++approximated_face_count;
+    approximation_tolerance =
+        std::max(approximation_tolerance, blend_face_tolerance(face));
+  }
+}
+
+// The support faces of `edges`, mapped through the builder to the output. The
+// same walk `collect_fillet_result_evidence` does, factored so the per-contour
+// and whole-result collectors cannot measure different supports.
+void collect_support_faces(BRepFilletAPI_MakeFillet &builder,
+                           const EdgeFaces &input_edge_faces,
+                           const TopoDS_Edge &edge,
+                           const TopTools_IndexedMapOfShape &output_faces,
+                           std::vector<TopoDS_Face> &support_faces) {
+  if (!input_edge_faces.Contains(edge))
+    return;
+  for (const TopoDS_Shape &support : input_edge_faces.FindFromKey(edge)) {
+    const TopTools_ListOfShape &modified = builder.Modified(support);
+    if (modified.IsEmpty()) {
+      add_output_face(support_faces, support, output_faces);
+      continue;
+    }
+    for (const TopoDS_Shape &successor : modified)
+      add_output_face(support_faces, successor, output_faces);
+  }
+}
+
+} // namespace
+
+std::vector<FilletContourEvidence> collect_fillet_contour_evidence(
+    BRepFilletAPI_MakeFillet &builder, const std::vector<int> &contour_indices,
+    const TopoDS_Shape &input, const TopoDS_Shape &output, double radius) {
+  std::vector<FilletContourEvidence> out;
+  if (input.IsNull() || output.IsNull())
+    return out;
+  TopTools_IndexedMapOfShape output_faces;
+  TopExp::MapShapes(output, TopAbs_FACE, output_faces);
+  EdgeFaces input_edge_faces;
+  TopExp::MapShapesAndAncestors(input, TopAbs_EDGE, TopAbs_FACE,
+                                input_edge_faces);
+  for (int index : contour_indices) {
+    FilletContourEvidence contour;
+    contour.index = index;
+    std::vector<TopoDS_Face> blend_faces;
+    std::vector<TopoDS_Face> support_faces;
+    for (int i = 1; i <= builder.NbEdges(index); ++i) {
+      const TopoDS_Edge edge = builder.Edge(index, i);
+      for (const TopoDS_Shape &generated : builder.Generated(edge))
+        add_output_face(blend_faces, generated, output_faces);
+      collect_support_faces(builder, input_edge_faces, edge, output_faces,
+                            support_faces);
+    }
+    contour.generated_face_count = static_cast<int>(blend_faces.size());
+    contour.support_face_count = static_cast<int>(support_faces.size());
+    classify_blend_faces(blend_faces, contour.surface_class,
+                         contour.approximation_tolerance,
+                         contour.approximated_face_count);
+    contour.blend =
+        measure_blend_evidence(output, blend_faces, support_faces, radius);
+    out.push_back(std::move(contour));
+  }
+  return out;
+}
+
 FilletResultEvidence collect_fillet_result_evidence(
     BRepFilletAPI_MakeFillet &builder, const TopoDS_Shape &input,
     const TopoDS_Shape &output, const std::vector<ResolvedEdge> &requested,
@@ -204,23 +316,14 @@ FilletResultEvidence collect_fillet_result_evidence(
   for (const ResolvedEdge &selected : requested) {
     for (const TopoDS_Shape &generated : builder.Generated(selected.edge))
       add_output_face(blend_faces, generated, output_faces);
-
-    if (!input_edge_faces.Contains(selected.edge))
-      continue;
-    for (const TopoDS_Shape &support :
-         input_edge_faces.FindFromKey(selected.edge)) {
-      const TopTools_ListOfShape &modified = builder.Modified(support);
-      if (modified.IsEmpty()) {
-        add_output_face(support_faces, support, output_faces);
-        continue;
-      }
-      for (const TopoDS_Shape &successor : modified)
-        add_output_face(support_faces, successor, output_faces);
-    }
+    collect_support_faces(builder, input_edge_faces, selected.edge, output_faces,
+                          support_faces);
   }
 
   out.generated_face_count = static_cast<int>(blend_faces.size());
   out.support_face_count = static_cast<int>(support_faces.size());
+  classify_blend_faces(blend_faces, out.surface_class,
+                       out.approximation_tolerance, out.approximated_face_count);
   out.blend = measure_blend_evidence(output, blend_faces, support_faces, radius);
   return out;
 }

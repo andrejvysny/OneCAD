@@ -164,6 +164,16 @@ struct FilletRangeResult {
   int refusal_probes = 0;
   int invalid_probes = 0;
 
+  // SCHEMA §7.6 remnant floor (kernel-hardening WP-G). At least one probe BUILT
+  // a publishable result that nonetheless carried a face below `res²` or an
+  // edge below `res`, and was therefore classified a NON-success. The measure
+  // is the one from the SMALLEST such radius, so it names the first value at
+  // which the search stopped being able to offer clean geometry.
+  bool remnant_floor_hit = false;
+  std::string remnant_floor_kind; // "face" | "edge"
+  double remnant_floor_value = 0.0;  // mm² for a face, mm for an edge
+  double remnant_floor_radius = 0.0;
+
   // The search stopped early because the budget ran out. Bounds are still
   // ordered and still true; they are simply looser than a full run's.
   bool budget_exhausted = false;
@@ -188,6 +198,13 @@ private:
   struct Observation {
     ProbeClassification classification = ProbeClassification::Refusal;
     LimitingEvidence evidence;
+    // WP-G: the probe BUILT and would have published, but the result carries
+    // sub-resolution topology, so it is a non-success like any other. Recorded
+    // separately from `classification` because the MEASURE is what the §7.6
+    // result reports; the classification alone would not say what was too small.
+    bool remnant = false;
+    std::string remnant_kind;
+    double remnant_value = 0.0;
   };
 
   // Returns false when the search must stop (budget, cancellation).

@@ -427,8 +427,18 @@ Envelope handle_analyze_edge_op_range(Session &session, const Envelope &req,
             mode.c_str(), resolved.size(), result.probes_used, stopped,
             answer.confidence.c_str());
 
-  return Envelope::ok_response(
-      req.id,
+  // SCHEMA §7.6 remnant floor (WP-G): OPTIONAL and present only when a probe
+  // was so classified, so a run that never met one is byte-identical to before.
+  json remnant_hit = nullptr;
+  json remnant_measure = nullptr;
+  if (result.remnant_floor_hit) {
+    remnant_hit = true;
+    remnant_measure = json{{"kind", result.remnant_floor_kind},
+                           {"value", result.remnant_floor_value},
+                           {"radius", result.remnant_floor_radius}};
+  }
+
+  json response =
       json{{"snapshotId", published->snapshot_id},
            {"mode", mode},
            {"targetBodyId", picks.body_id},
@@ -450,7 +460,12 @@ Envelope handle_analyze_edge_op_range(Session &session, const Envelope &req,
            {"probesUsed", result.probes_used},
            {"budgetExhausted", result.budget_exhausted},
            {"stoppedReason", stopped},
-           {"refusal", nullptr}});
+           {"refusal", nullptr}};
+  if (!remnant_hit.is_null()) {
+    response["remnantFloorHit"] = remnant_hit;
+    response["remnantFloorMeasure"] = std::move(remnant_measure);
+  }
+  return Envelope::ok_response(req.id, std::move(response));
 }
 
 } // namespace onecad::session

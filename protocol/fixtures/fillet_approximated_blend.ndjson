@@ -1,0 +1,105 @@
+# CANONICAL fixture — kernel-hardening WP-G: the fillet acceptance envelope's
+# two blend classes, on the wire (SCHEMA §7.3 "Two blend classes, two budgets",
+# §7.2 warning `FILLET_BLEND_APPROXIMATED`).
+#
+# WHAT THIS PROVES. OCCT builds a fillet in one of two ways. On a KPart corner it
+# has a closed form and the blend face is a torus/cylinder/cone — ANALYTIC, exact
+# to 2e-16. On anything else it WALKS the blend and fits a B-spline within its own
+# approximation tolerance — APPROXIMATED, and the section radius then wobbles by
+# ~1e-3 mm. Before WP-G both were judged by the same 1e-9 gate, so every walked
+# blend was REFUSED `FILLET_SEMANTIC_CHECK_FAILED` — which is every
+# boss-on-a-shaft and every oblique rim a daily-driver part needs
+# (finding fillet-chamfer-1). Now the class is measured and each gets the budget
+# that fits what it IS, and an approximated blend that publishes says so.
+#
+# THE TWO BODIES, one plan, so the contrast is same-radius and same-run:
+#   `body_op1` — a Ø40 shaft (a r=20 circle on XZ extruded 60 symmetric about the
+#     XZ plane) with a Ø20 boss fused on (a r=10 circle on XY extruded 40 up).
+#     Their intersection is a cylinder/cylinder tee whose seam OCCT splits into
+#     the tangent pair `e:1` + `e:4`; a fillet there is APPROXIMATED.
+#   `body_op5` — a 40 x 20 x 20 box parked at x >= 60 so it cannot interact. Its
+#     vertical edge `e:1` is plane/plane, so a fillet there is ANALYTIC.
+# Both are filleted at r = 2.0. One warns; the other is silent. That is the whole
+# claim, and running them in one session is what makes it a controlled comparison
+# rather than two anecdotes.
+#
+# ONE VOCABULARY. The evidence is exactly the `blendEvidence` object a REFUSAL
+# already emits (`maximumSectionRadiusError`, `allowedSectionRadiusError`,
+# `maximumTangencyRadians`, `allowedTangencyRadians`, the section radii,
+# `coordinateMagnitude`, the two face counts) plus `blendSurfaceClass`,
+# `approximationTolerance`, `maxContourVertexValence` and the two counts
+# `approximatedContours` / `approximatedBlendFaces`. There are NO alias
+# spellings; `test_fillet_acceptance_envelope.cpp` asserts their absence, because
+# two names for one number is how the two tracks drift apart.
+#
+# WHAT IS PINNED, AND WHAT IS NOT. Everything a reader BRANCHES on is literal:
+# the warning's `code`, `severity`, `stage`, `evidence.blendSurfaceClass`, and the
+# counts (`approximatedContours`, `approximatedBlendFaces`, `generatedFaceCount`,
+# `supportFaceCount`, `boundaryCount`, `sampleCount`, `maxContourVertexValence`).
+# The MEASUREMENTS are `$any`: `maximumSectionRadiusError`,
+# `maximumTangencyRadians`, the section radii and `coordinateMagnitude` are
+# OCCT's arithmetic, not a protocol fact, and `json_subset` compares numbers
+# exactly — NDJSON is the wrong instrument for a value allowed to move in its
+# last bits. Their measured pins live in
+# `worker/tests/test_fillet_acceptance_envelope.cpp`, which asserts case 1 at
+# 1.97e-3 mm +/-10 % and 1.24e-5 rad +/-20 % (and case 2 at 2.87e-3 / 4.94e-6) —
+# the numbers SCHEMA §14 records.
+#
+# `allowedSectionRadiusError` IS literal (0.02) because it is not a measurement:
+# it is `min(r x kRelSection, kSectionCeiling)` = `min(2 x 0.01, 0.05)`, the
+# budget the SCHEMA defines, and a change to it is a change to `kRelSection` or
+# `kSectionCeiling` — which SCHEMA §7.3 makes a §14 entry with a new measurement,
+# exactly the thing that must not happen silently.
+#
+# `approximationTolerance` and `allowedTangencyRadians` are `$any` DESPITE being
+# the same kind of thing, because the second is derived from the first
+# (`min(max(1e-9, kTangencyFactor x tol / r), 1e-2)`, here 4 x 1e-4 / 2 = 2e-4 on
+# macOS) and the first is whatever tolerance OCCT chose to fit this blend to. A
+# Linux build of the same OCCT version may choose differently, and this file must
+# pass on both. `kTangencyFactor` is pinned by the envelope test's margin
+# assertion instead.
+#
+# `maxContourVertexValence` is 0 here and that is correct, not missing: the tee
+# seam is a CLOSED contour, so its edge chain has no end vertex to count.
+#
+# The warning is the ONLY diagnostic on the seam step, and the box step's
+# `diagnostics` is pinned EMPTY — the harness matches arrays element by element
+# from index 0, so `[]` asserts "nothing", which is the half of the contract that
+# says an analytic blend stays silent.
+{"expect": {"v": 1, "t": "hello", "seq": 0}}
+{"send": {"v": 1, "t": "req", "id": 1, "verb": "OpenSession", "args": {"documentId": "doc_fillet_approximated_blend", "documentRevision": 0, "workerEpoch": 4, "mode": "determinism"}}}
+{"expect": {"v": 1, "t": "resp", "id": 1, "ok": true, "result": {"sessionOpen": true}}}
+# The two bodies. Six steps, one plan: the shaft, the boss fused onto it,
+# and the untouched box the analytic half of the comparison is taken on.
+{"send": {"v": 1, "t": "req", "id": 2, "verb": "ExecutePlan", "args": {"jobId": 70, "documentRevision": 1, "workerEpoch": 4, "expectedBaseHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "prefixHashes": ["0101010101010101010101010101010101010101010101010101010101010101", "0202020202020202020202020202020202020202020202020202020202020202", "0303030303030303030303030303030303030303030303030303030303030303", "0404040404040404040404040404040404040404040404040404040404040404", "0505050505050505050505050505050505050505050505050505050505050505", "0606060606060606060606060606060606060606060606060606060606060606"], "targetStep": 5, "ops": [{"opType": "Sketch", "opId": "op0", "stepIndex": 0, "params": {"sketchId": "sk1", "plane": {"kind": "XZ"}, "entities": [{"id": "c1", "type": "Circle", "center": [0, 0], "radius": 20}], "constraints": []}}, {"opType": "Extrude", "opId": "op1", "stepIndex": 1, "inputs": [], "params": {"sketchId": "sk1", "distance": 60, "booleanMode": "NewBody", "extrudeMode": "Symmetric"}}, {"opType": "Sketch", "opId": "op2", "stepIndex": 2, "params": {"sketchId": "sk2", "plane": {"kind": "XY"}, "entities": [{"id": "c2", "type": "Circle", "center": [0, 0], "radius": 10}], "constraints": []}}, {"opType": "Extrude", "opId": "op3", "stepIndex": 3, "inputs": [], "params": {"sketchId": "sk2", "distance": 40, "booleanMode": "Add", "extrudeMode": "Blind", "targetBodyId": "body_op1"}}, {"opType": "Sketch", "opId": "op4", "stepIndex": 4, "params": {"sketchId": "sk3", "plane": {"kind": "XY"}, "entities": [{"id": "l1", "type": "Line", "p0": [60, -10], "p1": [100, -10]}, {"id": "l2", "type": "Line", "p0": [100, -10], "p1": [100, 10]}, {"id": "l3", "type": "Line", "p0": [100, 10], "p1": [60, 10]}, {"id": "l4", "type": "Line", "p0": [60, 10], "p1": [60, -10]}], "constraints": []}}, {"opType": "Extrude", "opId": "op5", "stepIndex": 5, "inputs": [], "params": {"sketchId": "sk3", "distance": 20, "booleanMode": "NewBody", "extrudeMode": "Blind"}}]}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 0, "jobId": 70, "payload": {"bodyEvents": [], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 1, "jobId": 70, "payload": {"bodyEvents": [{"kind": "created", "bodyId": "body_op1"}], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 2, "jobId": 70, "payload": {"bodyEvents": [], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 3, "jobId": 70, "payload": {"bodyEvents": [{"kind": "modified", "bodyId": "body_op1"}], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 4, "jobId": 70, "payload": {"bodyEvents": [], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "event", "id": 2, "event": "planStep", "stepIndex": 5, "jobId": 70, "payload": {"bodyEvents": [{"kind": "created", "bodyId": "body_op5"}], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "resp", "id": 2, "ok": true, "jobId": 70, "result": {"planPrepared": true, "lastValidStep": 5, "stoppedReason": "completed"}}}
+{"send": {"v": 1, "t": "req", "id": 3, "verb": "AcceptPrepared", "args": {"jobId": 70, "documentRevision": 1, "workerEpoch": 4}}}
+{"expect": {"v": 1, "t": "resp", "id": 3, "ok": true, "jobId": 70, "result": {"accepted": true, "snapshotId": 1, "documentRevision": 1}}}
+# `e:1` and `e:4` are the two halves OCCT split the tee seam into; both are
+# named because `tangentClosureVersion: 1` requires the stored closure to
+# match the live one exactly, and a seed-only record would halt.
+{"send": {"v": 1, "t": "req", "id": 4, "verb": "BindElementIds", "args": {"snapshotId": 1, "bindings": [{"bodyId": "body_op1", "topoKey": "e:1", "elementId": "el_seam_a", "kind": "edge"}, {"bodyId": "body_op1", "topoKey": "e:4", "elementId": "el_seam_b", "kind": "edge"}, {"bodyId": "body_op5", "topoKey": "e:1", "elementId": "el_box_edge", "kind": "edge"}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 4, "ok": true, "result": {"bound": [{"bodyId": "body_op1", "topoKey": "e:1", "elementId": "el_seam_a", "kind": "edge"}, {"bodyId": "body_op1", "topoKey": "e:4", "elementId": "el_seam_b", "kind": "edge"}, {"bodyId": "body_op5", "topoKey": "e:1", "elementId": "el_box_edge", "kind": "edge"}]}}}
+# APPROXIMATED — the cylinder/cylinder tee seam. Publishes, and says so.
+{"send": {"v": 1, "t": "req", "id": 5, "verb": "ExecutePlan", "args": {"jobId": 71, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "0606060606060606060606060606060606060606060606060606060606060606", "prefixHashes": ["0707070707070707070707070707070707070707070707070707070707070707"], "targetStep": 6, "ops": [{"opType": "Fillet", "opId": "op6", "stepIndex": 6, "inputs": [{"primary": {"bodyId": "body_op1", "elementId": "el_seam_a", "kind": "edge"}, "anchor": {"worldPoint": [0.0, -4.999999999999999, 18.660254037844382]}}, {"primary": {"bodyId": "body_op1", "elementId": "el_seam_b", "kind": "edge"}, "anchor": {"worldPoint": [0.0, -4.999999999999999, 18.660254037844382]}}], "params": {"mode": "Fillet", "radius": 2.0, "edgeIds": ["el_seam_a", "el_seam_b"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op1"}}]}}}
+{"expect": {"v": 1, "t": "event", "id": 5, "event": "planStep", "stepIndex": 6, "jobId": 71, "payload": {"bodyEvents": [{"kind": "modified", "bodyId": "body_op1"}], "diagnostics": [{"severity": "warning", "code": "FILLET_BLEND_APPROXIMATED", "stage": "publication", "message": "$present", "evidence": {"blendSurfaceClass": "approximated", "approximationTolerance": "$any", "approximatedContours": 1, "approximatedBlendFaces": 2, "generatedFaceCount": 2, "supportFaceCount": 2, "boundaryCount": 4, "sampleCount": 50, "maxContourVertexValence": 0, "allowedSectionRadiusError": 0.02, "allowedTangencyRadians": "$any", "maximumSectionRadiusError": "$any", "maximumTangencyRadians": "$any", "minimumSectionRadius": "$any", "maximumSectionRadius": "$any", "coordinateMagnitude": "$any"}}]}}}
+{"expect": {"v": 1, "t": "resp", "id": 5, "ok": true, "jobId": 71, "result": {"planPrepared": true, "lastValidStep": 6, "stoppedReason": "completed", "perStepResults": [{"stepIndex": 6, "status": "ok", "bodyIds": ["body_op1"]}]}}}
+{"send": {"v": 1, "t": "req", "id": 6, "verb": "DiscardPrepared", "args": {"jobId": 71}}}
+{"expect": {"v": 1, "t": "resp", "id": 6, "ok": true, "jobId": 71, "result": {"discarded": true}}}
+# ANALYTIC — the same radius on the box's vertical edge. Publishes, silent.
+{"send": {"v": 1, "t": "req", "id": 7, "verb": "ExecutePlan", "args": {"jobId": 72, "documentRevision": 2, "workerEpoch": 4, "expectedBaseHash": "0606060606060606060606060606060606060606060606060606060606060606", "prefixHashes": ["0707070707070707070707070707070707070707070707070707070707070707"], "targetStep": 6, "ops": [{"opType": "Fillet", "opId": "op6", "stepIndex": 6, "inputs": [{"primary": {"bodyId": "body_op5", "elementId": "el_box_edge", "kind": "edge"}, "anchor": {"worldPoint": [10.0, 60.0, 10.0]}}], "params": {"mode": "Fillet", "radius": 2.0, "edgeIds": ["el_box_edge"], "chainTangentEdges": true, "tangentClosureVersion": 1, "targetBodyId": "body_op5"}}]}}}
+{"expect": {"v": 1, "t": "event", "id": 7, "event": "planStep", "stepIndex": 6, "jobId": 72, "payload": {"bodyEvents": [{"kind": "modified", "bodyId": "body_op5"}], "diagnostics": []}}}
+{"expect": {"v": 1, "t": "resp", "id": 7, "ok": true, "jobId": 72, "result": {"planPrepared": true, "lastValidStep": 6, "stoppedReason": "completed", "perStepResults": [{"stepIndex": 6, "status": "ok", "bodyIds": ["body_op5"]}]}}}
+{"send": {"v": 1, "t": "req", "id": 8, "verb": "DiscardPrepared", "args": {"jobId": 72}}}
+{"expect": {"v": 1, "t": "resp", "id": 8, "ok": true, "jobId": 72, "result": {"discarded": true}}}
+# Neither prepared plan was accepted, so the head is exactly where step 5 left it.
+{"send": {"v": 1, "t": "req", "id": 9, "verb": "GetWorkerHead", "args": {}}}
+{"expect": {"v": 1, "t": "resp", "id": 9, "ok": true, "result": {"documentRevision": 1, "workerEpoch": 4, "snapshotId": 1, "hasScratch": false, "historyPrefixHash": "0606060606060606060606060606060606060606060606060606060606060606"}}}
+{"send": {"v": 1, "t": "req", "id": 10, "verb": "Shutdown", "args": {}}}
+{"expect": {"v": 1, "t": "resp", "id": 10, "ok": true, "result": {"goodbye": true}}}
