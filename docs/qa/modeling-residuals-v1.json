@@ -83,12 +83,12 @@
       "id": "MC-R9",
       "status": "open",
       "category": "browser-lane-nondeterminism",
-      "impact": "e2e/revolve-commit.spec.ts:111 ('Revolve guidance') failed in ONE full chromium run that took 19 min instead of the usual 14 because the machine was loaded, and passes in isolation and on the clean re-run. Superficially MC-R8's signature, but NOT the same mechanism: that spec already calls waitForCameraSettled at both of its probe sites (:124, :130), so the debounced auto-fit cannot explain it. Un-root-caused, so the browser gate is measured green rather than reproducibly green.",
-      "affectedVersions": "e2e mock lane, chromium as observed 2026-08-14",
+      "impact": "e2e/revolve-commit.spec.ts:111 ('Revolve guidance') failed in ONE full chromium run that took 19 min instead of the usual 14 because the machine was loaded, and passes in isolation and on the clean re-run. Superficially MC-R8's signature, but NOT the same mechanism: that spec already calls waitForCameraSettled at both of its probe sites (:124, :130), so the debounced auto-fit cannot explain it. Un-root-caused, so the browser gate is measured green rather than reproducibly green. 2026-09-09 REVIEWED, KEPT OPEN. A second occurrence landed at the same line on the OTHER project (webkit, 261/262, CI run 34002553498): 'revolve-empty-hint' not visible within 8 s after clicking Revolve straight after openEditorDebug. Commit 8602b45 added a waitForCameraSettled BEFORE the arm — a point earlier in the test than the two probe sites MC-R9's own analysis had already ruled out — on the reasoning that the empty-state banner is an engine overlay item with nothing to draw on before the engine settles. That is a NAMED CAUSE, not a measured one: both the commit message and the TODO.md row record 'not reproduced locally' (webkit 10/10 in 44 s before the fix, 10/10 after). The spec then passed on both projects in the 2026-09-09 L3 (e2e 524/0). Under this entry's own closure rule that is a clean re-run, so it does not close. What WOULD close it: a reproduction under load that shows the banner absent while the engine is unsettled, or an instrumented run pinning which of the two orderings was actually taken.",
+      "affectedVersions": "e2e mock lane; chromium as observed 2026-08-14, webkit as observed 2026-09-05 (CI run 34002553498)",
       "reproduction": "Full chromium suite under load, retries 0. Not reproducible in isolation.",
       "owner": "revolve commit lane",
       "mustNotWorsenTest": "e2e/revolve-commit.spec.ts",
-      "reopeningTrigger": "Already open. Closes only on a measured root cause, never on a clean re-run or a retry."
+      "reopeningTrigger": "Already open. Closes only on a measured root cause, never on a clean re-run or a retry. The 2026-09-09 ordering fix (8602b45) is a named cause with no local reproduction and does not satisfy this rule."
     },
     {
       "id": "MC-R6",

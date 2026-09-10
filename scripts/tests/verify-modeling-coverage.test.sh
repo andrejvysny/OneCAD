@@ -107,4 +107,19 @@ expect_contracts_failure \
   'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));x.rows[0].operation="Bevel";fs.writeFileSync(p,JSON.stringify(x))' \
   "an operation absent from the coverage manifest"
 
+# The two SEMANTIC controls (WP-S1 rider R2). Shape checks alone let the manifest
+# claim Extrude/NewBody publishes at Tier A for as long as anyone cared to read
+# it; these prove a stated VALUE can now go red against the code it describes.
+expect_contracts_failure \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.operation==="Fillet");r.validationTier="Tier A plus semantic edge diagnostics";fs.writeFileSync(p,JSON.stringify(x))' \
+  "a validationTier claiming Tier A for an op the worker publishes at Tier B"
+
+expect_contracts_failure \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.operation==="TransformBody");r.validationTier="Tier B per result";fs.writeFileSync(p,JSON.stringify(x))' \
+  "a validationTier claiming Tier B for an op that never requests it"
+
+expect_contracts_failure \
+  'const fs=require("node:fs"),p=process.argv[1],x=JSON.parse(fs.readFileSync(p));const r=x.rows.find(r=>r.operation==="Loft");r.supportStatus="supported";r.uiExposure="exposed";fs.writeFileSync(p,JSON.stringify(x))' \
+  "an operation marked supported with no worker dispatch arm"
+
 echo "modeling verifier negative controls: OK"

@@ -36,10 +36,19 @@ that the change was unintended.
 
 ## What is pinned today
 
-| Suite | Rows | Recorded |
-|---|---|---|
-| `fillet/foundation:t0` | 136 | linux-x64 2026-08-14 · darwin-arm64 2026-08-15, semantic-publication hardening |
-| `fillet/matrix:m1` | 120 | 2026-08-09, GH-0 WP0.3 |
+| Suite | Rows per platform | Platforms recorded | Recorded |
+|---|---|---|---|
+| `fillet/foundation:t0` | 136 | linux-x64 **and** darwin-arm64 (272 rows total) | linux-x64 2026-08-14 · darwin-arm64 2026-08-15, semantic-publication hardening |
+| `fillet/matrix:m1` | 336 | **darwin-arm64 only** (336 rows total; zero linux-x64) | 2026-08-09, GH-0 WP0.3 |
+
+Counted off `digests.json` on 2026-09-09, not off memory — this table previously
+said m1 was 120 rows, which it has not been for some time.
+
+**`fillet/matrix:m1` has no Linux baseline, and that is a real hole.** m1 is the
+336-row metamorphic campaign that caught WP-G's exact-geometry widening defect,
+and a Linux-only regression on the support-surface matrix currently has nothing
+to fail against. Recording those rows needs a Linux run; until then, treat a
+green m1 as evidence about darwin-arm64 alone.
 
 ### 2026-08-14 T0 semantic update
 
