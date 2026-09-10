@@ -1,0 +1,72 @@
+# CANONICAL §7.4 fixture — `SketchRegions` DIAGNOSTICS (kernel-hardening WP-S1,
+# 2026-09-09).
+#
+# WHY THIS EXISTS. Until this build `SketchRegions` had no diagnostics channel at
+# all: every refusal crossed the wire as one opaque sentence naming nothing, and
+# every advisory the detector produced was dropped on this lane. Measured on a
+# real interactive session (`logs/dev.jsonl`, 2026-09-09 17:30): a hand-drawn
+# profile was refused with "profile has overlapping or coincident analytic
+# curves" and the user had no way to learn WHICH curves, so the sketch dead-ended.
+#
+# WHAT THIS FILE PINS
+#
+#   * The refusal keeps its EXISTING §8 `error.code` — `OP_FAILED` — and the
+#     reason rides `detail.diagnostics[].reasonCode`. This is the load-bearing
+#     half: §8's taxonomy is closed, `onecad-protocol/src/messages.rs` parses
+#     `error.code` into an enum with no catch-all, and the client treats a
+#     malformed envelope as a desynchronized stream and fails EVERY in-flight
+#     request. A new top-level code would cost the connection on every refused
+#     profile.
+#   * All three fields §7.2 makes required are present — `severity`, `code`,
+#     `message` — plus `stage`. A reader DROPS an entry missing any of them, so an
+#     entry carrying only `reasonCode` and `evidence` would publish nothing at all.
+#     `message` is deliberately NOT pinned here: it is the human sentence and the
+#     stderr log, and pinning it would freeze prose. `reasonCode` is what a
+#     consumer routes on and it IS pinned.
+#   * `evidence.entityIds` are WIRE entity ids, not the detector's internal ones.
+#     The detector works in an internal id space and splits sources into fragments;
+#     the ids here have been mapped back through the same `mapBaseEdge` seam the
+#     advisory warnings use. An id that cannot be mapped is OMITTED rather than
+#     published raw — an id that resolves to nothing is worse than saying nothing.
+#   * ORDER IS NORMATIVE: ascending by analytic source index, which is what lets a
+#     subset matcher pin an array element-by-element at all.
+#   * The success leg pins the OTHER half — the advisory channel. A degenerate
+#     entity is dropped and detection CONTINUES, and until this build that drop was
+#     invisible in sketch mode (it reached the wire only on the modeling path's
+#     `planStep`). The region still publishes normally, which is the point: this is
+#     an advisory, not a refusal.
+#
+# WHAT THIS FILE DOES NOT PIN. Cancellation has no reason code: it is unreachable
+# for this verb at this build (the solver lane never plumbs the job's cancel token
+# into the detector) and the Rust `Cancelled` error has no field to carry a
+# diagnostic. The solver lane's own refusals — unknown sketch id, wire translation,
+# a non-converged solve, hole triangulation, an incomplete fill, a duplicate binary
+# section — carry no reason code by design; `reasonCode` stays OPTIONAL per §7.2,
+# and its absence means this producer made no claim.
+#
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+
+# --- LEG 1: a genuine overlap refuses, and NAMES BOTH CURVES -------------------
+# L1 runs (0,0)->(20,0) and L2 runs (10,0)->(40,0): the two share one analytic
+# support and overlap over [10,20]. L3/L4/L5 close the chain so the only defect is
+# the overlap. A point tangency is NOT this case — two collinear segments that
+# merely touch end-to-end collapse to one split and publish normally, which
+# `worker/tests/test_region_table.cpp` pins as a positive control.
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"ov","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[20,0]},{"id":"p3","type":"Point","at":[10,0]},{"id":"p4","type":"Point","at":[40,0]},{"id":"p5","type":"Point","at":[40,20]},{"id":"p6","type":"Point","at":[0,20]},{"id":"L1","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"L2","type":"Line","p0Ref":"p3","p1Ref":"p4"},{"id":"L3","type":"Line","p0Ref":"p4","p1Ref":"p5"},{"id":"L4","type":"Line","p0Ref":"p5","p1Ref":"p6"},{"id":"L5","type":"Line","p0Ref":"p6","p1Ref":"p1"}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchId":"ov"}}}
+
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchRegions","args":{"sketchId":"ov"}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":false,"error":{"code":"OP_FAILED","retriable":false,"detail":{"diagnostics":[{"severity":"error","code":"OP_FAILED","stage":"profile","reasonCode":"SKETCH_PROFILE_OVERLAPPING_CURVES","evidence":{"entityIds":["L1","L2"]}}]}}}}
+
+# --- LEG 2: a degenerate entity is an ADVISORY, and the region still publishes --
+# `Ldeg` is 1e-7 mm long, below the detector's 1e-6 mm node-merge coincidence
+# tolerance, so its endpoints would collapse into one node and it can carry no
+# edge. It is dropped and detection CONTINUES — the rectangle publishes as one
+# region whose outer loop is exactly L1..L4, and the drop is now visible on this
+# lane instead of only on the modeling path.
+{"send":{"v":1,"t":"req","id":3,"verb":"SketchUpsert","args":{"sketchId":"dg","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[40,0]},{"id":"p3","type":"Point","at":[40,20]},{"id":"p4","type":"Point","at":[0,20]},{"id":"p5","type":"Point","at":[0.0000001,0]},{"id":"L1","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"L2","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"L3","type":"Line","p0Ref":"p3","p1Ref":"p4"},{"id":"L4","type":"Line","p0Ref":"p4","p1Ref":"p1"},{"id":"Ldeg","type":"Line","p0Ref":"p1","p1Ref":"p5"}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"upserted":true,"sketchId":"dg"}}}
+
+{"send":{"v":1,"t":"req","id":4,"verb":"SketchRegions","args":{"sketchId":"dg"}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"sketchId":"dg","regionIdentityVersion":3,"diagnostics":[{"severity":"warning","code":"SKETCH_ENTITY_DEGENERATE","stage":"profile","evidence":{"entityId":"Ldeg"}}],"regions":[{"outerLoop":["L1","L2","L3","L4"],"holes":[]}]}}}

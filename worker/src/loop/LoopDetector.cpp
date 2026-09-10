@@ -40,6 +40,25 @@ namespace onecad::core::loop {
 
 constexpr double kMinArea = 1e-6;
 
+// SCHEMA §7.4: a refusal carries a machine-routable reason beside the human
+// sentence. `message` stays byte-identical at every site — it is both the
+// stderr log and the wire `message`, and widening or rewording it would change
+// what the detector reports, not just how a consumer routes on it.
+void refuse(AdjacencyGraph& graph, std::string message, ProfileRefusalReason reason,
+            std::vector<sk::EntityID> entityIds = {}) {
+    graph.errorMessage = std::move(message);
+    graph.refusal.reason = reason;
+    graph.refusal.entityIds = std::move(entityIds);
+}
+
+void refuseLimit(AdjacencyGraph& graph, std::string message, const char* limitName,
+                 std::size_t limit, std::size_t measured) {
+    refuse(graph, std::move(message), ProfileRefusalReason::LimitExceeded);
+    graph.refusal.limitName = limitName;
+    graph.refusal.limit = static_cast<std::uint64_t>(limit);
+    graph.refusal.measured = static_cast<std::uint64_t>(measured);
+}
+
 sk::Vec2d toVec2(const gp_Pnt2d& p) {
     return {p.X(), p.Y()};
 }
@@ -161,6 +180,15 @@ struct AnalyticSource {
     sk::Vec2d boundsMin{};
     sk::Vec2d boundsMax{};
 };
+
+/// The two base entities of a refused curve pair. SCHEMA §7.4 fixes the order
+/// as ascending source index, which `candidatePairs` already guarantees
+/// (`first < second`); asserting it here keeps a future caller from reversing it.
+std::vector<sk::EntityID> pairEntityIds(const std::vector<AnalyticSource>& sources,
+                                        std::size_t first, std::size_t second) {
+    if (first > second) std::swap(first, second);
+    return {sources[first].fragment.baseEntityId, sources[second].fragment.baseEntityId};
+}
 
 /// Chord tolerance for fragment sampling (mm): ten times the authoring
 /// resolution, i.e. the largest polygon-to-curve gap region detection is willing
@@ -763,6 +791,7 @@ LoopDetectionResult LoopDetector::detect(const sk::Sketch& sketch,
     if (!graph) {
         result.success = false;
         result.errorMessage = "Failed to build adjacency graph";
+        result.refusal.reason = ProfileRefusalReason::GraphBuildFailed;
         return result;
     }
     // Advisory findings survive a later refusal: they are often WHY it refused.
@@ -772,6 +801,7 @@ LoopDetectionResult LoopDetector::detect(const sk::Sketch& sketch,
     if (!graph->errorMessage.empty()) {
         result.success = false;
         result.errorMessage = graph->errorMessage;
+        result.refusal = graph->refusal;
         return result;
     }
 
@@ -1233,13 +1263,16 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                                    entity->type() == sk::EntityType::Ellipse;
             if (supported &&
                 config_.curveRefinementPolicy == CurveRefinementPolicy::V3PhysicalProximity) {
-                graph->errorMessage = "profile refinement could not preserve analytic provenance";
+                refuse(*graph, "profile refinement could not preserve analytic provenance",
+                       ProfileRefusalReason::RefinementFailed, {entity->id()});
                 return graph;
             }
             continue;
         }
         if (sources.size() >= config_.maxPlanarizedSources) {
-            graph->errorMessage = "profile refinement exceeds analytic-source limit";
+            refuseLimit(*graph, "profile refinement exceeds analytic-source limit",
+                        "maxPlanarizedSources", config_.maxPlanarizedSources,
+                        sources.size() + 1);
             return graph;
         }
         sources.push_back(std::move(*source));
@@ -1274,7 +1307,9 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             if (!boxesMayTouch(sources[first], sources[second])) continue;
             candidatePairs.emplace(first, second);
             if (candidatePairs.size() > config_.maxPlanarizedCurvePairs) {
-                graph->errorMessage = "profile refinement exceeds curve-pair limit";
+                refuseLimit(*graph, "profile refinement exceeds curve-pair limit",
+                            "maxPlanarizedCurvePairs", config_.maxPlanarizedCurvePairs,
+                            candidatePairs.size());
                 return graph;
             }
         }
@@ -1292,7 +1327,9 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                                sources[i].fragment.lastParameter,
                                sources[i].fragment.endPoint, tolerance,
                                config_.curveRefinementPolicy)) {
-                graph->errorMessage = "profile refinement could not measure exact curve distance";
+                refuse(*graph, "profile refinement could not measure exact curve distance",
+                       ProfileRefusalReason::RefinementFailed,
+                       {sources[i].fragment.baseEntityId});
                 return graph;
             }
         }
@@ -1311,7 +1348,8 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             const auto firstParameter = projectCurveParameter(sources[first], point, tolerance);
             const auto secondParameter = projectCurveParameter(sources[second], point, tolerance);
             if (!firstParameter || !secondParameter) {
-                graph->errorMessage = "profile refinement could not parameterize analytic intersection";
+                refuse(*graph, "profile refinement could not parameterize analytic intersection",
+                       ProfileRefusalReason::RefinementFailed, pairEntityIds(sources, first, second));
                 return graph;
             }
             const sk::Vec2d shared{point.X(), point.Y()};
@@ -1319,7 +1357,8 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                                tolerance, config_.curveRefinementPolicy) ||
                 !addCurveSplit(splits[second], sources[second], *secondParameter, shared,
                                tolerance, config_.curveRefinementPolicy)) {
-                graph->errorMessage = "profile refinement could not measure exact curve distance";
+                refuse(*graph, "profile refinement could not measure exact curve distance",
+                       ProfileRefusalReason::RefinementFailed, pairEntityIds(sources, first, second));
                 return graph;
             }
         }
@@ -1332,7 +1371,9 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             Handle(Geom2d_Curve) secondSegment;
             intersector.Segment(index, firstSegment, secondSegment);
             if (shareAnalyticSupport(sources[first], sources[second], tolerance)) {
-                graph->errorMessage = "profile has overlapping or coincident analytic curves";
+                refuse(*graph, "profile has overlapping or coincident analytic curves",
+                       ProfileRefusalReason::OverlappingCurves,
+                       pairEntityIds(sources, first, second));
                 return graph;
             }
             // Different supports can only meet at a point. OCCT's tolerance may
@@ -1343,7 +1384,8 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             const auto firstParameter = projectCurveParameter(sources[first], point, tolerance);
             const auto secondParameter = projectCurveParameter(sources[second], point, tolerance);
             if (!firstParameter || !secondParameter) {
-                graph->errorMessage = "profile refinement could not parameterize tangent contact";
+                refuse(*graph, "profile refinement could not parameterize tangent contact",
+                       ProfileRefusalReason::RefinementFailed, pairEntityIds(sources, first, second));
                 return graph;
             }
             const sk::Vec2d shared{point.X(), point.Y()};
@@ -1351,7 +1393,8 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                                tolerance, config_.curveRefinementPolicy) ||
                 !addCurveSplit(splits[second], sources[second], *secondParameter, shared,
                                tolerance, config_.curveRefinementPolicy)) {
-                graph->errorMessage = "profile refinement could not measure exact curve distance";
+                refuse(*graph, "profile refinement could not measure exact curve distance",
+                       ProfileRefusalReason::RefinementFailed, pairEntityIds(sources, first, second));
                 return graph;
             }
         }
@@ -1360,7 +1403,8 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             // Their shared authored endpoint is already in `splits`; they need no
             // intersection refinement. Other failures remain deterministic refusal.
             if (shareAuthoredEndpoint(sources[first], sources[second], tolerance)) continue;
-            graph->errorMessage = "profile refinement failed for analytic curve pair";
+            refuse(*graph, "profile refinement failed for analytic curve pair",
+                   ProfileRefusalReason::RefinementFailed, pairEntityIds(sources, first, second));
             return graph;
         }
     }
@@ -1409,19 +1453,24 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                 const std::optional<double> distance = physicalCurveIntervalLength(
                     sources[sourceIndex], start.parameter, end.parameter, tolerance);
                 if (!distance.has_value()) {
-                    graph->errorMessage =
-                        "profile refinement could not measure exact curve distance";
+                    refuse(*graph, "profile refinement could not measure exact curve distance",
+                           ProfileRefusalReason::RefinementFailed,
+                           {sources[sourceIndex].fragment.baseEntityId});
                     return graph;
                 }
                 if (*distance <= tolerance) continue;
             }
             if (config_.curveRefinementPolicy == CurveRefinementPolicy::V3PhysicalProximity &&
                 !exactFragmentIsContinuous(sources[sourceIndex], start, end, tolerance)) {
-                graph->errorMessage = "profile refinement found an exact-curve discontinuity";
+                refuse(*graph, "profile refinement found an exact-curve discontinuity",
+                       ProfileRefusalReason::Discontinuous,
+                       {sources[sourceIndex].fragment.baseEntityId});
                 return graph;
             }
             if (++fragmentCount > config_.maxPlanarizedFragments) {
-                graph->errorMessage = "profile refinement exceeds fragment limit";
+                refuseLimit(*graph, "profile refinement exceeds fragment limit",
+                            "maxPlanarizedFragments", config_.maxPlanarizedFragments,
+                            fragmentCount);
                 return graph;
             }
             int startNode = graph->findOrCreateNode(start.point, std::nullopt, tolerance);

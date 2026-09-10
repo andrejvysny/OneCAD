@@ -746,6 +746,112 @@ void test_coincident_analytic_curves_refuse_stably() {
           "coincident analytic refusal remains stable");
 }
 
+json rect_with_split_bottom_edge() {
+    // A rectangle whose BOTTOM edge is drawn as two collinear segments meeting
+    // end-to-end at (20,0) — i.e. a polyline running straight through a vertex,
+    // which is what any hand-drawn chain produces when the user clicks a point
+    // on a straight run. The two segments share one analytic support (the same
+    // infinite line) and touch at exactly one point.
+    return {
+        {"sketchId", "split-bottom-rect"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(401)}, {"type", "Line"}, {"p0", {0, 0}}, {"p1", {20, 0}}},
+             {{"id", uuid(402)}, {"type", "Line"}, {"p0", {20, 0}}, {"p1", {40, 0}}},
+             {{"id", uuid(403)}, {"type", "Line"}, {"p0", {40, 0}}, {"p1", {40, 20}}},
+             {{"id", uuid(404)}, {"type", "Line"}, {"p0", {40, 20}}, {"p1", {0, 20}}},
+             {{"id", uuid(405)}, {"type", "Line"}, {"p0", {0, 20}}, {"p1", {0, 0}}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+// PROBE (WP-S1 S0): a straight-through polyline vertex must NOT be mistaken for
+// an overlapping profile. Two collinear segments that merely TOUCH share an
+// analytic support, so if `Geom2dAPI_InterCurveCurve` reports the contact as a
+// zero-length segment rather than a point, `LoopDetector.cpp:1335` refuses the
+// whole profile.
+void test_collinear_touching_segments_publish_one_region() {
+    const json sketch = rect_with_split_bottom_edge();
+    onecad::wire::TranslateResult translated = onecad::wire::translate(sketch);
+    check(translated.ok, "split-bottom wire sketch translates");
+    if (!translated.ok) return;
+    const sk::SolveResult solve = translated.sketch->solve();
+    check(solve.success, "split-bottom wire sketch solves");
+    if (!solve.success) return;
+
+    loop::LoopDetector detector;
+    detector.setConfig(loop::makeRegionDetectionConfig());
+    const loop::LoopDetectionResult detected = detector.detect(*translated.sketch);
+    std::fprintf(stderr, "PROBE collinear-touching: success=%d error=\"%s\"\n",
+                 detected.success ? 1 : 0, detected.errorMessage.c_str());
+    check(detected.success,
+          "a straight-through polyline vertex is not an overlapping profile");
+    if (!detected.success) return;
+
+    const loop::RegionTable table = table_from(sketch);
+    check(table.success && table.regions.size() == 1,
+          "split-bottom rectangle publishes exactly one region");
+    if (!table.success || table.regions.size() != 1) return;
+    std::string error;
+    const auto face = onecad::ops::build_profile_face(sketch, table.regions[0].id, 2, error);
+    check(face.has_value(), "split-bottom region resolves to a face: " + error);
+    if (face) {
+        check(std::abs(face_area(*face) - 800.0) < 1e-6,
+              "split-bottom rectangle keeps its 800 mm2 area");
+    }
+}
+
+json overlapping_collinear_lines() {
+    // Two collinear segments that genuinely OVERLAP over [10,20] plus a closing
+    // chain. This one MUST refuse — the probe is about the refusal naming which
+    // two entities are at fault, not about accepting it.
+    return {
+        {"sketchId", "overlapping-collinear"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(411)}, {"type", "Line"}, {"p0", {0, 0}}, {"p1", {20, 0}}},
+             {{"id", uuid(412)}, {"type", "Line"}, {"p0", {10, 0}}, {"p1", {40, 0}}},
+             {{"id", uuid(413)}, {"type", "Line"}, {"p0", {40, 0}}, {"p1", {40, 20}}},
+             {{"id", uuid(414)}, {"type", "Line"}, {"p0", {40, 20}}, {"p1", {0, 20}}},
+             {{"id", uuid(415)}, {"type", "Line"}, {"p0", {0, 20}}, {"p1", {0, 0}}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+// PROBE (WP-S1 S0): a genuine overlap must refuse AND name the two entities.
+void test_overlapping_collinear_lines_name_both_entities() {
+    const json sketch = overlapping_collinear_lines();
+    onecad::wire::TranslateResult translated = onecad::wire::translate(sketch);
+    check(translated.ok, "overlapping-collinear wire sketch translates");
+    if (!translated.ok) return;
+    const sk::SolveResult solve = translated.sketch->solve();
+    check(solve.success, "overlapping-collinear wire sketch solves");
+    if (!solve.success) return;
+
+    loop::LoopDetector detector;
+    detector.setConfig(loop::makeRegionDetectionConfig());
+    const loop::LoopDetectionResult detected = detector.detect(*translated.sketch);
+    std::fprintf(stderr, "PROBE overlapping-collinear: success=%d error=\"%s\"\n",
+                 detected.success ? 1 : 0, detected.errorMessage.c_str());
+    check(!detected.success, "genuinely overlapping collinear lines are refused");
+    if (detected.success) return;
+    // The ids ride the STRUCTURED refusal, not the human sentence: `message` is
+    // the log line, `evidence.entityIds` is what a consumer routes on. They are
+    // readable only after `buildRegionTable` has remapped them out of the
+    // detector's internal id space (SCHEMA §7.4).
+    const loop::RegionTable table = table_from(sketch);
+    check(!table.success, "the overlapping profile refuses at the region table too");
+    check(table.refusal.reason == loop::ProfileRefusalReason::OverlappingCurves,
+          "the overlap refusal carries SKETCH_PROFILE_OVERLAPPING_CURVES");
+    const std::vector<sk::EntityID> expected{uuid(411), uuid(412)};
+    check(table.refusal.entityIds == expected,
+          "the overlap refusal names both offending entities, ascending by source index");
+}
+
 void test_required_hole_failure_is_fatal() {
     sk::Sketch sketch;
     loop::Face face;
@@ -774,6 +880,8 @@ int main() {
     test_analytic_refinement_honors_cancellation();
     test_analytic_refinement_limits_sources_before_pair_collection();
     test_coincident_analytic_curves_refuse_stably();
+    test_collinear_touching_segments_publish_one_region();
+    test_overlapping_collinear_lines_name_both_entities();
     test_required_hole_failure_is_fatal();
     if (g_failures == 0) {
         std::fprintf(stderr, "region_table: OK\n");

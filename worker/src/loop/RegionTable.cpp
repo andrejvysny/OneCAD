@@ -229,10 +229,12 @@ bool assignIdentity(RegionDefinition& region, const WireEdgeMapper& mapper,
     return true;
 }
 
-RegionTable failed(std::string message, std::vector<DetectionWarning> warnings = {}) {
+RegionTable failed(std::string message, std::vector<DetectionWarning> warnings = {},
+                   ProfileRefusal refusal = {}) {
     RegionTable result;
     result.errorMessage = std::move(message);
     result.warnings = std::move(warnings);
+    result.refusal = std::move(refusal);
     return result;
 }
 
@@ -249,6 +251,26 @@ std::vector<DetectionWarning> mappedWarnings(const std::vector<DetectionWarning>
     return result;
 }
 
+// The refusal's ids go through the SAME seam as the warnings, but with a
+// stricter rule (SCHEMA §7.4): an id the mapper leaves unchanged was not mapped,
+// and publishing an internal id that resolves to nothing is worse than saying
+// nothing. One unmappable id drops the WHOLE vector, because naming one half of
+// an offending pair asserts something the producer cannot support.
+ProfileRefusal mappedRefusal(const ProfileRefusal& refusal, const WireEdgeMapper& mapper) {
+    ProfileRefusal result = refusal;
+    result.entityIds.clear();
+    if (!mapper) return result;
+    for (const sk::EntityID& id : refusal.entityIds) {
+        const std::string mapped = mapper(id);
+        if (mapped.empty() || mapped == id) {
+            result.entityIds.clear();
+            return result;
+        }
+        result.entityIds.push_back(mapped);
+    }
+    return result;
+}
+
 }  // namespace
 
 RegionTable buildRegionTable(const LoopDetectionResult& result,
@@ -259,7 +281,8 @@ RegionTable buildRegionTable(const LoopDetectionResult& result,
         return failed(result.errorMessage.empty() ? "loop detection failed"
                                                    : result.errorMessage,
                       mapBaseEdge ? mappedWarnings(result.warnings, mapBaseEdge)
-                                  : result.warnings);
+                                  : result.warnings,
+                      mappedRefusal(result.refusal, mapBaseEdge));
     }
     if (!mapBaseEdge) return failed("region table requires an edge-id mapper");
 

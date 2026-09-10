@@ -1387,15 +1387,25 @@ async fn imported_bodies_are_first_class_downstream_citizens() {
         );
         eprintln!("PHASE 7: {name} ⇒ {state:?}");
     }
-    assert!(
-        snap3.bodies.is_empty(),
-        "PHASE 7: the plan stopped at m−1 = the empty base — no body may be published \
-         from a document whose only geometry source was deleted, got {:?}",
-        snap3
-            .bodies
-            .iter()
-            .map(|b| body_id_wire(b.body))
-            .collect::<Vec<_>>()
+    // RE-EXPRESSED 2026-09-09 (WP-D1 dirty-closure isolation; recorded decision in
+    // TODO.md). This used to assert `snap3.bodies.is_empty()` on the premise of "a
+    // document whose ONLY geometry source was deleted". That premise was never true
+    // of THIS document: the deleted STEP import is one geometry source, and the
+    // MODELLED slab — `SLAB_SKETCH_REC`, a plain rect on a datum plane, extruded
+    // NewBody by `SLAB_EXTRUDE_REC` at :917-921 — is a second one that consumes
+    // nothing from the import. It only vanished because the old regen stopped the
+    // whole plan at the first halt and dropped every later body with it, which is
+    // exactly the defect WP-D1 fixes. Deleting an unrelated import must not delete
+    // the user's own modelling.
+    //
+    // The assertion is STRONGER now, not weaker: it pins WHICH body survives and
+    // that no imported body does, where the old one only counted to zero.
+    let published_ids: Vec<String> = snap3.bodies.iter().map(|b| body_id_wire(b.body)).collect();
+    assert_eq!(
+        published_ids,
+        vec![body_id_wire(slab)],
+        "PHASE 7: the modelled slab is independent of the deleted import and must \
+         survive it; every imported body must be gone, got {published_ids:?}"
     );
     eprintln!(
         "PHASE 7: Fillet ⇒ {fillet_state:?} (reason {:?}, candidates {})",

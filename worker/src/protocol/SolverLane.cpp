@@ -37,13 +37,54 @@ constexpr double kAngleEpsilon = 1e-9;  // "changed angle" threshold (rad)
 // may refuse and re-offer.
 constexpr double kMinArcSweep = 1e-3;  // rad
 
+// §7.2 per-carrier diagnostic budget; the Rust reader consumes at most this many.
+constexpr std::size_t kMaxDiagnostics = 64;
+
 using PointPosMap = std::unordered_map<sk::EntityID, std::pair<double, double>>;
 
-Envelope err(const Envelope& req, const char* code, const std::string& msg) {
+Envelope err(const Envelope& req, const char* code, const std::string& msg,
+             std::optional<json> detail = std::nullopt) {
     // §8: OP_FAILED / REF_UNRESOLVED are recoverable (session intact); retriable
     // is false — these are input/state errors, not transient failures.
-    return Envelope::error_response(req.id,
-                                    ErrorInfo{code, msg, /*retriable=*/false});
+    // `detail` carries §7.2-shaped `diagnostics` when the refusal has structured
+    // evidence; the top-level `code` stays a closed §8 value either way, because
+    // an unknown one fails the whole frame and costs every in-flight request.
+    return Envelope::error_response(
+        req.id, ErrorInfo{code, msg, /*retriable=*/false, std::move(detail)});
+}
+
+// SCHEMA §7.3 `SKETCH_ENTITY_DEGENERATE`, on the `SketchRegions` channel: an
+// entity below the detector's node-merge tolerance was dropped and detection
+// continued. Advisory, and it survives a refusal — a dropped entity is often WHY
+// the profile refused.
+json degenerate_entity_diagnostic(const loop::DetectionWarning& warning) {
+    return json{{"severity", "warning"},
+                {"code", "SKETCH_ENTITY_DEGENERATE"},
+                {"message", warning.text()},
+                {"stage", "profile"},
+                {"evidence", json{{"entityId", warning.entityId}}}};
+}
+
+// SCHEMA §7.4: the profile refusal, as the one entry that says WHICH entities
+// are at fault. `severity`/`code`/`message` are all three required — the Rust
+// reader drops an entry missing any of them, so an entry carrying only
+// `reasonCode` + `evidence` would publish nothing at all.
+json profile_refusal_diagnostic(const loop::ProfileRefusal& refusal, const char* code,
+                                const std::string& message) {
+    json entry = {{"severity", "error"},
+                  {"code", code},
+                  {"message", message},
+                  {"stage", "profile"},
+                  {"reasonCode", loop::profileRefusalReasonCode(refusal.reason)}};
+    json evidence = json::object();
+    if (!refusal.entityIds.empty()) evidence["entityIds"] = refusal.entityIds;
+    if (refusal.hasLimit()) {
+        evidence["limitName"] = refusal.limitName;
+        evidence["limit"] = refusal.limit;
+        evidence["measured"] = refusal.measured;
+    }
+    if (!evidence.empty()) entry["evidence"] = std::move(evidence);
+    return entry;
 }
 
 bool read_target(const json& p, double& x, double& y) {
@@ -886,7 +927,20 @@ Envelope SolverLane::on_regions(const Envelope& req) {
         det, map_edge, sk::constants::COINCIDENCE_TOLERANCE,
         loop::RegionIdentityVersion::V3);
     if (!table.success) {
-        return err(req, "OP_FAILED", "SketchRegions: " + table.errorMessage);
+        const std::string message = "SketchRegions: " + table.errorMessage;
+        json diagnostics = json::array();
+        if (table.refusal.has()) {
+            diagnostics.push_back(
+                profile_refusal_diagnostic(table.refusal, "OP_FAILED", message));
+        }
+        // The advisories are not dropped to make room for the refusal: §7.4 keeps
+        // both, and the dropped entity is often the reason for the refusal.
+        for (const loop::DetectionWarning& warning : table.warnings) {
+            if (diagnostics.size() >= kMaxDiagnostics) break;
+            diagnostics.push_back(degenerate_entity_diagnostic(warning));
+        }
+        if (diagnostics.empty()) return err(req, "OP_FAILED", message);
+        return err(req, "OP_FAILED", message, json{{"diagnostics", std::move(diagnostics)}});
     }
 
     json regions = json::array();
@@ -958,6 +1012,15 @@ Envelope SolverLane::on_regions(const Envelope& req) {
         {"regionIdentityVersion", 3},
         {"regions", std::move(regions)},
     };
+    // §7.4: absent means "nothing to report", so an empty array is never emitted.
+    if (!table.warnings.empty()) {
+        json diagnostics = json::array();
+        for (const loop::DetectionWarning& warning : table.warnings) {
+            if (diagnostics.size() >= kMaxDiagnostics) break;
+            diagnostics.push_back(degenerate_entity_diagnostic(warning));
+        }
+        result["diagnostics"] = std::move(diagnostics);
+    }
     Envelope resp = Envelope::ok_response(req.id, std::move(result));
     // Attach the binary tail + section table.
     for (const auto& s : bin_sections) {

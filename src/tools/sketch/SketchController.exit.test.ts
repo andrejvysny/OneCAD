@@ -21,6 +21,7 @@ import type { SketchEntity, SketchPlane, SketchSession } from "@/ipc/types";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 
 const PLANE: SketchPlane = {
@@ -148,6 +149,70 @@ describe("SketchController exit ordering", () => {
     // ...but the failure is LOUD, never silent.
     expect(logSnapshot().filter((e) => e.level === "error" && e.tag === "sketch")).toHaveLength(1);
     expect(sketchStore.getState().session).toBeNull();
+    __resetLogForTests({ enabled: false });
+  });
+  /*
+   * WP-S1 (was a red-first S0 probe; both assertions were measured failing on
+   * 2026-09-09 before the fix). A refused profile used to leave the user with
+   * nothing on screen, and the one thing that IS recorded is wrong.
+   *
+   * Measured on a real session (`logs/dev.jsonl`, 2026-09-09 17:30): the user
+   * drew a profile, exited, and `finishSketch` was refused with "SketchRegions:
+   * profile has overlapping or coincident analytic curves". `SketchController`
+   * runs the exit chain in a fire-and-forget `void (async () => …)()` and, on
+   * failure, calls only `logError` — no `errorHint` — then closes the session
+   * regardless. The user saw nothing and found out later, when arming Extrude.
+   *
+   * The log copy is also FALSE. `document_runtime.rs` upserts the timeline
+   * record BEFORE the regions call precisely so a region refusal cannot lose it,
+   * and returns `FinishSketchError { committed }` so the api layer still emits,
+   * schedules and persists. The record is committed; the regions CACHE is what
+   * failed. "timeline record may be missing" sends a reader hunting a bug that
+   * is not there.
+   */
+  it("surfaces a refused finishSketch to the user, and does not claim the record is missing", async () => {
+    const refusal = Object.assign(
+      new Error("op failed (OpFailed, recoverable=true): SketchRegions: profile has overlapping or coincident analytic curves"),
+      {
+        kind: "opFailed",
+        diagnostics: [
+          {
+            severity: "error",
+            code: "OP_FAILED",
+            reasonCode: "SKETCH_PROFILE_OVERLAPPING_CURVES",
+            message: "profile has overlapping or coincident analytic curves",
+            stage: "profile",
+            evidence: { entityIds: ["e1", "e2"] },
+          },
+        ],
+      },
+    );
+    clientMock.finishSketch.mockImplementation((id: string) => {
+      calls.push(`finishSketch:${id}`);
+      return Promise.reject(refusal);
+    });
+    // The structured log lane's gate is closed under vitest — open it for this
+    // assertion, exactly as the cancel-failure spec above does.
+    __resetLogForTests();
+
+    toolStore.getState().setMode("sketch", "sketch1");
+    await flush();
+    toolStore.getState().setMode("model");
+    await flush();
+    await flush();
+
+    const entries = logSnapshot();
+    const finishFailure = entries.find((e) => String(e.msg).includes("finishSketch FAILED"));
+    // (a) the user must be told something went wrong
+    const hint = viewportStore.getState().statusHint;
+    expect(hint, "a refused finish must reach the user, not only the log").not.toBeNull();
+    expect(hint?.severity).toBe("error");
+
+    // (b) and the log must not send a reader hunting a record that IS committed
+    expect(
+      String(finishFailure?.msg ?? ""),
+      "the timeline record is committed before regions; the copy must not say otherwise",
+    ).not.toContain("timeline record may be missing");
     __resetLogForTests({ enabled: false });
   });
 });

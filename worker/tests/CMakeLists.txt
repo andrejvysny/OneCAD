@@ -15,6 +15,11 @@ add_executable(test_region_table test_region_table.cpp)
 target_link_libraries(test_region_table PRIVATE worker_core)
 add_test(NAME region_table COMMAND test_region_table)
 
+# --- WP-S1: a refused profile names WHICH entities are at fault (SCHEMA §7.4). ---
+add_executable(test_sketch_region_diagnostics test_sketch_region_diagnostics.cpp)
+target_link_libraries(test_sketch_region_diagnostics PRIVATE worker_core)
+add_test(NAME sketch_region_diagnostics COMMAND test_sketch_region_diagnostics)
+
 # --- Construction geometry is solved but never bounds a region (SCHEMA §7.3). ---
 add_executable(test_sketch_construction test_sketch_construction.cpp)
 target_link_libraries(test_sketch_construction PRIVATE worker_core)
@@ -1069,6 +1074,18 @@ add_test(
 # measurement that ever moved a decision fails here. No non-zero residual literal is
 # pinned and the SolveDrag/BeginGesture ABSENCES are not assertable by a subset
 # matcher — both live in test_solver_residual.cpp. See the fixture header.
+# Kernel-hardening WP-S1 — §7.4 `SketchRegions` diagnostics. Leg 1 pins the refusal
+# carrying `reasonCode` + WIRE `entityIds` in normative source order on an UNCHANGED
+# `OP_FAILED` envelope (a new top-level code would fail the frame and cost every
+# in-flight request); leg 2 pins the advisory channel, where a degenerate entity is
+# dropped and the region still publishes. `message` is deliberately unpinned — it is
+# prose; `reasonCode` is what a consumer routes on. See the fixture header.
+add_test(
+    NAME canonical_sketch_regions_diagnostics
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/sketch_regions_diagnostics.ndjson
+)
 add_test(
     NAME canonical_sketch_solve_residual
     COMMAND worker_harness

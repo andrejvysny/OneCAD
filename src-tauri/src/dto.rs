@@ -1555,6 +1555,15 @@ pub struct FinishSketchDto {
     /// always emit v2; absent on a stored profile remains the legacy v1 path.
     pub region_identity_version: u32,
     pub regions: Vec<SketchRegionDto>,
+    /// Advisories the detector raised while SUCCEEDING (SCHEMA §7.4, WP-S1) —
+    /// today only `SKETCH_ENTITY_DEGENERATE`, an entity below the node-merge
+    /// coincidence tolerance that was dropped so detection could continue.
+    /// Omission-legal: absent means the producer had nothing to report, and a
+    /// consumer may infer nothing from its absence. Before this channel existed
+    /// the drop reached the wire on the modeling path only, so a sketch-mode user
+    /// never learned an entity had been ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
 }
 
 /// One promoted element (`promoteSelection`; SCHEMA §7.5 `AcquireElementIds`

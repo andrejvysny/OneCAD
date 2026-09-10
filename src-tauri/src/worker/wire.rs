@@ -2397,6 +2397,7 @@ pub fn parse_sketch_regions(
     if regions.is_empty() {
         if bin_sections.is_empty() && tail.is_empty() {
             return Ok(crate::dto::FinishSketchDto {
+                diagnostics: parse_diagnostics(result.get("diagnostics")),
                 region_identity_version,
                 regions: Vec::new(),
             });
@@ -2423,6 +2424,7 @@ pub fn parse_sketch_regions(
     }
     reject_unreferenced_sections("SketchRegions", &sections, &referenced_bins)?;
     Ok(crate::dto::FinishSketchDto {
+        diagnostics: parse_diagnostics(result.get("diagnostics")),
         region_identity_version,
         regions: parsed,
     })

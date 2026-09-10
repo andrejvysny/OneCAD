@@ -750,7 +750,7 @@ unknown code as an opaque warning):
 | code | meaning |
 |---|---|
 | `REGION_REBOUND_BY_ANCHOR` | the op's stored `regionId` matched no cell after an edit moved a crossing; the op bound the unique cell containing `regionAnchor` instead (§7.3 "Region anchor"). `stage` is `"profile"`. Evidence `{ "region": { "from": "<stale regionId>", "to": "<bound regionId>", "anchor": [u, v] } }`. The params are unchanged; the warning repeats on every regen until the user re-picks. |
-| `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) only — `SketchRegions` (§7.4) has no diagnostics channel and stays silent about it. |
+| `SKETCH_ENTITY_DEGENERATE` | an entity that is zero-length TO THE DETECTOR'S GRAPH — shorter (or a smaller radius) than the node-merge coincidence tolerance, 1e-6 mm, so its endpoints would collapse into one node and it can carry no edge — is dropped and detection continues instead of refusing the whole graph. NOT the authoring resolution: a 0.0005 mm edge is real boundary (dropping it deleted a hole from a region — adversarial review 2026-09-03). The message carries the measured length/radius and the tolerance. Emitted on the exact-fragment (V2/V3) path only; V1 profiles never emit it. `stage` is `"profile"`. Evidence `{ "entityId": "<wire entity id>" }` (the WIRE id space). The step still succeeds. Reaches the wire on the modeling path (`planStep` of the op that built the profile) and, since WP-S1 (2026-09-09), on the `SketchRegions` result's own OPTIONAL `diagnostics` array ([§7.4](#74-sketch-solver-lane)) — so a dropped degenerate entity is now visible in sketch mode too. Both channels are omission-legal; a consumer that sees neither is not entitled to assume nothing was dropped. |
 | `FILLET_BLEND_APPROXIMATED` | an approximated (walked) fillet blend published inside its fit bound + radius-relative section budget (kernel-hardening WP-G, 2026-09-06; §7.3 Fillet "Two blend classes"). `stage` is `"publication"`. Evidence is the `blendEvidence` object with the failure path's existing keys — `maximumSectionRadiusError`, `allowedSectionRadiusError`, `maximumTangencyRadians`, `allowedTangencyRadians` — plus `blendSurfaceClass`, `approximationTolerance`, `maxContourVertexValence` and the two counts `approximatedContours`, `approximatedBlendFaces`; ONE vocabulary, no aliases; emitted ONCE per step. The op published; the warning repeats on every regen because the geometry is what it is. |
 | `ARTIFACT_TESSELLATE_FAILED` | the plan prepared but the `artifacts.tessellate` attachment for this step threw (kernel-hardening WP-H, 2026-09-05): the step is `Ok`, the scratch is stored, and the mesh is simply not attached — Rust treats it as "not cached" and fetches it through `Tessellate` later. `stage` is `"artifact"`; the message carries the kernel's text. Before WP-H an artifact failure failed the whole prepared plan. |
 
@@ -773,7 +773,12 @@ Op-specific reason codes exist OUTSIDE that policy set and are catalogued in
 their op's §7.3 prose: Fillet's `FILLET_RADIUS_INVALID`, `FILLET_CONTOUR_INVALID`,
 `FILLET_INVALID_RESULT`, `FILLET_SEMANTIC_CHECK_FAILED`, `FILLET_BLEND_TOO_COARSE`
 (WP-G) and Chamfer's `CHAMFER_INVALID_RESULT` (WP-G); they ride the same
-`reasonCode` slot with the same reader rules.
+`reasonCode` slot with the same reader rules. A verb outside §7.3 may own a set too:
+the sketch profile refusals `SKETCH_PROFILE_OVERLAPPING_CURVES`,
+`SKETCH_PROFILE_DISCONTINUOUS`, `SKETCH_PROFILE_LIMIT_EXCEEDED`,
+`SKETCH_PROFILE_REFINEMENT_FAILED` and `SKETCH_PROFILE_GRAPH_BUILD_FAILED` are
+catalogued under `SketchRegions` in [§7.4](#74-sketch-solver-lane) (WP-S1) — look
+there, not here, for the codes a solver-lane verb can send.
 
 | `reasonCode` | Refused because |
 |---|---|
@@ -3142,6 +3147,9 @@ preview fill).
 // result
 {
   "sketchId": "sk_1", "sketchRevision": 5, "regionIdentityVersion": 3,
+  "diagnostics": [ { "severity": "warning", "code": "SKETCH_ENTITY_DEGENERATE",
+                     "message": "…", "stage": "profile",
+                     "evidence": { "entityId": "…" } } ],   // OPTIONAL, omission-legal
   "regions": [
     {
       "regionId": "r0",
@@ -3254,6 +3262,84 @@ preview fill).
   tessellation in **both** cases (region area/fill for an ellipse is a sampled
   polygon and therefore slightly under-reports the analytic π·a·b); it is
   display/selection evidence, never committed topology.
+
+- **`diagnostics` (ADDITIVE, OPTIONAL, omission-legal) — the profile refusal says
+  WHICH entities are at fault.** Added 2026-09-09 (WP-S1); before it `SketchRegions`
+  had no diagnostics channel at all and every refusal crossed the wire as one opaque
+  sentence, so a user whose profile was refused had nothing to act on. Two halves:
+
+  - **On success**, the result MAY carry `diagnostics: [ … ]` in the same bounded
+    shape a `planStep` diagnostic uses ([§7.2](#72-regen--executeplan)) — `severity`, `code`,
+    `message`, optional `stage`, `reasonCode`, `evidence`. This is the channel
+    `SKETCH_ENTITY_DEGENERATE` ([§7.3](#73-op-payload-schemas-vertical-slice)) was
+    previously unable to reach: a dropped degenerate entity is now visible in sketch
+    mode, not only on the modeling path. Absent means "nothing to report"; a reader
+    that does not understand an entry ignores it.
+  - **On refusal**, the reason rides `detail.diagnostics[].reasonCode` with
+    `evidence.entityIds`. **The refusal MUST NOT introduce a new top-level
+    `error.code`** — [§8](#8-error-taxonomy) states the taxonomy is closed and
+    `onecad-protocol/src/messages.rs` parses `error.code` into a plain enum with no
+    catch-all arm. The consequence is not local: an unrecognised value fails the whole
+    `RespFrame`, and the client treats a malformed envelope as a desynchronised stream
+    and fails **every** in-flight request, not just this one. A refused profile must
+    never cost the connection. The terminal error therefore keeps its existing §8
+    code — `OP_FAILED` for a profile refusal, `REF_UNRESOLVED` for an unresolved
+    sketch id — and no code is added.
+
+  `reasonCode` is a SMALL closed set, not one code per message string. The producer's
+  human sentence stays in `message` and in the stderr log; the code is what a consumer
+  routes on:
+
+  | `reasonCode` | Meaning | `evidence` |
+  |---|---|---|
+  | `SKETCH_PROFILE_OVERLAPPING_CURVES` | two sources share one analytic support and overlap over a positive interval (a duplicate line, a segment drawn back over another). A point tangency is NOT this — it collapses to one split. | `entityIds`: exactly the two base entities |
+  | `SKETCH_PROFILE_DISCONTINUOUS` | an exact fragment is not continuous over its own interval | `entityIds`: the one base entity |
+  | `SKETCH_PROFILE_LIMIT_EXCEEDED` | an analytic-source, curve-pair or fragment ceiling was passed | `limitName`, `limit`, `measured` |
+  | `SKETCH_PROFILE_REFINEMENT_FAILED` | a refinement step could not parameterize, measure or preserve provenance for a source or a pair | `entityIds` when a source or pair is in scope, else omitted |
+  | `SKETCH_PROFILE_GRAPH_BUILD_FAILED` | the adjacency graph could not be built at all | omitted |
+
+  **Every refusal entry MUST carry the three fields §7.2 makes required** —
+  `severity: "error"`, a `code` equal to the terminal `error.code`, and a non-empty
+  `message` (the producer's own sentence) — plus `stage: "profile"`. A reader DROPS an
+  entry that is missing any of them, so a producer that emits only `reasonCode` and
+  `evidence` publishes nothing at all. The §7.2 bounds apply verbatim to this carrier:
+  ≤64 entries, `code` ≤128 B, `message` ≤4096 B, `stage` ≤64 B, `reasonCode` ≤64 B,
+  `evidence` ≤64 KiB encoded.
+
+  **`reasonCode` stays OPTIONAL here, exactly as §7.2 defines it** — absent means this
+  producer made no claim. WP-S1 scopes the codes above to the loop-detector refusal
+  surface; the solver lane's own refusals (unknown sketch id, wire translation, a
+  non-converged solve, hole triangulation, an incomplete fill, a duplicate binary
+  section) carry none and are unchanged.
+
+  **`entityIds` are WIRE entity ids, and the producer does not have them at the point
+  of refusal.** The detector works in an INTERNAL id space and splits a source into
+  fragments; the internal→wire mapping is the `mapBaseEdge` seam the advisory warnings
+  already go through. A refusal MUST be mapped through that same seam. Publishing a
+  raw internal or fragment id would look right and resolve to nothing, which is worse
+  than saying nothing: a producer that cannot map a base entity MUST omit `entityIds`.
+  Where a pair is reported, order is **ascending by source index** — in wire terms, by
+  the entity's position in the request's `entities` array, which the translation
+  preserves — so a consumer and a fixture can both rely on it.
+
+  **A singular `entityId` means exactly-one-by-construction; a plural `entityIds` means
+  variable cardinality.** The two coexist deliberately — `SKETCH_ENTITY_DEGENERATE`
+  keeps its singular form. Do not unify them.
+
+  **Advisory findings survive a refusal.** The modeling path already pushes the
+  degenerate-entity advisories BEFORE it checks for failure, on the rule that they are
+  often *why* it refused; a `SketchRegions` refusal MAY likewise carry those
+  `SKETCH_ENTITY_DEGENERATE` entries in `detail.diagnostics[]` alongside the refusal
+  entry, and MUST NOT drop them to make room for it.
+
+  **Cancellation is not specified here.** It is unreachable for `SketchRegions` at this
+  build — the solver lane does not plumb the job's cancel token into the detector, so
+  every internal cancellation refusal is dead on the wire — and the Rust `Cancelled`
+  error carries no diagnostics field to hold one. No reason code is minted for it.
+
+  The refusal itself is **unchanged**: this bullet adds evidence, it does not widen or
+  narrow what `SketchRegions` accepts. A profile refused before this field existed is
+  refused after it, for the same reason, with the same `message`.
 
 ### 7.5 Element identity
 
@@ -5078,6 +5164,67 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-09-09 — SketchRegions refusal diagnostics (kernel-hardening WP-S1).**
+  [§7.4](#74-sketch-solver-lane) `SketchRegions` gains an ADDITIVE, OPTIONAL,
+  omission-legal `diagnostics` array on the success path (the same bounded §7.2
+  shape), and its refusals now carry `detail.diagnostics[].reasonCode` with
+  `evidence.entityIds` on an unchanged `OP_FAILED` envelope. FIVE reason codes, a
+  closed set: `SKETCH_PROFILE_OVERLAPPING_CURVES`,
+  `SKETCH_PROFILE_DISCONTINUOUS`, `SKETCH_PROFILE_LIMIT_EXCEEDED`,
+  `SKETCH_PROFILE_REFINEMENT_FAILED` and `SKETCH_PROFILE_GRAPH_BUILD_FAILED`, scoped to
+  the loop-detector refusal surface; the solver lane's own refusals carry none, and
+  `reasonCode` stays OPTIONAL as §7.2 defines it. `entityIds` are WIRE entity ids and
+  MUST go through the same internal→wire `mapBaseEdge` seam the advisory warnings use —
+  a raw internal or fragment id would look right and resolve to nothing — with a pair
+  ordered ascending by source index; a producer that cannot map one omits the field.
+  Every refusal entry also carries the three fields §7.2 makes required (`severity`,
+  `code`, `message`) plus `stage: "profile"`, because a reader drops an entry missing
+  any of them. Cancellation gets NO code: it is unreachable for this verb at this build
+  (the solver lane does not plumb the cancel token into the detector) and the Rust
+  `Cancelled` error has no field to carry diagnostics.
+  The §7.3 `SKETCH_ENTITY_DEGENERATE` row is corrected: it previously stated that
+  `SketchRegions` has no diagnostics channel, which was true and is no longer.
+  *Reason:* measured on a real user session (`logs/dev.jsonl`, 2026-09-09 17:30) —
+  a hand-drawn profile was refused with *"profile has overlapping or coincident
+  analytic curves"* and the message named neither offending entity, so the user had
+  nothing to act on. `worker/src/loop/LoopDetector.cpp` carried **14**
+  non-cancellation bare-string refusal sites (20 `errorMessage =` assignments less the
+  5 cancellation sites and one forward), none with a reason code or an entity, while
+  both entity ids were already in scope at the refusal itself. *Explicitly NOT changed:* what the
+  detector accepts. A red-first probe confirmed that two collinear segments meeting
+  end-to-end (a polyline running straight through a vertex) are already handled
+  correctly — `Geom2dAPI_InterCurveCurve` reports that contact as a point, so it
+  collapses to one split and never reaches the overlap refusal. *No top-level
+  `error.code` is added* — §8's taxonomy is closed and `messages.rs` has no
+  catch-all arm, so a new code would fail the frame and force a worker restart.
+  *Fixtures:* `protocol/fixtures/sketch_regions_diagnostics.ndjson`, executable by BOTH
+  lanes — ctest `canonical_sketch_regions_diagnostics` (5 expectations matched against
+  the real worker) and the Rust directory scan's strict parse
+  (`ndjson_fixtures_parse_into_message_types`). Leg 1 pins the refusal's `reasonCode`
+  and both WIRE entity ids in normative source order on an unchanged `OP_FAILED`
+  envelope; leg 2 pins the advisory channel, where a degenerate entity is dropped and
+  the region still publishes. `message` is deliberately unpinned — it is prose, and
+  `reasonCode` is what a consumer routes on. The matcher was negative-controlled: a
+  wrong `reasonCode` fails with `MISMATCH at error.detail.diagnostics.[0].reasonCode`. Cross-track sign-off recorded 2026-09-10 — protocol-auditor
+  schema-vs-code review BEFORE the code (`approve_with_changes`, every filed change
+  applied) and AFTER it (`approve_with_changes`, prose-only edits, no code change
+  required); both tracks re-verified by the orchestrator on the main thread (ctest
+  193/193, `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` 97 targets / 1574 / 0 with
+  0 skips, stdout hygiene clean).
+  *Protocol audit before code:* `approve_with_changes` 2026-09-09, every filed change
+  applied — the required-field omission, the `REF_UNRESOLVED` correction, the
+  cancellation row dropped, the scope narrowed to the loop detector, the id-space
+  mapping seam named, advisory survival stated, and the §7.2 bounds restated for the new
+  carrier. The before-code audit named a Rust-side BLOCKER this hunk
+  depended on — `document_runtime.rs`'s finish-sketch path flattened the engine error
+  into a string and rebuilt it with an empty diagnostics vector, destroying every
+  `reasonCode` and `entityIds` one frame after they were correctly parsed, on exactly
+  the lane that motivated this change. **CLOSED:** `prefixed_engine_error`
+  (`document_runtime.rs`, called from the finish-sketch path) prefixes the message per
+  variant and preserves `diagnostics`; the real-worker regression test
+  `src-tauri/tests/sketch_region_diagnostics.rs` asserts the reason code and both wire
+  entity ids survive, and was measured RED (`got []`) against the old flattening.
 
 - **2026-09-02 — Commit-tier validation (kernel-hardening WP-E).**
   [§7.2](#72-regen--executeplan): every publication of NEW geometry is validated

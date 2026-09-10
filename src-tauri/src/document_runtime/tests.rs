@@ -67,6 +67,9 @@ struct FakeState {
     /// How many times `fetch_mesh` was invoked — the observable the inline-artifact
     /// path is pinned against (a seeded cache must fetch ZERO times).
     mesh_fetches: usize,
+    /// How many `ExecutePlan`s this backend has served — the observable the WP-D1
+    /// no-recursion rule is pinned against (a halt must cost exactly TWO plans).
+    plan_calls: usize,
 }
 
 struct FakeBackend {
@@ -115,6 +118,14 @@ struct FakeBackend {
     /// keeps every pre-existing test's payload byte-identical; a mate test sets
     /// it to model a worker that resolved a cylindrical target.
     mate_resolved: Mutex<Option<onecad_core::document::record::MateResolved>>,
+    /// Timeline steps whose op HALTS the plan with `opFailed` (SCHEMA §7.2). Keyed
+    /// by step index, not execution position, so a plan that skips a step still
+    /// fails on the right record.
+    failing_steps: std::collections::BTreeSet<usize>,
+    /// 1-based `ExecutePlan` ordinal from which the plan HARD-fails (a `Failed`
+    /// terminal, no steps). `Some(2)` models a worker that dies inside the WP-D1
+    /// isolation window, after the halted pass already published.
+    hard_fail_from_plan: Option<usize>,
     state: Mutex<FakeState>,
 }
 
@@ -135,6 +146,8 @@ impl Default for FakeBackend {
             resolve_outcome: Mutex::new(None),
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             mate_resolved: Mutex::new(None),
+            failing_steps: std::collections::BTreeSet::new(),
+            hard_fail_from_plan: None,
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -166,6 +179,30 @@ impl FakeBackend {
             regions_fail: true,
             ..Self::default()
         }
+    }
+
+    /// A backend whose plan HALTS at each of `steps` with an `opFailed` row — the
+    /// per-step early stop (`stoppedReason: opFailed`, no `planStep` for the
+    /// failing op) that the hard [`with_failing_plan`](Self::with_failing_plan)
+    /// terminal cannot model. Steps below the first halt still execute.
+    fn with_failing_steps(steps: &[usize]) -> Self {
+        Self {
+            failing_steps: steps.iter().copied().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// [`with_failing_steps`](Self::with_failing_steps) whose SECOND plan — the
+    /// WP-D1 isolation pass — hard-fails instead of running.
+    fn with_failing_steps_then_dead_worker(steps: &[usize]) -> Self {
+        Self {
+            hard_fail_from_plan: Some(2),
+            ..Self::with_failing_steps(steps)
+        }
+    }
+
+    fn plan_calls(&self) -> usize {
+        self.state.lock().unwrap().plan_calls
     }
 
     /// A backend whose `execute_plan` hard-fails (a `Failed` terminal).
@@ -267,7 +304,13 @@ fn echo_hash(request: &PlanRequest, last_valid: Option<usize>) -> HistoryPrefixH
 impl GeometryEngine for FakeBackend {
     async fn execute_plan(&self, request: PlanRequest) -> mpsc::Receiver<PlanEvent> {
         // Finding 5: a hard regen failure — a single `Failed` terminal, no steps.
-        let events = if self.plan_fails {
+        let plan_call = {
+            let mut st = self.state.lock().unwrap();
+            st.plan_calls += 1;
+            st.plan_calls
+        };
+        let hard_fail = self.plan_fails || self.hard_fail_from_plan.is_some_and(|n| plan_call >= n);
+        let events = if hard_fail {
             vec![PlanEvent::Failed(EngineError::OpFailed {
                 code: OpFailureCode::OpFailed,
                 recoverable: false,
@@ -285,8 +328,22 @@ impl GeometryEngine for FakeBackend {
             let mut per_step: Vec<StepResult> = Vec::new();
             let mut last_valid: Option<usize> = None;
             let mut artifact_meshes: Vec<PreparedMeshRef> = Vec::new();
+            let mut stopped_reason = StoppedReason::Completed;
             for op in &request.ops {
                 let step = op.step_index;
+                // A halted step emits NO `planStep` event — its verdict rides the
+                // terminal's `perStepResults` row alone (SCHEMA §7.2).
+                if self.failing_steps.contains(&step) {
+                    per_step.push(StepResult {
+                        step_index: step,
+                        status: StepStatus::OpFailed,
+                        body_ids: vec![],
+                        message: format!("fake op failure at step {step}"),
+                        diagnostics: vec![kernel_diagnostic()],
+                    });
+                    stopped_reason = StoppedReason::OpFailed;
+                    break;
+                }
                 let body_ids = self.bodies_for(step, op.record_id);
                 if let (true, Some(lod)) = (self.inline_meshes, artifact_lod) {
                     artifact_meshes.extend(body_ids.iter().map(|b| PreparedMeshRef {
@@ -325,7 +382,7 @@ impl GeometryEngine for FakeBackend {
                 job_id: job,
                 prepared_snapshot_id: snapshot_id,
                 last_valid_step: last_valid,
-                stopped_reason: StoppedReason::Completed,
+                stopped_reason,
                 per_step,
                 history_prefix_hash: echo_hash(&request, last_valid),
                 artifact_meshes,
@@ -606,6 +663,7 @@ impl SolverEngine for FakeBackend {
         Ok(FinishSketchDto {
             region_identity_version: 2,
             regions: vec![],
+            diagnostics: vec![],
         })
     }
 }
@@ -5175,4 +5233,309 @@ fn a_legacy_reference_face_slot_still_names_the_operated_body() {
         rt.repair_candidate_body(&format!("{record_id}.input1")),
         Some(body.to_string())
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-D1: a halted step must not delete or block bodies outside its closure
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The product case: three standalone parts, one breaks, the other two stay on
+/// screen. Before WP-D1 the whole plan stopped at the halt and every later body —
+/// including an imported vendor component — vanished from the projection.
+#[tokio::test]
+async fn a_body_outside_the_halted_steps_closure_survives() {
+    let backend = Arc::new(FakeBackend::with_failing_steps(&[1]));
+    let mut rt = runtime_with(backend.clone());
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(report.outcome, Outcome::Published(_)),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(
+        backend.plan_calls(),
+        2,
+        "the halt cost exactly one extra plan"
+    );
+
+    let proj = rt.projection();
+    let upstream = BodyId(Uuid::from_u128(0x10)).to_string();
+    let independent = BodyId(Uuid::from_u128(0x12)).to_string();
+    assert!(
+        proj.bodies.contains_key(&upstream),
+        "the pre-halt body stays"
+    );
+    assert!(
+        proj.bodies.contains_key(&independent),
+        "a body from a step with NO dependency on the halt must survive it"
+    );
+    assert_eq!(
+        proj.bodies.len(),
+        2,
+        "the halted step's body is NOT published"
+    );
+
+    // The halt is loud; its independent successor is honestly Valid.
+    assert_eq!(proj.features[0].status, crate::dto::FeatureStatus::Ok);
+    assert_eq!(proj.features[1].status, crate::dto::FeatureStatus::Error);
+    assert_eq!(proj.features[2].status, crate::dto::FeatureStatus::Ok);
+
+    // Design point 3: the exclusion is EPHEMERAL. Nothing was suppressed.
+    assert!(
+        proj.features.iter().all(|f| !f.suppressed),
+        "the isolation pass must never touch the record `suppressed` flag"
+    );
+}
+
+/// Design point 4: the isolation pass excludes the halted record, so the worker
+/// returns no row for it — its `Error` state, its reason and its diagnostics must
+/// still reach the user, merged from the halted pass.
+#[tokio::test]
+async fn the_halted_steps_verdict_survives_the_isolation_pass() {
+    let backend = Arc::new(FakeBackend::with_failing_steps(&[1]));
+    let mut rt = runtime_with(backend.clone());
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let Outcome::Published(snap) = &report.outcome else {
+        panic!("expected Published, got {:?}", report.outcome);
+    };
+    // This snapshot is the ISOLATION pass's — it carries the independent body the
+    // halted pass never reached — so every assertion below is about the MERGE, not
+    // about a truncated publish that would satisfy them trivially.
+    assert!(
+        snap.bodies
+            .iter()
+            .any(|b| b.body == BodyId(Uuid::from_u128(0x12))),
+        "the published snapshot is the isolation pass's"
+    );
+
+    // The DOCUMENT did not complete just because the isolation plan did.
+    assert_eq!(snap.stopped_reason, StoppedReason::OpFailed);
+    // The valid LINEAR prefix still ends below the halt — this is also what stops
+    // `prepare_checkpoint` minting over an isolated head.
+    assert_eq!(snap.step_index, Some(0));
+    assert!(
+        snap.diagnostics_by_step.contains_key(&1),
+        "the halted step's diagnostics survive: {:?}",
+        snap.diagnostics_by_step.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        snap.diagnostics_by_step[&1][0].code,
+        "FILLET_WALKING_FAILED"
+    );
+    assert!(
+        snap.diagnostics
+            .iter()
+            .any(|d| d.code == "FILLET_WALKING_FAILED"),
+        "and reach the flat diagnostics list the report publishes"
+    );
+
+    let failed = &report.failed_steps;
+    assert_eq!(failed.len(), 1, "exactly one failed step: {failed:?}");
+    assert_eq!(
+        failed[0].record_id,
+        RecordId(Uuid::from_u128(0x11)).to_string()
+    );
+    assert_eq!(failed[0].message, "fake op failure at step 1");
+    assert_eq!(
+        rt.projection().features[1].status_message.as_deref(),
+        Some("fake op failure at step 1"),
+        "the frontend still shows WHY the step broke"
+    );
+}
+
+/// Design point 5: ONE pass, no recursion. If the isolation pass halts too, it
+/// publishes what it reached and stops there — it never spawns a third plan.
+#[tokio::test]
+async fn the_isolation_pass_never_recurses() {
+    // Steps 1 and 3 both break. Pass 1 halts at 1; pass 2 runs [0, 2, 3] and halts
+    // at 3. There is no pass 3, even though 2's body proves isolation "worked".
+    let backend = Arc::new(FakeBackend::with_failing_steps(&[1, 3]));
+    let mut rt = runtime_with(backend.clone());
+    for seed in [0x10u128, 0x11, 0x12, 0x13] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(report.outcome, Outcome::Published(_)),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(
+        backend.plan_calls(),
+        2,
+        "exactly two plans, never a cascade"
+    );
+
+    let proj = rt.projection();
+    assert_eq!(proj.features[0].status, crate::dto::FeatureStatus::Ok);
+    assert_eq!(proj.features[1].status, crate::dto::FeatureStatus::Error);
+    assert_eq!(proj.features[2].status, crate::dto::FeatureStatus::Ok);
+    assert_eq!(
+        proj.features[3].status,
+        crate::dto::FeatureStatus::Error,
+        "the SECOND halt is reported by the isolation pass itself"
+    );
+    assert_eq!(proj.bodies.len(), 2, "steps 0 and 2 only");
+}
+
+/// The fail-closed half: a successor that operates on a body the halted step also
+/// touched is NOT run past it, even though the graph edge has vanished (the halted
+/// record's `outputs` were cleared on the first failure). Nothing is provably
+/// independent, so the pass is skipped entirely — no wasted replay.
+#[tokio::test]
+async fn a_successor_sharing_the_halted_steps_body_is_not_run_past_it() {
+    let body = BodyId(Uuid::from_u128(0x10));
+    let backend = Arc::new(FakeBackend::with_failing_steps(&[1]));
+    let mut rt = runtime_with(backend.clone());
+
+    // A clean regen first, so step 0's `outputs` really name the body.
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert_eq!(backend.plan_calls(), 1);
+
+    for (seed, edge) in [(0x21u128, "el_a"), (0x22, "el_b")] {
+        rt.apply(EditCommand::AddOperation {
+            record: fillet_record(seed, body, edge, Vec3::new_unchecked(1.0, 0.0, 0.0)),
+            at_cursor: true,
+        })
+        .unwrap();
+    }
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(report.outcome, Outcome::Published(_)),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(
+        backend.plan_calls(),
+        2,
+        "nothing was provably independent, so no isolation replay was spent"
+    );
+
+    let proj = rt.projection();
+    assert_eq!(proj.features[1].status, crate::dto::FeatureStatus::Error);
+    assert_eq!(
+        proj.features[2].status,
+        crate::dto::FeatureStatus::Dirty,
+        "the second fillet cuts the same body — it must NOT re-bind past the halt"
+    );
+    assert!(
+        !proj.features[2].suppressed,
+        "Dirty because it did not run, never Suppressed"
+    );
+    assert_eq!(proj.bodies.len(), 1);
+}
+
+/// An isolated head is NOT the document head, so it must not mint a checkpoint:
+/// `CheckpointStore::save` is a per-step insert that OVERWRITES, and the stored
+/// prefix hash of an isolation plan can never match the full record slice, so the
+/// entry would be permanently unusable AND would have destroyed a good one.
+#[tokio::test]
+async fn an_isolated_head_mints_no_checkpoint() {
+    let backend = Arc::new(FakeBackend {
+        checkpoints_work: true,
+        ..FakeBackend::with_failing_steps(&[1])
+    });
+    let mut rt = runtime_with(backend.clone());
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    // The isolation pass DID execute the head step (2) — the guard is the published
+    // `step_index`, not the absence of head geometry.
+    assert_eq!(rt.projection().bodies.len(), 2);
+
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(
+        backend.checkpoint_saves(),
+        0,
+        "a document with a halted step is not fully regenerated at head"
+    );
+    assert_eq!(rt.checkpoint_count(), 0);
+}
+
+/// WP-D1 FIX 2: the isolation pass is an OPTIMISTIC extra. A worker that dies
+/// inside its window must cost only the isolation benefit — the halted pass's own
+/// publish, with every pre-halt body it already computed, still lands. Losing that
+/// too would make a mid-isolation crash strictly worse than having no isolation.
+#[tokio::test]
+async fn a_dead_worker_in_the_isolation_window_keeps_the_halted_publish() {
+    let backend = Arc::new(FakeBackend::with_failing_steps_then_dead_worker(&[1]));
+    let mut rt = runtime_with(backend.clone());
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(report.outcome, Outcome::Published(_)),
+        "the HALTED pass still publishes, got {:?}",
+        report.outcome
+    );
+    assert_eq!(backend.plan_calls(), 2, "the isolation pass was attempted");
+
+    let proj = rt.projection();
+    assert!(
+        proj.bodies
+            .contains_key(&BodyId(Uuid::from_u128(0x10)).to_string()),
+        "the pre-halt body is NOT lost to a failed isolation attempt"
+    );
+    assert_eq!(
+        proj.bodies.len(),
+        1,
+        "and the isolation benefit is simply absent"
+    );
+    assert_eq!(proj.features[0].status, crate::dto::FeatureStatus::Ok);
+    assert_eq!(proj.features[1].status, crate::dto::FeatureStatus::Error);
+    assert_eq!(
+        proj.features[2].status,
+        crate::dto::FeatureStatus::Dirty,
+        "pre-WP-D1 truncation is the fallback — never worse than it"
+    );
+}
+
+/// WP-D1 FIX 4: a `NeedsRepair` halt with no §9 items still merges its EMPTY item
+/// set. The isolation executor ran `repair.clear_from(0)`, so skipping the write
+/// would leave whatever the pass happened to compute standing for that step.
+#[tokio::test]
+async fn the_halted_steps_repair_set_is_restored_even_when_empty() {
+    let backend = Arc::new(FakeBackend::with_failing_steps(&[1]));
+    let mut rt = runtime_with(backend.clone());
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let Outcome::Published(snap) = &report.outcome else {
+        panic!("expected Published, got {:?}", report.outcome);
+    };
+    assert!(
+        rt.repair_items().is_empty(),
+        "no items, and that is the answer"
+    );
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    assert!(snap.repair_summary.steps.is_empty());
+    assert!(report.needs_repair.is_empty());
 }

@@ -43,6 +43,8 @@ import { toolChipStore } from "@/stores/toolChipStore";
 import { applySketchSolveResult } from "./solveResult";
 import { promoteOne } from "@/ipc/promote";
 import { errorKind } from "@/ipc/apiError";
+import { diagnosticHint } from "@/ipc/operationDiagnostics";
+import type { OperationDiagnostic } from "@/ipc/types";
 import {
   projectHint,
   projectInit,
@@ -1223,11 +1225,37 @@ export class SketchController {
       void (async () => {
         try {
           await this.deps.client.cancelSketch(sketchId);
-          await this.deps.client.finishSketch(sketchId);
+          const finished = await this.deps.client.finishSketch(sketchId);
+          // A SUCCESSFUL finish can still have dropped geometry: an entity below
+          // the detector's node-merge tolerance is ignored so detection can
+          // continue (SCHEMA §7.4 `SKETCH_ENTITY_DEGENERATE`). That drop used to
+          // reach the wire on the modeling path only, so a sketch-mode user never
+          // learned an entity had been ignored — and then wondered why the
+          // profile was not the one they drew.
+          const advisories = finished?.diagnostics ?? [];
+          if (advisories.length > 0) {
+            viewportStore
+              .getState()
+              .setStatusHint(sketchAdvisoryHint(advisories), { severity: "info" });
+          }
         } catch (e) {
-          logError("sketch", "exit: finishSketch FAILED (timeline record may be missing)", {
+          // The RECORD IS COMMITTED. `finish_sketch_with_outcome` upserts the
+          // timeline record BEFORE it asks for regions, and returns the outcome
+          // alongside the refusal, precisely so a region refusal cannot lose it —
+          // the record is the durable half and the regions are a rebuildable
+          // cache. The old copy here claimed the record "may be missing" and sent
+          // readers hunting a bug that is not there.
+          logError("sketch", "exit: finishSketch refused (record committed; regions unavailable)", {
             sketchId,
             error: e,
+          });
+          // And TELL THE USER. This used to log only, so a refused profile closed
+          // the sketch silently and the user found out much later, when arming
+          // Extrude, through a nested backend sentence naming no geometry
+          // (measured on a real session, logs/dev.jsonl 2026-09-09 17:30).
+          viewportStore.getState().setStatusHint(profileRefusalHint(e), {
+            severity: "error",
+            sticky: true,
           });
         }
       })();
@@ -4032,6 +4060,27 @@ function facePickFrom(
 /** Human message from a rejected backend sketch call. */
 function sketchErr(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Phrase the advisories a SUCCESSFUL finish carried (WP-S1). */
+function sketchAdvisoryHint(advisories: OperationDiagnostic[]): string {
+  if (advisories.length === 1) return `Sketch finished: ${diagnosticHint(advisories[0])}`;
+  return `Sketch finished with ${advisories.length} warnings: ${diagnosticHint(advisories[0])}`;
+}
+
+/**
+ * User-facing text for a refused `finishSketch` (WP-S1).
+ *
+ * Prefers the first error-severity structured diagnostic, which routes on
+ * `reasonCode` and names the geometry; falls back to the backend's own sentence
+ * when the worker sent no diagnostics — an older worker, or one of the solver-lane
+ * refusals that carry no reason code by design (SCHEMA §7.4).
+ */
+function profileRefusalHint(e: unknown): string {
+  const diagnostics = (e as { diagnostics?: OperationDiagnostic[] } | null)?.diagnostics;
+  const named = diagnostics?.find((d) => d.severity === "error" && d.reasonCode);
+  if (named) return `Sketch not usable as a profile: ${diagnosticHint(named)}`;
+  return `Sketch not usable as a profile: ${sketchErr(e)}`;
 }
 
 /** A document-mm length rendered in the user's DISPLAY unit, for a hint. */

@@ -22,6 +22,7 @@
 #include "../sketch/SketchTypes.h"
 #include "CurveFragment.h"
 #include "DetectionWarning.h"
+#include "ProfileRefusal.h"
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -178,6 +179,11 @@ struct LoopDetectionResult {
 
     /// Error message if failed
     std::string errorMessage;
+
+    /// Machine-routable form of `errorMessage`, in the INTERNAL id space.
+    /// Empty on success and on every refusal outside the exact-refinement
+    /// surface SCHEMA §7.4 gives reason codes to.
+    ProfileRefusal refusal;
 
     /// Entities dropped without refusing the rest of the graph. Advisory only:
     /// a warning never makes `success` false.

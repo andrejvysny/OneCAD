@@ -23,7 +23,7 @@ use onecad_core::document::body::BodyLifecycleEvent;
 use onecad_core::document::refs::ElementKind;
 use onecad_core::document::repair::{LadderLevel, RepairCandidate, RepairItem, RepairReason};
 use onecad_core::document::Document;
-use onecad_core::history::StepState;
+use onecad_core::history::{DependencyGraph, StepState};
 use onecad_core::ids::{BodyId, DocumentId, DocumentRevision, JobId, TopoKey, WorkerEpoch};
 use onecad_core::math::Vec3;
 use onecad_core::regen::{
@@ -872,4 +872,142 @@ async fn same_plan_twice_publishes_identical_snapshot_excluding_generation() {
             .collect::<Vec<_>>()
     };
     assert_eq!(bodies(&a), bodies(&b), "identical bodies modulo generation");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-D1 D0: the executor stops the whole plan dead — a LAYER pin, not a defect
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One plan, one halt: everything after the failing step is `Dirty` and its
+/// bodies never reach the registry, even when the later record depends on
+/// nothing. `extrude_record` sets `profile: None` and `target_body: None`, so
+/// every record in `timeline_of(n)` derives no inputs at all and the dependency
+/// graph agrees they are mutually independent — this test asserts that as a fact
+/// first, so the result cannot be dismissed as hidden coupling.
+///
+/// **This behaviour is CORRECT AT THIS LAYER and must stay.** `RegenSession`
+/// (`executor.rs`) carries bodies, timeline, repair and elements — and no
+/// dependency graph. The executor therefore cannot compute a dependency closure
+/// and has no business deciding which records survive a halt; SCHEMA Invariant 6
+/// (publish ≤ m−1) is its whole contract, and the three tests above pin it.
+///
+/// Isolation belongs one layer up, in `DocumentRuntime`, which owns the
+/// `EditSession` and its `DependencyGraph` (it already calls `graph.downstream`)
+/// and which orchestrates begin/drive/finish. Note `document_runtime.rs:1433`
+/// hands the planner a freshly constructed EMPTY `DependencyGraph`, which is why
+/// `planner.rs:492`'s `let _ = graph;` is harmless: the real graph is on the
+/// session, so an exclusion set has to arrive as data rather than be derived
+/// inside the planner.
+///
+/// The user-visible consequence this pins — an unrelated body disappearing
+/// because something else broke — is asserted where it can actually be fixed,
+/// against the real runtime.
+#[tokio::test]
+async fn one_plan_halts_whole_and_that_is_the_executors_contract() {
+    let tl = timeline_of(3);
+
+    // Independence is a fact about these records, not an assumption.
+    let mut graph = DependencyGraph::new();
+    graph.rebuild_from_records(tl.records());
+    let failing = tl.records()[1].record_id;
+    assert!(
+        graph.downstream(failing).is_empty(),
+        "the three standalone NewBody extrudes must have no dependents at all"
+    );
+
+    let independent_body = default_body_of(tl.records()[2].record_id);
+    let upstream_body = default_body_of(tl.records()[0].record_id);
+
+    let req = plan_request(&tl, RegenRequest::ToEnd { from: 0 }, JOB, REV, EPOCH);
+    let mut scripts = BTreeMap::new();
+    scripts.insert(
+        1,
+        StepScript::Fail {
+            code: OpFailureCode::GeometryInvalid,
+        },
+    );
+    let exec = RegenExecutor::new(FakeEngine::new(scripts));
+    let mut session = RegenSession::with_timeline(tl);
+    let publisher = SnapshotPublisher::new();
+    let gate = move || (REV, EPOCH);
+    let cancel = CancelToken::new();
+
+    let out = exec
+        .run(req, &mut session, &gate, &cancel, &publisher)
+        .await;
+    let snap = match out {
+        Outcome::Published(s) => s,
+        other => panic!("expected Published (accepted m-1), got {other:?}"),
+    };
+    assert_eq!(snap.stopped_reason, StoppedReason::OpFailed);
+    assert!(
+        session.bodies.contains(upstream_body),
+        "the body from the step BEFORE the failure survives"
+    );
+    assert!(
+        !session.bodies.contains(independent_body),
+        "one plan publishes <= m-1 and nothing past the halt, dependency or not"
+    );
+    assert_eq!(session.bodies.len(), 1, "only step 0's body committed");
+}
+
+/// WP-D1 D0 CENSUS PROBE: where the dependency graph FAILS OPEN.
+///
+/// `history/graph.rs` divergence 2 is deliberate and load-bearing: element
+/// inputs create **no** edges, because a v2 `ElementId` is opaque and does not
+/// embed a `BodyId` (that linkage lives in the worker's ElementMap partition,
+/// not in pure core). So a Fillet carrying only bare `edge_ids` — no typed
+/// `edges[].primary` to push its body — declares element inputs, produces no
+/// graph edge, and reads as INDEPENDENT of the step that made the body it cuts.
+///
+/// WP-D1's isolation pass must therefore not trust `downstream()` alone. A
+/// record is executable past a halt only when independence is POSITIVELY
+/// provable; this probe pins the exact shape that is not.
+#[test]
+fn element_only_inputs_form_no_graph_edge_so_isolation_must_fail_closed() {
+    use onecad_core::document::record::{FilletParams, KnownOperation, Operation, OperationRecord};
+    use onecad_core::document::variables::Scalar;
+    use onecad_core::ids::ElementId;
+
+    let producer = extrude_record(0x10, 5.0);
+    let producer_id = producer.record_id;
+
+    // A fillet on that body, addressed the legacy way: element ids only.
+    let bare = OperationRecord::new(
+        rid(0x20),
+        0,
+        "Fillet",
+        Operation::Known(KnownOperation::Fillet(FilletParams {
+            radius: Scalar::new(1.0),
+            edge_ids: vec![ElementId::new("el_probe_1")],
+            edges: Vec::new(),
+            chain_tangent_edges: true,
+            tangent_closure_version: None,
+            extra: Default::default(),
+        })),
+    );
+    let bare_id = bare.record_id;
+
+    let inputs = bare.op.derive_inputs();
+    assert!(
+        inputs.bodies.is_empty() && !inputs.elements.is_empty(),
+        "the bare-edge_ids fillet declares elements and no body: {inputs:?}"
+    );
+
+    let mut graph = DependencyGraph::new();
+    graph.rebuild_from_records(&[producer, bare]);
+
+    let downstream = graph.downstream(producer_id);
+    eprintln!(
+        "PROBE element-only-inputs: downstream(producer) = {} entries, contains fillet = {}",
+        downstream.len(),
+        downstream.contains(&bare_id)
+    );
+    // This is the CURRENT, DELIBERATE behaviour (divergence 2) — not a defect to
+    // fix here. It is the reason WP-D1 excludes any record whose independence the
+    // graph cannot prove, rather than executing everything `downstream()` omits.
+    assert!(
+        !downstream.contains(&bare_id),
+        "divergence 2: element inputs form no edge, so the graph cannot see this dependency"
+    );
 }

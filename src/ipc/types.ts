@@ -451,6 +451,14 @@ export interface FinishSketchResult {
   /** Canonical region-id format; production P2 worker responses use 2. */
   regionIdentityVersion?: number;
   regions: SketchRegion[];
+  /**
+   * Advisories the detector raised while SUCCEEDING (SCHEMA §7.4, WP-S1) —
+   * today only `SKETCH_ENTITY_DEGENERATE`, an entity below the node-merge
+   * coincidence tolerance that was dropped so detection could continue.
+   * Omission-legal: absent means the producer had nothing to report, never that
+   * nothing was dropped.
+   */
+  diagnostics?: OperationDiagnostic[];
 }
 
 // ── Sketch drag gesture (SCHEMA §7.4 BeginGesture / SolveDrag / EndGesture) ───

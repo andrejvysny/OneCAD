@@ -75,12 +75,13 @@ use onecad_core::io::imports::{ImportBlob, ImportBlobs, MAX_IMPORT_BLOB_BYTES};
 use onecad_core::io::IoError;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
-    mint_element_ids, AcquireRequest, BindElementIdsRequest, CancelToken, CheckpointArtifacts,
-    CheckpointStore, ElementBinding, EngineError, GeometryEngine, InMemoryCheckpointStore, Lod,
-    MeshKey, MeshSink, ModelSnapshot, Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest,
-    PolicyVersions, RefResolution, RegenExecutor, RegenPlan, RegenPlanner, RegenRequest,
-    RegenSession, ResolveOutcome, ResolveRef, ResolveRequest, Signature, SnapshotPublisher,
-    TessellateSpec, UnresolvedVariable,
+    isolation_scope, mint_element_ids, AcquireRequest, BindElementIdsRequest, CancelToken,
+    CheckpointArtifacts, CheckpointStore, ElementBinding, EngineError, GeometryEngine,
+    InMemoryCheckpointStore, Lod, MeshKey, MeshSink, ModelSnapshot, Outcome, Pick, PlanArtifacts,
+    PlanContext, PlanRequest, PolicyVersions, RefResolution, RegenExecutor, RegenPlan,
+    RegenPlanner, RegenRequest, RegenSession, RepairSummary, ResolveOutcome, ResolveRef,
+    ResolveRequest, Signature, SnapshotPublisher, StoppedReason, TessellateSpec,
+    UnresolvedVariable,
 };
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
@@ -1372,7 +1373,12 @@ impl DocumentRuntime {
         let Some(prepared) = self.begin_regen(request) else {
             return self.noop_report();
         };
-        let driven = prepared.drive(cancel).await;
+        let mut driven = prepared.drive(cancel.clone()).await;
+        // Phase 2.5/2.6 (WP-D1): a halted publish gets ONE from-0 isolation pass,
+        // and only its result is finished — the halted one is never published.
+        if let Some(isolation) = self.begin_isolation_regen(&driven) {
+            driven = adopt_isolated(driven, isolation.drive(cancel).await);
+        }
         self.finish_regen(driven)
     }
 
@@ -1485,6 +1491,10 @@ impl DocumentRuntime {
             return None;
         }
         let job = self.next_job_id();
+        // The target the planner SETTLED on (request clamp + §7.3/WP-VE.1 ceiling) —
+        // captured before `into_request` consumes the plan, because a WP-D1 isolation
+        // pass must re-plan against exactly this ceiling, not re-derive it.
+        let target_step = plan.target_step;
         let (plan_rev, epoch) = self.fencing.get();
         let artifacts = PlanArtifacts {
             tessellate: Some(TessellateSpec {
@@ -1556,6 +1566,9 @@ impl DocumentRuntime {
             mesh_sink: MeshSink::default(),
             planner_ms: planning_started.elapsed().as_millis() as u64,
             clock,
+            target_step,
+            edited_from: request.edited_from(),
+            isolation: None,
         })
     }
 
@@ -1618,6 +1631,11 @@ impl DocumentRuntime {
             // runs on this path, so the clock stays at zero.
             planner_ms: 0,
             clock: Arc::new(EngineClock::default()),
+            target_step: target.saturating_sub(1),
+            edited_from: None,
+            // A CLEAR publishes NO geometry and never halts, so it is never a
+            // candidate for isolation and never IS one.
+            isolation: None,
         })
     }
 
@@ -1651,6 +1669,158 @@ impl DocumentRuntime {
             .then_some(target + 1)
     }
 
+    /// Phase 2.5 (**locked**), WP-D1: after a regen HALTED at some record `H`,
+    /// compile one further from-0 pass that excludes `H` and everything whose
+    /// independence of it is not provable — so a broken feature cannot delete or
+    /// block bodies outside its dependency closure. `None` ⇒ finish `driven`
+    /// normally.
+    ///
+    /// The caller drives the returned plan with the lock released, exactly like
+    /// any other regen, and hands the result to [`finish_regen`](Self::finish_regen)
+    /// **instead of** `driven`: the halted pass's own result is dropped, so exactly
+    /// one snapshot, one `document-changed` and one regen-finished event go out.
+    /// Its step states, diagnostics and repair items ride along in
+    /// [`IsolationCarry`] and are merged back at commit.
+    ///
+    /// Refused, in order:
+    ///
+    /// * a pass that already carries a carry — **one pass, no recursion** (design
+    ///   point 5): a second halt publishes `≤ m−1` the ordinary way;
+    /// * anything but a `Published` halt — a crash / supersede / cancel commits
+    ///   nothing at all, so there is no truncation to repair;
+    /// * a moved fencing tuple or a foreign runtime instance — the covering regen
+    ///   is already on the way and `finish_regen` will report `Superseded`
+    ///   (design point 6: no second fencing mechanism);
+    /// * a scope with nothing provably independent above the halt — the pass would
+    ///   reproduce the halted result exactly, so it is not worth a full replay.
+    ///   This is the COMMON case (a fillet that fails with a shell after it), and
+    ///   it is what keeps the extra ~0.5 s off almost every failure.
+    pub fn begin_isolation_regen(&mut self, driven: &DrivenRegen) -> Option<PreparedRegen> {
+        if driven.isolation.is_some() {
+            return None; // one pass, never a cascade.
+        }
+        let Outcome::Published(snap) = &driven.outcome else {
+            return None;
+        };
+        if driven.instance != self.instance || self.fencing.get() != driven.expected {
+            return None;
+        }
+        let halted_step = halted_step_of(snap)?;
+        // Records from the SAME source the graph is built from. The regen mirror's
+        // `outputs` are refreshed only when the timeline is re-synced, while
+        // `session.graph()` is rebuilt on every commit that changed them — and
+        // `isolation_scope` reads `outputs` (for taint) alongside the graph's
+        // producer index, so mixing the two vintages would let the taint set and
+        // the edges disagree about the very same record. Index-safe: the mirror is
+        // a `records().to_vec()` clone with the same cursor, so a step index means
+        // the same record in both.
+        let scope = isolation_scope(
+            self.session.document().timeline.records(),
+            self.session.graph(),
+            halted_step,
+            driven.target_step,
+        );
+        if !scope.is_worth_running() {
+            return None;
+        }
+        // From step 0 and with NO checkpoint, always (design point 2): the base is
+        // then the empty prefix, so the extra exclusion cannot make
+        // `expectedBaseHash` describe an op sequence the plan never executes, and
+        // decision D5 keeps it base-valid.
+        let plan = RegenPlanner::without_checkpoint_excluding(
+            &self.regen.timeline,
+            driven.target_step,
+            &scope.excluded,
+        );
+        if plan.is_empty() {
+            return None;
+        }
+        let planning_started = std::time::Instant::now();
+        let job = self.next_job_id();
+        let (plan_rev, epoch) = self.fencing.get();
+        let plan_req = plan
+            .into_request(
+                job,
+                plan_rev,
+                epoch,
+                PolicyVersions::default(),
+                PlanArtifacts {
+                    tessellate: Some(TessellateSpec {
+                        lod: DISPLAY_LOD,
+                        include_edges: true,
+                    }),
+                },
+            )
+            // The same edit context the halted pass claimed: the geometry is still
+            // post-edit however the base is rebuilt. This is NOT the F12 checkpoint
+            // fallback, so the §10 anchor-exact carve-out stays available.
+            .with_edited_from(driven.edited_from);
+        self.last_regen_used_checkpoint = false;
+        let excluded_steps = scope.excluded_steps.clone();
+        tracing::info!(
+            job = %job.0,
+            halted = halted_step,
+            excluded = ?excluded_steps,
+            independent = ?scope.independent_steps,
+            "begin_isolation_regen: replaying from 0 without the halted record's closure"
+        );
+        let carry = IsolationCarry {
+            halted_step,
+            halted_state: snap
+                .step_states
+                .iter()
+                .find(|(step, _)| *step == halted_step)
+                .map_or(StepState::Dirty, |(_, state)| state.clone()),
+            stopped_reason: snap.stopped_reason,
+            diagnostics: snap
+                .diagnostics_by_step
+                .iter()
+                .filter(|(step, _)| excluded_steps.contains(step))
+                .map(|(step, ds)| (*step, ds.clone()))
+                .collect(),
+            repair_items: driven
+                .scratch
+                .repair
+                .items_for_step(halted_step)
+                .into_iter()
+                .cloned()
+                .collect(),
+            excluded_steps,
+        };
+        let step_count = plan_req.ops.len();
+        let executed: BTreeSet<RecordId> = plan_req.ops.iter().map(|o| o.record_id).collect();
+        let base_hash_prefix = hash_prefix(plan_req.expected_base_hash.as_str());
+        let clock = Arc::new(EngineClock::default());
+        Some(PreparedRegen {
+            work: PreparedWork::Plan {
+                plan_req: Box::new(plan_req),
+                engine: Box::new(
+                    AdoptingEngine::new(self.engine.clone(), HashSet::new())
+                        .with_clock(clock.clone()),
+                ),
+            },
+            scratch: self.clone_regen_session(),
+            fencing: self.fencing.clone(),
+            publisher: self.publisher.clone(),
+            instance: self.instance,
+            expected: (plan_rev, epoch),
+            lod: DISPLAY_LOD,
+            // What the user currently SEES — the halted pass committed nothing, so
+            // this is still the pre-regen head and the `removed` delta stays honest.
+            prior: driven.prior.clone(),
+            executed,
+            job: Some(job),
+            base_hash_prefix,
+            step_count,
+            mesh_sink: MeshSink::default(),
+            planner_ms: planning_started.elapsed().as_millis() as u64,
+            clock,
+            target_step: driven.target_step,
+            edited_from: driven.edited_from,
+            isolation: Some(Box::new(carry)),
+        })
+    }
+
     /// Phase 3 (**locked**): commit a driven regen back into the live session.
     ///
     /// A `Published` snapshot commits **only if** the fencing tokens are unchanged
@@ -1666,7 +1836,7 @@ impl DocumentRuntime {
     pub fn finish_regen(&mut self, driven: DrivenRegen) -> RegenReport {
         let DrivenRegen {
             outcome,
-            scratch,
+            mut scratch,
             prior,
             instance,
             expected,
@@ -1677,7 +1847,20 @@ impl DocumentRuntime {
             step_count,
             mesh_sink,
             timings,
+            isolation,
+            ..
         } = driven;
+        // WP-D1: an isolation pass excluded the halted record, so the worker
+        // returned no row for it — fold the halted pass's own verdict back in
+        // BEFORE anything is committed or reported. Done here rather than at
+        // publish time because `self.regen.timeline` (which the frontend's feature
+        // statuses are read from) is exactly this `scratch`.
+        let outcome = match (&isolation, &outcome) {
+            (Some(carry), Outcome::Published(snap)) => {
+                Outcome::Published(merge_isolation(carry, &mut scratch, snap))
+            }
+            _ => outcome,
+        };
         let job = JobLabel(job);
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
         // into EVERY outcome — including Superseded/Failed — for commit correlation.
@@ -3876,7 +4059,7 @@ impl DocumentRuntime {
             Ok(regions) => regions,
             Err(e) => {
                 return Err(FinishSketchError {
-                    error: op_failed(format!("finishSketch: {e}")),
+                    error: prefixed_engine_error("finishSketch", e),
                     committed: outcome.map(Box::new),
                 })
             }
@@ -4989,6 +5172,44 @@ pub struct PreparedRegen {
     planner_ms: u64,
     /// Where the wrapped engine books its worker round trips during phase 2.
     clock: Arc<EngineClock>,
+    /// The inclusive last timeline step this plan targets — what a WP-D1
+    /// isolation pass must re-plan against (the request's own clamp plus the
+    /// §7.3 repair / WP-VE.1 variable ceiling `begin_regen` applied).
+    target_step: usize,
+    /// The triggering request's `editedFrom` claim (SCHEMA §7.2), kept so an
+    /// isolation pass re-plans with the SAME edit context — the geometry is
+    /// still post-edit however the base is rebuilt.
+    edited_from: Option<usize>,
+    /// `Some` iff THIS is the WP-D1 isolation pass, carrying the halted pass's
+    /// evidence for the steps this plan deliberately does not execute. Also the
+    /// no-recursion flag: a pass that carries one never spawns another.
+    isolation: Option<Box<IsolationCarry>>,
+}
+
+/// Evidence from a HALTED regen that the WP-D1 isolation pass cannot reproduce —
+/// it excludes the halted record, so the worker returns no row for it.
+///
+/// Carried through phase 2 and merged into the published state by
+/// [`DocumentRuntime::finish_regen`], so the user sees exactly ONE snapshot, one
+/// `document-changed` and one regen-finished event: never a flash of the
+/// truncated state followed by the isolated one.
+#[derive(Debug)]
+struct IsolationCarry {
+    /// The step the halted pass stopped at.
+    halted_step: usize,
+    /// That step's state from the halted pass (`Error { .. }` / `NeedsRepair`).
+    halted_state: StepState,
+    /// The halted pass's terminal reason, republished verbatim: the document did
+    /// not complete just because the isolation plan did.
+    stopped_reason: StoppedReason,
+    /// Steps the isolation plan SKIPS — published `Dirty`. Never
+    /// `StepState::Suppressed`, which is user state and which `dto.rs`'s
+    /// `feature_status` cannot tell apart from a real suppression.
+    excluded_steps: Vec<usize>,
+    /// The halted pass's per-step diagnostics for those skipped steps.
+    diagnostics: BTreeMap<usize, Vec<onecad_core::regen::Diagnostic>>,
+    /// The halted pass's NeedsRepair items for the halted step.
+    repair_items: Vec<RepairItem>,
 }
 
 /// Renders an optional [`JobId`] for the regen lane: the bare uuid, or `clear` for
@@ -5003,6 +5224,141 @@ impl std::fmt::Display for JobLabel {
             None => f.write_str("clear"),
         }
     }
+}
+
+/// Chooses which of the two WP-D1 passes phase 3 commits: the isolation pass IFF
+/// it published, else the halted pass that earned the isolation attempt.
+///
+/// The isolation pass is an OPTIMISTIC extra. A worker that dies, times out or is
+/// cancelled inside its window must cost only the isolation benefit — a regression
+/// to the pre-WP-D1 truncated publish — never the halted pass's publish as well,
+/// which already computed and accepted every pre-halt body. Substituting
+/// unconditionally would make a mid-isolation crash strictly WORSE than having no
+/// isolation at all.
+///
+/// A `Superseded` isolation pass falls back safely too: both passes carry the same
+/// fencing tuple (`begin_isolation_regen` refuses a moved one), so `finish_regen`
+/// re-fences the halted pass and reports `Superseded` itself rather than committing
+/// stale geometry.
+pub fn adopt_isolated(halted: DrivenRegen, isolated: DrivenRegen) -> DrivenRegen {
+    if matches!(isolated.outcome, Outcome::Published(_)) {
+        return isolated;
+    }
+    tracing::warn!(
+        outcome = outcome_label(&isolated.outcome),
+        "regen: isolation pass did not publish — falling back to the halted pass's own result"
+    );
+    halted
+}
+
+/// The step a published regen HALTED at, or `None` if it completed.
+///
+/// The lowest step above the snapshot's last valid one whose state is `Error` or
+/// `NeedsRepair`. It cannot be confused with a SEEDED `NeedsRepair` gate: a seed
+/// makes `begin_regen` compile a plan that stops strictly BELOW it, so a gated
+/// step is always above a halt that happened inside the plan, and `min` picks the
+/// halt. `validate_terminal` guarantees every step at or below `step_index` is
+/// `Ok`, so nothing lower can match.
+fn halted_step_of(snap: &ModelSnapshot) -> Option<usize> {
+    if matches!(snap.stopped_reason, StoppedReason::Completed) {
+        return None;
+    }
+    snap.step_states
+        .iter()
+        .filter(|(step, state)| {
+            matches!(state, StepState::Error { .. } | StepState::NeedsRepair)
+                && snap.step_index.is_none_or(|last| *step > last)
+        })
+        .map(|(step, _)| *step)
+        .min()
+}
+
+/// Folds a halted pass's verdict into the isolation pass's result (WP-D1 design
+/// point 4), returning the ONE snapshot that gets published.
+///
+/// The isolation plan excluded the halted record and its unprovable successors,
+/// so it produced nothing for them; this is the only place that truth survives.
+/// After it: the halted step reads with its halted-pass state, diagnostics and
+/// repair items; every excluded step reads `Dirty`; every independent step keeps
+/// the isolation pass's own `Valid` and its bodies.
+///
+/// `id` and `generation` are the isolation pass's and are left alone — the mesh
+/// sink about to be seeded is keyed by that generation.
+fn merge_isolation(
+    carry: &IsolationCarry,
+    scratch: &mut RegenSession,
+    snap: &Arc<ModelSnapshot>,
+) -> Arc<ModelSnapshot> {
+    let _ = scratch
+        .timeline
+        .mark_state(carry.halted_step, carry.halted_state.clone());
+    for &step in &carry.excluded_steps {
+        // `Dirty`, never `Suppressed`: `dto::feature_status` collapses the two into
+        // one frontend status, so a `Suppressed` here would read to the user as a
+        // feature THEY turned off.
+        if step != carry.halted_step && scratch.timeline.state(step) != Some(&StepState::Suppressed)
+        {
+            let _ = scratch.timeline.mark_state(step, StepState::Dirty);
+        }
+    }
+    // Unconditionally, empty vector included: the isolation executor already ran
+    // `repair.clear_from(0)`, so the halted step's §9 items exist nowhere else. An
+    // empty set is a real answer — a `NeedsRepair` halt with no items would
+    // otherwise merge to an amber row with no repair panel behind it.
+    scratch
+        .repair
+        .set_step(carry.halted_step, carry.repair_items.clone());
+
+    let mut diagnostics_by_step = snap.diagnostics_by_step.clone();
+    for (step, ds) in &carry.diagnostics {
+        diagnostics_by_step.insert(*step, ds.clone());
+    }
+    let diagnostics: Vec<onecad_core::regen::Diagnostic> = diagnostics_by_step
+        .values()
+        .flatten()
+        .take(64)
+        .cloned()
+        .collect();
+
+    let mut step_states: BTreeMap<usize, StepState> = snap.step_states.iter().cloned().collect();
+    for &step in &carry.excluded_steps {
+        if let Some(state) = scratch.timeline.state(step) {
+            step_states.insert(step, state.clone());
+        }
+    }
+
+    let mut repair_steps: Vec<usize> = scratch
+        .repair
+        .items()
+        .iter()
+        .map(|item| item.step_index)
+        .collect();
+    repair_steps.sort_unstable();
+    repair_steps.dedup();
+
+    Arc::new(ModelSnapshot {
+        // The valid LINEAR prefix still ends below the halt, whatever the isolation
+        // pass ran above it. This is also the checkpoint guard: `prepare_checkpoint`
+        // mints only at `step_index == head_step`, so an isolated head can never
+        // overwrite a good acceleration base with one whose stored prefix hash
+        // describes ops the geometry does not contain.
+        step_index: carry.halted_step.checked_sub(1),
+        // The FIRST stop is the document's reason, always — the isolation pass is an
+        // addition on top of the halted plan, never a re-diagnosis of it. A second
+        // halt inside the isolation pass must not rewrite `needsRepair` into
+        // `opFailed`: SCHEMA §8 describes the first op whose input could not be
+        // bound, and that op is still this one. The second halt stays fully visible
+        // through its own `Error` step state, `failed_steps` and diagnostics.
+        stopped_reason: carry.stopped_reason,
+        step_states: step_states.into_iter().collect(),
+        diagnostics,
+        diagnostics_by_step,
+        repair_summary: RepairSummary {
+            needs_repair_count: scratch.repair.len(),
+            steps: repair_steps,
+        },
+        ..(**snap).clone()
+    })
 }
 
 /// The first 12 chars of a hash — enough to correlate `begin_regen` ↔ `regen.drive`
@@ -5087,6 +5443,9 @@ impl PreparedRegen {
             mesh_sink,
             planner_ms,
             clock,
+            target_step,
+            edited_from,
+            isolation,
         } = self;
         // The phase-2 span. Everything the executor awaits nests inside it — INCLUDING
         // the `onecad_protocol::frames` tx/rx events, which is the join from a regen to
@@ -5147,6 +5506,9 @@ impl PreparedRegen {
             step_count,
             mesh_sink,
             timings,
+            target_step,
+            edited_from,
+            isolation,
         }
     }
 }
@@ -5226,6 +5588,10 @@ pub struct DrivenRegen {
     mesh_sink: MeshSink,
     /// The phase-1 + phase-2 wall-clock split, measured by [`PreparedRegen::drive`].
     timings: RegenTimings,
+    /// Carried verbatim from [`PreparedRegen`] — see the fields there.
+    target_step: usize,
+    edited_from: Option<usize>,
+    isolation: Option<Box<IsolationCarry>>,
 }
 
 /// Logs once when an opened container still carries the pre-V2 `checkpoints/` cache.
@@ -5742,6 +6108,51 @@ pub fn mesh_key_string(key: MeshKey) -> String {
 
 /// A sketch-flow domain issue as a recoverable [`EngineError`] (the session stays
 /// editable) — surfaced to the command as [`ApiError::OpFailed`](crate::error::ApiError).
+/// Prefixes an [`EngineError`]'s message with a lane name **without flattening the
+/// error**.
+///
+/// The obvious `op_failed(format!("{lane}: {e}"))` loses everything but the
+/// sentence: `op_failed` mints an empty `diagnostics` vector and `Display` skips the
+/// field, so every `reasonCode` and every `evidence.entityIds` the worker sent is
+/// destroyed one frame after `wire::parse_diagnostics` correctly parsed it. That is
+/// exactly what happened on the finish-sketch lane, which is the lane WP-S1's
+/// diagnostics exist to serve — a refused profile reached the user as an opaque
+/// sentence naming no geometry.
+fn prefixed_engine_error(
+    lane: &str,
+    error: onecad_core::regen::EngineError,
+) -> onecad_core::regen::EngineError {
+    use onecad_core::regen::EngineError as E;
+    match error {
+        E::OpFailed {
+            code,
+            recoverable,
+            message,
+            diagnostics,
+        } => E::OpFailed {
+            code,
+            recoverable,
+            message: format!("{lane}: {message}"),
+            diagnostics,
+        },
+        // The fatal variants carry no structured evidence, so prefixing the
+        // sentence is lossless for them.
+        E::Crashed { message } => E::Crashed {
+            message: format!("{lane}: {message}"),
+        },
+        E::NotConnected { message } => E::NotConnected {
+            message: format!("{lane}: {message}"),
+        },
+        E::Protocol { message } => E::Protocol {
+            message: format!("{lane}: {message}"),
+        },
+        E::Timeout { message } => E::Timeout {
+            message: format!("{lane}: {message}"),
+        },
+        E::Cancelled => E::Cancelled,
+    }
+}
+
 fn op_failed(message: impl Into<String>) -> onecad_core::regen::EngineError {
     onecad_core::regen::EngineError::OpFailed {
         code: onecad_core::regen::OpFailureCode::OpFailed,

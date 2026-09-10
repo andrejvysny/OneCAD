@@ -5,6 +5,7 @@
 #include "../sketch/SketchTypes.h"
 #include "CurveFragment.h"
 #include "DetectionWarning.h"
+#include "ProfileRefusal.h"
 
 #include <optional>
 #include <string>
@@ -45,6 +46,8 @@ struct AdjacencyGraph {
     std::unordered_map<sk::EntityID, int> nodeByPointId;
     std::unordered_map<sk::EntityID, int> edgeByEntity;
     std::string errorMessage;
+    /// Machine-routable form of `errorMessage`, in the INTERNAL id space.
+    ProfileRefusal refusal;
     /// Entities dropped during graph construction; never a refusal.
     std::vector<DetectionWarning> warnings;
     /// Curve pairs kept by the broad-phase cull during exact refinement.

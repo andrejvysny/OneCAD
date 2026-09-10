@@ -55,7 +55,7 @@
 //!   prepare) as `PlanPrepared.historyPrefixHash`; the executor verifies that
 //!   opaque echo (X-WP1 item 2 / review F9).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -559,6 +559,34 @@ impl RegenPlanner {
     /// drift), so an unusable cache degrades performance, never correctness.
     #[must_use]
     pub fn without_checkpoint(timeline: &Timeline, target_step: usize) -> RegenPlan {
+        Self::without_checkpoint_excluding(timeline, target_step, &BTreeSet::new())
+    }
+
+    /// [`without_checkpoint`](Self::without_checkpoint) with an extra set of
+    /// records the plan must SKIP — the WP-D1 isolation pass.
+    ///
+    /// The exclusion is **ephemeral**: a parameter of this one plan, never the
+    /// record's `suppressed` flag (that is user state and rides undo) and never
+    /// [`StepState::Suppressed`], which the frontend cannot tell apart from a user
+    /// suppression. An excluded step is reported `Dirty`, like any step that did
+    /// not execute.
+    ///
+    /// **From step 0, always.** That is what makes the extra exclusion legal
+    /// against the §4.3 rule that the planner's op filter must stay identical to
+    /// the one [`history_prefix_hash`] applies: with `start_step == 0` the base is
+    /// the EMPTY prefix (the SHA-256-of-nothing anchor), so it cannot describe an
+    /// op sequence this plan does not execute, and decision D5 keeps a from-0 plan
+    /// base-valid. `prefix_hashes` is built from `planned_ops` by
+    /// [`compute_hashes`] and echoed by execution order, so dropping ops moves
+    /// both sides together — no wire, SCHEMA or fixture change.
+    ///
+    /// [`StepState::Suppressed`]: crate::history::StepState::Suppressed
+    #[must_use]
+    pub fn without_checkpoint_excluding(
+        timeline: &Timeline,
+        target_step: usize,
+        excluded: &BTreeSet<crate::ids::RecordId>,
+    ) -> RegenPlan {
         let records = timeline.records();
         let applied = timeline.cursor();
         if applied == 0 {
@@ -574,7 +602,7 @@ impl RegenPlanner {
         let target = target_step.min(applied - 1);
         let planned_ops: Vec<PlannedOp> = (0..=target)
             .filter_map(|i| records.get(i).map(|rec| (i, rec)))
-            .filter(|(_, rec)| !rec.suppressed)
+            .filter(|(_, rec)| !rec.suppressed && !excluded.contains(&rec.record_id))
             .map(|(i, rec)| planned_op(i, rec))
             .collect();
         let (expected_base_hash, prefix_hashes) = compute_hashes(records, 0, &planned_ops);

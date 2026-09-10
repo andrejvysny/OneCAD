@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "loop/ProfileRefusal.h"
 #include "loop/RegionUtils.h"
 
 namespace onecad::core::loop {
@@ -13,6 +14,11 @@ namespace onecad::core::loop {
 struct RegionTable {
     bool success = false;
     std::string errorMessage;
+    /// Machine-routable form of `errorMessage` for a loop-detection refusal,
+    /// with `entityIds` already remapped through `mapBaseEdge` into the
+    /// caller's id space. Empty for the table's own failures, which SCHEMA §7.4
+    /// gives no reason code.
+    ProfileRefusal refusal;
     std::vector<RegionDefinition> regions;
     /// Advisory findings forwarded from loop detection, with each `entityId`
     /// remapped through `mapBaseEdge` into the caller's id space.

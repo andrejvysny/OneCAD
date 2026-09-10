@@ -88,7 +88,34 @@ export function diagnosticHint(diagnostic: OperationDiagnostic): string {
               : "out of range";
       return `${param} must be ${bound} (got ${String(value)})`;
     }
+    // WP-S1 — sketch profile refusals (SCHEMA §7.4). The backend's own sentence
+    // is accurate but says nothing the user can act on; these name the geometry.
+    // `entityIds` are WIRE entity ids, mapped worker-side — a count is the most
+    // this can say until the sketch overlay highlights them.
+    case "SKETCH_PROFILE_OVERLAPPING_CURVES":
+      return `${curveCount(evidence, "Two curves")} lie on top of each other — delete or trim the duplicate`;
+    case "SKETCH_PROFILE_DISCONTINUOUS":
+      return `${curveCount(evidence, "A curve")} is broken along its own length — redraw it`;
+    case "SKETCH_PROFILE_LIMIT_EXCEEDED": {
+      const measured = evidence.measured;
+      const limit = evidence.limit;
+      const what = typeof evidence.limitName === "string" ? evidence.limitName : "sketch complexity";
+      return measured !== undefined && limit !== undefined
+        ? `This sketch is too complex to solve regions for: ${what} ${String(measured)} exceeds the limit of ${String(limit)}`
+        : `This sketch is too complex to solve regions for (${what})`;
+    }
+    case "SKETCH_PROFILE_REFINEMENT_FAILED":
+      return `${curveCount(evidence, "Some curves")} could not be resolved into a closed profile — check for near-coincident or self-touching geometry`;
+    case "SKETCH_PROFILE_GRAPH_BUILD_FAILED":
+      return "This sketch could not be assembled into loops at all — check for stray or disconnected geometry";
     default:
       return diagnostic.message;
   }
+}
+
+/** Phrase how many entities a profile refusal implicates, when it names any. */
+function curveCount(evidence: Record<string, unknown>, fallback: string): string {
+  const ids = evidence.entityIds;
+  if (!Array.isArray(ids) || ids.length === 0) return fallback;
+  return ids.length === 1 ? "1 curve" : `${ids.length} curves`;
 }

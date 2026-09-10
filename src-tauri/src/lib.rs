@@ -46,7 +46,7 @@ use tokio::sync::{watch, Mutex};
 
 use onecad_core::regen::{CancelToken, Outcome, RegenDirective, RegenRequest, RegenScheduler};
 
-use crate::document_runtime::{DocumentRuntime, RegenReport};
+use crate::document_runtime::{adopt_isolated, DocumentRuntime, RegenReport};
 use crate::dto::DocumentProjection;
 use crate::state::AppState;
 
@@ -189,7 +189,25 @@ pub fn regen_driver_with_started(
             on_started();
             // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
             let cancel = directive.cancel.clone();
-            let driven = prepared.drive(directive.cancel).await;
+            let mut driven = prepared.drive(directive.cancel).await;
+            // Phase 2.5 (locked) + 2.6 (UNLOCKED), WP-D1: a regen that HALTED at some
+            // record gets ONE further from-0 pass that excludes that record's
+            // unprovable closure, so a broken feature cannot wipe bodies outside it.
+            // Only the second result is finished — the truncated one is never
+            // published, so the user never sees it flash and no awaiter settles twice.
+            let isolation = {
+                let mut guard = runtime.lock().await;
+                let Some(rt) = guard.as_mut() else {
+                    return Outcome::NoOp; // document closed during the worker IO.
+                };
+                rt.begin_isolation_regen(&driven)
+            };
+            if let Some(prepared) = isolation {
+                // Adopt the isolation pass ONLY if it published: a worker that dies
+                // or is cancelled inside its window must cost the isolation benefit,
+                // never the halted pass's own publish (`adopt_isolated`).
+                driven = adopt_isolated(driven, prepared.drive(cancel.clone()).await);
+            }
             // Phase 3 (locked): commit iff still current, then emit events.
             let (report, projection) = {
                 let mut guard = runtime.lock().await;
