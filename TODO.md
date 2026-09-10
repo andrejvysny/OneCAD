@@ -2,6 +2,565 @@
 
 ## KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
 
+### Now (2026-09-09, session 30 — plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`)
+
+Program this session, user-approved after a fresh state review: **WP-S1 sketch-region refusal
+diagnostics → WP-D1 dirty-closure error isolation → WP-X dogfood (user-run) → WP-J export/import
+honesty → re-plan → WP-A2**, with four riders folded into the two gates (pattern count clamp,
+close MC-R9, R2 semantic contracts verifier, R3 `boolean/foundation:b1` kernelbench).
+**CI is OUT OF SCOPE by user instruction — local development and local gates only.**
+
+Three findings moved the order off the session-29 plan (`act-as-senior-software-cached-charm.md`),
+whose WP-J and WP-A2 designs are otherwise reused unchanged:
+
+1. **Dogfood already produced a failure, and it is not in the export lane.** `logs/dev.jsonl` from
+   2026-09-09 17:30 records a real interactive session that could not finish a sketch —
+   `SketchRegions: profile has overlapping or coincident analytic curves`. The refusal names no
+   entity; `protocol/SCHEMA.md:753` states outright that `SketchRegions` has no diagnostics channel.
+   `SketchController.ts:1223-1234` then swallows the finish failure into a `logError` with copy that
+   is factually wrong ("timeline record may be missing" — `document_runtime.rs:3858-3882` upserts the
+   record BEFORE the regions call precisely so a refusal cannot lose it, and returns
+   `FinishSketchError { committed }`). The user learns of it only later, arming Extrude, through
+   `ModelToolController.ts:1334/1386/1411`.
+2. **One broken feature deletes every unrelated body from the screen.** Measured end to end:
+   `PlanExecutor.cpp:806-826` returns at the failing step with no `perStepResults` rows for later
+   steps; `executor.rs:756-770` marks them `Dirty`; `executor.rs:732` swaps the whole body registry
+   for the partial scratch; `document_runtime.rs:1975-1979` reports every prior-but-absent body as
+   `removed`; `documentStore.applySnapshot:419-430` spreads wholesale. `planner.rs:492` is
+   `let _ = graph;` — no independent-branch execution. No test covers two independent bodies.
+3. **The WP-K "live regression" framing was WRONG and is corrected.** Before WP-H the worker's
+   single-threaded read loop left pings unanswered mid-op, so the effective budget was the ping
+   timeout (~1.2 s measured in the H0 probes). WP-H's status thread widened it to
+   `ExecutePlan` 180 s / readers 60 s / **everything else 30 s** (`manager.rs:156-158`, `:175-183`;
+   compared field is `since_progress_ms`, never `age_ms`, `:1298-1305`). `MsgType::Progress` is never
+   constructed and only `PlanExecutor.cpp:345/802` calls `ctx.emit`, so only a completed plan step
+   resets the clock. Exposure is real but narrow (a 639 KB STEP imports in ~260 ms; the two vendor
+   files here are 5.3 MB and 7.1 MB). WP-K stays DEFERRED, named rather than asserted.
+
+Also corrected while planning: the checkpoint save-growth defect is **already fixed** (W2 — container
+57.6 → 7.0 KB, save 154 → 30 ms), and checkpoints are in-session only by deliberate decision, so
+"every reopen replays from 0" is design, not a bug.
+
+- [x] **WP-S1 S0 probe 1 — collinear touching segments: HYPOTHESIS REFUTED, no false refusal.**
+      Predicted RED, measured GREEN. `worker/tests/test_region_table.cpp`
+      `test_collinear_touching_segments_publish_one_region` — a rectangle whose bottom edge is drawn
+      as two collinear segments meeting end-to-end at (20,0), i.e. a polyline running straight
+      through a vertex. Measured: `success=1`, `errorMessage=""`, exactly one region, face area
+      800 mm² exact. `Geom2dAPI_InterCurveCurve` reports the touch as a POINT, so `:1328`
+      `NbPoints() > 0` carries it past the `shareAnalyticSupport` refusal at `:1335` as designed.
+      Kept as a positive regression pin. **The user's sketch really did contain an overlap** — the
+      package is diagnostics only, not a refusal-logic fix.
+- [x] **WP-S1 S0 probe 2 — genuine overlap names no entity: RED as predicted.**
+      `test_overlapping_collinear_lines_name_both_entities` — two collinear segments overlapping over
+      [10,20] inside a closing chain. Measured: `success=0`,
+      `errorMessage="profile has overlapping or coincident analytic curves"`, and the message
+      contains NEITHER offending entity id. The whole file is otherwise green: exactly 1 FAIL, the
+      predicted one. Both ids are already in scope at the refusal site
+      (`sources[first].fragment.baseEntityId` / `sources[second]…`; `AnalyticSource` at `:148-163`,
+      `baseEntityId` used at `:1447`). `LoopDetector.cpp` had **14** non-cancellation bare-string
+      refusal sites — 20 `errorMessage =` assignments less the 5 cancellation sites and one
+      forward; the "21" first recorded here was wrong and the after-code audit caught it — none
+      carrying a reason code or an entity.
+- [x] **WP-S1 S0 probe 3 — the frontend swallows a refused finish: RED as predicted, both halves.**
+      `src/tools/sketch/SketchController.exit.test.ts`
+      `surfaces a refused finishSketch to the user, and does not claim the record is missing`.
+      Drives the real exit chain with `finishSketch` rejecting on an `opFailed` carrying the
+      `SKETCH_PROFILE_OVERLAPPING_CURVES` diagnostic. Measured: the exit chain runs
+      (`["cancelSketch:sketch1","finishSketch:sketch1"]`), the log ring contains exactly
+      `"exit: finishSketch FAILED (timeline record may be missing)"`, and
+      `viewportStore.statusHint` is **null** — the user is told nothing at all and the session closes
+      anyway. Both assertions red: (a) no hint reaches the user, (b) the copy claims a record that IS
+      committed may be missing (`document_runtime.rs:3858-3882` upserts BEFORE the regions call and
+      returns `FinishSketchError { committed }` precisely so a refusal cannot lose it). The other two
+      specs in the file stay green.
+- [ ] WP-S1 S0 remaining probe: finish a refused sketch through the REAL worker (Rust) — no
+      structured diagnostic reaches the DTO. Blocked behind the worker half defining the shape;
+      folds into S2b.
+- [ ] WP-S1 S1 — SCHEMA §7.4 `diagnostics[]` + `detail.diagnostics[].reasonCode` with
+      `evidence.entityIds[]`; refusal `error.code` STAYS `OP_FAILED` (`messages.rs:76-96` is a plain
+      `Deserialize` enum with no `#[serde(other)]`, so a new top-level code fails the whole frame and
+      §8 makes that fatal). Map the 21 strings onto a SMALL closed reason-code set. Amend
+      `SCHEMA.md:753`, which currently says the channel does not exist. §14 entry.
+      `protocol-auditor` before the hunk lands and again after the code.
+- [x] **WP-S1 S1 SCHEMA hunk written and protocol-audited BEFORE code: `approve_with_changes`,
+      every filed change applied.** Three hunks: §7.3 row `:753` (the "no diagnostics channel" claim
+      corrected), §7.4 example + a new normative bullet, §14 entry. What the audit changed:
+      - **BLOCKER (Rust, pre-existing, exposed by this hunk):** `document_runtime.rs:3875-3881` —
+        the finish-sketch path does `op_failed(format!("finishSketch: {e}"))`, and `op_failed`
+        (`:5745-5752`) builds `EngineError::OpFailed { diagnostics: Vec::new() }` while `Display`
+        drops diagnostics. So on **exactly the lane the user hit**, every `reasonCode` and
+        `entityIds` is destroyed one frame after `wire.rs:996-1064` correctly parses it. The worker
+        half is INERT until this is fixed. The sibling `api/mod.rs:1730-1743 get_sketch_regions`
+        path is clean.
+      - **BLOCKER (spec):** the refusal table omitted `severity` / `code` / `message`, which §7.2
+        makes REQUIRED and which `wire.rs:1011-1029` silently DROPS an entry for. Added, plus
+        `stage: "profile"` and the §7.2 bounds restated for the new carrier.
+      - **Factual error corrected:** "the terminal error is `OP_FAILED`" is wrong —
+        `SolverLane.cpp:864` returns `REF_UNRESOLVED` for an unknown sketch id.
+      - **`SKETCH_PROFILE_CANCELLED` DROPPED** (six codes → five): the worker cannot emit it
+        (`LoopDetectorConfig::isCancelled` is set only by `test_region_table.cpp:690`; the cancel
+        token is plumbed into the kernel lane only, never `SolverLane::on_regions`) and Rust's
+        `EngineError::Cancelled` is a unit variant with no field to carry diagnostics.
+      - **ID-SPACE TRAP named** (would have made the feature useless): `LoopDetector` works in the
+        INTERNAL id space; the internal→wire seam is `RegionTable.cpp:242-262`'s
+        `mappedWarnings(..., mapBaseEdge)`, which already runs on the FAILURE path. Copying
+        `fragment.baseEntityId` straight out — which the first draft of the brief told the
+        implementer to do — publishes ids no consumer can resolve. Pair order is now normative
+        (ascending by source index) so a fixture can pin it.
+      - Scope narrowed to the loop-detector surface (six `SolverLane` refusals carry no code,
+        `reasonCode` stays OPTIONAL); advisory survival on refusal made explicit
+        (`OpCommon.cpp:483-489` + `LoopDetector.cpp:769`); `SKETCH_GRAPH_BUILD_FAILED` renamed
+        `SKETCH_PROFILE_GRAPH_BUILD_FAILED` for one prefix per producer; plural `entityIds` kept
+        beside singular `entityId` with the cardinality rule stated.
+      - Confirmed by the audit: the closed-taxonomy premise holds and is **stronger** than stated —
+        `client.rs:486-494` `fail_all`s every in-flight request on a malformed envelope, so an
+        unknown `error.code` costs the connection, not one call. The success-path field is
+        addition-legal on both tracks (no `deny_unknown_fields` on the wire path; the fixture
+        harness is a subset matcher). The five codes cover all 12 distinct `LoopDetector` messages
+        with no orphans. No existing fixture's bytes move. Hygiene clean.
+      - Fixtures OWED: `protocol/fixtures/sketch_regions_refusal.ndjson` — **`send`/`expect` only**,
+        because `messages.rs:669-726` enumerates the whole directory, strict-parses every `send` and
+        panics on any other directive — plus a success leg for the new `SKETCH_ENTITY_DEGENERATE`
+        channel, registered as `canonical_sketch_regions_*` beside `canonical_sketch_solve_residual`.
+- [x] **WP-S1 S2a worker LANDED, re-verified by the orchestrator.** New `worker/src/loop/ProfileRefusal.h`
+      (closed five-member reason enum, no cancellation member; `entityIds` + the
+      `limitName`/`limit`/`measured` triple; the id SPACE documented as internal-until-remapped);
+      `AdjacencyGraph`/`LoopDetectionResult`/`RegionTable` carry it; `LoopDetector.cpp` converts all
+      **13** non-cancellation refusal sites; `RegionTable::mappedRefusal` routes the ids through the
+      SAME `mapBaseEdge` seam as `mappedWarnings`, on the failure path; `SolverLane::err` gains a
+      defaulted `std::optional<json> detail` (it had no `detail` parameter at all, so the lane
+      physically could not attach diagnostics), and `on_regions` attaches the refusal entry plus the
+      surviving advisories on refusal and an optional `diagnostics` array on success.
+      **Orchestrator re-ran the gate rather than trusting the agent: ctest 192 / 192** (`ctest -N` =
+      192 — 191 plus the one new registration, nothing dropped), **stdout hygiene clean**, both WP-S1
+      probes pass.
+      **Diff reviewed.** Every refusal-site change is a mechanical `graph->errorMessage = "…"` →
+      `refuse(*graph, "…", Reason)` substitution with the message byte-identical; no `continue`,
+      `return`, `shareAnalyticSupport` or `NbPoints` condition is touched, so the accepted set is
+      provably unchanged, and the five cancellation sites do not appear in the diff at all. Every
+      diagnostic carries the three required fields plus `stage` and `reasonCode`, `evidence` is
+      omitted when empty, and the 64-entry §7.2 budget is enforced on both paths.
+      Two implementer decisions accepted: the mapper has no failure channel, so "`mapped == id`"
+      is the unmapped signal — correct BY CONSTRUCTION here, since the production mapper
+      (`internal_edge_to_wire`, `SolverLane.cpp:869-873`) returns the internal id on a miss — and one
+      unmappable id drops the WHOLE vector rather than naming half a pair. Checked that the
+      re-expressed probe passes for the right reason: `table_from(json)` uses the production mapper,
+      not the identity mapper the other overload uses.
+- [x] **WP-S1 frontend hint layer LANDED (orchestrator, main thread).** `diagnosticHint` gains arms
+      for all five reason codes, phrased off `evidence` (curve counts, the limit triple);
+      `SketchController`'s exit path now (a) surfaces the refusal with a sticky error hint —
+      `profileRefusalHint` prefers the first error-severity structured diagnostic and falls back to
+      the backend sentence — and (b) drops the false "timeline record may be missing" copy for
+      "refused (record committed; regions unavailable)", which is what actually happened. The S0
+      probe is green; `bunx tsc --noEmit` clean. **Honest limit:** until the Rust half lands, this
+      lane still falls back to the raw message, because `document_runtime.rs:3878` discards the
+      diagnostics. The user gets a hint where they previously got silence, which is the larger half.
+- [ ] **WP-S1 S2b Rust half — OWED, and it is what makes the worker half visible.** Must include the
+      `document_runtime.rs:3875-3881` blocker (flattens the engine error and rebuilds it with an
+      empty diagnostics vector), `parse_sketch_regions` reading the new success-path `diagnostics`
+      (`wire.rs:2386-2428` ignores it today), the `FinishSketchDto`/`ipc/types.ts` field, and the
+      `severity` restoration at `wire.rs:1898-1917`. Sequenced AFTER WP-D1 clears
+      `document_runtime.rs`.
+- [x] **WP-S1 cross-track fixture LANDED — `protocol/fixtures/sketch_regions_diagnostics.ndjson`.**
+      Both legs were probed against the REAL worker before being pinned, rather than written from the
+      spec and hoped: leg 1 (overlap refusal) returns `error.code: "OP_FAILED"`, `retriable: false`,
+      and `detail.diagnostics[0]` with `severity`/`code`/`message`/`stage`/`reasonCode` plus
+      `evidence.entityIds: ["L1","L2"]` — **wire** ids, in normative source order; leg 2 (degenerate
+      entity) publishes one region with `outerLoop: ["L1","L2","L3","L4"]` and carries the
+      `SKETCH_ENTITY_DEGENERATE` advisory with `evidence.entityId: "Ldeg"`, a channel that did not
+      exist on this lane before. `message` deliberately unpinned (prose). Registered as
+      `canonical_sketch_regions_diagnostics`; **ctest -N now 193**, the case passes, and the Rust
+      directory scan strict-parses it (`cargo test -p onecad-protocol` **37 passed / 0 failed**,
+      incl. `ndjson_fixtures_parse_into_message_types`). Matcher negative-controlled: a wrong
+      `reasonCode` fails with `MISMATCH at error.detail.diagnostics.[0].reasonCode`. SCHEMA §14
+      updated from "fixtures OWED" to name it.
+- [x] **L1/L2 checkpoint on the frontend layer (orchestrator, main thread):** `bunx tsc --noEmit`
+      clean · `bun run test` **318 files / 5623 passed / 0 failed / 78 skipped**. Baseline at the
+      WP-G gate was 318 / 5618 / 78, so +5 is exactly the new tests (3 pattern-clamp regressions,
+      1 range drift guard, 1 sketch-refusal probe) and nothing regressed — including the shared
+      `diagnosticHint`, which other lanes consume. Worker layer at the same point: **ctest 193 / 193**
+      (191 + `fillet`-unchanged + the new `canonical_sketch_regions_diagnostics`), stdout hygiene
+      clean. NOT a gate: clippy, the worker-backed workspace tests, kernelbench and e2e are owed at
+      the commit boundary, and WP-D1 plus WP-S1's Rust half are still in flight.
+- [x] **WP-D1 LANDED in `DocumentRuntime`, diff reviewed, gate re-run by the orchestrator.**
+      New `crates/onecad-core/src/regen/isolation.rs` (`isolation_scope` + the single
+      `independence_is_provable` predicate, 11 unit tests); `planner.rs` gains
+      `without_checkpoint_excluding`; `document_runtime.rs` gains `IsolationCarry`,
+      `begin_isolation_regen` (phase 2.5, locked), `halted_step_of` and `merge_isolation` folded into
+      `finish_regen` before commit; `lib.rs`'s production driver gains phases 2.5/2.6.
+      **The predicate has FIVE clauses, each closing a distinct fail-open**, and I checked the one
+      claim that could have been wrong: clause 2 relies on `graph.upstream()` being transitive, and
+      it is — `graph.rs:281-286` uses the same recursive `collect` DFS as `downstream`. The two
+      pre-accepted deviations are in (body taint, `step_index = halted_step − 1`) plus one addition,
+      an `upstream ∩ excluded` clause that subsumes `downstream(H)` and closes chains running through
+      a record excluded for another reason. Every clause only ever excludes MORE.
+      Implementer-found bug, fixed before hand-off: its first `stopped_reason` rule preferred pass
+      2's reason, which flipped a `NeedsRepair` document into `OpFailed` when pass 2 hit a different
+      halt; corrected to always publish the halted pass's reason, since §8 describes the first op
+      whose input could not be bound and that op has not changed.
+- [x] **`step_import_gate.rs:1390` RE-EXPRESSED, and it is a recorded user-visible decision.** The
+      assertion read `snap3.bodies.is_empty()` under the rationale *"a document whose ONLY geometry
+      source was deleted"*. **That premise was never true of that document.** Verified by reading
+      the fixture: `SLAB_SKETCH_REC` is a plain rect on a datum plane (`:915-920`) and
+      `SLAB_EXTRUDE_REC` extrudes it NewBody (`:921`) — a second geometry source that consumes
+      nothing from the STEP import; only `BOOLEAN_REC` (`:923-926`) touches both, and it correctly
+      stays `Error`. The slab used to vanish solely because the old regen stopped the whole plan at
+      the first halt, which is the defect WP-D1 fixes. The replacement is STRONGER, not weaker: it
+      pins WHICH body survives (`vec![body_id_wire(slab)]`) where the old one only counted to zero.
+      No other PHASE 7 assertion moved — Boolean ⇒ `Error`, host Extrude ⇒ `Dirty`, repair banner
+      names the fillet with zero candidates.
+- [x] **Rust-layer verification (orchestrator, main thread, sidecar restaged first):**
+      `cargo fmt --all --check` clean · `cargo clippy --workspace --all-targets -- -D warnings`
+      clean on 1.97.0 · `ONECAD_WORKER_PATH=… ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+      --no-fail-fast` **97 targets / 1574 passed / 0 failed / 0 ignored / 0 skips** (WP-G baseline
+      was 96 / 1555; +1 target is `regen_isolation`, +19 tests are the isolation unit and runtime
+      cases). Worker-backed targets confirmed NON-VACUOUS and identical to the WP-G census:
+      `m2_gate` 2, `wire_contract` 19, `topology_rebind` 16, `breadth_ops` 11, `checkpoints` 7,
+      `worker_chaos` **21** (incl. `convergence_drill_kill_mid_plan_repeatedly`, the CI red — green
+      locally), `real_worker_smoke` 5, `restore_fencing` 1, `fillet_blend_class` 2, plus
+      `regen_isolation` 1 and `step_import_gate` 1.
+- [x] **WP-S1 S2b Rust half LANDED (orchestrator, main thread), blocker fixed red-first.**
+      `prefixed_engine_error(lane, e)` replaces `op_failed(format!("finishSketch: {e}"))` at
+      `document_runtime.rs:4054` — it prefixes the message per variant and PRESERVES `diagnostics`,
+      where the old form minted an empty vector and `Display` skipped the field. New real-worker test
+      `src-tauri/tests/sketch_region_diagnostics.rs` drives an overlapping profile through
+      `finish_sketch` and asserts the reason code, `code == "OP_FAILED"`, `stage == "profile"` and
+      **both wire entity ids in normative source order**. **Measured RED on the old code —
+      `panicked … the refusal must reach Rust with its reason code intact, got []`** — and green
+      after; the old behaviour was restored temporarily to prove it.
+      Success path plumbed too: `parse_sketch_regions` reads the new omission-legal `diagnostics`,
+      `FinishSketchDto` and `FinishSketchResult` carry it, and a successful finish that dropped a
+      degenerate entity now says so with an `info` hint instead of silently publishing a profile the
+      user did not draw. Sketch suite **60 files / 1260 passed**, `bunx tsc --noEmit` clean.
+- [x] **DECISION — the `wire.rs:1899-1917` `severity` restoration is DEFERRED to WP-J, not skipped.**
+      It parses into `(String, String)` tuples, so restoring severity changes `PreparedImport`'s type
+      and ripples through `imports.rs`. Two reasons not to do it here: the protocol audit measured
+      that the ONLY consumer of a `PreparedImport`, `add_import_record`, never reads the field at
+      all — so the fix has no observable effect until something reads it — and WP-J restructures this
+      exact path ("keep Lane B, delete the decoy": carry `InspectStep` diagnostics through
+      `PreparedImport` into the `ImportStep` record's advisories). Doing it now is churn against a
+      shape WP-J replaces. Recorded in both places, as the plan's coupling note requires.
+- [x] **Gate rungs measured so far (orchestrator, main thread):** hex grep **0** · coverage verifier
+      **32 rows / 9 corpus cases / 16 CI jobs / 19 registry operations** · contracts verifier
+      **39 rows / 18 operations / 15 tier-checked** · verifier negative controls **all ✓** ·
+      kernelbench `fillet/foundation:t0` both backends **136 rows unchanged** + **semantics OK** ·
+      kernelbench `fillet/matrix:m1` both backends **336 rows unchanged** + **semantics OK**, with
+      `grep -c FILLET_BLEND_APPROXIMATED` over `results.jsonl` = **0**, so WP-G's exact-first ruling
+      still holds and neither package moved any geometry. OWED at the commit boundary: `bun run e2e`
+      both projects, which must run ALONE — that lane is exactly where a loaded run produces false
+      reds (MC-R9, the whole Phase A triage), so it waits until the two reviews are back and any
+      fixes are in.
+- [x] **DECISION — the sketch-overlay highlight is DROPPED from WP-S1, with a reason.** The plan
+      scoped "highlight the named entities in the sketch overlay through the existing
+      `sketchSelection` store". Measured while implementing: **there is no overlay to highlight on
+      the lane that refuses.** `finishSketch` is called from the EXIT path
+      (`SketchController.ts:1223-1250`), which closes the session; the sibling lane
+      (`ModelToolController.ts:1334/1386/1411`, arming Extrude) is also outside a sketch. Highlighting
+      would need the refusal to hold the sketch OPEN, which is a product decision about exit
+      semantics, not an implementation detail, and well beyond this package. The in-sketch region
+      preview (`prepare_sketch_regions`) IS a lane where a highlight would land — a real follow-up,
+      named here rather than silently dropped. What ships instead: the hint names how many curves are
+      implicated and why, which is the actionable half.
+- [x] **WP-S1 S3 protocol audit AFTER code = `approve_with_changes`, prose-only — NO code change
+      required.** The auditor independently re-ran the fixture (`harness: OK (5 expectation(s)
+      matched)`), its own negative control, the real-worker Rust test, `cargo test -p onecad --lib
+      worker::wire` (123/0) and the hygiene gate. Substantive findings, all confirming the code:
+      the emitted JSON matches §7.4 on both paths with the ≤64-entry bound enforced at both sites;
+      **the "mapper returned the input unchanged" proxy for "unmapped" cannot false-positive**,
+      because internal ids are random UUIDv4 minted inside `SketchEntity` while wire ids are
+      caller-supplied and read BEFORE that mint, so a collision would need the caller to guess a
+      122-bit value the worker had not generated yet; **pair order is guaranteed by construction**,
+      not incidentally (`candidatePairs` is a `std::set<std::pair<size_t,size_t>>` with
+      `first < second`, and `pairEntityIds` swaps as well); the closed taxonomy is intact across
+      every `err(...)` site in `worker/src`; omission-legality holds in BOTH directions; nothing
+      leaked outside the loop-detector scope; and **WP-D1 does not touch the wire** (verified
+      separately). Six required edits applied, all in SCHEMA prose: the stray `(or CANCELLED)`
+      removed, "six reason codes" → five, the site count corrected (see below), the now-stale "the
+      worker half is inert" replaced with the closure record, cross-track sign-off recorded, and a
+      broken `(#72-regen)` anchor this hunk had introduced fixed. Two recommendations also applied:
+      §7.2's reasonCode catalogue now points at §7.4 for the solver-lane codes, and "ascending by
+      source index" is restated in WIRE terms (position in the request's `entities` array) so a
+      consumer can actually compute it.
+      **A count I got wrong and the audit caught:** I recorded "21 bare-string refusal sites". The
+      real number is **14** non-cancellation sites — 20 `errorMessage =` assignments less the 5
+      cancellation sites and one forward. Re-counted on `HEAD` myself before accepting it. Corrected
+      in both SCHEMA §14 and this file.
+      Two residuals recorded, neither blocking: `mappedWarnings` does not apply the strict
+      unmappable rule that `mappedRefusal` does (unreachable today — every degenerate-advisory kind
+      is registered in `internal_edge_to_wire`), and two PRE-EXISTING broken `(#72-regen)` anchors
+      elsewhere in the file are left alone as not this package's business.
+- [x] **WP-D1 adversarial review = DEFECTIVE, and it found the sixth hole.** The reviewer verified
+      the six subsidiary claims — from-0 empty base anchor (it ran a probe printing
+      `base_is_empty_anchor=true` for an exclusion-bearing plan and confirmed `compute_hashes` moves
+      `prefix_hashes` with `planned_ops`), ephemerality, publish-once, no-recursion,
+      `step_index = halted−1`, unchanged fencing — and confirmed `RegenExecutor`/Invariant 6 and the
+      wire are untouched. It also independently confirmed my `step_import_gate` re-expression is
+      right, by deriving from `derive_inputs` that `SLAB_SKETCH_REC` has zero inputs and
+      `SLAB_EXTRUDE_REC` depends solely on the slab sketch.
+      **BLOCKER — `taint_from` is strictly weaker than `independence_is_provable`.** The halted
+      record never passes through the predicate, only through `taint_from`
+      (`outputs ∪ derive_inputs().bodies`), so clause 4 protects a record as a CONSUMER but never as
+      the EXCLUDED record. With empty `outputs` AND empty input bodies the taint set is empty,
+      `downstream(H)` is empty too (no outputs ⇒ no forward edges), and everything above is admitted.
+      Both premises re-verified by me: `validate_fillet_lockstep` (`edit/session.rs:2021-2027`)
+      explicitly ACCEPTS a legacy Fillet with `edges: []` and bare `edge_ids`, which derives elements
+      and no body; and `sync_record_outputs` (`:368-371`) CLEARS a failed executed record's outputs
+      at commit, so the first halt taints correctly on stale outputs, the commit strips them, and
+      from the next edit the shield is gone. Reviewer probe: `excluded_steps=[1]
+      independent_steps=[2] worth=true`, plan `[0, 2]` — a Shell re-resolving its face refs against
+      the UN-FILLETED body and publishing `Valid`. That is the H5-B silent wrong bind, strictly worse
+      than the defect WP-D1 fixes. Its own test masked variant B by hand-setting
+      `opaque.outputs = vec![b]` (`isolation.rs:415`).
+      Four more: a failed/cancelled/superseded pass 2 unconditionally destroys pass 1's `Published`
+      snapshot (`lib.rs:206`, `document_runtime.rs:1380` overwrite `driven` regardless), so a halt
+      that used to publish its pre-halt bodies now publishes nothing — an availability regression on
+      the failure path; the exclusion decision mixes two vintages of `outputs` (regen mirror vs
+      session graph), which is exactly why the blocker triggers on an edit-after-halt rather than on
+      the halt; the repair-item restore is guarded `if !…is_empty()` so a `NeedsRepair` halt with no
+      §9 items goes amber with no banner; and a doc comment says "three holes" before enumerating
+      five. Fix round dispatched to the context-holding agent.
+- [ ] **RECORDED LIMIT, not fixed:** the two `begin_regen` ceilings (`document_runtime.rs:1455-1476`
+      — the SCHEMA §7.3 seeded repair gate and the WP-VE.1 unresolved-variable gate) produce plans
+      that COMPLETE below the gate, so `halted_step_of` returns `None` and no isolation pass runs. A
+      document gated by a seeded `TransformBody` item or a deleted variable therefore still loses
+      every body above the gate, imported components included. WP-D1's guarantee is scoped to WORKER
+      halts (`OpFailed`/`NeedsRepair`), which is narrower than "one broken feature never deletes
+      unrelated bodies" reads. Also informational: `stopped_reason` and `repair_summary` can disagree
+      after a second halt; no consumer asserts the coupling.
+- [x] **WP-D1 fix round LANDED — all five fixes in, re-verified by the orchestrator.**
+      **FIX 1 (blocker):** `body_effect_is_knowable` sits beside `taint_from` and names
+      `sync_record_outputs` as the reason; unknown effect is `Operation::Opaque`, or non-empty
+      `inputs.elements` with empty `inputs.bodies` AND empty `outputs`. `isolation_scope` carries a
+      `poisoned` flag seeded from the halt that short-circuits `independence_is_provable` for
+      everything above it. I checked the rule's completeness against `derive_inputs`: every
+      body-modifying op declares its target body (Shell, Boolean, Hole, OffsetFace, TransformBody,
+      Pattern, Mirror, and Extrude in a non-NewBody mode), so Fillet/Chamfer with bare `edge_ids` is
+      the only reachable elements-only shape — and a creator with empty `outputs` is caught by
+      clause 3 instead, because it is not a producer in the graph. Proven red-first with the clause
+      forced true: `a_bare_edge_fillet_halt_with_cleared_outputs_poisons_the_whole_pass` gave
+      `excluded_steps` left `[1]` right `[1, 2]` — the reviewer's repro exactly. Variant B is closed
+      structurally: the masking test now loops over `[vec![b], Vec::new()]` so the empty-`outputs`
+      case can never hide behind the hand-set one again. A plain `Sketch` stays body-free and safe
+      (`a_body_free_record_does_not_poison`), and `poisoning_refuses_only_the_records_above_it` pins
+      that the poison is NOT retroactive.
+      **FIX 2:** `adopt_isolated` substitutes the isolation pass only on `Published`, else falls back
+      to the halted pass with a warn — reviewed, it is exactly that and nothing more. The worst case
+      is now the pre-WP-D1 truncated publish, never less, pinned by
+      `a_dead_worker_in_the_isolation_window_keeps_the_halted_publish`, measured red under the old
+      unconditional substitution. **FIX 3:** records now read from `session.document().timeline`,
+      the same source the graph is built from. **FIX 4:** repair items restored unconditionally.
+      **FIX 5:** the doc comment's clause count corrected.
+      Honest attribution from the implementer, which I accept: `step_import_gate` is green because
+      of MY re-expression dated 2026-09-09, not because of its fixes — it probed each fix
+      individually and instrumented `begin_isolation_regen` to confirm the isolation pass still runs
+      and still publishes the slab there (`halt=0 excluded=[0] independent=[1,2,3,4,5]`), then
+      removed every probe and diff-proved the file byte-identical.
+- [x] **GATE (orchestrator, main thread, sidecar restaged):** `cargo fmt --all --check` clean ·
+      `cargo clippy --workspace --all-targets -- -D warnings` clean on 1.97.0 ·
+      `ONECAD_WORKER_PATH=… ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`
+      **98 result lines / 1580 passed / 0 failed / 0 ignored / 0 skips** (WP-G baseline 96/1555;
+      +2 targets are `regen_isolation` and `sketch_region_diagnostics`, +25 tests) · ctest
+      **193 / 193** · stdout hygiene clean · `bunx tsc --noEmit` clean · vitest **318 files / 5623
+      passed / 0 failed / 78 skipped** · hex **0** · coverage **32/9/16/19** · contracts
+      **39/18/15** · verifier negative controls all ✓ · kernelbench t0 **136 rows unchanged** +
+      semantics OK and m1 **336 rows unchanged** + semantics OK, `FILLET_BLEND_APPROXIMATED` = 0.
+      `src`+`e2e` md5 before e2e: `a125e751ae930ab964d6e8ff90fd0d4d`.
+- [ ] **e2e RUN 1 (2026-09-10 00:39-01:12) — RED: 521 passed / 3 failed (32.4 min), and INVALID FOR
+      ATTRIBUTION. Recorded as a red, not explained away.** All three failures are webkit and all
+      three are the SAME failure — `page.goto: Test timeout of 45000ms exceeded` navigating to
+      `localhost:4177`. **No assertion ran in any of them; the app never loaded.**
+      `history-suppress.spec.ts:103`, `rect.spec.ts:23`, `transform-body.spec.ts:303`.
+      Measured, not assumed:
+      - Not adjacent — 01:03:33, 01:06:56, 01:10:49, a 7-minute window of intermittent navigation
+        failure rather than one hiccup.
+      - The same three pass IN ISOLATION on webkit in ~2 s each (21 specs across those three files,
+        **21 passed in 38.9 s**).
+      - `src`+`e2e` md5 **`a125e751ae930ab964d6e8ff90fd0d4d`** IDENTICAL before and after the run, so
+        the lane tested exactly the intended bytes and no concurrent session edited them.
+      - Machine load at triage: 15-minute average **6.25**, four users logged in, and `ListAgents`
+        shows a peer Claude session `land-tree-fix-reds-start-m12` started ~1 h ago — overlapping the
+        run window, idle only by the time I looked. Port 4177 free, no stray Vite.
+      **This is the documented invalid-attribution case** (CLAUDE.md: a gate run concurrently with
+      another heavy job proves nothing; the precedent went 448/4 with all four passing in isolation
+      afterwards). A navigation timeout also cannot be caused by this session's frontend changes: the
+      page never executed a line, and a module-level fault would have failed all 524 specs, not 3.
+      **The cause of the timeouts themselves is NOT established, and an isolated re-run does not
+      establish it** — the same rule that keeps MC-R9 open. Re-running the full lane alone.
+- [ ] **e2e RUN 2 (01:15-01:47) — RED again: 521 passed / 3 failed (32.3 min), DIFFERENT specs, and
+      the cause is now MEASURED.** `hole.spec.ts:143`, `revolve-region.spec.ts:33`,
+      `transform-body.spec.ts:564` — a set DISJOINT from run 1's. All three are again
+      `page.goto: Test timeout of 45000ms exceeded` to `localhost:4177`.
+      Across both runs: **6 failures, 6 navigation timeouts, 0 assertion failures, no spec failing
+      twice, all passing in isolation.** A defect in this session's code cannot produce that — the
+      page never executes a line, and a module-level fault would fail all 524 specs rather than a
+      rotating three.
+      **Named cause, measured not inferred:** `ps aux` during triage shows
+      `.venv/bin/python -m pytest -q -p no:cacheprovider` at **100.9 % CPU** and `dasd` at
+      **96.3 % CPU** — a concurrent Python test suite from another project saturating a core for the
+      duration of both runs, with 15-minute load averages of 6.25 and 6.58. That starves the Vite dev
+      server intermittently, which is precisely a navigation timeout. This is CLAUDE.md's
+      invalid-for-attribution rule with the competing job identified by name rather than assumed.
+      **Neither run is a valid measurement of this code, so neither is the gate rung of record, and
+      NO commit is made on them.** The e2e rung is OWED and needs a quiescent machine. Every other L3
+      rung is green and recorded above.
+      **The competing job IDENTIFIED (2026-09-10 11:03):** PID 25430,
+      `.venv/bin/python -m pytest -q -p no:cacheprovider` in
+      `~/workspace/blackpen-org-demo/engine`, elapsed **1 day 13 h 48 m** at 100.3 % CPU, launched by
+      a DIFFERENT Claude Code session (`CODEX_COMPANION_SESSION_ID=36d220d0…`, transcript under
+      `.claude/projects/-Users-andrejvysny-workspace-blackpen-org-demo-desktop/`). A pytest suite
+      running for 37 hours is hung, not busy. It is another project's process and another session's
+      child, so terminating it is the user's call, not this session's. Until it is gone, any e2e run
+      on this machine is invalid for attribution by the same rule that voided runs 1 and 2.
+- [x] **e2e RUN 3 — GREEN, and it is the gate rung of record: `bun run e2e` both projects
+      `retries: 0` = 524 passed / 0 failed (32.8 min).** Run on a QUIET machine after the user
+      authorised terminating PID 25430; top consumer during the run was under 26 %. `src`+`e2e` md5
+      **`a125e751ae930ab964d6e8ff90fd0d4d`** identical before and after, and identical to the
+      checksum both invalid runs were measured against — so all three runs tested byte-identical
+      code and the only variable was the machine. That closes the triage with a measurement rather
+      than a hypothesis: the code was never implicated, and runs 1 and 2 are recorded above as red
+      and invalid rather than explained away.
+      **FULL L3 GREEN.** ctest 193/193 · cargo 98 result lines / 1580 / 0 / 0 skips · vitest
+      318 / 5623 / 0 / 78 · e2e 524 / 0 · kernelbench t0 136 + m1 336 rows unchanged, semantics OK ·
+      fmt/clippy(1.97.0)/tsc/hex/hygiene/verifiers all clean.
+- [x] **WP-D1 D0 probe 1 — an independent later body is destroyed by an upstream failure: RED as
+      predicted.** `crates/onecad-core/tests/regen_executor.rs`
+      `a_failed_step_blocks_a_provably_independent_later_body`. `timeline_of(3)` is three standalone
+      NewBody extrudes — `extrude_record` sets `profile: None` and `target_body: None`, so
+      `derive_inputs` yields NOTHING for any of them. The test asserts independence as a FACT first
+      (`graph.downstream(failing).is_empty()` — PASSES, the graph already agrees), then fails step 1.
+      Measured: `bodies=1`, `contains_independent=false` — only step 0's body survives; step 2's
+      body, which depends on nothing, is never created. The rest of the file is green: 19 passed,
+      1 failed, the predicted one.
+- [x] **WP-D1 D0 probe 2 — the graph's FAIL-OPEN surface, pinned.**
+      `element_only_inputs_form_no_graph_edge_so_isolation_must_fail_closed` — GREEN, and it is a
+      pin, not a defect report. `history/graph.rs:498-527` carries
+      `// Element inputs deliberately form no edges (divergence 2)`, documented at `graph.rs:23-31`:
+      a v2 `ElementId` is opaque and does NOT embed a `BodyId`, so element→owner-body linkage cannot
+      be reconstructed in pure core and lives in the worker's ElementMap partition. Measured: a
+      Fillet carrying only bare `edge_ids` (no typed `edges[].primary` to push its body) declares
+      elements and zero bodies, and `downstream(producer)` does not contain it — it reads as
+      INDEPENDENT of the step that built the body it cuts.
+      **This changes WP-D1's rule.** `graph.downstream(H)` alone is NOT a safe closure. A record may
+      execute past a halt only when independence is POSITIVELY provable; it is excluded when any of
+      these holds: it is `Operation::Opaque` (no typed deps by construction,
+      `record.rs:679-681`); `derive_inputs()` yields an `elements` entry not accompanied by a body
+      input that is itself proven independent; or any body/sketch input has no producer in the graph.
+      Recorded as a standing limit either way.
+      Mitigating structural guarantee, also measured: `derive_inputs` matches **all 19**
+      `KnownOperation` variants explicitly with **no catch-all arm**, so a new op cannot silently
+      fail open — it is a compile error until someone declares its inputs.
+- [x] **WP-D1 RULING — the isolation pass belongs in `DocumentRuntime`, not `RegenExecutor`.** The
+      implementer stopped at the brief's tripwire with a real contradiction: the D0 acceptance test
+      and `op_failure_marks_error_and_publishes_m_minus_one` (`regen_executor.rs:231-273`) are
+      byte-identical setups — same `timeline_of(3)`, same `StepScript::Fail` at step 1 — asserting
+      opposite outcomes for step 2, so no implementation could satisfy both. It offered (A) change
+      the three pinned assertions or (B) abandon the design. **Both rejected; the dilemma had a third
+      exit and the fault was mine.** `RegenSession` (`executor.rs:181-190`) carries bodies, timeline,
+      repair and elements and **no dependency graph**, so the executor structurally cannot compute a
+      closure — the acceptance test was placed at a layer that cannot do the work. Verified:
+      `DocumentRuntime` owns `self.session.graph()` and already calls `graph.downstream(...)`
+      (`document_runtime.rs:1858/:1868/:3922`), and `:1433` hands the planner a freshly constructed
+      EMPTY `DependencyGraph`, which is exactly why `planner.rs:492`'s `let _ = graph;` is harmless.
+      Consequence for the design: **the exclusion set arrives at the planner as DATA computed by
+      `DocumentRuntime`; it is never derived inside the planner.**
+      Resolution, with **no pinned assertion touched**: the D0 probe is re-expressed as an
+      executor-layer characterization pin, `one_plan_halts_whole_and_that_is_the_executors_contract`,
+      asserting the CURRENT behaviour plus the independence fact, with the layering written into its
+      doc comment. Measured: `cargo test -p onecad-core --test regen_executor` **20 passed / 0
+      failed**. Acceptance moves to a real-worker `DocumentRuntime` test in `src-tauri/tests/`.
+- [x] **WP-D1 — two implementer findings ACCEPTED, both re-verified in code by the orchestrator:**
+      (1) **A fourth "not provable" condition is required.** `edit/session.rs:368-371` gives an
+      executed record `outputs.get(&id).cloned().unwrap_or_default()`, so a FAILED record's outputs
+      are cleared at commit, and `graph.rs:78` builds the producer index from `record.outputs` — the
+      edge from the failed op to a later op on the same body therefore VANISHES on the second regen,
+      and none of the first three conditions catch it (the later record declares a body input and
+      that body has a producer). It would execute against a body that never received the failed
+      feature and re-resolve its refs against the wrong topology: an H5-B silent wrong bind published
+      as `Valid`. Rule added: a record is not provable if it consumes a body in
+      `⋃(E.outputs ∪ E.derive_inputs().bodies)` over the excluded set. Strictly more exclusive, so it
+      cannot loosen anything.
+      (2) **The isolation pass publishes `step_index = halted_step − 1`.** `document_runtime.rs:2920`
+      gates checkpoint minting on `latest_snapshot.step_index == Some(head_step)`; a pass-2 head
+      would open it and `CheckpointStore::save` would overwrite a good acceleration base with one
+      whose stored prefix hash can never match `history_prefix_hash(&records[0..=step])`. Not
+      geometry corruption — `choose_checkpoint` refuses it — but permanent loss of that base.
+- [ ] WP-D1 dirty-closure error isolation — single from-0 isolation pass, `excluded = {H} ∪
+      graph.downstream(H)`, ephemeral (never the record `suppressed` flag), one pass with no
+      recursion, fail-closed on an incomplete `derive_inputs`. From 0 always, because D5 makes a
+      from-0 plan base-valid so the `planner.rs:453-457` predicate/hash rule cannot be violated.
+      `adversarial-reviewer` on a fresh context is MANDATORY.
+- [x] **RIDER — pattern count clamp REMOVED, red-first proven.** The chip UI and the FSM were
+      already correct: `ModelToolChips.CountStepper` validates typed entry through `acceptCount`
+      (2–128, refuse never clamp, `aria-invalid` on rejection) and disables `+` at
+      `PATTERN_STEPPER_MAX` = 12, and `modelToolMachine.ts:1238-1268` carries the normative "ONE
+      pattern-count range policy across TS / Rust / worker (U6)" comment. The defect was entirely in
+      two later hops: `ModelToolController.onLinearCount:5950` / `onCircularCount:6069` wrapped every
+      typed count in `clampPatternCount()` — a 2–12 ceiling — BEFORE the FSM saw it, and
+      `countFromValueText` clamped the same way, so re-editing a committed ×20 pattern re-armed it as
+      ×12. Both removed: the two call sites pass `count` through, and `patternPreview.MAX_PATTERN_COUNT`
+      is now the AUTHORING maximum 128 (the stepper bound stays in `modelToolMachine`, where the policy
+      prose lives). Three new regression tests in
+      `ModelToolController.patternReedit.test.ts` — typed 20 survives on linear, typed 24 on circular,
+      and a `×20` re-edit with no numeric stored count reads 20 — **measured RED 3/3 on the old code
+      and green after** (the old behaviour was restored temporarily to prove it). `patternPreview.test.ts`
+      re-expressed (recorded decision: it previously PINNED the truncation) plus a new drift guard
+      asserting `MAX_PATTERN_COUNT === modelToolMachine.PATTERN_COUNT_MAX`, since the preview module
+      cannot import the FSM (the FSM imports `WORLD_AXIS` from it, so the edge only goes one way).
+      Measured: `patternReedit` + `patternPreview` + `modelToolMachine` + `ModelToolChips`
+      **187 passed / 0**, `bunx tsc --noEmit` clean.
+- [x] **RIDER — MC-R9 REVIEWED and deliberately KEPT OPEN.** The rider was approved on the premise
+      that the WP-H triage produced the measured root cause its closure rule demands. **It did not.**
+      Both records say otherwise in their own words: `8602b45`'s commit message is *"CI webkit red
+      once (261/262), never local in 10 runs"* and this file's row for that red reads *"Named cause …
+      Not reproduced locally (webkit 10/10, 44 s)"*. MC-R9's rule is *"Closes only on a measured root
+      cause, never on a clean re-run or a retry"*, and a named hypothesis plus a green L3 is exactly
+      the clean re-run the rule forbids. The entry is UPDATED instead, with the second occurrence
+      (webkit, same line, CI run 34002553498), the fact that `8602b45` added `waitForCameraSettled` at
+      a point EARLIER than the two probe sites MC-R9's own analysis had ruled out, and an explicit
+      statement of what would close it: a reproduction under load showing the banner absent while the
+      engine is unsettled, or an instrumented run pinning which ordering was taken. Verifiers still
+      pass (`verify-modeling-coverage.mjs`, `verify-modeling-contracts.mjs`).
+- [x] **RIDER R2 — the contracts manifest now verifies two of its own claims against code.**
+      `scripts/verify-modeling-contracts.mjs` checked field presence, enum membership, duplicate
+      keys and a coverage cross-reference, and never opened a source file. Added two semantic checks,
+      both with explicit vacuity guards (a check that silently scans zero tokens fails loudly):
+      **`validationTier`** cross-read against the `PublicationTier::TierA/TierB` tokens in the worker
+      file that owns each operation's publication (15 operations mapped; Sketch, Loft and Sweep have
+      no op file and stay prose), and **`supportStatus`** cross-read against `PlanExecutor.cpp`'s
+      `op_type == "…"` dispatch arms using the same regex the coverage verifier uses, so the two
+      manifests cannot disagree about what the worker executes. The header now states which fields are
+      enforced and which stay prose on purpose.
+      First run flagged **six** rows. Two were the check crying wolf — `TransformBody::move` / `::copy`
+      read *"Tier A per result (P3 deferred full Tier B for performance)"*, and matching any mention
+      of "Tier B" turned an honest deferral note into a claim. Tightened to the **leading** tier token;
+      a later mention is commentary. The remaining **four are genuine drift**, all the same WP-E
+      ruling: `Extrude::NewBody`, `Extrude::draft`, `Revolve::NewBody` and `Revolve::body-edge axis`
+      claimed Tier A while `ExtrudeOp.cpp` and `RevolveOp.cpp` request Tier B and never Tier A —
+      measured: each file has exactly two publication sites (`ExtrudeOp.cpp:1257/:1299`,
+      `RevolveOp.cpp:441/:477`), both Tier B. The MANIFEST was the stale side, as the WP-E comments in
+      both files say; all four rows corrected, kernel untouched.
+      Three negative controls added to `scripts/tests/verify-modeling-coverage.test.sh` proving the
+      new checks can go red: a Tier A claim on a Tier B op, a Tier B claim on an op that never
+      requests it, and Loft marked supported with no dispatch arm. Measured: full control suite
+      **all ✓, "modeling verifier negative controls: OK"**; `verify-modeling-contracts` **39 rows /
+      18 operations / 15 tier-checked**, exit 0; `verify-modeling-coverage` **32 rows / 9 corpus cases
+      / 16 CI jobs / 19 registry operations**, exit 0.
+- [x] **RIDER — `bench/robustness/baselines/README.md` row counts corrected** (the local half of the
+      dropped R1). Counted off `digests.json`, not memory: `fillet/foundation:t0` is 136 rows per
+      platform on **both** linux-x64 and darwin-arm64 (272 total); `fillet/matrix:m1` is **336 rows,
+      darwin-arm64 ONLY, zero linux-x64**. The README claimed m1 was 120. The missing Linux baseline
+      is now stated as the real hole it is — m1 is the campaign that caught WP-G's exact-geometry
+      widening defect, and a Linux-only regression on the support-surface matrix has nothing to fail
+      against, so a green m1 is evidence about darwin-arm64 alone.
+- [ ] Then WP-X dogfood (user-run), then WP-J per the session-29 plan § Step 1.
+- [ ] DEFERRED, recorded not diagnosed (CI out of scope): the two reds on run `34393727159` —
+      `frontend` `InspectorPanel.test.tsx:499` (`applyEditCommand` never called inside a
+      `settleUntil` poll that budgets 50 event-loop turns, against a production path with no
+      debounce) and `rust-8.0.1` `worker_chaos.rs:623`
+      `convergence_drill_kill_mid_plan_repeatedly` (exhausted all 45 attempts in 7.79 s without ever
+      observing a publish). Both green in the last local L3. The second deserves a second look if it
+      ever appears locally — never converging in 45 attempts is not obviously a slow-machine shape.
+
 ### Now (2026-09-06 16:45, END of session 28 — plan `~/.claude/plans/act-as-senior-software-delightful-nova.md`)
 - [x] **Gate — WP-G (2026-09-09, main thread, suites run ALONE, teed to the session scratchpad):**
       worker rebuilt + sidecar restaged sha `ec30553c87b610ec8…` (fingerprint `0a6a1dce34181289`

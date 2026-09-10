@@ -1,3 +1,108 @@
+# Handoff — session 30: WP-S1 sketch diagnostics + WP-D1 regen isolation, both reviewed; e2e run 3 is the rung of record
+
+Session 30 · 2026-09-09/10 · plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`
+
+> Read `TODO.md` § "Now (2026-09-09, session 30)" first — it is the full ledger, in order, with every
+> measured count and every ruling. `CURRENT_STATE.md` § NOW is the snapshot.
+> **CI is OUT OF SCOPE by user instruction; local gates only.**
+
+## Goal
+
+Analyse the state, plan the next hardening, and execute it. The session-29 plan proposed
+WP-J → dogfood → WP-A2. Three measured findings re-ordered that, and the user chose the new order.
+
+## What happened
+
+**The program moved because of evidence, not opinion.**
+
+1. **Dogfood had already produced a failure, and not in the export lane.** `logs/dev.jsonl`
+   2026-09-09 17:30 records a real session where a hand-drawn profile could not be finished:
+   `SketchRegions: profile has overlapping or coincident analytic curves`, naming no entity, on the
+   core sketch→extrude loop. SCHEMA stated outright that `SketchRegions` had no diagnostics channel.
+2. **One broken feature deleted every unrelated body.** Traced through all four layers; `planner.rs`
+   accepted and discarded the dependency graph (`let _ = graph;`). Against the stated light
+   multi-part priority.
+3. **The session-29 plan's "WP-K is a live regression" framing was wrong** and is corrected: before
+   WP-H the effective budget was the ~1.2 s ping timeout, so WP-H strictly widened it.
+
+**WP-S1 (sketch-region diagnostics) — worker, Rust, frontend, fixture.** Five reason codes on an
+unchanged `OP_FAILED` envelope; `evidence.entityIds` in the WIRE id space. The detector's accepted set
+is provably unchanged (messages byte-identical, no control-flow condition touched). Protocol-audited
+before AND after the code; the after-pass was prose-only.
+
+**WP-D1 (dirty-closure error isolation) — `DocumentRuntime`.** One further from-0 regen excluding the
+halt and everything not provably independent of it. Six clauses, each closing a distinct fail-open.
+
+**Riders:** pattern-count clamp removed; contracts manifest made semantic (caught four drifted rows);
+MC-R9 reviewed and KEPT OPEN; baselines README corrected.
+
+## Findings that corrected my own work
+
+- **My acceptance test was at the wrong LAYER.** `RegenSession` carries no dependency graph, so
+  `RegenExecutor` structurally cannot compute a closure. The implementer stopped at the tripwire with
+  a real contradiction and offered "change the pinned assertions" or "abandon the design"; both were
+  wrong — the fault was mine. Re-expressed as an executor-layer pin, moved isolation to
+  `DocumentRuntime`, and **no pinned assertion was touched**.
+- **My first brief told the implementer to publish internal ids.** The protocol audit caught it:
+  `LoopDetector` works in an internal id space and the internal→wire seam is `mapBaseEdge`. Copying
+  `fragment.baseEntityId` straight out would have published ids no consumer can resolve — the feature
+  would have looked done and been useless.
+- **My refusal-site count was wrong** — 21 recorded, 14 actual. Caught by the after-code audit,
+  re-counted on `HEAD` before accepting.
+
+## Dead-ends / rulings (do not re-litigate)
+
+- **MC-R9 is NOT closable** on the WP-H ordering fix: `8602b45`'s own message says "never local in
+  10 runs" and the ledger row says "Named cause … Not reproduced locally". That is the clean re-run
+  its closure rule forbids. Entry updated with the second occurrence and what would close it.
+- **`step_import_gate.rs:1390` re-expressed, and the adversarial reviewer independently confirmed it
+  was right**: the slab is a NewBody extrude of its own datum sketch with no path to the import. The
+  new assertion is strictly stronger — it pins WHICH body survives where the old one counted to zero.
+- **The `severity` restoration is deferred to WP-J**, not skipped: its only consumer never reads the
+  field, and WP-J restructures that exact lane.
+- **The sketch-overlay highlight is dropped**: the refusing lane closes the session, so there is no
+  overlay to highlight in. The in-sketch region preview is the lane where it would land.
+- **WP-D1's guarantee is scoped to WORKER halts.** The two `begin_regen` ceilings produce plans that
+  COMPLETE below the gate, so no isolation runs for them.
+
+## Reviews earned their cost again
+
+The adversarial review returned **defective** and found the sixth hole: `taint_from` was strictly
+weaker than `independence_is_provable`, so a halted record with cleared `outputs` and element-only
+inputs tainted nothing and admitted a downstream Shell — an H5-B silent wrong bind published as
+`Valid`, strictly worse than the defect being fixed. Both premises were re-verified by the
+orchestrator. Its own test had masked the variant by hand-setting `outputs`. Fixed red-first; the test
+now loops over both shapes. It also found that a failed pass 2 destroyed pass 1's publish.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; read `TODO.md` § "Now (2026-09-09, session 30)".
+2. **Check the e2e run of record** (run 3) at the bottom of that section. Runs 1 and 2 were both
+   521/3 and both INVALID: six failures, six `page.goto` timeouts, zero assertion failures, disjoint
+   spec sets, all passing in isolation. Cause measured — a hung 37-hour `pytest` from another Claude
+   session at 100 % CPU, since terminated with the user's authorisation.
+3. Then **WP-X dogfood (user-run)** → **WP-J** per the session-29 plan § Step 1, which carries the
+   corrected refusal mechanism and the ten-probe J0 list → re-plan → **WP-A2**.
+4. R3 (`boolean/foundation:b1` kernelbench) is the one rider not done — deliberately held, because
+   recording an oracle baseline while agents mutate the tree is invalid for attribution.
+
+## Open questions
+
+- Nothing blocking. User-run gates owed: the 19-row checklist, the Tauri smoke, "STEP opens
+  coloured", "3MF opens in a slicer" (after WP-J), the dogfood parts.
+- `src-tauri/tests/regen_isolation.rs` has no row in `docs/qa/` — the coverage verifier only fails on
+  cited-but-missing, so it passes, but a row would be honest.
+- Delete the stray untracked `src-tauri/.claude/` by hand; a `.gitignore` line for nested `.claude/`
+  would stop it recurring.
+
+## Pointers
+
+- Tasks → `TODO.md` § "Now (2026-09-09, session 30)" · Snapshot → `CURRENT_STATE.md` § NOW ·
+  Plan, evidence and both corrected designs →
+  `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`.
+
+---
+
 # Handoff — WP-G GATED and PUSHED (`1490d07`); next program planned: WP-J → dogfood → WP-A2
 
 Session 29 · 2026-09-09 · plan `~/.claude/plans/act-as-senior-software-cached-charm.md`

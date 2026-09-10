@@ -41,3 +41,18 @@ nothing unless it is shown to fail without the fix.
 - Red-first for a C++ production choice: edit the one expression, rebuild only the affected target,
   confirm the FAIL line, then restore with the inverse `Edit` and `diff` against a `/tmp` backup.
   `diff -q ... && rm ...` compound commands hit the permission prompt; run a bare `diff` instead.
+- `cargo test -p <crate>` stops at the FIRST failing test target and never runs the
+  rest, so a single red integration target hides the whole-crate count. Use
+  `--no-fail-fast` whenever you need a baseline number to report.
+- Red-first for a Rust production choice inside one function: `cp` the file to the
+  scratchpad, insert `if true { return <inert>; }` at the top of the function, run,
+  then `cp` the backup back and run a bare `diff` to prove byte-identity. Probe each
+  mechanism SEPARATELY (e.g. "skip the whole pass" vs "skip only the merge") — a test
+  that stays green under one probe and red under the other tells you exactly which
+  half it is pinning.
+- Before attributing a gate's status change to your own diff, `git status` the gate
+  file. In a shared worktree the orchestrator may have re-expressed the assertion
+  under you; single-fix probes that all leave it green are the tell.
+- `tracing::warn!/info!` produce NO output under `cargo test` (no subscriber
+  installed), so grepping test output for a tracing line proves nothing. Use a
+  temporary `eprintln!` with `-- --nocapture` when you need to see a decision.

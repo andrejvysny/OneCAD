@@ -1,6 +1,59 @@
 # Current State
 
-Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
+Last verified: 2026-09-10 11:20 — session 30: WP-S1 sketch-region diagnostics and WP-D1 dirty-closure error isolation landed in the tree with four riders, both packages reviewed, every gate rung green except the e2e lane whose first two runs were invalidated by a hung 37-hour pytest process from another session.
+
+(historical) Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
+
+## NOW — SKETCH DIAGNOSTICS + REGEN ISOLATION (2026-09-10, session 30, plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`)
+
+Two packages landed in the tree, both reviewed; four riders with them. The program was re-ordered off
+the session-29 plan after three measured findings — see `TODO.md` § "Now (2026-09-09, session 30)"
+for the full ledger. **CI is out of scope by user instruction: local development and local gates only.**
+
+- **WP-S1 — a refused sketch profile now names the curves at fault.** Driven by real evidence rather
+  than an audit guess: `logs/dev.jsonl` 2026-09-09 17:30 records a hand-drawn profile refused with
+  *"profile has overlapping or coincident analytic curves"*, naming nothing, on the core
+  sketch→extrude loop. `SketchRegions` had no diagnostics channel at all (SCHEMA said so outright).
+  Now five reason codes on an UNCHANGED `OP_FAILED` envelope — a new top-level code would fail the
+  frame and cost every in-flight request — with `evidence.entityIds` in the WIRE id space, remapped
+  through the same seam the advisories use. What the detector ACCEPTS is unchanged: every message is
+  byte-identical and no control-flow condition moved. The Rust half closed the blocker that made the
+  worker half inert (`op_failed(format!(…))` minted an empty diagnostics vector and destroyed every
+  reason code one frame after parsing). Protocol-audited BEFORE the code and AFTER it; the second
+  pass was prose-only.
+- **WP-D1 — one broken feature no longer deletes unrelated bodies.** A halt used to stop the whole
+  plan and drop every later body, so breaking a bracket's fillet made an imported vendor component
+  vanish — squarely against the light multi-part fit-check priority. `DocumentRuntime` now issues one
+  further from-0 regen excluding the halt and everything not PROVABLY independent of it. Six
+  exclusion clauses, each closing a distinct fail-open. `RegenExecutor` and SCHEMA Invariant 6 are
+  untouched; no wire change.
+- **Riders:** the silent pattern-count clamp removed (a typed 20 became 12, on two lanes); the
+  contracts manifest now verifies `validationTier` and `supportStatus` against code, which caught
+  four genuinely drifted rows; MC-R9 reviewed and deliberately KEPT OPEN; the baselines README row
+  counts corrected.
+
+**Gate — every rung measured on the main thread, suites alone, EXCEPT e2e:** ctest **193 / 193** ·
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **98 result lines / 1580 passed / 0 failed / 0
+skips** · vitest **318 files / 5623 passed / 0 failed / 78 skipped** · `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean on 1.97.0 · `bunx tsc --noEmit` clean ·
+stdout hygiene clean · hex **0** · coverage **32/9/16/19** · contracts **39/18/15** · verifier
+negative controls all ✓ · kernelbench `fillet/foundation:t0` **136 rows unchanged** + semantics OK
+and `fillet/matrix:m1` **336 rows unchanged** + semantics OK with `FILLET_BLEND_APPROXIMATED` = 0.
+
+- **e2e: see `TODO.md` for the run of record.** Runs 1 and 2 were both 521/3 and both INVALID for
+  attribution — all six failures were `page.goto` timeouts with zero assertion failures, on disjoint
+  spec sets, all passing in isolation. Cause measured, not guessed: PID 25430,
+  `.venv/bin/python -m pytest` in `~/workspace/blackpen-org-demo/engine`, pinning a core at 100 % for
+  **1 day 13 hours**, launched by a different Claude Code session and hung rather than busy. The user
+  authorised terminating it; run 3 is the rung of record.
+- **Blockers:** none technical.
+- **Owed, unchanged:** the 19-row `docs/qa/MANUAL_RELEASE_GATES.md` checklist, the merged-stack Tauri
+  smoke, "STEP opens coloured", "3MF opens in a slicer" (meaningful only after WP-J), the WP-X
+  dogfood parts. Delete the stray untracked `src-tauri/.claude/` by hand — never stage it.
+- **Next:** WP-X dogfood (user-run) → WP-J export/import honesty → re-plan → WP-A2 feature origin.
+  Two limits recorded rather than discovered later: WP-D1's guarantee is scoped to WORKER halts, so
+  the two `begin_regen` ceilings still truncate; and the sketch-overlay highlight was dropped because
+  the refusing lane has no open sketch to highlight in.
 
 ## NOW — KERNEL HARDENING P1: WP-G GATED (2026-09-09, session 29, plan `~/.claude/plans/act-as-senior-software-cached-charm.md`)
 
