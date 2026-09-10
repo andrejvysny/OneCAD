@@ -470,4 +470,74 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
     expect(selectedIds).toContain("body_feat-lp:1");
     expect(selectedIds).toContain("body_feat-lp:2");
   });
+  /*
+   * REGRESSION (2026-09-09): a typed instance count above the STEPPER bound was
+   * silently truncated to 12. `ModelToolChips.CountStepper` validates typed
+   * entry through `acceptCount` (2-128, refuse never clamp) and hands the raw
+   * number to `onCount`, but `onLinearCount` / `onCircularCount` then wrapped it
+   * in `clampPatternCount()` — a 2-12 chip clamp — BEFORE the FSM saw it. The
+   * user typed 20, watched the field snap back to 12, and got 12 instances.
+   */
+  it("a typed instance count above the stepper bound is NOT truncated", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      direction: [1, 0, 0],
+      spacing: { value: 20 },
+      count: 3,
+      fuseResult: true,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-lp", kind: "boolean", opType: "LinearPattern", label: "Linear Pattern", valueText: "×3", status: "ok" }],
+    });
+    await controller.editLinearPatternFeature("feat-lp");
+    await flush();
+
+    toolChipStore.getState().onCount?.(20);
+    expect(toolChipStore.getState().count).toBe(20);
+
+    // The FSM still REFUSES out of range rather than clamping to the ceiling.
+    toolChipStore.getState().onCount?.(129);
+    expect(toolChipStore.getState().count).toBe(20);
+  });
+
+  it("a circular pattern's typed count is not truncated either", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      axisDirection: [0, 0, 1],
+      axisOrigin: [0, 0, 0],
+      angleDeg: { value: 360 },
+      count: 4,
+      fuseResult: true,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-cp", kind: "boolean", opType: "CircularPattern", label: "Circular Pattern", valueText: "×4", status: "ok" }],
+    });
+    await controller.editCircularPatternFeature("feat-cp");
+    await flush();
+
+    toolChipStore.getState().onCount?.(24);
+    expect(toolChipStore.getState().count).toBe(24);
+  });
+
+  it("re-editing a >12 pattern with no numeric stored count reads the real count from '×N'", async () => {
+    build();
+    // `countFromValueText` is the fallback when `stored.count` is not a number;
+    // it clamped to 12 too, so a committed 20-instance pattern re-armed as 12.
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      direction: [1, 0, 0],
+      spacing: { value: 20 },
+      fuseResult: true,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-lp", kind: "boolean", opType: "LinearPattern", label: "Linear Pattern", valueText: "×20", status: "ok" }],
+    });
+
+    await controller.editLinearPatternFeature("feat-lp");
+    await flush();
+
+    expect(toolChipStore.getState().count).toBe(20);
+  });
 });

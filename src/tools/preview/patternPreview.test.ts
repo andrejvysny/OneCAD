@@ -12,7 +12,10 @@ import {
   mirrorGhostTransforms,
   clampPatternCount,
   countFromValueText,
+  MAX_PATTERN_COUNT,
+  MIN_PATTERN_COUNT,
 } from "./patternPreview";
+import { PATTERN_COUNT_MAX, PATTERN_COUNT_MIN } from "@/tools/modelTools/modelToolMachine";
 describe("point transforms", () => {
   it("translatePoint adds the offset", () => {
     expect(translatePoint([1, 2, 3], [10, 0, -1])).toEqual([11, 2, 2]);
@@ -100,16 +103,35 @@ describe("mirror placement", () => {
 });
 
 describe("count clamp + parse", () => {
-  it("clampPatternCount clamps to [2, 12] and rounds", () => {
+  /*
+   * RE-EXPRESSED 2026-09-09 (recorded decision, TODO.md § KERNEL HARDENING).
+   * These previously PINNED the truncation as intended behaviour: a 12 ceiling
+   * here silently turned a typed 20 into 12 on the live entry lane
+   * (`ModelToolController.onLinearCount` / `onCircularCount` wrapped every typed
+   * count in `clampPatternCount` BEFORE the FSM saw it) and again on the re-edit
+   * fallback (`countFromValueText`). The authoring range is 2-128; the +/- chip
+   * buttons stop at 12, which is a chip bound and not a value policy.
+   */
+  it("clampPatternCount guards the AUTHORING range [2, 128] and rounds", () => {
     expect(clampPatternCount(1)).toBe(2);
-    expect(clampPatternCount(20)).toBe(12);
+    expect(clampPatternCount(20)).toBe(20);
+    expect(clampPatternCount(128)).toBe(128);
+    expect(clampPatternCount(129)).toBe(128);
     expect(clampPatternCount(3.4)).toBe(3);
     expect(clampPatternCount(Number.NaN)).toBe(3);
   });
 
-  it("countFromValueText parses '×N' back to a count", () => {
+  it("the authoring ceiling is ONE number across the preview and the FSM", () => {
+    // Drift guard: `modelToolMachine` owns the policy prose and cites the
+    // worker's `PatternOp.cpp kMaxPatternCount`; this module cannot import it
+    // (the FSM imports WORLD_AXIS from here, so the edge only goes one way).
+    expect(MAX_PATTERN_COUNT).toBe(PATTERN_COUNT_MAX);
+    expect(MIN_PATTERN_COUNT).toBe(PATTERN_COUNT_MIN);
+  });
+
+  it("countFromValueText parses '×N' back to a count without truncating it", () => {
     expect(countFromValueText("×4")).toBe(4);
-    expect(countFromValueText("×20")).toBe(12); // clamped
+    expect(countFromValueText("×20")).toBe(20);
     expect(countFromValueText("nope")).toBe(3); // fallback
   });
 });

@@ -233,11 +233,28 @@ export function mirrorGhostTransforms(planePoint: Vec3, planeNormal: Vec3): Ghos
 
 export const DEFAULT_PATTERN_COUNT = 3;
 export const MIN_PATTERN_COUNT = 2;
-export const MAX_PATTERN_COUNT = 12;
+/*
+ * The AUTHORING maximum, not the stepper maximum. These must stay equal to
+ * `modelToolMachine.PATTERN_COUNT_MAX` and to the worker's
+ * `PatternOp.cpp kMaxPatternCount`; `patternCountRangeIsOnePolicy` in
+ * `patternPreview.test.ts` pins the first of those. The +/- buttons stop at
+ * `modelToolMachine.PATTERN_STEPPER_MAX` (12) for ergonomics — that is a CHIP
+ * bound and never a value policy. It used to live here as the clamp ceiling,
+ * which silently truncated a typed 20 to 12 on both the live entry lane and the
+ * re-edit fallback below.
+ */
+export const MAX_PATTERN_COUNT = 128;
 export const DEFAULT_LINEAR_SPACING = 20;
 export const DEFAULT_CIRCULAR_ANGLE = 360;
 
-/** Clamp a pattern instance count to the chip range [2, 12] (integer). */
+/**
+ * Clamp a pattern instance count into the AUTHORING range [2, 128] (integer).
+ *
+ * This is a guard against a malformed or unparseable stored value, NOT an input
+ * policy: typed authoring goes through `modelToolMachine.acceptCount`, which
+ * REFUSES out-of-range input rather than clamping it, because a clamp commits a
+ * count the user never saw previewed.
+ */
 export function clampPatternCount(count: number): number {
   if (!Number.isFinite(count)) return DEFAULT_PATTERN_COUNT;
   return Math.max(MIN_PATTERN_COUNT, Math.min(MAX_PATTERN_COUNT, Math.round(count)));

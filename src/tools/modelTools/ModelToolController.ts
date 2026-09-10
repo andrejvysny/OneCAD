@@ -150,7 +150,6 @@ import {
   linearGhostTransforms,
   circularGhostTransforms,
   mirrorGhostTransforms,
-  clampPatternCount,
   countFromValueText,
   placementMatrix,
   applyPlacementToPoint,
@@ -5947,7 +5946,7 @@ export class ModelToolController {
     this.rebuildLinearGhost();
   }
   private onLinearCount(count: number): void {
-    this.linear = linearPatternStep(this.linear, { kind: "setCount", count: clampPatternCount(count) }).state;
+    this.linear = linearPatternStep(this.linear, { kind: "setCount", count }).state;
     toolChipStore.getState().setCount(this.linear.count);
     this.rebuildLinearGhost();
   }
@@ -6066,7 +6065,7 @@ export class ModelToolController {
     this.rebuildCircularGhost();
   }
   private onCircularCount(count: number): void {
-    this.circular = circularPatternStep(this.circular, { kind: "setCount", count: clampPatternCount(count) }).state;
+    this.circular = circularPatternStep(this.circular, { kind: "setCount", count }).state;
     toolChipStore.getState().setCount(this.circular.count);
     this.rebuildCircularGhost();
   }
