@@ -66,6 +66,52 @@ jobs:
           scripts/tests/verify-modeling-coverage.test.sh
           node scripts/verify-modeling-contracts.mjs
 
+  # Pure Rust crates — fmt, clippy, and unit tests for every crate that does NOT
+  # depend on Tauri, GTK, WebKit, or the OCCT worker. These run in ~3 min on the
+  # self-hosted runner and give near-instant feedback on domain-layer changes
+  # before the heavy OCCT-dependent jobs even start.
+  rust-lint-test:
+    name: rust-lint-test (pure crates, no OCCT)
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && (github.event_name == 'push'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (fmt + clippy)
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+          rustup component add rustfmt clippy
+      - name: fmt
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+      - name: clippy (pure crates)
+        working-directory: src-tauri
+        run: |
+          cargo clippy \
+            -p onecad-core \
+            -p onecad-protocol \
+            -p onecad-library \
+            -p onecad-worker-stub \
+            -p onecad-kernelbench \
+            --all-targets -- -D warnings
+      - name: test (pure crates)
+        working-directory: src-tauri
+        run: |
+          cargo test \
+            -p onecad-core \
+            -p onecad-protocol \
+            -p onecad-library \
+            -p onecad-worker-stub \
+            -p onecad-kernelbench
+
   linux-worker:
     name: linux-worker
     if: >-
