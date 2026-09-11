@@ -47,3 +47,37 @@ Severity: blocker means the policy accepts a wrong result or refuses a valid one
 3. Minimal fix for each failing step, or "no fix needed".
 4. Anything the derivation assumes without stating.
 ```
+
+## research
+
+```
+1. Direct answer to the question, stated first, in at most five lines.
+2. Sources: for each, what it establishes, and its reliability class — specification | documented
+   vendor behaviour | peer-reviewed paper | textbook | mailing list or forum | observed-only.
+   Give the identifier a reader can open (OCCT class and method name, paper title and author,
+   URL).
+3. Mapping onto OneCAD: which of the stated invariants the prior art satisfies, which it violates,
+   and which assumptions it needs that this repository cannot guarantee (exact arithmetic, bounded
+   degree, closed input, single-scale models).
+4. What the repository would have to measure to confirm the answer here, named concretely: a
+   kernelbench row, a ctest, a probe.
+5. No-source list: every claim you could not attach a source to, kept separate from the answer.
+```
+
+## perf
+
+```
+1. Cost model: the parameters that drive the cost, with units, and the model in terms of them.
+2. Complexity per stage and the dominant term; say which stage the model predicts dominates and at
+   what input size the crossover sits.
+3. Accuracy and conditioning cost of each proposed speed-up. A faster predicate that can flip a
+   sign is a defect, not a trade-off; say which of your proposals change a decision and which change
+   only a duration.
+4. The measurement that would confirm or refute the model, named as a kernelbench row or a ctest,
+   with the input that isolates the stage.
+5. Ranked changes: expected factor, risk, and what would have to be re-gated for each.
+6. Confidence (high | medium | low) and the unknowns that would change the ranking.
+```
+
+`followup` has no contract of its own — it inherits the parent run's, and returns only the sections
+the new information changes.

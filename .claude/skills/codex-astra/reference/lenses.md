@@ -37,3 +37,20 @@ Curve-curve intersection refinement, periodic parameter intervals, tangential co
 ## Numerical optimisation
 
 Objective conditioning, step control, termination criteria, and whether the reported optimum is a true minimum. Ask for the input on which the method stalls or diverges.
+
+## Prior art and kernel behaviour
+
+Separate what OCCT *specifies* from what it is merely *observed* to do here, and say which class each
+claim belongs to. For a published algorithm, state its assumptions explicitly — exact arithmetic,
+bounded degree, general position, closed or manifold input, a single length scale — and say which of
+them this repository cannot guarantee. Prefer a source that documents its own failure cases over one
+that reports only successes. Where the prior art disagrees with the current implementation, say which
+one is making the stronger claim.
+
+## Algorithmic performance
+
+Where the cost actually sits, and what the asymptotic constant is hiding at the sizes that matter.
+Distinguish a speed-up that changes only a duration from one that changes a decision — a cheaper
+predicate that can flip a sign is a correctness change wearing a performance costume. Ask which stage
+to measure first and what input isolates it, and whether the proposed change moves work from a place
+that is cached to a place that is not, or from regen time to edit time.
