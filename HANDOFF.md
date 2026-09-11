@@ -1,10 +1,20 @@
-# Handoff — session 30: WP-S1 sketch diagnostics + WP-D1 regen isolation, both reviewed; e2e run 3 is the rung of record
+# Handoff — session 30 COMMITTED: WP-S1 sketch diagnostics + WP-D1 regen isolation, full L3 green, 5 commits unpushed
 
 Session 30 · 2026-09-09/10 · plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`
 
 > Read `TODO.md` § "Now (2026-09-09, session 30)" first — it is the full ledger, in order, with every
 > measured count and every ruling. `CURRENT_STATE.md` § NOW is the snapshot.
 > **CI is OUT OF SCOPE by user instruction; local gates only.**
+>
+> **Committed and NOT pushed.** `74122c1` (WP-S1 + WP-D1) · `f5dec0d` (pattern clamp) · `15e4eb9`
+> (QA verifier) · `5f1f0f9` (ledgers), plus session 29's `5b5cde1` — **5 ahead of `origin/master`**.
+> Push was never authorised in this session; ask before pushing. `git diff HEAD` is empty, so HEAD is
+> exactly the tree the gate was measured on.
+>
+> **FULL L3 GREEN:** ctest 193/193 · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` 98 targets /
+> 1580 passed / 0 skips · vitest 318 files / 5623 passed / 78 skipped · **e2e 524 / 0** · kernelbench
+> t0 136 and m1 336 rows unchanged with semantics OK · fmt, clippy 1.97.0, tsc, hex, hygiene and the
+> three verifiers clean.
 
 ## Goal
 
@@ -77,10 +87,13 @@ now loops over both shapes. It also found that a failed pass 2 destroyed pass 1'
 ## How to resume
 
 1. Run the `handoff` skill with "resume"; read `TODO.md` § "Now (2026-09-09, session 30)".
-2. **Check the e2e run of record** (run 3) at the bottom of that section. Runs 1 and 2 were both
-   521/3 and both INVALID: six failures, six `page.goto` timeouts, zero assertion failures, disjoint
-   spec sets, all passing in isolation. Cause measured — a hung 37-hour `pytest` from another Claude
-   session at 100 % CPU, since terminated with the user's authorisation.
+2. **Nothing is owed on the gate.** e2e run 3 is 524/0. Runs 1 and 2 were both 521/3 and both
+   INVALID — six failures, six `page.goto` timeouts, zero assertion failures, disjoint spec sets, all
+   passing in isolation; cause measured as a hung 37-hour `pytest` from another Claude session at
+   100 % CPU, since terminated with the user's authorisation. All three runs tested the byte-identical
+   checksum `a125e751ae930ab964d6e8ff90fd0d4d`. **If you gate on this machine, check for competing
+   load first** (`ps aux | sort -rk3 | head`) — concurrent sessions in this tree are normal here and
+   the e2e lane is the one that cannot survive them.
 3. Then **WP-X dogfood (user-run)** → **WP-J** per the session-29 plan § Step 1, which carries the
    corrected refusal mechanism and the ten-probe J0 list → re-plan → **WP-A2**.
 4. R3 (`boolean/foundation:b1` kernelbench) is the one rider not done — deliberately held, because

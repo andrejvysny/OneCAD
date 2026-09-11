@@ -1,8 +1,64 @@
 # OneCAD-Tauri Migration TODO
 
+## Native UX test recovery (2026-09-11)
+
+- [x] User-authorized termination of frozen bundled OneCAD and its worker.
+- [x] Rebuild/stage worker with `scripts/build-worker.sh Release`: exit 0; deprecation warnings.
+- [x] `bun run tauri build --debug --bundles app`: exit 0; frontend chunk-size warning. Native launch and New project verified through Computer Use.
+- [x] Resumed second manual modeling UX pass: revolved housing, four Hole operations, slot cut, measurement, section view, drag/snap comparisons. Extended `/private/tmp/OneCAD-UX-Review-2026-09-11.md`; pure hover and modifier-based navigation remain untested.
+
+No application source changes or regression-suite result claimed for this recovery.
+
+## Astra delegation policy reworked for ChatGPT Pro 5x (2026-09-11)
+
+- [x] `/codex-astra` rewritten off the Plus-era rationing rules. Six modes now: `derive`, `break`,
+      `verify`, plus new `research` (live web, prior art and documented OCCT behaviour), `perf`
+      (complexity and conditioning of a kernel path), and `followup` (resume the parent session with
+      the answers it asked for). `disable-model-invocation` removed so Fable can propose a run itself;
+      the skill body carries the guard that loading it is not approval and the run waits for the user.
+- [x] Two premises corrected against codex-cli 0.153.4 and `~/.codex/models_cache.json`: Astra efforts
+      are `low|medium|high|xhigh|max|ultra` (`ultra` is multi-agent v2 with sub-agents at `xhigh`,
+      explicit approval only, and burns more than one call), and the context window is 272 000 with
+      `max_context_window` 872 000, so the packet cap moved 40 KB to 120 KB.
+- [x] Budget is now about three calls per work package with a fan-out of at most two on distinct
+      questions. A kernel question is repository-grounded by default (read-only, at most twelve named
+      paths) and never allowlists `corpus/expected-values/` on a `derive`, which would let a derivation
+      read its own expected answer.
+- [x] **Validated with one real call**, not assumed: a `verify` packet (hash `d1ac2d30fdf8`) at `low`
+      effort with a planted wrong sagitta. Astra recomputed `5(1-cos(pi/12)) = 0.1703708686 mm` against
+      the claimed `0.1866 mm`, caught the disagreement, and marked the unsupplied wire conversion
+      `unverifiable` instead of guessing. 20 s / 415 output tokens. The `followup` lane was then proven
+      by resuming the same `thread_id`: it recalled the parent geometry and returned only the changed
+      step, 9 s / 80 output tokens, 7 040 cached input tokens reused. Two mechanics were wrong in the
+      draft and are now fixed in the skill: the session id is `thread_id` on the JSONL's first
+      `thread.started` line, and `codex exec resume` rejects `-s`, so the sandbox goes through
+      `-c 'sandbox_mode="read-only"'`.
+- [x] `CLAUDE.md` gained the Astra-first domain list (fillet robustness, blend algorithms, tolerance
+      theory, topology identity, curve intersections, solver mathematics, Sweep, Loft, modeled threads,
+      direct modeling), the three-step loop (Astra derives, Fable builds, Astra breaks), the WP-G worked
+      example (Astra `max` leads the acceptance policy, Fable `xhigh` implements it across C++,
+      fixtures, Rust and the gate ladder), and four enforceable clauses binding the loop to
+      `fable-orchestrator`'s `PLAN.md` sections.
+
+No gate rung applies: markdown, skill, and policy only, with no source, protocol, or test change.
+
 ## KERNEL HARDENING (2026-09-02, plan `~/.claude/plans/act-as-senior-cad-glimmering-wreath.md`)
 
 ### Now (2026-09-09, session 30 — plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`)
+
+**COMMITTED 2026-09-10 behind a FULL L3 GREEN — four commits carved from ONE gated tree, staged by
+path, `src-tauri/.claude/` never staged:** `74122c1` `feat(kernel)` WP-S1 + WP-D1 (28 files,
++3169 / −49; gated together because both touch `document_runtime.rs`) · `f5dec0d` `fix(tools)`
+pattern clamp (4 files, +117 / −9) · `15e4eb9` `chore(qa)` semantic contracts verifier + MC-R9 +
+baselines README (5 files, +175 / −13) · `5f1f0f9` `chore(ledgers)` (6 files, +820).
+`git diff HEAD` empty — HEAD IS the gated tree. **5 commits unpushed** (those four plus session 29's
+`5b5cde1`); push was never authorised this session.
+
+**NEXT ACTION — `WP-X` dogfood, and it is the USER's to run.** Two of the three things most likely to
+derail it are now fixed: a refused sketch says which curves are at fault instead of dead-ending, and
+a broken feature no longer takes unrelated bodies off the screen. Setup and the per-part recording
+list are in the plan file § Step 3. Everything after it (WP-J → re-plan → WP-A2) is unchanged.
+
 
 Program this session, user-approved after a fresh state review: **WP-S1 sketch-region refusal
 diagnostics → WP-D1 dirty-closure error isolation → WP-X dogfood (user-run) → WP-J export/import

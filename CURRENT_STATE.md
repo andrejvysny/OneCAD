@@ -1,10 +1,18 @@
 # Current State
 
-Last verified: 2026-09-10 11:20 — session 30: WP-S1 sketch-region diagnostics and WP-D1 dirty-closure error isolation landed in the tree with four riders, both packages reviewed, every gate rung green except the e2e lane whose first two runs were invalidated by a hung 37-hour pytest process from another session.
+Last verified: 2026-09-10 11:43 — session 30 COMMITTED: four commits on `master` (`74122c1` WP-S1+WP-D1 · `f5dec0d` pattern clamp · `15e4eb9` QA verifier · `5f1f0f9` ledgers) behind a FULL L3 GREEN including e2e 524/0. Tree clean apart from the untracked `src-tauri/.claude/`. **5 commits unpushed** (those four plus session 29's `5b5cde1`) — push not authorized.
 
 (historical) Last verified: 2026-09-02 11:24 — DAILY DRIVER v2 PAUSED BY USER mid-WP-P: five WPs committed (`3a82910` WP0 · `a60da42` WP-C · `e7010ce` WP-E · `1d7b4a0` WP-V · `a38b940` WP-T1, all full-L3), WP-P worker+Rust halves LANDED UNCOMMITTED (2,718 insertions + 10 new files), FE half + gate + commit owed, on `master` (5 ahead of origin — push not authorized)
 
 ## NOW — SKETCH DIAGNOSTICS + REGEN ISOLATION (2026-09-10, session 30, plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`)
+
+**Branch:** `master`, clean except `?? src-tauri/.claude/`, **5 ahead of `origin/master`** (`1490d07`).
+**Commits this session, each a slice of ONE gated tree:**
+`74122c1` feat(kernel) WP-S1 + WP-D1 (28 files, +3169 / −49 — gated together because both touch
+`document_runtime.rs`; `TODO.md` keeps them separate) · `f5dec0d` fix(tools) pattern clamp (4 files,
++117 / −9) · `15e4eb9` chore(qa) semantic contracts verifier + MC-R9 + baselines README (5 files,
++175 / −13) · `5f1f0f9` chore(ledgers) (6 files, +820).
+`git diff HEAD` is empty — HEAD IS the tree the gate was measured on.
 
 Two packages landed in the tree, both reviewed; four riders with them. The program was re-ordered off
 the session-29 plan after three measured findings — see `TODO.md` § "Now (2026-09-09, session 30)"
@@ -32,7 +40,7 @@ for the full ledger. **CI is out of scope by user instruction: local development
   four genuinely drifted rows; MC-R9 reviewed and deliberately KEPT OPEN; the baselines README row
   counts corrected.
 
-**Gate — every rung measured on the main thread, suites alone, EXCEPT e2e:** ctest **193 / 193** ·
+**Gate — FULL L3, every rung measured on the main thread with suites run alone:** ctest **193 / 193** ·
 `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **98 result lines / 1580 passed / 0 failed / 0
 skips** · vitest **318 files / 5623 passed / 0 failed / 78 skipped** · `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean on 1.97.0 · `bunx tsc --noEmit` clean ·
@@ -40,12 +48,15 @@ stdout hygiene clean · hex **0** · coverage **32/9/16/19** · contracts **39/1
 negative controls all ✓ · kernelbench `fillet/foundation:t0` **136 rows unchanged** + semantics OK
 and `fillet/matrix:m1` **336 rows unchanged** + semantics OK with `FILLET_BLEND_APPROXIMATED` = 0.
 
-- **e2e: see `TODO.md` for the run of record.** Runs 1 and 2 were both 521/3 and both INVALID for
-  attribution — all six failures were `page.goto` timeouts with zero assertion failures, on disjoint
-  spec sets, all passing in isolation. Cause measured, not guessed: PID 25430,
-  `.venv/bin/python -m pytest` in `~/workspace/blackpen-org-demo/engine`, pinning a core at 100 % for
-  **1 day 13 hours**, launched by a different Claude Code session and hung rather than busy. The user
-  authorised terminating it; run 3 is the rung of record.
+- **e2e 524 / 0 (32.8 min), both projects, `retries: 0` — GREEN and the rung of record.** It took
+  three runs. Runs 1 and 2 were both 521/3 and both INVALID for attribution: six failures, six
+  `page.goto` timeouts, ZERO assertion failures, disjoint spec sets, all passing in isolation. Cause
+  measured rather than guessed — PID 25430, `.venv/bin/python -m pytest` in
+  `~/workspace/blackpen-org-demo/engine`, pinning a core at 100 % for **1 day 13 hours**, launched by
+  a different Claude Code session and hung rather than busy. The user authorised terminating it; run
+  3 on the quiet machine went green against the byte-identical `src`+`e2e` checksum
+  `a125e751ae930ab964d6e8ff90fd0d4d` that both invalid runs were measured against — so all three
+  tested the same code and the only variable was the machine. Both reds stay recorded as reds.
 - **Blockers:** none technical.
 - **Owed, unchanged:** the 19-row `docs/qa/MANUAL_RELEASE_GATES.md` checklist, the merged-stack Tauri
   smoke, "STEP opens coloured", "3MF opens in a slicer" (meaningful only after WP-J), the WP-X
