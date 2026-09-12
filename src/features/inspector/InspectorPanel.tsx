@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Icon } from "@/icons/Icon";
 import {
   useDocumentStore,
@@ -19,12 +20,48 @@ import { InspectorSectionHost } from "@/modules/modeling/InspectorSectionHost";
 import { ConstraintMenu } from "@/features/sketch/ConstraintMenu";
 import { cn } from "@/ui/cn";
 import {
+  INSPECTOR_MAX_WIDTH,
+  INSPECTOR_MIN_WIDTH,
+  useInspectorInset,
+  useInspectorLayoutStore,
+} from "@/stores/inspectorLayoutStore";
+import { ActiveToolInspector } from "./ActiveToolInspector";
+import {
   sketchStatusText,
   sketchStatusSentence,
   sketchStatusToneClass,
+  hasCurrentSketchEvaluation,
   emptySketchCard,
+  projectedOnlySketchCard,
 } from "@/features/sketch/constraintStatus";
 import type { SketchStatus } from "@/stores/documentStore";
+
+function InspectorDrawerHeader({
+  open,
+  onToggle,
+}: {
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const action = open ? "Collapse inspector" : "Open inspector";
+  return (
+    <header className={cn("flex h-8 shrink-0 items-center", open ? "justify-between px-2" : "justify-center")}>
+      {open && <div id="inspector-drawer-heading" className="text-[13px] font-semibold text-ink">Inspector</div>}
+      <button
+        type="button"
+        data-testid="inspector-drawer-toggle"
+        aria-label={action}
+        aria-controls="inspector-drawer-content"
+        aria-expanded={open}
+        title={action}
+        onClick={onToggle}
+        className="flex h-7 w-7 items-center justify-center rounded bg-chip text-[14px] text-ink-3 hover:bg-hover-2"
+      >
+        <span aria-hidden>{open ? "‹" : "›"}</span>
+      </button>
+    </header>
+  );
+}
 
 /**
  * Context-aware inspector (prototype 1c), three states:
@@ -49,6 +86,23 @@ import type { SketchStatus } from "@/stores/documentStore";
  * stays; sections render under it.
  */
 export function InspectorPanel() {
+  const width = useInspectorLayoutStore((state) => state.width);
+  const drawerOpen = useInspectorLayoutStore((state) => state.open);
+  const inspectorInset = useInspectorInset();
+  const setWidth = useInspectorLayoutStore((state) => state.setWidth);
+  const toggleOpen = useInspectorLayoutStore((state) => state.toggleOpen);
+  const resizeStart = useRef<{ x: number; width: number } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const stopResize = (target?: HTMLElement, pointerId?: number) => {
+    resizeStart.current = null;
+    if (target && pointerId !== undefined && target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+  };
+  const toggleDrawer = () => {
+    if (drawerOpen && contentRef.current?.contains(document.activeElement)) {
+      (document.activeElement as HTMLElement).blur();
+    }
+    toggleOpen();
+  };
   const mode = useToolStore((s) => s.mode);
   const sel = useSelectionStore(primarySelection);
   const bodies = useDocumentStore((s) => s.bodies);
@@ -83,36 +137,91 @@ export function InspectorPanel() {
   const gearFeatureId = !gearArmed ? resolveGearFeatureId(sel, features) : null;
 
   return (
-    <div className="absolute bottom-[34px] right-0 top-0 z-20 box-border w-[260px] overflow-auto border-l border-border bg-panel p-4">
-      {gearArmed ? (
-        <GearPropertiesPanel />
-      ) : sketching && activeSketchId && sketches[activeSketchId] ? (
-        <SketchState
-          sketchName={sketches[activeSketchId].name}
-          dof={sketches[activeSketchId].dof}
-          status={sketches[activeSketchId].status}
-          entityCount={sketchSession?.entities.length ?? 0}
+    <aside
+      data-testid="inspector-panel"
+      id="inspector-drawer"
+      style={{ width: inspectorInset, maxWidth: "100vw" }}
+      className="absolute bottom-[34px] right-0 top-0 z-20 box-border flex min-w-0 flex-col overflow-hidden border-l border-border bg-panel"
+    >
+      <InspectorDrawerHeader open={drawerOpen} onToggle={toggleDrawer} />
+      {drawerOpen && (
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-label="Resize inspector"
+          aria-orientation="vertical"
+          aria-valuemin={INSPECTOR_MIN_WIDTH}
+          aria-valuemax={INSPECTOR_MAX_WIDTH}
+          aria-valuenow={width}
+          aria-controls="inspector-drawer"
+          data-testid="inspector-resize-handle"
+          className="absolute bottom-0 left-0 top-8 w-2 cursor-col-resize"
+          onPointerDown={(event) => {
+            if (event.button !== 0 || !event.isPrimary) return;
+            resizeStart.current = { x: event.clientX, width };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            if (!resizeStart.current) return;
+            setWidth(resizeStart.current.width + resizeStart.current.x - event.clientX);
+          }}
+          onPointerUp={(event) => stopResize(event.currentTarget, event.pointerId)}
+          onPointerCancel={(event) => stopResize(event.currentTarget, event.pointerId)}
+          onLostPointerCapture={() => { resizeStart.current = null; }}
+          onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.key === "ArrowLeft") setWidth(width + 20);
+            if (event.key === "ArrowRight") setWidth(width - 20);
+            if (event.key === "Home") setWidth(INSPECTOR_MIN_WIDTH);
+            if (event.key === "End") setWidth(INSPECTOR_MAX_WIDTH);
+          }}
         />
-      ) : sketching ? (
-        // Plane-pick phase (no activeSketchId yet) or the sketch registry
-        // hasn't caught up: no solve state exists, so claim nothing about DOF
-        // (mirrors SelectionState's "absent solve state renders no placard").
-        <div className="text-[12px] text-ink-6">Select a sketch plane to begin.</div>
-      ) : showRepair ? (
-        <RepairPanel />
-      ) : gearFeatureId ? (
-        <GearSelectedSummary featureId={gearFeatureId} />
-      ) : sel && sel.kind === "feature" ? (
-        <FeatureState featureId={sel.id} features={features} />
-      ) : sel ? (
-        <SelectionState sel={sel} bodies={bodies} sketches={sketches} />
-      ) : (
-        <>
-          <EmptyState />
-          <InspectorSectionHost />
-        </>
       )}
-    </div>
+      <div
+        ref={contentRef}
+        id="inspector-drawer-content"
+        data-testid="inspector-drawer-content"
+        aria-labelledby="inspector-drawer-heading"
+        aria-hidden={!drawerOpen}
+        inert={!drawerOpen}
+        hidden={!drawerOpen}
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-4 pb-4 pt-3"
+      >
+        <ActiveToolInspector />
+        {gearArmed ? (
+          <GearPropertiesPanel />
+        ) : sketching && activeSketchId && sketches[activeSketchId] ? (
+          <SketchState
+            sketchName={sketches[activeSketchId].name}
+            dof={sketches[activeSketchId].dof}
+            status={sketches[activeSketchId].status}
+            solveCurrent={hasCurrentSketchEvaluation(sketches[activeSketchId])}
+            entityCount={sketchSession?.entities.length ?? 0}
+            projectedCount={sketchSession?.entities.filter((e) => e.referenceLocked).length ?? 0}
+          />
+        ) : sketching ? (
+          // Plane-pick phase (no activeSketchId yet) or the sketch registry
+          // hasn't caught up: no solve state exists, so claim nothing about DOF
+          // (mirrors SelectionState's "absent solve state renders no placard").
+          <div className="text-[12px] text-ink-6">Select a sketch plane to begin.</div>
+        ) : showRepair ? (
+          <RepairPanel />
+        ) : gearFeatureId ? (
+          <GearSelectedSummary featureId={gearFeatureId} />
+        ) : sel && sel.kind === "feature" ? (
+          <FeatureState featureId={sel.id} features={features} />
+        ) : sel ? (
+          <SelectionState sel={sel} bodies={bodies} sketches={sketches} />
+        ) : (
+          <>
+            <EmptyState />
+            <InspectorSectionHost />
+          </>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -172,17 +281,22 @@ function SelectionState({
    * the sketch chrome bar and the sketch-card branch below already use; this was
    * the second, silent authority.
    *
-   * ABSENT solve state renders NO placard at all (LGU-1 WP-A, defect F1).
+   * Missing evaluation metadata renders the explicit "Not evaluated" state.
    * Defaulting it to `dof: 0, status: "under"` made `sketchStatusText` report
    * "Fully constrained · DOF 0" for a sketch the registry has never heard of —
    * the strongest possible claim, made on no evidence, which the screenshot
    * audit caught on screen in model mode. The `dof === 0` guard INSIDE
    * `sketchStatusText` is a different thing and stays: there the zero is a real
    * solver result whose status label is merely lagging. Here there is no solve
-   * at all, and the honest render is silence.
+   * at all, and the honest render says that it has not been evaluated.
    */
   const solve = sketches[sketchId];
-  const status = solve ? sketchStatusText(solve.status, solve.dof) : null;
+  const solveCurrent = hasCurrentSketchEvaluation(solve);
+  const status = solveCurrent
+    ? sketchStatusText(solve.status, solve.dof)
+    : isSketch
+      ? { label: "Not evaluated", tone: "under" as const }
+      : null;
 
   return (
     <>
@@ -254,20 +368,36 @@ function SketchState({
   sketchName,
   dof,
   status,
+  solveCurrent,
   entityCount,
+  projectedCount = 0,
 }: {
   sketchName: string;
-  dof: number;
-  status: SketchStatus;
+  dof?: number;
+  status?: SketchStatus;
+  solveCurrent: boolean;
   entityCount: number;
+  /** Entities that are host-face projections (`referenceLocked`), never drawn. */
+  projectedCount?: number;
 }) {
   // A blank sketch has nothing to be "fully defined" about — its registry
   // dof/status (typically 0/"ok") reads through the ordinary path as the
-  // false completeness claim the audit caught (design item 12 / A11a).
+  // false completeness claim the audit caught (design item 12 / A11a). A sketch
+  // holding ONLY projected references is the same situation from the user's
+  // side: nothing drawn yet, so the card must not claim "fully defined" either.
   const empty = entityCount === 0;
+  const projectedOnly = !empty && projectedCount >= entityCount;
   const { label, tone, sentence } = empty
     ? emptySketchCard()
-    : { ...sketchStatusText(status, dof), sentence: sketchStatusSentence(status, dof) };
+    : projectedOnly
+      ? projectedOnlySketchCard(projectedCount)
+      : solveCurrent && dof !== undefined && status !== undefined
+        ? { ...sketchStatusText(status, dof), sentence: sketchStatusSentence(status, dof) }
+        : {
+            label: "Not evaluated",
+            tone: "under" as const,
+            sentence: "Solve the current sketch to inspect constraints.",
+          };
   // under/ok share the plain neutral card — under-constrained mid-sketch is
   // normal, not a warning. over/error each get their own severity tint so a
   // redundant constraint doesn't read as visually identical to a conflicting

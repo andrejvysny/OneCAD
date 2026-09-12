@@ -45,6 +45,8 @@ use crate::ids::{BodyId, RecordId, SketchId};
 #[derive(Debug, Clone)]
 struct Node {
     record_id: RecordId,
+    /// Explicit record inputs (FeaturePattern source features).
+    input_records: Vec<RecordId>,
     /// Body inputs (from `Operation::derive_inputs`).
     input_bodies: Vec<BodyId>,
     /// Sketch inputs (from `Operation::derive_inputs`).
@@ -60,6 +62,58 @@ struct Node {
     failure_reason: String,
 }
 
+#[cfg(test)]
+mod feature_pattern_tests {
+    use super::*;
+    use crate::document::record::{FeaturePatternLayout, FeaturePatternParams, OpaqueOperation};
+    use crate::document::refs::Extra;
+    use crate::document::variables::Scalar;
+    use crate::math::Vec3;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn rid(value: u128) -> RecordId {
+        RecordId(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn direct_source_edge_tracks_edit_suppression_and_deletion() {
+        let mut source = OperationRecord::new(
+            rid(1),
+            0,
+            "source",
+            Operation::Opaque(OpaqueOperation {
+                raw: serde_json::Map::from_iter([("opType".into(), json!("Alien"))]),
+            }),
+        );
+        let pattern = OperationRecord::new(
+            rid(2),
+            1,
+            "pattern",
+            Operation::Known(KnownOperation::FeaturePattern(FeaturePatternParams {
+                source_record_ids: vec![rid(1)],
+                layout: FeaturePatternLayout::Linear {
+                    direction: Vec3::new(1.0, 0.0, 0.0).unwrap(),
+                    spacing: Scalar::new(1.0),
+                },
+                count: 2,
+                semantics_version: 1,
+                extra: Extra::new(),
+            })),
+        );
+        let mut graph = DependencyGraph::new();
+        graph.rebuild_from_records(&[source.clone(), pattern.clone()]);
+        assert!(graph.downstream(rid(1)).contains(&rid(2)));
+        source.name = "edited".into();
+        source.suppressed = true;
+        graph.rebuild_from_records(&[source, pattern.clone()]);
+        assert!(graph.downstream(rid(1)).contains(&rid(2)));
+        graph.rebuild_from_records(&[pattern]);
+        assert!(!graph.contains(rid(1)));
+        assert!(graph.upstream(rid(2)).is_empty());
+    }
+}
+
 impl Node {
     fn from_record(record: &OperationRecord) -> Self {
         // USE the record's derived uniform input view (plan: reuse
@@ -72,6 +126,7 @@ impl Node {
         };
         Self {
             record_id: record.record_id,
+            input_records: inputs.records,
             input_bodies: inputs.bodies,
             input_sketches: inputs.sketches,
             input_elements: inputs.elements,
@@ -509,6 +564,7 @@ impl DependencyGraph {
             };
             let input_bodies = node.input_bodies.clone();
             let input_sketches = node.input_sketches.clone();
+            let input_records = node.input_records.clone();
             let output_bodies = node.output_bodies.clone();
             let output_sketch = node.output_sketch;
 
@@ -520,6 +576,11 @@ impl DependencyGraph {
             for sketch in &input_sketches {
                 if let Some(prod) = self.sketch_producers.get(sketch).copied() {
                     self.link(prod, *id);
+                }
+            }
+            for producer in input_records {
+                if self.nodes.contains_key(&producer) {
+                    self.link(producer, *id);
                 }
             }
             // Element inputs deliberately form no edges (divergence 2).

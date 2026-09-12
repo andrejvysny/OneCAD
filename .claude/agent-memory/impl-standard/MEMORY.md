@@ -1,2 +1,4 @@
 - [WP-G fillet acceptance envelope](wpg-fillet-acceptance-envelope.md) — test_fillet_acceptance_envelope.cpp assertion shape, CandidateResult/FilletBuildResult diagnostic wiring gaps
 - [Rust fillet record test pattern](rust-fillet-record-test-pattern.md) — build Sketch/Extrude/Fillet OperationRecords directly, promote TopoKey via query_element_by_topo_key, read step diagnostics
+- [Sketch sticky-toggle + hint pattern](sketch-sticky-toggle-hint-pattern.md) — shared toggle helpers go in sketchService.ts; constructionMode resets on openSession (D-2); no generic chip primitive exists
+- [WP-U3 clamp hint site](wpu3-clamp-hint-typed-commit-only.md) — typed-commit path is `onFilletChip`, not the brief's line numbers; mock analyzeEdgeOpRange always confidence:"none", no e2e clamp possible

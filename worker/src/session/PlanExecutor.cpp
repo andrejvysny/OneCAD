@@ -36,6 +36,7 @@
 #include "ops/ShellOp.h"
 #include "protocol/Limits.h"
 #include "session/ClassifyElement.h"
+#include "session/FeaturePattern.h"
 #include "session/Signatures.h"
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
@@ -453,6 +454,10 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     if (op_type == "TransformBody") return ops::execute_transform_body(octx, op, op_id);
     if (op_type == "PlaceComponent") return ops::execute_place_component(octx, op, op_id);
     if (op_type == "DetachComponent") return ops::execute_detach_component(octx, op, op_id);
+    if (op_type == "FeaturePattern") {
+        return execute_feature_pattern(job, op, op_id, last_sketch_id, cancel,
+                                       validation_mode);
+    }
 
     // SetComponentParams / ReplaceComponent (P2/P3 — in-place edits of
     // PlaceComponentParams at the Rust layer, no distinct wire op) and
@@ -463,14 +468,66 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
 struct CandidateSnapshot {
     BodyStore bodies;
     em::ElementMapPartition partition;
+    ResolvedInputEvidenceLedger input_evidence;
+    TopologyOwnerLedger topology_owners;
     std::size_t sketch_count = 0;
     std::string last_sketch_id;
 };
 
 CandidateSnapshot snapshot_candidate(const ScratchJob& job,
                                      const std::string& last_sketch_id) {
-    return CandidateSnapshot{job.bodies, job.partition, job.sketches.size(),
+    return CandidateSnapshot{job.bodies, job.partition, job.resolved_input_evidence,
+                             job.topology_owners, job.sketches.size(),
                              last_sketch_id};
+}
+
+void capture_resolved_input_evidence(ScratchJob& job, const json& op,
+                                     const std::string& op_id) {
+    ResolvedOpEvidence captured;
+    std::size_t eligible = 0;
+    captured.effective_hash = feature_pattern_effective_source_hash(op);
+    if (op.contains("inputs") && op["inputs"].is_array()) {
+        for (std::size_t i = 0; i < op["inputs"].size(); ++i) {
+            const json& input = op["inputs"][i];
+            const json primary = input.value("primary", json::object());
+            const std::string kind = primary.value("kind", std::string());
+            if (kind != "edge" && kind != "face" && kind != "vertex") continue;
+            const std::string element_id = primary.value("elementId", std::string());
+            const std::string body_id = primary.value("bodyId", std::string());
+            if (element_id.empty() || body_id.empty()) continue;
+            ++eligible;
+            const em::PartitionEntry* entry = job.partition.find(element_id);
+            const BodyRecord* body = job.bodies.get(body_id);
+            if (!entry || !body || entry->body_id != body_id || entry->kind !=
+                    em::ElementMapPartition::kind_from_name(kind) || entry->shape.IsNull()) continue;
+            const OriginClaim origin = job.topology_owners.lookup(body_id, entry->shape);
+            captured.inputs.push_back(ResolvedInputEvidence{
+                i, element_id, body_id, kind,
+                em::ElementMapPartition::descriptor_to_json(
+                    em::ElementMapPartition::describe(entry->shape, body->geom)),
+                entry->anchor.is_null() ? input.value("anchor", json::object()) : entry->anchor,
+                origin.state, origin.producer_record_id});
+        }
+    }
+    if (captured.inputs.empty() || captured.inputs.size() != eligible) {
+        job.resolved_input_evidence.erase(op_id);
+    } else {
+        job.resolved_input_evidence[op_id] = std::move(captured);
+    }
+}
+
+void apply_topology_history(ScratchJob& job, const std::string& op_id,
+                            const std::vector<BodyEvent>& events,
+                            const std::vector<TopologyBodyHistory>& histories) {
+    std::vector<std::string> touched;
+    touched.reserve(events.size());
+    for (const BodyEvent& event : events) touched.push_back(event.body_id);
+    session::apply_topology_history(job.topology_owners, op_id, touched, histories);
+    for (const std::string& body_id : touched) {
+        if (const BodyRecord* body = job.bodies.get(body_id)) {
+            job.topology_owners.retain_body_members(body_id, body->geom);
+        }
+    }
 }
 
 void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
@@ -516,6 +573,8 @@ void rollback_candidate(ScratchJob& job, std::string& last_sketch_id,
                         CandidateResult& result, CandidateSnapshot snapshot) {
     job.bodies = std::move(snapshot.bodies);
     job.partition = std::move(snapshot.partition);
+    job.resolved_input_evidence = std::move(snapshot.input_evidence);
+    job.topology_owners = std::move(snapshot.topology_owners);
     job.sketches.resize(snapshot.sketch_count);
     last_sketch_id = std::move(snapshot.last_sketch_id);
     result.body_events.clear();
@@ -653,6 +712,7 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
                            result.needs_repair, result.diagnostics);
     }
     if (result.needs_repair.empty()) {
+        capture_resolved_input_evidence(job, op, op_id);
         ops::OpOutcome outcome =
             run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit,
                           job.from_zero_replay, validation_mode);
@@ -660,6 +720,15 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
             if (const auto invariant_failure =
                     validate_published_bodies(job, op, outcome)) {
                 outcome = *invariant_failure;
+            } else if (outcome.topology_history_mode ==
+                       ops::TopologyHistoryMode::CompositeAdopted) {
+                if (op.value("opType", std::string()) != "FeaturePattern") {
+                    outcome = ops::OpOutcome::fail(
+                        "OP_FAILED", "composite topology history is reserved for FeaturePattern");
+                }
+            } else {
+                apply_topology_history(job, op_id, outcome.body_events,
+                                       outcome.topology_history);
             }
         }
         merge_outcome(result, std::move(outcome));
@@ -954,6 +1023,8 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     job.plan_document_revision = doc_rev;  // D4: adopted as head documentRevision at accept
     job.bodies = std::move(fence.cloned_bodies);
     job.partition = std::move(fence.cloned_partition);
+    job.resolved_input_evidence = std::move(fence.cloned_input_evidence);
+    job.topology_owners = std::move(fence.cloned_topology_owners);
     job.gear_bodies = std::move(fence.cloned_gear_bodies);
     job.prepared_snapshot_id = fence.prepared_snapshot_id;
     // The fence only returns Ok for a `baseCheckpoint` plan when the slot MATCHED,

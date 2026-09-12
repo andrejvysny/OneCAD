@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
 import {
   projectToScreen,
@@ -43,6 +43,180 @@ describe("projectToScreen (pure)", () => {
 });
 
 describe("HtmlOverlayDriver", () => {
+  it("recovers an annotation from unknown once a measured size arrives", () => {
+    const originalObserver = globalThis.ResizeObserver;
+    const fixture: { callback: ResizeObserverCallback | null } = { callback: null };
+    class TestObserver implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) { fixture.callback = callback; }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    globalThis.ResizeObserver = TestObserver;
+    try {
+      const cam = camAt(10);
+      const driver = new HtmlOverlayDriver();
+      const chip = document.createElement("div");
+      vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({ width: 0, height: 0 } as DOMRect);
+      const status = vi.fn();
+      driver.register("annotation", chip, new THREE.Vector3(), {
+        annotation: { priority: 100, pinned: false, onPlacementStatus: status },
+      });
+
+      driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+      expect(status).toHaveBeenLastCalledWith("unknown");
+      expect(chip.style.visibility).toBe("hidden");
+
+      const callback = fixture.callback;
+      if (!callback) throw new Error("expected ResizeObserver callback");
+      callback([{ contentRect: { width: 80, height: 24 } } as ResizeObserverEntry], {} as ResizeObserver);
+      driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+      expect(status).toHaveBeenLastCalledWith("visible");
+      expect(chip.style.visibility).toBe("");
+    } finally {
+      globalThis.ResizeObserver = originalObserver;
+    }
+  });
+
+  it("restores a no-space annotation when the viewport safe rectangle grows", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const chip = document.createElement("div");
+    vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({ width: 80, height: 24 } as DOMRect);
+    const status = vi.fn();
+    driver.register("annotation", chip, new THREE.Vector3(), {
+      annotation: { priority: 100, pinned: false, onPlacementStatus: status },
+    });
+
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 20, height: 20 });
+    expect(status).toHaveBeenLastCalledWith("no-space");
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+    expect(status).toHaveBeenLastCalledWith("visible");
+  });
+
+  it("keeps a no-space annotation measurable while its label resizes", () => {
+    const originalObserver = globalThis.ResizeObserver;
+    const fixture: { callback: ResizeObserverCallback | null } = { callback: null };
+    class TestObserver implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) { fixture.callback = callback; }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    globalThis.ResizeObserver = TestObserver;
+    try {
+      const cam = camAt(10);
+      const driver = new HtmlOverlayDriver();
+      const chip = document.createElement("div");
+      vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({ width: 80, height: 24 } as DOMRect);
+      const status = vi.fn();
+      driver.register("annotation", chip, new THREE.Vector3(), {
+        annotation: { priority: 100, pinned: false, onPlacementStatus: status },
+      });
+
+      driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 20, height: 20 });
+      expect(chip.style).toMatchObject({ display: "", visibility: "hidden" });
+      const callback = fixture.callback;
+      if (!callback) throw new Error("expected ResizeObserver callback");
+      callback([{ contentRect: { width: 120, height: 24 } } as ResizeObserverEntry], {} as ResizeObserver);
+      driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+
+      expect(status).toHaveBeenLastCalledWith("visible");
+      expect(chip.style.visibility).toBe("");
+    } finally {
+      globalThis.ResizeObserver = originalObserver;
+    }
+  });
+
+  it("runs annotation collision resolution after protected tool placement", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const tool = document.createElement("div");
+    const annotation = document.createElement("div");
+    vi.spyOn(tool, "getBoundingClientRect").mockReturnValue({ width: 120, height: 30 } as DOMRect);
+    vi.spyOn(annotation, "getBoundingClientRect").mockReturnValue({ width: 60, height: 24 } as DOMRect);
+    driver.register("tool", tool, new THREE.Vector3(), { constrainToSafeRect: true });
+    driver.register("annotation", annotation, new THREE.Vector3(), {
+      annotation: { priority: 100, pinned: false },
+    });
+
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+    const [toolX, toolY] = xyOf(tool);
+    const [labelX, labelY] = xyOf(annotation);
+    expect(Math.abs(labelX - toolX) < 90 && Math.abs(labelY - toolY) < 33).toBe(false);
+  });
+
+  it("keeps a screen-relocated chip inside the measured safe rectangle", () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    cam.position.set(0, 0, 10);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    const driver = new HtmlOverlayDriver();
+    const chip = document.createElement("div");
+    vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({ width: 40, height: 20 } as DOMRect);
+    driver.register("chip", chip, new THREE.Vector3(), {
+      screenPosition: { x: 390, y: 390 },
+      constrainToSafeRect: true,
+      axisFrom: new THREE.Vector3(0, 1, 0),
+      offsetPx: 60,
+    });
+
+    driver.update(cam, 400, 400, null, { x: 100, y: 100, width: 200, height: 200 });
+
+    expect(chip.style.transform).toContain("translate(280px, 290px)");
+
+    driver.update(cam, 400, 400, null, { x: 20, y: 30, width: 160, height: 120 });
+    expect(chip.style.transform).toContain("translate(160px, 140px)");
+  });
+
+  it("reports when no measured placement can clear the value handle", () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    cam.position.set(0, 0, 10);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    const driver = new HtmlOverlayDriver();
+    const chip = document.createElement("div");
+    vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({ width: 180, height: 100 } as DOMRect);
+    const onPlacementStatus = vi.fn();
+    driver.register("chip", chip, new THREE.Vector3(), {
+      avoidKeepOut: true,
+      constrainToSafeRect: true,
+      onPlacementStatus,
+    });
+    const safe = { x: 100, y: 100, width: 200, height: 120 };
+
+    driver.update(cam, 400, 400, safe, safe);
+    driver.update(cam, 400, 400, safe, safe);
+
+    expect(onPlacementStatus).toHaveBeenLastCalledWith({ width: 180, height: 100, fits: false });
+    expect(onPlacementStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an off-camera anchor as no-fit only after safe bounds are known", () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    cam.position.set(0, 0, 10);
+    cam.lookAt(0, 0, 0);
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+    const driver = new HtmlOverlayDriver();
+    const chip = document.createElement("div");
+    vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({ width: 120, height: 48 } as DOMRect);
+    const onPlacementStatus = vi.fn();
+    driver.register("chip", chip, new THREE.Vector3(0, 0, 20), {
+      constrainToSafeRect: true,
+      onPlacementStatus,
+    });
+
+    driver.update(cam, 400, 400, null, null);
+    expect(onPlacementStatus).toHaveBeenLastCalledWith({ width: 120, height: 48, fits: null });
+
+    driver.update(cam, 400, 400, null, { x: 0, y: 0, width: 400, height: 400 });
+    expect(onPlacementStatus).toHaveBeenLastCalledWith({ width: 120, height: 48, fits: false });
+    expect(chip.style.display).toBe("none");
+  });
+
   it("writes a transform for a visible item and hides behind-camera ones", () => {
     const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
     cam.position.set(0, 0, 10);

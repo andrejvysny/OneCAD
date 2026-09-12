@@ -1,13 +1,16 @@
-import { useRef, type Ref } from "react";
+import { useRef, useState, type Ref } from "react";
 import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
 import { LayersMenu } from "@/features/layers/LayersMenu";
+import { SectionControlsPopover } from "@/features/layers/SectionControls";
+import { NavigationHelp } from "./NavigationHelp";
 import { useLayersStore } from "@/stores/layersStore";
 import { Icon } from "@/icons/Icon";
 import type { IconName } from "@/icons/paths";
 import { useViewportStore } from "@/stores/viewportStore";
 import { selectedBodyIds, useSelectionStore } from "@/stores/selectionStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
+import { useMeasuredObstacle } from "@/app/shell/useMeasuredObstacle";
 
 function NavButton({
   icon,
@@ -78,9 +81,15 @@ export function NavPill() {
   const layersOpen = useLayersStore((s) => s.open);
   const toggleLayers = useLayersStore((s) => s.toggleOpen);
   const layersBtn = useRef<HTMLButtonElement | null>(null);
+  const sectionOptionsBtn = useRef<HTMLButtonElement | null>(null);
+  const navigationHelpBtn = useRef<HTMLButtonElement | null>(null);
+  const [sectionOptionsOpen, setSectionOptionsOpen] = useState(false);
+  const [navigationHelpOpen, setNavigationHelpOpen] = useState(false);
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  useMeasuredObstacle("navPill", root);
 
   return (
-    <div className="absolute bottom-[46px] left-[228px] z-[25] flex gap-0.5 rounded-md border border-border bg-surface p-[3px] shadow-ctrl">
+    <div ref={setRoot} className="absolute bottom-[46px] left-[228px] z-[25] flex gap-0.5 rounded-md border border-border bg-surface p-[3px] shadow-ctrl">
       <NavButton icon="home" label="Home view (H)" onClick={homeView} />
       <NavButton icon="fit" label="Zoom to fit (⇧F)" onClick={zoomFit} />
       <NavButton
@@ -111,6 +120,19 @@ export function NavPill() {
         onClick={toggleSection}
       />
       <NavButton
+        ref={sectionOptionsBtn}
+        icon="settings"
+        label="Section controls"
+        active={sectionOptionsOpen}
+        disabled={noSectionSupport}
+        onClick={() => setSectionOptionsOpen((open) => !open)}
+      />
+      <SectionControlsPopover
+        open={sectionOptionsOpen}
+        onClose={() => setSectionOptionsOpen(false)}
+        anchorRef={sectionOptionsBtn}
+      />
+      <NavButton
         ref={layersBtn}
         icon="layers"
         label="Viewport layers"
@@ -118,7 +140,19 @@ export function NavPill() {
         active={layersOpen}
         onClick={toggleLayers}
       />
+      <NavButton
+        ref={navigationHelpBtn}
+        icon="help"
+        label="Navigation help"
+        active={navigationHelpOpen}
+        onClick={() => setNavigationHelpOpen((open) => !open)}
+      />
       <LayersMenu anchorRef={layersBtn} />
+      <NavigationHelp
+        open={navigationHelpOpen}
+        onClose={() => setNavigationHelpOpen(false)}
+        anchorRef={navigationHelpBtn}
+      />
     </div>
   );
 }

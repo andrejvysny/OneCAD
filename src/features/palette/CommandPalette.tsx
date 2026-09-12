@@ -43,8 +43,12 @@ export function CommandPalette() {
         toolContext,
         activateWorkspace: (ws) => workspaceStore.getState().setActive(ws.id),
       }),
-    // The registry snapshots ARE the subscription; `platform` is stable.
-    [platform, toolContext, commands, tools, workspaces],
+    // The registry snapshots ARE the subscription; `platform` is stable. `open`
+    // is a dep so the doc comment above stays TRUE: a command whose availability
+    // or title is a function of live state (Undo/Redo read the history depth and
+    // the top-of-stack label) has to be asked again each time the palette opens,
+    // not answered off whatever the last registry change happened to capture.
+    [platform, toolContext, commands, tools, workspaces, open],
   );
 
   const results = useMemo(() => filterPaletteItems(items, query), [items, query]);

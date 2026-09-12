@@ -276,6 +276,7 @@ fn lower_operation(
     let (op_type, mut params) = split_operation(operation, wire_form(operation));
     strip_sketch_host_face(operation, &mut params);
     strip_chamfer_reference_face_refs(operation, &mut params);
+    lower_feature_pattern_sources(operation, &mut params);
     to_wire_body_form(&mut params);
     lift_profile_to_params(&mut params);
     inject_import_path(operation, &mut params);
@@ -285,6 +286,126 @@ fn lower_operation(
         "inputs": wire_op_inputs(operation, inputs),
         "params": params,
     })
+}
+
+/// Convert the core-only effective `sourceOps` templates into the exact same
+/// worker form as top-level operations. The persisted FeaturePattern never owns
+/// this field; `regen::lower_feature_patterns` overwrites any untrusted extra
+/// value before a plan reaches this layer.
+fn lower_feature_pattern_sources(operation: &Operation, params: &mut Value) {
+    if !matches!(
+        operation,
+        Operation::Known(KnownOperation::FeaturePattern(_))
+    ) {
+        return;
+    }
+    let Some(params_map) = params.as_object_mut() else {
+        return;
+    };
+    let Some(mut source_ops) = params_map
+        .remove("sourceOps")
+        .and_then(|value| value.as_array().cloned())
+    else {
+        return;
+    };
+    let mut valid = true;
+    for source in &mut source_ops {
+        let Some(map) = source.as_object() else {
+            valid = false;
+            break;
+        };
+        let source_id = map
+            .get("sourceRecordId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let op_type = map.get("opType").cloned().unwrap_or(Value::Null);
+        let source_params = map.get("params").cloned().unwrap_or_else(|| json!({}));
+        let determinism = map.get("determinism").cloned().unwrap_or_else(|| json!({}));
+        let Ok(source_operation) = serde_json::from_value::<Operation>(json!({
+            "opType": op_type,
+            "params": source_params,
+        })) else {
+            valid = false;
+            break;
+        };
+        if matches!(
+            source_operation,
+            Operation::Known(KnownOperation::FeaturePattern(_))
+        ) {
+            valid = false;
+            break;
+        }
+        let mut inputs = source_operation.derive_inputs();
+        let Some(stored_inputs) = map.get("inputs").cloned().and_then(|value| {
+            serde_json::from_value::<onecad_core::document::record::OperationInputs>(value).ok()
+        }) else {
+            valid = false;
+            break;
+        };
+        for id in stored_inputs.records {
+            if !inputs.records.contains(&id) {
+                inputs.records.push(id);
+            }
+        }
+        for id in stored_inputs.bodies {
+            if !inputs.bodies.contains(&id) {
+                inputs.bodies.push(id);
+            }
+        }
+        for id in stored_inputs.sketches {
+            if !inputs.sketches.contains(&id) {
+                inputs.sketches.push(id);
+            }
+        }
+        for id in stored_inputs.elements {
+            if !inputs.elements.contains(&id) {
+                inputs.elements.push(id);
+            }
+        }
+        let lowered = lower_operation(&source_operation, &inputs, &source_id);
+        *source = json!({
+            "sourceRecordId": source_id,
+            "opType": lowered.get("opType").cloned().unwrap_or(Value::Null),
+            "inputs": lowered.get("inputs").cloned().unwrap_or_else(|| json!([])),
+            "params": lowered.get("params").cloned().unwrap_or_else(|| json!({})),
+            "determinism": determinism,
+        });
+    }
+    if valid {
+        params_map.insert("sourceOps".into(), Value::Array(source_ops));
+    }
+}
+
+#[cfg(test)]
+mod feature_pattern_wire_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_template_only_legacy_body_for_edge_ref_lowering() {
+        let source = "00000000-0000-0000-0000-000000000001";
+        let body = "00000000-0000-0000-0000-000000000002";
+        let operation: Operation = serde_json::from_value(json!({
+            "opType":"FeaturePattern", "params": {
+                "sourceRecordIds":[source],
+                "layout":{"kind":"Linear","direction":[1.0,0.0,0.0],"spacing":{"value":2.0}},
+                "count":2,"semanticsVersion":1,
+                "sourceOps":[{"sourceRecordId":source,"opType":"Fillet",
+                    "params":{"radius":{"value":1.0},"edgeIds":["legacy-edge"]},
+                    "inputs":{"bodies":[body],"sketches":[],"elements":["legacy-edge"]},"determinism":{}}]
+            }
+        }))
+        .unwrap();
+        let wire = preview_wire_op(&operation, "00000000-0000-0000-0000-000000000003");
+        assert_eq!(
+            wire["params"]["sourceOps"][0]["inputs"][0]["primary"]["bodyId"],
+            format!("body_{body}")
+        );
+        assert_eq!(
+            wire["params"]["sourceOps"][0]["inputs"][0]["primary"]["elementId"],
+            "legacy-edge"
+        );
+    }
 }
 
 fn split_operation(operation: &Operation, op_val: Value) -> (Value, Value) {
@@ -8024,6 +8145,7 @@ mod body_wire_tests {
                 | KnownOperation::Boolean(_)
                 | KnownOperation::LinearPattern(_)
                 | KnownOperation::CircularPattern(_)
+                | KnownOperation::FeaturePattern(_)
                 | KnownOperation::Loft(_)
                 | KnownOperation::Sweep(_)
                 | KnownOperation::MirrorBody(_)
@@ -8036,7 +8158,11 @@ mod body_wire_tests {
                 | KnownOperation::DetachComponent(_) => {}
             }
         }
-        assert_eq!(cases.len(), 18, "one fixture per KnownOperation variant");
+        assert_eq!(
+            cases.len(),
+            18,
+            "one fixture per operation with semantic element inputs"
+        );
     }
 
     // ── HISTORY-HARDEN H9 — the repair SLOT TABLE ───────────────────────────
@@ -8097,6 +8223,60 @@ mod body_wire_tests {
             0
         )
         .is_err());
+    }
+
+    #[test]
+    fn feature_pattern_repair_fixture_replays_through_strict_repair_parser() {
+        let fixture = include_str!("../../../protocol/fixtures/feature_pattern_repair.ndjson");
+        let repair = fixture
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|directive| {
+                let expected = directive.get("expect")?;
+                let repairs = &expected["payload"]["needsRepair"];
+                (expected.get("event")?.as_str()? == "planStep"
+                    && repairs.as_array().is_some_and(|items| !items.is_empty()))
+                .then(|| repairs.clone())
+            })
+            .expect("canonical FeaturePattern repair event");
+        let parsed = parse_needs_repair(Some(&repair), 2)
+            .expect("canonical evidence repair obeys the closed repair schema");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].ladder_failed,
+            onecad_core::document::repair::LadderLevel::Descriptor
+        );
+        assert_eq!(
+            parsed[0].reason,
+            onecad_core::document::repair::RepairReason::NoCandidates
+        );
+        assert!(parsed[0].ui_label.contains("instance 1"));
+        assert!(parsed[0].ui_label.contains("source source_chamfer"));
+        assert!(parsed[0].ui_label.contains("input 0"));
+        assert!(parsed[0]
+            .ui_label
+            .contains("missing resolved source evidence"));
+
+        let nested_failure = fixture
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|directive| {
+                let expected = directive.get("expect")?;
+                (expected.get("jobId")?.as_u64()? == 902)
+                    .then(|| expected["result"]["perStepResults"][0]["diagnostics"][0].clone())
+            })
+            .expect("canonical nested source failure diagnostic");
+        assert_eq!(nested_failure["code"], "FEATURE_PATTERN_SOURCE_FAILED");
+        assert_eq!(nested_failure["evidence"]["featurePattern"]["instance"], 1);
+        assert_eq!(
+            nested_failure["evidence"]["featurePattern"]["sourceRecordId"],
+            "source_hole"
+        );
+        assert_eq!(
+            nested_failure["evidence"]["featurePattern"]["sourceIndex"],
+            0
+        );
     }
 
     /// **The slot table.** [`wire_op_inputs`] decides, per `opType`, what the

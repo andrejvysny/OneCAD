@@ -144,6 +144,8 @@ void Session::open(std::string document_id, std::uint64_t document_revision,
     mode_ = std::move(mode);
     bodies_ = BodyStore{};
     partition_ = elementmap::ElementMapPartition{};
+    input_evidence_.clear();
+    topology_owners_ = TopologyOwnerLedger{};
     gear_bodies_.clear();
     sketches_.clear();
     scratch_.reset();
@@ -169,6 +171,8 @@ std::uint64_t Session::reset() {
     history_prefix_hash_ = kEmptyPrefixHash;
     bodies_ = BodyStore{};
     partition_ = elementmap::ElementMapPartition{};
+    input_evidence_.clear();
+    topology_owners_ = TopologyOwnerLedger{};
     gear_bodies_.clear();
     sketches_.clear();
     scratch_.reset();
@@ -309,6 +313,8 @@ FenceOutcome Session::fence_and_clone(std::uint64_t job_id,
         out.status = FenceOutcome::Status::Ok;
         out.cloned_bodies = restored_base_->state.bodies;          // value copy of the base
         out.cloned_partition = restored_base_->state.partition;    // value copy of the base
+        out.cloned_input_evidence = restored_base_->state.input_evidence;
+        out.cloned_topology_owners = restored_base_->state.topology_owners;
         out.cloned_gear_bodies = restored_base_->state.gear_bodies;
         out.prepared_snapshot_id = ++snapshot_counter_;
         return out;
@@ -358,10 +364,14 @@ FenceOutcome Session::fence_and_clone(std::uint64_t job_id,
     if (from_zero) {
         out.cloned_bodies = BodyStore{};                          // empty base (D5)
         out.cloned_partition = elementmap::ElementMapPartition{};  // empty base (D5)
+        out.cloned_input_evidence.clear();
+        out.cloned_topology_owners = TopologyOwnerLedger{};
         out.cloned_gear_bodies.clear();                            // empty base (D5)
     } else {
         out.cloned_bodies = bodies_;        // value copy of the live head
         out.cloned_partition = partition_;  // value copy of the live head
+        out.cloned_input_evidence = input_evidence_;
+        out.cloned_topology_owners = topology_owners_;
         out.cloned_gear_bodies = gear_bodies_;
     }
     out.prepared_snapshot_id = ++snapshot_counter_;
@@ -408,6 +418,8 @@ AcceptOutcome Session::accept_prepared(std::uint64_t job_id,
     // intra-plan only — the solver lane owns sketch authoring; not republished here.)
     bodies_ = std::move(scratch_->bodies);
     partition_ = std::move(scratch_->partition);
+    input_evidence_ = std::move(scratch_->resolved_input_evidence);
+    topology_owners_ = std::move(scratch_->topology_owners);
     // SCHEMA §7.3 (WP-I): the gear-body map is PLAN-DERIVED, so it is rebuilt
     // here from the ACCEPTED plan against the freshly published bodies — no
     // per-body state to persist, and every replay reproduces it exactly.
@@ -444,6 +456,11 @@ BodyStore Session::bodies_copy() const {
 elementmap::ElementMapPartition Session::partition_copy() const {
     std::lock_guard<std::mutex> lk(mu_);
     return partition_;  // value copy
+}
+
+TopologyOwnerLedger Session::topology_owners_copy() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return topology_owners_;
 }
 
 std::map<std::string, ops::GearBodyInfo> Session::gear_bodies_copy() const {
@@ -518,7 +535,8 @@ bool Session::discard_prepared(std::uint64_t /*job_id*/) {
 
 CheckpointState Session::save_checkpoint(std::uint64_t step) {
     std::lock_guard<std::mutex> lk(mu_);
-    CheckpointState st{bodies_, partition_, history_prefix_hash_, gear_bodies_};
+    CheckpointState st{bodies_, partition_, input_evidence_, topology_owners_,
+                       history_prefix_hash_, gear_bodies_};
     checkpoints_[step] = st;  // supersede any earlier checkpoint at this step
     return st;
 }

@@ -71,6 +71,7 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "Boolean",
     "LinearPattern",
     "CircularPattern",
+    "FeaturePattern",
     "Loft",
     "Sweep",
     "MirrorBody",
@@ -310,6 +311,7 @@ pub enum KnownOperation {
     Boolean(BooleanParams),
     LinearPattern(LinearPatternParams),
     CircularPattern(CircularPatternParams),
+    FeaturePattern(FeaturePatternParams),
     Loft(LoftParams),
     Sweep(SweepParams),
     MirrorBody(MirrorBodyParams),
@@ -487,6 +489,18 @@ impl KnownOperation {
                     &mut p.angle_deg,
                 )]
             }
+            KnownOperation::FeaturePattern(p) => match &mut p.layout {
+                FeaturePatternLayout::Linear { spacing, .. } => {
+                    vec![("FeaturePattern.layout.spacing", Dimension::Length, spacing)]
+                }
+                FeaturePatternLayout::Circular { angle_deg, .. } => {
+                    vec![(
+                        "FeaturePattern.layout.angleDeg",
+                        Dimension::Angle,
+                        angle_deg,
+                    )]
+                }
+            },
             // A unit scale is a pure ratio — the one genuinely dimensionless
             // registered scalar.
             KnownOperation::ImportStep(p) => {
@@ -646,6 +660,7 @@ impl Operation {
                 KnownOperation::Boolean(_) => "Boolean",
                 KnownOperation::LinearPattern(_) => "LinearPattern",
                 KnownOperation::CircularPattern(_) => "CircularPattern",
+                KnownOperation::FeaturePattern(_) => "FeaturePattern",
                 KnownOperation::Loft(_) => "Loft",
                 KnownOperation::Sweep(_) => "Sweep",
                 KnownOperation::MirrorBody(_) => "MirrorBody",
@@ -785,6 +800,11 @@ impl Operation {
             KnownOperation::CircularPattern(p) => {
                 if let Some(b) = p.source_body {
                     inputs.push_body(b);
+                }
+            }
+            KnownOperation::FeaturePattern(p) => {
+                for record in &p.source_record_ids {
+                    inputs.push_record(*record);
                 }
             }
 
@@ -940,12 +960,22 @@ fn derive_fillet_chamfer_inputs(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationInputs {
+    /// Direct record dependencies. FeaturePattern uses these because a selected
+    /// source chain can contain several edits of the same body; the latest-body
+    /// producer index alone cannot retain every selected feature edge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<RecordId>,
     pub bodies: Vec<BodyId>,
     pub sketches: Vec<SketchId>,
     pub elements: Vec<ElementId>,
 }
 
 impl OperationInputs {
+    fn push_record(&mut self, id: RecordId) {
+        if !self.records.contains(&id) {
+            self.records.push(id);
+        }
+    }
     fn push_body(&mut self, id: BodyId) {
         if !self.bodies.contains(&id) {
             self.bodies.push(id);
@@ -1780,6 +1810,41 @@ pub struct CircularPatternParams {
     pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
+}
+
+/// A parametric repetition of an explicit, ordered feature chain. The source
+/// records remain ordinary timeline nodes and are re-read for every regeneration;
+/// their operation payloads are never copied into the persisted pattern record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeaturePatternParams {
+    /// Explicit source features in canonical timeline order.
+    pub source_record_ids: Vec<RecordId>,
+    pub layout: FeaturePatternLayout,
+    /// Total instance count, including the retained source instance.
+    pub count: u32,
+    /// Version 1 is the only executable semantics in this build.
+    pub semantics_version: u8,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+/// Instance transform authored by a feature pattern.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum FeaturePatternLayout {
+    Linear {
+        direction: Vec3,
+        spacing: Scalar,
+    },
+    Circular {
+        #[serde(rename = "axisOrigin")]
+        axis_origin: Vec3,
+        #[serde(rename = "axisDirection")]
+        axis_direction: Vec3,
+        #[serde(rename = "angleDeg")]
+        angle_deg: Scalar,
+    },
 }
 
 /// Loft parameters (OneCAD-CPP `LoftParams` `OperationRecord.h:144-150`).

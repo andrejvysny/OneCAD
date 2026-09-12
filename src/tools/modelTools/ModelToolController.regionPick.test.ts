@@ -23,6 +23,7 @@ import type {
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
 
 const PLANE: SketchPlane = {
@@ -245,6 +246,53 @@ describe("ModelToolController region pick", () => {
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
     const draft = clientMock.beginPreview.mock.calls[0][0];
     expect(draft.regionId).toBe("r1"); // the CLICKED region, not the first
+  });
+
+  it("keeps a chip-descendant pointerup out of the region behind it before confirming", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    toolStore.getState().setTool("extrude");
+    await flush();
+    await flush();
+
+    click(120, 120); // select r1 first
+    const chip = document.createElement("div");
+    chip.dataset.testid = "model-tool-chip";
+    const descendant = document.createElement("span");
+    chip.appendChild(descendant);
+    container.appendChild(chip);
+
+    // These coordinates are inside r0. Without the boundary guard the bubbling
+    // pointerup toggles r0, then the chip click confirms BOTH regions.
+    descendant.dispatchEvent(new MouseEvent("pointerdown", { clientX: 10, clientY: 10, button: 0, bubbles: true }));
+    descendant.dispatchEvent(new MouseEvent("pointerup", { clientX: 10, clientY: 10, button: 0, bubbles: true }));
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+    await flush();
+
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    expect(clientMock.beginPreview.mock.calls[0][0].regionId).toBe("r1");
+  });
+
+  it("makes region confirmation single-flight while preview opening is pending", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    let resolvePreview!: (value: { sessionId: string; previewBodyId: string }) => void;
+    clientMock.beginPreview = vi.fn(
+      () => new Promise((resolve) => { resolvePreview = resolve; }),
+    );
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    toolStore.getState().setTool("extrude");
+    await flush();
+    await flush();
+
+    click(120, 120);
+    toolChipStore.getState().onConfirm?.();
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    resolvePreview({ sessionId: "sess", previewBodyId: "pb" });
+    await flush();
   });
 
   it("(a2) revolve two regions → toggle region 2 + Enter → axis pick opens the lane on regions[1] → 360° commit", async () => {

@@ -72,6 +72,8 @@ export interface DimensionInputProps {
    * value edge (see `previewThrottle.ts`).
    */
   onPreview?: (value: number) => void;
+  /** Reports raw editor validity even when no numeric preview can be emitted. */
+  onValidityChange?: (valid: boolean, draft: string) => void;
   /**
    * Seed text for a type-to-enter arm (U3): the character the user typed on the
    * canvas, which REPLACES the formatted value rather than appending to it.
@@ -90,6 +92,15 @@ export interface DimensionInputProps {
    * legacy finite-only check (model-tool chips have no constraint kind).
    */
   kind?: SketchConstraintType;
+  /**
+   * The field's accessible name (WP-U10). Every model-chip call site passes a
+   * real name that says what the number IS — "Depth (mm)", "Radius (mm)" — so a
+   * role/name query (or a screen reader) can tell one chip's field from
+   * another's. The default stays the generic "Dimension value" for the sketch
+   * constraint badges and the sketch Dimension tool, whose value is read off
+   * the badge/gesture context rather than a per-field name.
+   */
+  label?: string;
 }
 
 const ERROR_FLASH_MS = 400;
@@ -117,11 +128,13 @@ export function DimensionInput({
   expr,
   onConfirm,
   onPreview,
+  onValidityChange,
   initialText,
   commitOnBlur = true,
   onCancel,
   autoFocus = false,
   kind,
+  label = "Dimension value",
 }: DimensionInputProps) {
   /*
    * Is this chip editing an ANGLE (degrees) rather than a LENGTH (mm)?
@@ -214,9 +227,11 @@ export function DimensionInput({
    * emit; every character after it comes through `onChange` normally.
    */
   useEffect(() => {
-    if (initialText === undefined || !onPreview) return;
+    if (initialText === undefined) return;
     const n = parse(initialText);
-    if (Number.isFinite(n) && (!kind || isValidForKind(kind, n))) {
+    const valid = Number.isFinite(n) && (!kind || isValidForKind(kind, n));
+    onValidityChange?.(valid, initialText);
+    if (valid && onPreview) {
       lastPreviewed.current = n;
       onPreview(n);
     }
@@ -259,10 +274,21 @@ export function DimensionInput({
   }, [value, unit, expr]);
 
   useEffect(() => {
-    if (autoFocus) {
-      ref.current?.focus();
-      ref.current?.select();
+    if (!autoFocus) return;
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // A type-to-enter SEED must not be selected: the user typed "1" on the canvas
+    // and the next key must APPEND ("12"), not replace the selection ("2"). Only a
+    // field opened without a seed (the dimension tool) selects its formatted value.
+    if (initialText !== undefined) {
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    } else {
+      el.select();
     }
+    // Mount-only by design (see `seeded`); `initialText` identity is the remount key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFocus]);
 
   useEffect(() => {
@@ -368,7 +394,7 @@ export function DimensionInput({
     // text it only partly understood ("25abc"), where parseFloat would commit 25.
     const n = parse(numericText);
     if (!Number.isFinite(n)) {
-      if (kind) {
+      if (kind || onValidityChange) {
         flashError();
         return false;
       }
@@ -406,7 +432,7 @@ export function DimensionInput({
     >
       <input
         ref={ref}
-        aria-label="Dimension value"
+        aria-label={label}
         aria-invalid={isError}
         /* The 36px field is prototype-exact for millimetres. Every other unit
            divides, so it systematically renders more decimals ("0.0394 in" for
@@ -420,6 +446,9 @@ export function DimensionInput({
         inputMode={onCommitExpr ? "text" : "decimal"}
         onChange={(e) => {
           setText(e.target.value);
+          const n = parse(e.target.value);
+          const valid = Number.isFinite(n) && (!kind || isValidForKind(kind, n));
+          onValidityChange?.(valid, e.target.value);
           if (!onPreview) return;
           // A half-typed BINDING never previews: the field is showing `=h`, and
           // emitting the stale number behind it would move the viewport to a
@@ -430,8 +459,7 @@ export function DimensionInput({
           // Every PARSEABLE change previews; partial/invalid text emits nothing
           // and leaves the FSM untouched (U3). Out-of-domain values are the
           // caller's to refuse — never clamped here.
-          const n = parse(e.target.value);
-          if (Number.isFinite(n) && (!kind || isValidForKind(kind, n))) {
+          if (valid) {
             lastPreviewed.current = n;
             onPreview(n);
           }

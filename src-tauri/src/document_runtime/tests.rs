@@ -8,18 +8,20 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation, Operation,
-    OperationRecord, RevolveParams,
+    BooleanMode, ExtrudeMode, ExtrudeParams, FeaturePatternLayout, FeaturePatternParams,
+    FilletParams, KnownOperation, Operation, OperationRecord, RevolveParams,
 };
 use onecad_core::document::variables::Scalar;
+use onecad_core::document::Document;
 use onecad_core::edit::{EditCommand, RegenHint, SketchEditOp, VisibilityTarget};
 use onecad_core::history::{StepState, Timeline};
 use onecad_core::ids::{
@@ -29,9 +31,9 @@ use onecad_core::regen::{
     AcceptResult, AcquireRequest, CheckpointArtifacts, Diagnostic, ElementMapDelta, EngineError,
     Fencing, GeometryEngine, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, Outcome,
     PlanEvent, PlanPrepared, PlanRequest, PlanStepEvent, PreparedMeshRef, RefResolution,
-    RegenRequest, ResolveRequest, RestoreRequest, RestoreResult, Severity, Signature, StepResult,
-    StepSignatures, StepStatus, StoppedReason, TessellateRequest, TessellateResult,
-    WorkerElementEvidence, WorkerHead,
+    RegenRequest, RegenScheduler, ResolveRequest, RestoreRequest, RestoreResult, SchedulerStatus,
+    Severity, Signature, StepResult, StepSignatures, StepStatus, StoppedReason, TessellateRequest,
+    TessellateResult, WorkerElementEvidence, WorkerHead,
 };
 
 use onecad_core::document::refs::{
@@ -556,6 +558,40 @@ impl MeshProvider for FakeBackend {
     }
 }
 
+struct DelayedMeshProvider {
+    started: Semaphore,
+    release: Semaphore,
+    bytes: Vec<u8>,
+}
+
+impl DelayedMeshProvider {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+            bytes: bytes.to_vec(),
+        }
+    }
+}
+
+#[async_trait]
+impl MeshProvider for DelayedMeshProvider {
+    async fn fetch_mesh(
+        &self,
+        _body: BodyId,
+        _lod: Lod,
+        _snapshot: SnapshotId,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.started.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("release semaphore")
+            .forget();
+        Ok(self.bytes.clone())
+    }
+}
+
 #[async_trait]
 impl SolverEngine for FakeBackend {
     async fn sketch_upsert(&self, sketch: &Sketch) -> Result<SketchUpsertDto, EngineError> {
@@ -969,7 +1005,7 @@ async fn d1_adoption_rejects_malformed_body_id() {
     }
     // Nothing published: no body, no document-changed payload.
     assert!(rt.projection().bodies.is_empty());
-    assert!(report.document_change().is_none());
+    assert!(report.document_change("test-document", "runtime").is_none());
 }
 
 #[tokio::test]
@@ -1019,6 +1055,101 @@ async fn mesh_cache_miss_then_hit_returns_identical_bytes() {
         Arc::ptr_eq(&first, &second),
         "hit returns the same cached Arc"
     );
+}
+
+fn runtime_with_delayed_mesh(provider: Arc<DelayedMeshProvider>) -> DocumentRuntime {
+    let backend = Arc::new(FakeBackend::new());
+    let engine: Arc<dyn GeometryEngine> = backend.clone();
+    let solver: Arc<dyn SolverEngine> = backend;
+    let meshes: Arc<dyn MeshProvider> = provider;
+    DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+async fn publish_one_body(rt: &mut DocumentRuntime) -> BodyId {
+    let body = BodyId(Uuid::from_u128(0x10));
+    rt.apply(add_extrude(0x10, 10.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+    rt.mesh_cache.clear();
+    body
+}
+
+async fn start_delayed_mesh(
+    rt: &mut DocumentRuntime,
+    provider: &Arc<DelayedMeshProvider>,
+    body: BodyId,
+) -> tokio::task::JoinHandle<DrivenMeshFetch> {
+    let prepared = rt.prepare_mesh_fetch(body, DISPLAY_LOD, None);
+    let task = tokio::spawn(async move { prepared.drive().await.expect_err("provider fetch") });
+    provider
+        .started
+        .acquire()
+        .await
+        .expect("fetch started")
+        .forget();
+    task
+}
+
+#[tokio::test]
+async fn delayed_mesh_adopts_when_runtime_epoch_and_snapshot_are_current() {
+    let provider = Arc::new(DelayedMeshProvider::new(b"current"));
+    let mut rt = runtime_with_delayed_mesh(provider.clone());
+    let body = publish_one_body(&mut rt).await;
+    let task = start_delayed_mesh(&mut rt, &provider, body).await;
+    provider.release.add_permits(1);
+    let driven = task.await.unwrap();
+
+    assert_eq!(
+        rt.adopt_mesh_fetch(driven).as_deref().map(Vec::as_slice),
+        Some(b"current".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn delayed_mesh_rejects_runtime_replacement_even_with_same_snapshot() {
+    let provider = Arc::new(DelayedMeshProvider::new(b"obsolete"));
+    let mut original = runtime_with_delayed_mesh(provider.clone());
+    let body = publish_one_body(&mut original).await;
+    let task = start_delayed_mesh(&mut original, &provider, body).await;
+    let mut replacement = runtime_with_delayed_mesh(provider.clone());
+    replacement.latest_snapshot = original.latest_snapshot.clone();
+    replacement.head_epoch = original.head_epoch;
+    provider.release.add_permits(1);
+    let driven = task.await.unwrap();
+
+    assert!(replacement.adopt_mesh_fetch(driven).is_none());
+}
+
+#[tokio::test]
+async fn delayed_mesh_rejects_worker_epoch_advance() {
+    let provider = Arc::new(DelayedMeshProvider::new(b"obsolete"));
+    let mut rt = runtime_with_delayed_mesh(provider.clone());
+    let body = publish_one_body(&mut rt).await;
+    let task = start_delayed_mesh(&mut rt, &provider, body).await;
+    rt.on_worker_restart(WorkerEpoch(9));
+    provider.release.add_permits(1);
+    let driven = task.await.unwrap();
+
+    assert!(rt.adopt_mesh_fetch(driven).is_none());
+}
+
+#[tokio::test]
+async fn delayed_mesh_rejects_stale_snapshot_after_new_publish() {
+    let provider = Arc::new(DelayedMeshProvider::new(b"obsolete"));
+    let mut rt = runtime_with_delayed_mesh(provider.clone());
+    let body = publish_one_body(&mut rt).await;
+    let task = start_delayed_mesh(&mut rt, &provider, body).await;
+    rt.apply(add_extrude(0x11, 20.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 1 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+    provider.release.add_permits(1);
+    let driven = task.await.unwrap();
+
+    assert!(rt.adopt_mesh_fetch(driven).is_none());
 }
 
 #[tokio::test]
@@ -1266,8 +1397,10 @@ async fn regen_report_builds_document_change_payload() {
         .await;
 
     let change = report
-        .document_change()
+        .document_change("test-document", "runtime")
         .expect("published → change payload");
+    assert_eq!(change.document_id, "test-document");
+    assert_eq!(change.runtime_session, "runtime");
     assert_eq!(change.changed_bodies.len(), 1);
     let ref_ = &change.changed_bodies[0];
     assert_eq!(ref_.body_id, "00000000-0000-0000-0000-000000000010");
@@ -1279,6 +1412,79 @@ async fn regen_report_builds_document_change_payload() {
         ref_.mesh_key
     );
     assert!(change.removed_bodies.is_empty());
+}
+
+#[test]
+fn runtime_session_is_unique_per_runtime_and_matches_only_itself() {
+    let first = runtime_with(Arc::new(FakeBackend::new()));
+    let second = runtime_with(Arc::new(FakeBackend::new()));
+    let token = first.runtime_session();
+    assert!(first.matches_runtime_session(&token));
+    assert!(!second.matches_runtime_session(&token));
+    assert_ne!(token, second.runtime_session());
+}
+
+#[tokio::test]
+async fn queued_old_runtime_regen_cannot_drive_replacement_runtime() {
+    let old_backend = Arc::new(FakeBackend::new());
+    let mut old = runtime_with(old_backend.clone());
+    old.apply(add_extrude(0x10, 10.0)).unwrap();
+    let old_session = old.runtime_session();
+
+    let new_backend = Arc::new(FakeBackend::new());
+    let new_runtime = runtime_with(new_backend.clone());
+    let new_before = new_runtime.projection();
+    let runtime = Arc::new(tokio::sync::Mutex::new(Some(old)));
+
+    let completions = Arc::new(AtomicUsize::new(0));
+    let completion_count = completions.clone();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let start_count = starts.clone();
+    let driver = crate::regen_driver_with_started(
+        runtime.clone(),
+        Arc::new(move |_, _| {
+            completion_count.fetch_add(1, Ordering::SeqCst);
+        }),
+        Arc::new(move |_| {
+            start_count.fetch_add(1, Ordering::SeqCst);
+        }),
+        Arc::new(|_| Box::pin(async {})),
+        Arc::new(tokio::sync::watch::channel(0u64).0),
+    );
+    let (scheduler, handle) = RegenScheduler::new(driver);
+    let mut status = handle.subscribe_status();
+
+    handle.request_for_runtime(RegenRequest::ToEnd { from: 0 }, Some(old_session));
+    *runtime.lock().await = Some(new_runtime);
+    let scheduler_task = tokio::spawn(scheduler.run());
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            status
+                .changed()
+                .await
+                .expect("scheduler status channel remains open");
+            if *status.borrow() == SchedulerStatus::Idle {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("queued request was consumed and refused");
+
+    let guard = runtime.lock().await;
+    let current = guard.as_ref().expect("replacement remains open");
+    assert_eq!(current.projection(), new_before, "replacement is untouched");
+    assert_eq!(new_backend.state.lock().unwrap().plan_calls, 0);
+    assert_eq!(old_backend.state.lock().unwrap().plan_calls, 0);
+    assert_eq!(starts.load(Ordering::SeqCst), 0, "no regen-started event");
+    assert_eq!(
+        completions.load(Ordering::SeqCst),
+        0,
+        "no projection or terminal event"
+    );
+    drop(guard);
+    scheduler_task.abort();
 }
 
 #[tokio::test]
@@ -1957,7 +2163,10 @@ async fn edit_during_regen_supersedes_via_live_fencing() {
         "the stale prepare must be superseded, got {:?}",
         report.outcome
     );
-    assert!(report.document_change().is_none(), "nothing published");
+    assert!(
+        report.document_change("test-document", "runtime").is_none(),
+        "nothing published"
+    );
 
     // A fresh regen at the new revision converges to both bodies.
     let converge = rt
@@ -1976,6 +2185,7 @@ async fn regen_driven_on_another_runtime_instance_never_commits() {
     // exactly, and phase 3 would commit doc A's scratch (timeline + bodies) INTO doc B.
     // The per-runtime `instance` id is what makes that impossible.
     let mut rt_a = runtime_with(Arc::new(FakeBackend::new()));
+    let runtime_a = rt_a.runtime_session();
     rt_a.apply(add_extrude(0x10, 25.0)).unwrap();
     let prepared = rt_a
         .begin_regen(RegenRequest::ToEnd { from: 0 })
@@ -1993,13 +2203,17 @@ async fn regen_driven_on_another_runtime_instance_never_commits() {
     );
 
     let report = rt_b.finish_regen(driven);
+    assert_eq!(
+        report.runtime_session, runtime_a,
+        "a superseded cross-runtime terminal must retain its originating runtime"
+    );
     assert!(
         matches!(report.outcome, Outcome::Superseded),
         "a regen prepared on ANOTHER runtime instance must be discarded, got {:?}",
         report.outcome
     );
     assert!(
-        report.document_change().is_none(),
+        report.document_change("test-document", "runtime").is_none(),
         "nothing may be published into the unrelated document"
     );
     assert!(
@@ -2234,10 +2448,10 @@ async fn sketch_gesture_commits_exactly_one_undo_command() {
     let session = rt.enter_sketch(sid).await.unwrap();
     assert_eq!(session.sketch_id, sid.to_string());
     let proj = rt.projection();
-    assert_eq!(proj.sketches[&sid.to_string()].dof, 0);
+    assert_eq!(proj.sketches[&sid.to_string()].dof, Some(0));
     assert_eq!(
         proj.sketches[&sid.to_string()].status,
-        crate::dto::SketchStatus::Ok
+        Some(crate::dto::SketchStatus::Ok)
     );
 
     // Drag: begin → N drags → pointer-up commits ONE undo command.
@@ -2270,6 +2484,487 @@ async fn sketch_gesture_commits_exactly_one_undo_command() {
         [0.0, 0.0],
         "undo reverts the drag"
     );
+}
+
+#[tokio::test]
+async fn projection_exposes_solve_only_for_the_geometry_that_was_evaluated() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let unsolved = &rt.projection().sketches[&sid.to_string()];
+    assert_eq!((unsolved.dof, unsolved.status), (None, None));
+    assert_eq!(unsolved.solve_geometry_token, None);
+    assert!(!rt.get_sketch(sid).unwrap().solve_current);
+
+    rt.enter_sketch(sid).await.unwrap();
+    let solved = &rt.projection().sketches[&sid.to_string()];
+    assert_eq!(solved.dof, Some(0));
+    assert!(rt.get_sketch(sid).unwrap().solve_current);
+    assert_eq!(
+        solved.solve_geometry_token.as_ref(),
+        Some(&solved.geometry_token)
+    );
+
+    rt.apply(EditCommand::SketchEdit {
+        sketch: sid,
+        ops: vec![SketchEditOp::AddEntity {
+            entity: SketchEntity::point(
+                EntityId(Uuid::from_u128(0x102)),
+                Vec2::new_unchecked(7.0, 8.0),
+                false,
+                false,
+            ),
+        }],
+    })
+    .unwrap();
+    let stale = &rt.projection().sketches[&sid.to_string()];
+    assert_eq!((stale.dof, stale.status), (None, None));
+    assert_eq!(stale.solve_geometry_token, None);
+    assert!(!rt.get_sketch(sid).unwrap().solve_current);
+}
+
+#[test]
+fn feature_commit_and_auto_hide_are_one_semantic_undo_step() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sketch = other_sketch(0xA701);
+    let sketch_id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    let depth = rt.undo_depth();
+
+    rt.apply_transaction(
+        "Extrude",
+        vec![
+            add_extrude(0xA702, 12.0),
+            EditCommand::SetVisibility {
+                target: VisibilityTarget::Sketch(sketch_id),
+                visible: false,
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(rt.undo_depth(), depth + 1);
+    assert_eq!(rt.session.undo_label(), Some("Extrude"));
+    assert!(!rt.session.document().sketch_visible(sketch_id));
+
+    rt.undo().expect("one atomic feature undo");
+    assert!(rt.session.document().sketch_visible(sketch_id));
+    assert!(rt
+        .session
+        .document()
+        .timeline
+        .record_by_id(RecordId(Uuid::from_u128(0xA702)))
+        .is_none());
+
+    rt.redo()
+        .expect("redo succeeds")
+        .expect("atomic redo exists");
+    assert!(!rt.session.document().sketch_visible(sketch_id));
+    assert!(rt
+        .session
+        .document()
+        .timeline
+        .record_by_id(RecordId(Uuid::from_u128(0xA702)))
+        .is_some());
+}
+
+#[test]
+fn failed_operation_receipt_rolls_back_exact_transaction_once() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply_transaction(
+        "Model features",
+        vec![add_extrude(0xA712, 4.0), add_extrude(0xA713, 6.0)],
+    )
+    .unwrap();
+    let token = rt
+        .arm_operation_rollback(
+            vec![
+                RecordId(Uuid::from_u128(0xA712)),
+                RecordId(Uuid::from_u128(0xA713)),
+            ],
+            0,
+        )
+        .unwrap();
+
+    let first = rt.rollback_failed_operation(&token);
+    assert!(first.rolled_back);
+    assert_eq!(first.reason, "rolledBack");
+    assert_eq!(rt.undo_depth(), 0);
+    assert_eq!(rt.redo_depth(), 1);
+    assert!(rt
+        .session
+        .document()
+        .timeline
+        .record_by_id(RecordId(Uuid::from_u128(0xA712)))
+        .is_none());
+
+    let duplicate = rt.rollback_failed_operation(&token);
+    assert!(!duplicate.rolled_back);
+    assert_eq!(duplicate.reason, "unknownOrConsumed");
+    assert_eq!(rt.redo_depth(), 1);
+}
+
+#[test]
+fn failed_operation_receipt_refuses_after_interleaving_edit_or_undo_aba() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply_transaction("Extrude", vec![add_extrude(0xA714, 5.0)])
+        .unwrap();
+    let token = rt
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xA714))], 0)
+        .unwrap();
+    rt.apply(add_extrude(0xA715, 7.0)).unwrap();
+    let interleaved_depth = rt.undo_depth();
+    let refused = rt.rollback_failed_operation(&token);
+    assert!(!refused.rolled_back);
+    assert_eq!(refused.reason, "stale");
+    assert_eq!(rt.undo_depth(), interleaved_depth);
+
+    rt.undo().unwrap();
+    rt.redo().unwrap().unwrap();
+    assert_eq!(rt.undo_depth(), interleaved_depth, "depth ABA is restored");
+    let duplicate = rt.rollback_failed_operation(&token);
+    assert!(!duplicate.rolled_back);
+    assert_eq!(duplicate.reason, "unknownOrConsumed");
+}
+
+#[test]
+fn failed_operation_receipt_refuses_after_depth_aba_without_prior_attempt() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply_transaction("Extrude", vec![add_extrude(0xA717, 5.0)])
+        .unwrap();
+    let token = rt
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xA717))], 0)
+        .unwrap();
+    let original_depth = rt.undo_depth();
+    rt.undo().unwrap();
+    rt.redo().unwrap().unwrap();
+    assert_eq!(
+        rt.undo_depth(),
+        original_depth,
+        "undo depth completed an ABA"
+    );
+
+    let refused = rt.rollback_failed_operation(&token);
+    assert!(!refused.rolled_back);
+    assert_eq!(refused.reason, "stale");
+    assert_eq!(rt.undo_depth(), original_depth);
+}
+
+#[test]
+fn rollback_token_cannot_cross_same_document_and_revision_runtime_replacement() {
+    let document_id = DocumentId(Uuid::from_u128(0xA718));
+    let make_runtime = || {
+        let backend = Arc::new(FakeBackend::new());
+        let engine: Arc<dyn GeometryEngine> = backend.clone();
+        let meshes: Arc<dyn MeshProvider> = backend.clone();
+        let solver: Arc<dyn SolverEngine> = backend;
+        DocumentRuntime::from_document(
+            Document::new(document_id),
+            "Same document".into(),
+            None,
+            false,
+            engine,
+            meshes,
+            solver,
+        )
+    };
+    let mut first = make_runtime();
+    first
+        .apply_transaction("Extrude", vec![add_extrude(0xA719, 5.0)])
+        .unwrap();
+    let token = first
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xA719))], 0)
+        .unwrap();
+
+    let mut replacement = make_runtime();
+    replacement
+        .apply_transaction("Extrude", vec![add_extrude(0xA719, 5.0)])
+        .unwrap();
+    assert_eq!(first.document_uuid(), replacement.document_uuid());
+    assert_eq!(first.revision(), replacement.revision());
+    assert_eq!(first.undo_depth(), replacement.undo_depth());
+    let refused = replacement.rollback_failed_operation(&token);
+    assert!(!refused.rolled_back);
+    assert_eq!(refused.reason, "unknownOrConsumed");
+}
+
+#[test]
+fn rollback_receipt_is_runtime_bound_and_reedit_gets_one() {
+    let mut original = runtime_with(Arc::new(FakeBackend::new()));
+    original
+        .apply_transaction("Extrude", vec![add_extrude(0xA716, 5.0)])
+        .unwrap();
+    let token = original
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xA716))], 0)
+        .unwrap();
+
+    let mut replacement = runtime_with(Arc::new(FakeBackend::new()));
+    let wrong_runtime = replacement.rollback_failed_operation(&token);
+    assert!(!wrong_runtime.rolled_back);
+    assert_eq!(wrong_runtime.reason, "unknownOrConsumed");
+
+    original
+        .apply_transaction(
+            "Update Operation",
+            vec![EditCommand::UpdateOperationParams {
+                record: RecordId(Uuid::from_u128(0xA716)),
+                op: extrude_record(0xA716, 9.0).op,
+            }],
+        )
+        .unwrap();
+    assert!(original
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xA716))], 1)
+        .is_some());
+}
+
+#[test]
+fn rollback_receipt_never_borrows_prior_history_without_a_new_undo_item() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0xA720, 5.0)).unwrap();
+    let depth = rt.undo_depth();
+    let position = rt.undo_position();
+    assert!(rt
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xA720))], position)
+        .is_none());
+    assert_eq!(rt.undo_depth(), depth);
+}
+
+#[test]
+fn rollback_receipt_arms_when_a_valid_push_evicts_the_undo_bottom() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    for seed in 0xB000..0xB0C8 {
+        rt.apply(add_extrude(seed, 1.0)).unwrap();
+    }
+    let capped_depth = rt.undo_depth();
+    let prior_position = rt.undo_position();
+    rt.apply_transaction("Extrude", vec![add_extrude(0xB0C8, 2.0)])
+        .unwrap();
+    assert_eq!(
+        rt.undo_depth(),
+        capped_depth,
+        "the bottom entry was evicted"
+    );
+    assert_eq!(rt.undo_position(), prior_position + 1);
+    assert!(rt
+        .arm_operation_rollback(vec![RecordId(Uuid::from_u128(0xB0C8))], prior_position)
+        .is_some());
+}
+
+#[test]
+fn failed_compound_member_rolls_back_without_history_or_revision_change() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let revision = rt.revision();
+    let undo_depth = rt.undo_depth();
+    let missing = RecordId(Uuid::from_u128(0xA799));
+
+    assert!(rt
+        .apply_transaction(
+            "Extrude",
+            vec![
+                add_extrude(0xA705, 5.0),
+                EditCommand::RemoveOperation { record: missing },
+            ],
+        )
+        .is_err());
+    assert_eq!(rt.revision(), revision);
+    assert_eq!(rt.undo_depth(), undo_depth);
+    assert_eq!(rt.redo_depth(), 0);
+    assert!(rt
+        .session
+        .document()
+        .timeline
+        .record_by_id(RecordId(Uuid::from_u128(0xA705)))
+        .is_none());
+}
+
+#[test]
+fn feature_transaction_refusal_preserves_caller_owned_transaction() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.session.begin_transaction("caller");
+
+    let error = rt
+        .apply_transaction("Extrude", vec![add_extrude(0xA706, 5.0)])
+        .expect_err("nested feature transaction must be refused");
+    assert!(error.to_string().contains("cannot nest"));
+    assert!(rt.session.transaction_open());
+    rt.session.cancel_transaction();
+}
+
+#[test]
+fn noop_undo_keeps_a_saved_empty_document_clean() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let revision = rt.revision();
+    assert!(rt.mark_saved(std::path::Path::new("/tmp/noop-undo.onecad"), revision));
+    assert!(!rt.is_dirty());
+
+    assert!(rt.undo().is_none());
+    assert_eq!(rt.revision(), revision);
+    assert!(!rt.is_dirty());
+}
+
+#[tokio::test]
+async fn feature_transaction_refuses_without_disturbing_an_active_gesture() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sketch, point) = sketch_with_point();
+    let sketch_id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.enter_sketch(sketch_id).await.unwrap();
+    rt.begin_gesture(sketch_id, point, GestureTarget::point(point))
+        .await
+        .unwrap();
+
+    let error = rt
+        .apply_transaction("Extrude", vec![add_extrude(0xA703, 3.0)])
+        .expect_err("feature commit must stand down during drag");
+    assert!(error.to_string().contains("sketch drag"));
+    assert!(rt.active_gesture.is_some(), "refusal preserves the gesture");
+    rt.solve_drag([2.0, 3.0])
+        .await
+        .expect("the original gesture remains usable");
+}
+
+#[test]
+fn unevaluated_sketch_projection_omits_solver_fields_on_the_wire() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sketch = other_sketch(0xA704);
+    let sketch_id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    let value = serde_json::to_value(rt.projection()).unwrap();
+    let row = &value["sketches"][sketch_id.to_string()];
+    assert!(row.get("dof").is_none());
+    assert!(row.get("status").is_none());
+    assert!(row.get("solveGeometryToken").is_none());
+}
+
+#[tokio::test]
+async fn cancel_new_sketch_removes_creation_and_clears_redo() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let prior = other_sketch(0xA70F);
+    let prior_id = prior.id;
+    rt.apply(EditCommand::AddSketch { sketch: prior }).unwrap();
+    let sketch = other_sketch(0xA710);
+    let id = sketch.id;
+    let depth = rt.undo_depth();
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.enter_sketch(id).await.unwrap();
+    rt.mark_open_sketch_created(id);
+
+    let outcome = rt.cancel_sketch(id, true).await.unwrap();
+    assert!(outcome.discarded);
+    assert!(outcome.revert.is_some());
+    assert_eq!(rt.undo_depth(), depth);
+    assert_eq!(rt.redo_depth(), 0);
+    assert!(!rt.session.document().sketches.contains_key(&id));
+    assert!(rt.undo().is_some());
+    assert!(!rt.session.document().sketches.contains_key(&prior_id));
+    assert!(rt.redo().unwrap().is_some());
+    assert!(rt.session.document().sketches.contains_key(&prior_id));
+    assert!(!rt.session.document().sketches.contains_key(&id));
+}
+
+#[tokio::test]
+async fn cancel_edited_new_sketch_removes_visit_and_creation() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sketch = other_sketch(0xA713);
+    let id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.enter_sketch(id).await.unwrap();
+    rt.mark_open_sketch_created(id);
+    let point = SketchEntity::point(
+        EntityId(Uuid::from_u128(0xA714)),
+        Vec2::new_unchecked(1.0, 2.0),
+        false,
+        false,
+    );
+    rt.sketch_upsert(id, vec![SketchEditOp::AddEntity { entity: point }])
+        .await
+        .unwrap();
+
+    let outcome = rt.cancel_sketch(id, true).await.unwrap();
+    assert!(outcome.discarded);
+    assert!(outcome.revert.is_some());
+    assert!(!rt.session.document().sketches.contains_key(&id));
+    assert_eq!(rt.redo_depth(), 0);
+}
+
+#[tokio::test]
+async fn cancel_dragged_new_sketch_accepts_same_visit_drag_transaction() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sketch, point) = sketch_with_point();
+    let id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.enter_sketch(id).await.unwrap();
+    rt.mark_open_sketch_created(id);
+    rt.begin_gesture(id, point, GestureTarget::point(point))
+        .await
+        .unwrap();
+    rt.solve_drag([3.0, 4.0]).await.unwrap();
+    rt.end_gesture(Some([3.0, 4.0])).await.unwrap();
+
+    let outcome = rt.cancel_sketch(id, true).await.unwrap();
+    assert!(outcome.discarded);
+    assert!(!rt.session.document().sketches.contains_key(&id));
+}
+
+#[tokio::test]
+async fn cancel_new_sketch_read_only_refuses_without_mutation() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sketch = other_sketch(0xA715);
+    let id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.enter_sketch(id).await.unwrap();
+    rt.mark_open_sketch_created(id);
+    let depth = rt.undo_depth();
+    rt.read_only = true;
+
+    let outcome = rt.cancel_sketch(id, true).await.unwrap();
+    assert!(!outcome.discarded);
+    assert_eq!(rt.undo_depth(), depth);
+    assert!(rt.session.document().sketches.contains_key(&id));
+}
+
+#[tokio::test]
+async fn cancel_new_sketch_refuses_while_other_sketch_gesture_is_active() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let created = other_sketch(0xA716);
+    let created_id = created.id;
+    rt.apply(EditCommand::AddSketch { sketch: created })
+        .unwrap();
+    rt.enter_sketch(created_id).await.unwrap();
+    rt.mark_open_sketch_created(created_id);
+    let created_session = rt.sketch_session.take();
+
+    let (other, point) = sketch_with_point();
+    let other_id = other.id;
+    rt.apply(EditCommand::AddSketch { sketch: other }).unwrap();
+    rt.enter_sketch(other_id).await.unwrap();
+    rt.begin_gesture(other_id, point, GestureTarget::point(point))
+        .await
+        .unwrap();
+    rt.sketch_session = created_session;
+    let depth = rt.undo_depth();
+
+    let outcome = rt.cancel_sketch(created_id, true).await.unwrap();
+    assert!(!outcome.discarded);
+    assert_eq!(rt.undo_depth(), depth);
+    assert!(rt.active_gesture.is_some());
+    assert!(rt.session.document().sketches.contains_key(&created_id));
+}
+
+#[tokio::test]
+async fn cancel_new_sketch_refuses_after_interleaving_command() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sketch = other_sketch(0xA711);
+    let id = sketch.id;
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.enter_sketch(id).await.unwrap();
+    rt.mark_open_sketch_created(id);
+    rt.apply(add_extrude(0xA712, 4.0)).unwrap();
+
+    let outcome = rt.cancel_sketch(id, true).await.unwrap();
+    assert!(!outcome.discarded);
+    assert!(rt.session.document().sketches.contains_key(&id));
 }
 
 #[tokio::test]
@@ -2546,7 +3241,7 @@ async fn prepare_sketch_regions_ok_again_after_cancel() {
         "blocked mid-gesture"
     );
 
-    rt.cancel_sketch(sid).await.unwrap();
+    rt.cancel_sketch(sid, false).await.unwrap();
     rt.prepare_sketch_regions(sid)
         .expect("a cancelled gesture unblocks prepare")
         .drive()
@@ -2686,7 +3381,9 @@ async fn every_gesture_teardown_path_releases_the_lane_claim() {
             0 => {
                 rt.end_gesture(Some([1.0, 1.0])).await.unwrap();
             }
-            1 => rt.cancel_sketch(sid).await.unwrap(),
+            1 => {
+                rt.cancel_sketch(sid, false).await.unwrap();
+            }
             _ => {
                 rt.finish_sketch(sid).await.unwrap();
             }
@@ -2810,6 +3507,49 @@ async fn promote_selection_mints_ids_and_is_stable() {
         again[0].element_id, ids[0].element_id,
         "re-pick reuses the id (Invariant 1)"
     );
+}
+
+/// The pick-shape guard is [`TopoKey::parse`], not a prefix list.
+///
+/// The MESH1 id table is two-namespace, so the viewport hands back a minted
+/// `el_…` label for any bound element and used to have it promoted — which fell
+/// through to the anchor rung and came back as "Selection is out of date" on a
+/// fresh pick. A prefix list also let `face:1` and `f:` through to the worker,
+/// where they resolve to nothing and cost a round-trip to say so.
+#[tokio::test]
+async fn promote_selection_refuses_a_pick_that_is_not_topokey_shaped() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let body = BodyId(Uuid::from_u128(0xB0));
+
+    let err = rt
+        .promote_selection(SnapshotId(5), body, vec![(TopoKey::new("el_4f2a"), None)])
+        .await
+        .expect_err("an ElementId is already persistent — there is nothing to promote");
+    let message = err.to_string();
+    assert!(
+        message.contains("is an ElementId, not a TopoKey"),
+        "the refusal must say what the pick actually is: {message}"
+    );
+
+    for bad in ["face:1", "f:", "f:x", "", "fe:1"] {
+        let err = rt
+            .promote_selection(SnapshotId(5), body, vec![(TopoKey::new(bad), None)])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("is not a TopoKey"),
+            "pick {bad:?} must be refused as malformed: {err}"
+        );
+    }
+
+    // …and every well-formed key still passes the guard and mints.
+    for good in ["f:3", "e:12", "v:1", "b:2"] {
+        let promoted = rt
+            .promote_selection(SnapshotId(5), body, vec![(TopoKey::new(good), None)])
+            .await
+            .unwrap_or_else(|e| panic!("pick {good:?} must pass the shape guard: {e}"));
+        assert_eq!(promoted[0].topo_key, good);
+    }
 }
 
 #[tokio::test]
@@ -3003,6 +3743,38 @@ async fn rebind_recovers_after_a_transient_transport_failure() {
     );
 }
 
+#[tokio::test]
+async fn unlocked_persisted_rebind_is_fenced_against_a_new_head() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let body = BodyId(Uuid::from_u128(0x10));
+    rt.promote_selection(
+        SnapshotId(report.snapshot_id),
+        body,
+        vec![(TopoKey::new("f:1"), None)],
+    )
+    .await
+    .expect("promotion records re-bind evidence");
+
+    let ticket = rt
+        .prepare_persisted_rebind()
+        .expect("published head with persisted evidence");
+    rt.apply(add_extrude(0x11, 10.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 1 }, CancelToken::new())
+        .await;
+
+    let stale = ticket.drive().await;
+    assert_eq!(rt.adopt_persisted_rebind(stale), (0, 0));
+    assert!(
+        rt.has_unbound_persisted_elements(),
+        "a stale unlocked result must re-arm the current head"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // get_operation_params (re-edit deep-merge source; Findings 3+4) + refId-only
 // resolve_refs hydration (Finding 2)
@@ -3032,6 +3804,40 @@ async fn operation_params_returns_the_stored_params_for_a_reedit() {
     assert!(rt
         .operation_params(RecordId(Uuid::from_u128(0xDEAD)))
         .is_none());
+}
+
+#[test]
+fn feature_pattern_operation_params_omit_derived_source_ops() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let source = RecordId(Uuid::from_u128(0x1235));
+    rt.apply(add_extrude(0x1235, 12.0)).unwrap();
+    let pattern = RecordId(Uuid::from_u128(0x1236));
+    rt.apply(EditCommand::AddOperation {
+        record: OperationRecord::new(
+            pattern,
+            0,
+            "Feature Pattern",
+            Operation::Known(KnownOperation::FeaturePattern(FeaturePatternParams {
+                source_record_ids: vec![source],
+                layout: FeaturePatternLayout::Linear {
+                    direction: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                    spacing: Scalar::new(20.0),
+                },
+                count: 2,
+                semantics_version: 1,
+                extra: Default::default(),
+            })),
+        ),
+        at_cursor: true,
+    })
+    .unwrap();
+
+    let params = rt.operation_params(pattern).unwrap();
+    assert_eq!(params["sourceRecordIds"], serde_json::json!([source]));
+    assert!(
+        params.get("sourceOps").is_none(),
+        "derived worker payload must not round-trip into authoring params: {params}"
+    );
 }
 
 #[test]
@@ -3696,6 +4502,164 @@ async fn below_cap_session_still_squashes() {
         "the 3 contiguous sketch edits collapse into ONE net command \
          (AddSketch + squash + the minted Sketch record)"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-U7 D-1 — the sketch chrome's Cancel DISCARDS the session
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Adds `count` points to `sid`, one granular upsert each.
+async fn add_session_points(rt: &mut DocumentRuntime, sid: SketchId, seed: u128, count: u128) {
+    for i in 0..count {
+        let point = SketchEntity::point(
+            EntityId(Uuid::from_u128(seed + i)),
+            Vec2::new_unchecked(i as f64, 0.0),
+            false,
+            false,
+        );
+        rt.sketch_upsert(sid, vec![SketchEditOp::AddEntity { entity: point }])
+            .await
+            .unwrap();
+    }
+}
+
+fn entity_count(rt: &DocumentRuntime, sid: SketchId) -> usize {
+    rt.session
+        .document()
+        .sketch(sid)
+        .expect("sketch present")
+        .entities()
+        .len()
+}
+
+#[tokio::test]
+async fn cancel_sketch_discard_restores_the_state_at_entry() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    rt.enter_sketch(sid).await.unwrap(); // watermark 1
+    let prior = rt.session.document().sketch(sid).cloned().unwrap();
+
+    add_session_points(&mut rt, sid, 0xB000, 2).await;
+    assert_eq!(entity_count(&rt, sid), 3, "the two session points landed");
+
+    let outcome = rt.cancel_sketch(sid, true).await.unwrap();
+    assert!(outcome.discarded, "the session was discarded: {outcome:?}");
+    assert_eq!(outcome.kept_reason, None);
+    assert_eq!(
+        rt.session.document().sketch(sid),
+        Some(&prior),
+        "the sketch is back to the state it had at enter"
+    );
+    assert_eq!(
+        rt.session.undo_depth(),
+        1,
+        "the undo depth is back at the enter watermark"
+    );
+    assert_eq!(
+        rt.redo_depth(),
+        0,
+        "a discarded session must NOT be redoable back into existence"
+    );
+    assert!(rt.sketch_session.is_none(), "the session is consumed");
+}
+
+#[tokio::test]
+async fn cancel_unmarked_sketch_visit_leaves_creation_unchanged() {
+    // The runtime half of "Cancel deletes a sketch minted this session": AddSketch
+    // is committed BEFORE enter, so it sits BELOW the watermark and the discard
+    // never touches it — the sketch survives, empty, and the frontend's
+    // `deleteSketch` compensation is what removes it.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    rt.enter_sketch(sid).await.unwrap(); // watermark 1
+    add_session_points(&mut rt, sid, 0xB100, 2).await;
+
+    assert!(rt.cancel_sketch(sid, true).await.unwrap().discarded);
+    assert!(
+        rt.session.document().sketch(sid).is_some(),
+        "the discard reverts the SESSION, not the AddSketch below the watermark"
+    );
+
+    rt.apply(EditCommand::DeleteSketch { sketch: sid }).unwrap();
+    assert!(
+        rt.session.document().sketch(sid).is_none(),
+        "after the frontend-side delete no sketch is left"
+    );
+}
+
+#[tokio::test]
+async fn cancel_sketch_without_discard_keeps_the_edits() {
+    // Esc / Finish behaviour is untouched: squash only, geometry kept.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    rt.enter_sketch(sid).await.unwrap(); // watermark 1
+    add_session_points(&mut rt, sid, 0xB200, 2).await;
+
+    let outcome = rt.cancel_sketch(sid, false).await.unwrap();
+    assert!(!outcome.discarded);
+    assert_eq!(
+        outcome.kept_reason, None,
+        "nothing was refused — none was asked"
+    );
+    assert_eq!(entity_count(&rt, sid), 3, "the session geometry stays");
+    assert_eq!(
+        rt.session.undo_depth(),
+        2,
+        "the two granular edits collapsed into ONE net step above the watermark"
+    );
+}
+
+#[tokio::test]
+async fn cancel_sketch_discard_refused_when_the_session_is_interleaved() {
+    // A model op committed mid-session stops the squash's contiguous run, so the
+    // granular steps are still on the stack — undoing ONE of them is not "discard
+    // the session". The refusal is reported and the geometry is kept.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    rt.enter_sketch(sid).await.unwrap(); // watermark 1
+    add_session_points(&mut rt, sid, 0xB300, 1).await;
+    rt.apply(add_extrude(0xE7, 5.0)).unwrap(); // interleaved model op
+    let depth = rt.session.undo_depth();
+
+    let outcome = rt.cancel_sketch(sid, true).await.unwrap();
+    assert!(!outcome.discarded);
+    assert_eq!(
+        outcome.kept_reason,
+        Some("the session was interleaved with other edits")
+    );
+    assert_eq!(entity_count(&rt, sid), 2, "the session geometry stays");
+    assert_eq!(rt.session.undo_depth(), depth, "no step was reverted");
+}
+
+#[tokio::test]
+async fn cancel_sketch_discard_refused_after_an_eviction() {
+    // Same guard the squash already has (finding 3): once the stack bottom shifts
+    // out past UNDO_CAP the depth watermark no longer addresses the session, so
+    // the discard refuses wholesale rather than reverting the wrong step.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    for i in 0..149u128 {
+        rt.apply(add_extrude(0x2000 + i, 5.0)).unwrap(); // → depth 150
+    }
+    rt.enter_sketch(sid).await.unwrap(); // watermark 150, evicted_at_enter 0
+    add_session_points(&mut rt, sid, 0xB400, 60).await;
+    assert_eq!(rt.session.evictions(), 10, "the bottom 10 steps evicted");
+
+    let outcome = rt.cancel_sketch(sid, true).await.unwrap();
+    assert!(!outcome.discarded);
+    assert_eq!(outcome.kept_reason, Some("history was trimmed"));
+    assert_eq!(entity_count(&rt, sid), 61, "the session geometry stays");
+    assert_eq!(rt.session.undo_depth(), 200, "no step was reverted");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4697,6 +5661,54 @@ fn empty_element_ref() -> ElementRef {
 struct FakeElements {
     /// `topoKey → (center, area)`.
     faces: HashMap<String, ([f64; 3], f64)>,
+}
+
+#[tokio::test]
+async fn geometry_read_ticket_requires_and_revalidates_exact_head() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend);
+    rt.bind_geometry_read_query(Arc::new(FakeElements {
+        faces: HashMap::new(),
+    }))
+    .unwrap();
+    rt.apply(add_extrude(0x701, 10.0)).unwrap();
+    let first = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(first.outcome, Outcome::Published(_)));
+    let snapshot = SnapshotId(first.snapshot_id);
+    let ticket = rt
+        .prepare_geometry_read(&rt.document_id(), &rt.runtime_session(), snapshot)
+        .unwrap();
+    assert!(rt.geometry_read_is_current(&ticket));
+    assert!(rt
+        .prepare_geometry_read(&rt.document_id(), &rt.runtime_session(), SnapshotId(0))
+        .is_err());
+    let replacement = runtime_with(Arc::new(FakeBackend::new()));
+    assert!(!replacement.geometry_read_is_current(&ticket));
+
+    rt.apply(add_extrude(0x702, 5.0)).unwrap();
+    let second = rt
+        .run_regen(RegenRequest::ToEnd { from: 1 }, CancelToken::new())
+        .await;
+    assert!(matches!(second.outcome, Outcome::Published(_)));
+    assert!(!rt.geometry_read_is_current(&ticket));
+    let current_ticket = rt
+        .prepare_geometry_read(
+            &rt.document_id(),
+            &rt.runtime_session(),
+            SnapshotId(second.snapshot_id),
+        )
+        .unwrap();
+    rt.on_worker_restart(WorkerEpoch(99));
+    assert!(!rt.geometry_read_is_current(&current_ticket));
+    assert!(rt
+        .prepare_geometry_read(
+            &rt.document_id(),
+            &rt.runtime_session(),
+            SnapshotId(second.snapshot_id),
+        )
+        .is_err());
 }
 
 #[async_trait]

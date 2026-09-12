@@ -10,4 +10,6 @@
 - [Worker liveness probes](repo_worker_liveness_probes.md) — single-threaded stub, in-process Dispatcher/PlanExecutor drivers, MESH1 header offsets, restore keyed on stepIndex
 - [Fillet acceptance envelope](repo_fillet_acceptance.md) — two blend classes, curvature-derived residual, remnant floor, which kernelbench rows may move
 - [OCW1 driver for fixtures](repo_ocw1_driver.md) — harness --repl desyncs on ExecutePlan; frame the worker directly, plus the param names that bite
+- [MESH1 id namespace](repo_mesh_id_namespace.md) — mesh tables mix TopoKeys with minted ElementIds; only TopoKeys promote, and which lanes still trip on it
+- [Viewport selection policy](repo_viewport_selection_policy.md) — D-5 + Astra break: persistent id first, an ordinal is not evidence across a regen, regen-only reconcile
 - [Regen isolation + closure](repo_regen_isolation.md) — why graph.downstream() is not proof of independence, what timeline_of(n) really builds, checkpoint-mint seams

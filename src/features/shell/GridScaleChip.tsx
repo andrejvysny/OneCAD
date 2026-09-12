@@ -15,6 +15,7 @@ import { MonoValue } from "@/ui/MonoValue";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatLengthWithUnit } from "@/units/format";
+import { useInspectorChromeInset } from "@/stores/inspectorLayoutStore";
 
 /**
  * Renders nothing while the grid is hidden — the legend describes lines that
@@ -27,6 +28,7 @@ export function GridScaleChip() {
   // has to re-render on a unit switch — `formatLengthWithUnit` reads the
   // preference at call time and would otherwise render a stale unit.
   const unit = useSettingsStore((s) => s.displayUnit);
+  const chromeInset = useInspectorChromeInset();
   if (!gridVisible) return null;
 
   return (
@@ -35,10 +37,10 @@ export function GridScaleChip() {
       // Non-interactive, like every other viewport chip: the canvas underneath
       // is picked constantly and this must never swallow a click.
       //
-      // `right-[264px]`, not `right-3`: the canvas runs full-bleed under the
-      // inspector panel, so the VISIBLE right edge is the panel's left edge.
-      // Same offset `CornerCluster` uses for the same reason.
-      className="pointer-events-none absolute bottom-3 right-[264px] z-[2]"
+      // The canvas runs full-bleed under the inspector, so chrome follows its
+      // actual transient inset rather than carrying a second guessed width.
+      style={{ right: chromeInset }}
+      className="pointer-events-none absolute bottom-3 z-[2]"
     >
       <span className="flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 shadow-ctrl">
         {/* One cell, drawn. Cheaper to read than the word "grid". */}

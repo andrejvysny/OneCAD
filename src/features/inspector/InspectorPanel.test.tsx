@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { screen, act, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { InspectorPanel } from "./InspectorPanel";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { toolChipStore } from "@/stores/toolChipStore";
 import { getMockLatency, mockClient } from "@/ipc/mockClient";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
@@ -15,6 +17,7 @@ import { settleUntil } from "@/test/settle";
 import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import { flushSketchMutations } from "@/tools/sketch/sketchService";
 import type { SketchConstraint, SketchSession } from "@/ipc/types";
+import { inspectorLayoutStore } from "@/stores/inspectorLayoutStore";
 
 /**
  * A live sketch session carrying the constraints the inspector summarizes.
@@ -34,11 +37,109 @@ function sessionWithConstraints(constraints: SketchConstraint[]): SketchSession 
 }
 
 describe("InspectorPanel", () => {
-  beforeEach(() => resetStores());
+  beforeEach(() => {
+    resetStores();
+    documentStore.getState().setSketchSolve("sketch2", 3, "under");
+  });
+
+  it("clamps the accessible left-edge resizer by keyboard", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const handle = screen.getByTestId("inspector-resize-handle");
+    expect(handle).toHaveAttribute("role", "separator");
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(screen.getByTestId("inspector-panel")).toHaveStyle({ width: "280px" });
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(screen.getByTestId("inspector-panel")).toHaveStyle({ width: "420px" });
+  });
+
+  it("keeps a keyboard-accessible reopen control outside hidden drawer content", async () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const user = userEvent.setup();
+    const panel = screen.getByTestId("inspector-panel");
+    const toggle = screen.getByTestId("inspector-drawer-toggle");
+    const content = screen.getByTestId("inspector-drawer-content");
+
+    expect(toggle).toHaveAccessibleName("Collapse inspector");
+    expect(toggle).toHaveAttribute("aria-controls", "inspector-drawer-content");
+    toggle.focus();
+    await user.keyboard("{Enter}");
+
+    expect(toggle).toHaveAccessibleName("Open inspector");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(panel).toHaveStyle({ width: "32px" });
+    expect(content).toHaveAttribute("hidden");
+    expect(content).toHaveAttribute("inert");
+    expect(screen.queryByRole("separator", { name: "Resize inspector" })).toBeNull();
+  });
+
+  it("keeps hidden inspector controls mounted, inert, and draft-preserving", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => toolChipStore.getState().showExtrude(
+      10,
+      [0, 0, 0],
+      { onValue: vi.fn(), onSymmetric: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() },
+      { showDraft: true },
+    ));
+
+    const draft = screen.getByLabelText("Draft angle (°)");
+    fireEvent.change(draft, { target: { value: "12" } });
+    draft.focus();
+    fireEvent.click(screen.getByTestId("inspector-drawer-toggle"));
+    expect(draft).not.toHaveFocus();
+    expect(screen.getByTestId("inspector-drawer-content")).toHaveAttribute("hidden");
+
+    fireEvent.click(screen.getByTestId("inspector-drawer-toggle"));
+    expect(screen.getByLabelText("Draft angle (°)")).toHaveValue("12");
+  });
+
+  it("uses a viewport-capped width and cancels pointer resizing before another move", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const panel = screen.getByTestId("inspector-panel");
+    const handle = screen.getByTestId("inspector-resize-handle");
+    const releasePointerCapture = vi.fn();
+    Object.defineProperties(handle, {
+      setPointerCapture: { value: vi.fn() },
+      hasPointerCapture: { value: vi.fn(() => true) },
+      releasePointerCapture: { value: releasePointerCapture },
+    });
+
+    expect(panel).toHaveStyle({ width: "320px", maxWidth: "100vw" });
+    fireEvent.pointerDown(handle, { button: 0, isPrimary: true, pointerId: 1, clientX: 0 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: -1000 });
+    expect(panel).toHaveStyle({ width: "420px", maxWidth: "100vw" });
+    fireEvent.pointerCancel(handle, { pointerId: 1 });
+    expect(releasePointerCapture).toHaveBeenCalledWith(1);
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 1000 });
+    expect(panel).toHaveStyle({ width: "420px", maxWidth: "100vw" });
+  });
+
+  it("keeps the shared layout through tool and document changes without remounting focus", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    const panel = screen.getByTestId("inspector-panel");
+    const toggle = screen.getByTestId("inspector-drawer-toggle");
+    toggle.focus();
+
+    act(() => inspectorLayoutStore.getState().setWidth(280));
+    expect(panel).toHaveStyle({ width: "280px" });
+    expect(screen.getByTestId("inspector-drawer-toggle")).toBe(toggle);
+    expect(toggle).toHaveFocus();
+
+    act(() => {
+      toolStore.getState().setMode("sketch", "sketch2");
+      documentStore.getState().setSketchSolve("sketch2", 2, "under");
+      inspectorLayoutStore.getState().setWidth(420);
+    });
+    expect(panel).toHaveStyle({ width: "420px" });
+    act(() => inspectorLayoutStore.getState().setOpen(false));
+    expect(panel).toHaveStyle({ width: "32px" });
+
+    resetStores();
+    expect(inspectorLayoutStore.getState()).toMatchObject({ width: 320, open: true });
+  });
 
   it("shows the SELECTION state for the default sketch selection", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
-    expect(screen.getByText("Sketch 2")).toBeInTheDocument();
+    expect(screen.getAllByText("Sketch 2").length).toBeGreaterThan(0); // selection header + its history row
     expect(screen.getByText("Sketch")).toBeInTheDocument();
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
     expect(screen.getByText("History")).toBeInTheDocument();
@@ -69,10 +170,10 @@ describe("InspectorPanel", () => {
    * is one layer up, where `SelectionState` FABRICATES a solve state for a
    * sketch the registry has never heard of (`solve?.status ?? "under"`,
    * `solve?.dof ?? 0`) and so reports the strongest possible claim about a
-   * sketch it knows nothing about. Absent evidence must render no placard, not
-   * a confident one.
+   * sketch it knows nothing about. Absent evidence must render "Not evaluated",
+   * not a confident solver claim.
    */
-  it("claims nothing about a sketch whose solve state is not loaded", () => {
+  it("marks a sketch without loaded solve state as not evaluated", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       documentStore.setState({ sketches: {} });
@@ -80,6 +181,30 @@ describe("InspectorPanel", () => {
     });
 
     expect(screen.getByText("Sketch")).toBeInTheDocument();
+    expect(screen.getByText("Not evaluated")).toBeInTheDocument();
+    expect(screen.queryByText(/Fully constrained/)).toBeNull();
+    expect(screen.queryByText(/constrained · DOF/)).toBeNull();
+  });
+
+  it("treats a selected legacy sketch without evaluation tokens as not evaluated", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      const sketches = documentStore.getState().sketches;
+      documentStore.setState({
+        sketches: {
+          ...sketches,
+          sketch2: {
+            ...sketches.sketch2,
+            dof: 0,
+            status: "ok",
+            geometryToken: undefined as never,
+            solveGeometryToken: undefined,
+          },
+        },
+      });
+    });
+
+    expect(screen.getByText("Not evaluated")).toBeInTheDocument();
     expect(screen.queryByText(/Fully constrained/)).toBeNull();
     expect(screen.queryByText(/constrained · DOF/)).toBeNull();
   });
@@ -134,7 +259,7 @@ describe("InspectorPanel", () => {
       ]),
     );
 
-    expect(screen.getByText("Sketch 2")).toBeInTheDocument();
+    expect(screen.getAllByText("Sketch 2").length).toBeGreaterThan(0); // selection header + its history row
     expect(screen.getByText("Sketch profile")).toBeInTheDocument();
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
   });
@@ -215,7 +340,7 @@ describe("InspectorPanel", () => {
       );
     });
 
-    expect(screen.getByText("Sketch 2")).toBeInTheDocument();
+    expect(screen.getAllByText("Sketch 2").length).toBeGreaterThan(0); // selection header + its history row
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
     // Constraint discovery lives here now too (moved off the top chrome bar).
     expect(screen.getByRole("button", { name: "Add constraint" })).toBeInTheDocument();
@@ -232,6 +357,56 @@ describe("InspectorPanel", () => {
     expect(
       screen.getByText(/degrees of freedom remain/),
     ).toBeInTheDocument();
+  });
+
+  it("treats an active legacy sketch without evaluation tokens as not evaluated", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      const sketches = documentStore.getState().sketches;
+      documentStore.setState({
+        sketches: {
+          ...sketches,
+          sketch2: {
+            ...sketches.sketch2,
+            dof: 0,
+            status: "ok",
+            geometryToken: undefined as never,
+            solveGeometryToken: undefined,
+          },
+        },
+      });
+      toolStore.getState().setMode("sketch", "sketch2");
+      sketchStore.getState().setSession(sessionWithConstraints([]));
+    });
+
+    expect(screen.getByText("Not evaluated")).toBeInTheDocument();
+    expect(screen.getByText("Solve the current sketch to inspect constraints.")).toBeInTheDocument();
+    expect(screen.getByText("Not evaluated")).toBeInTheDocument();
+    expect(screen.queryByText(/Fully constrained/)).toBeNull();
+  });
+
+  it("shows the current active sketch's evaluated degrees of freedom", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      const sketches = documentStore.getState().sketches;
+      documentStore.setState({
+        sketches: {
+          ...sketches,
+          sketch2: {
+            ...sketches.sketch2,
+            dof: 2,
+            status: "under",
+            geometryToken: "evaluation:2",
+            solveGeometryToken: "evaluation:2",
+          },
+        },
+      });
+      toolStore.getState().setMode("sketch", "sketch2");
+      sketchStore.getState().setSession(sessionWithConstraints([]));
+    });
+
+    expect(screen.getByText("Under-constrained · DOF 2")).toBeInTheDocument();
+    expect(screen.queryByText("Not evaluated")).toBeNull();
   });
 
   it("shows the empty-constraints hint when the sketch has none", () => {
@@ -267,6 +442,30 @@ describe("InspectorPanel", () => {
 
     expect(screen.getByText("Empty sketch")).toBeInTheDocument();
     expect(screen.getByText("Draw geometry to begin.")).toBeInTheDocument();
+    expect(screen.queryByText(/Fully constrained/)).toBeNull();
+    expect(screen.queryByText(/Sketch is fully defined/)).toBeNull();
+  });
+
+  it("shows 'Projected geometry only' when every entity is a host-face projection", () => {
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    act(() => {
+      documentStore.getState().setSketchSolve("sketch2", 0, "ok");
+      toolStore.getState().setMode("sketch", "sketch2");
+      sketchStore.getState().setSession({
+        sketchId: "sketch2",
+        plane: { kind: "XY", origin: [0, 0, 0], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
+        entities: [
+          { id: "p1", type: "line", start: [0, 0], end: [10, 0], referenceLocked: true },
+          { id: "p2", type: "line", start: [10, 0], end: [10, 10], referenceLocked: true },
+        ] as never,
+        constraints: [],
+        dof: 0,
+        status: "FullyConstrained",
+      });
+    });
+
+    expect(screen.getByText("Projected geometry only")).toBeInTheDocument();
+    expect(screen.getByText(/2 projected reference edges/)).toBeInTheDocument();
     expect(screen.queryByText(/Fully constrained/)).toBeNull();
     expect(screen.queryByText(/Sketch is fully defined/)).toBeNull();
   });

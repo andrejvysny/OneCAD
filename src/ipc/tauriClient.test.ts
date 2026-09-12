@@ -18,13 +18,22 @@ import { operationToEditCommand } from "./tauriCommandMap";
 import { makeBoxMesh } from "./mockMeshes";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { documentStore, emptyDocument, seedMockDocument } from "@/stores/documentStore";
+// Eagerly load the native-menu router graph. It (and `fileActions`/`appStore`
+// under it) calls `createClient()` at MODULE scope, and the listener below
+// imports it lazily — which, with `mockIPC`'s `__TAURI_INTERNALS__` installed,
+// would mint a SECOND tauri client mid-test and double-deliver the event.
+// Production only ever has the one memoized client, so that is an artifact of
+// building one by hand here, not a defect under test.
+import "@/features/shell/menuActions";
+import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
+import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { viewportStore } from "@/stores/viewportStore";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
-import type { DocumentChange, OperationOp } from "./types";
+import type { DocumentChange, NeedsRepairEvent, OperationOp } from "./types";
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-function readyProjection(revision: number, features: unknown[] = []): unknown {
+function readyProjection(revision: number, features: unknown[] = []): Record<string, unknown> {
   return {
     status: "ready",
     revision,
@@ -111,7 +120,9 @@ describe("tauriClient command marshalling", () => {
       }
     });
     await createTauriClient().getBodyMesh("uuid-1", "coarse");
-    expect(payload).toEqual({ bodyId: "uuid-1", lod: "coarse", generation: null });
+    expect(payload).toEqual({ bodyId: "uuid-1", lod: "coarse", generation: null, expectedRuntimeSession: null });
+    await createTauriClient().getBodyMesh("uuid-1", "fine", 27, "runtime-1");
+    expect(payload).toEqual({ bodyId: "uuid-1", lod: "fine", generation: 27, expectedRuntimeSession: "runtime-1" });
   });
 
   it("listRecents + openFileDialog pass through", async () => {
@@ -647,14 +658,24 @@ describe("tauriClient projectToSketch / updateProjection / detachProjection (WP-
       snapshotId: 7,
       sketchId: session.sketchId,
       mode: "faceOutline",
-      sources: [{ bodyId: "body1", topoKey: "f:4" }],
+      sources: [
+        { bodyId: "body1", topoKey: "f:4" },
+        // A pick that was already promoted: its persistent id must reach the
+        // command, or the backend re-promotes a snapshot ordinal at the head
+        // (WP-U4 / D-5).
+        { bodyId: "body1", topoKey: "f:9", elementId: "el_seat" },
+      ],
     });
-    // Same body_<uuid> wire form promoteSelection uses; anchor absent → null.
+    // Same body_<uuid> wire form promoteSelection uses; anchor absent → null,
+    // elementId absent → null (an omitted field is not a legal serde Option).
     expect(args).toEqual({
       snapshotId: 7,
       sketchId: enterId,
       mode: "faceOutline",
-      sources: [{ bodyId: "body_body1", topoKey: "f:4", anchor: null }],
+      sources: [
+        { bodyId: "body_body1", topoKey: "f:4", elementId: null, anchor: null },
+        { bodyId: "body_body1", topoKey: "f:9", elementId: "el_seat", anchor: null },
+      ],
     });
     expect(result.sketchId).toBe(session.sketchId); // the FRONTEND id, not the wire echo
     expect(result.snapshotId).toBe(7);
@@ -1211,6 +1232,10 @@ describe("tauriClient fresh-sketch naming", () => {
       datums: {},
       features: [],
       appliedOps: 0,
+      undoDepth: 0,
+      redoDepth: 0,
+      undoLabel: null,
+      redoLabel: null,
       geometrySource: "live",
     });
     let addName: string | undefined;
@@ -1248,6 +1273,27 @@ describe("tauriClient mesh path", () => {
     const view = parseMeshPayload(buf);
     expect(view.positions.length).toBeGreaterThan(0);
     expect(view.indices.length % 3).toBe(0);
+  });
+
+  it("marshals the native render-watchdog acknowledgment identity", async () => {
+    let seen: unknown;
+    mockIPC((cmd, payload) => {
+      if (cmd === "mesh_render_completed") seen = payload;
+    });
+    await createTauriClient().meshRenderCompleted({
+      expectationId: 8,
+      documentId: "doc-a",
+      revision: 3,
+      snapshotId: 5,
+      bodyId: "body-a",
+    });
+    expect(seen).toEqual({
+      expectationId: 8,
+      documentId: "doc-a",
+      revision: 3,
+      snapshotId: 5,
+      bodyId: "body-a",
+    });
   });
 });
 
@@ -1287,6 +1333,7 @@ describe("tauriClient events", () => {
         await emit("projection-updated", {
           status: "ready",
           documentId: "doc-reopened",
+          runtimeSession: "runtime-reopened",
           revision: 1,
           title: "Reopened",
           dirty: false,
@@ -1295,7 +1342,7 @@ describe("tauriClient events", () => {
           datums: {},
           features: [],
         });
-        return { documentId: "doc-reopened", title: "Reopened" };
+        return { documentId: "doc-reopened", runtimeSession: "runtime-reopened", title: "Reopened" };
       }
       return undefined;
     }, { shouldMockEvents: true });
@@ -1420,12 +1467,12 @@ describe("operationToEditCommand", () => {
 // ── applyOperation / undo / redo — command + regen correlation ────────────────
 
 describe("tauriClient edit + correlation", () => {
-  it("applyOperation invokes apply_edit_command and correlates the regen", async () => {
+  it("applyOperation receives a backend rollback receipt and correlates the regen", async () => {
     let command: { cmd?: string } | undefined;
     mockIPC(
       (cmd, payload) => {
-        if (cmd === "apply_edit_command") {
-          command = (payload as { command: { cmd?: string } }).command;
+        if (cmd === "apply_operation") {
+          command = (payload as { commands: { cmd?: string }[] }).commands[0];
           setTimeout(() => {
             // Real backend order: document-changed (bodies), then the regen-finished
             // sibling. A fresh AddOperation (recordId) settles on the latter.
@@ -1436,9 +1483,12 @@ describe("tauriClient edit + correlation", () => {
             });
             void emit("regen-finished", { revision: 6, sourceRevision: 5, outcome: "published" });
           }, 0);
-          return readyProjection(5, [
-            { id: "f", kind: "extrude", label: "Extrude", valueText: "25.0 mm", status: "dirty" },
-          ]);
+          return {
+            projection: readyProjection(5, [
+              { id: "f", kind: "extrude", label: "Extrude", valueText: "25.0 mm", status: "dirty" },
+            ]),
+            rollbackToken: "receipt-1",
+          };
         }
       },
       { shouldMockEvents: true },
@@ -1457,10 +1507,11 @@ describe("tauriClient edit + correlation", () => {
     expect(res.features).toHaveLength(1);
     expect(res.opLabel).toBe("Union");
     expect(res.terminal).toBe("published");
+    expect(res.rollbackToken).toBe("receipt-1");
   });
 
   it("applyOperation falls back to the pre-regen projection when no regen fires", async () => {
-    mockIPC((cmd) => (cmd === "apply_edit_command" ? readyProjection(5) : undefined), {
+    mockIPC((cmd) => (cmd === "apply_operation" ? { projection: readyProjection(5) } : undefined), {
       shouldMockEvents: true,
     });
     __setRegenTimeoutForTests(20);
@@ -1471,6 +1522,51 @@ describe("tauriClient edit + correlation", () => {
     expect(res.revision).toBe(5);
     expect(res.changedBodies).toEqual([]);
     expect(res.terminal).toBe("timeout");
+  });
+
+  it("conditional rollback marshals its token and a stale refusal does not wait for regen", async () => {
+    let sent: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd !== "rollback_failed_operation") return undefined;
+        sent = (payload as { token: string }).token;
+        return { projection: readyProjection(8), rolledBack: false, reason: "stale" };
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const started = performance.now();
+    const result = await createTauriClient().rollbackFailedOperation("receipt-stale");
+    expect(sent).toBe("receipt-stale");
+    expect(result).toMatchObject({ rolledBack: false, reason: "stale", terminal: "noop" });
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it("direct updateOperationParams uses the receipt-bearing operation command", async () => {
+    let payload: { commands?: { cmd?: string; record?: string }[] } | undefined;
+    mockIPC(
+      (cmd, args) => {
+        if (cmd !== "apply_operation") return undefined;
+        payload = args as typeof payload;
+        setTimeout(
+          () => void emit("regen-finished", { revision: 10, sourceRevision: 9, outcome: "noop" }),
+          0,
+        );
+        return { projection: readyProjection(9), rollbackToken: "reedit-receipt" };
+      },
+      { shouldMockEvents: true },
+    );
+    const command = operationToEditCommand({
+      opType: "Boolean",
+      featureId: "record-1",
+      params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
+    } as OperationOp);
+    const result = await createTauriClient().applyEditCommand(command);
+    expect(payload?.commands).toEqual([expect.objectContaining({
+      cmd: "updateOperationParams",
+      record: "record-1",
+    })]);
+    expect(result.rollbackToken).toBe("reedit-receipt");
   });
 
   it("undo invokes undo and reports the removed bodies from the regen", async () => {
@@ -1540,7 +1636,7 @@ describe("tauriClient edit + correlation", () => {
   it("surfaces a rejected command as an Error carrying the ApiError kind", async () => {
     mockIPC(
       (cmd) => {
-        if (cmd === "apply_edit_command") return Promise.reject({ kind: "opFailed", message: "boom" });
+        if (cmd === "apply_operation") return Promise.reject({ kind: "opFailed", message: "boom" });
       },
       { shouldMockEvents: true },
     );
@@ -1759,7 +1855,7 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
     unsub();
   });
 
-  it("endPreview(commit) materializes the op through apply_edit_command", async () => {
+  it("endPreview(commit) atomically materializes and hides its consumed sketch", async () => {
     const cmds: string[] = [];
     mockIPC(
       (cmd) => {
@@ -1775,7 +1871,7 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
           };
         }
         if (cmd === "get_sketch_regions") return { regions: [PREVIEW_REGION] };
-        if (cmd === "apply_edit_command") {
+        if (cmd === "apply_operation") {
           setTimeout(() => {
             void emit("document-changed", {
               revision: 9,
@@ -1802,7 +1898,7 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
     client.updatePreview(session.sessionId, { distance: 20 }, 1);
     const res = await client.endPreview(session.sessionId, true);
     expect(res).not.toBeNull();
-    expect(cmds).toContain("apply_edit_command");
+    expect(cmds).toContain("apply_operation");
     expect(res?.changedBodies[0].bodyId).toBe("b9");
   });
 
@@ -1979,6 +2075,31 @@ describe("tauriClient conflicting-id mapping (backend uuid → frontend id)", ()
   });
 });
 
+describe("tauriClient scoped geometry reads", () => {
+  it("marshals the complete authoritative fence without changing legacy calls", async () => {
+    const seen: Array<{ cmd: string; payload: unknown }> = [];
+    mockIPC((cmd, payload) => {
+      seen.push({ cmd, payload });
+      if (cmd === "query_mass_properties") {
+        return { bodyId: "body_a", volume: 1, surfaceArea: 2, centroid: [0, 0, 0], inertia: [1, 1, 1] };
+      }
+      return null;
+    });
+    const client = createTauriClient();
+    const fence = { documentId: "doc", runtimeSession: "runtime", snapshotId: 17 };
+    await client.elementInfo("a", "el_1", "f:1", fence);
+    await client.massProperties("a", fence);
+    await client.classifyElement("a", "el_1", "f:1", fence);
+    await client.massProperties("a");
+
+    expect(seen.slice(0, 3).every(({ payload }) =>
+      (payload as { readFence?: unknown }).readFence === fence,
+    )).toBe(true);
+    expect((seen[0].payload as { snapshotId: number }).snapshotId).toBe(17);
+    expect((seen[3].payload as { readFence?: unknown }).readFence).toBeUndefined();
+  });
+});
+
 // ── Promotion (pick → ElementId) ──────────────────────────────────────────────
 
 describe("tauriClient promoteSelection", () => {
@@ -1990,13 +2111,39 @@ describe("tauriClient promoteSelection", () => {
         return [{ topoKey: "f:2", elementId: "el_abc", kind: "face", bodyId: "body_uuid-1" }];
       }
     });
-    const out = await createTauriClient().promoteSelection("uuid-1", [
-      { topoKey: "f:2", anchor: { worldPoint: [1, 2, 3] } },
-    ]);
+    const out = await createTauriClient().promoteSelection(
+      "uuid-1",
+      [{ topoKey: "f:2", anchor: { worldPoint: [1, 2, 3] } }],
+      7,
+      "runtime-1",
+    );
     expect(out[0].elementId).toBe("el_abc");
+    expect(out[0].bodyId).toBe("uuid-1");
     expect(args?.bodyId).toBe("body_uuid-1"); // bare uuid prefixed to the wire form
-    expect(args?.snapshotId).toBe(0); // no regen published yet ⇒ default snapshot 0
+    expect(args?.snapshotId).toBe(7);
+    expect((args as { expectedRuntimeSession?: string })?.expectedRuntimeSession).toBe("runtime-1");
     expect(args?.picks?.[0].topoKey).toBe("f:2");
+  });
+
+  it("rejects a promoted element returned for another wire body", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "promote_selection") {
+        return [{ topoKey: "f:2", elementId: "el_abc", kind: "face", bodyId: "body_other" }];
+      }
+    });
+    await expect(
+      createTauriClient().promoteSelection("uuid-1", [{ topoKey: "f:2" }], 7),
+    ).rejects.toThrow("unexpected body");
+  });
+
+  it("preserves an already-wire-form caller body after exact validation", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "promote_selection") {
+        return [{ topoKey: "f:2", elementId: "el_abc", kind: "face", bodyId: "body_uuid-1" }];
+      }
+    });
+    const out = await createTauriClient().promoteSelection("body_uuid-1", [{ topoKey: "f:2" }], 7);
+    expect(out[0].bodyId).toBe("body_uuid-1");
   });
 
   it("forwards the published snapshotId from document-changed (not 0)", async () => {
@@ -2238,7 +2385,7 @@ describe("tauriClient regen-finished correlation", () => {
   it("resolves a no-geometry edit from regen-finished (not the timeout)", async () => {
     mockIPC(
       (cmd) => {
-        if (cmd === "apply_edit_command") {
+        if (cmd === "apply_operation") {
           setTimeout(() => void emit("regen-finished", { revision: 12, outcome: "noop" }), 0);
           return readyProjection(11);
         }
@@ -2259,7 +2406,7 @@ describe("tauriClient regen-finished correlation", () => {
     // and settles the commit on its regen-finished sibling.
     mockIPC(
       (cmd) => {
-        if (cmd === "apply_edit_command") {
+        if (cmd === "apply_operation") {
           setTimeout(() => {
             void emit("regen-finished", { revision: 8, sourceRevision: 3, outcome: "superseded" });
             void emit("document-changed", {
@@ -2284,7 +2431,7 @@ describe("tauriClient regen-finished correlation", () => {
   it("resolves a failed regen-finished as a failure carrying the worker message", async () => {
     mockIPC(
       (cmd) => {
-        if (cmd === "apply_edit_command") {
+        if (cmd === "apply_operation") {
           setTimeout(
             () =>
               void emit("regen-finished", {
@@ -2322,7 +2469,7 @@ describe("tauriClient regen-finished correlation", () => {
     // the awaiter falls through to the safety timeout (null → pre-regen projection).
     mockIPC(
       (cmd) => {
-        if (cmd === "apply_edit_command") {
+        if (cmd === "apply_operation") {
           setTimeout(
             () => void emit("regen-finished", { revision: 4, sourceRevision: 2, outcome: "failed", message: "old" }),
             0,
@@ -2346,8 +2493,8 @@ describe("tauriClient regen-finished correlation", () => {
     let recordId: string | undefined;
     mockIPC(
       (cmd, payload) => {
-        if (cmd === "apply_edit_command") {
-          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+        if (cmd === "apply_operation") {
+          recordId = (payload as { commands: { record: { recordId: string } }[] }).commands[0].record.recordId;
           setTimeout(() => {
             void emit("document-changed", {
               revision: 10,
@@ -2390,8 +2537,8 @@ describe("tauriClient regen-finished correlation", () => {
     let recordId: string | undefined;
     mockIPC(
       (cmd, payload) => {
-        if (cmd === "apply_edit_command") {
-          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+        if (cmd === "apply_operation") {
+          recordId = (payload as { commands: { record: { recordId: string } }[] }).commands[0].record.recordId;
           setTimeout(() => {
             void emit("document-changed", {
               revision: 12,
@@ -2433,8 +2580,8 @@ describe("tauriClient regen-finished correlation", () => {
     let recordId = "";
     mockIPC(
       (cmd, payload) => {
-        if (cmd === "apply_edit_command") {
-          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+        if (cmd === "apply_operation") {
+          recordId = (payload as { commands: { record: { recordId: string } }[] }).commands[0].record.recordId;
           return {
             ...(readyProjection(5, [{ id: "f0" }, { id: "f1" }, { id: recordId }]) as object),
             appliedOps: 2,
@@ -2461,8 +2608,8 @@ describe("tauriClient regen-finished correlation", () => {
     let recordId = "";
     mockIPC(
       (cmd, payload) => {
-        if (cmd === "apply_edit_command") {
-          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+        if (cmd === "apply_operation") {
+          recordId = (payload as { commands: { record: { recordId: string } }[] }).commands[0].record.recordId;
           return {
             ...(readyProjection(5, [{ id: "f0" }, { id: "f1" }, { id: recordId }, { id: "unrelated-draft" }]) as object),
             appliedOps: 3,
@@ -2584,11 +2731,136 @@ describe("tauriClient correlation reset on document replacement", () => {
     params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
   } as OperationOp;
 
+  it("runs beforeAdopt after native success and before buffered event replay", async () => {
+    const order: string[] = [];
+    let invokePayload: Record<string, unknown> | undefined;
+    mockIPC(async (cmd, payload) => {
+      if (cmd !== "open_document") return undefined;
+      invokePayload = payload as Record<string, unknown>;
+      await emit("projection-updated", {
+        ...readyProjection(1), documentId: "doc-new", runtimeSession: "runtime-new",
+      });
+      return { documentId: "doc-new", runtimeSession: "runtime-new", title: "New" };
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onProjectionUpdated(() => order.push("projection"));
+    await tick();
+
+    await client.openDocument("/new.onecad", undefined, {
+      beforeAdopt: () => order.push("beforeAdopt"),
+    });
+
+    expect(order).toEqual(["beforeAdopt", "projection"]);
+    expect(invokePayload).not.toHaveProperty("beforeAdopt");
+  });
+
+  it("does not call beforeAdopt on failure and swallows trusted hook errors after success", async () => {
+    let fail = true;
+    mockIPC((cmd) => {
+      if (cmd !== "new_document") return undefined;
+      if (fail) throw new Error("native failed");
+      return { documentId: "doc-new", runtimeSession: "runtime-new", title: "New" };
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    const hook = vi.fn(() => { throw new Error("local reset failed"); });
+    await expect(client.newDocument({ beforeAdopt: hook })).rejects.toThrow("native failed");
+    expect(hook).not.toHaveBeenCalled();
+    fail = false;
+    await expect(client.newDocument({ beforeAdopt: hook })).resolves.toMatchObject({
+      runtimeSession: "runtime-new",
+    });
+    expect(hook).toHaveBeenCalledOnce();
+  });
+
+  it("keeps successful replacement authority when replay subscribers throw", async () => {
+    const projections: string[] = [];
+    const repairs: string[] = [];
+    mockIPC(async (cmd) => {
+      if (cmd === "get_projection") return {
+        ...readyProjection(1), documentId: "doc-old", runtimeSession: "runtime-old",
+      };
+      if (cmd === "open_document") {
+        await emit("projection-updated", {
+          ...readyProjection(2), documentId: "doc-new", runtimeSession: "runtime-new",
+        });
+        await emit("needs-repair", {
+          runtimeSession: "runtime-new", revision: 2, snapshotId: 2, items: [],
+        });
+        return { documentId: "doc-new", runtimeSession: "runtime-new", title: "New" };
+      }
+      return undefined;
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onProjectionUpdated(() => { throw new Error("bad projection subscriber"); });
+    client.onProjectionUpdated((projection) =>
+      projections.push(projection.runtimeSession ?? "missing"));
+    client.onNeedsRepair(() => { throw new Error("bad repair subscriber"); });
+    client.onNeedsRepair((event) => repairs.push(event.runtimeSession ?? "missing"));
+    client.onDocumentChanged(() => {});
+    await tick();
+    await client.getProjection();
+
+    await expect(client.openDocument("/new.onecad")).resolves.toMatchObject({
+      runtimeSession: "runtime-new",
+    });
+    await emit("document-changed", {
+      documentId: "doc-old", runtimeSession: "runtime-old", revision: 9, snapshotId: 9,
+      changedBodies: [{ bodyId: "old", meshKey: "old:fine:9" }], removedBodies: [],
+    });
+    await emit("document-changed", {
+      documentId: "doc-new", runtimeSession: "runtime-new", revision: 3, snapshotId: 3,
+      changedBodies: [{ bodyId: "new", meshKey: "new:fine:3" }], removedBodies: [],
+    });
+
+    expect(projections).toEqual(["runtime-new"]);
+    expect(repairs).toEqual(["runtime-new"]);
+    expect(client.getCurrentMeshPublication()).toMatchObject({
+      runtimeSession: "runtime-new",
+      revision: 3,
+    });
+  });
+
+  it("runs close beforeAdopt after backend success but before clearing frontend authority", async () => {
+    let failClose = false;
+    mockIPC((cmd) => {
+      if (cmd === "get_projection") return {
+        ...readyProjection(1), documentId: "doc-old", runtimeSession: "runtime-old",
+      };
+      if (cmd === "close_document") {
+        if (failClose) throw new Error("close failed");
+        return undefined;
+      }
+      return undefined;
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onDocumentChanged(() => {});
+    await tick();
+    await client.getProjection();
+    await emit("document-changed", {
+      documentId: "doc-old", runtimeSession: "runtime-old", revision: 1, snapshotId: 1,
+      changedBodies: [], removedBodies: [],
+    });
+    const seen: string[] = [];
+    failClose = true;
+    await expect(client.closeDocument({
+      beforeAdopt: () => seen.push("beforeAdopt"),
+    })).rejects.toThrow("close failed");
+    expect(seen).toEqual([]);
+    expect(client.getCurrentMeshPublication()?.runtimeSession).toBe("runtime-old");
+
+    failClose = false;
+    await client.closeDocument({
+      beforeAdopt: () => seen.push("beforeAdopt"),
+    });
+    expect(seen).toEqual(["beforeAdopt"]);
+    expect(client.getCurrentMeshPublication()).toBeNull();
+  });
+
   it("open(docB) drops docA's buffered publish so docB's first commit can't settle off it", async () => {
     mockIPC(
       (cmd) => {
         if (cmd === "open_document") return { documentId: "docB", title: "B" };
-        if (cmd === "apply_edit_command") {
+        if (cmd === "apply_operation") {
           // docB's first commit is a NOOP (only a regen-finished, no document-changed):
           // its success bodies must come from nothing, not docA's stale buffer.
           setTimeout(() => void emit("regen-finished", { revision: 2, sourceRevision: 1, outcome: "noop" }), 0);
@@ -2615,6 +2887,250 @@ describe("tauriClient correlation reset on document replacement", () => {
     const res = await client.applyOperation(op);
     expect(res.changedBodies).toEqual([]);
     unsub();
+  });
+
+  it("buffers matching events during replacement and rejects delayed same-id ABA events", async () => {
+    mockIPC(async (cmd) => {
+      if (cmd !== "open_document") return undefined;
+      await emit("projection-updated", {
+        ...readyProjection(1),
+        documentId: "same-doc",
+        runtimeSession: "runtime-new",
+        geometrySource: "live",
+      });
+      await emit("document-changed", {
+        documentId: "same-doc",
+        runtimeSession: "runtime-new",
+        revision: 1,
+        snapshotId: 1,
+        changedBodies: [{ bodyId: "new", meshKey: "new:fine:1" }],
+        removedBodies: [],
+      });
+      // A delayed old-runtime event arrives LAST while the replacement command is
+      // still pending; keyed buffering must not overwrite the new runtime's event.
+      await emit("document-changed", {
+        documentId: "same-doc",
+        runtimeSession: "runtime-old",
+        revision: 99,
+        snapshotId: 1,
+        changedBodies: [{ bodyId: "old-during-open", meshKey: "old:fine:1" }],
+        removedBodies: [],
+      });
+      return { documentId: "same-doc", runtimeSession: "runtime-new", title: "Same" };
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    const seen: DocumentChange[] = [];
+    client.onDocumentChanged((change) => seen.push(change));
+    await tick();
+
+    await client.openDocument("/same.onecad");
+    await emit("document-changed", {
+      documentId: "same-doc",
+      runtimeSession: "runtime-old",
+      revision: 1,
+      snapshotId: 1,
+      changedBodies: [{ bodyId: "old", meshKey: "old:fine:1" }],
+      removedBodies: [],
+    });
+
+    expect(seen.map((change) => change.changedBodies[0]?.bodyId)).toEqual(["new"]);
+    expect(client.getCurrentMeshPublication()?.runtimeSession).toBe("runtime-new");
+  });
+
+  it("restores the prior runtime publication when open fails before replacement", async () => {
+    const repairs: NeedsRepairEvent[] = [];
+    mockIPC(async (cmd) => {
+      if (cmd === "get_projection") return {
+        ...readyProjection(4),
+        documentId: "doc-old",
+        runtimeSession: "runtime-old",
+        geometrySource: "live",
+      };
+      if (cmd === "open_document") {
+        await emit("regen-finished", {
+          runtimeSession: "runtime-old", revision: 5, sourceRevision: 5, outcome: "noop",
+        });
+        await emit("regen-started", { runtimeSession: "runtime-old" });
+        await emit("needs-repair", {
+          runtimeSession: "runtime-old", revision: 5, snapshotId: 5, items: [],
+        });
+        await emit("document-changed", {
+          documentId: "doc-old",
+          runtimeSession: "runtime-old",
+          revision: 5,
+          snapshotId: 5,
+          changedBodies: [{ bodyId: "newer-old", meshKey: "newer-old:fine:5" }],
+          removedBodies: [],
+        });
+        throw new Error("open failed");
+      }
+      return undefined;
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onDocumentChanged(() => {});
+    client.onNeedsRepair((event) => repairs.push(event));
+    await tick();
+    await client.getProjection();
+    await emit("document-changed", {
+      documentId: "doc-old",
+      runtimeSession: "runtime-old",
+      revision: 4,
+      snapshotId: 4,
+      changedBodies: [{ bodyId: "old", meshKey: "old:fine:4" }],
+      removedBodies: [],
+    });
+
+    await expect(client.openDocument("/bad.onecad")).rejects.toThrow("open failed");
+    expect(client.getCurrentMeshPublication()?.runtimeSession).toBe("runtime-old");
+    expect(client.getCurrentMeshPublication()?.revision).toBe(5);
+    expect(client.getCurrentMeshPublication()?.changedBodies[0]?.bodyId).toBe("newer-old");
+    expect(documentStore.getState().regenBusy).toBe(1);
+    expect(repairs[repairs.length - 1]?.runtimeSession).toBe("runtime-old");
+  });
+
+  it("does not let a late getProjection response re-authorize a closed runtime", async () => {
+    const repairs: NeedsRepairEvent[] = [];
+    let resolveProjection!: (value: Record<string, unknown>) => void;
+    const delayed = new Promise<Record<string, unknown>>((resolve) => {
+      resolveProjection = resolve;
+    });
+    mockIPC((cmd) => {
+      if (cmd === "get_projection") return delayed;
+      if (cmd === "close_document") return undefined;
+      return undefined;
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onDocumentChanged(() => {});
+    client.onNeedsRepair((event) => repairs.push(event));
+    await tick();
+    const projection = client.getProjection();
+    await client.closeDocument();
+    documentStore.getState().applySnapshot(emptyDocument());
+    resolveProjection({
+      ...readyProjection(8),
+      documentId: "closed-doc",
+      runtimeSession: "closed-runtime",
+      geometrySource: "live",
+    });
+    await projection;
+    await emit("projection-updated", {
+      ...readyProjection(9),
+      documentId: "closed-doc",
+      runtimeSession: "closed-runtime",
+      geometrySource: "live",
+    });
+    await emit("document-changed", {
+      documentId: "closed-doc",
+      runtimeSession: "closed-runtime",
+      revision: 8,
+      snapshotId: 8,
+      changedBodies: [{ bodyId: "stale", meshKey: "stale:fine:8" }],
+      removedBodies: [],
+    });
+    await emit("regen-started", { runtimeSession: "closed-runtime" });
+    await emit("regen-finished", {
+      runtimeSession: "closed-runtime", revision: 9, sourceRevision: 9,
+      outcome: "failed", message: "closed failure",
+    });
+    await emit("needs-repair", {
+      runtimeSession: "closed-runtime", revision: 9, snapshotId: 9,
+      items: [{ opId: "closed", refId: "closed.input", reason: "no-candidates", candidateCount: 0 }],
+    });
+    expect(client.getCurrentMeshPublication()).toBeNull();
+    expect(documentStore.getState().status).toBe("empty");
+    expect(documentStore.getState().regenBusy).toBe(0);
+    expect(repairs).toEqual([]);
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("closed failure");
+  });
+
+  it("flushes ordered lifecycle state when getProjection first establishes authority", async () => {
+    const repairs: NeedsRepairEvent[] = [];
+    mockIPC((cmd) => cmd === "get_projection" ? {
+      ...readyProjection(3), documentId: "doc-a", runtimeSession: "runtime-a",
+    } : undefined, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onNeedsRepair((event) => repairs.push(event));
+    await tick();
+    // A no-op completion clamps zero, then a real job starts: ordered result is 1,
+    // not the zero produced by a starts-minus-finishes aggregate.
+    await emit("regen-finished", {
+      runtimeSession: "runtime-a", revision: 2, sourceRevision: 2, outcome: "noop",
+    });
+    await emit("regen-started", { runtimeSession: "runtime-a" });
+    await emit("needs-repair", {
+      runtimeSession: "runtime-a", revision: 2, snapshotId: 2, items: [],
+    });
+
+    await client.getProjection();
+
+    expect(documentStore.getState().regenBusy).toBe(1);
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0].runtimeSession).toBe("runtime-a");
+  });
+
+  it("buffers lifecycle events by session and replays only the successful replacement", async () => {
+    const repairs: NeedsRepairEvent[] = [];
+    mockIPC(async (cmd) => {
+      if (cmd !== "open_document") return undefined;
+      await emit("regen-started", { runtimeSession: "runtime-new" });
+      await emit("regen-started", { runtimeSession: "runtime-old" });
+      await emit("regen-finished", {
+        runtimeSession: "runtime-new", revision: 2, sourceRevision: 1, outcome: "published",
+      });
+      await emit("needs-repair", {
+        runtimeSession: "runtime-new", revision: 2, snapshotId: 2, items: [],
+      });
+      await emit("needs-repair", {
+        runtimeSession: "runtime-old", revision: 99, snapshotId: 99,
+        items: [{ opId: "old", refId: "old.input", reason: "no-candidates", candidateCount: 0 }],
+      });
+      return { documentId: "doc-new", runtimeSession: "runtime-new", title: "New" };
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    client.onNeedsRepair((event) => repairs.push(event));
+    await tick();
+
+    await client.openDocument("/new.onecad");
+    await emit("regen-started", { runtimeSession: "runtime-old" });
+    await emit("regen-finished", {
+      runtimeSession: "runtime-old", revision: 100, sourceRevision: 100,
+      outcome: "failed", message: "stale failure",
+    });
+    await emit("needs-repair", {
+      runtimeSession: "runtime-old", revision: 100, snapshotId: 100,
+      items: [{ opId: "late-old", refId: "old.input", reason: "no-candidates", candidateCount: 0 }],
+    });
+
+    expect(documentStore.getState().regenBusy).toBe(0);
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0].runtimeSession).toBe("runtime-new");
+    expect(viewportStore.getState().statusHint?.message ?? "").not.toContain("stale failure");
+  });
+
+  it("refuses an edit response crossing a replacement boundary", async () => {
+    let resolveEdit!: (value: ReturnType<typeof readyProjection>) => void;
+    const delayedEdit = new Promise<ReturnType<typeof readyProjection>>((resolve) => {
+      resolveEdit = resolve;
+    });
+    mockIPC((cmd) => {
+      if (cmd === "get_projection") return {
+        ...readyProjection(1), documentId: "doc-old", runtimeSession: "runtime-old",
+      };
+      if (cmd === "apply_operation") return delayedEdit;
+      if (cmd === "new_document") return {
+        documentId: "doc-new", runtimeSession: "runtime-new", title: "New",
+      };
+      return undefined;
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+    await client.getProjection();
+    const edit = client.applyOperation(op);
+    await client.newDocument();
+    resolveEdit(Object.assign(readyProjection(2), {
+      documentId: "doc-old", runtimeSession: "runtime-old",
+    }));
+
+    await expect(edit).rejects.toThrow("document changed while command was in flight");
   });
 });
 
@@ -3575,5 +4091,96 @@ describe("tauriClient entityStates reverse map (SCHEMA §7.4)", () => {
     // Only the hydrated ENTITY survives: the backing point and the stale id both
     // fall out, because neither names anything the viewport can color.
     expect(session.entityStates).toEqual({ l1: "fullyConstrained" });
+  });
+});
+
+// ── menu-action (native menu → the ONE frontend router) ───────────────────────
+//
+// The event carries a verb and nothing else; these pin that the verb reaches the
+// same code a ⌘-chord does, and that an unrecognised one is ignored rather than
+// guessed at.
+
+describe("tauriClient menu-action", () => {
+  afterEach(() => setModelToolController(null));
+
+  it("routes Edit → Undo through the shared undo router", async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    const ctrl = { undo: vi.fn(() => Promise.resolve()), redo: vi.fn(() => Promise.resolve()) };
+    setModelToolController(ctrl as unknown as ModelToolController);
+    createTauriClient();
+    await tick(); // let the lazy listen() register
+
+    await emit("menu-action", { action: "undo" });
+    // The router module is imported dynamically on first use.
+    await vi.waitFor(() => expect(ctrl.undo).toHaveBeenCalledTimes(1));
+    expect(ctrl.redo).not.toHaveBeenCalled();
+
+    await emit("menu-action", { action: "redo" });
+    await vi.waitFor(() => expect(ctrl.redo).toHaveBeenCalledTimes(1));
+  });
+
+  it("ignores a verb it does not know", async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    const ctrl = { undo: vi.fn(() => Promise.resolve()), redo: vi.fn(() => Promise.resolve()) };
+    setModelToolController(ctrl as unknown as ModelToolController);
+    createTauriClient();
+    await tick();
+
+    await emit("menu-action", { action: "teleport" });
+    await emit("menu-action", {});
+    await tick(20);
+    expect(ctrl.undo).not.toHaveBeenCalled();
+    expect(ctrl.redo).not.toHaveBeenCalled();
+  });
+});
+
+// ── undo/redo that reverted nothing settles at once ───────────────────────────
+
+describe("tauriClient revert correlation", () => {
+  /** Fails loudly instead of hanging when the awaiter waits for a regen. */
+  function within<T>(ms: number, work: Promise<T>, what: string): Promise<T> {
+    return Promise.race([
+      work,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(what)), ms)),
+    ]);
+  }
+
+  it("settles a no-op undo immediately instead of waiting out the correlation", async () => {
+    // `api::undo` schedules NO regen when nothing reverted, so there is no
+    // document-changed and no regen-finished to correlate against — the depth
+    // not moving is the signal.
+    mockIPC(
+      (cmd) => (cmd === "undo" ? { ...(readyProjection(4) as object), undoDepth: 0, redoDepth: 1 } : undefined),
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(8000);
+    const res = await within(250, createTauriClient().undo(), "undo waited for a regen that never fires");
+    expect(res.terminal).toBe("noop");
+    // Nothing was reverted, so there is no step to name — the controller turns
+    // this into "Nothing to undo".
+    expect(res.opLabel).toBeUndefined();
+  });
+
+  it("still waits for the regen when the undo really moved a step", async () => {
+    documentStore.getState().applySnapshot({
+      ...seedMockDocument(),
+      undoDepth: 2,
+      undoLabel: "Extrude",
+    });
+    mockIPC(
+      (cmd) => {
+        if (cmd !== "undo") return undefined;
+        setTimeout(() => {
+          void emit("document-changed", { revision: 4, changedBodies: [], removedBodies: ["gone"] });
+        }, 0);
+        return { ...(readyProjection(4) as object), undoDepth: 1, redoDepth: 1 };
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().undo();
+    expect(res.removedBodies).toEqual(["gone"]);
+    expect(res.terminal).toBe("published");
+    expect(res.opLabel).toBe("Extrude");
   });
 });

@@ -23,7 +23,10 @@ function renderStatusBar() {
 }
 
 describe("StatusBar", () => {
-  beforeEach(() => resetStores());
+  beforeEach(() => {
+    resetStores();
+    documentStore.getState().setSketchSolve("sketch2", 3, "under");
+  });
 
   /*
    * AMENDED (LGU-1 WP-A, F1's neighbour). This asserted "DOF: 0" for the
@@ -45,6 +48,27 @@ describe("StatusBar", () => {
     expect(screen.getByText(/273\.00/)).toBeInTheDocument();
 
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
+    expect(screen.queryByText(/^DOF:/)).toBeNull();
+  });
+
+  it("omits legacy selected-sketch DOF without current evaluation metadata", () => {
+    renderStatusBar();
+    act(() => {
+      const sketches = documentStore.getState().sketches;
+      documentStore.setState({
+        sketches: {
+          ...sketches,
+          sketch2: {
+            ...sketches.sketch2,
+            dof: 0,
+            status: "ok",
+            geometryToken: undefined as never,
+            solveGeometryToken: undefined,
+          },
+        },
+      });
+    });
+
     expect(screen.queryByText(/^DOF:/)).toBeNull();
   });
 

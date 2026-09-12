@@ -30,6 +30,7 @@ import type { MeshEntry } from "../mesh/meshRegistry";
 import { getEntry } from "../mesh/meshRegistry";
 import { BODY_EDGE_WIDTH } from "./bodyMaterials";
 import { MAX_DPR } from "./SketchObject";
+import { isInteractiveBoundary } from "@/ui/interactiveBoundary";
 
 export interface PickHit {
   bodyId: string;
@@ -41,6 +42,20 @@ export interface PickHit {
   worldPos: THREE.Vector3;
   /** Local hint for previews/promotion (face normal in world space). */
   surfaceHint?: { normal?: [number, number, number] };
+}
+
+export type ProbeCandidateKind = "body" | "face" | "edge";
+export interface ProbeCandidateFilter {
+  kinds?: readonly ProbeCandidateKind[];
+  includeBodyIds?: readonly string[];
+  excludeBodyIds?: readonly string[];
+}
+export interface ProbeCandidate extends Omit<PickHit, "kind"> {
+  kind: ProbeCandidateKind;
+  meshRev?: number;
+  entryIdentity?: { bodyId: string; meshRev: number };
+  /** Exact installed object captured at probe time; local proof, never IPC. */
+  entry?: MeshEntry;
 }
 
 export interface PickModifiers {
@@ -278,6 +293,66 @@ export class Picker {
     return this.pickAt(clientX, clientY);
   }
 
+  /** Ordered, read-only overlap enumeration. Does not affect hover or selection. */
+  probeCandidates(
+    clientX: number,
+    clientY: number,
+    filter: ProbeCandidateFilter = {},
+  ): ProbeCandidate[] {
+    const allowed = new Set<ProbeCandidateKind>(filter.kinds ?? ["face", "edge"]);
+    if ([...allowed].some((kind) => kind !== "body" && kind !== "face" && kind !== "edge")) {
+      return [];
+    }
+    const include = filter.includeBodyIds ? new Set(filter.includeBodyIds) : null;
+    const exclude = new Set(filter.excludeBodyIds ?? []);
+    const raw = this.raycastAll(clientX, clientY, allowed.has("edge"));
+    if (!raw) return [];
+    const candidates: ProbeCandidate[] = [];
+    if (allowed.has("face") || allowed.has("body")) {
+      for (const hit of raw.faceHits) {
+        const face = resolvePick(hit, "face");
+        if (!face || (include && !include.has(face.bodyId)) || exclude.has(face.bodyId)) continue;
+        const entry = getEntry(face.bodyId);
+        const candidate = {
+          ...face,
+          meshRev: entry?.meshRev,
+          entryIdentity: entry ? { bodyId: face.bodyId, meshRev: entry.meshRev } : undefined,
+          entry,
+        };
+        if (allowed.has("face")) candidates.push(candidate);
+        if (allowed.has("body")) {
+          candidates.push({ ...candidate, kind: "body", topoKey: face.bodyId, elementId: undefined });
+        }
+      }
+    }
+    if (allowed.has("edge")) {
+      for (const hit of raw.edgeHits) {
+        const edge = resolvePick(hit, "edge");
+        if (!edge || (include && !include.has(edge.bodyId)) || exclude.has(edge.bodyId)) continue;
+        const entry = getEntry(edge.bodyId);
+        candidates.push({
+          ...edge,
+          meshRev: entry?.meshRev,
+          entryIdentity: entry ? { bodyId: edge.bodyId, meshRev: entry.meshRev } : undefined,
+          entry,
+        });
+      }
+    }
+    const nearest = new Map<string, ProbeCandidate>();
+    for (const candidate of candidates) {
+      const key = `${candidate.bodyId}/${candidate.kind}/${candidate.topoKey}`;
+      const prior = nearest.get(key);
+      if (!prior || candidate.distance < prior.distance) nearest.set(key, candidate);
+    }
+    return [...nearest.values()].sort((a, b) => {
+      const ad = a.distance - (a.kind === "edge" ? raw.threshold : 0);
+      const bd = b.distance - (b.kind === "edge" ? raw.threshold : 0);
+      const rank = (kind: ProbeCandidateKind) => kind === "edge" ? 0 : kind === "face" ? 1 : 2;
+      return ad - bd || rank(a.kind) - rank(b.kind) ||
+        a.bodyId.localeCompare(b.bodyId) || a.topoKey.localeCompare(b.topoKey);
+    });
+  }
+
   // ── pointer handlers ──
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -299,6 +374,10 @@ export class Picker {
   };
 
   private onPointerDown = (e: PointerEvent): void => {
+    if (isInteractiveBoundary(e)) {
+      this.downButton = -1;
+      return;
+    }
     this.downX = e.clientX;
     this.downY = e.clientY;
     this.downButton = e.button;
@@ -306,6 +385,10 @@ export class Picker {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
+    if (isInteractiveBoundary(e)) {
+      this.downButton = -1;
+      return;
+    }
     const wasClick =
       this.downButton === 0 &&
       e.button === 0 &&
@@ -363,6 +446,18 @@ export class Picker {
     clientX: number,
     clientY: number,
   ): { hit: THREE.Intersection; kind: "face" | "edge" } | null {
+    const all = this.raycastAll(clientX, clientY, true);
+    if (!all) return null;
+    const faceHit = all.faceHits[0] ?? null;
+    const edgeHit = all.edgeHits[0] ?? null;
+    return choosePreferredHit(faceHit, edgeHit, all.threshold);
+  }
+
+  private raycastAll(clientX: number, clientY: number, includeEdges: boolean): {
+    faceHits: THREE.Intersection[];
+    edgeHits: THREE.Intersection[];
+    threshold: number;
+  } | null {
     const rect = this.deps.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
     const ndc = new THREE.Vector2(
@@ -388,16 +483,22 @@ export class Picker {
     // group (children keep visible=true) — hidden bodies must not be pickable.
     this.deps.getRoot().traverseVisible((o) => {
       if (o.userData.kind === "face") faceObjects.push(o);
-      else if (o.userData.kind === "edge") edgeObjects.push(o);
+      else if (includeEdges && o.userData.kind === "edge") edgeObjects.push(o);
     });
     this.flushEdgeResolution(edgeObjects);
 
     // The WHOLE sorted array, not `[0]`: under a section cut the nearest hit is
     // routinely on the half that was clipped away.
     const planes = this.deps.getClippingPlanes?.() ?? null;
-    const faceHit = firstUnclippedHit(this.raycaster.intersectObjects(faceObjects, false), planes);
-    const edgeHit = firstUnclippedHit(this.raycaster.intersectObjects(edgeObjects, false), planes);
-    return choosePreferredHit(faceHit, edgeHit, threshold);
+    const visible = (hits: THREE.Intersection[]) => !planes || planes.length === 0
+      ? hits
+      : hits.filter((hit) => planes.every((p) =>
+          p.distanceToPoint(hit.pointOnLine ?? hit.point) >= 0));
+    return {
+      faceHits: visible(this.raycaster.intersectObjects(faceObjects, false)),
+      edgeHits: visible(this.raycaster.intersectObjects(edgeObjects, false)),
+      threshold,
+    };
   }
 
   /**

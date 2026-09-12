@@ -44,6 +44,7 @@
 pub mod checkpoint;
 pub mod engine;
 pub mod executor;
+pub mod feature_pattern;
 pub mod isolation;
 pub mod planner;
 pub mod scheduler;
@@ -65,6 +66,10 @@ pub use engine::{
     TessellateRequest, TessellateResult, TessellateSpec, WorkerElementEvidence, WorkerHead,
 };
 pub use executor::{CancelToken, MeshSink, Outcome, RegenExecutor, RegenSession, RevisionGate};
+pub use feature_pattern::{
+    lower_feature_patterns, FeaturePatternError, FEATURE_PATTERN_MAX_COUNT,
+    FEATURE_PATTERN_MIN_COUNT, FEATURE_PATTERN_SEMANTICS_VERSION,
+};
 pub use isolation::{isolation_scope, IsolationScope};
 pub use planner::{
     history_prefix_hash, HistoryPrefixHash, PlanContext, RegenPlan, RegenPlanner, RegenRequest,

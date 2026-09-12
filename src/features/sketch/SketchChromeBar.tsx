@@ -4,9 +4,11 @@ import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useDocumentStore } from "@/stores/documentStore";
+import { sketchStore } from "@/stores/sketchStore";
 import { runAction } from "@/shortcuts/useShortcuts";
 import { SketchErrorPulse } from "./SketchErrorPulse";
 import { ProjectionBanner } from "./ProjectionBanner";
+import { hasCurrentSketchEvaluation } from "./constraintStatus";
 
 /**
  * Sketch chrome row (prototype 1c), shown only in sketch mode, second row of
@@ -16,7 +18,10 @@ import { ProjectionBanner } from "./ProjectionBanner";
  * width, border, shadow and position belong to the stack wrapper, not here.
  * Two variants: before a sketch exists (no activeSketchId) a "Select a
  * sketch plane" prompt with Cancel; once entered, the editing pill (name +
- * Cancel + Finish). Cancel discards straight to model mode (matching Esc).
+ * Cancel + Finish). Cancel DISCARDS (WP-U7 D-1): it arms the sketch store's exit
+ * intent and flips the mode, and the SketchController reverts the session to its
+ * state at entry — deleting the sketch if this visit minted it. Esc and Finish
+ * keep their edits.
  * Finish routes through the same `finishSketch` shortcut action as Enter: it
  * drains the sketch mutation queue first, then returns to model selection
  * and prompts for a profile. Compact layout per 1c — no flex spacer (that is
@@ -53,13 +58,19 @@ export function SketchChromeBar() {
 
   if (mode !== "sketch") return null;
 
-  const cancel = () => setMode("model");
+  // WP-U7 D-1: Cancel DISCARDS — the intent is armed on the store first, because
+  // the mode flip is the only channel to the SketchController, which consumes it
+  // in its exit path. Esc and Finish leave the intent at "keep".
+  const cancel = () => {
+    sketchStore.getState().setExitIntent("discard");
+    setMode("model");
+  };
   const finish = () => runAction({ type: "finishSketch" });
 
   // Plane-pick phase: no sketch yet — prompt for a plane; Cancel returns to model.
   if (!activeSketchId) {
     return (
-      <div className="flex h-[38px] items-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
+      <div className="flex min-h-[38px] max-w-full flex-wrap items-center justify-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
         <SketchErrorPulse />
         <Icon
           name="penEdit"
@@ -79,11 +90,11 @@ export function SketchChromeBar() {
   }
 
   const name = sketch?.name ?? "Sketch";
-  const dof = sketch?.dof ?? 0;
+  const dof = hasCurrentSketchEvaluation(sketch) ? sketch.dof : undefined;
 
   return (
     <>
-    <div className="flex h-[38px] items-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
+    <div className="flex min-h-[38px] max-w-full flex-wrap items-center justify-center gap-2.5 rounded-b-md border border-t-0 border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
       <SketchErrorPulse />
       <Icon
           name="penEdit"
@@ -93,20 +104,23 @@ export function SketchChromeBar() {
         />
       {/* Never collapses — identifying which sketch is being edited outranks
           every other label in this row. */}
-      <span className="shrink-0 whitespace-nowrap text-[12.5px] font-semibold text-sel-text">
+      <span
+        title={`Editing ${name}`}
+        className="min-w-0 max-w-48 truncate whitespace-nowrap text-[12.5px] font-semibold text-sel-text"
+      >
         Editing {name}
       </span>
       {/* E2E-only settle probe (sr-only — never shown to a real user; the
           visible status now lives solely in the inspector panel's
-          `SketchState` card). Stays a fixed "DOF: N" so `dofPill()`
-          (`e2e/helpers.ts`) has one stable node to poll. */}
+          `SketchState` card). Numeric output requires current solver evidence. */}
       <span data-testid="sketch-dof" data-dof={dof} className="sr-only">
-        DOF: {dof}
+        {dof === undefined ? "Not evaluated" : `DOF: ${dof}`}
       </span>
       <Button
         size="sm"
         variant="secondary"
         aria-label="Cancel"
+        title="Discard changes since entering the sketch"
         className="shrink-0 whitespace-nowrap text-ink-3"
         onClick={cancel}
       >

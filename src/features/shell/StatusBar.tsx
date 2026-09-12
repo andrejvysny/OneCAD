@@ -11,6 +11,7 @@ import { useSelectionStore, primarySelection } from "@/stores/selectionStore";
 import { useDocumentStore } from "@/stores/documentStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkerStore, type WorkerLifecycleState } from "@/stores/workerStore";
+import { hasCurrentSketchEvaluation } from "@/features/sketch/constraintStatus";
 import {
   useViewportStore,
   formatCursor,
@@ -67,7 +68,11 @@ export function StatusBar() {
   // probe (`e2e/helpers.ts`'s `dofPill`), so this row is free to drop its
   // sketch-mode copy. The model-mode case (a sketch/region SELECTED, not
   // being edited) is the only place StatusBar remains the sole DOF surface.
-  const dof = sketching ? null : (selectedSketch?.dof ?? null);
+  // A projection's stale or legacy number is not a DOF result, so omit the
+  // segment until the solver identifies the geometry it evaluated.
+  const dof = !sketching && hasCurrentSketchEvaluation(selectedSketch)
+    ? selectedSketch.dof
+    : null;
   const showDof = dof !== null;
   const persp = projection === "persp";
   const statusLeft = sketching

@@ -15,15 +15,11 @@
  * minimal button rows — a proper op popover / gizmo lands with the param-dialog
  * work (design TODO acknowledged).
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
-import { HoleChipCluster } from "./HoleChipCluster";
 import { GearChipCluster } from "./GearChipCluster";
-import { ExtrudeOverflow } from "./ExtrudeChipControls";
-import { EdgeOpOverflow } from "./EdgeOpChipControls";
-import { RevolveOverflow } from "./RevolveChipControls";
 import {
   acceptCount,
   PATTERN_COUNT_MAX,
@@ -40,11 +36,38 @@ import type {
   MirrorPlane,
   TransformMode,
 } from "@/tools/modelTools/modelToolMachine";
+import { activeToolPresentation } from "@/tools/modelTools/activeToolPresentation";
+import { useToolChipPlacement, toolChipPlacementStore } from "@/stores/toolChipPlacementStore";
+import { useViewportWorkArea } from "@/stores/viewportWorkAreaStore";
+import { useToolChipDockHost } from "./toolChipDockBridge";
 
 const CHIP_ID = MODEL_TOOL_CHIP_ID;
-const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
-const PATTERN_AXES: PatternAxis[] = ["X", "Y", "Z"];
-const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
+
+/** The host group's `aria-label` (WP-U10), one per `ToolChipKind`. Names the
+ *  CLUSTER, not the value inside it — the value's own field carries that name. */
+const CHIP_GROUP_LABEL: Record<string, string> = {
+  extrudeDepth: "Extrude",
+  revolveAngle: "Revolve",
+  revolveAxisPick: "Revolve",
+  datumOffset: "Datum plane",
+  regionSelect: "Region select",
+  filletRadius: "Fillet or chamfer",
+  shellThickness: "Shell",
+  offsetFace: "Offset face",
+  hole: "Hole",
+  gear: "Gear",
+  sketchValue: "Sketch edit",
+  dimension: "Dimension",
+  linearPattern: "Linear pattern",
+  circularPattern: "Circular pattern",
+  transform: "Move or rotate",
+  mirror: "Mirror",
+  booleanOp: "Boolean operation",
+};
+
+export const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
+export const PATTERN_AXES: PatternAxis[] = ["X", "Y", "Z"];
+export const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
 
 /** The armed-placement mode segments (WP-B W1). */
 const TRANSFORM_MODES: { mode: TransformMode; label: string; testid: string }[] = [
@@ -66,7 +89,7 @@ const OFFSET_DISTANCE_TYPES: { type: OffsetDistanceType; label: string; testid: 
 ];
 
 /** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
-function SegmentToggle<T extends string>({
+export function SegmentToggle<T extends string>({
   options,
   active,
   onPick,
@@ -78,10 +101,12 @@ function SegmentToggle<T extends string>({
   onPick: (v: T) => void;
   label: string;
   /**
-   * Per-segment `data-testid`. The chips live under the viewport's overlay root,
-   * which is `aria-hidden` (it decorates a canvas), so role/name queries cannot
-   * reach them — a testid is the ONLY handle e2e has. Optional because the
-   * pattern/mirror chips predate that need and have no spec depending on them.
+   * Per-segment `data-testid`. Playwright's e2e lane keeps using it as the
+   * stable handle regardless of accessible name (WP-U10 made the chip subtree
+   * role/name-reachable in the DOM tree, but a testid is still cheaper and more
+   * resilient for e2e than chaining a group name into a button name). Optional
+   * because the pattern/mirror chips predate that need and have no spec
+   * depending on them.
    */
   testid?: (v: T) => string;
 }) {
@@ -120,22 +145,44 @@ function SegmentToggle<T extends string>({
  * clamped, and the field says what the range is instead of silently disagreeing
  * with the preview.
  */
-function CountStepper({ count, onCount }: { count: number; onCount: (n: number) => void }) {
+export function CountStepper({
+  count,
+  onCount,
+  resetKey,
+}: {
+  count: number;
+  onCount: (n: number) => void;
+  /** Changes only when a fresh armed pattern supplies a different handler. */
+  resetKey: unknown;
+}) {
   const [text, setText] = useState(String(count));
   const [rejected, setRejected] = useState(false);
   useEffect(() => {
     setText(String(count));
     setRejected(false);
-  }, [count]);
+    toolChipStore.getState().setRawValueValidity("pattern-count", true, String(count));
+  }, [count, resetKey]);
+
+  const applyCount = (next: number, nextText: string): void => {
+    setText(nextText);
+    setRejected(false);
+    toolChipStore.getState().setRawValueValidity("pattern-count", true, nextText);
+    onCount(next);
+  };
 
   const submit = (raw: string): void => {
-    const n = Number.parseInt(raw.trim(), 10);
-    if (acceptCount(n) === null) {
+    if (!/^\d+$/.test(raw.trim())) {
       setRejected(true);
+      toolChipStore.getState().setRawValueValidity("pattern-count", false, raw);
       return;
     }
-    setRejected(false);
-    onCount(n);
+    const n = Number(raw.trim());
+    if (acceptCount(n) === null) {
+      setRejected(true);
+      toolChipStore.getState().setRawValueValidity("pattern-count", false, raw);
+      return;
+    }
+    applyCount(n, raw);
   };
 
   return (
@@ -144,7 +191,7 @@ function CountStepper({ count, onCount }: { count: number; onCount: (n: number) 
         type="button"
         aria-label="Fewer instances"
         disabled={count <= PATTERN_COUNT_MIN}
-        onClick={() => onCount(count - 1)}
+        onClick={() => applyCount(count - 1, String(count - 1))}
         className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2 disabled:opacity-40"
       >
         −
@@ -165,7 +212,7 @@ function CountStepper({ count, onCount }: { count: number; onCount: (n: number) 
           setText(e.target.value);
           submit(e.target.value);
         }}
-        onBlur={() => setText(String(count))}
+        onBlur={() => undefined}
         onKeyDown={(e) => {
           if (e.key === "Enter") submit(text);
           e.stopPropagation();
@@ -175,7 +222,7 @@ function CountStepper({ count, onCount }: { count: number; onCount: (n: number) 
         type="button"
         aria-label="More instances"
         disabled={count >= PATTERN_STEPPER_MAX}
-        onClick={() => onCount(count + 1)}
+        onClick={() => applyCount(count + 1, String(count + 1))}
         className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2 disabled:opacity-40"
       >
         +
@@ -191,8 +238,9 @@ function CancelButton({ onCancel }: { onCancel?: () => void }) {
       type="button"
       data-testid="chip-cancel"
       aria-label="Cancel"
+      disabled={!onCancel}
       onClick={() => onCancel?.()}
-      className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+      className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2 disabled:pointer-events-none disabled:opacity-40"
     >
       ✕
     </button>
@@ -209,15 +257,24 @@ function CancelButton({ onCancel }: { onCancel?: () => void }) {
  * button carried belongs in the result summary, where `3 total · 2 new bodies ·
  * source retained` says more than the word "Apply" ever did.
  */
-function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCancel?: () => void }) {
+export function ConfirmButtons({
+  onConfirm,
+  onCancel,
+  disabled = false,
+}: {
+  onConfirm?: () => void;
+  onCancel?: () => void;
+  disabled?: boolean;
+}) {
   return (
     <>
       <button
         type="button"
         data-testid="chip-confirm"
         aria-label="Confirm"
+        disabled={disabled}
         onClick={() => onConfirm?.()}
-        className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
+        className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
       >
         ✓
       </button>
@@ -312,12 +369,33 @@ function TangentToggle({
   );
 }
 
+/** Inspector-only Offset Face secondaries; the primary distance stays on the chip. */
+export function OffsetFaceInspectorControls() {
+  const distanceType = useToolChipStore((s) => s.distanceType);
+  const distanceTypes = useToolChipStore((s) => s.distanceTypes);
+  const chainTangentFaces = useToolChipStore((s) => s.chainTangentFaces);
+  return (
+    <>
+      <DistanceTypeSegments
+        active={distanceType}
+        allowed={distanceTypes}
+        onPick={(type) => toolChipStore.getState().onDistanceType?.(type)}
+      />
+      <TangentToggle
+        pressed={chainTangentFaces}
+        disabled={distanceType === "Total"}
+        onToggle={() => toolChipStore.getState().onChainTangent?.(!chainTangentFaces)}
+      />
+    </>
+  );
+}
+
 /**
  * The [Move | Rotate] segment group on the armed placement cluster (WP-B W1).
  * The mode decides what the number to its right MEANS (mm along the axis vs
  * degrees about it), so it reads left-to-right as one sentence.
  */
-function TransformModeSegments({
+export function TransformModeSegments({
   active,
   onPick,
 }: {
@@ -351,7 +429,7 @@ function TransformModeSegments({
  * the bodies or leaves them behind. Alt at gizmo-grab writes the same FSM flag,
  * so this button is where the user can see (and undo) that choice.
  */
-function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolean) => void }) {
+export function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolean) => void }) {
   return (
     <button
       type="button"
@@ -378,7 +456,7 @@ function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolea
  * the flag was previously hard-coded there with no way to author it, so a fused
  * mirror could only be reached by re-editing a record some other lane wrote.
  */
-function FuseToggle({ fuse, onToggle }: { fuse: boolean; onToggle: (fuse: boolean) => void }) {
+export function FuseToggle({ fuse, onToggle }: { fuse: boolean; onToggle: (fuse: boolean) => void }) {
   return (
     <button
       type="button"
@@ -404,7 +482,7 @@ function FuseToggle({ fuse, onToggle }: { fuse: boolean; onToggle: (fuse: boolea
  * and the label names the pick still outstanding. That is the only feedback the
  * chip can give: the picks themselves happen in the viewport.
  */
-function AlignButton({ phase, onStart }: { phase: AlignPhase | null; onStart: () => void }) {
+export function AlignButton({ phase, onStart }: { phase: AlignPhase | null; onStart: () => void }) {
   const label = phase === "pickMoving" ? "Pick face" : phase === "pickDest" ? "Pick target" : "Align";
   return (
     <button
@@ -428,32 +506,13 @@ export function ModelToolChips() {
   const kind = useToolChipStore((s) => s.kind);
   const value = useToolChipStore((s) => s.value);
   const count = useToolChipStore((s) => s.count);
-  const axis = useToolChipStore((s) => s.axis);
-  const plane = useToolChipStore((s) => s.plane);
   const op = useToolChipStore((s) => s.op);
-  const symmetric = useToolChipStore((s) => s.symmetric);
-  const showSymmetric = useToolChipStore((s) => s.showSymmetric);
   const booleanMode = useToolChipStore((s) => s.booleanMode);
-  const canBoolean = useToolChipStore((s) => s.canBoolean);
-  const showBooleanSegments = useToolChipStore((s) => s.showBooleanSegments);
   const edgeOp = useToolChipStore((s) => s.edgeOp);
   const transformMode = useToolChipStore((s) => s.transformMode);
-  const copy = useToolChipStore((s) => s.copy);
-  const fuse = useToolChipStore((s) => s.fuse);
-  const alignPhase = useToolChipStore((s) => s.alignPhase);
-  const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
   const distanceType = useToolChipStore((s) => s.distanceType);
-  const distanceTypes = useToolChipStore((s) => s.distanceTypes);
-  const chainTangentFaces = useToolChipStore((s) => s.chainTangentFaces);
   const valueError = useToolChipStore((s) => s.valueError);
-  const distance2 = useToolChipStore((s) => s.distance2);
-  const chamferAngleDeg = useToolChipStore((s) => s.chamferAngleDeg);
-  const showChamferFlip = useToolChipStore((s) => s.showChamferFlip);
   const endCondition = useToolChipStore((s) => s.endCondition);
-  const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
-  const showEndConditions = useToolChipStore((s) => s.showEndConditions);
-  const draftAngleDeg = useToolChipStore((s) => s.draftAngleDeg);
-  const showDraft = useToolChipStore((s) => s.showDraft);
   const suffix = useToolChipStore((s) => s.suffix);
   const label = useToolChipStore((s) => s.label);
   const worldPos = useToolChipStore((s) => s.worldPos);
@@ -462,37 +521,117 @@ export function ModelToolChips() {
   /** Type-to-enter arm (U3): remounting on `token` is what focuses the field, and
    *  `seed` is the character that replaces the formatted value. */
   const primaryEntry = useToolChipStore((s) => s.primaryEntry);
-  const targetName = useToolChipStore((s) => s.targetName);
-  const toolName = useToolChipStore((s) => s.toolName);
-  const onSwap = useToolChipStore((s) => s.onSwap);
   const resultSummary = useToolChipStore((s) => s.resultSummary);
+  const chipState = useToolChipStore((s) => s);
+  const presentation = useMemo(() => activeToolPresentation(chipState), [chipState]);
+  const placement = useToolChipPlacement((state) => state.placement);
+  const dockHost = useToolChipDockHost();
+  const safeRect = useViewportWorkArea((state) => state.obstacleClearRect);
+  const viewport = useViewportWorkArea((state) => state.viewport);
+  const validation = presentation?.validation ?? { status: "valid" as const };
   // A plain DOM host, created once; the engine owns its DOM position.
+  //
+  // `role="group"` + `aria-hidden="false"` (below, alongside the tool's own
+  // `aria-label`) pull this subtree back OUT of the decorative overlay's hidden
+  // state: the engine's chip layer no longer carries `aria-hidden` (WP-U10,
+  // `ViewportEngine.chipLayer()`) so a role/name query — or a screen reader —
+  // can reach a chip's controls, while `overlayRef`'s canvas decoration in
+  // `ViewportRoot` stays hidden. `aria-hidden="false"` on the host itself is
+  // belt-and-braces: aria-hidden is a PARENT-overrides-child state (an
+  // ancestor's `true` wins regardless), so the layer change is what actually
+  // does the work, not this attribute alone.
   const [host] = useState(() => {
     const el = document.createElement("div");
     el.dataset.testid = "model-tool-chip";
+    el.setAttribute("role", "group");
+    el.setAttribute("aria-hidden", "false");
     return el;
   });
 
   const anchorKey = worldPos ? worldPos.join(",") : "";
+  const effectiveMode = placement.mode === "docked" && dockHost ? "docked" : placement.mode === "floating" ? "floating" : "anchored";
+  const activeDockHost = effectiveMode === "docked" ? dockHost : null;
+  const dragPoint = useRef<{ x: number; y: number } | null>(null);
+  const dragOffset = useRef<{ x: number; y: number } | null>(null);
+  const dragPointerId = useRef<number | null>(null);
+  const dragOrigin = useRef<typeof placement | null>(null);
+  const focusedElement = useRef<HTMLElement | null>(null);
+  const [placementStatus, setPlacementStatus] = useState<{
+    kind: typeof kind;
+    anchorKey: string;
+    width: number;
+    height: number;
+    fits: boolean | null;
+  } | null>(null);
+  const onPlacementStatus = useCallback((status: { width: number; height: number; fits: boolean | null }) => {
+    setPlacementStatus((previous) => {
+      const next = { kind, anchorKey, ...status };
+      return previous?.kind === next.kind && previous.anchorKey === next.anchorKey
+        && previous.width === next.width && previous.height === next.height && previous.fits === next.fits
+        ? previous
+        : next;
+    });
+    if (status.fits === null) engine?.invalidate();
+  }, [anchorKey, engine, kind]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!engine || kind === "none" || !worldPos) return;
+    const restoreFocus = () => {
+      focusedElement.current?.focus({ preventScroll: true });
+      focusedElement.current = null;
+    };
+    const preserveFocus = () => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && host.contains(active)) focusedElement.current = active;
+    };
     // `anchorKey` is the ARM's anchor, not a live one: a chip whose anchor tracks
     // the gesture (extrude) is moved by the controller through `engine.moveChip`,
     // never by a store write — this effect UNMOUNTS on every change, and a chip
     // detached mid-drag loses input focus and fires `commitOnBlur` on half-typed
     // text. See the header of `toolChipStore`.
+    if (effectiveMode === "docked" && activeDockHost) {
+      engine.unmountChip(CHIP_ID, host);
+      host.style.position = "";
+      host.style.transform = "";
+      host.style.display = "";
+      activeDockHost.appendChild(host);
+      restoreFocus();
+      return () => {
+        preserveFocus();
+        engine.unmountChip(CHIP_ID, host);
+        if (host.parentElement === activeDockHost) host.remove();
+      };
+    }
     engine.mountChip(CHIP_ID, host, worldPos, {
       axisFrom: anchorAxisFrom ?? undefined,
       offsetPx: anchorOffsetPx || undefined,
+      screenPosition: placement.mode === "floating" ? { x: placement.x, y: placement.y } : undefined,
+      constrainToSafeRect: true,
+      onPlacementStatus,
       // The chip and the value arrow share this anchor, so without this the chip
       // sits ON the arrow and every press meant for the arrow hits the chip
       // instead (measured: the arrow's grab pixel resolved to `chip-cancel`).
       avoidValueHandle: true,
     });
-    return () => engine.unmountChip(CHIP_ID, host);
+    restoreFocus();
+    return () => {
+      preserveFocus();
+      engine.unmountChip(CHIP_ID, host);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engine, kind, anchorKey, host]);
+  }, [engine, kind, anchorKey, host, effectiveMode, activeDockHost, placement, onPlacementStatus]);
+
+  useLayoutEffect(() => {
+    if (!dockHost || placement.mode === "docked" || kind === "none" || viewport.width <= 0) return;
+    const currentStatus = placementStatus?.kind === kind && placementStatus.anchorKey === anchorKey
+      ? placementStatus
+      : null;
+    const width = currentStatus?.width ?? host.offsetWidth;
+    const height = currentStatus?.height ?? host.offsetHeight;
+    const hasFootprint = currentStatus?.fits !== false
+      && (safeRect === null || (width <= safeRect.width && height <= safeRect.height));
+    if (!hasFootprint) toolChipPlacementStore.getState().dock();
+  }, [anchorKey, dockHost, host, kind, placement.mode, placementStatus, safeRect, viewport.width]);
 
   if (kind === "none" || !worldPos) return null;
 
@@ -506,21 +645,29 @@ export function ModelToolChips() {
    *     Nothing is lost, because the value already went out through `onPreview`.
    *   - `primaryEntry` seeds + focuses the field when the user typed on canvas.
    */
-  const primaryField = (suffix: string, opts?: { onConfirm?: boolean }) => (
+  const primaryField = (
+    suffix: string,
+    fieldLabel: string,
+    opts?: { onConfirm?: boolean; fieldId?: string },
+  ) => (
     <DimensionInput
       key={primaryEntry ? `primary-${primaryEntry.token}` : `primary-${anchorKey}`}
       value={value}
       suffix={suffix}
+      label={fieldLabel}
       initialText={primaryEntry?.seed}
       autoFocus={primaryEntry !== null}
       commitOnBlur={false}
+      onValidityChange={(valid, draft) =>
+        toolChipStore.getState().setRawValueValidity(opts?.fieldId ?? "primary", valid, draft)
+      }
       onPreview={(v) => toolChipStore.getState().onValue?.(v)}
       onCommit={(v) => toolChipStore.getState().onValue?.(v)}
       onConfirm={opts?.onConfirm ? () => toolChipStore.getState().onConfirm?.() : undefined}
     />
   );
 
-  const numericChip = (suffix: string) => primaryField(suffix);
+  const numericChip = (suffix: string, fieldLabel: string) => primaryField(suffix, fieldLabel);
 
   /*
    * The OperationHUD frame (U4) — ONE wrapper for every armed model tool.
@@ -541,44 +688,153 @@ export function ModelToolChips() {
     <div
       data-testid="operation-hud"
       className={cn(
-        "pointer-events-auto inline-flex flex-col items-stretch gap-1 rounded-2xl border bg-surface px-1.5 py-1 shadow-popover",
+        "pointer-events-auto inline-flex min-w-0 max-w-full flex-col items-stretch gap-1 rounded-2xl border bg-surface px-1.5 py-1 shadow-popover",
+        effectiveMode === "docked" && "w-full",
         valueError ? "border-warn-border" : "border-border",
       )}
     >
+      <div className="flex items-center justify-end gap-1 px-1">
+        {effectiveMode !== "docked" && (
+          <button
+            type="button"
+            data-testid="chip-drag-handle"
+            data-viewport-interactive
+            aria-label="Move tool controls"
+            title="Drag tool controls"
+            className="cursor-move rounded-full bg-chip px-2 py-0.5 text-[11px] text-ink-4"
+            onPointerDown={(event) => {
+              if (event.button !== 0 || dragPointerId.current !== null) return;
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              const point = engine?.clientToViewport(event.clientX, event.clientY) ?? null;
+              const rect = host.getBoundingClientRect();
+              const center = engine?.clientToViewport(rect.left + rect.width / 2, rect.top + rect.height / 2) ?? null;
+              dragPointerId.current = event.pointerId;
+              dragOrigin.current = placement;
+              dragOffset.current = point && center
+                ? { x: point.x - center.x, y: point.y - center.y }
+                : null;
+              dragPoint.current = center;
+            }}
+            onPointerMove={(event) => {
+              if (dragPointerId.current !== event.pointerId || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const point = engine?.clientToViewport(event.clientX, event.clientY) ?? null;
+              const offset = dragOffset.current;
+              const center = point && offset ? { x: point.x - offset.x, y: point.y - offset.y } : null;
+              dragPoint.current = center;
+              if (center) engine?.setChipScreenPosition(CHIP_ID, center);
+            }}
+            onPointerUp={(event) => {
+              if (dragPointerId.current !== event.pointerId) return;
+              event.preventDefault();
+              event.stopPropagation();
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              const point = dragPoint.current;
+              dragPoint.current = null;
+              dragOffset.current = null;
+              dragPointerId.current = null;
+              dragOrigin.current = null;
+              if (point) toolChipPlacementStore.getState().floatAt(point.x, point.y);
+            }}
+            onPointerCancel={(event) => {
+              if (dragPointerId.current !== event.pointerId) return;
+              event.stopPropagation();
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              const origin = dragOrigin.current;
+              if (origin?.mode === "floating") engine?.setChipScreenPosition(CHIP_ID, { x: origin.x, y: origin.y });
+              else engine?.setChipScreenPosition(CHIP_ID, null);
+              dragPoint.current = null;
+              dragOffset.current = null;
+              dragPointerId.current = null;
+              dragOrigin.current = null;
+            }}
+            onLostPointerCapture={(event) => {
+              if (dragPointerId.current !== event.pointerId) return;
+              const origin = dragOrigin.current;
+              if (origin?.mode === "floating") engine?.setChipScreenPosition(CHIP_ID, { x: origin.x, y: origin.y });
+              else engine?.setChipScreenPosition(CHIP_ID, null);
+              dragPoint.current = null;
+              dragOffset.current = null;
+              dragPointerId.current = null;
+              dragOrigin.current = null;
+            }}
+          >
+            ⋮⋮
+          </button>
+        )}
+        {dockHost && placement.mode !== "docked" && (
+          <button
+            type="button"
+            data-testid="chip-dock"
+            onClick={() => toolChipPlacementStore.getState().dock()}
+            className="rounded-full bg-chip px-2 py-0.5 text-[11px] text-ink-4"
+          >
+            Dock
+          </button>
+        )}
+        {placement.mode === "docked" && (
+          <button
+            type="button"
+            data-testid="chip-return"
+            onClick={() => toolChipPlacementStore.getState().anchor()}
+            className="rounded-full bg-chip px-2 py-0.5 text-[11px] text-ink-4"
+          >
+            Return
+          </button>
+        )}
+      </div>
       {resultSummary && (
         <div
           data-testid="chip-result-summary"
           role="status"
           aria-live="polite"
-          className="px-1.5 pt-0.5 text-[11px] text-ink-5"
+          className="min-w-0 break-words px-1.5 pt-0.5 text-[11px] text-ink-5"
         >
           {resultSummary}
         </div>
       )}
-      <div className="inline-flex items-center gap-1">{children}</div>
+      {validation.status !== "valid" && (kind === "extrudeDepth" || kind === "hole") ? (
+        <div data-testid="tool-validation" role="status" aria-label={validation.message} className="px-1.5 text-[11px] text-warn">!</div>
+      ) : validation.status !== "valid" && (
+        <div data-testid="tool-validation" role="alert" className="flex min-w-0 flex-wrap items-center gap-1 px-1.5 text-[11px] text-warn">
+          <span>{validation.message}</span>
+          {validation.status === "invalid" && validation.suggestedValue !== undefined && (
+            <button
+              type="button"
+              data-testid="tool-validation-use-suggested"
+              className="rounded-full bg-chip px-2 py-0.5 font-medium text-ink-2 hover:bg-hover-2"
+              onClick={() => toolChipStore.getState().onUseSuggestedValue?.()}
+            >
+              {validation.suggestedLabel ?? "Use suggested"}
+            </button>
+          )}
+        </div>
+      )}
+      <div className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1">{children}</div>
     </div>
   );
 
   // The armed extrude / revolve cluster commits on chip-input Enter via `onConfirm`
   // (apply typed value THEN confirm — single fire; the input stops propagation so
   // the controller's capture-phase Enter never double-fires).
-  const clusterInput = (unit: string) => primaryField(unit, { onConfirm: true });
+  const clusterInput = (unit: string, fieldLabel: string) =>
+    primaryField(unit, fieldLabel, { onConfirm: true });
   const confirmButtons = (
     <ConfirmButtons
       onConfirm={() => toolChipStore.getState().onConfirm?.()}
-      onCancel={() => toolChipStore.getState().onCancel?.()}
+      onCancel={presentation?.canCancel ? () => toolChipStore.getState().onCancel?.() : undefined}
+      disabled={presentation?.canConfirm === false}
     />
   );
   // The boolean segments now live behind revolve's own `⋯` (UNIFY-UX Phase 2) —
   // keyed on the anchor so a fresh axis pick reopens collapsed.
-  const revolveOverflow = showBooleanSegments ? (
-    <RevolveOverflow
-      key={`overflow-${anchorKey}`}
-      booleanMode={booleanMode}
-      canBoolean={canBoolean}
-      onBooleanMode={(m) => toolChipStore.getState().onBooleanMode?.(m)}
-    />
-  ) : null;
 
   // Only the FRESH edge-op arm sets this flag; the shell shares the value-chip
   // branch below (`shellThickness`) and the edge-op re-edit renders the bare
@@ -586,66 +842,28 @@ export function ModelToolChips() {
   // chamfer second leg both live behind it (UNIFY-UX Phase 1) — keyed on the
   // anchor so a fresh arm reopens collapsed instead of inheriting the previous
   // arm's expanded state, mirroring extrude's `⋯`.
-  const edgeOpOverflow = showEdgeOpSegments ? (
-    <EdgeOpOverflow
-      key={`overflow-${anchorKey}`}
-      edgeOp={edgeOp}
-      onEdgeOp={(k) => toolChipStore.getState().onEdgeOp?.(k)}
-      distance2={distance2}
-      onDistance2={(v) => toolChipStore.getState().onDistance2?.(v)}
-      chamferAngleDeg={chamferAngleDeg}
-      onChamferAngle={(v) => toolChipStore.getState().onChamferAngle?.(v)}
-      showChamferFlip={showChamferFlip}
-      onChamferFlip={() => toolChipStore.getState().onChamferFlip?.()}
-      onConfirm={() => toolChipStore.getState().onConfirm?.()}
-    />
-  ) : null;
 
   let content: React.ReactNode;
   if (kind === "extrudeDepth") {
-    // THE DIMENSION AND NOTHING ELSE. The arrow states the direction, the tint
-    // states Add vs Cut, and everything that is neither goes behind `⋯` — keyed
-    // on the anchor so a fresh arm reopens collapsed instead of inheriting the
-    // previous arm's expanded state.
+    // The viewport host keeps the primary input, resolved operation and terminal
+    // actions; inspector owns every secondary setting for this armed operation.
     content = panel(
       <>
         {/* A distance is meaningless for the non-Blind end conditions — the
             kernel derives it — so the numeric input hides rather than showing a
             value that does not drive the result. */}
-        {endCondition === "Blind" && clusterInput(LENGTH_SUFFIX)}
-        <ExtrudeOverflow
-          key={`overflow-${anchorKey}`}
-          endCondition={endCondition}
-          canUseBodyEnds={canUseBodyEnds}
-          showEndConditions={showEndConditions}
-          onEndCondition={(c) => toolChipStore.getState().onEndCondition?.(c)}
-          draftAngleDeg={draftAngleDeg}
-          showDraft={showDraft}
-          onDraftAngle={(d) => toolChipStore.getState().onDraftAngle?.(d)}
-          symmetric={symmetric}
-          showSymmetric={showSymmetric}
-          onSymmetric={(sym) => toolChipStore.getState().onSymmetric?.(sym)}
-          booleanMode={booleanMode}
-          canBoolean={canBoolean}
-          showBooleanSegments={showBooleanSegments}
-          onBooleanMode={(m) => toolChipStore.getState().onBooleanMode?.(m)}
-          onConfirm={() => toolChipStore.getState().onConfirm?.()}
-        />
+        {endCondition === "Blind" && clusterInput(LENGTH_SUFFIX, `Depth (${LENGTH_SUFFIX})`)}
+        <span data-testid="chip-mode-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">
+          {booleanMode === "NewBody" ? "New" : booleanMode}
+        </span>
         {confirmButtons}
       </>,
     );
   } else if (kind === "revolveAngle") {
     content = panel(
       <>
-        {clusterInput("°")}
-        <button
-          type="button"
-          onClick={() => toolChipStore.getState().onResetAxis?.()}
-          className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3 hover:bg-hover-2"
-        >
-          Axis
-        </button>
-        {revolveOverflow}
+        {clusterInput("°", "Angle (°)")}
+        <span data-testid="chip-revolve-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{booleanMode}</span>
         {confirmButtons}
       </>,
     );
@@ -684,7 +902,7 @@ export function ModelToolChips() {
         >
           {label}
         </span>
-        {clusterInput(LENGTH_SUFFIX)}
+        {clusterInput(LENGTH_SUFFIX, `Offset (${LENGTH_SUFFIX})`)}
         {confirmButtons}
       </>,
     );
@@ -701,6 +919,7 @@ export function ModelToolChips() {
         <ConfirmButtons
           onConfirm={() => toolChipStore.getState().onConfirm?.()}
           onCancel={() => toolChipStore.getState().onCancel?.()}
+          disabled={presentation?.canConfirm === false}
         />
       </>,
     );
@@ -715,8 +934,20 @@ export function ModelToolChips() {
     // exactly what the interaction contract forbids.
     content = panel(
       <>
-        {clusterInput(LENGTH_SUFFIX)}
-        {edgeOpOverflow}
+        {clusterInput(
+          LENGTH_SUFFIX,
+          kind === "shellThickness"
+            ? `Thickness (${LENGTH_SUFFIX})`
+            : edgeOp === "Chamfer"
+              ? `Distance (${LENGTH_SUFFIX})`
+              : `Radius (${LENGTH_SUFFIX})`,
+        )}
+        {kind === "filletRadius" && (
+          <span data-testid="chip-edgeop-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{edgeOp}</span>
+        )}
+        {kind === "shellThickness" && (
+          <span data-testid="chip-shell-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Shell</span>
+        )}
         {confirmButtons}
       </>,
     );
@@ -730,26 +961,18 @@ export function ModelToolChips() {
     // desynchronize the stored param from the preview the user approved).
     content = panel(
       <>
-        {clusterInput(LENGTH_SUFFIX)}
-        <DistanceTypeSegments
-          active={distanceType}
-          allowed={distanceTypes}
-          onPick={(t) => toolChipStore.getState().onDistanceType?.(t)}
-        />
-        <TangentToggle
-          pressed={chainTangentFaces}
-          disabled={distanceType === "Total"}
-          onToggle={() => toolChipStore.getState().onChainTangent?.(!chainTangentFaces)}
-        />
+        {clusterInput(LENGTH_SUFFIX, `Offset (${LENGTH_SUFFIX})`)}
+        <span data-testid="chip-offset-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{distanceType}</span>
         {confirmButtons}
       </>,
     );
   } else if (kind === "hole") {
-    // WP-C T3. The cluster's own shape depends on `holeType`, so it lives in its
-    // own component; only the shared ✓/✕ pair is added here.
     content = panel(
       <>
-        <HoleChipCluster />
+        {primaryField(LENGTH_SUFFIX, `Hole diameter (${LENGTH_SUFFIX})`, { fieldId: "hole-diameter" })}
+        <span data-testid="chip-hole-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">
+          Hole
+        </span>
         {confirmButtons}
       </>,
     );
@@ -776,6 +999,7 @@ export function ModelToolChips() {
           key={`sketchValue-${anchorKey}`}
           value={value}
           suffix={LENGTH_SUFFIX}
+          label={`${label} (${LENGTH_SUFFIX})`}
           autoFocus
           onCommit={(v) => toolChipStore.getState().onValue?.(v)}
         />
@@ -801,30 +1025,16 @@ export function ModelToolChips() {
   } else if (kind === "linearPattern") {
     content = panel(
       <>
-        <SegmentToggle
-          options={PATTERN_AXES}
-          active={axis}
-          label="Pattern axis"
-          testid={(a) => `chip-pattern-axis-${a.toLowerCase()}`}
-          onPick={(a) => toolChipStore.getState().onAxis?.(a)}
-        />
-        <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
-        {numericChip(LENGTH_SUFFIX)}
+        {numericChip(LENGTH_SUFFIX, `Spacing (${LENGTH_SUFFIX})`)}
+        <span data-testid="chip-pattern-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Linear</span>
         {confirmButtons}
       </>,
     );
   } else if (kind === "circularPattern") {
     content = panel(
       <>
-        <SegmentToggle
-          options={PATTERN_AXES}
-          active={axis}
-          label="Pattern axis"
-          testid={(a) => `chip-pattern-axis-${a.toLowerCase()}`}
-          onPick={(a) => toolChipStore.getState().onAxis?.(a)}
-        />
-        <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
-        {numericChip("°")}
+        {numericChip("°", "Angle (°)")}
+        <span data-testid="chip-pattern-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Circular</span>
         {confirmButtons}
       </>,
     );
@@ -834,34 +1044,18 @@ export function ModelToolChips() {
     // revolve clusters (apply the typed value THEN confirm, single fire).
     content = panel(
       <>
-        <TransformModeSegments
-          active={transformMode}
-          onPick={(m) => toolChipStore.getState().onTransformMode?.(m)}
-        />
-        <SegmentToggle
-          options={PATTERN_AXES}
-          active={axis}
-          label="Placement axis"
-          testid={(a) => `chip-axis-${a.toLowerCase()}`}
-          onPick={(a) => toolChipStore.getState().onAxis?.(a)}
-        />
-        {clusterInput(transformMode === "rotate" ? "°" : LENGTH_SUFFIX)}
-        <CopyToggle copy={copy} onToggle={(c) => toolChipStore.getState().onCopy?.(c)} />
-        <AlignButton phase={alignPhase} onStart={() => toolChipStore.getState().onAlign?.()} />
+        {clusterInput(
+          transformMode === "rotate" ? "°" : LENGTH_SUFFIX,
+          transformMode === "rotate" ? "Angle (°)" : `Distance (${LENGTH_SUFFIX})`,
+        )}
+        <span data-testid="chip-transform-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{transformMode}</span>
         {confirmButtons}
       </>,
     );
   } else if (kind === "mirror") {
     content = panel(
       <>
-        <SegmentToggle
-          options={MIRROR_PLANES}
-          active={plane}
-          label="Mirror plane"
-          testid={(p) => `chip-mirror-plane-${p.toLowerCase()}`}
-          onPick={(p) => toolChipStore.getState().onPlane?.(p)}
-        />
-        <FuseToggle fuse={fuse} onToggle={(f) => toolChipStore.getState().onFuse?.(f)} />
+        <span data-testid="chip-mirror-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">Mirror</span>
         {confirmButtons}
       </>,
     );
@@ -876,50 +1070,12 @@ export function ModelToolChips() {
           * unreadable to a third of users and unreadable against a body that
           * happens to be the same colour.
           */}
-        {(targetName || toolName) && (
-          <span className="inline-flex items-center gap-1 px-1 text-[11px]">
-            <span className="text-ink-5">Target</span>
-            <span data-testid="chip-bool-target" className="font-medium text-ink-2">
-              {targetName}
-            </span>
-            <span className="text-ink-5">Tool</span>
-            <span data-testid="chip-bool-tool" className="font-medium text-ink-2">
-              {toolName}
-            </span>
-          </span>
-        )}
-        {onSwap && (
-          <button
-            type="button"
-            data-testid="chip-bool-swap"
-            aria-label="Swap target and tool"
-            title="Swap target and tool"
-            onClick={() => toolChipStore.getState().onSwap?.()}
-            className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
-          >
-            ⇄
-          </button>
-        )}
-        <div className="flex overflow-hidden rounded-full">
-          {BOOLEAN_OPS.map((o) => (
-            <button
-              key={o}
-              type="button"
-              data-testid={`chip-boolean-${o.toLowerCase()}`}
-              onClick={() => toolChipStore.getState().onOp?.(o)}
-              className={cn(
-                "px-2 py-1 text-[11.5px] font-medium",
-                o === op ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-              )}
-            >
-              {o}
-            </button>
-          ))}
-        </div>
+        <span data-testid="chip-boolean-badge" className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3">{op}</span>
         {confirmButtons}
       </>,
     );
   }
 
+  host.setAttribute("aria-label", `${CHIP_GROUP_LABEL[kind] ?? "Model tool"} options`);
   return createPortal(content, host);
 }

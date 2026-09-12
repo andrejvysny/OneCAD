@@ -8,9 +8,11 @@
 import { describe, it, expect } from "vitest";
 import {
   sketchStatusText,
+  sketchStatusSentence,
   sketchStatusToneClass,
   sketchStatusIsAlert,
   emptySketchCard,
+  projectedOnlySketchCard,
 } from "./constraintStatus";
 
 describe("constraintStatus WP0", () => {
@@ -46,6 +48,15 @@ describe("constraintStatus 4-state tone (Sketcher UX cleanup)", () => {
     expect(result.tone).toBe("error");
   });
 
+  it("keeps over-constrained and conflicting sentences at DOF 0", () => {
+    expect(sketchStatusSentence("over", 0)).toBe(
+      "Sketch is over-constrained. Remove or change a conflicting constraint.",
+    );
+    expect(sketchStatusSentence("error", 0)).toBe(
+      "Conflicting constraints. Remove one to resolve.",
+    );
+  });
+
   it("maps each tone to a distinct, non-alarming-for-under color class", () => {
     expect(sketchStatusToneClass("under")).toBe("text-dof-neutral");
     expect(sketchStatusToneClass("ok")).toBe("text-dof-ok");
@@ -71,5 +82,15 @@ describe("emptySketchCard (design item 12 / audit A11a)", () => {
     expect(card.tone).toBe("under");
     expect(sketchStatusToneClass(card.tone)).toBe("text-dof-neutral");
     expect(sketchStatusIsAlert(card.tone)).toBe(false);
+  });
+});
+
+describe("projectedOnlySketchCard (UX review 2026-09-11)", () => {
+  it("never claims completeness for a sketch that only holds projected references", () => {
+    const card = projectedOnlySketchCard(11);
+    expect(card.label).toBe("Projected geometry only");
+    expect(card.sentence).toBe("11 projected reference edges · draw geometry to begin.");
+    expect(sketchStatusIsAlert(card.tone)).toBe(false);
+    expect(projectedOnlySketchCard(1).sentence).toBe("1 projected reference edge · draw geometry to begin.");
   });
 });

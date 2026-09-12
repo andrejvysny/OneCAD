@@ -164,6 +164,8 @@ public:
     // appends each removed elementId to `delta.removed`.
     void remove_body(const std::string& body_id, ElementMapDelta& delta);
 
+    void rename_body(const std::string& old_body_id, const std::string& new_body_id);
+
     // --- evidence helpers (stateless; SCHEMA §7.5/§10) ---
     // The TopoKey of `element_id` **as tracked on `body_id`**; "" when the entry is
     // absent OR belongs to a DIFFERENT body.

@@ -512,3 +512,92 @@ export function edgeMetricsFromMesh(blob: ArrayBuffer, edgeId: string): MockEdge
   const { center, size } = bboxOf(points);
   return { length: total, center, straight: points.length === 2, size };
 }
+
+/** One mesh edge's CIRCULAR fit — the inputs the measure tool's Ø reading needs. */
+export interface MockEdgeCircleMetrics {
+  /** The fitted circle's centre, world mm. */
+  center: Vec3;
+  /** Unit normal of the circle's plane (its axis direction). */
+  normal: Vec3;
+  /** The circle radius, mm. */
+  radius: number;
+}
+
+/**
+ * Fit a circle to the edge carrying `edgeId`, or `null` when it is not one.
+ *
+ * Companion to `cylinderMetricsFromMesh`'s face fit, for a closed polyline
+ * edge instead of a facet ring: Newell's method recovers a best-fit plane
+ * normal from the point loop (robust to which three points get picked, unlike
+ * a single cross product), the points are projected into that plane, and
+ * `fitCircle` (Kåsa) fits a circle to the projection. Both the planarity and
+ * the fit residual are CHECKED before an answer is returned — a straight edge,
+ * a box's rectangular loop, or a non-planar polyline fail one of them and get
+ * `null`, the same refusal discipline `cylinderMetricsFromMesh` applies.
+ */
+export function edgeCircleFit(blob: ArrayBuffer, edgeId: string): MockEdgeCircleMetrics | null {
+  const view = parseMeshPayload(blob);
+  const ranges = view.edgeRanges;
+  const edgePositions = view.edgePositions;
+  if (!ranges || !edgePositions) return null;
+  const index = edgeIds(view).indexOf(edgeId);
+  if (index < 0) return null;
+
+  const firstPoint = ranges[2 * index];
+  const pointCount = ranges[2 * index + 1];
+  // A circle's polyline approximation needs a real polygon — a straight edge (2
+  // points) or a short polyline cannot be distinguished from a curve reliably.
+  if (pointCount < 8) return null;
+  const points: Vec3[] = [];
+  for (let p = firstPoint; p < firstPoint + pointCount; p++) {
+    points.push(vertexAt(edgePositions, p));
+  }
+
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    nx += (a[1] - b[1]) * (a[2] + b[2]);
+    ny += (a[2] - b[2]) * (a[0] + b[0]);
+    nz += (a[0] - b[0]) * (a[1] + b[1]);
+    cx += a[0];
+    cy += a[1];
+    cz += a[2];
+  }
+  const normal = normalize([nx, ny, nz]);
+  if (!normal) return null;
+  const centroid: Vec3 = [cx / points.length, cy / points.length, cz / points.length];
+
+  const e1 = normalize(
+    Math.abs(normal[0]) < 0.9 ? cross(normal, [1, 0, 0]) : cross(normal, [0, 1, 0]),
+  );
+  if (!e1) return null;
+  const e2 = cross(normal, e1);
+  const uv: [number, number][] = points.map((p) => {
+    const d = sub(p, centroid);
+    return [dot(d, e1), dot(d, e2)];
+  });
+  const circle = fitCircle(uv);
+  if (!circle) return null;
+  const { u, v, radius } = circle;
+  for (const [pu, pv] of uv) {
+    if (Math.abs(Math.hypot(pu - u, pv - v) - radius) > 1e-3 * radius) return null;
+  }
+  // Every point must actually lie IN the fitted plane, or this is not a planar
+  // circle (an ellipse traced by an oblique cut, say).
+  for (const p of points) {
+    if (Math.abs(dot(sub(p, centroid), normal)) > 1e-3 * radius) return null;
+  }
+
+  const center: Vec3 = [
+    centroid[0] + e1[0] * u + e2[0] * v,
+    centroid[1] + e1[1] * u + e2[1] * v,
+    centroid[2] + e1[2] * u + e2[2] * v,
+  ];
+  return { center, normal, radius };
+}

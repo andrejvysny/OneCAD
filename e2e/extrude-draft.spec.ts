@@ -47,7 +47,7 @@ async function lastFeature(page: Page): Promise<{ id: string; label: string }> {
 
 /** The draft segment's own degrees input (the cluster also has a mm depth one). */
 function draftInput(page: Page) {
-  return page.getByTestId("chip-draft-input").getByLabel("Dimension value");
+  return page.getByTestId("chip-draft-input").getByLabel("Draft angle (°)");
 }
 
 /**

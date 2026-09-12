@@ -24,6 +24,7 @@ function pick(id: string, center: [number, number, number], over: Partial<Measur
     surfaceType: 0,
     normal: [0, 0, 1],
     hasNormal: true,
+    radius: null,
     ...over,
   };
 }
@@ -56,7 +57,7 @@ describe("pickFromElementInfo", () => {
       size: 44.72,
       magnitude: 800,
     };
-    expect(pickFromElementInfo("body1", info)).toEqual({
+    expect(pickFromElementInfo("body1", info, null)).toEqual({
       bodyId: "body1",
       elementId: "el_7",
       kind: "face",
@@ -67,7 +68,26 @@ describe("pickFromElementInfo", () => {
       surfaceType: 0,
       normal: [0, 0, 1],
       hasNormal: true,
+      // WP-U11: no classify frame for this pick.
+      radius: null,
     });
+  });
+
+  it("carries the classifyElement radius through when the pick is a cylinder/circle", () => {
+    const info: ElementInfo = {
+      elementId: "el_8",
+      topoKey: "f:23",
+      bodyId: "body_x",
+      kind: "face",
+      surfaceType: 1,
+      curveType: -1,
+      center: [0, 0, 0],
+      normal: [0, 0, 1],
+      hasNormal: true,
+      size: 40,
+      magnitude: 1000,
+    };
+    expect(pickFromElementInfo("body1", info, 20).radius).toBe(20);
   });
 
   it("copies the center array (a later mutation of the DTO cannot leak in)", () => {
@@ -84,7 +104,7 @@ describe("pickFromElementInfo", () => {
       size: 1,
       magnitude: 1,
     };
-    const p = pickFromElementInfo("body1", info);
+    const p = pickFromElementInfo("body1", info, null);
     info.center[0] = 999;
     expect(p.center[0]).toBe(1);
   });

@@ -9,7 +9,7 @@ import { SketchController } from "./SketchController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickablePlane } from "@/viewport/engine/PlanePicker";
 import type { CadClient } from "@/ipc/client";
-import type { EnterSketchTarget, SketchPlane, SketchSession } from "@/ipc/types";
+import type { CancelSketchResult, EnterSketchTarget, SketchPlane, SketchSession } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore } from "@/stores/documentStore";
@@ -59,8 +59,11 @@ function makeEngineMock(hit: () => PickablePlane | null) {
 function makeClientMock() {
   return {
     enterSketch: vi.fn((target: EnterSketchTarget) => Promise.resolve(makeSession(target))),
-    cancelSketch: vi.fn(() => Promise.resolve()),
+    cancelSketch: vi.fn((_id: string, opts?: { discard?: boolean }): Promise<CancelSketchResult> =>
+      Promise.resolve({ discarded: opts?.discard === true }),
+    ),
     deleteSketch: vi.fn(() => Promise.resolve()),
+    finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
   };
 }
 
@@ -163,11 +166,99 @@ describe("SketchController plane-pick", () => {
     resolveEnter(makeSession({ newOnPlane: "XZ" }));
     await flush();
 
-    expect(clientMock.cancelSketch).toHaveBeenCalledWith("sketchNew");
-    expect(clientMock.deleteSketch).toHaveBeenCalledWith("sketchNew"); // fresh-create cleanup
+    expect(clientMock.cancelSketch).toHaveBeenCalledWith("sketchNew", { discard: true });
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
     // The late session was NOT wired in: no tree row, no active session.
     expect(documentStore.getState().sketches["sketchNew"]).toBeUndefined();
     expect(sketchStore.getState().session).toBeNull();
+  });
+
+  it("exit then immediate sketch re-entry cannot publish the prior deferred session", async () => {
+    let resolveEnter!: (session: SketchSession) => void;
+    clientMock.enterSketch.mockImplementationOnce(() => new Promise<SketchSession>((resolve) => {
+      resolveEnter = resolve;
+    }));
+    toolStore.getState().setMode("sketch");
+    await flush();
+    hitKind = "XZ";
+    pointer("pointerdown", 100, 100, 0, 1);
+    pointer("pointerup", 100, 100, 0, 0);
+    await flush();
+
+    toolStore.getState().setMode("model");
+    toolStore.getState().setMode("sketch");
+    resolveEnter(makeSession({ newOnPlane: "XZ" }));
+    await flush();
+    await flush();
+
+    expect(engineMock.enterSketch).not.toHaveBeenCalled();
+    expect(clientMock.cancelSketch).toHaveBeenCalledWith("sketchNew", { discard: true });
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
+    expect(toolStore.getState().mode).toBe("sketch");
+    expect(engineMock.setPlanePickerVisible).toHaveBeenLastCalledWith(true);
+  });
+
+  it("a refused stale-create discard keeps changes and does not auto-restart", async () => {
+    let resolveEnter!: (session: SketchSession) => void;
+    clientMock.enterSketch.mockImplementationOnce(() => new Promise<SketchSession>((resolve) => {
+      resolveEnter = resolve;
+    }));
+    clientMock.cancelSketch.mockResolvedValueOnce({
+      discarded: false,
+      keptReason: "history changed",
+    });
+    toolStore.getState().setMode("sketch");
+    await flush();
+    hitKind = "XZ";
+    pointer("pointerdown", 100, 100, 0, 1);
+    pointer("pointerup", 100, 100, 0, 0);
+    await flush();
+    toolStore.getState().setMode("model");
+    toolStore.getState().setMode("sketch");
+    resolveEnter(makeSession({ newOnPlane: "XZ" }));
+    await flush();
+    await flush();
+
+    expect(clientMock.enterSketch).toHaveBeenCalledTimes(1);
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint).toMatchObject({
+      message: expect.stringContaining("history changed"),
+      severity: "warn",
+    });
+  });
+
+  it("Cancel delegates removal of this visit's sketch to the atomic backend cancel", async () => {
+    toolStore.getState().setMode("sketch");
+    await flush();
+    hitKind = "XZ";
+    pointer("pointerdown", 100, 100, 0, 1);
+    pointer("pointerup", 100, 100, 0, 0);
+    await flush();
+    expect(viewportStore.getState().activeSketchId).toBe("sketchNew");
+
+    sketchStore.getState().setExitIntent("discard"); // the chrome bar's Cancel
+    toolStore.getState().setMode("model");
+    await flush();
+    await flush();
+
+    expect(clientMock.cancelSketch).toHaveBeenCalledWith("sketchNew", { discard: true });
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
+  });
+
+  it("Esc after a plane pick KEEPS the sketch (only Cancel discards)", async () => {
+    toolStore.getState().setMode("sketch");
+    await flush();
+    hitKind = "XZ";
+    pointer("pointerdown", 100, 100, 0, 1);
+    pointer("pointerup", 100, 100, 0, 0);
+    await flush();
+
+    toolStore.getState().setMode("model"); // no intent armed
+    await flush();
+    await flush();
+
+    expect(clientMock.cancelSketch).toHaveBeenCalledWith("sketchNew");
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
   });
 
   it("an explicit id skips the picker and enters that sketch directly", async () => {

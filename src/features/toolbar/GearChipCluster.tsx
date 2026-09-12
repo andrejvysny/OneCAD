@@ -18,7 +18,7 @@ export function GearChipCluster() {
   const module = useToolChipStore((s) => s.value);
 
   return (
-    <span data-testid="chip-gear-summary" className="px-2 py-1 text-[11.5px] font-medium text-ink-2">
+    <span data-testid="chip-gear-summary" className="min-w-0 break-words px-2 py-1 text-[11.5px] font-medium text-ink-2">
       Gear · {gearValueText(teeth, module)}
     </span>
   );

@@ -33,6 +33,7 @@ use onecad_core::regen::{
 /// cancel it, and the completion channel the test uses to resolve it.
 struct StartedJob {
     request: RegenRequest,
+    runtime_session: Option<String>,
     cancel: onecad_core::regen::CancelToken,
     complete: Option<oneshot::Sender<Outcome>>,
 }
@@ -57,6 +58,7 @@ fn fake_driver(
         let (tx, rx) = oneshot::channel::<Outcome>();
         state.lock().unwrap().started.push(StartedJob {
             request: directive.request,
+            runtime_session: directive.runtime_session,
             cancel: directive.cancel.clone(),
             complete: Some(tx),
         });
@@ -87,6 +89,10 @@ fn nth_request(state: &Arc<Mutex<FakeState>>, i: usize) -> RegenRequest {
 
 fn nth_cancelled(state: &Arc<Mutex<FakeState>>, i: usize) -> bool {
     state.lock().unwrap().started[i].cancel.is_cancelled()
+}
+
+fn nth_runtime_session(state: &Arc<Mutex<FakeState>>, i: usize) -> Option<String> {
+    state.lock().unwrap().started[i].runtime_session.clone()
 }
 
 fn complete_nth(state: &Arc<Mutex<FakeState>>, i: usize, outcome: Outcome) {
@@ -373,6 +379,25 @@ async fn handle_maps_command_outcome() {
     advance_ms(PREVIEW_DEBOUNCE_MS + 5).await;
     assert_eq!(count(&state), 2);
     assert_eq!(nth_request(&state, 1), RegenRequest::ToStep(4));
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_fence_survives_the_queued_request_window() {
+    let (state, handle, _jh) = spawn(true, SchedulerConfig::default());
+    handle.request_for_runtime(RegenRequest::ToEnd { from: 0 }, Some("runtime-old".into()));
+    // Model replacement before the scheduler drains its command queue. The app
+    // driver compares this preserved OLD token against its now-current runtime.
+    let current_runtime = "runtime-new";
+    tick().await;
+
+    assert_eq!(
+        nth_runtime_session(&state, 0).as_deref(),
+        Some("runtime-old")
+    );
+    assert_ne!(
+        nth_runtime_session(&state, 0).as_deref(),
+        Some(current_runtime)
+    );
 }
 
 /// Shutdown cancels the in-flight job, drops pending work, and lets the loop exit

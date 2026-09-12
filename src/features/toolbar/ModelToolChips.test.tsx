@@ -6,33 +6,58 @@
  * callbacks the ModelToolController registers.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent, within } from "@testing-library/react";
+import { render as testingRender, screen, act, fireEvent, within } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { ModelToolChips } from "./ModelToolChips";
-import { toolChipStore } from "@/stores/toolChipStore";
+import { ActiveToolInspector } from "@/features/inspector/ActiveToolInspector";
+import { MODEL_TOOL_CHIP_ID, toolChipStore } from "@/stores/toolChipStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
+import { toolChipPlacementStore } from "@/stores/toolChipPlacementStore";
+import { viewportWorkAreaStore } from "@/stores/viewportWorkAreaStore";
+import { documentStore } from "@/stores/documentStore";
 
 const WORLD: [number, number, number] = [0, 0, 0];
 
-/**
- * Reveal the extrude cluster's collapsed controls. Everything but the dimension
- * now lives behind `⋯` (see `ExtrudeChipControls`), so a test that asserts an
- * end condition, the draft segment, ⇔ or a boolean segment must open it first.
- */
-const openOverflow = (): void => {
-  fireEvent.click(screen.getByTestId("chip-overflow"));
-};
+function seedToolContextProjection(): void {
+  documentStore.setState({
+    bodies: { body1: { id: "body1", name: "Body 1", visible: true } },
+    sketches: {
+      sketch1: { id: "sketch1", name: "Sketch 1", visible: true, geometryToken: "g1" },
+    },
+  });
+}
 
-/** Reveal the fillet cluster's [Fillet|Chamfer] toggle + chamfer second leg,
- *  which now live behind their own `⋯` (see `EdgeOpChipControls`). */
-const openFilletOverflow = (): void => {
-  fireEvent.click(screen.getByTestId("chip-fillet-overflow"));
-};
+function publishBodyContext(tool: "linearPattern" | "circularPattern" | "mirror"): void {
+  seedToolContextProjection();
+  toolChipStore.getState().setContext(tool, { tool, kind: "bodies", bodies: [{ bodyId: "body1" }] });
+}
+
+function publishProfileContext(tool: "extrudeDepth" | "revolveAngle"): void {
+  seedToolContextProjection();
+  toolChipStore.getState().setContext(tool, {
+    tool,
+    kind: "profile",
+    sketch: { sketchId: "sketch1" },
+    regionIds: ["region1"],
+    hostBodies: [],
+    direction: tool === "extrudeDepth"
+      ? { kind: "normal", vector: [0, 0, 1] }
+      : { kind: "sketchLine", lineId: "line1" },
+  });
+}
+
+/** Render the compact viewport primary alongside inspector-only secondaries. */
+const render = (ui: ReactElement) => testingRender(<>{ui}<ActiveToolInspector /></>);
+const renderExtrudeUi = () => render(<ModelToolChips />);
+
+/** Fillet secondaries are always docked in the active-tool inspector. */
+const openFilletOverflow = (): void => {};
 
 /** Reveal the revolve cluster's New Body / Add / Cut segments, which now live
  *  behind their own `⋯` (see `RevolveChipControls`). */
 const openRevolveOverflow = (): void => {
-  fireEvent.click(screen.getByTestId("chip-revolve-overflow"));
+  // Revolve secondaries are docked in the active-tool inspector.
 };
 
 /** A fake engine that hosts the chip in the document so the portal is queryable. */
@@ -51,6 +76,8 @@ describe("ModelToolChips (M6b)", () => {
   afterEach(() => {
     setViewportEngine(null);
     toolChipStore.getState().clear();
+    toolChipPlacementStore.getState().reset();
+    viewportWorkAreaStore.getState().reset();
   });
 
   it("renders nothing while cleared", () => {
@@ -61,8 +88,29 @@ describe("ModelToolChips (M6b)", () => {
   it("shell chip renders a mm dimension input", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("2");
+    expect(screen.getByLabelText("Thickness (mm)")).toHaveValue("2");
     expect(screen.getByText("mm")).toBeInTheDocument();
+  });
+
+  it("invalid raw primary text blocks both Enter and clicked Confirm", () => {
+    const onConfirm = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showShell(2, WORLD, vi.fn(), {
+        onConfirm,
+        onCancel: vi.fn(),
+      }),
+    );
+    const input = screen.getByLabelText("Thickness (mm)");
+    fireEvent.change(input, { target: { value: "12abc" } });
+    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByTestId("chip-confirm"));
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(toolChipStore.getState().validation).toMatchObject({
+      status: "invalid",
+      draft: "12abc",
+    });
   });
 
   it("linear-pattern chip dispatches axis / count / confirm", () => {
@@ -74,6 +122,7 @@ describe("ModelToolChips (M6b)", () => {
     act(() =>
       toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis, onCount, onSpacing, onConfirm }),
     );
+    act(() => publishBodyContext("linearPattern"));
 
     // Axis toggle: X active, click Y.
     expect(screen.getByRole("button", { name: "X" })).toHaveAttribute("aria-pressed", "true");
@@ -89,7 +138,7 @@ describe("ModelToolChips (M6b)", () => {
     expect(onCount).toHaveBeenCalledWith(2);
 
     // Spacing input present + ✓ commits (U2: one confirm vocabulary).
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("20");
+    expect(screen.getByLabelText("Spacing (mm)")).toHaveValue("20");
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
@@ -157,6 +206,49 @@ describe("ModelToolChips (M6b)", () => {
     expect(total).toHaveAttribute("aria-invalid", "true");
   });
 
+  it("a step replaces an invalid count draft and clears only its own validity error", () => {
+    const onCount = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+        onAxis: vi.fn(),
+        onCount,
+        onSpacing: vi.fn(),
+        onConfirm: vi.fn(),
+      }),
+    );
+    act(() => toolChipStore.getState().setRawValueValidity("other-field", false, "bad"));
+
+    const total = screen.getByTestId("pattern-count");
+    fireEvent.change(total, { target: { value: "200" } });
+    expect(total).toHaveAttribute("aria-invalid", "true");
+    fireEvent.click(screen.getByRole("button", { name: "More instances" }));
+
+    expect(onCount).toHaveBeenCalledWith(4);
+    expect(total).toHaveValue("4");
+    expect(total).toHaveAttribute("aria-invalid", "false");
+    expect(toolChipStore.getState().rawInputErrors).not.toHaveProperty("pattern-count");
+    expect(toolChipStore.getState().rawInputErrors).toHaveProperty("other-field");
+  });
+
+  it("a fresh same-count pattern arm clears the previous count draft", () => {
+    render(<ModelToolChips />);
+    const show = () => toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+      onAxis: vi.fn(),
+      onCount: vi.fn(),
+      onSpacing: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+    act(show);
+    fireEvent.change(screen.getByTestId("pattern-count"), { target: { value: "200" } });
+    expect(screen.getByTestId("pattern-count")).toHaveAttribute("aria-invalid", "true");
+
+    act(show);
+    expect(screen.getByTestId("pattern-count")).toHaveValue("3");
+    expect(screen.getByTestId("pattern-count")).toHaveAttribute("aria-invalid", "false");
+    expect(toolChipStore.getState().rawInputErrors).not.toHaveProperty("pattern-count");
+  });
+
   it("the stepper stops at its own bounds without clamping a typed value", () => {
     const onCount = vi.fn();
     render(<ModelToolChips />);
@@ -178,8 +270,9 @@ describe("ModelToolChips (M6b)", () => {
     const handlers = { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onConfirm: vi.fn() };
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, handlers));
+    act(() => publishBodyContext("circularPattern"));
     expect(screen.getByRole("button", { name: "Z" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("360");
+    expect(screen.getByLabelText("Angle (°)")).toHaveValue("360");
     expect(screen.getByText("°")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(handlers.onConfirm).toHaveBeenCalled();
@@ -190,6 +283,7 @@ describe("ModelToolChips (M6b)", () => {
     const onConfirm = vi.fn();
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showMirror("XY", WORLD, { onPlane, onConfirm }));
+    act(() => publishBodyContext("mirror"));
     expect(screen.getByRole("button", { name: "XY" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "YZ" }));
     expect(onPlane).toHaveBeenCalledWith("YZ");
@@ -255,15 +349,15 @@ describe("ModelToolChips (M6b)", () => {
     onCancel: vi.fn(),
   });
 
-  it("armed extrude cluster: value + ⇔ toggle + ✓/✕ dispatch through the handlers", () => {
+  it("armed extrude keeps value + badge + ✓/✕ in the viewport and moves ⇔ to inspector", () => {
     const h = extrudeHandlers();
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     act(() => toolChipStore.getState().showExtrude(24.5, WORLD, h, { symmetric: false }));
+    act(() => publishProfileContext("extrudeDepth"));
 
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("24.5");
+    expect(screen.getByLabelText("Depth (mm)")).toHaveValue("24.5");
     expect(screen.getByText("mm")).toBeInTheDocument();
 
-    openOverflow();
     const sym = screen.getByTestId("chip-symmetric");
     expect(sym).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(sym);
@@ -275,14 +369,22 @@ describe("ModelToolChips (M6b)", () => {
     expect(h.onCancel).toHaveBeenCalledTimes(1);
   });
 
+  // WP-U10: the chip host is a named group, and its field is reachable by
+  // role + accessible name alone — no testid needed for either query.
+  it("the extrude chip's host and its depth field are reachable by role/name", () => {
+    renderExtrudeUi();
+    act(() => toolChipStore.getState().showExtrude(24.5, WORLD, extrudeHandlers()));
+
+    expect(screen.getByRole("group", { name: "Extrude options" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Depth (mm)" })).toHaveValue("24.5");
+  });
+
   it("⇔ toggle reflects a pressed seed; re-edit (showSymmetric:false) hides it", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { symmetric: true }));
-    openOverflow();
     expect(screen.getByTestId("chip-symmetric")).toHaveAttribute("aria-pressed", "true");
 
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showSymmetric: false }));
-    openOverflow();
     expect(screen.queryByTestId("chip-symmetric")).toBeNull();
     // ✓ / ✕ still present in a re-edit cluster.
     expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
@@ -293,7 +395,7 @@ describe("ModelToolChips (M6b)", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showExtrude(10, WORLD, h));
 
-    const input = screen.getByLabelText("Dimension value");
+    const input = screen.getByLabelText("Depth (mm)");
     fireEvent.change(input, { target: { value: "25" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
@@ -305,7 +407,7 @@ describe("ModelToolChips (M6b)", () => {
 
   it("renders the boolean segment group and fires onBooleanMode on a pick", () => {
     const h = { ...extrudeHandlers(), onBooleanMode: vi.fn() };
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     act(() =>
       toolChipStore.getState().showExtrude(10, WORLD, h, {
         showBooleanSegments: true,
@@ -314,21 +416,19 @@ describe("ModelToolChips (M6b)", () => {
       }),
     );
 
-    openOverflow();
     expect(screen.getByTestId("chip-bool-newbody")).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByTestId("chip-bool-cut"));
     expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
   });
 
   it("disables Add/Cut (title 'Needs an existing body') when no boolean target exists", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     act(() =>
       toolChipStore.getState().showExtrude(10, WORLD, { ...extrudeHandlers(), onBooleanMode: vi.fn() }, {
         showBooleanSegments: true,
         canBoolean: false,
       }),
     );
-    openOverflow();
     expect(screen.getByTestId("chip-bool-add")).toBeDisabled();
     expect(screen.getByTestId("chip-bool-cut")).toBeDisabled();
     expect(screen.getByTestId("chip-bool-newbody")).not.toBeDisabled();
@@ -336,9 +436,8 @@ describe("ModelToolChips (M6b)", () => {
   });
 
   it("omits the boolean segment group in a re-edit cluster (showBooleanSegments off)", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showBooleanSegments: false }));
-    openOverflow();
     expect(screen.queryByTestId("chip-bool-cut")).toBeNull();
   });
 
@@ -347,6 +446,15 @@ describe("ModelToolChips (M6b)", () => {
     const onCancel = vi.fn();
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showRegionSelect(2, WORLD, { onConfirm, onCancel }));
+    act(() => {
+      seedToolContextProjection();
+      toolChipStore.getState().setContext("regionSelect", {
+        tool: "regionSelect",
+        kind: "regions",
+        sketch: { sketchId: "sketch1" },
+        selectedRegionIds: ["region1", "region2"],
+      });
+    });
 
     expect(screen.getByTestId("chip-region-count")).toHaveTextContent("2 regions");
     act(() => toolChipStore.getState().setCount(1));
@@ -373,15 +481,13 @@ describe("ModelToolChips (M6b)", () => {
     return onEdgeOp;
   };
 
-  it("the fillet overflow readout tracks the active op and marks Chamfer non-default", () => {
+  it("the fillet badge tracks the active operation", () => {
     render(<ModelToolChips />);
     edgeOpCluster({ edgeOp: "Fillet" });
-    expect(screen.getByTestId("chip-fillet-overflow-readout")).toHaveTextContent("Fillet");
-    expect(screen.queryByTestId("chip-fillet-overflow-dot")).toBeNull();
+    expect(screen.getByTestId("chip-edgeop-badge")).toHaveTextContent("Fillet");
 
     act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
-    expect(screen.getByTestId("chip-fillet-overflow-readout")).toHaveTextContent("Chamfer");
-    expect(screen.getByTestId("chip-fillet-overflow-dot")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-edgeop-badge")).toHaveTextContent("Chamfer");
   });
 
   it("armed edge-op cluster renders the segments behind `⋯`, marks the active op, and dispatches", () => {
@@ -430,7 +536,7 @@ describe("ModelToolChips (M6b)", () => {
     act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
     expect(screen.getByTestId("chip-chamfer-d2")).toBeInTheDocument();
     // It never shadows the FIRST distance's locator.
-    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument();
+    expect(screen.getByLabelText("Distance (mm)")).toBeInTheDocument();
 
     act(() => toolChipStore.getState().setEdgeOp("Fillet"));
     expect(screen.queryByTestId("chip-chamfer-d2")).toBeNull();
@@ -514,7 +620,7 @@ describe("ModelToolChips (M6b)", () => {
     act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
     expect(screen.getByTestId("chip-chamfer-angle")).toBeInTheDocument();
     expect(screen.getByTestId("chip-chamfer-d2")).toBeInTheDocument();
-    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument(); // d1 unshadowed
+    expect(screen.getByLabelText("Distance (mm)")).toBeInTheDocument(); // d1 unshadowed
 
     act(() => toolChipStore.getState().setEdgeOp("Fillet"));
     expect(screen.queryByTestId("chip-chamfer-angle")).toBeNull();
@@ -608,15 +714,31 @@ describe("ModelToolChips (M6b)", () => {
     expect(screen.queryByTestId("chip-fillet-overflow")).toBeNull();
   });
 
+  it("disables Cancel once the operation is applying", () => {
+    const onCancel = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showShell(2, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel }),
+    );
+    act(() =>
+      toolChipStore.getState().setPreviewLifecycle({ status: "applying", arm: 1, request: 1 }),
+    );
+
+    fireEvent.click(screen.getByTestId("chip-cancel"));
+    expect(screen.getByTestId("chip-cancel")).toBeDisabled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
   it("armed revolve cluster: degree value + Axis reset + ✓/✕ dispatch through the handlers", () => {
     const h = { onValue: vi.fn(), onResetAxis: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() };
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showRevolve(360, WORLD, h));
+    act(() => publishProfileContext("revolveAngle"));
 
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("360");
+    expect(screen.getByLabelText("Angle (°)")).toHaveValue("360");
     expect(screen.getByText("°")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Axis" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change axis" }));
     expect(h.onResetAxis).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByTestId("chip-confirm"));
     expect(h.onConfirm).toHaveBeenCalledTimes(1);
@@ -641,8 +763,8 @@ describe("ModelToolChips (M6b)", () => {
         booleanMode: "NewBody",
       }),
     );
-    expect(screen.queryByTestId("chip-bool-cut")).toBeNull(); // collapsed by default
-    expect(screen.getByTestId("chip-revolve-overflow-readout")).toHaveTextContent("New");
+    expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-revolve-badge")).toHaveTextContent("NewBody");
 
     openRevolveOverflow();
     expect(screen.getByTestId("chip-bool-newbody")).toHaveAttribute("aria-pressed", "true");
@@ -684,12 +806,11 @@ describe("extrude end-condition segments", () => {
         { showEndConditions: true, ...opts },
       );
     });
-    openOverflow(); // the segments live behind `⋯` now
     return onEndCondition;
   };
 
   it("is absent unless the arm asks for it (re-edit shows value + ✓/✕ only)", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ showEndConditions: false });
     expect(screen.queryByTestId("chip-end-blind")).toBeNull();
   });
@@ -698,7 +819,7 @@ describe("extrude end-condition segments", () => {
   // them outright with no body ("ToNext requires an existing target body"), so
   // they are not offered rather than offered-and-doomed.
   it("disables the body-reaching conditions when no body exists", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ canUseBodyEnds: false });
     expect(screen.getByTestId("chip-end-blind")).toBeEnabled();
     expect(screen.getByTestId("chip-end-throughall")).toBeDisabled();
@@ -707,7 +828,7 @@ describe("extrude end-condition segments", () => {
   });
 
   it("enables them once a body exists and dispatches the pick", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     const onEnd = showExtrude({ canUseBodyEnds: true });
     expect(screen.getByTestId("chip-end-tonext")).toBeEnabled();
     fireEvent.click(screen.getByTestId("chip-end-tonext"));
@@ -719,20 +840,20 @@ describe("extrude end-condition segments", () => {
   // the segment is disabled under NewBody even when bodies exist — and back on
   // for Add/Cut.
   it("disables Through all under NewBody even when bodies exist", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ canUseBodyEnds: true, booleanMode: "NewBody" });
     expect(screen.getByTestId("chip-end-throughall")).toBeDisabled();
     expect(screen.getByTestId("chip-end-tonext")).toBeEnabled();
   });
 
   it("offers Through all again under Add", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ canUseBodyEnds: true, booleanMode: "Add" });
     expect(screen.getByTestId("chip-end-throughall")).toBeEnabled();
   });
 
   it("marks the active condition pressed", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ canUseBodyEnds: true, booleanMode: "Cut", endCondition: "ThroughAll" });
     expect(screen.getByTestId("chip-end-throughall")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("chip-end-blind")).toHaveAttribute("aria-pressed", "false");
@@ -742,7 +863,7 @@ describe("extrude end-condition segments", () => {
   // it — so the numeric input and the symmetric toggle hide rather than showing a
   // value that does not drive the result.
   it("hides the distance input and the ⇔ toggle for a non-Blind condition", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ canUseBodyEnds: true, endCondition: "Blind" });
     expect(screen.queryByRole("button", { name: /symmetric/i })).not.toBeNull();
     act(() => {
@@ -774,42 +895,36 @@ describe("extrude draft segment", () => {
         { showDraft: true, ...opts },
       );
     });
-    openOverflow(); // the segment lives behind `⋯` now
     return onDraftAngle;
   };
 
-  /** The draft input, scoped past the cluster's own depth `Dimension value`. */
-  const draftInput = () => within(screen.getByTestId("chip-draft-input")).getByLabelText("Dimension value");
+  /** The draft input, scoped past the cluster's own `Depth (mm)` field. */
+  const draftInput = () => within(screen.getByTestId("chip-draft-input")).getByLabelText("Draft angle (°)");
 
   it("is absent unless the arm asks for it", () => {
-    render(<ModelToolChips />);
+    renderExtrudeUi();
     showExtrude({ showDraft: false });
-    expect(screen.queryByTestId("chip-draft")).toBeNull();
-  });
-
-  it("opens COLLAPSED at 0 so the common no-draft extrude keeps a small chip", () => {
-    render(<ModelToolChips />);
-    showExtrude({});
-    expect(screen.getByTestId("chip-draft")).toHaveTextContent("Draft");
     expect(screen.queryByTestId("chip-draft-input")).toBeNull();
   });
 
-  it("expands on click and dispatches the typed degrees", () => {
-    render(<ModelToolChips />);
+  it("keeps the draft field visible in the inspector at zero", () => {
+    renderExtrudeUi();
+    showExtrude({});
+    expect(draftInput()).toHaveValue("0");
+  });
+
+  it("dispatches typed degrees without hiding the draft field", () => {
+    renderExtrudeUi();
     const onDraft = showExtrude({});
 
-    fireEvent.click(screen.getByTestId("chip-draft"));
     fireEvent.change(draftInput(), { target: { value: "10" } });
     fireEvent.keyDown(draftInput(), { key: "Enter" });
     expect(onDraft).toHaveBeenCalledWith(10);
   });
 
-  // A drafted prism looks nearly identical to a straight one at small angles, so
-  // the number itself is the only honest readout that a draft is armed.
-  it("a NON-ZERO draft opens expanded and shows the angle in the label", () => {
-    render(<ModelToolChips />);
+  it("a non-zero draft stays visible as its editable value", () => {
+    renderExtrudeUi();
     showExtrude({ draftAngleDeg: 12 });
-    expect(screen.getByTestId("chip-draft")).toHaveTextContent("Draft 12°");
     expect(draftInput()).toHaveValue("12");
     expect(screen.getByText("°")).toBeInTheDocument();
   });
@@ -846,7 +961,7 @@ describe("offset-face cluster", () => {
   it("renders the distance, the ✓/✕ pair and the tangent toggle", () => {
     render(<ModelToolChips />);
     show(handlers());
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("2.5");
+    expect(screen.getByLabelText("Offset (mm)")).toHaveValue("2.5");
     expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
     expect(screen.getByTestId("chip-offset-tangent")).toHaveAttribute("aria-pressed", "true");
   });
@@ -903,7 +1018,7 @@ describe("offset-face cluster", () => {
     show(handlers(), { valueError: true });
     // SCHEMA §7.3 forbids clamping, so the refused entry is simply not stored —
     // the field still reads the number that WAS accepted.
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("2.5");
+    expect(screen.getByLabelText("Offset (mm)")).toHaveValue("2.5");
   });
 });
 
@@ -922,14 +1037,30 @@ describe("ModelToolChips anchor lifecycle", () => {
     );
     const unmountChip = vi.fn((_id: string, el: HTMLElement) => el.remove());
     const moveChip = vi.fn();
-    setViewportEngine({ mountChip, unmountChip, moveChip } as unknown as ViewportEngine);
-    return { mountChip, unmountChip, moveChip };
+    const setChipScreenPosition = vi.fn();
+    const clientToViewport = vi.fn((x: number, y: number) => ({ x, y }));
+    const invalidate = vi.fn();
+    setViewportEngine({
+      mountChip,
+      unmountChip,
+      moveChip,
+      setChipScreenPosition,
+      clientToViewport,
+      invalidate,
+    } as unknown as ViewportEngine);
+    return { mountChip, unmountChip, moveChip, setChipScreenPosition };
   }
 
-  beforeEach(() => toolChipStore.getState().clear());
+  beforeEach(() => {
+    toolChipStore.getState().clear();
+    toolChipPlacementStore.getState().reset();
+    viewportWorkAreaStore.getState().reset();
+  });
   afterEach(() => {
     setViewportEngine(null);
     toolChipStore.getState().clear();
+    toolChipPlacementStore.getState().reset();
+    viewportWorkAreaStore.getState().reset();
   });
 
   it("mounts ONCE per arm and forwards the axis placement", () => {
@@ -951,6 +1082,9 @@ describe("ModelToolChips anchor lifecycle", () => {
       axisFrom: [0, 0, 0],
       offsetPx: 56,
       avoidValueHandle: true,
+      screenPosition: undefined,
+      constrainToSafeRect: true,
+      onPlacementStatus: expect.any(Function),
     });
     expect(unmountChip).not.toHaveBeenCalled();
   });
@@ -967,7 +1101,7 @@ describe("ModelToolChips anchor lifecycle", () => {
       ),
     );
     const host = screen.getByTestId("model-tool-chip");
-    const input = screen.getByLabelText("Dimension value");
+    const input = screen.getByLabelText("Depth (mm)");
     input.focus();
 
     // 30 drag frames' worth of store churn — value + symmetric, exactly what the
@@ -982,7 +1116,7 @@ describe("ModelToolChips anchor lifecycle", () => {
     expect(mountChip).toHaveBeenCalledTimes(1);
     expect(unmountChip).not.toHaveBeenCalled();
     expect(screen.getByTestId("model-tool-chip")).toBe(host);
-    expect(document.activeElement).toBe(screen.getByLabelText("Dimension value"));
+    expect(document.activeElement).toBe(screen.getByLabelText("Depth (mm)"));
   });
 
   it("a chip WITHOUT an axis placement passes no AXIS placement, but still avoids the arrow", () => {
@@ -995,17 +1129,195 @@ describe("ModelToolChips anchor lifecycle", () => {
       axisFrom: undefined,
       offsetPx: undefined,
       avoidValueHandle: true,
+      screenPosition: undefined,
+      constrainToSafeRect: true,
+      onPlacementStatus: expect.any(Function),
     });
+  });
+
+  it("moves the same focused draft node through dock and return without confirming", () => {
+    const { mountChip } = trackingEngine();
+    const onConfirm = vi.fn();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showShell(2, WORLD, vi.fn(), {
+        onConfirm,
+        onCancel: vi.fn(),
+      }),
+    );
+    const input = screen.getByLabelText("Thickness (mm)");
+    fireEvent.change(input, { target: { value: "12abc" } });
+    input.focus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dock" }));
+    expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
+    expect(input).toHaveValue("12abc");
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByTestId("tool-chip-dock")).toContainElement(screen.getByTestId("model-tool-chip"));
+    expect(screen.getByTestId("operation-hud")).toHaveClass("w-full", "max-w-full", "min-w-0");
+
+    fireEvent.click(screen.getByRole("button", { name: "Return" }));
+    expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(mountChip).toHaveBeenCalledTimes(2);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("auto-docks when measured chrome leaves no safe footprint", () => {
+    const { mountChip } = trackingEngine();
+    viewportWorkAreaStore.getState().setViewport({ x: 0, y: 0, width: 320, height: 240 });
+    viewportWorkAreaStore.getState().publishRegion("toolbar", { x: 0, y: 0, width: 320, height: 240 });
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const placement = mountChip.mock.calls[0][3] as {
+      onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
+    };
+    act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: false }));
+    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+  });
+
+  it("auto-docks when a measured content change has no valid final placement", () => {
+    const { mountChip } = trackingEngine();
+    viewportWorkAreaStore.getState().setViewport({ x: 0, y: 0, width: 800, height: 600 });
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const placement = mountChip.mock.calls[0][3] as {
+      onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
+    };
+
+    act(() => placement.onPlacementStatus({ width: 500, height: 80, fits: false }));
+
+    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+  });
+
+  it("keeps the focused draft node when its anchor moves behind the camera", () => {
+    const { mountChip } = trackingEngine();
+    viewportWorkAreaStore.getState().setViewport({ x: 0, y: 0, width: 800, height: 600 });
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const placement = mountChip.mock.calls[0][3] as {
+      onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
+    };
+    const input = screen.getByLabelText("Thickness (mm)");
+    fireEvent.change(input, { target: { value: "12abc" } });
+    input.focus();
+
+    act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: true }));
+    expect(toolChipPlacementStore.getState().placement.mode).toBe("anchored");
+    act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: false }));
+
+    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+    expect(screen.getByLabelText("Thickness (mm)")).toBe(input);
+    expect(input).toHaveValue("12abc");
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("waits for safe bounds instead of docking an unknown placement", () => {
+    const { mountChip } = trackingEngine();
+    viewportWorkAreaStore.setState((state) => ({
+      ...state,
+      viewport: { x: 0, y: 0, width: 800, height: 600 },
+      obstacleClearRect: null,
+    }));
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const placement = mountChip.mock.calls[0][3] as {
+      onPlacementStatus: (status: { width: number; height: number; fits: boolean | null }) => void;
+    };
+
+    act(() => placement.onPlacementStatus({ width: 280, height: 80, fits: null }));
+
+    expect(toolChipPlacementStore.getState().placement.mode).toBe("anchored");
+  });
+
+  it("temporarily returns a dock preference to its anchor when no dock host exists", () => {
+    const { mountChip } = trackingEngine();
+    toolChipPlacementStore.getState().dock();
+    testingRender(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+
+    expect(toolChipPlacementStore.getState().placement.mode).toBe("docked");
+    expect(mountChip).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Return" })).toBeInTheDocument();
+  });
+
+  it("captures a physical drag, commits screen placement on release, and never confirms", () => {
+    const { setChipScreenPosition } = trackingEngine();
+    const onConfirm = vi.fn();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn(), { onConfirm, onCancel: vi.fn() }));
+    const handle = screen.getByTestId("chip-drag-handle");
+    const host = screen.getByTestId("model-tool-chip");
+    vi.spyOn(host, "getBoundingClientRect").mockReturnValue({
+      left: 60, top: 40, width: 100, height: 40, right: 160, bottom: 80,
+    } as DOMRect);
+    let captured = false;
+    handle.setPointerCapture = vi.fn(() => { captured = true; });
+    handle.hasPointerCapture = vi.fn(() => captured);
+    handle.releasePointerCapture = vi.fn(() => { captured = false; });
+    const escapedRelease = vi.fn();
+    document.body.addEventListener("pointerup", escapedRelease);
+
+    fireEvent.pointerDown(handle, { pointerId: 7, clientX: 100, clientY: 80 });
+    fireEvent.pointerMove(handle, { pointerId: 7, clientX: 180, clientY: 140 });
+    fireEvent.pointerUp(handle, { pointerId: 7, clientX: 180, clientY: 140 });
+
+    expect(setChipScreenPosition).toHaveBeenLastCalledWith(MODEL_TOOL_CHIP_ID, { x: 190, y: 120 });
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "floating", x: 190, y: 120 });
+    expect(escapedRelease).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    document.body.removeEventListener("pointerup", escapedRelease);
+  });
+
+  it("restores an anchored chip on pointer cancellation", () => {
+    const { setChipScreenPosition } = trackingEngine();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const handle = screen.getByTestId("chip-drag-handle");
+    let captured = false;
+    handle.setPointerCapture = vi.fn(() => { captured = true; });
+    handle.hasPointerCapture = vi.fn(() => captured);
+    handle.releasePointerCapture = vi.fn(() => { captured = false; });
+    fireEvent.pointerDown(handle, { pointerId: 8, button: 0, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(handle, { pointerId: 8, clientX: 40, clientY: 40 });
+    fireEvent.pointerCancel(handle, { pointerId: 8, clientX: 40, clientY: 40 });
+    expect(setChipScreenPosition).toHaveBeenLastCalledWith(MODEL_TOOL_CHIP_ID, null);
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "anchored" });
+  });
+
+  it("restores the original floating position on cancellation", () => {
+    const { setChipScreenPosition } = trackingEngine();
+    toolChipPlacementStore.getState().floatAt(300, 200);
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const handle = screen.getByTestId("chip-drag-handle");
+    let captured = false;
+    handle.setPointerCapture = vi.fn(() => { captured = true; });
+    handle.hasPointerCapture = vi.fn(() => captured);
+    handle.releasePointerCapture = vi.fn(() => { captured = false; });
+    fireEvent.pointerDown(handle, { pointerId: 9, button: 0, clientX: 300, clientY: 200 });
+    fireEvent.pointerMove(handle, { pointerId: 9, clientX: 360, clientY: 260 });
+    fireEvent.pointerCancel(handle, { pointerId: 9, clientX: 360, clientY: 260 });
+    expect(setChipScreenPosition).toHaveBeenLastCalledWith(MODEL_TOOL_CHIP_ID, { x: 300, y: 200 });
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "floating", x: 300, y: 200 });
+  });
+
+  it("ignores non-primary starts and unmatched releases", () => {
+    const { setChipScreenPosition } = trackingEngine();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    const handle = screen.getByTestId("chip-drag-handle");
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => false);
+    fireEvent.pointerDown(handle, { pointerId: 10, button: 2, clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(handle, { pointerId: 11, clientX: 20, clientY: 20 });
+    expect(handle.setPointerCapture).not.toHaveBeenCalled();
+    expect(setChipScreenPosition).not.toHaveBeenCalled();
+    expect(toolChipPlacementStore.getState().placement).toEqual({ mode: "anchored" });
   });
 });
 
-/*
- * THE COLLAPSED EXTRUDE CHIP. The point of the overflow is that the chip carries
- * a dimension and nothing else — but a setting the user cannot see must still be
- * ANNOUNCED, and a boolean mode the drag direction changes on its own must be
- * readable without opening anything.
- */
-describe("extrude overflow", () => {
+describe("compact extrude chip and inspector", () => {
   const handlers = () => ({
     onValue: vi.fn(),
     onSymmetric: vi.fn(),
@@ -1025,6 +1337,7 @@ describe("extrude overflow", () => {
         ...opts,
       }),
     );
+    act(() => publishProfileContext("extrudeDepth"));
     return h;
   };
 
@@ -1037,86 +1350,56 @@ describe("extrude overflow", () => {
     toolChipStore.getState().clear();
   });
 
-  it("collapses to the dimension, ⋯, ✓ and ✕ — nothing else", () => {
-    render(<ModelToolChips />);
+  it("keeps value, mode and confirmation in the viewport; secondaries live in the inspector", () => {
+    renderExtrudeUi();
     show();
-    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument();
-    expect(screen.getByTestId("chip-overflow")).toBeInTheDocument();
+    expect(screen.getByLabelText("Depth (mm)")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-mode-badge")).toHaveTextContent("New");
     expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
     expect(screen.getByTestId("chip-cancel")).toBeInTheDocument();
-    for (const hidden of ["chip-end-blind", "chip-draft", "chip-symmetric", "chip-bool-cut"]) {
-      expect(screen.queryByTestId(hidden)).toBeNull();
-    }
+    expect(screen.queryByTestId("chip-overflow")).toBeNull();
+    expect(screen.getByTestId("active-tool-inspector")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-end-blind")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-draft-input")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-symmetric")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();
   });
 
-  it("the ⋯ button READS OUT the resolved boolean mode", () => {
-    render(<ModelToolChips />);
+  it("the compact badge follows the resolved boolean mode", () => {
+    renderExtrudeUi();
     show({ booleanMode: "Add" });
-    expect(screen.getByTestId("chip-mode-readout")).toHaveTextContent("Add");
-    // …and follows a mode the DRAG resolved, with no user interaction.
+    expect(screen.getByTestId("chip-mode-badge")).toHaveTextContent("Add");
     act(() => toolChipStore.getState().setBooleanMode("Cut"));
-    expect(screen.getByTestId("chip-mode-readout")).toHaveTextContent("Cut");
+    expect(screen.getByTestId("chip-mode-badge")).toHaveTextContent("Cut");
   });
 
-  it("a re-edit with no boolean segments shows the neutral ⋯ glyph", () => {
-    render(<ModelToolChips />);
-    show({ showBooleanSegments: false });
-    expect(screen.getByTestId("chip-mode-readout")).toHaveTextContent("⋯");
-  });
-
-  it("raises a dot when a HIDDEN setting is non-default, and not otherwise", () => {
-    render(<ModelToolChips />);
-    show();
-    expect(screen.queryByTestId("chip-overflow-dot")).toBeNull();
-
-    show({ draftAngleDeg: 7 });
-    expect(screen.getByTestId("chip-overflow-dot")).toBeInTheDocument();
-
-    show({ symmetric: true });
-    expect(screen.getByTestId("chip-overflow-dot")).toBeInTheDocument();
-
-    show({ endCondition: "ThroughAll", canUseBodyEnds: true });
-    expect(screen.getByTestId("chip-overflow-dot")).toBeInTheDocument();
-  });
-
-  it("toggles open/closed, and an OUTSIDE press dismisses it", () => {
-    render(<ModelToolChips />);
-    show();
-    openOverflow();
-    expect(screen.getByTestId("chip-overflow-panel")).toBeInTheDocument();
-
-    openOverflow();
-    expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
-
-    openOverflow();
-    fireEvent.pointerDown(document.body);
-    expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
-  });
-
-  it("a press INSIDE the panel keeps it open", () => {
-    render(<ModelToolChips />);
+  it("inspector callbacks update the same armed operation and keep the primary input focused", () => {
+    renderExtrudeUi();
     const h = show();
-    openOverflow();
-    fireEvent.pointerDown(screen.getByTestId("chip-bool-cut"));
+    const depth = screen.getByLabelText("Depth (mm)");
+    depth.focus();
     fireEvent.click(screen.getByTestId("chip-bool-cut"));
     expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
-    expect(screen.getByTestId("chip-overflow-panel")).toBeInTheDocument();
+    expect(document.activeElement).toBe(depth);
+    fireEvent.click(screen.getByTestId("chip-confirm"));
+    expect(h.onConfirm).toHaveBeenCalledTimes(1);
   });
 
-  it("a fresh arm reopens COLLAPSED", () => {
-    render(<ModelToolChips />);
-    show();
-    openOverflow();
-    expect(screen.getByTestId("chip-overflow-panel")).toBeInTheDocument();
-    // A new arm anchors somewhere else; the panel must not survive it.
-    act(() =>
-      toolChipStore.getState().showExtrude(10, [0, 0, 40], handlers(), {
-        showEndConditions: true,
-        showBooleanSegments: true,
-        showDraft: true,
-      }),
-    );
-    expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
+  it("invalid inspector draft blocks shared confirmation without replacing the valid preview value", () => {
+    renderExtrudeUi();
+    const h = show();
+    const draft = within(screen.getByTestId("chip-draft-input")).getByLabelText("Draft angle (°)");
+    fireEvent.change(draft, { target: { value: "12abc" } });
+    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Depth (mm)"), { target: { value: "22" } });
+    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(toolChipStore.getState().rawInputErrors).toHaveProperty("extrude-draft");
+    fireEvent.click(screen.getByTestId("chip-confirm"));
+    expect(h.onConfirm).not.toHaveBeenCalled();
+    expect(h.onDraftAngle).not.toHaveBeenCalled();
+    expect(toolChipStore.getState().draftAngleDeg).toBe(0);
+    fireEvent.change(draft, { target: { value: "12" } });
+    expect(screen.getByTestId("chip-confirm")).toBeEnabled();
   });
 });
 
@@ -1131,8 +1414,8 @@ describe("critical mode closure", () => {
     toolChipStore.getState().clear();
   });
 
-  it("extrude overflow hides Intersect pending vertical proof", () => {
-    render(<ModelToolChips />);
+  it("extrude inspector hides Intersect pending vertical proof", () => {
+    renderExtrudeUi();
     act(() =>
       toolChipStore.getState().showExtrude(
         10,
@@ -1147,7 +1430,6 @@ describe("critical mode closure", () => {
         { showBooleanSegments: true, canBoolean: true, booleanMode: "NewBody" },
       ),
     );
-    openOverflow();
     expect(screen.getByTestId("chip-bool-newbody")).toBeInTheDocument();
     expect(screen.getByTestId("chip-bool-add")).toBeInTheDocument();
     expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();

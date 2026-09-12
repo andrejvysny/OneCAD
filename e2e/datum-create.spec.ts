@@ -44,7 +44,7 @@ test.describe("datum plane — create", () => {
     await expect.poll(async () => (await extrudeDebug(page))?.datumPhase).toBe("offset");
     const chip = page.getByTestId("model-tool-chip");
     await expect(chip.getByTestId("chip-datum-base")).toHaveText("XY");
-    const input = chip.getByLabel("Dimension value");
+    const input = chip.getByLabel(/^Offset \(/);
     await expect(input).toHaveValue("10");
     // The ghost is on screen — a datum that will exist, not one that does.
     expect(

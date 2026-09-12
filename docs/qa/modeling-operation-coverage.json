@@ -385,6 +385,34 @@
       "uiExposure": "exposed"
     },
     {
+      "operation": "FeaturePattern",
+      "mode": "V1 restricted same-host Hole→Chamfer",
+      "supportStatus": "deferred",
+      "cppTest": "worker/tests/test_feature_pattern.cpp",
+      "rustRealWorkerTest": "",
+      "frontendTest": "",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1",
+      "notes": "Hidden/deferred manifest row for the only shared-host worker adapter currently implemented. worker/tests/test_feature_pattern.cpp covers a bounded Hole→Chamfer chain, malformed payloads, repair and atomic failure. It does not establish general feature patterns, typed Rust integration, frontend exposure, persistence, or native acceptance.",
+      "uiExposure": "hidden"
+    },
+    {
+      "operation": "FeaturePattern",
+      "mode": "V1 restricted independent Sketch→Blind NewBody Extrude→straight Fillet",
+      "supportStatus": "deferred",
+      "cppTest": "worker/tests/test_feature_pattern.cpp",
+      "rustRealWorkerTest": "",
+      "frontendTest": "",
+      "playwrightTest": "",
+      "corpusCase": "",
+      "kernelbenchSuite": "",
+      "ciJob": "worker-8-0-1",
+      "notes": "Hidden/deferred manifest row for the only independent-child worker adapter currently implemented: transformed Sketch, one-direction Blind NewBody Extrude, then straight-edge Fillet on the virtual Extrude output. worker/tests/test_feature_pattern.cpp is bounded C++ evidence only. Typed Rust integration is in progress and is intentionally not cited; general adapters, UI, persistence and native acceptance remain unproven.",
+      "uiExposure": "hidden"
+    },
+    {
       "operation": "Loft",
       "mode": "all",
       "supportStatus": "unsupported",

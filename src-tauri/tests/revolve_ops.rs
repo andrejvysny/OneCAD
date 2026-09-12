@@ -174,7 +174,7 @@ async fn wire_with(runtime: Runtime) -> (Runtime, SchedulerHandle, UnboundedRece
         move |report: &RegenReport, projection: &DocumentProjection| {
             let _ = tx.send((
                 report.outcome_str().to_string(),
-                report.document_change(),
+                report.document_change(&projection.document_id, &projection.runtime_session),
                 projection.clone(),
             ));
         },
@@ -1057,7 +1057,7 @@ async fn interactive_arm(runtime: &Runtime, sid: SketchId, drawn: &Sketch) -> St
             .await
             .expect("sketch_upsert");
         // SketchController.exit()'s FIRST half: worker-gesture teardown + squash.
-        rt.cancel_sketch(sid).await.expect("cancel_sketch");
+        rt.cancel_sketch(sid, false).await.expect("cancel_sketch");
         assert_eq!(
             sketch_record_count(rt),
             0,

@@ -79,6 +79,8 @@ interface Row {
   arm: (c: ModelToolController, featureId: string) => Promise<void>;
   /** What the primary value reads before typing. */
   seeded: number;
+  /** The primary field's accessible name (WP-U10). */
+  label: string;
 }
 
 const ROWS: Row[] = [
@@ -95,6 +97,7 @@ const ROWS: Row[] = [
     },
     arm: (c, id) => c.editLinearPatternFeature(id),
     seeded: 20,
+    label: "Spacing (mm)",
   },
   {
     tool: "circularPattern",
@@ -110,6 +113,7 @@ const ROWS: Row[] = [
     },
     arm: (c, id) => c.editCircularPatternFeature(id),
     seeded: 360,
+    label: "Angle (°)",
   },
 ];
 
@@ -173,7 +177,7 @@ describe("modeling interaction contract — type-to-enter and live preview", () 
       // Proves the fixture armed and that `value` IS the primary parameter slot
       // the router must write to. Without this, a red below could be a bad arm.
       expect(toolChipStore.getState().value).toBe(row.seeded);
-      expect(screen.getByLabelText("Dimension value")).toHaveValue(String(row.seeded));
+      expect(screen.getByLabelText(row.label)).toHaveValue(String(row.seeded));
     });
 
     it(`${row.tool} · typing routes to the primary value without a prior click`, async () => {
@@ -187,7 +191,7 @@ describe("modeling interaction contract — type-to-enter and live preview", () 
       // Nothing was clicked: the canvas has focus, the chip field does not.
       act(() => typeOnCanvas("2"));
 
-      const field = screen.getByLabelText("Dimension value");
+      const field = screen.getByLabelText(row.label);
       // The typed character REPLACED the formatted value rather than appending,
       // and the field took focus so the next character edits normally.
       expect(field).toHaveValue("2");
@@ -212,7 +216,7 @@ describe("modeling interaction contract — type-to-enter and live preview", () 
       // The arm itself draws one ghost; only keystrokes after that count.
       const before = engineMock.showGhostPreview.mock.calls.length;
       act(() => typeOnCanvas("2"));
-      const field = screen.getByLabelText("Dimension value");
+      const field = screen.getByLabelText(row.label);
       act(() => {
         fireEvent.change(field, { target: { value: "25" } });
       });
@@ -231,7 +235,7 @@ describe("modeling interaction contract — type-to-enter and live preview", () 
         await flush();
       });
 
-      const field = screen.getByLabelText("Dimension value");
+      const field = screen.getByLabelText(row.label);
       act(() => {
         fireEvent.change(field, { target: { value: "12abc" } });
       });

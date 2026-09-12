@@ -277,7 +277,7 @@ async fn cancel_squashes_session_into_one_command() {
     run_three_upserts(&mut rt, sid).await;
     assert_eq!(rt.undo_depth(), base_depth + 3, "3 granular steps landed");
 
-    rt.cancel_sketch(sid).await.expect("cancel_sketch");
+    rt.cancel_sketch(sid, false).await.expect("cancel_sketch");
     assert_eq!(
         rt.undo_depth(),
         base_depth + 1,

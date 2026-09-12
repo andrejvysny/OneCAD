@@ -149,6 +149,8 @@ describe("SketchController dispose parity", () => {
     expect(rafCb).toBeTypeOf("function");
 
     controller.dispose();
+    expect(engineMock.setSketchSnap).toHaveBeenCalledWith(null, false);
+    engineMock.setSketchSnap.mockClear();
     rafCb!(0); // the frame fires after teardown
 
     // The disposed guard bailed before touching the engine.

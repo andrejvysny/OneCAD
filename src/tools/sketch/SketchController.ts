@@ -28,6 +28,7 @@ import type {
   SketchUpsertResult,
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
+import type { CapturedFaceBounds } from "@/viewport/engine/faceFrameBounds";
 import type { PickablePlane } from "@/viewport/engine/PlanePicker";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { getDatumVisuals } from "@/modules/modeling/datumViewport";
@@ -40,6 +41,7 @@ import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sk
 import { settingsStore, type AutoConstrainMode } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { isInteractiveBoundary } from "@/ui/interactiveBoundary";
 import { applySketchSolveResult } from "./solveResult";
 import { promoteOne } from "@/ipc/promote";
 import { errorKind } from "@/ipc/apiError";
@@ -73,6 +75,12 @@ import { canonicalKey as canonicalConstraintKey, persistAcceptedIntents } from "
 /** Alt-held placement: infer nothing (spec §38). Module-level so the commit path
  *  allocates no set per commit. */
 const EMPTY_KINDS: ReadonlySet<SketchConstraintType> = new Set<SketchConstraintType>();
+
+interface SketchEntryTicket {
+  sessionEpoch: number;
+  documentId: string | undefined;
+  runtimeSession: string | undefined;
+}
 
 /**
  * STRUCTURAL topology — the welds a compound shape needs to stay one shape.
@@ -464,7 +472,16 @@ export class SketchController {
   private dimensionActive = false;
   private dimState: DimState = dimensionInit();
   private priorProjection: Projection | null = null;
+  /** The sketch this controller MINTED during the open session (a plane / face /
+   *  datum pick), as opposed to one it re-entered. WP-U7 D-1: a discarding Cancel
+   *  deletes it, because the backend revert cannot — its `AddSketch` was committed
+   *  before the session opened and so sits below the session watermark. Null for a
+   *  re-entered sketch, and cleared on every exit. */
+  private createdSketchId: string | null = null;
   private entering = false;
+  /** Invalidates a deferred session open across exit/re-entry without coupling it to pointer settings. */
+  private sessionEpoch = 0;
+  private restartEnterAfterStale = false;
   // A sketch→sketch retarget that landed while an enter/switch was still in flight
   // (latest-wins). Drained once the in-flight open settles.
   private pendingSwitchId: string | null = null;
@@ -555,6 +572,13 @@ export class SketchController {
   // A pointerup / Esc that arrived while beginGesture was still in flight — its end
   // is deferred here so a fast flick never double-commits the gesture.
   private dragEndPending: { target?: [number, number]; restore: boolean } | null = null;
+  /** Select-drag snapping is isolated from draw-tool latch state. */
+  private dragSnapLatch: SnapLatch = emptyLatch();
+  private dragSnapCache: SnapCandidateCache | null = null;
+  private dragSnapEntities: SketchEntity[] = [];
+  private dragHeldHint = false;
+  private dragLatestSample: { clientX: number; clientY: number; altKey: boolean } | null = null;
+  private dragRequestedSnap = false;
 
   // Marquee / box select (W2-D). `armed` on an empty-space LMB down (which CLAIMS the
   // gesture from LMB orbit); `active` once it passes DRAG_PX. Mutually exclusive with
@@ -597,7 +621,9 @@ export class SketchController {
         if (s.mode !== lastMode) {
           lastMode = s.mode;
           if (s.mode === "sketch") void this.enter();
-          else this.exit();
+          // The mode flip is the ONLY channel the chrome's Cancel has, so the
+          // intent it armed is read (and consumed) here — WP-U7 D-1.
+          else this.exit({ discard: sketchStore.getState().takeExitIntent() === "discard" });
         }
         if (s.mode === "sketch" && s.sketchTool !== lastTool) {
           lastTool = s.sketchTool;
@@ -675,7 +701,7 @@ export class SketchController {
         this.beginPlanePick(datumEntry.refusal);
         return;
       }
-      const opened = await this.openSession(activeId);
+      const opened = await this.openSession(activeId, this.captureExistingSketchFace(activeId));
       if (!opened) this.failOutOfSketchMode();
     } finally {
       this.entering = false;
@@ -731,6 +757,7 @@ export class SketchController {
    */
   private async switchTo(newId: string): Promise<void> {
     this.entering = true;
+    const initialFaceBounds = this.captureExistingSketchFace(newId);
     try {
       const closing = this.teardownSession({ restoreProjection: false });
       sketchStore.getState().setSession(null);
@@ -760,7 +787,7 @@ export class SketchController {
       if (this.disposed || toolStore.getState().mode !== "sketch") return;
       if (this.pendingSwitchId !== null && this.pendingSwitchId !== newId) return;
       this.pendingSwitchId = null;
-      const opened = await this.openSession(newId);
+      const opened = await this.openSession(newId, initialFaceBounds);
       if (!opened) this.failOutOfSketchMode(); // never strand chrome on a dead session
     } finally {
       this.entering = false;
@@ -772,6 +799,11 @@ export class SketchController {
    *  matches the session that just opened is that open's OWN echo, not a user
    *  retarget — drop it. */
   private drainPendingSwitch(): void {
+    if (this.restartEnterAfterStale) {
+      this.restartEnterAfterStale = false;
+      if (!this.disposed && toolStore.getState().mode === "sketch") void this.enter();
+      return;
+    }
     const pending = this.pendingSwitchId;
     this.pendingSwitchId = null;
     if (pending === null || this.disposed) return;
@@ -793,31 +825,58 @@ export class SketchController {
 
   /** Enter the client session for `target` and wire it into the stores + engine.
    *  Returns false when the client rejected (session not opened). */
-  private async openSession(target: EnterSketchTarget): Promise<boolean> {
+  private async openSession(
+    target: EnterSketchTarget,
+    initialFaceBounds?: CapturedFaceBounds,
+    ticket = this.entryTicket(),
+  ): Promise<boolean> {
     let session: SketchSession;
     try {
       session = await this.deps.client.enterSketch(target);
     } catch (e) {
+      if (!this.entryTicketCurrent(ticket)) {
+        this.armRestartAfterStale(ticket);
+        return true;
+      }
       logError("sketch", "enterSketch FAILED", { target, error: e });
       viewportStore.getState().setStatusHint(`Enter sketch failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
       return false;
     }
-    if (toolStore.getState().mode !== "sketch") {
-      // The user Esc'd / left model-side during the deferred enter: the backend
-      // session is live but there is no UI to drive it. Cancel it, and — for a
-      // FRESH create (plane pick, target is not an existing id) — also delete the
-      // empty sketch it just minted so it doesn't orphan in the tree. (Creations
-      // are serialized by the controller's `entering` flag, so this fires once.)
-      void this.deps.client.cancelSketch(session.sketchId);
-      if (typeof target !== "string") {
-        void this.deps.client
-          .deleteSketch(session.sketchId)
-          .catch((e: unknown) =>
-            logError("sketch", "orphan cleanup FAILED", { sketchId: session.sketchId, error: e }),
+    const documentChanged = !this.sameDocument(ticket.documentId, ticket.runtimeSession);
+    const staleVisit = ticket.sessionEpoch !== this.sessionEpoch;
+    if (this.disposed || toolStore.getState().mode !== "sketch" || documentChanged || staleVisit) {
+      // A different document/runtime owns the current client now. Its ids may
+      // collide with the stale response, so no cleanup verb is safe there.
+      let cleanupSettled = false;
+      if (!documentChanged && !this.disposed) {
+        try {
+          const fresh = typeof target !== "string";
+          const outcome = await this.deps.client.cancelSketch(
+            session.sketchId,
+            fresh ? { discard: true } : undefined,
           );
+          const stillCurrentDocument = this.sameDocument(ticket.documentId, ticket.runtimeSession);
+          if (fresh && !outcome.discarded) {
+            if (stillCurrentDocument) {
+              viewportStore.getState().setStatusHint(
+                `Cannot discard stale sketch — ${outcome.keptReason ?? "the sketch could not be reverted"}; changes kept`,
+                { severity: "warn", sticky: true },
+              );
+            }
+          } else {
+            cleanupSettled = stillCurrentDocument;
+          }
+        } catch (e) {
+          logError("sketch", "stale session cleanup FAILED", { sketchId: session.sketchId, error: e });
+        }
       }
+      if (cleanupSettled) this.armRestartAfterStale(ticket);
       return true; // the session opened; the user just left
     }
+
+    // A string target is a RE-ENTRY of an existing sketch; anything else minted
+    // one just now (WP-U7 D-1 — only the latter is deleted by a discard).
+    this.createdSketchId = typeof target === "string" ? null : session.sketchId;
 
     // A freshly created sketch (plane pick) isn't in the tree yet — register it,
     // then make it the active + selected sketch so the chrome + inspector bind.
@@ -849,6 +908,7 @@ export class SketchController {
     selectionStore.getState().set([{ kind: "sketch", id: session.sketchId }]);
 
     sketchStore.getState().setSession(session);
+    sketchStore.getState().resetConstructionMode(); // per-sketch (D-2): never carries over
     sketchStore.getState().clearSketchUndo(); // fresh session ⇒ no carried-over history
     sketchStore.getState().setConflicting(session.conflicting ?? []); // seed from the enter solve
     sketchStore.getState().setEntityStates(session.entityStates ?? {}); // ditto, per-entity
@@ -858,22 +918,51 @@ export class SketchController {
     // switch re-opens a session while already ortho, and overwriting here would make
     // the eventual exit "restore" ortho instead of the user's real projection.
     this.priorProjection ??= viewportStore.getState().projection;
+    viewportStore.getState().setProjection("ortho");
+    const suppressFrame = this.pendingSwitchId !== null && this.pendingSwitchId !== session.sketchId;
     this.deps.engine.enterSketch(
       session.plane,
       session.entities,
       session.status,
       session.constraints,
       session.entityStates ?? {},
+      { initialFaceBounds, suppressFrame },
     );
     // WP-P: a REUSED SketchObject (sketch→sketch switch) still holds the previous
     // sketch's projected ids, so this is passed unconditionally — an empty list
     // is the honest reset for a sketch with no projections.
     this.deps.engine.setSketchProjectedIds(Object.keys(session.projections ?? {}));
     this.projectEllipseHinted = false;
-    viewportStore.getState().setProjection("ortho");
-
     this.selectMachine(toolStore.getState().sketchTool);
     return true;
+  }
+
+  private sameDocument(documentId: string | undefined, runtimeSession: string | undefined): boolean {
+    const current = documentStore.getState();
+    return current.documentId === documentId && current.runtimeSession === runtimeSession;
+  }
+
+  private entryTicket(): SketchEntryTicket {
+    const document = documentStore.getState();
+    return {
+      sessionEpoch: this.sessionEpoch,
+      documentId: document.documentId,
+      runtimeSession: document.runtimeSession,
+    };
+  }
+
+  private entryTicketCurrent(ticket: SketchEntryTicket): boolean {
+    return !this.disposed
+      && toolStore.getState().mode === "sketch"
+      && ticket.sessionEpoch === this.sessionEpoch
+      && this.sameDocument(ticket.documentId, ticket.runtimeSession);
+  }
+
+  private armRestartAfterStale(ticket: SketchEntryTicket): void {
+    this.restartEnterAfterStale = this.sameDocument(ticket.documentId, ticket.runtimeSession)
+      && !this.disposed
+      && toolStore.getState().mode === "sketch"
+      && this.pendingSwitchId === null;
   }
 
   /**
@@ -900,19 +989,33 @@ export class SketchController {
     const bodyId = face.bodyId;
     if (!bodyId) return { entered: false };
 
+    const ticket = this.entryTicket();
+    const initialFaceBounds = this.deps.engine.captureFaceFrame?.({
+      bodyId,
+      topoKey: face.topoKey,
+      elementId: face.elementId,
+    });
     const resolved = await this.resolveFaceHost({
       bodyId,
       topoKey: face.topoKey,
       elementId: face.elementId,
       worldPoint: face.anchor?.worldPoint,
     });
+    if (!this.entryTicketCurrent(ticket)) {
+      this.armRestartAfterStale(ticket);
+      return { entered: true };
+    }
     // An unidentifiable pick falls through SILENTLY, exactly as before: the user
     // asked for "a sketch", not for this face, so the picker is the answer.
     if (resolved.kind === "unresolved") return { entered: false };
     if (resolved.kind === "refused") return { entered: false, refusal: resolved.reason };
     if (toolStore.getState().mode !== "sketch") return { entered: false };
 
-    const opened = await this.openSession({ newOnFace: resolved.target, plane: resolved.plane });
+    const opened = await this.openSession(
+      { newOnFace: resolved.target, plane: resolved.plane },
+      initialFaceBounds ?? undefined,
+      ticket,
+    );
     return { entered: opened };
   }
 
@@ -1086,8 +1189,13 @@ export class SketchController {
     if (this.entering) return; // a double-click must not create two sketches
     this.entering = true;
     try {
+      const ticket = this.entryTicket();
+      const initialFaceBounds = this.deps.engine.captureFaceFrame?.(pick);
       const resolved = await this.resolveFaceHost(pick);
-      if (this.disposed || toolStore.getState().mode !== "sketch") return;
+      if (!this.entryTicketCurrent(ticket)) {
+        this.armRestartAfterStale(ticket);
+        return;
+      }
       if (resolved.kind !== "ok") {
         this.setFaceHover(null);
         this.showPlanePickPrompt(
@@ -1098,7 +1206,11 @@ export class SketchController {
         return; // stay in the pick phase — the world quads are still on screen
       }
       this.endPlanePick();
-      const opened = await this.openSession({ newOnFace: resolved.target, plane: resolved.plane });
+      const opened = await this.openSession(
+        { newOnFace: resolved.target, plane: resolved.plane },
+        initialFaceBounds ?? undefined,
+        ticket,
+      );
       if (!opened && toolStore.getState().mode === "sketch") {
         // Re-show the quads but keep the failure hint visible (don't overwrite
         // the statusHint openSession just set).
@@ -1171,6 +1283,7 @@ export class SketchController {
    * `restoreProjection` is false for a sketch→sketch switch (see switchTo).
    */
   private teardownSession(opts: { restoreProjection: boolean }): SketchSession | null {
+    this.sessionEpoch++;
     sketchSelectionStore.getState().clear();
     this.endPlanePick();
     this.machine = null;
@@ -1200,7 +1313,7 @@ export class SketchController {
     this.deps.engine.setSketchSnap(null, false);
     this.deps.engine.setSketchGhost(null, null);
     this.deps.engine.setSketchTrimGhost(null);
-    this.deps.engine.exitSketch();
+    this.deps.engine.exitSketch({ restoreView: opts.restoreProjection });
     viewportStore.getState().setStatusHint(null);
     if (opts.restoreProjection && this.priorProjection) {
       viewportStore.getState().setProjection(this.priorProjection);
@@ -1210,8 +1323,36 @@ export class SketchController {
     return sketchStore.getState().session;
   }
 
-  private exit(): void {
+  private captureExistingSketchFace(sketchId: string): CapturedFaceBounds | undefined {
+    const host = documentStore.getState().sketches[sketchId]?.hostFace;
+    if (!host) return undefined;
+    return this.deps.engine.captureFaceFrame?.({ bodyId: host.bodyId, elementId: host.elementId }) ?? undefined;
+  }
+
+  /**
+   * Leave sketch mode.
+   *
+   * `discard` (WP-U7 D-1 — the chrome bar's **Cancel**) throws the session away:
+   * the backend reverts to the state at `enterSketch` and a sketch this session
+   * MINTED is deleted, so Cancel means what it says. It deliberately skips
+   * `finishSketch` — minting a timeline record for geometry that was just
+   * reverted would leave a record pointing at nothing the user asked for.
+   *
+   * Everything else (Esc, Finish, a mode flip from elsewhere) keeps its edits and
+   * runs the cancel→finish pair below.
+   */
+  private exit(opts: { discard: boolean }): void {
     const session = this.teardownSession({ restoreProjection: true });
+    if (session && opts.discard) {
+      const sketchId = session.sketchId;
+      const createdHere = this.createdSketchId === sketchId;
+      this.createdSketchId = null;
+      trace("sketch", `exit: DISCARD ${sketchId} (createdInSession=${createdHere})`);
+      void this.discardSession(sketchId, createdHere);
+      sketchStore.getState().setSession(null);
+      return;
+    }
+    this.createdSketchId = null;
     if (session) {
       // EXTRUDE-COMMIT-FIX: every keep-exit must mint/refresh the sketch's `Sketch`
       // TIMELINE record — the regen planner resolves modeling-op profiles ONLY from
@@ -1261,6 +1402,52 @@ export class SketchController {
       })();
     }
     sketchStore.getState().setSession(null);
+  }
+
+  /**
+   * The discard half of {@link exit} (WP-U7 D-1).
+   *
+   * The queued mutations are DRAINED first: an upsert still in flight would land
+   * after the revert and put back geometry the user just discarded. Then the
+   * backend reverts the session, and a sketch minted during this visit is deleted
+   * — the revert alone cannot remove it, because its `AddSketch` was committed
+   * BEFORE the session opened and so sits below the session watermark.
+   *
+   * A discard the backend REFUSES (its history was trimmed, or the session was
+   * interleaved with model edits) keeps the geometry: the sketch stays, nothing is
+   * deleted, and the user is told rather than left to discover it.
+   */
+  private async discardSession(sketchId: string, createdHere: boolean): Promise<void> {
+    try {
+      await flushSketchMutations();
+      const outcome = await this.deps.client.cancelSketch(sketchId, { discard: true });
+      if (!outcome.discarded) {
+        // A refused discard IS a keep-exit, and every keep-exit must mint or
+        // refresh the sketch's `Sketch` timeline record (EXTRUDE-COMMIT-FIX —
+        // the regen planner resolves profiles ONLY from it). The backend has
+        // already run the cancel half; only the finish half is owed.
+        await this.deps.client.finishSketch(sketchId);
+        viewportStore
+          .getState()
+          .setStatusHint(
+            `Cannot discard — ${outcome.keptReason ?? "the sketch could not be reverted"}; changes kept`,
+            { severity: "warn", sticky: true },
+          );
+        return;
+      }
+      if (!createdHere) {
+        // The always-visible static layer diffs ONLY the geometry token, and the
+        // mock lane publishes no projection — same stamp `switchTo` documents.
+        documentStore.getState().bumpSketchGeometry(sketchId);
+      }
+      viewportStore.getState().setStatusHint("Sketch changes discarded");
+    } catch (e) {
+      logError("sketch", "exit: discarding the sketch session FAILED", { sketchId, error: e });
+      viewportStore.getState().setStatusHint(`Discard failed: ${sketchErr(e)}`, {
+        severity: "error",
+        sticky: true,
+      });
+    }
   }
 
   // ── Project edges (WP-P; SCHEMA §7.6 `ProjectToSketchPlane`) ─────────────
@@ -2032,6 +2219,10 @@ export class SketchController {
   }
 
   private onPointerDown = (e: PointerEvent): void => {
+    if (isInteractiveBoundary(e)) {
+      this.downButton = -1;
+      return;
+    }
     this.downX = e.clientX;
     this.downY = e.clientY;
     this.downButton = e.button;
@@ -2043,6 +2234,11 @@ export class SketchController {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
+    if (isInteractiveBoundary(e)) {
+      this.releaseActiveSketchGesture();
+      this.downButton = -1;
+      return;
+    }
     if (this.selectActive) {
       this.onSelectPointerUp(e);
       return;
@@ -2128,6 +2324,28 @@ export class SketchController {
     logSketchStep(this.machine.id, "click", stepped);
     this.applySteppedClick(stepped, dims);
   };
+
+  /** Finish/cancel a canvas-owned gesture without using chrome coordinates. */
+  private releaseActiveSketchGesture(): void {
+    if (this.selectActive) {
+      if (this.dragging || this.dragStarting) {
+        // Releasing into UI has no meaningful sketch-plane target. Cancel to the
+        // grab's zero-delta point instead of committing a chip's coordinates.
+        this.cancelSelectDrag();
+      } else {
+        if (this.marqueeActive || this.marqueeArmed) this.cancelMarquee();
+        if (this.dragArmed) {
+          this.deps.engine.setSketchDrawingActive(false);
+          this.dragArmed = null;
+        }
+      }
+      return;
+    }
+    if (this.arcDragging) {
+      this.arcDragging = false;
+      this.stepArcToggle(false);
+    }
+  }
 
   /** Drop what belongs to the CURRENT gesture alone: the values the user pinned,
    *  the chips showing them, and the chain's angle reference. Idempotent. */
@@ -3319,11 +3537,12 @@ export class SketchController {
       Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
     if (far) this.moved = true;
     if (this.dragging || this.dragStarting) {
-      this.scheduleSelectSolve(e.clientX, e.clientY);
+      this.dragLatestSample = { clientX: e.clientX, clientY: e.clientY, altKey: e.altKey };
+      if (this.dragging) this.scheduleSelectSolve(e.clientX, e.clientY, e.altKey);
       return;
     }
     if (this.dragArmed && far) {
-      void this.beginSelectDrag(e.clientX, e.clientY);
+      void this.beginSelectDrag(e.clientX, e.clientY, e.altKey);
       return;
     }
     if (this.marqueeActive || (this.marqueeArmed && far)) {
@@ -3403,14 +3622,15 @@ export class SketchController {
     const button = this.downButton;
     this.downButton = -1;
     if (this.dragging) {
-      const pt = this.deps.engine.screenToPlane(e.clientX, e.clientY);
-      void this.finishDrag(pt ? [pt.x, pt.y] : undefined, false);
+      void this.finishDrag(this.selectDragTarget(e.clientX, e.clientY, e.altKey), false);
       return;
     }
     if (this.dragStarting) {
       // beginGesture still in flight: defer the commit until it resolves.
-      const pt = this.deps.engine.screenToPlane(e.clientX, e.clientY);
-      this.dragEndPending = { target: pt ? [pt.x, pt.y] : undefined, restore: false };
+      this.dragEndPending = {
+        target: this.selectDragTarget(e.clientX, e.clientY, e.altKey),
+        restore: false,
+      };
       return;
     }
     // Marquee past DRAG_PX → resolve the box; sub-threshold → tear it down and fall
@@ -3439,7 +3659,7 @@ export class SketchController {
   };
 
   /** First move past DRAG_PX on an armed handle: open the backend gesture. */
-  private async beginSelectDrag(clientX: number, clientY: number): Promise<void> {
+  private async beginSelectDrag(clientX: number, clientY: number, altKey: boolean): Promise<void> {
     const session = sketchStore.getState().session;
     const armed = this.dragArmed;
     if (!session || !armed || this.dragStarting || this.dragging) return;
@@ -3450,29 +3670,51 @@ export class SketchController {
     this.dragLastSeq = 0;
     this.dragAccum = {};
     this.dragCurves = {};
+    this.dragLatestSample = { clientX, clientY, altKey };
+    this.dragSnapLatch = emptyLatch();
+    this.dragSnapEntities = session.entities.filter((e) => e.id !== armed.sel.entityId);
+    this.dragSnapCache = buildSnapCache(this.dragSnapEntities);
+    if (armed.kind === "entityBody") {
+      viewportStore.getState().setStatusHint(
+        "Move drag is free; point snapping applies to point and radius handles",
+      );
+    }
+    const sessionGeneration = sketchStore.getState().sessionGeneration;
     try {
       const begun = await this.deps.client.beginGesture(
         session.sketchId,
         armed.pointRef,
         gestureTarget(armed),
       );
-      // §7.4: the per-entity map is GESTURE-FIXED — diagnosed here, echoed by
-      // endGesture, absent from every solveDrag. Publishing it once at Begin is
-      // what lets the drag frames carry none without the tint going stale. The
-      // NARROW engine setter, not `updateSketchSession`: the geometry has not
-      // moved yet, so republishing the whole session here would re-triangulate
-      // every closure fill at pointer-down.
-      sketchStore.getState().setEntityStates(begun.entityStates ?? {});
+      // A mode/session/tool switch while BeginGesture was in flight owns teardown.
+      // Never publish the old gesture's entity map into the replacement sketch.
+      const current = sketchStore.getState();
+      if (
+        !this.selectActive ||
+        this.dragArmed !== armed ||
+        current.sessionGeneration !== sessionGeneration ||
+        current.session?.sketchId !== session.sketchId
+      ) {
+        // Only a tool switch inside the SAME live sketch leaves this gesture ours
+        // to close. Session/mode exits already close it through cancelSketch.
+        if (current.session?.sketchId === session.sketchId) {
+          void this.deps.client.endGesture().catch(() => {});
+        }
+        return;
+      }
+      // §7.4: the per-entity map is GESTURE-FIXED — publish only after the fence.
+      current.setEntityStates(begun.entityStates ?? {});
       this.deps.engine.setSketchEntityStates(begun.entityStates ?? {});
     } catch (err) {
+      const current = sketchStore.getState();
+      if (
+        this.dragArmed !== armed ||
+        current.sessionGeneration !== sessionGeneration ||
+        current.session?.sketchId !== session.sketchId
+      ) return;
       viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
       this.resetDrag();
       this.deps.engine.setSketchDrawingActive(false);
-      return;
-    }
-    // A tool/mode change during the await tore the gesture down: close it cleanly.
-    if (!this.selectActive || this.dragArmed !== armed) {
-      void this.deps.client.endGesture().catch(() => {});
       return;
     }
     this.dragStarting = false;
@@ -3484,14 +3726,15 @@ export class SketchController {
       void this.finishDrag(pending.target, pending.restore);
       return;
     }
-    this.scheduleSelectSolve(clientX, clientY); // seed the first solve at the current pointer
+    const latest = this.dragLatestSample;
+    if (latest) this.scheduleSelectSolve(latest.clientX, latest.clientY, latest.altKey);
   }
 
   /** Coalesce the latest drag target and fire one solveDrag per frame (latest-wins). */
-  private scheduleSelectSolve(clientX: number, clientY: number): void {
-    const pt = this.deps.engine.screenToPlane(clientX, clientY);
-    if (!pt) return;
-    this.pendingTarget = [pt.x, pt.y];
+  private scheduleSelectSolve(clientX: number, clientY: number, altKey: boolean): void {
+    const target = this.selectDragTarget(clientX, clientY, altKey);
+    if (!target) return;
+    this.pendingTarget = target;
     if (this.solveScheduled) return;
     this.solveScheduled = true;
     requestAnimationFrame(() => {
@@ -3500,12 +3743,54 @@ export class SketchController {
       const target = this.pendingTarget;
       this.pendingTarget = null;
       if (!target || !this.dragging) return;
-      void this.fireSolve(target);
+      const requestedSnap = this.dragRequestedSnap;
+      void this.fireSolve(target, requestedSnap);
     });
   }
 
+  /** Resolve configured snap sources for target-like drags; whole-entity move stays raw. */
+  private selectDragTarget(clientX: number, clientY: number, altKey: boolean): [number, number] | undefined {
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!raw) {
+      this.clearTransientSnapFeedback();
+      return undefined;
+    }
+    const armed = this.dragArmed;
+    if (!armed || armed.kind === "entityBody") {
+      this.clearTransientSnapFeedback();
+      return [raw.x, raw.y];
+    }
+    const metric = this.deps.engine.planeScreenMetric(raw);
+    if (!metric) return [raw.x, raw.y];
+    const settings = settingsStore.getState();
+    const { decision, latch } = computeSnapDecision(raw, this.dragSnapEntities, {
+      gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
+      pixelWorld: this.deps.engine.planePixelWorld(),
+      metric,
+      snapPx: this.snapPx(),
+      enableGrid: settings.snapTo.grid,
+      enableGuideLines: settings.snapTo.sketchGuideLines,
+      enableGuidePoints: settings.snapTo.sketchGuidePoints,
+      enableQuadrant: settings.snapTo.quadrant,
+      enableIntersection: settings.snapTo.intersection,
+      enableOnCurve: settings.snapTo.onCurve,
+      enablePolar: false,
+      suppress: altKey,
+      cache: this.dragSnapCache ?? undefined,
+      latch: this.dragSnapLatch,
+      traceId: mintTraceId(),
+    });
+    this.dragSnapLatch = latch;
+    this.dragRequestedSnap = decision.snapped;
+    this.deps.engine.setSketchSnap(
+      decision,
+      settings.show.snappingHints,
+    );
+    return [decision.point.x, decision.point.y];
+  }
+
   /** One incremental drag solve; drop null/stale-seq responses, else preview the delta. */
-  private async fireSolve(target: [number, number]): Promise<void> {
+  private async fireSolve(target: [number, number], requestedSnap: boolean): Promise<void> {
     let res;
     try {
       res = await this.deps.client.solveDrag(target);
@@ -3523,11 +3808,59 @@ export class SketchController {
         solvedPositions: this.dragAccum,
         solvedCurves: this.dragCurves,
       });
+      const origin = this.draggedPointCoord();
+      const requestedMove = origin
+        ? Math.hypot(target[0] - origin[0], target[1] - origin[1]) > 1e-9
+        : false;
+      const actual = this.solvedDragTarget(moved, target);
+      const solvedMoved = actual && origin
+        ? Math.hypot(actual[0] - origin[0], actual[1] - origin[1]) > 1e-9
+        : Object.keys(this.dragAccum).length > 0 || Object.keys(this.dragCurves).length > 0;
+      if (!solvedMoved && requestedMove) {
+        this.dragHeldHint = true;
+        viewportStore.getState().setStatusHint(
+          "No movement solved at this pointer position; inspect the sketch constraints",
+        );
+      } else if (solvedMoved && this.dragHeldHint) {
+        this.dragHeldHint = false;
+        viewportStore.getState().setStatusHint(null);
+      }
+      const snapUnsatisfied = requestedSnap && actual !== null &&
+        Math.hypot(actual[0] - target[0], actual[1] - target[1]) > 0.25 * this.deps.engine.planePixelWorld();
+      if (snapUnsatisfied) {
+        this.deps.engine.setSketchSnap(null, false);
+        viewportStore.getState().setStatusHint(
+          "Snap target not reached; the solver kept the geometry at its solved position",
+        );
+      }
       // TRANSIENT: this runs once per rAF for the whole drag, so the engine must
       // not re-triangulate the live closure fills here. `finishDrag`'s
       // non-transient update rebuilds them once, at the committed geometry.
       this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus, undefined, { transient: true });
     }
+  }
+
+  /** Observable point represented by the current gesture after a solver response. */
+  private solvedDragTarget(entities: SketchEntity[], requested: [number, number]): [number, number] | null {
+    const armed = this.dragArmed;
+    if (!armed) return null;
+    const entity = entities.find((candidate) => candidate.id === armed.sel.entityId);
+    if (!entity) return null;
+    if (armed.kind === "radius" && (entity.type === "Circle" || entity.type === "Arc")) {
+      const center = entity.center;
+      const radius = entity.radius;
+      if (!center || radius === undefined) return null;
+      const dx = requested[0] - center[0];
+      const dy = requested[1] - center[1];
+      const length = Math.hypot(dx, dy);
+      if (length === 0) return center;
+      return [
+        center[0] + (dx / length) * radius,
+        center[1] + (dy / length) * radius,
+      ];
+    }
+    if (!armed.sel.point) return null;
+    return entityPoints(entity).find((point) => point.position === armed.sel.point)?.coord ?? null;
   }
 
   /** Esc mid-drag: end the gesture at the ORIGINAL position (no explicit cancel verb
@@ -3631,6 +3964,13 @@ export class SketchController {
     this.dragPlane = null;
     this.pendingTarget = null;
     this.dragEndPending = null;
+    this.dragSnapLatch = emptyLatch();
+    this.dragSnapCache = null;
+    this.dragSnapEntities = [];
+    this.dragHeldHint = false;
+    this.dragLatestSample = null;
+    this.dragRequestedSnap = false;
+    this.clearTransientSnapFeedback();
   }
 
   // ── Marquee / box select (W2-D) ─────────────────────────────────────────────
@@ -3944,12 +4284,14 @@ export class SketchController {
 
   dispose(): void {
     this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
+    this.sessionEpoch++;
     this.arcDragging = false;
     this.extendActive = false;
     this.snapCache = null;
     this.snapCacheKey = null;
     this.clearLiveDimGesture();
     this.pendingSwitchId = null;
+    this.restartEnterAfterStale = false;
     this.endPlanePick();
     sketchSelectionStore.getState().clear();
     this.endSketchEditTool();

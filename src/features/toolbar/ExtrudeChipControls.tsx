@@ -15,10 +15,10 @@
  * `BooleanModeSegments` is shared with the REVOLVE cluster, which still renders
  * it inline — collapsing happens in the extrude branch, not in these controls.
  */
-import { useState } from "react";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { ChipOverflow } from "@/features/toolbar/ChipOverflow";
+import { toolChipStore } from "@/stores/toolChipStore";
 import type { BooleanMode, ExtrudeEndCondition } from "@/tools/modelTools/modelToolMachine";
 
 /** Intersect stays hidden until its full real-worker/browser evidence gate passes. */
@@ -110,10 +110,8 @@ export function EndConditionSegments({
  * `BRepOffsetAPI_DraftAngle`), but no UI ever authored one — this is that
  * surface.
  *
- * It stays COLLAPSED at 0 so the common no-draft extrude keeps a two-control
- * chip, and expands into a degrees input on click. A NON-ZERO draft is always
- * visible in the button label, because a drafted prism looks nearly identical to
- * a straight one at small angles and the number is the only honest readout.
+ * It stays visible in the inspector: collapsing an invalid field would hide the
+ * exact draft text that is blocking confirmation.
  */
 export function DraftSegment({
   deg,
@@ -124,28 +122,19 @@ export function DraftSegment({
   onDeg: (deg: number) => void;
   onConfirm: () => void;
 }) {
-  const [open, setOpen] = useState(deg !== 0);
   return (
-    <>
-      <button
-        type="button"
-        data-testid="chip-draft"
-        aria-pressed={open}
-        title="Draft angle applied to the side faces (degrees)"
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          "rounded-full px-2 py-1 text-[11.5px] font-medium",
-          deg !== 0 || open ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-        )}
-      >
-        {deg === 0 ? "Draft" : `Draft ${deg}°`}
-      </button>
-      {open && (
-        <span data-testid="chip-draft-input">
-          <DimensionInput value={deg} suffix="°" onCommit={onDeg} onConfirm={onConfirm} />
-        </span>
-      )}
-    </>
+    <span data-testid="chip-draft-input">
+      <DimensionInput
+        value={deg}
+        suffix="°"
+        label="Draft angle (°)"
+        onValidityChange={(valid, draft) =>
+          toolChipStore.getState().setRawValueValidity("extrude-draft", valid, draft)
+        }
+        onCommit={onDeg}
+        onConfirm={onConfirm}
+      />
+    </span>
   );
 }
 

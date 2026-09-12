@@ -12,9 +12,12 @@
  * `src/test/contracts/inspectorContract.ts`. Pairs that can never render together
  * share one.
  */
+import { createElement } from "react";
 import type { InspectorContext, ModuleScope } from "@/platform";
 import { ModelingScopes } from "./manifest";
 import { ModelingInspectorSections as Ids, ModelingInspectorPriorities as P } from "./inspectorSectionIds";
+import { useToolStore } from "@/stores/toolStore";
+import { MeasurePanel } from "@/features/measure/MeasurePanel";
 import {
   BodyAppearanceSection,
   FaceAppearanceSection,
@@ -35,7 +38,20 @@ const isKind = (ctx: InspectorContext, ...kinds: string[]) => {
   return sel !== undefined && kinds.includes(sel.typeId);
 };
 
+export function MeasurementInspectorSection() {
+  const mode = useToolStore((state) => state.mode);
+  const modelTool = useToolStore((state) => state.modelTool);
+  return mode === "model" && modelTool === "measure" ? createElement(MeasurePanel) : null;
+}
+
 export function contributeInspectorSections(scope: ModuleScope): void {
+  scope.registerInspectorSection({
+    id: Ids.Measurement,
+    title: "Measurement",
+    priority: P.Measurement,
+    canRender: modelling,
+    component: MeasurementInspectorSection,
+  });
   scope.registerInspectorSection({
     id: Ids.AppearanceBody,
     title: "Appearance",

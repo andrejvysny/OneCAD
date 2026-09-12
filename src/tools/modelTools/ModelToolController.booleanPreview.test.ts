@@ -74,6 +74,7 @@ function makeClientMock(capturePreview?: (cb: (result: PreviewResult) => void) =
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     undo: vi.fn(() => Promise.resolve(okResult())),
+    rollbackFailedOperation: vi.fn(() => Promise.resolve({ ...okResult(), rolledBack: true, reason: "rolledBack" as const })),
     getOperationParams: vi.fn(() =>
       Promise.resolve({ operation: "Union", targetBodyId: "body1", toolBodyId: "body2" }),
     ),
@@ -362,11 +363,12 @@ describe("ModelToolController boolean kernel preview", () => {
     clientMock.endPreview.mockResolvedValueOnce({
       ...okResult(),
       errorMessage: "regen failed after apply",
+      rollbackToken: "rb-boolean-1",
     });
 
     await applyAndSettle();
 
-    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+    expect(clientMock.rollbackFailedOperation).toHaveBeenCalledWith("rb-boolean-1");
     expect(toolStore.getState().phase).toBe("armed");
     expect(toolChipStore.getState().kind).toBe("booleanOp");
     expect(viewportStore.getState().statusHint?.message).toContain("regen failed after apply");
@@ -377,11 +379,11 @@ describe("ModelToolController boolean kernel preview", () => {
     await armBoolean();
     // `classifyRegen` reads the terminal when no message is present — a result with
     // bodies but `terminal:"failed"` used to be counted as success by body count.
-    clientMock.endPreview.mockResolvedValueOnce({ ...okResult(), terminal: "failed" });
+    clientMock.endPreview.mockResolvedValueOnce({ ...okResult(), terminal: "failed", rollbackToken: "rb-boolean-2" });
 
     await applyAndSettle();
 
-    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+    expect(clientMock.rollbackFailedOperation).toHaveBeenCalledWith("rb-boolean-2");
     expect(toolStore.getState().phase).toBe("armed");
     expect(toolChipStore.getState().kind).toBe("booleanOp");
   });

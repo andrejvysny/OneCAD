@@ -39,12 +39,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { trace, traceWarn } from "@/debug/trace";
 import { logDebug, logError, logWarn } from "@/debug/log";
-import type { CadClient } from "./client";
+import type { CadClient, DocumentReplacementOptions, GeometryReadFence } from "./client";
 import { parseOperationDiagnostics } from "./operationDiagnostics";
 import type {
   ApplyOperationResult,
+  RollbackFailedOperationResult,
   AutosaveEvent,
   BeginGestureResult,
+  CancelSketchResult,
   ClassifyResult,
   ComponentParamValue,
   ComponentUpgrade,
@@ -78,6 +80,7 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  OperationEffects,
   OperationDiagnostic,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
@@ -96,6 +99,7 @@ import type {
   OnRecovery,
   RecoveryInfo,
   RegenTerminal,
+  RegenStarted,
   ReindexReport,
   SaveOutcome,
   RegenFinished,
@@ -184,8 +188,11 @@ const CMD = {
   stepFileDialog: "step_file_dialog",
   saveFileDialog: "save_file_dialog",
   getMesh: "get_mesh",
+  meshRenderCompleted: "mesh_render_completed",
   getProjection: "get_projection",
   applyEditCommand: "apply_edit_command",
+  applyOperation: "apply_operation",
+  rollbackFailedOperation: "rollback_failed_operation",
   getOperationParams: "get_operation_params",
   featureDependencies: "feature_dependencies",
   canFoldTransform: "can_fold_transform",
@@ -248,6 +255,7 @@ const EVT = {
   needsRepair: "needs-repair",
   closeRequested: "close-requested",
   autosave: "autosave",
+  menuAction: "menu-action",
 } as const;
 
 /** Local lane bookkeeping latency; exact Tauri L2 geometry comes from PreviewOp. */
@@ -286,6 +294,7 @@ export function __setRegenTimeoutForTests(ms: number): void {
 // ── Wire DTOs (camelCase; mirror src-tauri/src/dto.rs) ────────────────────────
 interface DocumentSnapshotDto {
   documentId: string;
+  runtimeSession: string;
   title: string;
 }
 /** `RecoveryInfoDto` is field-identical to the frontend `RecoveryInfo`. */
@@ -307,6 +316,7 @@ interface SketchSessionDto {
   constraints: unknown;
   dof: number;
   status: SketchSolveStatus;
+  solveCurrent?: boolean;
   /** Backend constraint uuids in conflict (SCHEMA §7.4); mapped to frontend ids. */
   conflicting?: string[];
   /** Per-entity constrained state keyed by backend ENTITY uuid (SCHEMA §7.4;
@@ -587,6 +597,118 @@ export function createTauriClient(): CadClient {
   // The newest published change — buffered so a covering publish landing in the
   // window between the command returning and `setTarget` still resolves the awaiter.
   let lastPublishedChange: DocumentChange | null = null;
+  let activeRuntimeSession: string | null = null;
+  let replacementPending = false;
+  let lifecycleEpoch = 0;
+  const pendingProjections = new Map<string, DocumentProjectionWire>();
+  const pendingChanges = new Map<string, DocumentChange>();
+  interface PendingLifecycle {
+    /** Exact ordered transform `busy -> max(busy + delta, floor)`. */
+    delta: number;
+    floor: number;
+    terminal: RegenFinished | null;
+    repair: NeedsRepairEvent | null;
+  }
+  const pendingLifecycle = new Map<string, PendingLifecycle>();
+  const MAX_PENDING_RUNTIME_SESSIONS = 4;
+
+  function bufferBySession<T extends { runtimeSession?: string; revision: number }>(
+    map: Map<string, T>,
+    value: T,
+  ): void {
+    const session = value.runtimeSession;
+    if (!session) return;
+    const previous = map.get(session);
+    if (!previous || value.revision >= previous.revision) map.set(session, value);
+    while (map.size > MAX_PENDING_RUNTIME_SESSIONS) {
+      const oldest = map.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
+
+  interface ReplacementState {
+    runtimeSession: string | null;
+    publication: DocumentChange | null;
+    snapshotId: number;
+    regenBusy: number;
+  }
+
+  function beginReplacement(): ReplacementState {
+    const prior = {
+      runtimeSession: activeRuntimeSession,
+      publication: lastPublishedChange,
+      snapshotId: currentSnapshotId,
+      regenBusy: documentStore.getState().regenBusy,
+    };
+    replacementPending = true;
+    lifecycleEpoch += 1;
+    pendingProjections.clear();
+    pendingChanges.clear();
+    pendingLifecycle.clear();
+    resetCorrelation();
+    return prior;
+  }
+
+  function finishReplacement(snapshot: DocumentSnapshotDto): void {
+    activeRuntimeSession = snapshot.runtimeSession;
+    replacementPending = false;
+    const projection = pendingProjections.get(activeRuntimeSession) ?? null;
+    const change = pendingChanges.get(activeRuntimeSession) ?? null;
+    pendingProjections.clear();
+    pendingChanges.clear();
+    if (projection) {
+      onProjectionUpdatedEvent(projection);
+    }
+    if (change) {
+      onDocumentChangedEvent(change);
+    }
+    flushLifecycle(activeRuntimeSession, 0);
+  }
+
+  function abortReplacement(prior: ReplacementState): void {
+    replacementPending = false;
+    activeRuntimeSession = prior.runtimeSession;
+    const projection = prior.runtimeSession
+      ? pendingProjections.get(prior.runtimeSession) ?? null
+      : null;
+    const change = prior.runtimeSession
+      ? pendingChanges.get(prior.runtimeSession) ?? null
+      : null;
+    pendingProjections.clear();
+    pendingChanges.clear();
+    if (projection) onProjectionUpdatedEvent(projection);
+    if (change) onDocumentChangedEvent(change);
+    else {
+      lastPublishedChange = prior.publication;
+      currentSnapshotId = prior.snapshotId;
+    }
+    if (prior.runtimeSession) flushLifecycle(prior.runtimeSession, prior.regenBusy);
+  }
+
+  function beforeAdopt(options?: DocumentReplacementOptions): void {
+    try {
+      options?.beforeAdopt?.();
+    } catch (error) {
+      // Native success has already published the replacement. A local reset hook
+      // cannot turn that fact into a fictional backend rollback.
+      traceWarn("ipc", "document replacement beforeAdopt hook failed", error);
+    }
+  }
+
+  function notifySubscribers<T>(
+    listeners: Set<(value: T) => void>,
+    value: T,
+    eventName: string,
+  ): void {
+    for (const listener of [...listeners]) {
+      try {
+        listener(value);
+      } catch (error) {
+        traceWarn("ipc", `${eventName} subscriber failed`, error);
+      }
+    }
+  }
 
   function settle(a: Awaiter, r: Resolved): void {
     clearTimeout(a.timer);
@@ -708,6 +830,18 @@ export function createTauriClient(): CadClient {
   }
 
   function onDocumentChangedEvent(change: DocumentChange): void {
+    if (replacementPending) {
+      bufferBySession(pendingChanges, change);
+      return;
+    }
+    if (activeRuntimeSession === null && change.runtimeSession) {
+      bufferBySession(pendingChanges, change);
+      return;
+    }
+    if (
+      activeRuntimeSession !== null &&
+      change.runtimeSession !== activeRuntimeSession
+    ) return;
     trace(
       "ipc",
       `document-changed: rev=${change.revision} changed=[${change.changedBodies.map((b) => b.bodyId).join(", ")}] ` +
@@ -716,11 +850,51 @@ export function createTauriClient(): CadClient {
     // Adopt the published snapshot id so promoteSelection scopes picks correctly.
     if (change.snapshotId && change.snapshotId > 0) currentSnapshotId = change.snapshotId;
     lastPublishedChange = change;
-    for (const cb of [...docChangeListeners]) cb(change);
+    notifySubscribers(docChangeListeners, change, "document-changed");
     resolvePublished(change);
   }
 
-  function onRegenStartedEvent(): void {
+  function lifecycleFor(session: string): PendingLifecycle {
+    let pending = pendingLifecycle.get(session);
+    if (!pending) {
+      pending = { delta: 0, floor: 0, terminal: null, repair: null };
+      pendingLifecycle.set(session, pending);
+    }
+    while (pendingLifecycle.size > MAX_PENDING_RUNTIME_SESSIONS) {
+      const oldest = pendingLifecycle.keys().next().value as string | undefined;
+      if (oldest === undefined || oldest === session) break;
+      pendingLifecycle.delete(oldest);
+    }
+    return pending;
+  }
+
+  function flushLifecycle(session: string, baselineBusy: number): void {
+    const pending = pendingLifecycle.get(session);
+    pendingLifecycle.clear();
+    if (!pending) {
+      documentStore.getState().regenIdle();
+      for (let i = 0; i < baselineBusy; i += 1) documentStore.getState().regenStarted();
+      return;
+    }
+    if (pending.terminal) onRegenFinishedAuthorized(pending.terminal);
+    if (pending.repair) onNeedsRepairAuthorized(pending.repair);
+    documentStore.getState().regenIdle();
+    const busy = Math.max(baselineBusy + pending.delta, pending.floor);
+    for (let i = 0; i < busy; i += 1) documentStore.getState().regenStarted();
+  }
+
+  function onRegenStartedEvent(event: RegenStarted): void {
+    if (!event.runtimeSession) {
+      if (!replacementPending) documentStore.getState().regenStarted();
+      return;
+    }
+    if (replacementPending || activeRuntimeSession === null) {
+      const pending = lifecycleFor(event.runtimeSession);
+      pending.delta += 1;
+      pending.floor += 1;
+      return;
+    }
+    if (event.runtimeSession !== activeRuntimeSession) return;
     documentStore.getState().regenStarted();
   }
 
@@ -732,6 +906,22 @@ export function createTauriClient(): CadClient {
   const REGEN_FAILED_HINT_PREFIX = "Geometry rebuild failed — ";
 
   function onRegenFinishedEvent(rf: RegenFinished): void {
+    if (!rf.runtimeSession) {
+      if (!replacementPending) onRegenFinishedAuthorized(rf);
+      return;
+    }
+    if (replacementPending || activeRuntimeSession === null) {
+      const pending = lifecycleFor(rf.runtimeSession);
+      pending.delta -= 1;
+      pending.floor = Math.max(0, pending.floor - 1);
+      if (!pending.terminal || rf.revision >= pending.terminal.revision) pending.terminal = rf;
+      return;
+    }
+    if (rf.runtimeSession !== activeRuntimeSession) return;
+    onRegenFinishedAuthorized(rf);
+  }
+
+  function onRegenFinishedAuthorized(rf: RegenFinished): void {
     // Paired with `regen-started`, CLAMPED at zero in the store: a no-op regen
     // finishes without ever having started, so completions outnumber starts.
     documentStore.getState().regenSettled();
@@ -774,8 +964,27 @@ export function createTauriClient(): CadClient {
   }
 
   function onProjectionUpdatedEvent(p: DocumentProjectionWire): void {
+    if (replacementPending) {
+      bufferBySession(pendingProjections, p);
+      return;
+    }
+    if (activeRuntimeSession === null && p.runtimeSession) {
+      bufferBySession(pendingProjections, p);
+      return;
+    }
+    if (
+      activeRuntimeSession !== null &&
+      p.runtimeSession !== activeRuntimeSession
+    ) return;
     applyProjectionToStore(p); // hydrate documentStore (revision-reconciled)
-    for (const cb of [...projectionListeners]) cb(p);
+    notifySubscribers(projectionListeners, p, "projection-updated");
+    const pendingChange = activeRuntimeSession
+      ? pendingChanges.get(activeRuntimeSession)
+      : undefined;
+    if (pendingChange) {
+      pendingChanges.delete(activeRuntimeSession!);
+      onDocumentChangedEvent(pendingChange);
+    }
   }
 
   function onWorkerStatusEvent(s: WorkerStatus): void {
@@ -783,7 +992,21 @@ export function createTauriClient(): CadClient {
   }
 
   function onNeedsRepairEvent(e: NeedsRepairEvent): void {
-    for (const cb of [...needsRepairListeners]) cb(e);
+    if (!e.runtimeSession) {
+      if (!replacementPending) onNeedsRepairAuthorized(e);
+      return;
+    }
+    if (replacementPending || activeRuntimeSession === null) {
+      const pending = lifecycleFor(e.runtimeSession);
+      if (!pending.repair || e.revision >= pending.repair.revision) pending.repair = e;
+      return;
+    }
+    if (e.runtimeSession !== activeRuntimeSession) return;
+    onNeedsRepairAuthorized(e);
+  }
+
+  function onNeedsRepairAuthorized(e: NeedsRepairEvent): void {
+    notifySubscribers(needsRepairListeners, e, "needs-repair");
   }
 
   function onCloseRequestedEvent(): void {
@@ -812,6 +1035,33 @@ export function createTauriClient(): CadClient {
     if (viewportStore.getState().statusHint?.message.startsWith(AUTOSAVE_FAILED_HINT_PREFIX)) {
       viewportStore.getState().setStatusHint(null);
     }
+  }
+
+  /**
+   * A native menu item was picked (`src-tauri/src/menu.rs`). Rust sends the verb
+   * only; the frontend decides what it means, so this hands straight to the
+   * shared router that the ⌘-chords and the ⌘K palette already share.
+   *
+   * The router module is loaded DYNAMICALLY, and deliberately: it reaches the
+   * shell's file bridges and the sketch/model tool layer, and a static import
+   * would pull that whole graph into the IPC module (which every lane loads,
+   * mock included) and close an `ipc → features → ipc/client → ipc` cycle at
+   * module-eval time. A menu event is a human click; one microtask of import
+   * latency is free.
+   */
+  function onMenuActionEvent(payload: { action?: string } | null): void {
+    const action = payload?.action;
+    trace("ipc", `menu-action: ${action ?? "(none)"}`);
+    void (async () => {
+      const { isMenuAction, runMenuAction } = await import("@/features/shell/menuActions");
+      // An unknown verb means a newer shell than this webview — ignore it rather
+      // than guess. Nothing in the menu is destructive enough to warrant a hint.
+      if (!isMenuAction(action)) {
+        traceWarn("ipc", `menu-action: unknown verb ${String(action)} ignored`);
+        return;
+      }
+      await runMenuAction(action);
+    })();
   }
 
   /** Await the correlated regen completion for a commit. Register BEFORE invoking
@@ -881,7 +1131,7 @@ export function createTauriClient(): CadClient {
         unlisteners.push(
           await listen<DocumentChange>(EVT.documentChanged, (e) => onDocumentChangedEvent(e.payload)),
           await listen<DocumentProjectionDto>(EVT.projectionUpdated, (e) => onProjectionUpdatedEvent(e.payload)),
-          await listen<void>(EVT.regenStarted, () => onRegenStartedEvent()),
+          await listen<RegenStarted>(EVT.regenStarted, (e) => onRegenStartedEvent(e.payload)),
           await listen<RegenFinished>(EVT.regenFinished, (e) => onRegenFinishedEvent(e.payload)),
           await listen<SketchUpsertDto>(EVT.sketchSolved, (e) => {
             lastSketchSolved = e.payload;
@@ -890,6 +1140,7 @@ export function createTauriClient(): CadClient {
           await listen<NeedsRepairEvent>(EVT.needsRepair, (e) => onNeedsRepairEvent(e.payload)),
           await listen<void>(EVT.closeRequested, () => onCloseRequestedEvent()),
           await listen<AutosaveEvent>(EVT.autosave, (e) => onAutosaveEvent(e.payload)),
+          await listen<{ action?: string }>(EVT.menuAction, (e) => onMenuActionEvent(e.payload)),
         );
         return true;
       } catch (e) {
@@ -907,6 +1158,25 @@ export function createTauriClient(): CadClient {
   // the command round-trip, so the listeners must be attaching before any
   // command can possibly be invoked on this client.
   void ensureEvents();
+
+  async function callProjectionFenced(
+    cmd: string,
+    args: Record<string, unknown>,
+  ): Promise<DocumentProjectionDto> {
+    const commandEpoch = lifecycleEpoch;
+    const commandSession = activeRuntimeSession;
+    const projection = await call<DocumentProjectionDto>(cmd, args);
+    if (
+      commandEpoch !== lifecycleEpoch ||
+      commandSession !== activeRuntimeSession ||
+      (commandSession !== null &&
+        projection.runtimeSession !== undefined &&
+        projection.runtimeSession !== commandSession)
+    ) {
+      throw new Error("document changed while command was in flight");
+    }
+    return projection;
+  }
 
   /**
    * Run an edit command and correlate its regen into an ApplyOperationResult.
@@ -927,9 +1197,12 @@ export function createTauriClient(): CadClient {
     opLabel: string | undefined,
     scope: ApplyEditScope,
     unwrap: (raw: T) => DocumentProjectionDto,
+    rawNoRegen?: (raw: T) => boolean,
   ): Promise<{ raw: T; result: ApplyOperationResult }> {
     const { recordId } = scope;
     await ensureEvents();
+    const commandEpoch = lifecycleEpoch;
+    const commandSession = activeRuntimeSession;
     trace("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} label=${opLabel ?? "?"}`);
     const awaiter = awaitNextChange(scope);
     let raw: T;
@@ -942,11 +1215,19 @@ export function createTauriClient(): CadClient {
       traceWarn("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} invoke THREW`, e);
       throw e;
     }
+    if (
+      commandEpoch !== lifecycleEpoch ||
+      commandSession !== activeRuntimeSession ||
+      (commandSession !== null && projection.runtimeSession !== commandSession)
+    ) {
+      awaiter.cancel();
+      throw new Error("document changed while command was in flight");
+    }
     // Conditionally regen-less (see `ApplyEditScope.noRegenWhen`): the command
     // succeeded and enqueued nothing, so the pre-regen projection IS the whole
     // answer. `noop`, never `timeout` — nothing failed, there was simply nothing
     // to rebuild.
-    if (scope.noRegenWhen?.(projection) === true) {
+    if (scope.noRegenWhen?.(projection) === true || rawNoRegen?.(raw) === true) {
       awaiter.cancel();
       trace("ipc", `applyEdit: cmd=${cmd} fired no regen — settling noop off the projection`);
       return {
@@ -1079,6 +1360,52 @@ export function createTauriClient(): CadClient {
   }
 
   /**
+   * `undo` / `redo` (WP-U1).
+   *
+   * `api::undo` answers with the PROJECTION, never a label, so the name of the
+   * step being reverted has to be read off the projection the store already
+   * holds — top of the undo stack is exactly what the next undo takes back.
+   *
+   * And `opLabel` is reported only when the step actually MOVED. The runtime
+   * refuses a revert while a drag gesture is open (`revert_blocked_by_gesture`)
+   * and still returns a perfectly good projection, so "a step was available" and
+   * "a step was reverted" are different facts; the depth before vs after is the
+   * one signal that separates them, and the status hint says different things
+   * for each.
+   */
+  async function revert(cmd: string, dir: "undo" | "redo"): Promise<ApplyOperationResult> {
+    const before = documentStore.getState();
+    const label = dir === "undo" ? before.undoLabel : before.redoLabel;
+    const depthBefore = dir === "undo" ? before.undoDepth : before.redoDepth;
+    const { raw, result } = await applyEditRaw<DocumentProjectionDto>(
+      cmd,
+      {},
+      label ?? undefined,
+      {
+        // A revert that reverted NOTHING enqueues no regen: `api::undo`/`redo`
+        // only call the scheduler when the runtime handed back a revert (an
+        // empty stack, and a revert refused while a drag gesture is open, both
+        // return a perfectly good projection and schedule nothing). Without this
+        // the awaiter sat out the full correlation timeout before "Nothing to
+        // undo" could appear — seconds of nothing, for the one case that needs
+        // an immediate answer. The depth NOT moving is the same fact the backend
+        // decided on, read off the projection it returned. An older backend that
+        // reports no depth cannot be second-guessed: wait, as before.
+        noRegenWhen: (p) => {
+          const after = dir === "undo" ? p.undoDepth : p.redoDepth;
+          return after !== undefined && after >= depthBefore;
+        },
+      },
+      (p) => p,
+    );
+    const depthAfter = dir === "undo" ? raw.undoDepth : raw.redoDepth;
+    // A projection that reports no depth cannot be second-guessed — take the
+    // label rather than claim nothing happened.
+    if (depthAfter === undefined || depthAfter < depthBefore) return result;
+    return { ...result, opLabel: undefined };
+  }
+
+  /**
    * The two variable WRITES (W5 result truth) — `upsert_variable` /
    * `remove_variable`, which were the last kernel-touching commands exempt from
    * the `regenOutcome` doctrine.
@@ -1122,6 +1449,8 @@ export function createTauriClient(): CadClient {
    */
   async function insertStep(): Promise<ApplyOperationResult | null> {
     await ensureEvents();
+    const commandEpoch = lifecycleEpoch;
+    const commandSession = activeRuntimeSession;
     const awaiter = awaitNextChange();
     let projection: DocumentProjectionDto | null;
     try {
@@ -1134,6 +1463,16 @@ export function createTauriClient(): CadClient {
     if (!projection) {
       awaiter.cancel(); // dialog cancelled — nothing was appended, no regen fires
       return null;
+    }
+    if (
+      commandEpoch !== lifecycleEpoch ||
+      commandSession !== activeRuntimeSession ||
+      (commandSession !== null &&
+        projection.runtimeSession !== undefined &&
+        projection.runtimeSession !== commandSession)
+    ) {
+      awaiter.cancel();
+      throw new Error("document changed while command was in flight");
     }
     awaiter.setTarget(projection.revision);
     const resolved = await awaiter.promise;
@@ -1151,7 +1490,7 @@ export function createTauriClient(): CadClient {
     return result;
   }
 
-  async function applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
+  async function applyOperation(op: OperationOp, effects?: OperationEffects): Promise<ApplyOperationResult> {
     const command = operationToEditCommand(op);
     // BOTH shapes name a timeline record, so both opt into failedSteps /
     // repairSteps / affectedBodies correlation: a fresh op mints its recordId
@@ -1169,7 +1508,61 @@ export function createTauriClient(): CadClient {
         : command.cmd === "updateOperationParams"
           ? command.record
           : undefined;
-    return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op), { recordId });
+    type OperationApplyWire = DocumentProjectionDto | {
+      projection: DocumentProjectionDto;
+      rollbackToken?: string;
+    };
+    const unwrapOperation = (response: OperationApplyWire): DocumentProjectionDto =>
+      "projection" in response ? response.projection : response;
+    const { raw, result } = await applyEditRaw<OperationApplyWire>(
+      CMD.applyOperation,
+      { commands: [command], effects },
+      opLabelFor(op),
+      { recordId },
+      unwrapOperation,
+    );
+    const rollbackToken = "rollbackToken" in raw ? raw.rollbackToken : undefined;
+    return rollbackToken === undefined ? result : { ...result, rollbackToken };
+  }
+
+  async function applyOperations(
+    ops: OperationOp[],
+    effects?: OperationEffects,
+  ): Promise<ApplyOperationResult> {
+    if (ops.length === 0) throw new Error("applyOperations requires at least one operation");
+    const commands = ops.map(operationToEditCommand);
+    if (commands.some((command) => command.cmd !== "addOperation")) {
+      throw new Error("applyOperations accepts only fresh operations");
+    }
+    type OperationApplyWire = DocumentProjectionDto | {
+      projection: DocumentProjectionDto;
+      rollbackToken?: string;
+    };
+    const { raw, result } = await applyEditRaw<OperationApplyWire>(
+      CMD.applyOperation,
+      { commands, effects },
+      opLabelFor(ops[0]),
+      { documentScope: true },
+      (response) => "projection" in response ? response.projection : response,
+    );
+    const rollbackToken = "rollbackToken" in raw ? raw.rollbackToken : undefined;
+    return rollbackToken === undefined ? result : { ...result, rollbackToken };
+  }
+
+  async function rollbackFailedOperation(token: string): Promise<RollbackFailedOperationResult> {
+    const { raw, result } = await applyEditRaw<{
+      projection: DocumentProjectionDto;
+      rolledBack: boolean;
+      reason: RollbackFailedOperationResult["reason"];
+    }>(
+      CMD.rollbackFailedOperation,
+      { token },
+      "Rollback failed operation",
+      {},
+      (response) => response.projection,
+      (response) => !response.rolledBack,
+    );
+    return { ...result, rolledBack: raw.rolledBack, reason: raw.reason };
   }
 
   // ── Sketch solver lane state (frontend id ↔ backend UUID via sketchWireMap) ──
@@ -1252,14 +1645,20 @@ export function createTauriClient(): CadClient {
           // re-derived here) and FROZEN with the sketch (V1 policy).
           buildAddSketchOnDatum(backendSketchId, name, host.plane, host.datumId)
         : buildAddSketch(backendSketchId, name, planeKind);
-    await call<DocumentProjectionDto>(CMD.applyEditCommand, { command });
+    await callProjectionFenced(CMD.applyEditCommand, { command });
     return map;
   }
 
   // One preview lane owns pacing/session state. Exact meshes come from PreviewOp;
-  // commit routes the same candidate through apply_edit_command.
+  // commit routes the same candidate through the receipt-bearing operation command.
   const lane = createLocalSolverLane({
-    commit: applyOperation,
+    commit: (op) =>
+      applyOperation(
+        op,
+        (op.opType === "Extrude" || op.opType === "Revolve") && "sketchId" in op
+          ? { hideSketchIds: [op.sketchId] }
+          : undefined,
+      ),
     latencyMs: () => PREVIEW_LATENCY_MS,
     // MODEL-OPS W3: the drag-time exact mesh now comes from the REAL kernel.
     // Nothing is committed — the worker runs the op on a throwaway copy of its
@@ -1342,7 +1741,10 @@ export function createTauriClient(): CadClient {
     }
     let dto: SketchSessionDto;
     try {
-      dto = await call<SketchSessionDto>(CMD.enterSketch, { sketchId: map.backendSketchId });
+      dto = await call<SketchSessionDto>(CMD.enterSketch, {
+        sketchId: map.backendSketchId,
+        createdHere: firedAddSketch,
+      });
     } catch (e) {
       // The AddSketch already committed but enter_sketch rejected (e.g. worker down):
       // the empty sketch is orphaned in the document, and every retry would mint
@@ -1381,6 +1783,7 @@ export function createTauriClient(): CadClient {
       constraints,
       dof: dto.dof,
       status: dto.status,
+      solveCurrent: dto.solveCurrent,
       // Map the entering solve's conflicting uuids → frontend ids (after seeding the
       // id-map so map.constraint is populated). Seeds the store's conflictingIds.
       conflicting: frontendConflictingIds(map, dto.conflicting),
@@ -1527,6 +1930,7 @@ export function createTauriClient(): CadClient {
       constraints: frontendConstraintsFromDto(dto.constraints, dto.entities),
       dof: dto.dof,
       status: dto.status,
+      solveCurrent: dto.solveCurrent,
       // A pure static read opens no session + seeds no id-map, so backend uuids can't
       // be mapped; the display layer carries no conflict tint (backend returns []).
       conflicting: [],
@@ -1536,10 +1940,19 @@ export function createTauriClient(): CadClient {
     };
   }
 
-  async function cancelSketch(sketchId: string): Promise<void> {
+  /** `discard` (WP-U7 D-1) asks the backend to REVERT the session to its state at
+   *  `enterSketch`; the default keep-exit only squashes. The backend answers with
+   *  what it actually did — a refused discard keeps the geometry and names why. */
+  async function cancelSketch(
+    sketchId: string,
+    opts?: { discard?: boolean },
+  ): Promise<CancelSketchResult> {
     const map = sketchMaps.get(sketchId);
-    if (!map) return; // never entered — nothing to cancel
-    await call<void>(CMD.cancelSketch, { sketchId: map.backendSketchId });
+    if (!map) return { discarded: false }; // never entered — nothing to cancel
+    return await call<CancelSketchResult>(CMD.cancelSketch, {
+      sketchId: map.backendSketchId,
+      discard: opts?.discard ?? false,
+    });
   }
 
   /** Compensation/cleanup: remove a sketch from the document via a `DeleteSketch`
@@ -1548,7 +1961,7 @@ export function createTauriClient(): CadClient {
    *  delete leaves the map (and the sketch) intact for the caller to react to. */
   async function deleteSketch(sketchId: string): Promise<void> {
     const backendSketchId = sketchMaps.get(sketchId)?.backendSketchId ?? sketchId;
-    await call<DocumentProjectionDto>(CMD.applyEditCommand, {
+    await callProjectionFenced(CMD.applyEditCommand, {
       command: buildDeleteSketch(backendSketchId),
     });
     sketchMaps.delete(sketchId);
@@ -1733,7 +2146,7 @@ export function createTauriClient(): CadClient {
       // timeout for every eye click. Take the pre-regen projection as the whole answer
       // — the same shape `deleteSketch` uses. NOTE: DeleteSketch is deliberately NOT in
       // this set: it dirties the timeline (`ToEnd`) and must stay correlated.
-      const projection = await call<DocumentProjectionDto>(CMD.applyEditCommand, { command });
+      const projection = await callProjectionFenced(CMD.applyEditCommand, { command });
       return {
         revision: projection.revision,
         changedBodies: [],
@@ -1753,8 +2166,23 @@ export function createTauriClient(): CadClient {
     // `failedSteps` can never name it), `setOperationSuppression` and
     // `setRollback` (their effect is on DOWNSTREAM steps, so scoping the change to
     // the named record's own bodies would drop exactly the bodies that moved).
-    const recordId = command.cmd === "updateOperationParams" ? command.record : undefined;
-    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command), { recordId });
+    if (command.cmd === "addOperation" || command.cmd === "updateOperationParams") {
+      const recordId = command.cmd === "addOperation" ? command.record.recordId : command.record;
+      type OperationApplyWire = DocumentProjectionDto | {
+        projection: DocumentProjectionDto;
+        rollbackToken?: string;
+      };
+      const { raw, result } = await applyEditRaw<OperationApplyWire>(
+        CMD.applyOperation,
+        { commands: [command], effects: undefined },
+        editCommandLabel(command),
+        { recordId },
+        (response) => "projection" in response ? response.projection : response,
+      );
+      const rollbackToken = "rollbackToken" in raw ? raw.rollbackToken : undefined;
+      return rollbackToken === undefined ? result : { ...result, rollbackToken };
+    }
+    return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command));
   }
 
   /** H2 escape hatch: forget the worker's poison keys (returns how many). */
@@ -1830,30 +2258,38 @@ export function createTauriClient(): CadClient {
     bodyId: string,
     elementId: string,
     topoKey?: string,
+    fence?: GeometryReadFence,
   ): Promise<ElementInfo | null> {
     // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
     // the frontend a bare uuid).
     const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
     return call<ElementInfo | null>(CMD.elementInfo, {
-      snapshotId: currentSnapshotId,
+      snapshotId: fence?.snapshotId ?? currentSnapshotId,
       bodyId: wireBodyId,
       elementId,
       topoKey: topoKey ?? null,
+      ...(fence ? { readFence: fence } : {}),
     });
   }
 
   /**
    * One body's exact kernel mass properties (WP-C1). Read-only.
    *
-   * No `snapshotId` is sent — a BodyId is durable across snapshots, so the
-   * backend answers against the current head (see `api::query_mass_properties`).
+   * Scoped measurement callers send an exact runtime/head fence. Legacy callers
+   * omit it and retain the current-head behavior.
    * An unknown body REJECTS; there is no `null` arm to absorb.
    */
-  async function massProperties(bodyId: string): Promise<MassProperties> {
+  async function massProperties(
+    bodyId: string,
+    fence?: GeometryReadFence,
+  ): Promise<MassProperties> {
     // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
     // the frontend a bare uuid).
     const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
-    return call<MassProperties>(CMD.massProperties, { bodyId: wireBodyId });
+    return call<MassProperties>(CMD.massProperties, {
+      bodyId: wireBodyId,
+      ...(fence ? { readFence: fence } : {}),
+    });
   }
 
   /**
@@ -1866,6 +2302,7 @@ export function createTauriClient(): CadClient {
     bodyId: string,
     elementId: string,
     topoKey?: string,
+    fence?: GeometryReadFence,
   ): Promise<ClassifyResult | null> {
     // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
     // the frontend a bare uuid).
@@ -1874,6 +2311,7 @@ export function createTauriClient(): CadClient {
       bodyId: wireBodyId,
       elementId,
       topoKey: topoKey ?? null,
+      ...(fence ? { readFence: fence } : {}),
     });
   }
 
@@ -1954,8 +2392,22 @@ export function createTauriClient(): CadClient {
     return call<ProjectTemplate>(CMD.saveAsTemplate, { id, name, description, previewPng });
   }
 
-  async function newFromTemplate(id: string): Promise<DocumentSnapshot> {
-    return call<DocumentSnapshot>(CMD.newFromTemplate, { id });
+  async function newFromTemplate(
+    id: string,
+    options?: DocumentReplacementOptions,
+  ): Promise<DocumentSnapshot> {
+    await ensureEvents();
+    const prior = beginReplacement();
+    let snapshot: DocumentSnapshotDto;
+    try {
+      snapshot = await call<DocumentSnapshotDto>(CMD.newFromTemplate, { id });
+    } catch (error) {
+      abortReplacement(prior);
+      throw error;
+    }
+    beforeAdopt(options);
+    finishReplacement(snapshot);
+    return snapshot;
   }
 
   async function saveAsComponent(
@@ -2132,6 +2584,7 @@ export function createTauriClient(): CadClient {
     bodyId: string,
     picks: PromotePick[],
     snapshotId = currentSnapshotId,
+    expectedRuntimeSession?: string,
   ): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
@@ -2140,8 +2593,22 @@ export function createTauriClient(): CadClient {
       snapshotId,
       bodyId: wireBodyId,
       picks: picks.map((p) => ({ topoKey: p.topoKey, anchor: p.anchor })),
+      expectedRuntimeSession: expectedRuntimeSession ?? null,
     });
-    return out.map((e) => ({ topoKey: e.topoKey, elementId: e.elementId, kind: e.kind, bodyId: e.bodyId }));
+    return out.map((e) => {
+      if (e.bodyId !== wireBodyId) {
+        throw new Error("promote_selection returned an element for an unexpected body");
+      }
+      return {
+        topoKey: e.topoKey,
+        elementId: e.elementId,
+        kind: e.kind,
+        // The command boundary uses `body_<uuid>`, while most frontend callers
+        // use the bare id published by document-changed. Return the caller's
+        // exact namespace only after verifying the backend's exact wire body.
+        bodyId,
+      };
+    });
   }
 
   /** Re-key a `detach_projection` `entityIds` array the same way
@@ -2174,6 +2641,9 @@ export function createTauriClient(): CadClient {
       sources: req.sources.map((s) => ({
         bodyId: s.bodyId.startsWith("body_") ? s.bodyId : `body_${s.bodyId}`,
         topoKey: s.topoKey,
+        // Present ⇒ the command addresses the source by the persistent id and
+        // promotes nothing (WP-U4 / D-5).
+        elementId: s.elementId ?? null,
         anchor: s.anchor ?? null,
       })),
     });
@@ -2231,33 +2701,71 @@ export function createTauriClient(): CadClient {
     async revealInFileManager(path: string): Promise<void> {
       await call<void>(CMD.revealInFileManager, { path });
     },
-    async newDocument(): Promise<DocumentSnapshot> {
+    async newDocument(options?: DocumentReplacementOptions): Promise<DocumentSnapshot> {
       // Events BEFORE the command: the pre-regen projection (and a fast open-regen's
       // document-changed) fires during/right after the round-trip.
       await ensureEvents();
-      const snap = await call<DocumentSnapshotDto>(CMD.newDocument);
-      resetCorrelation(); // drop the OLD document's buffered change + pending awaiters
-      return snap;
+      const prior = beginReplacement();
+      let snapshot: DocumentSnapshotDto;
+      try {
+        snapshot = await call<DocumentSnapshotDto>(CMD.newDocument);
+      } catch (error) {
+        abortReplacement(prior);
+        throw error;
+      }
+      beforeAdopt(options);
+      finishReplacement(snapshot);
+      return snapshot;
     },
-    async openDocument(path: string, onRecovery?: OnRecovery): Promise<DocumentSnapshot> {
+    async openDocument(
+      path: string,
+      onRecovery?: OnRecovery,
+      options?: DocumentReplacementOptions,
+    ): Promise<DocumentSnapshot> {
       await ensureEvents();
+      const prior = beginReplacement();
       // `onRecovery` is undefined on the ordinary open; Rust rejects with
       // `recoveryPending` if this path turns out to have unresolved autosaved work.
-      const snap = await call<DocumentSnapshotDto>(CMD.openDocument, { path, onRecovery });
-      resetCorrelation();
-      return snap;
+      let snapshot: DocumentSnapshotDto;
+      try {
+        snapshot = await call<DocumentSnapshotDto>(CMD.openDocument, { path, onRecovery });
+      } catch (error) {
+        abortReplacement(prior);
+        throw error;
+      }
+      beforeAdopt(options);
+      finishReplacement(snapshot);
+      return snapshot;
     },
-    async importStep(path: string): Promise<DocumentSnapshot> {
+    async importStep(path: string, options?: DocumentReplacementOptions): Promise<DocumentSnapshot> {
       await ensureEvents();
-      const snap = await call<DocumentSnapshotDto>(CMD.importStep, { path });
-      resetCorrelation();
-      return snap;
+      const prior = beginReplacement();
+      let snapshot: DocumentSnapshotDto;
+      try {
+        snapshot = await call<DocumentSnapshotDto>(CMD.importStep, { path });
+      } catch (error) {
+        abortReplacement(prior);
+        throw error;
+      }
+      beforeAdopt(options);
+      finishReplacement(snapshot);
+      return snapshot;
     },
-    async importProject(): Promise<DocumentSnapshot | null> {
+    async importProject(options?: DocumentReplacementOptions): Promise<DocumentSnapshot | null> {
       await ensureEvents();
-      const snap = await call<DocumentSnapshotDto | null>(CMD.importProject);
-      if (snap) resetCorrelation();
-      return snap;
+      const prior = beginReplacement();
+      let snapshot: DocumentSnapshotDto | null;
+      try {
+        snapshot = await call<DocumentSnapshotDto | null>(CMD.importProject);
+      } catch (error) {
+        abortReplacement(prior);
+        throw error;
+      }
+      if (snapshot) {
+        beforeAdopt(options);
+        finishReplacement(snapshot);
+      } else abortReplacement(prior);
+      return snapshot;
     },
     async importFileDialog(): Promise<string | null> {
       return call<string | null>(CMD.importFileDialog);
@@ -2317,9 +2825,20 @@ export function createTauriClient(): CadClient {
       call<EvaluatedExpression>(CMD.evaluateExpression, { expr, site }),
     removeVariable: (name: string) =>
       variableEdit(CMD.removeVariable, { name }, "RemoveVariable"),
-    async closeDocument(): Promise<void> {
-      await call<void>(CMD.closeDocument);
-      resetCorrelation();
+    async closeDocument(options?: DocumentReplacementOptions): Promise<void> {
+      const prior = beginReplacement();
+      try {
+        await call<void>(CMD.closeDocument);
+        beforeAdopt(options);
+        replacementPending = false;
+        pendingProjections.clear();
+        pendingChanges.clear();
+        pendingLifecycle.clear();
+        activeRuntimeSession = null;
+      } catch (error) {
+        abortReplacement(prior);
+        throw error;
+      }
     },
     async checkRecovery(): Promise<RecoveryInfo[]> {
       return call<RecoveryInfoDto[]>(CMD.checkRecovery);
@@ -2327,14 +2846,28 @@ export function createTauriClient(): CadClient {
     async recoverDocument(
       documentId: string,
       accept: boolean,
+      options?: DocumentReplacementOptions,
     ): Promise<DocumentSnapshot | null> {
       if (accept) await ensureEvents(); // a recover-open emits like an open
-      const snap = await call<DocumentSnapshotDto | null>(CMD.recoverDocument, {
-        documentId,
-        accept,
-      });
-      if (accept) resetCorrelation(); // a discard (accept:false) opens no new document
-      return snap;
+      if (!accept) {
+        return call<DocumentSnapshotDto | null>(CMD.recoverDocument, { documentId, accept });
+      }
+      const prior = beginReplacement();
+      let snapshot: DocumentSnapshotDto | null;
+      try {
+        snapshot = await call<DocumentSnapshotDto | null>(CMD.recoverDocument, {
+          documentId,
+          accept,
+        });
+      } catch (error) {
+        abortReplacement(prior);
+        throw error;
+      }
+      if (snapshot) {
+        beforeAdopt(options);
+        finishReplacement(snapshot);
+      } else abortReplacement(prior);
+      return snapshot;
     },
     async openFileDialog(): Promise<string | null> {
       return call<string | null>(CMD.openFileDialog);
@@ -2406,16 +2939,34 @@ export function createTauriClient(): CadClient {
       await call<void>(CMD.cancelExit);
     },
 
-    async getBodyMesh(bodyId: string, lod: Lod): Promise<ArrayBuffer> {
+    async getBodyMesh(
+      bodyId: string,
+      lod: Lod,
+      generation?: number,
+      expectedRuntimeSession?: string,
+    ): Promise<ArrayBuffer> {
       // Rust `get_mesh` returns `tauri::ipc::Response` → invoke resolves an
       // ArrayBuffer (MESH1 bytes verbatim, zero-copy). generation null = latest.
-      return call<ArrayBuffer>(CMD.getMesh, { bodyId, lod, generation: null });
+      return call<ArrayBuffer>(CMD.getMesh, {
+        bodyId,
+        lod,
+        generation: generation ?? null,
+        expectedRuntimeSession: expectedRuntimeSession ?? null,
+      });
+    },
+
+    async meshRenderCompleted(correlation): Promise<void> {
+      await call<void>(CMD.meshRenderCompleted, correlation);
     },
 
     onDocumentChanged(cb: (change: DocumentChange) => void): () => void {
       void ensureEvents();
       docChangeListeners.add(cb);
       return () => docChangeListeners.delete(cb);
+    },
+
+    getCurrentMeshPublication(): DocumentChange | null {
+      return lastPublishedChange;
     },
 
     onProjectionUpdated(cb: (p: DocumentProjectionWire) => void): () => void {
@@ -2427,18 +2978,49 @@ export function createTauriClient(): CadClient {
     async getProjection(): Promise<DocumentProjectionWire> {
       // One-shot authoritative pull (missed-event race on mount); reconciled by
       // revision exactly like the projection-updated event path.
+      const requestedAtEpoch = lifecycleEpoch;
       const p = await call<DocumentProjectionDto>(CMD.getProjection);
-      applyProjectionToStore(p);
+      if (!replacementPending && requestedAtEpoch === lifecycleEpoch) {
+        const establishedAuthority = activeRuntimeSession === null && Boolean(p.runtimeSession);
+        if (establishedAuthority) {
+          activeRuntimeSession = p.runtimeSession ?? null;
+        }
+        if (
+          activeRuntimeSession === null ||
+          p.runtimeSession === activeRuntimeSession
+        ) {
+          const bufferedProjection = activeRuntimeSession
+            ? pendingProjections.get(activeRuntimeSession)
+            : undefined;
+          if (activeRuntimeSession) pendingProjections.delete(activeRuntimeSession);
+          const projection = bufferedProjection && bufferedProjection.revision >= p.revision
+            ? bufferedProjection
+            : p;
+          applyProjectionToStore(projection);
+          const pendingChange = activeRuntimeSession
+            ? pendingChanges.get(activeRuntimeSession)
+            : undefined;
+          if (pendingChange) {
+            pendingChanges.delete(activeRuntimeSession!);
+            onDocumentChangedEvent(pendingChange);
+          }
+          if (establishedAuthority && activeRuntimeSession) {
+            flushLifecycle(activeRuntimeSession, documentStore.getState().regenBusy);
+          }
+        }
+      }
       return p;
     },
 
     applyOperation,
+    applyOperations,
+    rollbackFailedOperation,
 
     async undo(): Promise<ApplyOperationResult> {
-      return applyEdit(CMD.undo, {}, undefined);
+      return revert(CMD.undo, "undo");
     },
     async redo(): Promise<ApplyOperationResult> {
-      return applyEdit(CMD.redo, {}, undefined);
+      return revert(CMD.redo, "redo");
     },
 
     // ── Sketch solver lane + drag gesture + promotion (REAL commands) ─────────
@@ -2492,6 +3074,7 @@ export function createTauriClient(): CadClient {
     beginPreview: lane.beginPreview,
     updatePreview: lane.updatePreview,
     endPreview: lane.endPreview,
+    takePreviewOperation: lane.takePreviewOperation,
     onPreviewResult: lane.onPreviewResult,
   };
 }

@@ -15,6 +15,8 @@
 {"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"meshes":[{"bodyId":"body_op1","format":"MESH1","sha256":"$hex64","triangleCount":"$present"}]}}}
 {"send":{"v":1,"t":"req","id":5,"verb":"AcquireElementIds","args":{"snapshotId":1,"bodyId":"body_op1","picks":[{"topoKey":"f:1"}]}}}
 {"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"ids":[{"topoKey":"f:1","kind":"face","bodyId":"body_op1","descriptor":"$present"}]}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"AcquireElementIds","args":{"snapshotId":1,"bodyId":"body_op1","picks":[{"topoKey":"f:999","kind":"face","anchor":{"worldPoint":[0,0,0]}}]}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"ids":[]}}}
 {"send":{"v":1,"t":"req","id":6,"verb":"QueryElement","args":{"snapshotId":1,"topoKey":"f:1","bodyId":"body_op1"}}}
 {"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"present":true,"topoKey":"f:1","bodyId":"body_op1","kind":"face"}}}
 {"send":{"v":1,"t":"req","id":9,"verb":"Shutdown","args":{}}}

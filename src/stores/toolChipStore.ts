@@ -36,6 +36,11 @@ export const DEFAULT_CHIP_OFFSET_PX = 26;
 import { createStore, useStore } from "zustand";
 import type { BooleanOperation, HoleType, OffsetDistanceType } from "@/ipc/types";
 import type { HoleFit } from "@/tools/modelTools/holeStandards";
+import type {
+  ActiveToolContext,
+  ActiveToolContextFor,
+  ContextToolKind,
+} from "@/tools/modelTools/activeToolContext";
 import {
   DEFAULT_HOLE_CB_DEPTH,
   DEFAULT_HOLE_CB_DIAMETER,
@@ -363,6 +368,34 @@ export type ChipKind =
    *  WP-C T2b): `[ <label> <value> mm ]`, open for as long as the tool is armed. */
   | "sketchValue";
 
+export type ToolValueValidation =
+  | { status: "valid" }
+  | { status: "pending"; message: string; draft?: number | string }
+  | {
+      status: "invalid";
+      draft: number | string;
+      message: string;
+      suggestedValue?: number;
+      suggestedLabel?: string;
+    };
+
+export interface RawInputError {
+  draft: string;
+  message: string;
+}
+
+function firstRawInputError(errors: Record<string, RawInputError>): ToolValueValidation | null {
+  const error = Object.values(errors)[0];
+  return error ? { status: "invalid", draft: error.draft, message: error.message } : null;
+}
+
+export type ToolPreviewLifecycle = {
+  status: "none" | "pending" | "valid" | "invalid" | "applying";
+  arm: number;
+  request: number;
+  message?: string;
+};
+
 /**
  * The chips whose editor has a PRIMARY numeric value — the one a typed character
  * routes to (U3, contract column `primaryEntry`).
@@ -388,6 +421,9 @@ export const PRIMARY_VALUE_CHIPS: ReadonlySet<ChipKind> = new Set<ChipKind>([
 
 export interface ToolChipState {
   kind: ChipKind;
+  /** Authored reference identities for this tool visit. Labels are resolved live. */
+  context: ActiveToolContext | null;
+  retainedCommitFailure: { message: string } | null;
   /**
    * A type-to-enter arm (U3, contract column `primaryEntry`).
    *
@@ -457,6 +493,18 @@ export interface ToolChipState {
   chainTangentFaces: boolean;
   /** The last authored value was refused as out-of-domain (never clamped). */
   valueError: boolean;
+  /** Controller-owned range/preview validation, before raw text errors are applied. */
+  rangeValidation: ToolValueValidation;
+  /** Recovery action belonging to rangeValidation, never to incomplete raw text. */
+  rangeSuggestedAction: (() => void) | null;
+  /** Incomplete numeric text, keyed by field so one valid field cannot clear another. */
+  rawInputErrors: Record<string, RawInputError>;
+  /** Aggregate validation exposed to presentation and confirmation policy. */
+  validation: ToolValueValidation;
+  /** Authoritative preview lane state, fenced across arms and requests. */
+  previewLifecycle: ToolPreviewLifecycle;
+  /** Apply a verified recovery value to the preview. Never commits the tool. */
+  onUseSuggestedValue: (() => void) | null;
   onDistanceType: ((t: OffsetDistanceType) => void) | null;
   onChainTangent: ((chain: boolean) => void) | null;
   /** Which profile the armed hole cluster is authoring (WP-C T3). */
@@ -764,6 +812,12 @@ export interface ToolChipState {
   setChainTangent(chainTangentFaces: boolean): void;
   /** Update just the armed offset's value-error flag (a refused entry). */
   setValueError(valueError: boolean): void;
+  setValidation(validation: ToolValueValidation): void;
+  setRetainedCommitFailure(message: string): void;
+  setRangeValidation(validation: ToolValueValidation, onUseSuggestedValue?: (() => void) | null): void;
+  setRawValueValidity(fieldId: string, valid: boolean, draft: string): void;
+  clearValidation(): void;
+  setPreviewLifecycle(lifecycle: ToolPreviewLifecycle): void;
   /** Update just the armed placement's mode (Move / Rotate). */
   setTransformMode(mode: TransformMode): void;
   /** Update just the armed placement's copy flag (Alt-drag / the Copy segment). */
@@ -783,6 +837,7 @@ export interface ToolChipState {
   beginPrimaryEntry(seed: string): void;
   /** Restate what the armed operation will produce (see `resultSummary`). */
   setResultSummary(summary: string): void;
+  setContext<K extends ContextToolKind>(tool: K, context: ActiveToolContextFor<K>): void;
   clear(): void;
 }
 
@@ -804,6 +859,7 @@ function resolveChipAnchor(opts?: ChipAnchorOpts): {
 }
 
 const CLEARED = {
+  retainedCommitFailure: null as { message: string } | null,
   kind: "none" as ChipKind,
   value: 0,
   count: 3,
@@ -832,6 +888,12 @@ const CLEARED = {
   distanceTypes: ["Offset"] as readonly OffsetDistanceType[],
   chainTangentFaces: true,
   valueError: false,
+  rangeValidation: { status: "valid" } as ToolValueValidation,
+  rangeSuggestedAction: null,
+  rawInputErrors: {} as Record<string, RawInputError>,
+  validation: { status: "valid" } as ToolValueValidation,
+  previewLifecycle: { status: "none", arm: 0, request: 0 } as ToolPreviewLifecycle,
+  onUseSuggestedValue: null,
   onDistanceType: null,
   onChainTangent: null,
   holeType: "simple" as HoleType,
@@ -901,6 +963,7 @@ const CLEARED = {
   targetName: "",
   toolName: "",
   resultSummary: "",
+  context: null,
   primaryEntry: null,
   onOp: null,
   onBooleanMode: null,
@@ -1226,6 +1289,62 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
   setValueError(valueError) {
     set({ valueError });
   },
+  setValidation(rangeValidation) {
+    get().setRangeValidation(rangeValidation);
+  },
+  setRetainedCommitFailure(message) {
+    set({ retainedCommitFailure: { message } });
+  },
+  setRangeValidation(rangeValidation, rangeSuggestedAction = null) {
+    const rawInputErrors = get().rawInputErrors;
+    const raw = firstRawInputError(rawInputErrors);
+    const validation = raw ?? rangeValidation;
+    set({
+      rangeValidation,
+      rangeSuggestedAction,
+      validation,
+      valueError: validation.status === "invalid",
+      onUseSuggestedValue: raw ? null : rangeSuggestedAction,
+    });
+  },
+  setRawValueValidity(fieldId, valid, draft) {
+    const rawInputErrors = { ...get().rawInputErrors };
+    if (valid) delete rawInputErrors[fieldId];
+    else rawInputErrors[fieldId] = { draft, message: "Enter a complete numeric value" };
+    const raw = firstRawInputError(rawInputErrors);
+    const validation = raw ?? get().rangeValidation;
+    set({
+      rawInputErrors,
+      validation,
+      valueError: validation.status === "invalid",
+      onUseSuggestedValue: raw ? null : get().rangeSuggestedAction,
+    });
+  },
+  clearValidation() {
+    const rangeValidation: ToolValueValidation = { status: "valid" };
+    const raw = firstRawInputError(get().rawInputErrors);
+    const validation = raw ?? rangeValidation;
+    set({
+      rangeValidation,
+      rangeSuggestedAction: null,
+      validation,
+      valueError: validation.status === "invalid",
+      onUseSuggestedValue: null,
+    });
+  },
+  setPreviewLifecycle(previewLifecycle) {
+    const current = get().previewLifecycle;
+    if (
+      previewLifecycle.arm < current.arm ||
+      (previewLifecycle.arm === current.arm && previewLifecycle.request < current.request) ||
+      (current.status === "applying" &&
+        previewLifecycle.arm === current.arm &&
+        previewLifecycle.request === current.request &&
+        previewLifecycle.status !== "applying" &&
+        previewLifecycle.status !== "invalid")
+    ) return;
+    set({ previewLifecycle });
+  },
   setTransformMode(transformMode) {
     set({ transformMode });
   },
@@ -1240,6 +1359,10 @@ export const toolChipStore = createStore<ToolChipState>()((set, get) => ({
   },
   setResultSummary(resultSummary) {
     set({ resultSummary });
+  },
+  setContext(tool, context) {
+    if (get().kind !== tool || context.tool !== tool) return;
+    set({ context });
   },
   beginPrimaryEntry(seed) {
     const token = (get().primaryEntry?.token ?? 0) + 1;

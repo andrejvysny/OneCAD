@@ -9,6 +9,7 @@
  */
 import { createStore, useStore } from "zustand";
 
+import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import type {
   FeaturePrimaryKind,
   Rgba,
@@ -51,8 +52,10 @@ export interface SketchMeta {
   id: string;
   name: string;
   visible: boolean;
-  dof: number;
-  status: SketchStatus;
+  dof?: number;
+  status?: SketchStatus;
+  /** Equals geometryToken only when dof/status describe current geometry. */
+  solveGeometryToken?: string;
   /** Stable authoritative geometry identity; metadata-only changes preserve it. */
   geometryToken: string;
   /**
@@ -140,10 +143,11 @@ export interface DocumentProjection {
   /**
    * The document this projection describes (backend-authoritative). Revisions
    * are meaningful only within one documentId — the hydration guard resets on a
-   * documentId change instead of comparing revisions across documents. Absent
-   * in the mock lane (same-document semantics).
+   * documentId change instead of comparing revisions across documents.
    */
   documentId?: string;
+  /** Opaque native runtime identity; absent in the mock lane. */
+  runtimeSession?: string;
   revision: number;
   title: string;
   dirty: boolean;
@@ -169,6 +173,26 @@ export interface DocumentProjection {
    * `features.length` IS the total — a second copy could only ever disagree.
    */
   appliedOps: number;
+  /**
+   * Undo-stack depth (committed steps that can be reverted) and its redo twin,
+   * with the labels of the two steps at the top of each stack.
+   *
+   * Backend-authoritative, hydrated from every `projection-updated`; the mock
+   * lane mirrors its own snapshot stacks into them. The DEPTH is what enables
+   * the palette's Undo/Redo rows, and what lets an undo that reverted nothing be
+   * reported honestly: depth 0 means "nothing to undo", depth > 0 with nothing
+   * reverted means the runtime refused (a drag gesture is open).
+   *
+   * The labels are `null`, never absent, so a snapshot that has none CLEARS a
+   * stale one — `applySnapshot` merges, so an omitted key would keep the old.
+   */
+  undoDepth: number;
+  /** Redo-stack depth. See {@link undoDepth}. */
+  redoDepth: number;
+  /** Label of the step an undo would revert; `null` when the stack is empty. */
+  undoLabel: string | null;
+  /** Label of the step a redo would replay. See {@link undoLabel}. */
+  redoLabel: string | null;
   /**
    * Provenance of the geometry the viewport is showing ({@link GeometrySource}).
    * Backend-authoritative. A payload from a backend older than the field — and
@@ -240,6 +264,42 @@ export interface DocumentState extends DocumentProjection {
    * local stamp never has to coexist with a hydrated one for the same id.
    */
   bumpSketchGeometry(id: string): void;
+}
+
+/** Whether an entity still exists in the projection that just named its registry. */
+function selectionRefExists(ref: EntityRef, projection: DocumentProjection): boolean {
+  switch (ref.kind) {
+    case "body":
+      return projection.bodies[ref.id] !== undefined;
+    case "face":
+    case "edge":
+    case "vertex":
+      return ref.bodyId !== undefined && projection.bodies[ref.bodyId] !== undefined;
+    case "sketch":
+      return projection.sketches[ref.id] !== undefined;
+    case "sketchRegion":
+      return projection.sketches[ref.sketchId] !== undefined;
+    case "feature":
+      return projection.features.some((feature) => feature.id === ref.id);
+    case "datum":
+      return projection.datums[ref.id] !== undefined;
+  }
+}
+
+/**
+ * Drop selections and hover that an authoritative projection says no longer
+ * exist. This is intentionally projection-only: topology survival/rebinding is
+ * owned by `rebindPick`, where mesh and persistent-element evidence is present.
+ */
+export function reconcileSelectionForProjection(
+  projection: DocumentProjection,
+): void {
+  const selection = selectionStore.getState();
+  const kept = selection.selected.filter((ref) => selectionRefExists(ref, projection));
+  if (kept.length !== selection.selected.length) selection.set(kept);
+  if (selection.hover && !selectionRefExists(selection.hover, projection)) {
+    selection.setHover(null);
+  }
 }
 
 /**
@@ -318,6 +378,8 @@ export function nextDatumName(datums: Record<string, DatumMeta>): string {
 export function seedMockDocument(): DocumentProjection {
   return {
     status: "ready",
+    documentId: "mock-document",
+    runtimeSession: "mock-runtime",
     revision: 5,
     title: "Bracket v2",
     dirty: false,
@@ -361,6 +423,12 @@ export function seedMockDocument(): DocumentProjection {
     ],
     // The whole demo timeline is applied (no rollback bar in the seed).
     appliedOps: 5,
+    // The seed is a freshly "opened" document: nothing has been edited in this
+    // session, so there is nothing to take back.
+    undoDepth: 0,
+    redoDepth: 0,
+    undoLabel: null,
+    redoLabel: null,
     // The demo's meshes are synthesized on the spot, not read back from a
     // container — "live" is the truthful label, and it keeps the cached chip out
     // of every mock-lane and e2e run.
@@ -380,6 +448,10 @@ export function emptyDocument(): DocumentProjection {
     datums: {},
     features: [],
     appliedOps: 0,
+    undoDepth: 0,
+    redoDepth: 0,
+    undoLabel: null,
+    redoLabel: null,
     geometrySource: "none",
   };
 }
@@ -419,17 +491,23 @@ export const documentStore = createStore<DocumentState>()((set) => ({
   applySnapshot(snapshot) {
     set((s) => ({
       ...snapshot,
-      // A nickname belongs to ONE document. `documentId` is absent on the mock
-      // lane (same-document semantics), where a snapshot never means "a
-      // different file", so the override survives there.
+      // A nickname belongs to ONE document; a replacement clears the override.
       displayTitle:
         snapshot.documentId !== undefined && snapshot.documentId !== s.documentId
           ? null
           : s.displayTitle,
     }));
+    // Publish backend truth first. Selection subscribers can synchronously arm
+    // or disarm tools, so clearing a removed ref against the old document would
+    // briefly expose an actionable stale target to those subscribers.
+    reconcileSelectionForProjection(snapshot);
   },
 
   applyChange(change) {
+    // Change events are deltas, so even a registry-shaped field is not proof
+    // that omitted rows were deleted. Only a complete snapshot clears refs;
+    // otherwise a just-authored optimistic ref can disappear during projection
+    // lag and leave the active tool without its required target.
     set(change);
   },
 
@@ -489,7 +567,12 @@ export const documentStore = createStore<DocumentState>()((set) => ({
     set((s) => {
       const sketch = s.sketches[id];
       if (!sketch) return {};
-      return { sketches: { ...s.sketches, [id]: { ...sketch, dof, status } } };
+      return {
+        sketches: {
+          ...s.sketches,
+          [id]: { ...sketch, dof, status, solveGeometryToken: sketch.geometryToken },
+        },
+      };
     });
   },
 

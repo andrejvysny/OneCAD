@@ -32,6 +32,7 @@
 #include "kernel/validation/GeometryPrecision.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
+#include "ops/TopologyHistory.h"
 #include "sketch/Sketch.h"
 #include "sketch/SketchLine.h"
 #include "sketch/SketchPoint.h"
@@ -452,6 +453,7 @@ OpOutcome revolve_impl(OpContext& ctx, const json& op, const std::string& op_id,
         ctx.bodies.create(bid, op_id, tool_shape);
         out.body_events.push_back({"created", bid});
         out.body_ids.push_back(bid);
+        out.topology_history.push_back(created_body_history(bid, tool_shape));
         return out;
     }
 

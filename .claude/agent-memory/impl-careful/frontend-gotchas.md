@@ -1,6 +1,6 @@
 ---
 name: frontend-gotchas
-description: OneCAD frontend implementation gotchas — engine test doubles, frozen contracts vs new tools, status-hint shape, preview-session frozen inputs, mock box adjacency
+description: OneCAD frontend implementation gotchas — engine test doubles, frozen contracts vs new tools, status-hint shape, preview-session frozen inputs, mock box adjacency, palette rows are registry commands
 metadata:
   type: project
 ---
@@ -17,8 +17,12 @@ CLAUDE.md and none is derivable without running the suite.
   `src/**/*.test.ts` (they are cast `as unknown as ViewportEngine`, so `tsc` is
   blind to the gap). Grep the doubles by an existing sibling method name and add
   the new key to each; there is no shared factory.
-- `viewportStore`'s `StatusSeverity` is only `"info" | "error"` — there is no
-  `warning` rung. A partial refusal has to be reported as `error`.
+- `viewportStore`'s `StatusSeverity` is `"info" | "warn" | "error"` (the `warn`
+  rung was added after the WP-P note that said it did not exist). `StatusBar`
+  only styles `error` differently, so `warn` and `info` look the same on screen.
+- `documentStore.applySnapshot` is a zustand `set` — it MERGES. A projection
+  field that can go absent must therefore be `T | null`, never optional: an
+  omitted key leaves the previous value in place instead of clearing it.
 - `sketchService.ts` reaches the viewport through the module singleton
   `getViewportEngine()` (engine BRIDGE), not through `SketchController`'s
   `deps.engine`. A controller test that asserts on an engine double must also
@@ -72,4 +76,30 @@ CLAUDE.md and none is derivable without running the suite.
   onwards. Read the id off the `ApplyOperationResult`'s own `features` instead.
 - `tsconfig`'s lib target predates `Array.prototype.at`: `.at(-1)` type-errors
   (TS2550) even though vitest runs it fine. Use `rows[rows.length - 1]`.
-
+- The ⌘K palette has no registry of its own: `buildPaletteItems` projects off
+  `platform.commands/tools/workspaces`, so a new palette row is a registered
+  CommandDefinition. For modeling that means three edits — `ModelingCommands` in
+  `modules/modeling/ids.ts`, a `COMMAND_ACTIONS` entry (the map is
+  `Record<ModelingCommandKey, …>`, so an id without an entry fails `tsc`), and
+  `register.test.ts` asserts `platform.commands.size ===
+  Object.keys(ModelingCommands).length`.
+- `buildPaletteItems` COPIES `def.title` when it builds. A row whose title
+  depends on live state needs a `get title()` accessor on the definition (legal
+  against `readonly title: string`) AND `open` in `CommandPalette`'s `items`
+  useMemo deps, or the memo serves whatever the last registry change captured.
+- `api::undo` / `api::redo` answer with the `DocumentProjection`, never a label.
+  `tauriClient` has to derive `opLabel` itself; it used to pass `undefined`, so
+  "Undid X" only ever appeared on the mock lane.
+- Every mutating mock verb settles through `withCursor()` in `mockClient.ts` —
+  the one hook point for mirroring mock-only state into `documentStore` without
+  touching each of the ~9 undo-stack push sites.
+- The sketch chrome bar's ONLY channel to `SketchController` is the tool-mode
+  flip (no controller singleton — it is constructed inside `ViewportRoot`), so a
+  button that needs the controller to behave differently arms a store flag first
+  and the controller consumes it in the mode subscription (`sketchStore.exitIntent`,
+  WP-U7).
+- An e2e spec that reads the live sketch entity count right after a tree
+  double-click must use a reader that returns `-1` instead of throwing (see
+  `sketch-multi-object.spec.ts`): "Editing …" becomes visible as soon as the tree
+  sets `activeSketchId`, which is ~30 mock-latency ms BEFORE `sketchStore.session`
+  lands, and `expect.poll` does not swallow a throw.

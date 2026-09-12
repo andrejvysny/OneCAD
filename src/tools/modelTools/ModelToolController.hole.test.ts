@@ -397,6 +397,28 @@ describe("ModelToolController — Hole", () => {
     expect(toolChipStore.getState().kind).toBe("none");
   });
 
+  it("the ✓ KEEPS the seat-face ref — a hole does not consume its seat", async () => {
+    // WP-U4 / D-5, after the Astra break: a fillet eats its edges and a shell
+    // eats its faces, but a hole leaves the seat face standing. Clearing it made
+    // "four holes in one face" four separate face picks. The mesh swap now
+    // reconciles the ref against the new publication instead, so the seat stays
+    // selected and the next Hole arms straight away.
+    build();
+    const body = { kind: "body" as const, id: "body1" };
+    const seat = { kind: "face" as const, id: "body1#f:2", bodyId: "body1", topoKey: "f:2" };
+    selectionStore.getState().set([seat, body]);
+    await armHole();
+    await pump();
+    answerPreview();
+
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+    await flush();
+
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
+    expect(selectionStore.getState().selected).toEqual([seat, body]);
+  });
+
   it("Enter commits the armed hole too", async () => {
     build();
     await armHole();

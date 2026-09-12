@@ -20,9 +20,11 @@ import type { CommandId, Disposable, ModuleScope, TreeNodeAction, TreeSection } 
 import { ModelingTreeProvider } from "./panelIds";
 import { ModelingTreeCommands } from "./ids";
 import { documentStore } from "@/stores/documentStore";
-import { selectionStore } from "@/stores/selectionStore";
+import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { getViewportEngine } from "@/viewport/engineBridge";
+import { requestTreeReveal, type TreeNodeLocator } from "@/features/tree/treeReveal";
 import {
   deleteDatum,
   deleteSketch,
@@ -40,6 +42,87 @@ const isSelected = (kind: TreeRowKind, id: string): boolean =>
 
 const select = (kind: TreeRowKind, id: string) => () => {
   selectionStore.getState().set([{ kind, id }]);
+};
+
+const isHovered = (kind: TreeRowKind, id: string): boolean => {
+  const hover = selectionStore.getState().hover;
+  if (!hover) return false;
+  if (hover.kind === kind) return hover.id === id;
+  if (kind === "body") {
+    return (
+      (hover.kind === "face" || hover.kind === "edge" || hover.kind === "vertex") &&
+      hover.bodyId === id
+    );
+  }
+  return kind === "sketch" && hover.kind === "sketchRegion" && hover.sketchId === id;
+};
+
+/** Return an exact lease so an old row cannot clear a newer hover target. */
+const startHover = (kind: TreeRowKind, id: string) => () => {
+  const ref: EntityRef = { kind, id };
+  selectionStore.getState().setHover(ref);
+  return {
+    dispose: () => {
+      if (selectionStore.getState().hover === ref) selectionStore.getState().setHover(null);
+    },
+  };
+};
+
+const revealTarget = (): TreeNodeLocator | null => {
+  const ref = selectionStore.getState().selected[0];
+  if (!ref) return null;
+  const document = documentStore.getState();
+  if (ref.kind === "body" && document.bodies[ref.id]) {
+    return { providerId: ModelingTreeProvider, nodeId: ref.id };
+  }
+  if (ref.kind === "sketch" && document.sketches[ref.id]) {
+    return { providerId: ModelingTreeProvider, nodeId: ref.id };
+  }
+  if (ref.kind === "datum" && document.datums[ref.id]) {
+    return { providerId: ModelingTreeProvider, nodeId: ref.id };
+  }
+  if (
+    (ref.kind === "face" || ref.kind === "edge" || ref.kind === "vertex") &&
+    ref.bodyId &&
+    document.bodies[ref.bodyId]
+  ) {
+    return { providerId: ModelingTreeProvider, nodeId: ref.bodyId };
+  }
+  return ref.kind === "sketchRegion" && document.sketches[ref.sketchId]
+    ? { providerId: ModelingTreeProvider, nodeId: ref.sketchId }
+    : null;
+};
+
+const isCurrentVisibleBody = (id: string): boolean => {
+  const document = documentStore.getState();
+  return (
+    document.status === "ready" &&
+    document.geometrySource === "live" &&
+    !viewportStore.getState().geometryPending &&
+    document.bodies[id]?.visible === true
+  );
+};
+
+/** Bound preflight prevents ViewportEngine.fitToBodies from fitting all on a miss. */
+const canFrameBody = (id: string): boolean => {
+  if (!isCurrentVisibleBody(id)) return false;
+  const engine = getViewportEngine();
+  if (!engine) return false;
+  return engine.getBoundsForBodies([id]) !== null;
+};
+
+const frameBody = (id: string): boolean => {
+  if (!isCurrentVisibleBody(id)) return false;
+  const engine = getViewportEngine();
+  if (!engine?.getBoundsForBodies([id])) return false;
+  engine.fitToBodies([id]);
+  return true;
+};
+
+const frameAction: TreeNodeAction = {
+  id: `${ModelingTreeCommands.frameBody}.action`,
+  title: "Frame in viewport",
+  commandId: ModelingTreeCommands.frameBody as CommandId,
 };
 
 /**
@@ -74,11 +157,14 @@ export function modelingTreeSections(): readonly TreeSection[] {
           ? { meta: "Quarantined", problem: true }
           : {}),
         selected: isSelected("body", b.id),
+        hovered: isHovered("body", b.id),
         visible: b.visible,
         // Isolated AWAY → dim the row. The eye still reports the document's own
         // visibility; isolation is a transient viewport mask.
         dimmed: isolated !== null && !isolated.includes(b.id),
         select: select("body", b.id),
+        startHover: startHover("body", b.id),
+        ...(canFrameBody(b.id) ? { actions: [frameAction] } : {}),
         toggleVisible: (v) => void setBodyVisible(b.id, v),
         rename: (name) => void renameBody(b.id, name),
       })),
@@ -92,8 +178,10 @@ export function modelingTreeSections(): readonly TreeSection[] {
         icon: "pen",
         kind: "sketch",
         selected: isSelected("sketch", s.id),
+        hovered: isHovered("sketch", s.id),
         visible: s.visible,
         select: select("sketch", s.id),
+        startHover: startHover("sketch", s.id),
         activate: () => setMode("sketch", s.id),
         toggleVisible: (v) => void setSketchVisible(s.id, v),
         rename: (name) => void renameSketch(s.id, name),
@@ -111,7 +199,9 @@ export function modelingTreeSections(): readonly TreeSection[] {
         // No `visible` key at all: a datum carries no visibility fact in the
         // document, so the host renders no eye (absent ≠ false).
         selected: isSelected("datum", d.id),
+        hovered: isHovered("datum", d.id),
         select: select("datum", d.id),
+        startHover: startHover("datum", d.id),
         activate: () => {
           // Select FIRST, then flip: SketchController's
           // `tryEnterOnSelectedDatum` reads the selection when the mode changes.
@@ -165,6 +255,38 @@ function contributeTreeCommands(scope: ModuleScope): void {
       if (!id) return { status: "cancelled" as const };
       void deleteSketch(id);
       return { status: "done" as const };
+    },
+  });
+
+  scope.registerCommand({
+    id: ModelingTreeCommands.revealSelection as CommandId,
+    title: "Reveal selected entity in tree",
+    group: "modeling.tree",
+    canExecute: () => ({
+      enabled: revealTarget() !== null,
+      reason: "Select a body, sketch, datum, or subelement first",
+    }),
+    execute: () => {
+      const target = revealTarget();
+      if (!target) return { status: "cancelled" as const };
+      return requestTreeReveal(target) ? { status: "done" as const } : { status: "cancelled" as const };
+    },
+  });
+
+  scope.registerCommand({
+    id: ModelingTreeCommands.frameBody as CommandId,
+    title: "Frame body in viewport",
+    group: "modeling.tree",
+    canExecute: () => {
+      const id = selectedId("body");
+      return {
+        enabled: id !== undefined && canFrameBody(id),
+        reason: "Select a body with current visible geometry",
+      };
+    },
+    execute: () => {
+      const id = selectedId("body");
+      return id && frameBody(id) ? { status: "done" as const } : { status: "cancelled" as const };
     },
   });
 

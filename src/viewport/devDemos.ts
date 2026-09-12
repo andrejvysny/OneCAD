@@ -61,7 +61,11 @@ export function runDemoFlags(deps: DemoFlagsDeps): void {
   if (vpdemo) {
     const changedBodies = [{ bodyId: "body1", meshKey: mockMeshKey("body1", "coarse") }];
     if (vpdemoCylinder) changedBodies.push(seedMockDemoCylinder());
-    emitMockDocumentChanged({ revision: 1, changedBodies, removedBodies: [] });
+    emitMockDocumentChanged({
+      revision: documentStore.getState().revision,
+      changedBodies,
+      removedBodies: [],
+    });
   }
 
   // ?sketchdemo — enter sketch mode on the seeded XY sketch (no backend;

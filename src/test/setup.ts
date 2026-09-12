@@ -28,6 +28,21 @@ if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
   });
 }
 
+// jsdom has no ResizeObserver. Shell measurements need the browser shape during
+// ordinary renders; lifecycle tests explicitly replace this inert baseline.
+if (typeof ResizeObserver === "undefined") {
+  class ResizeObserverStub {
+    observe(_target: Element): void {}
+    unobserve(_target: Element): void {}
+    disconnect(): void {}
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    writable: true,
+    configurable: true,
+    value: ResizeObserverStub,
+  });
+}
+
 // React Testing Library does not auto-clean without global afterEach.
 afterEach(() => {
   cleanup();

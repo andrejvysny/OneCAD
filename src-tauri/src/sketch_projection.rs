@@ -1018,6 +1018,7 @@ mod tests {
         }
         // Serialized on the session DTO under camelCase keys; omitted when empty.
         let session = crate::dto::SketchSessionDto {
+            solve_current: true,
             sketch_id: "sk".into(),
             plane: serde_json::json!({}),
             entities: serde_json::json!([]),

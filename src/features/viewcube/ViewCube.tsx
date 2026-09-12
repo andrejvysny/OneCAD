@@ -173,6 +173,13 @@ export function ViewCube() {
         className="relative h-[60px] w-[60px] mt-3 mb-5"
         style={{ perspective: "260px" }}
       >
+        {/* Conservative CSS-3D envelope: the rotated 48px cube and 24px depth
+            fit within this 100px bound, independent of camera updates. */}
+        <div
+          aria-hidden="true"
+          data-obstacle-protrusion
+          className="pointer-events-none absolute -left-[20px] -top-[20px] h-[100px] w-[100px]"
+        />
         <div
           ref={cubeRef}
           className="absolute inset-0 touch-none select-none"

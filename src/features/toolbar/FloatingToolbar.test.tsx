@@ -327,4 +327,11 @@ describe("FloatingToolbar — construction toggle", () => {
       "true",
     );
   });
+
+  it("wraps registered tools instead of hiding them when the work area narrows", () => {
+    renderWithPlatform(<FloatingToolbar />);
+    const toolbar = screen.getByRole("toolbar", { name: "Tools" });
+    expect(toolbar).toHaveClass("flex-wrap", "max-w-full");
+    expect(toolbar).not.toHaveClass("overflow-hidden");
+  });
 });

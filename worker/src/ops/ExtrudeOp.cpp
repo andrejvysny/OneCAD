@@ -1,6 +1,7 @@
 // ExtrudeOp.cpp — see ExtrudeOp.h. Ports RegenerationEngine.cpp buildExtrude
 // (:774-1059) incl. ToFace/ToNext end conditions (:858-894) + draft (:977-1013).
 #include "ops/ExtrudeOp.h"
+#include "ops/TopologyHistory.h"
 
 #include <algorithm>
 #include <array>
@@ -1271,6 +1272,7 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
         ctx.bodies.create(bid, op_id, tool_shape);
         out.body_events.push_back({"created", bid, {}});  // no rankKey: no ordinal ranked
         out.body_ids.push_back(bid);
+        out.topology_history.push_back(created_body_history(bid, tool_shape));
         return out;  // new body: no pre-existing partition entries → empty delta
     }
 
@@ -1321,6 +1323,10 @@ OpOutcome extrude_impl(OpContext& ctx, const json& op, const std::string& op_id,
     // Publish the successor: a single-solid result modifies the target in place; a
     // multi-solid boolean-Cut splits into deterministic children (SCHEMA §2, D1).
     publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out);
+    if (builder && ctx.bodies.get(target_id)) {
+        out.topology_history.push_back(modified_body_history(
+            target_id, old_target, br.shape, *builder, referenceable_topology(tool_shape)));
+    }
     return out;
 }
 

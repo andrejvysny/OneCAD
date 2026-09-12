@@ -14,19 +14,19 @@
  * is not part of the record; that is the whole conditional-block contract
  * (SCHEMA §7.3).
  *
- * The chips live under the viewport's `aria-hidden` overlay root, so role/name
- * queries cannot reach them — every control carries a `data-testid`, which is the
- * only handle e2e has (the `SegmentToggle` convention).
+ * The chips live under the viewport's chip layer, which no longer carries
+ * `aria-hidden` (WP-U10) — role/name queries can reach them, and every field
+ * also carries a `data-testid`, which stays the e2e handle (the `SegmentToggle`
+ * convention).
  */
 
 import { useEffect, useState } from "react";
 import { cn } from "@/ui/cn";
-import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
-import { LENGTH_SUFFIX, formatLength, parseLength } from "@/units/format";
+import { LENGTH_SUFFIX, formatLength, lengthSuffix, parseLength } from "@/units/format";
 import { HOLE_CS_ANGLES } from "@/tools/modelTools/holeMachine";
-import { HOLE_STANDARDS, type HoleFit } from "@/tools/modelTools/holeStandards";
+import { HOLE_STANDARDS, holeStandard, type HoleFit } from "@/tools/modelTools/holeStandards";
 import type { HoleType } from "@/ipc/types";
 
 /** The three hole profiles, in the order a machinist reads them. */
@@ -113,15 +113,18 @@ function ThroughOrDepthField({
     if (trimmed === "" || trimmed.toLowerCase() === THROUGH_TEXT.toLowerCase()) {
       if (value !== null) onValue(null);
       setText(THROUGH_TEXT);
+      toolChipStore.getState().setRawValueValidity("hole-depth", true, "");
       return;
     }
     const n = parseLength(trimmed, unit);
     if (n === undefined || n === null || !Number.isFinite(n) || n <= 0) {
       setText(shown(value));
+      toolChipStore.getState().setRawValueValidity("hole-depth", true, "");
       return;
     }
     if (n !== value) onValue(n);
     setText(shown(n));
+    toolChipStore.getState().setRawValueValidity("hole-depth", true, "");
   };
 
   return (
@@ -130,14 +133,24 @@ function ThroughOrDepthField({
         ↧
       </span>
       <input
-        aria-label="Hole depth"
+        aria-label={`Hole depth (${lengthSuffix(unit)})`}
         data-testid="chip-hole-depth"
         className={cn("bg-transparent text-right outline-none", unit === "mm" ? "w-10" : "w-14")}
         value={text}
         inputMode="decimal"
         placeholder={THROUGH_TEXT}
         title="Hole depth — 'Thru' drills all the way through"
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          setText(next);
+          const trimmed = next.trim();
+          const valid = trimmed === "" || trimmed.toLowerCase() === THROUGH_TEXT.toLowerCase() ||
+            (() => {
+              const parsed = parseLength(trimmed, unit);
+              return parsed !== undefined && parsed !== null && Number.isFinite(parsed) && parsed > 0;
+            })();
+          toolChipStore.getState().setRawValueValidity("hole-depth", valid, next);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -149,6 +162,7 @@ function ThroughOrDepthField({
             e.preventDefault();
             e.stopPropagation();
             setText(shown(value));
+            toolChipStore.getState().setRawValueValidity("hole-depth", true, "");
           }
         }}
       />
@@ -159,12 +173,18 @@ function ThroughOrDepthField({
 /** A plain labelled length field for a conditional dimension. */
 function DimField({
   label,
+  ariaLabel,
   testid,
+  fieldId,
   value,
   onValue,
 }: {
   label: string;
+  /** The accessible name (WP-U10) — the glyph `label` is decorative-only, so
+   *  a screen reader gets the real field name instead. */
+  ariaLabel: string;
   testid: string;
+  fieldId: string;
   value: number;
   onValue: (v: number) => void;
 }) {
@@ -175,14 +195,22 @@ function DimField({
     setText(formatLength(value, unit));
   }, [value, unit]);
 
+  useEffect(() => () => {
+    // A hidden conditional field must not keep confirmation blocked after a
+    // profile switch; its last valid parameter remains controller-owned.
+    toolChipStore.getState().setRawValueValidity(fieldId, true, "");
+  }, [fieldId]);
+
   const commit = (): void => {
     const n = parseLength(text.trim(), unit);
     if (n === undefined || n === null || !Number.isFinite(n) || n <= 0) {
       setText(formatLength(value, unit));
+      toolChipStore.getState().setRawValueValidity(fieldId, true, "");
       return;
     }
     if (n !== value) onValue(n);
     setText(formatLength(n, unit));
+    toolChipStore.getState().setRawValueValidity(fieldId, true, "");
   };
 
   return (
@@ -191,12 +219,18 @@ function DimField({
         {label}
       </span>
       <input
-        aria-label={testid}
+        aria-label={ariaLabel}
         data-testid={testid}
         className={cn("bg-transparent text-right outline-none", unit === "mm" ? "w-10" : "w-14")}
         value={text}
         inputMode="decimal"
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          setText(next);
+          const parsed = parseLength(next.trim(), unit);
+          const valid = parsed !== undefined && parsed !== null && Number.isFinite(parsed) && parsed > 0;
+          toolChipStore.getState().setRawValueValidity(fieldId, valid, next);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -208,6 +242,7 @@ function DimField({
             e.preventDefault();
             e.stopPropagation();
             setText(formatLength(value, unit));
+            toolChipStore.getState().setRawValueValidity(fieldId, true, "");
           }
         }}
       />
@@ -306,20 +341,26 @@ function FragmentRow({
   onPick: (thread: string, fit: HoleFit, threaded?: boolean) => void;
   setOpen: (v: boolean) => void;
 }) {
+  const unit = useSettingsStore((s) => s.displayUnit);
+  const size = holeStandard(thread);
   if (threaded) {
+    // WP-U10: the cell prints the mm value it would apply, never `·` — the
+    // picker doubles as a preview of what a tap-drill pick fills.
+    const tapDrill = formatLength(size?.tapDrillMm ?? 0, unit);
     return (
       <>
         <span className="col-span-2 px-1 font-mono text-[11px] text-ink-2">{thread}</span>
         <button
           type="button"
           data-testid={`chip-hole-std-${thread}-thread`}
+          aria-label={`${thread} tap drill Ø${tapDrill} ${lengthSuffix(unit)}`}
           onClick={() => {
             onPick(thread, "normal", true);
             setOpen(false);
           }}
           className="rounded-full bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink-3 hover:bg-hover-2"
         >
-          ·
+          Ø{tapDrill}
         </button>
       </>
     );
@@ -327,26 +368,29 @@ function FragmentRow({
   return (
     <>
       <span className="px-1 font-mono text-[11px] text-ink-2">{thread}</span>
-      {FITS.map((f) => (
-        <button
-          key={f.fit}
-          type="button"
-          data-testid={`chip-hole-std-${thread}-${f.fit}`}
-          onClick={() => {
-            onPick(thread, f.fit);
-            setOpen(false);
-          }}
-          className="rounded-full bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink-3 hover:bg-hover-2"
-        >
-          ·
-        </button>
-      ))}
+      {FITS.map((f) => {
+        const v = formatLength(size?.clearance[f.fit] ?? 0, unit);
+        return (
+          <button
+            key={f.fit}
+            type="button"
+            data-testid={`chip-hole-std-${thread}-${f.fit}`}
+            aria-label={`${thread} ${f.label.toLowerCase()} fit Ø${v} ${lengthSuffix(unit)}`}
+            onClick={() => {
+              onPick(thread, f.fit);
+              setOpen(false);
+            }}
+            className="rounded-full bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink-3 hover:bg-hover-2"
+          >
+            Ø{v}
+          </button>
+        );
+      })}
     </>
   );
 }
 
-export function HoleChipCluster() {
-  const diameter = useToolChipStore((s) => s.value);
+export function HoleInspectorControls() {
   const holeType = useToolChipStore((s) => s.holeType);
   const depth = useToolChipStore((s) => s.holeDepth);
   const cbDiameter = useToolChipStore((s) => s.cbDiameter);
@@ -366,12 +410,6 @@ export function HoleChipCluster() {
         }))}
         onPick={(v) => toolChipStore.getState().onHoleType?.(v)}
       />
-      <DimensionInput
-        value={diameter}
-        suffix={LENGTH_SUFFIX}
-        onCommit={(v) => toolChipStore.getState().onValue?.(v)}
-        onConfirm={() => toolChipStore.getState().onConfirm?.()}
-      />
       <ThroughOrDepthField
         value={depth}
         onValue={(v) => toolChipStore.getState().onDepth?.(v)}
@@ -380,13 +418,17 @@ export function HoleChipCluster() {
         <>
           <DimField
             label="⌴Ø"
+            ariaLabel={`Counterbore diameter (${LENGTH_SUFFIX})`}
             testid="chip-hole-cb-diameter"
+            fieldId="hole-cb-diameter"
             value={cbDiameter}
             onValue={(v) => toolChipStore.getState().onCbDiameter?.(v)}
           />
           <DimField
             label="⌴↧"
+            ariaLabel={`Counterbore depth (${LENGTH_SUFFIX})`}
             testid="chip-hole-cb-depth"
+            fieldId="hole-cb-depth"
             value={cbDepth}
             onValue={(v) => toolChipStore.getState().onCbDepth?.(v)}
           />
@@ -396,7 +438,9 @@ export function HoleChipCluster() {
         <>
           <DimField
             label="⌵Ø"
+            ariaLabel={`Countersink diameter (${LENGTH_SUFFIX})`}
             testid="chip-hole-cs-diameter"
+            fieldId="hole-cs-diameter"
             value={csDiameter}
             onValue={(v) => toolChipStore.getState().onCsDiameter?.(v)}
           />

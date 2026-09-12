@@ -1,5 +1,6 @@
 // FilletChamferOp.cpp — see FilletChamferOp.h. Ports buildFillet / buildChamfer.
 #include "ops/FilletChamferOp.h"
+#include "ops/TopologyHistory.h"
 
 #include <algorithm>
 #include <cmath>
@@ -820,6 +821,8 @@ OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
                          const std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
                          std::vector<json>& advisories) {
     OpOutcome out;
+    const auto* target = ctx.bodies.get(target_id);
+    const TopoDS_Shape before = target ? target->geom : TopoDS_Shape{};
     // The step is Ok, so these ride `planStep` (`OpOutcome::diagnostics` ->
     // `merge_outcome` -> `emit_plan_step`). They are only ever attached HERE,
     // on the success path — appending an advisory to a Failed outcome would
@@ -837,6 +840,13 @@ OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
     }
     out.body_events.push_back({"modified", target_id, {}});
     out.body_ids.push_back(target_id);
+    if (fillet_builder) {
+        out.topology_history.push_back(modified_body_history(
+            target_id, before, result, fillet_builder->history()));
+    } else if (builder) {
+        out.topology_history.push_back(modified_body_history(
+            target_id, before, result, *builder));
+    }
     return out;
 }
 

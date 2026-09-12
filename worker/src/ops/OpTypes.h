@@ -23,6 +23,7 @@
 #include "nlohmann/json.hpp"
 #include "session/BodyStore.h"
 #include "session/Signatures.h"
+#include "session/TopologyOrigins.h"
 #include "util/Cancel.h"
 
 namespace onecad::ops {
@@ -31,6 +32,7 @@ namespace onecad::ops {
 // construction algorithms; this mode only selects how much result evidence must
 // exist before scratch geometry may be published.
 enum class ValidationMode { PreviewInteractive, CommitAuthoritative, GateDeep };
+enum class TopologyHistoryMode { Direct, CompositeAdopted };
 
 // Scratch state + policy handed to an op executor. References are into the
 // kernel-lane-local ScratchJob (never the live session), so op execution is
@@ -75,6 +77,10 @@ struct OpOutcome {
     // this lets an op surface non-fatal findings (e.g. §7.3 ImportStep's
     // STEP_SEWN / STEP_HEALED vocabulary) on a step that SUCCEEDS.
     std::vector<nlohmann::json> diagnostics;
+    // Adapter-certified live-builder history. Omitted/Unproven history for a
+    // touched body invalidates ownership; the executor never infers births by diff.
+    std::vector<session::TopologyBodyHistory> topology_history;
+    TopologyHistoryMode topology_history_mode = TopologyHistoryMode::Direct;
     // Component Library P3 WP-3.1: set ONLY when `PlaceComponent`'s `mate`
     // resolved AutoBind and the recomputed seat moved beyond the reseat
     // epsilon (`ComponentOp.cpp`'s `kMateReseatTranslationEpsilonMm`/

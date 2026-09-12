@@ -28,11 +28,11 @@ import { CadOrbitControls } from "./CadOrbitControls";
 import type { DevicePref, InputDevice } from "./navInput";
 import { GridPlane } from "./GridPlane";
 import { OriginTriad } from "./OriginTriad";
-import { HtmlOverlayDriver } from "./HtmlOverlayDriver";
+import { HtmlOverlayDriver, type OverlayAnnotationPlacement } from "./HtmlOverlayDriver";
 import { ViewportContributionHost } from "./ContributionHost";
 import type { Registry, ViewportContribution } from "@/platform";
 import { palette } from "./palette";
-import { Picker, linePickThreshold, type PickHit, type PickModifiers } from "./Picker";
+import { Picker, linePickThreshold, type PickHit, type PickModifiers, type ProbeCandidate, type ProbeCandidateFilter } from "./Picker";
 import { HighlightLayer } from "./HighlightLayer";
 import {
   SketchStaticLayer,
@@ -40,12 +40,14 @@ import {
   type SketchStaticHit,
 } from "./SketchStaticLayer";
 import { RegionPickLayer } from "./RegionPickLayer";
-import { flushDisposals } from "../mesh/meshRegistry";
+import { flushDisposals, getEntry } from "../mesh/meshRegistry";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import type { EntityRef } from "@/stores/selectionStore";
 import { SketchObject } from "./SketchObject";
 import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
+import { captureFaceBounds, isFaceBoundsCurrent, type CapturedFaceBounds } from "./faceFrameBounds";
+import { sketchFrameBounds } from "./sketchFrameBounds";
 import { computePlaneScreenMetric, newPlaneMetricScratch } from "./planeMetric";
 import type {
   SketchConstraint,
@@ -152,6 +154,10 @@ export interface ChipPlacement {
    * exclusion is right to refuse, leaving the arrow ungrabbable.
    */
   avoidValueHandle?: boolean;
+  screenPosition?: { x: number; y: number };
+  constrainToSafeRect?: boolean;
+  onPlacementStatus?: (status: { width: number; height: number; fits: boolean | null }) => void;
+  annotation?: OverlayAnnotationPlacement;
 }
 
 /** Store-wiring seam the viewport bridge supplies for picking (engine stays store-agnostic). */
@@ -361,9 +367,12 @@ export class ViewportEngine {
    *  spec caught it). Chips alone get a z=30 layer; pointer-events stay opt-in
    *  per chip exactly as in the overlay. */
   private chipLayerEl: HTMLElement | null = null;
+  private overlaySafeRect: { x: number; y: number; width: number; height: number } | null = null;
   private sketch: SketchObject | null = null;
   private snapIndicator: SnapIndicator | null = null;
   private sketchPlane: SketchPlane | null = null;
+  private sketchEntities: readonly SketchEntity[] = [];
+  private sketchDrafts: readonly DraftEntity[] = [];
   private savedView: ReturnType<CadOrbitControls["getViewState"]> | null = null;
   private ghostEl: HTMLElement | null = null;
   private ghostRegistered = false;
@@ -801,6 +810,22 @@ export class ViewportEngine {
     if (animating) this.scheduleFrame();
   };
 
+  private readonly afterRenderListeners = new Map<() => void, number>();
+  private renderSubmission = 0;
+
+  /** Observe the next actual renderer submission, not merely its scheduled rAF. */
+  onAfterRender(listener: () => void): () => void {
+    this.afterRenderListeners.set(listener, this.renderSubmission + 1);
+    return () => this.afterRenderListeners.delete(listener);
+  }
+
+  private notifyRenderCompleted(submission: number): void {
+    if (this.disposed) return;
+    for (const [listener, minimum] of [...this.afterRenderListeners]) {
+      if (submission >= minimum) listener();
+    }
+  }
+
   private renderFrame(): void {
     if (!this.rendererHandle || !this.controls) return;
     // A display change with no CSS resize never reaches `ResizeObserver`, so
@@ -887,14 +912,28 @@ export class ViewportEngine {
     // Before the draw: the cut's stencil pairs mirror whatever bodies are
     // visible RIGHT NOW (no-op while the section is off).
     this.section?.update();
-    this.rendererHandle.renderer.render(this.scene, camera);
+    const submission = ++this.renderSubmission;
+    const renderResult = this.rendererHandle.renderer.render(this.scene, camera);
     // The arrow is oriented and scaled just above, so its box is current for this
     // frame — chips that opted in are pushed clear of it inside `update`.
-    this.overlayDriver.update(camera, width, height, this.getInteractionOverlayBounds("valueHandle"));
+    this.overlayDriver.update(
+      camera,
+      width,
+      height,
+      this.getInteractionOverlayBounds("valueHandle"),
+      this.overlaySafeRect,
+    );
     // Double-buffer disposal: geometries swapped out earlier are freed now, one
     // frame later, so nothing that referenced them this frame reads freed data.
     flushDisposals();
     this.frames++;
+    if (renderResult) {
+      void renderResult
+        .then(() => this.notifyRenderCompleted(submission))
+        .catch((error: unknown) => logWarn("vp", "async renderer submission failed", { error }));
+    } else {
+      this.notifyRenderCompleted(submission);
+    }
     if (this.debug) {
       const now = performance.now();
       if (this.lastFrameAt > 0) {
@@ -1177,9 +1216,37 @@ export class ViewportEngine {
     this.controls?.homeView(true);
   }
 
-  fitView(): void {
+  fitView(): boolean {
     this.cancelAutoFit();
-    this.controls?.fitView();
+    if (this.sketchPlane) {
+      const bounds = sketchFrameBounds(this.sketchPlane, this.sketchEntities, this.sketchDrafts);
+      return bounds ? this.fitBounds(bounds) : false;
+    }
+    const bounds = this.getSceneBounds();
+    return bounds ? this.fitBounds(bounds) : false;
+  }
+
+  /** Frame explicit world bounds inside the measured unobstructed viewport. */
+  fitBounds(bounds: THREE.Box3, orientation?: { yaw: number; pitch: number }): boolean {
+    this.cancelAutoFit();
+    if (!this.controls) return false;
+    const { width, height } = this.viewportSize();
+    return this.controls.frameView({
+      bounds,
+      viewport: {
+        width,
+        height,
+        ...(this.overlaySafeRect ? { safeRect: this.overlaySafeRect } : {}),
+      },
+      ...orientation,
+    });
+  }
+
+  /** Explicitly frame the currently published operation preview; never falls back to committed bodies. */
+  fitPreview(): boolean {
+    this.cancelAutoFit();
+    const bounds = this.getVisibleRootBounds(this.previewRoot) ?? this.previewMesh?.getBounds() ?? null;
+    return bounds ? this.fitBounds(bounds) : false;
   }
 
   /**
@@ -1203,7 +1270,8 @@ export class ViewportEngine {
     this.autoFitTimer = setTimeout(() => {
       this.autoFitTimer = null;
       if (this.disposed) return;
-      this.controls?.fitView();
+      const bounds = this.getSceneBounds();
+      if (bounds) this.fitBounds(bounds);
     }, delayMs);
   }
 
@@ -1221,13 +1289,13 @@ export class ViewportEngine {
   }
 
   /**
-   * Frame exactly `bodyIds` (zoom-to-selection, W3). Falls back to the
-   * whole-scene fit when none of them has visible geometry — a stale or hidden
-   * id must never leave the camera pointing at nothing.
+   * Frame exactly the visible geometry among `bodyIds` (zoom-to-selection, W3).
+   * A stale/hidden target refuses without moving; it must not become fit-all.
    */
-  fitToBodies(bodyIds: readonly string[]): void {
+  fitToBodies(bodyIds: readonly string[]): boolean {
     this.cancelAutoFit();
-    this.controls?.fitView(this.getBoundsForBodies(bodyIds) ?? undefined);
+    const bounds = this.getBoundsForBodies(bodyIds);
+    return bounds ? this.fitBounds(bounds) : false;
   }
 
   /**
@@ -1248,6 +1316,16 @@ export class ViewportEngine {
       box.union(one.setFromObject(child));
     }
     return box.isEmpty() ? null : box;
+  }
+
+  captureFaceFrame(identity: {
+    bodyId: string;
+    elementId?: string;
+    topoKey?: string;
+  }): CapturedFaceBounds | null {
+    const body = this.visibleBody(identity.bodyId);
+    const entry = getEntry(identity.bodyId);
+    return body && entry ? captureFaceBounds(entry, body, identity) : null;
   }
 
   /**
@@ -1273,10 +1351,23 @@ export class ViewportEngine {
     this.controls?.cancelAnimation();
   }
 
-  private getSceneBounds = (): THREE.Box3 | null => {
-    const box = new THREE.Box3().setFromObject(this.bodiesRoot);
+  private getSceneBounds = (): THREE.Box3 | null => this.getVisibleRootBounds(this.bodiesRoot);
+
+  private getVisibleRootBounds(root: THREE.Group): THREE.Box3 | null {
+    const box = new THREE.Box3();
+    const one = new THREE.Box3();
+    for (const child of root.children) {
+      if (!child.visible) continue;
+      box.union(one.setFromObject(child));
+    }
     return box.isEmpty() ? null : box;
-  };
+  }
+
+  private visibleBody(bodyId: string): THREE.Object3D | undefined {
+    return this.bodiesRoot.children.find(
+      (child) => child.visible && String(child.userData.bodyId ?? "") === bodyId,
+    );
+  }
 
   /** Raycast a client point onto the world Z=0 plane. Null if it misses. */
   screenToWorldOnZ0(clientX: number, clientY: number): THREE.Vector3 | null {
@@ -1305,6 +1396,7 @@ export class ViewportEngine {
     status: SketchSolveStatus,
     constraints: SketchConstraint[] = [],
     entityStates: SketchEntityStates = {},
+    opts: { initialFaceBounds?: CapturedFaceBounds; suppressFrame?: boolean } = {},
   ): void {
     if (this.disposed) return;
     if (!this.sketch) {
@@ -1319,6 +1411,8 @@ export class ViewportEngine {
       });
     }
     this.sketchPlane = plane;
+    this.sketchEntities = entities;
+    this.sketchDrafts = [];
     // Before the session, so the first build already colors per entity. A REUSED
     // SketchObject (sketch→sketch switch) is reset by the `{}` default, which
     // reads as unknown-for-all — the previous sketch's map must not leak in.
@@ -1339,12 +1433,21 @@ export class ViewportEngine {
     // The sketch aims the camera along the plane normal; a queued auto-fit
     // landing mid-session would fight it (and be saved as the "restore" pose).
     this.cancelAutoFit();
-    this.savedView = this.controls?.getViewState() ?? null;
+    this.savedView ??= this.controls?.getViewState() ?? null;
     const normal = new THREE.Vector3().fromArray(plane.normal);
     const origin = new THREE.Vector3().fromArray(plane.origin);
     const xAxis = new THREE.Vector3().fromArray(plane.xAxis);
     const dist = this.controls?.getDistance() ?? 260;
-    this.controls?.viewAlongNormal(normal, origin, dist, true, xAxis);
+    if (!opts.suppressFrame && this.controls) {
+      const orientation = this.controls.orientationAlongNormal(normal, xAxis);
+      const entityBounds = sketchFrameBounds(plane, entities);
+      const faceBounds = opts.initialFaceBounds && this.currentFaceBounds(opts.initialFaceBounds)
+        ? opts.initialFaceBounds.bounds
+        : null;
+      const bounds = entityBounds ?? faceBounds;
+      if (bounds) this.fitBounds(bounds, orientation);
+      else this.controls.setView({ ...orientation, distance: dist, target: origin }, true);
+    }
     this.invalidate();
   }
 
@@ -1371,6 +1474,7 @@ export class ViewportEngine {
     opts?: { transient?: boolean; entityStates?: SketchEntityStates },
   ): void {
     this.sketchPlane = plane;
+    this.sketchEntities = entities;
     if (opts?.entityStates) this.sketch?.setEntityStates(opts.entityStates);
     this.sketch?.setSession(plane, entities, status, constraints, opts);
     // A committed edit invalidates any hover-time doomed-piece ghost (it was drawn
@@ -1380,6 +1484,7 @@ export class ViewportEngine {
   }
 
   setSketchPreview(drafts: DraftEntity[]): void {
+    this.sketchDrafts = drafts;
     this.sketch?.setPreview(drafts);
   }
 
@@ -1497,6 +1602,14 @@ export class ViewportEngine {
     return this.picker?.probe(clientX, clientY) ?? null;
   }
 
+  probeCandidates(
+    clientX: number,
+    clientY: number,
+    filter: ProbeCandidateFilter = {},
+  ): ProbeCandidate[] {
+    return this.picker?.probeCandidates(clientX, clientY, filter) ?? [];
+  }
+
   /** Raycast a client point onto the current sketch plane → plane (u,v). */
   screenToPlane(clientX: number, clientY: number): Point2 | null {
     if (!this.canvas || !this.sketchPlane) return null;
@@ -1583,7 +1696,7 @@ export class ViewportEngine {
   }
 
   /** Exit sketch mode: tear down the presence and restore the saved camera. */
-  exitSketch(): void {
+  exitSketch(opts: { restoreView?: boolean } = {}): void {
     this.sketch?.dispose();
     this.sketch = null;
     this.sketchStatic?.setSessionActive(false);
@@ -1595,6 +1708,8 @@ export class ViewportEngine {
     this.snapIndicator?.dispose();
     this.snapIndicator = null;
     this.sketchPlane = null;
+    this.sketchEntities = [];
+    this.sketchDrafts = [];
     if (this.ghostRegistered) {
       this.overlayDriver.unregister("__sketch_ghost");
       this.ghostRegistered = false;
@@ -1602,11 +1717,15 @@ export class ViewportEngine {
     this.ghostEl?.remove();
     this.ghostEl = null;
     this.controls?.setLmbOrbitSuppressed(false);
-    if (this.savedView && this.controls) {
+    if (opts.restoreView !== false && this.savedView && this.controls) {
       this.controls.setView(this.savedView, true);
       this.savedView = null;
     }
     this.invalidate();
+  }
+
+  private currentFaceBounds(capture: CapturedFaceBounds): boolean {
+    return isFaceBoundsCurrent(capture, getEntry(capture.bodyId), this.visibleBody(capture.bodyId));
   }
 
   // ---- Model-tool previews (F-WP7) ----
@@ -2167,14 +2286,20 @@ export class ViewportEngine {
   }
 
   /** The lazily-created chip layer (see [`chipLayerEl`]). Parented beside the
-   *  overlay so its z-index competes with the panels at the same level. */
+   *  overlay so its z-index competes with the panels at the same level.
+   *
+   *  NOT `aria-hidden` (WP-U10): unlike `overlayEl`, which decorates the canvas
+   *  and stays hidden, this layer holds REAL interactive controls — model-tool
+   *  chips, sketch dimension/constraint badges, measure/repair labels — and
+   *  aria-hidden is a parent-overrides-child state, so hiding this ancestor
+   *  would exclude every one of them from a role/name query or a screen reader
+   *  no matter what a child chip's own `aria-hidden`/`role` says. */
   private chipLayer(): HTMLElement | null {
     const parent = this.overlayEl?.parentElement;
     if (!parent) return null;
     if (!this.chipLayerEl || this.chipLayerEl.parentElement !== parent) {
       const el = document.createElement("div");
       el.dataset.chipLayer = "1";
-      el.setAttribute("aria-hidden", "true");
       const s = el.style;
       s.position = "absolute";
       s.inset = "0";
@@ -2202,6 +2327,18 @@ export class ViewportEngine {
       offsetPx: placement?.offsetPx,
       clusterId: placement?.clusterId,
       avoidKeepOut: placement?.avoidValueHandle,
+      screenPosition: placement?.screenPosition,
+      constrainToSafeRect: placement?.constrainToSafeRect,
+      onPlacementStatus: placement?.onPlacementStatus,
+      annotation: placement?.annotation
+        ? {
+          ...placement.annotation,
+          onSizeChanged: () => {
+            placement.annotation?.onSizeChanged?.();
+            this.invalidate();
+          },
+        }
+        : undefined,
     });
     this.invalidate();
   }
@@ -2210,6 +2347,22 @@ export class ViewportEngine {
     this.overlayDriver.setWorldPos(id, new THREE.Vector3().fromArray(world));
     if (axisFrom) this.overlayDriver.setAxisFrom(id, new THREE.Vector3().fromArray(axisFrom));
     this.invalidate();
+  }
+
+  setChipScreenPosition(id: string, position: { x: number; y: number } | null): void {
+    this.overlayDriver.setScreenPosition(id, position);
+    this.invalidate();
+  }
+
+  setOverlaySafeRect(rect: { x: number; y: number; width: number; height: number } | null): void {
+    this.overlaySafeRect = rect;
+    this.invalidate();
+  }
+
+  clientToViewport(clientX: number, clientY: number): { x: number; y: number } | null {
+    const rect = this.container?.getBoundingClientRect();
+    if (!rect) return null;
+    return { x: clientX - rect.left, y: clientY - rect.top };
   }
 
   unmountChip(id: string, el: HTMLElement): void {
@@ -2375,6 +2528,7 @@ export class ViewportEngine {
     this.cancelAutoFit();
     if (this.rafPending) cancelAnimationFrame(this.rafId);
     this.rafPending = false;
+    this.afterRenderListeners.clear();
 
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;

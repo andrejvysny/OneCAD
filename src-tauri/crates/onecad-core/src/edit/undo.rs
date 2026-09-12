@@ -355,6 +355,44 @@ impl UndoStack {
         self.redo.len()
     }
 
+    /// The label of the step an undo would revert (top of the undo stack).
+    #[must_use]
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.last().map(|t| t.label.as_str())
+    }
+
+    #[must_use]
+    pub fn top_is_add_sketch(&self, sketch_id: SketchId) -> bool {
+        matches!(
+            self.undo.last().map(|txn| txn.edits.as_slice()),
+            Some([AppliedEdit { forward: EditCommand::AddSketch { sketch }, .. }]) if sketch.id == sketch_id
+        )
+    }
+
+    #[must_use]
+    pub fn is_created_sketch_suffix(&self, watermark: usize, sketch_id: SketchId) -> bool {
+        if watermark == 0 || watermark > self.undo.len() {
+            return false;
+        }
+        let creation = &self.undo[watermark - 1];
+        let exact_creation = matches!(creation.edits.as_slice(),
+            [AppliedEdit { forward: EditCommand::AddSketch { sketch }, .. }] if sketch.id == sketch_id);
+        exact_creation
+            && self.undo[watermark..].iter().all(|txn| {
+                txn.edits.iter().all(|edit| match &edit.forward {
+                    EditCommand::SketchEdit { sketch, .. }
+                    | EditCommand::SketchDragGesture { sketch, .. } => *sketch == sketch_id,
+                    _ => false,
+                })
+            })
+    }
+
+    /// The label of the step a redo would replay (top of the redo stack).
+    #[must_use]
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|t| t.label.as_str())
+    }
+
     /// The monotonic count of committed steps evicted past [`UNDO_CAP`]. The
     /// sketch-session squash records this at enter and REFUSES the squash if it has
     /// moved since (the bottom shifted out, so the depth watermark is stale).
@@ -430,6 +468,16 @@ impl UndoStack {
     pub fn push_redone(&mut self, txn: Txn) {
         self.undo.push(txn);
         self.enforce_cap();
+    }
+
+    /// Drops the redo stack alone.
+    ///
+    /// The sketch-cancel DISCARD (WP-U7 D-1) is the one caller: it undoes the
+    /// squashed net step to restore the state at sketch entry, and that undo
+    /// leaves the step on the redo stack. Redoing it would re-create the very
+    /// session the user just discarded, so the entry is dropped.
+    pub fn clear_redo(&mut self) {
+        self.redo.clear();
     }
 
     /// Clears both stacks.

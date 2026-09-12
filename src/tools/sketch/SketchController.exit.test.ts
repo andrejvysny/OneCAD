@@ -74,6 +74,7 @@ describe("SketchController exit ordering", () => {
   let clientMock: {
     enterSketch: ReturnType<typeof vi.fn>;
     cancelSketch: ReturnType<typeof vi.fn>;
+    deleteSketch: ReturnType<typeof vi.fn>;
     finishSketch: ReturnType<typeof vi.fn>;
   };
 
@@ -94,8 +95,12 @@ describe("SketchController exit ordering", () => {
             status: "UnderConstrained",
           }),
       ),
-      cancelSketch: vi.fn((id: string) => {
-        calls.push(`cancelSketch:${id}`);
+      cancelSketch: vi.fn((id: string, opts?: { discard?: boolean }) => {
+        calls.push(`cancelSketch:${id}${opts?.discard ? ":discard" : ""}`);
+        return Promise.resolve({ discarded: opts?.discard === true });
+      }),
+      deleteSketch: vi.fn((id: string) => {
+        calls.push(`deleteSketch:${id}`);
         return Promise.resolve();
       }),
       finishSketch: vi.fn((id: string) => {
@@ -214,5 +219,62 @@ describe("SketchController exit ordering", () => {
       "the timeline record is committed before regions; the copy must not say otherwise",
     ).not.toContain("timeline record may be missing");
     __resetLogForTests({ enabled: false });
+  });
+
+  /*
+   * WP-U7 D-1 — the chrome bar's Cancel DISCARDS. It arms `sketchStore.exitIntent`
+   * and flips the mode; this exit must then revert the session and skip
+   * `finishSketch` entirely (minting a timeline record for geometry that was just
+   * reverted would record something the user never asked for).
+   */
+  it("a discarding exit reverts the session and never mints the record", async () => {
+    toolStore.getState().setMode("sketch", "sketch1");
+    await flush();
+
+    sketchStore.getState().setExitIntent("discard");
+    toolStore.getState().setMode("model");
+    await flush();
+    await flush();
+
+    expect(calls).toEqual(["cancelSketch:sketch1:discard"]);
+    expect(clientMock.finishSketch).not.toHaveBeenCalled();
+    // A RE-ENTERED sketch is never deleted — only one minted in this visit is.
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toBe("Sketch changes discarded");
+    expect(sketchStore.getState().session).toBeNull();
+    // Take-once: the next exit is a plain keep-exit again.
+    expect(sketchStore.getState().exitIntent).toBe("keep");
+  });
+
+  it("a REFUSED discard keeps the geometry and says so", async () => {
+    clientMock.cancelSketch.mockImplementation((id: string) => {
+      calls.push(`cancelSketch:${id}`);
+      return Promise.resolve({ discarded: false, keptReason: "history was trimmed" });
+    });
+
+    toolStore.getState().setMode("sketch", "sketch1");
+    await flush();
+    sketchStore.getState().setExitIntent("discard");
+    toolStore.getState().setMode("model");
+    await flush();
+    await flush();
+
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.message).toBe("Cannot discard — history was trimmed; changes kept");
+    expect(hint?.severity).toBe("warn");
+    expect(clientMock.deleteSketch).not.toHaveBeenCalled();
+    // A refused discard is a keep-exit: the timeline record must still be
+    // minted/refreshed, or the model would be built from stale geometry.
+    expect(calls).toEqual(["cancelSketch:sketch1", "finishSketch:sketch1"]);
+  });
+
+  it("Esc / Finish leave the keep-exit untouched", async () => {
+    toolStore.getState().setMode("sketch", "sketch1");
+    await flush();
+    toolStore.getState().setMode("model"); // no intent armed
+    await flush();
+    await flush();
+
+    expect(calls).toEqual(["cancelSketch:sketch1", "finishSketch:sketch1"]);
   });
 });

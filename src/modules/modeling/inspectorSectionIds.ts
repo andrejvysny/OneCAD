@@ -18,6 +18,7 @@ const sectionId = (name: string) =>
   );
 
 export const ModelingInspectorSections = {
+  Measurement: sectionId("measurement"),
   /** Body and face Appearance are mutually exclusive — one selection, one kind. */
   AppearanceBody: sectionId("appearance.body"),
   AppearanceFace: sectionId("appearance.face"),
@@ -32,6 +33,7 @@ export const ModelingInspectorSections = {
 } as const;
 
 export const ModelingInspectorPriorities = {
+  Measurement: 90,
   Appearance: 100,
   Dimensions: 150,
   History: 200,

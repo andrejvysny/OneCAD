@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { act } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import { resolveBinding } from "./keymap";
 import { useShortcuts } from "./useShortcuts";
 import { toolStore } from "@/stores/toolStore";
@@ -454,6 +454,22 @@ describe("useShortcuts", () => {
     });
     expect(toolStore.getState().modelTool).toBe("select");
   });
+
+  it("ignores CAD shortcuts raised from a popup-owned keyboard scope", () => {
+    render(
+      <>
+        <Harness />
+        <div data-cad-keyboard-scope>
+          <button type="button">popup control</button>
+        </div>
+      </>,
+    );
+    const target = document.querySelector("[data-cad-keyboard-scope] button")!;
+    const ev = new KeyboardEvent("keydown", { key: "e", bubbles: true, cancelable: true });
+    act(() => target.dispatchEvent(ev));
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(ev.defaultPrevented).toBe(false);
+  });
 });
 
 describe("useShortcuts — undo/redo routing (mode-gated)", () => {
@@ -496,6 +512,74 @@ describe("useShortcuts — undo/redo routing (mode-gated)", () => {
     press("y", { meta: true });
     expect(redoSketch).toHaveBeenCalledTimes(1);
     expect(ctrl.redo).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The guard ORDER, not just the guard. ⌘Z used to be resolved above the
+   * editable-target bail, so typing a dimension and pressing ⌘Z reverted the
+   * MODEL instead of the keystroke (2026-09-11 review). The bail now runs first;
+   * the router re-checks the focus itself, and this proves the keydown lane
+   * never reaches it from a field at all.
+   */
+  it("⌘Z inside a text field never reaches the undo lane (native text undo keeps it)", () => {
+    render(<Harness />);
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.focus();
+    const ev = new KeyboardEvent("keydown", {
+      key: "z",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      field.dispatchEvent(ev);
+    });
+    expect(ctrl.undo).not.toHaveBeenCalled();
+    expect(undoSketch).not.toHaveBeenCalled();
+    // Not swallowed either: the field (and the webview's own text undo) still
+    // gets the keystroke.
+    expect(ev.defaultPrevented).toBe(false);
+    field.remove();
+  });
+
+  it("⌘Z inside a popup field remains native text undo", () => {
+    render(<Harness />);
+    const popup = document.createElement("div");
+    popup.dataset.cadKeyboardScope = "";
+    const field = document.createElement("input");
+    popup.appendChild(field);
+    document.body.appendChild(popup);
+    const ev = new KeyboardEvent("keydown", {
+      key: "z",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => field.dispatchEvent(ev));
+    expect(ctrl.undo).not.toHaveBeenCalled();
+    expect(undoSketch).not.toHaveBeenCalled();
+    expect(ev.defaultPrevented).toBe(false);
+    popup.remove();
+  });
+
+  it("...and ⌘S from that same field still SAVES (the file chords sit above the bail)", async () => {
+    render(<Harness />);
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.focus();
+    const ev = new KeyboardEvent("keydown", {
+      key: "s",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      field.dispatchEvent(ev);
+    });
+    expect(ev.defaultPrevented).toBe(true);
+    await waitFor(() => expect(viewportStore.getState().statusHint?.message).toMatch(/^Saved /));
+    field.remove();
   });
 });
 
@@ -777,8 +861,12 @@ describe("finishSketch confirmation", () => {
       await flush();
     });
 
+    // The confirmation lands after the mutation queue drains — an async chain
+    // whose tick count depends on load, so poll rather than count ticks.
+    await waitFor(() =>
+      expect(viewportStore.getState().statusHint?.message).toBe(`Finished ${name} — 3 entities`),
+    );
     const hint = viewportStore.getState().statusHint;
-    expect(hint?.message).toBe(`Finished ${name} — 3 entities`);
     expect(hint?.severity).toBe("info");
     expect(hint?.sticky).toBe(false); // auto-dismisses; not a tool prompt
   });
@@ -790,7 +878,9 @@ describe("finishSketch confirmation", () => {
       press("Enter");
       await flush();
     });
-    expect(viewportStore.getState().statusHint?.message).toMatch(/— 1 entity$/);
+    await waitFor(() =>
+      expect(viewportStore.getState().statusHint?.message).toMatch(/— 1 entity$/),
+    );
   });
 
   it("never overwrites an error the finish itself raised", async () => {

@@ -36,6 +36,7 @@
 #include "nlohmann/json.hpp"
 #include "ops/GearOp.h"
 #include "session/BodyStore.h"
+#include "session/TopologyOrigins.h"
 
 namespace onecad::session {
 
@@ -48,6 +49,24 @@ struct StepResult {
     std::string message;                 // opFailed: the §8 recoverable message (why)
     nlohmann::json diagnostics = nlohmann::json::array();  // optional structured evidence
 };
+
+struct ResolvedInputEvidence {
+    std::size_t input_index = 0;
+    std::string element_id;
+    std::string body_id;
+    std::string kind;
+    nlohmann::json descriptor = nlohmann::json::object();
+    nlohmann::json anchor = nlohmann::json::object();
+    OriginState origin_state = OriginState::Unknown;
+    std::string producer_record_id;
+};
+
+struct ResolvedOpEvidence {
+    std::string effective_hash;
+    std::vector<ResolvedInputEvidence> inputs;
+};
+
+using ResolvedInputEvidenceLedger = std::map<std::string, ResolvedOpEvidence>;
 
 struct ScratchJob {
     std::uint64_t job_id = 0;
@@ -102,6 +121,15 @@ struct ScratchJob {
     // The scratch element-map partition (clone of live at fence time; rebound by
     // each op's OCCT history).
     elementmap::ElementMapPartition partition;
+
+    // Current ref evidence captured after generic resolution but before an op can
+    // consume or tombstone its selected topology. FeaturePattern replays use this
+    // transient ledger instead of stale authoring descriptors.
+    ResolvedInputEvidenceLedger resolved_input_evidence;
+
+    // Factual builder-history ownership. Pattern-relative roles are derived
+    // later; an absent shape is Unknown, never implicit host support.
+    TopologyOwnerLedger topology_owners;
 
     // SCHEMA §7.3 gear referenceability (WP-I): the session's gear-body map at
     // fence time, i.e. the gear bodies this plan INHERITED. `plan` above covers

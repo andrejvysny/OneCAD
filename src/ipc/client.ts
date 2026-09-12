@@ -11,6 +11,7 @@
  */
 import type {
   ApplyOperationResult,
+  RollbackFailedOperationResult,
   BeginGestureResult,
   ClassifyResult,
   ComponentParamValue,
@@ -26,6 +27,7 @@ import type {
   EvaluatedExpression,
   ExpressionDimension,
   VariableEditResult,
+  CancelSketchResult,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
@@ -42,6 +44,7 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  OperationEffects,
   PlaceComponentSource,
   ReindexReport,
   PreviewDraft,
@@ -80,6 +83,18 @@ import type { WireEditCommand } from "./tauriCommandMap";
 import { mockClient } from "./mockClient";
 import { createTauriClient } from "./tauriClient";
 
+/** Local-only hook run after native success and before authoritative event replay. */
+export interface DocumentReplacementOptions {
+  beforeAdopt?: () => void;
+}
+
+/** Authoritative head identity required by user-visible geometry reads. */
+export interface GeometryReadFence {
+  documentId: string;
+  runtimeSession: string;
+  snapshotId: number;
+}
+
 export interface CadClient {
   /** Recent projects for the start screen list. */
   listRecents(): Promise<RecentProject[]>;
@@ -102,7 +117,7 @@ export interface CadClient {
    */
   revealInFileManager(path: string): Promise<void>;
   /** Create a blank document and open it. */
-  newDocument(): Promise<DocumentSnapshot>;
+  newDocument(options?: DocumentReplacementOptions): Promise<DocumentSnapshot>;
   /**
    * Open an existing .onecad project at `path`.
    *
@@ -113,15 +128,15 @@ export interface CadClient {
    * crash container. Pass `"openSaved"` to discard the autosave deliberately, or
    * route the user to {@link CadClient.recoverDocument} instead.
    */
-  openDocument(path: string, onRecovery?: OnRecovery): Promise<DocumentSnapshot>;
+  openDocument(path: string, onRecovery?: OnRecovery, options?: DocumentReplacementOptions): Promise<DocumentSnapshot>;
   /** Import a STEP file at `path` into a new document. */
-  importStep(path: string): Promise<DocumentSnapshot>;
+  importStep(path: string, options?: DocumentReplacementOptions): Promise<DocumentSnapshot>;
   /**
    * Import another `.onecad` project. If a document is open the source timeline
    * is appended to it; otherwise a fresh document is created. Resolves `null`
    * when the dialog is cancelled.
    */
-  importProject(): Promise<DocumentSnapshot | null>;
+  importProject(options?: DocumentReplacementOptions): Promise<DocumentSnapshot | null>;
   /** Pick a STEP or OneCAD file for the unified start-screen import button. */
   importFileDialog(): Promise<string | null>;
   /**
@@ -218,7 +233,7 @@ export interface CadClient {
    * start screen. The backend emits an empty projection so the editor clears.
    * Safe to call when no document is open (no-op).
    */
-  closeDocument(): Promise<void>;
+  closeDocument(options?: DocumentReplacementOptions): Promise<void>;
   /**
    * Show a native file-open dialog and resolve to the chosen path (or null if
    * cancelled). Rust owns the real dialog (tauri-plugin-dialog Rust API — the
@@ -285,7 +300,16 @@ export interface CadClient {
    * single-body blob verbatim from the Rust MeshCache via `tauri::ipc::Response`
    * (zero-copy ArrayBuffer). The mock synthesizes the exact bytes locally.
    */
-  getBodyMesh(bodyId: string, lod: Lod): Promise<ArrayBuffer>;
+  getBodyMesh(bodyId: string, lod: Lod, generation?: number, expectedRuntimeSession?: string): Promise<ArrayBuffer>;
+
+  /** Acknowledge a debug-native expectation after actual renderer completion. */
+  meshRenderCompleted(correlation: {
+    expectationId: number;
+    documentId: string;
+    revision: number;
+    snapshotId: number;
+    bodyId: string;
+  }): Promise<void>;
 
   /**
    * Subscribe to backend `document-changed` events. Fires with the changed +
@@ -294,6 +318,8 @@ export interface CadClient {
    * in-process emitter.
    */
   onDocumentChanged(cb: (change: DocumentChange) => void): Unsubscribe;
+  /** Latest authoritative live publication retained for viewport bootstrap. */
+  getCurrentMeshPublication(): DocumentChange | null;
 
   // ── Sketch solver lane (SCHEMA §7.4) ──────────────────────────────────────
   // The real client routes these to the worker's PlaneGCS actor; the mock runs
@@ -357,8 +383,18 @@ export interface CadClient {
    */
   getSketch(sketchId: string): Promise<SketchSession>;
 
-  /** Discard the in-flight sketch edit session (no geometry change). */
-  cancelSketch(sketchId: string): Promise<void>;
+  /**
+   * Close the in-flight sketch edit session.
+   *
+   * By default this is the KEEP exit Esc/Finish use: the worker gesture is torn
+   * down and the session's granular edits are squashed into one net undo step,
+   * with no geometry change. `{ discard: true }` (WP-U7 D-1 — the sketch
+   * chrome's Cancel) additionally REVERTS that net step, so the sketch is back
+   * to the state it had at `enterSketch`, and the revert is not redoable. A
+   * discard the backend cannot honour comes back `discarded: false` with a
+   * `keptReason`; it never silently keeps the geometry.
+   */
+  cancelSketch(sketchId: string, opts?: { discard?: boolean }): Promise<CancelSketchResult>;
 
   /**
    * Remove a sketch feature from the document (a `DeleteSketch` EditCommand).
@@ -432,6 +468,7 @@ export interface CadClient {
     picks: PromotePick[],
     /** Explicit candidate provenance; omitted only for a fresh live pick. */
     snapshotId?: number,
+    expectedRuntimeSession?: string,
   ): Promise<PromotedElement[]>;
 
   /**
@@ -462,6 +499,7 @@ export interface CadClient {
     bodyId: string,
     elementId: string,
     topoKey?: string,
+    fence?: GeometryReadFence,
   ): Promise<ElementInfo | null>;
 
   /**
@@ -479,7 +517,7 @@ export interface CadClient {
    * to fall back to, and an empty answer would be indistinguishable from a body
    * that genuinely encloses no volume.
    */
-  massProperties(bodyId: string): Promise<MassProperties>;
+  massProperties(bodyId: string, fence?: GeometryReadFence): Promise<MassProperties>;
 
   /**
    * Surface/curve classification of a picked face or edge, plus a seatable
@@ -497,6 +535,7 @@ export interface CadClient {
     bodyId: string,
     elementId: string,
     topoKey?: string,
+    fence?: GeometryReadFence,
   ): Promise<ClassifyResult | null>;
 
   // ── Component Library (WP-1.3) ──────────────────────────────────────────
@@ -602,7 +641,7 @@ export interface CadClient {
    * and the template itself is never the save target — that detach IS its
    * immutability.
    */
-  newFromTemplate(id: string): Promise<DocumentSnapshot>;
+  newFromTemplate(id: string, options?: DocumentReplacementOptions): Promise<DocumentSnapshot>;
 
   /**
    * Captures one body at head as a reusable `document`-kind component (spec §7
@@ -895,7 +934,11 @@ export interface CadClient {
    * feature timeline. A `featureId` on the op re-targets an existing feature
    * (parametric edit). Also emits a `document-changed` event.
    */
-  applyOperation(op: OperationOp): Promise<ApplyOperationResult>;
+  applyOperation(op: OperationOp, effects?: OperationEffects): Promise<ApplyOperationResult>;
+  /** Commit several fresh features as one backend transaction/undo step. */
+  applyOperations(ops: OperationOp[], effects?: OperationEffects): Promise<ApplyOperationResult>;
+  /** Revert only the exact operation transaction identified by a backend receipt. */
+  rollbackFailedOperation(token: string): Promise<RollbackFailedOperationResult>;
 
   /**
    * Open a Level-2 preview session for a drafted op (NEW_SPEC §15). Returns the
@@ -917,6 +960,9 @@ export interface CadClient {
    * discards the scratch state and resolves null.
    */
   endPreview(sessionId: string, commit: boolean): Promise<ApplyOperationResult | null>;
+
+  /** Return the exact authored op without consuming its fresh preview session. */
+  takePreviewOperation(sessionId: string): OperationOp | null;
 
   /** Subscribe to exact Level-2 preview results (carry their epoch for reconcile). */
   onPreviewResult(cb: (r: PreviewResult) => void): Unsubscribe;
@@ -967,7 +1013,7 @@ export interface CadClient {
    * A failed restore leaves the offer PENDING, so the caller can retry or discard —
    * rejecting here does not consume it.
    */
-  recoverDocument(documentId: string, accept: boolean): Promise<DocumentSnapshot | null>;
+  recoverDocument(documentId: string, accept: boolean, options?: DocumentReplacementOptions): Promise<DocumentSnapshot | null>;
 
   // ── Close/quit confirmation (unsaved-changes guard) ────────────────────────
   // Rust intercepts BOTH the native window-close button AND an app-level exit

@@ -11,8 +11,9 @@
  * in the document so the portaled controls are queryable.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { ModelToolChips } from "./ModelToolChips";
+import { ActiveToolInspector } from "@/features/inspector/ActiveToolInspector";
 import { toolChipStore, type HoleChipHandlers } from "@/stores/toolChipStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
@@ -41,6 +42,8 @@ function handlers(): HoleChipHandlers {
   };
 }
 
+const renderHoleUi = () => render(<><ModelToolChips /><ActiveToolInspector /></>);
+
 describe("HoleChipCluster", () => {
   let h: HoleChipHandlers;
 
@@ -55,11 +58,11 @@ describe("HoleChipCluster", () => {
   });
 
   it("a simple hole shows the profile segments, Ø, depth and the standards button — and NO conditional pair", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple", depth: null }));
 
     expect(screen.getByTestId("chip-hole-simple")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("6.6");
+    expect(screen.getByLabelText("Hole diameter (mm)")).toHaveValue("6.6");
     // Through-all reads as a word, never as a blank field.
     expect(screen.getByTestId("chip-hole-depth")).toHaveValue("Thru");
     expect(screen.getByTestId("chip-hole-std")).toBeInTheDocument();
@@ -68,10 +71,14 @@ describe("HoleChipCluster", () => {
     expect(screen.queryByTestId("chip-hole-cb-diameter")).toBeNull();
     expect(screen.queryByTestId("chip-hole-cs-diameter")).toBeNull();
     expect(screen.queryByTestId("chip-hole-cs-90")).toBeNull();
+    expect(screen.getByTestId("chip-hole-badge")).toHaveTextContent("Hole");
+    const chip = within(screen.getByTestId("operation-hud"));
+    expect(chip.getByLabelText("Hole diameter (mm)")).toHaveValue("6.6");
+    expect(chip.queryByTestId("chip-hole-simple")).toBeNull();
   });
 
   it("a counterbore shows ONLY the cb pair", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() =>
       toolChipStore.getState().showHole(6.6, WORLD, h, {
         holeType: "counterbore",
@@ -89,7 +96,7 @@ describe("HoleChipCluster", () => {
   });
 
   it("a countersink shows ONLY the cs pair, with the four SCHEMA angles as segments", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() =>
       toolChipStore.getState().showHole(6.6, WORLD, h, {
         holeType: "countersink",
@@ -110,7 +117,7 @@ describe("HoleChipCluster", () => {
   });
 
   it("dispatches the profile flip, the angle pick and ✓/✕", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() =>
       toolChipStore
         .getState()
@@ -127,7 +134,7 @@ describe("HoleChipCluster", () => {
   });
 
   it("the depth field authors a blind depth, and 'Thru' takes it back to through-all", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { depth: null }));
     const depth = screen.getByTestId("chip-hole-depth");
 
@@ -150,7 +157,7 @@ describe("HoleChipCluster", () => {
   });
 
   it("the standards popover is closed until asked, and a pick reports thread + fit", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "counterbore" }));
     expect(screen.queryByTestId("chip-hole-std-panel")).toBeNull();
 
@@ -168,8 +175,30 @@ describe("HoleChipCluster", () => {
     expect(screen.queryByTestId("chip-hole-std-panel")).toBeNull();
   });
 
+  // WP-U10: the cell prints the mm value a pick would apply, never `·`, and
+  // names it fully so a screen reader (or a role/name query) can tell M3-close
+  // from M3-normal.
+  it("the Std cells print the fit's value, and name it with thread + fit + unit", () => {
+    renderHoleUi();
+    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple" }));
+    fireEvent.click(screen.getByTestId("chip-hole-std"));
+
+    const m3Close = screen.getByTestId("chip-hole-std-M3-close");
+    expect(m3Close).toHaveTextContent("Ø3.2");
+    expect(m3Close).toHaveAccessibleName("M3 close fit Ø3.2 mm");
+
+    const m3Normal = screen.getByTestId("chip-hole-std-M3-normal");
+    expect(m3Normal).toHaveTextContent("Ø3.4");
+    expect(m3Normal).toHaveAccessibleName("M3 normal fit Ø3.4 mm");
+
+    fireEvent.click(screen.getByTestId("chip-hole-thread"));
+    const m3Tap = screen.getByTestId("chip-hole-std-M3-thread");
+    expect(m3Tap).toHaveTextContent("Ø2.5");
+    expect(m3Tap).toHaveAccessibleName("M3 tap drill Ø2.5 mm");
+  });
+
   it("the thread toggle (WP-T1) swaps the fit pair for a single tap-drill pick", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple" }));
     fireEvent.click(screen.getByTestId("chip-hole-std"));
 
@@ -192,7 +221,7 @@ describe("HoleChipCluster", () => {
   });
 
   it("a cb dimension edit dispatches the raw millimetres", () => {
-    render(<ModelToolChips />);
+    renderHoleUi();
     act(() =>
       toolChipStore
         .getState()
@@ -202,5 +231,25 @@ describe("HoleChipCluster", () => {
     fireEvent.change(cbd, { target: { value: "15" } });
     fireEvent.blur(cbd);
     expect(h.onCbDiameter).toHaveBeenCalledWith(15);
+  });
+
+  it("keeps invalid secondary text keyed until that field is corrected", () => {
+    renderHoleUi();
+    act(() =>
+      toolChipStore.getState().showHole(6.6, WORLD, h, {
+        holeType: "counterbore",
+        cbDiameter: 11,
+        cbDepth: 6.8,
+      }),
+    );
+    const cbDepth = screen.getByTestId("chip-hole-cb-depth");
+    fireEvent.change(cbDepth, { target: { value: "abc" } });
+    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Hole diameter (mm)"), { target: { value: "8" } });
+    expect(screen.getByTestId("chip-confirm")).toBeDisabled();
+    expect(toolChipStore.getState().rawInputErrors).toHaveProperty("hole-cb-depth");
+    act(() => toolChipStore.setState({ holeType: "countersink" }));
+    expect(screen.getByTestId("chip-confirm")).toBeEnabled();
+    expect(toolChipStore.getState().rawInputErrors).not.toHaveProperty("hole-cb-depth");
   });
 });

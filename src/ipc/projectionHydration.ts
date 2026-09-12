@@ -61,7 +61,8 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
       name: s.name,
       visible: s.visible,
       dof: s.dof,
-      status: sketchStatus(s.status),
+      status: s.status === undefined ? undefined : sketchStatus(s.status),
+      solveGeometryToken: s.solveGeometryToken,
       geometryToken: s.geometryToken,
       // Face-hosted sketches only; the backend omits it everywhere else, and the
       // store treats `undefined` as "not hosted on a face" (SKETCH-ON-FACE W3).
@@ -89,6 +90,7 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
   return {
     status: p.status,
     documentId: p.documentId,
+    runtimeSession: p.runtimeSession,
     revision: p.revision,
     title: p.title,
     dirty: p.dirty,
@@ -107,6 +109,13 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
     // `features` are built from ALL timeline records and `total_ops` is
     // `timeline.len()` (document_runtime.rs), so `features.length` IS the total.
     appliedOps: Math.min(p.appliedOps ?? features.length, features.length),
+    // History reach (WP-U1). Absent (a backend older than the field) ⇒ 0 / null:
+    // the reading that disables the palette's Undo row rather than offering a
+    // command this build cannot know is available.
+    undoDepth: p.undoDepth ?? 0,
+    redoDepth: p.redoDepth ?? 0,
+    undoLabel: p.undoLabel ?? null,
+    redoLabel: p.redoLabel ?? null,
     // Absent (mock lane, or a backend older than the field) ⇒ "none": no chip.
     // Anything unrecognised is treated the same way rather than trusted — the
     // chip must never be driven by a token this build does not understand.

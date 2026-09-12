@@ -99,7 +99,7 @@ test("a chip shows the stored millimetres in the picked unit, geometry untouched
 
   await armDatumOffsetChip(page);
   const chip = page.getByTestId("model-tool-chip");
-  const input = chip.getByLabel("Dimension value");
+  const input = chip.getByLabel("Offset (in)");
 
   // The FSM still holds the 10 mm seed; only the FIELD moved. 10 / 25.4 =
   // 0.3937007…, four decimals.
@@ -114,7 +114,7 @@ test("a BARE number is read in the display unit and stored as MILLIMETRES", asyn
   await armDatumOffsetChip(page);
 
   const chip = page.getByTestId("model-tool-chip");
-  const input = chip.getByLabel("Dimension value");
+  const input = chip.getByLabel("Offset (in)");
 
   // Displaying inches, "1" means one INCH — the professional convention.
   await input.fill("1");
@@ -146,7 +146,7 @@ test("an explicit suffix overrides the display unit", async ({ page }) => {
   await pickUnit(page, "in");
   await armDatumOffsetChip(page);
 
-  const input = page.getByTestId("model-tool-chip").getByLabel("Dimension value");
+  const input = page.getByTestId("model-tool-chip").getByLabel("Offset (in)");
   await input.fill("2 mm");
   await input.blur();
   await expect.poll(async () => (await extrudeDebug(page))?.datumOffset).toBe(2);
@@ -159,7 +159,7 @@ test("switching back to mm re-labels the same value — the document does not mo
   await armDatumOffsetChip(page);
 
   const chip = page.getByTestId("model-tool-chip");
-  const input = chip.getByLabel("Dimension value");
+  const input = chip.getByLabel("Offset (mm)");
   await input.fill("50.8");
   await input.blur();
   await expect.poll(async () => (await extrudeDebug(page))?.datumOffset).toBe(50.8);

@@ -82,9 +82,26 @@ describe("mockClient — sketch solver lane flows", () => {
     await expect(mockClient.getSketch("ghost-xyz")).rejects.toThrow(/unknown sketch/);
   });
 
-  it("cancelSketch resolves without throwing", async () => {
+  it("cancelSketch keeps the session by default", async () => {
     await mockClient.enterSketch("sk");
-    await expect(mockClient.cancelSketch("sk")).resolves.toBeUndefined();
+    await expect(mockClient.cancelSketch("sk")).resolves.toEqual({ discarded: false });
+  });
+
+  /* WP-U7 D-1: the lane is the mock's only sketch authority, so restoring the
+   * snapshot taken at `enterSketch` IS the mock's session revert. */
+  it("cancelSketch with discard restores the sketch to its state at entry", async () => {
+    await mockClient.enterSketch("sk-discard");
+    await mockClient.sketchUpsert(
+      "sk-discard",
+      [{ id: "e1", type: "Line", p0: [0, 0], p1: [10, 0] }],
+      [],
+    );
+    expect((await mockClient.getSketch("sk-discard")).entities).toHaveLength(1);
+
+    await expect(mockClient.cancelSketch("sk-discard", { discard: true })).resolves.toEqual({
+      discarded: true,
+    });
+    expect((await mockClient.getSketch("sk-discard")).entities).toHaveLength(0);
   });
 
   it("deleteSketch drops the document row + the lane session (re-enter is empty)", async () => {

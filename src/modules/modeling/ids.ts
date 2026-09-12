@@ -71,6 +71,10 @@ export const ModelingCommands = {
   // Isolation masks BODIES, so it stays modeling. `zoomFit` and `home` do NOT:
   // they are view navigation and moved to `onecad.shell` (ARCHITECTURE.md §7).
   isolate: "onecad.modeling.command.isolate",
+  // History (WP-U1). Registered rather than hard-coded into the palette so ⌘Z,
+  // the palette row and the native Edit menu are one command with one answer.
+  undo: "onecad.modeling.command.undo",
+  redo: "onecad.modeling.command.redo",
 } as const;
 
 export type ModelingCommandKey = keyof typeof ModelingCommands;
@@ -86,6 +90,8 @@ export type ModelingCommandKey = keyof typeof ModelingCommands;
 export const ModelingTreeCommands = {
   deleteSketch: "onecad.modeling.command.deleteSketch",
   deleteDatum: "onecad.modeling.command.deleteDatum",
+  revealSelection: "onecad.modeling.command.revealSelectionInTree",
+  frameBody: "onecad.modeling.command.frameBodyInViewport",
 } as const;
 
 export function modelToolId(tool: ModelTool): ToolId {

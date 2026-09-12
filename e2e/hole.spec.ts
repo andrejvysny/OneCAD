@@ -65,7 +65,7 @@ async function lastFeature(page: Page): Promise<{ id: string; label: string; val
 
 /** The cluster's primary Ø field (the shared `DimensionInput`). */
 function diameterInput(page: Page) {
-  return page.getByLabel("Dimension value");
+  return page.getByLabel("Hole diameter (mm)");
 }
 
 /**
@@ -398,4 +398,63 @@ test("the thread toggle fills the ISO 261 tap-drill diameter, and the row keeps 
   await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("armed");
   await expect.poll(async () => (await holeDebug(page))?.holeEdit).toBe(id);
   await expect.poll(async () => (await holeDebug(page))?.holeDiameter).toBe(5.0);
+});
+
+/*
+ * WP-U4 / D-5 — the seat face is NOT consumed by the hole it seats.
+ *
+ * A fillet eats its edges and a shell eats its faces, so the tool clears those
+ * refs on commit. A hole perforates its seat and leaves it standing, and the
+ * reviewer's "four holes in one flange" flow depends on the pick surviving the
+ * regen: clearing it made every hole a fresh face pick. What removes a ref that
+ * the regen really did invalidate is the mesh swap (`viewport/mesh/rebindPick`).
+ */
+
+/** The ids currently in `selectionStore` (dev-only `__stores`). */
+async function selectedRefIds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { selection: { getState(): { selected: Array<{ id: string }> } } };
+    };
+    return (w.__stores?.selection.getState().selected ?? []).map((r) => r.id);
+  });
+}
+
+/** True once the selected face carries the Rust-minted id `promotePick` writes back. */
+async function selectionIsPromoted(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { selection: { getState(): { selected: Array<{ elementId?: string }> } } };
+    };
+    const refs = w.__stores?.selection.getState().selected ?? [];
+    return refs.length > 0 && refs.every((r) => Boolean(r.elementId));
+  });
+}
+
+test("the seat face SURVIVES the hole commit, and the next Hole arms on it again", async ({
+  page,
+}) => {
+  // Select the seat with the ordinary pick first, so the ref is the real thing:
+  // a promoted ElementId, which is what the swap reconciles against.
+  const face = await findFaceOnBody(page);
+  await clickAtClient(page, face.x, face.y);
+  await expect.poll(() => selectedRefIds(page)).toEqual([`${face.bodyId}#${face.topoKey}`]);
+  await expect.poll(() => selectionIsPromoted(page)).toBe(true);
+
+  await page.getByRole("button", { name: "Hole", exact: true }).click();
+  await clickAtClient(page, face.x, face.y);
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("armed");
+  await page.getByTestId("chip-confirm").click();
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("idle");
+  expect((await lastFeature(page)).label).toBe("Hole");
+
+  // The seat is still there, still selected, and nothing says the pick is stale.
+  await expect.poll(() => selectedRefIds(page)).toEqual([`${face.bodyId}#${face.topoKey}`]);
+  await expect(page.getByText("Selection is out of date — pick again")).toHaveCount(0);
+
+  // …and a second Hole seats on the same face with no residue from the first.
+  await page.getByRole("button", { name: "Hole", exact: true }).click();
+  await clickAtClient(page, face.x, face.y);
+  await expect.poll(async () => (await holeDebug(page))?.holePhase).toBe("armed");
+  await expect(page.getByText("Selection is out of date — pick again")).toHaveCount(0);
 });

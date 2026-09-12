@@ -206,8 +206,8 @@ describe("ModelToolController extrude gesture (chip exclusion + grab-relative de
     );
   }
 
-  function release(clientY: number): void {
-    container.dispatchEvent(
+  function release(clientY: number, target: HTMLElement = container): void {
+    target.dispatchEvent(
       new MouseEvent("pointerup", { clientX: 5, clientY, button: 0, buttons: 0, bubbles: true }),
     );
   }
@@ -234,6 +234,19 @@ describe("ModelToolController extrude gesture (chip exclusion + grab-relative de
     press(yFor(40));
     expect(debug().phase).toBe("dragging");
     expect(engineMock.setExtrudeHandleHover).toHaveBeenCalledWith(true);
+  });
+
+  it("a canvas drag released over chip chrome returns to armed without a behind-chip action", () => {
+    press(yFor(40));
+    move(yFor(55));
+    expect(debug().phase).toBe("dragging");
+
+    release(yFor(5), chip); // deliberately a different coordinate over UI
+
+    expect(debug().phase).toBe("armed");
+    expect(toolStore.getState().phase).toBe("armed");
+    expect(engineMock.setExtrudeHandleHover).toHaveBeenLastCalledWith(false);
+    expect(clientMock.endPreview).not.toHaveBeenCalled();
   });
 
   // ── 2. re-grabbing does not move the depth ─────────────────────────────────

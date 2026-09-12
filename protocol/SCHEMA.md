@@ -2436,6 +2436,74 @@ Field names from OneCAD-CPP `CircularPatternParams` (flat `axisX/Y/Z` +
 - `fuseResult`, `resultPolicyVersion`, child ordinal mapping, and lineage are identical
   to LinearPattern.
 
+**FeaturePattern** (`op.featurePattern`, semantics version 1) — replay an explicit
+timeline-ordered feature chain for each non-seed instance. The persisted record
+contains only `sourceRecordIds`, `layout`, `count`, and `semanticsVersion`; Rust
+adds derived `sourceOps` to the effective wire record by lowering every source
+through the ordinary operation converter.
+
+```json
+{
+  "sourceRecordIds": ["<hole-record>", "<chamfer-record>"],
+  "layout": { "kind": "Circular", "axisOrigin": [0,0,0],
+              "axisDirection": [0,0,1], "angleDeg": 360.0 },
+  "count": 4, "semanticsVersion": 1,
+  "sourceOps": [
+    { "sourceRecordId": "<hole-record>", "opType": "Hole",
+      "params": {}, "inputs": [], "determinism": {} }
+  ]
+}
+```
+
+- `count` is an integer in `[2,128]` and includes the already-retained source
+  instance. `semanticsVersion` is the integer `1`; fractional numeric values are
+  malformed, never truncated.
+  Linear spacing is finite, signed, and non-zero and uses a normalized non-zero
+  direction. Circular angle is finite, signed, non-zero, and at most 360 degrees
+  in magnitude; it uses
+  `angleDeg/count`, matching CircularPattern.
+- Sources are explicit, unique, earlier, applied records in timeline order. A
+  source FeaturePattern, unsupported adapter, disconnected chain, multiple host
+  lineages, skipped copy, or per-instance override is refused before execution.
+- Each non-seed instance replays its source operations through the same candidate
+  executor as a top-level step. Nested results stay worker-local. Success emits
+  only the canonical created child or final modified host lifecycle; any nested
+  failure restores the complete outer candidate (bodies, element partition,
+  sketch materialization and last-sketch state).
+- Instance operation/element IDs are UUID-shaped SHA-256 derivations over
+  `onecad.feature-pattern.v1\0pattern\0source\0instance`, with RFC 4122 version-5
+  and variant bits. A collision refuses the pattern.
+- A successfully resolved body-subelement reference is journaled immediately
+  before its source operation executes, keyed by source record, effective
+  `{opType,params,inputs,determinism}` hash, input index, body, element and kind.
+  This transient evidence follows accepted heads and in-memory checkpoints; it is
+  rebuilt by full replay after restart. Missing, incomplete, ownership-mismatched,
+  or hash-mismatched evidence is `NeedsRepair` and never falls back to frozen intent.
+- The worker also keeps a transient factual topology-owner ledger. Supported
+  operation adapters classify exact live OCCT history as inherited survivors or
+  successors, operation-created births, conflicts, or unknown outputs. The ledger
+  records producer record IDs, not pattern-relative roles. FeaturePattern derives
+  producer-local versus retained-host support from that evidence and its selected
+  source IDs; unknown or conflicting ownership never means host support. The ledger
+  is checkpointed and rolled back with candidate geometry and rebuilt by replay.
+- A downstream source reference is rewritten to the instance's virtual ElementId
+  and resolved against the preceding instance output using that current evidence. Descriptor/anchor ambiguity
+  is `NeedsRepair` before ordinary whole-body resolution runs; zero or multiple
+  producer-output matches never fall through to select a congruent source twin. A host
+  face may retain its source identity only when it is the same operative face.
+- Worker semantics version 1 currently executes these fail-closed chain shapes:
+  `Hole → Chamfer...` on one host; `Sketch → Blind Extrude(NewBody) →
+  (Fillet|Chamfer)...`; one or two directly consumed sketches followed by
+  `Revolve(NewBody, sketchLine axis) → (Fillet|Chamfer)...`; and exactly
+  `Sketch → Blind Extrude(Add|Cut, targetBodyId) → (Hole|Fillet|Chamfer)...` on one
+  shared host. These chains accept only supported straight-edge modifiers;
+  independent chains publish each child as `body_<pattern-opId>:<instance-1>`.
+  Shared-host Add/Cut retains the designated host identity and rejects an instance whose
+  face/edge/vertex identity set is unchanged. Both Linear and Circular layouts
+  replay transformed sketch planes. Other modes, references, curve classes, and
+  chain shapes remain unsupported until their producer evidence is specified and
+  cross-track tested.
+
 **MirrorBody** (`op.mirrorBody`) — reflect a source body across a plane. Field names
 from OneCAD-CPP `MirrorBodyParams` (flat `planePointX/Y/Z` + `planeNormalX/Y/Z` →
 `planePoint` + `planeNormal`). Added M6a.
@@ -3399,6 +3467,18 @@ snapshot MUST be refused with `REF_UNRESOLVED` (a `TopoKey` is snapshot-scoped
 evidence ([§9](#9-needsrepair-payload)), so promoting a pick taken against a
 superseded snapshot would mint a persistent id for an arbitrary element); an
 absent `snapshotId` is "no claim" and is resolved against the head.
+
+A non-empty `topoKey` is authoritative evidence. If it does not resolve on the
+addressed body, that pick is omitted; its anchor MUST NOT retarget it to nearby
+geometry. Legacy picks that omit `topoKey` may use `anchor.worldPoint`, but only
+when the nearest sub-shape of the requested kind is unique at the body's
+acquisition tolerance: `max(authoringResolution, 2 × inputTolerance)`. The factor
+two conservatively accounts for the independent tolerance intervals of the best
+candidate and runner-up. Shared topology is deduplicated by OCCT identity, while
+distinct congruent shapes remain competitors. An equal-distance/shared-boundary
+result, a failed/non-finite distance calculation, or a present non-string
+`topoKey` is ambiguous/invalid and is omitted. Rust treats any `ids[]` count
+mismatch as an atomic promotion refusal.
 
 `AcquireElementIds` is read-only. `elementId` is **minted by Rust**, not the
 worker: the worker returns authoritative `topoKey → (bodyId, kind, descriptor,
@@ -4784,7 +4864,7 @@ STATE (see [§8](#8-error-taxonomy)).
                                          //   | "ordinal-permutation" (Rust-seeded only)
                                          //   | "legacyReferenceFace" (op-built, Chamfer only)
                                          //   | "mateAxisReversed" | "mateSeatOffFace" (op-built, PlaceComponent only)
-  "scoringVersion": 4,                   // = resolverVersion the scores were computed under
+  "scoringVersion": 6,                   // = resolverVersion the scores were computed under
   "seedEdgeId": "el_…e14",               // OPTIONAL — only with reason "legacyReferenceFace"
   "resolvedAxis": [0, 0, -1],            // OPTIONAL — only with reason "mateAxisReversed"
   "frozenAxis": [0, 0, 1],               // OPTIONAL — only with reason "mateAxisReversed"
@@ -4931,7 +5011,7 @@ count (edges). This is `quantizationVersion = 1` / `descriptorVersion = 1`.
 
 **Scoring (REDESIGNED — normalized).** OneCAD-CPP's `score()` is an unbounded,
 scale-dependent cost that cannot express the locked policy; this protocol replaces
-it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 4`;
+it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 6`;
 version 3 added Modified-channel provenance at the history rung; version 2 added
 the edit-scoped veto and proportional anchor scale; version 1 had neither).
 Version 4 adds the signed `outward` sidedness feature and the relative,
@@ -4966,19 +5046,15 @@ them. Whether letting it do so is correct depends on something the worker cannot
 see in the geometry:
 
 - On a **no-edit replay** — a `RevertToEnd` lane with no [§7.2](#72-regen--executeplan)
-  `editedFrom` (rollback, undo, redo), or a from-0 reopen that claims `editedFrom: 0`
-  under resolverVersion 4 — the geometry is rebuilt exactly as the ref was authored
-  against, so the stored anchor sits ON its element and **the anchor MAY decide the
-  tie**: with no claim by rule, with a claim through the anchor-exact carve-out
-  below. This is what makes a reopen, a rollback and an undo/redo resolve cleanly.
+  `editedFrom` (open, rollback, undo, redo) — the geometry is rebuilt exactly as the
+  ref was authored against, so the stored anchor **MAY decide** the tie.
 - After an **upstream content edit** (`editedFrom = k`, for refs owned by a step
   `> k`) the geometry moved out from under the stored anchor, which can now sit
   closer to a twin than to the real element. There the anchor is precisely the
   evidence the edit invalidated, so **it MUST NOT decide**: the worker emits
   NeedsRepair with `reason: "ambiguous"` and both candidates in the evidence.
 
-Normatively, for a ref owned by a step `> editedFrom`, auto-bind is REFUSED when
-**both** hold:
+Normatively, for a ref owned by a step `> editedFrom`, auto-bind is REFUSED when:
 
 1. **Descriptor tie** — the assigned candidate and its best rival are separated by
    **less than `0.02` in DESCRIPTOR-ONLY score**: the same weighted confidence
@@ -4989,35 +5065,10 @@ Normatively, for a ref owned by a step `> editedFrom`, auto-bind is REFUSED when
    veto must fire only where the descriptor genuinely cannot tell candidates apart
    (congruent twins separate by exactly `0`), never merely because descriptor
    evidence is weak.
-2. **NOT anchor-exact** — the assigned candidate does not still lie on its stored
-   anchor. "Lies on" is measured as the distance from the anchor world point to the
-   candidate **sub-shape** (NOT to its centroid), against `0.05 × ` the anchor
-   scale. **Shape distance is load-bearing**: a parametric edit routinely slides a
-   feature along its own axis — growing an extrude's depth moves every vertical
-   edge's midpoint by half the delta while the edge still passes exactly through its
-   anchor — and centroid distance would misreport that as a move.
-
-Clause 2 is the **anchor-exact carve-out**, and it is what keeps the veto scoped to
-the class it was built for. An element still sitting on its anchor demonstrably did
-NOT move, so the edit never made *its* anchor stale and there is nothing to
-distrust; that covers ~all real edits. The veto therefore fires on the **DRIFT**
-class — a twin merely NEARER to a stale anchor than the moved original, where
-nothing is sitting where it was authored and proximity alone would be a guess.
-
-A ref with **no frozen descriptor** ties at descriptor score `0` against every
-candidate, so clause 1 always holds for it; clause 2 still resolves the common case
-(a vertex pick whose element did not move), so such a ref is not blanket-refused
-after an edit.
-
-**Accepted residual — the TELEPORT case.** An edit that parks an EXACT congruent
-twin *precisely* at the stale anchor, while moving the original away, still
-auto-binds — to the twin, silently. This is locally undecidable at this rung: the
-worker sees two byte-identical descriptors, one exactly at the anchor, and no
-evidence separating "it never moved" from "something else moved onto it". Refusing
-it means dropping the carve-out, which regresses the flagship gesture (a fillet on a
-plain box — whose four vertical edges are exact twins — would then NeedsRepair after
-every upstream edit). The residual is accepted and documented here; closing it is
-reserved for the from-0 history rung, which has the lineage this stage lacks.
+A post-edit anchor that lies exactly on a candidate does not override this refusal:
+a congruent twin may have moved onto the stale point. This fail-closed rule can
+produce a repair false-positive when an upstream edit genuinely left one of several
+descriptor-tied elements in place; without lineage, silently choosing is unsound.
 
 Note the two version fields answer different questions and MAY differ: §7.2
 `policyVersions.resolverVersion` is the axis **Rust pins** (it gates checkpoint-cache
@@ -5090,6 +5141,23 @@ partition may be restored under v4 scoring is a recorded open item. Pinned by `w
 probes `hole_ops.rs::plate_hole_survives_commit_and_reopen` and
 `topology_rebind.rs::plate_top_edge_fillet_survives_commit_and_reopen`, and the
 `scoringVersion` fixtures.
+
+**Clean-replay anchor reinforcement (`resolverVersion = 5`, 2026-09-12).** Version
+4 allowed a below-`0.10` margin anchor decision only when the assigned candidate
+and score runner tied in descriptor-only space. Version 5 additionally permits
+that decision only when there is no upstream-edit claim and no checkpoint-fallback
+replay, the pick lies on the winner within `0.01 mm`, every rival is at least 10
+times farther, and the winner's descriptor-only score is not lower than any
+rival's. A descriptor-better rival, a point shared by two candidates, an upstream
+edit, or a fallback replay retains version 4's NeedsRepair behavior. The
+edit-scoped congruent-twin veto and all global score/margin thresholds are unchanged.
+
+**Post-edit exact-anchor refusal (`resolverVersion = 6`, 2026-09-12).** A
+descriptor tie downstream of `editedFrom` always refuses, even when one candidate
+lies exactly on the stored anchor. Exactness cannot distinguish an unchanged
+element from a congruent twin moved onto the stale point. Clean/no-edit replay keeps
+version 5 behavior. This deliberately prefers a repair false-positive over a silent
+wrong bind when post-edit lineage is insufficient.
 
 ---
 
@@ -5244,6 +5312,18 @@ sign-off) once fixtures exist.
   positive volume and failed only much later inside an unrelated fillet's input
   audit. *Fixtures:* new `protocol/fixtures/revolve_profile_crosses_axis.ndjson`
   (both lanes). No wire shape moves. Cross-track sign-off recorded 2026-09-02 — protocol-auditor: schema-vs-code review (read-only), `approve` after every filed change was applied; worker + Rust gates re-verified by the orchestrator (ctest and `cargo test --workspace` counts in the TODO.md § KERNEL HARDENING gate row).
+
+- **2026-09-12 — resolverVersion 6: post-edit exact-anchor refusal.** [§10](#10-resolution-ladder)
+  removes the post-upstream-edit anchor-exact carve-out. Descriptor ties now fail
+  closed even when a candidate occupies the stale anchor; clean replay remains v5.
+  [§9](#9-needsrepair-payload) `scoringVersion` moves 5 → 6.
+
+- **2026-09-12 — resolverVersion 5: clean-replay anchor reinforcement.** [§10](#10-resolution-ladder)
+  permits an exact, uniquely separated anchor to reinforce a descriptor-nonworse
+  winner only on an ordinary clean replay. Post-upstream-edit and checkpoint-
+  fallback decisions, shared anchors, descriptor-better rivals, the congruent-twin
+  veto and the locked confidence thresholds remain unchanged. [§9](#9-needsrepair-payload)
+  `scoringVersion` moves 4 → 5; Rust's checkpoint-policy axis remains 1.
 
 - **2026-09-02 — resolverVersion 4: sidedness + relative anchor (kernel-hardening
   WP-A).** [§10](#10-resolution-ladder) adds the signed `outward` descriptor
@@ -6462,7 +6542,8 @@ sign-off) once fixtures exist.
   post-restore-failure fallback, and it is indistinguishable from an ordinary
   replay-from-0 in the plan, so the worker cannot infer it. Rust now declares it and
   the worker gates the §10 anchor-exact carve-out on that declaration alone. The
-  ordinary edit lane is UNCHANGED — its teleport case remains the accepted residual.
+  ordinary edit lane now fails closed on descriptor ties; clean replays retain the
+  bounded exact-anchor recovery described by resolver version 5.
   Omitted when false, so an ordinary plan's `args` are byte-identical to the prior
   text and **no bump is required for existing fixtures**. Evidence, split by what
   each artifact actually proves: the BEHAVIOUR is proven end to end by

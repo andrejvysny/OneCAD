@@ -123,6 +123,14 @@ impl Timeline {
         &self.records
     }
 
+    /// Mutable access for regen-only effective-history lowering.
+    ///
+    /// Callers must use this only on a detached effective timeline. Persisted
+    /// document history must continue through edit commands and undo capture.
+    pub fn effective_records_mut(&mut self) -> &mut [OperationRecord] {
+        &mut self.records
+    }
+
     /// All step states in timeline order (parallel to [`Timeline::records`]).
     #[must_use]
     pub fn states(&self) -> &[StepState] {

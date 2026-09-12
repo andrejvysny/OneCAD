@@ -1,0 +1,15 @@
+# FeaturePattern fail-closed decode fixture. A malformed derived source is a
+# recoverable candidate failure; it never escapes the worker or advances state.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_feature_pattern_malformed","documentRevision":0,"workerEpoch":8,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":801,"documentRevision":1,"workerEpoch":8,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"targetStep":0,"ops":[{"opType":"FeaturePattern","opId":"pattern_bad","stepIndex":0,"inputs":[],"params":{"semanticsVersion":1,"count":2,"sourceRecordIds":["record_hole"],"layout":{"kind":"Linear","direction":[1,0,0],"spacing":-2.0},"sourceOps":["not-an-object"]}}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":801,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed"}],"historyPrefixHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"DiscardPrepared","args":{"jobId":801}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":801,"result":{"discarded":true}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"ExecutePlan","args":{"jobId":802,"documentRevision":1,"workerEpoch":8,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"targetStep":0,"ops":[{"opType":"FeaturePattern","opId":"pattern_fractional","stepIndex":0,"inputs":[],"params":{"semanticsVersion":1,"count":2.5,"sourceRecordIds":["record_hole"],"layout":{"kind":"Linear","direction":[1,0,0],"spacing":2.0},"sourceOps":[]}}]}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"jobId":802,"result":{"planPrepared":true,"lastValidStep":null,"stoppedReason":"opFailed","perStepResults":[{"stepIndex":0,"status":"opFailed"}],"historyPrefixHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"DiscardPrepared","args":{"jobId":802}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"jobId":802,"result":{"discarded":true}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"goodbye":true}}}

@@ -88,6 +88,27 @@ pub struct DocumentSession {
     open_txn: Option<Box<TxnState>>,
 }
 
+/// What [`DocumentSession::squash_sketch_session`] did to the undo stack.
+///
+/// The sketch-cancel DISCARD (WP-U7 D-1) decides on this: it may undo the
+/// squashed step ONLY on [`NetStep`](Self::NetStep). After a
+/// [`Refused`](Self::Refused) the granular steps are still on the stack and an
+/// undo would revert exactly one of them (or an interleaved model op), which is
+/// not what "discard the session" means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SketchSquashOutcome {
+    /// Nothing to collapse (`count == 0`).
+    Empty,
+    /// Refused — the granular steps are untouched (interleaved non-sketch work,
+    /// or the sketch no longer exists).
+    Refused,
+    /// Net-zero session: the granular steps were dropped and nothing pushed. The
+    /// document already holds `prior`.
+    NetZero,
+    /// The session collapsed into ONE net step whose inverse restores `prior`.
+    NetStep,
+}
+
 /// A transaction being accumulated between `begin_transaction`/`end_transaction`.
 #[derive(Debug)]
 struct TxnState {
@@ -146,6 +167,30 @@ impl DocumentSession {
     #[must_use]
     pub fn undo_depth(&self) -> usize {
         self.undo.undo_depth()
+    }
+
+    /// Current redo depth.
+    #[must_use]
+    pub fn redo_depth(&self) -> usize {
+        self.undo.redo_depth()
+    }
+
+    /// The label of the step [`undo`](Self::undo) would revert.
+    #[must_use]
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.undo_label()
+    }
+
+    /// The label of the step [`redo`](Self::redo) would replay.
+    #[must_use]
+    pub fn redo_label(&self) -> Option<&str> {
+        self.undo.redo_label()
+    }
+
+    /// Drops the redo stack alone (the sketch-cancel discard — see
+    /// [`UndoStack::clear_redo`]).
+    pub fn clear_redo(&mut self) {
+        self.undo.clear_redo();
     }
 
     /// The monotonic count of undo steps evicted past the cap since open. The
@@ -218,6 +263,22 @@ impl DocumentSession {
         }
     }
 
+    /// Whether a caller-owned transaction is already collecting edits.
+    #[must_use]
+    pub fn transaction_open(&self) -> bool {
+        self.open_txn.is_some()
+    }
+
+    #[must_use]
+    pub fn top_undo_is_add_sketch(&self, sketch_id: SketchId) -> bool {
+        self.undo.top_is_add_sketch(sketch_id)
+    }
+
+    #[must_use]
+    pub fn is_created_sketch_suffix(&self, watermark: usize, sketch_id: SketchId) -> bool {
+        self.undo.is_created_sketch_suffix(watermark, sketch_id)
+    }
+
     /// Commits the open transaction as one undo step and returns the combined
     /// outcome (merged deltas, unioned dirty span, strongest regen). Returns
     /// `None` if no transaction is open or it is empty.
@@ -265,9 +326,20 @@ impl DocumentSession {
     /// A net-zero session (final sketch == `prior`, or the sketch no longer
     /// exists) pops the granular steps and pushes nothing. `count == 0` is a no-op
     /// (a crash between enter and finish/cancel leaves the granular steps).
-    pub fn squash_sketch_session(&mut self, sketch: SketchId, prior: Sketch, count: usize) {
+    ///
+    /// The returned [`SketchSquashOutcome`] says which of those happened. The
+    /// sketch-cancel DISCARD (WP-U7) needs it: only a [`SketchSquashOutcome::NetStep`]
+    /// may be undone to restore the state at sketch entry — undoing after a
+    /// REFUSAL would revert one granular (or worse, one interleaved model) step
+    /// instead.
+    pub fn squash_sketch_session(
+        &mut self,
+        sketch: SketchId,
+        prior: Sketch,
+        count: usize,
+    ) -> SketchSquashOutcome {
         if count == 0 {
-            return;
+            return SketchSquashOutcome::Empty;
         }
         // B1 guard — **all-or-nothing, never a clamp**. Squash ONLY when the entire
         // watermark→head range (`count` newest steps) is a contiguous run of txns
@@ -290,11 +362,12 @@ impl DocumentSession {
             txn.edits.iter().all(|e| is_this_sketch_edit(&e.forward))
         });
         if contiguous != count {
-            return; // interleaved non-sketch work — keep the granular txns.
+            // interleaved non-sketch work — keep the granular txns.
+            return SketchSquashOutcome::Refused;
         }
         let Some(final_sketch) = self.document.sketches.get(&sketch) else {
             // Sketch deleted mid-session (unexpected): leave the granular steps.
-            return;
+            return SketchSquashOutcome::Refused;
         };
         // The provenance map is part of the net result: a session that only
         // projected, updated or detached geometry leaves entities and constraints
@@ -305,7 +378,7 @@ impl DocumentSession {
             && final_sketch.projections == prior.projections;
         if net_zero {
             self.undo.squash(count, None);
-            return;
+            return SketchSquashOutcome::NetZero;
         }
         let ops = squash_redo_ops(&prior, final_sketch);
         let edit = AppliedEdit {
@@ -317,6 +390,7 @@ impl DocumentSession {
         };
         let label = edit.forward.label().to_string();
         self.undo.squash(count, Some(Txn::single(label, edit)));
+        SketchSquashOutcome::NetStep
     }
 
     /// Syncs every record's **derived** `outputs` — the bodies that op

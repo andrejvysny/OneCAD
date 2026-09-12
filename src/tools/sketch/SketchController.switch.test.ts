@@ -221,6 +221,7 @@ describe("SketchController sketch→sketch switch", () => {
     await settle();
 
     expect(calls).toEqual(["cancelSketch:A", "finishSketch:A", "enterSketch:B"]);
+    expect(engineMock.exitSketch).toHaveBeenCalledWith({ restoreView: false });
   });
 
   it("[c] rapid A→B→C is latest-wins: lands on C, and B is never opened", async () => {
@@ -264,6 +265,8 @@ describe("SketchController sketch→sketch switch", () => {
     // A opened first, THEN was closed for B — never skipped, never interleaved.
     expect(calls).toEqual(["enterSketch:A", "cancelSketch:A", "finishSketch:A", "enterSketch:B"]);
     expect(sketchStore.getState().session?.sketchId).toBe("B");
+    expect(engineMock.enterSketch.mock.calls[0][5]).toMatchObject({ suppressFrame: true });
+    expect(engineMock.enterSketch.mock.calls[1][5]).toMatchObject({ suppressFrame: false });
   });
 
   it("[e] the plane-pick create path is NOT a switch: one enterSketch, zero cancel/finish", async () => {
@@ -281,6 +284,9 @@ describe("SketchController sketch→sketch switch", () => {
   });
 
   it("[e2] a normal existing-sketch entry is NOT a switch either", async () => {
+    engineMock.enterSketch.mockImplementationOnce(() => {
+      expect(viewportStore.getState().projection).toBe("ortho");
+    });
     toolStore.getState().setMode("sketch", "A");
     await settle();
 
@@ -327,6 +333,7 @@ describe("SketchController sketch→sketch switch", () => {
     toolStore.getState().setMode("model");
     await settle();
     expect(viewportStore.getState().projection).toBe("persp"); // NOT the switch-time ortho
+    expect(engineMock.exitSketch).toHaveBeenLastCalledWith({ restoreView: true });
   });
 
   it("[i] a rejected switch-open falls back to model mode instead of stranding the chrome", async () => {

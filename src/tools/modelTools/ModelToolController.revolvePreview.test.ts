@@ -30,6 +30,7 @@ import type {
   ApplyOperationResult,
   AxisRef,
   FinishSketchResult,
+  OperationOp,
   PreviewDraft,
   PreviewParams,
   PreviewResult,
@@ -137,6 +138,7 @@ interface ClientOpts {
 function makeClientMock(opts: ClientOpts, capture?: (cb: (r: PreviewResult) => void) => void) {
   let seq = 0;
   let endCall = 0;
+  const drafts = new Map<string, PreviewDraft>();
   return {
     onPreviewResult: vi.fn((cb: (r: PreviewResult) => void) => {
       capture?.(cb);
@@ -145,16 +147,31 @@ function makeClientMock(opts: ClientOpts, capture?: (cb: (r: PreviewResult) => v
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: opts.regions })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: opts.regions })),
     getSketch: vi.fn(() => Promise.resolve(makeSession(opts.axisEntities ?? [AXIS_OK]))),
-    beginPreview: vi.fn((_d: PreviewDraft) =>
-      Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` }),
-    ),
+    beginPreview: vi.fn((draft: PreviewDraft) => {
+      const sessionId = `pv-${++seq}`;
+      drafts.set(sessionId, draft);
+      return Promise.resolve({ sessionId, previewBodyId: `pb-${seq}` });
+    }),
     updatePreview: vi.fn((_id: string, _params: PreviewParams, _epoch: number) => {}),
     endPreview: vi.fn((_id: string, _commit: boolean) =>
       Promise.resolve(opts.endResults ? (opts.endResults[endCall++] ?? ok(`b${endCall}`)) : ok(`b${++endCall}`)),
     ),
     applyOperation: vi.fn(() => Promise.resolve(ok("adhoc"))),
+    applyOperations: vi.fn(() => Promise.resolve(ok("batch"))),
+    takePreviewOperation: vi.fn((sessionId: string) => {
+      const draft = drafts.get(sessionId);
+      if (!draft || draft.opType !== "Revolve") return null;
+      return {
+        opType: "Revolve" as const,
+        sketchId: draft.sketchId,
+        regionId: draft.regionId,
+        inputs: [{ primary: { bodyId: "", kind: "face" as const }, anchor: {} }],
+        params: draft.params,
+      };
+    }),
     applyEditCommand: vi.fn(() => Promise.resolve(ok("edit"))),
     undo: vi.fn(() => Promise.resolve(ok("undone"))),
+    rollbackFailedOperation: vi.fn(() => Promise.resolve({ ...ok("undone"), rolledBack: true, reason: "rolledBack" as const })),
     getOperationParams: vi.fn(
       (): Promise<Record<string, unknown>> => Promise.resolve(opts.storedParams ?? {}),
     ),
@@ -418,8 +435,8 @@ describe("ModelToolController revolve kernel preview", () => {
   });
 
   it("the success hint SURVIVES finishRevolve's reset to select", async () => {
-    // Hint-clobber regression: `finishRevolve` published "Revolved" and THEN called
-    // setTool("select"), whose synchronous sweep cleared it.
+    // Hint-clobber regression: `finishRevolve` published its completion hint and
+    // THEN called setTool("select"), whose synchronous sweep cleared it.
     __setBodyLoadTimeoutForTests(0); // no mesh ingest here — finish on the bounded wait
     build({ regions: [R0] });
     await armAndPickAxis();
@@ -429,7 +446,7 @@ describe("ModelToolController revolve kernel preview", () => {
 
     expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
     expect(toolStore.getState().modelTool).toBe("select");
-    expect(viewportStore.getState().statusHint?.message).toBe("Revolved");
+    expect(viewportStore.getState().statusHint?.message).toBe("New body created");
   });
 
   it("proceeds with the commit when no exact candidate ever arrives (bounded barrier)", async () => {
@@ -446,7 +463,7 @@ describe("ModelToolController revolve kernel preview", () => {
     expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
   });
 
-  it("commits one previewed candidate per region, in region order", async () => {
+  it("commits all previewed regions and sketch hiding as one transaction", async () => {
     build({ regions: [R0, R1] });
     await armTwoRegionsAndPickAxis();
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
@@ -454,9 +471,15 @@ describe("ModelToolController revolve kernel preview", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     for (let i = 0; i < 6; i++) await flush();
 
-    const committed = clientMock.endPreview.mock.calls.filter((c) => c[1] === true);
-    expect(committed.map((c) => c[0])).toEqual(["pv-1", "pv-2"]);
-    expect(clientMock.applyOperation).not.toHaveBeenCalled();
+    expect(clientMock.applyOperations).toHaveBeenCalledTimes(1);
+    const committed = (clientMock.applyOperations.mock.calls as unknown as [[OperationOp[]]])[0][0];
+    expect(committed.map((op) => ("regionId" in op ? op.regionId : undefined))).toEqual([
+      R0.regionId,
+      R1.regionId,
+    ]);
+    expect(clientMock.applyOperations).toHaveBeenCalledWith(expect.any(Array), {
+      hideSketchIds: ["sk"],
+    });
   });
 
   // ── (d) a failed final preview blocks + re-arms ──────────────────────────────
@@ -493,14 +516,14 @@ describe("ModelToolController revolve kernel preview", () => {
   it("a failed commit result rolls back, stays armed, and re-arms the lane session", async () => {
     build({
       regions: [R0],
-      endResults: [{ revision: 1, features: [], changedBodies: [], removedBodies: [], errorMessage: "worker exploded" }],
+      endResults: [{ revision: 1, features: [], changedBodies: [], removedBodies: [], errorMessage: "worker exploded", rollbackToken: "rb-revolve" }],
     });
     await armAndPickAxis();
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     for (let i = 0; i < 6; i++) await flush();
 
-    expect(clientMock.undo).toHaveBeenCalledTimes(1); // errored record popped
+    expect(clientMock.rollbackFailedOperation).toHaveBeenCalledWith("rb-revolve");
     expect(debug().revolvePhase).toBe("armed");
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
     expect(viewportStore.getState().statusHint?.message).toContain("worker exploded");
@@ -634,7 +657,7 @@ describe("ModelToolController revolve kernel preview", () => {
     for (let i = 0; i < 4; i++) await flush();
 
     expect(clientMock.endPreview).not.toHaveBeenCalled();
-    expect(viewportStore.getState().statusHint?.message).toContain("Cannot confirm");
+    expect(viewportStore.getState().statusHint?.message).toContain("axis line unresolved");
     expect(debug().revolvePhase).toBe("armed");
   });
 });

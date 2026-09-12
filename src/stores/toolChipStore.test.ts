@@ -69,3 +69,35 @@ describe("toolChipStore edge-op fields", () => {
     expect(toolChipStore.getState().onEdgeOp).toBeNull();
   });
 });
+
+describe("toolChipStore typed context", () => {
+  it("rejects a context published for a different active tool", () => {
+    toolChipStore.getState().clear();
+    toolChipStore.getState().showShell(2, [0, 0, 0], vi.fn());
+    toolChipStore.getState().setContext("linearPattern", {
+      tool: "linearPattern",
+      kind: "bodies",
+      bodies: [{ bodyId: "body1" }],
+    });
+
+    expect(toolChipStore.getState().context).toBeNull();
+  });
+
+  it("clears an authored context on the next tool visit", () => {
+    toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+      onAxis: vi.fn(),
+      onCount: vi.fn(),
+      onSpacing: vi.fn(),
+      onConfirm: vi.fn(),
+    });
+    toolChipStore.getState().setContext("linearPattern", {
+      tool: "linearPattern",
+      kind: "bodies",
+      bodies: [{ bodyId: "body1" }],
+    });
+    expect(toolChipStore.getState().context?.tool).toBe("linearPattern");
+
+    toolChipStore.getState().showShell(2, WORLD, vi.fn());
+    expect(toolChipStore.getState().context).toBeNull();
+  });
+});

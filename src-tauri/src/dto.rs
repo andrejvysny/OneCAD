@@ -92,8 +92,15 @@ pub struct SketchDto {
     pub id: String,
     pub name: String,
     pub visible: bool,
-    pub dof: u32,
-    pub status: SketchStatus,
+    /// Last solver result, only when evaluated against `geometry_token`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dof: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SketchStatus>,
+    /// Geometry token the solve evaluated. Absent together with `dof`/`status`
+    /// when this runtime has not solved the current sketch geometry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solve_geometry_token: Option<String>,
     /// Deterministic hash of plane, attachment, entities, and constraints. The
     /// frontend uses it to invalidate static profile fills without rebuilding
     /// every sketch for unrelated document revisions.
@@ -321,6 +328,8 @@ pub struct DocumentProjection {
     /// documents drops every projection of a freshly opened one. Empty for the
     /// "no document" projection.
     pub document_id: String,
+    /// Opaque identity of this in-memory runtime; never persisted or reused.
+    pub runtime_session: String,
     pub revision: u64,
     pub title: String,
     pub dirty: bool,
@@ -345,6 +354,18 @@ pub struct DocumentProjection {
     pub applied_ops: usize,
     /// Total op count (timeline length).
     pub total_ops: usize,
+    /// Undo-stack depth (committed steps that can be reverted). Drives the
+    /// palette's enabled-by-depth Undo row and lets the frontend tell "nothing to
+    /// undo" apart from "the runtime refused" (`revert_blocked_by_gesture`).
+    pub undo_depth: usize,
+    /// Redo-stack depth. See [`undo_depth`](Self::undo_depth).
+    pub redo_depth: usize,
+    /// Human-facing label of the step an undo would revert (`Txn::label`), or
+    /// `None` when the stack is empty.
+    pub undo_label: Option<String>,
+    /// Human-facing label of the step a redo would replay. See
+    /// [`undo_label`](Self::undo_label).
+    pub redo_label: Option<String>,
     /// Where the geometry the viewport is currently showing came from — the honest
     /// answer to "is this the real model?".
     ///
@@ -365,6 +386,7 @@ impl DocumentProjection {
         Self {
             status: DocStatus::Empty,
             document_id: String::new(),
+            runtime_session: String::new(),
             revision: 0,
             title: String::new(),
             dirty: false,
@@ -375,6 +397,10 @@ impl DocumentProjection {
             variables: Vec::new(),
             applied_ops: 0,
             total_ops: 0,
+            undo_depth: 0,
+            redo_depth: 0,
+            undo_label: None,
+            redo_label: None,
             geometry_source: GEOMETRY_SOURCE_NONE.to_string(),
         }
     }
@@ -393,6 +419,7 @@ pub const GEOMETRY_SOURCE_LIVE: &str = "live";
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSnapshotDto {
     pub document_id: String,
+    pub runtime_session: String,
     pub title: String,
 }
 
@@ -727,6 +754,8 @@ pub struct BodyMeshRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentChange {
+    pub document_id: String,
+    pub runtime_session: String,
     pub revision: u64,
     /// The published [`ModelSnapshot`](onecad_core::regen::ModelSnapshot) id this
     /// geometry belongs to (SCHEMA §7.5). The frontend forwards it to
@@ -735,6 +764,15 @@ pub struct DocumentChange {
     pub snapshot_id: u64,
     pub changed_bodies: Vec<BodyMeshRef>,
     pub removed_bodies: Vec<String>,
+}
+
+/// Exact runtime/head identity for user-visible geometry reads.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeometryReadFenceDto {
+    pub document_id: String,
+    pub runtime_session: String,
+    pub snapshot_id: u64,
 }
 
 // ── Solver-lane DTOs (SCHEMA §7.4) — mirror `src/ipc/types.ts` sketch shapes ──
@@ -846,6 +884,7 @@ pub struct SketchSessionDto {
     pub constraints: serde_json::Value,
     pub dof: u32,
     pub status: SketchSolveStatus,
+    pub solve_current: bool,
     /// Constraint ids in conflict (SCHEMA §7.4; empty when the sketch is solvable).
     /// Threaded from the entering `SketchUpsert` solve so re-entering a conflicting
     /// sketch surfaces the offending constraints. Always serialized (no skip), so
@@ -1547,6 +1586,23 @@ pub struct SketchOnFaceDto {
     pub projected_boundary_version: u32,
 }
 
+/// `cancelSketch` result (`types.ts CancelSketchResult`) — WP-U7 D-1.
+///
+/// A plain (`discard: false`) cancel reports `{ discarded: false }`: it only
+/// squashed the session. A DISCARD that the runtime could not honour reports
+/// `discarded: false` plus the `keptReason` the chrome shows, so the user is told
+/// the geometry is still there rather than left to discover it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelSketchDto {
+    /// True when the session's edits were reverted to the state at sketch entry.
+    pub discarded: bool,
+    /// Why a requested discard was refused (the edits are kept). Omitted when
+    /// none was requested, or it succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_reason: Option<String>,
+}
+
 /// `finishSketch` result (`types.ts FinishSketchResult`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1816,6 +1872,7 @@ pub struct FailedStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegenFinished {
+    pub runtime_session: String,
     pub revision: u64,
     /// The revision this regen was fenced against at `begin_regen`.
     pub source_revision: u64,
@@ -1852,6 +1909,18 @@ pub struct RegenFinished {
     /// can be raised into an error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repair_steps: Vec<String>,
+}
+
+/// The `menu-action` event payload — which native menu item the user picked
+/// (`crate::menu`). The backend deliberately carries no more than the verb: the
+/// frontend owns what "undo" means (sketch vs model, and text undo inside a
+/// focused field), and the file verbs reuse the same bridges the ⌘-chords do, so
+/// a menu click and a chord can never diverge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuActionDto {
+    /// `new` | `open` | `save` | `saveAs` | `undo` | `redo`.
+    pub action: &'static str,
 }
 
 /// One entry in the `needs-repair` event — a **lean** summary of a step left in
@@ -1918,10 +1987,18 @@ pub struct NeedsRepairItemDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NeedsRepairEvent {
+    pub runtime_session: String,
     pub revision: u64,
     /// Snapshot that produced `items`; candidate TopoKeys are valid only here.
     pub snapshot_id: u64,
     pub items: Vec<NeedsRepairItemDto>,
+}
+
+/// Identity-bearing start half of a regeneration lifecycle pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegenStarted {
+    pub runtime_session: String,
 }
 
 /// A feature's upstream/downstream transitive closures from the session's derived
@@ -2010,6 +2087,7 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
             KnownOperation::Boolean(_)
             | KnownOperation::LinearPattern(_)
             | KnownOperation::CircularPattern(_)
+            | KnownOperation::FeaturePattern(_)
             | KnownOperation::MirrorBody(_)
             | KnownOperation::ImportStep(_)
             // Interim bucket: `FeatureKind` is a coarse icon grouping and has no
@@ -2244,6 +2322,7 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::Boolean(_) => "Boolean",
             KnownOperation::LinearPattern(_) => "Linear Pattern",
             KnownOperation::CircularPattern(_) => "Circular Pattern",
+            KnownOperation::FeaturePattern(_) => "Feature Pattern",
             KnownOperation::MirrorBody(_) => "Mirror",
             KnownOperation::Loft(_) => "Loft",
             KnownOperation::Sweep(_) => "Sweep",
@@ -2392,6 +2471,7 @@ mod tests {
         let proj = DocumentProjection {
             status: DocStatus::Ready,
             document_id: "doc-1".into(),
+            runtime_session: "runtime-1".into(),
             revision: 5,
             title: "Bracket".into(),
             dirty: false,
@@ -2427,10 +2507,15 @@ mod tests {
             }],
             applied_ops: 1,
             total_ops: 1,
+            undo_depth: 2,
+            redo_depth: 0,
+            undo_label: Some("Extrude".into()),
+            redo_label: None,
             geometry_source: GEOMETRY_SOURCE_LIVE.to_string(),
         };
         let v = serde_json::to_value(&proj).unwrap();
         assert_eq!(v["status"], "ready");
+        assert_eq!(v["runtimeSession"], "runtime-1");
         assert_eq!(v["revision"], 5);
         assert_eq!(v["bodies"]["b1"]["visible"], true);
         assert_eq!(v["features"][0]["kind"], "extrude");
@@ -2438,6 +2523,10 @@ mod tests {
         assert_eq!(v["features"][0]["status"], "ok");
         assert_eq!(v["appliedOps"], 1);
         assert_eq!(v["totalOps"], 1);
+        assert_eq!(v["undoDepth"], 2);
+        assert_eq!(v["redoDepth"], 0);
+        assert_eq!(v["undoLabel"], "Extrude");
+        assert_eq!(v["redoLabel"], serde_json::Value::Null);
         assert_eq!(v["geometrySource"], "live");
         // The variable table rides the projection (W5) — declaration order, the
         // same camelCase `VariableDto` `list_variables` already served.
@@ -2836,6 +2925,7 @@ mod tests {
 
         // SketchSessionDto surfaces it too (session-enter surface).
         let session = SketchSessionDto {
+            solve_current: true,
             sketch_id: "sk_1".into(),
             plane: serde_json::json!({}),
             entities: serde_json::json!([]),
@@ -2899,6 +2989,7 @@ mod tests {
             serde_json::json!("conflicting")
         );
         let session = SketchSessionDto {
+            solve_current: true,
             sketch_id: "sk_1".into(),
             plane: serde_json::json!({}),
             entities: serde_json::json!([]),
@@ -3068,6 +3159,7 @@ mod tests {
     fn regen_finished_failed_steps_and_affected_bodies_serialize_additively() {
         // A clean publish carries neither field on the wire (old payloads parse).
         let clean = RegenFinished {
+            runtime_session: "runtime-1".into(),
             revision: 7,
             source_revision: 7,
             outcome: "published".into(),

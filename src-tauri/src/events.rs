@@ -19,9 +19,9 @@ pub const DOCUMENT_CHANGED: &str = "document-changed";
 pub const REGEN_PROGRESS: &str = "regen-progress";
 
 /// A regen job STARTED — emitted once the driver has a prepared plan (i.e. the
-/// job will really run the worker), before the unlocked drive phase. Payload-less
-/// on purpose: it exists so the frontend can show a "Rebuilding…" indicator, and
-/// richer per-step progress belongs to [`REGEN_PROGRESS`], not here.
+/// job will really run the worker), before the unlocked drive phase. Carries only
+/// the originating runtime session so a delayed old-worker start cannot affect a
+/// replacement document; richer per-step progress belongs to [`REGEN_PROGRESS`].
 ///
 /// Pairing: every started job ends in exactly one [`REGEN_FINISHED`], but the
 /// converse does NOT hold — a no-op regen finishes without ever starting. The
@@ -58,3 +58,10 @@ pub const AUTOSAVE: &str = "autosave";
 /// prompt (`appStore.requestClose`) always gets a chance to run; `confirm_exit` /
 /// `cancel_exit` (`api`) resolve the prompt.
 pub const CLOSE_REQUESTED: &str = "close-requested";
+
+/// A native menu item was activated — carries a
+/// [`MenuActionDto`](crate::dto::MenuActionDto) (`{action}`) so the frontend's
+/// one undo/redo router and the shared file bridges run the command, instead of
+/// Rust reaching into document state behind the UI's back. Desktop only: the
+/// mock lane has no native menu and never sees this event.
+pub const MENU_ACTION: &str = "menu-action";

@@ -17,6 +17,10 @@ import { toolChipStore } from "@/stores/toolChipStore";
 import { liveDimStore } from "@/stores/liveDimStore";
 import { workerStore } from "@/stores/workerStore";
 import { repairStore } from "@/stores/repairStore";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
+import { inspectorLayoutStore } from "@/stores/inspectorLayoutStore";
+import { viewportWorkAreaStore } from "@/stores/viewportWorkAreaStore";
+import { toolChipPlacementStore } from "@/stores/toolChipPlacementStore";
 import { resetMockSketches, resetMockDocument } from "@/ipc/mockClient";
 
 export function resetStores(): void {
@@ -89,9 +93,13 @@ export function resetStores(): void {
   });
   sketchStore.getState().reset();
   toolChipStore.getState().clear();
+  operationAttemptStore.getState().clear();
   liveDimStore.getState().clear();
   workerStore.getState().reset();
   repairStore.getState().reset();
+  inspectorLayoutStore.getState().reset();
+  viewportWorkAreaStore.getState().reset();
+  toolChipPlacementStore.getState().reset();
   resetMockSketches();
   resetMockDocument();
 }

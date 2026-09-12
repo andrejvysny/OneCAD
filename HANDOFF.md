@@ -1,3 +1,130 @@
+# CURRENT HANDOFF — 2026-09-12 (AUTHORITATIVE; HISTORICAL REPORT BELOW)
+
+This is the handoff for a new Claude Code session. The older “session 30 committed/full L3 green” header below is historical and must not be treated as current acceptance. Current source state is dirty and shared; do not clean, reset, stage, commit, push or pull unrelated work.
+
+## RESUMED IMPLEMENTATION — 2026-09-12
+
+The draft handoff is retained for continuity; implementation is resumed under the current plan. ui_plan Sol owns the typed presentation contract; tools_plan Sol owns the general-pattern contract audit pending main approval. Luna handles simple documentation/UI tasks, Terra moderate UI, Sol complex work, and Astra final review. No new tests or gates are implied by this note.
+
+## Identity and safety
+
+- Repository: `/Users/andrejvysny/workspace/CAD/OneCAD-Tauri`.
+- `master` HEAD: `80d4e74c8d32b4d847261d7d502dd397286f0788`.
+- 244 porcelain entries existed before this documentation handoff. They are not presumed program-owned.
+- Last known native app state was closed at the prior checkpoint; the owned mock Vite server was stopped. Recheck process/port state before browser/native work.
+- This handoff adds no source changes and makes no acceptance closure claim.
+
+## Evidence of record
+
+Use the durable artifacts under `docs/qa/evidence/ux-hardening-2026-09-11/`: `full-vitest-final.log` (332 files, 5880 passed, 78 skipped, 5958 total, 31.36s), `final-cargo-workspace-rerun.log` (worker-required 1646 passed, 0 failed, 0 ignored, 0 filtered across exactly 100 result lines), `full-ctest.log` (196/196), `final-clippy-after-dto.log` (fmt + warning-free clippy, 44.48s), `final-build.log` (tsc + Vite build, 2.03s, existing >500kB warning), and the preserved failure logs. Verifiers passed coverage 34/9/16/20 and contracts 41/19/15.
+
+The full browser was not rerun after final implementation. Current browser evidence is only the fresh chooser Chromium + WebKit 2/2 retries 0 run. Native acceptance was not rerun. Full native, browser, and remaining implementation gates are open despite the green bounded gates. The Vitest RED is a historical record without a currently claimed durable RED artifact; the Rust RED artifact is durable.
+
+## Product status
+
+Approximate judgment: 62% implementation (55–65 rough range), 50–55% full delivery. Not measured closure and not 62% new code. Runtime/tools are strongest; inspection and patterns remain weakest.
+
+Completed/bounded code and evidence includes: interactive single-flight boundary; validation/drafts/explicit `Use maximum`; Hole defaults; atomic operation/consumed-sketch visibility; rollback receipts with runtime/revision/exact undo entry and cap 200; currentness/fail-closed references; runtime session/manager/epoch replacement and restart fences; lifecycle coalescing and mesh identity fences; appStore success-boundary reset/single-flight; subscriber-failure isolation; candidate chooser/filter/keyboard; movable chip/dock/focus/offscreen behavior; responsive inspector history; section/nav controls.
+
+Pattern support is intentionally restricted. Main evidence covers 6 real-worker integration tests, core 10, and selected CTest 3 before full CTest. Accepted bounded families are Hole→Chamfer*, selected Sketch→one-direction Blind Extrude NewBody→straight Fillet/Chamfer*, one or two direct consumed sketches→Revolve NewBody with a sketch-line axis→straight Fillet/Chamfer*, and exact Sketch→Blind Extrude Add/Cut with explicit shared host and no modifiers. Atomic no-effect Cut rejects unchanged Face/Edge/Vertex identity sets; no nearest fallback. Backend-hidden broad mixed adapters and public UI are absent.
+
+## Phase/package ledger for resume
+
+### Phase 0 — baseline evidence and inventory
+
+Status: partial/done for baseline evidence, review inventory, schema/fixture lockstep and verifier manifests. Owed: recheck all current dirty-tree ownership and rerun only gates required by changed scope. Do not infer closure from historical L3.
+
+### Phase 1A — native stalls, locks and publication
+
+Status: partial. Runtime session/manager id/epoch fencing, restart fences, lifecycle coalescing, mesh identity fences, appStore success-boundary reset, replacement single-flight and subscriber-failure isolation are implemented; scheduler fence, queued-old-runtime app-driver and restart-owner automation are 1/1. Tracing reproduced the two-thread webview-lock stall; pinned versions and the narrow Tauri tracing feature are documented. Owed: native stress and publication-to-render completion, plus validation of the unlocked-rebind design.
+
+### Phase 1B — interaction boundary
+
+Status: bounded/accepted by Astra for automated UI boundary and single-flight confirmation. Owed: native pointer, AX and Enter equivalence; physical hover/modifier drag/key-repeat behavior.
+
+### Phase 1C — solver/currentness/reference safety
+
+Status: partial. Solver currentness, persistent identity and ambiguity handling are bounded. Owed: native validation of those seams and fail-closed reference behavior; typed targets and reference consistency are tracked under 2C/2D.
+
+### Phase 1D — removed selection and inspector trust
+
+Status: partial. Removed selection/hover cleanup, title/verb ranking and currentness are bounded. Owed: inspector recovery/history trust, tree/canvas hover + Reveal, native recovery/undo and persistence.
+
+### Phase 2A — atomic operation/undo/visibility
+
+Status: partial. Atomic operation, consumed-sketch visibility and rollback receipts are implemented; exact receipt gates are bounded. Owed: native rollback across fillet/hole/offset families, 100-commit stress, save/autosave isolation and all failure receipts.
+
+### Phase 2B — semantic labels/dirty behavior
+
+Status: bounded but not closed. Palette ranking, semantic labels, no-op clean/autosave behavior and field-local undo boundaries are bounded. Owed: invalid-mode/tool-first/constraint variants and every report-tool variant.
+
+### Phase 2C — shared UI/presentation seam
+
+Status: partial. Shared presentation/controller contract, typed targets/references and one-parameter authority are bounded. Owed: full consistency across tools and native window matrix; annotation work is tracked under 3B.
+
+### Phase 2D — chip/inspector rendering, accessibility and layout
+
+Status: partial. All tool families already render through the frame; remaining work is typed contract/targets/reference consistency, accessibility labels/AX equivalence, dock placement edge cases, stable full-parameter inspector and native visual checks.
+
+### Phase 2E — solver-backed drag, snap and rollback
+
+Status: partial. Solver-backed drag, snap-before-constraint ordering and rollback/currentness seams are bounded. Owed: constraint/snap/trim/both-cancel matrix, native rollback stress and complex dimensioned cases.
+
+### Phase 2F — sketch wording and indicators
+
+Status: partial. Sketch wording, snap/constraint indicators and related semantic labels are bounded. Owed: all sketch wording/indicator variants and native constraint/snap evidence.
+
+### Phase 3A — candidate API and reference picking
+
+Status: bounded partial. Candidate API, reference picking, currentness and fail-closed identity are bounded. Owed: native provenance breadth, all tool reference contracts and ambiguity handling.
+
+### Phase 3B — candidate UI, hover/reveal, framing, section, measurement and history
+
+Status: partial. Candidate chooser/filter/keyboard has fresh browser proof. Owed: annotations, tree/canvas hover + Reveal, framing/section/measurement/history integration and native selection trust.
+
+### Phase 3C — FeaturePattern contracts, core and worker
+
+Status: restricted partial. Canonical selected IDs, shared host lineage and fail-closed validation are bounded for selected families. Owed: general mixed chains, dependencies, source edit, suppression, repair, persistence and native breadth; do not claim Loft/Sweep or opaque extension support.
+
+### Phase 3D — FeaturePattern UI and tests
+
+Status: open/partial. FeaturePattern UI and tests remain backend-hidden or bounded only. Owed: dependencies/source edit/suppression/repair/persistence UI and contract tests.
+
+### Phase 4 — documentation and review fixes
+
+Status: active. This handoff, TODO, PLAN and issue matrix carry the current evidence and boundaries; Astra/main acceptance is a separate all-phase responsibility, not a Phase 4 closure gate.
+
+## Resume procedure
+
+Read root AGENTS and CLAUDE, then the current sections of CURRENT_STATE/HANDOFF/PLAN, then TODO and the issue matrix. Inspect `git status`, processes and ports. Use the cheapest capable delegated model; Claude Code must verify which equivalent models/tools are actually available and must not assume GPT-model availability or add extra GPT calls as authority. Use Bun and `npx tsc`; stage the worker before Cargo. If native work is selected, read `/Users/andrejvysny/.codex/skills/onecad-computer-use/SKILL.md` first and keep native claims separate from browser/mock evidence. Choose a bounded typed-target or D-camera task, obtain review, then pattern contracts serially before UI. Keep maximum three coding agents and one runtime/controller owner; main reviews and runs heavy gates serially.
+
+### Verified source pointers
+
+- Runtime/session/restart APIs: `src-tauri/src/document_runtime.rs`, `src-tauri/src/worker/manager.rs`, `src-tauri/src/events.rs`, `src-tauri/src/api/mod.rs`.
+- FE replacement/publication: `src/ipc/tauriClient.ts`, `src/ipc/mockClient.ts`, `src/stores/appStore.ts` and their focused tests.
+- Chip/presentation/inspector: `src/tools/modelTools/activeToolPresentation.ts`, `src/stores/toolChipPlacementStore.ts`, `src/features/toolbar/toolChipDockBridge.ts`, `src/features/toolbar/ModelToolChips.tsx`, `src/features/inspector/ActiveToolInspector.tsx`, `src/viewport/engine/HtmlOverlayDriver.ts`.
+- Candidates/picking: `src/features/selection/OverlapCandidateChooser.tsx`, `src/features/selection/OverlapCandidateChooser.test.tsx`, `src/viewport/mesh/rebindPick.ts`, `src/viewport/mesh/meshSync.ts`.
+- Runtime/provenance: `src-tauri/src/state.rs`, `src-tauri/crates/onecad-core/src/regen/feature_pattern.rs`, `worker/src/session/FeaturePattern.cpp`, `worker/src/session/FeaturePatternValidation.cpp`, `worker/src/session/FeaturePatternIdentity.cpp`, `src-tauri/tests/feature_pattern_integration.rs`, `protocol/SCHEMA.md`, `docs/qa/modeling-operation-contracts.json`.
+
+### Worker-first command block
+
+```text
+bun run build
+npx tsc --noEmit
+scripts/build-worker.sh Release
+(cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && ONECAD_WORKER_PATH="$PWD/../worker/build/onecad-worker" ONECAD_REQUIRE_WORKER=1 cargo test --workspace)
+ctest --test-dir worker/build --output-on-failure
+bun run test
+bun run e2e --retries=0
+bun run tauri build --debug --bundles app
+```
+
+Build/stage the worker before Cargo; `bun.lock` is authoritative, never update `package-lock.json`; native validation requires the Computer-Use skill and a fresh served-module check.
+
+Main-independent gates cited above were run before this documentation task; no tests are being rerun for this handoff. Claude Code should use the cheapest capable available model, verify equivalent model/tool availability rather than assuming GPT availability, and never add extra model calls as authority.
+
+Unresolved questions: none product-level. Engineering validation is still open in the ledger above.
+
 # Handoff — session 30 COMMITTED: WP-S1 sketch diagnostics + WP-D1 regen isolation, full L3 green, 5 commits unpushed
 
 Session 30 · 2026-09-09/10 · plan `~/.claude/plans/act-as-senior-software-buzzing-stroustrup.md`

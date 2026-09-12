@@ -20,6 +20,7 @@ import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { settingsStore } from "@/stores/settingsStore";
 import { resetStores } from "@/test/resetStores";
 
 const PLANE: SketchPlane = {
@@ -59,6 +60,7 @@ function makeEngineMock() {
     // 1:1 mapping so client coords equal plane coords.
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
     planePixelWorld: vi.fn(() => 1),
+    getCameraDistance: vi.fn(() => 100),
     // Isotropic 1px-per-unit metric: matches `planePixelWorld: 1` above, so a
     // plane distance IS a screen-pixel distance in these tests.
     planeScreenMetric: vi.fn(() => ({ m00: 1, m01: 0, m10: 0, m11: 1 })),
@@ -157,10 +159,17 @@ describe("SketchController select tool", () => {
     vi.unstubAllGlobals();
   });
 
-  function mouse(type: string, x: number, y: number, button: number, buttons: number, mods?: { shiftKey?: boolean; metaKey?: boolean }): void {
+  function mouse(type: string, x: number, y: number, button: number, buttons: number, mods?: { shiftKey?: boolean; metaKey?: boolean; altKey?: boolean }): void {
     container.dispatchEvent(
       new MouseEvent(type, { clientX: x, clientY: y, button, buttons, bubbles: true, ...mods }),
     );
+  }
+
+  function chromePointerUp(x: number, y: number): void {
+    const chrome = document.createElement("div");
+    chrome.dataset.viewportInteractive = "";
+    container.appendChild(chrome);
+    chrome.dispatchEvent(new MouseEvent("pointerup", { clientX: x, clientY: y, button: 0, buttons: 0, bubbles: true }));
   }
 
   const selected = () => sketchSelectionStore.getState().selected;
@@ -276,6 +285,166 @@ describe("SketchController select tool", () => {
     expect(selected()).toEqual([{ entityId: "e1", point: "Start" }]);
   });
 
+  it("a delayed begin solves the newest move and its current Alt state, not the stale first move", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(
+      new Promise<BeginGestureResult>((resolve) => { resolveBegin = resolve; }),
+    );
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 31, 1, 0, 1); // begins; would grid-snap to [30,0]
+    mouse("pointermove", 32, 2, 0, 1, { altKey: true }); // newest sample is raw
+    expect(clientMock.solveDrag).not.toHaveBeenCalled();
+
+    resolveBegin({ gestureId: 1, ready: true });
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenCalledTimes(1);
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([32, 2]);
+  });
+
+  it("pointer-up during delayed begin commits the release sample without a stale solve", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(
+      new Promise<BeginGestureResult>((resolve) => { resolveBegin = resolve; }),
+    );
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 31, 1, 0, 1);
+    mouse("pointerup", 42, 3, 0, 0, { altKey: true });
+    resolveBegin({ gestureId: 1, ready: true });
+    await flush();
+
+    expect(clientMock.solveDrag).not.toHaveBeenCalled();
+    expect(clientMock.endGesture).toHaveBeenCalledWith([42, 3]);
+  });
+
+  it("Escape during delayed begin restores the original point after begin resolves", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(
+      new Promise<BeginGestureResult>((resolve) => { resolveBegin = resolve; }),
+    );
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 31, 1, 0, 1);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    resolveBegin({ gestureId: 1, ready: true });
+    await flush();
+
+    expect(clientMock.solveDrag).not.toHaveBeenCalled();
+    expect(clientMock.endGesture).toHaveBeenCalledWith([0, 0]);
+    expect(sketchStore.getState().session!.entities[0].p0).toEqual([0, 0]);
+  });
+
+  it("a tool switch during delayed begin neither publishes stale entity state nor leaks its gesture", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(
+      new Promise<BeginGestureResult>((resolve) => { resolveBegin = resolve; }),
+    );
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 30, 0, 0, 1);
+    toolStore.getState().setTool("line");
+    resolveBegin({ gestureId: 1, ready: true, entityStates: { e1: "conflicting" } });
+    await flush();
+
+    expect(sketchStore.getState().entityStates).toEqual({});
+    expect(engineMock.setSketchEntityStates).not.toHaveBeenCalledWith({ e1: "conflicting" });
+    expect(clientMock.endGesture).toHaveBeenCalledTimes(1);
+  });
+
+  it("a mode exit during delayed begin leaves teardown ownership to cancelSketch", async () => {
+    let resolveBegin!: (value: BeginGestureResult) => void;
+    clientMock.beginGesture.mockReturnValueOnce(
+      new Promise<BeginGestureResult>((resolve) => { resolveBegin = resolve; }),
+    );
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 30, 0, 0, 1);
+    toolStore.getState().setMode("model");
+    resolveBegin({ gestureId: 1, ready: true, entityStates: { e1: "conflicting" } });
+    await flush();
+
+    expect(sketchStore.getState().session).toBeNull();
+    expect(engineMock.setSketchEntityStates).not.toHaveBeenCalledWith({ e1: "conflicting" });
+    expect(clientMock.endGesture).not.toHaveBeenCalled();
+    expect(clientMock.cancelSketch).toHaveBeenCalledWith("sketch1");
+  });
+
+  it("uses configured grid snapping, while Grid-off and current-event Alt stay raw", async () => {
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 31, 1, 0, 1);
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([30, 0]);
+
+    settingsStore.setState((s) => ({ snapTo: { ...s.snapTo, grid: false } }));
+    mouse("pointermove", 31, 1, 0, 1);
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([31, 1]);
+
+    settingsStore.setState((s) => ({ snapTo: { ...s.snapTo, grid: true } }));
+    mouse("pointermove", 32, 2, 0, 1, { altKey: true });
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([32, 2]);
+    mouse("pointermove", 31, 1, 0, 1);
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([30, 0]);
+  });
+
+  it("excludes dragged geometry from on-curve candidates", async () => {
+    settingsStore.setState((s) => ({
+      snapTo: {
+        ...s.snapTo,
+        grid: false,
+        sketchGuideLines: false,
+        sketchGuidePoints: false,
+        quadrant: false,
+        intersection: false,
+        onCurve: true,
+      },
+    }));
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 20, 1, 0, 1);
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([20, 1]);
+    mouse("pointerup", 20, 1, 0, 0);
+    await flush();
+    expect(clientMock.endGesture).toHaveBeenCalledWith([20, 1]);
+  });
+
+  it("uses the same on-curve resolver for preview and final pointer-up", async () => {
+    const session = sketchStore.getState().session!;
+    sketchStore.getState().setSession({
+      ...session,
+      entities: [...session.entities, { id: "e2", type: "Line", p0: [25, 10], p1: [25, 40] }],
+    });
+    settingsStore.setState((s) => ({
+      snapTo: {
+        ...s.snapTo,
+        grid: false,
+        sketchGuideLines: false,
+        sketchGuidePoints: false,
+        quadrant: false,
+        intersection: false,
+        onCurve: true,
+      },
+    }));
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 24, 20, 0, 1);
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([25, 20]);
+    mouse("pointerup", 24, 21, 0, 0);
+    await flush();
+    expect(clientMock.endGesture).toHaveBeenCalledWith([25, 21]);
+  });
+
+  it("cancels a canvas drag released over interactive chrome without using chrome coordinates", async () => {
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 30, 0, 0, 1);
+    await flush();
+
+    chromePointerUp(200, 200);
+    await flush();
+
+    expect(clientMock.endGesture).toHaveBeenCalledWith([0, 0]);
+    expect(sketchStore.getState().session!.entities[0].p0).toEqual([0, 0]);
+    expect(engineMock.setSketchDrawingActive).toHaveBeenLastCalledWith(false);
+  });
+
   // SP-0 D3 made `beginGesture` refusable at will: the backend now fences a drag
   // against an in-flight `getSketchRegions` on the same sketch (recoverable, "…
   // retry"). That turns a once-exotic rejection into an ordinary one, so the
@@ -339,6 +508,35 @@ describe("SketchController select tool", () => {
     const preview = calls[calls.length - 1][1] as SketchEntity[];
     expect(preview[0].p0).toEqual([20, 0]); // latest delta
     expect(preview[0].p1).toEqual([50, 0]); // response-1 coupled move retained
+  });
+
+  it("retracts a requested snap when the solver returns the same held coordinate", async () => {
+    clientMock.solveDrag.mockResolvedValueOnce({
+      gestureId: 1,
+      seq: 1,
+      status: "success",
+      dof: 2,
+      conflicting: [],
+      positions: { "e1.Start": [0, 0] },
+      curves: {},
+      solveMicros: 0,
+      superseded: false,
+    });
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 30, 0, 0, 1);
+    await flush();
+
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Snap target not reached; the solver kept the geometry at its solved position",
+    );
+    expect(engineMock.setSketchSnap).toHaveBeenLastCalledWith(null, false);
+    expect(engineMock.updateSketchSession).toHaveBeenLastCalledWith(
+      PLANE,
+      ENTITIES,
+      "UnderConstrained",
+      undefined,
+      { transient: true },
+    );
   });
 
   it("idle pointer moves drive hover (set on hit, cleared on miss)", () => {
@@ -540,6 +738,13 @@ describe("SketchController select tool — SP-2 gesture kinds", () => {
       "c1",
       expect.objectContaining({ kind: "radius", entityId: "c1" }),
     );
+  });
+
+  it("snaps a radius drag target to the configured grid", async () => {
+    mouse("pointerdown", 20, 100, 0, 1);
+    mouse("pointermove", 31, 101, 0, 1);
+    await flush();
+    expect(clientMock.solveDrag).toHaveBeenLastCalledWith([30, 100]);
   });
 
   it("a radius drag moves NO point, so the preview comes from `curves` alone", async () => {

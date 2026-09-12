@@ -1,21 +1,33 @@
 /*
- * rebindPick — resolving a ref against a mesh, and re-resolving one a regen
- * renamed.
+ * rebindPick — resolving a ref against a mesh, and what happens to one a regen
+ * renamed or consumed.
  *
- * The whole point of this module is what it REFUSES, so most of these specs are
- * negative: a rebind that guesses is worse than a highlight that vanishes, and
- * the two pieces of evidence it guesses from (a world point, and the direction
- * the OLD mesh gave the element) each have to be able to veto on their own.
+ * The whole point of this module is what it REFUSES. It used to search the new
+ * mesh for the nearest element matching the old one's position and direction;
+ * D-5 (PLAN 2026-09-11) removed that, because a plausible answer the backend
+ * never agreed to is exactly the silent-wrong-bind class the identity ladder
+ * exists to prevent. So the specs below are about EVIDENCE: the new mesh names
+ * it, or the backend resolves its promoted ElementId, or it goes away.
+ *
+ * A SNAPSHOT ORDINAL IS NOT EVIDENCE ACROSS A REGEN (Astra break F1). Element
+ * counts only grow over the measured regens — a 3 mm chamfer takes the box from
+ * 12 to 15 edges, each hole adds two faces and three edges — so an old `f:N` /
+ * `e:N` almost always still names SOMETHING afterwards, just not the element
+ * that was picked. The transient key is therefore only evidence WITHIN the one
+ * publication it was read from; across a regen the authority is the persistent
+ * ElementId (named by the new mesh, or confirmed by the backend) or nothing.
  *
  * Geometry is real MESH1: `encodeMesh1` writes the same bytes the worker would,
  * so the face/edge ordinals, id tables and buffers are the ones the app resolves
  * through — no hand-built stand-in for `BodyMeshView`.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { encodeMesh1, type EdgeSource, type FaceSource } from "@/ipc/mockMeshes";
-import { buildBodyObjects, type MeshEntry } from "./meshRegistry";
+import type { CadClient } from "@/ipc/client";
+import type { ElementInfo } from "@/ipc/types";
+import { buildBodyObjects, swap, __resetRegistryForTests, type MeshEntry } from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
-import { ordinalForRef, rebindRef, rebindRefs, rebindSelectionForBody } from "./rebindPick";
+import { dropSelectionForBody, ordinalForRef, reconcileSelectionForBody } from "./rebindPick";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
 
@@ -23,6 +35,7 @@ type V3 = [number, number, number];
 
 const live: MeshEntry[] = [];
 afterEach(() => {
+  __resetRegistryForTests();
   for (const e of live.splice(0)) e.dispose();
   resetStores();
 });
@@ -37,7 +50,7 @@ interface Quad {
  * Build a registry entry from quads (+ optional polyline edges). Face normals
  * come out of the corner WINDING, exactly as they would from a real tessellation.
  */
-function meshOf(quads: Quad[], edges: EdgeSource[] = [], faceBboxes = false): MeshEntry {
+function meshOf(quads: Quad[], edges: EdgeSource[] = [], idsHaveElementIds = false): MeshEntry {
   const positions: number[] = [];
   const faces: FaceSource[] = [];
   for (const q of quads) {
@@ -51,7 +64,7 @@ function meshOf(quads: Quad[], edges: EdgeSource[] = [], faceBboxes = false): Me
       ],
     });
   }
-  const blob = encodeMesh1({ positions, faces, edges, faceBboxes });
+  const blob = encodeMesh1({ positions, faces, edges, idsHaveElementIds });
   const entry = buildBodyObjects(parseMeshPayload(blob), "b1", 1);
   live.push(entry);
   return entry;
@@ -99,17 +112,80 @@ const faceRef = (topoKey: string, worldPoint?: V3, elementId?: string): EntityRe
   ...(worldPoint ? { anchor: { worldPoint } } : {}),
 });
 
-const edgeRef = (topoKey: string, worldPoint?: V3): EntityRef => ({
+const edgeRef = (topoKey: string, elementId?: string): EntityRef => ({
   kind: "edge",
   id: topoRefId("b1", topoKey),
   bodyId: "b1",
   topoKey,
-  ...(worldPoint ? { anchor: { worldPoint } } : {}),
+  elementId,
 });
 
+/** One edge the new mesh keeps — enough to give it a populated EDGE table. */
+const SURVIVING_EDGE: EdgeSource[] = [{ id: "e:9", points: [[-10, 10, 5], [10, 10, 5]] }];
+
 /** A slab whose three faces carry the given ids (the shape never changes). */
-const slab = (ids: [string, string, string], faceBboxes = false): MeshEntry =>
-  meshOf([top(ids[0]), under(ids[1], -5), side(ids[2])], [], faceBboxes);
+const slab = (ids: [string, string, string]): MeshEntry =>
+  meshOf([top(ids[0]), under(ids[1], -5), side(ids[2])]);
+
+/**
+ * A face table with the given ids in ORDINAL order (one +Z quad per id, stacked
+ * in z so every face is distinct). `idsHaveElementIds` makes it the MESH1
+ * two-namespace table `Tessellate.cpp` emits: minted ids for bound elements,
+ * snapshot TopoKeys for everything else.
+ */
+const stack = (ids: string[], idsHaveElementIds = true): MeshEntry =>
+  meshOf(ids.map((id, i) => top(id, i)), [], idsHaveElementIds);
+
+/** Register `entry` as the body's live mesh (what the supersede guard reads). */
+function publish(entry: MeshEntry): MeshEntry {
+  swap("b1", entry);
+  return entry;
+}
+
+/**
+ * One REGEN swap: `prev` was on screen, `next` has just been published. This is
+ * the ONLY reload that reconciles — `meshSync` does not call it for a colour /
+ * visibility / self-heal reload, and there is no `prev` on a first load.
+ */
+function regen(prev: MeshEntry, next: MeshEntry, client: CadClient | null): void {
+  publish(next);
+  reconcileSelectionForBody("b1", prev, next, client);
+}
+
+/** A promise plus its resolver — an `elementInfo` answer held mid-flight. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** A `CadClient` stub whose ONLY live method is `elementInfo`. */
+function clientWith(elementInfo: CadClient["elementInfo"]): CadClient {
+  return { elementInfo } as unknown as CadClient;
+}
+
+/** The fields `reconcileSelectionForBody` fences an `elementInfo` answer on. */
+function infoNaming(topoKey: string, over?: Partial<ElementInfo>): ElementInfo {
+  return {
+    elementId: "el_x",
+    topoKey,
+    bodyId: "b1",
+    kind: "face",
+    surfaceType: 0,
+    curveType: -1,
+    center: [0, 0, 0],
+    normal: [0, 0, 1],
+    hasNormal: true,
+    size: 1,
+    magnitude: 1,
+    ...over,
+  };
+}
+
+const selected = (): EntityRef[] => selectionStore.getState().selected;
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 // ── ordinalForRef ───────────────────────────────────────────────────────────
 
@@ -124,173 +200,366 @@ describe("ordinalForRef", () => {
     expect(ordinalForRef(e.faceIndex, e.view, faceRef("f:99"))).toBe(-1);
   });
 
+  it("PREFERS the promoted ElementId over a TopoKey the same table also names", () => {
+    // Astra break F1, the proved counterexample. Nine faces: the ref's old
+    // ordinal `f:7` is STILL in the table (ordinal 6) but now names a different
+    // face, while the element the user actually picked is bound and therefore
+    // labelled `el_x` (ordinal 8). Reading the transient key first draws 6.
+    const e = stack(["f:1", "f:2", "f:3", "f:4", "f:5", "f:6", "f:7", "f:8", "el_x"]);
+    expect(e.faceIndex.ordinalForId("f:7")).toBe(6); // the trap is really set
+    expect(ordinalForRef(e.faceIndex, e.view, faceRef("f:7", undefined, "el_x"))).toBe(8);
+  });
+
   it("falls back to the promoted ElementId only when the mesh carries ElementIds", () => {
     // IDS_HAVE_ELEMENTIDS clear: the id table holds TopoKeys, so an ElementId in
     // it would be a coincidence — never a match to lean on.
     const plain = meshOf([top("el_top")]);
     expect(ordinalForRef(plain.faceIndex, plain.view, faceRef("f:gone", undefined, "el_top"))).toBe(-1);
 
-    const minted = buildBodyObjects(
-      parseMeshPayload(
-        encodeMesh1({
-          positions: [-10, -10, 5, 10, -10, 5, 10, 10, 5, -10, 10, 5],
-          faces: [{ id: "el_top", triangles: [[0, 1, 2], [0, 2, 3]] }],
-          idsHaveElementIds: true,
-        }),
-      ),
-      "b1",
-      1,
-    );
-    live.push(minted);
+    const minted = meshOf([top("el_top")], [], true);
     expect(ordinalForRef(minted.faceIndex, minted.view, faceRef("f:gone", undefined, "el_top"))).toBe(0);
   });
 });
 
-// ── faces ───────────────────────────────────────────────────────────────────
+// ── the swap policy (D-5: selection never guesses) ──────────────────────────
 
-describe("rebindRef (face)", () => {
-  it("re-binds a pure renumber: same geometry, new ids", () => {
+describe("reconcileSelectionForBody", () => {
+  // ── (a) the new mesh names the persistent id ──────────────────────────────
+
+  it("keeps a ref the NEW mesh names by its promoted id, and asks the backend nothing", async () => {
+    // `Tessellate.cpp` substitutes the minted ElementId for a bound element, so
+    // the id table itself is authority enough. The ref adopts that label, which
+    // is what `HighlightLayer` then draws through.
+    const prev = stack(["f:1", "f:2"]);
+    const next = stack(["f:7", "f:8", "el_top"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+    const elementInfo = vi.fn();
+
+    regen(prev, next, clientWith(elementInfo));
+    await flush();
+
+    expect(selected()).toHaveLength(1);
+    expect(selected()[0].topoKey).toBe("el_top"); // drawable in THIS publication
+    expect(selected()[0].id).toBe("b1#f:1"); // identity never moves
+    expect(selected()[0].elementId).toBe("el_top");
+    expect(elementInfo).not.toHaveBeenCalled();
+  });
+
+  it("resolves the nine-face trap to the PROMOTED element, with zero queries", async () => {
+    // Astra break F1 end to end: `f:7` survives at ordinal 6 naming another
+    // face; the picked element is bound and sits at ordinal 8 as `el_x`.
+    const prev = stack(["f:7"]);
+    const next = stack(["f:1", "f:2", "f:3", "f:4", "f:5", "f:6", "f:7", "f:8", "el_x"]);
+    selectionStore.getState().set([faceRef("f:7", [2, 2, 5], "el_x")]);
+    const elementInfo = vi.fn();
+
+    regen(prev, next, clientWith(elementInfo));
+    await flush();
+
+    expect(elementInfo).not.toHaveBeenCalled();
+    expect(ordinalForRef(next.faceIndex, next.view, selected()[0])).toBe(8);
+  });
+
+  // ── (c) an unpromoted ref has no authority across a regen ─────────────────
+
+  it("DROPS an unpromoted ref even when its old ordinal still resolves", async () => {
+    // The consumed-edge counterexample: after the chamfer the box has MORE
+    // edges than before, so `e:12` still names something — a different edge.
+    // Nothing has confirmed it, so it goes.
+    const prev = meshOf([top("f:1")], [{ id: "e:12", points: [[-10, 10, 5], [10, 10, 5]] }]);
+    const next = meshOf(
+      [top("f:1")],
+      [
+        { id: "e:12", points: [[-10, -10, 5], [10, -10, 5]] },
+        { id: "e:13", points: [[-10, 10, 5], [10, 10, 5]] },
+      ],
+    );
+    const ref = edgeRef("e:12");
+    selectionStore.getState().set([ref]);
+    const elementInfo = vi.fn();
+
+    regen(prev, next, clientWith(elementInfo));
+    await flush();
+
+    expect(selected()).toEqual([]);
+    expect(elementInfo).not.toHaveBeenCalled(); // nothing to ask about
+  });
+
+  it("DROPS a stale unpromoted ref synchronously, and silently", () => {
     const prev = slab(["f:1", "f:2", "f:3"]);
     const next = slab(["f:7", "f:8", "f:9"]);
-    expect(rebindRef(faceRef("f:1", [2, 2, 5]), prev, next)).toBe("f:7");
-    expect(rebindRef(faceRef("f:3", [10, 3, 0]), prev, next)).toBe("f:9");
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5]), faceRef("f:7")]);
+
+    regen(prev, next, clientWith(vi.fn()));
+
+    expect(selected()).toEqual([]);
   });
 
-  it("uses the old face's centroid when the ref carries no anchor", () => {
+  // ── (b) the backend confirms the persistent id ────────────────────────────
+
+  it("holds a promoted ref in place, then adopts the TopoKey the BACKEND returns", async () => {
     const prev = slab(["f:1", "f:2", "f:3"]);
     const next = slab(["f:7", "f:8", "f:9"]);
-    expect(rebindRef(faceRef("f:1"), prev, next)).toBe("f:7");
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+    const elementInfo = vi.fn(async () => infoNaming("f:7"));
+
+    regen(prev, next, clientWith(elementInfo));
+    expect(selected()).toHaveLength(1); // no flicker while the query is in flight
+    await flush();
+
+    expect(elementInfo).toHaveBeenCalledWith("b1", "el_top", "");
+    expect(selected()[0].topoKey).toBe("f:7");
+    expect(selected()[0].id).toBe("b1#f:1"); // identity is the pick-time composite
+    expect(selected()[0].elementId).toBe("el_top");
   });
 
-  it("REFUSES when the face moved out from under its anchor", () => {
-    // The classic parametric edit: grow the extrude and the selected top face is
-    // 20 mm away. Nothing is at the anchor any more, so nothing is bound.
-    const prev = meshOf([top("f:1", 5)]);
-    const next = meshOf([top("f:7", 25)]);
-    expect(rebindRef(faceRef("f:1", [2, 2, 5]), prev, next)).toBeNull();
+  it("DROPS a promoted ref the backend cannot resolve (the consumed edge)", async () => {
+    const prev = meshOf([top("f:7")], SURVIVING_EDGE);
+    const next = meshOf([top("f:7")], SURVIVING_EDGE);
+    selectionStore.getState().set([edgeRef("e:1", "el_edge")]);
+
+    regen(prev, next, clientWith(vi.fn(async () => null)));
+    await flush();
+
+    expect(selected()).toEqual([]);
   });
 
-  it("REFUSES a face sitting exactly at the anchor that points the OTHER way", () => {
-    // Distance alone would take this: it is coincident with the old face. The
-    // direction test is the only thing between the user and a silent mis-bind.
-    const prev = meshOf([top("f:1", 5)]);
-    const next = meshOf([under("f:7", 5)]);
-    expect(rebindRef(faceRef("f:1", [2, 2, 5]), prev, next)).toBeNull();
-  });
-
-  it("REFUSES when the previous mesh cannot name the ref either (no evidence)", () => {
+  it("DROPS a promoted ref when the query itself fails — a refusal is not evidence", async () => {
     const prev = slab(["f:1", "f:2", "f:3"]);
     const next = slab(["f:7", "f:8", "f:9"]);
-    expect(rebindRef(faceRef("f:404", [2, 2, 5]), prev, next)).toBeNull();
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+
+    regen(
+      prev,
+      next,
+      clientWith(
+        vi.fn(async () => {
+          throw new Error("worker gone");
+        }),
+      ),
+    );
+    await flush();
+
+    expect(selected()).toEqual([]);
   });
 
-  it("picks the nearest same-facing candidate, not merely the first", () => {
-    // Two parallel +Z faces; the anchor is on the upper one.
-    const prev = meshOf([top("f:1", 5)]);
-    const next = meshOf([top("f:low", -5), top("f:high", 5)]);
-    expect(rebindRef(faceRef("f:1", [2, 2, 5]), prev, next)).toBe("f:high");
+  it("DROPS a promoted ref when there is no client to confirm it with", () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+
+    regen(prev, next, null);
+
+    expect(selected()).toEqual([]);
   });
 
-  it("agrees with itself whether or not FACE_BBOXES is present", () => {
-    // The bbox section is a PREFILTER: it may only make the search cheaper.
-    const prev = slab(["f:1", "f:2", "f:3"], true);
-    const next = slab(["f:7", "f:8", "f:9"], true);
-    expect(next.view.hasFaceBboxes).toBe(true);
-    expect(rebindRef(faceRef("f:1", [2, 2, 5]), prev, next)).toBe("f:7");
-    expect(rebindRef(faceRef("f:1", [2, 2, 25]), prev, next)).toBeNull();
-  });
-});
+  // ── F2: the answer has to be about THIS publication ───────────────────────
 
-// ── edges ───────────────────────────────────────────────────────────────────
+  it("DROPS an answer whose TopoKey the DISPLAYED mesh does not name", async () => {
+    // The head raced ahead: `elementInfo` answers from S=3 while S=2 is still on
+    // screen. An undrawable label would leave an invisible, authorable selection.
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
 
-const EDGE_ALONG_X: EdgeSource[] = [{ id: "e:1", points: [[-10, -10, 5], [10, -10, 5]] }];
+    regen(prev, next, clientWith(vi.fn(async () => infoNaming("f:99"))));
+    await flush();
 
-describe("rebindRef (edge)", () => {
-  it("re-binds an edge that only changed its id", () => {
-    const prev = meshOf([top("f:1")], EDGE_ALONG_X);
-    const next = meshOf([top("f:7")], [{ id: "e:9", points: [[-10, -10, 5], [10, -10, 5]] }]);
-    expect(rebindRef(edgeRef("e:1", [0, -10, 5]), prev, next)).toBe("e:9");
+    expect(selected()).toEqual([]);
   });
 
-  it("re-binds a REVERSED edge — direction is absolute for a 1-D element", () => {
-    const prev = meshOf([top("f:1")], EDGE_ALONG_X);
-    const next = meshOf([top("f:7")], [{ id: "e:9", points: [[10, -10, 5], [-10, -10, 5]] }]);
-    expect(rebindRef(edgeRef("e:1", [0, -10, 5]), prev, next)).toBe("e:9");
+  it("DROPS an answer that belongs to another body", async () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+
+    regen(prev, next, clientWith(vi.fn(async () => infoNaming("f:7", { bodyId: "b2" }))));
+    await flush();
+
+    expect(selected()).toEqual([]);
   });
 
-  it("REFUSES an edge crossing the anchor at a different angle", () => {
-    const prev = meshOf([top("f:1")], EDGE_ALONG_X);
-    const next = meshOf([top("f:7")], [{ id: "e:9", points: [[0, -30, 5], [0, 10, 5]] }]);
-    expect(rebindRef(edgeRef("e:1", [0, -10, 5]), prev, next)).toBeNull();
+  it("DROPS an answer whose kind is not the ref's", async () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+
+    regen(prev, next, clientWith(vi.fn(async () => infoNaming("f:7", { kind: "edge" }))));
+    await flush();
+
+    expect(selected()).toEqual([]);
   });
 
-  it("REFUSES an edge that moved away (a fillet consumed it)", () => {
-    const prev = meshOf([top("f:1")], EDGE_ALONG_X);
-    const next = meshOf([top("f:7")], [{ id: "e:9", points: [[-10, -5, 5], [10, -5, 5]] }]);
-    expect(rebindRef(edgeRef("e:1", [0, -10, 5]), prev, next)).toBeNull();
+  it("ignores an answer a LATER mesh swap superseded", async () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
+
+    regen(prev, next, clientWith(vi.fn(async () => infoNaming("f:7"))));
+    publish(slab(["f:11", "f:12", "f:13"])); // a second regen lands first
+    await flush();
+
+    // Neither adopted nor dropped by the stale answer: the newer swap owns the
+    // ref now (and ran its own reconcile pass).
+    expect(selected()[0].topoKey).toBe("f:1");
   });
 
-  it("REFUSES when the new mesh has no edges at all", () => {
-    const prev = meshOf([top("f:1")], EDGE_ALONG_X);
-    const next = meshOf([top("f:7")]);
-    expect(rebindRef(edgeRef("e:1", [0, -10, 5]), prev, next)).toBeNull();
-  });
-});
+  // ── F3: a reply applies to the ref OBJECT, never to its reusable id ────────
 
-// ── the ref rewrite ─────────────────────────────────────────────────────────
+  it("never re-adds a ref the user deselected while the query was in flight", async () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().set([faceRef("f:1", [2, 2, 5], "el_top")]);
 
-describe("rebindRefs", () => {
-  const prev = (): MeshEntry => slab(["f:1", "f:2", "f:3"]);
-  const next = (): MeshEntry => slab(["f:7", "f:8", "f:9"]);
+    regen(prev, next, clientWith(vi.fn(async () => infoNaming("f:7"))));
+    selectionStore.getState().clear(); // the user moved on
+    await flush();
 
-  it("rewrites topoKey and NEVER the id (identity is the pick-time composite)", () => {
-    const ref = faceRef("f:1", [2, 2, 5]);
-    const out = rebindRefs("b1", prev(), next(), [ref])!;
-    expect(out[0].topoKey).toBe("f:7");
-    expect(out[0].id).toBe("b1#f:1");
-    expect(out[0].anchor).toEqual(ref.anchor); // untouched
+    expect(selected()).toEqual([]);
   });
 
-  it("returns null when nothing was stale (no store write, no repaint)", () => {
-    const p = prev();
-    const n = next();
-    expect(rebindRefs("b1", p, n, [faceRef("f:7", [2, 2, 5])])).toBeNull();
-    expect(rebindRefs("b1", p, n, [])).toBeNull();
+  it("leaves a FRESH pick that reuses the deselected ref's id untouched", async () => {
+    // `EntityRef.id` is the PICK-TIME `${bodyId}#${topoKey}` and never moves, so
+    // a ref whose label an earlier confirmation rewrote (`f:7` → `f:12`) keeps an
+    // id a later pick of the current `f:7` mints again. Matching a reply on that
+    // string deleted the new selection outright.
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    const stale: EntityRef = {
+      kind: "face",
+      id: topoRefId("b1", "f:7"),
+      bodyId: "b1",
+      topoKey: "f:12",
+      elementId: "el_top",
+    };
+    selectionStore.getState().set([stale]);
+    const gate = deferred<ElementInfo | null>();
+
+    regen(prev, next, clientWith(vi.fn(() => gate.promise)));
+    const fresh = faceRef("f:7", [3, 3, 5]); // same id, a DIFFERENT object
+    selectionStore.getState().set([fresh]);
+    gate.resolve(null); // the old query finally answers "gone"
+    await flush();
+
+    expect(selected()).toEqual([fresh]);
   });
 
-  it("leaves other bodies, other kinds and un-rebindable refs alone", () => {
-    const p = prev();
-    const n = next();
+  // ── F4: no evidence is not a licence to keep an invisible selection ───────
+
+  it("CONFIRMS an edge ref when the new blob carries no edge table at all", async () => {
+    // A blob with no EDGE sections cannot draw an edge highlight, so "absent
+    // evidence" is not a reason to keep the ref — it is a reason to ask.
+    const prev = meshOf([top("f:1")], SURVIVING_EDGE);
+    const next = meshOf([top("f:1")]);
+    expect(next.edgeIndex).toBeNull();
+    selectionStore.getState().set([edgeRef("e:1", "el_edge")]);
+    const elementInfo = vi.fn(async () => null);
+
+    regen(prev, next, clientWith(elementInfo));
+    await flush();
+
+    expect(elementInfo).toHaveBeenCalledWith("b1", "el_edge", "");
+    expect(selected()).toEqual([]);
+  });
+
+  it("DROPS an unpromoted edge ref when the new blob carries no edge table", () => {
+    const prev = meshOf([top("f:1")], SURVIVING_EDGE);
+    const next = meshOf([top("f:1")]);
+    selectionStore.getState().set([edgeRef("e:1")]);
+
+    regen(prev, next, clientWith(vi.fn()));
+
+    expect(selected()).toEqual([]);
+  });
+
+  // ── hover, other bodies, and the reloads that are NOT a regen ─────────────
+
+  it("drops a stale HOVER and never queries the backend for one", async () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
+    selectionStore.getState().setHover(faceRef("f:1", [2, 2, 5], "el_top"));
+    const elementInfo = vi.fn(async () => infoNaming("f:7"));
+
+    regen(prev, next, clientWith(elementInfo));
+    await flush();
+
+    expect(selectionStore.getState().hover).toBeNull();
+    expect(elementInfo).not.toHaveBeenCalled();
+  });
+
+  it("clears hover even when the new mesh names its promoted id", () => {
+    const prev = stack(["f:1"]);
+    const next = stack(["f:7", "el_top"]);
+    selectionStore.getState().setHover(faceRef("f:1", undefined, "el_top"));
+
+    regen(prev, next, clientWith(vi.fn()));
+
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("leaves other bodies and other kinds alone", () => {
+    const prev = slab(["f:1", "f:2", "f:3"]);
+    const next = slab(["f:7", "f:8", "f:9"]);
     const foreign: EntityRef = { kind: "face", id: "b2#f:1", bodyId: "b2", topoKey: "f:1" };
     const body: EntityRef = { kind: "body", id: "b1" };
-    const stale = faceRef("f:2", [2, 2, -5]);
-    const out = rebindRefs("b1", p, n, [foreign, body, stale])!;
-    expect(out[0]).toBe(foreign);
-    expect(out[1]).toBe(body);
-    expect(out[2].topoKey).toBe("f:8"); // the −Z face, matched on its own normal
-  });
-});
+    const sketch: EntityRef = { kind: "sketch", id: "sk1" };
+    const stale = faceRef("f:2");
+    selectionStore.getState().set([foreign, body, sketch, stale]);
 
-describe("rebindSelectionForBody", () => {
-  it("re-points both the selection and the hover at the new ids", () => {
-    const p = slab(["f:1", "f:2", "f:3"]);
-    const n = slab(["f:7", "f:8", "f:9"]);
-    selectionStore.getState().set([faceRef("f:1", [2, 2, 5])]);
-    selectionStore.getState().setHover(faceRef("f:3", [10, 3, 0]));
+    regen(prev, next, clientWith(vi.fn()));
 
-    rebindSelectionForBody("b1", p, n);
-
-    expect(selectionStore.getState().selected[0].topoKey).toBe("f:7");
-    expect(selectionStore.getState().hover?.topoKey).toBe("f:9");
+    expect(selected()).toEqual([foreign, body, sketch]);
   });
 
-  it("is a no-op with no previous entry — a first load has nothing to rebind FROM", () => {
-    const n = slab(["f:7", "f:8", "f:9"]);
+  it("does NOTHING on a first load — there is no previous publication to survive", async () => {
+    // The body's very first mesh. The pick that armed the tool was taken against
+    // this same publication, so there is nothing to reconcile and nothing to ask.
+    const next = publish(slab(["f:7", "f:8", "f:9"]));
+    const before = [faceRef("f:1", [2, 2, 5]), faceRef("f:2", undefined, "el_top")];
+    selectionStore.getState().set(before);
+    const elementInfo = vi.fn();
+
+    reconcileSelectionForBody("b1", undefined, next, clientWith(elementInfo));
+    await flush();
+
+    expect(selected()).toBe(before); // identity: no store write, no repaint
+    expect(elementInfo).not.toHaveBeenCalled();
+  });
+
+  it("does NOTHING when the swap re-publishes the very same entry", async () => {
+    const next = publish(slab(["f:7", "f:8", "f:9"]));
     const before = [faceRef("f:1", [2, 2, 5])];
     selectionStore.getState().set(before);
 
-    rebindSelectionForBody("b1", undefined, n);
+    reconcileSelectionForBody("b1", next, next, clientWith(vi.fn()));
+    await flush();
 
-    expect(selectionStore.getState().selected).toBe(before);
+    expect(selected()).toBe(before);
+  });
+});
+
+// ── a body that left the document ───────────────────────────────────────────
+
+describe("dropSelectionForBody", () => {
+  it("removes the removed body's body/element refs and hover, and nothing else", () => {
+    const foreign: EntityRef = { kind: "face", id: "b2#f:1", bodyId: "b2", topoKey: "f:1" };
+    const bodyRow: EntityRef = { kind: "body", id: "b1" };
+    const sketch: EntityRef = { kind: "sketch", id: "sk1" };
+    selectionStore.getState().set([faceRef("f:1"), edgeRef("e:2", "el_e"), foreign, bodyRow, sketch]);
+    selectionStore.getState().setHover(faceRef("f:1"));
+
+    dropSelectionForBody("b1");
+
+    expect(selected()).toEqual([foreign, sketch]);
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("writes nothing when the body owns no body or element ref", () => {
+    const before = [{ kind: "body", id: "b2" } as EntityRef];
+    selectionStore.getState().set(before);
+
+    dropSelectionForBody("b1");
+
+    expect(selected()).toBe(before);
   });
 });

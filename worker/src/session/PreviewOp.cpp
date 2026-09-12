@@ -275,6 +275,7 @@ Envelope handle_preview_op(Session& session, const Envelope& req,
     ScratchJob job;
     job.bodies = session.bodies_copy();
     job.partition = session.partition_copy();
+    job.topology_owners = session.topology_owners_copy();
     // WP-I: a preview resolves refs against the LIVE head, so it inherits the
     // head's gear-body map. `job.plan` stays empty — a preview carries one op,
     // never the `Gear` op that minted an existing body.

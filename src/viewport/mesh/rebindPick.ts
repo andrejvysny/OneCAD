@@ -1,355 +1,260 @@
 /*
- * rebindPick — resolving a selection ref against a mesh, and re-resolving one
- * whose TopoKey did not survive a regen.
+ * rebindPick — resolving a selection ref against a mesh, and deciding what
+ * happens to one whose label did not survive a regen.
  *
  * A TopoKey (`"f:22"`) is a SNAPSHOT-SCOPED shape-map ordinal (SCHEMA §10): a
- * rebuild may renumber every one of them. So a face selected before a parametric
- * edit routinely names NOTHING after it — `TopoIndex.ordinalForId` returns -1,
- * `HighlightLayer` drops the overlay, and the highlight simply vanishes with no
- * way for the user to tell a deselect from a defect.
+ * rebuild may renumber every one of them, and an edge a fillet consumed is gone
+ * outright. So a ref made before a parametric edit routinely names NOTHING after
+ * it — `TopoIndex.ordinalForId` returns -1 and `HighlightLayer` draws no overlay.
  *
- * `rebindRef` re-binds such a ref to the element it still visually refers to, and
- * is built to REFUSE rather than guess (the house rule: a deterministic no-bind
- * beats a silent wrong bind):
+ * This module USED to close that gap by searching the new mesh for the nearest
+ * element that matched the old one's position and direction. That search is what
+ * put the highlight on the chamfer's neighbouring edge after the picked one was
+ * consumed: a plausible answer the backend never agreed to.
  *
- *  - POSITION comes from the pick's own anchor — the point the user clicked,
- *    which lies ON the element — falling back to the old element's centroid.
- *  - DIRECTION comes from the PREVIOUS registry entry, the one the ref was picked
- *    against. Position alone cannot tell "this face is still here, renumbered"
- *    from "this face moved and a different one slid under the anchor": grow an
- *    extrude with its top face selected and the old anchor lands exactly ON a
- *    side WALL. The normal test rejects that; distance alone would bind it.
- *    With no previous entry naming the old element there is no evidence at all,
- *    and nothing is rebound.
- *  - A match must also be within {@link REBIND_TOL_FRAC} of the body's bbox
- *    diagonal. The tolerance exists because a regen RE-TESSELLATES — the same
- *    nominal surface returns as different triangles — and is deliberately far
- *    tighter than any parametric delta a user would type.
+ * **D-5 (PLAN, 2026-09-11): selection never guesses.** A ref survives a REGEN
+ * only when something AUTHORITATIVE still names it:
+ *
+ *  - the new mesh's id table names its promoted `ElementId` (MESH1
+ *    `IDS_HAVE_ELEMENTIDS`: `Tessellate.cpp` substitutes the minted id for any
+ *    element that already has a live binding), or
+ *  - it carries a promoted `ElementId` and the BACKEND resolves that id at the
+ *    current head, in which case the ref adopts the TopoKey the backend
+ *    returned — provided that key is drawable in the mesh actually on screen.
+ *
+ * Anything else is dropped, silently — the highlight goes with the geometry, and
+ * the user re-picks. This is the identity ladder's "deterministic NeedsRepair
+ * beats a silent wrong bind" law applied to the viewport.
+ *
+ * **A SNAPSHOT ORDINAL IS NOT EVIDENCE ACROSS A REGEN** (Astra break F1). Element
+ * counts only grow over the measured regens — a 3 mm chamfer takes the box from
+ * 12 to 15 edges, each hole adds two faces and three edges — so an old `f:N` /
+ * `e:N` almost always still names SOMETHING afterwards, just not the element the
+ * user picked. Keeping a ref because "the new mesh still resolves its label" is
+ * therefore the silent wrong bind wearing a different hat, and an UNPROMOTED ref
+ * is dropped across a regen even when its old ordinal resolves.
+ *
+ * That rule applies to a REGEN only. A colour edit, a visibility flip and the
+ * self-healing `reconcile()` pass all re-publish the SAME topology, so `meshSync`
+ * does not reconcile for them, and a body's first mesh has no previous
+ * publication for a pick to have been taken against.
  *
  * `id` is IDENTITY (`${bodyId}#${topoKey}` — what `sameRef` and the selection
  * toggle compare on) and is NEVER rewritten; only the `topoKey` field the
  * viewport resolves through. Same policy as `promotePick`'s elementId write-back.
+ * It is also REUSABLE: a deselect plus a fresh pick of the same label mints the
+ * same string, so an in-flight reply is applied to the ref OBJECT it was asked
+ * about, never to whatever currently carries its id.
  */
+import type { CadClient } from "@/ipc/client";
+import type { ElementInfo } from "@/ipc/types";
+import { bareBodyId } from "@/ipc/tauriCommandMap";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import type { TopoIndex } from "./faceRangeIndex";
-import type { MeshEntry } from "./meshRegistry";
+import { getEntry, type MeshEntry } from "./meshRegistry";
 import type { BodyMeshView } from "./parseMeshPayload";
-
-type V3 = [number, number, number];
-
-/** A rebind candidate must sit within this fraction of the bbox diagonal. */
-const REBIND_TOL_FRAC = 1e-3;
-/** …and agree in direction with the element the ref used to name (≈25°). */
-const REBIND_DIR_MIN = 0.9;
-/** Degenerate bbox (a single point body): still allow an exact positional match. */
-const REBIND_TOL_FLOOR = 1e-9;
 
 /**
  * Ordinal of the element a ref names, or -1.
  *
  * The mesh's id tables hold TopoKeys today, but MESH1 `IDS_HAVE_ELEMENTIDS`
- * lets a producer emit MINTED ElementIds instead (mesh_format.md §2). A ref that
- * has been promoted carries both, so try the persistent id when the transient
- * one misses — inert until the worker sets the flag, and the only lookup that
- * survives a renumber for free once it does.
+ * lets a producer emit MINTED ElementIds instead (mesh_format.md §2). A promoted
+ * ref carries both, and the PERSISTENT one is tried first: a renumber can hand
+ * the ref's old transient key to a different element, so reading it first draws
+ * that other element (Astra break F1). The transient key stays the fallback for
+ * an unpromoted pick, whose label is the only handle it has.
  */
 export function ordinalForRef(index: TopoIndex, view: BodyMeshView, ref: EntityRef): number {
+  if (ref.elementId && view.idsHaveElementIds) {
+    const ord = index.ordinalForId(ref.elementId);
+    if (ord >= 0) return ord;
+  }
   if (ref.topoKey) {
     const ord = index.ordinalForId(ref.topoKey);
     if (ord >= 0) return ord;
   }
-  if (ref.elementId && view.idsHaveElementIds) return index.ordinalForId(ref.elementId);
   return -1;
 }
 
-// ── vector scratch ──────────────────────────────────────────────────────────
+/** A face/edge ref belonging to `bodyId` — the only kinds a mesh swap may touch. */
+function isBodyElementRef(ref: EntityRef, bodyId: string): boolean {
+  return (ref.kind === "face" || ref.kind === "edge") && ref.bodyId === bodyId;
+}
 
-const dot3 = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
-const distSq = (q: V3, x: number, y: number, z: number): number => {
-  const dx = q[0] - x;
-  const dy = q[1] - y;
-  const dz = q[2] - z;
-  return dx * dx + dy * dy + dz * dz;
-};
-
-function bboxDiag(view: BodyMeshView): number {
-  return Math.hypot(
-    view.bboxMax[0] - view.bboxMin[0],
-    view.bboxMax[1] - view.bboxMin[1],
-    view.bboxMax[2] - view.bboxMin[2],
-  );
+/** The id table that could name this ref, or null when the blob carries none. */
+function indexFor(ref: EntityRef, entry: MeshEntry): TopoIndex | null {
+  return ref.kind === "face" ? entry.faceIndex : entry.edgeIndex;
 }
 
 /**
- * Squared distance from `q` to triangle (ai,bi,ci) — indices are FLOAT offsets
- * into `P`. Ericson, *Real-Time Collision Detection* §5.1.5 (barycentric region
- * test); returns the exact closest-point distance, edges and vertices included.
+ * What the NEW publication says about one face/edge ref.
+ *
+ *  - `keep` — its id table names the ref's persistent ElementId. `label` is that
+ *    id: the ref adopts it so the highlight resolves through the handle the
+ *    backend agrees on rather than a reusable ordinal.
+ *  - `confirm` — the ref has a persistent id the mesh does not name. Only the
+ *    backend can say whether the element survived, and under what label.
+ *  - `drop` — no persistent handle at all. There is nothing to ask about, and
+ *    the transient key carries no authority across a regen.
+ *
+ * A MISSING index is a `drop`/`confirm`, never a keep: a blob with no EDGE
+ * sections cannot draw an edge highlight, and a selection that draws nothing but
+ * still authors operations is the invisible-selection defect (Astra break F4).
  */
-function pointTriangleDistSq(q: V3, P: Float32Array, ai: number, bi: number, ci: number): number {
-  const ax = P[ai], ay = P[ai + 1], az = P[ai + 2];
-  const bx = P[bi], by = P[bi + 1], bz = P[bi + 2];
-  const cx = P[ci], cy = P[ci + 1], cz = P[ci + 2];
-  const abx = bx - ax, aby = by - ay, abz = bz - az;
-  const acx = cx - ax, acy = cy - ay, acz = cz - az;
-  const apx = q[0] - ax, apy = q[1] - ay, apz = q[2] - az;
-  const d1 = abx * apx + aby * apy + abz * apz;
-  const d2 = acx * apx + acy * apy + acz * apz;
-  if (d1 <= 0 && d2 <= 0) return apx * apx + apy * apy + apz * apz; // vertex a
-  const bpx = q[0] - bx, bpy = q[1] - by, bpz = q[2] - bz;
-  const d3 = abx * bpx + aby * bpy + abz * bpz;
-  const d4 = acx * bpx + acy * bpy + acz * bpz;
-  if (d3 >= 0 && d4 <= d3) return bpx * bpx + bpy * bpy + bpz * bpz; // vertex b
-  const vc = d1 * d4 - d3 * d2;
-  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
-    const v = d1 / (d1 - d3); // edge ab
-    return distSq(q, ax + abx * v, ay + aby * v, az + abz * v);
-  }
-  const cpx = q[0] - cx, cpy = q[1] - cy, cpz = q[2] - cz;
-  const d5 = abx * cpx + aby * cpy + abz * cpz;
-  const d6 = acx * cpx + acy * cpy + acz * cpz;
-  if (d6 >= 0 && d5 <= d6) return cpx * cpx + cpy * cpy + cpz * cpz; // vertex c
-  const vb = d5 * d2 - d1 * d6;
-  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
-    const w = d2 / (d2 - d6); // edge ac
-    return distSq(q, ax + acx * w, ay + acy * w, az + acz * w);
-  }
-  const va = d3 * d6 - d5 * d4;
-  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
-    const w = (d4 - d3) / (d4 - d3 + (d5 - d6)); // edge bc
-    return distSq(q, bx + (cx - bx) * w, by + (cy - by) * w, bz + (cz - bz) * w);
-  }
-  const denom = 1 / (va + vb + vc); // interior
-  const v = vb * denom;
-  const w = vc * denom;
-  return distSq(q, ax + abx * v + acx * w, ay + aby * v + acy * w, az + abz * v + acz * w);
-}
-
-// ── faces ───────────────────────────────────────────────────────────────────
-
-/** Area-weighted centroid + unit normal of a face, or null when degenerate. */
-export function faceGeom(view: BodyMeshView, ord: number): { point: V3; dir: V3 } | null {
-  if (ord < 0 || ord >= view.faceCount) return null;
-  const firstTri = view.faceRanges[ord * 2];
-  const triCount = view.faceRanges[ord * 2 + 1];
-  const P = view.positions;
-  const IX = view.indices;
-  let nx = 0, ny = 0, nz = 0, cx = 0, cy = 0, cz = 0, area2 = 0;
-  for (let t = firstTri; t < firstTri + triCount; t++) {
-    const a = IX[t * 3] * 3, b = IX[t * 3 + 1] * 3, c = IX[t * 3 + 2] * 3;
-    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
-    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
-    const kx = uy * vz - uz * vy, ky = uz * vx - ux * vz, kz = ux * vy - uy * vx;
-    const w = Math.hypot(kx, ky, kz); // 2 × triangle area
-    nx += kx; ny += ky; nz += kz;
-    cx += (w * (P[a] + P[b] + P[c])) / 3;
-    cy += (w * (P[a + 1] + P[b + 1] + P[c + 1])) / 3;
-    cz += (w * (P[a + 2] + P[b + 2] + P[c + 2])) / 3;
-    area2 += w;
-  }
-  const nl = Math.hypot(nx, ny, nz);
-  if (nl === 0 || area2 === 0) return null;
-  return { point: [cx / area2, cy / area2, cz / area2], dir: [nx / nl, ny / nl, nz / nl] };
-}
-
-/** Squared distance from `q` to a face's nearest triangle. */
-function faceDistSq(view: BodyMeshView, ord: number, q: V3): number {
-  const firstTri = view.faceRanges[ord * 2];
-  const triCount = view.faceRanges[ord * 2 + 1];
-  const IX = view.indices;
-  let best = Infinity;
-  for (let t = firstTri; t < firstTri + triCount; t++) {
-    const d = pointTriangleDistSq(q, view.positions, IX[t * 3] * 3, IX[t * 3 + 1] * 3, IX[t * 3 + 2] * 3);
-    if (d < best) best = d;
-  }
-  return best;
-}
-
-/** Cheap prefilter. No FACE_BBOXES section ⇒ every face is a candidate. */
-function inFaceBbox(view: BodyMeshView, ord: number, q: V3, eps: number): boolean {
-  const bb = view.faceBboxes;
-  if (!bb) return true;
-  const o = ord * 6;
-  for (let a = 0; a < 3; a++) {
-    if (q[a] < bb[o + a] - eps || q[a] > bb[o + 3 + a] + eps) return false;
-  }
-  return true;
-}
-
-/** Nearest face to `q` that also points the same way as `dir`, or -1. */
-function nearestFace(view: BodyMeshView, q: V3, dir: V3, tol: number): number {
-  let best = -1;
-  let bestSq = tol * tol;
-  for (let f = 0; f < view.faceCount; f++) {
-    if (!inFaceBbox(view, f, q, tol)) continue;
-    const dsq = faceDistSq(view, f, q);
-    if (dsq >= bestSq) continue;
-    // Only for a candidate that would WIN — the normal costs a pass over its
-    // triangles, and most faces never get close enough to need one.
-    const g = faceGeom(view, f);
-    if (!g || dot3(g.dir, dir) < REBIND_DIR_MIN) continue;
-    best = f;
-    bestSq = dsq;
-  }
-  return best;
-}
-
-// ── edges ───────────────────────────────────────────────────────────────────
-
-/** Squared distance from `q` to segment `s` of an expanded segment buffer. */
-function pointSegmentDistSq(q: V3, pos: Float32Array, s: number): number {
-  const o = s * 6;
-  const ax = pos[o], ay = pos[o + 1], az = pos[o + 2];
-  const dx = pos[o + 3] - ax, dy = pos[o + 4] - ay, dz = pos[o + 5] - az;
-  const len = dx * dx + dy * dy + dz * dz;
-  if (len === 0) return distSq(q, ax, ay, az);
-  let t = ((q[0] - ax) * dx + (q[1] - ay) * dy + (q[2] - az) * dz) / len;
-  t = t < 0 ? 0 : t > 1 ? 1 : t;
-  return distSq(q, ax + dx * t, ay + dy * t, az + dz * t);
-}
-
-/** Nearest segment of one edge to `q`: its squared distance and unit direction. */
-function nearestSegment(
-  pos: Float32Array,
-  first: number,
-  count: number,
-  q: V3,
-): { distSq: number; dir: V3 } | null {
-  let best = Infinity;
-  let at = -1;
-  for (let s = first; s < first + count; s++) {
-    const d = pointSegmentDistSq(q, pos, s);
-    if (d < best) {
-      best = d;
-      at = s;
-    }
-  }
-  if (at < 0) return null;
-  const o = at * 6;
-  const dx = pos[o + 3] - pos[o], dy = pos[o + 4] - pos[o + 1], dz = pos[o + 5] - pos[o + 2];
-  const len = Math.hypot(dx, dy, dz);
-  if (len === 0) return null;
-  return { distSq: best, dir: [dx / len, dy / len, dz / len] };
-}
-
-/** Probe point + local direction of an edge as the OLD mesh had it. */
-function edgeRefFrame(entry: MeshEntry, ord: number, anchor: V3 | null): { point: V3; dir: V3 } | null {
-  const ranges = entry.edgeSegmentRanges;
-  const pos = entry.edgeSegmentPositions;
-  if (!ranges || !pos) return null;
-  const first = ranges[ord * 2];
-  const count = ranges[ord * 2 + 1];
-  if (count === 0) return null;
-  // No anchor (a ref built off the tree rather than a pick): the midpoint of the
-  // edge's middle segment stands in for it — always ON the edge, unlike a chord.
-  const mid = first + (count >> 1);
-  const o = mid * 6;
-  const point: V3 = anchor ?? [
-    (pos[o] + pos[o + 3]) / 2,
-    (pos[o + 1] + pos[o + 4]) / 2,
-    (pos[o + 2] + pos[o + 5]) / 2,
-  ];
-  const near = nearestSegment(pos, first, count, point);
-  return near ? { point, dir: near.dir } : null;
-}
-
-/** Nearest edge to `q` running (anti)parallel to `dir`, or -1. */
-function nearestEdge(entry: MeshEntry, q: V3, dir: V3, tol: number): number {
-  const ranges = entry.edgeSegmentRanges;
-  const pos = entry.edgeSegmentPositions;
-  const index = entry.edgeIndex;
-  if (!ranges || !pos || !index) return -1;
-  let best = -1;
-  let bestSq = tol * tol;
-  for (let e = 0; e < index.count; e++) {
-    const near = nearestSegment(pos, ranges[e * 2], ranges[e * 2 + 1], q);
-    if (!near || near.distSq >= bestSq) continue;
-    // ABSOLUTE: an edge has no outward side, so a reversed parametrisation is
-    // the same edge (a face's normal, by contrast, is signed and stays signed).
-    if (Math.abs(dot3(near.dir, dir)) < REBIND_DIR_MIN) continue;
-    best = e;
-    bestSq = near.distSq;
-  }
-  return best;
-}
-
-// ── public API ──────────────────────────────────────────────────────────────
-
-/**
- * The TopoKey `ref` should carry in `next`, or null when nothing there is a
- * defensible match. `prev` is the entry the ref was picked against.
- */
-export function rebindRef(ref: EntityRef, prev: MeshEntry, next: MeshEntry): string | null {
-  if (ref.kind !== "face" && ref.kind !== "edge") return null;
-  const tol = Math.max(REBIND_TOL_FRAC * bboxDiag(next.view), REBIND_TOL_FLOOR);
-  const wp = ref.anchor?.worldPoint;
-  const anchor: V3 | null = wp ? [wp[0], wp[1], wp[2]] : null;
-
-  if (ref.kind === "face") {
-    const prevOrd = ordinalForRef(prev.faceIndex, prev.view, ref);
-    if (prevOrd < 0) return null;
-    const from = faceGeom(prev.view, prevOrd);
-    if (!from) return null;
-    const ord = nearestFace(next.view, anchor ?? from.point, from.dir, tol);
-    return ord < 0 ? null : next.faceIndex.idOf(ord);
-  }
-
-  if (!prev.edgeIndex || !next.edgeIndex) return null;
-  const prevOrd = ordinalForRef(prev.edgeIndex, prev.view, ref);
-  if (prevOrd < 0) return null;
-  const from = edgeRefFrame(prev, prevOrd, anchor);
-  if (!from) return null;
-  const ord = nearestEdge(next, from.point, from.dir, tol);
-  return ord < 0 ? null : next.edgeIndex.idOf(ord);
-}
-
-/** Does this ref belong to `bodyId` AND name nothing in `next` any more? */
-function isStale(ref: EntityRef, bodyId: string, next: MeshEntry): boolean {
-  if (ref.kind !== "face" && ref.kind !== "edge") return false;
-  if (ref.bodyId !== bodyId || !ref.topoKey) return false;
-  const index = ref.kind === "face" ? next.faceIndex : next.edgeIndex;
-  return index ? ordinalForRef(index, next.view, ref) < 0 : false;
-}
-
-/**
- * Rebind every stale face/edge ref of `bodyId` in `refs`. Returns a NEW array,
- * or null when nothing moved — so a caller can skip the store write (and the
- * repaint) entirely in the overwhelmingly common no-op case.
- */
-export function rebindRefs(
-  bodyId: string,
-  prev: MeshEntry,
+function verdictFor(
+  ref: EntityRef,
   next: MeshEntry,
-  refs: readonly EntityRef[],
-): EntityRef[] | null {
-  let changed = false;
-  const out = refs.map((ref) => {
-    if (!isStale(ref, bodyId, next)) return ref;
-    const topoKey = rebindRef(ref, prev, next);
-    if (!topoKey || topoKey === ref.topoKey) return ref;
-    changed = true;
-    // `id` is identity and stays put; only the transient TopoKey is refreshed.
-    return { ...ref, topoKey };
-  });
-  return changed ? out : null;
+): { kind: "keep"; label: string } | { kind: "confirm" } | { kind: "drop" } {
+  const elementId = ref.elementId;
+  if (elementId && next.view.idsHaveElementIds) {
+    const index = indexFor(ref, next);
+    if (index && index.ordinalForId(elementId) >= 0) return { kind: "keep", label: elementId };
+  }
+  return elementId ? { kind: "confirm" } : { kind: "drop" };
 }
 
 /**
- * Store glue: re-point the selection + hover at the geometry they still mean,
- * after `bodyId`'s mesh was replaced. Call between the registry `swap` and the
- * highlight refresh, so the rebuild reads the rebound keys.
+ * The TopoKey an `elementInfo` answer entitles this ref to adopt, or null.
+ *
+ * `QueryElement` answers about the HEAD, which may already be ahead of the mesh
+ * on screen (Astra break F2). An answer is only usable when it is about this
+ * body, about this kind of element, and names something the DISPLAYED mesh can
+ * actually draw — otherwise adopting it either points the highlight at another
+ * element or leaves the ref selected and invisible.
  */
-export function rebindSelectionForBody(
+function acceptedLabel(
+  bodyId: string,
+  ref: EntityRef,
+  next: MeshEntry,
+  info: ElementInfo | null,
+): string | null {
+  if (!info?.topoKey) return null;
+  if (bareBodyId(info.bodyId) !== bareBodyId(bodyId)) return null;
+  if (info.kind !== ref.kind) return null;
+  const index = indexFor(ref, next);
+  return index && index.ordinalForId(info.topoKey) >= 0 ? info.topoKey : null;
+}
+
+/**
+ * Ask the backend whether `ref`'s promoted ElementId still resolves at the head,
+ * and adopt the TopoKey it answers with — or drop the ref when it does not.
+ *
+ * `elementInfo` with an empty `topoKey` walks the ELEMENTID rung only
+ * (`api::element_info`), which is exactly the question: "does this persistent id
+ * still name an element of this body, and what is it called now?". An element
+ * that no operation references is not re-bound across a regen, so `null` here is
+ * the ordinary answer for a plain pick that a rebuild renumbered — and dropping
+ * it is the point.
+ */
+async function confirmRef(
+  bodyId: string,
+  ref: EntityRef,
+  next: MeshEntry,
+  client: CadClient,
+): Promise<void> {
+  let info: ElementInfo | null = null;
+  try {
+    info = await client.elementInfo(bodyId, ref.elementId ?? "", "");
+  } catch {
+    // A refused / unreachable query is not evidence that the element survived.
+    info = null;
+  }
+  // A later swap of the SAME body supersedes this answer outright: it was asked
+  // about a mesh that is no longer on screen.
+  if (getEntry(bodyId) !== next) return;
+  const sel = selectionStore.getState();
+  // The ref OBJECT, never its id: `id` is reusable, so a deselect plus a fresh
+  // pick of the same label would otherwise take this answer's verdict.
+  const at = sel.selected.indexOf(ref);
+  if (at < 0) return; // deselected / superseded while in flight — never re-add
+  const topoKey = acceptedLabel(bodyId, ref, next, info);
+  if (!topoKey) {
+    sel.set(sel.selected.filter((_, i) => i !== at));
+    return;
+  }
+  if (sel.selected[at].topoKey === topoKey) return; // confirmed, nothing to rewrite
+  const out = sel.selected.slice();
+  // `id` is identity and stays put; only the transient TopoKey is refreshed.
+  out[at] = { ...out[at], topoKey };
+  sel.set(out);
+}
+
+/**
+ * Store glue: reconcile the selection + hover against `bodyId`'s NEW mesh. Call
+ * between the registry `swap` and the highlight refresh, so the rebuild reads the
+ * surviving refs.
+ *
+ * `prev` is the entry that was on screen. Absent (a body's FIRST mesh) or
+ * identical to `next`, there is no regen to survive and nothing is touched —
+ * the pick that armed the current tool was taken against this very publication.
+ * `meshSync` calls this only for a regen reload for the same reason.
+ *
+ * Synchronous for everything that can be decided locally (kept against the new
+ * id table, or dropped for want of a persistent id); a ref that carries an
+ * ElementId the mesh does not name stays in place while {@link confirmRef} asks
+ * the backend, so the selection never flickers out and back. Its highlight
+ * simply does not draw until the answer lands.
+ *
+ * Hover is never resolved against the backend — it is a pointer artefact that the
+ * next mouse move re-establishes, and a hover path must not issue IO.
+ */
+export function reconcileSelectionForBody(
   bodyId: string,
   prev: MeshEntry | undefined,
   next: MeshEntry,
+  client: CadClient | null,
 ): void {
   if (!prev || prev === next) return;
   const sel = selectionStore.getState();
-  const selected = rebindRefs(bodyId, prev, next, sel.selected);
-  if (selected) sel.set(selected);
-  if (sel.hover) {
-    const hover = rebindRefs(bodyId, prev, next, [sel.hover]);
-    if (hover) sel.setHover(hover[0]);
+
+  // Hover is pointer-derived, not a persisted identity claim. A topology swap
+  // invalidates it even if the new mesh names the same ElementId; the next
+  // pointer move re-establishes hover against the rendered publication.
+  const hover = sel.hover;
+  if (hover && isBodyElementRef(hover, bodyId)) sel.setHover(null);
+
+  const kept: EntityRef[] = [];
+  const pending: EntityRef[] = [];
+  let rewritten = false;
+  for (const ref of sel.selected) {
+    if (!isBodyElementRef(ref, bodyId)) {
+      kept.push(ref);
+      continue;
+    }
+    const verdict = verdictFor(ref, next);
+    if (verdict.kind === "keep") {
+      if (ref.topoKey === verdict.label) kept.push(ref);
+      else {
+        kept.push({ ...ref, topoKey: verdict.label });
+        rewritten = true;
+      }
+    } else if (verdict.kind === "confirm" && client) {
+      kept.push(ref);
+      pending.push(ref);
+    }
+    // else: no persistent handle (or no client to ask) and no evidence — dropped.
   }
+  if (rewritten || kept.length !== sel.selected.length) sel.set(kept);
+  if (!client) return;
+  for (const ref of pending) void confirmRef(bodyId, ref, next, client);
+}
+
+/**
+ * The body left the document: drop every ref that named it.
+ *
+ * Removing the mesh alone leaves refs pointing at geometry that no longer exists
+ * anywhere — undrawable, and still authorable by the next tool. A body-row ref
+ * is equally stale once its body is absent: retaining it is how the inspector
+ * acquired a nameless, actionable Solid state after Pattern undo. Sketches and
+ * features are reconciled by the authoritative document projection instead.
+ */
+export function dropSelectionForBody(bodyId: string): void {
+  const sel = selectionStore.getState();
+  const ownsBody = (ref: EntityRef): boolean =>
+    ref.kind === "body"
+      ? ref.id === bodyId
+      : (ref.kind === "face" || ref.kind === "edge" || ref.kind === "vertex") && ref.bodyId === bodyId;
+  if (sel.hover && ownsBody(sel.hover)) sel.setHover(null);
+  const kept = sel.selected.filter((ref) => !ownsBody(ref));
+  if (kept.length !== sel.selected.length) sel.set(kept);
 }

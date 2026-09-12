@@ -28,6 +28,7 @@ import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
 import type { BooleanMode } from "./modelToolMachine";
 
 /** Drive a boolean segment through the chip handler the controller registered. */
@@ -112,12 +113,22 @@ describe("ModelToolController Wave 2", () => {
     let endCall = 0;
     let applyCall = 0;
     let seq = 0;
+    const previewOps = new Map<string, OperationOp>();
     return {
       onPreviewResult: vi.fn(() => () => {}),
       finishSketch: vi.fn(opts.finish),
       getSketchRegions: vi.fn(opts.finish),
       getSketch: vi.fn(() => Promise.resolve(makeSession(opts.entities))),
-      beginPreview: vi.fn((_d: PreviewDraft) => Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` })),
+      beginPreview: vi.fn((d: PreviewDraft) => {
+        const sessionId = `pv-${++seq}`;
+        previewOps.set(sessionId, d as OperationOp);
+        return Promise.resolve({ sessionId, previewBodyId: `pb-${seq}` });
+      }),
+      takePreviewOperation: vi.fn((id: string) => previewOps.get(id) ?? null),
+      applyOperations: vi.fn((_ops: OperationOp[]) => Promise.resolve(
+        opts.endResults?.find((result) => result.errorMessage) ??
+          ok(opts.endResults?.[0]?.changedBodies[0]?.bodyId ?? "batch"),
+      )),
       updatePreview: vi.fn(),
       endPreview: vi.fn(() => Promise.resolve(opts.endResults ? opts.endResults[endCall++] ?? ok(`b${endCall}`) : ok(`b${endCall++}`))),
       applyOperation: vi.fn((_op: OperationOp) => Promise.resolve(opts.applyResults ? opts.applyResults[applyCall++] ?? ok(`rv${applyCall}`) : ok(`rv${applyCall++}`))),
@@ -284,7 +295,7 @@ describe("ModelToolController Wave 2", () => {
     await flush();
     expect(controller.extrudeActive).toBe(false);
     expect(selectionStore.getState().selected).toEqual([{ kind: "body", id: "body-a" }]);
-    expect(documentStore.getState().sketches.sk.visible).toBe(false); // consumed sketch hidden
+    expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), true);
   });
 
   // ── revolve N-loop + all-regions axis validity ────────────────────────────────
@@ -332,15 +343,17 @@ describe("ModelToolController Wave 2", () => {
     expect(drafts.map((d) => d.opType)).toEqual(["Revolve", "Revolve"]);
     expect(drafts.map((d) => d.regionId)).toEqual(["r0", "r1"]);
 
-    // Confirm → each region commits its OWN previewed candidate (no ad-hoc second op).
+    // Confirm → the authored candidates commit in one atomic operation batch.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
     await flush();
     await flush();
     await flush();
     expect(clientMock.applyOperation).not.toHaveBeenCalled();
-    const committed = (clientMock.endPreview.mock.calls as unknown[][]).filter((c) => c[1] === true);
-    expect(committed.map((c) => c[0])).toEqual(["pv-1", "pv-2"]);
+    expect(clientMock.applyOperations).toHaveBeenCalledTimes(1);
+    expect(clientMock.applyOperations.mock.calls[0][0]).toHaveLength(2);
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", false);
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-2", false);
   });
 
   // ── MODEL-HARDEN findings ─────────────────────────────────────────────────────
@@ -467,6 +480,29 @@ describe("ModelToolController Wave 2", () => {
     }
   });
 
+  it("dispose after backend success but during body ingest settles the cached terminal", async () => {
+    __setBodyLoadTimeoutForTests(10_000);
+    try {
+      build({ finish: () => Promise.resolve({ regions: [R0] }), endResults: [ok("waiting-body")] });
+      await armExtrude();
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      await flush();
+      await flush();
+      await flush();
+      expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
+      expect(toolStore.getState().phase).toBe("committing");
+      expect(operationAttemptStore.getState().attempt?.phase).toBe("applying");
+
+      controller.dispose();
+
+      expect(operationAttemptStore.getState().attempt).toMatchObject({ phase: "completed" });
+      toolStore.getState().setTool("shell");
+      expect(toolStore.getState().modelTool).toBe("shell");
+    } finally {
+      __setBodyLoadTimeoutForTests(4000);
+    }
+  });
+
   it("editExtrudeFeature while already armed ends the open lane session before re-arming (finding 10)", async () => {
     build({ finish: () => Promise.resolve({ regions: [R0] }) });
     documentStore.setState({
@@ -508,7 +544,7 @@ describe("ModelToolController Wave 2", () => {
     expect(controller.extrudeActive).toBe(true); // re-armed
   });
 
-  it("revolve partial failure rebuilds the lathe preview for the REMAINING region (finding 12)", async () => {
+  it("an atomic revolve batch failure re-arms every region", async () => {
     build({
       finish: () => Promise.resolve({ regions: [R0, R1] }),
       entities: [AXIS_OK, AXIS_BAD],
@@ -536,8 +572,8 @@ describe("ModelToolController Wave 2", () => {
     await flush();
     // The stop-on-failure path re-armed and rebuilt the lathe preview for the remaining region.
     expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(2);
-    expect(viewportStore.getState().statusHint?.message).toMatch(/Revolve 2 of 2 failed/);
-    // …and re-opened the FAILED region's lane session so the work is never lost.
+    expect(viewportStore.getState().statusHint?.message).toMatch(/Revolve 1 of 2 failed/);
+    // Atomic failure authored nothing, so both regions are re-opened.
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(3);
   });
 

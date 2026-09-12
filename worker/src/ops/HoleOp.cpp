@@ -1,5 +1,6 @@
 // HoleOp.cpp — see HoleOp.h.
 #include "ops/HoleOp.h"
+#include "ops/TopologyHistory.h"
 
 #include <cmath>
 #include <memory>
@@ -425,6 +426,10 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     }
     out.body_events.push_back({"modified", target_id, {}});
     out.body_ids.push_back(target_id);
+    if (builder) {
+        out.topology_history.push_back(modified_body_history(
+            target_id, target_shape, br.shape, *builder, referenceable_topology(tool)));
+    }
     return out;
 }
 

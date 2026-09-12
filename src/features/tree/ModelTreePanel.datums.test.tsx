@@ -4,7 +4,7 @@
  * referenced-guard rejection surfacing as a sticky hint with nothing removed).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ModelTreePanel } from "./ModelTreePanel";
 import { selectionStore } from "@/stores/selectionStore";
@@ -60,6 +60,26 @@ describe("ModelTreePanel — Datums section", () => {
     await user.click(screen.getByRole("option", { name: /Datum 1/ }));
     expect(selectionStore.getState().selected).toEqual([{ kind: "datum", id: "d1" }]);
     expect(screen.getByRole("option", { name: /Datum 1/ })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("datum hover is transient and leaves selection and document facts alone", () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    const before = documentStore.getState();
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+    const row = screen.getByRole("option", { name: /Datum 1/ });
+
+    fireEvent.pointerEnter(row);
+
+    expect(selectionStore.getState().hover).toEqual({ kind: "datum", id: "d1" });
+    expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+    expect(row).toHaveAttribute("data-hovered", "true");
+    expect(documentStore.getState().revision).toBe(before.revision);
+    expect(documentStore.getState().dirty).toBe(before.dirty);
+    expect(apply).not.toHaveBeenCalled();
+
+    fireEvent.pointerLeave(row);
+    expect(selectionStore.getState().hover).toBeNull();
+    apply.mockRestore();
   });
 
   it("a DOUBLE-click selects the datum AND enters sketch mode with no target (the on-datum entry)", async () => {

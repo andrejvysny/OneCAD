@@ -20,6 +20,7 @@ import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
   ApplyOperationResult,
+  RollbackFailedOperationResult,
   PreviewDraft,
   PreviewResult,
   SemanticRef,
@@ -32,6 +33,7 @@ import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 
 const okResult = (): ApplyOperationResult => ({
@@ -47,6 +49,13 @@ const failResult = (): ApplyOperationResult => ({
   changedBodies: [],
   removedBodies: [],
   errorMessage: "fillet radius too large for edge",
+  rollbackToken: "rb-1",
+});
+
+const rollbackOk = (): RollbackFailedOperationResult => ({
+  ...okResult(),
+  rolledBack: true,
+  reason: "rolledBack",
 });
 
 /** Two picked edges on one body, in click order (the order both fields must keep). */
@@ -161,6 +170,7 @@ function makeClientMock(
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     undo: vi.fn(() => Promise.resolve(okResult())),
+    rollbackFailedOperation: vi.fn((): Promise<RollbackFailedOperationResult> => Promise.resolve(rollbackOk())),
     getOperationParams: vi.fn(() =>
       Promise.resolve({
         radius: { value: 2 },
@@ -473,6 +483,38 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(viewportStore.getState().statusHint?.message).toBe("Shelled");
   });
 
+  // ── the commit clears what it consumed (WP-U4 step 5, D-5) ───────────────
+
+  it("a committed fillet drops its own edges from the selection, keeping the body ref", async () => {
+    // The op ate those edges. Leaving their refs selected means the next pick
+    // lands on top of a ref naming geometry that no longer exists — the mesh swap
+    // can only drop it silently, and until then the highlight is a lie.
+    build();
+    const body: EntityRef = { kind: "body", id: "body1" };
+    await armFillet();
+    selectionStore.getState().set([...EDGES, body]);
+    answerPreview();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    answerPreview();
+    await flush();
+    await flush();
+
+    expect(viewportStore.getState().statusHint?.message).toBe("Filleted 2 edges");
+    expect(selectionStore.getState().selected).toEqual([body]);
+  });
+
+  it("a committed shell drops its own faces from the selection", async () => {
+    build();
+    await armShell();
+    answerPreview();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+    await flush();
+
+    expect(viewportStore.getState().statusHint?.message).toBe("Shelled");
+    expect(selectionStore.getState().selected).toEqual([]);
+  });
+
   it("Enter is skipped while a chip input has focus (no double-commit)", async () => {
     build();
     await armFillet();
@@ -498,13 +540,125 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
     // The command applied but its regen failed → the errored row is rolled back so
     // a retried ✓ cannot stack duplicates.
-    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+    expect(clientMock.rollbackFailedOperation).toHaveBeenCalledWith("rb-1");
     expect(toolStore.getState().phase).toBe("armed"); // work kept
     expect(toolStore.getState().modelTool).toBe("fillet");
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(2); // preview RE-ARMED
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
     expect(hint?.message).toContain("fillet radius too large for edge");
+  });
+
+  it("keeps authoring locked until failed-result rollback completes", async () => {
+    build(failResult);
+    let resolveUndo: (result: RollbackFailedOperationResult) => void = () => {};
+    clientMock.rollbackFailedOperation.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveUndo = resolve;
+    }));
+    await armFillet();
+    answerPreview();
+
+    toolChipStore.getState().onConfirm?.();
+    answerPreview();
+    await flush();
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("applying");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("applying");
+    expect(toolStore.getState().modelTool).toBe("fillet");
+    toolStore.getState().setTool("shell");
+    expect(toolStore.getState().modelTool).toBe("fillet");
+
+    resolveUndo(rollbackOk());
+    await flush();
+    await flush();
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("failed");
+    expect(toolStore.getState().phase).toBe("armed");
+  });
+
+  it("does not report a null preview commit as completed", async () => {
+    build();
+    clientMock.endPreview.mockResolvedValueOnce(null as unknown as ApplyOperationResult);
+    await armFillet();
+    answerPreview();
+
+    toolChipStore.getState().onConfirm?.();
+    answerPreview();
+    await flush();
+    await flush();
+
+    expect(clientMock.rollbackFailedOperation).not.toHaveBeenCalled();
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("failed");
+    expect(viewportStore.getState().statusHint?.message).toContain("returned no result");
+  });
+
+  it("blocks duplicate confirm when conditional rollback is refused", async () => {
+    build(failResult);
+    clientMock.rollbackFailedOperation.mockResolvedValueOnce({
+      ...okResult(),
+      rolledBack: false,
+      reason: "tokenMismatch",
+    });
+    await armFillet();
+    answerPreview();
+    toolChipStore.getState().onConfirm?.();
+    answerPreview();
+    await flush();
+    await flush();
+
+    expect(toolChipStore.getState().retainedCommitFailure?.message).toContain("remains in history");
+    const commits = (clientMock.endPreview.mock.calls as unknown[][]).filter((call) => call[1] === true).length;
+    toolChipStore.getState().onValue?.(1);
+    toolChipStore.getState().onEdgeOp?.("Chamfer");
+    await settleTrailing();
+    answerPreview();
+    expect(toolChipStore.getState().retainedCommitFailure).not.toBeNull();
+    toolChipStore.getState().onConfirm?.();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+    expect((clientMock.endPreview.mock.calls as unknown[][]).filter((call) => call[1] === true)).toHaveLength(commits);
+  });
+
+  it("dispose during rollback settles the detached attempt without stale publication", async () => {
+    build(failResult);
+    let resolveUndo: (result: RollbackFailedOperationResult) => void = () => {};
+    clientMock.rollbackFailedOperation.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveUndo = resolve;
+    }));
+    await armFillet();
+    answerPreview();
+    toolChipStore.getState().onConfirm?.();
+    answerPreview();
+    await flush();
+
+    controller.dispose();
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("applying");
+    resolveUndo(rollbackOk());
+    await flush();
+
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("failed");
+    toolStore.getState().setTool("shell");
+    expect(toolStore.getState().modelTool).toBe("shell");
+  });
+
+  it("does not publish delayed rollback output into a replacement document", async () => {
+    build(failResult);
+    let resolveUndo: (result: RollbackFailedOperationResult) => void = () => {};
+    clientMock.rollbackFailedOperation.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveUndo = resolve;
+    }));
+    await armFillet();
+    answerPreview();
+    toolChipStore.getState().onConfirm?.();
+    answerPreview();
+    await flush();
+
+    documentStore.setState({ documentId: "replacement", revision: 99, features: [] });
+    resolveUndo({ ...rollbackOk(), revision: 2 });
+    await flush();
+
+    expect(documentStore.getState().documentId).toBe("replacement");
+    expect(documentStore.getState().revision).toBe(99);
   });
 
   // ── cancel / teardown ────────────────────────────────────────────────────────
@@ -651,7 +805,10 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     toolChipStore.getState().onConfirm?.();
     await flush();
 
-    expect(toolStore.getState().modelTool).toBe("select");
+    expect(toolStore.getState().modelTool).toBe("fillet");
+    expect(toolChipStore.getState().kind).toBe("filletRadius");
+    expect(toolChipStore.getState().value).toBe(4);
+    expect(toolChipStore.getState().onConfirm).toBeTypeOf("function");
     expect(viewportStore.getState().statusHint?.message).toBe("Fillet failed: kernel said no");
     expect(viewportStore.getState().statusHint?.severity).toBe("error");
   });

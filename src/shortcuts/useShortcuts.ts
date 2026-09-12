@@ -16,9 +16,8 @@ import {
   deleteConstraints,
   deleteEntities,
   flushSketchMutations,
-  redoSketch,
   setEntitiesConstruction,
-  undoSketch,
+  toggleConstructionModeWithHint,
 } from "@/tools/sketch/sketchService";
 import { visibleConstraints } from "@/features/inspector/ConstraintList";
 import { applicableConstraintsFor } from "@/features/sketch/useApplicableConstraints";
@@ -26,7 +25,6 @@ import { CONSTRAINT_REQUIREMENT } from "@/features/sketch/constraintCatalog";
 import { documentStore } from "@/stores/documentStore";
 import type { SketchConstraintType } from "@/ipc/types";
 import { sketchStore } from "@/stores/sketchStore";
-import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { activateTool } from "@/tools/activateTool";
 import {
   closeProject,
@@ -39,16 +37,14 @@ import { modelingContext } from "@/modules/modeling/selectionContext";
 import { usePlatform, type Platform } from "@/platform";
 import { logWarn } from "@/debug/log";
 import { resolveBinding, type ShortcutAction } from "./keymap";
+import { isEditableTarget } from "./editableTarget";
+import { runRedo, runUndo } from "@/features/shell/undoActions";
 
-function isEditableTarget(el: EventTarget | null): boolean {
-  if (!(el instanceof HTMLElement)) return false;
-  const tag = el.tagName;
-  return (
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    tag === "SELECT" ||
-    el.isContentEditable
-  );
+function isPopupKeyboardEvent(event: KeyboardEvent): boolean {
+  const selector = "[data-cad-keyboard-scope]";
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  if (path.some((node) => node instanceof Element && node.matches(selector))) return true;
+  return event.target instanceof Element && !!event.target.closest(selector);
 }
 
 /** Esc ladder: cancel active tool → exit isolation → exit section view →
@@ -157,7 +153,7 @@ function runToggleConstruction(): void {
   const sel = sketchSelectionStore.getState().selected;
   const entityIds = [...new Set(sel.map((s) => s.entityId))];
   if (entityIds.length === 0) {
-    sketchStore.getState().toggleConstructionMode();
+    toggleConstructionModeWithHint();
     return;
   }
   const picked = sketchStore.getState().session?.entities.filter((e) => entityIds.includes(e.id)) ?? [];
@@ -273,29 +269,11 @@ export function useShortcuts(): void {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // Undo / redo own the ⌘Z / ⇧⌘Z (and Ctrl+Y) chords (F-WP7). In SKETCH mode
-      // they drive the sketch-scoped undo (sketchService); in model mode, the
-      // ModelToolController history — mode-gated so the two never cross-fire.
+      // A portaled popup owns its keyboard interaction. This bail is deliberately
+      // before every CAD/file chord so fields retain native undo and a menu's
+      // Escape handler remains its local close path.
+      if (isPopupKeyboardEvent(e)) return;
       const mod = e.metaKey || e.ctrlKey;
-      const inSketch = toolStore.getState().mode === "sketch";
-      if (mod && (e.key === "z" || e.key === "Z")) {
-        e.preventDefault();
-        if (inSketch) {
-          if (e.shiftKey) void redoSketch(createClient());
-          else void undoSketch(createClient());
-        } else {
-          const ctrl = getModelToolController();
-          if (e.shiftKey) void ctrl?.redo();
-          else void ctrl?.undo();
-        }
-        return;
-      }
-      if (mod && (e.key === "y" || e.key === "Y")) {
-        e.preventDefault();
-        if (inSketch) void redoSketch(createClient());
-        else void getModelToolController()?.redo();
-        return;
-      }
       // File chords own ⌘S (Save) / ⇧⌘S (Save As) / ⌘O (Open) in every mode; they
       // route through the shared fileActions bridge (Rust owns dialogs + fs).
       if (mod && (e.key === "s" || e.key === "S")) {
@@ -322,9 +300,30 @@ export function useShortcuts(): void {
         paletteStore.getState().toggle();
         return;
       }
+      // The editable-target bail runs HERE, above undo/redo rather than below it
+      // (WP-U1). ⌘Z inside a number field used to reach the document history and
+      // revert the model instead of the typo — the chord was resolved before
+      // anything asked where the focus was. ⌘K above stays the one documented
+      // exception; the file chords are above it too, and deliberately, because
+      // ⌘S must save whatever the focus is.
+      if (isEditableTarget(e.target)) return;
+      // Undo / redo own the ⌘Z / ⇧⌘Z (and Ctrl+Y) chords (F-WP7) through the ONE
+      // router every surface shares (`undoActions`) — the keydown lane, the ⌘K
+      // palette and the native Edit menu must not each decide what undo means.
+      // The router re-checks the focus itself, so this bail is belt and braces.
+      if (mod && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        if (e.shiftKey) void runRedo();
+        else void runUndo();
+        return;
+      }
+      if (mod && (e.key === "y" || e.key === "Y")) {
+        e.preventDefault();
+        void runRedo();
+        return;
+      }
       // Leave remaining OS / app chords (Cmd/Ctrl/Alt) to their owners; Shift ok.
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (isEditableTarget(e.target)) return;
       if (e.repeat) return;
       const action = resolveBinding(e.key, e.shiftKey, toolStore.getState().mode);
       if (!action) {

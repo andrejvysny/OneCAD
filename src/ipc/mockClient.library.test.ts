@@ -73,6 +73,29 @@ describe("mockClient.classifyElement — measured cylinder answers", () => {
   it("is null for a key the body does not carry", async () => {
     expect(await mockClient.classifyElement(MOCK_DEMO_BORE_BODY_ID, "", "f:999")).toBeNull();
   });
+
+  // WP-U11: the measure tool's Ø reading on a circle edge, from the same
+  // `classifyElement` frame the placement solver already computes.
+  it("reports the outer top ring as a circle edge with the outer radius", async () => {
+    const ring = await mockClient.classifyElement(MOCK_DEMO_BORE_BODY_ID, "", "e:0");
+    expect(ring!.kind).toBe("edge");
+    expect(ring!.curveType).toBe("circle");
+    expect(ring!.frame!.radius).toBeCloseTo(20, 3);
+    expect(ring!.frame!.normal).toBeNull();
+    expect(ring!.frame!.axis![2]).toBeCloseTo(1, 3);
+  });
+
+  it("still reports the bore's own top ring as a circle, at the bore radius", async () => {
+    const bore = await mockClient.classifyElement(MOCK_DEMO_BORE_BODY_ID, "", "e:2");
+    expect(bore!.curveType).toBe("circle");
+    expect(bore!.frame!.radius).toBeCloseTo(4.25, 3);
+  });
+
+  it("still reports a straight box edge as a line with no frame — the existing lane is untouched", async () => {
+    const boxEdge = await mockClient.classifyElement("body1", "", "e:0");
+    expect(boxEdge!.curveType).toBe("line");
+    expect(boxEdge!.frame).toBeNull();
+  });
 });
 
 describe("mockClient library catalog — mirrors the shipped seed packages", () => {

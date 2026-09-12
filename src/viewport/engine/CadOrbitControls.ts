@@ -30,6 +30,12 @@
 import * as THREE from "three";
 import type { CameraRig } from "./CameraRig";
 import {
+  CAMERA_MAX_DISTANCE,
+  CAMERA_MIN_DISTANCE,
+  computeCameraFit,
+  type FitViewport,
+} from "./cameraFit";
+import {
   navInit,
   navReduce,
   type DevicePref,
@@ -182,6 +188,13 @@ interface TweenTarget {
   pitch: number;
   distance: number;
   target: THREE.Vector3;
+}
+
+export interface FrameViewRequest {
+  readonly bounds: THREE.Box3;
+  readonly viewport: FitViewport;
+  readonly yaw?: number;
+  readonly pitch?: number;
 }
 
 interface Tween {
@@ -542,6 +555,26 @@ export class CadOrbitControls {
     });
   }
 
+  /** Frame explicit bounds inside an explicit measured work area. Refuses an impossible fit. */
+  frameView(request: FrameViewRequest): boolean {
+    const yaw = request.yaw ?? this.yaw;
+    const pitch = request.pitch ?? this.pitch;
+    const offset = sphericalToOffset(yaw, pitch, 1);
+    const target = computeCameraFit({
+      bounds: request.bounds,
+      basis: this.rig.basisForOffset(offset),
+      projection: this.rig.projection,
+      verticalFovDeg: this.rig.fovDeg,
+      aspect: this.rig.aspectRatio,
+      viewport: request.viewport,
+      yaw,
+      pitch,
+    });
+    if (!target) return false;
+    this.animateTo(target);
+    return true;
+  }
+
   /** Snap to a canonical view given a target→camera direction (ViewCube). */
   snapToViewDirection(dir: THREE.Vector3): void {
     const d = dir.clone().normalize();
@@ -579,10 +612,17 @@ export class CadOrbitControls {
     animated = true,
     xAxis?: THREE.Vector3,
   ): void {
-    const d = normal.clone().normalize();
-    const yaw = (xAxis && yawForPlaneXAxis(xAxis)) ?? yawForDirection(d);
-    const pitch = clampPitch(Math.asin(Math.max(-1, Math.min(1, d.z))));
+    const { yaw, pitch } = this.orientationAlongNormal(normal, xAxis);
     this.setView({ yaw, pitch, distance, target: target.clone() }, animated);
+  }
+
+  orientationAlongNormal(normal: THREE.Vector3, xAxis?: THREE.Vector3): { yaw: number; pitch: number } {
+    const d = normal.clone().normalize();
+    const pole = Math.hypot(d.x, d.y) < POLE_EPS;
+    return {
+      yaw: pole && xAxis ? (yawForPlaneXAxis(xAxis) ?? yawForDirection(d)) : yawForDirection(d),
+      pitch: clampPitch(Math.asin(Math.max(-1, Math.min(1, d.z)))),
+    };
   }
 
   private defaultDistance(): number {
@@ -639,11 +679,8 @@ export class CadOrbitControls {
 
 // ---- module-local helpers ----
 
-const MIN_DIST = 0.5;
-const MAX_DIST = 50_000;
-
 function clampDistance(d: number): number {
-  return Math.max(MIN_DIST, Math.min(MAX_DIST, d));
+  return Math.max(CAMERA_MIN_DISTANCE, Math.min(CAMERA_MAX_DISTANCE, d));
 }
 
 function clampFactor(f: number): number {

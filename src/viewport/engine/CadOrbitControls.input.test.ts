@@ -17,6 +17,7 @@ import type { DevicePref } from "./navInput";
 
 interface Harness {
   controls: CadOrbitControls;
+  rig: CameraRig;
   el: HTMLElement;
   pref: { value: DevicePref };
   dragActive: { value: boolean };
@@ -38,8 +39,10 @@ function setup(
   const dragActive = { value: false };
   const devices: string[] = [];
 
+  const rig = new CameraRig(76);
+  rig.setAspect(1000 / 800);
   const controls = new CadOrbitControls({
-    rig: new CameraRig(76),
+    rig,
     element: el,
     onChange: () => {},
     getBounds,
@@ -48,7 +51,7 @@ function setup(
     onDeviceChange: (d) => devices.push(d),
   });
   controls.applyToRig();
-  return { controls, el, pref: prefRef, dragActive, devices };
+  return { controls, rig, el, pref: prefRef, dragActive, devices };
 }
 
 function wheel(
@@ -371,6 +374,42 @@ describe("CadOrbitControls — fitView bounds argument", () => {
     settle(h);
     expect(h.controls.getTarget().toArray()).toEqual([0, 0, 0]);
     expect(h.controls.getDistance()).toBeGreaterThan(0);
+  });
+});
+
+describe("CadOrbitControls — measured frame", () => {
+  const bounds = new THREE.Box3(new THREE.Vector3(-4, -3, -2), new THREE.Vector3(8, 6, 5));
+  const viewport = { width: 1000, height: 800, safeRect: { x: 200, y: 80, width: 620, height: 650 } };
+
+  it("animates once to the requested destination orientation", () => {
+    const h = setup();
+    expect(h.controls.frameView({ bounds, viewport, yaw: 0.4, pitch: 0.7 })).toBe(true);
+    h.controls.update(performance.now() + 10_000);
+    expect(h.controls.yaw).toBeCloseTo(0.4, 12);
+    expect(h.controls.pitch).toBeCloseTo(0.7, 12);
+    for (const x of [bounds.min.x, bounds.max.x]) {
+      for (const y of [bounds.min.y, bounds.max.y]) {
+        for (const z of [bounds.min.z, bounds.max.z]) {
+          const p = new THREE.Vector3(x, y, z).project(h.rig.getCamera());
+          expect(p.x).toBeGreaterThanOrEqual(-0.6);
+          expect(p.x).toBeLessThanOrEqual(0.64);
+          expect(p.y).toBeGreaterThanOrEqual(-0.825);
+          expect(p.y).toBeLessThanOrEqual(0.8);
+        }
+      }
+    }
+  });
+
+  it("does not replace the current tween when the measured work area is blocked", () => {
+    const h = setup();
+    expect(h.controls.frameView({ bounds, viewport, yaw: 0.2, pitch: 0.3 })).toBe(true);
+    expect(h.controls.frameView({
+      bounds,
+      viewport: { width: 1000, height: 800, safeRect: { x: 1100, y: 0, width: 100, height: 100 } },
+    })).toBe(false);
+    h.controls.update(performance.now() + 10_000);
+    expect(h.controls.yaw).toBeCloseTo(0.2, 12);
+    expect(h.controls.pitch).toBeCloseTo(0.3, 12);
   });
 });
 

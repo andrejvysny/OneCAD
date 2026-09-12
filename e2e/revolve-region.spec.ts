@@ -114,7 +114,7 @@ test("revolve arms on the SELECTED region — no region picker, then commits", a
   const axisClient = await planePointToClient(page, snap.plane, axisMid);
   await clickAtClient(page, axisClient.x, axisClient.y);
   await expect(page.getByText(/Drag to set angle/)).toBeVisible();
-  await expect(page.getByLabel("Dimension value")).toHaveValue("360");
+  await expect(page.getByLabel("Angle (°)")).toHaveValue("360");
 
   await page.keyboard.press("Enter");
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);

@@ -43,6 +43,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, Notify};
 
+static NEXT_MANAGER_ID: AtomicU64 = AtomicU64::new(1);
+
 use onecad_protocol::client::{ProtocolClient, WorkerEvent};
 use onecad_protocol::messages::{HelloResult, Lane};
 use onecad_protocol::ProtocolError;
@@ -185,6 +187,7 @@ impl SupervisorConfig {
 
 /// Shared supervisor + connection state (behind the `WorkerManager`).
 struct Shared {
+    manager_id: u64,
     config: SupervisorConfig,
     /// The current connection; `None` while (re)starting or Failed.
     conn: RwLock<Option<Arc<ProtocolClient>>>,
@@ -545,6 +548,12 @@ pub struct WorkerManager {
 }
 
 impl WorkerManager {
+    /// Process-local identity for runtime ownership fencing.
+    #[must_use]
+    pub(crate) fn identity_token(&self) -> u64 {
+        self.shared.manager_id
+    }
+
     /// Spawns the supervisor for `config` (returns immediately; the connection is
     /// established asynchronously). Call [`wait_ready`](Self::wait_ready) to await
     /// the first successful handshake.
@@ -552,6 +561,7 @@ impl WorkerManager {
     pub fn spawn(config: SupervisorConfig) -> Self {
         let (lifecycle, _) = broadcast::channel(64);
         let shared = Arc::new(Shared {
+            manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             config,
             conn: RwLock::new(None),
             epoch: AtomicU64::new(1),
@@ -604,6 +614,11 @@ impl WorkerManager {
     /// Sets the restart hook (mark-dirty + replay). Replaces any prior hook.
     pub fn set_restart_hook(&self, hook: RestartHook) {
         *self.shared.restart_hook.write().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invoke_restart_hook(&self, epoch: WorkerEpoch) {
+        fire_restart_hook(&self.shared, epoch);
     }
 
     /// Awaits [`WorkerState::Ready`] up to `timeout`; `false` on
@@ -2964,6 +2979,7 @@ mod poison_tests {
     fn shared(poison_threshold: u32) -> Arc<Shared> {
         let (lifecycle, _) = broadcast::channel(8);
         Arc::new(Shared {
+            manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             config: SupervisorConfig {
                 binary: PathBuf::from("/nonexistent/onecad-worker"),
                 envs: Vec::new(),

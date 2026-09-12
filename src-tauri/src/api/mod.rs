@@ -9,11 +9,9 @@
 //!
 //! ## Tracing (DEV-OBSERVABILITY wave R)
 //!
-//! The **baseline is free**: tauri's `tracing` cargo feature wraps every
-//! `#[tauri::command]` in an `ipc::request::handler` debug span carrying the command
-//! name + timing, so a new command is observable the day it is added. Only commands
-//! whose *arguments* identify the work are hand-`#[instrument]`ed on top (always
-//! `skip_all` + explicit id fields — payloads never enter the log).
+//! Commands that identify durable work are hand-`#[instrument]`ed (`skip_all` plus
+//! explicit ids; payloads never enter the log). Tauri's framework tracing feature
+//! stays disabled because its synchronous WebKit eval path can invert webview locks.
 //!
 //! Two deliberate omissions:
 //! * `err(…)` is only ever attached to a `Result`-returning command (it is a compile
@@ -27,6 +25,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(debug_assertions)]
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
+};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -35,7 +41,7 @@ use onecad_core::document::modules::{ModuleId, ModuleState};
 use onecad_core::document::record::{MateSidedness, Operation};
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::document::variables::{Scalar, Unit, Variable, VariableTable};
-use onecad_core::edit::{EditCommand, SketchEditOp};
+use onecad_core::edit::{EditCommand, SketchEditOp, VisibilityTarget};
 use onecad_core::expr::Dimension;
 use onecad_core::ids::{
     BodyId, ConstraintId, DocumentId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey,
@@ -51,10 +57,10 @@ use crate::autosave;
 use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
 use crate::dto::{dimension_name, variable_dtos, EvaluatedExpressionDto};
 use crate::dto::{
-    BeginGestureDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto,
-    FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto, RecentProjectDto,
-    RecoveryInfoDto, ResolveRefDto, SaveOutcomeDto, SketchOnFaceDto, SketchSessionDto,
-    SketchUpsertDto, VariableDto,
+    BeginGestureDto, CancelSketchDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto,
+    DragSolveDto, FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto,
+    RecentProjectDto, RecoveryInfoDto, ResolveRefDto, SaveOutcomeDto, SketchOnFaceDto,
+    SketchSessionDto, SketchUpsertDto, VariableDto,
 };
 use crate::error::ApiError;
 use crate::events;
@@ -83,11 +89,17 @@ pub fn open_runtime_over_new_backend(
     state: &AppState,
     path: &Path,
 ) -> Result<DocumentRuntime, ApiError> {
-    let (engine, meshes, solver) = state.make_backend();
-    DocumentRuntime::open(path, engine, meshes, solver).map_err(|e| {
-        state.rollback_backend();
-        ApiError::from(e)
-    })
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    DocumentRuntime::open(path, engine, meshes, solver)
+        .map(|mut rt| {
+            rt.bind_geometry_read_query(query)
+                .expect("fresh runtime has no geometry-read provider");
+            rt
+        })
+        .map_err(|e| {
+            state.rollback_backend();
+            ApiError::from(e)
+        })
 }
 
 /// Async sibling of [`open_runtime_over_new_backend`] — the same swap + open +
@@ -108,9 +120,15 @@ pub async fn open_runtime_over_new_backend_blocking(
     state: &AppState,
     path: PathBuf,
 ) -> Result<DocumentRuntime, ApiError> {
-    let (engine, meshes, solver) = state.make_backend();
-    match tokio::task::spawn_blocking(move || DocumentRuntime::open(&path, engine, meshes, solver))
-        .await
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
+    match tokio::task::spawn_blocking(move || {
+        DocumentRuntime::open(&path, engine, meshes, solver).map(|mut rt| {
+            rt.bind_geometry_read_query(query)
+                .expect("fresh runtime has no geometry-read provider");
+            rt
+        })
+    })
+    .await
     {
         Ok(Ok(rt)) => Ok(rt),
         Ok(Err(e)) => {
@@ -147,40 +165,54 @@ pub async fn open_runtime_over_new_backend_blocking(
 /// itself is factored out with an explicit `timeout` so a test can inject a
 /// short one instead of paying out the real window.
 ///
-/// `still_current` is consulted AFTER the wait: the gate can outlive its document
+/// `enqueue_if_current` runs AFTER the wait: the gate can outlive its runtime
 /// — a close/open during the window retires the worker this readiness watches and
-/// installs a NEW runtime whose own gate is pending — and a stale gate firing then
-/// would race that document's handshake with a from-0 replay it never asked for
-/// (or supersede its active regen). The scheduler is global, so the request alone
-/// carries no document identity; the probe supplies it.
+/// installs a NEW runtime whose own gate is pending. The callback checks and
+/// enqueues while holding the runtime lock, so stale work cannot supersede current
+/// scheduler work; the tag also fences replacement before driver begin.
 fn spawn_gated_regen<C, Fut>(
     readiness: std::sync::Arc<dyn crate::worker::WorkerReadiness>,
     sched: crate::state::SharedScheduler,
     timeout: std::time::Duration,
-    still_current: C,
+    expected_runtime_session: String,
+    enqueue_if_current: C,
 ) where
-    C: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = bool> + Send,
+    C: FnOnce(crate::state::SharedScheduler, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
 {
     tauri::async_runtime::spawn(async move {
         let _ = readiness.wait_ready(timeout).await;
-        if !still_current().await {
-            return;
-        }
-        if let Some(handle) = sched.get() {
-            handle.request(RegenRequest::ToEnd { from: 0 });
-        }
+        enqueue_if_current(sched, expected_runtime_session).await;
     });
+}
+
+async fn enqueue_initial_regen_if_current(
+    runtime: std::sync::Arc<tokio::sync::Mutex<Option<DocumentRuntime>>>,
+    sched: crate::state::SharedScheduler,
+    expected_runtime_session: String,
+) {
+    let guard = runtime.lock().await;
+    if guard
+        .as_ref()
+        .is_some_and(|rt| rt.matches_runtime_session(&expected_runtime_session))
+    {
+        if let Some(handle) = sched.get() {
+            handle.request_for_runtime(
+                RegenRequest::RevertToEnd { from: 0 },
+                Some(expected_runtime_session),
+            );
+        }
+    }
 }
 
 /// Production entry point for [`spawn_gated_regen`] — the 8 s window is generous
 /// relative to [`AppState::prewarm`]'s near-instant common case, while still
 /// bounding how long a genuinely stuck cold start can silently withhold the
-/// document's first regen. The document uuid captured here is the staleness probe:
-/// the gate fires only while the SAME document is still the open one.
+/// document's first regen. The immutable runtime session is both the early
+/// staleness probe and the scheduler directive's begin-time ABA fence.
 pub(crate) async fn schedule_initial_regen(state: &AppState) {
     let expected = match state.runtime.lock().await.as_ref() {
-        Some(rt) => rt.document_uuid(),
+        Some(rt) => rt.runtime_session(),
         None => return, // no document — nothing to rebuild
     };
     let runtime = state.runtime.clone();
@@ -188,13 +220,8 @@ pub(crate) async fn schedule_initial_regen(state: &AppState) {
         state.readiness(),
         state.scheduler.clone(),
         std::time::Duration::from_secs(8),
-        move || async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .is_some_and(|rt| rt.document_uuid() == expected)
-        },
+        expected.clone(),
+        move |sched, expected| enqueue_initial_regen_if_current(runtime, sched, expected),
     );
 }
 
@@ -204,18 +231,25 @@ pub async fn new_document(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DocumentSnapshotDto, ApiError> {
-    let (engine, meshes, solver) = state.make_backend();
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
-        *guard = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        let mut runtime = DocumentRuntime::new_blank(engine, meshes, solver);
+        runtime
+            .bind_geometry_read_query(query)
+            .expect("fresh runtime has no geometry-read provider");
+        *guard = Some(runtime);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
         (snapshot_of(rt), rt.projection())
     };
     // The new runtime is published, so the previous document's worker is now
     // unreachable — retire it (see `AppState::make_backend`'s two-phase contract).
     // Nothing between the swap and here can fail, so there is no rollback arm.
     state.commit_backend();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "new document");
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     Ok(snapshot)
 }
@@ -282,9 +316,12 @@ pub async fn open_document(
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
         (snapshot_of(rt), rt.projection())
     };
     state.commit_backend();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "opened document");
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     recents::record(&app, Path::new(&path));
     // Rebuild geometry from the loaded (all-Dirty) timeline, once the worker can
@@ -314,7 +351,7 @@ pub async fn import_step(
     app: AppHandle,
     path: String,
 ) -> Result<DocumentSnapshotDto, ApiError> {
-    let (engine, meshes, solver) = state.make_backend();
+    let (engine, meshes, solver, query) = state.make_backend_with_query();
     // Worker round-trip FIRST, with no lock held and no runtime published (the
     // R-WP11 rule); the backend was just built, so `state.step_import()` is this
     // document's worker.
@@ -326,6 +363,8 @@ pub async fn import_step(
         .await
         .inspect_err(|_| state.rollback_backend())?;
     let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+    rt.bind_geometry_read_query(query)
+        .expect("fresh runtime has no geometry-read provider");
     rt.add_import_record(&prepared, false)
         .inspect_err(|_| state.rollback_backend())?;
     let (snapshot, projection) = {
@@ -333,9 +372,12 @@ pub async fn import_step(
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
         (snapshot_of(rt), rt.projection())
     };
     state.commit_backend();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "imported document");
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     schedule_initial_regen(&state).await;
     state.note_mutation();
@@ -401,11 +443,14 @@ pub async fn import_project(
         let mut guard = state.runtime.lock().await;
         let create_new = guard.is_none();
         let outcome = if create_new {
-            let (engine, meshes, solver) = state.make_backend();
+            let (engine, meshes, solver, query) = state.make_backend_with_query();
             let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+            rt.bind_geometry_read_query(query)
+                .expect("fresh runtime has no geometry-read provider");
             let outcome = rt.import_project(Path::new(&path))?;
             rt.adopt_current_epoch();
             *guard = Some(rt);
+            state.bind_restart_owner(guard.as_ref().unwrap());
             outcome
         } else {
             let rt = guard
@@ -833,6 +878,7 @@ pub async fn close_document(state: State<'_, AppState>, app: AppHandle) -> Resul
         let mut guard = state.runtime.lock().await;
         let id = guard.as_ref().map(DocumentRuntime::document_uuid);
         *guard = None;
+        state.clear_restart_owner();
         id
     };
     if let (Some(id), Some(root)) = (closed, autosave::autosave_root(&app)) {
@@ -842,6 +888,8 @@ pub async fn close_document(state: State<'_, AppState>, app: AppHandle) -> Resul
     // process leak — it used to live until the app quit) and pre-warm its
     // replacement so the next open is instant. Exactly one sidecar stays alive.
     state.rewarm();
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&DocumentProjection::empty(), "document closed");
     let _ = app.emit(events::PROJECTION_UPDATED, &DocumentProjection::empty());
     Ok(())
 }
@@ -979,6 +1027,7 @@ pub async fn recover_document(
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
+        state.bind_restart_owner(rt);
         (
             snapshot_of(rt),
             rt.projection(),
@@ -1006,6 +1055,8 @@ pub async fn recover_document(
         };
         let _ = onecad_core::io::recovery::write_marker(root, &marker);
     }
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "recovered document");
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     // DI-2: the recovered work is unsaved and must be protected from the NEXT crash
     // on its own merits. `mark_recovered` sets `dirty`, but the autosave loop is
@@ -1077,12 +1128,180 @@ pub async fn apply_edit_command(
         projection.applied_ops,
         projection.total_ops
     );
+    #[cfg(debug_assertions)]
+    render_watchdog_reconcile_projection(&projection, "document edit");
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     if let Some(sched) = state.scheduler.get() {
         sched.handle(&outcome);
     }
     state.note_mutation();
     Ok(projection)
+}
+
+/// Automatic display effects coupled to a modeling feature commit.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationEffects {
+    #[serde(default)]
+    hide_sketch_ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyOperationResponse {
+    projection: DocumentProjection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollback_token: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackFailedOperationResponse {
+    projection: DocumentProjection,
+    rolled_back: bool,
+    reason: &'static str,
+}
+
+/// Applies a fresh operation and its automatic sketch hiding atomically. User
+/// visibility toggles continue through `apply_edit_command` as independent edits.
+#[tauri::command]
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn apply_operation(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    commands: Vec<EditCommand>,
+    effects: Option<OperationEffects>,
+) -> Result<ApplyOperationResponse, ApiError> {
+    if commands.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "apply_operation requires at least one addOperation".into(),
+        ));
+    }
+    let mut consumed = std::collections::BTreeSet::new();
+    let mut labels = Vec::new();
+    let mut record_ids = Vec::new();
+    let reedit = commands.len() == 1
+        && matches!(
+            commands.first(),
+            Some(EditCommand::UpdateOperationParams { .. })
+        );
+    for command in &commands {
+        match command {
+            EditCommand::AddOperation { record, .. } if !reedit => {
+                consumed.extend(record.op.derive_inputs().sketches);
+                labels.push(semantic_operation_label(record));
+                record_ids.push(record.record_id);
+            }
+            EditCommand::UpdateOperationParams { record, op } if reedit => {
+                labels.push(semantic_operation_type(op));
+                record_ids.push(*record);
+            }
+            _ => {
+                return Err(ApiError::InvalidCommand(
+                    "apply_operation accepts fresh addOperation commands or one updateOperationParams"
+                        .into(),
+                ));
+            }
+        }
+    }
+    let label = if labels.iter().all(|candidate| candidate == &labels[0]) {
+        labels[0].clone()
+    } else {
+        "Model features".to_string()
+    };
+    let mut commands = commands;
+    let mut hides = std::collections::BTreeSet::new();
+    let requested_hides = effects.unwrap_or_default().hide_sketch_ids;
+    if reedit && !requested_hides.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "automatic sketch hiding is only valid for fresh operations".into(),
+        ));
+    }
+    for raw in requested_hides {
+        let sketch = SketchId::from_str(&raw)
+            .map_err(|e| ApiError::InvalidCommand(format!("bad sketchId {raw:?}: {e}")))?;
+        if !consumed.contains(&sketch) {
+            return Err(ApiError::InvalidCommand(format!(
+                "cannot auto-hide sketch {raw}: it is not consumed by this operation"
+            )));
+        }
+        if !hides.insert(sketch) {
+            continue;
+        }
+        commands.push(EditCommand::SetVisibility {
+            target: VisibilityTarget::Sketch(sketch),
+            visible: false,
+        });
+    }
+    let (outcome, projection, rollback_token) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("applyOperation".into()))?;
+        let prior_undo_position = rt.undo_position();
+        let outcome = rt.apply_transaction(&label, commands)?;
+        let rollback_token = rt.arm_operation_rollback(record_ids, prior_undo_position);
+        (outcome, rt.projection(), rollback_token)
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(scheduler) = state.scheduler.get() {
+        scheduler.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(ApplyOperationResponse {
+        projection,
+        rollback_token,
+    })
+}
+
+/// Undoes a failed operation only when its backend-issued receipt still names
+/// the current runtime's exact undo top.
+#[tauri::command]
+#[tracing::instrument(skip(state, app), err(Display))]
+pub async fn rollback_failed_operation(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    token: String,
+) -> Result<RollbackFailedOperationResponse, ApiError> {
+    let (attempt, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("rollbackFailedOperation".into()))?;
+        let attempt = rt.rollback_failed_operation(&token);
+        let projection = rt.projection();
+        (attempt, projection)
+    };
+    if attempt.rolled_back {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+        if let (Some(scheduler), Some(request)) = (
+            state.scheduler.get(),
+            attempt.revert.as_ref().and_then(|revert| revert.regen),
+        ) {
+            scheduler.request(request);
+        }
+        state.note_mutation();
+    }
+    Ok(RollbackFailedOperationResponse {
+        projection,
+        rolled_back: attempt.rolled_back,
+        reason: attempt.reason,
+    })
+}
+
+fn semantic_operation_label(record: &onecad_core::document::record::OperationRecord) -> String {
+    let authored = record.name.trim();
+    if !authored.is_empty() && authored != "Operation" && authored != "Add Operation" {
+        return authored.to_string();
+    }
+    semantic_operation_type(&record.op)
+}
+
+fn semantic_operation_type(op: &Operation) -> String {
+    serde_json::to_value(op)
+        .ok()
+        .and_then(|value| value.get("opType")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "Model feature".into())
 }
 
 /// The SCHEMA §9 `mateAxisReversed` repair (`CadClient.repairMateAxis`;
@@ -1644,17 +1863,35 @@ pub async fn get_mesh(
     body_id: String,
     lod: String,
     generation: Option<u64>,
+    expected_runtime_session: Option<String>,
 ) -> Result<tauri::ipc::Response, ApiError> {
     let body = BodyId::from_str(&body_id)
         .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId {body_id:?}: {e}")))?;
     let lod = lod_from_str(&lod);
-    let bytes = {
+    tracing::debug!(bodyId = %body_id, generation, "get_mesh: prepare");
+    let prepared = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("getMesh".into()))?;
-        rt.get_mesh(body, lod, generation).await
+        if expected_runtime_session
+            .as_deref()
+            .is_some_and(|expected| !rt.matches_runtime_session(expected))
+        {
+            return Err(ApiError::StalePreview(
+                "mesh request belongs to a replaced document runtime".into(),
+            ));
+        }
+        rt.prepare_mesh_fetch(body, lod, generation)
     };
+    let bytes = match prepared.drive().await {
+        Ok(bytes) => bytes,
+        Err(driven) => {
+            let mut guard = state.runtime.lock().await;
+            guard.as_mut().and_then(|rt| rt.adopt_mesh_fetch(driven))
+        }
+    };
+    tracing::debug!(bodyId = %body_id, generation, hit = bytes.is_some(), "get_mesh: complete");
     // MESH1 travels verbatim; a miss is an empty buffer (frontend keeps its mesh).
     let data = bytes.map(|a| a.as_ref().clone()).unwrap_or_default();
     Ok(tauri::ipc::Response::new(data))
@@ -1672,6 +1909,7 @@ pub async fn enter_sketch(
     state: State<'_, AppState>,
     app: AppHandle,
     sketch_id: String,
+    created_here: Option<bool>,
 ) -> Result<SketchSessionDto, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
     let (session, projection) = {
@@ -1680,6 +1918,9 @@ pub async fn enter_sketch(
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("enterSketch".into()))?;
         let session = rt.enter_sketch(id).await?;
+        if created_here.unwrap_or(false) {
+            rt.mark_open_sketch_created(id);
+        }
         (session, rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
@@ -1911,16 +2152,53 @@ pub async fn end_gesture(
 }
 
 /// Exits sketch mode / cancels an in-flight gesture without committing.
+///
+/// `discard` (absent ⇒ `false`) is WP-U7 D-1: the sketch chrome's **Cancel**
+/// asks for the session's edits to be REVERTED to the state at sketch entry,
+/// where Esc and Finish keep them. A discard that lands takes the same lane a
+/// [`undo`] does — projection event plus the revert's own regen request — because
+/// without that regen the viewport keeps showing the geometry just discarded.
 #[tauri::command]
-pub async fn cancel_sketch(state: State<'_, AppState>, sketch_id: String) -> Result<(), ApiError> {
+pub async fn cancel_sketch(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    sketch_id: String,
+    discard: Option<bool>,
+) -> Result<CancelSketchDto, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
-    tracing::info!("cancel_sketch: sketch={id} (squash-only exit — NO timeline record minted)");
-    let mut guard = state.runtime.lock().await;
-    let rt = guard
-        .as_mut()
-        .ok_or_else(|| ApiError::NoDocument("cancelSketch".into()))?;
-    rt.cancel_sketch(id).await?;
-    Ok(())
+    let discard = discard.unwrap_or(false);
+    tracing::info!(
+        "cancel_sketch: sketch={id} discard={discard} (squash exit — NO timeline record minted)"
+    );
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("cancelSketch".into()))?;
+        let outcome = rt.cancel_sketch(id, discard).await?;
+        // Only a real discard moved the document; a keep-exit stays silent (it
+        // always did, and the following finishSketch publishes anyway).
+        let projection = outcome.discarded.then(|| rt.projection());
+        (outcome, projection)
+    };
+    if let Some(projection) = projection {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    }
+    if let Some(revert) = outcome.revert {
+        if let (Some(sched), Some(request)) = (state.scheduler.get(), revert.regen) {
+            sched.request(request);
+        }
+    }
+    // Dirty the document only when a step actually moved (mirrors `api::undo`):
+    // a discard with nothing committed since entry changes no bytes and must not
+    // mark the document unsaved.
+    if outcome.discarded && outcome.revert.is_some() {
+        state.note_mutation();
+    }
+    Ok(CancelSketchDto {
+        discarded: outcome.discarded,
+        kept_reason: outcome.kept_reason.map(str::to_owned),
+    })
 }
 
 /// Computes the closed profile regions for extrude/revolve selection + preview fill
@@ -1995,6 +2273,7 @@ pub async fn promote_selection(
     snapshot_id: u64,
     body_id: String,
     picks: Vec<PickInput>,
+    expected_runtime_session: Option<String>,
 ) -> Result<Vec<PromotedElementDto>, ApiError> {
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
     let picks: Vec<(TopoKey, Option<AnchorIntent>)> = picks
@@ -2006,6 +2285,14 @@ pub async fn promote_selection(
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("promoteSelection".into()))?;
+        if expected_runtime_session
+            .as_deref()
+            .is_some_and(|expected| !rt.matches_runtime_session(expected))
+        {
+            return Err(ApiError::StalePreview(
+                "selection belongs to a replaced document runtime".into(),
+            ));
+        }
         let ids = rt
             .promote_selection(SnapshotId(snapshot_id), body, picks)
             .await?;
@@ -2057,6 +2344,14 @@ pub async fn preview_op(
         _ => onecad_core::regen::Lod::Coarse,
     };
     let (operation, op_id) = parse_preview_operation(op)?;
+    if matches!(
+        operation,
+        Operation::Known(onecad_core::document::record::KnownOperation::FeaturePattern(_))
+    ) {
+        return Err(ApiError::InvalidCommand(
+            "FeaturePattern preview requires authoritative source expansion".into(),
+        ));
+    }
     let op_id_log = op_id.clone();
     let result = state
         .preview()
@@ -2146,8 +2441,8 @@ pub async fn face_sketch_plane(
 ) -> Result<crate::dto::SketchPlaneDto, ApiError> {
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
     {
-        // Presence check only — the runtime lock is NOT held across the worker
-        // round-trip below (the R-WP11 rule; a held lock makes fencing inert).
+        // Prepare the optional scoped ticket; the runtime lock is not held across
+        // worker IO and the ticket is revalidated afterward.
         let guard = state.runtime.lock().await;
         guard
             .as_ref()
@@ -2466,8 +2761,27 @@ pub async fn add_sketch_on_face(
 pub struct ProjectionSourceInput {
     pub body_id: String,
     pub topo_key: String,
+    /// The persistent Rust-minted id, when the pick already carries one.
+    ///
+    /// Present ⇒ the source is addressed by it and promotion is SKIPPED. A
+    /// `TopoKey` is a snapshot-scoped ordinal a regen hands to a different
+    /// sub-shape, so re-resolving one at the head can bind a source the user
+    /// never picked — and this command writes the `projectedHash` staleness
+    /// baseline, which would make such a bind permanently undetectable
+    /// (WP-U4 / D-5). NOT an OCW1 field: the wire already addresses a source by
+    /// `elementId`; this is the Tauri DTO catching up.
+    #[serde(default)]
+    pub element_id: Option<String>,
     #[serde(default)]
     pub anchor: Option<AnchorIntent>,
+}
+
+/// How one projection source is addressed: by the persistent id it already
+/// carries, or by the snapshot-scoped key that has to be promoted to get one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectionAddress {
+    Promoted(ElementId),
+    Pick(TopoKey),
 }
 
 fn refusal_dtos(refusals: Vec<wire::ProjectionRefusal>) -> Vec<crate::dto::ProjectionRefusalDto> {
@@ -2536,23 +2850,44 @@ pub async fn project_to_sketch(
             "projectToSketch: at least one source is required".into(),
         ));
     }
-    // De-duplicate on (body, topoKey), preserving request order: a doubled pick
+    // De-duplicate on (body, address), preserving request order: a doubled pick
     // would otherwise promote as a mismatched batch and project the same edge
     // twice into the sketch.
-    let mut picks: Vec<(BodyId, TopoKey, Option<AnchorIntent>)> = Vec::new();
+    let mut addressed: Vec<(BodyId, ProjectionAddress, Option<AnchorIntent>)> = Vec::new();
     for source in sources {
-        if source.topo_key.is_empty() {
-            return Err(ApiError::InvalidCommand(
-                "projectToSketch: every source needs a topoKey".into(),
-            ));
-        }
         let body = wire::parse_body_id(&source.body_id).map_err(ApiError::InvalidCommand)?;
-        let key = TopoKey::new(source.topo_key);
-        if picks.iter().any(|(b, k, _)| *b == body && *k == key) {
+        let address = match source.element_id.filter(|id| !id.is_empty()) {
+            Some(id) => ProjectionAddress::Promoted(ElementId::new(id)),
+            None => {
+                if source.topo_key.is_empty() {
+                    return Err(ApiError::InvalidCommand(
+                        "projectToSketch: every source needs a topoKey or an elementId".into(),
+                    ));
+                }
+                ProjectionAddress::Pick(TopoKey::new(source.topo_key))
+            }
+        };
+        if addressed
+            .iter()
+            .any(|(b, a, _)| *b == body && *a == address)
+        {
             continue;
         }
-        picks.push((body, key, source.anchor));
+        addressed.push((body, address, source.anchor));
     }
+    // Only the un-promoted sources go through `promote_selection`; a source that
+    // already names its ElementId is bound in the worker's partition already.
+    // Skipping the promotion also skips its stale-pick gate, which costs nothing:
+    // an ElementId is durable across snapshots (Invariant 1), so there is no
+    // older pick snapshot for it to be stale against — and the kernel query plus
+    // `apply_sketch_edit_fenced` below still fence the whole triple on the head.
+    let picks: Vec<(BodyId, TopoKey, Option<AnchorIntent>)> = addressed
+        .iter()
+        .filter_map(|(body, address, anchor)| match address {
+            ProjectionAddress::Pick(key) => Some((*body, key.clone(), anchor.clone())),
+            ProjectionAddress::Promoted(_) => None,
+        })
+        .collect();
     let snapshot = SnapshotId(snapshot_id);
 
     // ── Locked: presence, the gesture refusal, the plane, and the promotion ──
@@ -2592,49 +2927,67 @@ pub async fn project_to_sketch(
         let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     }
 
-    let mut wire_sources = Vec::with_capacity(picks.len());
+    // A source addressed by its ElementId declares the kind the MODE requires:
+    // the worker refuses any other value anyway (`ProjectToSketchPlane` checks
+    // `sources[].kind` against the mode's required kind), and there is no
+    // promotion answer to read one off.
+    let mode_kind = match mode {
+        wire::ProjectionMode::FaceOutline => wire::ProjectionSourceKind::Face,
+        wire::ProjectionMode::Edges => wire::ProjectionSourceKind::Edge,
+    };
+    let mut wire_sources = Vec::with_capacity(addressed.len());
     let mut minted_refusals: Vec<wire::ProjectionRefusal> = Vec::new();
-    for (body, key, _) in &picks {
+    for (body, address, _) in &addressed {
         let body_wire = wire::body_id_wire(*body);
-        let hit = promoted
-            .iter()
-            .find(|p| p.body_id == body_wire && p.topo_key == key.as_str())
-            .ok_or_else(|| {
-                ApiError::Internal(format!(
-                    "projectToSketch: promotion returned no identity for {body_wire} {}",
-                    key.as_str()
-                ))
-            })?;
+        let (element_id, key, kind) = match address {
+            ProjectionAddress::Promoted(id) => (id.as_str().to_string(), "", mode_kind),
+            ProjectionAddress::Pick(key) => {
+                let hit = promoted
+                    .iter()
+                    .find(|p| p.body_id == body_wire && p.topo_key == key.as_str())
+                    .ok_or_else(|| {
+                        ApiError::Internal(format!(
+                            "projectToSketch: promotion returned no identity for {body_wire} {}",
+                            key.as_str()
+                        ))
+                    })?;
+                let kind = match hit.kind.as_str() {
+                    "face" => wire::ProjectionSourceKind::Face,
+                    _ => wire::ProjectionSourceKind::Edge,
+                };
+                (hit.element_id.clone(), key.as_str(), kind)
+            }
+        };
         // A source this sketch has already projected is REFUSED, not projected
         // again: a second coincident outline would give one source two provenance
         // runs, and no later update could tell which rows belong to which
         // (WP-P F15). Per-source, so the rest of the batch still lands.
         if already
             .values()
-            .any(|row| row.source_body == *body && row.source_element_id.as_str() == hit.element_id)
+            .any(|row| row.source_body == *body && row.source_element_id.as_str() == element_id)
         {
             minted_refusals.push(wire::ProjectionRefusal {
                 body_id: body_wire,
-                element_id: hit.element_id.clone(),
-                topo_key: key.as_str().to_string(),
+                element_id: element_id.clone(),
+                topo_key: key.to_string(),
                 code: sketch_projection::ALREADY_PROJECTED.to_string(),
                 message: format!(
-                    "{} is already projected into this sketch — update or detach the existing \
-                     geometry instead of projecting it a second time",
-                    hit.element_id
+                    "{element_id} is already projected into this sketch — update or detach the \
+                     existing geometry instead of projecting it a second time"
                 ),
             });
             continue;
         }
-        wire_sources.push(wire::ProjectionSource {
-            body: *body,
-            address: wire::FaceAddress::ElementId(hit.element_id.as_str()),
-            kind: match hit.kind.as_str() {
-                "face" => wire::ProjectionSourceKind::Face,
-                _ => wire::ProjectionSourceKind::Edge,
-            },
-        });
+        wire_sources.push((*body, element_id, kind));
     }
+    let wire_sources: Vec<wire::ProjectionSource<'_>> = wire_sources
+        .iter()
+        .map(|(body, element_id, kind)| wire::ProjectionSource {
+            body: *body,
+            address: wire::FaceAddress::ElementId(element_id.as_str()),
+            kind: *kind,
+        })
+        .collect();
     if wire_sources.is_empty() {
         // Every pick was already projected: there is nothing to ask the kernel,
         // and an empty `sources` array is not a legal §7.6 request.
@@ -3051,6 +3404,7 @@ pub async fn element_info(
     body_id: String,
     element_id: String,
     topo_key: Option<String>,
+    read_fence: Option<crate::dto::GeometryReadFenceDto>,
 ) -> Result<Option<crate::dto::ElementInfoDto>, ApiError> {
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
     let topo_key = topo_key.unwrap_or_default();
@@ -3059,42 +3413,70 @@ pub async fn element_info(
             "elementInfo: one of elementId / topoKey is required".into(),
         ));
     }
-    {
-        // Presence check only — the runtime lock is NOT held across the worker
-        // round-trip below (the R-WP11 rule; a held lock makes fencing inert).
+    let ticket = {
+        // Prepare the optional scoped ticket; worker IO is unlocked and the
+        // exact runtime/head/provider ticket is revalidated afterward.
         let guard = state.runtime.lock().await;
-        guard
+        let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("elementInfo".into()))?;
-    }
+        read_fence
+            .as_ref()
+            .map(|fence| {
+                if fence.snapshot_id != snapshot_id {
+                    return Err("geometry read snapshot arguments disagree".to_string());
+                }
+                rt.prepare_geometry_read(
+                    &fence.document_id,
+                    &fence.runtime_session,
+                    SnapshotId(fence.snapshot_id),
+                )
+            })
+            .transpose()
+            .map_err(ApiError::StalePreview)?
+    };
     // The caller supplies the snapshot its pick was made against — the same
     // contract `promoteSelection` / `faceSketchPlane` use, so the lookup resolves
     // against the exact snapshot the mesh was tessellated at (Invariant 4).
     let snapshot = SnapshotId(snapshot_id);
-    let query = state.element_query();
-    if !topo_key.is_empty() {
+    let query = ticket
+        .as_ref()
+        .map_or_else(|| state.element_query(), |ticket| ticket.query.clone());
+    let result = if !topo_key.is_empty() {
         if let Some(info) = query
             .query_element_by_topo_key(snapshot, body, &topo_key)
             .await?
         {
-            return Ok(Some(info));
+            Some(info)
+        } else if element_id.is_empty() {
+            None
+        } else {
+            query.query_element(snapshot, body, &element_id).await?
+        }
+    } else if element_id.is_empty() {
+        None
+    } else {
+        query.query_element(snapshot, body, &element_id).await?
+    };
+    if let Some(ticket) = &ticket {
+        let guard = state.runtime.lock().await;
+        if !guard
+            .as_ref()
+            .is_some_and(|rt| rt.geometry_read_is_current(ticket))
+        {
+            return Err(ApiError::StalePreview(
+                "document changed while geometry read was in flight".into(),
+            ));
         }
     }
-    if element_id.is_empty() {
-        return Ok(None);
-    }
-    query
-        .query_element(snapshot, body, &element_id)
-        .await
-        .map_err(Into::into)
+    Ok(result)
 }
 
 /// One body's exact mass properties (`QueryMassProperties`; SCHEMA §7.5; WP-C1).
 ///
-/// A pure READ, like [`element_info`]: no fence, no history, no minting, nothing
-/// published — measuring can never enter the undo stack. Worker IO runs OUTSIDE
-/// the runtime lock (the R-WP11 rule); the lock is taken only for the
-/// document-presence check.
+/// A pure READ, like [`element_info`]: no history, no minting, nothing published.
+/// Scoped callers provide a runtime/head fence; legacy callers remain unscoped.
+/// Worker IO runs outside the runtime lock and is revalidated afterward.
 ///
 /// No snapshot argument, deliberately. A `BodyId` is durable across snapshots
 /// (Invariant 1) while a `TopoKey` is not, so unlike [`element_info`] there is
@@ -3110,20 +3492,46 @@ pub async fn element_info(
 pub async fn query_mass_properties(
     state: State<'_, AppState>,
     body_id: String,
+    read_fence: Option<crate::dto::GeometryReadFenceDto>,
 ) -> Result<crate::dto::MassPropertiesDto, ApiError> {
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
-    {
-        // Presence check only — the lock is NOT held across the worker round-trip.
+    let ticket = {
+        // Prepare the optional scoped ticket; worker IO stays unlocked.
         let guard = state.runtime.lock().await;
-        guard
+        let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("queryMassProperties".into()))?;
-    }
-    state
-        .element_query()
+        read_fence
+            .as_ref()
+            .map(|fence| {
+                rt.prepare_geometry_read(
+                    &fence.document_id,
+                    &fence.runtime_session,
+                    SnapshotId(fence.snapshot_id),
+                )
+            })
+            .transpose()
+            .map_err(ApiError::StalePreview)?
+    };
+    let query = ticket
+        .as_ref()
+        .map_or_else(|| state.element_query(), |ticket| ticket.query.clone());
+    let result = query
         .query_mass_properties(body, body_id)
         .await
-        .map_err(Into::into)
+        .map_err(ApiError::from)?;
+    if let Some(ticket) = &ticket {
+        let guard = state.runtime.lock().await;
+        if !guard
+            .as_ref()
+            .is_some_and(|rt| rt.geometry_read_is_current(ticket))
+        {
+            return Err(ApiError::StalePreview(
+                "document changed while geometry read was in flight".into(),
+            ));
+        }
+    }
+    Ok(result)
 }
 
 /// Surface/curve classification of a picked face or edge (`ClassifyElement`;
@@ -3131,9 +3539,8 @@ pub async fn query_mass_properties(
 /// query: what kind of geometry is this, and what frame would a mate seat
 /// against (plane origin+normal, cylinder/circle axis+radius).
 ///
-/// A pure READ, like [`query_mass_properties`]: no fence, no snapshot, always
-/// the current head — this is issued on every hover frame during a live drag,
-/// not tied to a picked snapshot the way [`element_info`] is.
+/// A pure READ, like [`query_mass_properties`]. Measurement callers provide an
+/// exact runtime/head fence; legacy hover callers remain current-head unscoped.
 ///
 /// Same two-rung addressing as [`element_info`] (topoKey tried first, the
 /// fresh-pick case; elementId is the fallback), collapsed into `Ok(None)`
@@ -3146,6 +3553,7 @@ pub async fn classify_element(
     body_id: String,
     element_id: String,
     topo_key: Option<String>,
+    read_fence: Option<crate::dto::GeometryReadFenceDto>,
 ) -> Result<Option<crate::dto::ClassifyElementDto>, ApiError> {
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
     let topo_key = topo_key.unwrap_or_default();
@@ -3154,27 +3562,52 @@ pub async fn classify_element(
             "classifyElement: one of elementId / topoKey is required".into(),
         ));
     }
-    {
-        // Presence check only — the runtime lock is NOT held across the worker
-        // round-trip below (the R-WP11 rule; a held lock makes fencing inert).
+    let ticket = {
+        // Prepare the optional scoped ticket; worker IO stays unlocked.
         let guard = state.runtime.lock().await;
-        guard
+        let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("classifyElement".into()))?;
-    }
-    let query = state.element_query();
-    if !topo_key.is_empty() {
+        read_fence
+            .as_ref()
+            .map(|fence| {
+                rt.prepare_geometry_read(
+                    &fence.document_id,
+                    &fence.runtime_session,
+                    SnapshotId(fence.snapshot_id),
+                )
+            })
+            .transpose()
+            .map_err(ApiError::StalePreview)?
+    };
+    let query = ticket
+        .as_ref()
+        .map_or_else(|| state.element_query(), |ticket| ticket.query.clone());
+    let result = if !topo_key.is_empty() {
         if let Some(info) = query.classify_element_by_topo_key(body, &topo_key).await? {
-            return Ok(Some(info));
+            Some(info)
+        } else if element_id.is_empty() {
+            None
+        } else {
+            query.classify_element(body, &element_id).await?
+        }
+    } else if element_id.is_empty() {
+        None
+    } else {
+        query.classify_element(body, &element_id).await?
+    };
+    if let Some(ticket) = &ticket {
+        let guard = state.runtime.lock().await;
+        if !guard
+            .as_ref()
+            .is_some_and(|rt| rt.geometry_read_is_current(ticket))
+        {
+            return Err(ApiError::StalePreview(
+                "document changed while geometry read was in flight".into(),
+            ));
         }
     }
-    if element_id.is_empty() {
-        return Ok(None);
-    }
-    query
-        .classify_element(body, &element_id)
-        .await
-        .map_err(Into::into)
+    Ok(result)
 }
 
 /// Exact BRep solid and face counts (`QueryBodyTopology`; SCHEMA §7.5).
@@ -3966,6 +4399,196 @@ pub struct FeLogEvent {
 /// capped at the source too, this is the belt-and-braces bound on the log line.
 const FE_CTX_CAP: usize = 2048;
 
+#[cfg(debug_assertions)]
+struct RenderExpectation {
+    document_id: String,
+    revision: u64,
+    snapshot_id: u64,
+    started: Instant,
+    bodies: std::collections::BTreeSet<String>,
+}
+
+#[cfg(debug_assertions)]
+static RENDER_EXPECTATIONS: OnceLock<Mutex<HashMap<u64, RenderExpectation>>> = OnceLock::new();
+#[cfg(debug_assertions)]
+static NEXT_RENDER_EXPECTATION: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(debug_assertions)]
+fn render_expectations() -> &'static Mutex<HashMap<u64, RenderExpectation>> {
+    RENDER_EXPECTATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(debug_assertions)]
+fn render_watchdog_expect(
+    change: &crate::dto::DocumentChange,
+    projection: &DocumentProjection,
+) -> Option<u64> {
+    render_watchdog_reconcile_projection(projection, "authoritative publication projection");
+    let bodies = change
+        .changed_bodies
+        .iter()
+        .filter(|body| {
+            projection
+                .bodies
+                .get(&body.body_id)
+                .is_none_or(|meta| meta.visible)
+        })
+        .map(|body| body.body_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if bodies.is_empty() {
+        return None;
+    }
+    Some(insert_render_expectation(
+        &projection.document_id,
+        change.revision,
+        change.snapshot_id,
+        bodies,
+    ))
+}
+
+#[cfg(debug_assertions)]
+fn render_watchdog_reconcile_projection(projection: &DocumentProjection, reason: &str) {
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut retired = Vec::new();
+    for (expectation_id, pending) in guard.iter_mut() {
+        let before = pending.bodies.len();
+        if projection.document_id != pending.document_id {
+            pending.bodies.clear();
+        } else {
+            pending
+                .bodies
+                .retain(|body| projection.bodies.get(body).is_some_and(|meta| meta.visible));
+        }
+        if pending.bodies.len() != before {
+            retired.push((*expectation_id, before - pending.bodies.len()));
+        }
+    }
+    guard.retain(|_, pending| !pending.bodies.is_empty());
+    drop(guard);
+    for (expectation_id, bodies) in retired {
+        tracing::debug!(
+            expectationId = expectation_id,
+            retiredBodies = bodies,
+            reason,
+            "mesh render watchdog retired"
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+fn insert_render_expectation(
+    document_id: &str,
+    revision: u64,
+    snapshot_id: u64,
+    bodies: std::collections::BTreeSet<String>,
+) -> u64 {
+    let expectation_id = NEXT_RENDER_EXPECTATION.fetch_add(1, Ordering::Relaxed);
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // One app window owns one active runtime. A publication for a different
+    // document retires expectations from the replaced runtime instead of
+    // reporting them as render stalls three seconds later.
+    guard.retain(|_, pending| pending.document_id == document_id);
+    for pending in guard
+        .values_mut()
+        .filter(|pending| pending.document_id == document_id)
+    {
+        pending.bodies.retain(|body| !bodies.contains(body));
+    }
+    guard.retain(|_, pending| !pending.bodies.is_empty());
+    guard.insert(
+        expectation_id,
+        RenderExpectation {
+            document_id: document_id.to_owned(),
+            revision,
+            snapshot_id,
+            started: Instant::now(),
+            bodies,
+        },
+    );
+    drop(guard);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let pending = render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&expectation_id);
+        if let Some(pending) = pending {
+            tracing::error!(
+                expectationId = expectation_id,
+                documentId = %pending.document_id,
+                revision = pending.revision,
+                snapshotId = pending.snapshot_id,
+                elapsedMs = pending.started.elapsed().as_millis() as u64,
+                pendingBodies = ?pending.bodies,
+                pid = std::process::id(),
+                thread = ?std::thread::current().id(),
+                "mesh render watchdog timeout"
+            );
+        }
+    });
+    expectation_id
+}
+
+#[cfg(debug_assertions)]
+fn acknowledge_render(
+    expectation_id: u64,
+    document_id: &str,
+    revision: u64,
+    snapshot_id: u64,
+    body_id: &str,
+) {
+    let mut guard = render_expectations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(expected) = guard.get_mut(&expectation_id) else {
+        return;
+    };
+    if expected.document_id != document_id
+        || expected.revision != revision
+        || expected.snapshot_id != snapshot_id
+    {
+        return;
+    }
+    expected.bodies.remove(body_id);
+    if expected.bodies.is_empty() {
+        let elapsed = expected.started.elapsed().as_millis() as u64;
+        let snapshot_id = expected.snapshot_id;
+        guard.remove(&expectation_id);
+        tracing::debug!(
+            expectationId = expectation_id,
+            documentId = document_id,
+            revision,
+            snapshotId = snapshot_id,
+            elapsedMs = elapsed,
+            "mesh render watchdog acknowledged"
+        );
+    }
+}
+
+#[tauri::command]
+pub fn mesh_render_completed(
+    expectation_id: u64,
+    document_id: String,
+    revision: u64,
+    snapshot_id: u64,
+    body_id: String,
+) {
+    #[cfg(debug_assertions)]
+    acknowledge_render(
+        expectation_id,
+        &document_id,
+        revision,
+        snapshot_id,
+        &body_id,
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = (expectation_id, document_id, revision, snapshot_id, body_id);
+}
+
 /// Re-emits batched frontend log events into the Rust `tracing` stream under target
 /// `fe`, so ONE `logs/dev.jsonl` carries both lanes in wall-clock order.
 ///
@@ -4039,13 +4662,38 @@ fn emit_fe_event(event: &FeLogEvent, ctx: Option<&str>) {
 /// (including the inline `run_regen` used by tests and the headless CLI); logging
 /// here as well would double every line for the app lane only.
 pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &DocumentProjection) {
-    if let Some(change) = report.document_change() {
+    #[cfg(debug_assertions)]
+    if report
+        .document_change(&projection.document_id, &projection.runtime_session)
+        .is_none()
+    {
+        render_watchdog_reconcile_projection(projection, "authoritative no-op projection");
+    }
+    if let Some(change) =
+        report.document_change(&projection.document_id, &projection.runtime_session)
+    {
+        #[cfg(debug_assertions)]
+        let expectation_id = render_watchdog_expect(&change, projection);
+        #[cfg(debug_assertions)]
+        let payload = serde_json::json!({
+            "revision": change.revision,
+            "snapshotId": change.snapshot_id,
+            "changedBodies": change.changed_bodies,
+            "removedBodies": change.removed_bodies,
+            "renderExpectationId": expectation_id,
+            "documentId": projection.document_id,
+            "runtimeSession": projection.runtime_session,
+        });
+        #[cfg(debug_assertions)]
+        let _ = app.emit(events::DOCUMENT_CHANGED, payload);
+        #[cfg(not(debug_assertions))]
         let _ = app.emit(events::DOCUMENT_CHANGED, change);
     }
     let _ = app.emit(events::PROJECTION_UPDATED, projection);
     let _ = app.emit(
         events::REGEN_FINISHED,
         crate::dto::RegenFinished {
+            runtime_session: report.runtime_session.clone(),
             revision: report.revision,
             source_revision: report.source_revision,
             outcome: report.outcome_str().to_string(),
@@ -4075,6 +4723,7 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
         let _ = app.emit(
             events::NEEDS_REPAIR,
             crate::dto::NeedsRepairEvent {
+                runtime_session: report.runtime_session.clone(),
                 revision: report.revision,
                 snapshot_id: report.snapshot_id,
                 items: report.needs_repair.clone(),
@@ -4086,6 +4735,7 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
 pub(crate) fn snapshot_of(rt: &DocumentRuntime) -> DocumentSnapshotDto {
     DocumentSnapshotDto {
         document_id: rt.document_id(),
+        runtime_session: rt.runtime_session(),
         title: rt.title().to_string(),
     }
 }
@@ -4139,6 +4789,138 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static RENDER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn projection_with_body(document_id: &str, body: Option<(&str, bool)>) -> DocumentProjection {
+        let mut projection = DocumentProjection::empty();
+        projection.document_id = document_id.into();
+        if let Some((id, visible)) = body {
+            projection.bodies.insert(
+                id.into(),
+                crate::dto::BodyDto {
+                    id: id.into(),
+                    name: id.into(),
+                    visible,
+                    health: onecad_core::document::body::BodyHealth::Healthy,
+                    color: None,
+                    face_colors: Default::default(),
+                },
+            );
+        }
+        projection
+    }
+
+    #[test]
+    fn render_watchdog_ack_requires_full_identity_and_clears_each_body() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let expectation_id = 91_337;
+        render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                expectation_id,
+                RenderExpectation {
+                    document_id: "doc-a".into(),
+                    revision: 7,
+                    snapshot_id: 44,
+                    started: Instant::now(),
+                    bodies: ["body-a".to_string(), "body-b".to_string()]
+                        .into_iter()
+                        .collect(),
+                },
+            );
+        acknowledge_render(expectation_id, "wrong-doc", 7, 44, "body-a");
+        acknowledge_render(expectation_id, "doc-a", 7, 44, "body-a");
+        assert_eq!(
+            render_expectations()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&expectation_id)
+                .expect("body-b remains")
+                .bodies,
+            ["body-b".to_string()].into_iter().collect()
+        );
+        acknowledge_render(expectation_id, "doc-a", 7, 44, "body-b");
+        assert!(!render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&expectation_id));
+    }
+
+    #[test]
+    fn newer_publication_supersedes_same_document_body_without_revision_collision() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let replaced_runtime = insert_render_expectation(
+            "doc-old",
+            1,
+            9,
+            ["body-old".to_string()].into_iter().collect(),
+        );
+        let first = insert_render_expectation(
+            "doc-supersede",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        let second = insert_render_expectation(
+            "doc-supersede",
+            1,
+            11,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        let guard = render_expectations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!guard.contains_key(&replaced_runtime));
+        assert!(!guard.contains_key(&first));
+        assert!(guard.contains_key(&second));
+    }
+
+    #[test]
+    fn removal_only_projection_retires_pending_body_without_acknowledging_it() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let id = insert_render_expectation(
+            "doc-remove",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        render_watchdog_reconcile_projection(
+            &projection_with_body("doc-remove", None),
+            "test removal",
+        );
+        assert!(!render_expectations().lock().unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn hidden_body_projection_retires_pending_body() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let id = insert_render_expectation(
+            "doc-hidden",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        render_watchdog_reconcile_projection(
+            &projection_with_body("doc-hidden", Some(("body-a", false))),
+            "test hidden",
+        );
+        assert!(!render_expectations().lock().unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn empty_replacement_projection_retires_prior_document_expectations() {
+        let _serial = RENDER_TEST_LOCK.lock().unwrap();
+        let id = insert_render_expectation(
+            "doc-old-empty",
+            1,
+            10,
+            ["body-a".to_string()].into_iter().collect(),
+        );
+        render_watchdog_reconcile_projection(&DocumentProjection::empty(), "test close");
+        assert!(!render_expectations().lock().unwrap().contains_key(&id));
+    }
 
     #[test]
     fn civil_from_days_epoch_and_a_known_date() {
@@ -4298,7 +5080,31 @@ mod tests {
         use crate::state::SharedScheduler;
         use crate::worker::WorkerReadiness;
 
-        use super::super::spawn_gated_regen;
+        use super::super::{enqueue_initial_regen_if_current, spawn_gated_regen};
+
+        fn blank_runtime() -> crate::document_runtime::DocumentRuntime {
+            let backend = Arc::new(crate::worker::PendingBackend);
+            crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            )
+        }
+
+        fn reopened_same_document(
+            original: &mut crate::document_runtime::DocumentRuntime,
+            path: &std::path::Path,
+        ) -> crate::document_runtime::DocumentRuntime {
+            original.save(path, super::super::save_meta()).unwrap();
+            let backend = Arc::new(crate::worker::PendingBackend);
+            crate::document_runtime::DocumentRuntime::open(
+                path,
+                backend.clone(),
+                backend.clone(),
+                backend,
+            )
+            .unwrap()
+        }
 
         /// Never reports ready; sleeps out the caller's timeout first so the
         /// gate's "fire anyway on timeout" behavior is genuinely exercised
@@ -4340,13 +5146,13 @@ mod tests {
         /// needed to observe "the request fired").
         fn recording_scheduler() -> (
             SharedScheduler,
-            tokio::sync::mpsc::UnboundedReceiver<RegenRequest>,
+            tokio::sync::mpsc::UnboundedReceiver<(RegenRequest, Option<String>)>,
         ) {
             let (tx, rx) = unbounded_channel();
             let driver = move |directive: RegenDirective| {
                 let tx = tx.clone();
                 async move {
-                    let _ = tx.send(directive.request);
+                    let _ = tx.send((directive.request, directive.runtime_session));
                     Outcome::NoOp
                 }
             };
@@ -4355,6 +5161,12 @@ mod tests {
             let shared: SharedScheduler = Arc::new(OnceLock::new());
             shared.set(handle).expect("freshly-constructed OnceLock");
             (shared, rx)
+        }
+
+        async fn enqueue_tagged(sched: SharedScheduler, session: String) {
+            if let Some(handle) = sched.get() {
+                handle.request_for_runtime(RegenRequest::RevertToEnd { from: 0 }, Some(session));
+            }
         }
 
         /// The load-bearing half of the fix: while the worker is still connecting,
@@ -4369,7 +5181,8 @@ mod tests {
                 Arc::new(Latch(latch.clone())),
                 sched.clone(),
                 Duration::from_secs(30),
-                || async { true },
+                "runtime-a".to_string(),
+                enqueue_tagged,
             );
 
             assert!(
@@ -4380,14 +5193,15 @@ mod tests {
             );
 
             latch.notify_one();
-            let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            let (got, session) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
                 .await
                 .expect("the request fires as soon as readiness resolves")
                 .expect("scheduler channel stayed open");
             assert!(
-                matches!(got, RegenRequest::ToEnd { from: 0 }),
+                matches!(got, RegenRequest::RevertToEnd { from: 0 }),
                 "got {got:?}"
             );
+            assert_eq!(session.as_deref(), Some("runtime-a"));
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -4403,17 +5217,19 @@ mod tests {
                 Arc::new(Never),
                 sched.clone(),
                 Duration::from_millis(20),
-                || async { true },
+                "runtime-a".to_string(),
+                enqueue_tagged,
             );
 
-            let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            let (got, session) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
                 .await
                 .expect("the request must still fire once the timeout elapses")
                 .expect("scheduler channel stayed open");
             assert!(
-                matches!(got, RegenRequest::ToEnd { from: 0 }),
+                matches!(got, RegenRequest::RevertToEnd { from: 0 }),
                 "got {got:?}"
             );
+            assert_eq!(session.as_deref(), Some("runtime-a"));
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -4425,17 +5241,19 @@ mod tests {
                 Arc::new(Already),
                 sched.clone(),
                 Duration::from_secs(30),
-                || async { true },
+                "runtime-a".to_string(),
+                enqueue_tagged,
             );
 
-            let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            let (got, session) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
                 .await
                 .expect("an already-ready readiness must not wait anywhere near the timeout")
                 .expect("scheduler channel stayed open");
             assert!(
-                matches!(got, RegenRequest::ToEnd { from: 0 }),
+                matches!(got, RegenRequest::RevertToEnd { from: 0 }),
                 "got {got:?}"
             );
+            assert_eq!(session.as_deref(), Some("runtime-a"));
         }
 
         /// A gate whose document was replaced while it waited must NOT fire:
@@ -4449,7 +5267,8 @@ mod tests {
                 Arc::new(Already),
                 sched.clone(),
                 Duration::from_secs(30),
-                || async { false }, // the close/open-during-wait shape
+                "runtime-a".to_string(),
+                |_sched, _session| async {}, // the close/open-during-wait shape
             );
 
             assert!(
@@ -4458,6 +5277,90 @@ mod tests {
                     .is_err(),
                 "a stale gate must never reach the scheduler"
             );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn same_document_runtime_replacement_is_stale() {
+            let (sched, mut rx) = recording_scheduler();
+            let temp = tempfile::tempdir().unwrap();
+            let mut old = blank_runtime();
+            let replacement = reopened_same_document(&mut old, &temp.path().join("same.onecad"));
+            assert_eq!(old.document_uuid(), replacement.document_uuid());
+            assert_ne!(old.runtime_session(), replacement.runtime_session());
+            let old_session = old.runtime_session();
+            let runtime = Arc::new(tokio::sync::Mutex::new(Some(old)));
+            *runtime.lock().await = Some(replacement);
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                old_session,
+                move |sched, session| enqueue_initial_regen_if_current(runtime, sched, session),
+            );
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                    .await
+                    .is_err(),
+                "the same document id in a new runtime must not revive the old gate"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn stale_gate_does_not_supersede_current_runtime_request() {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (tx, mut rx) = unbounded_channel();
+            let driver_release = release.clone();
+            let driver = move |directive: RegenDirective| {
+                let release = driver_release.clone();
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send("started");
+                    tokio::select! {
+                        _ = release.notified() => {
+                            let _ = tx.send("completed");
+                            Outcome::NoOp
+                        }
+                        _ = directive.cancel.cancelled() => {
+                            let _ = tx.send("cancelled");
+                            Outcome::Cancelled
+                        }
+                    }
+                }
+            };
+            let (scheduler, handle) = RegenScheduler::new(driver);
+            tokio::spawn(scheduler.run());
+            let sched: SharedScheduler = Arc::new(OnceLock::new());
+            sched.set(handle).expect("fresh scheduler");
+            sched.get().unwrap().request_for_runtime(
+                RegenRequest::ToEnd { from: 7 },
+                Some("runtime-new".to_string()),
+            );
+            assert_eq!(rx.recv().await, Some("started"));
+
+            let old = blank_runtime();
+            let old_session = old.runtime_session();
+            let runtime = Arc::new(tokio::sync::Mutex::new(Some(old)));
+            *runtime.lock().await = Some(blank_runtime());
+            let callback_done = Arc::new(tokio::sync::Notify::new());
+            let done = callback_done.clone();
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                old_session,
+                move |sched, session| async move {
+                    enqueue_initial_regen_if_current(runtime, sched, session).await;
+                    done.notify_one();
+                },
+            );
+            callback_done.notified().await;
+            release.notify_one();
+            let terminal = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("current request completes")
+                .expect("scheduler remains open");
+            assert_eq!(terminal, "completed", "stale gate cancelled current work");
         }
 
         /// `PendingBackend` — the production no-worker fallback — must itself
@@ -4618,6 +5521,47 @@ mod tests {
             assert_eq!(names(&rt), vec![("width".into(), 10.0)]);
             rt.undo();
             assert!(names(&rt).is_empty(), "undo returns to the blank table");
+        }
+
+        /// The projection reports the history DEPTHS and the top-of-stack LABELS
+        /// (WP-U1). Without them the frontend cannot enable an Undo row, cannot
+        /// name the step it is about to revert, and — worst — cannot tell an empty
+        /// stack apart from a revert the runtime refused, so it reports "nothing
+        /// to undo" for both.
+        #[test]
+        fn the_projection_reports_undo_and_redo_depth_with_labels() {
+            use crate::worker::PendingBackend;
+            use std::sync::Arc;
+
+            let backend = Arc::new(PendingBackend);
+            let mut rt = crate::document_runtime::DocumentRuntime::new_blank(
+                backend.clone(),
+                backend.clone(),
+                backend,
+            );
+            let p = rt.projection();
+            assert_eq!(p.undo_depth, 0, "a blank document has nothing to undo");
+            assert_eq!(p.redo_depth, 0);
+            assert_eq!(p.undo_label, None);
+            assert_eq!(p.redo_label, None);
+
+            rt.apply(upsert_variable_command(&rt.variables(), "width", 10.0).unwrap())
+                .unwrap();
+            let p = rt.projection();
+            assert_eq!(p.undo_depth, 1, "one committed edit ⇒ one undo step");
+            assert_eq!(p.redo_depth, 0);
+            assert!(p.undo_label.is_some(), "the step carries its Txn label");
+            let undone = p.undo_label.clone();
+
+            rt.undo();
+            let p = rt.projection();
+            assert_eq!(p.undo_depth, 0);
+            assert_eq!(p.redo_depth, 1, "the undone step is replayable");
+            assert_eq!(p.undo_label, None);
+            assert_eq!(
+                p.redo_label, undone,
+                "the redo row names the step that was undone"
+            );
         }
 
         #[test]

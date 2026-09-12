@@ -278,10 +278,8 @@ void dump_top2(const char* label, const em::LadderResolution& r) {
 // Nothing is sitting where it was authored, so nothing has earned the anchor's
 // trust, and binding on proximity alone would be a silent wrong bind.
 //
-// Also pins the carve-out BOUNDARY in both directions: inside the anchor-exact
-// epsilon the twin binds (the winner demonstrably did not move), outside it vetoes.
-// A carve-out that is too wide fails the second half; one that is absent or too
-// narrow fails the first.
+// Resolver v6 refuses both sides of the former anchor-exact boundary: proximity
+// cannot distinguish an unchanged element from a twin moved onto the stale point.
 void test_edit_scoped_drift_veto_needs_repair() {
     const double eps = twin_scene_exact_threshold();
 
@@ -292,8 +290,8 @@ void test_edit_scoped_drift_veto_needs_repair() {
     check(res_near.size() == 1, "drift: one resolution (inside eps)");
     if (!res_near.empty()) {
         dump_top2("drift<eps", res_near[0]);
-        check(res_near[0].outcome == em::LadderOutcome::AutoBind,
-              "drift: WITHIN the anchor-exact epsilon the anchor may still decide");
+        check(res_near[0].outcome == em::LadderOutcome::NeedsRepair,
+              "drift: post-edit descriptor tie refuses even within historical epsilon");
     }
 
     // (ii) OUTSIDE the epsilon — genuine drift ⇒ the veto fires.
@@ -315,22 +313,17 @@ void test_edit_scoped_drift_veto_needs_repair() {
     }
 }
 
-// (7b) B3 TELEPORT — on a CHECKPOINT replay the anchor-exact carve-out is correct:
-// the incremental path's `apply_placement` keeps anchors fresh, so an exact twin AT
-// the anchor genuinely did not move. It auto-binds.
-//
-// On a FROM-0 replay there is no migrated partition; the stored anchor can be stale,
-// and the same carve-out would bless a congruent decoy parked at the stale anchor
-// (VF-M5). `LadderEditContext::from_zero_replay` disables the carve-out there.
-void test_edit_scoped_teleport_is_the_accepted_residual() {
+// (7b) B3 TELEPORT — both ordinary and fallback edit lanes fail closed. An exact
+// stale anchor is locally indistinguishable from a congruent decoy moved onto it.
+void test_edit_scoped_teleport_is_refused() {
     const TwinScene s = b3_twin_scene(0.0);  // twin EXACTLY at the stale anchor
     const auto res = em::resolve_descriptor_stage(s.box, "body", {s.ref},
                                                   em::LadderEditContext{true});
     check(res.size() == 1, "teleport: one resolution");
     if (res.empty()) return;
     dump_top2("teleport", res[0]);
-    check(res[0].outcome == em::LadderOutcome::AutoBind,
-          "teleport: checkpoint replay keeps the anchor-exact carve-out");
+    check(res[0].outcome == em::LadderOutcome::NeedsRepair,
+          "teleport: ordinary post-edit lane refuses an exact stale anchor");
 
     const auto res_from0 = em::resolve_descriptor_stage(
         s.box, "body", {s.ref}, em::LadderEditContext{/*post_upstream_edit=*/true,
@@ -550,7 +543,22 @@ void test_v4_plate_rim_edge_and_anchor_only_face() {
     check(fres.size() == 1 && fres[0].bound_topo_key == ftk, "v4 plate: bound the TOP face");
 }
 
+void test_v5_clean_replay_anchor_reinforcement_policy() {
+    const em::LadderEditContext clean{};
+    check(em::clean_replay_anchor_reinforcement(clean, 1.0, {0.94, 0.70}, 0.0, 5.0),
+          "v5: exact anchor may reinforce a descriptor-nonworse clean winner");
+    check(!em::clean_replay_anchor_reinforcement(clean, 0.94, {1.0, 0.70}, 0.0, 5.0),
+          "v5: any descriptor-better rival blocks anchor reinforcement");
+    check(!em::clean_replay_anchor_reinforcement(clean, 1.0, {0.94}, 0.0, 0.0),
+          "v5: an exact point shared by two shapes remains ambiguous");
+    check(!em::clean_replay_anchor_reinforcement({true, false}, 1.0, {0.94}, 0.0, 5.0),
+          "v5: post-upstream-edit behavior is not broadened");
+    check(!em::clean_replay_anchor_reinforcement({true, true}, 1.0, {0.94}, 0.0, 5.0),
+          "v5: checkpoint-fallback replay behavior is not broadened");
+}
+
 int main() {
+    test_v5_clean_replay_anchor_reinforcement_policy();
     test_v4_opposite_facing_twins_resolve();
     test_v4_same_facing_twins_still_tie();
     test_v4_plate_rim_edge_and_anchor_only_face();
@@ -561,7 +569,7 @@ int main() {
     test_symmetric_split_needs_repair();
     test_survives_small_edit_else_needs_repair();
     test_edit_scoped_drift_veto_needs_repair();
-    test_edit_scoped_teleport_is_the_accepted_residual();
+    test_edit_scoped_teleport_is_refused();
     test_no_edit_context_anchor_still_decides();
     test_proportional_anchor_floor_submm();
     test_exact_tie_needs_repair_either_way();

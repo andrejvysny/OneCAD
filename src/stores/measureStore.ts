@@ -10,6 +10,7 @@
 import { createStore, useStore } from "zustand";
 import type { MeasurePick, MeasureSummary } from "@/tools/modelTools/measureTool";
 import type { MassProperties } from "@/ipc/types";
+import type { GeometryReadFence } from "@/ipc/client";
 
 export interface MeasureState {
   /** Measured elements, oldest first (≤2 — see measureTool MAX_PICKS). */
@@ -29,10 +30,11 @@ export interface MeasureState {
    * `__stores` surface like the rest.
    */
   mass: MassProperties | null;
+  massFence: GeometryReadFence | null;
   /** Replace the whole reading (the controller recomputes both together). */
   set(picks: MeasurePick[], summary: MeasureSummary | null): void;
   /** Attach (or drop) the mass reading for the currently measured body. */
-  setMass(mass: MassProperties | null): void;
+  setMass(mass: MassProperties | null, fence?: GeometryReadFence): void;
   clear(): void;
 }
 
@@ -40,6 +42,7 @@ export const measureStore = createStore<MeasureState>()((set) => ({
   picks: [],
   summary: null,
   mass: null,
+  massFence: null,
   set(picks, summary) {
     // `mass` is deliberately LEFT ALONE. It carries its own `bodyId` and the
     // panel renders it only when that matches the measured body, so a stale
@@ -47,11 +50,11 @@ export const measureStore = createStore<MeasureState>()((set) => ({
     // which keeps the card from flickering empty on every re-pick of the same body.
     set({ picks, summary });
   },
-  setMass(mass) {
-    set({ mass });
+  setMass(mass, fence) {
+    set({ mass, massFence: mass && fence ? fence : null });
   },
   clear() {
-    set({ picks: [], summary: null, mass: null });
+    set({ picks: [], summary: null, mass: null, massFence: null });
   },
 }));
 

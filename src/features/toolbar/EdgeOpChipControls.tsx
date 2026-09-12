@@ -12,6 +12,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/ui/cn";
 import { ChipOverflow } from "@/features/toolbar/ChipOverflow";
+import { toolChipStore } from "@/stores/toolChipStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatLength, parseLength } from "@/units/format";
 import type { EdgeOpKind } from "@/tools/modelTools/modelToolMachine";
@@ -99,6 +100,7 @@ export function ChamferDistance2Field({
     if (trimmed === "" || trimmed === EQUAL_LEG_TEXT) {
       if (value !== null) onValue(null);
       setText(EQUAL_LEG_TEXT);
+      toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
       return;
     }
     const n = parseLength(trimmed, unit);
@@ -106,10 +108,12 @@ export function ChamferDistance2Field({
     // anything else — so a rejected entry reverts rather than authoring it.
     if (n === undefined || n === null || !Number.isFinite(n) || n <= 0) {
       setText(shown(value));
+      toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
       return;
     }
     if (n !== value) onValue(n);
     setText(shown(n));
+    toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
   };
 
   return (
@@ -128,7 +132,15 @@ export function ChamferDistance2Field({
         inputMode="decimal"
         placeholder={EQUAL_LEG_TEXT}
         title="Second chamfer distance — '=' for equal legs"
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          setText(next);
+          const trimmed = next.trim();
+          const parsed = parseLength(trimmed, unit);
+          const valid = trimmed === "" || trimmed === EQUAL_LEG_TEXT ||
+            (parsed !== undefined && parsed !== null && Number.isFinite(parsed) && parsed > 0);
+          toolChipStore.getState().setRawValueValidity("chamfer-distance2", valid, next);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -140,6 +152,7 @@ export function ChamferDistance2Field({
             e.preventDefault();
             e.stopPropagation();
             setText(shown(value));
+            toolChipStore.getState().setRawValueValidity("chamfer-distance2", true, "");
           }
         }}
       />
@@ -195,15 +208,18 @@ export function ChamferAngleField({
     if (trimmed === "") {
       if (value !== null) onValue(null);
       setText(NO_ANGLE_TEXT);
+      toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
       return;
     }
     const n = Number(trimmed);
     if (!Number.isFinite(n) || n <= 0 || n >= 180) {
       setText(shown(value));
+      toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
       return;
     }
     if (n !== value) onValue(n);
     setText(shown(n));
+    toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
   };
 
   return (
@@ -219,7 +235,13 @@ export function ChamferAngleField({
         inputMode="decimal"
         placeholder="°"
         title="Chamfer angle in degrees — clears the second distance"
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          setText(next);
+          const number = Number(next.trim());
+          const valid = next.trim() === "" || (Number.isFinite(number) && number > 0 && number < 180);
+          toolChipStore.getState().setRawValueValidity("chamfer-angle", valid, next);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -231,6 +253,7 @@ export function ChamferAngleField({
             e.preventDefault();
             e.stopPropagation();
             setText(shown(value));
+            toolChipStore.getState().setRawValueValidity("chamfer-angle", true, "");
           }
         }}
       />
@@ -277,6 +300,22 @@ export interface EdgeOpOverflowProps {
   showChamferFlip?: boolean;
   onChamferFlip?: () => void;
   onConfirm?: () => void;
+}
+
+/** Inspector-only edge secondary controls; primary value remains in the viewport. */
+export function EdgeOpInspectorControls(props: EdgeOpOverflowProps): React.ReactElement {
+  return (
+    <>
+      <EdgeOpSegments active={props.edgeOp} onPick={props.onEdgeOp} />
+      {props.edgeOp === "Chamfer" && (
+        <>
+          <ChamferDistance2Field value={props.distance2} onValue={props.onDistance2} onConfirm={props.onConfirm} />
+          <ChamferAngleField value={props.chamferAngleDeg} onValue={props.onChamferAngle} onConfirm={props.onConfirm} />
+          {props.showChamferFlip && props.onChamferFlip && <ChamferFlipButton onFlip={props.onChamferFlip} />}
+        </>
+      )}
+    </>
+  );
 }
 
 /** Short label for the active op — the collapsed chip's readout. */

@@ -59,7 +59,8 @@ use onecad_core::document::variables::{Variable, VariableTable};
 use onecad_core::document::Document;
 use onecad_core::edit::session::{empty_outcome, merge_outcome, DocumentSession};
 use onecad_core::edit::{
-    CommandOutcome, EditCommand, InputPath, InputRef, SketchEditOp, UndoOutcome,
+    CommandOutcome, EditCommand, InputPath, InputRef, SketchEditOp, SketchSquashOutcome,
+    UndoOutcome,
 };
 use onecad_core::error::DomainError;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
@@ -92,7 +93,7 @@ use crate::dto::{
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDependenciesDto, FeatureDto, FinishSketchDto,
     NeedsRepairItemDto, PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto,
-    SketchSolveStatus, SketchStatus, SketchUpsertDto, GEOMETRY_SOURCE_CACHED, GEOMETRY_SOURCE_LIVE,
+    SketchSolveStatus, SketchUpsertDto, GEOMETRY_SOURCE_CACHED, GEOMETRY_SOURCE_LIVE,
     GEOMETRY_SOURCE_NONE,
 };
 use crate::error::ApiError;
@@ -182,6 +183,9 @@ pub struct RegenTimings {
 /// `outcome` will read a broken feature as a success. Assert on BOTH.
 #[derive(Debug)]
 pub struct RegenReport {
+    /// Runtime that prepared this regen. Unlike the accompanying projection this
+    /// remains the OLD runtime when a lock-free drive crosses a document swap.
+    pub runtime_session: String,
     /// The executor terminal (Published / Superseded / EngineFailed / Cancelled / NoOp).
     pub outcome: Outcome,
     /// The document revision the regen was fenced against.
@@ -257,11 +261,17 @@ impl RegenReport {
 
     /// The `document-changed` payload, or `None` when nothing was published.
     #[must_use]
-    pub fn document_change(&self) -> Option<DocumentChange> {
+    pub fn document_change(
+        &self,
+        document_id: &str,
+        runtime_session: &str,
+    ) -> Option<DocumentChange> {
         if !matches!(self.outcome, Outcome::Published(_)) {
             return None;
         }
         Some(DocumentChange {
+            document_id: document_id.to_string(),
+            runtime_session: runtime_session.to_string(),
             revision: self.revision,
             snapshot_id: self.snapshot_id,
             changed_bodies: self
@@ -309,6 +319,7 @@ struct SketchSession {
     /// session's steps (the stack bottom shifted out past the cap), so the squash is
     /// refused wholesale — the granular steps stay (safe, noisier stack).
     evicted_at_enter: u64,
+    created_this_visit: bool,
 }
 
 /// Immutable input for a read-only sketch-region query. Prepared under the
@@ -322,6 +333,53 @@ pub struct PreparedSketchRegions {
     /// drive is the whole point: it is what a `beginGesture` landing mid-drive
     /// collides with. See [`solver_lane`].
     _claim: Claim,
+}
+
+pub enum PreparedMeshFetch {
+    Ready(Option<Arc<Vec<u8>>>),
+    Fetch {
+        provider: Arc<dyn MeshProvider>,
+        key: MeshKey,
+        snapshot: SnapshotId,
+        instance: Uuid,
+        worker_epoch: WorkerEpoch,
+    },
+}
+
+pub struct DrivenMeshFetch {
+    key: MeshKey,
+    snapshot: SnapshotId,
+    instance: Uuid,
+    worker_epoch: WorkerEpoch,
+    bytes: Option<Arc<Vec<u8>>>,
+}
+
+impl PreparedMeshFetch {
+    pub async fn drive(self) -> Result<Option<Arc<Vec<u8>>>, DrivenMeshFetch> {
+        match self {
+            Self::Ready(bytes) => Ok(bytes),
+            Self::Fetch {
+                provider,
+                key,
+                snapshot,
+                instance,
+                worker_epoch,
+            } => {
+                let bytes = provider
+                    .fetch_mesh(key.body, key.lod, snapshot)
+                    .await
+                    .ok()
+                    .map(Arc::new);
+                Err(DrivenMeshFetch {
+                    key,
+                    snapshot,
+                    instance,
+                    worker_epoch,
+                    bytes,
+                })
+            }
+        }
+    }
 }
 
 impl PreparedSketchRegions {
@@ -349,6 +407,53 @@ pub struct RevertReport {
     /// [`DocumentRuntime::revert_report`]). `None` ⇒ the revert moved nothing the
     /// timeline regenerates, so scheduling anything would be pure waste.
     pub regen: Option<RegenRequest>,
+}
+
+/// What one [`DocumentRuntime::cancel_sketch`] did (WP-U7 D-1).
+///
+/// A `discard = false` cancel always reports `{ discarded: false, kept_reason: None }` —
+/// nothing was asked of it beyond the squash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelSketchOutcome {
+    /// True when the session's edits were reverted: the sketch holds exactly what
+    /// it held at `enter_sketch`.
+    pub discarded: bool,
+    /// Why a requested discard was NOT honoured (the edits are kept, today's
+    /// behaviour). `None` when none was requested, or it succeeded.
+    pub kept_reason: Option<&'static str>,
+    /// The regen the revert needs, for the api layer to schedule — exactly what
+    /// [`DocumentRuntime::undo`] hands its caller. `None` when nothing was
+    /// reverted. Dropping it would leave the viewport showing the discarded
+    /// geometry.
+    pub revert: Option<RevertReport>,
+}
+
+impl CancelSketchOutcome {
+    /// The "changes kept" outcome, with the reason a requested discard was refused.
+    fn kept(kept_reason: Option<&'static str>) -> Self {
+        Self {
+            discarded: false,
+            kept_reason,
+            revert: None,
+        }
+    }
+}
+
+/// What [`DocumentRuntime::squash_sketch_session`] did to the undo stack — the
+/// runtime-side twin of [`SketchSquashOutcome`], with the session bookkeeping
+/// (open session, eviction watermark) folded in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSquash {
+    /// No open session for this sketch: nothing was collapsed, and the watermark
+    /// that would address the session's steps is gone.
+    NoSession(&'static str),
+    /// Refused — the granular steps are untouched.
+    Refused(&'static str),
+    /// Nothing to collapse, or a net-zero session: the document already holds the
+    /// state it had at enter.
+    NoNetStep,
+    /// One net step sits at the watermark; its inverse restores the entry state.
+    NetStep,
 }
 
 /// An admitted checkpoint mint (SCHEMA §7.7): the head step to save, plus the
@@ -476,6 +581,22 @@ struct PromotionEntry {
     descriptor: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone)]
+struct OperationRollbackReceipt {
+    token: String,
+    instance: Uuid,
+    revision: DocumentRevision,
+    undo_depth: usize,
+    record_ids: Vec<RecordId>,
+}
+
+#[derive(Debug)]
+pub struct OperationRollbackResult {
+    pub rolled_back: bool,
+    pub reason: &'static str,
+    pub revert: Option<RevertReport>,
+}
+
 /// The per-document runtime (V1 single writer).
 pub struct DocumentRuntime {
     session: DocumentSession,
@@ -503,6 +624,9 @@ pub struct DocumentRuntime {
     /// nor gets reported as a failure. Do not re-filter, and do not widen this
     /// back to the unfiltered `substitute_variables` result.
     unresolved_variables: BTreeMap<usize, UnresolvedVariable>,
+    /// Fail-closed effective-history lowering errors for FeaturePattern records.
+    feature_pattern_errors:
+        BTreeMap<usize, onecad_core::regen::feature_pattern::FeaturePatternError>,
     /// Sketches whose projected geometry no longer matches its source, keyed by
     /// the SKETCH and rendered through the same
     /// [`step_diagnostics`](Self::step_diagnostics) point `EXPR_UNRESOLVED` uses
@@ -553,6 +677,7 @@ pub struct DocumentRuntime {
     /// collide exactly, and phase 3 would commit the wrong document's geometry.
     /// [`finish_regen`](Self::finish_regen) discards any regen not minted here.
     instance: Uuid,
+    operation_rollback: Option<OperationRollbackReceipt>,
     title: String,
     path: Option<PathBuf>,
     dirty: bool,
@@ -582,11 +707,12 @@ pub struct DocumentRuntime {
     engine: Arc<dyn GeometryEngine>,
     meshes: Arc<dyn MeshProvider>,
     solver: Arc<dyn SolverEngine>,
+    read_query: Option<Arc<dyn crate::worker::ElementQuery>>,
     occt_fingerprint: String,
     job_seq: u64,
-    /// Last solver-lane `(dof, status)` per sketch — real projection dof/status
+    /// Last solver-lane `(dof, status, geometry token)` per sketch.
     /// (replaces the `dof:0`/`Ok` placeholders). Empty until a sketch is solved.
-    sketch_solve: BTreeMap<SketchId, (u32, SketchSolveStatus)>,
+    sketch_solve: BTreeMap<SketchId, (u32, SketchSolveStatus, String)>,
     /// The active drag gesture, if the pointer is down mid-drag.
     active_gesture: Option<ActiveGesture>,
     /// Per-sketch solver-lane claims (SP-0 D3) — the RAII fence between a drag
@@ -688,6 +814,14 @@ fn face_candidate_summary(info: &crate::dto::ElementInfoDto) -> String {
 pub struct RepairSeams<'a> {
     pub faces: &'a dyn crate::worker::FaceBoundaryProjection,
     pub elements: &'a dyn crate::worker::ElementQuery,
+}
+
+#[derive(Clone)]
+pub struct GeometryReadTicket {
+    instance: Uuid,
+    snapshot: SnapshotId,
+    epoch: WorkerEpoch,
+    pub query: Arc<dyn crate::worker::ElementQuery>,
 }
 
 /// An OWNED `PrepareEdgeOp` pick address (SCHEMA §7.6 accepts exactly one of the
@@ -815,8 +949,9 @@ impl DocumentRuntime {
         // WP-VE.1: the mirror carries EFFECTIVE records — a loaded document's
         // expr-bound scalars are resolved here, so the very first regen already
         // builds the variable table's current numbers.
-        let (effective_timeline, unresolved_variables) =
+        let (mut effective_timeline, unresolved_variables) =
             onecad_core::regen::substituted_timeline(&doc.timeline, &doc.variables);
+        let feature_pattern_errors = lower_feature_patterns(&mut effective_timeline);
         log_unresolved_variables(&unresolved_variables, "open");
         let regen = RegenSession {
             bodies: seed_regen_bodies(&doc),
@@ -836,7 +971,9 @@ impl DocumentRuntime {
             session: DocumentSession::new(doc),
             regen,
             unresolved_variables,
+            feature_pattern_errors,
             instance: Uuid::new_v4(),
+            operation_rollback: None,
             fencing: Arc::new(FencingCell::new(engine.current_epoch().0)),
             title,
             path,
@@ -856,6 +993,7 @@ impl DocumentRuntime {
             engine,
             meshes,
             solver,
+            read_query: None,
             occt_fingerprint: "pending-r-wp11".to_string(),
             job_seq: 0,
             sketch_solve: BTreeMap::new(),
@@ -888,11 +1026,82 @@ impl DocumentRuntime {
         self.session.document().id.to_string()
     }
 
+    /// Opaque identity of this in-memory runtime, used only as an ABA fence.
+    #[must_use]
+    pub fn runtime_session(&self) -> String {
+        self.instance.to_string()
+    }
+
+    /// Checks an opaque runtime token without exposing the underlying UUID.
+    #[must_use]
+    pub fn matches_runtime_session(&self, expected: &str) -> bool {
+        self.instance.to_string() == expected
+    }
+
+    pub fn bind_geometry_read_query(
+        &mut self,
+        query: Arc<dyn crate::worker::ElementQuery>,
+    ) -> Result<(), String> {
+        if self.read_query.is_some() {
+            return Err("geometry read provider is already bound".into());
+        }
+        self.read_query = Some(query);
+        Ok(())
+    }
+
+    pub fn prepare_geometry_read(
+        &self,
+        document_id: &str,
+        runtime_session: &str,
+        snapshot: SnapshotId,
+    ) -> Result<GeometryReadTicket, String> {
+        if snapshot == SnapshotId(0)
+            || self.document_id() != document_id
+            || !self.matches_runtime_session(runtime_session)
+            || self.head_snapshot_id() != Some(snapshot)
+            || self.fencing.get().1 != self.head_epoch
+        {
+            return Err("geometry read belongs to a stale document head".into());
+        }
+        let query = self
+            .read_query
+            .clone()
+            .ok_or_else(|| "geometry read provider is not bound to this runtime".to_string())?;
+        Ok(GeometryReadTicket {
+            instance: self.instance,
+            snapshot,
+            epoch: self.head_epoch,
+            query,
+        })
+    }
+
+    pub fn geometry_read_is_current(&self, ticket: &GeometryReadTicket) -> bool {
+        self.instance == ticket.instance
+            && self.head_snapshot_id() == Some(ticket.snapshot)
+            && self.head_epoch == ticket.epoch
+            && self.fencing.get().1 == ticket.epoch
+    }
+
     /// Current undo depth (committed steps). Used by tests / diagnostics; the B1
     /// sketch-session squash is asserted against it.
     #[must_use]
     pub fn undo_depth(&self) -> usize {
         self.session.undo_depth()
+    }
+
+    /// Monotonic position of the undo top, including entries evicted by the cap.
+    #[must_use]
+    pub fn undo_position(&self) -> u64 {
+        self.session.evictions() + self.session.undo_depth() as u64
+    }
+
+    /// Current redo depth (undone steps that can be replayed). Rides the
+    /// projection (WP-U1) so the frontend can enable a Redo row by depth, and is
+    /// what the WP-U7 sketch-cancel discard is asserted against (a discarded
+    /// session must not be redoable).
+    #[must_use]
+    pub fn redo_depth(&self) -> usize {
+        self.session.redo_depth()
     }
 
     /// The current document revision.
@@ -1047,6 +1256,111 @@ impl DocumentRuntime {
         }
         self.after_mutation();
         Ok(outcome)
+    }
+
+    /// Applies a user-visible compound edit as one atomic undo step and one
+    /// document revision. Any rejected member rolls the entire transaction back.
+    pub fn apply_transaction(
+        &mut self,
+        label: &str,
+        commands: Vec<EditCommand>,
+    ) -> Result<CommandOutcome, DomainError> {
+        if self.read_only {
+            return Err(DomainError::ReadOnly);
+        }
+        if self.active_gesture.is_some() {
+            return Err(DomainError::Validation(
+                "cannot commit a feature during a sketch drag".into(),
+            ));
+        }
+        if self.session.transaction_open() {
+            return Err(DomainError::Validation(
+                "cannot nest a feature transaction".into(),
+            ));
+        }
+        let mut hydrated = Vec::with_capacity(commands.len());
+        for command in commands {
+            self.reject_timeline_body_delete(&command)?;
+            hydrated.push(self.hydrate_ref_intents(command));
+        }
+        self.session.begin_transaction(label);
+        for command in hydrated {
+            if let Err(error) = self.session.apply(command) {
+                self.session.cancel_transaction();
+                return Err(error);
+            }
+        }
+        let Some(outcome) = self.session.end_transaction() else {
+            return Err(DomainError::Validation("empty transaction".into()));
+        };
+        if let Some(dirty) = outcome.dirty {
+            self.checkpoints.invalidate_from(dirty.from);
+        }
+        self.after_mutation();
+        Ok(outcome)
+    }
+
+    /// Arms a one-shot rollback receipt for the transaction that just committed.
+    /// Must be called before releasing the runtime's authoring lock.
+    pub fn arm_operation_rollback(
+        &mut self,
+        record_ids: Vec<RecordId>,
+        prior_undo_position: u64,
+    ) -> Option<String> {
+        if record_ids.is_empty() || self.undo_position() != prior_undo_position + 1 {
+            self.operation_rollback = None;
+            return None;
+        }
+        let token = Uuid::new_v4().to_string();
+        self.operation_rollback = Some(OperationRollbackReceipt {
+            token: token.clone(),
+            instance: self.instance,
+            revision: self.revision(),
+            undo_depth: self.session.undo_depth(),
+            record_ids,
+        });
+        Some(token)
+    }
+
+    /// Conditionally undoes exactly the operation transaction named by `token`.
+    /// Any intervening authoring mutation changes revision/depth and fails closed.
+    pub fn rollback_failed_operation(&mut self, token: &str) -> OperationRollbackResult {
+        let Some(receipt) = self.operation_rollback.take() else {
+            return OperationRollbackResult {
+                rolled_back: false,
+                reason: "unknownOrConsumed",
+                revert: None,
+            };
+        };
+        if receipt.token != token {
+            self.operation_rollback = Some(receipt);
+            return OperationRollbackResult {
+                rolled_back: false,
+                reason: "tokenMismatch",
+                revert: None,
+            };
+        }
+        if receipt.instance != self.instance
+            || receipt.revision != self.revision()
+            || receipt.undo_depth != self.session.undo_depth()
+            || receipt.record_ids.is_empty()
+        {
+            return OperationRollbackResult {
+                rolled_back: false,
+                reason: "stale",
+                revert: None,
+            };
+        }
+        let revert = self.undo();
+        OperationRollbackResult {
+            rolled_back: revert.is_some(),
+            reason: if revert.is_some() {
+                "rolledBack"
+            } else {
+                "blocked"
+            },
+            revert,
+        }
     }
 
     /// Rejects `DeleteBody` for a body the timeline produces. The Session cannot see
@@ -1351,11 +1665,13 @@ impl DocumentRuntime {
     /// (records, variables), so it needs no worker round-trip to be true.
     fn sync_regen_timeline(&mut self) {
         let doc = self.session.document();
-        let (mirror, unresolved) =
+        let (mut mirror, unresolved) =
             onecad_core::regen::substituted_timeline(&doc.timeline, &doc.variables);
+        let feature_pattern_errors = lower_feature_patterns(&mut mirror);
         log_unresolved_variables(&unresolved, "edit");
         self.regen.timeline = mirror;
         self.unresolved_variables = unresolved;
+        self.feature_pattern_errors = feature_pattern_errors;
     }
 
     // ── Regen (the driver body) ──────────────────────────────────────────────
@@ -1404,6 +1720,7 @@ impl DocumentRuntime {
     pub fn noop_report(&self) -> RegenReport {
         let rev = self.fencing.revision().0;
         RegenReport {
+            runtime_session: self.instance.to_string(),
             outcome: Outcome::NoOp,
             revision: rev,
             source_revision: rev,
@@ -1419,6 +1736,16 @@ impl DocumentRuntime {
                     message: u.message.clone(),
                     diagnostics: Vec::new(),
                 })
+                .chain(self.feature_pattern_errors.values().filter(|error| {
+                    matches!(
+                        error.disposition,
+                        onecad_core::regen::feature_pattern::FeaturePatternFailureDisposition::InvalidCommand
+                    )
+                }).map(|error| FailedStep {
+                        record_id: error.record_id.to_string(),
+                        message: error.message.clone(),
+                        diagnostics: Vec::new(),
+                    }))
                 .collect(),
             diagnostics: Vec::new(),
             affected_bodies: BTreeMap::new(),
@@ -1450,13 +1777,14 @@ impl DocumentRuntime {
         // lower wins; the step itself already carries `StepState::Error` from
         // `sync_regen_timeline`, and everything after it stays Dirty — the same
         // shape as any other failed step.
-        let gate = match (
+        let gate = [
             self.regen.repair.first_seeded_step(),
             self.unresolved_variables.keys().next().copied(),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+            self.feature_pattern_errors.keys().next().copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let ceiling = match gate {
             None => None,
             // A gate on step 0 leaves nothing legal to execute at all.
@@ -1932,6 +2260,7 @@ impl DocumentRuntime {
                 let diagnostics = snap.diagnostics.clone();
                 let affected_bodies = affected_bodies_of(&self.regen.timeline, &self.regen.bodies);
                 let report = RegenReport {
+                    runtime_session: instance.to_string(),
                     outcome,
                     revision: self.fencing.revision().0,
                     source_revision,
@@ -1956,6 +2285,7 @@ impl DocumentRuntime {
                 "regen: SUPERSEDED (window race — accepted lock-free, document advanced)"
             );
             let report = RegenReport {
+                runtime_session: instance.to_string(),
                 outcome: Outcome::Superseded,
                 revision: self.fencing.revision().0,
                 source_revision,
@@ -2001,6 +2331,7 @@ impl DocumentRuntime {
             _ => Vec::new(),
         };
         let report = RegenReport {
+            runtime_session: instance.to_string(),
             outcome,
             revision: self.fencing.revision().0,
             source_revision,
@@ -2082,7 +2413,8 @@ impl DocumentRuntime {
     /// candidate `TopoKey` for it would be promoted against.
     fn needs_repair_items(&self) -> Vec<NeedsRepairItemDto> {
         let records = self.regen.timeline.records();
-        self.regen
+        let mut out: Vec<_> = self
+            .regen
             .repair
             .items()
             .iter()
@@ -2099,7 +2431,33 @@ impl DocumentRuntime {
                 });
                 needs_repair_item_dto(op_id, body_id, item)
             })
-            .collect()
+            .collect();
+        out.extend(
+            self.feature_pattern_errors
+                .values()
+                .filter(|error| {
+                    matches!(
+                error.disposition,
+                onecad_core::regen::feature_pattern::FeaturePatternFailureDisposition::NeedsRepair
+            )
+                })
+                .map(|error| NeedsRepairItemDto {
+                    op_id: error.record_id.to_string(),
+                    ref_id: error
+                        .source_record_id
+                        .map(|id| format!("{}.source.{id}", error.record_id))
+                        .unwrap_or_else(|| format!("{}.source", error.record_id)),
+                    reason: "missing-source".into(),
+                    scoring_version: None,
+                    candidate_count: 0,
+                    body_id: None,
+                    seed_edge_id: None,
+                    resolved_axis: None,
+                    frozen_axis: None,
+                    resolved_sidedness: None,
+                }),
+        );
+        out
     }
 
     /// Moves the driven scratch state into the live session and records the
@@ -2385,34 +2743,59 @@ impl DocumentRuntime {
         lod: Lod,
         generation: Option<u64>,
     ) -> Option<Arc<Vec<u8>>> {
-        let Some((gen, snap_id, latest_gen)) = self.latest_snapshot.as_ref().map(|snap| {
-            (
-                generation.unwrap_or(snap.generation),
-                snap.id,
-                snap.generation,
-            )
-        }) else {
-            if matches!(generation, None | Some(0)) {
-                return self.cached_meshes.get(&(body, lod)).cloned();
-            }
-            return None;
+        match self.prepare_mesh_fetch(body, lod, generation).drive().await {
+            Ok(ready) => ready,
+            Err(driven) => self.adopt_mesh_fetch(driven),
+        }
+    }
+
+    pub fn prepare_mesh_fetch(
+        &mut self,
+        body: BodyId,
+        lod: Lod,
+        generation: Option<u64>,
+    ) -> PreparedMeshFetch {
+        let Some(snapshot) = self.latest_snapshot.as_ref() else {
+            return PreparedMeshFetch::Ready(
+                matches!(generation, None | Some(0))
+                    .then(|| self.cached_meshes.get(&(body, lod)).cloned())
+                    .flatten(),
+            );
         };
+        let generation = generation.unwrap_or(snapshot.generation);
         let key = MeshKey {
             body,
             lod,
-            generation: gen,
+            generation,
         };
         if let Some(bytes) = self.mesh_cache.get(&key) {
-            return Some(bytes);
+            return PreparedMeshFetch::Ready(Some(bytes));
         }
-        // V1 serves only the current snapshot's generation; a stale one is a miss.
-        if gen != latest_gen {
+        if generation != snapshot.generation {
+            return PreparedMeshFetch::Ready(None);
+        }
+        PreparedMeshFetch::Fetch {
+            provider: self.meshes.clone(),
+            key,
+            snapshot: snapshot.id,
+            instance: self.instance,
+            worker_epoch: self.head_epoch,
+        }
+    }
+
+    pub fn adopt_mesh_fetch(&mut self, driven: DrivenMeshFetch) -> Option<Arc<Vec<u8>>> {
+        let current = self.latest_snapshot.as_ref()?;
+        if self.instance != driven.instance
+            || self.head_epoch != driven.worker_epoch
+            || self.fencing.get().1 != driven.worker_epoch
+            || current.id != driven.snapshot
+            || current.generation != driven.key.generation
+        {
             return None;
         }
-        let bytes = self.meshes.fetch_mesh(body, lod, snap_id).await.ok()?;
-        let arc = Arc::new(bytes);
-        self.mesh_cache.put(key, arc.clone());
-        Some(arc)
+        let bytes = driven.bytes?;
+        self.mesh_cache.put(driven.key, bytes.clone());
+        Some(bytes)
     }
 
     /// Drains a just-committed regen's inline MESH1 artifacts into the cache, so the
@@ -3212,22 +3595,25 @@ impl DocumentRuntime {
 
         // Sketches: real dof/status come from the last solver-lane solve
         // (`sketch_solve`, updated by enter/upsert/end-gesture, SCHEMA §7.4);
-        // an unsolved sketch reads `dof:0`/`Ok` until first solved.
+        // Solver fields are published only when the cached result certifies this
+        // exact geometry token; open/restore and post-edit projections omit them.
         let mut sketches = BTreeMap::new();
         for (id, sk) in &doc.sketches {
-            let (dof, status) = self
+            let geometry_token = sketch_geometry_token(sk);
+            let solve = self
                 .sketch_solve
                 .get(id)
-                .map_or((0, SketchStatus::Ok), |(dof, st)| (*dof, st.tree_status()));
+                .filter(|(_, _, solved_token)| solved_token == &geometry_token);
             sketches.insert(
                 id.to_string(),
                 SketchDto {
                     id: id.to_string(),
                     name: sk.name.clone(),
                     visible: doc.sketch_visible(*id),
-                    dof,
-                    status,
-                    geometry_token: sketch_geometry_token(sk),
+                    dof: solve.map(|(dof, _, _)| *dof),
+                    status: solve.map(|(_, status, _)| status.tree_status()),
+                    solve_geometry_token: solve.map(|(_, _, token)| token.clone()),
+                    geometry_token,
                     host_face: sketch_host_face(sk),
                 },
             );
@@ -3264,6 +3650,7 @@ impl DocumentRuntime {
         DocumentProjection {
             status: DocStatus::Ready,
             document_id: doc.id.to_string(),
+            runtime_session: self.instance.to_string(),
             revision: self.fencing.revision().0,
             title: self.title.clone(),
             dirty: self.dirty,
@@ -3283,6 +3670,13 @@ impl DocumentRuntime {
             // (`appliedOps < totalOps` ⇒ ops sit beyond the rollback bar).
             applied_ops: doc.timeline.cursor(),
             total_ops: doc.timeline.len(),
+            // History reach (WP-U1): the frontend needs the DEPTHS to enable its
+            // Undo/Redo rows and to tell an empty stack apart from a refused
+            // revert, and the top-of-stack LABELS to name the step in both.
+            undo_depth: self.session.undo_depth(),
+            redo_depth: self.session.redo_depth(),
+            undo_label: self.session.undo_label().map(str::to_owned),
+            redo_label: self.session.redo_label().map(str::to_owned),
             geometry_source: self.geometry_source().to_string(),
         }
     }
@@ -3371,6 +3765,19 @@ impl DocumentRuntime {
                 message: item.message.clone(),
                 stage: None,
                 reason_code: Some(expr_reason_code(item.kind).to_string()),
+                evidence: None,
+            });
+        }
+        if let Some(error) = self.feature_pattern_errors.get(&index) {
+            out.push(onecad_core::regen::Diagnostic {
+                severity: onecad_core::regen::Severity::Error,
+                code: "FEATURE_PATTERN_SOURCE_INVALID".into(),
+                message: error.message.clone(),
+                stage: None,
+                reason_code: Some(match error.disposition {
+                    onecad_core::regen::feature_pattern::FeaturePatternFailureDisposition::InvalidCommand => "invalid-command",
+                    onecad_core::regen::feature_pattern::FeaturePatternFailureDisposition::NeedsRepair => "needs-repair",
+                }.into()),
                 evidence: None,
             });
         }
@@ -3653,6 +4060,7 @@ impl DocumentRuntime {
                 prior: sketch.clone(),
                 undo_watermark: self.session.undo_depth(),
                 evicted_at_enter: self.session.evictions(),
+                created_this_visit: false,
             });
         }
         Ok(SketchSessionDto {
@@ -3662,6 +4070,7 @@ impl DocumentRuntime {
             constraints,
             dof: solved.dof,
             status: solved.status,
+            solve_current: true,
             // Surface the entering solve's conflicting constraints (SCHEMA §7.4) so
             // re-entering a conflicting sketch tints the offending constraints.
             conflicting: solved.conflicting,
@@ -3670,6 +4079,16 @@ impl DocumentRuntime {
             entity_states: solved.entity_states,
             projections: crate::sketch_projection::projections_dto(&sketch),
         })
+    }
+
+    pub fn mark_open_sketch_created(&mut self, sketch_id: SketchId) {
+        if let Some(session) = self
+            .sketch_session
+            .as_mut()
+            .filter(|s| s.sketch_id == sketch_id)
+        {
+            session.created_this_visit = true;
+        }
     }
 
     /// Reads a sketch's current geometry as a static snapshot — no worker call, no
@@ -3685,11 +4104,13 @@ impl DocumentRuntime {
     pub fn get_sketch(&self, sketch_id: SketchId) -> Result<SketchSessionDto, EngineError> {
         let sketch = self.sketch_or_err(sketch_id, "getSketch")?;
         let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
-        let (dof, status) = self
+        let token = sketch_geometry_token(&sketch);
+        let (dof, status, solve_current) = self
             .sketch_solve
             .get(&sketch_id)
-            .copied()
-            .unwrap_or((0, SketchSolveStatus::UnderConstrained));
+            .filter(|(_, _, cached)| cached == &token)
+            .map(|(dof, status, _)| (*dof, *status, true))
+            .unwrap_or((0, SketchSolveStatus::UnderConstrained, false));
         Ok(SketchSessionDto {
             sketch_id: sketch_id.to_string(),
             plane,
@@ -3697,6 +4118,7 @@ impl DocumentRuntime {
             constraints,
             dof,
             status,
+            solve_current,
             // A static read carries no live solve — the sketch_solve cache stores only
             // (dof, status), so there is no conflicting-id evidence to surface here.
             conflicting: Vec::new(),
@@ -3964,12 +4386,50 @@ impl DocumentRuntime {
     }
 
     /// Exits sketch mode / cancels an in-flight gesture without committing (SCHEMA
-    /// §7.4 — discard scratch). The document is unchanged.
+    /// §7.4 — discard scratch).
+    ///
+    /// With `discard = false` the document is unchanged: the in-session granular
+    /// edits are merely collapsed into one net undo step (the exit-and-keep that
+    /// Esc and Finish use).
+    ///
+    /// With `discard = true` (WP-U7 D-1 — the sketch chrome's **Cancel**) that net
+    /// step is then UNDONE, so the sketch is back to the state it had at
+    /// `enter_sketch`, and the redo entry the undo pushed is dropped (redoing it
+    /// would re-create the session the user just discarded). A discard the runtime
+    /// cannot honour reports itself in
+    /// [`CancelSketchOutcome::kept_reason`] and keeps today's behaviour — it never
+    /// reverts a step it is not sure belongs to the session.
     ///
     /// # Errors
     /// Never fails hard; a best-effort worker `EndGesture` (no commit) is ignored.
-    pub async fn cancel_sketch(&mut self, sketch_id: SketchId) -> Result<(), EngineError> {
-        if let Some(g) = self.active_gesture.take() {
+    pub async fn cancel_sketch(
+        &mut self,
+        sketch_id: SketchId,
+        discard: bool,
+    ) -> Result<CancelSketchOutcome, EngineError> {
+        let created = self
+            .sketch_session
+            .as_ref()
+            .filter(|session| session.sketch_id == sketch_id)
+            .map(|session| (session.created_this_visit, session.undo_watermark));
+        if discard && self.read_only {
+            return Ok(CancelSketchOutcome::kept(Some("the document is read-only")));
+        }
+        if discard && matches!(self.active_gesture.as_ref(), Some(g) if g.sketch_id != sketch_id) {
+            return Ok(CancelSketchOutcome::kept(Some(
+                "another sketch gesture is active",
+            )));
+        }
+        if discard
+            && matches!(created, Some((true, watermark)) if !self.session.is_created_sketch_suffix(watermark, sketch_id)
+                || self.session.document().sketch_dirty_step(sketch_id).is_some())
+        {
+            return Ok(CancelSketchOutcome::kept(Some(
+                "the sketch creation is interleaved or has dependents",
+            )));
+        }
+        if matches!(self.active_gesture.as_ref(), Some(g) if g.sketch_id == sketch_id) {
+            let g = self.active_gesture.take().expect("matched active gesture");
             // Best-effort: end the worker gesture so it does not leak (no commit).
             let _ = self
                 .solver
@@ -3980,9 +4440,66 @@ impl DocumentRuntime {
         // sketch_upsert edits committed during the session collapse into one net
         // undoable command (same as finish) so the user reverts the whole session
         // with a single undo.
-        self.squash_sketch_session(sketch_id);
-        tracing::info!("cancel_sketch: sketch={sketch_id} squashed (no timeline record)");
-        Ok(())
+        let squash = self.squash_sketch_session(sketch_id);
+        if !discard {
+            tracing::info!("cancel_sketch: sketch={sketch_id} squashed (no timeline record)");
+            return Ok(CancelSketchOutcome::kept(None));
+        }
+        match squash {
+            // The one case a revert is provably the session's own work.
+            SessionSquash::NetStep => {
+                let Some(outcome) = self.session.undo() else {
+                    tracing::info!(
+                        "cancel_sketch: sketch={sketch_id} discard REFUSED (undo stood down)"
+                    );
+                    return Ok(CancelSketchOutcome::kept(Some(
+                        "the edit could not be reverted",
+                    )));
+                };
+                let mut revert = self.revert_report(outcome);
+                // A discarded session must not be redoable back into existence.
+                self.session.clear_redo();
+                tracing::info!(
+                    "cancel_sketch: sketch={sketch_id} DISCARDED (net session step reverted)"
+                );
+                if matches!(created, Some((true, _))) {
+                    let outcome = self.session.undo().expect("creation suffix preflighted");
+                    revert = self.revert_report(outcome);
+                    self.session.clear_redo();
+                }
+                self.after_mutation();
+                Ok(CancelSketchOutcome {
+                    discarded: true,
+                    kept_reason: None,
+                    revert: Some(revert),
+                })
+            }
+            // Nothing was committed since enter (or it netted to zero): the
+            // document already holds the state the discard asks for.
+            SessionSquash::NoNetStep => {
+                let creation_revert = if matches!(created, Some((true, _))) {
+                    let outcome = self.session.undo().expect("creation suffix preflighted");
+                    let revert = self.revert_report(outcome);
+                    self.session.clear_redo();
+                    self.after_mutation();
+                    Some(revert)
+                } else {
+                    None
+                };
+                tracing::info!("cancel_sketch: sketch={sketch_id} discarded (nothing to revert)");
+                Ok(CancelSketchOutcome {
+                    discarded: true,
+                    kept_reason: None,
+                    revert: creation_revert,
+                })
+            }
+            SessionSquash::Refused(reason) | SessionSquash::NoSession(reason) => {
+                tracing::info!(
+                    "cancel_sketch: sketch={sketch_id} discard REFUSED ({reason}) — changes kept"
+                );
+                Ok(CancelSketchOutcome::kept(Some(reason)))
+            }
+        }
     }
 
     /// Computes the closed profile regions for a sketch (SCHEMA §7.4 `SketchRegions`)
@@ -4149,8 +4666,9 @@ impl DocumentRuntime {
     /// recorded in the document element partition index.
     ///
     /// # Errors
-    /// [`EngineError`] on a worker failure, or a recoverable `OpFailed` when the
-    /// pick was taken against a snapshot that is no longer the head (VF-M3).
+    /// [`EngineError`] on a worker failure, a recoverable `OpFailed` when the
+    /// pick was taken against a snapshot that is no longer the head (VF-M3), or a
+    /// recoverable `OpFailed` when a pick is not TopoKey-shaped at all.
     pub async fn promote_selection(
         &mut self,
         snapshot: SnapshotId,
@@ -4158,6 +4676,41 @@ impl DocumentRuntime {
         picks: Vec<(TopoKey, Option<AnchorIntent>)>,
     ) -> Result<Vec<PromotedElementDto>, EngineError> {
         self.gate_stale_pick(snapshot)?;
+        // The MESH1 id table is a TWO-NAMESPACE table: `Tessellate.cpp` substitutes
+        // the minted ElementId for any element that already has a live binding, and
+        // the viewport hands that label straight back as the pick's `topoKey`
+        // (`Picker.ts`). The worker's `resolve_pick` parses only `f:N`/`e:N`/`v:N`,
+        // so such a pick used to fall through to the anchor rung — and, when that
+        // missed, come back as "an incomplete or mismatched batch", i.e. "Selection
+        // is out of date" on a perfectly fresh pick (UX review 2026-09-11).
+        //
+        // Refuse it HERE, saying what it actually is. An ElementId is already the
+        // persistent handle promotion mints, so re-promoting one would at best
+        // duplicate it and at worst let the anchor rung bind a different element.
+        //
+        // The shape test is [`TopoKey::parse`], the one definition of the form
+        // (`<f|e|v|b>:<u64>`), not a prefix list: `f:` and `face:1` both pass a
+        // prefix test and then resolve to nothing a worker round-trip later.
+        if let Some(key) = picks
+            .iter()
+            .map(|(topo_key, _)| topo_key)
+            .find(|topo_key| !topo_key.is_valid())
+            .map(TopoKey::as_str)
+        {
+            return Err(EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::RefUnresolved,
+                recoverable: true,
+                message: if key.starts_with("el_") {
+                    format!(
+                        "pick '{key}' is an ElementId, not a TopoKey — it is already persistent \
+                         and needs no promotion"
+                    )
+                } else {
+                    format!("pick '{key}' is not a TopoKey — expected 'f:N', 'e:N' or 'v:N'")
+                },
+                diagnostics: Vec::new(),
+            });
+        }
         let mut requested_keys: Vec<String> = picks
             .iter()
             .map(|(topo_key, _)| topo_key.as_str().to_string())
@@ -4182,8 +4735,12 @@ impl DocumentRuntime {
             return Err(EngineError::OpFailed {
                 code: onecad_core::regen::OpFailureCode::RefUnresolved,
                 recoverable: true,
-                message: "element promotion returned an incomplete or mismatched batch — re-pick"
-                    .into(),
+                message: format!(
+                    "element promotion returned an incomplete or mismatched batch — re-pick \
+                     (requested=[{}] returned=[{}])",
+                    requested_keys.join(","),
+                    returned_keys.join(",")
+                ),
                 diagnostics: Vec::new(),
             });
         }
@@ -4508,10 +5065,18 @@ impl DocumentRuntime {
     /// leaves every id unbound, exactly as before this existed — but re-arms the
     /// pass (bounded), since a transport failure is not a ladder answer.
     pub async fn rebind_persisted_elements(&mut self) -> (usize, usize) {
-        self.rebind_attempted = true;
-        let Some(snapshot) = self.head_snapshot_id() else {
+        let Some(ticket) = self.prepare_persisted_rebind() else {
             return (0, 0);
         };
+        let result = ticket.drive().await;
+        self.adopt_persisted_rebind(result)
+    }
+
+    /// Captures the one-shot persisted-id rebind under the document lock.
+    /// [`PersistedRebind::drive`] performs all worker IO after the caller releases it.
+    pub(crate) fn prepare_persisted_rebind(&mut self) -> Option<PersistedRebind> {
+        self.rebind_attempted = true;
+        let snapshot = self.head_snapshot_id()?;
         // Only entries with evidence, and only ones the CURRENT head still has a
         // body for — a ref into a body that no longer exists has nothing to
         // enumerate against, and the ladder would just report that back at the cost
@@ -4539,15 +5104,34 @@ impl DocumentRuntime {
                 "rebind: persisted elements skipped — their body is not in the current head"
             );
         }
-        if pending.is_empty() {
+        (!pending.is_empty()).then(|| PersistedRebind {
+            engine: self.engine.clone(),
+            instance: self.instance,
+            snapshot,
+            epoch: self.head_epoch,
+            pending,
+        })
+    }
+
+    /// Adopts only the bookkeeping from an unlocked persisted-id rebind.
+    /// Worker bindings are snapshot-scoped, so a result from a replaced runtime or
+    /// superseded head is discarded and the current head gets its own attempt.
+    pub(crate) fn adopt_persisted_rebind(
+        &mut self,
+        result: PersistedRebindResult,
+    ) -> (usize, usize) {
+        if self.instance != result.instance
+            || self.head_snapshot_id() != Some(result.snapshot)
+            || self.head_epoch != result.epoch
+        {
+            self.rebind_attempted = false;
             return (0, 0);
         }
-
-        match self.rebind_entries(snapshot, &pending).await {
+        match result.counts {
             Ok(counts) => counts,
             Err(()) => {
                 self.note_rebind_transport_failure();
-                (0, pending.len())
+                (0, result.pending)
             }
         }
     }
@@ -4613,16 +5197,8 @@ impl DocumentRuntime {
     /// Resolves `pending` through the §7.5 ladder against `snapshot` and installs
     /// ONLY the `AutoBind`s. `Err(())` is a transport failure (the ladder never
     /// answered), which the caller distinguishes from "the ladder said no".
-    async fn rebind_entries(
-        &self,
-        snapshot: SnapshotId,
-        pending: &[(ElementId, ElementEntry)],
-    ) -> Result<(usize, usize), ()> {
-        Self::rebind_entries_with(&self.engine, snapshot, pending).await
-    }
-
-    /// [`rebind_entries`](Self::rebind_entries) against an engine handle instead
-    /// of `&self`, so a caller holding only a cloned `Arc` can drive the ladder
+    /// Rebinds against an engine handle instead of `&self`, so a caller holding
+    /// only a cloned `Arc` can drive the ladder
     /// with the runtime lock released (WP-P F7).
     pub(crate) async fn rebind_entries_with(
         engine: &Arc<dyn GeometryEngine>,
@@ -5056,7 +5632,14 @@ impl DocumentRuntime {
             .records()
             .iter()
             .find(|r| r.record_id == record)?;
-        let op = serde_json::to_value(&rec.op).ok()?;
+        let mut op = rec.op.clone();
+        if let Operation::Known(KnownOperation::FeaturePattern(params)) = &mut op {
+            // `sourceOps` is worker-only effective lowering context. Returning it
+            // to a re-edit client would let derived payload leak back into stored
+            // authoring state on the next whole-params update.
+            params.extra.remove("sourceOps");
+        }
+        let op = serde_json::to_value(&op).ok()?;
         op.get("params").cloned()
     }
 
@@ -5097,12 +5680,15 @@ impl DocumentRuntime {
     /// [`enter_sketch`](Self::enter_sketch) and asks the session to squash every
     /// undo step committed since. A crash between enter and finish/cancel leaves
     /// the granular steps (acceptable — no squash without a live watermark).
-    fn squash_sketch_session(&mut self, sketch_id: SketchId) {
+    ///
+    /// Returns what it did to the undo stack — [`cancel_sketch`](Self::cancel_sketch)'s
+    /// discard may only revert a [`SessionSquash::NetStep`].
+    fn squash_sketch_session(&mut self, sketch_id: SketchId) -> SessionSquash {
         match self.sketch_session.as_ref() {
             // Only the matching session is consumed; a different sketch's open
             // session (a frontend ordering bug) is left intact.
             Some(session) if session.sketch_id == sketch_id => {}
-            _ => return,
+            _ => return SessionSquash::NoSession("the sketch edit session had already closed"),
         }
         let session = self.sketch_session.take().expect("checked Some above");
         // Finding 3: an eviction past the undo cap since enter shifted the stack bottom,
@@ -5112,19 +5698,31 @@ impl DocumentRuntime {
         // sketch edits, but `count` now under-counts the session and would strand its
         // earliest edits below the net-inverse.
         if self.session.evictions() != session.evicted_at_enter {
-            return;
+            return SessionSquash::Refused("history was trimmed");
         }
         let count = self
             .session
             .undo_depth()
             .saturating_sub(session.undo_watermark);
-        self.session
-            .squash_sketch_session(sketch_id, session.prior, count);
+        match self
+            .session
+            .squash_sketch_session(sketch_id, session.prior, count)
+        {
+            SketchSquashOutcome::NetStep => SessionSquash::NetStep,
+            SketchSquashOutcome::Empty | SketchSquashOutcome::NetZero => SessionSquash::NoNetStep,
+            SketchSquashOutcome::Refused => {
+                SessionSquash::Refused("the session was interleaved with other edits")
+            }
+        }
     }
 
     fn record_solve(&mut self, sketch: SketchId, solved: &SketchUpsertDto) {
-        self.sketch_solve
-            .insert(sketch, (solved.dof, solved.status));
+        if let Some(current) = self.session.document().sketch(sketch) {
+            self.sketch_solve.insert(
+                sketch,
+                (solved.dof, solved.status, sketch_geometry_token(current)),
+            );
+        }
     }
 
     fn next_gesture_id(&mut self) -> u64 {
@@ -5184,6 +5782,14 @@ pub struct PreparedRegen {
     /// evidence for the steps this plan deliberately does not execute. Also the
     /// no-recursion flag: a pass that carries one never spawns another.
     isolation: Option<Box<IsolationCarry>>,
+}
+
+impl PreparedRegen {
+    /// Runtime identity captured under the phase-one document lock.
+    #[must_use]
+    pub fn runtime_session(&self) -> String {
+        self.instance.to_string()
+    }
 }
 
 /// Evidence from a HALTED regen that the WP-D1 isolation pass cannot reproduce —
@@ -5688,6 +6294,40 @@ pub type ProjectionRebind = (
     Vec<(ElementId, ElementEntry)>,
 );
 
+/// Persisted element rebind captured under the runtime lock, then driven without it.
+pub(crate) struct PersistedRebind {
+    engine: Arc<dyn GeometryEngine>,
+    instance: Uuid,
+    snapshot: SnapshotId,
+    epoch: WorkerEpoch,
+    pending: Vec<(ElementId, ElementEntry)>,
+}
+
+impl PersistedRebind {
+    /// Runs the resolution/binding worker round trips without a document guard.
+    pub(crate) async fn drive(self) -> PersistedRebindResult {
+        let pending = self.pending.len();
+        let counts =
+            DocumentRuntime::rebind_entries_with(&self.engine, self.snapshot, &self.pending).await;
+        PersistedRebindResult {
+            instance: self.instance,
+            snapshot: self.snapshot,
+            epoch: self.epoch,
+            pending,
+            counts,
+        }
+    }
+}
+
+/// Result of an unlocked persisted element rebind, fenced on adoption.
+pub(crate) struct PersistedRebindResult {
+    instance: Uuid,
+    snapshot: SnapshotId,
+    epoch: WorkerEpoch,
+    pending: usize,
+    counts: Result<(usize, usize), ()>,
+}
+
 /// One sketch's projection re-check request (WP-P B4).
 ///
 /// Captured under the runtime lock, driven with it RELEASED, then handed back to
@@ -5752,6 +6392,26 @@ fn log_unresolved_variables(unresolved: &BTreeMap<usize, UnresolvedVariable>, la
             item.message
         );
     }
+}
+
+fn lower_feature_patterns(
+    timeline: &mut Timeline,
+) -> BTreeMap<usize, onecad_core::regen::feature_pattern::FeaturePatternError> {
+    use onecad_core::regen::feature_pattern::FeaturePatternFailureDisposition;
+
+    let applied = timeline.cursor();
+    let errors =
+        onecad_core::regen::lower_feature_patterns(timeline.effective_records_mut(), applied);
+    for (step, error) in &errors {
+        let state = match error.disposition {
+            FeaturePatternFailureDisposition::InvalidCommand => StepState::Error {
+                reason: error.message.clone(),
+            },
+            FeaturePatternFailureDisposition::NeedsRepair => StepState::NeedsRepair,
+        };
+        let _ = timeline.mark_state(*step, state);
+    }
+    errors
 }
 
 /// The timeline records left in `StepState::Error` after a regen, as

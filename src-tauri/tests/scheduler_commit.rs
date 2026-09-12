@@ -275,7 +275,7 @@ async fn wire_with(runtime: Runtime) -> (Runtime, SchedulerHandle, UnboundedRece
         move |report: &RegenReport, projection: &DocumentProjection| {
             let _ = tx.send((
                 report.outcome_str().to_string(),
-                report.document_change(),
+                report.document_change(&projection.document_id, &projection.runtime_session),
                 projection.clone(),
             ));
         },
@@ -534,7 +534,12 @@ async fn rapid_double_commit_correlates_exactly() {
         report_a.revision
     );
     assert!(
-        report_a.document_change().is_none(),
+        report_a
+            .document_change(
+                &rt.projection().document_id,
+                &rt.projection().runtime_session
+            )
+            .is_none(),
         "a superseded regen publishes nothing (empty changedBodies for the awaiter)"
     );
 
@@ -558,8 +563,9 @@ async fn rapid_double_commit_correlates_exactly() {
         report_b.source_revision >= rev_a,
         "the final publish covers commit A (source_revision >= rev_a)"
     );
+    let projection_b = rt.projection();
     let change_b = report_b
-        .document_change()
+        .document_change(&projection_b.document_id, &projection_b.runtime_session)
         .expect("a published regen carries a document_change");
     assert_eq!(
         change_b.changed_bodies.len(),

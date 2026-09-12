@@ -56,4 +56,46 @@ describe("NavPill isolate button", () => {
     await user.click(isolateButton());
     expect(viewportStore.getState().isolatedBodyIds).toBeNull();
   });
+
+  it("shares section state between its activation and adjacent controls", async () => {
+    const user = userEvent.setup();
+    render(<NavPill />);
+
+    await user.click(screen.getByRole("button", { name: "Section controls" }));
+    expect(screen.getByTestId("section-controls-popover")).toBeInTheDocument();
+    expect(screen.getByTestId("section-plane-yz")).toBeDisabled();
+
+    await user.click(screen.getByTestId("nav-section"));
+    await user.click(screen.getByRole("button", { name: "Section controls" }));
+    await user.click(screen.getByTestId("section-plane-yz"));
+    expect(viewportStore.getState().section).toMatchObject({ enabled: true, plane: "YZ" });
+  });
+
+  it("opens a labelled Section controls dialog from the keyboard and returns focus", async () => {
+    const user = userEvent.setup();
+    render(<NavPill />);
+    const trigger = screen.getByRole("button", { name: "Section controls" });
+    trigger.focus();
+    await user.keyboard("{Enter}");
+
+    expect(screen.getByRole("dialog", { name: "Section controls" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Section view" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Section controls" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("shows the controller's mouse and trackpad mappings in navigation help", async () => {
+    const user = userEvent.setup();
+    render(<NavPill />);
+    await user.click(screen.getByRole("button", { name: "Navigation help" }));
+
+    expect(screen.getByRole("dialog", { name: "Navigation help" })).toBeInTheDocument();
+    const help = screen.getByTestId("navigation-help");
+    expect(help).toHaveTextContent("Middle or right drag: pan");
+    expect(help).toHaveTextContent("Shift + right drag: orbit");
+    expect(help).toHaveTextContent("Two-finger scroll: pan");
+    expect(help).toHaveTextContent("Shift + two-finger scroll: orbit");
+    expect(help).toHaveTextContent("Pinch: zoom");
+  });
 });

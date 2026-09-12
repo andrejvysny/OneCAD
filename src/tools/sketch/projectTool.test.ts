@@ -74,6 +74,20 @@ describe("projectTool — requests", () => {
     }
   });
 
+  it("carries a PROMOTED pick's ElementId so the backend need not re-promote it", () => {
+    // WP-U4 / D-5: a TopoKey is a snapshot ordinal a regen hands to a different
+    // sub-shape, so promoting one at the head can bind the wrong source and
+    // write a `projectedHash` baseline for geometry the user never picked. When
+    // the pick already carries the persistent id, that is what the request says.
+    let state = projectInit();
+    state = projectToggle(state, { ...pick("e:0"), elementId: "el_a" });
+    state = projectToggle(state, pick("e:5"));
+
+    const [req] = projectRequests(state, "sk1");
+    expect(req.sources.map((s) => s.elementId)).toEqual(["el_a", undefined]);
+    expect(req.sources.map((s) => s.topoKey)).toEqual(["e:0", "e:5"]);
+  });
+
   it("splits two bodies into separate single-body requests", () => {
     let state = projectInit();
     state = projectToggle(state, pick("e:0", "edge", "body1"));

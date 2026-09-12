@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ModelTreePanel } from "./ModelTreePanel";
 import { selectionStore } from "@/stores/selectionStore";
@@ -11,6 +11,10 @@ import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform"
 import { addonId, contributionId, type Platform, type TreeProviderId } from "@/platform";
 import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingTree } from "@/modules/modeling/treeProvider";
+import { ModelingTreeCommands } from "@/modules/modeling/ids";
+import { ModelingTreeProvider } from "@/modules/modeling/panelIds";
+import { sidebarTabStore } from "@/stores/sidebarTabStore";
+import { requestTreeReveal } from "./treeReveal";
 
 describe("ModelTreePanel", () => {
   beforeEach(() => resetStores());
@@ -72,6 +76,148 @@ describe("ModelTreePanel", () => {
   it("does not own Settings — that is application chrome, and lives in the StatusBar", () => {
     renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
+  });
+
+  it("tree hover is transient and cannot mutate the document or selection", () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    const before = documentStore.getState();
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+    const row = screen.getByRole("option", { name: /Body 1/ });
+
+    fireEvent.pointerEnter(row);
+
+    expect(selectionStore.getState().hover).toEqual({ kind: "body", id: "body1" });
+    expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+    expect(row).toHaveAttribute("data-hovered", "true");
+    expect(documentStore.getState().revision).toBe(before.revision);
+    expect(documentStore.getState().dirty).toBe(before.dirty);
+    expect(apply).not.toHaveBeenCalled();
+
+    fireEvent.pointerLeave(row);
+    expect(selectionStore.getState().hover).toBeNull();
+    apply.mockRestore();
+  });
+
+  it("maps canvas subelement and sketch-region hover to their owning rows", () => {
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+    const body = screen.getByRole("option", { name: /Body 1/ });
+    const sketch = screen.getByRole("option", { name: /Sketch 2/ });
+
+    act(() => selectionStore.getState().setHover({ kind: "face", id: "body1#f:2", bodyId: "body1" }));
+    expect(body).toHaveAttribute("data-hovered", "true");
+    act(() => selectionStore.getState().setHover({ kind: "edge", id: "body1#e:3", bodyId: "body1" }));
+    expect(body).toHaveAttribute("data-hovered", "true");
+    act(() => selectionStore.getState().setHover({ kind: "vertex", id: "body1#v:1", bodyId: "body1" }));
+    expect(body).toHaveAttribute("data-hovered", "true");
+    act(() => selectionStore.getState().setHover({ kind: "sketchRegion", id: "region", sketchId: "sketch2", regionId: "r1" }));
+    expect(sketch).toHaveAttribute("data-hovered", "true");
+    expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+  });
+
+  it("leaving an old row preserves a newer canvas hover", () => {
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+    const body = screen.getByRole("option", { name: /Body 1/ });
+    fireEvent.pointerEnter(body);
+    const newer = { kind: "sketch", id: "sketch4" } as const;
+    act(() => selectionStore.getState().setHover(newer));
+
+    fireEvent.pointerLeave(body);
+
+    expect(selectionStore.getState().hover).toBe(newer);
+  });
+
+  it("hovering a hidden sketch leaves its visibility, history, and document facts unchanged", () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    const before = documentStore.getState();
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+    const row = screen.getByRole("option", { name: /Sketch 5/ });
+
+    fireEvent.pointerEnter(row);
+
+    expect(selectionStore.getState().hover).toEqual({ kind: "sketch", id: "sketch5" });
+    expect(documentStore.getState().sketches.sketch5.visible).toBe(false);
+    expect(documentStore.getState().features).toBe(before.features);
+    expect(documentStore.getState().revision).toBe(before.revision);
+    expect(documentStore.getState().dirty).toBe(before.dirty);
+    expect(apply).not.toHaveBeenCalled();
+    apply.mockRestore();
+  });
+
+  it("reveals a selected row by switching tabs, opening its section, and scrolling its own ref", () => {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    try {
+      const platform = bootTestPlatform(contributeModelingTree);
+      renderWithPlatform(<ModelTreePanel />, { platform });
+      const section = screen.getByTestId("tree-section-onecad.modeling.tree.sketches");
+      fireEvent.click(section);
+      expect(section).toHaveAttribute("aria-expanded", "false");
+      act(() => sidebarTabStore.getState().setActiveTab("variables"));
+      const before = documentStore.getState();
+
+      act(() => platform.commands.get(ModelingTreeCommands.revealSelection as never)?.execute({ selection: [], scopes: [] }));
+
+      expect(sidebarTabStore.getState().activeTab).toBe("model");
+      expect(screen.getByTestId("tree-section-onecad.modeling.tree.sketches")).toHaveAttribute("aria-expanded", "true");
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+      expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+      expect(documentStore.getState().revision).toBe(before.revision);
+      expect(documentStore.getState().dirty).toBe(before.dirty);
+    } finally {
+      sidebarTabStore.getState().setActiveTab("model");
+      if (original) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", original);
+      else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+    }
+  });
+
+  it("resolves reveal targets by provider id, not a colliding foreign node id", () => {
+    const platform = bootTestPlatform(contributeModelingTree);
+    const providerId = contributionId<TreeProviderId>(MODELING_MODULE_ID, "onecad.modeling.tree.duplicate");
+    platform.createScope(MODELING_MODULE_ID).registerTreeProvider({
+      id: providerId,
+      sections: () => [{
+        id: "duplicate",
+        title: "Duplicate",
+        defaultCollapsed: true,
+        nodes: [{ id: "sketch2", label: "Foreign Sketch 2", icon: "cube", kind: "foreign", selected: false, select: () => {} }],
+      }],
+    });
+    renderWithPlatform(<ModelTreePanel />, { platform });
+    const modelSection = screen.getByTestId("tree-section-onecad.modeling.tree.sketches");
+    const foreignSection = screen.getByTestId("tree-section-duplicate");
+    fireEvent.click(modelSection);
+    expect(modelSection).toHaveAttribute("aria-expanded", "false");
+    expect(foreignSection).toHaveAttribute("aria-expanded", "false");
+
+    act(() => requestTreeReveal({ providerId: ModelingTreeProvider, nodeId: "sketch2" }));
+
+    expect(modelSection).toHaveAttribute("aria-expanded", "true");
+    expect(foreignSection).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("drops a reveal request whose target disappears before the host resolves it", () => {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    try {
+      renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+      act(() => documentStore.setState({ sketches: {} }));
+      act(() => sidebarTabStore.getState().setActiveTab("variables"));
+
+      let accepted = false;
+      act(() => {
+        accepted = requestTreeReveal({ providerId: ModelingTreeProvider, nodeId: "sketch2" });
+      });
+
+      expect(accepted).toBe(false);
+      expect(sidebarTabStore.getState().activeTab).toBe("variables");
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      sidebarTabStore.getState().setActiveTab("model");
+      if (original) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", original);
+      else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+    }
   });
 });
 

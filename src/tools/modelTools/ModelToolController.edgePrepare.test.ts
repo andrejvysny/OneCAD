@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CadClient } from "@/ipc/client";
 import type {
   ApplyOperationResult,
+  PrepareEdgeOpRequest,
   PrepareEdgeOpResult,
   PreviewDraft,
   PreviewResult,
@@ -83,7 +84,7 @@ function clientMock(capture: (cb: (result: PreviewResult) => void) => void) {
     }),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
-    prepareEdgeOp: vi.fn((): Promise<PrepareEdgeOpResult> =>
+    prepareEdgeOp: vi.fn((_req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult> =>
       Promise.resolve({
         snapshotId: 7,
         targetBodyId: "body_body1",
@@ -166,6 +167,24 @@ describe("ModelToolController prepared edge closure", () => {
     expect(chamfer.params.edgeIds).toEqual(fillet.params.edgeIds);
     expect(chamfer.params.tangentClosureVersion).toBe(1);
     expect(client.prepareEdgeOp).toHaveBeenCalledTimes(1);
+  });
+
+  it("addresses a PROMOTED pick by its ElementId, never by the reusable ordinal", async () => {
+    // WP-U4 / D-5: `e:1` names a different edge after any regen that renumbered
+    // the body, so authoring the op from it is how a chamfer lands on a
+    // neighbour. The persistent id is the only handle that still means the edge
+    // the user picked — and `edge_op_bodies` accepts exactly ONE address, so the
+    // ordinal must not ride along.
+    selectionStore
+      .getState()
+      .set(PICKS.map((pick) => ({ ...pick, elementId: `el_${pick.topoKey!.slice(2)}` })));
+    toolStore.getState().setTool("fillet");
+    await flush();
+
+    const sent = client.prepareEdgeOp.mock.calls[0][0];
+    expect(sent.pickedEdges.map((e) => e.elementId)).toEqual(["el_1", "el_2"]);
+    expect(sent.pickedEdges.map((e) => e.topoKey)).toEqual([undefined, undefined]);
+    expect(sent.pickedEdges.map((e) => e.bodyId)).toEqual(["body1", "body1"]);
   });
 
   it("refuses before promotion or preview when preparation declines", async () => {

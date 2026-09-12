@@ -267,3 +267,62 @@ test("measuring two faces of the box reports the ANGLE between them", async ({ p
   // The same reading rides the floating pair chip.
   await expect(page.getByTestId("measure-angle")).toHaveText("Angle: 90°");
 });
+
+/*
+ * ── WP-U11: diameter for circular edges (FE only) ────────────────────────────
+ *
+ * The seed box has no circular geometry, so this needs `?vpdemo=cyl`'s bushing
+ * (outer wall radius 20 mm — `mockClient.seedMockDemoCylinder`). The pick still
+ * goes through the engine's own `probePick` raycast, same discipline as the
+ * face cases above; only the target kind ("edge") differs.
+ */
+
+/** The `?vpdemo=cyl` bushing (see `mockClient.MOCK_DEMO_BORE_BODY_ID`). */
+const BUSHING = "body_demo_bore";
+
+/** A canvas pixel where an edge of `bodyId` is what the ray hits. */
+async function findEdgeOnBody(page: Page, bodyId: string): Promise<{ x: number; y: number }> {
+  await waitForCameraSettled(page);
+  let found: { x: number; y: number } | null = null;
+  await expect(async () => {
+    found = await page.evaluate((want) => {
+      const engine = (
+        window as unknown as {
+          __vpEngine?: {
+            probePick(x: number, y: number): { bodyId: string; kind: string; topoKey: string } | null;
+          };
+        }
+      ).__vpEngine;
+      const canvas = document.querySelector(
+        '[data-testid="viewport-canvas"] canvas',
+      ) as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 5; // finer than the face scan: an edge is a narrow pick band
+      for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
+        for (let x = rect.left + step; x <= rect.right - step; x += step) {
+          const hit = engine.probePick(x, y);
+          if (hit && hit.kind === "edge" && hit.bodyId === want) return { x, y };
+        }
+      }
+      return null;
+    }, bodyId);
+    expect(found, `no ${bodyId} edge found under any scanned pixel`).not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [200, 400, 800] });
+  return found as unknown as { x: number; y: number };
+}
+
+test("measuring a circular edge shows its diameter", async ({ page }) => {
+  await page.goto("/?vpdebug&vpdemo=cyl");
+  await expect(page.locator(CANVAS)).toBeVisible();
+  const edgePoint = await findEdgeOnBody(page, BUSHING);
+
+  await armMeasure(page);
+  await clickPoint(page, edgePoint);
+  const first = page.getByTestId("measure-label-0");
+  await expect(first).toBeVisible();
+  // Ø 40 mm — twice the bushing's 20 mm outer radius (`DEMO_BORE_ORIGIN`
+  // fixture). Whichever ring the scan lands on (outer wall or bore), the
+  // reading leads with the diameter ahead of the arc length.
+  await expect(first).toContainText(/^Ø [\d.]+ mm · Length [\d.]+ mm$/);
+});

@@ -112,6 +112,14 @@ export class PreviewMesh {
     return this.group.visible && this.meshes.length > 0;
   }
 
+  /** Visible L1 geometry bounds for an explicit Fit request; excludes handles/manipulators. */
+  getBounds(): THREE.Box3 | null {
+    if (!this.visible) return null;
+    this.group.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(this.group);
+    return bounds.isEmpty() ? null : bounds;
+  }
+
   private disposeMeshes(): void {
     for (const mesh of this.meshes) {
       this.group.remove(mesh);

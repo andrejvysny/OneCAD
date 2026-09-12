@@ -231,7 +231,7 @@ async fn two_disconnected_objects_in_one_session_both_survive_finish() {
 
     // SketchController.exit(): cancel FIRST (worker-gesture teardown + take-once
     // squash), then finish (solve + regions + Sketch timeline-record upsert).
-    rt.cancel_sketch(sid).await.expect("cancel");
+    rt.cancel_sketch(sid, false).await.expect("cancel");
     let (dto, _outcome) = rt.finish_sketch_with_outcome(sid).await.expect("finish");
     assert!(
         !dto.regions.is_empty(),
@@ -299,7 +299,7 @@ async fn a_second_session_adds_to_the_sketch_instead_of_replacing_it() {
     rt.sketch_upsert(sid, rect_gesture_ops())
         .await
         .expect("upsert (rect)");
-    rt.cancel_sketch(sid).await.expect("cancel 1");
+    rt.cancel_sketch(sid, false).await.expect("cancel 1");
     rt.finish_sketch(sid).await.expect("finish 1");
 
     // Session 2 — re-open the SAME sketch and draw a second, separate object.
@@ -312,7 +312,7 @@ async fn a_second_session_adds_to_the_sketch_instead_of_replacing_it() {
     rt.sketch_upsert(sid, standalone_line_ops())
         .await
         .expect("upsert (standalone line)");
-    rt.cancel_sketch(sid).await.expect("cancel 2");
+    rt.cancel_sketch(sid, false).await.expect("cancel 2");
     rt.finish_sketch(sid).await.expect("finish 2");
 
     assert_has_both_objects(

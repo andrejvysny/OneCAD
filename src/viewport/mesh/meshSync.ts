@@ -31,7 +31,7 @@ import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod, Rgba } from "@/ipc/types";
 import type { BodyMeta } from "@/stores/documentStore";
 import { trace } from "@/debug/trace";
-import { logError } from "@/debug/log";
+import { logDebug, logError } from "@/debug/log";
 import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -42,15 +42,43 @@ import { BodyMaterialLibrary } from "../engine/bodyMaterials";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { parseMeshPayload } from "./parseMeshPayload";
 import type { BodyMeshView } from "./parseMeshPayload";
-import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, swap } from "./meshRegistry";
-import { rebindSelectionForBody } from "./rebindPick";
+import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, setCurrentMeshPublication, swap, type MeshProvenance } from "./meshRegistry";
+import { dropSelectionForBody, reconcileSelectionForBody } from "./rebindPick";
 
 /** Committed bodies use the worker's display-quality tier; drag previews choose separately. */
 const DEFAULT_LOD: Lod = "fine";
 
+/**
+ * Why a body's mesh is being fetched — the fact that decides whether the
+ * selection has a regen to survive (D-5).
+ *
+ * `"regen"` is a `document-changed` publish: the topology may have been
+ * renumbered, elements consumed, new ones created. `"cosmetic"` is every other
+ * reload — a colour edit, a visibility flip, the self-healing `reconcile()` pass
+ * — which re-publishes the SAME topology under the same snapshot. Reconciling
+ * those would put every selected face through a backend round-trip (and drop
+ * every unpromoted one) because the user changed a colour.
+ */
+type LoadReason = "regen" | "cosmetic";
+
+interface RenderCorrelation {
+  expectationId: number;
+  documentId: string;
+  revision: number;
+  snapshotId: number;
+}
+
 /** Bounded retry for a `get_mesh` miss (mesh not regenerated/cached yet). */
 const EMPTY_MESH_RETRIES = 3;
 const EMPTY_MESH_RETRY_MS = 300;
+
+/** Strict parser for normative `<bodyId>:<lod>:<generation>` mesh cache keys. */
+export function meshGeneration(meshKey: string): number | null {
+  const match = /^(.*):(coarse|medium|fine):(0|[1-9]\d*)$/.exec(meshKey);
+  if (!match) return null;
+  const generation = Number(match[3]);
+  return Number.isSafeInteger(generation) ? generation : null;
+}
 
 function colorsEqual(
   a: Rgba | undefined,
@@ -87,9 +115,45 @@ export class MeshIngest {
   private readonly loadSeq = new Map<string, number>();
   /** Bodies with a fetch in flight — `reconcile()` skips these (no fetch storms). */
   private readonly pending = new Set<string>();
+  /** Token of the request currently owning the network slot for each body. */
+  private readonly activeToken = new Map<string, number>();
+  /** One latest-wins reload retained behind each in-flight body request. */
+  private readonly queued = new Map<string, LoadReason>();
+  /** Latest native publication revision expected to reach an actual rendered frame. */
+  private readonly renderCorrelation = new Map<string, RenderCorrelation>();
   private detached = false;
+  /** Latest successful live publication. Absent during bootstrap/cached-open. */
+  private currentPublication: MeshProvenance | null = null;
   /** Fires after a body's mesh finishes loading into the scene (F-WP7 commit reconcile). */
   private readonly bodyLoadedListeners = new Set<(bodyId: string) => void>();
+
+  private traceRendered(bodyId: string, token: number, startedAt: number): void {
+    const engine = this.engine;
+    if (!engine) return;
+    const correlation = this.renderCorrelation.get(bodyId);
+    if (!correlation && !import.meta.env.DEV) return;
+    const revision = correlation?.revision ?? 0;
+    let unsubscribe = () => {};
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      trace("mesh", `render completion timeout revision=${revision} body=${bodyId} token=${token} timeoutMs=2000`);
+    }, 2000);
+    unsubscribe = engine.onAfterRender(() => {
+      unsubscribe();
+      clearTimeout(timeout);
+      if (
+        this.detached ||
+        this.loadSeq.get(bodyId) !== token ||
+        !this.bodyObjects.has(bodyId)
+      ) return;
+      trace("mesh", `render completed revision=${revision} body=${bodyId} token=${token} elapsedMs=${(performance.now() - startedAt).toFixed(1)}`);
+      if (correlation) {
+        void this.client?.meshRenderCompleted({ ...correlation, bodyId }).catch((error: unknown) => {
+          logDebug("mesh", "render acknowledgment unavailable", { bodyId, error });
+        });
+      }
+    });
+  }
 
   /** Subscribe to "a body finished loading into bodiesRoot". Returns an unsubscribe. */
   onBodyLoaded(cb: (bodyId: string) => void): () => void {
@@ -104,6 +168,7 @@ export class MeshIngest {
     this.detached = false;
 
     this.unsubs.push(client.onDocumentChanged((c) => this.onDocumentChanged(c)));
+    this.adoptPublication(client.getCurrentMeshPublication?.() ?? null);
 
     // Visibility flips come through the document store (tree eye toggle) — and
     // EVERY applied projection reconciles scene ↔ store, so a body whose mesh
@@ -178,7 +243,7 @@ export class MeshIngest {
     const bodies = documentStore.getState().bodies;
     for (const [id, meta] of Object.entries(bodies)) {
       if (meta.visible && !this.bodyObjects.has(id) && !this.pending.has(id)) {
-        void this.loadBody(id, DEFAULT_LOD);
+        void this.loadBody(id, DEFAULT_LOD, "cosmetic");
       }
     }
     for (const id of [...this.bodyObjects.keys()]) {
@@ -208,12 +273,66 @@ export class MeshIngest {
   }
 
   private onDocumentChanged(change: DocumentChange): void {
+    trace("mesh", `publication delivered revision=${change.revision} changed=${change.changedBodies.length} removed=${change.removedBodies.length}`);
+    const document = documentStore.getState();
+    if (
+      change.documentId === undefined ||
+      change.runtimeSession === undefined ||
+      change.documentId !== document.documentId ||
+      change.runtimeSession !== document.runtimeSession
+    ) return;
+    this.adoptPublication(change);
     for (const id of change.removedBodies) this.dropBody(id);
     const bodies = documentStore.getState().bodies;
     for (const ref of change.changedBodies) {
+      if (
+        change.renderExpectationId !== undefined &&
+        change.documentId !== undefined &&
+        change.snapshotId !== undefined
+      ) {
+        this.renderCorrelation.set(ref.bodyId, {
+          expectationId: change.renderExpectationId,
+          documentId: change.documentId,
+          revision: change.revision,
+          snapshotId: change.snapshotId,
+        });
+      }
       const visible = bodies[ref.bodyId]?.visible ?? true;
-      if (visible) void this.loadBody(ref.bodyId, DEFAULT_LOD);
+      if (visible) {
+        void this.loadBody(
+          ref.bodyId,
+          DEFAULT_LOD,
+          "regen",
+          0,
+          this.currentPublication?.generation,
+        );
+      }
     }
+  }
+
+  private adoptPublication(change: DocumentChange | null): void {
+    const liveDocumentId = documentStore.getState().documentId;
+    const generations = change?.changedBodies.map((ref) => meshGeneration(ref.meshKey)) ?? [];
+    const generation = generations[0];
+    this.currentPublication =
+      change?.documentId !== undefined &&
+      change.documentId === liveDocumentId &&
+      change.runtimeSession !== undefined &&
+      change.runtimeSession === documentStore.getState().runtimeSession &&
+      change.snapshotId !== undefined &&
+      Number.isSafeInteger(change.snapshotId) &&
+      change.snapshotId > 0 &&
+      generation !== undefined &&
+      generation !== null &&
+      generations.every((candidate) => candidate === generation)
+        ? {
+            documentId: change.documentId,
+            runtimeSession: change.runtimeSession,
+            snapshotId: change.snapshotId,
+            generation,
+          }
+        : null;
+    setCurrentMeshPublication(this.currentPublication);
   }
 
   private onVisibilityChanged(
@@ -231,7 +350,7 @@ export class MeshIngest {
         // Lazy-load on first show. Gated on the DOCUMENT fact, not the effective
         // one: fetching a body that isolation is currently masking costs one
         // mesh but keeps it fresh, and `loadBody` applies the mask on arrival.
-        void this.loadBody(id, DEFAULT_LOD);
+        void this.loadBody(id, DEFAULT_LOD, "cosmetic");
       }
     }
   }
@@ -248,7 +367,7 @@ export class MeshIngest {
       if (colorsEqual(was, now) && faceColorsEqual(wasFaces, nowFaces)) continue;
       // Rebuild only bodies that are already in the scene; reconcile handles the rest.
       if (this.bodyObjects.has(id) || (next[id]?.visible ?? true)) {
-        void this.loadBody(id, DEFAULT_LOD);
+        void this.loadBody(id, DEFAULT_LOD, "cosmetic");
       }
     }
   }
@@ -320,7 +439,7 @@ export class MeshIngest {
     for (const [id, handle] of this.bodyObjects) handle.setVisible(this.effectiveVisible(id));
     for (const id of Object.keys(documentStore.getState().bodies)) {
       if (!this.bodyObjects.has(id) && this.effectiveVisible(id)) {
-        void this.loadBody(id, DEFAULT_LOD);
+        void this.loadBody(id, DEFAULT_LOD, "cosmetic");
       }
     }
     this.engine?.invalidate();
@@ -348,18 +467,52 @@ export class MeshIngest {
     return out.size > 0 ? out : undefined;
   }
 
-  private async loadBody(bodyId: string, lod: Lod, attempt = 0): Promise<void> {
+  private async loadBody(
+    bodyId: string,
+    lod: Lod,
+    reason: LoadReason,
+    attempt = 0,
+    requestedGeneration?: number,
+  ): Promise<void> {
     if (!this.client || !this.engine || !this.materials) return;
+    if (this.pending.has(bodyId) && attempt === 0) {
+      this.loadSeq.set(bodyId, (this.loadSeq.get(bodyId) ?? 0) + 1);
+      this.queued.set(bodyId, reason === "regen" ? "regen" : (this.queued.get(bodyId) ?? reason));
+      trace("mesh", `mesh request coalesced body=${bodyId} reason=${reason}`);
+      return;
+    }
+    const liveDocumentId = documentStore.getState().documentId;
+    const currentPublication = this.currentPublication;
+    const effectiveGeneration = requestedGeneration ?? (
+      currentPublication !== null && currentPublication.documentId === liveDocumentId
+        ? currentPublication.generation
+        : undefined
+    );
     const token = (this.loadSeq.get(bodyId) ?? 0) + 1;
+    const startedAt = performance.now();
     this.loadSeq.set(bodyId, token);
+    this.activeToken.set(bodyId, token);
+    trace("mesh", `mesh request start body=${bodyId} token=${token} reason=${reason}`);
     this.pending.add(bodyId);
     const bodyColor = documentStore.getState().bodies[bodyId]?.color;
     const faceColorsMeta = documentStore.getState().bodies[bodyId]?.faceColors;
 
     try {
-      const buffer = await this.client.getBodyMesh(bodyId, lod);
+      const publication = this.currentPublication;
+      const buffer = effectiveGeneration === undefined
+        ? await this.client.getBodyMesh(bodyId, lod)
+        : await this.client.getBodyMesh(
+            bodyId,
+            lod,
+            effectiveGeneration,
+            publication?.runtimeSession,
+          );
       // Discard if detached or superseded by a newer fetch for this body.
       if (this.detached || this.loadSeq.get(bodyId) !== token) return;
+      if (
+        effectiveGeneration !== undefined &&
+        (!publication || this.currentPublication !== publication || publication.generation !== effectiveGeneration)
+      ) return;
       // Empty = the mesh isn't regenerated/cached yet (Rust get_mesh miss). The
       // document-changed / reconcile paths re-trigger this fetch once published;
       // the bounded self-retry covers a publish that lands with no further event.
@@ -372,7 +525,7 @@ export class MeshIngest {
               this.loadSeq.get(bodyId) === token &&
               !this.bodyObjects.has(bodyId)
             ) {
-              void this.loadBody(bodyId, lod, attempt + 1);
+              void this.loadBody(bodyId, lod, reason, attempt + 1, effectiveGeneration);
             }
           }, EMPTY_MESH_RETRY_MS);
         }
@@ -381,19 +534,34 @@ export class MeshIngest {
 
       const view = parseMeshPayload(buffer);
       const authoredFaceColors = await this.resolveAuthoredFaceColors(bodyId, view, faceColorsMeta);
+      // `resolveAuthoredFaceColors` can await one worker round-trip PER authored
+      // colour, which is long enough for a newer publish to overtake this one.
+      // Re-check before the swap, or an older mesh installs over a newer one.
+      if (this.detached || this.loadSeq.get(bodyId) !== token) return;
+      if (
+        effectiveGeneration !== undefined &&
+        (!publication ||
+          this.currentPublication !== publication ||
+          publication.documentId !== documentStore.getState().documentId ||
+          publication.runtimeSession !== documentStore.getState().runtimeSession ||
+          publication.generation !== effectiveGeneration)
+      ) return;
       const entry = buildBodyObjects(
         view,
         bodyId,
         ++this.meshRev,
         bodyColor,
         authoredFaceColors,
+        effectiveGeneration === undefined ? undefined : publication ?? undefined,
       );
-      const prevEntry = getEntry(bodyId); // read BEFORE the swap — the rebind's evidence
+      const prev = getEntry(bodyId);
       swap(bodyId, entry);
-      // A regen renumbers TopoKeys, so a selection made before it names nothing
-      // after it and its highlight would silently vanish. Re-point the refs at the
-      // geometry they still mean BEFORE the highlight rebuild below reads them.
-      rebindSelectionForBody(bodyId, prevEntry, entry);
+      // A regen renumbers TopoKeys and consumes elements outright, so a selection
+      // made before it may name nothing after it. Decide each ref's fate against
+      // the NEW mesh (and, for a promoted one, against the backend) BEFORE the
+      // highlight rebuild below reads them — never by searching for a lookalike.
+      // A cosmetic reload re-publishes the SAME topology: nothing to survive.
+      if (reason === "regen") reconcileSelectionForBody(bodyId, prev, entry, this.client);
 
       // Rebuild the scene object (remove old, add new).
       const old = this.bodyObjects.get(bodyId);
@@ -407,9 +575,11 @@ export class MeshIngest {
 
       this.engine.refreshHighlights();
       this.engine.invalidate();
+      trace("mesh", `mesh installed body=${bodyId} token=${token} elapsedMs=${(performance.now() - startedAt).toFixed(1)}`);
+      this.traceRendered(bodyId, token, startedAt);
       for (const cb of [...this.bodyLoadedListeners]) cb(bodyId);
     } catch (e) {
-      if (this.detached) return;
+      if (this.detached || this.loadSeq.get(bodyId) !== token) return;
       // A fetch/parse/build failure must never be silent: without this the body
       // simply never appears and nothing anywhere says why (the SAVE/OPEN bug
       // class). Keep serving other bodies.
@@ -419,7 +589,13 @@ export class MeshIngest {
         severity: "error",
       });
     } finally {
-      if (this.loadSeq.get(bodyId) === token) this.pending.delete(bodyId);
+      if (this.activeToken.get(bodyId) === token) {
+        this.activeToken.delete(bodyId);
+        this.pending.delete(bodyId);
+        const queued = this.queued.get(bodyId);
+        this.queued.delete(bodyId);
+        if (queued && !this.detached) void this.loadBody(bodyId, lod, queued);
+      }
     }
   }
 
@@ -441,9 +617,13 @@ export class MeshIngest {
       this.engine?.bodiesRoot.remove(handle.group);
       this.bodyObjects.delete(bodyId);
     }
-    this.loadSeq.delete(bodyId);
-    this.pending.delete(bodyId);
+    this.loadSeq.set(bodyId, (this.loadSeq.get(bodyId) ?? 0) + 1);
+    this.renderCorrelation.delete(bodyId);
+    this.queued.delete(bodyId);
     remove(bodyId);
+    // The geometry is gone for good, so a face/edge ref naming it can never draw
+    // again — and must never author an op either (D-5, drawable-or-gone).
+    dropSelectionForBody(bodyId);
     this.updateGeometryPending();
     this.engine?.refreshHighlights();
     this.engine?.invalidate();
@@ -464,6 +644,11 @@ export class MeshIngest {
     this.bodyObjects.clear();
     this.loadSeq.clear();
     this.pending.clear();
+    this.activeToken.clear();
+    this.queued.clear();
+    this.renderCorrelation.clear();
+    this.currentPublication = null;
+    setCurrentMeshPublication(null);
     disposeAll(); // registry empty + leak tripwire
     this.materials?.dispose();
     this.materials = null;

@@ -49,6 +49,10 @@ export interface UndoProvenance {
 /** Undo/redo history depth cap (oldest entries are sliced off). */
 const UNDO_CAP = 50;
 
+/** What the next sketch-mode exit does with the session's edits (WP-U7 D-1):
+ *  `"keep"` is Esc / Finish, `"discard"` is the chrome bar's Cancel. */
+export type SketchExitIntent = "keep" | "discard";
+
 export interface SketchState {
   session: SketchSession | null;
   /** Bumped on EVERY setSession — the fencing token queued mutations check. */
@@ -67,10 +71,18 @@ export interface SketchState {
   entityStates: SketchEntityStates;
   /** STICKY draw modifier (W1-B): while on, every entity the draw tools commit is
    *  authored as CONSTRUCTION geometry (dashed, excluded from regions, still
-   *  solved). Toggled by X with an empty sketch selection / the chrome-bar button.
-   *  Session-independent — it survives entering and leaving sketches, and is not
-   *  persisted (a document close resets the store). */
+   *  solved). Toggled by X with an empty sketch selection / the toolbar button.
+   *  PER-SKETCH (D-2): `SketchController.openSession` resets it to `false` on
+   *  every sketch entry, so it never carries over from a previously edited
+   *  sketch. Not persisted (a document close resets the store either way). */
   constructionMode: boolean;
+  /** How the NEXT sketch-mode exit must be handled (WP-U7 D-1). The chrome's
+   *  Cancel sets `"discard"` immediately before flipping the mode; the
+   *  SketchController consumes it (back to `"keep"`) in its exit path. Esc,
+   *  Finish and every other exit leave it `"keep"` — today's exit-and-keep.
+   *  Held here rather than passed to the controller because the mode flip IS the
+   *  only channel between the chrome button and the controller. */
+  exitIntent: SketchExitIntent;
   entitySeq: number;
   constraintSeq: number;
   undoStack: SketchSnapshot[];
@@ -87,6 +99,13 @@ export interface SketchState {
   setEntityStates(states: SketchEntityStates): void;
   /** Flip the sticky construction draw modifier. */
   toggleConstructionMode(): void;
+  /** Force the sticky construction draw modifier off (sketch entry, D-2). No-op
+   *  when already off — never fires a subscriber for nothing. */
+  resetConstructionMode(): void;
+  /** Arm the next exit's intent (the chrome Cancel sets `"discard"`). */
+  setExitIntent(intent: SketchExitIntent): void;
+  /** Read the armed exit intent and reset it to `"keep"` — one exit, one use. */
+  takeExitIntent(): SketchExitIntent;
   /** Mint the next entity id (`e1`, `e2`, …) and advance the counter. */
   nextEntityId(): string;
   /** Mint the next constraint id (`c1`, `c2`, …) and advance the counter. */
@@ -108,6 +127,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
   conflictingIds: [],
   entityStates: {},
   constructionMode: false,
+  exitIntent: "keep",
   entitySeq: 0,
   constraintSeq: 0,
   undoStack: [],
@@ -148,6 +168,22 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
 
   toggleConstructionMode() {
     set((s) => ({ constructionMode: !s.constructionMode }));
+  },
+
+  resetConstructionMode() {
+    set((s) => (s.constructionMode ? { constructionMode: false } : {}));
+  },
+
+  setExitIntent(intent) {
+    set((s) => (s.exitIntent === intent ? {} : { exitIntent: intent }));
+  },
+
+  takeExitIntent() {
+    const intent = get().exitIntent;
+    // Take-once: a discard that never reached an exit (a superseded mode flip)
+    // must not colour the NEXT one.
+    if (intent !== "keep") set({ exitIntent: "keep" });
+    return intent;
   },
 
   nextEntityId() {
@@ -205,6 +241,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
       conflictingIds: [],
       entityStates: {},
       constructionMode: false,
+      exitIntent: "keep",
       entitySeq: 0,
       constraintSeq: 0,
       undoStack: [],

@@ -57,6 +57,7 @@ const failResult = (): ApplyOperationResult => ({
   changedBodies: [],
   removedBodies: [],
   errorMessage: "worker exploded",
+  rollbackToken: "rb-extrude",
 });
 
 function makeSession(): SketchSession {
@@ -119,6 +120,7 @@ function makeClientMock(
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     undo: vi.fn(() => Promise.resolve(okResult())),
+    rollbackFailedOperation: vi.fn(() => Promise.resolve({ ...okResult(), rolledBack: true, reason: "rolledBack" as const })),
     promoteSelection: vi.fn(() => Promise.resolve([{ topoKey: "f:2", elementId: "el-face-2", kind: "face" }])),
     getOperationParams: vi.fn(() =>
       Promise.resolve({
@@ -257,7 +259,7 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     expect(hint?.message).toContain("worker exploded"); // reason named
     // The applied-but-failed command is rolled back so a retried ✓ cannot stack
     // duplicate errored records (observed: 20 stacked failed Extrudes).
-    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+    expect(clientMock.rollbackFailedOperation).toHaveBeenCalledTimes(1);
   });
 
   it("a retried confirm after a failure never stacks records (one rollback per attempt)", async () => {
@@ -272,7 +274,7 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     await flush();
 
     expect(clientMock.endPreview).toHaveBeenCalledTimes(2);
-    expect(clientMock.undo).toHaveBeenCalledTimes(2); // every applied-but-failed commit rolled back
+    expect(clientMock.rollbackFailedOperation).toHaveBeenCalledTimes(2); // every applied-but-failed commit rolled back
     expect(toolStore.getState().phase).toBe("armed"); // still armed, work kept
   });
 
@@ -310,7 +312,7 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     expect(toolStore.getState().modelTool).toBe("select");
     expect(selectionStore.getState().selected).toEqual([]);
     expect(documentStore.getState().bodies.body1).toBeUndefined();
-    expect(viewportStore.getState().statusHint?.message).toBe("Cut completed");
+    expect(viewportStore.getState().statusHint?.message).toBe("Cut created");
   });
 
   it("blocks confirm after a stale preview, retries once, and clears only on success", async () => {
@@ -333,7 +335,7 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
     expect(clientMock.endPreview).not.toHaveBeenCalled();
-    expect(viewportStore.getState().statusHint?.message).toContain("Cannot confirm");
+    expect(viewportStore.getState().statusHint?.message).toContain("head changed");
 
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(clientMock.updatePreview).toHaveBeenCalledTimes(2);

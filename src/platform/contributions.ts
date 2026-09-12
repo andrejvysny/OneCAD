@@ -301,6 +301,8 @@ export interface TreeNode {
   readonly selected: boolean;
   /** Rendered dimmed — shown but not currently in play. */
   readonly dimmed?: boolean;
+  /** A transient pointer correspondence, visually distinct from selection. */
+  readonly hovered?: boolean;
   /**
    * A short trailing value the row carries (a load magnitude, "not installed").
    * Right-aligned mono, and NOT a second label: the host truncates the label
@@ -316,6 +318,12 @@ export interface TreeNode {
   /** Absent ⇒ this row has no visibility fact at all. */
   readonly visible?: boolean;
   select(): void;
+  /**
+   * Starts this node's transient hover and returns the exact cleanup lease.
+   * The host disposes it on pointer leave and unmount; owners must not clear a
+   * newer hover they did not start.
+   */
+  startHover?(): Disposable;
   activate?(): void;
   toggleVisible?(next: boolean): void;
   rename?(next: string): void;

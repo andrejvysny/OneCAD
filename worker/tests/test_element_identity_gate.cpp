@@ -37,8 +37,10 @@
 #include <string>
 
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Compound.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
@@ -76,7 +78,7 @@ void check(bool cond, const std::string& msg) {
 
 // Drive a Session to a published head holding one 10 mm cube. Returns the head
 // snapshot id (the worker mints it at AcceptPrepared).
-std::uint64_t publish_cube(Session& session, bool transformed = false) {
+std::uint64_t publish_cube(Session& session, bool transformed = false, bool duplicate = false) {
     session.open("doc_1", /*documentRevision=*/0, /*workerEpoch=*/3, "determinism");
     auto fence = session.fence_and_clone(/*jobId=*/1, /*documentRevision=*/0, /*workerEpoch=*/3,
                                          onecad::session::kEmptyPrefixHash);
@@ -87,6 +89,14 @@ std::uint64_t publish_cube(Session& session, bool transformed = false) {
     job.prepared_snapshot_id = fence.prepared_snapshot_id;
     job.history_prefix_hash = std::string(64, 'a');
     TopoDS_Shape cube = BRepPrimAPI_MakeBox(kBox, kBox, kBox).Shape();
+    if (duplicate) {
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        builder.Add(compound, cube);
+        builder.Add(compound, BRepBuilderAPI_Transform(cube, gp_Trsf(), true).Shape());
+        cube = compound;
+    }
     if (transformed) {
         gp_Trsf placement;
         placement.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0.37);
@@ -213,8 +223,50 @@ void test_anchor_veto() {
     // proportional to the candidate's own size rather than absolute.
     const Envelope corner = acquire(
         session,
+        json{{"snapshotId", head}, {"bodyId", kBody}, {"picks", anchor_pick(0.01, 0.01, kBox)}});
+    check(id_count(corner) == 1, "anchor near a face corner uniquely binds the top face");
+
+    const Envelope shared_corner = acquire(
+        session,
         json{{"snapshotId", head}, {"bodyId", kBody}, {"picks", anchor_pick(0.0, 0.0, kBox)}});
-    check(id_count(corner) == 1, "anchor at a face corner still binds");
+    check(id_count(shared_corner) == 0, "anchor on a shared face corner is ambiguous");
+
+    const Envelope stale_key = acquire(session, json{{"snapshotId", head}, {"bodyId", kBody},
+        {"picks", json::array({json{{"topoKey", "f:999"},
+            {"kind", "face"}, {"anchor", json{{"worldPoint", {5.0, 5.0, kBox}}}}}})}});
+    check(id_count(stale_key) == 0, "invalid explicit topoKey never falls through to anchor");
+
+    const Envelope malformed_key = acquire(session, json{{"snapshotId", head}, {"bodyId", kBody},
+        {"picks", json::array({json{{"topoKey", 999}, {"kind", "face"},
+            {"anchor", json{{"worldPoint", {5.0, 5.0, kBox}}}}}})}});
+    check(id_count(malformed_key) == 0, "non-string explicit topoKey never becomes anchor-only");
+
+    const Envelope edge = acquire(session, json{{"snapshotId", head}, {"bodyId", kBody},
+        {"picks", json::array({json{{"kind", "edge"},
+            {"anchor", json{{"worldPoint", {5.0, 0.0, kBox}}}}}})}});
+    check(id_count(edge) == 1 && edge.result["ids"][0]["kind"] == "edge",
+          "anchor-only unique box edge resolves after shared-topology dedupe");
+
+    const Envelope vertex = acquire(session, json{{"snapshotId", head}, {"bodyId", kBody},
+        {"picks", json::array({json{{"kind", "vertex"},
+            {"anchor", json{{"worldPoint", {0.0, 0.0, kBox}}}}}})}});
+    check(id_count(vertex) == 1 && vertex.result["ids"][0]["kind"] == "vertex",
+          "anchor-only unique box vertex resolves after shared-topology dedupe");
+
+    const Envelope atomic = acquire(session, json{{"snapshotId", head}, {"bodyId", kBody},
+        {"picks", json::array({json{{"topoKey", "f:1"}}, json{{"topoKey", "f:999"}}})}});
+    check(id_count(atomic) == 1,
+          "Acquire reports only resolved evidence; Rust count mismatch keeps promotion atomic");
+}
+
+void test_congruent_distinct_shapes_are_ambiguous() {
+    Session session;
+    const std::uint64_t head = publish_cube(session, false, true);
+    const json pick = json::array({json{{"kind", "face"},
+        {"anchor", json{{"worldPoint", {5.0, 5.0, kBox}}}}}});
+    const Envelope result = acquire(
+        session, json{{"snapshotId", head}, {"bodyId", kBody}, {"picks", pick}});
+    check(id_count(result) == 0, "congruent distinct faces are ambiguous, never ordinal-picked");
 }
 
 void test_bind_query_resolve_round_trip(bool transformed) {
@@ -304,6 +356,7 @@ void test_invalid_batches_are_atomic() {
 int main() {
     test_snapshot_gate();
     test_anchor_veto();
+    test_congruent_distinct_shapes_are_ambiguous();
     test_bind_query_resolve_round_trip(false);
     test_bind_query_resolve_round_trip(true);
     test_identity_snapshot_fences();

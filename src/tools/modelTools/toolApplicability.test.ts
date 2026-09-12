@@ -186,7 +186,7 @@ describe.each(["linearPattern", "circularPattern"] as const)("getToolApplicabili
   it("empty selection ⇒ disabled", () => {
     expect(getToolApplicability(tool, [], NO_SKETCHES)).toEqual({
       enabled: false,
-      reason: "Select a body to pattern",
+      reason: "Select a body to pattern — feature patterns are not supported yet",
     });
   });
 
@@ -197,7 +197,7 @@ describe.each(["linearPattern", "circularPattern"] as const)("getToolApplicabili
   it("wrong-kind selection (a vertex) ⇒ disabled", () => {
     expect(getToolApplicability(tool, [vertex], NO_SKETCHES)).toEqual({
       enabled: false,
-      reason: "Select a body to pattern",
+      reason: "Select a body to pattern — feature patterns are not supported yet",
     });
   });
 });

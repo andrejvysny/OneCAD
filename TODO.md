@@ -1,4 +1,271 @@
+# CURRENT UX HARDENING HANDOFF CHECKLIST — 2026-09-12
+
+Authoritative current checklist; all prior ledger entries remain historical evidence. No source edits or commits are part of this handoff.
+
+## RESUMED IMPLEMENTATION — 2026-09-12
+
+Handoff draft retained; implementation is resumed. ui_plan Sol owns typed presentation contract work and tools_plan Sol owns the general-pattern contract audit pending main approval. Allocation remains Luna simple docs/UI, Terra moderate UI, Sol complex work, Astra final review. This docs note adds no test or gate result.
+
+### Main-reviewed checkpoint — 2026-09-12, continuing implementation
+
+- [x] Main independently ran typed inspector targets, chips, tree provider/Reveal/rows/panels, camera fit/navigation/rig: **11 files / 203 tests passed**; chained `npx tsc --noEmit` passed. Camera Stage A is accepted; engine/sketch integration remains open.
+- [x] Main ran worker-required `cargo test --test feature_pattern_integration -- --nocapture`: **7 passed / 0 failed / 0 ignored / 0 filtered**. Main selected ladder/pattern/reference CTest gate: **13/13 passed**. Bounded shared-host Add→Fillet evidence does not establish general patterns.
+- [x] Main ran worker-required `cargo test --test topology_rebind -- --nocapture`: **16 passed / 0 failed / 0 ignored / 0 filtered**.
+- [ ] **Safety finding from that green suite:** `vfm5_teleport_on_the_ordinary_edit_lane_is_the_accepted_residual` deliberately asserts `boundDecoy=true`. This historical characterization is not current safety acceptance. Investigate and replace the wrong-bind acceptance with a fail-closed regression under the current hardening requirements; checkpoint-fallback refusal already passes.
+- [ ] **General-pattern origin contract:** existing resolved-input evidence lacks authoritative producer ownership. Before/after topology difference is insufficient when Boolean operations rebuild host boundaries. Sol/native_fix owns transient ledger/checkpoint/rollback plumbing; Sol/tools_plan owns operation provenance adapters and pattern folding. Missing producer matches must never fall through to host geometry. Contract review precedes execution changes.
+- [ ] **Measurement currentness:** mass readings cache by body ID only; same-ID geometry changes and delayed cross-document reads need scoped currentness tests/fixes. Implementation not yet assigned.
+- [ ] Native GUI, full integrated gates and all-phase acceptance remain open. No native evidence was produced by these automated checks; the existing bundled app is stale.
+
+### Independent integration checkpoint — 2026-09-12, continued
+
+- [x] Subsequent main rerun after corrected clean replay provenance and Revolve owner history: worker-required FeaturePattern **7/7**, topology recovery **16/16** (zero failed/ignored/filtered). The stale-anchor teleport now reports `NeedsRepair`, zero removed volume and `boundDecoy=false`; earlier RED runs remain recorded below.
+- [x] Main selected worker CTest **5/5**: ladder, topology origins, FeaturePattern and both canonical pattern fixtures. Main Fit Preview/target/presentation tests **3 files / 25 tests**, followed by `npx tsc --noEmit`, passed.
+- [ ] Main review found initial readiness scheduling still captures document UUID rather than runtime session and enqueues after the check without a runtime tag. Same-file reopen and check-to-enqueue replacement need deterministic regression coverage; Sol/native_fix owns this correction before scoped measurement reads.
+- [ ] Follow-up review requires the readiness currentness check and enqueue to share the runtime lock: a stale tagged request could otherwise cancel valid scheduler work before the driver rejects it. The source correction is present; initial agent regressions substituted a no-op callback rather than the production guard and were rejected as evidence. Tests must exercise the shared production helper with deterministic replacement barriers.
+- [x] Readiness correction subsequently reviewed: shared production helper holds runtime lock for exact-session check plus tagged enqueue. Main readiness **7/7** passed; after correcting the misleading two-blank-document fixture, main actual same-file Save/Open replacement regression **1/1** passed (equal document UUID, unequal runtime session). Superseded initial test claims above remain historical. Native scheduling acceptance remains open.
+- [ ] Sol/tools_plan continues explicit mixed-chain adapters/negative tests; Terra owns bounded annotation pin/hide and collision placement design. Fit Preview is automated-validated only; no native acceptance claim.
+- [ ] Remaining implementation audit: native render watchdog correlates mesh install/after-render and logs timeouts, but no independent main-thread responsiveness probe or automatic bounded timeout sample capture is present. Plan 1A monitoring/stress is not closed by render acknowledgments alone. Explicit planar-face/datum normal framing outside sketch entry also remains to implement/verify; current section UI exposes principal planes, offset and flip.
+- [x] Main subsequent worker Release build/stage passed with stdout hygiene; annotation helper/store/controls/driver **4 files / 40 tests** passed. Correcting an initially nonexistent `.test.tsx` filter, actual `MeasureOverlay.test.ts` plus engine tests passed **2 files / 54 tests** (jsdom canvas warnings; no GPU/native claim). Further annotation review corrections remain in flight.
+- [ ] Main post-mixed-pattern selected CTest is **RED: 4/5**, canonical FeaturePattern repair fixture. It expected a later Chamfer missing-evidence repair; actual failure occurs at the root Hole with an ambiguous transformed face, and nested repair items lack the required pattern instance/source/input fields. Sol/tools_plan owns diagnosis and contract/fixture correction; do not overwrite the matcher merely to accept an unintended earlier failure.
+- [x] Main strengthened annotation/engine suite **6 files / 98 tests** passed after placement, pin/hide and lifecycle review; TypeScript then exposed three annotation contract/test fixture errors, assigned back to Terra. No native annotation claim.
+- [ ] Main first scoped-measurement Cargo compile is **RED (5 errors)**: query field landed in the wrong struct and a function argument list rather than the runtime initializer. Sol/native_fix owns correction plus genuine delayed-read tests; marshalling and ticket tests alone do not prove measurement currentness.
+- [ ] User-visible layout decision: move the existing fixed-but-floating MeasurePanel out of ViewportOverlay into inspector priority 90 while Measure is active. Keep geometry labels in the viewport; retain existing mass/currentness ownership. Terra owns contribution/root-layout/tests. Earlier descriptions calling the viewport card “docked” were inaccurate.
+
+- [x] Main worker Release build/stage completed; stdout hygiene passed. Existing C++ deprecation/initializer warnings remain; no warning-free C++ claim.
+- [x] Main isolated camera/sketch-entry suite: **13 files / 184 tests passed**. Its chained TypeScript check initially failed on a narrow test mock return type (`keptReason`); Luna corrected the fixture to `CancelSketchResult`. Main then independently passed `npx tsc --noEmit` and **plane-pick 9/9**. The agent's earlier overlapping-build run is preliminary only.
+- [ ] Main worker-required FeaturePattern integration is **RED: 6 passed / 1 failed / 0 ignored / 0 filtered**. Existing Revolve→modifier pattern lost producer provenance because NewBody Revolve lacked a history hook. Sol/tools_plan supplied a bounded hook; rerun pending. The combined Cargo command stopped here, so it did not execute the topology target.
+- [ ] Main separate worker-required topology target is **RED: 11 passed / 5 failed / 0 ignored / 0 filtered** after resolver v6. Several clean setup/reopen calls claim `ToEnd { from: 0 }` edit provenance. Sol/native_fix also found the same production error in new/open/import regeneration and restart scheduling: these must use no-edit `RevertToEnd` while real edits retain their dirty floor. Do not weaken ambiguity refusal to hide incorrect request provenance.
+- [ ] Camera review additionally corrected reversed non-pole face framing, stale face captures after body transforms, and delayed entry across document/mode changes. Stale cleanup never deletes in a replacement document; same-document cleanup waits and respects refused discard. Native evidence still owed. The pre-existing normal asynchronous keep-exit needs separate backend sketch-session ownership fencing.
+- [ ] Measurement scoped-read contract approved for subsequent work: document/runtime/published-snapshot fence, runtime-owned provider captured under lock, unlocked read, post-read runtime/snapshot/epoch validation, full-tuple frontend cache. Current mass cache remains uncorrected until that package lands.
+- [ ] General-pattern operation breadth, provenance cost measurement, annotation controls, model-preview Fit UI, native stress/persistence/window acceptance and final unchanged-tree gates remain open. No completion percentage increase claimed.
+
+- [x] Preserve durable evidence: Vitest 332 files/5880 pass/78 skip; worker Rust 1646/0/0/0 across exactly 100 result lines; CTest 196/196; post-DTO fmt/clippy warning-free; build tsc+Vite pass with existing >500kB warning.
+- [x] Preserve RED logs: Vitest 5869/9/78 and Rust 475/1; corrected stale contracts/async cleanup and misplaced DTO assertion are tests/docs corrections, not a closure claim.
+- [ ] Full browser rerun after final implementation; current browser evidence is chooser Chromium + WebKit 2/2 retries 0 only.
+- [ ] Native GUI acceptance after final implementation; app was last known closed at the prior checkpoint and mock Vite was stopped.
+- [ ] Phase 0 baseline evidence/inventory ownership and current-scope reconciliation.
+- [ ] Phase 1A native deadlock/unlocked-rebind and stress/publication-to-render completion; scheduler fence, queued-old-runtime app-driver and restart-owner automation are already 1/1.
+- [ ] Phase 1C solver currentness, persistent identity and ambiguity evidence; native validation and fail-closed references.
+- [ ] Phase 1D removed-selection/inspector trust, tree/canvas hover + Reveal, native recovery/undo/currentness/persistence.
+- [ ] Phase 2A native rollback, 100 commit stress, save/autosave isolation.
+- [ ] Phase 2B palette ranking, semantic labels, no-op clean/autosave, field-local undo, invalid-mode/tool-first/constraint and report variants.
+- [ ] Phase 2C shared presentation/controller contract: typed targets/references, one-parameter authority and cross-tool consistency.
+- [ ] Phase 2D chip/inspector rendering, accessibility and layout; all tool families already render through the frame.
+- [ ] Phase 2E solver-backed drag/snap/rollback: constraint/snap/trim/both-cancel and native stress.
+- [ ] Phase 2F sketch wording/indicators and all semantic variants.
+- [ ] Phase 3A candidate API/reference picking and native provenance/ambiguity.
+- [ ] Phase 3B candidate UI, annotations, tree hover/Reveal, framing, section, measurement and history.
+- [ ] Phase 3C FeaturePattern contracts/core/worker: mixed chains, refs, provenance, cycles, hosts, suppression, repair, persistence.
+- [ ] Phase 3D FeaturePattern UI/tests; broad UI remains backend-hidden.
+- [ ] Phase 4 docs/review fixes; Astra/main owns all-phase acceptance, not Phase 4.
+- [ ] All-phase acceptance: annulus hollow one-op; 100 each fillet/hole/offset across 3 launches; invalid/constraint/snap/trim; removed/recovery/currentness; housing/flange; patterns/BodyPattern V2; isolated save/open/autosave; exact window matrix; every report-tool variant.
+- [ ] Preserve allocation: Luna simple/docs, Terra moderate UI, Sol complex concurrency/geometry, Astra final review; maximum three coding agents.
+
+Current engineering judgment is approximately 62% implementation (55–65 rough range) and 50–55% full delivery, not measured closure. Product unresolved questions: none. Engineering validation remains open. Allocation: Luna simple tasks/docs, Terra moderate UI, Sol complex concurrency/geometry, Astra final review. Use cheapest-capable delegation; Claude Code must verify model/tool availability and not assume GPT equivalents.
+
 # OneCAD-Tauri Migration TODO
+
+## UX hardening program baseline — delegated implementation (2026-09-11)
+
+- [x] Preserve F/H/O native-stall logs and process samples in
+      `docs/qa/evidence/ux-hardening-2026-09-11/`; source SHA-256 values and dirty-tree baseline are recorded in its README.
+- [x] Inventory original review plus Addenda C/D/E and the approved hardening gaps in
+      `docs/qa/evidence/ux-hardening-2026-09-11/issue-matrix.md`. Statuses distinguish earlier engineering claims,
+      native-unverified work, and open findings; this is not a claim that current dirty changes are program-owned.
+- [ ] **1A — Sol:** two-thread native deadlock is now reproduced in tracing (main thread waits on `webviews_lock`; regen
+      emitter synchronously waits on main-thread eval receive). An unlocked-rebind ticket is in progress; native stress and
+      publication-to-render completion evidence remain required.
+- [x] **1B — Terra accepted by Astra:** interactive UI boundary and single-flight confirmation; review found and fixed the
+      active-drag UI-release regression. Automated coverage only; native pointer/AX/Enter equivalence remains open.
+- [x] **1D/2B — Terra accepted by Astra:** removed selection/hover cleanup and title/verb-first palette ranking. Full snapshots
+      reconcile absent body/element/sketch/feature refs; partial deltas deliberately do not. Native recovery/undo acceptance remains open.
+- [ ] **1C/2A/2C/2E/3A/3C — Sol:** solver currentness, reference safety, atomic undo/visibility, shared presentation seam,
+      sketch snap/rollback, candidate API and FeaturePattern contracts/core/worker.
+- [ ] **2B/2D/2F/3B/3D/4 — Terra:** semantic labels/dirty regressions, chip/inspector UI, wording, measurement/section/navigation,
+      feature-pattern UI and documentation after approved backend seams.
+- [ ] **Astra main session:** review every diff, run integration gates and independently perform bundled native acceptance.
+
+- [x] **Checkpoint evidence:** baseline `npx tsc --noEmit` passed. Astra independently reran region pick, sketch selection,
+      picker, rebind pick, document projection, and palette suites: 122 passed. Native Sol's initial check/clippy/fence-1 and
+      feature guard passed; `cargo tree --all-features` found no runtime-wry tracing dependency.
+- [x] **UI/tool checkpoint evidence:** Astra independently ran active-tool presentation, model chips, dimension input, and
+      controller chamfer-angle/offset-face/hole suites: 183 passed. Core `feature_pattern` has 4 passing negative-validation
+      tests only; this is not mixed-chain geometry evidence.
+- [ ] **FeaturePattern review gate:** restricted implementation now has core 8/8, wire 1/1 and worker 3/3 bounded cases
+      (Hole→Chamfer plus malformed/repair). Full operation adapters/mixed-chain proof, provenance breadth and native acceptance
+      remain open; do not represent it as general feature patterning.
+- [ ] **Inspector migration:** all tool families render through the frame; 320 px frame/280–420 px bounds and Extrude secondary
+      seam are WIP. Drawer-quality review, legacy overflow removal, chip relocation/docking and placement behavior remain open.
+- [ ] **Native status:** user-requested TERM stopped OneCAD PID 33374 and worker PID 33395; their absence was verified. No
+      native validation ran after termination.
+- [x] **Worker/core checkpoint evidence:** worker build/stage Release passed; `feature_pattern` CTest is 1/1 passed, but a
+      safety review found unresolved producer fallback, so FeaturePattern is not accepted. `document_runtime::tests` passed
+      116 with `ONECAD_REQUIRE_WORKER=1` against its fake runtime backend — not native-worker geometry proof.
+- [x] **Frontend/core checkpoint evidence:** five FE atomic/solver suites passed 211; two Extrude suites passed 77. Hole UI
+      implementation reported 87 tests plus tsc from its agent; main independent rerun remains in progress.
+- [x] **Atomic Cancel focused gate:** prior partial `NetStep` rollback/missing-mutation defects were fixed and reviewed, including
+      readonly foreign-gesture coverage. `cargo --lib cancel_` 11/11 and FE mock/IPC/exit coverage 157/157 passed; native
+      rollback acceptance remains open.
+- [ ] **Mesh coalescing review gate:** first implementation was rejected for stale-install and ABA hazards. Requires runtime/epoch
+      backend ticket plus explicit stale-generation regressions; no responsiveness claim from it.
+- [x] **Drawer/CountStepper focused gate:** accepted bounded code and focused tests. Astra independently reran chips, Hole,
+      presentation and Inspector suites: 123/123 plus tsc. An intermediate 120-pass/1-fail stale-axis-label expectation was
+      repaired before this current run; native UI acceptance remains open.
+- [x] **Strict FeaturePattern repair parser focused gate:** Rust test 1/1 passed. This does not broaden the restricted pattern
+      acceptance or replace worker/native geometry coverage.
+- [ ] **C++ explicit-reference guard:** `AcquireElementIds` may fall back to nearest anchor when an explicit TopoKey is invalid.
+      Sol owns fail-closed correction and regressions; do not treat this as fixed by existing selection work.
+- [ ] **Tool lifecycle feedback ordering:** Cancel/tool-switch can lose published completion feedback, and an old non-preview commit
+      can reset a newly activated tool. Sol owns sequencing/epoch safeguards and regressions.
+- [x] **Worker provenance/scoped CTest checkpoint:** current Release build/stage passed; actual OCCT 8.0.1 metadata is pinned to
+      `onecad-occt-8.0.1-b8f597c67781-kp1`, and the local cache override was verified correct. C++ deprecation/initializer
+      warnings remain. Fresh CTest 5/5 covered FeaturePattern, identity/acquisition and malformed/repair fixtures only.
+- [x] **Scoped transport/acquisition evidence:** meshSync/ViewportEngine/tauriClient 209/209, latest meshSync 38/38 including
+      acknowledgement rejection, native API watchdog/retirement 29/29, and delayed-mesh 4/4 against a fake delayed provider.
+      Explicit-invalid-key fail-closed, finite-anchor uniqueness, shared-topology dedupe and producer-only pattern binding have
+      focused tests; they remain native-pending.
+- [ ] **Detached submitted-promise lifecycle:** do not falsely report failure after a detached submitted promise. Sol is working
+      this UI lifecycle edge; no closure from the current focused transport tests.
+- [x] **Modeling manifest integration:** bounded, deferred/hidden FeaturePattern rows were added for the two actual worker
+      adapters only. `verify-modeling-coverage.mjs` now passed (34 rows, 9 corpus cases, 20 registry operations) and contracts
+      passed (41 rows, 19 operations, 15 tier-checked). The earlier coverage failure and separate tracing-guard pass remain
+      recorded in the append-only matrix; this does not establish general FeaturePattern support.
+- [x] **Section/navigation bounded review:** Astra reviewed SectionControls/Nav and independently ran LayersMenu/NavPill 15/15.
+      Numeric precision, invalid alert, shared state and nav mapping were accepted; shared-popover focus/clamp and native UI
+      validation remain open.
+- [ ] **FeaturePattern source-edit regeneration defect:** independent `cargo feature_pattern_integration`
+      `independent_pattern_survives_edit_history_and_reopen` is 0/1. The first three bodies/identity metrology pass, but changing
+      source Extrude 10→16 leaves only the source and reports `FEATURE_PATTERN_PRODUCER_BIND` at instance 1 Fillet input 0.
+      Reopen assertions were not reached. Native_plan owns the fix; tools_plan owns the test. No ignored failure.
+- [ ] **Failed-model rollback receipt correctness:** generic `client.undo` can run after the native API acquires a different
+      runtime and undo a replacement document or interleaved top transaction. Native_fix is replacing it with a backend-issued
+      receipt bound to runtime instance, exact undo entry and revision plus a conditional rollback command; null/no-op without a
+      receipt must never undo prior work. Frontend integration and main independent runs remain pending.
+- [x] **Bounded FeaturePattern integration evidence:** real-worker `feature_pattern_integration` 2/2 passed: same-host
+      Hole→asymmetric-Chamfer and independent Sketch/Extrude/Fillet source edits/history/raw persistence/fresh-worker reopen.
+      Selected CTest 11/11 including canonical malformed/repair passed. This remains bounded-adapter evidence, not general patterns.
+- [x] **Focused frontend evidence:** rollback IPC/tauriClient plus Picker/ViewportEngine four files passed 211. Main model-tools
+      run passed 812 across 45 files before later review corrections; Popover/Nav/Layers/shortcuts earlier passed 81. These are
+      not a stable-tree final gate.
+- [ ] **Receipt/no-op guard:** backend receipt must never arm for a no-op transaction or a previous undo top; main receipt cargo
+      test encountered active-edit signature mismatch and is not a stable-tree gate.
+- [ ] **Retained-failure validation:** controller retained-failure block can be reset by numeric validation. Require an independent
+      typed validation block before accepting the failure-preservation UX.
+- [ ] **Rollback receipt follow-up:** main independently ran receipt tests 5/5, same-document replacement 1/1, TypeScript, and
+      frontend 145. A depth-only undo-cap defect was subsequently found and corrected by native_fix; the final independent rerun
+      remains owed, so the transaction row stays open.
+- [ ] **Focused UI evidence, not an integrated gate:** latest history/Inspector/chips/presentation/edgeShell suites passed 217/217.
+      Earlier model-tools/chips ran 46 files/889 passed, but Inspector failed to load while Terra was mid-editing a HistoryList parse.
+      Do not report an integrated UI green result.
+- [ ] **Browser accessibility regression boundary:** initial 48-test run was blocked at browser launch (Chromium Mach bootstrap
+      permission; WebKit abort; provenance `2026-09-11T19-47-10-301Z`). A max-fail-1 retry had 1 passed, 1 failed, 46 not run and
+      isolated a history-button/toolbar `Extrude` accessibility-name collision. The exact regression later passed 2/2 on Chromium
+      and WebKit with retries 0; Terra correction and the broad browser workflow remain open.
+- [ ] **Cross-session snapshot fencing:** SnapshotPublisher counters reset on reopen, allowing `(docId, snapshot, generation)` to
+      repeat across sessions. Native_fix is adding authoritative `runtimeSession` fences to snapshots/projections/changes, bootstrap
+      replay, and backend mesh/promote expected tokens. No native evidence yet.
+- [ ] **Candidate selection UX:** candidate enumeration is implemented and reviewed; chooser UI and full normal-selection behavior
+      remain open.
+- [ ] **Inspector/corner overlap (E5):** native screenshot shows the old 264 px CornerCluster/GridScaleChip inset overlaying the
+      new 320 px Inspector. Shared-inset correction is in progress; responsive/native validation remains pending.
+- [ ] **Evidence correction — E5 overlap:** the preceding screenshot is a Playwright mock-browser screenshot, not native evidence.
+      The visual regression remains real for that browser lane, but native UI acceptance is still wholly pending. The available
+      `.last-run.json` records only passed status and contains no trustworthy run timestamp; no `19-54-44` identifier is claimed.
+- [ ] **Current scoped worker evidence:** main independently passed FeaturePattern core 9/9, selected CTest 3/3, and real-worker
+      integration 2/2 covering four sources. Adapters remain bounded; C3's 0..N extension is not accepted.
+- [ ] **Measured inspector layout:** store/component tests passed 44/44 and Chromium measured 9 layouts (three sizes × 280/320/420)
+      plus collapsed 32; cube/grid clearance measured 12 px. The mock screenshot `/tmp/onecad-layout-1024-420.png` still shows a
+      toolbar crossing the Inspector header/cube and model clipping. ui_plan is implementing a measured work-area fix.
+- [ ] **Approved shell layout contract:** measurement wrappers use `display: contents` around shell SlotHosts to preserve visual
+      layout/order while deriving actual panel, toolbar and corner occupied rectangles; toolbar wraps rather than scrolling
+      horizontally. This is a user-visible golden-shell decision, not native acceptance.
+- [ ] **Solver/currentness follow-up:** agent fixed legacy `undefined === undefined` currentness and reports 38 tests; this is
+      preliminary, not independent main evidence. Accessibility/error-wording corrections remain active.
+- [x] **jsdom measurement baseline:** `src/test/setup.ts` now supplies only an inert normal `ResizeObserver` shape
+      (`observe`/`unobserve`/`disconnect`) when jsdom lacks one. Lifecycle tests retain their explicit custom observer; no
+      production measurement behavior or timeout changed. Narrow StartScreen passed 20/20.
+- [ ] **Main four-target suite evidence:** main recorded 61 pass / 19 fail. Three StartScreen failures and 12 uncaught missing
+      `ResizeObserver` errors motivated the baseline fix; the remaining 16 failures are promotion failures assigned to the native
+      audit. Rerun the four targets after the active heavy lane settles; do not call the suite green yet.
+
+No source fix is marked complete from this ledger until automated and required native evidence are appended. Current FeaturePattern,
+DTO, solver, atomic-transaction, shared-tool-seam, UI and native-stress work remains in progress; no full-green or closure claim.
+No commits/pushes.
+
+## Post-fix native UX retest (2026-09-11)
+
+- [x] Rebuild/stage worker and debug native app from current uncommitted fixes: both build commands exit 0; warnings recorded, no regression suites rerun.
+- [x] Retest recovery, numeric entry, selection, sketch interaction, and complex modeling through Computer Use only: 12-feature housing; body pattern/undo; arc/trim; section/display/measurement. Three persistent native stalls captured after backend publication; app recovered and left responsive, project unsaved.
+- [x] Append observed results and remaining coverage to `OneCAD-UX-Review-2026-09-11.md` Addendum E; preserve engineering response and previous findings. Includes cross-tool UI placement/consistency audit.
+- [ ] Follow up native stalls, pointer-versus-Enter region discrepancy, invalid-tool recovery, physical-input/persistence gaps. This retest is not a clean full native sign-off.
+
+No source inspection or implementation in this manual test pass. Unresolved questions: none before execution.
+
+## UX review 2026-09-11 — twelve work packages, full L3 green, UNCOMMITTED (2026-09-11)
+
+Plan: `~/.claude/plans/act-as-senior-cad-twinkly-kurzweil.md` (mirrored as `PLAN.md`, run log inside). Source:
+`OneCAD-UX-Review-2026-09-11.md`. Every finding with a code-side cause is fixed; the rest are recorded below.
+
+- [x] **Root causes found in `logs/dev.jsonl` before any code moved.** ⌘Z/⌃Z reached the backend as `redo`
+      (Shift carried by the injector), there was no native menu, no palette Undo, no hint on a no-op revert, and the
+      chord fired inside text fields. "Selection is out of date" on a fresh pick = the MESH1 id table names an
+      already-bound element by its minted ElementId (`el_…`, `Tessellate.cpp`), `Picker.ts` copied that label into
+      `topoKey`, and `AcquireElementIds` cannot parse it. "12 → 2 mm" = the type-to-enter seed was `select()`ed on
+      mount so the second digit replaced the first. Fillet clamp discarded its own `clamped/reason`. History section
+      was `features.slice(0, 3)`. Sketch Cancel was squash-and-finish. Construction mode was sticky by design.
+- [x] WP-U1 undo/redo: shared router (`src/features/shell/undoActions.ts`), editable-target guard ahead of the chord,
+      "Nothing to undo" / "Finish the drag first" hints, projection `undoDepth/redoDepth/undoLabel/redoLabel`,
+      palette "Undo Extrude"/"Redo …", `tauriClient.revert()` reports a label only when the depth moved, native
+      menu (`src-tauri/src/menu.rs`: File/Edit/Window, `menu-action` event, `noRegenWhen` on a no-op revert).
+- [x] WP-U2 seed caret at end (`DimensionInput`). WP-U3 clamp disclosure hint. WP-U5 body edge beats a coincident
+      sketch on a tie. WP-U6 full timeline in the selection History (+ "N features · nothing filtered"). WP-U8
+      construction mode per sketch + banner + hint. WP-U9 "Cut created / Joined / New body created", "Cut did not
+      intersect any body", disabled-tool reason as a hint, pattern reason names the feature-pattern gap (also
+      fixed a latent bug: `booleanMode` was read after the FSM settle). WP-U10 chip aria-labels with units, chip
+      layer no longer `aria-hidden`, Std picker prints "Ø3.4". WP-U11 measure Ø/R via `classifyElement` (FE only —
+      the protocol audit refused a `QueryElement` field: its elementId rung never reaches geometry). WP-U12
+      "Projected geometry only" card; cursor rounding labels itself "Rounded" beside a visible snap.
+- [x] WP-U7 sketch Cancel discards (D-1): core `SketchSquashOutcome`, runtime `cancel_sketch(id, discard)` undoes
+      only a `NetStep` and clears redo, api mirrors `undo`; FE `exit({discard})` drains the queue, deletes a sketch
+      minted this visit; Esc/Finish unchanged. Adversarial review: 1 MAJOR fixed (a refused discard must still
+      `finishSketch`), 1 MINOR fixed (no dirty flag on a no-net-step discard), 2 MINOR recorded.
+- [x] WP-U4 selection integrity (critical): `promoteOne` short-circuits an `el_` label; Rust `promote_selection`
+      refuses a non-TopoKey pick self-describingly (`TopoKey::is_valid`) and lists requested/returned keys;
+      geometric rebind DELETED; `reconcileSelectionForBody` keeps a ref only when the new id table names its
+      ElementId, confirms via `elementInfo` (fenced on body, kind, drawability, object identity), DROPS an
+      unpromoted ref across a regen; edge picks / projection sources address by ElementId; fillet/chamfer/shell
+      clear their consumed inputs; a hole keeps its seat face. New `src-tauri/tests/selection_promote.rs` (real
+      worker, red-first). **Astra `break` (call 1 of ~3, xhigh, grounded, packet 04fb9a7c75a3) + local
+      adversarial review both returned DEFECTIVE on the first cut** — converging blocker: a stale ordinal always
+      resolves because element counts only grow — all findings closed red-first in T13b. Accepted derivation:
+      `docs/design/astra/wp-u4-selection-survival.md` (F5 rejected as outside this path; one out-of-allowlist
+      read recorded).
+- [x] **L3 measured on the main thread, sequential:** `bunx tsc --noEmit` clean · `bun run test` **322 files,
+      5700 passed / 78 skipped / 0 failed** (×2; one load-only flake in `useShortcuts.test.tsx` fixed by polling)
+      · `bun run e2e` **542 passed / 0 failed** (chromium + webkit, `retries: 0`, 31.0 min, run alone) · hex gate
+      empty · `verify-modeling-coverage.mjs` 32 rows · `verify-modeling-contracts.mjs` 39 rows · negative controls
+      OK · `cargo fmt --all --check` OK · `cargo clippy --workspace --all-targets -- -D warnings` clean ·
+      `ONECAD_WORKER_PATH=… ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1593 passed / 0 failed / 0 ignored,
+      99 targets** · `ctest --test-dir worker/build` **193 / 193** · `check-worker-stdout-hygiene.sh` clean.
+- [ ] **Commit not made** — no authorisation this session; the tree is the gated tree (`git status`: modified +
+      new files under `src/`, `src-tauri/`, `worker/src/session/ElementIdentity.cpp`, `e2e/`, `docs/design/astra/`,
+      `PLAN.md`; `src-tauri/.claude/` and `.claude/agent-memory/` are agent scratch — never stage them).
+- [ ] **Owed user-run gates (bundled app):** menubar shows OneCAD/File/Edit/Window; Edit → Undo removes a committed
+      Extrude and Redo restores it; ⌘Z undoes once (hold: steady repeat); ⌘Z inside a number field undoes typing
+      only; ⌘Z on empty history hints "Nothing to undo" immediately; ⌘N on a dirty document prompts; ⌘W still
+      closes the project; ⌘X/⌘C/⌘V/⌘A in a text field work · type 100 mm on the 12 mm plate's fillet → chip 11.99
+      + "Radius limited to …" hint · revolve + four holes on one face: the seat stays selected, no stale hint ·
+      chamfer, ⌘Z, re-pick the restored edge, ⇧⌘Z → selection empty (mock lane cannot publish on redo).
+- [ ] **Follow-ups recorded in `PLAN.md`:** feature-level (hole) patterns (Astra-first `derive` when scheduled);
+      freeze root cause (no evidence survived; add a FE heartbeat line to `dev.jsonl`); Astra F5 — the §10 ladder's
+      documented teleport residual and sub-margin anchor exception are weaker than "backend confirmation proves
+      identity"; `project_to_sketch` has no within-batch duplicate guard across the two address forms;
+      `projectTool.ts` carries a literal NUL byte in a group key (git shows the file as binary); a chip's aria-label
+      unit does not re-render on a unit switch while armed; ⌘Z right after cancelling a freshly created sketch
+      first resurrects the empty sketch (`DeleteSketch` is its own step); `adoptPreparedEdges` anchor fallback is
+      dead on the real lane; ViewCube orbit vs roll; measurement-chip de-overlap; docked full-parameter inspector;
+      sketch-vertex drag unattributed (mock spec green); "Size fixed; position still free" sentence not honest
+      without a per-entity constraint decomposition.
 
 ## Native UX test recovery (2026-09-11)
 
@@ -11151,3 +11418,47 @@ build/hex-gate clean.
 - RISKY WP = extra independent review pass.
 - protocol/ or Descriptor.* or serde schema change = cross-track sign-off + fixture bump.
 - Git: commit at gate boundaries (user-approved 2026-07-17). Initial commit e14774d.
+
+## UX hardening allocation and evidence update — 2026-09-11 (append-only)
+
+- Allocation: Luna owns simple fixes, test updates and docs; Terra owns moderate UI; Sol owns complex concurrency/geometry; main Astra reviews and accepts only. Maximum three coding streams.
+- Main independent evidence: promoter + StartScreen six suites **240/240**; native receipt **6/6** (cap included); currentness three suites **55/55**; chooser + ViewportRoot + Popover three suites **32/32** before browser work.
+- Main also measured bounded Revolve core **9/9** and real-worker **4/4**. Mounted layout covered 1024/1156/1440 windows with Inspector 420, toolbar wrapping and corner clearance; `/tmp/onecad-mounted-layout-1024.png` is MOCK, not native evidence.
+- Preserve the interrupted full-unit history (**61 passed / 19 failed**) and do not convert it into a stable full-gate or native claim. A26 tests and shared Add5 integration are agent-preliminary only.
+- Chooser browser did not open at 430×400; diagnostic remains pending. Do not claim native or browser pass from that attempt.
+
+### Continuation evidence — 2026-09-11 (append-only)
+
+- Main independently ran **7 files / 182 tests passed**: mock publication/import/promote plus chips, HtmlOverlayDriver, ViewportRoot and ViewportEngine, before the latest drag changes.
+- Worker Release build/stage passed (OCCT deprecation warnings remain); `ctest -R feature_pattern` passed **3/3**; real-worker `feature_pattern_integration` passed **5/5**, including shared Add5 on the corrected enum/host ledger.
+- Chooser remains blocked/defective: publication is current, but the installed mesh has undefined provenance; the exact candidate entry is present yet candidates are filtered. The revision fixture mismatch is fixed, but is not proven as the root cause.
+- Native app was not launched; full gates are not claimed. Latest drag agent result (**83 passed**) and dev-demo result (**2 passed**) are preliminary only. Native event/restart review remains rejected pending ABA, queued-restart, `getProjection` lifecycle/order, and coalescer corrections.
+
+### Final hardening checkpoint — 2026-09-11 (append-only)
+
+- Allocation: Luna simple fixes/test updates/docs; Terra moderate UI; Sol complex concurrency/geometry; main Astra review/acceptance only; maximum three coding streams.
+- Main independent evidence: promoter + StartScreen **240/240**; native receipt **6/6** including cap; currentness **55/55**; chooser + ViewportRoot + Popover **32/32**; bounded Revolve core **9/9** and real-worker **4/4**; six frontend files **230 tests**; three UI suites **129 tests**.
+- Fresh chooser browser passed Chromium + WebKit **2/2**, retries 0, after stale-server restart; prior stale-server WebKit failure remains historical. Mounted layout covers 1024/1156/1440, Inspector 420, wrapped toolbars and corner clearance; `/tmp/onecad-mounted-layout-1024.png` is MOCK, not native.
+- Worker Release/stage passed; feature_pattern **3/3**; real-worker pattern **6/6**; core pattern **10/10**; scheduler fence **1/1**; queued-runtime app-driver **1/1**; restart-owner **1/1**. Wrong-filter queued-runtime **0 tests** excluded.
+- Preserve RED history **61 pass / 19 fail**, A26/shared Add5 preliminary labels, and initial mock missing-provenance observation; strict proof was not weakened. Native app was not relaunched; full gates, native acceptance, stress, persistence GUI, remaining adapters/CTest targets and D-camera remain OPEN. No percentage increase claimed.
+
+### Final main gate evidence — 2026-09-11 (append-only)
+
+- Full CTest passed **196/196** ([durable log](docs/qa/evidence/ux-hardening-2026-09-11/full-ctest.log); source `/tmp/onecad-ux-full-ctest.log`).
+- Full Vitest prior RED was **5869 pass / 9 fail / 78 skipped** (**5956 total**); all nine stale-contract/async-cleanup failures are now fixed in tests only. Current frozen-source main rerun: **332 files, 5880 passed / 78 skipped, 5958 total**, **31.36s** ([durable log](docs/qa/evidence/ux-hardening-2026-09-11/full-vitest-final.log); source `/tmp/onecad-ux-full-vitest-final.log`). Main `npx tsc` passed.
+- Final clippy was still running at checkpoint; do not claim it. Native GUI was not relaunched; full browser and full Rust workspace remain owed. General pattern breadth/UI, typed-target and D-camera remain open. Latest subscriber-failure isolation review is included in the full unit run.
+- Allocation remains Luna simple tasks/docs, Sol complex work, Astra final review. No percentage increase claimed.
+- Main subsequently passed `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` (49.21s; [durable log](docs/qa/evidence/ux-hardening-2026-09-11/final-clippy.log); source `/tmp/onecad-ux-final-clippy.log`). `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` is running at this checkpoint; leave it pending and do not claim.
+- The worker-required full workspace run then recorded **475 pass / 1 fail** in the first `lib` target; durable RED log: [final-cargo-workspace-red.log](docs/qa/evidence/ux-hardening-2026-09-11/final-cargo-workspace-red.log). The bounded DTO correction is separate: `ONECAD_REQUIRE_WORKER=1 cargo test --lib dto::tests` passed **22/22**.
+- Final worker-required Rust rerun exited 0: **1646 passed / 0 failed / 0 ignored / 0 filtered** across exactly 100 result lines, with no missing-worker skips. Durable log: [final-cargo-workspace-rerun.log](docs/qa/evidence/ux-hardening-2026-09-11/final-cargo-workspace-rerun.log); source `/tmp/onecad-ux-final-cargo-workspace-rerun.log`. Preserve the earlier RED as history. Post-DTO fmt/clippy rerun status is not newly claimed; full browser, native GUI and remaining implementations remain open.
+- Post-DTO main `cargo fmt --all --check` and warning-free workspace clippy passed in **44.48s** ([durable log](docs/qa/evidence/ux-hardening-2026-09-11/final-clippy-after-dto.log); source `/tmp/onecad-ux-final-clippy-after-dto.log`). The final build remains in progress; do not claim it yet.
+- Final `bun run build` passed (tsc + Vite, 2.03s) with the existing >500kB chunk warning ([durable log](docs/qa/evidence/ux-hardening-2026-09-11/final-build.log); source `/tmp/onecad-ux-final-build.log`). Native remained closed.
+
+## CURRENT RESUMPTION CHECKPOINT — 2026-09-12 (append-only)
+
+The earlier handoff framing that this work included no source edits is historical, not a current implementation stop. Resumed packages are 2C shared presentation contract, 3B measurement/candidate UI, and 3C FeaturePattern contracts; native gates remain open.
+
+- Main independently verified measurement UI: **2 files / 23 tests passed**.
+- Main independently verified worker FeaturePattern: **1/1**. A subsequent required-worker Cargo run is RED: `shared_host::extrude_add_fillet_pattern_keeps_one_host_through_edit_and_reopen` **0 passed / 1 failed / 6 filtered**, failing at source Fillet with `NeedsRepair`, ambiguous scoring 4, candidate count 5. Sol/native_fix owns diagnosis; no acceptance claim.
+- Typed-context Sol result **198** is preliminary only; tree work remains pending.
+- Native app, full browser, full Rust/CTest, stress, persistence GUI, remaining pattern adapters and D-camera gates remain open. This checkpoint adds no new test run; preserve earlier evidence boundaries.

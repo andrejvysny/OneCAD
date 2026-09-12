@@ -1,10 +1,11 @@
-import { useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
 import { cn } from "@/ui/cn";
 import { Icon } from "@/icons/Icon";
 import { EyeToggle } from "@/ui/EyeToggle";
 import { TextInput } from "@/ui/TextInput";
 import { MonoValue } from "@/ui/MonoValue";
 import type { IconName } from "@/icons/paths";
+import type { Disposable } from "@/platform";
 
 type TreeRowProps = {
   name: string;
@@ -12,7 +13,13 @@ type TreeRowProps = {
   /** Eye state. Only meaningful alongside `onToggleVisible`. */
   visible?: boolean;
   selected: boolean;
+  /** Transient correspondence with geometry, never a selection state. */
+  hovered?: boolean;
   onSelect: () => void;
+  /** Starts an owned hover lease which this row settles on leave/unmount. */
+  onHoverStart?: () => Disposable;
+  /** Host-owned row handle for scrolling without a global DOM query. */
+  rowRef?: RefCallback<HTMLDivElement>;
   /**
    * Show/hide handler. OMITTED ⇒ the row renders no eye at all — a datum plane
    * has no visibility fact in the document (DATUM W1), and a dead toggle that
@@ -62,7 +69,10 @@ export function TreeRow({
   icon,
   visible = true,
   selected,
+  hovered = false,
   onSelect,
+  onHoverStart,
+  rowRef,
   onToggleVisible,
   dimmed = false,
   meta,
@@ -74,6 +84,7 @@ export function TreeRow({
   onRenameCancel,
 }: TreeRowProps) {
   const input = useRef<HTMLInputElement>(null);
+  const hoverLease = useRef<Disposable | null>(null);
   // Guards the blur handler: Enter/Escape both settle the edit and then blur, and a
   // second commit off that blur would either double-write or resurrect a cancelled
   // name. Whichever path settles first wins.
@@ -89,6 +100,13 @@ export function TreeRow({
     el?.select();
   }, [editing]);
 
+  const stopHover = (): void => {
+    hoverLease.current?.dispose();
+    hoverLease.current = null;
+  };
+
+  useEffect(() => () => stopHover(), []);
+
   const commit = (): void => {
     if (settled.current) return;
     settled.current = true;
@@ -102,6 +120,7 @@ export function TreeRow({
 
   return (
     <div
+      ref={rowRef}
       role="option"
       aria-selected={selected}
       // While editing, the row must not select/activate underneath the field —
@@ -109,13 +128,21 @@ export function TreeRow({
       onClick={editing ? undefined : onSelect}
       onDoubleClick={editing ? undefined : onActivate}
       onContextMenu={onContextMenu}
+      onPointerEnter={() => {
+        stopHover();
+        hoverLease.current = onHoverStart?.() ?? null;
+      }}
+      onPointerLeave={stopHover}
+      data-hovered={hovered ? "true" : undefined}
       className={cn(
         "mx-2 my-px flex h-8 cursor-default items-center gap-2 rounded-sm px-2",
         selected
           ? "bg-sel-bg text-sel-text"
           : problem
             ? "text-warn hover:bg-hover-2"
-            : "text-tree-label hover:bg-hover-2",
+            : hovered
+              ? "bg-hover-2 text-tree-label"
+              : "text-tree-label hover:bg-hover-2",
         dimmed && "opacity-50",
       )}
     >

@@ -480,3 +480,45 @@ describe("DimensionInput — expression unit guardrails", () => {
     expect(screen.queryByTestId("dimension-expr-hint")).not.toBeInTheDocument();
   });
 });
+
+describe("DimensionInput — type-to-enter seed keeps the first digit", () => {
+  it("appends the second digit instead of replacing a selected seed", () => {
+    const onPreview = vi.fn();
+    const onCommit = vi.fn();
+    render(
+      <DimensionInput value={10} initialText="1" autoFocus onPreview={onPreview} onCommit={onCommit} />,
+    );
+    const input = screen.getByRole("textbox") as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("1");
+    expect(input.selectionStart).toBe(1);
+    expect(input.selectionEnd).toBe(1);
+    // Simulate the browser appending at the caret.
+    fireEvent.change(input, { target: { value: "12" } });
+    expect(input.value).toBe("12");
+    expect(onPreview).toHaveBeenLastCalledWith(12);
+  });
+
+  it("still selects the formatted value when opened without a seed", () => {
+    render(<DimensionInput value={10} autoFocus onCommit={vi.fn()} />);
+    const input = screen.getByRole("textbox") as HTMLInputElement;
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(input.value.length);
+  });
+});
+
+// WP-U10: every model-chip call site passes a real accessible name; the sketch
+// constraint badges and the Dimension tool keep the generic default.
+describe("DimensionInput — accessible name (WP-U10)", () => {
+  it("defaults to the generic 'Dimension value' name when no label is given", () => {
+    render(<DimensionInput value={5} onCommit={vi.fn()} />);
+    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument();
+  });
+
+  it("uses the caller's label, including the unit, when one is given", () => {
+    render(<DimensionInput value={24.5} suffix="mm" label="Depth (mm)" onCommit={vi.fn()} />);
+    const field = screen.getByLabelText("Depth (mm)") as HTMLInputElement;
+    expect(field.value).toBe("24.5");
+    expect(screen.queryByLabelText("Dimension value")).toBeNull();
+  });
+});

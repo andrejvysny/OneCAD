@@ -74,6 +74,8 @@ export type OnRecovery = "openSaved";
  */
 export interface DocumentSnapshot {
   documentId: string;
+  /** Required from native; optional only for legacy mock fixtures. */
+  runtimeSession?: string;
   title: string;
 }
 
@@ -114,6 +116,12 @@ export interface BodyMeshRef {
  */
 export interface DocumentChange {
   revision: number;
+  /** Opaque in-memory runtime identity; fences same-document reopen ABA. */
+  runtimeSession?: string;
+  /** Debug-native render watchdog correlation; absent outside debug bundles. */
+  renderExpectationId?: number;
+  /** Document identity paired with `renderExpectationId`. */
+  documentId?: string;
   /**
    * The published snapshot id this geometry belongs to (SCHEMA §7.5). Forwarded
    * to `promoteSelection` so a picked TopoKey resolves against the exact snapshot
@@ -289,7 +297,12 @@ export type ProjectionRefusalCode =
  *  optional anchor evidence the resolution ladder rebinds with. */
 export interface ProjectionSource {
   bodyId: string;
+  /** Snapshot-scoped evidence. Required unless `elementId` is present. */
   topoKey: string;
+  /** The persistent Rust-minted id, when the pick already carries one. Present ⇒
+   *  the backend addresses the source by it and SKIPS promotion, instead of
+   *  resolving a snapshot ordinal against the head (WP-U4 / D-5). */
+  elementId?: string;
   anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
 }
 
@@ -347,6 +360,8 @@ export interface SketchSession {
   constraints: SketchConstraint[];
   dof: number;
   status: SketchSolveStatus;
+  /** False for static reads without a solve certified for current geometry. */
+  solveCurrent?: boolean;
   /** Constraint ids in conflict (SCHEMA §7.4; FRONTEND ids, unknown dropped by the
    *  client). Seeds the sketch store's `conflictingIds` on session enter. Absent ⇒ []. */
   conflicting?: string[];
@@ -425,6 +440,21 @@ export interface SketchUpsertResult {
   /** Per-entity constrained state after this solve (SCHEMA §7.4). Every solve
    *  write-back REPLACES the store's `entityStates` from it. Absent ⇒ `{}`. */
   entityStates?: SketchEntityStates;
+}
+
+/**
+ * `cancelSketch` result (Rust `dto.rs CancelSketchDto`) — WP-U7 D-1.
+ *
+ * A plain (keep) cancel reports `discarded: false`: it only squashed the
+ * session. A DISCARD the backend could not honour also reports `false`, plus the
+ * `keptReason` the chrome shows — the geometry is still there and the user has to
+ * be told rather than left to find out.
+ */
+export interface CancelSketchResult {
+  /** True when the session's edits were reverted to the state at sketch entry. */
+  discarded: boolean;
+  /** Why a requested discard was refused (the edits are kept). */
+  keptReason?: string;
 }
 
 /** One closed profile region (SCHEMA §7.4 SketchRegions). */
@@ -559,14 +589,20 @@ export interface DragSolveResult {
 export interface PromotePick {
   topoKey: string;
   anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
+  /** What the caller picked. Carried only so `promoteOne`'s already-an-ElementId
+   *  short-circuit can answer with a real kind — a mesh label has none, and the
+   *  wire promotion returns the worker's. Never sent to the backend. */
+  kind?: "face" | "edge" | "vertex";
 }
 
 /** One promoted element (Rust-minted `elementId`; `PromotedElementDto`). */
 export interface PromotedElement {
   topoKey: string;
   elementId: string;
-  /** `face` | `edge` | `vertex`. */
-  kind: string;
+  /** `face` | `edge` | `vertex`. ABSENT only on `promoteOne`'s local
+   *  short-circuit for a pick that is already an ElementId, when the caller
+   *  declared no {@link PromotePick.kind} — the wire DTO always carries one. */
+  kind?: string;
   bodyId: string;
 }
 
@@ -996,6 +1032,8 @@ export interface NeedsRepairItem {
  * published regen; an EMPTY `items` means repairs cleared (drop the banner).
  */
 export interface NeedsRepairEvent {
+  /** Required from native; optional only for legacy mock fixtures. */
+  runtimeSession?: string;
   revision: number;
   /** Snapshot that produced the repairs; candidate TopoKeys are valid only here. */
   snapshotId: number;
@@ -1176,9 +1214,11 @@ export interface SketchProjection {
   id: string;
   name: string;
   visible: boolean;
-  dof: number;
+  dof?: number;
   /** `ok` | `under` | `over` | `error`. */
-  status: string;
+  status?: string;
+  /** Geometry token evaluated by the solver; absent means not evaluated. */
+  solveGeometryToken?: string;
   /** Deterministic identity of authoritative plane/entities/constraints. */
   geometryToken: string;
   /** The host face, for a face-hosted sketch. Omitted for world/datum sketches. */
@@ -1225,6 +1265,8 @@ export interface DocumentProjectionWire {
    * semantics — the mock never replaces the document out from under the store).
    */
   documentId?: string;
+  /** Opaque in-memory runtime identity; always present on native projections. */
+  runtimeSession?: string;
   revision: number;
   title: string;
   dirty: boolean;
@@ -1254,6 +1296,22 @@ export interface DocumentProjectionWire {
   /** Total op count (timeline length). See {@link appliedOps}. */
   totalOps?: number;
   /**
+   * Undo-stack depth (committed steps that can be reverted) and its redo twin.
+   *
+   * Optional: a backend older than the field omits them, and the mock lane
+   * derives them from its own snapshot stacks. They exist so the frontend can
+   * enable an Undo/Redo row by DEPTH and can tell an empty stack apart from a
+   * revert the runtime refused (`revert_blocked_by_gesture`) — the two used to
+   * be indistinguishable, so a blocked ⌘Z reported "nothing to undo".
+   */
+  undoDepth?: number;
+  /** Redo-stack depth. See {@link undoDepth}. */
+  redoDepth?: number;
+  /** Label of the step an undo would revert (`Txn::label`); absent when empty. */
+  undoLabel?: string;
+  /** Label of the step a redo would replay. See {@link undoLabel}. */
+  redoLabel?: string;
+  /**
    * Where the geometry the viewport is showing came from (backend-authoritative).
    *
    * - `"live"` — a regen has published; this IS the document's geometry.
@@ -1272,10 +1330,16 @@ export interface DocumentProjectionWire {
 /** Every terminal a correlated regeneration can report. */
 export type RegenTerminal = "published" | "noop" | "needsRepair" | "failed" | "timeout";
 
+/** Runtime-scoped start half of a regeneration lifecycle pair. */
+export interface RegenStarted {
+  runtimeSession: string;
+}
+
 /** The `regen-finished` payload (F-WP8 flag 3). `sourceRevision` is the revision
  *  the regen was fenced against at `begin_regen` (MODEL-HARDEN W0.5 commit
  *  provenance); the mock lane may omit it (then it falls back to `revision`). */
 export interface RegenFinished {
+  runtimeSession: string;
   revision: number;
   /** The revision this regen was PREPARED for (rapid-commit correlation). */
   sourceRevision?: number;
@@ -2082,6 +2146,11 @@ export interface ComponentGeometry {
  * the mock which finished region to synthesize a body from (the worker resolves
  * the region from the semantic ref in F-WP8).
  */
+export interface OperationEffects {
+  /** Sketches automatically consumed/hidden by this feature commit. */
+  hideSketchIds: string[];
+}
+
 export type OperationOp =
   | {
       opType: "Extrude";
@@ -2327,6 +2396,13 @@ export interface ApplyOperationResult {
    * inference; no production result may omit it.
    */
   terminal?: RegenTerminal;
+  /** Backend-issued one-shot receipt for conditionally reverting this exact commit. */
+  rollbackToken?: string;
+}
+
+export interface RollbackFailedOperationResult extends ApplyOperationResult {
+  rolledBack: boolean;
+  reason: "rolledBack" | "stale" | "blocked" | "tokenMismatch" | "unknownOrConsumed";
 }
 
 // ── Two-level preview (NEW_SPEC §15) ─────────────────────────────────────────

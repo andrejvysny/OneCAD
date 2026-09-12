@@ -52,6 +52,13 @@ export interface MeasurePick {
   normal: [number, number, number];
   /** Whether the descriptor actually carried a normal. */
   hasNormal: boolean;
+  /**
+   * A circle edge's / cylindrical face's radius (mm), from the companion
+   * `classifyElement` read (WP-U11) — `null` for any other kind, and `null`
+   * when the classify call refused or the frame carried no radius. Advisory:
+   * absence never blocks the magnitude/center reading above.
+   */
+  radius: number | null;
 }
 
 /** Ordered picks, oldest first. Empty is the armed-but-untouched state. */
@@ -119,8 +126,16 @@ export function measureInit(): MeasureState {
   return { picks: [] };
 }
 
-/** A `MeasurePick` from one backend `ElementInfo` read. */
-export function pickFromElementInfo(bodyId: string, info: ElementInfo): MeasurePick {
+/**
+ * A `MeasurePick` from one backend `ElementInfo` read, plus the radius from
+ * the companion `classifyElement` read (`null` when it refused or carried
+ * none — see {@link MeasurePick.radius}).
+ */
+export function pickFromElementInfo(
+  bodyId: string,
+  info: ElementInfo,
+  radius: number | null,
+): MeasurePick {
   return {
     bodyId,
     elementId: info.elementId,
@@ -131,6 +146,7 @@ export function pickFromElementInfo(bodyId: string, info: ElementInfo): MeasureP
     surfaceType: info.surfaceType,
     normal: [info.normal[0], info.normal[1], info.normal[2]],
     hasNormal: info.hasNormal,
+    radius,
   };
 }
 

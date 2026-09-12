@@ -21,7 +21,11 @@
  */
 import { toolStore, type ModelTool, type SketchTool, type Tool } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { documentStore } from "@/stores/documentStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { flushSketchMutations } from "@/tools/sketch/sketchService";
+import { getToolApplicability } from "@/tools/modelTools/toolApplicability";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
 
 const SKETCH_ONLY: ReadonlySet<Tool> = new Set([
   "line",
@@ -102,6 +106,20 @@ async function finishSketchToTool(tool: ModelTool): Promise<void> {
 }
 
 export async function activateTool(tool: Tool): Promise<void> {
+  const operationAttempt = operationAttemptStore.getState();
+  const documentId = documentStore.getState().documentId;
+  if (
+    operationAttempt.attempt?.phase === "applying" &&
+    operationAttempt.attempt.documentId === documentId
+  ) {
+    viewportStore.getState().setStatusHint("Operation is still applying", {
+      severity: "info",
+      sticky: true,
+    });
+    return;
+  }
+  if (operationAttempt.attempt?.documentId !== documentId) operationAttempt.clear();
+  operationAttempt.clear();
   const s = toolStore.getState();
   // The model toolbar's "New sketch" id is an enter intent, not a real tool.
   if (tool === "sketch") {
@@ -115,6 +133,26 @@ export async function activateTool(tool: Tool): Promise<void> {
   if (s.mode === "sketch" && MODEL_ONLY.has(tool)) {
     await finishSketchToTool(tool as ModelTool);
     return;
+  }
+  // Re-activating the tool that is ALREADY current (same shortcut pressed twice,
+  // or a palette re-run) does not change `modelTool`, so `ModelToolController`'s
+  // toolStore subscriber never re-fires `onToolChange` — the arm guard that
+  // normally surfaces a disabled tool's reason as a status hint stays silent.
+  // The toolbar button itself cannot be clicked while disabled (it drops its
+  // `onClick`), so this is the one path left that can reach a disabled tool
+  // silently: surface the reason here instead. A genuine tool CHANGE still gets
+  // its hint from the arm guard, which this deliberately does not duplicate.
+  if (s.mode === "model" && tool === s.modelTool) {
+    const verdict = getToolApplicability(tool, selectionStore.getState().selected, {
+      sketches: documentStore.getState().sketches,
+      bodies: documentStore.getState().bodies,
+    });
+    if (!verdict.enabled) {
+      viewportStore
+        .getState()
+        .setStatusHint(verdict.reason ?? null, { severity: "warn", sticky: true });
+      return;
+    }
   }
   s.setTool(tool);
 }

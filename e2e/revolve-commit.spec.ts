@@ -71,7 +71,7 @@ test("revolve: axis pick → armed 360° → drag angle → release stays armed 
   await clickAtClient(page, axisClient.x, axisClient.y);
   await expect(page.getByText(/Drag to set angle/)).toBeVisible();
   expect((await extrudeDebug(page))?.revolvePhase).toBe("armed");
-  await expect(page.getByLabel("Dimension value")).toHaveValue("360");
+  await expect(page.getByLabel("Angle (°)")).toHaveValue("360");
   // Wave 2: an existing body (the mock's seeded Body 1) offers the boolean segments
   // on the armed revolve cluster — behind its own `⋯` since UNIFY-UX Phase 2.
   await openRevolveOverflow(page);

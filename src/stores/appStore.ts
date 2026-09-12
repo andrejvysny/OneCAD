@@ -143,6 +143,7 @@ export interface AppState {
 
 export const appStore = createStore<AppState>()((set, get) => {
   let pendingReplacement: (() => Promise<void>) | null = null;
+  let replacementFlight: Promise<void> | null = null;
   const enter = (document: DocumentSnapshot) =>
     set({ screen: "editor", document });
 
@@ -151,6 +152,18 @@ export const appStore = createStore<AppState>()((set, get) => {
   // prototype's Sketch 2 selection).
   const resetIfReplacing = () => {
     if (get().document) resetDocumentScopedUi();
+  };
+
+  /** Serialize only backend-changing continuations; waiting for the prompt is not a flight. */
+  const runSingleflight = async (continuation: () => Promise<void>): Promise<void> => {
+    if (replacementFlight) return replacementFlight;
+    const flight = Promise.resolve()
+      .then(continuation)
+      .finally(() => {
+        if (replacementFlight === flight) replacementFlight = null;
+      });
+    replacementFlight = flight;
+    await flight;
   };
 
   function importKind(path: string): "project" | "step" {
@@ -172,7 +185,7 @@ export const appStore = createStore<AppState>()((set, get) => {
   const openOrPrompt = async (path: string): Promise<void> => {
     let document: DocumentSnapshot;
     try {
-      document = await client.openDocument(path);
+      document = await client.openDocument(path, undefined, { beforeAdopt: resetIfReplacing });
     } catch (e) {
       if (!isRecoveryPending(e)) throw e;
       set({
@@ -256,26 +269,23 @@ export const appStore = createStore<AppState>()((set, get) => {
 
     async newProject() {
       await get().requestReplacement(async () => {
-        resetIfReplacing();
-        const document = await client.newDocument();
+        const document = await client.newDocument({ beforeAdopt: resetIfReplacing });
         enter(document);
       });
     },
 
     async newFromTemplate(id) {
       await get().requestReplacement(async () => {
-        resetIfReplacing();
         // Deliberately NOT recorded in recents: nothing has been saved yet, and
         // an entry pointing into the library would reopen the template itself
         // rather than the user's copy.
-        const document = await client.newFromTemplate(id);
+        const document = await client.newFromTemplate(id, { beforeAdopt: resetIfReplacing });
         enter(document);
       });
     },
 
     async openProject(path) {
       await get().requestReplacement(async () => {
-        resetIfReplacing();
         await openOrPrompt(path);
       });
     },
@@ -284,7 +294,6 @@ export const appStore = createStore<AppState>()((set, get) => {
       await get().requestReplacement(async () => {
         const path = await client.openFileDialog();
         if (!path) return; // cancelled — nothing swapped, so nothing to invalidate
-        resetIfReplacing();
         // The dialog reaches the same files the recents list does, so it needs the
         // same guard. Only the recents CARD can carry a warning badge; picking the
         // file through the OS dialog arrives with no warning at all.
@@ -310,8 +319,7 @@ export const appStore = createStore<AppState>()((set, get) => {
         const path = await client.stepFileDialog();
         if (!path) return; // cancelled — silent, nothing to report
         try {
-          resetIfReplacing();
-          const document = await client.importStep(path);
+          const document = await client.importStep(path, { beforeAdopt: resetIfReplacing });
           enter(document);
         } catch (e) {
           set({ importError: e instanceof Error ? e.message : String(e) });
@@ -321,9 +329,8 @@ export const appStore = createStore<AppState>()((set, get) => {
 
     async importProject() {
       await get().requestReplacement(async () => {
-        const snap = await client.importProject();
+        const snap = await client.importProject({ beforeAdopt: resetIfReplacing });
         if (!snap) return; // cancelled — silent
-        resetIfReplacing();
         enter(snap);
       });
     },
@@ -335,12 +342,12 @@ export const appStore = createStore<AppState>()((set, get) => {
         if (!path) return; // cancelled — silent, nothing to report
         try {
           if (importKind(path) === "step") {
-            resetIfReplacing();
-            const document = await client.importStep(path);
+            const document = await client.importStep(path, { beforeAdopt: resetIfReplacing });
             enter(document);
           } else {
-            resetIfReplacing();
-            const document = await client.openDocument(path);
+            const document = await client.openDocument(path, undefined, {
+              beforeAdopt: resetIfReplacing,
+            });
             enter(document);
             void get().loadRecents();
           }
@@ -352,9 +359,12 @@ export const appStore = createStore<AppState>()((set, get) => {
 
     async closeProject() {
       if (!get().document) return; // nothing open
-      resetDocumentScopedUi();
-      documentStore.getState().applySnapshot(emptyDocument());
-      await client.closeDocument();
+      await client.closeDocument({
+        beforeAdopt: () => {
+          resetDocumentScopedUi();
+          documentStore.getState().applySnapshot(emptyDocument());
+        },
+      });
       set({ screen: "start", document: null });
       void get().loadRecents();
     },
@@ -385,8 +395,9 @@ export const appStore = createStore<AppState>()((set, get) => {
       set({ recoveryPendingId: documentId });
       try {
         await get().requestReplacement(async () => {
-          resetIfReplacing();
-          const document = await client.recoverDocument(documentId, true);
+          const document = await client.recoverDocument(documentId, true, {
+            beforeAdopt: resetIfReplacing,
+          });
           if (document) enter(document);
           set({ recovery: get().recovery.filter((o) => o.documentId !== documentId) });
         });
@@ -426,9 +437,10 @@ export const appStore = createStore<AppState>()((set, get) => {
       // "openSaved" — the destructive branch, and the reason this prompt exists at
       // all. The backend clears the recovery state before it opens the older file.
       await get().requestReplacement(async () => {
-        resetIfReplacing();
         try {
-          const document = await client.openDocument(conflict.path, "openSaved");
+          const document = await client.openDocument(conflict.path, "openSaved", {
+            beforeAdopt: resetIfReplacing,
+          });
           set({ recovery: get().recovery.filter((o) => o.originalPath !== conflict.path) });
           enter(document);
         } catch (e) {
@@ -440,6 +452,12 @@ export const appStore = createStore<AppState>()((set, get) => {
     },
 
     async requestClose(intent) {
+      if (replacementFlight) {
+        // A native quit can arrive while a replacement is committing. Release
+        // Rust's ExitGuard even though the replacement itself remains the winner.
+        if (intent === "quit" && get().pendingCloseIntent !== "quit") await client.cancelExit();
+        return;
+      }
       const pending = get().pendingCloseIntent;
       // Same prompt already up: ignore. (The dialog blocks the pointer but NOT the
       // shortcut lane, so ⌘W/⌘Q can re-enter; Rust's ExitGuard likewise swallows a
@@ -454,20 +472,21 @@ export const appStore = createStore<AppState>()((set, get) => {
       pendingReplacement = null;
       if (!documentStore.getState().dirty) {
         set({ pendingCloseIntent: null });
-        await proceed(intent);
+        await runSingleflight(() => proceed(intent));
         return;
       }
       set({ pendingCloseIntent: intent });
     },
 
     async requestReplacement(continuation) {
+      if (replacementFlight) return;
       const pending = get().pendingCloseIntent;
       if (pending === "replacement") return;
       if (pending === "quit") await client.cancelExit();
       pendingReplacement = null;
       if (!get().document || !documentStore.getState().dirty) {
         set({ pendingCloseIntent: null });
-        await continuation();
+        await runSingleflight(continuation);
         return;
       }
       pendingReplacement = continuation;
@@ -475,6 +494,7 @@ export const appStore = createStore<AppState>()((set, get) => {
     },
 
     async confirmClose(action) {
+      if (replacementFlight) return;
       const intent = get().pendingCloseIntent;
       if (!intent) return; // nothing pending
       if (action === "cancel") {
@@ -483,18 +503,20 @@ export const appStore = createStore<AppState>()((set, get) => {
         if (intent === "quit") await client.cancelExit();
         return;
       }
-      if (action === "save") {
-        const outcome = await saveDocument();
-        if (!outcome?.clean) return; // failure/cancel/racing edit — stay open
-      }
-      set({ pendingCloseIntent: null });
-      if (intent === "replacement") {
-        const continuation = pendingReplacement;
-        pendingReplacement = null;
-        await continuation?.();
-        return;
-      }
-      await proceed(intent);
+      await runSingleflight(async () => {
+        if (action === "save") {
+          const outcome = await saveDocument();
+          if (!outcome?.clean) return; // failure/cancel/racing edit — stay open
+        }
+        set({ pendingCloseIntent: null });
+        if (intent === "replacement") {
+          const continuation = pendingReplacement;
+          pendingReplacement = null;
+          await continuation?.();
+          return;
+        }
+        await proceed(intent);
+      });
     },
   };
 });

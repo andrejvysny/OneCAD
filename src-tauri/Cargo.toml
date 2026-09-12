@@ -62,10 +62,12 @@ tauri-build = { version = "2", features = [] }
 onecad-core = { workspace = true }
 onecad-library = { path = "crates/onecad-library" }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
-# `tracing`: tauri's command macro then wraps EVERY `#[tauri::command]` in a
-# `ipc::request::handler` debug span (cmd name + timing) at the call-site module
-# target — the command-boundary baseline, with zero per-command code.
-tauri = { version = "2", features = ["tracing"] }
+# Do not enable Tauri's `tracing` feature. In tauri-runtime-wry 2.11.x it makes
+# background `eval_script` synchronous; `AppHandle::emit` then waits for the main
+# thread while retaining Tauri's webview registry mutex. A simultaneous IPC fetch
+# takes the inverse path and deadlocks. OneCAD keeps command timing in its own
+# tracing/log-event lanes without enabling that framework path.
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-wdio = { version = "1", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1", optional = true }

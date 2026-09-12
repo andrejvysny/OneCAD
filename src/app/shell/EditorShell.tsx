@@ -15,7 +15,7 @@
  * tree is a deliberate code-split chunk (see `App.tsx`) and the start screen must
  * not pay for it. They are owned by a scope that dies with this screen.
  */
-import { useEffect, useLayoutEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useShortcuts } from "@/shortcuts/useShortcuts";
 import { createClient } from "@/ipc/client";
 import { workerStore } from "@/stores/workerStore";
@@ -39,6 +39,8 @@ import { contributeModelingUi } from "@/modules/modeling/ui";
 import { LIBRARY_MODULE_ID } from "@/modules/library/manifest";
 import { contributeLibraryUi } from "@/modules/library/register";
 import { SHELL_MODULE_ID, contributeShellChrome } from "@/modules/shell/register";
+import { MeasuredShellRegion } from "./MeasuredShellRegion";
+import { useViewportWorkArea } from "@/stores/viewportWorkAreaStore";
 
 /**
  * The regions inside the work area, in render order. `"viewport"` is the host's
@@ -105,6 +107,8 @@ export function EditorShell() {
   useEditorContributions(platform);
   useShortcuts();
   const isVisible = usePanelFilter(platform);
+  const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(null);
+  const available = useViewportWorkArea((state) => state.available);
 
   // Which of this document's modules this build does not have. Real data: the
   // Rust layer answers `listDocumentModules`, and the diff is what the
@@ -143,7 +147,7 @@ export function EditorShell() {
           pill to ~0px, so every `@min-[…]` read as never-true). This div,
           the flex-1 canvas region, has a real width from layout, so it's
           the query context every collapse tier below reads. */}
-      <div className="@container/canvas relative min-h-0 flex-1">
+      <div ref={setViewportElement} className="@container/canvas relative min-h-0 flex-1">
         {EDITOR_REGIONS.map((region) => {
           if (region === "viewport") {
             return <ViewportRoot key={region} className="absolute inset-x-0 bottom-[34px] top-0" />;
@@ -157,14 +161,27 @@ export function EditorShell() {
           }
           if (region === Slots.ToolbarPrimary) {
             return (
-              <div
-                key={region}
-                style={{ top: TOOLBAR_STACK_TOP }}
-                className="absolute left-1/2 z-30 flex -translate-x-1/2 flex-col items-stretch"
-              >
-                <SlotHost slot={Slots.ToolbarPrimary} filter={isVisible} />
-                <SlotHost slot={Slots.ToolbarContextual} filter={isVisible} />
-              </div>
+              <MeasuredShellRegion key={region} region="toolbar" viewport={viewportElement}>
+                <div
+                  style={{
+                    top: TOOLBAR_STACK_TOP,
+                    left: available.width > 0 ? available.x : 0,
+                    width: available.width > 0 ? available.width : "100%",
+                  }}
+                  className="absolute z-30 flex flex-col items-center px-3"
+                >
+                  <SlotHost slot={Slots.ToolbarPrimary} filter={isVisible} />
+                  <SlotHost slot={Slots.ToolbarContextual} filter={isVisible} />
+                </div>
+              </MeasuredShellRegion>
+            );
+          }
+          if (region === Slots.ShellLeft || region === Slots.ShellRight || region === Slots.ShellBottom) {
+            const measured = region === Slots.ShellLeft ? "left" : region === Slots.ShellRight ? "right" : "bottom";
+            return (
+              <MeasuredShellRegion key={region} region={measured} viewport={viewportElement}>
+                <SlotHost slot={region} filter={isVisible} />
+              </MeasuredShellRegion>
             );
           }
           return <SlotHost key={region} slot={region} filter={isVisible} />;

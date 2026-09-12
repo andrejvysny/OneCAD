@@ -190,6 +190,20 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(sketchStore.getState().undoStack.length).toBeGreaterThan(0);
   });
 
+  it("openSession resets constructionMode to false on every entry (D-2)", async () => {
+    sketchStore.getState().toggleConstructionMode();
+    expect(sketchStore.getState().constructionMode).toBe(true);
+
+    // Leave and re-enter (a DIFFERENT sketch this time) — the leftover ON state
+    // from the previous sketch must not carry over into the new one.
+    toolStore.getState().setMode("model");
+    await flush();
+    toolStore.getState().setMode("sketch", "sketch2");
+    await flush();
+
+    expect(sketchStore.getState().constructionMode).toBe(false);
+  });
+
   it("rect: 2 corner clicks commit 4 lines", async () => {
     await setTool("rect");
     click(0, 0);

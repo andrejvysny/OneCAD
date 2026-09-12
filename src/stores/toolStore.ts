@@ -25,6 +25,7 @@ import type { ToolId } from "@/platform";
 import { viewportStore } from "./viewportStore";
 import { selectionStore } from "./selectionStore";
 import { documentStore } from "./documentStore";
+import { operationAttemptStore } from "./operationAttemptStore";
 
 export type EditorMode = "model" | "sketch";
 
@@ -129,6 +130,11 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
   flyoutDefault: {},
 
   setMode(mode, sketchId, opts) {
+    const attempt = operationAttemptStore.getState().attempt;
+    if (attempt?.phase === "applying" && attempt.documentId === documentStore.getState().documentId) {
+      viewportStore.getState().setStatusHint("Operation is still applying", { severity: "info", sticky: true });
+      return;
+    }
     if (mode === "sketch") {
       // No id ⇒ new-sketch intent: leave activeSketchId null so the controller
       // shows the plane picker. An explicit id targets that existing sketch.
@@ -148,6 +154,11 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
   },
 
   setTool(tool) {
+    const attempt = operationAttemptStore.getState().attempt;
+    if (attempt?.phase === "applying" && attempt.documentId === documentStore.getState().documentId) {
+      viewportStore.getState().setStatusHint("Operation is still applying", { severity: "info", sticky: true });
+      return;
+    }
     const { mode } = get();
     if (mode === "sketch") {
       set({ sketchTool: tool as SketchTool, phase: phaseFor(tool) });

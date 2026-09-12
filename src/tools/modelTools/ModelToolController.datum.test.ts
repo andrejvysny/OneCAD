@@ -17,6 +17,7 @@ import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
 
 // The datum layer is a viewport CONTRIBUTION now, so its imperative surface is
 // published through `modules/modeling/datumViewport` rather than hung off the
@@ -234,6 +235,23 @@ describe("ModelToolController — datum plane tool", () => {
     expect(debug().datumPhase).toBe("basePick");
   });
 
+  it("leaves popup-scoped Enter and Escape to the popup", async () => {
+    armAndPickBase("XY");
+    const popup = document.createElement("div");
+    popup.setAttribute("data-cad-keyboard-scope", "");
+    const button = document.createElement("button");
+    popup.appendChild(button);
+    document.body.appendChild(popup);
+
+    button.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true }));
+    button.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
+
+    expect(clientMock.applyEditCommand).not.toHaveBeenCalled();
+    expect(debug().datumPhase).toBe("offset");
+    expect(toolChipStore.getState().kind).toBe("datumOffset");
+    popup.remove();
+  });
+
   it("the name is the next free 'Datum N' against the existing projection", async () => {
     documentStore.getState().addDatum({
       id: "d1",
@@ -333,20 +351,59 @@ describe("ModelToolController — datum plane tool", () => {
     expect(debug().datumPhase).toBe("idle");
   });
 
-  it("a commit that is superseded mid-flight (tool switched) publishes no hint of its own", async () => {
+  it("blocks a tool switch after submission and reports the committed result", async () => {
     let resolveApply: (r: ApplyOperationResult) => void = () => {};
     build(vi.fn(() => new Promise<ApplyOperationResult>((r) => (resolveApply = r))));
     armAndPickBase("XY");
     toolChipStore.getState().onConfirm?.();
 
-    // The user moves on while the edit is in flight (bumps commitGen).
+    // Authoring is single-flight once the apply command has been submitted.
     toolStore.getState().setTool("extrude");
-    const hintBefore = viewportStore.getState().statusHint?.message ?? null;
+    expect(viewportStore.getState().statusHint?.message).toBe("Operation is still applying");
 
     resolveApply(okEdit);
     await flush();
 
-    expect(viewportStore.getState().statusHint?.message ?? null).toBe(hintBefore);
-    expect(toolStore.getState().modelTool).toBe("extrude"); // NOT reset to select
+    expect(viewportStore.getState().statusHint?.message).toBe("Datum 1 created");
+    expect(toolStore.getState().modelTool).toBe("select");
+  });
+
+  it("dispose releases a submitted attempt without letting its late result mutate the remount", async () => {
+    let resolveApply: (r: ApplyOperationResult) => void = () => {};
+    build(vi.fn(() => new Promise<ApplyOperationResult>((r) => (resolveApply = r))));
+    armAndPickBase("XY");
+    toolChipStore.getState().onConfirm?.();
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("applying");
+
+    controller.dispose();
+    expect(operationAttemptStore.getState().attempt).toMatchObject({ phase: "applying" });
+    toolStore.getState().setTool("extrude");
+    expect(toolStore.getState().modelTool).toBe("datum");
+
+    resolveApply(okEdit);
+    await flush();
+    expect(operationAttemptStore.getState().attempt?.phase).toBe("completed");
+    toolStore.getState().setTool("extrude");
+    expect(toolStore.getState().modelTool).toBe("extrude");
+    expect(documentStore.getState().datums).toEqual({});
+  });
+
+  it("ignores a history re-edit entry while another commit is deferred", async () => {
+    let resolveApply: (r: ApplyOperationResult) => void = () => {};
+    build(vi.fn(() => new Promise<ApplyOperationResult>((r) => (resolveApply = r))));
+    const getOperationParams = vi.fn(() => Promise.resolve({}));
+    clientMock.getOperationParams = getOperationParams;
+    documentStore.setState({
+      features: [{ id: "ex-1", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "10 mm", status: "ok" }],
+    });
+    armAndPickBase("XY");
+    toolChipStore.getState().onConfirm?.();
+
+    controller.editExtrudeFeature("ex-1");
+    expect(getOperationParams).not.toHaveBeenCalled();
+    expect(toolStore.getState().modelTool).toBe("datum");
+
+    resolveApply(okEdit);
+    await flush();
   });
 });

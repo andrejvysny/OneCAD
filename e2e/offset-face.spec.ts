@@ -145,7 +145,7 @@ test("a single face offers the distance types; a MULTI-face closure offers none"
 test("the chip's typed distance reaches the armed op", async ({ page }) => {
   await openEditorDebug(page, { mockBody: true });
   await armOffsetFace(page);
-  const input = page.getByLabel("Dimension value");
+  const input = page.getByLabel("Offset (mm)");
   await input.fill("6");
   await input.blur();
   await expect.poll(async () => (await toolPhases(page))?.offsetDistance).toBe(6);

@@ -161,9 +161,15 @@ describe("the modeling tools report every regen terminal honestly", () => {
       const selected = selectionStore.getState().selected.map((r) => r.id);
       expect(selected).toEqual(row.selects ? ["body2"] : ["body1"]);
 
-      // The tool always returns to select; a failure must not strand the chip.
-      expect(toolStore.getState().modelTool).toBe("select");
-      expect(toolChipStore.getState().kind).toBe("none");
+      if (row.terminal === "failed" || row.terminal === "timeout") {
+        // A failed submission keeps the authored values and retry action.
+        expect(toolStore.getState().modelTool).toBe("linearPattern");
+        expect(toolChipStore.getState().kind).toBe("linearPattern");
+        expect(toolChipStore.getState().onConfirm).toBeTypeOf("function");
+      } else {
+        expect(toolStore.getState().modelTool).toBe("select");
+        expect(toolChipStore.getState().kind).toBe("none");
+      }
     });
   }
 

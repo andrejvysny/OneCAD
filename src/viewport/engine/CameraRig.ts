@@ -14,8 +14,8 @@ import * as THREE from "three";
 export type ProjectionKind = "persp" | "ortho";
 
 const UP = new THREE.Vector3(0, 0, 1);
-const NEAR = 0.1;
-const FAR = 100_000;
+export const CAMERA_NEAR = 0.1;
+export const CAMERA_FAR = 100_000;
 
 // Scratch vectors + basis for the turntable orientation (no per-frame allocation).
 const _right = new THREE.Vector3();
@@ -47,9 +47,9 @@ export class CameraRig {
 
   constructor(fovDeg = 76) {
     this.fovDeg = fovDeg;
-    this.persp = new THREE.PerspectiveCamera(fovDeg, 1, NEAR, FAR);
+    this.persp = new THREE.PerspectiveCamera(fovDeg, 1, CAMERA_NEAR, CAMERA_FAR);
     this.persp.up.copy(UP);
-    this.ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, NEAR, FAR);
+    this.ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, CAMERA_NEAR, CAMERA_FAR);
     this.ortho.up.copy(UP);
   }
 
@@ -57,8 +57,17 @@ export class CameraRig {
     return this.kind;
   }
 
+  get aspectRatio(): number {
+    return this.aspect;
+  }
+
   getCamera(): THREE.Camera {
     return this.kind === "persp" ? this.persp : this.ortho;
+  }
+
+  /** Camera-local axes for a target→eye offset, using the rig's exact Z-up roll policy. */
+  basisForOffset(offset: THREE.Vector3): CameraBasis {
+    return cameraBasisForOffset(offset, this.getCamera());
   }
 
   setAspect(aspect: number): void {
@@ -109,25 +118,46 @@ export class CameraRig {
    * changes the heading.
    */
   private orient(cam: THREE.Camera, offset: THREE.Vector3): void {
-    // Horizontal heading ⇒ right vector. Perpendicular to (x, y) in the XY plane.
-    _right.set(-offset.y, offset.x, 0);
-    if (_right.lengthSq() < 1e-20) {
-      // Exactly down a pole: yaw is genuinely undefined here. Keep the camera's
-      // current right vector so the view holds still instead of jumping.
-      // `clampPitch` normally keeps us out of this case entirely.
-      _right.setFromMatrixColumn(cam.matrixWorld, 0);
-      _right.z = 0;
-      if (_right.lengthSq() < 1e-20) _right.set(1, 0, 0);
-    }
-    _right.normalize();
-
-    _fwd.copy(offset).negate().normalize(); // target→camera reversed = view dir
-    _up.crossVectors(_right, _fwd).normalize();
+    writeCameraBasis(offset, cam, _right, _up, _fwd);
 
     // Three's camera looks down its local -Z, so the third basis column is -fwd.
-    _basis.makeBasis(_right, _up, _fwd.negate());
+    _basis.makeBasis(_right, _up, _fwd);
     cam.quaternion.setFromRotationMatrix(_basis);
     // Keep `up` consistent for anything that reads it (it no longer drives roll).
     cam.up.copy(UP);
   }
+}
+
+export interface CameraBasis {
+  readonly right: THREE.Vector3;
+  readonly up: THREE.Vector3;
+  /** Camera local +Z, from target toward the eye. */
+  readonly back: THREE.Vector3;
+}
+
+/** Pure counterpart of {@link CameraRig.orient}; framing must use the same roll convention. */
+export function cameraBasisForOffset(offset: THREE.Vector3, fallbackCamera?: THREE.Camera): CameraBasis {
+  const right = new THREE.Vector3();
+  const up = new THREE.Vector3();
+  const back = new THREE.Vector3();
+  writeCameraBasis(offset, fallbackCamera, right, up, back);
+  return { right, up, back };
+}
+
+function writeCameraBasis(
+  offset: THREE.Vector3,
+  fallbackCamera: THREE.Camera | undefined,
+  right: THREE.Vector3,
+  up: THREE.Vector3,
+  back: THREE.Vector3,
+): void {
+  right.set(-offset.y, offset.x, 0);
+  if (right.lengthSq() < 1e-20) {
+    if (fallbackCamera) right.setFromMatrixColumn(fallbackCamera.matrixWorld, 0);
+    right.z = 0;
+    if (right.lengthSq() < 1e-20) right.set(1, 0, 0);
+  }
+  right.normalize();
+  back.copy(offset).normalize();
+  up.crossVectors(back, right).normalize();
 }

@@ -666,4 +666,10 @@ void ElementMapPartition::remove_body(const std::string& body_id, ElementMapDelt
     }
 }
 
+void ElementMapPartition::rename_body(const std::string& old_body_id,
+                                      const std::string& new_body_id) {
+    for (auto& [_, entry] : entries_)
+        if (entry.body_id == old_body_id) entry.body_id = new_body_id;
+}
+
 }  // namespace onecad::elementmap

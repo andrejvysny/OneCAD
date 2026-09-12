@@ -55,6 +55,12 @@
  * verbatim into `ConstraintMenu`, a trigger + popover mounted INSIDE
  * `SketchChromeBar` (no new panel id, no new registry entry — it is a plain
  * child component, not a contribution). Nothing else in this list moved.
+ *
+ * AMENDED 2026-09-11 (UX review shared work area) — recorded in TODO.md.
+ * `ToolbarPrimary`/`ToolbarContextual` and the left/right/bottom shell regions
+ * now have `display: contents` measurement wrappers. The wrappers add DOM
+ * nodes but no layout boxes, preserve contribution order and component
+ * identity, and let floating chrome use the panels' actual rendered bounds.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",

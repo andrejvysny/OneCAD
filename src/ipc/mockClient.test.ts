@@ -4,8 +4,8 @@
  * The mock keeps vitest deterministic with no backend: save is a no-op, Save As /
  * Export return fake paths, and worker-status never fires (the mock has no worker).
  */
-import { describe, it, expect } from "vitest";
-import { mockClient, setMockRecovery } from "./mockClient";
+import { describe, it, expect, vi } from "vitest";
+import { emitMockDocumentChanged, mockClient, setMockRecovery } from "./mockClient";
 
 describe("mockClient file seam", () => {
   it("saveDocument returns an authoritative outcome with or without a path", async () => {
@@ -120,6 +120,51 @@ describe("mockClient crash recovery", () => {
     // An explicit discard opens, and drops the offer with it.
     await expect(mockClient.openDocument("/docs/Bracket.onecad", "openSaved")).resolves.toBeTruthy();
     expect(await mockClient.checkRecovery()).toEqual([]);
+  });
+
+  it("runs beforeAdopt only for a successful mock replacement", async () => {
+    const hook = vi.fn();
+    setMockRecovery({
+      documentId: "d",
+      autosavePath: "/x/d.onecad",
+      originalPath: "/docs/Blocked.onecad",
+      modifiedMs: 1,
+    });
+    await expect(
+      mockClient.openDocument("/docs/Blocked.onecad", undefined, { beforeAdopt: hook }),
+    ).rejects.toMatchObject({ kind: "recoveryPending" });
+    expect(hook).not.toHaveBeenCalled();
+
+    await mockClient.newDocument({ beforeAdopt: hook });
+    expect(hook).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the current publication through rejected replacement and clears at adoption", async () => {
+    emitMockDocumentChanged({
+      revision: 7,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:coarse:7" }],
+      removedBodies: [],
+    });
+    const publication = mockClient.getCurrentMeshPublication();
+    expect(publication).not.toBeNull();
+
+    setMockRecovery({
+      documentId: "d",
+      autosavePath: "/x/d.onecad",
+      originalPath: "/docs/Blocked.onecad",
+      modifiedMs: 1,
+    });
+    await expect(mockClient.openDocument("/docs/Blocked.onecad")).rejects.toMatchObject({
+      kind: "recoveryPending",
+    });
+    expect(mockClient.getCurrentMeshPublication()).toEqual(publication);
+
+    const hook = vi.fn(() => {
+      expect(mockClient.getCurrentMeshPublication()).toEqual(publication);
+    });
+    await mockClient.openDocument("/docs/Blocked.onecad", "openSaved", { beforeAdopt: hook });
+    expect(hook).toHaveBeenCalledOnce();
+    expect(mockClient.getCurrentMeshPublication()).toBeNull();
   });
 });
 

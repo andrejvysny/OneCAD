@@ -225,6 +225,7 @@ function rowTitle(item: FeatureMeta, tone: HistoryRowTone, applied: boolean): st
 /** 32px history chip (prototype 1c). Selected feature = sel-bg + sel-text. */
 function FeatureRow({
   item,
+  position,
   selected,
   applied,
   tone,
@@ -235,6 +236,7 @@ function FeatureRow({
   valueEdit,
 }: {
   item: FeatureMeta;
+  position: number;
   selected: boolean;
   /** `false` ⇒ the row sits beyond the rollback bar (grayed + italic). */
   applied: boolean;
@@ -283,11 +285,19 @@ function FeatureRow({
   // that the tone system otherwise hides — an `error`-tone row already reads red, so
   // this only ever fires alongside `repair`/`stale`/`normal`.
   const diagnosticBadge = isError ? null : diagnosticBadgeSeverity(item);
+  const value = displayValue(item, unit);
+  const showDetails = Boolean(actions || editable || value);
+  const editing = editingValue && editable && item.primaryValue !== undefined;
 
   return (
     <div
+      className="mb-2"
+      data-testid={`history-item-${item.id}`}
+    >
+      <div
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? `Select feature ${position}: ${item.label}` : undefined}
       data-testid={`history-row-${item.id}`}
       data-applied={applied ? "true" : "false"}
       data-tone={tone}
@@ -295,8 +305,13 @@ function FeatureRow({
       onClick={() => onSelect?.(item.id)}
       onDoubleClick={() => onEdit?.(item)}
       onContextMenu={onContextMenu}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onSelect?.(item.id);
+      }}
       className={cn(
-        "group relative mb-1 flex h-8 items-center gap-2 rounded-sm px-2.5",
+        "relative flex min-h-8 w-full items-start gap-2 rounded-sm px-2.5 py-1 text-left",
         interactive && "cursor-pointer",
         selected ? "bg-sel-bg" : "bg-chip hover:bg-hover-2",
         suppressed && "opacity-60",
@@ -309,14 +324,15 @@ function FeatureRow({
         name={OPTYPE_ICON[item.opType ?? ""] ?? FEATURE_ICON[item.kind]}
         size={14}
         strokeWidth={1.7}
-        className={selected ? `text-sel-text ${ICON_MONO}` : TONE_ICON[tone]}
+        className={cn("mt-0.5 shrink-0", selected ? `text-sel-text ${ICON_MONO}` : TONE_ICON[tone])}
       />
       <span
         className={cn(
-          "flex-1 text-[12.5px]",
+          "min-w-0 flex-1 break-words text-[12.5px] leading-tight",
           selected ? "text-sel-text" : TONE_TEXT[tone],
           suppressed && "line-through",
         )}
+        style={{ overflowWrap: "anywhere" }}
       >
         {item.label}
       </span>
@@ -342,20 +358,26 @@ function FeatureRow({
           )}
         />
       )}
+      </div>
 
-      {/* The value is ALWAYS rendered — it used to disappear the moment a row grew
-          its affordance cluster, which hid the one number the row is about on
-          exactly the (full-timeline) view where a user goes to change it. The
-          cluster now sits BESIDE it. */}
-      {editingValue && editable && item.primaryValue !== undefined ? (
-        /* Clicks inside the field must not select the row — but a DOUBLE-click is
-           deliberately left to bubble: the row's dblclick re-edit is an established
-           gesture, and swallowing it here would make it die wherever the value chip
-           happens to sit under the pointer. The second click lands in the field,
-           the row arms the full editor, and the tool gate then closes this field. */
-        <span onClick={(e) => e.stopPropagation()}>
+      {showDetails && (
+        <div
+          data-testid={`history-details-${item.id}`}
+          className={cn(
+            "mt-1 flex min-w-0 flex-wrap items-center gap-1 px-2.5",
+            editing && "flex-col items-stretch",
+          )}
+        >
+      {/* Values and actions share one compact detail row. Only the active editor
+          takes its own full-width row, so it cannot squeeze the feature label. */}
+      {editing ? (
+        <div
+          data-testid={`history-editor-${item.id}`}
+          className="w-full min-w-0 max-w-full"
+          onDoubleClick={() => onEdit?.(item)}
+        >
           <DimensionInput
-            value={item.primaryValue}
+            value={item.primaryValue!}
             /* An angle marks its domain with "°"; a length passes the mm literal,
                which DimensionInput swaps for the live display unit (and which is
                what makes it parse bare input in that unit). */
@@ -379,18 +401,18 @@ function FeatureRow({
             }}
             onCancel={() => setEditingValue(false)}
           />
-        </span>
+        </div>
       ) : editable ? (
-        <MonoValue
+        <button
+          type="button"
           /* A click opens the editor AND still selects the row — the click is NOT
              swallowed. Stopping it here carved a dead zone out of the middle of the
              row (the chip sits near its centre once the affordance cluster reserves
              its width), so a click that happened to land on the value silently
              failed to select: the regression two committed specs caught. */
-          role="button"
-          tabIndex={0}
           data-testid={`history-value-${item.id}`}
           title={valueTitle(item, unit)}
+          aria-label={`Edit ${item.label} value`}
           onClick={(e) => {
             // The SECOND click of a double-click cancels the pending open and lets
             // the row's re-edit win — see VALUE_EDIT_OPEN_MS.
@@ -400,7 +422,9 @@ function FeatureRow({
               openTimer.current = null;
               setEditingValue(true);
             }, VALUE_EDIT_OPEN_MS);
+            onSelect?.(item.id);
           }}
+          onDoubleClick={() => onEdit?.(item)}
           onKeyDown={(e) => {
             // Keyboard activation carries no double-click ambiguity — open at once.
             if (e.key !== "Enter" && e.key !== " ") return;
@@ -410,37 +434,30 @@ function FeatureRow({
             setEditingValue(true);
           }}
           className={cn(
-            "cursor-text rounded-sm px-1 text-[11.5px] hover:bg-hover-3",
+            "max-w-full rounded-sm px-1 text-left font-mono text-[11.5px] tabular-nums hover:bg-hover-3 focus-visible:shadow-focus-ring focus-visible:outline-none",
             selected ? "text-sel-text" : "text-ink-4",
           )}
         >
-          {displayValue(item, unit)}
-        </MonoValue>
+          {value}
+        </button>
       ) : (
-        displayValue(item, unit) && (
+        value && (
           <MonoValue
             data-testid={`history-value-${item.id}`}
             title={item.primaryExpr === undefined ? undefined : valueTitle(item, unit)}
-            className={cn("text-[11.5px]", selected ? "text-sel-text" : "text-ink-4")}
+            className={cn("max-w-full text-[11.5px]", selected ? "text-sel-text" : "text-ink-4")}
           >
-            {displayValue(item, unit)}
+            {value}
           </MonoValue>
         )
       )}
 
       {actions && (
         <div
-          // Revealed on row hover; PINNED visible for the three rows a user needs to
-          // act on without hunting: a suppressed row (keeps its "dimmed + icon"
-          // signal, design §5.1), the SELECTED row (the one the inspector is about —
-          // hover-only affordances on it are undiscoverable on a trackpad), and an
-          // ERRORED row, whose suppress button is the one-click way to unblock the
-          // rest of the rebuild.
           className={cn(
-            "flex items-center gap-0.5",
-            suppressed || selected || isError ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+            "ml-auto flex flex-wrap items-center justify-end gap-1 opacity-100",
+            editing && "self-end",
           )}
-          onClick={(e) => e.stopPropagation()}
           // H10: the cluster becoming interactive is the "menu open" moment for the
           // dependent-count hint — fetched once, not on every render.
           onMouseEnter={ensureDeps}
@@ -512,6 +529,8 @@ function FeatureRow({
               }}
             />
           )}
+        </div>
+      )}
         </div>
       )}
     </div>
@@ -662,6 +681,7 @@ export function HistoryList({
           )}
           <FeatureRow
             item={f}
+            position={i + 1}
             selected={f.id === selectedId}
             applied={appliedOps === undefined || i < appliedOps}
             tone={rowTone(f, i, haltIndex)}

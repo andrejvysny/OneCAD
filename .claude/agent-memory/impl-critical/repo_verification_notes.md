@@ -56,3 +56,27 @@ nothing unless it is shown to fail without the fix.
 - `tracing::warn!/info!` produce NO output under `cargo test` (no subscriber
   installed), so grepping test output for a tracing line proves nothing. Use a
   temporary `eprintln!` with `-- --nocapture` when you need to see a decision.
+  To see a WORKER stderr line under `cargo test`, install a global capture
+  subscriber in a scratch test the way `tests/worker_stderr_capture.rs` does
+  (`registry().with(EnvFilter::new(DEFAULT_FILTER)).with(layer)`) — the stderr
+  forwarder is a detached task, so a thread-local subscriber never sees it.
+- A concurrent implementer's in-flight edit can make the WHOLE workspace fail to
+  compile on a symbol you never touched (a half-added enum, a DTO field added to
+  the struct but not the initializer). Do NOT "fix" it — poll with a backgrounded
+  `until cargo test --test <yours> --no-run -q >/dev/null 2>&1; do sleep 20; done`
+  and carry on. `cargo fmt --all --check` will likewise flag THEIR files; list the
+  failing paths (`| grep '^Diff in'`) before claiming the gate is red on you.
+- `rm` is permission-denied in this sandbox; delete a scratch file with
+  `python3 -c "import os; os.remove(...)"`, or `mv` it into the scratchpad directory.
+- The Playwright MOCK lane cannot express every regen assertion. `mockClient.undo/redo` report
+  `changedBodies` from `diffBodies` over `syntheticBodies` only, so undo/redo of an op on the
+  SEEDED demo box (`body1`) publishes no changed body and therefore triggers no mesh reload —
+  a "the swap reconciled the selection" assertion is unreachable there. A COMMIT does publish
+  (`mutateOp` returns `changed: [bodyId]` even for the no-CSG fillet/chamfer/shell/hole
+  branches), so drive a regen assertion off the commit, not off undo/redo.
+- `src/tools/sketch/projectTool.ts` contains a literal NUL byte (a `${bodyId}\x00${mode}` group
+  key), so git classifies it as BINARY: `git diff` shows `Bin <n> -> <m>` and no hunks. Read the
+  file to review a change there.
+- Red-first for a FRONTEND change: `cp` the module to the scratchpad, patch the one expression
+  with a short `python3` heredoc, run the single vitest/Playwright test, then `cp` the backup
+  back. Playwright's `-g "<substring>"` runs one test in ~40 s including the vite boot.

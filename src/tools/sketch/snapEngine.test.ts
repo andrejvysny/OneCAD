@@ -18,6 +18,7 @@ import {
   type SnapOptions,
 } from "./snapEngine";
 import type { SketchEntity } from "@/ipc/types";
+import { dimFrame } from "./liveDimFrames";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 
 const base: SnapOptions = {
@@ -388,6 +389,24 @@ describe("quadrant candidate — relation intent (A7)", () => {
     const { decision } = computeSnapDecision({ x: 0.5, y: 9.5 }, [a], { ...base, enableGrid: false });
     const quadrant = decision.accepted.find((c) => c.kind === "quadrant")!;
     expect(quadrant.relationIntents).toEqual([{ kind: "OnCurve", refs: [], curveIds: ["a1"] }]);
+  });
+});
+
+// ── numeric (cursor rounding) names itself (UX review 2026-09-11, C7) ─────────
+describe("cursor numeric rounding — label", () => {
+  it("names the rounding beside a visible snap, and stays silent on a numeric-only decision", () => {
+    const frame = dimFrame("line", [{ x: 0, y: 0 }]);
+    const opts = { ...base, frame, toolId: "line", toolAnchors: [{ x: 0, y: 0 }], quantum: { length: 1, angle: 1 } };
+    // Mid-cell, grid off: only rounding moves the cursor — not a snap, no label
+    // (pinned by src/test/snap-decision/arbitration.test.ts), but the candidate
+    // itself carries its name.
+    const alone = computeSnapDecision({ x: 25.3, y: 0 }, [], { ...opts, enableGrid: false }).decision;
+    expect(alone.accepted.find((c) => c.kind === "numeric")?.label).toBe("Rounded");
+    expect(alone.label).toBeNull();
+    // Near a grid node with grid on: the visible snap label carries the rounding too.
+    const withGrid = computeSnapDecision({ x: 29.4, y: 0.2 }, [], { ...opts, enableGrid: true }).decision;
+    expect(withGrid.primaryKind).toBe("grid");
+    expect(withGrid.label).toContain("Grid");
   });
 });
 

@@ -212,6 +212,10 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+add_executable(test_topology_origins test_topology_origins.cpp)
+target_link_libraries(test_topology_origins PRIVATE worker_core)
+add_test(NAME topology_origins COMMAND test_topology_origins)
+
 # Component Library WP-C: the §7.8 `ExtractPrismProfile` verb and the geometry it
 # measures — the exact section area / length / ratio, the named refusals, and the
 # POSE INDEPENDENCE proof (the same stick rotated 37° about its own axis
@@ -458,6 +462,10 @@ add_test(NAME pattern_v2_plan COMMAND test_pattern_v2_plan)
 add_executable(test_hole_op test_hole_op.cpp)
 target_link_libraries(test_hole_op PRIVATE worker_core)
 add_test(NAME hole_op COMMAND test_hole_op)
+
+add_executable(test_feature_pattern test_feature_pattern.cpp)
+target_link_libraries(test_feature_pattern PRIVATE worker_core)
+add_test(NAME feature_pattern COMMAND test_feature_pattern)
 
 # --- COMPONENT-LIBRARY WP-0.2: `PlaceComponent` numerics — the hardcoded M6
 #     SHCS generator's exact analytic volume, rigid-placement invariance, and
@@ -818,6 +826,18 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/hole_threaded.ndjson
 )
+add_test(
+    NAME canonical_feature_pattern_malformed
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/feature_pattern_malformed.ndjson
+)
+add_test(
+    NAME canonical_feature_pattern_repair
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/feature_pattern_repair.ndjson
+)
 # SCHEMA §7.4 `entityStates` (per-entity constrained state) — and the FIRST canonical
 # fixture to drive the sketch solver lane at all. Round 1 is the load-bearing one: one
 # under-constrained sketch in which the line is fully constrained and the circle is
@@ -1093,7 +1113,7 @@ add_test(
             --fixture ${PROTOCOL_FIXTURES}/sketch_solve_residual.ndjson
 )
 # Kernel-hardening WP-A — ResolveRefs all-three-outcome coverage, moved from the
-# harness lane so the §9 `scoringVersion` (4) is pinned in BOTH lanes (§13).
+# harness lane so the §9 `scoringVersion` (6) is pinned in BOTH lanes (§13).
 add_test(
     NAME canonical_resolve_refs
     COMMAND worker_harness

@@ -325,6 +325,20 @@ describe("Picker → real LineSegments2 raycast", () => {
     picker.dispose();
   });
 
+  it("enumeration keeps the existing edge-preferred probe first", () => {
+    const { picker, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+    const preferred = probe();
+    const candidates = picker.probeCandidates(VIEW.w / 2, VIEW.h / 2);
+    expect(candidates[0]).toMatchObject({
+      bodyId: preferred?.bodyId,
+      kind: preferred?.kind,
+      topoKey: preferred?.topoKey,
+      meshRev: 1,
+      entryIdentity: { bodyId: "body1", meshRev: 1 },
+    });
+    picker.dispose();
+  });
+
   it("flushes the drawing-buffer resolution into the shared edge material", () => {
     const { picker, material, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
     expect(material.resolution.x).toBe(0); // nothing has rendered
@@ -448,6 +462,95 @@ describe("Picker under a section cut — clicking through selects the interior",
     // Keeps z >= 100 — the box is entirely on the discarded side.
     const { picker, probe } = harness([new THREE.Plane(new THREE.Vector3(0, 0, 1), -100)]);
     expect(probe()).toBeNull();
+    picker.dispose();
+  });
+});
+
+describe("Picker overlap enumeration", () => {
+  const VIEW = { w: 800, h: 600 };
+
+  afterEach(() => {
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  function harness(options: { hiddenFront?: boolean; tied?: boolean; clipped?: boolean } = {}) {
+    const root = new THREE.Group();
+    for (const [bodyId, meshRev, z] of [
+      ["body-a", 11, 0],
+      ["body-b", 12, options.tied ? 0 : -50],
+    ] as const) {
+      const entry = buildBodyObjects(parseMeshPayload(makeBoxMesh()), bodyId, meshRev);
+      swap(bodyId, entry);
+      const mesh = new THREE.Mesh(
+        entry.geometry,
+        new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }),
+      );
+      mesh.userData = { bodyId, kind: "face" };
+      mesh.position.z = z;
+      const parent = new THREE.Group();
+      parent.visible = !(options.hiddenFront && bodyId === "body-a");
+      parent.add(mesh);
+      root.add(parent);
+    }
+    root.updateMatrixWorld(true);
+    const camera = new THREE.PerspectiveCamera(50, VIEW.w / VIEW.h, 0.1, 5000);
+    camera.position.set(0, -20, 400);
+    camera.lookAt(0, 0, -20);
+    camera.updateMatrixWorld(true);
+    const canvas = document.createElement("canvas");
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: VIEW.w, height: VIEW.h }) as DOMRect;
+    const picker = new Picker({
+      canvas,
+      getCamera: () => camera,
+      getRoot: () => root,
+      getViewportHeight: () => VIEW.h,
+      getFocusDistance: () => 400,
+      getResolution: () => VIEW,
+      getClippingPlanes: () => options.clipped
+        ? [new THREE.Plane(new THREE.Vector3(0, 0, -1), -20)]
+        : null,
+      invalidate: vi.fn(),
+      isActive: () => true,
+      onHover: vi.fn(),
+      onPick: vi.fn(),
+    });
+    return picker;
+  }
+
+  it("returns all stacked visible bodies with triangle hits deduplicated", () => {
+    const picker = harness();
+    const hits = picker.probeCandidates(VIEW.w / 2, VIEW.h / 2, { kinds: ["face"] });
+    expect(new Set(hits.map((hit) => hit.bodyId))).toEqual(new Set(["body-a", "body-b"]));
+    expect(new Set(hits.map((hit) => `${hit.bodyId}/${hit.topoKey}`)).size).toBe(hits.length);
+    expect(hits[0]?.bodyId).toBe("body-a");
+    picker.dispose();
+  });
+
+  it("honors clipping, hidden parents, inclusion, exclusion and body filtering", () => {
+    const clipped = harness({ clipped: true });
+    expect(new Set(clipped.probeCandidates(400, 300).map((hit) => hit.bodyId)))
+      .toEqual(new Set(["body-b"]));
+    clipped.dispose();
+    const hidden = harness({ hiddenFront: true });
+    expect(new Set(hidden.probeCandidates(400, 300).map((hit) => hit.bodyId)))
+      .toEqual(new Set(["body-b"]));
+    expect(hidden.probeCandidates(400, 300, { includeBodyIds: ["body-a"] })).toEqual([]);
+    expect(hidden.probeCandidates(400, 300, { excludeBodyIds: ["body-b"] })).toEqual([]);
+    const bodies = hidden.probeCandidates(400, 300, { kinds: ["body"] });
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({ kind: "body", bodyId: "body-b", topoKey: "body-b" });
+    hidden.dispose();
+  });
+
+  it("sorts exact depth ties by stable identity and rejects unsupported kinds", () => {
+    const picker = harness({ tied: true });
+    const bodies = picker.probeCandidates(400, 300, { kinds: ["body"] });
+    expect(bodies.slice(0, 2).map((hit) => hit.bodyId)).toEqual(["body-a", "body-b"]);
+    expect(picker.probeCandidates(400, 300, {
+      kinds: ["vertex" as unknown as "face"],
+    })).toEqual([]);
     picker.dispose();
   });
 });

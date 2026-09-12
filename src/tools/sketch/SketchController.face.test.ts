@@ -10,6 +10,7 @@
  * resolves it (see `api::face_sketch_plane`, mirrors `element_info`'s ladder).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as THREE from "three";
 import { SketchController } from "./SketchController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickablePlane } from "@/viewport/engine/PlanePicker";
@@ -17,6 +18,7 @@ import type { CadClient } from "@/ipc/client";
 import type { EnterSketchTarget, SketchPlane, SketchSession } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { documentStore } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
 
@@ -58,6 +60,7 @@ describe("SketchController — sketch on a selected face", () => {
   let clientMock: ReturnType<typeof makeClientMock>;
 
   function makeEngineMock() {
+    const captured = { bodyId: "body1", bounds: new THREE.Box3(new THREE.Vector3(), new THREE.Vector3(1, 1, 1)) };
     return {
       setPlanePickerVisible: vi.fn(),
       planePickerHover: vi.fn(),
@@ -67,6 +70,7 @@ describe("SketchController — sketch on a selected face", () => {
       probePick: vi.fn(() => null),
       datumHitTest: vi.fn(() => null),
       setDatumHover: vi.fn(),
+      captureFaceFrame: vi.fn(() => captured),
       enterSketch: vi.fn(),
       exitSketch: vi.fn(),
       setSketchProjectedIds: vi.fn(),
@@ -119,6 +123,10 @@ describe("SketchController — sketch on a selected face", () => {
     expect(engineMock.setPlanePickerVisible).not.toHaveBeenCalled();
     expect(clientMock.promoteSelection).not.toHaveBeenCalled(); // elementId already minted
     expect(clientMock.faceSketchPlane).toHaveBeenCalledWith("body1", "el_1", "f:22");
+    expect(engineMock.captureFaceFrame).toHaveBeenCalledWith({ bodyId: "body1", topoKey: "f:22", elementId: "el_1" });
+    expect(engineMock.captureFaceFrame.mock.invocationCallOrder[0]).toBeLessThan(
+      clientMock.faceSketchPlane.mock.invocationCallOrder[0],
+    );
     expect(clientMock.enterSketch).toHaveBeenCalledTimes(1);
     expect(clientMock.enterSketch).toHaveBeenCalledWith({
       // W2: the topoKey rides through to `add_sketch_on_face` too — it is the
@@ -130,6 +138,9 @@ describe("SketchController — sketch on a selected face", () => {
     const target = clientMock.enterSketch.mock.calls[0][0];
     if (typeof target === "string" || !("plane" in target)) throw new Error("expected a hosted target");
     expect(target.plane).toBe(FACE_PLANE);
+    expect(engineMock.enterSketch.mock.calls[0][5].initialFaceBounds).toBe(
+      engineMock.captureFaceFrame.mock.results[0].value,
+    );
     expect(viewportStore.getState().activeSketchId).toBe("sketchNew");
   });
 
@@ -145,6 +156,23 @@ describe("SketchController — sketch on a selected face", () => {
       newOnFace: { bodyId: "body1", elementId: "el_fresh", topoKey: "f:22", worldPoint: [1, 2, 25] },
       plane: FACE_PLANE,
     });
+  });
+
+  it("a document replacement during face-plane resolution cannot enter the stale target", async () => {
+    let resolvePlane!: (plane: SketchPlane) => void;
+    clientMock.faceSketchPlane.mockImplementationOnce(() => new Promise<SketchPlane>((resolve) => {
+      resolvePlane = resolve;
+    }));
+    selectionStore.getState().set([faceRef()]);
+    toolStore.getState().setMode("sketch");
+    await flush();
+    documentStore.setState({ documentId: "replacement", runtimeSession: "replacement-runtime" });
+    resolvePlane(FACE_PLANE);
+    await flush();
+    await flush();
+
+    expect(clientMock.enterSketch).not.toHaveBeenCalled();
+    expect(engineMock.enterSketch).not.toHaveBeenCalled();
   });
 
   // (b) zero selected faces ────────────────────────────────────────────────────

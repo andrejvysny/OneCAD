@@ -3,6 +3,7 @@ import { toolStore } from "./toolStore";
 import { viewportStore } from "./viewportStore";
 import { selectionStore } from "./selectionStore";
 import { resetStores } from "@/test/resetStores";
+import { operationAttemptStore } from "./operationAttemptStore";
 
 describe("toolStore.setMode (sketch entry)", () => {
   beforeEach(() => resetStores());
@@ -62,5 +63,43 @@ describe("toolStore.setMode opts.tool (AUTO-MODE preserve)", () => {
   it("select as an explicit tool keeps the idle phase", () => {
     toolStore.getState().setMode("sketch", undefined, { tool: "select" });
     expect(toolStore.getState().phase).toBe("idle");
+  });
+});
+
+describe("toolStore operation attempt fence", () => {
+  beforeEach(() => resetStores());
+
+  it("blocks direct tool and mode changes while submission is applying", () => {
+    toolStore.getState().setTool("extrude");
+    operationAttemptStore.getState().begin("mock-document", null);
+
+    toolStore.getState().setTool("fillet");
+    toolStore.getState().setMode("sketch");
+
+    expect(toolStore.getState()).toMatchObject({ mode: "model", modelTool: "extrude" });
+    expect(viewportStore.getState().statusHint?.message).toBe("Operation is still applying");
+  });
+
+  it("refuses a second applying attempt without replacing the first", () => {
+    const first = operationAttemptStore.getState().begin(undefined, null);
+    const second = operationAttemptStore.getState().begin(undefined, null);
+
+    expect(first).not.toBeNull();
+    expect(second).toBeNull();
+    expect(operationAttemptStore.getState().attempt?.token).toBe(first);
+  });
+
+  it("allows a new document runtime to own its own attempt", () => {
+    operationAttemptStore.getState().begin("doc-a", null);
+    const next = operationAttemptStore.getState().begin("doc-b", null);
+
+    expect(next).not.toBeNull();
+    expect(operationAttemptStore.getState().attempt?.documentId).toBe("doc-b");
+  });
+
+  it("does not block a different document runtime", () => {
+    operationAttemptStore.getState().begin("doc-a", null);
+    toolStore.getState().setTool("extrude");
+    expect(toolStore.getState().modelTool).toBe("extrude");
   });
 });

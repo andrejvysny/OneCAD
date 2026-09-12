@@ -1,3 +1,45 @@
+# CURRENT UX HARDENING — AUTHORITATIVE HANDOFF (2026-09-12)
+
+This section supersedes historical session headers below for current planning. It is a documentation handoff, not a claim that the dirty tree is program-owned or that acceptance is closed.
+
+## RESUMED IMPLEMENTATION — 2026-09-12
+
+Documentation handoff draft retained; implementation work is resumed. Current bounded allocation: ui_plan Sol owns the typed presentation contract; tools_plan Sol owns the general-pattern contract audit pending main approval; Luna remains on simple documentation/UI tasks, Terra on moderate UI, Sol on complex work, Astra on final review. This note changes no source and starts no gates.
+
+Identity: `master` at `80d4e74c8d32b4d847261d7d502dd397286f0788`; 244 porcelain entries existed before this docs task. Preserve all user/agent changes. No commits, push or pull in this handoff. Last known native app state was closed at the prior checkpoint and the owned mock Vite server was stopped; recheck processes and ports before any resume.
+
+## Current delivery estimate
+
+Engineering judgment only: approximately 62% implementation (rough range 55–65%) and 50–55% full delivery. These are not measured closure percentages and do not mean 62% new code. Weighted view: runtime 20%×80, tools 20%×80, sketch 15%×75, shared UI 15%×65, inspection 10%×35, patterns 20%×25 = 61.5%.
+
+## Durable evidence already verified
+
+- Vitest: [full-vitest-final.log](docs/qa/evidence/ux-hardening-2026-09-11/full-vitest-final.log), 332 files, 5880 passed, 78 skipped, 5958 total, 31.36s.
+- Rust worker-required rerun: [final-cargo-workspace-rerun.log](docs/qa/evidence/ux-hardening-2026-09-11/final-cargo-workspace-rerun.log), 1646 passed, 0 failed, 0 ignored, 0 filtered across exactly 100 result lines; no missing-worker skips.
+- CTest: [full-ctest.log](docs/qa/evidence/ux-hardening-2026-09-11/full-ctest.log), 196/196.
+- Clippy + fmt: [final-clippy-after-dto.log](docs/qa/evidence/ux-hardening-2026-09-11/final-clippy-after-dto.log), warning-free clippy and fmt, 44.48s.
+- Build: [final-build.log](docs/qa/evidence/ux-hardening-2026-09-11/final-build.log), `bun run build` / tsc + Vite passed in 2.03s; existing >500kB chunk warning remains.
+- Verifiers: coverage 34 rows/9 corpus/16 CI jobs/20 registry; contracts 41 rows/19 operations/15 tier checks.
+- Preserved RED history: full Vitest 5869 pass/9 fail/78 skip is a historical record (no durable Vitest RED log currently claimed); Rust 475 pass/1 fail has a durable log. Both were corrected by tests only. No full browser rerun after final implementation; only fresh chooser Chromium + WebKit 2/2 retries 0 is current browser evidence. No native acceptance after final implementation.
+
+## Implemented/currently bounded
+
+Single-flight interactive boundary; validation/drafts/explicit non-committing `Use maximum`; successful Hole defaults; atomic operation + consumed-sketch visibility; rollback receipts bound to runtime/revision/exact undo entry with cap 200; currentness and fail-closed refs; runtime session/manager id/epoch replacement and restart fences; latest-event lifecycle coalescing and mesh identity fences; success-boundary appStore reset and replacement single-flight; subscriber failures cannot create fictional rollback; overlap candidates chooser/filter/keyboard; movable chips, dock/focus preservation/offscreen fallback; inspector 320 default and 280–420 responsive history; section/nav controls.
+
+Main bounded pattern evidence: 6 real-worker integration tests, core 10, selected CTest 3 before full CTest 196. FeaturePattern is restricted to Hole→Chamfer*, selectedSketch→one-direction Blind Extrude NewBody→straight Fillet/Chamfer*, 1–2 direct consumed sketches→Revolve NewBody with sketch-line axis→straight Fillet/Chamfer*, and exact Sketch→Blind Extrude Add/Cut with explicit shared host and no modifiers. Atomic no-effect Cut rejects unchanged Face/Edge/Vertex identity sets, not container wrappers; no nearest fallback.
+
+## Remaining implementation / acceptance
+
+Typed targets and references across tools remain incomplete; per-tool consistency and named Chamfer AB remain. D-camera face/sketch bounds, panel-aware fit/context and explicit-fit preview remain. Tree/canvas hover + Reveal, annotation collision priority/pin/hide, further section face/datum framing, and all general FeaturePattern mixed chains/UI (dependencies, source edit, suppression, repair, persistence) remain open. Retest tool-first, invalid-mode and constraints variants before close.
+
+Native acceptance remains open: 100 commits per fillet/hole/offset family across three fresh launches plus render completion; full acceptance groups remain owed (annulus pointer/AX/Enter hollow commit, 100 stress, invalid rapid typing/delayed cancel, constraint/snap/Alt/trim/both-cancel, removed/recovery/currentness, complex dimensioned housing + revolved flange, general pattern refs/twins/source edits/BodyV2, isolated native save/open/autosave, 1024×768/1156×768/1440×900 normal/Retina/enlarged, and every report-tool variant). Physical hover/modifier drag/key repeat and unsupported tools require human-blocked reporting, never fabricated passes.
+
+Locked decisions: small movable chip + stable inspector; invalid typed values visible and blocking; `Use maximum` explicit/non-committing; snap before constraint solve with Alt bypassing snap but not constraints; FeaturePattern uses selected canonical record IDs, shared params, source included in count, no per-instance override/suppression, one-host lineage, invalid-all reject; BodyPattern V2 preserved; normative wire/schema/fixtures lockstep; no speculative framework or registry edits.
+
+Resume order: read AGENTS/CLAUDE, this section, HANDOFF current section, PLAN current section, then TODO/current report/matrix. Choose bounded typed-target or D-camera work, then pattern contracts serially, with approval before UI. Maximum three coding agents and one controller/runtime owner; main reviews and runs heavy gates serially. Build worker before Cargo; Bun lock is authoritative; use `npx tsc`; native Computer-Use skill is required before native validation. Recheck served modules after restarting any Vite server.
+
+Unresolved questions: none product-level. Engineering validation remains open as listed above.
+
 # Current State
 
 Last verified: 2026-09-10 11:43 — session 30 COMMITTED: four commits on `master` (`74122c1` WP-S1+WP-D1 · `f5dec0d` pattern clamp · `15e4eb9` QA verifier · `5f1f0f9` ledgers) behind a FULL L3 GREEN including e2e 524/0. Tree clean apart from the untracked `src-tauri/.claude/`. **5 commits unpushed** (those four plus session 29's `5b5cde1`) — push not authorized.

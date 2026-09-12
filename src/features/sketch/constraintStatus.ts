@@ -2,7 +2,7 @@
  * Sketch constraint-state → display text (chrome bar + inspector). One source so
  * the DOF wording stays consistent as the solver state updates (F-WP6).
  */
-import type { SketchStatus } from "@/stores/documentStore";
+import type { SketchMeta, SketchStatus } from "@/stores/documentStore";
 
 /**
  * Four real tones, not two. "under" is the expected state for most of a
@@ -11,6 +11,18 @@ import type { SketchStatus } from "@/stores/documentStore";
  * (UX audit). Reserve amber/red for states that actually need attention.
  */
 export type StatusTone = "under" | "ok" | "over" | "error";
+
+export function hasCurrentSketchEvaluation(
+  sketch: SketchMeta | undefined,
+): sketch is SketchMeta & { dof: number; status: SketchStatus; solveGeometryToken: string } {
+  if (!sketch || typeof sketch.dof !== "number" || sketch.status === undefined) return false;
+  const { geometryToken, solveGeometryToken } = sketch;
+  return typeof geometryToken === "string" &&
+    geometryToken.length > 0 &&
+    typeof solveGeometryToken === "string" &&
+    solveGeometryToken.length > 0 &&
+    solveGeometryToken === geometryToken;
+}
 
 /** Short pill: "Under-constrained · DOF 3" / "Fully constrained · DOF 0" / … */
 export function sketchStatusText(status: SketchStatus, dof: number): { label: string; tone: StatusTone } {
@@ -68,12 +80,31 @@ export function emptySketchCard(): { label: string; tone: StatusTone; sentence: 
   return { label: "Empty sketch", tone: "under", sentence: "Draw geometry to begin." };
 }
 
+/**
+ * A sketch whose ONLY entities are projected host-face references (a fresh
+ * sketch-on-face before the user draws anything). The solver reports those as
+ * fully constrained, which is true and useless: nothing the user drew exists yet,
+ * so the card says what the geometry IS instead of claiming completeness
+ * (UX review 2026-09-11, "constraint messaging is not context-specific").
+ */
+export function projectedOnlySketchCard(projectedCount: number): {
+  label: string;
+  tone: StatusTone;
+  sentence: string;
+} {
+  return {
+    label: "Projected geometry only",
+    tone: "under",
+    sentence: `${projectedCount} projected reference ${projectedCount === 1 ? "edge" : "edges"} · draw geometry to begin.`,
+  };
+}
+
 /** Inspector card body sentence. */
 export function sketchStatusSentence(status: SketchStatus, dof: number): string {
-  if (status === "ok" || dof === 0) return "Sketch is fully defined.";
   // DOF is not a redundant-constraint count — "over-constrained by N" claims a
   // number the solver never reports. State the fact, not a fabricated count.
   if (status === "over") return "Sketch is over-constrained. Remove or change a conflicting constraint.";
   if (status === "error") return "Conflicting constraints. Remove one to resolve.";
+  if (status === "ok" || dof === 0) return "Sketch is fully defined.";
   return `${dof} degrees of freedom remain. Add distance or coincident constraints to fully define.`;
 }

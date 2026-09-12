@@ -10,13 +10,19 @@ import { appStore } from "./appStore";
 import { documentStore } from "./documentStore";
 import { mockClient, setMockRecovery } from "@/ipc/mockClient";
 import { resetStores } from "@/test/resetStores";
+import type { DocumentSnapshot } from "@/ipc/types";
+import { selectionStore } from "@/stores/selectionStore";
+import { toolStore } from "@/stores/toolStore";
+import { sketchStore } from "@/stores/sketchStore";
+import { repairStore } from "@/stores/repairStore";
+import { viewportStore } from "@/stores/viewportStore";
 
 /** Seed an "open editor" state with a given dirty flag (appStore's own fields —
  *  resetStores doesn't touch appStore, it's not one of the F-WP3 chrome stores). */
 function openDocument(dirty: boolean): void {
   appStore.setState({
     screen: "editor",
-    document: { documentId: "doc-1", title: "Untitled" },
+    document: { documentId: "doc-1", runtimeSession: "runtime-1", title: "Untitled" },
     pendingCloseIntent: null,
   });
   documentStore.setState({ dirty });
@@ -253,8 +259,142 @@ describe("appStore unsaved-changes guard", () => {
     await appStore.getState().confirmClose("discard");
 
     expect(openDialog).toHaveBeenCalledTimes(1);
-    expect(openDocumentSpy).toHaveBeenCalledWith("/tmp/next.onecad");
+    expect(openDocumentSpy).toHaveBeenCalledWith(
+      "/tmp/next.onecad",
+      undefined,
+      expect.objectContaining({ beforeAdopt: expect.any(Function) }),
+    );
     expect(appStore.getState().pendingCloseIntent).toBeNull();
+  });
+
+  it("ignores a second clean replacement while the first continuation is in flight", async () => {
+    let resolveOpen!: (document: DocumentSnapshot) => void;
+    const openDocumentSpy = vi.spyOn(mockClient, "openDocument").mockReturnValue(
+      new Promise((resolve) => {
+        resolveOpen = resolve;
+      }),
+    );
+    const first = appStore.getState().openProject("/tmp/first.onecad");
+    const second = appStore.getState().openProject("/tmp/second.onecad");
+
+    await Promise.resolve();
+    expect(openDocumentSpy).toHaveBeenCalledTimes(1);
+    resolveOpen({ documentId: "next", runtimeSession: "runtime-next", title: "Next" });
+    await Promise.all([first, second]);
+  });
+
+  it("runs a dirty replacement continuation once when discard is confirmed twice", async () => {
+    let resolveOpen!: (document: DocumentSnapshot) => void;
+    const openDocumentSpy = vi.spyOn(mockClient, "openDocument").mockReturnValue(
+      new Promise((resolve) => {
+        resolveOpen = resolve;
+      }),
+    );
+    openDocument(true);
+    await appStore.getState().openProject("/tmp/next.onecad");
+    const first = appStore.getState().confirmClose("discard");
+    const second = appStore.getState().confirmClose("discard");
+    await Promise.resolve();
+    expect(openDocumentSpy).toHaveBeenCalledTimes(1);
+    resolveOpen({ documentId: "next", runtimeSession: "runtime-next", title: "Next" });
+    await Promise.all([first, second]);
+  });
+
+  it("releases the replacement flight after failure so a retry can run", async () => {
+    const openDocumentSpy = vi
+      .spyOn(mockClient, "openDocument")
+      .mockRejectedValueOnce(new Error("unreadable"))
+      .mockResolvedValueOnce({ documentId: "next", runtimeSession: "runtime-next", title: "Next" });
+
+    await expect(appStore.getState().openProject("/tmp/bad.onecad")).rejects.toThrow("unreadable");
+    await expect(appStore.getState().openProject("/tmp/good.onecad")).resolves.toBeUndefined();
+    expect(openDocumentSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases a synchronously rejected continuation for retry", async () => {
+    const openDocumentSpy = vi
+      .spyOn(mockClient, "openDocument")
+      .mockImplementationOnce(() => {
+        throw new Error("sync failure");
+      })
+      .mockResolvedValueOnce({ documentId: "next", runtimeSession: "runtime-next", title: "Next" });
+
+    await expect(appStore.getState().openProject("/tmp/bad.onecad")).rejects.toThrow("sync failure");
+    await expect(appStore.getState().openProject("/tmp/good.onecad")).resolves.toBeUndefined();
+    expect(openDocumentSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks synchronous re-entry while a replacement continuation starts", async () => {
+    let reentry!: Promise<void>;
+    const openDocumentSpy = vi.spyOn(mockClient, "openDocument").mockImplementation(async (path) => {
+      if (path === "/tmp/first.onecad") {
+        reentry = appStore.getState().openProject("/tmp/reentrant.onecad");
+      }
+      return { documentId: "next", runtimeSession: "runtime-next", title: "Next" };
+    });
+
+    await appStore.getState().openProject("/tmp/first.onecad");
+    await reentry;
+    expect(openDocumentSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps document-scoped UI intact when open reports recovery pending", async () => {
+    const selected = [{ kind: "body" as const, id: "body-a" }];
+    selectionStore.setState({ selected, hover: selected[0] });
+    toolStore.setState({ mode: "sketch" });
+    sketchStore.setState({ constructionMode: true });
+    repairStore.setState({ panelOpen: true, expandedRefId: "ref-a" });
+    viewportStore.setState({ isolatedBodyIds: ["body-a"] });
+    vi.spyOn(mockClient, "openDocument").mockRejectedValueOnce({ kind: "recoveryPending" });
+
+    await appStore.getState().openProject("/tmp/recovery.onecad");
+
+    expect(selectionStore.getState().selected).toEqual(selected);
+    expect(toolStore.getState().mode).toBe("sketch");
+    expect(sketchStore.getState().constructionMode).toBe(true);
+    expect(repairStore.getState().panelOpen).toBe(true);
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["body-a"]);
+  });
+
+  it("keeps document-scoped UI intact when close fails", async () => {
+    const selected = [{ kind: "body" as const, id: "body-a" }];
+    selectionStore.setState({ selected, hover: selected[0] });
+    toolStore.setState({ mode: "sketch" });
+    sketchStore.setState({ constructionMode: true });
+    repairStore.setState({ panelOpen: true, expandedRefId: "ref-a" });
+    viewportStore.setState({ isolatedBodyIds: ["body-a"] });
+    vi.spyOn(mockClient, "closeDocument").mockRejectedValueOnce(new Error("close failed"));
+
+    await expect(appStore.getState().closeProject()).rejects.toThrow("close failed");
+
+    expect(selectionStore.getState().selected).toEqual(selected);
+    expect(toolStore.getState().mode).toBe("sketch");
+    expect(sketchStore.getState().constructionMode).toBe(true);
+    expect(repairStore.getState().panelOpen).toBe(true);
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["body-a"]);
+  });
+
+  it("releases a native quit guard when it conflicts with an active replacement", async () => {
+    let resolveOpen!: (document: DocumentSnapshot) => void;
+    const openDocumentSpy = vi.spyOn(mockClient, "openDocument").mockReturnValue(
+      new Promise((resolve) => {
+        resolveOpen = resolve;
+      }),
+    );
+    const cancelExitSpy = vi.spyOn(mockClient, "cancelExit");
+    const closeProjectSpy = vi.spyOn(mockClient, "closeDocument");
+    openDocument(true);
+    await appStore.getState().openProject("/tmp/next.onecad");
+    const replacement = appStore.getState().confirmClose("discard");
+    await Promise.resolve();
+
+    await appStore.getState().requestClose("quit");
+    expect(cancelExitSpy).toHaveBeenCalledTimes(1);
+    expect(closeProjectSpy).not.toHaveBeenCalled();
+    expect(openDocumentSpy).toHaveBeenCalledTimes(1);
+
+    resolveOpen({ documentId: "next", runtimeSession: "runtime-next", title: "Next" });
+    await replacement;
   });
 });
 

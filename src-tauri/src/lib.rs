@@ -28,6 +28,8 @@ pub mod library_ingest;
 pub mod library_seed;
 pub mod library_seed_templates;
 pub mod logging;
+#[cfg(desktop)]
+pub mod menu;
 pub mod mesh_cache;
 pub mod recents;
 pub mod sketch_projection;
@@ -97,7 +99,7 @@ pub type RegenEmitter = Arc<dyn Fn(&RegenReport, &DocumentProjection) + Send + S
 /// before the unlocked drive phase. The production wrapper emits
 /// [`events::REGEN_STARTED`] so the frontend can show a busy indicator; every
 /// other caller passes the no-op ([`regen_driver_with_emitter`]).
-pub type RegenStartEmitter = Arc<dyn Fn() + Send + Sync>;
+pub type RegenStartEmitter = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// A post-PUBLISH sink, awaited after the driver's own post-publish work (the
 /// DI-4 element re-bind) and therefore after the resolution ladder has had its
@@ -138,7 +140,7 @@ pub fn regen_driver_with_emitter(
     regen_driver_with_started(
         runtime,
         emit,
-        Arc::new(|| {}),
+        Arc::new(|_| {}),
         Arc::new(|_| Box::pin(async {})),
         autosave_tick,
     )
@@ -173,6 +175,13 @@ pub fn regen_driver_with_started(
                 let Some(rt) = guard.as_mut() else {
                     return Outcome::NoOp; // document closed while the job was queued.
                 };
+                if directive
+                    .runtime_session
+                    .as_deref()
+                    .is_some_and(|expected| !rt.matches_runtime_session(expected))
+                {
+                    return Outcome::NoOp;
+                }
                 match rt.begin_regen(directive.request) {
                     Some(prepared) => prepared,
                     None => {
@@ -186,7 +195,7 @@ pub fn regen_driver_with_started(
             };
             // The job has real work: announce it BEFORE the (slow) drive phase, so
             // the busy indicator is up for the whole time the worker is out.
-            on_started();
+            on_started(&prepared.runtime_session());
             // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
             let cancel = directive.cancel.clone();
             let mut driven = prepared.drive(directive.cancel).await;
@@ -230,19 +239,30 @@ pub fn regen_driver_with_started(
                 // against. It is a no-op once the ids are bound, and deliberately
                 // off the LOCKED phases: it does worker round trips of its own and
                 // must never sit in the edit path.
-                let mut guard = runtime.lock().await;
-                if let Some(rt) = guard.as_mut() {
-                    if rt.has_unbound_persisted_elements() {
-                        let (bound, unresolved) = rt.rebind_persisted_elements().await;
-                        tracing::debug!(
-                            target: "onecad_lib::regen",
-                            bound,
-                            unresolved,
-                            "rebind: persisted element ids re-bound after publish"
-                        );
-                    }
+                let rebind = {
+                    let mut guard = runtime.lock().await;
+                    guard.as_mut().and_then(|rt| {
+                        rt.has_unbound_persisted_elements()
+                            .then(|| rt.prepare_persisted_rebind())
+                            .flatten()
+                    })
+                };
+                if let Some(ticket) = rebind {
+                    let result = ticket.drive().await;
+                    let (bound, unresolved) = {
+                        let mut guard = runtime.lock().await;
+                        guard
+                            .as_mut()
+                            .map(|rt| rt.adopt_persisted_rebind(result))
+                            .unwrap_or_default()
+                    };
+                    tracing::debug!(
+                        target: "onecad_lib::regen",
+                        bound,
+                        unresolved,
+                        "rebind: persisted element ids re-bound after publish"
+                    );
                 }
-                drop(guard);
                 // AFTER the re-bind, and with the lock released: the WP-P
                 // projection staleness pass. It is the last thing a publish owes
                 // and the first that must not hold anything up — so a job that
@@ -329,8 +349,13 @@ fn make_regen_driver(
             api::emit_regen_events(&app, report, projection);
         },
     );
-    let on_started: RegenStartEmitter = Arc::new(move || {
-        let _ = start_app.emit(events::REGEN_STARTED, ());
+    let on_started: RegenStartEmitter = Arc::new(move |runtime_session| {
+        let _ = start_app.emit(
+            events::REGEN_STARTED,
+            crate::dto::RegenStarted {
+                runtime_session: runtime_session.to_string(),
+            },
+        );
     });
     // WP-P B4: after every publish (and after the DI-4 re-bind above it), re-check
     // whether any sketch's projected geometry has stopped matching its source. It
@@ -417,6 +442,15 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // The native menu (WP-U1 / D-3). Installed HERE because `setup` runs on
+            // the main thread, which is the only thread AppKit lets a menu be built
+            // on. A failure must not abort startup: without a menu the ⌘-chords in
+            // `useShortcuts` still reach every one of the same verbs, so the app
+            // degrades rather than refuses to open.
+            #[cfg(desktop)]
+            if let Err(e) = menu::install(app.handle()) {
+                tracing::warn!("native menu install failed ({e}); keyboard chords still apply");
+            }
             // Reclaim import-blob temp directories a previous crash left behind
             // (`ImportWorkspace::drop` never ran). Best-effort, mtime-only, no
             // daemon — see `crate::imports`. Spawned off the window-creation
@@ -503,6 +537,8 @@ pub fn run() {
             api::check_recovery,
             api::recover_document,
             api::apply_edit_command,
+            api::apply_operation,
+            api::rollback_failed_operation,
             api::repair_mate_axis,
             api::get_operation_params,
             api::feature_dependencies,
@@ -571,6 +607,7 @@ pub fn run() {
             api::confirm_exit,
             api::cancel_exit,
             api::log_event,
+            api::mesh_render_completed,
             #[cfg(feature = "tauri-e2e")]
             tauri_e2e::composition_status,
         ])

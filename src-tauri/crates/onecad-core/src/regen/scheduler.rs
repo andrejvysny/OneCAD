@@ -123,6 +123,9 @@ pub struct RegenDirective {
     /// Fired by the scheduler when a newer request supersedes this job. The
     /// driver's executor `select!`s on it and returns [`Outcome::Cancelled`].
     pub cancel: CancelToken,
+    /// Optional app-owned runtime fence. The scheduler treats it as opaque and
+    /// preserves it through debounce/coalescing for the driver to validate.
+    pub runtime_session: Option<String>,
 }
 
 /// The executor-driver seam: runs one [`RegenDirective`] to an [`Outcome`].
@@ -235,8 +238,16 @@ impl SchedulerHandle {
 
     /// Enqueues a request directly (bypassing the [`RegenHint`] mapping).
     pub fn request(&self, request: RegenRequest) {
+        self.request_for_runtime(request, None);
+    }
+
+    /// Enqueue with an opaque runtime fence retained through latest-wins policy.
+    pub fn request_for_runtime(&self, request: RegenRequest, runtime_session: Option<String>) {
         // Send failure ⇒ the loop stopped (shut down / dropped); nothing to run.
-        let _ = self.commands.send(Command::Regen(request));
+        let _ = self.commands.send(Command::Regen {
+            request,
+            runtime_session,
+        });
     }
 
     /// Signals the loop to cancel any in-flight job, drop pending work, and exit.
@@ -264,19 +275,30 @@ impl SchedulerHandle {
 
 /// A control message on the request channel (not part of the public API).
 enum Command {
-    Regen(RegenRequest),
+    Regen {
+        request: RegenRequest,
+        runtime_session: Option<String>,
+    },
     Shutdown,
 }
 
 /// The next request to run once the pipeline frees up.
 enum Pending {
     /// A preview, runnable at `ready_at` (its debounce deadline).
-    Preview { step: usize, ready_at: Instant },
+    Preview {
+        step: usize,
+        ready_at: Instant,
+        runtime_session: Option<String>,
+    },
     /// A commit or a revert (undo/redo), runnable immediately (no debounce). The
     /// two schedule identically; `revert` only decides which [`RegenRequest`]
     /// variant is handed to the driver, and with it the SCHEMA §7.2 `editedFrom`
     /// claim (H8 — an undo must never claim an upstream edit).
-    ToEnd { from: usize, revert: bool },
+    ToEnd {
+        from: usize,
+        revert: bool,
+        runtime_session: Option<String>,
+    },
 }
 
 /// The single in-flight job: its identity and the future being driven.
@@ -396,7 +418,10 @@ impl<D: RegenDriver> RegenScheduler<D> {
             match event {
                 Event::CancelTimeout => self.on_cancel_timeout(),
                 Event::Completed(outcome) => self.on_job_complete(outcome),
-                Event::Command(Some(Command::Regen(req))) => self.on_request(req),
+                Event::Command(Some(Command::Regen {
+                    request,
+                    runtime_session,
+                })) => self.on_request(request, runtime_session),
                 Event::Command(Some(Command::Shutdown)) | Event::Command(None) => {
                     self.on_shutdown();
                     break;
@@ -428,23 +453,41 @@ impl<D: RegenDriver> RegenScheduler<D> {
     fn start_job(&mut self, pending: Pending) {
         self.seq += 1;
         let job_id = JobId(Uuid::from_u128(u128::from(self.seq)));
-        let (kind, request) = match pending {
-            Pending::Preview { step, .. } => {
-                (JobKind::Preview { step }, RegenRequest::ToStep(step))
-            }
+        let (kind, request, runtime_session) = match pending {
+            Pending::Preview {
+                step,
+                runtime_session,
+                ..
+            } => (
+                JobKind::Preview { step },
+                RegenRequest::ToStep(step),
+                runtime_session,
+            ),
             Pending::ToEnd {
                 from,
                 revert: false,
-            } => (JobKind::ToEnd { from }, RegenRequest::ToEnd { from }),
-            Pending::ToEnd { from, revert: true } => {
-                (JobKind::ToEnd { from }, RegenRequest::RevertToEnd { from })
-            }
+                runtime_session,
+            } => (
+                JobKind::ToEnd { from },
+                RegenRequest::ToEnd { from },
+                runtime_session,
+            ),
+            Pending::ToEnd {
+                from,
+                revert: true,
+                runtime_session,
+            } => (
+                JobKind::ToEnd { from },
+                RegenRequest::RevertToEnd { from },
+                runtime_session,
+            ),
         };
         let cancel = CancelToken::new();
         let fut = Box::pin(self.driver.drive(RegenDirective {
             job_id,
             request,
             cancel: cancel.clone(),
+            runtime_session,
         }));
         // A fresh job supersedes any prior error and resets the cancel guard.
         self.last_error = None;
@@ -458,7 +501,7 @@ impl<D: RegenDriver> RegenScheduler<D> {
     }
 
     /// Applies one incoming request per the policy table.
-    fn on_request(&mut self, request: RegenRequest) {
+    fn on_request(&mut self, request: RegenRequest, runtime_session: Option<String>) {
         match request {
             RegenRequest::ToStep(step) => {
                 // Preview: cancel any in-flight job (preview > regen; a running
@@ -467,6 +510,7 @@ impl<D: RegenDriver> RegenScheduler<D> {
                 self.pending = Some(Pending::Preview {
                     step,
                     ready_at: Instant::now() + self.config.debounce,
+                    runtime_session,
                 });
             }
             RegenRequest::ToEnd { from } => {
@@ -476,12 +520,17 @@ impl<D: RegenDriver> RegenScheduler<D> {
                 self.pending = Some(Pending::ToEnd {
                     from,
                     revert: false,
+                    runtime_session,
                 });
             }
             // A revert (undo/redo) is scheduled exactly like a commit.
             RegenRequest::RevertToEnd { from } => {
                 self.cancel_in_flight();
-                self.pending = Some(Pending::ToEnd { from, revert: true });
+                self.pending = Some(Pending::ToEnd {
+                    from,
+                    revert: true,
+                    runtime_session,
+                });
             }
         }
     }

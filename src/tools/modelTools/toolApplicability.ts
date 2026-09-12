@@ -175,7 +175,11 @@ export function getToolApplicability(
       return offsetFaceApplicability(selected);
     case "linearPattern":
     case "circularPattern":
-      return requireKind(selected, "body", "Select a body to pattern");
+      return requireKind(
+        selected,
+        "body",
+        "Select a body to pattern — feature patterns are not supported yet",
+      );
     case "mirror":
       return requireKind(selected, "body", "Select a body to mirror");
     case "transform":

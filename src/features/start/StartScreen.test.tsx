@@ -145,7 +145,10 @@ describe("StartScreen", () => {
     expect(
       await screen.findByRole("button", { name: "File" }, { timeout: 5000 }),
     ).toBeInTheDocument();
-    expect(importStep).toHaveBeenCalledWith("/Users/andrej/CAD/Projects/Imported.step");
+    expect(importStep).toHaveBeenCalledWith(
+      "/Users/andrej/CAD/Projects/Imported.step",
+      expect.objectContaining({ beforeAdopt: expect.any(Function) }),
+    );
     expect(openDocument).not.toHaveBeenCalled();
     expect(appStore.getState().importError).toBeNull();
   });
@@ -164,7 +167,11 @@ describe("StartScreen", () => {
     expect(
       await screen.findByRole("button", { name: "File" }, { timeout: 5000 }),
     ).toBeInTheDocument();
-    expect(openDocument).toHaveBeenCalledWith("/Users/andrej/CAD/Projects/Imported.onecad");
+    expect(openDocument).toHaveBeenCalledWith(
+      "/Users/andrej/CAD/Projects/Imported.onecad",
+      undefined,
+      expect.objectContaining({ beforeAdopt: expect.any(Function) }),
+    );
     expect(importStep).not.toHaveBeenCalled();
     expect(appStore.getState().importError).toBeNull();
   });

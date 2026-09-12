@@ -89,6 +89,12 @@ pub type BackendPair = (
     Arc<dyn MeshProvider>,
     Arc<dyn SolverEngine>,
 );
+pub type RuntimeBackend = (
+    Arc<dyn GeometryEngine>,
+    Arc<dyn MeshProvider>,
+    Arc<dyn SolverEngine>,
+    Arc<dyn ElementQuery>,
+);
 
 /// A backend bundle: the [`BackendPair`] facets plus the read-only side seams for
 /// the same worker — [`GeometryExporter`] (`export_step_file`), [`ElementQuery`]
@@ -149,6 +155,9 @@ pub struct AppState {
     /// The single open document (V1), or `None` when nothing is open. The regen
     /// driver and every command lock this one runtime (single writer).
     pub runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    /// Exact manager/runtime pair allowed to react to a restart. Updated only
+    /// while holding `runtime`; callbacks use the same runtime -> owner order.
+    restart_owner: Arc<StdMutex<Option<(u64, String)>>>,
     /// The **persistence lane** — serializes the two writers that can touch the same
     /// on-disk recovery state: an autosave (container + crash marker) and an explicit
     /// save (container + marker/autosave *clearing*).
@@ -235,6 +244,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Bind the currently published runtime to the live worker. Caller must hold
+    /// `runtime`, preserving the global runtime -> restart_owner lock order.
+    pub fn bind_restart_owner(&self, runtime: &DocumentRuntime) {
+        *self.restart_owner.lock().unwrap() = self
+            .live_worker()
+            .map(|worker| (worker.identity_token(), runtime.runtime_session()));
+    }
+
+    /// Clear restart ownership while holding `runtime` during document close.
+    pub fn clear_restart_owner(&self) {
+        *self.restart_owner.lock().unwrap() = None;
+    }
+
     #[cfg(feature = "tauri-e2e")]
     pub(crate) fn composition_worker_hello(
         &self,
@@ -259,6 +281,7 @@ impl AppState {
             live: Arc::new(StdMutex::new(None)),
             displaced: StdMutex::new(None),
             runtime: Arc::new(Mutex::new(None)),
+            restart_owner: Arc::new(StdMutex::new(None)),
             persistence: Arc::new(Mutex::new(())),
             scheduler: Arc::new(OnceLock::new()),
             app: Arc::new(OnceLock::new()),
@@ -377,6 +400,14 @@ impl AppState {
     /// time a user picked an unreadable file.
     #[must_use]
     pub fn make_backend(&self) -> BackendPair {
+        let (engine, meshes, solver, _) = self.make_backend_with_query();
+        (engine, meshes, solver)
+    }
+
+    /// Stages one backend and returns its runtime facets plus the query facet from
+    /// that exact factory result, immune to overlapping global-slot replacement.
+    #[must_use]
+    pub fn make_backend_with_query(&self) -> RuntimeBackend {
         let displaced = self.snapshot_backend();
         let (
             engine,
@@ -394,7 +425,7 @@ impl AppState {
             *slot = exporter;
         }
         if let Ok(mut slot) = self.element_query.write() {
-            *slot = elements;
+            *slot = elements.clone();
         }
         if let Ok(mut slot) = self.preview.write() {
             *slot = preview;
@@ -412,7 +443,7 @@ impl AppState {
             *slot = readiness;
         }
         *self.displaced.lock().unwrap() = Some(displaced);
-        (engine, meshes, solver)
+        (engine, meshes, solver, elements)
     }
 
     /// Captures the current backend — worker plus all six side seams — so a failed
@@ -561,7 +592,12 @@ impl AppState {
         // Hook + forwarder are installed HERE rather than at adoption so a warm
         // worker that flaps before it is adopted is still supervised and still
         // reported. With no document open the hook's replay is a no-op.
-        install_restart_hook(&wm, self.runtime.clone(), self.scheduler.clone());
+        install_restart_hook(
+            &wm,
+            self.runtime.clone(),
+            self.scheduler.clone(),
+            self.restart_owner.clone(),
+        );
         spawn_status_forwarder(&wm, self.app.clone());
         *self.warm.lock().unwrap() = Some(wm);
         tracing::info!("geometry worker pre-warmed");
@@ -606,18 +642,21 @@ impl Default for AppState {
         let app: SharedAppHandle = Arc::new(OnceLock::new());
         let warm: WorkerSlot = Arc::new(StdMutex::new(None));
         let live: WorkerSlot = Arc::new(StdMutex::new(None));
+        let restart_owner = Arc::new(StdMutex::new(None));
         let backend_factory = real_worker_factory(
             runtime.clone(),
             scheduler.clone(),
             app.clone(),
             warm.clone(),
             live.clone(),
+            restart_owner.clone(),
         );
         Self {
             warm,
             live,
             displaced: StdMutex::new(None),
             runtime,
+            restart_owner,
             persistence: Arc::new(Mutex::new(())),
             scheduler,
             app,
@@ -651,6 +690,7 @@ fn real_worker_factory(
     app: SharedAppHandle,
     warm: WorkerSlot,
     live: WorkerSlot,
+    restart_owner: Arc<StdMutex<Option<(u64, String)>>>,
 ) -> BackendFactory {
     Arc::new(move || {
         let wm = match take_warm(&warm) {
@@ -660,7 +700,12 @@ fn real_worker_factory(
                     return pending_bundle();
                 };
                 let wm = WorkerManager::spawn(SupervisorConfig::production(path));
-                install_restart_hook(&wm, runtime.clone(), scheduler.clone());
+                install_restart_hook(
+                    &wm,
+                    runtime.clone(),
+                    scheduler.clone(),
+                    restart_owner.clone(),
+                );
                 spawn_status_forwarder(&wm, app.clone());
                 wm
             }
@@ -710,19 +755,36 @@ fn install_restart_hook(
     wm: &WorkerManager,
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     scheduler: SharedScheduler,
+    owner: Arc<StdMutex<Option<(u64, String)>>>,
 ) {
+    let manager_identity = wm.identity_token();
     wm.set_restart_hook(Arc::new(move |epoch| {
         let rt = runtime.clone();
         let sch = scheduler.clone();
+        let owner = owner.clone();
         tokio::spawn(async move {
-            {
-                let mut guard = rt.lock().await;
-                if let Some(doc) = guard.as_mut() {
-                    doc.on_worker_restart(epoch);
+            let mut guard = rt.lock().await;
+            let owned = guard.as_ref().is_some_and(|doc| {
+                owner
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(manager, session)| {
+                        *manager == manager_identity && session == &doc.runtime_session()
+                    })
+            });
+            if owned {
+                let doc = guard.as_mut().expect("owner requires runtime");
+                let runtime_session = doc.runtime_session();
+                doc.on_worker_restart(epoch);
+                // Enqueue while ownership is established; the runtime-session tag
+                // independently rejects replacement before driver begin.
+                if let Some(handle) = sch.get() {
+                    handle.request_for_runtime(
+                        RegenRequest::RevertToEnd { from: 0 },
+                        Some(runtime_session),
+                    );
                 }
-            }
-            if let Some(handle) = sch.get() {
-                handle.request(RegenRequest::ToEnd { from: 0 });
             }
         });
     }));
@@ -977,6 +1039,54 @@ mod slot_tests {
     }
 
     #[tokio::test]
+    async fn restart_hook_mutates_only_the_exact_bound_worker_and_runtime() {
+        let state = AppState::new(Arc::new(pending_bundle));
+        let owner = unstartable();
+        let foreign = unstartable();
+        assert_ne!(owner.identity_token(), foreign.identity_token());
+        install_restart_hook(
+            &owner,
+            state.runtime.clone(),
+            state.scheduler.clone(),
+            state.restart_owner.clone(),
+        );
+        install_restart_hook(
+            &foreign,
+            state.runtime.clone(),
+            state.scheduler.clone(),
+            state.restart_owner.clone(),
+        );
+        *state.live.lock().unwrap() = Some(owner.clone());
+        let (engine, meshes, solver, ..) = bundle_from(owner.clone());
+        {
+            let mut guard = state.runtime.lock().await;
+            *guard = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+            state.bind_restart_owner(guard.as_ref().unwrap());
+        }
+
+        foreign.invoke_restart_hook(onecad_core::ids::WorkerEpoch(9));
+        tokio::task::yield_now().await;
+        assert!(!state.runtime.lock().await.as_ref().unwrap().is_dirty());
+
+        owner.invoke_restart_hook(onecad_core::ids::WorkerEpoch(10));
+        tokio::task::yield_now().await;
+        assert!(state.runtime.lock().await.as_ref().unwrap().is_dirty());
+
+        let (engine, meshes, solver, ..) = bundle_from(owner.clone());
+        {
+            let mut guard = state.runtime.lock().await;
+            *guard = Some(DocumentRuntime::new_blank(engine, meshes, solver));
+        }
+        owner.invoke_restart_hook(onecad_core::ids::WorkerEpoch(11));
+        tokio::task::yield_now().await;
+        assert!(
+            !state.runtime.lock().await.as_ref().unwrap().is_dirty(),
+            "even the same manager cannot mutate a replacement runtime before atomic binding"
+        );
+        state.retire_all();
+    }
+
+    #[tokio::test]
     async fn rolling_back_restores_every_side_seam_too() {
         // The pre-existing half-break: `export_step_file` / `face_sketch_plane` /
         // `preview_op` / `add_sketch_on_face` / `insert_step` / `clear_worker_circuit`
@@ -1003,6 +1113,19 @@ mod slot_tests {
         assert!(Arc::ptr_eq(&imports, &state.step_import()));
         assert!(Arc::ptr_eq(&circuit, &state.circuit()));
         assert!(Arc::ptr_eq(&readiness, &state.readiness()));
+    }
+
+    #[test]
+    fn runtime_query_from_factory_is_not_replaced_with_global_slot() {
+        let state = AppState::new(Arc::new(pending_bundle));
+        let (_, _, _, first_query) = state.make_backend_with_query();
+        state.commit_backend();
+        let _second = state.make_backend();
+        assert!(
+            !Arc::ptr_eq(&first_query, &state.element_query()),
+            "runtime-owned query must remain the exact original factory facet"
+        );
+        state.rollback_backend();
     }
 
     #[tokio::test]

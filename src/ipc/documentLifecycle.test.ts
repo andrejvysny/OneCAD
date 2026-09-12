@@ -90,11 +90,11 @@ describe("document lifecycle wiring", () => {
     dirtyDocumentScopedUi();
     const pending = appStore.getState().newProject();
 
-    // Synchronous prefix: the reset already ran, the swap has not.
-    expectDocumentScopedUiClean();
+    // While the backend replacement is pending, outgoing UI remains intact.
     expect(appStore.getState().document).toBe(openedDocument);
 
     await pending;
+    expectDocumentScopedUiClean();
     expect(appStore.getState().document).not.toBe(openedDocument);
   });
 
@@ -102,10 +102,10 @@ describe("document lifecycle wiring", () => {
     dirtyDocumentScopedUi();
     const pending = appStore.getState().openProject("/tmp/thing.ocad");
 
-    expectDocumentScopedUiClean();
     expect(appStore.getState().document).toBe(openedDocument);
 
     await pending;
+    expectDocumentScopedUiClean();
     expect(appStore.getState().document).not.toBe(openedDocument);
   });
 
@@ -121,9 +121,8 @@ describe("document lifecycle wiring", () => {
     dirtyDocumentScopedUi();
     const pending = appStore.getState().recoverDocument(documentId);
 
-    expectDocumentScopedUiClean();
-
     await pending;
+    expectDocumentScopedUiClean();
     expect(appStore.getState().screen).toBe("editor");
   });
 

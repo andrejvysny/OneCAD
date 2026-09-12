@@ -288,7 +288,7 @@ async fn wire_with(runtime: Runtime) -> (Runtime, SchedulerHandle, UnboundedRece
         move |report: &RegenReport, projection: &DocumentProjection| {
             let _ = tx.send((
                 report.outcome_str().to_string(),
-                report.document_change(),
+                report.document_change(&projection.document_id, &projection.runtime_session),
                 projection.clone(),
             ));
         },

@@ -8,6 +8,7 @@
  * a dev demo label is registered behind ?vpdebug.
  */
 import * as THREE from "three";
+import { placeAnnotations } from "./annotationPlacement";
 
 export interface ScreenPos {
   x: number;
@@ -107,6 +108,12 @@ interface OverlayItem {
   sizeObserver?: ResizeObserver;
   /** The side this item was last pushed to — see {@link keepOutShiftY}. */
   keepOutDir?: 1 | -1;
+  screenPosition?: { x: number; y: number };
+  constrainToSafeRect?: boolean;
+  onPlacementStatus?: (status: OverlayPlacementStatus) => void;
+  lastPlacementStatus?: OverlayPlacementStatus;
+  annotation?: OverlayAnnotationPlacement;
+  lastAnnotationStatus?: AnnotationPlacementStatus;
 }
 
 /** Below this screen-px length the leader is hidden — an offset chip that
@@ -143,6 +150,27 @@ export interface OverlayPlacement {
   /** Opt into the per-frame keep-out region `update()` is given (the value
    *  arrow's screen box). See {@link keepOutShiftY}. */
   avoidKeepOut?: boolean;
+  screenPosition?: { x: number; y: number };
+  constrainToSafeRect?: boolean;
+  onPlacementStatus?: (status: OverlayPlacementStatus) => void;
+  annotation?: OverlayAnnotationPlacement;
+}
+
+export interface OverlayPlacementStatus {
+  width: number;
+  height: number;
+  fits: boolean | null;
+}
+
+export type AnnotationPlacementStatus = "visible" | "no-space" | "unknown";
+
+/** Explicit opt-in for screen annotations that must yield to model controls. */
+export interface OverlayAnnotationPlacement {
+  priority: number;
+  pinned: boolean;
+  onPlacementStatus?: (status: AnnotationPlacementStatus) => void;
+  onScreenPosition?: (position: { x: number; y: number } | null) => void;
+  onSizeChanged?: () => void;
 }
 
 /** A screen-space box in CSS pixels. */
@@ -155,6 +183,16 @@ export interface ScreenRect {
 
 /** Clearance kept between a displaced item and the keep-out box, in CSS px. */
 export const KEEP_OUT_PAD_PX = 6;
+
+function clampCentre(value: number, start: number, span: number, itemSpan: number): number {
+  if (itemSpan >= span) return start + span / 2;
+  return Math.max(start + itemSpan / 2, Math.min(start + span - itemSpan / 2, value));
+}
+
+function rectsOverlap(a: ScreenRect, b: ScreenRect): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width
+    && a.y < b.y + b.height && b.y < a.y + a.height;
+}
 
 /**
  * The VERTICAL displacement that clears `rect` of `keepOut`, or null when they
@@ -213,14 +251,22 @@ export class HtmlOverlayDriver {
       clusterId: placement?.clusterId,
       leaderEl,
       avoidKeepOut: placement?.avoidKeepOut,
+      screenPosition: placement?.screenPosition,
+      constrainToSafeRect: placement?.constrainToSafeRect,
+      onPlacementStatus: placement?.onPlacementStatus,
+      annotation: placement?.annotation,
     };
-    if (placement?.avoidKeepOut) {
+    if (placement?.avoidKeepOut || placement?.constrainToSafeRect || placement?.annotation) {
       const rect = el.getBoundingClientRect();
       item.size = { w: rect.width, h: rect.height };
       if (typeof ResizeObserver !== "undefined") {
         item.sizeObserver = new ResizeObserver((entries) => {
           const box = entries[0]?.contentRect;
-          if (box) item.size = { w: box.width, h: box.height };
+          if (!box || box.width <= 0 || box.height <= 0) return;
+          item.size = { w: box.width, h: box.height };
+          item.lastPlacementStatus = undefined;
+          item.onPlacementStatus?.({ width: box.width, height: box.height, fits: null });
+          item.annotation?.onSizeChanged?.();
         });
         item.sizeObserver.observe(el);
       }
@@ -237,6 +283,11 @@ export class HtmlOverlayDriver {
   setAxisFrom(id: string, axisFrom: THREE.Vector3): void {
     const item = this.items.get(id);
     if (item?.axisFrom) item.axisFrom.copy(axisFrom);
+  }
+
+  setScreenPosition(id: string, position: { x: number; y: number } | null): void {
+    const item = this.items.get(id);
+    if (item) item.screenPosition = position ?? undefined;
   }
 
   unregister(id: string): void {
@@ -263,6 +314,7 @@ export class HtmlOverlayDriver {
     width: number,
     height: number,
     keepOut?: ScreenRect | null,
+    safeRect?: ScreenRect | null,
   ): void {
     if (this.items.size === 0) return;
     this.viewProj.multiplyMatrices(
@@ -270,6 +322,7 @@ export class HtmlOverlayDriver {
       camera.matrixWorldInverse,
     );
     interface Placed {
+      id: string;
       el: HTMLElement;
       x: number;
       y: number;
@@ -289,11 +342,26 @@ export class HtmlOverlayDriver {
       uy?: number;
     }
     const placed: Placed[] = [];
-    for (const item of this.items.values()) {
+    for (const [id, item] of this.items) {
       const { el, worldPos, axisFrom, offsetPx, clusterId, leaderEl } = item;
-      const p = projectToScreen(worldPos, this.viewProj, width, height);
+      const projected = projectToScreen(worldPos, this.viewProj, width, height);
+      const p = item.screenPosition
+        ? { ...item.screenPosition, visible: true, behind: false }
+        : projected;
       if (!p.visible) {
-        placed.push({ el, x: p.x, y: p.y, edge: "", visible: false, clusterId, leaderEl });
+        placed.push({
+          id,
+          el,
+          x: p.x,
+          y: p.y,
+          edge: "",
+          visible: false,
+          clusterId,
+          leaderEl,
+          item: item.onPlacementStatus || item.annotation ? item : undefined,
+          ux: 0,
+          uy: 0,
+        });
         continue;
       }
       let x = p.x;
@@ -303,7 +371,12 @@ export class HtmlOverlayDriver {
       let anchorY: number | undefined;
       let offsetUx = 0;
       let offsetUy = 0;
-      if (axisFrom && offsetPx) {
+      if (item.screenPosition) {
+        if (leaderEl && projected.visible) {
+          anchorX = projected.x;
+          anchorY = projected.y;
+        }
+      } else if (axisFrom && offsetPx) {
         // The tail only supplies a DIRECTION, so an off-screen tail is still
         // usable — but a tail BEHIND the camera projects through a negative w and
         // its x/y are meaningless, so that one falls back to the fixed offset.
@@ -325,6 +398,7 @@ export class HtmlOverlayDriver {
         offsetUy = uy * side;
       }
       placed.push({
+        id,
         el,
         x,
         y,
@@ -334,7 +408,7 @@ export class HtmlOverlayDriver {
         leaderEl,
         anchorX,
         anchorY,
-        item: item.avoidKeepOut ? item : undefined,
+        item: item.avoidKeepOut || item.constrainToSafeRect || item.annotation ? item : undefined,
         ux: offsetUx,
         uy: offsetUy,
       });
@@ -355,7 +429,7 @@ export class HtmlOverlayDriver {
     // push-down math assumes.
     const clusters = new Map<string, Placed[]>();
     for (const it of placed) {
-      if (!it.clusterId) continue;
+      if (!it.clusterId || it.item?.annotation) continue;
       const group = clusters.get(it.clusterId);
       if (group) group.push(it);
       else clusters.set(it.clusterId, [it]);
@@ -374,7 +448,7 @@ export class HtmlOverlayDriver {
     // is left alone rather than displaced by a guess.
     for (const it of placed) {
       const item = it.item;
-      if (!item) continue;
+      if (!item || item.annotation) continue;
       if (!it.visible || !keepOut || !item.size || item.size.w <= 0 || item.size.h <= 0) {
         item.keepOutDir = undefined;
         continue;
@@ -396,12 +470,110 @@ export class HtmlOverlayDriver {
       item.keepOutDir = shift.dir;
     }
     for (const it of placed) {
+      const item = it.item;
+      if (!item?.constrainToSafeRect || item.annotation || !safeRect || !item.size) continue;
+      const halfW = item.size.w / 2;
+      const halfH = item.size.h / 2;
+      const centreX = it.x + (it.ux ?? 0) * halfW;
+      const centreY = it.y + (it.uy ?? 0) * halfH;
+      it.x += clampCentre(centreX, safeRect.x, safeRect.width, item.size.w) - centreX;
+      it.y += clampCentre(centreY, safeRect.y, safeRect.height, item.size.h) - centreY;
+    }
+    for (const it of placed) {
+      const item = it.item;
+      if (!item?.avoidKeepOut || item.annotation || !keepOut || !safeRect || !item.size) continue;
+      const { w, h } = item.size;
+      const centreX = it.x + (it.ux ?? 0) * (w / 2);
+      const centreY = it.y + (it.uy ?? 0) * (h / 2);
+      const current = { x: centreX - w / 2, y: centreY - h / 2, width: w, height: h };
+      if (!rectsOverlap(current, keepOut)) continue;
+      for (const dir of [-1, 1] as const) {
+        const shift = keepOutShiftY(current, keepOut, KEEP_OUT_PAD_PX, dir);
+        if (!shift) break;
+        const wanted = centreY + shift.dy;
+        const nextCentreY = clampCentre(wanted, safeRect.y, safeRect.height, h);
+        const candidate = { ...current, y: nextCentreY - h / 2 };
+        if (rectsOverlap(candidate, keepOut)) continue;
+        it.y += nextCentreY - centreY;
+        item.keepOutDir = dir;
+        break;
+      }
+    }
+    const annotationItems = placed.filter((it) => it.item?.annotation);
+    if (annotationItems.length > 0) {
+      const protectedRects: ScreenRect[] = keepOut ? [keepOut] : [];
+      for (const it of placed) {
+        const item = it.item;
+        if (!item || item.annotation || !item.constrainToSafeRect || !item.size || !it.visible) continue;
+        const centerX = it.x + (it.ux ?? 0) * (item.size.w / 2);
+        const centerY = it.y + (it.uy ?? 0) * (item.size.h / 2);
+        protectedRects.push({ x: centerX - item.size.w / 2, y: centerY - item.size.h / 2, width: item.size.w, height: item.size.h });
+      }
+      const outcomes = placeAnnotations(
+        annotationItems.map((it) => ({
+          id: it.id,
+          priority: it.item!.annotation!.priority,
+          center: { x: it.x, y: it.y },
+          size: it.item!.size ? { width: it.item!.size.w, height: it.item!.size.h } : null,
+          pinned: it.item!.annotation!.pinned,
+          visible: it.visible,
+        })),
+        { x: 0, y: 0, width, height },
+        safeRect ?? null,
+        protectedRects,
+      );
+      const byId = new Map(outcomes.map((outcome) => [outcome.id, outcome]));
+      for (const it of annotationItems) {
+        const item = it.item!;
+        const annotation = item.annotation!;
+        const outcome = byId.get(it.id);
+        const status = outcome?.status ?? "unknown";
+        it.visible = status === "visible";
+        if (outcome?.center) {
+          it.x = outcome.center.x;
+          it.y = outcome.center.y;
+        }
+        annotation.onScreenPosition?.(outcome?.center ?? null);
+        if (item.lastAnnotationStatus === status) continue;
+        item.lastAnnotationStatus = status;
+        annotation.onPlacementStatus?.(status);
+      }
+    }
+    for (const it of placed) {
+      const item = it.item;
+      if (!item?.onPlacementStatus || !item.size || item.size.w <= 0 || item.size.h <= 0) continue;
+      const { w, h } = item.size;
+      let fits: boolean | null = null;
+      if (safeRect) {
+        const centreX = it.x + (it.ux ?? 0) * (w / 2);
+        const centreY = it.y + (it.uy ?? 0) * (h / 2);
+        const rect = { x: centreX - w / 2, y: centreY - h / 2, width: w, height: h };
+        const fitsSafe = it.visible && w <= safeRect.width && h <= safeRect.height
+          && rect.x >= safeRect.x && rect.y >= safeRect.y
+          && rect.x + rect.width <= safeRect.x + safeRect.width
+          && rect.y + rect.height <= safeRect.y + safeRect.height;
+        const fitsKeepOut = !item.avoidKeepOut || !keepOut || !rectsOverlap(rect, keepOut);
+        fits = fitsSafe && fitsKeepOut;
+      }
+      const status = { width: w, height: h, fits };
+      const previous = item.lastPlacementStatus;
+      if (previous?.width === status.width && previous.height === status.height && previous.fits === status.fits) continue;
+      item.lastPlacementStatus = status;
+      item.onPlacementStatus(status);
+    }
+    for (const it of placed) {
       if (!it.visible) {
-        it.el.style.display = "none";
+        if (it.item?.annotation) {
+          it.el.style.display = "";
+          it.el.style.visibility = "hidden";
+        } else {
+          it.el.style.display = "none";
+        }
         if (it.leaderEl) it.leaderEl.style.display = "none";
         continue;
       }
       it.el.style.display = "";
+      it.el.style.visibility = "";
       it.el.style.transform = `translate(-50%, -50%) translate(${it.x}px, ${it.y}px)${it.edge}`;
       if (it.leaderEl && it.anchorX !== undefined && it.anchorY !== undefined) {
         const ldx = it.x - it.anchorX;
@@ -420,6 +592,10 @@ export class HtmlOverlayDriver {
   }
 
   clear(): void {
+    for (const item of this.items.values()) {
+      item.leaderEl?.remove();
+      item.sizeObserver?.disconnect();
+    }
     this.items.clear();
   }
 }

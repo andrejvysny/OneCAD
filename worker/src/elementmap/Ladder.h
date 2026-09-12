@@ -129,6 +129,13 @@ struct LadderResolution {
 // (the default) admits everything and is byte-identical to the pre-WP-I pool.
 using CandidateFilter = std::function<bool(const TopoDS_Shape&)>;
 
+// Resolver-v5 clean-replay refinement for the below-margin anchor decision.
+// Exposed so its safety matrix is pinned without incidental OCCT enumeration.
+bool clean_replay_anchor_reinforcement(const LadderEditContext& edit,
+                                       double assigned_descriptor_score,
+                                       const std::vector<double>& rival_descriptor_scores,
+                                       double winner_distance, double nearest_rival_distance);
+
 std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_shape,
                                                        const std::string& body_id,
                                                        const std::vector<LadderRef>& refs,

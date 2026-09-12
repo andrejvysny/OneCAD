@@ -107,7 +107,8 @@ async function expectMinX(page: Page, bodyId: string, want: number): Promise<voi
 }
 
 const chip = (page: Page) => page.getByTestId("model-tool-chip");
-const chipInput = (page: Page) => chip(page).getByLabel("Dimension value");
+// "Distance (mm)" in Move mode, "Angle (°)" in Rotate mode (WP-U10).
+const chipInput = (page: Page) => chip(page).getByLabel(/^(Distance \(mm\)|Angle \(°\))$/);
 
 /** Select bodies and arm the placement tool with the `t` shortcut. */
 async function armTransform(page: Page, ...bodyIds: string[]): Promise<void> {

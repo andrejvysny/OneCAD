@@ -36,7 +36,7 @@ describe("File ▸ Rename…", () => {
     resetStores();
     appStore.setState({
       screen: "editor",
-      document: { documentId: "doc-1", title: "Untitled" },
+      document: { documentId: "doc-1", runtimeSession: "runtime-1", title: "Untitled" },
       pendingCloseIntent: null,
     });
     documentStore.getState().applySnapshot(projection("doc-1", "Bracket v2"));

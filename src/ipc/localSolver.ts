@@ -36,6 +36,7 @@
 import type {
   ApplyOperationResult,
   BeginGestureResult,
+  CancelSketchResult,
   CurveParams,
   DragSolveResult,
   EnterSketchTarget,
@@ -170,7 +171,7 @@ export interface LocalSolverLane {
     constraints: SketchConstraint[],
   ): Promise<SketchUpsertResult>;
   finishSketch(sketchId: string): Promise<FinishSketchResult>;
-  cancelSketch(sketchId: string): Promise<void>;
+  cancelSketch(sketchId: string, opts?: { discard?: boolean }): Promise<CancelSketchResult>;
   beginGesture(
     sketchId: string,
     dragPointId: string,
@@ -187,6 +188,7 @@ export interface LocalSolverLane {
   beginPreview(draft: PreviewDraft): Promise<PreviewSession>;
   updatePreview(sessionId: string, params: PreviewParams, epoch: number): void;
   endPreview(sessionId: string, commit: boolean): Promise<ApplyOperationResult | null>;
+  takePreviewOperation(sessionId: string): OperationOp | null;
   onPreviewResult(cb: (r: PreviewResult) => void): Unsubscribe;
   /** Resolve a finished sketch region → the {plane, profile} a profile-based op consumes. */
   resolveProfileInput(
@@ -352,6 +354,11 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
   const sketchSessions = new Map<string, SketchSession>();
   const sketchPlanes = new Map<string, SketchPlane>();
   const sketchRevisions = new Map<string, number>();
+  // WP-U7 D-1: the session as it stood at `enterSketch`, so a DISCARDING cancel
+  // can put it back. This lane is the mock's only sketch authority (the mock
+  // document store holds the row, never the entities), so restoring here IS the
+  // mock's equivalent of the backend's session undo.
+  const enterSnapshots = new Map<string, SketchSession>();
   let nextSketchSeq = 1;
   const finishedRegions = new Map<string, SketchRegion[]>();
 
@@ -558,6 +565,9 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         sketchPlanes.set(id, session.plane);
         sketchRevisions.set(id, 0);
       }
+      // The discard memento (WP-U7): re-entering an existing sketch snapshots what
+      // is already there, a fresh one snapshots its (possibly seeded) empty state.
+      enterSnapshots.set(id, cloneSession(session));
       return cloneSession(session);
     },
 
@@ -649,10 +659,24 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       return { regionIdentityVersion: 3, regions: finishedRegions.get(sketchId) ?? [] };
     },
 
-    async cancelSketch(_sketchId: string): Promise<void> {
+    async cancelSketch(
+      sketchId: string,
+      opts?: { discard?: boolean },
+    ): Promise<CancelSketchResult> {
       await wait(0);
       activeGesture = null;
       // Real backend discards scratch; the lane keeps the last committed session.
+      if (!opts?.discard) return { discarded: false };
+      // WP-U7 D-1: put the session back to its state at enter. No snapshot means
+      // this sketch was never entered through the lane — nothing to discard, and
+      // guessing would be worse than saying so.
+      const snapshot = enterSnapshots.get(sketchId);
+      if (!snapshot) return { discarded: false, keptReason: "the sketch edit session had already closed" };
+      sketchSessions.set(sketchId, cloneSession(snapshot));
+      sketchRevisions.set(sketchId, (sketchRevisions.get(sketchId) ?? 0) + 1);
+      finishedRegions.delete(sketchId); // the cached profiles described the discarded geometry
+      enterSnapshots.delete(sketchId);
+      return { discarded: true };
     },
 
     // ── Drag gesture (kinematic echo, per §7.4 target kind) ────────────────────
@@ -876,6 +900,13 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       return res;
     },
 
+    takePreviewOperation(sessionId: string): OperationOp | null {
+      const s = previewSessions.get(sessionId);
+      if (!s) return null;
+      if (s.editFeatureId) throw new Error("Feature re-edit must use a scalar update command");
+      return buildPreviewOp(s);
+    },
+
     onPreviewResult(cb: (r: PreviewResult) => void): Unsubscribe {
       previewListeners.add(cb);
       return () => previewListeners.delete(cb);
@@ -899,6 +930,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       sketchSessions.delete(sketchId);
       sketchPlanes.delete(sketchId);
       sketchRevisions.delete(sketchId);
+      enterSnapshots.delete(sketchId);
     },
 
     cacheSketchPlane(sketchId: string, plane: SketchPlane): void {
@@ -915,6 +947,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       sketchSessions.clear();
       sketchPlanes.clear();
       sketchRevisions.clear();
+      enterSnapshots.clear();
       nextSketchSeq = 1;
     },
 

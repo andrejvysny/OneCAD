@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as THREE from "three";
 import {
+  CadOrbitControls,
   clampPitch,
   sphericalToOffset,
   zoomToCursor,
@@ -93,6 +94,26 @@ describe("viewAlongNormal + CameraRig — plane axis ends up on screen-right/up"
     expect(right.y).toBeCloseTo(1, 3); // plane xAxis = world +Y
     expect(up.x).toBeCloseTo(-1, 3); // plane yAxis = world −X
     expect(up.y).toBeCloseTo(0, 3);
+  });
+});
+
+describe("orientationAlongNormal", () => {
+  const controlsFor = () => new CadOrbitControls({
+    rig: new CameraRig(),
+    element: document.createElement("div"),
+    onChange: () => {},
+    getBounds: () => null,
+  });
+
+  it.each([
+    [new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0)],
+    [new THREE.Vector3(1, 2, 3).normalize(), new THREE.Vector3(0, 1, 0)],
+  ])("keeps a non-pole destination parallel to the requested positive normal", (normal, xAxis) => {
+    const controls = controlsFor();
+    const orientation = controls.orientationAlongNormal(normal, xAxis);
+    const offset = sphericalToOffset(orientation.yaw, orientation.pitch, 1);
+    expect(offset.dot(normal.clone().normalize())).toBeCloseTo(1, 9);
+    controls.dispose();
   });
 });
 

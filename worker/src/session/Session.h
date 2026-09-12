@@ -66,6 +66,8 @@ struct FenceOutcome {
     nlohmann::json idempotent_result;                // when IdempotentPrepared
     BodyStore cloned_bodies;                         // when Ok
     elementmap::ElementMapPartition cloned_partition;  // when Ok
+    ResolvedInputEvidenceLedger cloned_input_evidence;  // when Ok
+    TopologyOwnerLedger cloned_topology_owners;          // when Ok
     std::map<std::string, ops::GearBodyInfo> cloned_gear_bodies;  // when Ok (WP-I)
     std::uint64_t prepared_snapshot_id = 0;          // when Ok
 };
@@ -87,6 +89,8 @@ struct AcceptOutcome {
 struct CheckpointState {
     BodyStore bodies;
     elementmap::ElementMapPartition partition;
+    ResolvedInputEvidenceLedger input_evidence;
+    TopologyOwnerLedger topology_owners;
     std::string history_prefix_hash;
     // SCHEMA §7.3 gear referenceability (WP-I): the plan-derived gear-body map
     // of the head this checkpoint froze. It rides the checkpoint for the same
@@ -210,6 +214,7 @@ public:
     // `published_state_at` so the snapshot fence and both stores are one read.
     BodyStore bodies_copy() const;
     elementmap::ElementMapPartition partition_copy() const;
+    TopologyOwnerLedger topology_owners_copy() const;
     // SCHEMA §7.3 gear referenceability (WP-I): the live head's gear-body map.
     std::map<std::string, ops::GearBodyInfo> gear_bodies_copy() const;
     std::uint64_t current_snapshot_id() const;
@@ -260,6 +265,8 @@ private:
 
     BodyStore bodies_;                          // live published bodies (real TopoDS_Shape)
     elementmap::ElementMapPartition partition_; // live published element-map partition
+    ResolvedInputEvidenceLedger input_evidence_;
+    TopologyOwnerLedger topology_owners_;
     // SCHEMA §7.3 gear referenceability (WP-I): body id → gear info for every
     // live gear body, rebuilt at each AcceptPrepared from the ACCEPTED plan.
     // `BindElementIds` consults it to refuse a tooth face by name.

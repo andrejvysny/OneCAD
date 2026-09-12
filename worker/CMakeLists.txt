@@ -109,6 +109,9 @@ add_library(worker_core STATIC
     src/session/ShapeMetrics.cpp
     src/session/Signatures.cpp
     src/session/PlanExecutor.cpp
+    src/session/FeaturePattern.cpp
+    src/session/FeaturePatternIdentity.cpp
+    src/session/FeaturePatternValidation.cpp
     src/session/PreviewOp.cpp
     # --- W-WP5: REAL OCCT ops + ElementMap V2 + tessellation ---
     src/elementmap/ElementMapPartition.cpp
@@ -135,6 +138,7 @@ add_library(worker_core STATIC
     src/kernel/fillet/FilletRangeAnalyzer.cpp
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
+    src/ops/TopologyHistory.cpp
     src/ops/BooleanOp.cpp
     # --- W-WP6: new OCCT ops (Revolve / Fillet / Chamfer) + STEP IO ---
     src/ops/RevolveOp.cpp

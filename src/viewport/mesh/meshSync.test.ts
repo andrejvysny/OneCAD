@@ -5,10 +5,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as THREE from "three";
-import { MeshIngest } from "./meshSync";
+import { MeshIngest, meshGeneration } from "./meshSync";
 import * as reg from "./meshRegistry";
-import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { makeBoxMesh, makeCylinderMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
@@ -21,29 +22,55 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 function fakeEngine() {
   const bodiesRoot = new THREE.Group();
+  const afterRender = new Set<() => void>();
   return {
     bodiesRoot,
     invalidate: vi.fn(),
     refreshHighlights: vi.fn(),
     setHighlightState: vi.fn(),
+    onAfterRender: (cb: () => void) => {
+      afterRender.add(cb);
+      return () => afterRender.delete(cb);
+    },
+    completeRender: () => [...afterRender].forEach((cb) => cb()),
   } as unknown as ViewportEngine & {
     bodiesRoot: THREE.Group;
     invalidate: ReturnType<typeof vi.fn>;
     refreshHighlights: ReturnType<typeof vi.fn>;
     setHighlightState: ReturnType<typeof vi.fn>;
+    completeRender: () => void;
   };
 }
 
-function fakeClient(getMesh: ReturnType<typeof vi.fn> = vi.fn(async () => makeBoxMesh())) {
+function fakeClient(
+  getMesh: ReturnType<typeof vi.fn> = vi.fn(async () => makeBoxMesh()),
+  retained: DocumentChange | null = null,
+) {
+  if (documentStore.getState().documentId === undefined) {
+    documentStore.setState({ documentId: "test-document", runtimeSession: "test-runtime" });
+  }
   const listeners = new Set<(c: DocumentChange) => void>();
   const client = {
     getBodyMesh: getMesh,
+    getCurrentMeshPublication: () => retained,
     onDocumentChanged: (cb: (c: DocumentChange) => void) => {
       listeners.add(cb);
       return () => listeners.delete(cb);
     },
   } as unknown as CadClient;
-  return { client, getMesh, emit: (c: DocumentChange) => listeners.forEach((l) => l(c)) };
+  return {
+    client,
+    getMesh,
+    emit: (c: DocumentChange) => {
+      const document = documentStore.getState();
+      const change = {
+        ...c,
+        documentId: c.documentId ?? document.documentId,
+        runtimeSession: c.runtimeSession ?? document.runtimeSession,
+      };
+      listeners.forEach((listener) => listener(change));
+    },
+  };
 }
 
 function setBodies(bodies: Record<string, boolean>) {
@@ -98,6 +125,76 @@ function childVisibility(engine: ReturnType<typeof fakeEngine>, bodyId: string):
 }
 
 describe("MeshIngest onDocumentChanged", () => {
+  it("strictly parses normative mesh generations including split body ids", () => {
+    expect(meshGeneration("body_uuid:split:4:fine:27")).toBe(27);
+    expect(meshGeneration("body:fine:not-a-number")).toBeNull();
+    expect(meshGeneration("body:fine:9007199254740992")).toBeNull();
+    expect(meshGeneration("body:unknown:2")).toBeNull();
+  });
+
+  it("pins the fetch and installed entry to an authoritative publication generation", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({ documentId: "doc-1", runtimeSession: "runtime-1", geometrySource: "live" });
+    const engine = fakeEngine();
+    const { client, getMesh, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+
+    emit({ ...changed("body1"), documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 41 });
+    await tick();
+
+    expect(getMesh).toHaveBeenLastCalledWith("body1", "fine", 1, "runtime-1");
+    expect(reg.getEntry("body1")?.provenance).toEqual({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 41,
+      generation: 1,
+    });
+  });
+
+  it("fails closed to an unpinned install for a malformed publication meshKey", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({ documentId: "doc-1", geometrySource: "live" });
+    const engine = fakeEngine();
+    const { client, getMesh, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit({
+      ...changed("body1"),
+      documentId: "doc-1",
+      snapshotId: 42,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:bad" }],
+    });
+    await tick();
+    expect(getMesh).toHaveBeenLastCalledWith("body1", "fine");
+    expect(reg.getEntry("body1")?.provenance).toBeUndefined();
+  });
+
+  it("rejects a delayed event from a replaced same-id runtime even when snapshot and generation repeat", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-new",
+      geometrySource: "live",
+    });
+    const engine = fakeEngine();
+    const { client, getMesh, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    getMesh.mockClear();
+
+    emit({
+      ...changed("body1"),
+      documentId: "doc-1",
+      runtimeSession: "runtime-old",
+      snapshotId: 1,
+    });
+    await tick();
+
+    expect(getMesh).not.toHaveBeenCalled();
+    expect(reg.getCurrentMeshPublication()).toBeNull();
+  });
+
   it("fetches + swaps + adds a scene object for a changed, visible body", async () => {
     setBodies({ body1: true });
     const engine = fakeEngine();
@@ -148,6 +245,46 @@ describe("MeshIngest onDocumentChanged", () => {
 });
 
 describe("MeshIngest initial sweep (bodies already in the store at attach)", () => {
+  it("pins bootstrap fetches from the retained matching native publication", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      geometrySource: "live",
+    });
+    const retained = {
+      ...changed("body1"),
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 9,
+    };
+    const getMesh = vi.fn(async () => makeBoxMesh());
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), fakeClient(getMesh, retained).client);
+    await tick();
+
+    expect(getMesh).toHaveBeenCalledWith("body1", "fine", 1, "runtime-1");
+    expect(reg.getEntry("body1")?.provenance).toEqual({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 9,
+      generation: 1,
+    });
+  });
+
+  it("keeps bootstrap/open mesh unpinned and therefore non-authoritative until a publication", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({ documentId: "opened-doc", geometrySource: "cached" });
+    const engine = fakeEngine();
+    const { client, getMesh } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    expect(getMesh).toHaveBeenCalledWith("body1", "fine");
+    expect(reg.getEntry("body1")?.provenance).toBeUndefined();
+  });
+
   it("loads only the visible pre-seeded bodies on attach, before any event fires", async () => {
     setBodies({ body1: true, body2: false });
     const engine = fakeEngine();
@@ -672,5 +809,246 @@ describe("MeshIngest load-failure surfacing", () => {
       __resetLogForTests({ enabled: false });
       viewportStore.getState().setStatusHint(null);
     }
+  });
+});
+
+// ── selection integrity across the two kinds of reload (WP-U4 / D-5) ─────────
+
+describe("MeshIngest selection reconcile", () => {
+  const faceRef = (topoKey: string) => ({
+    kind: "face" as const,
+    id: `body1#${topoKey}`,
+    bodyId: "body1",
+    topoKey,
+  });
+
+  afterEach(() => {
+    selectionStore.getState().set([]);
+    selectionStore.getState().setHover(null);
+  });
+
+  it("a COLOUR reload keeps the selection; the next REGEN publish reconciles it", async () => {
+    // `onColorChanged` re-publishes the same topology under the same snapshot.
+    // Reconciling it would drop every unpromoted ref because a colour changed.
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit(changed("body1"));
+    await tick();
+
+    selectionStore.getState().set([faceRef("f:4")]);
+    documentStore.setState({
+      bodies: { body1: { id: "body1", name: "body1", visible: true, color: [1, 2, 3, 255] } },
+    });
+    await tick();
+
+    expect(selectionStore.getState().selected).toHaveLength(1);
+
+    // The same body, published by a regen this time: an unpromoted ref has no
+    // authority across one, so it goes.
+    emit(changed("body1"));
+    await tick();
+
+    expect(selectionStore.getState().selected).toEqual([]);
+  });
+
+  it("dropping a removed body clears its face/edge refs", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit(changed("body1"));
+    await tick();
+
+    const other = { kind: "sketch" as const, id: "sketch1" };
+    selectionStore.getState().set([faceRef("f:4"), other]);
+    emit({ revision: 2, changedBodies: [], removedBodies: ["body1"] });
+    await tick();
+
+    expect(selectionStore.getState().selected).toEqual([other]);
+  });
+
+  it("coalesces a burst overtaking delayed authored colors and installs only newest mesh", async () => {
+    // `resolveAuthoredFaceColors` awaits one `elementInfo` per authored colour,
+    // which is long enough for a newer publish to overtake this one. Without a
+    // re-check after that await the older mesh swaps in over the newer.
+    documentStore.setState({
+      bodies: {
+        body1: {
+          id: "body1",
+          name: "body1",
+          visible: true,
+          faceColors: { el_a: [9, 9, 9, 255] },
+        },
+      },
+    });
+    const meshes = [makeBoxMesh(), makeCylinderMesh()];
+    let nth = 0;
+    const getMesh = vi.fn(async () => meshes[Math.min(nth++, 1)]);
+    const gates: Array<(v: null) => void> = [];
+    const { client, emit } = fakeClient(getMesh);
+    (client as unknown as { elementInfo: () => Promise<null> }).elementInfo = () =>
+      new Promise<null>((r) => gates.push(r));
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client); // reconcile() → load #1 (box)
+    await tick();
+    emit(changed("body1")); // → load #2 (cylinder)
+    await tick();
+    expect(gates).toHaveLength(1);
+
+    gates[0](null); // current load completes; exactly one queued reload starts
+    await tick();
+    expect(gates).toHaveLength(2);
+    expect(reg.getEntry("body1")).toBeUndefined(); // superseded box never installs
+    gates[1](null);
+    await tick();
+
+    expect(reg.getEntry("body1")!.view.faceCount).toBe(3); // the cylinder, not the box
+  });
+
+  it("rejects the final swap when runtime authority changes during authored-color resolution", async () => {
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-old",
+      geometrySource: "live",
+      bodies: {
+        body1: {
+          id: "body1",
+          name: "body1",
+          visible: true,
+          faceColors: { el_a: [9, 9, 9, 255] },
+        },
+      },
+    });
+    const retained = {
+      ...changed("body1"),
+      documentId: "doc-1",
+      runtimeSession: "runtime-old",
+      snapshotId: 1,
+    };
+    let resolveColor!: (value: null) => void;
+    const { client } = fakeClient(vi.fn(async () => makeBoxMesh()), retained);
+    (client as unknown as { elementInfo: () => Promise<null> }).elementInfo = () =>
+      new Promise<null>((resolve) => { resolveColor = resolve; });
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), client);
+    await tick();
+
+    documentStore.setState({ runtimeSession: "runtime-new" });
+    resolveColor(null);
+    await tick();
+
+    expect(reg.getEntry("body1")).toBeUndefined();
+  });
+
+  it("rejects a delayed fetch across removal and re-add without token ABA", async () => {
+    setBodies({ body1: true });
+    const gates: Array<(mesh: ArrayBuffer) => void> = [];
+    const getMesh = vi.fn(() => new Promise<ArrayBuffer>((resolve) => gates.push(resolve)));
+    const { client, emit } = fakeClient(getMesh);
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    expect(gates).toHaveLength(1);
+
+    documentStore.setState({ bodies: {} });
+    emit({ revision: 2, changedBodies: [], removedBodies: ["body1"] });
+    documentStore.setState({
+      bodies: { body1: { id: "body1", name: "body1", visible: true } },
+    });
+    emit(changed("body1"));
+    expect(gates).toHaveLength(1);
+
+    gates[0](makeBoxMesh());
+    await tick();
+    expect(reg.getEntry("body1")).toBeUndefined();
+    expect(gates).toHaveLength(2);
+    gates[1](makeCylinderMesh());
+    await tick();
+    expect(reg.getEntry("body1")!.view.faceCount).toBe(3);
+  });
+
+  it("bounds repeated remove and re-add bursts to one active plus one queued fetch", async () => {
+    setBodies({ body1: true });
+    const gates: Array<(mesh: ArrayBuffer) => void> = [];
+    const getMesh = vi.fn(() => new Promise<ArrayBuffer>((resolve) => gates.push(resolve)));
+    const { client, emit } = fakeClient(getMesh);
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), client);
+
+    for (let revision = 2; revision <= 5; revision++) {
+      documentStore.setState({ bodies: {} });
+      emit({ revision, changedBodies: [], removedBodies: ["body1"] });
+      documentStore.setState({
+        bodies: { body1: { id: "body1", name: "body1", visible: true } },
+      });
+      emit(changed("body1"));
+    }
+    expect(getMesh).toHaveBeenCalledTimes(1);
+
+    gates[0](makeBoxMesh());
+    await tick();
+    expect(getMesh).toHaveBeenCalledTimes(2);
+    gates[1](makeCylinderMesh());
+    await tick();
+    expect(reg.getEntry("body1")!.view.faceCount).toBe(3);
+  });
+
+  it("retains the last valid mesh when the latest fetch fails", async () => {
+    setBodies({ body1: true });
+    const getMesh = vi
+      .fn<() => Promise<ArrayBuffer>>()
+      .mockResolvedValueOnce(makeBoxMesh())
+      .mockRejectedValueOnce(new Error("latest unavailable"));
+    const { client, emit } = fakeClient(getMesh);
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    const lastValid = reg.getEntry("body1");
+
+    emit(changed("body1"));
+    await tick();
+
+    expect(reg.getEntry("body1")).toBe(lastValid);
+    expect(engine.bodiesRoot.children).toHaveLength(1);
+    expect(viewportStore.getState().statusHint?.message).toContain("failed to load");
+  });
+
+  it("keeps the installed mesh and contains a rejected native render acknowledgment", async () => {
+    setBodies({ body1: true });
+    documentStore.setState({ documentId: "doc-a", runtimeSession: "runtime-a" });
+    const { client, emit } = fakeClient();
+    const acknowledge = vi.fn(async () => { throw new Error("runtime replaced"); });
+    (client as unknown as { meshRenderCompleted: typeof acknowledge }).meshRenderCompleted = acknowledge;
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit({
+      ...changed("body1"),
+      snapshotId: 7,
+      documentId: "doc-a",
+      runtimeSession: "runtime-a",
+      renderExpectationId: 11,
+    });
+    await tick();
+    await tick();
+    const installed = reg.getEntry("body1");
+
+    engine.completeRender();
+    await tick();
+
+    expect(acknowledge).toHaveBeenCalledWith({
+      expectationId: 11,
+      documentId: "doc-a",
+      revision: 1,
+      snapshotId: 7,
+      bodyId: "body1",
+    });
+    expect(reg.getEntry("body1")).toBe(installed);
   });
 });

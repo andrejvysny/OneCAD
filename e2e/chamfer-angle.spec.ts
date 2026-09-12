@@ -28,7 +28,10 @@ const EDGE_REF = {
   id: "body1#e:5",
   bodyId: "body1",
   topoKey: "e:5",
-  elementId: "el-edge-5",
+  // NO `elementId`: a seeded ref stands in for a FRESH pick, and promotion is
+  // fire-and-forget — the id lands a round-trip later. Seeding one the backend
+  // never minted would be a fiction the edge-op lane now acts on, because a
+  // promoted pick is addressed BY that id (WP-U4 / D-5).
   anchor: { worldPoint: [40, 0, 15] as [number, number, number] },
 };
 
@@ -162,7 +165,7 @@ test("a distance-angle chamfer BLOCKS the flip to Fillet, and allows it once cle
   // `session::CHAMFER_ANGLE_FLIP_REASON`).
   await reopenRow(page, id);
   await page.getByTestId("chip-edgeop-fillet").click();
-  await page.getByLabel("Dimension value").click();
+  await page.getByLabel("Radius (mm)").click();
   await page.keyboard.press("Enter");
   await expect(page.getByText(/clear angleDeg first/)).toBeVisible();
   // The rejected flip wrote nothing.
@@ -181,7 +184,7 @@ test("a distance-angle chamfer BLOCKS the flip to Fillet, and allows it once cle
   await reopenRow(page, id);
   await expect(angleField(page)).toHaveValue("");
   await page.getByTestId("chip-edgeop-fillet").click();
-  await page.getByLabel("Dimension value").click();
+  await page.getByLabel("Radius (mm)").click();
   await page.keyboard.press("Enter");
   await expect.poll(async () => (await lastFeature(page)).label).toBe("Fillet");
   expect((await getFeatureLabels(page)).length).toBe(rowCount);

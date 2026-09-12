@@ -342,24 +342,28 @@ function hexToRgba(hex: string, alpha01: number): Rgba {
 // ── History ──────────────────────────────────────────────────────────────────
 
 /**
- * Lineage for a SELECTED body/sketch — a slice, not the timeline. A body shows
- * its build-up (Sketch 1 / Extrude / Fillet); anything else shows the extrude
- * that consumed it. Deliberately never passes `appliedOps`: a row index inside a
- * slice is not the global timeline index the rollback cursor is expressed in.
+ * History for a SELECTED body/sketch/element — the WHOLE timeline, in order.
+ *
+ * This used to be a slice (the first three rows for a body, the first extrude for
+ * anything else), which hid every Hole / Pattern / Chamfer authored after the
+ * third feature and made direct edits look unreachable (UX review 2026-09-11).
+ * The projection carries no feature→body lineage, so the honest list is the full
+ * one, labelled with its count so the user can see nothing is filtered.
+ * Deliberately never passes `appliedOps`: the rollback cursor belongs to the
+ * feature-selected view (`HistoryFeatureSection`).
  */
 export function HistorySelectionSection() {
   const sel = useSelectionStore(primarySelection);
   const features = useDocumentStore((s) => s.features);
   if (!sel || sel.kind === "feature") return null;
 
-  const items =
-    sel.kind === "body"
-      ? features.slice(0, 3)
-      : features.filter((f) => f.kind === "extrude").slice(0, 1);
   return (
     <>
       <SectionLabel className="pb-1.5 pt-4">History</SectionLabel>
-      <HistoryList items={items} onSelect={selectFeature} onEdit={editFeature} />
+      <div className="pb-1 text-[11px] text-ink-3" data-testid="history-count">
+        {features.length} {features.length === 1 ? "feature" : "features"} · nothing filtered
+      </div>
+      <HistoryList items={features} onSelect={selectFeature} onEdit={editFeature} />
     </>
   );
 }

@@ -1179,3 +1179,17 @@ export function detachProjection(client: CadClient, sketchId: string): Promise<v
       });
   });
 }
+
+/** Flip the STICKY construction draw modifier and report what changed (D-2/WP-U8).
+ *  The single shared entry point for the toggle — the `X` shortcut (empty
+ *  selection) and the toolbar's Construction button both call this instead of
+ *  the raw store setter, so the hint text lives in exactly one place. */
+export function toggleConstructionModeWithHint(): void {
+  const next = !sketchStore.getState().constructionMode;
+  sketchStore.getState().toggleConstructionMode();
+  viewportStore
+    .getState()
+    .setStatusHint(
+      next ? "Construction geometry on — new entities are reference only" : "Construction geometry off",
+    );
+}

@@ -12,6 +12,8 @@ import { activateTool, isModelOnlyTool, isSketchOnlyTool } from "./activateTool"
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
+import { documentStore } from "@/stores/documentStore";
 
 describe("activateTool — tool classification", () => {
   it("classifies sketch-only vs model-only vs context-local tools", () => {
@@ -57,6 +59,26 @@ describe("activateTool — model mode", () => {
     await activateTool("extrude");
     expect(toolStore.getState().mode).toBe("model");
     expect(toolStore.getState().modelTool).toBe("extrude");
+  });
+
+  it("refuses another authoring tool while an operation is applying", async () => {
+    toolStore.getState().setTool("extrude");
+    operationAttemptStore.getState().begin(documentStore.getState().documentId, null);
+
+    await activateTool("fillet");
+
+    expect(toolStore.getState().modelTool).toBe("extrude");
+    expect(viewportStore.getState().statusHint?.message).toBe("Operation is still applying");
+  });
+
+  it("releases an attempt owned by another document", async () => {
+    operationAttemptStore.getState().begin("old-document", null);
+    documentStore.setState({ documentId: "new-document" });
+
+    await activateTool("fillet");
+
+    expect(toolStore.getState().modelTool).toBe("fillet");
+    expect(operationAttemptStore.getState().attempt).toBeNull();
   });
 
   it("the 'sketch' id enters sketch mode with the default tool", async () => {

@@ -9,6 +9,8 @@ import { RENDER_MODES } from "@/viewport/engine/renderModes";
 import { SnapPopover } from "@/features/snap/SnapPopover";
 import { DisplayModePopover } from "@/features/shell/DisplayModePopover";
 import { ViewCube } from "@/features/viewcube/ViewCube";
+import { useViewportWorkArea } from "@/stores/viewportWorkAreaStore";
+import { useMeasuredObstacle } from "@/app/shell/useMeasuredObstacle";
 
 function ClusterButton({
   icon,
@@ -65,14 +67,27 @@ export function CornerCluster() {
   const gridVisible = useViewportStore((s) => s.gridVisible);
   const toggleGrid = useViewportStore((s) => s.toggleGrid);
   const displayMode = useSettingsStore((s) => s.displayMode);
+  const available = useViewportWorkArea((state) => state.available);
+  const toolbar = useViewportWorkArea((state) => state.regions.toolbar);
+  const viewportWidth = useViewportWorkArea((state) => state.viewport.width);
 
   // Two popovers share this column; only one may be open at a time.
   const [openPopover, setOpenPopover] = useState<"none" | "display" | "snap">("none");
   const displayBtnRef = useRef<HTMLButtonElement | null>(null);
   const snapBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  useMeasuredObstacle("cornerCluster", root);
 
   return (
-    <div className="absolute right-[264px] top-3 z-[25] flex flex-col items-center gap-2">
+    <div
+      ref={setRoot}
+      data-testid="corner-cluster"
+      style={{
+        right: available.width > 0 ? viewportWidth - (available.x + available.width) + 12 : 12,
+        top: Math.max(12, (toolbar?.y ?? 0) + (toolbar?.height ?? 0) + 8),
+      }}
+      className="absolute z-[25] flex flex-col items-center gap-2"
+    >
       <div className="-translate-x-4">
         <ViewCube />
       </div>

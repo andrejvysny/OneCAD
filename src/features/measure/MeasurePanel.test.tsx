@@ -9,9 +9,10 @@
  * async body-fetch behaviour needs a render.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { mockClient } from "@/ipc/mockClient";
+import { act, render, screen } from "@testing-library/react";
+import { emitMockDocumentChanged, mockClient, resetMockDocument } from "@/ipc/mockClient";
 import { measureStore } from "@/stores/measureStore";
+import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { measureAdd, measureInit, measureSummary } from "@/tools/modelTools/measureTool";
 import type { MeasurePick } from "@/tools/modelTools/measureTool";
 import type { MassProperties } from "@/ipc/types";
@@ -22,6 +23,7 @@ import {
   measuredBodyId,
   planePairLabel,
 } from "./MeasurePanel";
+import { pickReadout } from "./measurePresentation";
 
 function facePick(
   id: string,
@@ -39,6 +41,7 @@ function facePick(
     surfaceType: 0,
     normal,
     hasNormal: true,
+    radius: null,
   };
 }
 
@@ -59,7 +62,16 @@ const MASS: MassProperties = {
   ],
 };
 
-beforeEach(() => measureStore.getState().clear());
+beforeEach(() => {
+  documentStore.setState(seedMockDocument());
+  resetMockDocument();
+  emitMockDocumentChanged({
+    revision: 1,
+    changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:1" }],
+    removedBodies: [],
+  });
+  measureStore.getState().clear();
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe("measuredBodyId", () => {
@@ -125,6 +137,28 @@ describe("planePairLabel", () => {
   });
 });
 
+describe("pickReadout", () => {
+  it("labels factual face and circular-edge values with their owner", () => {
+    expect(pickReadout(facePick("face", [0, 0, 0], [0, 0, 1]))).toBe(
+      "face · Body body1 · Area 4800 mm²",
+    );
+    expect(
+      pickReadout({
+        ...facePick("edge", [0, 0, 0], [0, 0, 1]),
+        kind: "edge",
+        magnitude: 20.735,
+        radius: 3.3,
+      }),
+    ).toBe("edge · Body body1 · Diameter Ø 6.6 mm · Length 20.735 mm");
+  });
+
+  it("uses an explicit unavailable owner for malformed identity, without inventing geometry", () => {
+    expect(
+      pickReadout({ ...facePick("vertex", [0, 0, 0], [0, 0, 1], ""), kind: "vertex", magnitude: 12 }),
+    ).toBe("vertex · Body body unavailable · Value 12");
+  });
+});
+
 describe("MeasurePanel rendering", () => {
   it("renders nothing until something is picked", () => {
     render(<MeasurePanel />);
@@ -140,7 +174,7 @@ describe("MeasurePanel rendering", () => {
     expect(await screen.findByTestId("measure-volume")).toHaveTextContent("144000 mm³");
     expect(screen.getByTestId("measure-surface-area")).toHaveTextContent("18000 mm²");
     expect(screen.getByTestId("measure-centroid")).toHaveTextContent("0, 0, 0");
-    expect(spy).toHaveBeenCalledWith("body1");
+    expect(spy).toHaveBeenCalledWith("body1", expect.objectContaining({ snapshotId: expect.any(Number) }));
   });
 
   it("shows the angle line once two planes are picked", async () => {
@@ -153,6 +187,9 @@ describe("MeasurePanel rendering", () => {
 
     expect(await screen.findByTestId("measure-plane-pair")).toHaveTextContent("Angle: 90°");
     expect(screen.getByTestId("measure-panel-distance")).toHaveTextContent("mm");
+    expect(screen.getByTestId("measure-panel-delta")).toHaveTextContent("ΔX");
+    expect(screen.getByTestId("measure-pick-0")).toHaveTextContent("Area");
+    expect(screen.getByTestId("measure-pick-1")).toHaveTextContent("Area");
   });
 
   it("does NOT caption a stale reading onto a different body", async () => {
@@ -174,6 +211,29 @@ describe("MeasurePanel rendering", () => {
     render(<MeasurePanel />);
 
     await Promise.resolve();
+    expect(screen.queryByTestId("measure-volume")).toBeNull();
+    expect(measureStore.getState().mass).toBeNull();
+  });
+
+  it("never installs a delayed mass result after the same body advances snapshot", async () => {
+    let resolve!: (value: MassProperties) => void;
+    vi.spyOn(mockClient, "massProperties").mockReturnValue(
+      new Promise<MassProperties>((done) => {
+        resolve = done;
+      }),
+    );
+    measureStore.getState().set([facePick("f4", [0, 0, 15], [0, 0, 1])], null);
+    render(<MeasurePanel />);
+
+    await act(async () => {
+      emitMockDocumentChanged({
+        revision: 2,
+        changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:2" }],
+        removedBodies: [],
+      });
+      resolve(MASS);
+      await Promise.resolve();
+    });
     expect(screen.queryByTestId("measure-volume")).toBeNull();
     expect(measureStore.getState().mass).toBeNull();
   });

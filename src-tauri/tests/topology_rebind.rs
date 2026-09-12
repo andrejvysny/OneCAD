@@ -886,7 +886,7 @@ async fn build_filleted_box(
     );
 
     add_op(rt, fillet_record(body, edge_el.clone(), edge_anchor, 2.0));
-    let fil_report = regen_all(rt).await;
+    let fil_report = regen_from(rt, 2).await;
     let fil_snap = published(&fil_report, "H5-B fillet").clone();
     let filleted = fil_snap.repair_summary.needs_repair_count == 0;
     let fmesh = body_mesh(rt, body).await;
@@ -934,8 +934,7 @@ async fn build_filleted_box(
 /// `h6a_edit_lane_vetoes_a_drifted_twin` is the other half that proves it did not
 /// simply give up on B3.
 ///
-/// The reopen leg (`ToEnd { from: 0 }` ⇒ `editedFrom: 0` under resolverVersion 4) pins
-/// the second axis: the
+/// The reopen leg (`RevertToEnd { from: 0 }` ⇒ no `editedFrom`) pins the second axis: the
 /// SAME document replayed from 0 off disk rebuilds byte-identical geometry, so the
 /// anchor is authoritative there regardless of the carve-out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1002,7 +1001,9 @@ async fn h6a_flagship_edit_lane_fillet_survives_and_reopens_clean() {
 
     // ── (2) REOPEN: the same document off disk, replayed from 0, no edit. ─────
     let mut reopened = open_over(&wm, &path);
-    let replay = regen_from(&mut reopened, 0).await;
+    let replay = reopened
+        .run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await;
     let snap = published(&replay, "H6a reopen").clone();
     eprintln!(
         "H6a reopen (no editedFrom): needsRepair={}",
@@ -1654,7 +1655,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
         op: chamfer_op_on(&setup, 2.0, Some(5.0), reference),
     })
     .expect("re-authoring the same params dirties the step");
-    let _ = published(&regen_all(&mut rt).await, "two-distance chamfer replay");
+    let _ = published(&regen_from(&mut rt, 2).await, "two-distance chamfer replay");
     let (vol_replay, centroid_replay) = exact_mass(&wm, setup.body).await;
     assert_eq!(
         (vol_replay, centroid_replay),
@@ -1668,7 +1669,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
         op: chamfer_op_on(&setup, 2.0, Some(7.0), reference),
     })
     .expect("editing distance2 alone is a plain params edit");
-    let _ = published(&regen_all(&mut rt).await, "distance2 re-edit");
+    let _ = published(&regen_from(&mut rt, 2).await, "distance2 re-edit");
     let (vol_2x7, _) = exact_mass(&wm, setup.body).await;
     assert!(
         ((base_vol - vol_2x7) - wedge(2.0, 7.0)).abs() < 1e-6 * base_vol,
@@ -1701,7 +1702,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
         op: chamfer_op_on(&setup, 2.0, None, reference),
     })
     .expect("clearing distance2 is a plain params edit");
-    let _ = published(&regen_all(&mut rt).await, "distance2 cleared").clone();
+    let _ = published(&regen_from(&mut rt, 2).await, "distance2 cleared").clone();
     let (vol_equal, _) = exact_mass(&wm, setup.body).await;
     assert!(
         ((base_vol - vol_equal) - wedge(2.0, 2.0)).abs() < 1e-6 * base_vol,
@@ -1715,7 +1716,7 @@ async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
         op: fillet_op(&setup, 2.0),
     })
     .expect("with distance2 cleared the W3 swap is the plain sanctioned one");
-    let back = published(&regen_all(&mut rt).await, "chamfer → fillet").clone();
+    let back = published(&regen_from(&mut rt, 2).await, "chamfer → fillet").clone();
     assert_eq!(back.repair_summary.needs_repair_count, 0);
     let (vol_fillet, _) = exact_mass(&wm, setup.body).await;
     let removed_fillet = base_vol - vol_fillet;
@@ -2104,7 +2105,7 @@ async fn fillet_applies_from_frontend_mapper_json() {
     rt.apply(cmd)
         .expect("apply the frontend-shaped fillet (lockstep validation passes)");
 
-    let rep_f = regen_all(&mut rt).await;
+    let rep_f = regen_from(&mut rt, 2).await;
     let snap_f = published(&rep_f, "frontend-json fillet").clone();
     // The body input RESOLVED (not the pre-fix "requires body input"): the fillet APPLIES
     // — a rolled face is added on the same body (6 → ≥7). A vertical box edge reliably
@@ -2634,7 +2635,7 @@ async fn build_comb_fillet(
     let edge_el = ElementId::new(promoted[0].element_id.clone());
 
     add_op(rt, fillet_record(body, edge_el, centroid, H5_RADIUS));
-    let fil = regen_all(rt).await;
+    let fil = regen_from(rt, 2).await;
     let snap = published(&fil, "comb fillet").clone();
     assert_eq!(
         snap.repair_summary.needs_repair_count,
@@ -2950,10 +2951,9 @@ async fn h5_benign_large_edit_measures_the_ladder() {
 //
 // Two constraints shaped this scene, both measured rather than assumed:
 //
-//  * The comb sketch sits at step 2, behind a throwaway body. A sketch at step 0
-//    can only be regenerated with `ToEnd { from: 0 }`, which claims no
-//    `editedFrom`, so `post_upstream_edit` is false and the veto never arms.
-//    That is why every H5 test uses `regen_all` and why none of them reach here.
+//  * The comb sketch sits at step 2, behind a throwaway body. This lets the test
+//    distinguish a clean append (`ToEnd { from: 2 }`) from the later true edit
+//    (`ToEnd { from: 2 }` after mutating that record).
 //  * The authored rib ends 48 mm from the anchor. At 20 mm the ordinary
 //    auto-bind margin gate (0.10) refuses first (measured margin 0.0745) and the
 //    carve-out never gets to decide, which would make the fixture vacuous.
@@ -3004,7 +3004,7 @@ async fn teleport_suffix(
         ),
     );
     add_op(rt, extrude_record_as(EXTRUDE_REC, sid, "", COMB_DEPTH));
-    let rep = regen_all(rt).await;
+    let rep = regen_from(rt, 2).await;
     let _ = published(&rep, "teleport comb");
     let body = rep
         .changed
@@ -3038,7 +3038,7 @@ async fn teleport_suffix(
         .expect("promote the authored rib's top edge");
     let edge_el = ElementId::new(promoted[0].element_id.clone());
     add_op(rt, fillet_record(body, edge_el, centroid, H5_RADIUS));
-    let fil = regen_all(rt).await;
+    let fil = regen_from(rt, 4).await;
     let snap = published(&fil, "teleport fillet").clone();
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -3079,14 +3079,11 @@ fn teleport_bound_decoy(removed: f64, vol: f64, centroid_y: f64) -> bool {
     (centroid_y - y_if_decoy).abs() < (centroid_y - y_if_authored).abs()
 }
 
-/// **CHARACTERIZATION, not a gate.** On the ORDINARY edit lane the teleport is the
-/// documented, accepted residual (`Ladder.cpp` "TELEPORT residual", the H6a
-/// decision): the carve-out blesses a congruent decoy parked at the stale anchor,
-/// and locally there is nothing to separate them. VF-M5 does NOT change this lane —
-/// `checkpointFallbackReplay` is false here — so this test pins the boundary and
-/// must keep reporting the same thing after the protocol field lands.
+/// The ordinary edit lane must fail closed when a congruent decoy teleports exactly
+/// onto the stale anchor. Descriptor evidence ties, so anchor exactness cannot prove
+/// continuity after an upstream edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn vfm5_teleport_on_the_ordinary_edit_lane_is_the_accepted_residual() {
+async fn post_edit_teleport_to_stale_anchor_is_refused() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
         return;
@@ -3111,16 +3108,13 @@ async fn vfm5_teleport_on_the_ordinary_edit_lane_is_the_accepted_residual() {
         anchor.x, anchor.y, anchor.z, c[1]
     );
 
-    // Pins the SHIPPED behaviour, so a change here is a deliberate decision and not
-    // a side effect of the VF-M5 work: the ordinary lane still binds the decoy.
     assert_eq!(
-        needs_repair, 0,
-        "the ordinary edit lane keeps the anchor-exact carve-out (H6a)"
+        needs_repair, 1,
+        "a post-edit descriptor tie must not be settled by an exact stale anchor"
     );
     assert!(
-        decoy,
-        "the accepted residual IS the decoy bind — if this flipped, the ordinary \
-         lane changed and that is out of VF-M5's scope"
+        removed.abs() < 1e-6,
+        "refusal must retain the last valid unfilleted edit result, not bind either twin"
     );
     wm.shutdown().await;
 }

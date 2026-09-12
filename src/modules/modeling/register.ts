@@ -17,6 +17,8 @@ import { createClient } from "@/ipc/client";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { activeTool, toolStore, type ModelTool, type SketchTool } from "@/stores/toolStore";
+import { sketchStore } from "@/stores/sketchStore";
+import { runRedo, runUndo } from "@/features/shell/undoActions";
 import { getToolApplicability } from "@/tools/modelTools/toolApplicability";
 import type {
   CommandDefinition,
@@ -154,22 +156,92 @@ function toolDefinition(d: ModelingToolDescriptor): ToolDefinition {
   };
 }
 
+/**
+ * One non-tool action.
+ *
+ * Most are a `ShortcutAction` run through the shared `runAction` dispatcher, so a
+ * palette row and the keystroke cannot diverge. Undo/redo are the exception: they
+ * are not in the keymap tables at all (their chords are owned directly by
+ * `useShortcuts`, and the frozen keymap contract has no rows for them), so they
+ * carry a `history` direction and route through the shared undo router instead.
+ */
+type ModelingCommandSpec =
+  | { title: string; action: ShortcutAction }
+  | { title: string; history: "undo" | "redo" };
+
 /** The non-tool actions, in the order their bindings are declared. */
-const COMMAND_ACTIONS: Readonly<Record<ModelingCommandKey, { title: string; action: ShortcutAction }>> =
-  {
-    enterSketch: { title: "New sketch", action: { type: "enterSketch" } },
-    finishSketch: { title: "Finish sketch", action: { type: "finishSketch" } },
-    cancel: { title: "Cancel", action: { type: "cancel" } },
-    deleteSketchSelection: {
-      title: "Delete sketch selection",
-      action: { type: "deleteSketchSelection" },
+const COMMAND_ACTIONS: Readonly<Record<ModelingCommandKey, ModelingCommandSpec>> = {
+  enterSketch: { title: "New sketch", action: { type: "enterSketch" } },
+  finishSketch: { title: "Finish sketch", action: { type: "finishSketch" } },
+  cancel: { title: "Cancel", action: { type: "cancel" } },
+  deleteSketchSelection: {
+    title: "Delete sketch selection",
+    action: { type: "deleteSketchSelection" },
+  },
+  toggleConstruction: { title: "Construction geometry", action: { type: "toggleConstruction" } },
+  isolate: { title: "Isolate selection", action: { type: "isolate" } },
+  undo: { title: "Undo", history: "undo" },
+  redo: { title: "Redo", history: "redo" },
+};
+
+/** How deep the stack the given direction would pop is, in the CURRENT mode. */
+function historyDepth(dir: "undo" | "redo"): number {
+  if (toolStore.getState().mode === "sketch") {
+    const sketch = sketchStore.getState();
+    return dir === "undo" ? sketch.undoStack.length : sketch.redoStack.length;
+  }
+  const doc = documentStore.getState();
+  return dir === "undo" ? doc.undoDepth : doc.redoDepth;
+}
+
+/** The step that direction would take back, when the backend named one. */
+function historyLabel(dir: "undo" | "redo"): string | null {
+  // Sketch-scoped steps are unlabelled snapshots (`sketchStore`), so in sketch
+  // mode the row stays the bare verb rather than naming a MODEL step it would
+  // not touch.
+  if (toolStore.getState().mode === "sketch") return null;
+  const doc = documentStore.getState();
+  return dir === "undo" ? doc.undoLabel : doc.redoLabel;
+}
+
+function historyCommandDefinition(
+  key: ModelingCommandKey,
+  spec: { title: string; history: "undo" | "redo" },
+  priority: number,
+): CommandDefinition {
+  const { history: dir, title } = spec;
+  return {
+    id: ModelingCommands[key] as CommandId,
+    // A GETTER, not a frozen string: the palette reads `title` each time it
+    // rebuilds its rows (on open), so "Undo Extrude" names whatever is actually
+    // on top of the stack right now. A plain field would have been captured at
+    // module-activation time and read "Undo" forever.
+    get title(): string {
+      const label = historyLabel(dir);
+      return label === null ? title : `${title} ${label}`;
     },
-    toggleConstruction: { title: "Construction geometry", action: { type: "toggleConstruction" } },
-    isolate: { title: "Isolate selection", action: { type: "isolate" } },
+    group: "modeling.action",
+    priority,
+    // No `defaultShortcut`: ⌘Z / ⇧⌘Z / ⌘Y are handled directly by `useShortcuts`
+    // above the registry fallback lane, and the frozen keymap contract has no
+    // rows for them. Declaring one here would advertise a chord this registry
+    // does not own.
+    keywords: ["undo", "redo", "revert", "history"],
+    canExecute: () =>
+      historyDepth(dir) > 0
+        ? { enabled: true }
+        : { enabled: false, reason: dir === "undo" ? "Nothing to undo" : "Nothing to redo" },
+    execute: () => {
+      void (dir === "undo" ? runUndo() : runRedo());
+      return { status: "done" as const };
+    },
   };
+}
 
 function commandDefinition(key: ModelingCommandKey, priority: number): CommandDefinition {
-  const { title, action } = COMMAND_ACTIONS[key];
+  const spec = COMMAND_ACTIONS[key];
+  if ("history" in spec) return historyCommandDefinition(key, spec, priority);
+  const { title, action } = spec;
   const binding = MODELING_BINDINGS.find((b) => b.action.type === action.type);
   return {
     id: ModelingCommands[key] as CommandId,

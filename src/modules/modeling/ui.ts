@@ -29,7 +29,6 @@ import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips
 import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
 import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
 import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
-import { MeasurePanel } from "@/features/measure/MeasurePanel";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
@@ -43,17 +42,16 @@ export { ModelingPanels };
 /** Registers modeling's editor UI into `scope`, in the shipped mount order. */
 export function contributeModelingUi(scope: ModuleScope): void {
   const overlays = [
-    { id: ModelingPanels.ConstraintBadgeLayer, component: ConstraintBadgeLayer },
-    { id: ModelingPanels.SelectionDimensionLabels, component: SelectionDimensionLabels },
-    { id: ModelingPanels.LiveDimChips, component: LiveDimChips },
-    { id: ModelingPanels.ConstraintContextChips, component: ConstraintContextChips },
-    { id: ModelingPanels.ModelToolChips, component: ModelToolChips },
-    { id: ModelingPanels.MeasureOverlay, component: MeasureOverlay },
-    { id: ModelingPanels.RepairMarkerOverlay, component: RepairMarkerOverlay },
-    { id: ModelingPanels.MeasurePanel, component: MeasurePanel },
+    { id: ModelingPanels.ConstraintBadgeLayer, component: ConstraintBadgeLayer, priority: 100 },
+    { id: ModelingPanels.SelectionDimensionLabels, component: SelectionDimensionLabels, priority: 110 },
+    { id: ModelingPanels.LiveDimChips, component: LiveDimChips, priority: 120 },
+    { id: ModelingPanels.ConstraintContextChips, component: ConstraintContextChips, priority: 130 },
+    { id: ModelingPanels.ModelToolChips, component: ModelToolChips, priority: 140 },
+    { id: ModelingPanels.MeasureOverlay, component: MeasureOverlay, priority: 150 },
+    { id: ModelingPanels.RepairMarkerOverlay, component: RepairMarkerOverlay, priority: 160 },
   ];
-  overlays.forEach((p, i) =>
-    scope.registerPanel({ ...p, slot: Slots.ViewportOverlay, priority: 100 + i * 10 }),
+  overlays.forEach((panel) =>
+    scope.registerPanel({ ...panel, slot: Slots.ViewportOverlay }),
   );
 
   scope.registerPanel({

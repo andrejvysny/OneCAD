@@ -21,7 +21,10 @@ const EDGE_REF = {
   id: "body1#e:5",
   bodyId: "body1",
   topoKey: "e:5",
-  elementId: "el-edge-5",
+  // NO `elementId`: a seeded ref stands in for a FRESH pick, and promotion is
+  // fire-and-forget — the id lands a round-trip later. Seeding one the backend
+  // never minted would be a fiction the edge-op lane now acts on, because a
+  // promoted pick is addressed BY that id (WP-U4 / D-5).
   anchor: { worldPoint: [40, 0, 15] },
 };
 

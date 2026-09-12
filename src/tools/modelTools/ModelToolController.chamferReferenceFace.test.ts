@@ -33,6 +33,7 @@ import { toolStore } from "@/stores/toolStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { activeToolPresentation } from "./activeToolPresentation";
 import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 import { __resetLogForTests } from "@/debug/log";
@@ -434,9 +435,21 @@ describe("ModelToolController — chamfer reference faces (SCHEMA §7.3, WP-F)",
     toolChipStore.getState().onDistance2?.(1);
     await flush();
     await flush();
+    let presentation = activeToolPresentation(toolChipStore.getState());
+    if (presentation?.tool !== "filletRadius") throw new Error("edge-op presentation missing");
+    expect(presentation.targets?.referenceFaces[0]).toMatchObject({
+      a: { elementId: "el_f_3", resolution: "identity-only" },
+      b: { elementId: null, resolution: "unresolved" },
+    });
     toolChipStore.getState().onChamferFlip?.();
     await flush();
     await flush();
+    presentation = activeToolPresentation(toolChipStore.getState());
+    if (presentation?.tool !== "filletRadius") throw new Error("edge-op presentation missing");
+    expect(presentation.targets?.referenceFaces[0]).toMatchObject({
+      a: { elementId: "el_f_5", resolution: "identity-only" },
+      b: { elementId: null, resolution: "unresolved" },
+    });
     toolChipStore.getState().onChamferFlip?.();
     await flush();
     await flush();

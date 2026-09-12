@@ -17,7 +17,7 @@ import {
   type ToolId,
   type WorkspaceId,
 } from "@/platform";
-import { buildPaletteItems, filterPaletteItems, formatShortcut } from "./paletteItems";
+import { buildPaletteItems, filterPaletteItems, formatShortcut, type PaletteItem } from "./paletteItems";
 
 const OWNER = moduleId("onecad.demo");
 const EMPTY = { selection: [], scopes: [] };
@@ -113,6 +113,28 @@ describe("palette items", () => {
     const items = build(boot());
     const ranked = filterPaletteItems(items, "");
     expect(ranked[ranked.length - 1]?.title).toBe("Fillet");
+  });
+
+  it("ranks an exact redo verb above an enabled Undo keyword hit", () => {
+    const undo: PaletteItem = {
+      id: "undo",
+      kind: "command",
+      title: "Undo Extrude",
+      source: "Modeling",
+      shortcut: "",
+      enabled: true,
+      keywords: ["redo", "history"],
+      run: () => {},
+    };
+    const redo: PaletteItem = {
+      ...undo,
+      id: "redo",
+      title: "Redo Extrude",
+      enabled: false,
+      reason: "Nothing to redo",
+    };
+
+    expect(filterPaletteItems([undo, redo], "redo").map((item) => item.id)).toEqual(["redo", "undo"]);
   });
 
   it("formats modifiers in the conventional order", () => {

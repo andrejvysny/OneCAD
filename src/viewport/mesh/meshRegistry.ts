@@ -22,6 +22,8 @@ import type { Rgba } from "@/ipc/types";
 export interface MeshEntry {
   readonly bodyId: string;
   readonly meshRev: number;
+  /** Authoritative publication this exact installed object was fetched from. */
+  readonly provenance?: MeshProvenance;
   readonly view: BodyMeshView;
   /**
    * Faces. Plain bodies: indexed geometry whose attributes alias the blob
@@ -65,7 +67,23 @@ export interface MeshEntry {
   dispose(): void;
 }
 
+export interface MeshProvenance {
+  readonly documentId: string;
+  readonly runtimeSession: string;
+  readonly snapshotId: number;
+  readonly generation: number;
+}
+
 const registry = new Map<string, MeshEntry>();
+let currentPublication: MeshProvenance | null = null;
+
+export function setCurrentMeshPublication(provenance: MeshProvenance | null): void {
+  currentPublication = provenance;
+}
+
+export function getCurrentMeshPublication(): MeshProvenance | null {
+  return currentPublication;
+}
 const pendingDisposal: MeshEntry[] = [];
 let liveGeometryCount = 0;
 /** Incremented whenever the leak tripwire catches a non-empty registry on close. */
@@ -82,6 +100,7 @@ export function buildBodyObjects(
   meshRev: number,
   bodyColor?: Rgba,
   authoredFaceColors?: ReadonlyMap<string, Rgba>,
+  provenance?: MeshProvenance,
 ): MeshEntry {
   const geometry = new THREE.BufferGeometry();
   // `drawRange` counts INDICES when the geometry is indexed and VERTICES when it
@@ -125,6 +144,7 @@ export function buildBodyObjects(
   return {
     bodyId,
     meshRev,
+    provenance,
     view,
     geometry,
     edgeGeometry,
@@ -269,6 +289,7 @@ export function flushDisposals(): void {
 export function disposeAll(): void {
   for (const e of registry.values()) e.dispose();
   registry.clear();
+  currentPublication = null;
   flushDisposals();
   if (registrySize() !== 0 || liveGeometryCount !== 0) {
     leakTripwireCount++;

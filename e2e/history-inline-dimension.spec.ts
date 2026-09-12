@@ -212,10 +212,11 @@ test("the inline value editor is disabled while a model tool is armed", async ({
   const featureId = await drawAndExtrude(page);
   await openTimelineOn(page, featureId);
 
-  // SCOPED to the row on purpose: the model-tool chip's depth field carries the
-  // same "Dimension value" label, so a page-wide locator conflates "the history
-  // row's inline editor is open" with "a tool chip exists" — which is exactly
-  // what this test must tell apart once arming Extrude shows a chip.
+  // SCOPED to the row on purpose: a page-wide "Dimension value" locator would
+  // conflate "the history row's inline editor is open" with "a tool chip
+  // exists" once arming Extrude shows a chip (its own depth field carries a
+  // distinct "Depth (mm)" name post-WP-U10, but the row's own field stays
+  // scoped regardless of what a future chip is named).
   const rowEditor = page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
 
   // Select tool ⇒ editable.

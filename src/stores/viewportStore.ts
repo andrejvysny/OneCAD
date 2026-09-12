@@ -17,11 +17,14 @@ import type { InputDevice } from "@/viewport/engine/navInput";
 
 export type Projection = "persp" | "ortho";
 
-export type StatusSeverity = "info" | "error";
+export type StatusSeverity = "info" | "warn" | "error";
 
 /**
  * A status-bar hint carries its own presentation policy:
- *   - `severity` picks the text treatment (`error` renders red).
+ *   - `severity` picks the text treatment (`error` renders red; `warn` has no
+ *     distinct treatment of its own yet — it renders like `info` — but is a
+ *     real severity a caller can name for a non-failure that still deserves
+ *     attention, e.g. a Cut that touched nothing).
  *   - `sticky` hints persist until superseded/cleared (tool prompts + errors);
  *     non-sticky hints auto-dismiss after {@link AUTO_DISMISS_MS} (success/reject
  *     confirmations).

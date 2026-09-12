@@ -40,6 +40,8 @@ import {
 import { buildBodyObject } from "./BodyObject";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
+import type { ProbeCandidateFilter } from "./Picker";
+import type { CadOrbitControls, FrameViewRequest } from "./CadOrbitControls";
 
 let rafCbs: FrameRequestCallback[] = [];
 function flushFrame(t = 16): void {
@@ -78,6 +80,17 @@ function newDom() {
   };
 }
 
+it("passes overlap probes through without mutating picker state", () => {
+  const engine = new ViewportEngine();
+  const filter: ProbeCandidateFilter = { kinds: ["body"], includeBodyIds: ["body-a"] };
+  const probeCandidates = vi.fn(() => []);
+  (engine as unknown as { picker: { probeCandidates: typeof probeCandidates } }).picker = {
+    probeCandidates,
+  };
+  expect(engine.probeCandidates(12, 34, filter)).toEqual([]);
+  expect(probeCandidates).toHaveBeenCalledWith(12, 34, filter);
+});
+
 describe("ViewportEngine lifecycle", () => {
   it("initializes with the mocked renderer and renders on demand", async () => {
     const { canvas, overlay } = newDom();
@@ -103,6 +116,44 @@ describe("ViewportEngine lifecycle", () => {
     flushFrame();
     expect(engine.frameCount).toBe(2);
 
+    engine.dispose();
+  });
+
+  it("reports completion only after an actual renderer submission", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const completed = vi.fn();
+    const unsubscribe = engine.onAfterRender(completed);
+
+    expect(completed).not.toHaveBeenCalled();
+    flushFrame();
+    expect(mocks.renderer.render).toHaveBeenCalledTimes(1);
+    expect(completed).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+    engine.invalidate();
+    flushFrame();
+    expect(completed).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it("waits for asynchronous WebGPU-style render completion", async () => {
+    let complete!: () => void;
+    mocks.renderer.render.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { complete = resolve; }),
+    );
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const completed = vi.fn();
+    engine.onAfterRender(completed);
+
+    flushFrame();
+    expect(completed).not.toHaveBeenCalled();
+    complete();
+    await Promise.resolve();
+    expect(completed).toHaveBeenCalledTimes(1);
     engine.dispose();
   });
 
@@ -285,6 +336,67 @@ describe("ViewportEngine sketch roots", () => {
     expect(engine.overlay.size).toBe(registered);
     engine.dispose();
   });
+
+  it("keeps the original model view through a sketch switch and restores it once", async () => {
+    const { canvas, overlay } = newDom();
+    Object.defineProperty(canvas, "clientWidth", { value: 1000 });
+    Object.defineProperty(canvas, "clientHeight", { value: 700 });
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const controls = (engine as unknown as {
+      controls: { setView(view: { yaw: number; pitch: number; distance: number; target: THREE.Vector3 }, animated: boolean): void; getViewState(): { yaw: number; pitch: number; distance: number; target: THREE.Vector3 }; update(now: number): boolean };
+    }).controls;
+    const original = { yaw: 0.2, pitch: 0.3, distance: 123, target: new THREE.Vector3(7, 8, 9) };
+    controls.setView(original, false);
+
+    engine.enterSketch(PLANE, [], "UnderConstrained");
+    engine.exitSketch({ restoreView: false });
+    engine.enterSketch({ ...PLANE, origin: [50, 0, 0] }, [], "UnderConstrained");
+    engine.exitSketch({ restoreView: true });
+    controls.update(performance.now() + 10_000);
+
+    const restored = controls.getViewState();
+    expect(restored).toMatchObject({ yaw: original.yaw, pitch: original.pitch, distance: original.distance });
+    expect(restored.target.toArray()).toEqual([7, 8, 9]);
+    engine.dispose();
+  });
+
+  it("frames populated sketch geometry in one destination-orientation request", async () => {
+    const { canvas, overlay } = newDom();
+    Object.defineProperty(canvas, "clientWidth", { value: 1000 });
+    Object.defineProperty(canvas, "clientHeight", { value: 700 });
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const controls = (engine as unknown as { controls: CadOrbitControls }).controls;
+    const frame = vi.spyOn(controls, "frameView");
+    const directView = vi.spyOn(controls, "setView");
+
+    engine.enterSketch(PLANE, [{ id: "line", type: "Line", p0: [-4, -2], p1: [5, 3] }], "UnderConstrained");
+
+    expect(frame).toHaveBeenCalledTimes(1);
+    expect(frame.mock.calls[0][0]).toMatchObject({ yaw: -Math.PI / 2 });
+    expect(directView).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("explicit Fit uses the newest sketch preview and forgets it when cleared", async () => {
+    const { canvas, overlay } = newDom();
+    Object.defineProperty(canvas, "clientWidth", { value: 1000 });
+    Object.defineProperty(canvas, "clientHeight", { value: 700 });
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    engine.enterSketch(PLANE, [], "UnderConstrained");
+    const controls = (engine as unknown as { controls: CadOrbitControls }).controls;
+    const frame = vi.spyOn(controls, "frameView");
+    engine.setSketchPreview([{ type: "Line", p0: { x: -3, y: -2 }, p1: { x: 8, y: 4 } }]);
+
+    expect(engine.fitView()).toBe(true);
+    expect(frame).toHaveBeenCalledTimes(1);
+    engine.setSketchPreview([]);
+    expect(engine.fitView()).toBe(false);
+    expect(frame).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
 });
 
 /*
@@ -347,6 +459,20 @@ describe("ViewportEngine.getBoundsForBodies", () => {
     return group;
   }
 
+  function installFrameHarness(engine: ViewportEngine) {
+    const frameView = vi.fn<(request: FrameViewRequest) => boolean>(() => true);
+    const dispose = vi.fn();
+    const container = document.createElement("div");
+    Object.defineProperty(container, "clientWidth", { value: 1000 });
+    Object.defineProperty(container, "clientHeight", { value: 700 });
+    (engine as unknown as { controls: { frameView: typeof frameView; dispose: typeof dispose } }).controls = {
+      frameView,
+      dispose,
+    };
+    (engine as unknown as { container: HTMLElement }).container = container;
+    return frameView;
+  }
+
   it("unions only the requested bodies", () => {
     const engine = new ViewportEngine();
     engine.bodiesRoot.add(bodyAt("a", [0, 0, 0]), bodyAt("b", [100, 0, 0]));
@@ -381,6 +507,95 @@ describe("ViewportEngine.getBoundsForBodies", () => {
     engine.bodiesRoot.add(bodyAt("a", [0, 0, 0]));
     expect(engine.getBoundsForBodies(["nope"])).toBeNull();
     expect(engine.getBoundsForBodies([])).toBeNull();
+    engine.dispose();
+  });
+
+  it("frames visible scene bodies inside the measured safe rect", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    engine.bodiesRoot.add(bodyAt("shown", [0, 0, 0]));
+    const hidden = bodyAt("hidden", [100, 0, 0]);
+    hidden.visible = false;
+    engine.bodiesRoot.add(hidden);
+    engine.setOverlaySafeRect({ x: 220, y: 80, width: 610, height: 500 });
+
+    expect(engine.fitView()).toBe(true);
+    const request = frameView.mock.calls[0][0];
+    expect(request.viewport).toEqual({
+      width: 1000,
+      height: 700,
+      safeRect: { x: 220, y: 80, width: 610, height: 500 },
+    });
+    expect(request.bounds.min.toArray()).toEqual([-1, -1, -1]);
+    expect(request.bounds.max.toArray()).toEqual([1, 1, 1]);
+    engine.dispose();
+  });
+
+  it("does not turn an absent target into a whole-scene fit", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    engine.bodiesRoot.add(bodyAt("other", [0, 0, 0]));
+
+    expect(engine.fitToBodies(["missing"])).toBe(false);
+    expect(frameView).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("refuses a hidden requested target even when other bodies are visible", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    const hidden = bodyAt("hidden", [20, 0, 0]);
+    hidden.visible = false;
+    engine.bodiesRoot.add(bodyAt("other", [0, 0, 0]), hidden);
+
+    expect(engine.fitToBodies(["hidden"])).toBe(false);
+    expect(frameView).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("frames preview geometry only when explicitly requested", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    engine.bodiesRoot.add(bodyAt("committed", [100, 0, 0]));
+    engine.previewRoot.add(bodyAt("preview", [5, 0, 0]));
+
+    expect(engine.fitPreview()).toBe(true);
+    const framed = frameView.mock.calls[0][0].bounds as THREE.Box3;
+    expect(framed.min.x).toBe(4);
+    expect(framed.max.x).toBe(6);
+    expect(frameView).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it("uses L1 preview geometry when no exact L2 preview is published", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    const l1Bounds = new THREE.Box3(new THREE.Vector3(2, 3, 4), new THREE.Vector3(7, 8, 9));
+    (engine as unknown as { previewMesh: { getBounds(): THREE.Box3; dispose(): void } }).previewMesh = {
+      getBounds: () => l1Bounds,
+      dispose: () => {},
+    };
+
+    expect(engine.fitPreview()).toBe(true);
+    expect(frameView.mock.calls[0][0].bounds).toBe(l1Bounds);
+    engine.dispose();
+  });
+
+  it("refuses preview fit when neither L2 nor L1 geometry exists", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    expect(engine.fitPreview()).toBe(false);
+    expect(frameView).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("passes one requested destination orientation to the controls", () => {
+    const engine = new ViewportEngine();
+    const frameView = installFrameHarness(engine);
+    const target = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+
+    expect(engine.fitBounds(target, { yaw: 0.2, pitch: 0.7 })).toBe(true);
+    expect(frameView).toHaveBeenCalledWith(expect.objectContaining({ yaw: 0.2, pitch: 0.7 }));
     engine.dispose();
   });
 });

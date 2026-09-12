@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { render } from "@testing-library/react";
+import { createElement } from "react";
 import * as THREE from "three";
 import {
   cubeContainerMatrix,
@@ -6,6 +8,7 @@ import {
   cssMatrix3d,
   viewLabelForDirection,
   FACES,
+  ViewCube,
 } from "./ViewCube";
 
 describe("cubeContainerMatrix", () => {
@@ -63,6 +66,16 @@ describe("cssMatrix3d", () => {
     expect(cssMatrix3d([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])).toBe(
       "matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)",
     );
+  });
+});
+
+describe("ViewCube obstacle envelope", () => {
+  it("publishes a fixed, pointer-transparent 100px protrusion envelope", () => {
+    const { container } = render(createElement(ViewCube));
+    const envelope = container.querySelector("[data-obstacle-protrusion]");
+    expect(envelope).toHaveAttribute("aria-hidden", "true");
+    expect(envelope).toHaveClass("pointer-events-none", "h-[100px]", "w-[100px]");
+    expect(envelope).toHaveClass("-left-[20px]", "-top-[20px]");
   });
 });
 

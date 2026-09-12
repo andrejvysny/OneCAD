@@ -132,3 +132,59 @@ test("model-mode ⌘Z / ⇧⌘Z round-trips a committed op and a suppress toggle
   await expect(row).toHaveClass(/opacity-60/);
   expect(await featureSuppressed(page, "f3")).toBe(true);
 });
+
+/*
+ * A revert that reverts nothing has to SAY so (WP-U1). Before this, ⌘Z on an
+ * empty history was indistinguishable from a broken ⌘Z: the chord fired, the
+ * client answered, and the screen did not move.
+ */
+test("⌘Z on an empty history reports 'Nothing to undo' instead of going silent", async ({
+  page,
+}) => {
+  await openEditorDebug(page);
+  await page.keyboard.press("Meta+z");
+  await expect(page.getByTestId("status-hint")).toHaveText("Nothing to undo");
+
+  await page.keyboard.press("Meta+Shift+z");
+  await expect(page.getByTestId("status-hint")).toHaveText("Nothing to redo");
+});
+
+/*
+ * …and the chord is not the only way in. The ⌘K palette carries Undo/Redo rows
+ * enabled by history DEPTH and named by the step on top of the stack, so a user
+ * who never learned the chord can still find it — and can see whether there is
+ * anything to take back.
+ */
+test("the ⌘K palette offers Undo, named after the step it would revert", async ({ page }) => {
+  await openEditorDebug(page);
+  const openPalette = async () => {
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k");
+    await expect(page.getByTestId("command-palette")).toBeVisible();
+    await page.getByTestId("command-palette-input").fill("undo");
+  };
+  const undoRow = page.getByTestId("palette-item-onecad.modeling.command.undo");
+
+  // Nothing edited yet: the row is there, dimmed, and says why.
+  await openPalette();
+  await expect(undoRow).toBeVisible();
+  await expect(undoRow).toHaveText(/Undo/);
+  await expect(undoRow).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByTestId("palette-item-onecad.modeling.command.redo")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("command-palette")).toBeHidden();
+
+  // One real edit (a suppress toggle) later, it names that step and is runnable.
+  await bodyOptions(page).first().click();
+  await page.getByTestId("history-row-f3").click();
+  await page.getByTestId("history-suppress-f3").click();
+  await expect.poll(() => featureSuppressed(page, "f3")).toBe(true);
+
+  await openPalette();
+  await expect(undoRow).toHaveText(/Undo Suppress/);
+  await expect(undoRow).toHaveAttribute("aria-disabled", "false");
+
+  // Running it from the palette goes through the same router the chord does.
+  await undoRow.click();
+  await expect(page.getByTestId("command-palette")).toBeHidden();
+  await expect.poll(() => featureSuppressed(page, "f3")).toBeFalsy();
+});

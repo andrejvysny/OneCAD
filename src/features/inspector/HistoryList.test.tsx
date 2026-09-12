@@ -168,6 +168,7 @@ describe("HistoryList inline value editing (H3)", () => {
     // The field appears one double-click threshold later — see VALUE_EDIT_OPEN_MS.
     const input = await screen.findByLabelText("Dimension value");
     fireEvent.change(input, { target: { value: "40" } });
+    expect(input).toHaveValue("40");
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onCommit).toHaveBeenCalledWith(items[1], 40);
   });
@@ -183,10 +184,17 @@ describe("HistoryList inline value editing (H3)", () => {
     expect(screen.queryByLabelText("Dimension value")).toBeNull();
   });
 
-  it("Enter on the focused chip opens the editor immediately (no dblclick ambiguity)", async () => {
-    render(<HistoryList items={items} valueEdit={valueEdit(true)} />);
-    fireEvent.keyDown(screen.getByTestId("history-value-f2"), { key: "Enter" });
-    expect(await screen.findByLabelText("Dimension value")).toBeInTheDocument();
+  it("Enter on the focused chip opens, focuses, and commits keyboard editing", async () => {
+    const onCommit = vi.fn();
+    render(<HistoryList items={items} valueEdit={valueEdit(true, onCommit)} />);
+    const chip = screen.getByTestId("history-value-f2");
+    chip.focus();
+    fireEvent.keyDown(chip, { key: "Enter" });
+    const input = await screen.findByLabelText("Dimension value");
+    expect(input).toHaveFocus();
+    fireEvent.change(input, { target: { value: "40" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCommit).toHaveBeenCalledWith(items[1], 40);
   });
 
   it("a NON-editable row (tool armed / suppressed / past the cursor) shows plain text", async () => {
@@ -238,6 +246,59 @@ describe("HistoryList inline value editing (H3)", () => {
   it("hides the pen affordance on a list with no re-edit handler", () => {
     render(<HistoryList items={items} rowActions={rowActions()} />);
     expect(screen.queryByTestId("history-edit-f2")).toBeNull();
+  });
+
+  it("keeps an open editor mounted through an unrelated selected-row update", async () => {
+    const edit = valueEdit(true);
+    const { rerender } = render(<HistoryList items={items} valueEdit={edit} />);
+    fireEvent.keyDown(screen.getByTestId("history-value-f2"), { key: "Enter" });
+    const input = await screen.findByLabelText("Dimension value");
+    fireEvent.change(input, { target: { value: "31" } });
+
+    rerender(<HistoryList items={items} selectedId="f1" valueEdit={edit} />);
+    expect(screen.getByLabelText("Dimension value")).toBe(input);
+    expect(input).toHaveValue("31");
+  });
+
+  it("keeps long, similar history labels distinct in a constrained panel", () => {
+    const longItems: FeatureMeta[] = Array.from({ length: 12 }, (_, index) => ({
+      id: `long-${index}`,
+      kind: "extrude",
+      opType: "Extrude",
+      label: `Repeated feature label with a distinct ending ${index + 1}`,
+      valueText: "25.0 mm",
+      primaryValue: 25,
+      primaryValueKind: "length",
+      status: "ok",
+    }));
+    render(
+      <div style={{ fontSize: "20px", width: "280px" }}>
+        <HistoryList items={longItems} onSelect={() => {}} rowActions={rowActions()} />
+      </div>,
+    );
+
+    expect(screen.getAllByTestId(/history-row-long-/)).toHaveLength(longItems.length);
+    expect(screen.getByText(longItems[0].label)).toBeInTheDocument();
+    expect(screen.getByText(longItems[longItems.length - 1]!.label)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Select feature 1: ${longItems[0].label}` })).toBeInTheDocument();
+    expect(screen.getByTestId("history-row-long-0")).toHaveClass("min-h-8");
+    expect(screen.getByTestId("history-details-long-0")).toHaveClass("flex-wrap");
+    expect(screen.getByTestId("history-suppress-long-0")).toBeVisible();
+  });
+
+  it("places an active editor below its row without widening the action line", async () => {
+    render(
+      <div style={{ width: "280px" }}>
+        <HistoryList items={items} valueEdit={valueEdit(true)} rowActions={rowActions()} />
+      </div>,
+    );
+    fireEvent.keyDown(screen.getByTestId("history-value-f2"), { key: "Enter" });
+    const input = await screen.findByLabelText("Dimension value");
+    const editor = screen.getByTestId("history-editor-f2");
+
+    expect(screen.getByTestId("history-row-f2")).not.toContainElement(input);
+    expect(editor).toContainElement(input);
+    expect(editor).toHaveClass("w-full", "min-w-0", "max-w-full");
   });
 });
 
@@ -516,7 +577,7 @@ describe("HistoryList failure tones (H7b)", () => {
     expect(onToggleSuppress).toHaveBeenCalled();
   });
 
-  it("the SELECTED row also keeps its cluster visible", () => {
+  it("keeps every row's action cluster visible for narrow and enlarged layouts", () => {
     render(
       <HistoryList
         items={items}
@@ -533,7 +594,7 @@ describe("HistoryList failure tones (H7b)", () => {
       "opacity-100",
     );
     expect(screen.getByTestId("history-suppress-f1").parentElement?.className).toContain(
-      "opacity-0",
+      "opacity-100",
     );
   });
 });

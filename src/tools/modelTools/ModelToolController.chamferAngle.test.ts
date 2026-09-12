@@ -31,6 +31,7 @@ import { toolStore } from "@/stores/toolStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 import { __resetLogForTests } from "@/debug/log";
 
@@ -394,7 +395,7 @@ describe("ModelToolController — distance-angle chamfer", () => {
 
   // ── measured-range clamp suppression (SCHEMA §7.6) ────────────────────────
 
-  it("the EQUAL-LEG bound clamps a plain chamfer, and either mode LIFTS it", async () => {
+  it("the EQUAL-LEG bound rejects a plain chamfer draft, and either mode LIFTS it", async () => {
     build();
     await armChamfer();
     await flush(); // let the fire-and-forget range analysis land
@@ -403,9 +404,15 @@ describe("ModelToolController — distance-angle chamfer", () => {
     // assertion below is about what the chip edits add to this, which is nothing.
     const measured = clientMock.analyzeEdgeOpRange.mock.calls.length;
 
-    // Equal-leg: the measured 3 mm ceiling is the op the analysis actually built.
+    // Equal-leg: keep the last valid preview and retain the rejected draft.
+    const before = toolChipStore.getState().value;
     toolChipStore.getState().onValue?.(10);
-    expect(toolChipStore.getState().value).toBe(3);
+    expect(toolChipStore.getState().value).toBe(before);
+    expect(toolChipStore.getState().validation).toMatchObject({
+      status: "invalid",
+      draft: 10,
+      suggestedValue: 3,
+    });
 
     // A second leg makes it a different solid — the bound no longer describes it.
     toolChipStore.getState().onDistance2?.(2.5);
@@ -421,9 +428,49 @@ describe("ModelToolController — distance-angle chamfer", () => {
     // held inapplicable while the op was not the one it measured.
     toolChipStore.getState().onChamferAngle?.(null);
     toolChipStore.getState().onValue?.(10);
-    expect(toolChipStore.getState().value).toBe(3);
+    expect(toolChipStore.getState().value).toBe(12);
+    expect(toolChipStore.getState().validation.status).toBe("invalid");
 
     // No re-measure on any of it — a chip edit must not issue OCCT builds.
     expect(clientMock.analyzeEdgeOpRange).toHaveBeenCalledTimes(measured);
+  });
+
+  // ── clamp disclosure (WP-U3 / D-6) ────────────────────────────────────────
+
+  it("a typed value past the bound blocks confirm and offers a non-committing maximum", async () => {
+    build();
+    selectionStore.getState().set(EDGES);
+    toolStore.getState().setTool("fillet");
+    await flush();
+    await flush(); // let the fire-and-forget range analysis land
+
+    const before = toolChipStore.getState().value;
+    toolChipStore.getState().onValue?.(10);
+    expect(toolChipStore.getState().value).toBe(before);
+    expect(toolChipStore.getState().validation).toMatchObject({ status: "invalid", draft: 10 });
+    expect(toolChipStore.getState().onUseSuggestedValue).not.toBeNull();
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+
+    toolChipStore.getState().onUseSuggestedValue?.();
+    expect(toolChipStore.getState().value).toBe(3);
+    expect(toolChipStore.getState().validation.status).toBe("valid");
+    expect(clientMock.applyOperation).not.toHaveBeenCalled();
+
+    // A subsequent in-range edit clears the disclosure.
+    toolChipStore.getState().onValue?.(1);
+    expect(toolChipStore.getState().value).toBe(1);
+    expect(toolChipStore.getState().validation.status).toBe("valid");
+  });
+
+  it("a typed in-range value never sets a clamp hint", async () => {
+    build();
+    selectionStore.getState().set(EDGES);
+    toolStore.getState().setTool("fillet");
+    await flush();
+    await flush();
+
+    toolChipStore.getState().onValue?.(1);
+    expect(toolChipStore.getState().value).toBe(1);
+    expect(viewportStore.getState().statusHint?.message).not.toMatch(/limited to|moved to/);
   });
 });

@@ -24,6 +24,7 @@ import type { CadClient } from "@/ipc/client";
 import type {
   ApplyOperationResult,
   FinishSketchResult,
+  OperationOp,
   PreviewDraft,
   PreviewParams,
   PreviewResult,
@@ -116,6 +117,7 @@ function makeEngineMock() {
 
 function makeClientMock(capture: (cb: (r: PreviewResult) => void) => void) {
   let seq = 0;
+  const previewOps = new Map<string, OperationOp>();
   return {
     onPreviewResult: vi.fn((cb: (r: PreviewResult) => void) => {
       capture(cb);
@@ -124,9 +126,13 @@ function makeClientMock(capture: (cb: (r: PreviewResult) => void) => void) {
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0, R1] })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0, R1] })),
     getSketch: vi.fn(() => Promise.resolve(session)),
-    beginPreview: vi.fn((_d: PreviewDraft) =>
-      Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` }),
-    ),
+    beginPreview: vi.fn((d: PreviewDraft) => {
+      const sessionId = `pv-${++seq}`;
+      previewOps.set(sessionId, d as OperationOp);
+      return Promise.resolve({ sessionId, previewBodyId: `pb-${seq}` });
+    }),
+    takePreviewOperation: vi.fn((id: string) => previewOps.get(id) ?? null),
+    applyOperations: vi.fn((_ops: OperationOp[]) => Promise.resolve(ok("batch"))),
     updatePreview: vi.fn((_id: string, _params: PreviewParams, _epoch: number) => {}),
     endPreview: vi.fn((_id: string, _commit: boolean) => Promise.resolve(ok("b1"))),
     applyOperation: vi.fn(() => Promise.resolve(ok("adhoc"))),
@@ -275,10 +281,11 @@ describe("multi-session exact preview ownership (WP0.7)", () => {
     // survives its own recovery and wedges Enter forever — with an error hint on
     // screen contradicting a preview that visibly works again.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-    // The multi-region commit is sequential — one endPreview(true) per region.
+    // The recovered candidates commit together in one atomic batch.
     for (let i = 0; i < 8; i++) await flush();
-    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
-    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-2", true);
+    expect(clientMock.applyOperations).toHaveBeenCalledTimes(1);
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", false);
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-2", false);
   });
 
   it("a still-failing session keeps blocking the commit", async () => {

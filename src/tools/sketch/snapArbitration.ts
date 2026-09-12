@@ -225,7 +225,11 @@ export function numericCandidates(
       errorPx,
       semanticBiasPx: SEMANTIC_BIAS_PX.numeric,
       scorePx: errorPx + SEMANTIC_BIAS_PX.numeric,
-      label: "",
+      // Name the rule that moved the cursor: a user comparing a 31 mm and a
+      // 30 mm line with Grid on/off must be able to see whether the LENGTH was
+      // rounded rather than the point grid-snapped (UX review 2026-09-11, C7).
+      // A typed value is the user's own number, not a rule — no label.
+      label: isTyped ? "" : "Rounded",
       guides: [],
       refs: [],
       // Cursor rounding is a placement convenience, never a design assertion:
@@ -427,7 +431,10 @@ export function resolveSnap(input: ArbitrationInput): ArbitrationOutput {
       rejected,
       primaryId: set.primary?.id ?? null,
       primaryKind: primaryKindOf(visible, set.primary),
-      label: labelOf(visible),
+      // Numeric rounding stays out of `visible` (no glyph, no guides, never the
+      // primary kind) but DOES name itself in the hint so the user can tell a
+      // rounded length from a grid-snapped point (UX review 2026-09-11, C7).
+      label: withNumericLabels(labelOf(visible), set.members),
       guides: visible.flatMap((c) => [...c.guides]),
       // A numeric-only decision is NOT a "snap": cursor rounding is invisible
       // placement help, and showing a marker for it would claim the user aimed
@@ -489,6 +496,22 @@ const fieldOf = (c: SnapCandidate): DimFieldId | null =>
 function primaryKindOf(visible: readonly SnapCandidate[], primary: SnapCandidate | null): SnapKind {
   if (isSameRefGuidePair(visible)) return "alignHV";
   return (primary?.kind ?? "none") as SnapKind;
+}
+
+function withNumericLabels(
+  base: string | null,
+  members: readonly SnapCandidate[],
+): string | null {
+  const numeric = members
+    .filter((c) => c.source === "numeric")
+    .map((c) => c.label)
+    .filter((l) => l.length > 0);
+  // A numeric-ONLY decision is not a snap (`snapped: false`, label null — the
+  // indicator is hidden anyway); rounding names itself only beside a visible
+  // snap, e.g. "Grid · Rounded".
+  if (numeric.length === 0 || base === null) return base;
+  const unique = Array.from(new Set(numeric));
+  return `${base} · ${unique.join(" · ")}`;
 }
 
 function labelOf(visible: readonly SnapCandidate[]): string | null {

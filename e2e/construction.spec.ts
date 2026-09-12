@@ -273,5 +273,48 @@ test("a construction line is a valid revolve axis (the centerline workflow)", as
   await clickAtClient(page, axisClient.x, axisClient.y);
   await expect(page.getByText(/Drag to set angle/)).toBeVisible();
   expect((await extrudeDebug(page))?.revolvePhase).toBe("armed");
-  await expect(page.getByLabel("Dimension value")).toHaveValue("360");
+  await expect(page.getByLabel("Angle (°)")).toHaveValue("360");
+});
+
+const constructionBanner = (page: Page) => page.getByTestId("sketch-construction-banner");
+
+test("construction mode is per-sketch: it does not carry over into the next sketch (D-2)", async ({
+  page,
+}) => {
+  await freshSketch(page);
+
+  // Banner absent while off.
+  await expect(constructionBanner(page)).toHaveCount(0);
+
+  // X with an empty selection toggles the sticky draw mode on — banner appears.
+  await page.keyboard.press("x");
+  await expect(constructionButton(page)).toHaveAttribute("aria-pressed", "true");
+  await expect(constructionBanner(page)).toBeVisible();
+
+  // Draw one construction entity, then finish the sketch (mode flip resets FE
+  // session state, but `constructionMode` itself must be reset on the NEXT entry,
+  // not on exit — see SketchController.openSession).
+  await selectSketchTool(page, "Line");
+  await clickAt(page, -150, -100);
+  await clickAt(page, 150, 100);
+  await page.keyboard.press("Enter");
+  await expect.poll(() => sketchEntities(page).then((e) => e.length)).toBe(1);
+  expect((await sketchEntities(page))[0].construction).toBe(true);
+
+  await page.keyboard.press("Enter"); // finish the sketch
+  await expect(page.getByText(/^Editing /)).toHaveCount(0);
+  await waitForCameraSettled(page);
+
+  // A brand new sketch starts with construction mode OFF and no banner.
+  await enterSketchViaPlanePicker(page);
+  await waitForCameraSettled(page);
+  await expect(constructionButton(page)).toHaveAttribute("aria-pressed", "false");
+  await expect(constructionBanner(page)).toHaveCount(0);
+
+  await selectSketchTool(page, "Line");
+  await clickAt(page, -150, -100);
+  await clickAt(page, 150, 100);
+  await page.keyboard.press("Enter");
+  await expect.poll(() => sketchEntities(page).then((e) => e.length)).toBe(1);
+  expect((await sketchEntities(page))[0].construction).toBe(false);
 });

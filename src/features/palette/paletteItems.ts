@@ -133,8 +133,10 @@ export function buildPaletteItems(deps: PaletteDeps): PaletteItem[] {
  * Deliberately not fuzzy. A CAD command list is small and its names are
  * domain terms, so fuzzy matching mostly buys surprising hits ("fillet"
  * matching "Fixed support") in exchange for a ranking function nobody can
- * predict. Enabled items sort first so a usable answer is never buried under
- * greyed-out ones.
+ * predict. Exact title/verb intent ranks ahead of a keyword hit: querying
+ * "redo" must surface a disabled `Redo …` before an enabled `Undo …` that only
+ * happens to advertise "redo" as a history keyword. Availability breaks ties,
+ * so a usable equal-intent answer is never buried under a greyed-out one.
  */
 export function filterPaletteItems(
   items: readonly PaletteItem[],
@@ -147,5 +149,20 @@ export function filterPaletteItems(
       : items.filter((i) =>
           [i.title, i.source, ...i.keywords].some((t) => t.toLowerCase().includes(needle)),
         );
-  return matched.sort((a, b) => Number(b.enabled) - Number(a.enabled));
+  return matched.sort((a, b) => {
+    const rank = (item: PaletteItem): number => {
+      if (needle.length === 0) return 0;
+      const title = item.title.toLowerCase();
+      if (title === needle) return 0;
+      // Commands are verb-first (Undo Extrude, Redo Fillet). A whole leading
+      // verb is intent, unlike an incidental substring in a keyword.
+      if (title.startsWith(`${needle} `)) return 1;
+      if (title.includes(needle)) return 2;
+      if (item.source.toLowerCase().includes(needle)) return 3;
+      return 4; // matched by a keyword
+    };
+    const intent = rank(a) - rank(b);
+    if (intent !== 0) return intent;
+    return Number(b.enabled) - Number(a.enabled);
+  });
 }

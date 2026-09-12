@@ -111,6 +111,24 @@ std::string candidate_summary(km::ElementKind kind, const km::ElementDescriptor&
     return std::string(buf);
 }
 
+bool clean_replay_anchor_reinforcement(const LadderEditContext& edit,
+                                       double assigned_descriptor_score,
+                                       const std::vector<double>& rival_descriptor_scores,
+                                       double winner_distance, double nearest_rival_distance) {
+    if (edit.post_upstream_edit || edit.from_zero_replay || winner_distance < 0.0 ||
+        winner_distance > kAnchorMinSeparationMm) {
+        return false;
+    }
+    if (std::any_of(rival_descriptor_scores.begin(), rival_descriptor_scores.end(),
+                    [assigned_descriptor_score](double rival) {
+                        return rival > assigned_descriptor_score;
+                    })) {
+        return false;
+    }
+    return nearest_rival_distance >=
+           kAnchorDecisiveRatio * std::max(winner_distance, kAnchorMinSeparationMm);
+}
+
 namespace {
 
 // The enumerated candidate pool for one element kind of a body.
@@ -295,16 +313,11 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             // below still resolves the common case (a vertex pick whose element did
             // not move), so such a ref is not blanket-refused post-edit.
             //
-            // ANCHOR-EXACT CARVE-OUT: the veto fires only when the winner is NOT
-            // still sitting on the stored anchor. An element within
-            // `kAnchorExactEps * scale` of its anchor demonstrably did not move, so
-            // the edit never made ITS anchor stale and there is nothing to distrust —
-            // that covers ~all real edits. What remains uncaught is the TELEPORT
-            // residual (an edit that parks an exact congruent twin precisely at the
-            // stale anchor): locally undecidable, accepted and documented by the
-            // HISTORY-HARDEN H6a decision, reserved for the future from-0 history
-            // rung. The veto keeps catching the DRIFT class — a twin merely NEARER to
-            // the stale anchor than the moved original.
+            // Resolver v6 removes the former anchor-exact carve-out on this lane.
+            // After an upstream edit, exactness at a stale world point cannot prove
+            // continuity: a congruent twin may have moved onto that point. Descriptor
+            // ties therefore always fail closed. Clean replay remains governed by the
+            // v4/v5 anchor-decisive rules below.
             bool anchor_decided_a_tie = false;
             if (edit.post_upstream_edit && c >= 2 && anchor_scored[i]) {
                 bool has_rival = false;
@@ -318,26 +331,12 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 }
                 const bool descriptor_tie =
                     has_rival && (desc_score[i][aj] - desc_rival) < kDescriptorTieEpsilon;
-                // Same scale the `anchor` similarity feature used, from one source.
-                const double winner_anchor_dist = distance_to_shape(
-                    r.anchor.world_point, pool.shapes[aj], pool.descriptors[aj].center);
-                const bool anchor_exact =
-                    winner_anchor_dist <= kAnchorExactEps * anchor_scale(body_diag);
-                // From-0 replay with an edit context has no migrated partition, so a
-                // stored anchor can be stale. The anchor-exact carve-out that keeps
-                // legitimate "element did not move" resolutions working on a checkpoint
-                // replay would here bless a congruent decoy parked at the stale anchor
-                // (VF-M5). On this path we require descriptor evidence to separate the
-                // candidates; otherwise it is NeedsRepair.
-                const bool allow_anchor_exact = !edit.from_zero_replay;
-                anchor_decided_a_tie = descriptor_tie && (!anchor_exact || !allow_anchor_exact);
+                anchor_decided_a_tie = descriptor_tie;
             }
 
-            // ANCHOR-DECISIVE tie-break (v4, Scoring.h): the top two candidates tie
-            // in descriptor space, the pick lies ON the winner, and every rival is
-            // an order of magnitude farther — the pick names the element. This is
-            // what lets an anchor-only face pick (the Hole seat) and a pick on one
-            // of two same-facing twins resolve without a body-diagonal margin.
+            // ANCHOR-DECISIVE tie-break (v4/v5, Scoring.h). V4 admits a descriptor
+            // tie. V5 also admits an exact, separated, descriptor-nonworse winner,
+            // but only on a clean replay; edit/fallback behavior is unchanged.
             bool anchor_decisive = false;
             if (!anchor_decided_a_tie && c >= 2 && anchor_scored[i] &&
                 assigned >= kAutoBindMinScore && margin < kAutoBindMinMargin) {
@@ -363,7 +362,15 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 const bool winner_exact = winner_d >= 0.0 && winner_d <= kAnchorMinSeparationMm;
                 const bool rivals_far =
                     rival_d >= kAnchorDecisiveRatio * std::max(winner_d, kAnchorMinSeparationMm);
-                anchor_decisive = descriptor_tie && winner_exact && rivals_far;
+                std::vector<double> rival_descriptor_scores;
+                rival_descriptor_scores.reserve(static_cast<std::size_t>(c - 1));
+                for (int j = 0; j < c; ++j) {
+                    if (j != aj) rival_descriptor_scores.push_back(desc_score[i][j]);
+                }
+                const bool clean_reinforcement = clean_replay_anchor_reinforcement(
+                    edit, desc_score[i][aj], rival_descriptor_scores, winner_d, rival_d);
+                anchor_decisive =
+                    (descriptor_tie && winner_exact && rivals_far) || clean_reinforcement;
             }
 
             if (anchor_decided_a_tie) {

@@ -170,6 +170,12 @@ describe("SketchController — tangent-arc mode (SP-4 W3)", () => {
       new MouseEvent("pointerup", { clientX: x, clientY: y, button: 0, buttons: 0, bubbles: true }),
     );
   };
+  const interactiveUp = (x: number, y: number): void => {
+    const chrome = document.createElement("div");
+    chrome.dataset.viewportInteractive = "";
+    container.appendChild(chrome);
+    chrome.dispatchEvent(new MouseEvent("pointerup", { clientX: x, clientY: y, button: 0, buttons: 0, bubbles: true }));
+  };
   const click = (x: number, y: number): void => {
     down(x, y);
     up(x, y);
@@ -309,6 +315,20 @@ describe("SketchController — tangent-arc mode (SP-4 W3)", () => {
       // The chain kept going, and the mode auto-cleared (one arc per gesture).
       expect(machineState().anchors).toHaveLength(3);
       expect(arcMode()).toBe(false);
+    });
+
+    it("cancels a canvas-origin arc drag released over interactive chrome", async () => {
+      await chainOneLeg();
+      down(40, 0);
+      move(80, 40, 1);
+      expect(arcMode()).toBe(true);
+
+      interactiveUp(200, 200);
+      await flushSketchMutations();
+
+      expect(entities()).toHaveLength(1);
+      expect(arcMode()).toBe(false);
+      expect(clientMock.sketchUpsert).toHaveBeenCalledTimes(1); // the first leg only
     });
 
     it("a plain click (no drag) still commits a straight segment", async () => {

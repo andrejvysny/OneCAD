@@ -40,7 +40,10 @@ const EDGE_REF = {
   id: "body1#e:5",
   bodyId: "body1",
   topoKey: "e:5",
-  elementId: "el-edge-5",
+  // NO `elementId`: a seeded ref stands in for a FRESH pick, and promotion is
+  // fire-and-forget — the id lands a round-trip later. Seeding one the backend
+  // never minted would be a fiction the edge-op lane now acts on, because a
+  // promoted pick is addressed BY that id (WP-U4 / D-5).
   // Anchors the chip (and the real 3D handle it's now leader-lined off of, since
   // this edge resolves the bisector tier — UNIFY-UX Phase 1) ON the edge, not at
   // the world origin, which real MESH1 tier math needs to be honest anyway.
@@ -87,9 +90,16 @@ async function awayOnScreen(page: Page): Promise<{ x: number; y: number }> {
   return { x: d.x / len, y: d.y / len };
 }
 
+/** The armed edge-op cluster's primary field: "Radius (mm)" for a Fillet,
+ *  "Distance (mm)" for a Chamfer (WP-U10) — matched by either name so a spec
+ *  that flips the op type mid-flow does not need its own locator per state. */
+function primaryField(page: Page) {
+  return page.getByLabel(/^(Radius|Distance) \(mm\)$/);
+}
+
 /** The armed chip's current value (the only readout of the dragged size). */
 async function chipValue(page: Page): Promise<number> {
-  return Number.parseFloat(await page.getByLabel("Dimension value").inputValue());
+  return Number.parseFloat(await primaryField(page).inputValue());
 }
 
 /** The projection's last feature row (`__stores.document`, dev-only). */
@@ -114,6 +124,28 @@ async function lastFeature(
 /** The armed chamfer's second-distance field (`=` when equal-leg). */
 function d2Field(page: Page) {
   return page.getByLabel("Second distance");
+}
+
+/** `e:1` of the same box: the +x BOTTOM edge, untouched by a chamfer on `e:5`. */
+const SURVIVING_EDGE_REF = {
+  kind: "edge",
+  id: "body1#e:1",
+  bodyId: "body1",
+  topoKey: "e:1",
+  anchor: { worldPoint: [40, 0, -15] },
+};
+
+/** The one user-facing wording for a refused promotion (`src/ipc/promote.ts`). */
+const STALE_PICK_HINT = "Selection is out of date — pick again";
+
+/** The ids currently in `selectionStore` (dev-only `__stores`). */
+async function selectedRefIds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { selection: { getState(): { selected: Array<{ id: string }> } } };
+    };
+    return (w.__stores?.selection.getState().selected ?? []).map((r) => r.id);
+  });
 }
 
 /** Open the timeline and double-click the row `id` (the parametric re-edit entry).
@@ -275,6 +307,69 @@ test("the visible ✓ commits Fillet with no flip", async ({ page }) => {
   expect((await getFeatureLabels(page)).at(-1)).toBe("Fillet");
 });
 
+// ── the commit clears what it consumed (WP-U4 / D-5) ────────────────────────
+
+test("a committed chamfer drops the edge it ate; the next arm carries no stale hint", async ({
+  page,
+}) => {
+  // The reviewer's "displaced highlight after a chamfer": the consumed edge's ref
+  // used to survive the commit and be re-pointed at whatever sat nearest it in the
+  // new mesh. Now the commit clears its own inputs, and nothing guesses.
+  await armChamferViaSegment(page);
+  const before = await getFeatureLabels(page);
+
+  await dragEdgeOpHandle(page, 0, -40);
+  await page.getByTestId("chip-confirm").click();
+  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
+  expect((await getFeatureLabels(page)).at(-1)).toBe("Chamfer");
+
+  await expect.poll(async () => await selectedRefIds(page)).toEqual([]);
+  await expect(page.getByText(STALE_PICK_HINT)).toHaveCount(0);
+
+  // …and a SURVIVING edge arms the next op cleanly, with no residue from the last.
+  await seedSelection(page, [SURVIVING_EDGE_REF]);
+  await page.getByRole("button", { name: "Fillet / Chamfer", exact: true }).click();
+  await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
+  await expect(page.getByText(STALE_PICK_HINT)).toHaveCount(0);
+});
+
+test("the commit's REGEN drops a bystander pick, and ⌘Z/⇧⌘Z leaves no stale hint", async ({
+  page,
+}) => {
+  // Two different mechanisms, one publish. The chamfer's own inputs go through
+  // `clearConsumedSelection`; a ref that was merely SELECTED when the regen
+  // landed is judged by the mesh swap instead (`viewport/mesh/rebindPick`).
+  //
+  // `e:1` is untouched by a chamfer on `e:5` and its ordinal still resolves in
+  // the new table — element counts only grow across these regens — which is
+  // exactly why keeping it on that evidence would point the next op at whatever
+  // inherited the ordinal. Unpromoted, it has no authority across a regen, so it
+  // goes, silently.
+  await armChamferViaSegment(page);
+  const before = await getFeatureLabels(page);
+
+  // A second pick, made while the op is armed: the closure is already adopted,
+  // so this only changes what the selection holds when the publish lands.
+  await seedSelection(page, [EDGE_REF, SURVIVING_EDGE_REF]);
+  await expect.poll(async () => await selectedRefIds(page)).toEqual(["body1#e:5", "body1#e:1"]);
+
+  await dragEdgeOpHandle(page, 0, -40);
+  await page.getByTestId("chip-confirm").click();
+  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
+
+  await expect.poll(async () => await selectedRefIds(page)).toEqual([]);
+  await expect(page.getByText(STALE_PICK_HINT)).toHaveCount(0);
+
+  // ⌘Z restores the edge the chamfer ate, the user picks it again, and ⇧⌘Z eats
+  // it a second time. Nothing anywhere says the pick is out of date.
+  await page.keyboard.press("Meta+z");
+  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length);
+  await seedSelection(page, [EDGE_REF]);
+  await page.keyboard.press("Meta+Shift+z");
+  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
+  await expect(page.getByText(STALE_PICK_HINT)).toHaveCount(0);
+});
+
 test("Enter commits the armed op; ✕ cancels it with no row", async ({ page }) => {
   await armChamferViaSegment(page);
   const before = await getFeatureLabels(page);
@@ -325,7 +420,7 @@ test("a committed Fillet row re-edits its TYPE: dblclick → Chamfer segment →
   // (4) Flip + Enter. The size is untouched, so this commits a PURE opType swap.
   await page.getByTestId("chip-edgeop-chamfer").click();
   await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Chamfer");
-  await page.getByLabel("Dimension value").click();
+  await primaryField(page).click();
   await page.keyboard.press("Enter");
 
   // (5) The SAME row swapped — no new feature was authored.
@@ -397,7 +492,7 @@ test("a two-distance chamfer BLOCKS the type flip, and allows it once d2 is clea
   // (3) Flipping to Fillet would DROP the second leg, so the backend refuses the
   // edit with the standard allow-list reason — and the hint names the field.
   await page.getByTestId("chip-edgeop-fillet").click();
-  await page.getByLabel("Dimension value").click();
+  await primaryField(page).click();
   await page.keyboard.press("Enter");
   await expect(page.getByText(/clear distance2 first/)).toBeVisible();
   // The rejected flip wrote nothing: the row is still the same Chamfer.
@@ -416,7 +511,7 @@ test("a two-distance chamfer BLOCKS the type flip, and allows it once d2 is clea
   await reopenRow(page, id);
   await expect(d2Field(page)).toHaveValue("=");
   await page.getByTestId("chip-edgeop-fillet").click();
-  await page.getByLabel("Dimension value").click();
+  await primaryField(page).click();
   await page.keyboard.press("Enter");
   await expect.poll(async () => (await lastFeature(page)).label).toBe("Fillet");
   expect((await lastFeature(page)).id).toBe(id);

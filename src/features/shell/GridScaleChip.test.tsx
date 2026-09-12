@@ -8,6 +8,10 @@ import { GridScaleChip } from "./GridScaleChip";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { resetStores } from "@/test/resetStores";
+import {
+  INSPECTOR_CHROME_GUTTER,
+  inspectorLayoutStore,
+} from "@/stores/inspectorLayoutStore";
 
 describe("GridScaleChip", () => {
   beforeEach(() => {
@@ -37,5 +41,17 @@ describe("GridScaleChip", () => {
     act(() => viewportStore.getState().toggleGrid());
     render(<GridScaleChip />);
     expect(screen.queryByTestId("grid-scale")).toBeNull();
+  });
+
+  it("follows the single inspector inset at every open width and when collapsed", () => {
+    render(<GridScaleChip />);
+    const scale = screen.getByTestId("grid-scale");
+
+    for (const width of [280, 320, 420]) {
+      act(() => inspectorLayoutStore.getState().setWidth(width));
+      expect(scale).toHaveStyle({ right: `${width + INSPECTOR_CHROME_GUTTER}px` });
+    }
+    act(() => inspectorLayoutStore.getState().setOpen(false));
+    expect(scale).toHaveStyle({ right: `${32 + INSPECTOR_CHROME_GUTTER}px` });
   });
 });

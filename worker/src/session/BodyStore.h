@@ -108,6 +108,18 @@ public:
     // absent. Returns whether a body was removed.
     bool erase(const std::string& id) { return bodies_.erase(id) != 0; }
 
+    bool rename(const std::string& old_id, const std::string& new_id,
+                const std::string& provenance) {
+        if (old_id == new_id || bodies_.count(new_id) != 0) return false;
+        auto node = bodies_.extract(old_id);
+        if (node.empty()) return false;
+        node.key() = new_id;
+        node.mapped().id = new_id;
+        node.mapped().provenance = provenance;
+        bodies_.insert(std::move(node));
+        return true;
+    }
+
     std::size_t size() const { return bodies_.size(); }
 
     // Ids in ascending sorted order (deterministic iteration).

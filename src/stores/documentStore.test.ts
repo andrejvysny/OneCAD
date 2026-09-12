@@ -16,6 +16,7 @@ import {
   selectGeometryCached,
 } from "./documentStore";
 import type { DatumMeta, SketchMeta } from "./documentStore";
+import { selectionStore } from "./selectionStore";
 
 const TAURI = "__TAURI_INTERNALS__";
 
@@ -129,6 +130,12 @@ describe("documentStore seeding gate", () => {
       datums: {},
       features: [],
       appliedOps: 0,
+      // Nothing open ⇒ nothing to take back either, so both history rows are
+      // disabled and unnamed.
+      undoDepth: 0,
+      redoDepth: 0,
+      undoLabel: null,
+      redoLabel: null,
       // Nothing open ⇒ nothing to paint, and so no geometry-provenance chip.
       geometrySource: "none",
     });
@@ -191,6 +198,82 @@ describe("documentStore datum registry", () => {
   it("the seeded demo document and the empty projection both start with no datums", () => {
     expect(seedMockDocument().datums).toEqual({});
     expect(emptyDocument().datums).toEqual({});
+  });
+});
+
+describe("projection selection reconciliation", () => {
+  afterEach(() => {
+    documentStore.getState().applySnapshot(seedMockDocument());
+    selectionStore.getState().clear();
+    selectionStore.getState().setHover(null);
+  });
+
+  it("drops a removed body and every body-owned ref from selection and hover", () => {
+    const current = seedMockDocument();
+    selectionStore.getState().set([
+      { kind: "body", id: "body1" },
+      { kind: "face", id: "body1#f:1", bodyId: "body1", topoKey: "f:1" },
+      { kind: "sketch", id: "sketch2" },
+    ]);
+    selectionStore.getState().setHover({ kind: "body", id: "body1" });
+
+    documentStore.getState().applySnapshot({ ...current, bodies: {} });
+
+    expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("publishes the authoritative snapshot before selection subscribers observe a removed ref", () => {
+    const current = seedMockDocument();
+    documentStore.getState().applySnapshot(current);
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    let bodyVisibleWhenSelectionChanged: boolean | null = null;
+    const unsubscribe = selectionStore.subscribe(() => {
+      bodyVisibleWhenSelectionChanged = documentStore.getState().bodies.body1 !== undefined;
+    });
+
+    documentStore.getState().applySnapshot({ ...current, bodies: {} });
+    unsubscribe();
+
+    expect(bodyVisibleWhenSelectionChanged).toBe(false);
+  });
+
+  it("drops absent sketch, sketch region, feature and datum refs from a full projection", () => {
+    const current = { ...seedMockDocument(), datums: datumsNamed("Datum 1") };
+    selectionStore.getState().set([
+      { kind: "sketch", id: "sketch2" },
+      { kind: "sketchRegion", id: "region", sketchId: "sketch4", regionId: "r1" },
+      { kind: "feature", id: "f2" },
+      { kind: "datum", id: "d0" },
+    ]);
+    selectionStore.getState().setHover({ kind: "feature", id: "f2" });
+
+    documentStore.getState().applySnapshot({ ...current, sketches: {}, datums: {}, features: [] });
+
+    expect(selectionStore.getState().selected).toEqual([]);
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("does not drop refs for a partial projection change", () => {
+    const current = seedMockDocument();
+    documentStore.getState().applySnapshot(current);
+    const sketch = { kind: "sketch" as const, id: "sketch2" };
+    selectionStore.getState().set([sketch]);
+    selectionStore.getState().setHover(sketch);
+
+    documentStore.getState().applyChange({ dirty: true });
+
+    expect(selectionStore.getState().selected).toEqual([sketch]);
+    expect(selectionStore.getState().hover).toEqual(sketch);
+  });
+
+  it("does not treat a registry-shaped partial delta as a deletion list", () => {
+    documentStore.getState().applySnapshot(seedMockDocument());
+    selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]);
+
+    documentStore.getState().applyChange({ sketches: {} });
+
+    expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
   });
 });
 

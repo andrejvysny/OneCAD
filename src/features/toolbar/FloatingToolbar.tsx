@@ -2,7 +2,8 @@ import { Fragment, useEffect, useMemo, useReducer } from "react";
 import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
-import { sketchStore, useSketchStore } from "@/stores/sketchStore";
+import { useSketchStore } from "@/stores/sketchStore";
+import { toggleConstructionModeWithHint } from "@/tools/sketch/sketchService";
 import {
   usePlatform,
   useRegistryEntries,
@@ -122,7 +123,7 @@ export function FloatingToolbar() {
       role="toolbar"
       aria-label="Tools"
       className={cn(
-        "flex items-center gap-0.5",
+        "flex max-w-full flex-wrap items-center justify-center gap-0.5",
         "border border-border p-1 shadow-card",
         // In sketch mode this row is the top of `SketchToolbarStack`
         // (rendered by EditorShell) — SketchChromeBar stacks directly below
@@ -177,8 +178,19 @@ export function FloatingToolbar() {
             label="Construction"
             shortcut="X"
             active={constructionMode}
-            onClick={() => sketchStore.getState().toggleConstructionMode()}
+            onClick={() => toggleConstructionModeWithHint()}
           />
+          {/* Persistent indicator (D-2): construction mode has no other on-screen
+              trace once the toggle button scrolls out of view or the user forgets
+              which state it's in, so this chip stays up the whole time it's on. */}
+          {constructionMode && (
+            <span
+              data-testid="sketch-construction-banner"
+              className="ml-1 flex h-[22px] shrink-0 items-center whitespace-nowrap rounded-[11px] border border-border-strong bg-surface px-2.5 font-ui text-[11.5px] font-semibold text-accent"
+            >
+              Construction
+            </span>
+          )}
         </>
       )}
     </div>

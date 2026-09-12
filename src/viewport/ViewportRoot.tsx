@@ -29,14 +29,17 @@ import { MeshIngest } from "./mesh/meshSync";
 import { SketchStaticSync } from "./sketchStaticSync";
 import { DatumSync } from "./datumSync";
 import { setViewportEngine } from "./engineBridge";
+import { useViewportEngine } from "./engineBridge";
 import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
 import { GridScaleChip } from "@/features/shell/GridScaleChip";
+import { OverlapCandidateChooser } from "@/features/selection/OverlapCandidateChooser";
 import { useViewportStore, viewportStore } from "@/stores/viewportStore";
 import { layersStore } from "@/stores/layersStore";
 import { selectGeometryCached, useDocumentStore } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore, useToolStore } from "@/stores/toolStore";
 import { useToolChipStore } from "@/stores/toolChipStore";
+import { viewportWorkAreaStore } from "@/stores/viewportWorkAreaStore";
 import {
   selectionStore,
   sketchRegionRef,
@@ -73,10 +76,13 @@ function refFromSketchStaticHit(hit: SketchStaticHit): EntityRef {
 
 /**
  * Arbitrate a body-face/edge hit against a coplanar sketch fill under the same
- * pointer. Default: the sketch wins a numeric tie (`secondaryHitWins`) so a
- * sketch lying flush on a body face stays the easier target. `pickThrough`
- * (Alt held) suppresses that tie-break — the body wins outright, and the
- * sketch is only used when there is no body hit at all (W0.4).
+ * pointer. Default: the sketch wins a numeric tie (`secondaryHitWins`) against a
+ * body FACE, so a sketch lying flush on a body face stays the easier target — but
+ * never against a body EDGE: a finished sketch drawn on a face shares that face's
+ * boundary, and a click on the plate edge must select the edge (fillet / chamfer
+ * target), not the sketch that happens to trace it (UX review 2026-09-11).
+ * `pickThrough` (Alt held) suppresses the tie-break entirely — the body wins
+ * outright, and the sketch is only used when there is no body hit at all (W0.4).
  */
 export function refFromModelHits(
   bodyHit: PickHit | null,
@@ -86,7 +92,12 @@ export function refFromModelHits(
   if (
     !pickThrough &&
     sketchHit &&
-    (!bodyHit || secondaryHitWins(bodyHit.distance, sketchHit.distance))
+    (!bodyHit ||
+      (bodyHit.kind === "edge"
+        ? // Against an edge the sketch only wins when it is CLEARLY in front — a
+          // tie (the traced boundary) goes to the edge.
+          !secondaryHitWins(sketchHit.distance, bodyHit.distance)
+        : secondaryHitWins(bodyHit.distance, sketchHit.distance)))
   ) {
     return refFromSketchStaticHit(sketchHit);
   }
@@ -125,24 +136,29 @@ export function viewportGeometryChip(
  * promotion leaves the transient topoKey ref intact (the tool falls back to it)
  * and `promoteOne` hints that the pick is out of date.
  */
-function promotePick(client: ReturnType<typeof createClient>, ref: EntityRef): void {
+export function promotePick(client: ReturnType<typeof createClient>, ref: EntityRef): void {
   if ((ref.kind !== "face" && ref.kind !== "edge") || !ref.bodyId || !ref.topoKey) return;
-  const pick = { topoKey: ref.topoKey, anchor: ref.anchor ? { worldPoint: ref.anchor.worldPoint } : undefined };
+  const pick = {
+    topoKey: ref.topoKey,
+    kind: ref.kind,
+    anchor: ref.anchor ? { worldPoint: ref.anchor.worldPoint } : undefined,
+  };
   void promoteOne(client, ref.bodyId, pick).then((promoted) => {
     if (!promoted) return;
     const sel = selectionStore.getState();
-    // Only if the ref is still selected (selection may have moved on).
-    if (!sel.selected.some((r) => r.id === ref.id)) return;
-    // Both ids, never `id`: that stays the pick-time `${bodyId}#${topoKey}`
-    // identity `sameRef`/toggle compare on. The backend RESOLVED the pick, so its
-    // topoKey is the authority on which element the mesh names right now.
-    sel.set(
-      sel.selected.map((r) =>
-        r.id === ref.id
-          ? { ...r, elementId: promoted.elementId, topoKey: promoted.topoKey || r.topoKey }
-          : r,
-      ),
-    );
+    // The ref OBJECT, never its `id`: `${bodyId}#${topoKey}` is REUSABLE, so a
+    // deselect plus a fresh pick of the same label would otherwise take this
+    // reply's write-back (Astra break F3).
+    const at = sel.selected.indexOf(ref);
+    if (at < 0) return; // selection has moved on
+    // The persistent id only. `id` stays the pick-time composite `sameRef` and
+    // the toggle compare on, and `topoKey` stays the label THIS publication's id
+    // table gave us — the promotion answers about the head, which may already be
+    // ahead of the mesh on screen, and an undrawable key would blank the
+    // highlight. `ordinalForRef` prefers the ElementId from here on anyway.
+    const out = sel.selected.slice();
+    out[at] = { ...out[at], elementId: promoted.elementId };
+    sel.set(out);
   });
 }
 
@@ -169,6 +185,8 @@ export function ViewportRoot({ className }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
+  const [meshEpoch, setMeshEpoch] = useState(0);
+  const viewportEngine = useViewportEngine();
   const [sketching, setSketching] = useState(
     () => toolStore.getState().mode === "sketch",
   );
@@ -241,6 +259,12 @@ export function ViewportRoot({ className }: { className?: string }) {
         setViewportEngine(engine);
         setReady(true);
 
+        const applyOverlaySafeRect = () => {
+          engine.setOverlaySafeRect(viewportWorkAreaStore.getState().obstacleClearRect);
+        };
+        applyOverlaySafeRect();
+        cleanups.push(viewportWorkAreaStore.subscribe(applyOverlaySafeRect));
+
         // ── Viewport contributions (in-scene layers) ──
         // Handed the REGISTRY, not a snapshot: modeling's layers register when
         // the editor mounts while this init() is still awaiting the renderer, so
@@ -254,6 +278,7 @@ export function ViewportRoot({ className }: { className?: string }) {
         const meshIngest = new MeshIngest();
         meshIngest.attach(engine, client);
         cleanups.push(() => meshIngest.detach());
+        cleanups.push(meshIngest.onBodyLoaded(() => setMeshEpoch((epoch) => epoch + 1)));
 
         // ── Live re-theme ──
         // ONE orchestrator, because the ordering is not optional: the palette
@@ -695,6 +720,7 @@ export function ViewportRoot({ className }: { className?: string }) {
     <div
       ref={containerRef}
       data-testid="viewport-canvas"
+      tabIndex={-1}
       // Selection (pick a face/edge on hit, deselect on an empty click) is owned
       // by the engine Picker on the canvas — no React onClick clear here, which
       // would otherwise wipe a fresh pick as the click bubbles up.
@@ -714,6 +740,11 @@ export function ViewportRoot({ className }: { className?: string }) {
         ref={overlayRef}
         className="pointer-events-none absolute inset-0 z-[1]"
         aria-hidden="true"
+      />
+      <OverlapCandidateChooser
+        containerRef={containerRef}
+        engine={viewportEngine}
+        meshEpoch={meshEpoch}
       />
       {!ready && (
         <div

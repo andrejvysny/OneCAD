@@ -2,14 +2,22 @@
 #include "session/ElementIdentity.h"
 
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <optional>
 #include <string>
 
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <gp_Pnt.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/GeometryPrecision.h"
 #include "util/Log.h"
 
 namespace onecad::session {
@@ -34,8 +42,8 @@ const em::PartitionEntry* entry_by_topokey(const em::ElementMapPartition& part,
     return nullptr;
 }
 
-// Anchor-fallback sanity bound (VF-M3). `nearest_subshape` ranks candidates by
-// distance to their bbox CENTRE and always returns the least-bad one, so a pick
+// Anchor-fallback sanity bound (VF-M3). The unique matcher ranks candidates by
+// exact point-to-sub-shape distance; without a sanity bound, a pick
 // whose world point missed the body entirely still bound *something* — and that
 // something got a persistent, op-referencable ElementId.
 //
@@ -58,9 +66,46 @@ bool anchor_within_candidate(const TopoDS_Shape& candidate, double wx, double wy
     return dist <= kAnchorSlack * d.size + kAnchorFloorMm;
 }
 
-// Resolve a pick's shape: topoKey (explicit), else anchor.worldPoint nearest.
+TopoDS_Shape unique_anchor_subshape(const TopoDS_Shape& body, em::km::ElementKind kind,
+                                    double wx, double wy, double wz) {
+    const TopAbs_ShapeEnum type = kind == em::km::ElementKind::Face ? TopAbs_FACE
+        : kind == em::km::ElementKind::Edge ? TopAbs_EDGE
+        : kind == em::km::ElementKind::Vertex ? TopAbs_VERTEX : TopAbs_SHAPE;
+    if (type == TopAbs_SHAPE) return {};
+    const gp_Pnt point(wx, wy, wz);
+    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point).Vertex();
+    const auto precision = kernel::validation::precision_of(body);
+    // Two independently tolerance-bounded candidates have overlapping distance
+    // intervals until they differ by more than twice the input tolerance.
+    const double tie_tolerance =
+        std::max(precision.authoring_resolution(), 2.0 * precision.input_tolerance);
+    double best = std::numeric_limits<double>::infinity();
+    double runner_up = std::numeric_limits<double>::infinity();
+    TopoDS_Shape winner;
+    TopTools_IndexedMapOfShape candidates;
+    TopExp::MapShapes(body, type, candidates);  // IsSame-dedupes shared topology.
+    for (int index = 1; index <= candidates.Extent(); ++index) {
+        try {
+            const TopoDS_Shape& candidate = candidates(index);
+            BRepExtrema_DistShapeShape distance(vertex, candidate);
+            if (!distance.IsDone() || distance.NbSolution() == 0) return {};
+            const double value = distance.Value();
+            if (!std::isfinite(value)) return {};
+            if (value < best) { runner_up = best; best = value; winner = candidate; }
+            else if (value < runner_up) { runner_up = value; }
+        } catch (const Standard_Failure&) {
+            return {};
+        }
+    }
+    if (winner.IsNull() || runner_up - best <= tie_tolerance) return {};
+    return winner;
+}
+
+// Resolve a pick's shape: an explicit TopoKey is authoritative; only legacy
+// picks that omit it may use a unique anchor fallback.
 TopoDS_Shape resolve_pick(const TopoDS_Shape& body, const json& pick, em::km::ElementKind& kind_out,
                           std::string& topo_out) {
+    if (pick.contains("topoKey") && !pick["topoKey"].is_string()) return {};
     const std::string topo = get_str(pick, "topoKey");
     if (!topo.empty()) {
         TopoDS_Shape s = em::ElementMapPartition::shape_for_topokey(body, topo);
@@ -74,6 +119,7 @@ TopoDS_Shape resolve_pick(const TopoDS_Shape& body, const json& pick, em::km::El
             }
             return s;
         }
+        return {};
     }
     // Anchor fallback (kind hint from pick.kind, default face).
     if (pick.contains("anchor") && pick["anchor"].is_object() &&
@@ -83,8 +129,10 @@ TopoDS_Shape resolve_pick(const TopoDS_Shape& body, const json& pick, em::km::El
         em::km::ElementKind kind = em::ElementMapPartition::kind_from_name(kstr);
         if (kind == em::km::ElementKind::Unknown) kind = em::km::ElementKind::Face;
         const json& wp = pick["anchor"]["worldPoint"];
+        if (!wp[0].is_number() || !wp[1].is_number() || !wp[2].is_number()) return {};
         const double wx = wp[0].get<double>(), wy = wp[1].get<double>(), wz = wp[2].get<double>();
-        TopoDS_Shape s = em::ElementMapPartition::nearest_subshape(body, kind, wx, wy, wz);
+        if (!std::isfinite(wx) || !std::isfinite(wy) || !std::isfinite(wz)) return {};
+        TopoDS_Shape s = unique_anchor_subshape(body, kind, wx, wy, wz);
         // Deliberately NOT routed through the §10 descriptor ladder's 0.85 gate: the
         // ladder scores a REMEMBERED descriptor against candidates, while this pick
         // carries only a world point, and a corner hit would score far below 0.85 on
@@ -142,7 +190,22 @@ json acquire_ids(const PublishedStateSnapshot& state, const std::string& body_id
         em::km::ElementKind kind = em::km::ElementKind::Unknown;
         std::string topo;
         TopoDS_Shape sub = resolve_pick(body->geom, pick, kind, topo);
-        if (sub.IsNull()) continue;
+        if (sub.IsNull()) {
+            // The pick is DROPPED from the batch, and Rust then refuses the whole
+            // promotion as mismatched ("Selection is out of date"). Say WHY here —
+            // stderr only (stdout carries frames): which key was asked for, what
+            // kind hint it carried, and whether the anchor fallback even had a
+            // world point to try.
+            const bool anchored = pick.contains("anchor") && pick["anchor"].is_object() &&
+                                  pick["anchor"].contains("worldPoint");
+            WLOG_WARN(
+                "ref_identity verb=AcquireElementIds snapshot=%llu body=%s topoKey=%s kind=%s "
+                "anchor=%s outcome=unresolved",
+                static_cast<unsigned long long>(state.snapshot_id), body_id.c_str(),
+                get_str(pick, "topoKey").c_str(), get_str(pick, "kind", "").c_str(),
+                anchored ? "present" : "absent");
+            continue;
+        }
         const em::PartitionEntry* held = entry_by_topokey(state.partition, body_id, topo);
         const std::string kind_name = em::ElementMapPartition::kind_name(kind);
         WLOG_DEBUG(

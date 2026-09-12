@@ -1171,7 +1171,7 @@ async fn projection_is_refused_mid_gesture_and_against_a_moved_head() {
     {
         let mut guard = runtime.lock().await;
         let rt = guard.as_mut().unwrap();
-        rt.cancel_sketch(proj).await.expect("cancelSketch");
+        rt.cancel_sketch(proj, false).await.expect("cancelSketch");
         rt.apply(EditCommand::SketchEdit {
             sketch: base,
             ops: vec![SketchEditOp::SetDimension {

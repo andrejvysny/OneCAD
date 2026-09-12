@@ -21,9 +21,19 @@ import {
 import { toolbarFromRegistry, registeredTools, toolFromId } from "./registryToolbar";
 import { ModelingCommands, ModelingModelTools, ModelingSketchTools } from "./ids";
 import { MODELING_TOOL_DESCRIPTORS } from "./tools";
+import { documentStore } from "@/stores/documentStore";
+import { buildPaletteItems, filterPaletteItems } from "@/features/palette/paletteItems";
 
 vi.mock("@/tools/activateTool", () => ({ activateTool: vi.fn(async () => {}) }));
 vi.mock("@/shortcuts/useShortcuts", () => ({ runAction: vi.fn() }));
+// Undo/Redo must DELEGATE to the one router every surface shares; spying it is
+// how a second, palette-only undo implementation would be caught.
+vi.mock("@/features/shell/undoActions", () => ({
+  runUndo: vi.fn(async () => {}),
+  runRedo: vi.fn(async () => {}),
+}));
+
+const EMPTY_CTX = { selection: [], scopes: [] } as const;
 
 async function bootPlatform(): Promise<Platform> {
   const platform = createPlatform();
@@ -118,6 +128,71 @@ describe("modeling module registration", () => {
       .get(ModelingModelTools.extrude)
       ?.activate({ selection: [], scopes: [] });
     expect(activateTool).toHaveBeenCalledWith("extrude");
+  });
+
+  it("offers Undo/Redo as commands, enabled by history DEPTH and named by label", () => {
+    const undo = platform.commands.get(ModelingCommands.undo);
+    const redo = platform.commands.get(ModelingCommands.redo);
+    expect(undo, "undo must be registered — the palette projects off this registry").toBeDefined();
+    expect(redo).toBeDefined();
+
+    documentStore.getState().applyChange({
+      undoDepth: 0,
+      redoDepth: 0,
+      undoLabel: null,
+      redoLabel: null,
+    });
+    expect(undo?.title).toBe("Undo");
+    expect(undo?.canExecute?.(EMPTY_CTX)).toEqual({
+      enabled: false,
+      reason: "Nothing to undo",
+    });
+    expect(redo?.canExecute?.(EMPTY_CTX)).toEqual({
+      enabled: false,
+      reason: "Nothing to redo",
+    });
+
+    documentStore.getState().applyChange({
+      undoDepth: 2,
+      redoDepth: 1,
+      undoLabel: "Extrude",
+      redoLabel: "Fillet",
+    });
+    // The title is read LIVE: the row named "Undo" a moment ago must now name
+    // the step actually on top of the stack.
+    expect(undo?.title).toBe("Undo Extrude");
+    expect(redo?.title).toBe("Redo Fillet");
+    expect(undo?.canExecute?.(EMPTY_CTX)).toEqual({ enabled: true });
+    expect(redo?.canExecute?.(EMPTY_CTX)).toEqual({ enabled: true });
+  });
+
+  it("...and those commands reach the palette, searchable by 'undo'", () => {
+    documentStore.getState().applyChange({
+      undoDepth: 1,
+      redoDepth: 0,
+      undoLabel: "Extrude",
+      redoLabel: null,
+    });
+    const items = buildPaletteItems({
+      platform,
+      commandContext: EMPTY_CTX,
+      toolContext: EMPTY_CTX,
+      activateWorkspace: () => {},
+    });
+    const hits = filterPaletteItems(items, "undo");
+    expect(hits.map((i) => i.title)).toContain("Undo Extrude");
+    // "revert"/"history" are keywords on both rows, so the disabled Redo is
+    // findable by them too rather than silently vanishing.
+    expect(filterPaletteItems(items, "revert").map((i) => i.id)).toEqual(
+      expect.arrayContaining([ModelingCommands.undo, ModelingCommands.redo]),
+    );
+    expect(hits.find((i) => i.id === ModelingCommands.undo)?.enabled).toBe(true);
+  });
+
+  it("Undo executes through the shared router (not a second undo implementation)", async () => {
+    const { runUndo } = await import("@/features/shell/undoActions");
+    await platform.commands.get(ModelingCommands.undo)?.execute(EMPTY_CTX);
+    expect(runUndo).toHaveBeenCalledTimes(1);
   });
 
   it("a command execution routes through the shared action runner", async () => {

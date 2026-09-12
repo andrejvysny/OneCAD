@@ -10,9 +10,11 @@
  * verbatim. This file owns the mock's DOCUMENT model (synthetic bodies + feature
  * timeline + undo/redo); the tauri client replaces that half with real commands.
  */
-import type { CadClient } from "./client";
+import type { CadClient, DocumentReplacementOptions, GeometryReadFence } from "./client";
+import { logWarn } from "@/debug/log";
 import type {
   ApplyOperationResult,
+  RollbackFailedOperationResult,
   BodyMeshRef,
   ClassifyResult,
   ComponentParamValue,
@@ -37,6 +39,7 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  OperationEffects,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
   PrepareEdgeOpRequest,
@@ -114,6 +117,7 @@ import {
 import { frontendConstraintsFromDto, frontendEntitiesFromDto } from "./sketchWireMap";
 import {
   cylinderMetricsFromMesh,
+  edgeCircleFit,
   edgeMetricsFromMesh,
   faceMetricsFromMesh,
   massPropertiesFromMesh,
@@ -144,6 +148,7 @@ const wait = (ms = mockLatency) => new Promise((r) => setTimeout(r, ms));
 let nextDocId = 1;
 const snapshot = (title: string): DocumentSnapshot => ({
   documentId: `doc-${nextDocId++}`,
+  runtimeSession: `mock-runtime-${nextDocId}`,
   title,
 });
 
@@ -500,13 +505,65 @@ export function mockMeshKey(bodyId: string, lod: Lod, generation = 1): string {
 }
 
 const docChangeListeners = new Set<(c: DocumentChange) => void>();
+let lastMockPublication: DocumentChange | null = null;
+
+function assertMockReadFence(fence: GeometryReadFence | undefined): void {
+  if (!fence) return;
+  const publication = lastMockPublication;
+  if (
+    !publication ||
+    publication.documentId !== fence.documentId ||
+    publication.runtimeSession !== fence.runtimeSession ||
+    publication.snapshotId !== fence.snapshotId
+  ) {
+    throw new Error("stale geometry read fence");
+  }
+}
+let mockPublicationSequence = 0;
+
+function nextMockPublicationId(): number {
+  mockPublicationSequence = Math.max(1, mockPublicationSequence + 1);
+  return mockPublicationSequence;
+}
+
+function normalizeMockBodyRefs(
+  refs: BodyMeshRef[],
+  generation: number,
+): BodyMeshRef[] {
+  return refs.map((ref) => {
+    const match = /^(.+):(coarse|medium|fine):[0-9]+$/.exec(ref.meshKey);
+    if (!match) return ref;
+    return { ...ref, meshKey: mockMeshKey(match[1], match[2] as Lod, generation) };
+  });
+}
 
 /**
  * Simulate a worker `document-changed` event (the demo / seed fires this so the
  * viewport ingests through the SAME onDocumentChanged path the real worker uses).
  */
 export function emitMockDocumentChanged(change: DocumentChange): void {
-  for (const cb of [...docChangeListeners]) cb(change);
+  const document = documentStore.getState();
+  const snapshotOmitted = change.snapshotId === undefined;
+  const isGeometryPublication = change.changedBodies.length > 0;
+  const snapshotId = snapshotOmitted && isGeometryPublication
+    ? nextMockPublicationId()
+    : change.snapshotId;
+  if (snapshotId !== undefined && Number.isSafeInteger(snapshotId) && snapshotId > mockPublicationSequence) {
+    mockPublicationSequence = snapshotId;
+  }
+  const enriched = {
+    ...change,
+    documentId: change.documentId ?? document.documentId,
+    runtimeSession: change.runtimeSession ?? document.runtimeSession,
+    ...(snapshotId === undefined ? {} : { snapshotId }),
+    ...(snapshotOmitted && isGeometryPublication
+      ? { changedBodies: normalizeMockBodyRefs(change.changedBodies, snapshotId!) }
+      : {}),
+  };
+  lastMockPublication = enriched.documentId !== undefined && enriched.snapshotId !== undefined
+    ? enriched
+    : null;
+  for (const cb of [...docChangeListeners]) cb(enriched);
 }
 
 // ── Topology repair (M4b) — needs-repair emitter + canned resolveRefs ──────────
@@ -676,6 +733,28 @@ const mockSketchMeta = new Map<string, MockMeta>();
 /** Persistent elementId → (bodyId, topoKey) for mock `elementInfo` resolution. */
 const mockElementIdToTopoKey = new Map<string, { bodyId: string; topoKey: string }>();
 
+/**
+ * The TopoKey one picked sub-shape resolves to — the mock's `resolve_edge_pick`.
+ *
+ * A pick addressed by its persistent `elementId` (which is what an already
+ * promoted selection sends, WP-U4 / D-5) is looked up in the id map first, so
+ * the rest of this lane — and the MESH1 id table the viewport draws highlights
+ * and drag handles through — speaks the key the mesh actually carries. Echoing
+ * the `el_…` label back as a TopoKey resolves to nothing and silently degrades
+ * the arm to its no-geometry tier.
+ *
+ * MOCK LIMIT: there is no element partition here, so an id this lane never
+ * minted falls back to the raw label rather than refusing — the real worker
+ * would report the pick unresolved.
+ */
+function mockPickKey(bodyId: string, pick: { topoKey?: string; elementId?: string }): string {
+  if (pick.topoKey) return pick.topoKey;
+  const elementId = pick.elementId ?? "";
+  if (!elementId) return "";
+  const mapped = mockElementIdToTopoKey.get(elementId);
+  return mapped?.bodyId === bodyId ? mapped.topoKey : elementId;
+}
+
 function seedMockMetadata(): void {
   mockBodyMeta.clear();
   mockSketchMeta.clear();
@@ -832,7 +911,35 @@ interface DocSnap {
   masked: Map<string, ArrayBuffer>;
 }
 const undoStack: DocSnap[] = [];
+let rollbackSequence = 0;
+let operationRollback: { token: string; revision: number; undoDepth: number } | null = null;
+
+function armMockOperationRollback(result: ApplyOperationResult): ApplyOperationResult {
+  const token = `mock-rollback-${++rollbackSequence}`;
+  operationRollback = { token, revision: mockRevision, undoDepth: undoStack.length };
+  return { ...result, rollbackToken: token };
+}
 const redoStack: DocSnap[] = [];
+
+/**
+ * Mirror the mock's history depth into `documentStore` (WP-U1).
+ *
+ * On the real lane these four fields ride every `projection-updated`; the mock
+ * has no projection push, so the stacks it already keeps are pushed straight
+ * into the store instead. Without this the ⌘K palette's Undo/Redo rows would be
+ * permanently disabled in the mock and Playwright lanes, where they are the only
+ * thing that can be tested.
+ */
+function syncMockHistory(): void {
+  const top = (stack: DocSnap[]): string | null =>
+    stack.length === 0 ? null : stack[stack.length - 1].label;
+  documentStore.getState().applyChange({
+    undoDepth: undoStack.length,
+    redoDepth: redoStack.length,
+    undoLabel: top(undoStack),
+    redoLabel: top(redoStack),
+  });
+}
 
 const bodyRef = (bodyId: string): BodyMeshRef => ({
   bodyId,
@@ -954,6 +1061,9 @@ function insertAtMockCursor(featureId: string): void {
 /** Stamp the timeline cursor onto a result (H7b: the cursor rides the edit result). */
 function withCursor(res: ApplyOperationResult): ApplyOperationResult {
   const forced = mockForcedTerminal;
+  // Every mutating mock verb settles through here, which makes it the one place
+  // the history depth can be mirrored without touching all nine push sites.
+  syncMockHistory();
   return {
     ...res,
     appliedOps: mockAppliedOps,
@@ -1427,13 +1537,16 @@ function mutateOp(op: OperationOp): {
 }
 
 /** Commit an op: push undo, mutate, bump revision, build the result. */
-function commitOp(op: OperationOp): ApplyOperationResult {
+function commitOp(op: OperationOp, effects?: OperationEffects): ApplyOperationResult {
   enforceChamferReferenceFaces(op);
   // BEFORE the snapshot: an op that rewrites a seed body in place needs that
   // body's pre-op mesh captured, or undo reads as a deletion (see the helper).
   materializeOpTargets(op);
   undoStack.push(snap(labelForOp(op)));
   redoStack.length = 0;
+  for (const sketchId of effects?.hideSketchIds ?? []) {
+    writeMockMeta("sketch", sketchId, { visible: false });
+  }
   const { changed, removed, label, featureId } = mutateOp(op);
   // Remember the committed wire params so `getOperationParams` can serve a re-edit
   // its non-scalar inputs (axis / openFaces / edges) verbatim.
@@ -1620,20 +1733,20 @@ function enforceChamferReferenceFaces(op: OperationOp): void {
 
 /** Commit one op through the local model + emit its document-changed (the lane's
  *  `commit` seam + the client's own `applyOperation` share this path). */
-function commitAndEmit(op: OperationOp): Promise<ApplyOperationResult> {
+function commitAndEmit(op: OperationOp, effects?: OperationEffects): Promise<ApplyOperationResult> {
   // The mock has no regen job, but the busy indicator is part of the UI under
   // test: bracket the (latency-simulating) apply with the same store transitions
   // the real `regen-started`/`regen-finished` pair drives.
   documentStore.getState().regenStarted();
   return wait()
     .then(() => {
-      const res = commitOp(op);
+      const res = commitOp(op, effects);
       emitMockDocumentChanged({
         revision: res.revision,
         changedBodies: res.changedBodies,
         removedBodies: res.removedBodies,
       });
-      return withCursor(res);
+      return armMockOperationRollback(withCursor(res));
     })
     .finally(() => documentStore.getState().regenSettled());
 }
@@ -2584,7 +2697,16 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
 
 // ── Shared sketch-solver + preview lane (F-WP8 seam; same module the tauri
 //    client uses). Commit routes into the local document model above. ──────────
-const lane = createLocalSolverLane({ commit: commitAndEmit, latencyMs: () => mockLatency });
+const lane = createLocalSolverLane({
+  commit: (op) =>
+    commitAndEmit(
+      op,
+      (op.opType === "Extrude" || op.opType === "Revolve") && "sketchId" in op
+        ? { hideSketchIds: [op.sketchId] }
+        : undefined,
+    ),
+  latencyMs: () => mockLatency,
+});
 
 // ── Body-edge projection into a sketch (WP-P), mock lane ────────────────────
 //
@@ -2874,12 +2996,15 @@ function seededSketchRectangle(): SketchEntity[] {
  * seeded before delegating. An unknown id (not in the document) is left untouched —
  * it opens an empty session, exactly as before.
  */
+const mockCreatedSketchVisits = new Set<string>();
+
 async function enterSketchWithHydration(target: EnterSketchTarget): Promise<SketchSession> {
   if (typeof target === "string" && documentStore.getState().sketches[target] && !lane.hasSession(target)) {
     await lane.enterSketch(target);
     await lane.sketchUpsert(target, seededSketchRectangle(), []);
   }
   const session = await lane.enterSketch(target);
+  if (typeof target !== "string") mockCreatedSketchVisits.add(session.sketchId);
   // DATUM W1: the shared lane models the sketch's PLANE but not its attachment
   // (see the `mockSketchDatum` note above), so the mock client is where a
   // datum-hosted sketch gets registered against its host. Without this the
@@ -2937,6 +3062,9 @@ export function resetMockDocument(): void {
   mockFeatures = MOCK_BASE_FEATURES.map(cloneFeature);
   mockAppliedOps = MOCK_BASE_FEATURES.length;
   mockRevision = 5;
+  rollbackSequence = 0;
+  operationRollback = null;
+  lastMockPublication = null;
   nextBodySeq = 2;
   nextFeatureSeq = 100;
   nextImportSeq = 1;
@@ -2949,8 +3077,17 @@ export function resetMockDocument(): void {
   mockVariables = [];
   nextVariableSeq = 1;
   documentStore.getState().applyChange({ datums: {} });
+  syncMockHistory();
   // Re-adopt the (already reset) projection store as the mock's metadata authority.
   seedMockMetadata();
+}
+
+function beforeAdopt(options?: DocumentReplacementOptions): void {
+  try {
+    options?.beforeAdopt?.();
+  } catch (error) {
+    logWarn("ipc", "mock document replacement beforeAdopt hook failed", { error });
+  }
 }
 
 export const mockClient: CadClient = {
@@ -2988,11 +3125,13 @@ export const mockClient: CadClient = {
   async revealInFileManager() {
     await wait();
   },
-  async newDocument() {
+  async newDocument(options) {
     await wait();
+    beforeAdopt(options);
+    lastMockPublication = null;
     return snapshot("Untitled");
   },
-  async openDocument(path, onRecovery) {
+  async openDocument(path, onRecovery, options) {
     await wait();
     // Mirrors the Rust guard: a path an unresolved offer names cannot be opened
     // blind, because doing so is what destroys that offer's autosave.
@@ -3008,19 +3147,25 @@ export const mockClient: CadClient = {
       }
     }
     const known = RECENTS.find((p) => p.path === path);
+    beforeAdopt(options);
+    lastMockPublication = null;
     return snapshot(known?.name ?? basename(path));
   },
   // START-SCREEN lane: a new document FROM a STEP file. The mock has no document
   // model to swap (newDocument/openDocument likewise just hand back a snapshot and
   // leave the seeded projection in place), so this runs the same fabrication the
   // in-editor lane does — the editor then opens with the imported body + its row.
-  async importStep(path) {
+  async importStep(path, options) {
     await wait();
+    beforeAdopt(options);
+    lastMockPublication = null;
     importStepAndEmit();
     return snapshot(basename(path));
   },
-  async importProject() {
+  async importProject(options) {
     await wait();
+    beforeAdopt(options);
+    lastMockPublication = null;
     importStepAndEmit();
     return snapshot("ImportedProject");
   },
@@ -3091,8 +3236,10 @@ export const mockClient: CadClient = {
     emitMockDocumentChanged({ revision: mockRevision, changedBodies: [], removedBodies: [] });
     return variableEditResult(variables, "RemoveVariable");
   },
-  async closeDocument() {
+  async closeDocument(options) {
     await wait();
+    beforeAdopt(options);
+    lastMockPublication = null;
     mockModuleState.clear();
     documentStore.getState().applySnapshot(emptyDocument());
   },
@@ -3107,7 +3254,7 @@ export const mockClient: CadClient = {
     }
     return mockRecovery.map((o) => ({ ...o }));
   },
-  async recoverDocument(documentId: string, accept: boolean) {
+  async recoverDocument(documentId: string, accept: boolean, options?: DocumentReplacementOptions) {
     await wait();
     const offer = mockRecovery.find((o) => o.documentId === documentId);
     if (!offer) return null; // nothing pending under that id
@@ -3115,6 +3262,8 @@ export const mockClient: CadClient = {
     if (!accept) return null;
     // Title first, then the saved file's stem — the same ladder `mark_recovered`
     // walks, so the mock lane shows the name the real one would.
+    beforeAdopt(options);
+    lastMockPublication = null;
     return snapshot(offer.title ?? (offer.originalPath ? basename(offer.originalPath) : "Recovered"));
   },
   // The unified start-screen import picker. `appStore.importFromDialog` routes on
@@ -3184,14 +3333,19 @@ export const mockClient: CadClient = {
     return () => {};
   },
 
-  async getBodyMesh(bodyId, _lod) {
+  async getBodyMesh(bodyId, _lod, _generation) {
     await wait(MESH_LATENCY_MS);
     return mockBodyMesh(bodyId);
   },
 
+  async meshRenderCompleted(_correlation): Promise<void> {},
+
   onDocumentChanged(cb): () => void {
     docChangeListeners.add(cb);
     return () => docChangeListeners.delete(cb);
+  },
+  getCurrentMeshPublication(): DocumentChange | null {
+    return lastMockPublication;
   },
 
   // The mock writes its projection stores directly (no backend event stream), so
@@ -3234,6 +3388,13 @@ export const mockClient: CadClient = {
         ]),
       ),
       features: s.features.map((f) => ({ ...f })),
+      // Straight off the mock's own stacks — the rest of this projection mirrors
+      // the store, but the store's copy of these IS the mirror (`syncMockHistory`),
+      // so the stacks are the authority.
+      undoDepth: undoStack.length,
+      redoDepth: redoStack.length,
+      undoLabel: undoStack.length === 0 ? undefined : undoStack[undoStack.length - 1].label,
+      redoLabel: redoStack.length === 0 ? undefined : redoStack[redoStack.length - 1].label,
     };
   },
 
@@ -3292,8 +3453,11 @@ export const mockClient: CadClient = {
     bodyId: string,
     elementId: string,
     topoKey?: string,
+    fence?: GeometryReadFence,
   ): Promise<ElementInfo | null> {
+    assertMockReadFence(fence);
     await wait(MESH_LATENCY_MS);
+    assertMockReadFence(fence);
     let key = topoKey;
     if (!key && elementId) {
       const mapped = mockElementIdToTopoKey.get(elementId);
@@ -3391,8 +3555,10 @@ export const mockClient: CadClient = {
    * lane answers `REF_UNRESOLVED` there, and a mock that returned zeros would
    * make a UI bug (rendering "0 mm³") pass e2e.
    */
-  async massProperties(bodyId: string): Promise<MassProperties> {
+  async massProperties(bodyId: string, fence?: GeometryReadFence): Promise<MassProperties> {
+    assertMockReadFence(fence);
     await wait(MESH_LATENCY_MS);
+    assertMockReadFence(fence);
     const known =
       syntheticBodies.has(bodyId) || documentStore.getState().bodies[bodyId] !== undefined;
     if (!known) throw new Error(`massProperties: unknown body ${bodyId}`);
@@ -3403,23 +3569,27 @@ export const mockClient: CadClient = {
    * Component Library WP-0.1 mock. Reuses `elementInfo`'s same key resolution
    * (topoKey first, then elementId) and mesh-derived planar/edge metrics.
    *
-   * MOCK-LANE HONESTY: the plane AND cylinder cases are real frames, each
-   * MEASURED off the body's own MESH1 bytes — a planar face by its shared
-   * triangle normal, a cylindrical one by `cylinderMetricsFromMesh` (facet
-   * normals ⊥ a common axis + a least-squares circle fit, both checked). A
-   * face that is neither still answers with its kind and `frame: null` rather
-   * than fabricating an axis, and a curved EDGE still does too (the mock emits
-   * circles as polylines, which are indistinguishable from any other curve
-   * here). Real cylinder/circle frames are pinned against the OCCT worker in
-   * `src-tauri/tests/component_ops.rs`; what this lane owns is the UI chain
-   * that runs on one — hover → snap kind → auto-size → ghost → commit.
+   * MOCK-LANE HONESTY: the plane, cylinder AND circle-edge cases are real
+   * frames, each MEASURED off the body's own MESH1 bytes — a planar face by
+   * its shared triangle normal, a cylindrical face by `cylinderMetricsFromMesh`
+   * (facet normals ⊥ a common axis + a least-squares circle fit), a circular
+   * edge by `edgeCircleFit` (best-fit plane + the same circle fit) — all
+   * checked. A face or edge that fits neither still answers with its kind and
+   * `frame: null` rather than fabricating an axis (an ellipse, a box's
+   * straight edge). Real cylinder/circle frames are pinned against the OCCT
+   * worker in `src-tauri/tests/component_ops.rs`; what this lane owns is the
+   * UI chain that runs on one — hover → snap kind → auto-size → ghost →
+   * commit (WP-U11 measure is a second reader of the same frame).
    */
   async classifyElement(
     bodyId: string,
     elementId: string,
     topoKey?: string,
+    fence?: GeometryReadFence,
   ): Promise<ClassifyResult | null> {
+    assertMockReadFence(fence);
     await wait(MESH_LATENCY_MS);
+    assertMockReadFence(fence);
     let key = topoKey;
     if (!key && elementId) {
       const mapped = mockElementIdToTopoKey.get(elementId);
@@ -3432,6 +3602,22 @@ export const mockClient: CadClient = {
     if (isEdge) {
       const edge = edgeMetricsFromMesh(blob, key);
       if (!edge) return null;
+      if (!edge.straight) {
+        const circle = edgeCircleFit(blob, key);
+        if (circle) {
+          return {
+            kind: "edge",
+            surfaceType: "",
+            curveType: "circle",
+            frame: {
+              origin: circle.center,
+              normal: null,
+              axis: circle.normal,
+              radius: circle.radius,
+            },
+          };
+        }
+      }
       return {
         kind: "edge",
         surfaceType: "",
@@ -3598,12 +3784,15 @@ export const mockClient: CadClient = {
    * starting geometry is not, because the mock lane has no frozen container to
    * instantiate. Same honesty rule `saveAsComponent` follows below.
    */
-  async newFromTemplate(id: string): Promise<DocumentSnapshot> {
+  async newFromTemplate(
+    id: string,
+    options?: DocumentReplacementOptions,
+  ): Promise<DocumentSnapshot> {
     await wait();
     if (![...seededTemplates(), ...mockTemplates].some((t) => t.id === id)) {
       throw new Error(`newFromTemplate: unknown template ${id}`);
     }
-    return mockClient.newDocument();
+    return mockClient.newDocument(options);
   },
 
   /**
@@ -3949,7 +4138,7 @@ export const mockClient: CadClient = {
       const m = /^e:(\d+)$/.exec(key);
       return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
     };
-    const keys = [...new Set(req.pickedEdges.map((p) => p.topoKey ?? p.elementId ?? ""))];
+    const keys = [...new Set(req.pickedEdges.map((p) => mockPickKey(bodyId, p)))];
     const contourOf = new Map(
       [...keys].sort((a, b) => ordinalOf(a) - ordinalOf(b)).map((key, i) => [key, i]),
     );
@@ -3957,7 +4146,7 @@ export const mockClient: CadClient = {
       snapshotId,
       targetBodyId: bodyId,
       edges: req.pickedEdges.map((p) => {
-        const topoKey = p.topoKey ?? p.elementId ?? "";
+        const topoKey = mockPickKey(bodyId, p);
         const adjacentFaces = mockAdjacentFaces(bodyId, topoKey);
         return {
           topoKey,
@@ -4022,10 +4211,11 @@ export const mockClient: CadClient = {
         },
       };
     }
+    const bodyId = bodies[0] ?? "";
     return {
       ...unmeasured,
-      targetBodyId: bodies[0] ?? "",
-      edges: req.pickedEdges.map((p) => p.topoKey ?? p.elementId ?? ""),
+      targetBodyId: bodyId,
+      edges: req.pickedEdges.map((p) => mockPickKey(bodyId, p)),
       refusal: null,
     };
   },
@@ -4051,8 +4241,15 @@ export const mockClient: CadClient = {
   },
   applyEditCommand(command: WireEditCommand): Promise<ApplyOperationResult> {
     documentStore.getState().regenStarted();
+    const priorUndoDepth = undoStack.length;
     return mockApplyEditCommand(command)
       .then(withCursor)
+      .then((result) =>
+        (command.cmd === "addOperation" || command.cmd === "updateOperationParams")
+          && undoStack.length === priorUndoDepth + 1
+          ? armMockOperationRollback(result)
+          : result,
+      )
       .finally(() => documentStore.getState().regenSettled());
   },
 
@@ -4081,8 +4278,49 @@ export const mockClient: CadClient = {
 
   // ── Model operations (SCHEMA §7.3) — the mock's local document model ───────
 
-  applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
-    return commitAndEmit(op);
+  applyOperation(op: OperationOp, effects?: OperationEffects): Promise<ApplyOperationResult> {
+    return commitAndEmit(op, effects);
+  },
+
+  async applyOperations(ops: OperationOp[], effects?: OperationEffects): Promise<ApplyOperationResult> {
+    if (ops.length === 0) throw new Error("applyOperations requires at least one operation");
+    documentStore.getState().regenStarted();
+    try {
+      await wait();
+      for (const op of ops) enforceChamferReferenceFaces(op);
+      const consumedSketches = new Set(
+        ops.flatMap((op) => ("sketchId" in op && typeof op.sketchId === "string" ? [op.sketchId] : [])),
+      );
+      for (const sketchId of effects?.hideSketchIds ?? []) {
+        if (!consumedSketches.has(sketchId)) {
+          throw new Error(`cannot auto-hide sketch ${sketchId}: it is not consumed by this operation`);
+        }
+      }
+      const before = snap(labelForOp(ops[0]));
+      const beforeRevision = mockRevision;
+      const depth = undoStack.length;
+      let result: ApplyOperationResult | null = null;
+      for (const [index, op] of ops.entries()) {
+        result = commitOp(op, index === 0 ? effects : undefined);
+      }
+      undoStack.splice(depth, undoStack.length - depth, before);
+      mockRevision = beforeRevision + 1;
+      const bodyDiff = diffBodies(before.bodies, syntheticBodies);
+      const aggregate: ApplyOperationResult = {
+        ...result!,
+        revision: mockRevision,
+        changedBodies: bodyDiff.changed.map(bodyRef),
+        removedBodies: bodyDiff.removed,
+      };
+      emitMockDocumentChanged({
+        revision: aggregate.revision,
+        changedBodies: aggregate.changedBodies,
+        removedBodies: aggregate.removedBodies,
+      });
+      return armMockOperationRollback(withCursor(aggregate));
+    } finally {
+      documentStore.getState().regenSettled();
+    }
   },
 
   async canFoldTransform(bodyId: string): Promise<string | null> {
@@ -4113,6 +4351,40 @@ export const mockClient: CadClient = {
     };
     emitMockDocumentChanged({ revision: res.revision, changedBodies: res.changedBodies, removedBodies: res.removedBodies });
     return withCursor(res);
+  },
+
+  async rollbackFailedOperation(token: string): Promise<RollbackFailedOperationResult> {
+    await wait();
+    const receipt = operationRollback;
+    if (receipt === null) {
+      return { ...withCursor(noopResult()), rolledBack: false, reason: "unknownOrConsumed" };
+    }
+    if (receipt.token !== token) {
+      return { ...withCursor(noopResult()), rolledBack: false, reason: "tokenMismatch" };
+    }
+    operationRollback = null;
+    if (receipt.revision !== mockRevision || receipt.undoDepth !== undoStack.length) {
+      return { ...withCursor(noopResult()), rolledBack: false, reason: "stale" };
+    }
+    const preOp = undoStack.pop();
+    if (preOp === undefined) {
+      return { ...withCursor(noopResult()), rolledBack: false, reason: "blocked" };
+    }
+    redoStack.push(snap(preOp.label));
+    const { changed, removed } = restoreSnap(preOp);
+    const result = withCursor({
+      revision: mockRevision,
+      changedBodies: changed.map(bodyRef),
+      removedBodies: removed,
+      features: mockFeatures.map(cloneFeature),
+      opLabel: preOp.label,
+    });
+    emitMockDocumentChanged({
+      revision: result.revision,
+      changedBodies: result.changedBodies,
+      removedBodies: result.removedBodies,
+    });
+    return { ...result, rolledBack: true, reason: "rolledBack" };
   },
 
   async redo(): Promise<ApplyOperationResult> {
@@ -4146,12 +4418,21 @@ export const mockClient: CadClient = {
     const peeked = lane.peekSession(sketchId);
     if (peeked) {
       const projections = sketchProjections.get(sketchId);
-      return projections ? { ...peeked, projections } : peeked;
+      return projections ? { ...peeked, projections, solveCurrent: true } : { ...peeked, solveCurrent: true };
     }
     if (documentStore.getState().sketches[sketchId]) {
       const entities = seededSketchRectangle();
       const { dof, status } = solveDof(entities, []);
-      return { sketchId, plane: planeFor("XY"), entities, constraints: [], dof, status, conflicting: [] };
+      return {
+        sketchId,
+        plane: planeFor("XY"),
+        entities,
+        constraints: [],
+        dof,
+        status,
+        solveCurrent: false,
+        conflicting: [],
+      };
     }
     throw new Error(`getSketch: unknown sketch ${sketchId}`);
   },
@@ -4173,7 +4454,16 @@ export const mockClient: CadClient = {
     }
     throw new Error(`getSketchRegions: unknown sketch ${sketchId}`);
   },
-  cancelSketch: lane.cancelSketch,
+  async cancelSketch(sketchId, opts) {
+    const outcome = await lane.cancelSketch(sketchId, opts);
+    if (opts?.discard && outcome.discarded && mockCreatedSketchVisits.delete(sketchId)) {
+      documentStore.getState().removeSketch(sketchId);
+      lane.dropSession(sketchId);
+      sketchProjections.delete(sketchId);
+      mockAttachSketchToDatum(sketchId, null);
+    }
+    return outcome;
+  },
   // Compensation: drop the document row + the local lane session so a re-enter of
   // the same id opens a fresh empty session (no longer a document sketch, so the
   // hydration seed no longer fires).
@@ -4196,6 +4486,7 @@ export const mockClient: CadClient = {
   beginPreview: lane.beginPreview,
   updatePreview: lane.updatePreview,
   endPreview: lane.endPreview,
+  takePreviewOperation: lane.takePreviewOperation,
   onPreviewResult: lane.onPreviewResult,
 };
 

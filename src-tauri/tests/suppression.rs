@@ -830,9 +830,12 @@ async fn suppressing_every_op_clears_the_geometry() {
         "the published snapshot has no bodies"
     );
     // The viewport-facing delta must actually tell the frontend to drop the mesh.
+    let projection = rt.projection();
     let change = cleared
-        .document_change()
+        .document_change(&projection.document_id, &projection.runtime_session)
         .expect("a published clear emits a document-changed payload");
+    assert_eq!(change.document_id, projection.document_id);
+    assert_eq!(change.runtime_session, projection.runtime_session);
     assert!(
         change.changed_bodies.is_empty(),
         "nothing to (re)draw, got {:?}",
