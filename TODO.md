@@ -1,3 +1,10 @@
+# CONSOLIDATED CLAUDE CODE HANDOFF — 2026-09-12
+
+- [x] Created `CLAUDE-CODE-HANDOFF-2026-09-12.md`: consolidated implementation, open defects, source map, evidence boundaries, commands, native acceptance and resume order. Documentation-only task; no build/test rerun.
+- [ ] First resume checkpoint: compile and test latest scoped measurements/annotation inspector; reproduce current mixed-pattern failures. Existing CTest log (13:46 CEST) records **3/4**, with canonical repair passing but `feature_pattern` failing Add/Fillet/i−2 Chamfer and late-instance rollback cases. This is inspected log evidence, not a new main run.
+- [ ] Reconcile Git before continuing: another actor moved HEAD from `80d4e74` (312 dirty entries) to `ee5b449` with a clean tree during handoff inspection. Handoff agent made no commit/push/pull. Historical dirty-tree and gate claims below are not current-state assertions.
+- [ ] Preserve historical gate logs from `/tmp/onecad-ux-*`; older repository evidence links point to absent files. See consolidated handoff for exact paths and RED versus rerun distinction.
+
 # CURRENT UX HARDENING HANDOFF CHECKLIST — 2026-09-12
 
 Authoritative current checklist; all prior ledger entries remain historical evidence. No source edits or commits are part of this handoff.
