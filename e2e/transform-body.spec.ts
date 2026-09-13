@@ -130,11 +130,22 @@ async function typeAndConfirm(page: Page, value: string): Promise<void> {
 }
 
 /**
+ * The armed placement's SETTINGS panel.
+ *
+ * Mode, axis, Copy and Align moved OUT of the chip and into the parameter
+ * inspector (`ActiveToolInspector` → `TransformInspector`) with the compact-chip
+ * decision — the chip now keeps only the primary value, the resolved-mode badge
+ * and ✓/✕. Same testids, different host, so every settings lookup is scoped here
+ * rather than to `model-tool-chip`.
+ */
+const settings = (page: Page) => page.getByTestId("active-tool-inspector");
+
+/**
  * An axis segment. Testid-keyed on purpose: the chips are portaled under the
  * viewport's `aria-hidden` overlay root, so `getByRole` cannot see them at all.
  */
 const axisButton = (page: Page, axis: "X" | "Y" | "Z") =>
-  chip(page).getByTestId(`chip-axis-${axis.toLowerCase()}`);
+  settings(page).getByTestId(`chip-axis-${axis.toLowerCase()}`);
 
 /**
  * Switch the inspector to its FULL timeline. A body selection renders only the
@@ -156,8 +167,8 @@ test("t arms the placement cluster on a selected body", async ({ page }) => {
   await armTransform(page, BODY);
 
   // The cluster opens on Move · X · 0 — the whole W1 surface, no gizmo.
-  await expect(chip(page).getByTestId("chip-transform-move")).toHaveAttribute("aria-pressed", "true");
-  await expect(chip(page).getByTestId("chip-transform-rotate")).toHaveAttribute("aria-pressed", "false");
+  await expect(settings(page).getByTestId("chip-transform-move")).toHaveAttribute("aria-pressed", "true");
+  await expect(settings(page).getByTestId("chip-transform-rotate")).toHaveAttribute("aria-pressed", "false");
   await expect(axisButton(page, "X")).toHaveAttribute("aria-pressed", "true");
   await expect(chipInput(page)).toHaveValue("0");
   await expect(chip(page).getByTestId("chip-confirm")).toBeVisible();
@@ -266,7 +277,7 @@ test("Rotate Z 90 commits a rotation, not a translation", async ({ page }) => {
   const before = await waitForBody(page, BODY);
 
   await armTransform(page, BODY);
-  await chip(page).getByTestId("chip-transform-rotate").click();
+  await settings(page).getByTestId("chip-transform-rotate").click();
   await axisButton(page, "Z").click();
   await expect(axisButton(page, "Z")).toHaveAttribute("aria-pressed", "true");
   await typeAndConfirm(page, "90");
@@ -455,7 +466,7 @@ test("dragging the Z ring re-types the cluster to Rotate and commits a rotation"
   expect(dragged.translate).toEqual([0, 0, 0]); // …and a rotation is not a move
   expect(Math.abs(dragged.angleDeg)).toBeGreaterThanOrEqual(15); // the 15° snap
   // …and the chip segments follow the FSM, not the other way round.
-  await expect(chip(page).getByTestId("chip-transform-rotate")).toHaveAttribute("aria-pressed", "true");
+  await expect(settings(page).getByTestId("chip-transform-rotate")).toHaveAttribute("aria-pressed", "true");
   await expect(axisButton(page, "Z")).toHaveAttribute("aria-pressed", "true");
 
   await confirmWithEnter(page);
@@ -487,7 +498,7 @@ test("Alt-drag places a COPY: one more body, sources left where they were", asyn
   const dragged = await placement(page);
   expect(dragged.copy).toBe(true);
   // Alt writes the SAME flag the segment shows — one writer, visible state.
-  await expect(chip(page).getByTestId("chip-transform-copy")).toHaveAttribute("aria-pressed", "true");
+  await expect(settings(page).getByTestId("chip-transform-copy")).toHaveAttribute("aria-pressed", "true");
 
   await confirmWithEnter(page);
 
@@ -502,7 +513,7 @@ test("the Copy segment toggles the flag without a gizmo drag", async ({ page }) 
   await waitForBody(page, BODY);
   await armTransform(page, BODY);
 
-  const copyBtn = chip(page).getByTestId("chip-transform-copy");
+  const copyBtn = settings(page).getByTestId("chip-transform-copy");
   await expect(copyBtn).toHaveAttribute("aria-pressed", "false");
   await copyBtn.click();
   await expect(copyBtn).toHaveAttribute("aria-pressed", "true");
@@ -560,7 +571,7 @@ async function importSecondBody(page: Page): Promise<string> {
   return other;
 }
 
-const alignChip = (page: Page) => chip(page).getByTestId("chip-transform-align");
+const alignChip = (page: Page) => settings(page).getByTestId("chip-transform-align");
 
 test("Align: two face picks snap the body FLUSH onto another body's face", async ({ page }) => {
   await openEditorDebug(page, { mockBody: true });
@@ -591,7 +602,7 @@ test("Align: two face picks snap the body FLUSH onto another body's face", async
   expect(axis[2]).toBeCloseTo(1, 6); // a FREE axis, published because no chip can show one
   // It reads out as the Move it is, on the component it leaned on hardest.
   expect(solved.mode).toBe("move");
-  await expect(chip(page).getByTestId("chip-transform-move")).toHaveAttribute("aria-pressed", "true");
+  await expect(settings(page).getByTestId("chip-transform-move")).toHaveAttribute("aria-pressed", "true");
   await expect(chipInput(page)).toHaveValue("110");
 
   await confirmWithEnter(page);

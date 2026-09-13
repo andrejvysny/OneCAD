@@ -217,7 +217,11 @@ test("the inline value editor is disabled while a model tool is armed", async ({
   // exists" once arming Extrude shows a chip (its own depth field carries a
   // distinct "Depth (mm)" name post-WP-U10, but the row's own field stays
   // scoped regardless of what a future chip is named).
-  const rowEditor = page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+  //
+  // `history-item-…`, NOT `history-row-…`: `history-row-…` is only the clickable
+  // HEADER now, and the inline editor lives beside it under `history-details-…`
+  // — both children of the `history-item-…` wrapper (see `HistoryList.tsx`).
+  const rowEditor = page.getByTestId(`history-item-${featureId}`).getByLabel("Dimension value");
 
   // Select tool ⇒ editable.
   await page.getByTestId(`history-value-${featureId}`).click();

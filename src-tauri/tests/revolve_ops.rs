@@ -71,8 +71,9 @@ use onecad_core::document::record::{
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
 };
+use onecad_core::document::repair::RepairReason;
 use onecad_core::document::variables::Scalar;
-use onecad_core::edit::{EditCommand, SketchEditOp};
+use onecad_core::edit::{EditCommand, InputPath, InputRef, SketchEditOp};
 use onecad_core::ids::{
     BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, SnapshotId, TopoKey,
 };
@@ -141,8 +142,12 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
-async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, or save → reopen). `RevertToEnd` makes NO SCHEMA
+/// §7.2 `editedFrom` claim, so the §10 v6 post-edit descriptor-tie veto stays
+/// off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
         .await
 }
 
@@ -596,7 +601,7 @@ async fn revolve_new_body_pappus_volume() {
         revolve_record(REVOLVE, sid, "", 360.0, axis, BooleanMode::NewBody, None),
     );
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "pappus revolve");
     assert_eq!(
         snap.bodies.len(),
@@ -653,7 +658,7 @@ async fn revolve_partial_angle_half_volume() {
         revolve_record(REVOLVE, sid, "", 180.0, axis, BooleanMode::NewBody, None),
     );
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "half revolve");
     assert_eq!(
         snap.bodies.len(),
@@ -759,7 +764,7 @@ async fn revolve_cut_split_children_adopted() {
     let child0 = BodyId(split_child_uuid(Uuid::from_u128(REVOLVE), 0));
     let child1 = BodyId(split_child_uuid(Uuid::from_u128(REVOLVE), 1));
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "revolve cut split");
     let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
     assert_eq!(
@@ -790,7 +795,7 @@ async fn revolve_cut_split_children_adopted() {
     );
 
     // Ids + volumes stable across a second from-0 regen (pure fn of opId + ordinal).
-    let rep2 = regen_all(&mut rt).await;
+    let rep2 = clean_regen(&mut rt).await;
     let snap2 = published(&rep2, "revolve cut split replay");
     let head2: std::collections::HashSet<BodyId> = snap2.bodies.iter().map(|b| b.body).collect();
     assert_eq!(head, head2, "split child ids identical across a replay");
@@ -851,7 +856,7 @@ async fn revolve_stale_axis_fails_loud() {
     // A per-op failure is a Published snapshot with the failed step marked Error
     // (executor.rs:668; PlanExecutor stoppedReason=opFailed, last_valid_step=m-1) —
     // NOT an EngineFailed. No revolve body is created (a sketch mints none either).
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "stale axis revolve");
     assert!(
         snap.bodies.is_empty(),
@@ -949,7 +954,7 @@ async fn revolve_region_binding_explicit_and_fallback() {
         revolve_record(REVOLVE_2, sid, "", 360.0, axis, BooleanMode::NewBody, None),
     );
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "revolve region binding");
     let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
     assert_eq!(
@@ -980,7 +985,7 @@ async fn revolve_region_binding_explicit_and_fallback() {
             None,
         ),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     // A per-op failure still Publishes the valid prefix (the two good revolves); the
     // wrong-region step is Error with NO body of its own (mirrors the stale-axis case).
     let snap = published(&rep, "wrong-region revolve");
@@ -1339,7 +1344,7 @@ async fn revolve_reedit_binds_the_stored_region_not_the_first() {
             None,
         ),
     );
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let snap = published(&report, "two-region revolve");
     assert_eq!(snap.bodies.len(), 1, "one revolve body");
     let vol = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
@@ -1375,7 +1380,8 @@ async fn revolve_reedit_binds_the_stored_region_not_the_first() {
         op: reedit.op,
     })
     .expect("angle re-edit");
-    let report = regen_all(&mut rt).await;
+    // The edit lands ON the revolve — step 1 (0 sketch, 1 revolve).
+    let report = regen_from(&mut rt, 1).await;
     let snap = published(&report, "two-region revolve re-edit");
     assert_eq!(
         snap.bodies.len(),
@@ -1702,6 +1708,8 @@ fn add_profile_sketch(rt: &mut DocumentRuntime) -> SketchId {
     sid
 }
 
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
 async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
     rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
         .await
@@ -1734,7 +1742,8 @@ const PAPPUS_360: f64 = 9424.778; // 2π·15·100
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn revolve_typed_body_edge_axis_survives_reopen_and_upstream_edit() {
+async fn revolve_typed_body_edge_axis_needs_one_repair_after_an_upstream_edit_that_leaves_a_congruent_twin(
+) {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary");
         return;
@@ -1746,7 +1755,7 @@ async fn revolve_typed_body_edge_axis_survives_reopen_and_upstream_edit() {
 
     // (0) the axis body, and the promotion that turns its X-axis edge into identity.
     let axis_body = add_axis_body(&mut rt, 20.0);
-    let base = regen_all(&mut rt).await;
+    let base = clean_regen(&mut rt).await;
     let base_snap = published(&base, "axis body");
     let (edge_el, anchor) = promote_x_axis_edge(&mut rt, axis_body, base_snap.id).await;
 
@@ -1763,7 +1772,7 @@ async fn revolve_typed_body_edge_axis_survives_reopen_and_upstream_edit() {
             anchor,
         ),
     );
-    let first = regen_all(&mut rt).await;
+    let first = clean_regen(&mut rt).await;
     let snap = published(&first, "typed-axis revolve");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -1787,30 +1796,155 @@ async fn revolve_typed_body_edge_axis_survives_reopen_and_upstream_edit() {
     // (2) UPSTREAM EDIT on the LIVE session — deepen the extrude that owns the axis
     //     edge, through the edit lane (`from = 1`, which is what stamps SCHEMA §7.2
     //     `editedFrom`). The edge is rebuilt as a different OCCT edge, longer than
-    //     before; only the semantic ref can still name it. The axis LINE it defines
-    //     is unchanged, so the revolved volume must not move.
+    //     before; only the semantic ref can still name it.
     //
-    //     This runs on `rt`, not on the reopened runtime, for the same reason
-    //     `topology_rebind::h6a_flagship_edit_lane_…` does: an edit replayed from
-    //     zero has no migrated partition, so the anchor-exact carve-out is
-    //     deliberately disabled there (VF-M5) and the correct answer is NeedsRepair.
+    //     SCHEMA §10 resolver v6 (decision D-3) answers this with ONE repair, not a
+    //     silent rebind. The box's four vertical-face edges are congruent twins: they
+    //     share every descriptor term (type, tangent, outwardness, length) and differ
+    //     ONLY in the anchor term, so the assigned candidate's DESCRIPTOR-only
+    //     separation from its best rival is exactly 0 — a descriptor tie. v6 refuses
+    //     to let a STALE anchor break that tie downstream of `editedFrom`, because the
+    //     geometry moved and exactness at the old world point no longer proves
+    //     continuity (`Ladder.cpp`, EDIT-SCOPED DESCRIPTOR-TIE VETO; v5's anchor-exact
+    //     carve-out is gone). The blended score and margin would BOTH clear the
+    //     0.85/0.10 auto-bind bar — the veto runs first, on purpose.
+    //
+    //     That is the H5-B class this migration exists to fix: a deterministic
+    //     NeedsRepair the user answers with one pick beats a plausible wrong axis.
+    //     The rest of this leg proves the pick is available and that it sticks.
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(EXTRUDE_AXIS)),
         op: extrude_record(EXTRUDE_AXIS, SketchId(Uuid::from_u128(SKETCH_AXIS)), 24.0).op,
     })
     .expect("edit the axis body's extrude depth");
     let edited = regen_from(&mut rt, 1).await;
-    let edited_snap = published(&edited, "post-upstream-edit revolve");
+    let edited_snap = published(&edited, "post-upstream-edit revolve").clone();
+    let axis_slot = format!("{}.input0", RecordId(Uuid::from_u128(REVOLVE_TYPED)));
+    let items = rt.repair_items().to_vec();
+    let axis_item = items
+        .iter()
+        .find(|i| i.ref_id == axis_slot)
+        .unwrap_or_else(|| panic!("the REVOLVE's axis slot is what halts, got {items:?}"))
+        .clone();
+    let shape = |item: &onecad_core::document::repair::RepairItem| -> String {
+        item.candidates
+            .iter()
+            .map(|c| format!("{}@{:.4}/m{:.4}", c.topo_key.as_str(), c.score, c.margin))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(
+        edited_snap.repair_summary.needs_repair_count,
+        1,
+        "v6 asks for exactly ONE repair — the axis — after an upstream edit that \
+         leaves the axis edge's congruent twins in place; candidates were [{}]",
+        shape(&axis_item)
+    );
+    assert_eq!(
+        axis_item.reason,
+        RepairReason::Ambiguous,
+        "a refused descriptor tie reports `ambiguous`; candidates were [{}]",
+        shape(&axis_item)
+    );
+    assert_eq!(
+        axis_item.scoring_version,
+        Some(6),
+        "the refusal must be attributable to resolver v6; candidates were [{}]",
+        shape(&axis_item)
+    );
+    assert!(
+        axis_item.candidates.len() >= 2,
+        "the tie needs its twins: the panel offers the user a choice, got [{}]",
+        shape(&axis_item)
+    );
+    // The twin that makes this a tie: same kind, same length, different anchor.
+    let winner = &axis_item.candidates[0];
+    let twin = &axis_item.candidates[1];
+    assert!(
+        winner.score > twin.score && winner.summary == twin.summary,
+        "the rival is a CONGRUENT twin — identical descriptor summary, separated \
+         only by the anchor; got [{}]",
+        shape(&axis_item)
+    );
+    assert!(
+        !edited_snap
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "a refused axis publishes NO revolved body — a wrong-axis solid is worse \
+         than none"
+    );
+
+    // ── THE REPAIR: the user picks the top-ranked candidate, which IS the
+    //    lengthened axis edge (v6 refused it on principle, not on evidence). The
+    //    pick PROMOTES the TopoKey, so the axis resolves at rung 1 from here on.
+    let repaired_axis = {
+        let promoted = rt
+            .promote_selection(
+                SnapshotId(edited.snapshot_id),
+                axis_body,
+                vec![(
+                    winner.topo_key.clone(),
+                    Some(AnchorIntent {
+                        world_point: winner.world_pos,
+                        surface_uv: None,
+                        local_frame: None,
+                        adjacency_hint: None,
+                        extra: Default::default(),
+                    }),
+                )],
+            )
+            .await
+            .expect("promote the re-picked axis edge");
+        assert_eq!(promoted[0].kind, "edge");
+        ElementId::new(&promoted[0].element_id)
+    };
+    assert_ne!(
+        repaired_axis, edge_el,
+        "the re-pick mints a NEW id — the stale one is what v6 refused"
+    );
+    rt.apply(EditCommand::EditOperationInput {
+        record: RecordId(Uuid::from_u128(REVOLVE_TYPED)),
+        path: InputPath::RevolveAxis,
+        reference: InputRef::Element(edge_ref_of(axis_body, &repaired_axis, winner.world_pos)),
+    })
+    .expect("EditOperationInput{RevolveAxis} answers the §9 item");
+
+    // The repair lands ON the revolve — step 3 (0 sketch, 1 extrude, 2 profile
+    // sketch, 3 revolve), so that is the `editedFrom` this regen claims. Nothing is
+    // downstream of it, so v6's post-edit lane is not even consulted; the axis
+    // resolves at rung 1 from the id the re-pick just promoted.
+    let repaired = regen_from(&mut rt, 3).await;
+    let edited_snap = published(&repaired, "repaired-axis revolve");
     assert_eq!(
         edited_snap.repair_summary.needs_repair_count, 0,
-        "an upstream edit that only LENGTHENS the axis edge rebinds it on the live \
-         edit lane, it does not ask for repair"
+        "one pick closes the halt: the promoted axis resolves at rung 1, below \
+         v6's descriptor lane"
     );
+    assert!(
+        edited_snap
+            .bodies
+            .iter()
+            .any(|b| b.body == body_of(REVOLVE_TYPED)),
+        "the repaired axis publishes the revolved body again"
+    );
+    // The record now NAMES the re-picked edge — not the id the ladder refused.
+    let stored = rt
+        .operation_params(RecordId(Uuid::from_u128(REVOLVE_TYPED)))
+        .expect("revolve params");
+    assert_eq!(
+        stored["axis"]["edgeId"],
+        serde_json::json!(repaired_axis.as_str()),
+        "the repaired axis is the one the record replays from: {}",
+        stored["axis"]
+    );
+    // THE PROOF: same axis LINE ⇒ same Pappus solid. The repair recovered the
+    // model, it did not quietly revolve about something else.
     let edited_vol = mesh_vol(&mut rt, body_of(REVOLVE_TYPED), Lod::Fine).await;
     assert!(
         (edited_vol - vol).abs() < 1.0,
-        "the same axis line ⇒ the same revolved volume ({vol}) after the upstream edit, \
-         got {edited_vol}"
+        "the same axis line ⇒ the same revolved volume ({vol}) after the upstream edit \
+         and its repair, got {edited_vol}"
     );
 
     // (3) A LARGER upstream edit — the axis edge grows +100% — is deterministically
@@ -1840,7 +1974,7 @@ async fn revolve_typed_body_edge_axis_survives_reopen_and_upstream_edit() {
     // (4) REOPEN the saved pre-edit container and replay it from zero: the typed
     //     axis is persisted state, not session state.
     let mut reopened = open_over(&wm, &path);
-    let replay = regen_from(&mut reopened, 0).await;
+    let replay = clean_regen(&mut reopened).await;
     let replay_snap = published(&replay, "reopened typed-axis revolve");
     assert_eq!(
         replay_snap.repair_summary.needs_repair_count, 0,
@@ -1875,7 +2009,7 @@ async fn revolve_typed_axis_consumed_edge_is_needs_repair_not_failure() {
     let mut rt = runtime_over(&wm);
 
     let axis_body = add_axis_body(&mut rt, 20.0);
-    let base = regen_all(&mut rt).await;
+    let base = clean_regen(&mut rt).await;
     let base_snap = published(&base, "axis body");
     let (edge_el, anchor) = promote_x_axis_edge(&mut rt, axis_body, base_snap.id).await;
 
@@ -1898,7 +2032,7 @@ async fn revolve_typed_axis_consumed_edge_is_needs_repair_not_failure() {
         ),
     );
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "revolve over a consumed axis edge");
     assert!(
         snap.repair_summary.needs_repair_count > 0,
@@ -1940,7 +2074,7 @@ async fn revolve_typed_axis_consumed_edge_is_needs_repair_not_failure() {
     // what makes the difference, and this is the only way to show it.
     let mut control = runtime_over(&wm);
     let control_body = add_axis_body(&mut control, 20.0);
-    let control_base = regen_all(&mut control).await;
+    let control_base = clean_regen(&mut control).await;
     let control_snap = published(&control_base, "control axis body");
     let (control_el, control_anchor) =
         promote_x_axis_edge(&mut control, control_body, control_snap.id).await;
@@ -1956,7 +2090,7 @@ async fn revolve_typed_axis_consumed_edge_is_needs_repair_not_failure() {
             control_anchor,
         ),
     );
-    let control_rep = regen_all(&mut control).await;
+    let control_rep = clean_regen(&mut control).await;
     let control_out = published(&control_rep, "control revolve");
     assert_eq!(
         control_out.repair_summary.needs_repair_count, 0,

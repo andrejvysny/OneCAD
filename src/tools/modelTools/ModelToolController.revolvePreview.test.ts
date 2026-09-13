@@ -144,6 +144,8 @@ function makeClientMock(opts: ClientOpts, capture?: (cb: (r: PreviewResult) => v
       capture?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: opts.regions })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: opts.regions })),
     getSketch: vi.fn(() => Promise.resolve(makeSession(opts.axisEntities ?? [AXIS_OK]))),
@@ -211,6 +213,18 @@ describe("ModelToolController revolve kernel preview", () => {
     resetStores();
     __setExactPreviewTimeoutForTests(0); // most specs assert sequencing, not the barrier
     selectionStore.getState().set([]);
+    // The revolve chip's typed `profile` context names this sketch, and
+    // `activeToolPresentation`'s `missingRequiredTargetMessage` blocks confirmation
+    // of a tool whose sketch the projection does not carry. `seedMockDocument()`
+    // publishes sketch2/4/5 only, so publish the armed one the way production does.
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
   });

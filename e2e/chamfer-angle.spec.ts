@@ -167,7 +167,9 @@ test("a distance-angle chamfer BLOCKS the flip to Fillet, and allows it once cle
   await page.getByTestId("chip-edgeop-fillet").click();
   await page.getByLabel("Radius (mm)").click();
   await page.keyboard.press("Enter");
-  await expect(page.getByText(/clear angleDeg first/)).toBeVisible();
+  // SCOPED to the status hint — the inspector states the same refusal in its own
+  // `Failed: …` line now (see the note in `filletChamfer.spec.ts`).
+  await expect(page.getByTestId("status-hint")).toHaveText(/clear angleDeg first/);
   // The rejected flip wrote nothing.
   expect((await lastFeature(page)).label).toBe("Chamfer");
   expect((await lastFeature(page)).valueText).toBe("1.0 mm ∠30.0°");

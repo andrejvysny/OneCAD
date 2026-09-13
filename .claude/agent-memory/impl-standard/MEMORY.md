@@ -2,3 +2,6 @@
 - [Rust fillet record test pattern](rust-fillet-record-test-pattern.md) — build Sketch/Extrude/Fillet OperationRecords directly, promote TopoKey via query_element_by_topo_key, read step diagnostics
 - [Sketch sticky-toggle + hint pattern](sketch-sticky-toggle-hint-pattern.md) — shared toggle helpers go in sketchService.ts; constructionMode resets on openSession (D-2); no generic chip primitive exists
 - [WP-U3 clamp hint site](wpu3-clamp-hint-typed-commit-only.md) — typed-commit path is `onFilletChip`, not the brief's line numbers; mock analyzeEdgeOpRange always confidence:"none", no e2e clamp possible
+- [ModelToolController test engine mock](modeltoolcontroller-test-engine-mock.md) — `{} as ViewportEngine` throws on tool-switch cancel sweep; use a Proxy-based lazy vi.fn() stub
+- [Resolver v6 post-edit tie refusal](resolver-v6-post-edit-tie-refusal.md) — unminted seed ref + post_upstream_edit halts on the SEED's own descriptor tie before any op-built pair halt; mint the seed to reach the realistic path
+- [ToolChip confirm gate requires context](toolchip-confirm-gate-requires-context.md) — chip-confirm tests need setContext + seeded documentStore.bodies, else they hit the missing-target fallback, not the real gate

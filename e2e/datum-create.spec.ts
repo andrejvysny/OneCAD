@@ -66,7 +66,11 @@ test.describe("datum plane — create", () => {
 
     await expect(datumOptions(page)).toHaveCount(1);
     await expect(datumOptions(page).first()).toContainText("Datum 1");
-    await expect(page.getByText("Datum 1 created")).toBeVisible();
+    // By testid, not by text: the inspector's completion row now says
+    // "Completed: Datum 1 created" as well, so a bare text query is a
+    // strict-mode violation against two genuine matches. The status bar is the
+    // one this case is about.
+    await expect(page.getByTestId("status-hint")).toHaveText("Datum 1 created");
     // The tool returned to Select, and every trace of the arm is gone.
     await expect(page.getByRole("button", { name: "Select", exact: true })).toHaveAttribute(
       "aria-pressed",

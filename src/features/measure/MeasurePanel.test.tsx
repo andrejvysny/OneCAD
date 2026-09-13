@@ -216,11 +216,16 @@ describe("MeasurePanel rendering", () => {
   });
 
   it("never installs a delayed mass result after the same body advances snapshot", async () => {
+    // Only the FIRST read (fenced to the pre-advance snapshot) resolves. The
+    // panel's re-read for the advanced snapshot is legitimate and stays
+    // pending here, so the only reading that could reach the store is stale.
     let resolve!: (value: MassProperties) => void;
-    vi.spyOn(mockClient, "massProperties").mockReturnValue(
-      new Promise<MassProperties>((done) => {
-        resolve = done;
-      }),
+    let reads = 0;
+    vi.spyOn(mockClient, "massProperties").mockImplementation(
+      () =>
+        new Promise<MassProperties>((done) => {
+          if (reads++ === 0) resolve = done;
+        }),
     );
     measureStore.getState().set([facePick("f4", [0, 0, 15], [0, 0, 1])], null);
     render(<MeasurePanel />);

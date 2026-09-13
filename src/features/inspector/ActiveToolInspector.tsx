@@ -262,7 +262,21 @@ export function ActiveToolInspector() {
   const dockRef = useCallback((host: HTMLDivElement | null) => setToolChipDockHost(host), []);
   if (!presentation) return null;
 
-  if (state.kind === "none" || scopedAttempt?.phase === "completed") {
+  /*
+   * The read-only "last operation" recap, shown ONLY when no tool is armed.
+   *
+   * A settled attempt must never suppress a live tool. `operationAttemptStore`
+   * gives `completed` no authority over arming — `begin` refuses a second attempt
+   * only while one is `applying`, and so do `authoringEntryBlocked` and
+   * `toolStore.setTool`/`setMode`; `activateTool` clears because it is starting a
+   * new tool, not because `completed` is stateful. The two branches below already
+   * render the armed section under `applying` and `failed`, and `completed` was
+   * the one asymmetric case: because a re-edit entered from a history row
+   * (`editFeature` → `editXxxFeature`) never goes through `activateTool` — the
+   * only caller of `clear()` — the previous commit's recap kept the armed tool's
+   * whole secondary-control section off screen.
+   */
+  if (state.kind === "none") {
     const terminalSubtitle = scopedAttempt?.phase === "applying"
       ? "Applying…"
       : scopedAttempt?.phase === "failed"

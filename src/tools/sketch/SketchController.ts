@@ -43,6 +43,7 @@ import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { isInteractiveBoundary } from "@/ui/interactiveBoundary";
 import { applySketchSolveResult } from "./solveResult";
+import { entityPointSlots, pointCoordOf } from "./sketchTopology";
 import { promoteOne } from "@/ipc/promote";
 import { errorKind } from "@/ipc/apiError";
 import { diagnosticHint } from "@/ipc/operationDiagnostics";
@@ -198,6 +199,11 @@ import {
 import { LIVE_TOOL_MACHINES } from "./liveToolMachines";
 
 const DRAG_PX = 4;
+
+/** `autoConstrain`'s own coincidence tolerance (1e-6): the draw tools place
+ *  endpoints EXACTLY, so an anchor is only ever re-seated onto the point it
+ *  already held (see `reanchorChain`). */
+const ANCHOR_MATCH_TOL = 1e-6;
 
 /**
  * Log a sketch-tool step that actually PRODUCED something (committed geometry or
@@ -2731,6 +2737,9 @@ export class SketchController {
     // reverse-mapped to `entityId.Position` keys by the client). No-op when the
     // solve returned no movement (identity upsert) — same array reference.
     const solvedEntities = applySketchSolveResult(entities, result);
+    // …and the tool machine's own copy of those points is just as stale — see
+    // `reanchorChain`. Before anything else reads the chain.
+    if (solvedEntities !== entities) this.reanchorChain(newEntities, solvedEntities);
 
     const next: SketchSession = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
     sketchStore.getState().setSession(next);
@@ -2748,6 +2757,55 @@ export class SketchController {
     // The chain's angle reference for the NEXT segment. `?? null` on purpose: a
     // batch with no line (circle, ellipse) leaves nothing to measure against.
     this.lastChainLineId = newEntities.find((e) => e.type === "Line")?.id ?? null;
+  }
+
+  /**
+   * Re-seat the draw machine's anchors onto the geometry the SOLVE produced.
+   *
+   * A commit can MOVE the points it just authored: an auto-inferred `Horizontal`
+   * on a leg drawn a degree off flattens BOTH endpoints onto their mid-y (the
+   * mock's `mockEnforce` projection, and PlaneGCS resolves it the same way). The
+   * machine keeps its OWN copy of those points as the chain's anchors, so without
+   * this the next leg starts where the user clicked rather than where the previous
+   * leg actually ended — a visible gap, and `autoConstrain` then infers no
+   * `Coincident` for it either, because that weld is only inferred between points
+   * that are ALREADY exactly equal. The chain would be mechanically broken, not
+   * just cosmetically.
+   *
+   * Only an anchor still holding the pre-solve coordinate moves: a click that
+   * landed while this (queued, async) commit was in flight already owns the tail
+   * of the chain, and its point is not this commit's to rewrite.
+   */
+  private reanchorChain(authored: SketchEntity[], solved: readonly SketchEntity[]): void {
+    const state = this.machineState;
+    if (!state || state.anchors.length === 0) return;
+    // The same tolerance `autoConstrain` welds on: the tools place endpoints
+    // EXACTLY, so anything looser would re-seat an anchor onto a point the user
+    // meant to keep apart.
+    const samePoint = (a: readonly [number, number], b: readonly [number, number]): boolean =>
+      Math.abs(a[0] - b[0]) < ANCHOR_MATCH_TOL && Math.abs(a[1] - b[1]) < ANCHOR_MATCH_TOL;
+    const moved: Array<{ from: Point2; to: Point2 }> = [];
+    for (const entity of authored) {
+      const after = solved.find((s) => s.id === entity.id);
+      if (!after) continue;
+      for (const slot of entityPointSlots(entity)) {
+        if (slot.derived) continue;
+        const from = pointCoordOf(entity, slot.position);
+        const to = pointCoordOf(after, slot.position);
+        if (!from || !to) continue;
+        if (samePoint(from, to)) continue;
+        moved.push({ from: { x: from[0], y: from[1] }, to: { x: to[0], y: to[1] } });
+      }
+    }
+    if (moved.length === 0) return;
+    let changed = false;
+    const anchors = state.anchors.map((anchor) => {
+      const hit = moved.find((m) => samePoint([m.from.x, m.from.y], [anchor.x, anchor.y]));
+      if (!hit) return anchor;
+      changed = true;
+      return hit.to;
+    });
+    if (changed) this.machineState = { ...state, anchors };
   }
 
   /**

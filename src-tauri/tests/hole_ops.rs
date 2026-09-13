@@ -127,8 +127,20 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
-async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, or save → reopen). `RevertToEnd` makes NO SCHEMA
+/// §7.2 `editedFrom` claim, so the resolver's post-edit descriptor-tie veto
+/// (§10, resolver v6) stays off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`). Everything downstream of `from` is then held
+/// to the post-edit rules.
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
         .await
 }
 
@@ -506,7 +518,7 @@ async fn build_box(
         ),
     );
     add_op(rt, extrude_record(extrude_rec, sid, depth));
-    let rep = regen_all(rt).await;
+    let rep = clean_regen(rt).await;
     let _ = published(&rep, "box");
     let body = BodyId(Uuid::from_u128(extrude_rec));
     let mesh = body_mesh(rt, body).await;
@@ -535,7 +547,7 @@ async fn build_plate(
         ),
     );
     add_op(rt, extrude_record(extrude_rec, sid, thickness));
-    let rep = regen_all(rt).await;
+    let rep = clean_regen(rt).await;
     let _ = published(&rep, "plate");
     let body = BodyId(Uuid::from_u128(extrude_rec));
     let mesh = body_mesh(rt, body).await;
@@ -575,7 +587,7 @@ async fn simple_through_hole_removes_the_exact_cylinder() {
         &mut rt,
         hole_record(HOLE_A, hole_params(body, "el_hole_a", top, 6.0)),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "hole");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -629,7 +641,7 @@ async fn through_all_drills_the_full_thickness_of_each_host() {
         &mut rt,
         hole_record(HOLE_B, hole_params(body_b, "el_hole_b", top_b, 6.0)),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "two holes");
     let repair_items = rt.repair_items();
     assert_eq!(
@@ -680,7 +692,7 @@ async fn counterbore_and_countersink_remove_their_analytic_volumes() {
     cs.cs_angle_deg = Some(Scalar::new(90.0));
     add_op(&mut rt, hole_record(HOLE_B, cs));
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "dressed holes");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
 
@@ -722,7 +734,7 @@ async fn editing_the_diameter_redrills_the_hole() {
 
     let params = hole_params(body, "el_hole_a", top, 6.0);
     add_op(&mut rt, hole_record(HOLE_A, params.clone()));
-    published(&regen_all(&mut rt).await, "hole Ø6");
+    published(&clean_regen(&mut rt).await, "hole Ø6");
     let want6 = 10000.0 - removed_volume(6.0, 25.0, None, None);
     let got6 = exact_volume(&wm, body).await;
     assert!((got6 - want6).abs() < want6 * 1e-9, "Ø6: {got6} vs {want6}");
@@ -737,7 +749,8 @@ async fn editing_the_diameter_redrills_the_hole() {
         op: Operation::Known(KnownOperation::Hole(widened)),
     })
     .expect("UpdateOperationParams(Hole)");
-    let rep = regen_all(&mut rt).await;
+    // The edit lands ON the hole — step 2 (0 sketch, 1 extrude, 2 hole).
+    let rep = regen_from(&mut rt, 2).await;
     let snap = published(&rep, "hole Ø10");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -812,7 +825,7 @@ async fn hole_preview_matches_the_commit() {
 
     // The SAME record commits and lands where the preview promised.
     add_op(&mut rt, candidate);
-    published(&regen_all(&mut rt).await, "commit");
+    published(&clean_regen(&mut rt).await, "commit");
     let committed = body_mesh(&mut rt, body).await;
     let committed_view = validate_mesh_blob(&committed).expect("committed MESH1");
     assert_eq!(
@@ -840,7 +853,7 @@ async fn a_point_off_the_face_fails_loudly_and_recoverably() {
     let mut params = hole_params(body, "el_hole_a", top, 6.0);
     params.point = Vec3::new_unchecked(top.x, top.y, top.z + 10.0);
     add_op(&mut rt, hole_record(HOLE_A, params));
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "off-face hole");
 
     // Recoverable: the step errors by name, the prior geometry survives intact.
@@ -881,7 +894,7 @@ async fn saved_hole_reopens_identically() {
         params.cb_diameter = Some(Scalar::new(11.0));
         params.cb_depth = Some(Scalar::new(6.6));
         add_op(&mut rt, hole_record(HOLE_A, params));
-        published(&regen_all(&mut rt).await, "session-1 hole");
+        published(&clean_regen(&mut rt).await, "session-1 hole");
         let volume = exact_volume(&wm, body).await;
         // Pin the ABSOLUTE outcome, so a broken lane cannot make session-1 ==
         // session-2 vacuously true.
@@ -898,7 +911,7 @@ async fn saved_hole_reopens_identically() {
     // ── Session 2: FRESH runtime on a FRESH worker ───────────────────────────
     let wm = spawn_worker(bin).await;
     let mut rt = open_over(&wm, &doc);
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "reopen regen");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -979,7 +992,7 @@ async fn a_cross_body_element_ref_never_drills_the_wrong_body() {
         hole_record(HOLE_B, hole_params(body_b, "el_shared", top_b, 2.0)),
     );
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "cross-body hole");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -1111,7 +1124,7 @@ async fn hole_host_face_rebind_moves_the_drill_to_the_repicked_face() {
         &mut rt,
         hole_record(HOLE_A, hole_params(body, "el_top_face", top, 6.0)),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     assert_eq!(
         published(&rep, "top hole")
             .repair_summary
@@ -1133,7 +1146,7 @@ async fn hole_host_face_rebind_moves_the_drill_to_the_repicked_face() {
         op: Operation::Known(KnownOperation::Hole(broken)),
     })
     .expect("blind the hole's face ref");
-    let broken_report = regen_all(&mut rt).await;
+    let broken_report = regen_from(&mut rt, 2).await;
     // A ref with NO evidence must produce a deterministic NeedsRepair, never a
     // plausible-looking drill. (This is also the case that exposed the empty-anchor
     // protocol defect — see `wire::parse_needs_repair`. Before that fix this regen
@@ -1161,7 +1174,7 @@ async fn hole_host_face_rebind_moves_the_drill_to_the_repicked_face() {
         reference: InputRef::Element(face_ref(body, &ElementId::new("el_side_face"), side)),
     })
     .expect("EditOperationInput{HoleFace} is accepted for a Hole record");
-    let rep = regen_all(&mut rt).await;
+    let rep = regen_from(&mut rt, 2).await;
     let snap = published(&rep, "repaired hole");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -1205,7 +1218,7 @@ async fn hole_face_rebind_is_refused_without_identity_or_on_the_wrong_op() {
         &mut rt,
         hole_record(HOLE_A, hole_params(body, "el_top_face", top, 6.0)),
     );
-    let _ = regen_all(&mut rt).await;
+    let _ = clean_regen(&mut rt).await;
 
     // Evidence-only ref (no `primary`): an explicit user re-pick that silently
     // fell through to the ladder would defeat the point of re-picking.
@@ -1260,7 +1273,7 @@ async fn threaded_hole_matches_the_unthreaded_removed_volume() {
     params.depth = Some(Scalar::new(8.0));
     params.thread = Some(hole_thread(Scalar::new(1.0)));
     add_op(&mut rt, hole_record(HOLE_A, params));
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "threaded hole");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
 
@@ -1292,7 +1305,7 @@ async fn saved_threaded_hole_round_trips_the_block() {
         params.depth = Some(Scalar::new(8.0));
         params.thread = Some(hole_thread(Scalar::new(1.0)));
         add_op(&mut rt, hole_record(HOLE_A, params));
-        published(&regen_all(&mut rt).await, "threaded hole, session 1");
+        published(&clean_regen(&mut rt).await, "threaded hole, session 1");
         let volume = exact_volume(&wm, body).await;
         rt.save(&doc, save_meta()).expect("save");
         wm.shutdown().await;
@@ -1324,7 +1337,7 @@ async fn saved_threaded_hole_round_trips_the_block() {
 
     let wm = spawn_worker(bin).await;
     let mut rt = open_over(&wm, &doc);
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "threaded hole, reopen");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     assert_eq!(rt.head_body_ids(), vec![body]);
@@ -1363,7 +1376,7 @@ async fn expression_driven_thread_pitch_substitutes_and_breaks_loudly_when_undef
 
     // The binding resolves: no EXPR_UNRESOLVED, and geometry is unaffected
     // (Option B — pitch never drives the drill).
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "threaded hole, pitch = p");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     assert!(expr_diagnostic(&rt, HOLE_A).is_none());
@@ -1375,7 +1388,9 @@ async fn expression_driven_thread_pitch_substitutes_and_breaks_loudly_when_undef
     // really wired into the substitution pass, not silently skipped.
     rt.apply(EditCommand::RemoveVariable { variable: pitch_id })
         .expect("RemoveVariable p");
-    let report = regen_all(&mut rt).await;
+    // A variable edit dirties the whole timeline (`edit::session` §"SetVariable"),
+    // so the edit lane claims `editedFrom = 0`.
+    let report = regen_from(&mut rt, 0).await;
     assert_eq!(
         row_status(&rt, HOLE_A),
         FeatureStatus::Error,
@@ -1423,7 +1438,7 @@ async fn plate_hole_survives_commit_and_reopen() {
         let (body, top) = build_plate(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 100.0, 100.0, 5.0).await;
         let params = hole_params(body, "el_hole_plate", top, 6.0);
         add_op(&mut rt, hole_record(HOLE_A, params));
-        let rep = regen_all(&mut rt).await;
+        let rep = clean_regen(&mut rt).await;
         let snap = published(&rep, "plate hole commit");
         assert_eq!(
             snap.repair_summary.needs_repair_count, 0,
@@ -1442,7 +1457,7 @@ async fn plate_hole_survives_commit_and_reopen() {
 
     let wm = spawn_worker(bin).await;
     let mut rt = open_over(&wm, &doc);
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "plate hole reopen");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,

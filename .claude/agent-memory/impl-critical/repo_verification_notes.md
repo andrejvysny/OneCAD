@@ -77,6 +77,24 @@ nothing unless it is shown to fail without the fix.
 - `src/tools/sketch/projectTool.ts` contains a literal NUL byte (a `${bodyId}\x00${mode}` group
   key), so git classifies it as BINARY: `git diff` shows `Bin <n> -> <m>` and no hunks. Read the
   file to review a change there.
+- `scripts/build-worker.sh` can leave a ctest binary STALE: make/ninja treat source mtime ==
+  binary mtime as up to date, which is exactly what a `cp`-restored backup produces within the
+  same second. After restoring a source from a backup, `touch` it before rebuilding, or you will
+  run the previous binary and believe its output. (Tell: output from code no longer in the file.)
+- To prove a C++ test is red-first without reverting a multi-file diff, install ONE surgical probe
+  per mechanism (`if (false) return ...;` on a guard, `nullptr` in place of an evidence pointer,
+  the pre-fix early-return restored), rebuild only the affected targets, then `cp` the scratchpad
+  backups back and run a bare `diff` per file. Probes in DIFFERENT mechanisms can share one build
+  as long as their target assertions are disjoint.
+- Red-first for an ATOMICITY pin (a rollback assertion): you cannot break the rollback safely, so
+  instead mutate the observed job right AFTER the call (`topology_owners.add(...)`,
+  `bodies.create(...)`, `last = "..."`) and confirm the conjunct fires. That proves the conjunct is
+  live rather than vacuous.
+- Before blaming your diff for a red ctest target, prove pre-existence: `git show HEAD:<file> >
+  <file>` for your WHOLE diff, rebuild that one target, run it, then restore from a scratchpad
+  copy. (2026-09-13: `chamfer_reference_face` #190 was red at HEAD 65b4c60 for an unrelated
+  reason and was fixed by a concurrent agent mid-session — assuming either way would have been
+  wrong.)
 - Red-first for a FRONTEND change: `cp` the module to the scratchpad, patch the one expression
   with a short `python3` heredoc, run the single vitest/Playwright test, then `cp` the backup
   back. Playwright's `-g "<substring>"` runs one test in ~40 s including the vite boot.

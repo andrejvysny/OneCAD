@@ -286,11 +286,12 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
 
   // ── (f) HOST-BOOLEAN: the op defaults to MODIFYING the host, not a new body ─
   // This sketch is hosted on that body's face, so the arm opens on Add against it
-  // — the Shapr3D push/pull expectation. The segments themselves are behind the
-  // chip's `⋯`; the COLLAPSED readout is what the user sees change, and it is
-  // what this spec asserts, because a dismiss-on-outside-press popover cannot
-  // stay open across a viewport drag.
-  await expect(page.getByTestId("chip-mode-readout")).toHaveText("Add");
+  // — the Shapr3D push/pull expectation. The boolean SEGMENTS live in the
+  // inspector now (WP 2C/2D: compact chip + stable inspector), and the compact
+  // chip keeps only the resolved-mode BADGE — `chip-mode-badge`, which replaced
+  // the old overflow readout `chip-mode-readout` on this chip. The badge is what
+  // the user sees change, and it survives a viewport drag (a popover would not).
+  await expect(page.getByTestId("chip-mode-badge")).toHaveText("Add");
   expect((await extrudeDebug(page))?.booleanMode).toBe("Add");
 
   // Direction-aware, live: the +depth screen direction is (handle − plane point),
@@ -303,14 +304,14 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
   await dragExtrudeTo(page, into);
   expect((await extrudeDebug(page))?.depth as number).toBeLessThan(0); // really went in
   expect((await extrudeDebug(page))?.booleanMode).toBe("Cut");
-  await expect(page.getByTestId("chip-mode-readout")).toHaveText("Cut");
+  await expect(page.getByTestId("chip-mode-badge")).toHaveText("Cut");
 
   // …and back out again — the flip is live in BOTH directions, so the commit
   // below is an additive push/pull.
   await dragExtrudeTo(page, armedHandle);
   expect((await extrudeDebug(page))?.depth as number).toBeGreaterThan(0);
   expect((await extrudeDebug(page))?.booleanMode).toBe("Add");
-  await expect(page.getByTestId("chip-mode-readout")).toHaveText("Add");
+  await expect(page.getByTestId("chip-mode-badge")).toHaveText("Add");
 
   await page.keyboard.press("Enter"); // explicit confirm → commit
   await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 10_000 });

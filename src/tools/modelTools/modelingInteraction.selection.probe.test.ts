@@ -65,6 +65,8 @@ describe("modeling interaction contract — boolean success selection", () => {
       engine: makeEngineMock() as unknown as ViewportEngine,
       client: {
         onPreviewResult: vi.fn(() => () => {}),
+        onDocumentChanged: vi.fn(() => () => {}),
+        getCurrentMeshPublication: vi.fn(() => null),
         applyOperation: vi.fn(() => Promise.resolve(result)),
         applyEditCommand: vi.fn(() => Promise.resolve(result)),
         getOperationParams: vi.fn(() => Promise.resolve({ ...STORED_CUT })),

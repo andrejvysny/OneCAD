@@ -121,8 +121,19 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
-async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, or save → reopen). `RevertToEnd` makes NO SCHEMA
+/// §7.2 `editedFrom` claim, so the §10 v6 post-edit descriptor-tie veto stays
+/// off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
         .await
 }
 
@@ -591,7 +602,7 @@ async fn build_box(rt: &mut DocumentRuntime, sid: SketchId, depth: f64) -> (Body
         sketch_record(SKETCH_REC, &rect_sketch(sid, 0x1000, 0.0, 0.0, 20.0, 20.0)),
     );
     add_op(rt, extrude_record(EXTRUDE_REC, sid, depth));
-    let report = regen_all(rt).await;
+    let report = clean_regen(rt).await;
     let _ = published(&report, "stock box");
     (body_of(EXTRUDE_REC), SnapshotId(report.snapshot_id))
 }
@@ -666,7 +677,7 @@ async fn offset_top_face_grows_box() {
             },
         ),
     );
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let snapshot = published(&report, "offset top face");
     assert_eq!(
         snapshot.repair_summary.needs_repair_count, 0,
@@ -724,7 +735,7 @@ async fn offset_face_radius_resizes_cylinder_boss() {
         sketch_record(SKETCH_REC, &circle_sketch(sid, 0x2000, 0.0, 0.0, 10.0)),
     );
     add_op(&mut rt, extrude_record(EXTRUDE_REC, sid, 25.0));
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let _ = published(&report, "cylinder boss");
     let body = body_of(EXTRUDE_REC);
     let snap = SnapshotId(report.snapshot_id);
@@ -785,7 +796,7 @@ async fn offset_face_radius_resizes_cylinder_boss() {
             },
         ),
     );
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let snapshot = published(&report, "radius offset");
     assert_eq!(snapshot.repair_summary.needs_repair_count, 0);
     assert_eq!(snapshot.stopped_reason, StoppedReason::Completed);
@@ -850,7 +861,7 @@ async fn offset_survives_benign_upstream_edit() {
             },
         ),
     );
-    let _ = published(&regen_all(&mut rt).await, "offset before edit");
+    let _ = published(&clean_regen(&mut rt).await, "offset before edit");
     let before = exact_volume(&wm, body).await;
     assert!(
         (before - 12_000.0).abs() < 1e-6,
@@ -872,7 +883,8 @@ async fn offset_survives_benign_upstream_edit() {
         op: extrude_op(sid, 30.0),
     })
     .expect("edit the source extrude depth");
-    let report = regen_all(&mut rt).await;
+    // The edit lands ON the extrude — step 1 (0 sketch, 1 extrude, 2 offsetFace).
+    let report = regen_from(&mut rt, 1).await;
     let snapshot = published(&report, "offset after upstream edit");
     assert_eq!(
         snapshot.repair_summary.needs_repair_count, 0,
@@ -942,7 +954,7 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
             },
         ),
     );
-    let _ = published(&regen_all(&mut rt).await, "offset baseline");
+    let _ = published(&clean_regen(&mut rt).await, "offset baseline");
     assert!(
         (exact_volume(&wm, body).await - 12_000.0).abs() < 1e-6,
         "precondition: the offset APPLIES on the clean box"
@@ -956,7 +968,8 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
         op: sketch_op(&rect_sketch(sid, 0x1000, 500.0, 500.0, 3.0, 2.0)),
     })
     .expect("edit sketch (destructive)");
-    let broken = regen_all(&mut rt).await;
+    // The edit lands ON the sketch — step 0.
+    let broken = regen_from(&mut rt, 0).await;
     let snapshot = published(&broken, "destructive edit").clone();
 
     // (1) Deterministic NeedsRepair — never a silent bind onto the tiny box's cap.
@@ -996,7 +1009,8 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
             .collect()
     };
     let items_a = key(&rt);
-    let replay = regen_all(&mut rt).await;
+    // The SAME lane as `broken` — a determinism probe must not change provenance.
+    let replay = regen_from(&mut rt, 0).await;
     let _ = published(&replay, "destructive replay");
     assert_eq!(
         items_a,
@@ -1050,7 +1064,8 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
     })
     .expect("EditOperationInput{OffsetFaceFace{0}} is accepted for an OffsetFace record");
 
-    let fixed = regen_all(&mut rt).await;
+    // The repair lands ON the offset — step 2.
+    let fixed = regen_from(&mut rt, 2).await;
     let snapshot = published(&fixed, "repaired offset");
     assert_eq!(
         snapshot.repair_summary.needs_repair_count, 0,
@@ -1217,7 +1232,7 @@ async fn prepare_offset_face_handshake_and_fence() {
             },
         ),
     );
-    let moved = regen_all(&mut rt).await;
+    let moved = clean_regen(&mut rt).await;
     let head = SnapshotId(moved.snapshot_id);
     assert_ne!(head, snap, "the edit published a NEW head");
 
@@ -1293,7 +1308,7 @@ async fn offset_face_deterministic_across_processes() {
                 },
             ),
         );
-        let report = regen_all(&mut rt).await;
+        let report = clean_regen(&mut rt).await;
         let snapshot = published(&report, "determinism offset");
         assert_eq!(snapshot.repair_summary.needs_repair_count, 0);
         let signature = snapshot
@@ -1379,7 +1394,7 @@ async fn offset_face_v3_record_survives_save_and_reopen() {
             },
         ),
     );
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     assert_eq!(
         published(&report, "V3 offset").stopped_reason,
         StoppedReason::Completed
@@ -1411,7 +1426,7 @@ async fn offset_face_v3_record_survives_save_and_reopen() {
     let meshes: Arc<dyn MeshProvider> = Arc::new(wm2.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(wm2.clone());
     let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
-    let report2 = regen_all(&mut reopened).await;
+    let report2 = clean_regen(&mut reopened).await;
     let snapshot2 = published(&report2, "reopened V3 document");
     assert_eq!(snapshot2.stopped_reason, StoppedReason::Completed);
     assert_eq!(

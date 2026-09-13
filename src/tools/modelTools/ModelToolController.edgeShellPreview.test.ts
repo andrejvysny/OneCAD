@@ -32,6 +32,7 @@ import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { canConfirmActiveTool } from "./activeToolPresentation";
 import { resetStores } from "@/test/resetStores";
 import { operationAttemptStore } from "@/stores/operationAttemptStore";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
@@ -135,6 +136,8 @@ function makeClientMock(
       capturePreview?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
     prepareEdgeOp: vi.fn(() =>
@@ -768,6 +771,76 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
       },
     });
     expect(clientMock.endPreview).not.toHaveBeenCalled();
+  });
+
+  it("a re-edit is CONFIRMABLE: the typed context survives, so ✓ is enabled and Enter commits", async () => {
+    // The re-edit's own chip is the single commit path (see the spec above), but
+    // `toolChipStore.showFillet` re-seats the chip from CLEARED — which nulls
+    // `context` — and `setContext` only lands on a chip whose kind already matches.
+    // Without a republish `canConfirmActiveTool` is false, which DISABLES the ✓
+    // button (`ModelToolChips.tsx`) and drops Enter out of `armedConfirm`'s table,
+    // so a fillet/chamfer edited from history could never be applied at all.
+    // Calling `onConfirm?.()` directly cannot see this — it bypasses the gate.
+    build();
+    documentStore.setState({
+      features: [
+        { id: "feat-fi", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+      ],
+    });
+    await controller.editEdgeOpFeature("feat-fi", "Fillet");
+    await flush();
+
+    // The context names the record's STORED typed edges — a re-edit has no picks.
+    const context = toolChipStore.getState().context;
+    expect(context?.tool).toBe("filletRadius");
+    expect(canConfirmActiveTool(toolChipStore.getState())).toBe(true);
+
+    toolChipStore.getState().onValue?.(4);
+    // The REAL key path: capture-phase Enter on `window`, with no editable focus.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+
+    expect(clientMock.applyEditCommand).toHaveBeenCalledTimes(1);
+    expect(clientMock.applyEditCommand).toHaveBeenCalledWith({
+      cmd: "updateOperationParams",
+      record: "feat-fi",
+      op: {
+        opType: "Fillet",
+        params: {
+          radius: { value: 4 },
+          edgeIds: ["el-edge-5"],
+          edges: [{ primary: { bodyId: "body1", elementId: "el-edge-5", kind: "edge" } }],
+        },
+      },
+    });
+  });
+
+  it("the CHAMFER re-edit is confirmable too, in both the two-leg and the angle mode", async () => {
+    for (const stored of [
+      { radius: { value: 2 }, distance2: { value: 3 } },
+      { radius: { value: 2 }, angleDeg: { value: 30 } },
+    ]) {
+      build();
+      clientMock.getOperationParams.mockResolvedValue({
+        ...stored,
+        edgeIds: ["el-edge-5"],
+        edges: [{ primary: { bodyId: "body1", elementId: "el-edge-5", kind: "edge" } }],
+      });
+      documentStore.setState({
+        features: [
+          { id: "feat-ch", kind: "fillet", opType: "Chamfer", label: "Chamfer", valueText: "2.0 mm", status: "ok" },
+        ],
+      });
+      await controller.editEdgeOpFeature("feat-ch", "Chamfer");
+      await flush();
+      // `loadEdgeOpEditClosure` resolves a tick later and re-publishes the context
+      // through `pushChamferFlipToChip` — the gate must still be open afterwards.
+      await flush();
+      await flush();
+
+      expect(canConfirmActiveTool(toolChipStore.getState())).toBe(true);
+      controller.dispose();
+    }
   });
 
   it("the edge-op re-edit's result hint SURVIVES its reset to select", async () => {

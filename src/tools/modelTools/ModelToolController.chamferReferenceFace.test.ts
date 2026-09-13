@@ -108,6 +108,8 @@ function makeClientMock(
       capturePreview?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
     prepareEdgeOp: vi.fn(() =>

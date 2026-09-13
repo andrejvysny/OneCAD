@@ -1,4 +1,4 @@
-- [Frontend gotchas](frontend-gotchas.md) — engine doubles, five places to register a tool, beginPreview freezes inputs[], palette rows are registry commands, applySnapshot merges
+- [Frontend gotchas](frontend-gotchas.md) — engine doubles, showXxx nulls chip context, chip-vs-inspector split, mock lane had no mesh publication, stale chain anchors after a solve, first-vs-second-click snap asymmetry
 - [Projection seams](projection-seams.md) — PROJECTION_STALE has no evidence, feature rows have no sketch id, why every projection verb re-enters the sketch
 - [Core record gotchas](core-record-gotchas.md) — inputs re-derived on deserialize, ~65 SketchRegionRef literals, no regex on struct literals, insta snaps by hand
 - [Edge-op authoring seams](edge-op-authoring-seams.md) — the four seams a fillet/chamfer param must cross, core-serde vs OCW1, re-edit is a whole-op replace
@@ -6,3 +6,4 @@
 - [Fillet acceptance gate](fillet-acceptance-gate.md) — 1e-9 section/tangency gate refuses walked blends by ~1e6x; analytic blends measure 1e-16; how to probe it
 - [Supervisor + stub lanes](repo_supervisor_and_stub_lanes.md) — SupervisorConfig/WorkerHead fan-out, GeometryEngine default+forward rule, no tokio `rt` in core, stub's three threads
 - [Native menu lane](native-menu-lane.md) — muda's main-thread panic kills a build() test, predefined items steal OS chords, the duplicate-client emit trap, noRegenWhen
+- [Regen provenance in tests](regen-provenance-in-tests.md) — RevertToEnd vs ToEnd{from} in real-worker tests; v6 blanket-refuses anchor-only refs downstream of editedFrom

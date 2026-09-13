@@ -36,7 +36,7 @@ use onecad_core::document::record::{
 use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
 };
-use onecad_core::document::repair::RepairReason;
+use onecad_core::document::repair::{LadderLevel, RepairReason};
 use onecad_core::document::variables::Scalar;
 use onecad_core::document::Document;
 use onecad_core::edit::{EditCommand, InputPath, InputRef};
@@ -111,8 +111,19 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
 async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
     rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
+        .await
+}
+
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, undo, or save → reopen — `open_document` requests
+/// exactly this). `RevertToEnd` makes NO SCHEMA §7.2 `editedFrom` claim, so the
+/// §10 v6 post-edit descriptor-tie veto stays off.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
         .await
 }
 
@@ -623,7 +634,7 @@ async fn stock_box(bin: PathBuf) -> Stock {
         sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, BOX_U, BOX_V)),
     );
     add_op(&mut rt, extrude_record(EXTRUDE_A, sa, BOX_H));
-    let report = regen_from(&mut rt, 0).await;
+    let report = clean_regen(&mut rt).await;
     let snapshot = SnapshotId(report.snapshot_id);
     assert_eq!(
         published(&report, "stock box")
@@ -827,7 +838,7 @@ async fn a_typed_reference_face_survives_an_upstream_face_map_reorder() {
             ),
         ),
     );
-    let report = regen_from(&mut stock.rt, 0).await;
+    let report = clean_regen(&mut stock.rt).await;
     let snapshot = SnapshotId(report.snapshot_id);
     assert_eq!(
         published(&report, "typed chamfer")
@@ -889,8 +900,9 @@ async fn a_typed_reference_face_survives_an_upstream_face_map_reorder() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (b) The LEGACY record: replay unchanged, halt on an upstream edit, repair by
-//     CREATING the pair
+// (b) The LEGACY record: halt on open and repair by CREATING the pair, then halt
+//     AGAIN under §10 resolver v6 once an upstream edit lands, and repair that
+//     too
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A LEGACY asymmetric chamfer — `distance2` and NO pairs — is a record this build
@@ -902,6 +914,14 @@ async fn a_typed_reference_face_survives_an_upstream_face_map_reorder() {
 /// So this reproduces it the honest way — write the container by hand and open it
 /// through the production path — rather than through any sanctioned command. Mirrors
 /// `scheduler_commit::legacy_container_without_sketch_records_extrudes_after_open`.
+///
+/// Under SCHEMA §10 resolver v6 (decision D-3) such a record halts TWICE more once
+/// an upstream edit lands, and this test walks both halts to a working model:
+/// v6 refuses the record's ANCHOR-ONLY contour edge post-edit (a descriptor tie it
+/// will not let an anchor decide), and the core then refuses to move that contour
+/// without its reference face, so the repair is one `UpdateOperationParams`
+/// authoring the complete typed set. Deterministic NeedsRepair beats a silent bind;
+/// the test's job is to prove the user can still get back.
 fn legacy_container(path: &Path, sketch: &Sketch, body: BodyId, edge: &ElementId, edge_at: Vec3) {
     let mut doc = Document::new(DocumentId::new());
     doc.sketches.insert(sketch.id, sketch.clone());
@@ -930,7 +950,7 @@ fn save_meta() -> SaveMeta {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_legacy_asymmetric_chamfer_halts_needs_repair_once_an_upstream_edit_lands() {
+async fn a_legacy_asymmetric_chamfer_halts_on_open_and_twice_more_after_an_upstream_edit() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
         return;
@@ -953,12 +973,23 @@ async fn a_legacy_asymmetric_chamfer_halts_needs_repair_once_an_upstream_edit_la
     stock.rt = DocumentRuntime::open(&path, engine, meshes, solver).expect("open legacy");
     stock.wm = wm;
 
-    // ── EVERY LANE HALTS. The ordinal fallback is GONE (WP-F review, 2026-09-04):
-    // an uncovered contour halts regardless of SCHEMA §7.2 `editedFrom`, because
-    // gating it on the edit claim made the guard fire on open and vanish on redo.
-    // Both replay lanes are asserted, because they make OPPOSITE `editedFrom`
-    // claims: `RevertToEnd` makes none at all, and `ToEnd { from: 0 }` — the lane a
-    // REOPEN uses — claims `editedFrom: 0` (kernel-hardening WP-A).
+    // ── THE OPEN LANE HALTS. The ordinal fallback is GONE (WP-F review,
+    // 2026-09-04): an uncovered contour halts regardless of SCHEMA §7.2
+    // `editedFrom`, because gating it on the edit claim made the guard fire on
+    // open and vanish on redo.
+    //
+    // Only ONE replay lane is asserted. This used to assert a second,
+    // `ToEnd { from: 0 }` lane on the grounds that "a reopen replays
+    // `ToEnd { from: 0 }`" — that is no longer true:
+    // `api::enqueue_initial_regen_if_current` mints `RevertToEnd { from: 0 }` for
+    // new / open / import / restart, so NO production path replays a just-opened
+    // document while claiming an upstream edit. That probe pinned a lane no user
+    // can reach, and under §10 resolver v6 it no longer reaches this guard at all:
+    // the legacy record's edge ref is ANCHOR-ONLY, an anchor-only ref scores 0 in
+    // descriptor space against every candidate, and v6 refuses such a descriptor
+    // tie outright post-edit (`Ladder.cpp`, EDIT-SCOPED DESCRIPTOR-TIE VETO), so
+    // the step halts one rung earlier — on the edge, before the op can build its
+    // `LegacyReferenceFace` item.
     let halted_in = |rt: &DocumentRuntime, lane: &str| {
         let items = rt.repair_items().to_vec();
         let want = format!("{chamfer}.input1");
@@ -978,42 +1009,27 @@ async fn a_legacy_asymmetric_chamfer_halts_needs_repair_once_an_upstream_edit_la
         );
     };
 
-    let report = stock
-        .rt
-        .run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
-        .await;
-    let _ = published(&report, "legacy replay, no edit claim");
-    halted_in(&stock.rt, "RevertToEnd{from:0} (no editedFrom claim)");
+    // SCHEMA §7.3 records the halt-once migration path: no evidence of the
+    // intended face was ever persisted, so a deterministic halt the user answers
+    // with one pick is the honest outcome.
+    let report = clean_regen(&mut stock.rt).await;
+    let _ = published(&report, "legacy replay, the reopen lane");
+    halted_in(&stock.rt, "RevertToEnd{from:0} (the reopen lane)");
 
-    // A reopen replays `ToEnd { from: 0 }`. SCHEMA §7.3 records the halt-once
-    // migration path: no evidence of the intended face was ever persisted, so a
-    // deterministic halt the user answers with one pick is the honest outcome.
-    let report = regen_from(&mut stock.rt, 0).await;
-    let _ = published(&report, "legacy replay, reopen-style");
-    halted_in(&stock.rt, "ToEnd{from:0} (the reopen lane)");
-
-    // ── The upstream edit. Now the ordinal-derived choice is untrustworthy, so the
-    // step HALTS instead of silently mirroring the legs.
-    stock
-        .rt
-        .apply(EditCommand::SetRollback { cursor: 2 })
-        .expect("roll back to the extrude");
-    add_op(
-        &mut stock.rt,
-        hole_record(HOLE, stock.body, &stock.end_wall, stock.end_wall_at),
-    );
-    stock
-        .rt
-        .apply(EditCommand::SetRollback { cursor: 4 })
-        .expect("re-apply the whole timeline");
-    let report = regen_from(&mut stock.rt, 2).await;
+    // ── ANSWER IT, on the lane it was raised on. SCHEMA §7.3's halt-once migration
+    // is a ONE-PICK story, so the test has to show the pick landing: the §7.5 dry
+    // run offers the seed edge's two adjacent faces, the user chooses the top, and
+    // the pair is CREATED on the empty slot. Everything below the upstream edit
+    // then starts from a record that is TYPED, which is the state a real document
+    // reaches long before anyone edits upstream of it.
+    // The halt's full shape on the lane the user actually meets it on.
     let snapshot = SnapshotId(report.snapshot_id);
 
     let items = stock.rt.repair_items().to_vec();
     // N = 1 edge ref, 0 pairs ⇒ the pair the repair creates lands on slot 1.
     let want = format!("{chamfer}.input1");
     let item = items.iter().find(|i| i.ref_id == want).unwrap_or_else(|| {
-        panic!("the chamfer step halts needsRepair after the upstream edit, got {items:?}")
+        panic!("the chamfer step halts needsRepair on the PAIR slot, got {items:?}")
     });
     assert_eq!(
         item.reason,
@@ -1231,6 +1247,207 @@ async fn a_legacy_asymmetric_chamfer_halts_needs_repair_once_an_upstream_edit_la
         })
         .expect("the §9 repair CREATES the pair on the empty slot");
 
+    let report = clean_regen(&mut stock.rt).await;
+    let snapshot = SnapshotId(report.snapshot_id);
+    assert!(
+        report.failed_steps.is_empty(),
+        "the repaired chamfer must not fail on the open lane: {:?}",
+        report.failed_steps
+    );
+    assert_eq!(
+        published(&report, "repaired chamfer")
+            .repair_summary
+            .needs_repair_count,
+        0,
+        "one pick closes the OPEN-lane halt — the record is typed from now on"
+    );
+    let area = face_area(&stock.wm, snapshot, stock.body, picked.as_str()).await;
+    assert!(
+        (area - TOP_AREA_CHAMFERED).abs() < 1e-6,
+        "the repaired record measures `radius` on the face the USER chose: expected \
+         {TOP_AREA_CHAMFERED} mm², got {area}"
+    );
+
+    // ── The upstream edit. Now the ordinal-derived choice is untrustworthy, so the
+    // step HALTS instead of silently mirroring the legs.
+    stock
+        .rt
+        .apply(EditCommand::SetRollback { cursor: 2 })
+        .expect("roll back to the extrude");
+    add_op(
+        &mut stock.rt,
+        hole_record(HOLE, stock.body, &stock.end_wall, stock.end_wall_at),
+    );
+    stock
+        .rt
+        .apply(EditCommand::SetRollback { cursor: 4 })
+        .expect("re-apply the whole timeline");
+    let report = regen_from(&mut stock.rt, 2).await;
+
+    // ── HALT 1 of 2, THE SEED EDGE (SCHEMA §10 resolver v6; decision D-3).
+    //
+    // The legacy record's edge ref is ANCHOR-ONLY — `primary` + `anchor`, no
+    // `intent` — and the container it came out of carries no element map, so the
+    // id cannot resolve at rung 1 and the ladder falls to the descriptor stage.
+    // An anchor-only ref scores 0 in descriptor space against EVERY candidate, so
+    // its separation from its best rival is exactly 0: a descriptor tie. v6 refuses
+    // that outright for any step downstream of `editedFrom` (`Ladder.cpp`,
+    // EDIT-SCOPED DESCRIPTOR-TIE VETO — v6 removed v5's anchor-exact carve-out,
+    // because exactness at a STALE world point cannot prove continuity once the
+    // geometry moved). The chamfer sits at step 3 and the hole edit claims
+    // `editedFrom = 2`, so the edge halts BEFORE the op can build its pair item.
+    //
+    // This is the designed direction, not a regression: a deterministic NeedsRepair
+    // the user answers with one pick beats a silent bind onto a congruent twin.
+    let edge_slot = format!("{chamfer}.input0");
+    let items = stock.rt.repair_items().to_vec();
+    let edge_item = items
+        .iter()
+        .find(|i| i.ref_id == edge_slot)
+        .unwrap_or_else(|| {
+            panic!(
+                "v6 halts the legacy chamfer on its ANCHOR-ONLY edge ref FIRST \
+                 (input0), got {items:?}"
+            )
+        })
+        .clone();
+    assert_eq!(
+        edge_item.ladder_failed,
+        LadderLevel::Descriptor,
+        "the edge fell through to the descriptor stage — rung 1 has no element map"
+    );
+    assert_eq!(
+        edge_item.reason,
+        RepairReason::Ambiguous,
+        "v6 reports a refused descriptor tie as `ambiguous`"
+    );
+    assert_eq!(
+        edge_item.scoring_version,
+        Some(6),
+        "the refusal must be attributable to resolver v6"
+    );
+    assert!(
+        edge_item.candidates.len() >= 2,
+        "a tie needs rivals: the panel offers the user a choice, got {:?}",
+        edge_item.candidates
+    );
+    assert!(
+        stock
+            .rt
+            .repair_items()
+            .iter()
+            .all(|i| i.ref_id != format!("{chamfer}.input1")),
+        "the op never ran, so the pair slot cannot be halted yet: {:?}",
+        stock.rt.repair_items()
+    );
+
+    // ── THE REPAIR IS ONE COMMAND, AND THE CORE INSISTS. The obvious move — rebind
+    // the edge slot alone through SCHEMA §9's `EditOperationInput` — is REFUSED by
+    // name, twice over: `referenceFaces` is keyed by edge id (§7.3), so moving
+    // `edgeIds[0]` on its own would orphan the pair the open-lane repair just
+    // created, and on a record that still had no pairs the same command would be
+    // refused for introducing an uncovered asymmetry. Both guards say the same
+    // thing: an asymmetric chamfer's contour and its reference face move TOGETHER.
+    let edge_pick = edge_item.candidates[0].clone();
+    assert!(
+        (edge_pick.world_pos.x - stock.edge_at.x).abs() < 1e-6
+            && (edge_pick.world_pos.y - stock.edge_at.y).abs() < 1e-6
+            && (edge_pick.world_pos.z - stock.edge_at.z).abs() < 1e-6,
+        "v6 refused the edge on principle, not on evidence — the top-ranked \
+         candidate is still the edge the record always meant, at {:?}; got {:?}",
+        stock.edge_at,
+        edge_pick.world_pos
+    );
+    let snapshot = SnapshotId(report.snapshot_id);
+
+    // Both picks are promoted against THIS head — the panel never reuses a stale id.
+    let promoted_edge = stock
+        .rt
+        .promote_selection(
+            snapshot,
+            stock.body,
+            vec![(
+                edge_pick.topo_key.clone(),
+                Some(AnchorIntent {
+                    world_point: edge_pick.world_pos,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .expect("promote the re-picked contour edge");
+    assert_eq!(promoted_edge[0].kind, "edge");
+    let repaired_edge = ElementId::new(&promoted_edge[0].element_id);
+
+    let refused = stock
+        .rt
+        .apply(EditCommand::EditOperationInput {
+            record: chamfer,
+            path: InputPath::FilletEdges { index: 0 },
+            reference: InputRef::Element(anchored_ref(
+                stock.body,
+                &repaired_edge,
+                ElementKind::Edge,
+                edge_pick.world_pos,
+            )),
+        })
+        .expect_err("moving the contour alone would orphan the pair keyed by it");
+    assert!(
+        format!("{refused}").contains("not in edgeIds"),
+        "the refusal must NAME the broken §7.3 invariant, got: {refused}"
+    );
+
+    let head_top_key = top_plane_topo_key(&stock.wm, stock.body, snapshot, BOX_H).await;
+    let head_top = stock
+        .wm
+        .query_element_by_topo_key(snapshot, stock.body, &head_top_key)
+        .await
+        .expect("QueryElement by topoKey")
+        .expect("the top face resolves on the post-edit head");
+    let head_top_center =
+        Vec3::new_unchecked(head_top.center[0], head_top.center[1], head_top.center[2]);
+    let promoted_top = stock
+        .rt
+        .promote_selection(
+            snapshot,
+            stock.body,
+            vec![(
+                TopoKey::new(head_top_key),
+                Some(AnchorIntent {
+                    world_point: head_top_center,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .expect("promote the reference face on the post-edit head");
+    let picked = ElementId::new(&promoted_top[0].element_id);
+
+    // The sanctioned repair: ONE `UpdateOperationParams` authoring the complete
+    // typed set — the re-picked contour AND the pair keyed by it — which is exactly
+    // what the refusal above tells the caller to do. Both refs are now PROMOTED, so
+    // every later regen resolves them at rung 1, below v6's descriptor lane.
+    stock
+        .rt
+        .apply(EditCommand::UpdateOperationParams {
+            record: chamfer,
+            op: Operation::Known(KnownOperation::Chamfer(chamfer_params(
+                stock.body,
+                &repaired_edge,
+                edge_pick.world_pos,
+                Some((&picked, head_top_center)),
+            ))),
+        })
+        .expect("the complete typed set is the sanctioned repair");
+    stock.edge = repaired_edge;
+    stock.edge_at = edge_pick.world_pos;
+
     let report = regen_from(&mut stock.rt, 2).await;
     let snapshot = SnapshotId(report.snapshot_id);
     assert!(
@@ -1250,6 +1467,38 @@ async fn a_legacy_asymmetric_chamfer_halts_needs_repair_once_an_upstream_edit_la
         (area - TOP_AREA_CHAMFERED).abs() < 1e-6,
         "the repaired record measures `radius` on the face the USER chose: expected \
          {TOP_AREA_CHAMFERED} mm², got {area}"
+    );
+
+    // ── AND IT STAYS CLOSED. A FURTHER edit-lane regen — the same `editedFrom`
+    // claim that produced halt 1 — no longer halts anything: the re-picked edge is
+    // PROMOTED, so it resolves at rung 1 and v6's descriptor lane never runs on it
+    // (SCHEMA §10 v6, decision D-3). Without this the two repairs above would have
+    // proven the user can answer a halt, but not that answering it sticks.
+    let settled = regen_from(&mut stock.rt, 2).await;
+    assert!(
+        settled.failed_steps.is_empty(),
+        "the settled chamfer must not fail: {:?}",
+        settled.failed_steps
+    );
+    assert_eq!(
+        published(&settled, "settled chamfer")
+            .repair_summary
+            .needs_repair_count,
+        0,
+        "a repaired legacy chamfer survives every later edit-lane regen — the \
+         promoted edge resolves at rung 1, below v6's descriptor-tie veto"
+    );
+    let settled_area = face_area(
+        &stock.wm,
+        SnapshotId(settled.snapshot_id),
+        stock.body,
+        picked.as_str(),
+    )
+    .await;
+    assert!(
+        (settled_area - TOP_AREA_CHAMFERED).abs() < 1e-6,
+        "and it still measures `radius` on the SAME face: expected \
+         {TOP_AREA_CHAMFERED} mm², got {settled_area}"
     );
 
     stock.wm.shutdown().await;

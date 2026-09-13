@@ -14,11 +14,37 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { ModelToolChips } from "./ModelToolChips";
 import { ActiveToolInspector } from "@/features/inspector/ActiveToolInspector";
-import { toolChipStore, type HoleChipHandlers } from "@/stores/toolChipStore";
+import { toolChipStore, type HoleChipHandlers, type HoleChipOpts } from "@/stores/toolChipStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
+import { documentStore } from "@/stores/documentStore";
 
 const WORLD: [number, number, number] = [0, 0, 0];
+
+/**
+ * Mirrors ModelToolController.showHoleChip: production always pairs showHole
+ * with setContext("hole", { kind: "faces", ... }), and missingRequiredTargetMessage
+ * (activeToolPresentation.ts) blocks confirm unless that context is present and
+ * its affected body resolves in documentStore. Seed both so confirm-gating tests
+ * exercise the real gate instead of the "no context" fallback message.
+ */
+function showHoleWithContext(
+  diameter: number,
+  world: [number, number, number],
+  handlers: HoleChipHandlers,
+  opts: HoleChipOpts,
+): void {
+  documentStore.setState({
+    bodies: { body1: { id: "body1", name: "Body 1", visible: true } },
+  });
+  toolChipStore.getState().showHole(diameter, world, handlers, opts);
+  toolChipStore.getState().setContext("hole", {
+    tool: "hole",
+    kind: "faces",
+    affectedBodies: [{ bodyId: "body1" }],
+    faces: [],
+  });
+}
 
 function fakeEngine(): ViewportEngine {
   return {
@@ -59,7 +85,7 @@ describe("HoleChipCluster", () => {
 
   it("a simple hole shows the profile segments, Ø, depth and the standards button — and NO conditional pair", () => {
     renderHoleUi();
-    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple", depth: null }));
+    act(() => showHoleWithContext(6.6, WORLD, h, { holeType: "simple", depth: null }));
 
     expect(screen.getByTestId("chip-hole-simple")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByLabelText("Hole diameter (mm)")).toHaveValue("6.6");
@@ -80,7 +106,7 @@ describe("HoleChipCluster", () => {
   it("a counterbore shows ONLY the cb pair", () => {
     renderHoleUi();
     act(() =>
-      toolChipStore.getState().showHole(6.6, WORLD, h, {
+      showHoleWithContext(6.6, WORLD, h, {
         holeType: "counterbore",
         depth: 20,
         cbDiameter: 11,
@@ -98,7 +124,7 @@ describe("HoleChipCluster", () => {
   it("a countersink shows ONLY the cs pair, with the four SCHEMA angles as segments", () => {
     renderHoleUi();
     act(() =>
-      toolChipStore.getState().showHole(6.6, WORLD, h, {
+      showHoleWithContext(6.6, WORLD, h, {
         holeType: "countersink",
         depth: 20,
         csDiameter: 12.4,
@@ -119,9 +145,7 @@ describe("HoleChipCluster", () => {
   it("dispatches the profile flip, the angle pick and ✓/✕", () => {
     renderHoleUi();
     act(() =>
-      toolChipStore
-        .getState()
-        .showHole(6.6, WORLD, h, { holeType: "countersink", csDiameter: 12.4, csAngleDeg: 90 }),
+      showHoleWithContext(6.6, WORLD, h, { holeType: "countersink", csDiameter: 12.4, csAngleDeg: 90 }),
     );
     fireEvent.click(screen.getByTestId("chip-hole-counterbore"));
     expect(h.onHoleType).toHaveBeenCalledWith("counterbore");
@@ -135,14 +159,14 @@ describe("HoleChipCluster", () => {
 
   it("the depth field authors a blind depth, and 'Thru' takes it back to through-all", () => {
     renderHoleUi();
-    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { depth: null }));
+    act(() => showHoleWithContext(6.6, WORLD, h, { depth: null }));
     const depth = screen.getByTestId("chip-hole-depth");
 
     fireEvent.change(depth, { target: { value: "14" } });
     fireEvent.blur(depth);
     expect(h.onDepth).toHaveBeenCalledWith(14);
 
-    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { depth: 14 }));
+    act(() => showHoleWithContext(6.6, WORLD, h, { depth: 14 }));
     const again = screen.getByTestId("chip-hole-depth");
     fireEvent.change(again, { target: { value: "thru" } });
     fireEvent.blur(again);
@@ -158,7 +182,7 @@ describe("HoleChipCluster", () => {
 
   it("the standards popover is closed until asked, and a pick reports thread + fit", () => {
     renderHoleUi();
-    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "counterbore" }));
+    act(() => showHoleWithContext(6.6, WORLD, h, { holeType: "counterbore" }));
     expect(screen.queryByTestId("chip-hole-std-panel")).toBeNull();
 
     fireEvent.click(screen.getByTestId("chip-hole-std"));
@@ -180,7 +204,7 @@ describe("HoleChipCluster", () => {
   // from M3-normal.
   it("the Std cells print the fit's value, and name it with thread + fit + unit", () => {
     renderHoleUi();
-    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple" }));
+    act(() => showHoleWithContext(6.6, WORLD, h, { holeType: "simple" }));
     fireEvent.click(screen.getByTestId("chip-hole-std"));
 
     const m3Close = screen.getByTestId("chip-hole-std-M3-close");
@@ -199,7 +223,7 @@ describe("HoleChipCluster", () => {
 
   it("the thread toggle (WP-T1) swaps the fit pair for a single tap-drill pick", () => {
     renderHoleUi();
-    act(() => toolChipStore.getState().showHole(6.6, WORLD, h, { holeType: "simple" }));
+    act(() => showHoleWithContext(6.6, WORLD, h, { holeType: "simple" }));
     fireEvent.click(screen.getByTestId("chip-hole-std"));
 
     const toggle = screen.getByTestId("chip-hole-thread");
@@ -223,9 +247,7 @@ describe("HoleChipCluster", () => {
   it("a cb dimension edit dispatches the raw millimetres", () => {
     renderHoleUi();
     act(() =>
-      toolChipStore
-        .getState()
-        .showHole(6.6, WORLD, h, { holeType: "counterbore", cbDiameter: 11, cbDepth: 6.8 }),
+      showHoleWithContext(6.6, WORLD, h, { holeType: "counterbore", cbDiameter: 11, cbDepth: 6.8 }),
     );
     const cbd = screen.getByTestId("chip-hole-cb-diameter");
     fireEvent.change(cbd, { target: { value: "15" } });
@@ -236,7 +258,7 @@ describe("HoleChipCluster", () => {
   it("keeps invalid secondary text keyed until that field is corrected", () => {
     renderHoleUi();
     act(() =>
-      toolChipStore.getState().showHole(6.6, WORLD, h, {
+      showHoleWithContext(6.6, WORLD, h, {
         holeType: "counterbore",
         cbDiameter: 11,
         cbDepth: 6.8,

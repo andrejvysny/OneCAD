@@ -1780,6 +1780,11 @@ export class ModelToolController {
     this.publishExtrudeContext();
 
     this.sendPreview(); // initial exact L2 (all sessions)
+    // The armed phase has no other publisher: `sendPreview` reaches
+    // `markPreviewPending`, which returns for the extrude/revolve owners BEFORE
+    // its own `updateDebug()`. Without this the `?vpdebug` surface keeps
+    // reporting the pre-arm phase for the whole arm.
+    this.updateDebug();
   }
 
   private publishExtrudeContext(): void {
@@ -2823,7 +2828,13 @@ export class ModelToolController {
         anchorAxisFrom: this.revolveChipAxisFrom(),
       },
     );
+    // `showRevolve` re-seats the chip from CLEARED, which drops the axis-pick
+    // context — and `setContext` only lands on a chip whose kind already matches.
+    // Without this republish the armed `revolveAngle` chip carries no typed
+    // context at all, so the confirm gate reads "targets unavailable" and Enter/✓
+    // can never commit a freshly picked revolve.
     viewportStore.getState().setStatusHint(this.armHintFor("revolve"), { sticky: true });
+    this.publishRevolveContext("revolveAngle");
     toolStore.setState({ phase: "armed" });
     // The op is well-formed the moment an axis exists — open the kernel-preview
     // sessions now. Fire-and-forget: the arm itself is already complete + usable
@@ -3521,7 +3532,18 @@ export class ModelToolController {
   }
 
   private publishEdgeOperationContext(): void {
-    const affectedBodies = [...new Set(this.filletEdges.map((edge) => edge.bodyId).filter(Boolean))]
+    // A RE-EDIT arms with NO picks (`filletEdges` is empty by construction — the
+    // edges live in the stored params), so the live picks alone would publish an
+    // EMPTY context, which `missingRequiredTargetMessage` reads as "Affected body
+    // is no longer available" — that blocks ✓ and Enter for every fillet/chamfer
+    // edited from history. Fall back to the record's stored typed edges, exactly
+    // as the shell re-edit's `storedFaces` does. A legacy bare-`edgeIds` record
+    // carries no body evidence at all and stays empty on purpose: §9 repair is its
+    // path, and inventing a body here would author against a guess.
+    const edges = this.filletEdges.length
+      ? this.filletEdges.map((edge) => authoredElement(edge, "edge"))
+      : authoredStoredElements(this.filletStoredParams?.edges, "edge");
+    const affectedBodies = [...new Set(edges.map((edge) => edge.bodyId).filter(Boolean))]
       .map((bodyId) => ({ bodyId: bodyId as string }));
     const contours = this.chamferContours();
     const referenceFaces = contours.map((contour, index) => {
@@ -3538,7 +3560,7 @@ export class ModelToolController {
       tool: "filletRadius",
       kind: "edgeOperation",
       affectedBodies,
-      edges: this.filletEdges.map((edge) => authoredElement(edge, "edge")),
+      edges,
       referenceFaces,
     });
   }
@@ -5251,11 +5273,23 @@ export class ModelToolController {
         valueError: s.valueError,
       },
     );
+    // A RE-EDIT arms with NO picks: `setTool` fires `cancelOffsetFace`, which
+    // clears `offsetFaces` and `offsetTargetBodyId`, so the live picks alone would
+    // publish an EMPTY context — which `missingRequiredTargetMessage` reads as
+    // "Affected body is no longer available", blocking ✓ and Enter for every
+    // OffsetFace edited from history. Fall back to the record's own typed faces
+    // and target body, exactly as `publishEdgeOperationContext` and `armShell` do.
+    const storedTargetBodyId =
+      typeof this.offsetStoredParams?.targetBodyId === "string" ? this.offsetStoredParams.targetBodyId : "";
+    const targetBodyId = this.offsetTargetBodyId || storedTargetBodyId;
+    const faces = this.offsetFaces.length
+      ? this.offsetFaces.map((face) => authoredElement(face, "face"))
+      : authoredStoredElements(this.offsetStoredParams?.faces, "face");
     toolChipStore.getState().setContext("offsetFace", {
       tool: "offsetFace",
       kind: "faces",
-      affectedBodies: this.offsetTargetBodyId ? [{ bodyId: this.offsetTargetBodyId }] : [],
-      faces: this.offsetFaces.map((face) => authoredElement(face, "face")),
+      affectedBodies: targetBodyId ? [{ bodyId: targetBodyId }] : [],
+      faces,
       ...(this.offsetOppositeFace ? { oppositeFace: authoredElement(this.offsetOppositeFace, "face") } : {}),
     });
   }
@@ -9758,6 +9792,11 @@ export class ModelToolController {
         onChamferFlip: () => this.onChamferFlip(),
       },
     );
+    // `showFillet` re-seats the chip from CLEARED, which NULLS the typed context —
+    // and the gate that Enter/✓ both read refuses a chip without one. The fresh arm
+    // publishes it from inside `showEdgeOpChip`; this path has its own chip call, so
+    // it republishes here, off the same publisher (which reads the stored edges).
+    this.publishEdgeOperationContext();
     // WP-F: the record's closure adjacency, so a re-edit can offer [Flip reference]
     // and can author pairs if this edit introduces the asymmetry. Deliberately NOT
     // awaited — it is one worker round trip and the chip must open on this frame.

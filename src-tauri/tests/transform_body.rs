@@ -116,8 +116,19 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
-async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, or an undo). `RevertToEnd` makes NO SCHEMA §7.2
+/// `editedFrom` claim, so the §10 v6 post-edit descriptor-tie veto stays off —
+/// which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
         .await
 }
 
@@ -530,7 +541,7 @@ async fn translate_moves_exactly_and_preserves_the_body_id() {
     let mut rt = runtime_over(&wm);
 
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     let (vol0, min0, dims0) = body_geom(&mut rt, body).await;
     let head0 = wm.get_worker_head().await.expect("head before move");
 
@@ -538,7 +549,7 @@ async fn translate_moves_exactly_and_preserves_the_body_id() {
         &mut rt,
         transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "translate");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -602,7 +613,7 @@ async fn rotate_about_z_preserves_volume() {
     let mut rt = runtime_over(&wm);
 
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     let (vol0, _, dims0) = body_geom(&mut rt, body).await;
 
     // Pivot = the 20×20×25 box's own centre (10, 10, 12.5) — the FROZEN pivot a
@@ -616,7 +627,7 @@ async fn rotate_about_z_preserves_volume() {
         &mut rt,
         transform_record(OP_MOVE, vec![body], [0.0, 0.0, 0.0], Some(rotate), false),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "rotate");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     assert_eq!(snap.bodies.len(), 1);
@@ -658,7 +669,7 @@ async fn copy_two_targets_mints_ordinal_children() {
 
     let a = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
     let b = build_box(&mut rt, SKETCH_B, EXTRUDE_B, 0xB, 100.0, 0.0, 10.0).await;
-    let _ = published(&regen_all(&mut rt).await, "two boxes");
+    let _ = published(&clean_regen(&mut rt).await, "two boxes");
     let (_, a_min0, _) = body_geom(&mut rt, a).await;
     let (_, b_min0, _) = body_geom(&mut rt, b).await;
 
@@ -666,7 +677,7 @@ async fn copy_two_targets_mints_ordinal_children() {
         &mut rt,
         transform_record(OP_MOVE, vec![a, b], [0.0, 200.0, 0.0], None, true),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "copy two");
 
     let child0 = BodyId(split_child_uuid(Uuid::from_u128(OP_MOVE), 0));
@@ -719,13 +730,13 @@ async fn copy_one_target_mints_the_plain_body_id() {
     let mut rt = runtime_over(&wm);
 
     let a = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     let (_, a_min0, _) = body_geom(&mut rt, a).await;
     add_op(
         &mut rt,
         transform_record(OP_MOVE, vec![a], [0.0, 60.0, 0.0], None, true),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "copy one");
 
     let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
@@ -763,7 +774,7 @@ async fn multi_target_move_moves_both_bodies() {
 
     let a = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
     let b = build_box(&mut rt, SKETCH_B, EXTRUDE_B, 0xB, 100.0, 0.0, 10.0).await;
-    let _ = published(&regen_all(&mut rt).await, "two boxes");
+    let _ = published(&clean_regen(&mut rt).await, "two boxes");
     let (_, a_min0, _) = body_geom(&mut rt, a).await;
     let (_, b_min0, _) = body_geom(&mut rt, b).await;
 
@@ -771,7 +782,7 @@ async fn multi_target_move_moves_both_bodies() {
         &mut rt,
         transform_record(OP_MOVE, vec![a, b], [0.0, 0.0, 40.0], None, false),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "multi move");
     assert_eq!(
         snap.bodies.len(),
@@ -816,7 +827,7 @@ async fn undo_restores_the_exact_prior_hash_chain() {
     let mut rt = runtime_over(&wm);
 
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     let head0 = wm.get_worker_head().await.expect("head before");
     let (_, min0, _) = body_geom(&mut rt, body).await;
 
@@ -824,12 +835,12 @@ async fn undo_restores_the_exact_prior_hash_chain() {
         &mut rt,
         transform_record(OP_MOVE, vec![body], [33.0, 0.0, 0.0], None, false),
     );
-    let _ = published(&regen_all(&mut rt).await, "move");
+    let _ = published(&clean_regen(&mut rt).await, "move");
     let (_, moved, _) = body_geom(&mut rt, body).await;
     assert!((moved[0] - min0[0] - 33.0).abs() < 1e-3, "moved +33");
 
     assert!(rt.undo().is_some(), "undo the move");
-    let _ = published(&regen_all(&mut rt).await, "after undo");
+    let _ = published(&clean_regen(&mut rt).await, "after undo");
     let head1 = wm.get_worker_head().await.expect("head after undo");
     assert_eq!(
         head0.history_prefix_hash, head1.history_prefix_hash,
@@ -864,12 +875,12 @@ async fn editing_a_transform_seeds_needs_repair_on_the_downstream_fillet() {
 
     // steps: 0 Sketch · 1 Extrude · 2 TransformBody · 3 Fillet
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     add_op(
         &mut rt,
         transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
     );
-    let _ = published(&regen_all(&mut rt).await, "move");
+    let _ = published(&clean_regen(&mut rt).await, "move");
 
     // ── the HEALTHY flow: pick an edge of the MOVED box and fillet it ──────────
     let mesh = body_mesh(&mut rt, body).await;
@@ -880,7 +891,7 @@ async fn editing_a_transform_seeds_needs_repair_on_the_downstream_fillet() {
         &mut rt,
         fillet_record(body, ElementId::new("el_move_edge"), anchor, R),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "fillet on the moved box");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -927,7 +938,8 @@ async fn editing_a_transform_seeds_needs_repair_on_the_downstream_fillet() {
         "the gate names the fillet's edge ref"
     );
 
-    let rep = regen_all(&mut rt).await;
+    // The edit lands ON the move — step 2 (0 sketch, 1 extrude, 2 move, 3 fillet).
+    let rep = regen_from(&mut rt, 2).await;
     let snap = published(&rep, "regen after the transform edit");
     assert!(
         snap.repair_summary.needs_repair_count > 0,
@@ -968,7 +980,7 @@ async fn editing_a_transform_seeds_needs_repair_on_the_downstream_fillet() {
         rt.repair_items().iter().all(|i| !i.seeded),
         "the seed rides the SAME undo entry as the edit that planted it"
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "regen after undo");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -1004,13 +1016,13 @@ async fn suppressing_a_transform_seeds_the_same_gate() {
     let mut rt = runtime_over(&wm);
 
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     let (_, unmoved_min, _) = body_geom(&mut rt, body).await;
     add_op(
         &mut rt,
         transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
     );
-    let _ = published(&regen_all(&mut rt).await, "move");
+    let _ = published(&clean_regen(&mut rt).await, "move");
 
     let mesh = body_mesh(&mut rt, body).await;
     let view = validate_mesh_blob(&mesh).expect("MESH1 validates");
@@ -1019,7 +1031,7 @@ async fn suppressing_a_transform_seeds_the_same_gate() {
         &mut rt,
         fillet_record(body, ElementId::new("el_move_edge"), anchor, 3.0),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "fillet");
     assert_eq!(snap.repair_summary.needs_repair_count, 0, "healthy first");
     let (filleted_vol, _, _) = body_geom(&mut rt, body).await;
@@ -1037,7 +1049,8 @@ async fn suppressing_a_transform_seeds_the_same_gate() {
         "suppressing a TransformBody seeds the same downstream gate"
     );
 
-    let rep = regen_all(&mut rt).await;
+    // The suppression lands ON the move — step 2.
+    let rep = regen_from(&mut rt, 2).await;
     let snap = published(&rep, "regen after suppress");
     assert!(
         snap.step_states
@@ -1062,7 +1075,7 @@ async fn suppressing_a_transform_seeds_the_same_gate() {
         rt.repair_items().iter().all(|i| !i.seeded),
         "the suppression's seed rides its own undo entry"
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "regen after unsuppress");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
 
@@ -1144,12 +1157,12 @@ async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
 
     // steps: 0 Sketch · 1 Extrude(box) · 2 Move · 3 Sketch(on the moved face) · 4 Extrude
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     add_op(
         &mut rt,
         transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
     );
-    let _ = published(&regen_all(&mut rt).await, "move");
+    let _ = published(&clean_regen(&mut rt).await, "move");
 
     let host_sid = SketchId(Uuid::from_u128(SKETCH_HOST_REC));
     rt.apply(EditCommand::AddSketch {
@@ -1160,7 +1173,7 @@ async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
         .await
         .expect("finishSketch mints the Sketch record");
     add_op(&mut rt, extrude_record(EXTRUDE_HOST, host_sid, 4.0));
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "hosted extrude");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -1199,7 +1212,9 @@ async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
          the body extruded from it can execute against a stale frozen frame"
     );
 
-    let rep = regen_all(&mut rt).await;
+    // The edit lands ON the move — step 2 (0 sketch, 1 extrude, 2 move, 3 sketch,
+    // 4 extrude).
+    let rep = regen_from(&mut rt, 2).await;
     let snap = published(&rep, "regen after the transform edit");
     assert!(
         snap.step_states
@@ -1221,7 +1236,7 @@ async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
         rt.repair_items().iter().all(|i| !i.seeded),
         "the seed rides the SAME undo entry as the edit that planted it"
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "regen after undo");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     assert_eq!(snap.bodies.len(), 2, "the hosted body is back");
@@ -1245,12 +1260,12 @@ async fn a_legacy_hosted_sketch_record_is_gated_through_its_attachment() {
     let mut rt = runtime_over(&wm);
 
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     add_op(
         &mut rt,
         transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
     );
-    let _ = published(&regen_all(&mut rt).await, "move");
+    let _ = published(&clean_regen(&mut rt).await, "move");
 
     // The document knows the attachment…
     let host_sid = SketchId(Uuid::from_u128(SKETCH_HOST_REC));
@@ -1269,7 +1284,7 @@ async fn a_legacy_hosted_sketch_record_is_gated_through_its_attachment() {
     );
     add_op(&mut rt, legacy);
     add_op(&mut rt, extrude_record(EXTRUDE_HOST, host_sid, 4.0));
-    let _ = published(&regen_all(&mut rt).await, "legacy hosted extrude");
+    let _ = published(&clean_regen(&mut rt).await, "legacy hosted extrude");
 
     rt.apply(EditCommand::UpdateOperationParams {
         record: RecordId(Uuid::from_u128(OP_MOVE)),
@@ -1306,12 +1321,12 @@ async fn deleting_a_transform_seeds_the_gate_like_suppressing_it() {
 
     // steps: 0 Sketch · 1 Extrude · 2 Move · 3 Fillet(on the moved box)
     let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
-    let _ = published(&regen_all(&mut rt).await, "box");
+    let _ = published(&clean_regen(&mut rt).await, "box");
     add_op(
         &mut rt,
         transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
     );
-    let _ = published(&regen_all(&mut rt).await, "move");
+    let _ = published(&clean_regen(&mut rt).await, "move");
     let mesh = body_mesh(&mut rt, body).await;
     let view = validate_mesh_blob(&mesh).expect("MESH1 validates");
     let anchor = vertical_edge_anchor(&view, &mesh);
@@ -1319,7 +1334,7 @@ async fn deleting_a_transform_seeds_the_gate_like_suppressing_it() {
         &mut rt,
         fillet_record(body, ElementId::new("el_move_edge"), anchor, 3.0),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "fillet on the moved box");
     assert_eq!(snap.repair_summary.needs_repair_count, 0, "healthy first");
     let (filleted_vol, _, _) = body_geom(&mut rt, body).await;
@@ -1348,7 +1363,8 @@ async fn deleting_a_transform_seeds_the_gate_like_suppressing_it() {
         "the gate names the fillet's edge ref"
     );
 
-    let rep = regen_all(&mut rt).await;
+    // The removal lands at the POST-removal index 2 (0 sketch, 1 extrude, 2 fillet).
+    let rep = regen_from(&mut rt, 2).await;
     let snap = published(&rep, "regen after the delete");
     assert!(
         snap.step_states
@@ -1369,7 +1385,7 @@ async fn deleting_a_transform_seeds_the_gate_like_suppressing_it() {
         rt.repair_items().iter().all(|i| !i.seeded),
         "the delete's seeds ride the delete's own undo entry"
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "regen after undo");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     let (restored_vol, _, _) = body_geom(&mut rt, body).await;

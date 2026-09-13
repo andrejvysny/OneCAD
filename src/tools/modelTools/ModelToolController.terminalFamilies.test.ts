@@ -259,6 +259,8 @@ describe("every modeling commit family reports a regen terminal honestly", () =>
       engine: makeEngineMock() as unknown as ViewportEngine,
       client: {
         onPreviewResult: vi.fn(() => () => {}),
+        onDocumentChanged: vi.fn(() => () => {}),
+        getCurrentMeshPublication: vi.fn(() => null),
         applyOperation: vi.fn(() => Promise.resolve(result)),
         applyEditCommand: vi.fn(() => Promise.resolve(result)),
         getOperationParams: vi.fn(() => Promise.resolve({ ...family.stored })),

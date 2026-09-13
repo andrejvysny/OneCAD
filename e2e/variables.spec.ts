@@ -199,7 +199,7 @@ test("typing =name into a past extrude's value binds it to a variable", async ({
 
   // Open the inline editor and type a BINDING rather than a number.
   await page.getByTestId(`history-value-${featureId}`).click();
-  const input = page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+  const input = page.getByTestId(`history-item-${featureId}`).getByLabel("Dimension value");
   await expect(input).toBeFocused();
   await input.fill("=height");
   await input.press("Enter");
@@ -255,7 +255,7 @@ test("a variable edit that breaks its bound extrude saves the value AND says the
 
   // Bind the extrude's distance to the variable, as the binding spec above does.
   await page.getByTestId(`history-value-${featureId}`).click();
-  const input = page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+  const input = page.getByTestId(`history-item-${featureId}`).getByLabel("Dimension value");
   await expect(input).toBeFocused();
   await input.fill("=height");
   await input.press("Enter");
@@ -311,9 +311,14 @@ async function pickUnit(page: Page, unit: "mm" | "in"): Promise<void> {
   await expect(page.getByRole("tablist", { name: "Units" })).toHaveCount(0);
 }
 
-/** Open the inline value editor on a history row and return its input. */
+/**
+ * The inline value editor on a history row.
+ *
+ * Scoped to `history-item-…`, the wrapper: `history-row-…` is only the clickable
+ * header, and the editor sits beside it under `history-details-…`.
+ */
 function valueEditor(page: Page, featureId: string) {
-  return page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+  return page.getByTestId(`history-item-${featureId}`).getByLabel("Dimension value");
 }
 
 /*

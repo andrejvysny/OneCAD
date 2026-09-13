@@ -13,3 +13,4 @@
 - [MESH1 id namespace](repo_mesh_id_namespace.md) — mesh tables mix TopoKeys with minted ElementIds; only TopoKeys promote, and which lanes still trip on it
 - [Viewport selection policy](repo_viewport_selection_policy.md) — D-5 + Astra break: persistent id first, an ordinal is not evidence across a regen, regen-only reconcile
 - [Regen isolation + closure](repo_regen_isolation.md) — why graph.downstream() is not proof of independence, what timeline_of(n) really builds, checkpoint-mint seams
+- [Topology ownership ledger](repo_topology_ownership.md) — blend certificate, where the contour set comes from, fail-closed vanishing guard, origin-before-capability gate

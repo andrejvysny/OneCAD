@@ -8226,6 +8226,45 @@ mod body_wire_tests {
     }
 
     #[test]
+    fn feature_pattern_ownership_mismatch_repair_parses_with_a_closed_ladder_level() {
+        // The worker's `FEATURE_PATTERN_PRODUCER_BIND` items carry FeaturePattern
+        // extras and a `reason` outside the documented set; both must degrade, and
+        // `ladderFailed` must stay inside the closed enum or the whole planStep
+        // fails to parse (SCHEMA §9, 2026-09-13).
+        let items = parse_needs_repair(
+            Some(&json!([{
+                "refId": "3f2a9c1e-5b7d-5c1a-8e2f-0a1b2c3d4e5f.input1",
+                "elementId": "el_seat",
+                "ladderFailed": "descriptor",
+                "reason": "ownership-mismatch",
+                "scoringVersion": 6,
+                "instance": 2,
+                "sourceRecordId": "source_chamfer",
+                "inputIndex": 1,
+                "candidates": [],
+                "uiLabel": "FeaturePattern virtual reference ownership mismatch"
+            }])),
+            3,
+        )
+        .expect("an ownership-mismatch item parses");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].ladder_failed,
+            onecad_core::document::repair::LadderLevel::Descriptor
+        );
+        assert_eq!(
+            items[0].reason,
+            onecad_core::document::repair::RepairReason::Unknown,
+            "an unlisted reason token degrades instead of failing the payload"
+        );
+        assert!(parse_needs_repair(
+            Some(&json!([{ "refId": "r.input0", "ladderFailed": "identity", "reason": "ownership-mismatch" }])),
+            3
+        )
+        .is_err(), "a level outside the closed enum is still a hard error");
+    }
+
+    #[test]
     fn feature_pattern_repair_fixture_replays_through_strict_repair_parser() {
         let fixture = include_str!("../../../protocol/fixtures/feature_pattern_repair.ndjson");
         let repair = fixture
@@ -8262,8 +8301,12 @@ mod body_wire_tests {
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .find_map(|directive| {
+                // The nested-failure case is the `resp` that stopped `opFailed`
+                // (fixture jobId 904); a `resp` expectation carries no top-level
+                // `jobId`, so select it by its outcome, not by job.
                 let expected = directive.get("expect")?;
-                (expected.get("jobId")?.as_u64()? == 902)
+                (expected.get("t")?.as_str()? == "resp"
+                    && expected["result"]["stoppedReason"].as_str()? == "opFailed")
                     .then(|| expected["result"]["perStepResults"][0]["diagnostics"][0].clone())
             })
             .expect("canonical nested source failure diagnostic");

@@ -5,9 +5,11 @@
 #include <utility>
 #include <vector>
 
+#include <NCollection_IndexedDataMap.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 
 namespace onecad::session {
 
@@ -41,6 +43,36 @@ public:
             }
         }
         return result;
+    }
+
+    // The effective claim of every shape of ONE body, collapsed per IsSame class
+    // exactly as `lookup` collapses it: the first row stands, and any later row
+    // that disagrees makes the class Ambiguous (a fixed point — once Ambiguous,
+    // later rows cannot move it back). A shape with no row is ABSENT from the
+    // index; `lookup` reports that same shape Unknown.
+    //
+    // Build this once when many shapes of one body must be classified: `lookup`
+    // is an O(rows) scan, so a per-sub-shape loop over a large body is quadratic
+    // (measured 7.45 s for a FeaturePattern refresh over a 2041-sub-shape body at
+    // 128 instances). One pass plus hashed probes is O(rows + shapes).
+    using EffectiveClaims =
+        NCollection_IndexedDataMap<TopoDS_Shape, OriginClaim, TopTools_ShapeMapHasher>;
+
+    EffectiveClaims effective_claims(const std::string& body_id) const {
+        EffectiveClaims claims;
+        for (const OwnedShape& entry : entries_) {
+            if (entry.body_id != body_id || entry.shape.IsNull()) continue;
+            const int index = claims.FindIndex(entry.shape);
+            if (index == 0) {
+                claims.Add(entry.shape, entry.claim);
+                continue;
+            }
+            OriginClaim& current = claims.ChangeFromIndex(index);
+            if (current.state != entry.claim.state ||
+                current.producer_record_id != entry.claim.producer_record_id)
+                current = {OriginState::Ambiguous, {}};
+        }
+        return claims;
     }
 
     void erase_body(const std::string& body_id) {
@@ -90,23 +122,31 @@ struct TopologyBodyHistory {
     std::vector<TopologyConflict> conflicts;
 };
 
+// Order-insensitive by construction: the scan never short-circuits on Unknown,
+// because a single Unknown source appearing FIRST must not hide a disagreement
+// between two Known ones further down the list. Precedence is
+// Ambiguous > Unknown > the one common Known producer; no sources at all, or
+// only Unknown ones, is Unknown.
 inline OriginClaim inherit_origin(const TopologyOwnerLedger& prior,
                                   const std::string& body_id,
                                   const std::vector<TopoDS_Shape>& sources) {
-    OriginClaim result;
-    bool found = false;
+    bool any_unknown = false;
+    bool found_known = false;
+    std::string producer;
     for (const TopoDS_Shape& source : sources) {
         const OriginClaim claim = prior.lookup(body_id, source);
-        if (claim.state == OriginState::Unknown) return claim;
-        if (!found) {
-            result = claim;
-            found = true;
-        } else if (result.state != claim.state ||
-                   result.producer_record_id != claim.producer_record_id) {
-            return {OriginState::Ambiguous, {}};
+        if (claim.state == OriginState::Ambiguous) return {OriginState::Ambiguous, {}};
+        if (claim.state == OriginState::Unknown) {
+            any_unknown = true;
+            continue;
         }
+        if (found_known && producer != claim.producer_record_id)
+            return {OriginState::Ambiguous, {}};
+        found_known = true;
+        producer = claim.producer_record_id;
     }
-    return result;
+    if (any_unknown || !found_known) return {};
+    return {OriginState::Known, std::move(producer)};
 }
 
 inline void add_origin(TopologyOwnerLedger& ledger, const std::string& body_id,

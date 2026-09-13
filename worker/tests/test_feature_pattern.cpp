@@ -5,7 +5,9 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Tool.hxx>
 #include <GeomAbs_CurveType.hxx>
+#include <gp_Pnt.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -112,17 +114,64 @@ TopoDS_Shape circular_edge(const TopoDS_Shape& body, double x, double y, double 
     return best;
 }
 
-TopoDS_Shape straight_edge(const TopoDS_Shape& body, double x, double y, double z) {
+// Nearest edge of one curve type to a DESCRIPTOR centre (the bbox centre the
+// ownership vectors are pinned on, not a circle's axis point).
+TopoDS_Shape edge_of_type(const TopoDS_Shape& body, GeomAbs_CurveType type,
+                          double x, double y, double z) {
     TopoDS_Shape best; double distance = 1e100;
     for (TopExp_Explorer it(body, TopAbs_EDGE); it.More(); it.Next()) {
         BRepAdaptor_Curve curve(TopoDS::Edge(it.Current()));
-        if (curve.GetType() != GeomAbs_Line) continue;
+        if (curve.GetType() != type) continue;
         const auto d = em::ElementMapPartition::describe(it.Current(), body);
         const double candidate = std::pow(d.center.X() - x, 2) +
             std::pow(d.center.Y() - y, 2) + std::pow(d.center.Z() - z, 2);
         if (candidate < distance) { distance = candidate; best = it.Current(); }
     }
     return best;
+}
+
+TopoDS_Shape straight_edge(const TopoDS_Shape& body, double x, double y, double z) {
+    return edge_of_type(body, GeomAbs_Line, x, y, z);
+}
+
+TopoDS_Shape vertex_at(const TopoDS_Shape& body, double x, double y, double z) {
+    TopoDS_Shape best; double distance = 1e100;
+    for (TopExp_Explorer it(body, TopAbs_VERTEX); it.More(); it.Next()) {
+        const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+        const double candidate = std::pow(point.X() - x, 2) + std::pow(point.Y() - y, 2) +
+            std::pow(point.Z() - z, 2);
+        if (candidate < distance) { distance = candidate; best = it.Current(); }
+    }
+    return best;
+}
+
+// The EFFECTIVE ownership claim of one located shape, pinned by position. The
+// locators above return the NEAREST candidate, so without the position check a
+// miss would silently report some other shape's claim and pass.
+bool owned_at(const session::ScratchJob& job, const std::string& body_id,
+              const TopoDS_Shape& located, double x, double y, double z,
+              session::OriginState state, const std::string& producer) {
+    const session::BodyRecord* body = job.bodies.get(body_id);
+    if (located.IsNull() || body == nullptr) return false;
+    const gp_Pnt actual = located.ShapeType() == TopAbs_VERTEX
+        ? BRep_Tool::Pnt(TopoDS::Vertex(located))
+        : em::ElementMapPartition::describe(located, body->geom).center;
+    if (actual.Distance(gp_Pnt(x, y, z)) > 1e-6) return false;
+    const session::OriginClaim claim = job.topology_owners.lookup(body_id, located);
+    return claim.state == state && claim.producer_record_id == producer;
+}
+
+// Body ids AND the exact shapes behind them. A geometry signature alone would
+// accept a body rebuilt to identical measurements under a different TShape.
+bool same_bodies(const session::BodyStore& left, const session::BodyStore& right) {
+    if (left.ids() != right.ids()) return false;
+    for (const std::string& id : left.ids()) {
+        const session::BodyRecord* a = left.get(id);
+        const session::BodyRecord* b = right.get(id);
+        if (a == nullptr || b == nullptr || a->geom.IsNull() != b->geom.IsNull()) return false;
+        if (!a->geom.IsNull() && !a->geom.IsSame(b->geom)) return false;
+    }
+    return true;
 }
 
 json rectangle_sketch() {
@@ -644,6 +693,56 @@ void test_shared_host_extrude_add_pattern() {
     check(execute(modifier_job, modifier, last, cancel).status ==
               session::CandidateResult::Status::Ok,
           "shared-host seed Add Fillet succeeds");
+    // docs/design/astra/feature-pattern-producer-ownership.md §6, measured on
+    // OCCT 8.0.1. BRepFilletAPI reports only the blend FACE as Generated(seed
+    // edge): the face's own four boundary edges and their four vertices appear
+    // in no Modified and no Generated list, so without certified boundary
+    // completion they stay Unknown and every later feature that names one is
+    // refused for having no producer.
+    const TopoDS_Shape blended = modifier_job.bodies.get("body_host")->geom;
+    check(owned_at(modifier_job, "body_host",
+                   edge_of_type(blended, GeomAbs_Circle, -7.75, 9.75, 5.0),
+                   -7.75, 9.75, 5.0, session::OriginState::Known, "record_modifier") &&
+              owned_at(modifier_job, "body_host",
+                       edge_of_type(blended, GeomAbs_Line, -7.5, 10.0, 7.5),
+                       -7.5, 10.0, 7.5, session::OriginState::Known, "record_modifier") &&
+              owned_at(modifier_job, "body_host",
+                       edge_of_type(blended, GeomAbs_Line, -8.0, 9.5, 7.5),
+                       -8.0, 9.5, 7.5, session::OriginState::Known, "record_modifier") &&
+              owned_at(modifier_job, "body_host",
+                       edge_of_type(blended, GeomAbs_Circle, -7.75, 9.75, 10.0),
+                       -7.75, 9.75, 10.0, session::OriginState::Known, "record_modifier"),
+          "seed Fillet owns the four blend-born boundary edges OCCT omits");
+    check(owned_at(modifier_job, "body_host", vertex_at(blended, -7.5, 10.0, 5.0),
+                   -7.5, 10.0, 5.0, session::OriginState::Known, "record_modifier") &&
+              owned_at(modifier_job, "body_host", vertex_at(blended, -8.0, 9.5, 5.0),
+                       -8.0, 9.5, 5.0, session::OriginState::Known, "record_modifier") &&
+              owned_at(modifier_job, "body_host", vertex_at(blended, -7.5, 10.0, 10.0),
+                       -7.5, 10.0, 10.0, session::OriginState::Known, "record_modifier") &&
+              owned_at(modifier_job, "body_host", vertex_at(blended, -8.0, 9.5, 10.0),
+                       -8.0, 9.5, 10.0, session::OriginState::Known, "record_modifier"),
+          "seed Fillet owns the four blend-born boundary vertices OCCT omits");
+    // Exact lineage still wins everywhere it exists: the four neighbours the
+    // blend trimmed are reported Modified, so they keep the Add producer, and
+    // completion never reaches an output that already has a predecessor.
+    check(owned_at(modifier_job, "body_host",
+                   straight_edge(blended, -3.75, 10.0, 5.0),
+                   -3.75, 10.0, 5.0, session::OriginState::Known, "record_add") &&
+              owned_at(modifier_job, "body_host", straight_edge(blended, -8.0, 4.75, 5.0),
+                       -8.0, 4.75, 5.0, session::OriginState::Known, "record_add") &&
+              owned_at(modifier_job, "body_host", straight_edge(blended, -3.75, 10.0, 10.0),
+                       -3.75, 10.0, 10.0, session::OriginState::Known, "record_add") &&
+              owned_at(modifier_job, "body_host", straight_edge(blended, -8.0, 4.75, 10.0),
+                       -8.0, 4.75, 10.0, session::OriginState::Known, "record_add"),
+          "trimmed Add neighbours keep the Add producer through the Fillet");
+    // No ownership propagates by adjacency: an untouched host survivor is still
+    // Unknown even where it bounds a face the blend rebuilt.
+    check(owned_at(modifier_job, "body_host", straight_edge(blended, -100.0, 0.0, 5.0),
+                   -100.0, 0.0, 5.0, session::OriginState::Unknown, "") &&
+              owned_at(modifier_job, "body_host",
+                       straight_edge(blended, -100.0, -100.0, 2.5),
+                       -100.0, -100.0, 2.5, session::OriginState::Unknown, ""),
+          "untouched host survivors stay Unknown across the blend");
     TopoDS_Shape surviving_add_edge;
     json later_modifier;
     for (const auto& owned : modifier_job.topology_owners.entries()) {
@@ -734,9 +833,15 @@ void test_shared_host_extrude_add_pattern() {
               std::abs(modifier_pattern_volume - expected_modifier_volume) < 1e-5,
           "shared-host Add edges compose through Fillet then i-2 Chamfer");
     session::ScratchJob modifier_failure_job = modifier_seed_job;
+    // The whole pre-pattern job is the transaction boundary. Instance 1 lands the
+    // Add, the Fillet and the i-2 Chamfer on the host; instance 2 translates the
+    // profile 180 mm and falls off the 200 mm host edge. Everything instance 1
+    // wrote must be gone again, and the step must publish nothing at all.
+    const session::ScratchJob modifier_failure_before = modifier_failure_job;
     const std::string modifier_failure_signature =
         session::geometry_signature(modifier_failure_job.bodies);
     const std::size_t modifier_failure_partition = modifier_failure_job.partition.size();
+    const std::string modifier_failure_last = last;
     json modifier_failure = modifier_pattern;
     modifier_failure["params"]["layout"]["spacing"] = 90.0;
     const auto modifier_failure_result =
@@ -746,8 +851,49 @@ void test_shared_host_extrude_add_pattern() {
                   "instance 2 source record_add index 1") != std::string::npos &&
               session::geometry_signature(modifier_failure_job.bodies) ==
                   modifier_failure_signature &&
-              modifier_failure_job.partition.size() == modifier_failure_partition,
+              modifier_failure_job.partition.size() == modifier_failure_partition &&
+              same_bodies(modifier_failure_job.bodies, modifier_failure_before.bodies) &&
+              same_partition_body(modifier_failure_job.partition,
+                                  modifier_failure_before.partition, "body_host") &&
+              same_owner_ledger(modifier_failure_job.topology_owners,
+                                modifier_failure_before.topology_owners) &&
+              same_evidence(modifier_failure_job.resolved_input_evidence,
+                            modifier_failure_before.resolved_input_evidence) &&
+              modifier_failure_job.sketches.size() ==
+                  modifier_failure_before.sketches.size() &&
+              last == modifier_failure_last &&
+              modifier_failure_result.body_events.empty() &&
+              modifier_failure_result.body_ids.empty() &&
+              modifier_failure_result.delta.added.empty() &&
+              modifier_failure_result.delta.relabeled.empty() &&
+              modifier_failure_result.delta.removed.empty(),
           "shared-host Add modifier chain rolls back after a later instance fails");
+    // Astra break F3: a descriptor centre is a BOUNDING-BOX centre and
+    // `transform_descriptor` rotates it, so for a quarter-circle blend arc a
+    // rotated instance lands the centre ~0.073 mm away at 45 degrees — far past
+    // the 1e-6 match tolerance. The intended arc is then rejected while a
+    // perpendicular twin of equal length and size can still match uniquely, which
+    // is a silent mis-bind. Refuse the layout by name instead.
+    session::ScratchJob circular_modifier_job = modifier_seed_job;
+    const std::size_t circular_modifier_partition = circular_modifier_job.partition.size();
+    std::string circular_modifier_last = last;
+    json circular_modifier = modifier_pattern;
+    circular_modifier["opId"] = "shared_add_modifier_circular";
+    circular_modifier["params"]["layout"] = {{"kind", "Circular"},
+        {"axisOrigin", {-50.0, 0.0, 0.0}}, {"axisDirection", {0, 0, 1}},
+        {"angleDeg", 360.0}};
+    const auto circular_modifier_result =
+        execute(circular_modifier_job, circular_modifier, circular_modifier_last, cancel);
+    check(circular_modifier_result.status == session::CandidateResult::Status::Failed &&
+              circular_modifier_result.error_code == "UNSUPPORTED_OP" &&
+              circular_modifier_result.error_message.find("Linear layout") !=
+                  std::string::npos &&
+              circular_modifier_job.partition.size() == circular_modifier_partition &&
+              same_owner_ledger(circular_modifier_job.topology_owners,
+                                modifier_seed_job.topology_owners) &&
+              same_partition_body(circular_modifier_job.partition,
+                                  modifier_seed_job.partition, "body_host"),
+          "Fillet-produced arc refuses a Circular FeaturePattern layout by name");
     json pattern = {{"opType", "FeaturePattern"}, {"opId", "shared_add_pattern"},
         {"params", {{"semanticsVersion", 1}, {"count", 3},
                     {"sourceRecordIds", {"record_sketch", "record_add"}},
@@ -996,6 +1142,48 @@ void test_shared_add_hole_chamfer_pattern() {
             {"layout", {{"kind", "Linear"}, {"direction", {1, 0, 0}},
                         {"spacing", 20.0}}},
             {"sourceOps", json::array({sketch, add, hole_source, chamfer})}}}};
+    // Astra break F2: retained-host support is admitted on the FROZEN evidence
+    // (Known, unselected producer, matching id/body/kind, live membership). None
+    // of that re-reads the LIVE ledger, so a retained face whose effective claim
+    // has since gone Unknown or Ambiguous would still be accepted and the
+    // instance would bind to topology nobody can attribute. The live claim is the
+    // authority; both degradations must be NeedsRepair, and the outer step must
+    // restore everything.
+    const auto* retained_live = job.partition.find("retained_top");
+    check(retained_live != nullptr, "retained host face is still tracked at pattern time");
+    for (int variant = 0; retained_live != nullptr && variant < 2; ++variant) {
+        session::ScratchJob stale_job = job;
+        if (variant == 0) {
+            session::TopologyOwnerLedger pruned;
+            for (const session::OwnedShape& entry : stale_job.topology_owners.entries())
+                if (entry.body_id != "body_host" ||
+                    !entry.shape.IsSame(retained_live->shape)) pruned.add(entry);
+            stale_job.topology_owners = std::move(pruned);
+        } else {
+            stale_job.topology_owners.add({"body_host", retained_live->shape,
+                {session::OriginState::Known, "someone_else"}});
+        }
+        const session::ScratchJob stale_before = stale_job;
+        std::string stale_last = last;
+        const auto stale = execute(stale_job, pattern, stale_last, cancel);
+        const bool named = std::any_of(
+            stale.diagnostics.begin(), stale.diagnostics.end(), [](const json& diagnostic) {
+                return diagnostic.value("code", std::string()) ==
+                    "FEATURE_PATTERN_PRODUCER_BIND";
+            });
+        check(stale.status == session::CandidateResult::Status::NeedsRepair && named &&
+                  same_bodies(stale_job.bodies, stale_before.bodies) &&
+                  same_owner_ledger(stale_job.topology_owners,
+                                    stale_before.topology_owners) &&
+                  same_evidence(stale_job.resolved_input_evidence,
+                                stale_before.resolved_input_evidence) &&
+                  same_partition_body(stale_job.partition, stale_before.partition,
+                                      "body_host") &&
+                  stale_last == last,
+              variant == 0
+                  ? "retained-host support refuses a live claim gone Unknown"
+                  : "retained-host support refuses a live claim gone Ambiguous");
+    }
     const auto before = session::geometry_signature(job.bodies);
     const double host_volume = session::compute_shape_metrics(host).volume;
     const double seed_volume = session::compute_shape_metrics(

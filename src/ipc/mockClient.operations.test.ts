@@ -571,7 +571,11 @@ describe("mockClient operations", () => {
       { topoKey: "f:2", picked: true },
       { topoKey: "f:3", picked: true },
     ]);
-    expect(ok.currentDims).toEqual({ radius: 10, thickness: 10 });
+    // A MULTI-face closure has no single absolute reading to report, and SCHEMA
+    // §7.3 admits only `Offset` for one anyway. (This used to pin a fixed
+    // `{ radius: 10, thickness: 10 }` for every pick — see the classification
+    // describe at the end of this file for what replaced it and why.)
+    expect(ok.currentDims).toEqual({});
 
     const refused = await mockClient.prepareOffsetFace({
       pickedFaces: [
@@ -790,5 +794,78 @@ describe("mockClient — suppression + boolean re-edit", () => {
       targetBodyId: "body1",
       toolBodyId: "body9",
     });
+  });
+});
+
+/*
+ * `PrepareOffsetFace`'s `currentDims` classification (SCHEMA §7.3 / §7.6).
+ *
+ * The two absolute readings are MUTUALLY EXCLUSIVE per surface, and
+ * `ModelToolController.offsetAllowedTypes` reads that exclusivity straight off
+ * the answer (`radius` ⇒ Radius/Diameter, `thickness`/an opposite ⇒ Total). The
+ * mock used to answer a fixed `{ radius: 10, thickness: 10 }` for every pick,
+ * which classified every mock-lane face as curved and removed `Total` from the
+ * UI on a flat box face — so these pin the classification itself, not the
+ * numbers' provenance (that stays cargo/ctest).
+ */
+describe("mockClient prepareOffsetFace classification", () => {
+  beforeEach(() => {
+    setMockLatency(0);
+    resetMockDocument();
+  });
+
+  it("reports a planar box face as a thickness against its unique opposite, with no radius", async () => {
+    // `f:4` is the box's +Z top; `f:5` is the −Z bottom, 30 mm away (BOX_SIZE[2]).
+    const res = await mockClient.prepareOffsetFace({
+      snapshotId: 1,
+      pickedFaces: [{ bodyId: "body1", topoKey: "f:4" }],
+      distanceType: "Offset",
+      chainTangentFaces: true,
+    });
+    expect(res.refusal).toBeNull();
+    expect(res.currentDims.thickness).toBe(30);
+    expect(res.currentDims.radius).toBeUndefined();
+    expect(res.oppositeFace?.topoKey).toBe("f:5");
+  });
+
+  it("reports the cylinder's curved side as a radius, with no thickness and no opposite", async () => {
+    // `body2` renders as the r25×h60 cylinder; `f:0` is its side (non-planar).
+    const res = await mockClient.prepareOffsetFace({
+      snapshotId: 1,
+      pickedFaces: [{ bodyId: "body2", topoKey: "f:0" }],
+      distanceType: "Offset",
+      chainTangentFaces: true,
+    });
+    expect(res.refusal).toBeNull();
+    expect(res.currentDims.radius).toBe(25);
+    expect(res.currentDims.thickness).toBeUndefined();
+    expect(res.oppositeFace).toBeUndefined();
+  });
+
+  it("measures NOTHING for a face it cannot classify, rather than guessing", async () => {
+    // A synthesized body has no analytic entry — `{}` leaves only `Offset`, the
+    // one type that is always valid, instead of inventing a reading.
+    const res = await mockClient.prepareOffsetFace({
+      snapshotId: 1,
+      pickedFaces: [{ bodyId: "body99", topoKey: "f:0" }],
+      distanceType: "Offset",
+      chainTangentFaces: true,
+    });
+    expect(res.currentDims).toEqual({});
+    expect(res.oppositeFace).toBeUndefined();
+  });
+
+  it("measures nothing for a MULTI-face closure, which §7.3 admits only for Offset", async () => {
+    const res = await mockClient.prepareOffsetFace({
+      snapshotId: 1,
+      pickedFaces: [
+        { bodyId: "body1", topoKey: "f:4" },
+        { bodyId: "body1", topoKey: "f:3" },
+      ],
+      distanceType: "Offset",
+      chainTangentFaces: true,
+    });
+    expect(res.currentDims).toEqual({});
+    expect(res.oppositeFace).toBeUndefined();
   });
 });

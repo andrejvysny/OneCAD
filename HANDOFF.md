@@ -1,3 +1,39 @@
+# HANDOFF — session 31 (2026-09-13) — UX-hardening resume, Gate A one race from green — PAUSED
+
+Session 31 · 2026-09-13 · plan `~/.claude/plans/act-as-senior-software-atomic-sparrow.md`
+
+## Goal
+
+Resume the UX-hardening program from `OneCAD-UX-Review-2026-09-11.md`: close the open checkpoint (A), then sketch-visit receipts and a debug-only main-thread probe (B). User decisions: scope A+B; native smoke does not block B; Astra ≤3 calls pre-approved; commit at green L3 boundaries only; never push.
+
+## Original plan
+
+The plan file above (Context, D1–D8, task table T0–T10). Phase A is T0–T5; Phase B is T6–T10.
+
+## Done so far (and why) — read `TODO.md` § SESSION 31 for every measured count
+
+- **T0** reconciled a moved repo (stale CMake cache moved aside, worker rebuilt, stage fixed), baselined every rung, fixed three baseline reds that were test-authoring defects, preserved the old red ctest log as evidence.
+- **T1–T4 (WP-A2, Astra-first):** the two `feature_pattern` reds were root-caused with probes (OCCT reports only the blend FACE as Generated; the fillet's boundary edges/vertices are orphans → Unknown → fail-closed refusal), Astra `derive` produced the conditional ownership-completion rule, three of its unknowns were measured the same day, the fix landed with a fail-closed certificate (live-successor accounting, any-root witnesses, indexed effective claims, live-claim retained-host check, Linear-only fillet arcs, origin gate before capability refusal), then Astra `break` and a fresh adversarial reviewer converged on the same hole, which was closed. Accepted derivation + break record: `docs/design/astra/feature-pattern-producer-ownership.md`.
+- **Pre-existing HEAD debt surfaced by running the full ladder for the first time since `ee5b449`:** `chamfer_reference_face` unit test (v6 alignment, D-3), a fixture-vs-strict-parser mismatch and a jobId typo in a Rust test, a cross-track `ladderFailed: "identity"` outside the closed enum, 438 vitest reds (32 fakes missing `onDocumentChanged`, the `MeasurePanel` golden, seedings, four real controller defects: missing/empty typed-context publishes), 23 Rust integration reds (clean replays claiming `ToEnd { from: 0 }` under v6; attribution measured against HEAD's own worker), 106 e2e reds (inspector-drawer migration drift plus five real defects: mock publication, bootstrap mesh provenance, chain re-anchor after solve, inspector recap shadowing re-edits, mock offset dims).
+- **Dead ends / rulings:** do not restore the v6 anchor carve-out (SCHEMA §10, five pinning tests); the F1 partially-reported-split case is an accepted residual; the Boolean re-edit with a consumed tool body stays unconfirmable by design (product decision owed); the three producer-binding `reason` tokens stay tolerated-but-unlisted until a protocol package adds them with Rust variants.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume"; re-read `CLAUDE.md`, `CURRENT_STATE.md` § session 31, `TODO.md` § SESSION 31 "Now".
+2. `git status` — the dirty tree is this session's work (see CURRENT_STATE for what must never be staged). Nothing is running; port 4177 is free.
+3. Fix the `commitFillet` same-turn race red-first (TODO "OPEN"), run `bunx playwright test e2e/chamfer-angle.spec.ts e2e/filletChamfer.spec.ts --project=chromium` (retries 0), then a fresh-context `adversarial-reviewer` over the FE production diff, then `bun run e2e` ALONE (expect 544 / 0), then commit A on `master` by explicit path list with the measured counts, `bun run tauri build --debug --bundles app`, hand the user the native checklist in TODO.
+4. Phase B per the plan: T6 (Rust receipt) ∥ T8 (probe), then T7, T9, Gate B. Astra: one call left for WP-A2; Phase B needs none.
+
+## Open questions
+
+- Fix design for the `commitFillet` race (superseded-vs-own-reopen distinction, or preserve the arm generation across the sync's reopen) — engineering, decide at fix time.
+- Product: Boolean re-edit whose tool body was consumed (mark the consumed operand vs drop the liveness check); v6 consequence for cache-less documents (every anchor-only ref downstream of an edit prompts a repair); mock `openDocument`/`resolveRecovery` nulling the publication at adoption (pinned by a test).
+- What is `tauri-agent-real-user-testing-specification.md` (untracked, appeared mid-session)?
+
+## Pointers
+
+- Tasks → `TODO.md` § SESSION 31 · Snapshot → `CURRENT_STATE.md` § session 31 · Gate logs → `scratchpad/gateA3/` (temporary) · Probe evidence → `docs/qa/evidence/ux-hardening-2026-09-11/fp-ownership-probes-2026-09-13.log`.
+
 # CURRENT HANDOFF — 2026-09-12 (AUTHORITATIVE; HISTORICAL REPORT BELOW)
 
 This is the handoff for a new Claude Code session. The older “session 30 committed/full L3 green” header below is historical and must not be treated as current acceptance. Current source state is dirty and shared; do not clean, reset, stage, commit, push or pull unrelated work.

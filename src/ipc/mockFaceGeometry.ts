@@ -23,7 +23,7 @@
  *     parity: a mock sketch-on-face session has the same shape (locked entities +
  *     Fixed constraints + a detectable region) as the real one.
  */
-import type { SketchConstraint, SketchEntity, SketchPlane } from "./types";
+import type { OffsetCurrentDims, SketchConstraint, SketchEntity, SketchPlane } from "./types";
 import { frontendConstraintsFromDto, frontendEntitiesFromDto } from "./sketchWireMap";
 import { BOX_EDGE_PAIRS, BOX_FACES, BOX_SIZE, boxCorners, type BoxCornerKey } from "./mockMeshes";
 
@@ -226,6 +226,75 @@ export function mockAdjacentFaces(bodyId: string, edgeTopoKey: string): string[]
   return BOX_FACES.filter(
     (face) => face.corners.includes(pair[0]) && face.corners.includes(pair[1]),
   ).map((face) => face.id);
+}
+
+/** What the mock could MEASURE for one picked offset face (SCHEMA §7.3/§7.6). */
+export interface MockOffsetFaceDims {
+  currentDims: OffsetCurrentDims;
+  /** The unique `Total` opposite, as a TopoKey. Absent unless one was derived. */
+  oppositeTopoKey?: string;
+}
+
+/**
+ * `PrepareOffsetFace`'s `currentDims` for ONE picked face — CLASSIFIED, never
+ * guessed (kernel parity for the mock lane).
+ *
+ * SCHEMA §7.3 keys `currentDims` by what the surface can actually be measured as,
+ * and the two readings are mutually exclusive per face: a PLANAR face has a
+ * `thickness` against its unique opposite and no radius; a CYLINDRICAL one has a
+ * `radius` and no thickness. `ModelToolController.offsetAllowedTypes` reads that
+ * classification straight off the answer — `radius` ⇒ Radius/Diameter, `thickness`
+ * (or an opposite) ⇒ Total — so a mock that returned BOTH made every mock-lane face
+ * classify as curved and silently removed `Total` from the UI entirely.
+ *
+ * WHAT THE MOCK CANNOT CLASSIFY it reports as `{}` rather than inventing a number:
+ * a synthesized (extruded/boolean) body has no analytic entry at all, and neither
+ * does a multi-face closure, which §7.3 admits only for `Offset`. `{}` resolves to
+ * the `Offset`-only list — the one type that is always valid — which is the honest
+ * answer, and it is also what keeps this from becoming the silent wrong reading
+ * that the classification exists to remove.
+ */
+export function mockOffsetFaceDims(
+  bodyId: string,
+  picks: readonly { elementId?: string; topoKey?: string }[],
+): MockOffsetFaceDims {
+  if (picks.length !== 1) return { currentDims: {} };
+  const found = lookupMockFace(bodyId, picks[0].elementId, picks[0].topoKey);
+  // The cylinder's side: a radius, and no opposite to measure a thickness against.
+  if (found.kind === "nonPlanar") return { currentDims: { radius: CYLINDER.radius } };
+  if (found.kind !== "planar") return { currentDims: {} };
+  const opposite = oppositePlanarFace(bodyId, found.faceId);
+  if (!opposite) return { currentDims: {} };
+  return {
+    currentDims: { thickness: opposite.thickness },
+    oppositeTopoKey: opposite.faceId,
+  };
+}
+
+/**
+ * The face parallel to `faceId` on the far side of the solid, with the distance
+ * between them — derived from the same tables the viewport renders.
+ *
+ * The box's six faces pair by outward normal (`f:0`/`f:1` across X, `f:2`/`f:3`
+ * across Y, `f:4`/`f:5` across Z), which is exactly `BOX_FACES` index `k ^ 1`, and
+ * the gap is that axis's extent. The cylinder's two CAPS pair with each other
+ * across its height. Nothing else has a unique opposite.
+ */
+function oppositePlanarFace(
+  bodyId: string,
+  faceId: string,
+): { faceId: string; thickness: number } | null {
+  const shape = shapeForBody(bodyId);
+  if (shape === "box") {
+    const index = BOX_FACES.findIndex((f) => f.id === faceId);
+    if (index < 0) return null;
+    return { faceId: BOX_FACES[index ^ 1].id, thickness: BOX_SIZE[index >> 1] };
+  }
+  if (shape === "cylinder") {
+    if (faceId === "f:1") return { faceId: "f:2", thickness: CYLINDER.height };
+    if (faceId === "f:2") return { faceId: "f:1", thickness: CYLINDER.height };
+  }
+  return null;
 }
 
 // ── The projected boundary, in the shape the REAL DTO carries ────────────────

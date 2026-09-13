@@ -75,7 +75,11 @@ const ROWS: Row[] = [
   {
     tool: "boolean",
     opType: "Boolean",
-    stored: { operation: "Union", targetBodyId: "body1", toolBodyId: "body2-retired" },
+    // BOTH operands are live bodies on purpose: `activeToolPresentation` refuses to
+    // confirm a boolean whose operand the projection no longer carries, and that
+    // refusal is pinned by `activeToolPresentation.test.ts`. This probe is about
+    // Enter/✓ equivalence, not operand liveness.
+    stored: { operation: "Union", targetBodyId: "body1", toolBodyId: "body2" },
     arm: (c, id) => c.editBooleanFeature(id),
   },
   {
@@ -132,7 +136,10 @@ describe("modeling interaction contract — Enter commits every armed model tool
     applyOperation = vi.fn(() => Promise.resolve(okResult()));
     applyEditCommand = vi.fn(() => Promise.resolve(okResult()));
     documentStore.setState({
-      bodies: { body1: { id: "body1", name: "Body 1", visible: true } },
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true },
+        body2: { id: "body2", name: "Body 2", visible: true },
+      },
       features: [
         {
           id: "feat-1",
@@ -148,6 +155,8 @@ describe("modeling interaction contract — Enter commits every armed model tool
       engine: makeEngineMock() as unknown as ViewportEngine,
       client: {
         onPreviewResult: vi.fn(() => () => {}),
+        onDocumentChanged: vi.fn(() => () => {}),
+        getCurrentMeshPublication: vi.fn(() => null),
         applyOperation,
         applyEditCommand,
         getOperationParams: vi.fn(() => Promise.resolve({ ...row.stored })),

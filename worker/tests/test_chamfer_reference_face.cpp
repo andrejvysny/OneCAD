@@ -207,6 +207,7 @@ struct ChamferSpec {
     bool post_upstream_edit = false;        // §7.2 `stepIndex > editedFrom`
     bool angle = false;                     // `angleDeg` (AddDA) instead of `distance2`
     bool v1 = true;                         // carry `tangentClosureVersion: 1`
+    bool promote_seed = false;              // mint `el_edge` into the partition before the op
 };
 
 // id + the world point that locates the face on the 40x20x10 box.
@@ -292,6 +293,14 @@ Probe run_probe(Upstream upstream, const ChamferSpec& spec = {}) {
     print_face_table(upstream_name(upstream), pre);
 
     const TopoDS_Shape edge = nearest(pre, TopAbs_EDGE, kW / 2.0, 0.0, kDepth);
+    if (spec.promote_seed) {
+        // Realistic path: the seed edge is ALREADY partition-tracked (a prior op
+        // minted it), so rung-1 identity resolves it and the ladder never reaches
+        // the descriptor stage — matching `chamfer_reference_face_legacy_needsrepair
+        // .ndjson`'s `editedFrom` rounds, which halt at the pair, not the seed.
+        part.mint(body, "el_edge", km::ElementKind::Edge, edge, pre,
+                  json{{"worldPoint", {kW / 2.0, 0.0, kDepth}}});
+    }
     {
         // The face refs ride `inputs[N + i]` with N = `edgeIds.length` = 1, so the
         // pair's slot is `opc.input1` (SCHEMA §7.3, slot order normative).
@@ -515,6 +524,51 @@ void expect_legacy_item(const Probe& p, const std::string& tag, const char* ref_
     }
 }
 
+// ── resolver v6's post-edit exact-anchor refusal (SCHEMA §10, resolverVersion =
+//    6): `post_upstream_edit` makes an anchor-exact descriptor tie `NeedsRepair`
+//    rather than auto-bind, even though the winning candidate scores above the
+//    auto-bind threshold — the seed edge's OWN resolution halts before the
+//    op-built §9 pair item is ever reached. ──
+void expect_v6_post_edit_tie_refusal(const Probe& p, const std::string& tag) {
+    std::fprintf(stderr, "%s needsRepair = %s\n", tag.c_str(), p.needs_repair.dump().c_str());
+    check(p.status_ok, tag + "the halt is STATE, not an error (code '" + p.error_code + "')");
+    if (p.needs_repair.size() != 1) {
+        check(false, tag + "exactly ONE needs_repair item, got " + p.needs_repair.dump());
+        return;
+    }
+    const json& item = p.needs_repair[0];
+    check(item.value("refId", "") == "opc.input0",
+          tag + "refId == opc.input0 (got '" + item.value("refId", "") + "')");
+    check(item.value("reason", "") == "ambiguous",
+          tag + "reason == ambiguous (got '" + item.value("reason", "") + "')");
+    check(item.value("elementId", "?") == "el_edge",
+          tag + "elementId == el_edge (got '" + item.value("elementId", "") + "')");
+    check(item.value("ladderFailed", "") == "descriptor",
+          tag + "ladderFailed == descriptor (got '" + item.value("ladderFailed", "") + "')");
+    check(item.value("scoringVersion", 0) == onecad::elementmap::kResolverVersion,
+          tag + "scoringVersion == kResolverVersion");
+    check(item.contains("anchor") && item["anchor"].contains("worldPoint"),
+          tag + "the item carries the seed edge's anchor");
+    const json candidates = item.value("candidates", json::array());
+    check(!candidates.empty(), tag + "at least one candidate");
+    if (!candidates.empty()) {
+        // v6 refuses DESPITE an auto-bindable score — that is the whole point of
+        // the post-edit exact-anchor refusal (SCHEMA §10, resolverVersion 6).
+        check(candidates[0].value("topoKey", "") == "e:7",
+              tag + "leading candidate == e:7 (got '" + candidates[0].value("topoKey", "") + "')");
+        check(candidates[0].value("score", -1.0) >= 0.85,
+              tag + "leading candidate score >= 0.85 (got " +
+                  std::to_string(candidates[0].value("score", -1.0)) + ")");
+        check(candidates[0].value("margin", -1.0) >= 0.10,
+              tag + "leading candidate margin >= 0.10 (got " +
+                  std::to_string(candidates[0].value("margin", -1.0)) + ")");
+    }
+    for (const json& r : p.needs_repair) {
+        check(r.value("reason", "") != "legacyReferenceFace",
+              tag + "the seed refusal precedes the pair halt — no legacyReferenceFace item yet");
+    }
+}
+
 // ── a by-name refusal: top-level OP_FAILED + exactly ONE §7.2 diagnostic ─────
 void expect_refusal(const Probe& p, const std::string& tag, const char* code,
                     const char* edge_id, const char* face_id) {
@@ -722,22 +776,34 @@ int main() {
 
         // ── (b)+(c) A LEGACY record — asymmetric, no pair — HALTS, in EVERY
         //     lane. The ordinal rule is gone, so there is nothing left to fall
-        //     back to. `post_upstream_edit` is deliberately NOT consulted: it is a
-        //     per-PLAN claim that every `ToEnd(0)` lane sets and that `RevertToEnd`
-        //     (undo/redo) and `RegenToStep` previews omit, so gating the halt on it
-        //     would fire on open and vanish on the very next redo. Both values must
-        //     produce the SAME item. ──
+        //     back to. On the REALISTIC (promoted-seed) path the seed edge is
+        //     already partition-tracked, so rung-1 identity resolves it and the
+        //     halt is the pair contract's `legacyReferenceFace` item, IDENTICAL
+        //     with and without an edit context (a guard that changed shape between
+        //     an open and a redo would protect nothing). On the UNPROMOTED
+        //     post-edit lane (this test's seed ref is deliberately left unminted,
+        //     so both ops take the descriptor+anchor ladder), resolver v6's
+        //     post-edit exact-anchor refusal (SCHEMA §10, resolverVersion = 6)
+        //     refuses the seed edge's own anchor-exact descriptor tie before the
+        //     pair item is ever reached — a DIFFERENT halt, owned by the resolver,
+        //     not the pair contract. ──
         const Probe halted_replay = run_probe(Upstream::None);
-        const Probe halted_post_edit = run_probe(Upstream::None, {.post_upstream_edit = true});
+        const Probe halted_post_edit_unpromoted =
+            run_probe(Upstream::None, {.post_upstream_edit = true});
+        const Probe halted_post_edit_promoted =
+            run_probe(Upstream::None, {.post_upstream_edit = true, .promote_seed = true});
         std::fprintf(stderr, "-- (b)+(c) LEGACY record with no pair: halts in every lane --\n");
         // The plain box orders the edge's adjacent pair front f:2 < top f:6.
         expect_legacy_item(halted_replay, "[legacy, no edit context] ", "opc.input1", "el_edge",
                            {"f:2", "f:6"});
-        expect_legacy_item(halted_post_edit, "[legacy, post-edit] ", "opc.input1", "el_edge",
-                           {"f:2", "f:6"});
-        check(halted_replay.needs_repair == halted_post_edit.needs_repair,
-              "[legacy] the halt is IDENTICAL with and without an edit context — a guard "
-              "that changed shape between an open and a redo would protect nothing");
+        expect_legacy_item(halted_post_edit_promoted, "[legacy, post-edit, promoted seed] ",
+                           "opc.input1", "el_edge", {"f:2", "f:6"});
+        expect_v6_post_edit_tie_refusal(halted_post_edit_unpromoted,
+                                        "[legacy, post-edit, unpromoted seed] ");
+        check(halted_replay.needs_repair == halted_post_edit_promoted.needs_repair,
+              "[legacy] the halt is IDENTICAL with and without an edit context, once the seed is "
+              "partition-tracked (the realistic path) — a guard that changed shape between an "
+              "open and a redo would protect nothing");
         // The same record downstream of the ordinal-permuting hole halts too, so
         // there is no lane in which the old mirrored geometry can still be built.
         expect_legacy_item(run_probe(Upstream::HoleMinusXBlind), "[legacy, after the hole] ",
@@ -815,10 +881,17 @@ int main() {
         check(long_leg_face(n_plain) == "top(+Z)",
               "[non-v1 typed, plain box] the 4 mm leg is on the PAIRED face (got " +
                   long_leg_face(n_plain) + ")");
-        const Probe n_halted =
+        // Same resolver v6 split as (b)+(c): the promoted-seed (realistic) path
+        // reaches the pair contract's halt; the unpromoted seed hits the
+        // resolver's own post-edit exact-anchor refusal first.
+        const Probe n_halted_promoted = run_probe(
+            Upstream::None, {.post_upstream_edit = true, .v1 = false, .promote_seed = true});
+        expect_legacy_item(n_halted_promoted, "[non-v1 legacy, post-edit, promoted seed] ",
+                           "opc.input1", "el_edge", {"f:2", "f:6"});
+        const Probe n_halted_unpromoted =
             run_probe(Upstream::None, {.post_upstream_edit = true, .v1 = false});
-        expect_legacy_item(n_halted, "[non-v1 legacy, post-edit] ", "opc.input1", "el_edge",
-                           {"f:2", "f:6"});
+        expect_v6_post_edit_tie_refusal(n_halted_unpromoted,
+                                        "[non-v1 legacy, post-edit, unpromoted seed] ");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: exception %s\n", e.what());
         ++g_failures;

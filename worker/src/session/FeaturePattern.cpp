@@ -262,6 +262,21 @@ ops::OpOutcome execute_feature_pattern(ScratchJob& job, const json& op,
     }
 
     ops::OpOutcome result = ops::OpOutcome::ok();
+    // Both producer-binding refusals (origin gate and virtual-ref bind) report
+    // through one shape, so a repairable reference always reads the same way.
+    const auto producer_bind_failure = [&result](std::vector<json> repairs,
+                                                 const std::string& source_id, int instance) {
+        const std::size_t input_index = repairs.front().value("inputIndex", 0U);
+        result.needs_repair = std::move(repairs);
+        const std::string message = "FeaturePattern instance " + std::to_string(instance) +
+            " source " + source_id + " input " + std::to_string(input_index) +
+            " producer binding failed";
+        result.diagnostics.push_back(
+            {{"severity", "error"}, {"code", "FEATURE_PATTERN_PRODUCER_BIND"},
+             {"message", message}, {"stage", "reference-resolution"},
+             {"evidence", {{"featurePattern", {{"instance", instance},
+                 {"sourceRecordId", source_id}, {"inputIndex", input_index}}}}}});
+    };
     std::set<std::string> selected_ids;
     for (const json& source : params["sourceOps"])
         selected_ids.insert(source.value("sourceRecordId", std::string()));
@@ -310,40 +325,46 @@ ops::OpOutcome execute_feature_pattern(ScratchJob& job, const json& op,
                         return result;
                     }
                 }
-                if (execution_class != FeaturePatternExecutionClass::HostModifier &&
-                    source_index > creator_index &&
-                    source.value("opType", std::string()) != "Hole" &&
-                    !feature_pattern_modifier_inputs_supported(
-                        job, source, params["sourceOps"])) {
-                    return ops::OpOutcome::fail(
-                        "UNSUPPORTED_OP", "FeaturePattern source " +
-                        source.value("sourceRecordId", std::string()) + " index " +
-                        std::to_string(source_index) + " instance " +
-                        std::to_string(instance) +
-                        " supports only straight-edge Fillet/Chamfer inputs");
-                }
                 json nested = instantiate(source, trsf, op_id, instance, source_index,
                                           job, selected_ids, designated_host,
                                           virtual_ids, generated_ids,
                                           sketch_ids, body_ids);
+                const std::string source_record_id =
+                    source.value("sourceRecordId", std::string());
+                // Origin BEFORE capability: an input the ledger cannot attribute is
+                // missing evidence the user can repair, and reporting it as
+                // `UNSUPPORTED_OP` would hide a repairable reference behind a
+                // permanent-sounding refusal. The capability refusal below keeps
+                // its meaning — a curve type this adapter cannot pattern even when
+                // its producer IS known.
+                if (source_index > creator_index) {
+                    std::vector<json> origin_repairs =
+                        feature_pattern_unresolved_origin_repairs(
+                            job, nested, source_record_id, instance);
+                    if (!origin_repairs.empty()) {
+                        producer_bind_failure(std::move(origin_repairs), source_record_id,
+                                              instance);
+                        return result;
+                    }
+                }
+                std::string capability_refusal;
+                if (execution_class != FeaturePatternExecutionClass::HostModifier &&
+                    source_index > creator_index &&
+                    source.value("opType", std::string()) != "Hole" &&
+                    !feature_pattern_modifier_inputs_supported(
+                        job, source, params["sourceOps"],
+                        params.value("layout", json::object()), capability_refusal)) {
+                    return ops::OpOutcome::fail(
+                        "UNSUPPORTED_OP", "FeaturePattern source " + source_record_id +
+                        " index " + std::to_string(source_index) + " instance " +
+                        std::to_string(instance) + " " + capability_refusal);
+                }
                 if (source_index > creator_index) {
                     auto repairs = feature_pattern_bind_instance_output_refs(
                         job, nested, frozen_source, producer_topology, result.delta,
-                        instance, source.value("sourceRecordId", std::string()),
-                        selected_ids, designated_host);
+                        instance, source_record_id, selected_ids, designated_host);
                     if (!repairs.empty()) {
-                        const std::size_t input_index = repairs.front().value("inputIndex", 0U);
-                        result.needs_repair = std::move(repairs);
-                        const std::string message = "FeaturePattern instance " +
-                            std::to_string(instance) + " source " +
-                            source.value("sourceRecordId", std::string()) + " input " +
-                            std::to_string(input_index) + " producer binding failed";
-                        result.diagnostics.push_back(
-                            {{"severity", "error"}, {"code", "FEATURE_PATTERN_PRODUCER_BIND"},
-                             {"message", message}, {"stage", "reference-resolution"},
-                             {"evidence", {{"featurePattern", {{"instance", instance},
-                                 {"sourceRecordId", source.value("sourceRecordId", std::string())},
-                                 {"inputIndex", input_index}}}}}});
+                        producer_bind_failure(std::move(repairs), source_record_id, instance);
                         return result;
                     }
                 }

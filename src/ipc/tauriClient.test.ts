@@ -2092,11 +2092,19 @@ describe("tauriClient scoped geometry reads", () => {
     await client.classifyElement("a", "el_1", "f:1", fence);
     await client.massProperties("a");
 
-    expect(seen.slice(0, 3).every(({ payload }) =>
+    // `createTauriClient()` registers its event listeners through the same
+    // mocked invoke, so filter to the three read verbs instead of slicing.
+    const reads = seen.filter(({ cmd }) =>
+      cmd === "element_info" || cmd === "query_mass_properties" || cmd === "classify_element",
+    );
+    expect(reads.map(({ cmd }) => cmd)).toEqual([
+      "element_info", "query_mass_properties", "classify_element", "query_mass_properties",
+    ]);
+    expect(reads.slice(0, 3).every(({ payload }) =>
       (payload as { readFence?: unknown }).readFence === fence,
     )).toBe(true);
-    expect((seen[0].payload as { snapshotId: number }).snapshotId).toBe(17);
-    expect((seen[3].payload as { readFence?: unknown }).readFence).toBeUndefined();
+    expect((reads[0].payload as { snapshotId: number }).snapshotId).toBe(17);
+    expect((reads[3].payload as { readFence?: unknown }).readFence).toBeUndefined();
   });
 });
 

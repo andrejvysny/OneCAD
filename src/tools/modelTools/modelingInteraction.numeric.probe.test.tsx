@@ -142,6 +142,8 @@ describe("modeling interaction contract — type-to-enter and live preview", () 
       engine: engineMock as unknown as ViewportEngine,
       client: {
         onPreviewResult: vi.fn(() => () => {}),
+        onDocumentChanged: vi.fn(() => () => {}),
+        getCurrentMeshPublication: vi.fn(() => null),
         applyOperation: vi.fn(),
         applyEditCommand: vi.fn(),
         getOperationParams: vi.fn(() => Promise.resolve({ ...row.stored })),

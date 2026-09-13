@@ -29,6 +29,7 @@ import { toolStore } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { documentStore } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
 import { buildBodyObjects, swap as swapMesh, __resetRegistryForTests } from "@/viewport/mesh/meshRegistry";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
@@ -86,6 +87,8 @@ function makeEngineMock() {
 function makeClientMock() {
   return {
     onPreviewResult: vi.fn(() => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     getOperationParams: vi.fn(() => Promise.resolve<Record<string, unknown>>({})),
     canFoldTransform: vi.fn(() => Promise.resolve<string | null>(null)),
@@ -119,6 +122,17 @@ describe("ModelToolController align (face-to-face)", () => {
     swapMesh(MOVER, buildBodyObjects(parseMeshPayload(makeBoxMesh()), MOVER, 1));
     swapMesh(DEST, buildBodyObjects(parseMeshPayload(makeBoxMesh(40, 40, 40, 0, [110, 0, 0])), DEST, 1));
     swapMesh(ROUND, buildBodyObjects(parseMeshPayload(makeCylinderMesh()), ROUND, 1));
+    // A body on screen is also a body in the PROJECTION, and the chip's typed
+    // targets resolve against it: a target `documentStore` does not know is
+    // "no longer available" and BLOCKS confirm (`activeToolPresentation`). The
+    // mock seed carries only `body1`, so the other two boxes go in here too.
+    documentStore.setState({
+      bodies: {
+        ...documentStore.getState().bodies,
+        [DEST]: { id: DEST, name: "Body 2", visible: true },
+        [ROUND]: { id: ROUND, name: "Body 3", visible: true },
+      },
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
     engineMock = makeEngineMock();

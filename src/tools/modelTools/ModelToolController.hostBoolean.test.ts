@@ -121,6 +121,8 @@ function makeClientMock(
       capture?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0] })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0] })),
     getSketch: vi.fn(() => Promise.resolve(makeSession(opts.entities))),

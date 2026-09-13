@@ -118,6 +118,8 @@ function makeClientMock(storedParams?: Record<string, unknown>) {
   let seq = 0;
   return {
     onPreviewResult: vi.fn((_cb: (r: PreviewResult) => void) => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [REGION] })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [REGION] })),
     getSketch: vi.fn(() => Promise.resolve(session)),

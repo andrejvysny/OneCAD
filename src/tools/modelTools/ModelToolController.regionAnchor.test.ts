@@ -96,6 +96,8 @@ function makeClientMock() {
   let seq = 0;
   return {
     onPreviewResult: vi.fn((_cb: (result: PreviewResult) => void) => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0] })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0] })),
     getSketch: vi.fn(() => Promise.resolve(makeSession())),
@@ -140,6 +142,17 @@ describe("ModelToolController regionAnchor (SCHEMA §7.3 WP-B)", () => {
     selectionStore.getState().set([
       { kind: "sketchRegion", id: "region-ref", sketchId: "sk", regionId: "r0" },
     ]);
+    // The chip's typed profile context names this sketch, and the confirm gate
+    // (`missingRequiredTargetMessage`) refuses a tool whose sketch the projection
+    // does not carry. `seedMockDocument()` publishes sketch2/4/5 only.
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
   });

@@ -99,6 +99,8 @@ function makeClientMock(opts: { deferPreview?: boolean } = {}) {
   const pending: Array<() => void> = [];
   const client = {
     onPreviewResult: vi.fn((_cb: (r: PreviewResult) => void) => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
     prepareEdgeOp: vi.fn(() =>

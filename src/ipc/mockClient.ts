@@ -110,6 +110,7 @@ import {
   lookupMockFace,
   mockAdjacentFaces,
   mockElementHash,
+  mockOffsetFaceDims,
   mockProjectedContent,
   worldToPlaneUv,
   type MockFaceGeometry,
@@ -505,7 +506,55 @@ export function mockMeshKey(bodyId: string, lod: Lod, generation = 1): string {
 }
 
 const docChangeListeners = new Set<(c: DocumentChange) => void>();
-let lastMockPublication: DocumentChange | null = null;
+let mockPublicationSequence = 0;
+
+function nextMockPublicationId(): number {
+  mockPublicationSequence = Math.max(1, mockPublicationSequence + 1);
+  return mockPublicationSequence;
+}
+
+/**
+ * The publication for the geometry the mock lane is CURRENTLY serving.
+ *
+ * `seedMockDocument()` is written straight into `documentStore` and stays there
+ * across a mock `newDocument()` — the seed projection is what the lane keeps
+ * showing and what `getBodyMesh` keeps answering with — yet nothing ever fires the
+ * `document-changed` a real open publishes. With no retained publication,
+ * `promote.ts`'s `installedProofIsCurrent` refuses every pick as "Selection is out
+ * of date" on geometry that is on screen and perfectly current, which kills
+ * Measure and every other proof-gated pick in the whole mock lane.
+ *
+ * `tauriClient` RETAINS its last publication precisely so a viewport mounting
+ * after the publish can still adopt it; this is that same retained value, derived
+ * from the projection rather than from an event the mock has no reason to fire.
+ * Mesh generation and snapshot id are the SAME number — the convention
+ * `emitMockDocumentChanged` normalizes every later publication to.
+ */
+function currentMockPublication(): DocumentChange | null {
+  const document = documentStore.getState();
+  const bodyIds = Object.keys(document.bodies);
+  if (
+    document.documentId === undefined ||
+    document.runtimeSession === undefined ||
+    bodyIds.length === 0
+  ) {
+    return null;
+  }
+  const snapshotId = nextMockPublicationId();
+  return {
+    revision: document.revision,
+    documentId: document.documentId,
+    runtimeSession: document.runtimeSession,
+    snapshotId,
+    changedBodies: bodyIds.map((bodyId) => ({
+      bodyId,
+      meshKey: mockMeshKey(bodyId, "fine", snapshotId),
+    })),
+    removedBodies: [],
+  };
+}
+
+let lastMockPublication: DocumentChange | null = currentMockPublication();
 
 function assertMockReadFence(fence: GeometryReadFence | undefined): void {
   if (!fence) return;
@@ -518,12 +567,6 @@ function assertMockReadFence(fence: GeometryReadFence | undefined): void {
   ) {
     throw new Error("stale geometry read fence");
   }
-}
-let mockPublicationSequence = 0;
-
-function nextMockPublicationId(): number {
-  mockPublicationSequence = Math.max(1, mockPublicationSequence + 1);
-  return mockPublicationSequence;
 }
 
 function normalizeMockBodyRefs(
@@ -3064,7 +3107,9 @@ export function resetMockDocument(): void {
   mockRevision = 5;
   rollbackSequence = 0;
   operationRollback = null;
-  lastMockPublication = null;
+  // The seed baseline is back, so its publication is too — dropping it here would
+  // leave the restored geometry unpickable (see `currentMockPublication`).
+  lastMockPublication = currentMockPublication();
   nextBodySeq = 2;
   nextFeatureSeq = 100;
   nextImportSeq = 1;
@@ -3128,7 +3173,12 @@ export const mockClient: CadClient = {
   async newDocument(options) {
     await wait();
     beforeAdopt(options);
-    lastMockPublication = null;
+    // NOT null: the mock lane does not replace `documentStore` on a new document,
+    // so the seed projection — and the geometry `getBodyMesh` answers with — is
+    // still exactly what the editor shows. Publishing it is what a real backend's
+    // post-adoption regen does, and without it every pick on that geometry is
+    // refused as stale (see `currentMockPublication`).
+    lastMockPublication = currentMockPublication();
     return snapshot("Untitled");
   },
   async openDocument(path, onRecovery, options) {
@@ -4082,16 +4132,24 @@ export const mockClient: CadClient = {
         },
       };
     }
+    const targetBodyId = bodies[0] ?? "";
+    // CLASSIFIED, not seeded. This used to answer a fixed `{ radius: 10,
+    // thickness: 10 }` for every pick, which is not a shape any surface has:
+    // `offsetAllowedTypes` tests `radius` first, so every mock-lane face resolved
+    // as CURVED and `Total` was unreachable on a flat box face. See
+    // `mockOffsetFaceDims` for what the mock can and cannot measure.
+    const measured = mockOffsetFaceDims(targetBodyId, req.pickedFaces);
     return {
       snapshotId,
-      targetBodyId: bodies[0] ?? "",
+      targetBodyId,
       faces: req.pickedFaces.map((p) => ({
         topoKey: p.topoKey ?? p.elementId ?? "",
         picked: true,
       })),
-      // MOCK LIMIT: fixed seeds, not a measurement. Enough for the chip to open at
-      // a number for the absolute distance types; never claimed to be the body's.
-      currentDims: { radius: 10, thickness: 10 },
+      ...(measured.oppositeTopoKey
+        ? { oppositeFace: { topoKey: measured.oppositeTopoKey, picked: false } }
+        : {}),
+      currentDims: measured.currentDims,
       refusal: null,
     };
   },

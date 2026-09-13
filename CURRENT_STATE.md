@@ -1,3 +1,18 @@
+# CURRENT STATE — session 31 (2026-09-13, Fable, UX-hardening resume) — PAUSED
+
+Last verified: 2026-09-13 20:45 (this session). Plan: `~/.claude/plans/act-as-senior-software-atomic-sparrow.md`. Ledger: `TODO.md` § "SESSION 31" (read its "Now" block first).
+
+- **Branch:** `master` at `65b4c60`, **uncommitted**: 90 tracked files changed (+3084 / −439) plus untracked `docs/design/astra/feature-pattern-producer-ownership.md` (commit it), `.claude/agent-memory/**` (never stage), `worker/build-stale-cad-path/` (gitignored, delete by hand), and `tauri-agent-real-user-testing-specification.md` (appeared during the session, not this program's — ask the user). `master == origin/master`. Never push.
+- **Repo moved** from `workspace/CAD/OneCAD-Tauri` to `workspace/OneCAD` (older docs cite the old path). Worker rebuilt from scratch against `~/.onecad-occt/8.0.1`, fingerprint `0a6a1dce34181289`, 197 ctest targets; staged sha equals built sha.
+- **Gate A on the frozen tree BEFORE the e2e reconciliation (`scratchpad/gateA3`, serial, alone):** ctest **197/197** · fmt ✓ · clippy 1.97.0 ✓ · clippy 1.98.1 ✓ · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **100 lines / 1652 / 0 / 0** · tsc ✓ · build ✓ · vitest **346 / 5992 / 0 / 78** · hex 0 · coverage 34/9/16/20 · contracts 41/19/15 · coverage self-test ✓ · hygiene ✓ · tracing guard ✓ · **e2e 438 / 106 RED** (pre-existing on HEAD: inspector-drawer migration drift + five behavioural defects).
+- **After reconciliation (agent-run, not the run of record):** W1 set 43/43, W2 set 60/62 on chromium; full vitest **346 / 5998 / 0 / 78**; tsc clean. Rust/worker untouched since gateA3 except comment-only `Ladder.cpp` and the test-provenance corrections already inside the 1652/0 run.
+- **The one known red:** `e2e/chamfer-angle.spec.ts:129`, `:153` — a real same-turn race in `ModelToolController.commitFillet` (angle typed + Enter dropped while the chamfer sync reopens the preview). See TODO "OPEN".
+- **Production code changed this session (all red-first, all reviewed by me):** worker ledger completion for blend-born topology with a fail-closed certificate + FeaturePattern origin gate, live-claim retained-host check, Linear-only fillet arcs, indexed effective claims, closed-enum `ladderFailed`; SCHEMA §9/§14 prose; `ModelToolController.ts` 6 typed-context/debug publish hunks; `ActiveToolInspector.tsx` recap gate; `meshSync.ts` bootstrap provenance; `SketchController.ts` `reanchorChain`; `mockClient.ts` retained publication + `mockFaceGeometry.ts` offset dims; `planner.rs` doc comment. **Owed: a fresh-context adversarial review of the FE production diff before commit.**
+- **Decisions:** D-3 (resolver v6 normative; tests corrected, not the resolver; product consequence recorded), `MeasurePanel` no longer a shell contribution, F1 partial-split residual accepted for the blend certificate.
+- **Astra:** 2 of ~3 calls used (derive `1b00fee1a827`, break `fc0f11eaf38d`), accepted at `docs/design/astra/feature-pattern-producer-ownership.md` with the break record.
+- **Processes:** none left running (dev server on 4177 stopped, scratch worktree removed, monitors stopped).
+- **Blockers:** the chamfer race (small, understood). Owed user-run: native smoke checklist in TODO (after the bundle), manual release gates, STEP/3MF open-elsewhere.
+
 # CURRENT UX HARDENING — AUTHORITATIVE HANDOFF (2026-09-12)
 
 This section supersedes historical session headers below for current planning. It is a documentation handoff, not a claim that the dirty tree is program-owned or that acceptance is closed.

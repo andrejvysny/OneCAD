@@ -86,7 +86,12 @@ describe("ModelToolController — datum plane tool", () => {
       hitExtrudeHandle: vi.fn(() => false),
       isExtrudePreviewVisible: vi.fn(() => false),
     };
-    clientMock = { onPreviewResult: vi.fn(() => () => {}), applyEditCommand };
+    clientMock = {
+      onPreviewResult: vi.fn(() => () => {}),
+      onDocumentChanged: vi.fn(() => () => {}),
+      getCurrentMeshPublication: vi.fn(() => null),
+      applyEditCommand,
+    };
     controller = new ModelToolController({
       engine: engineMock as unknown as ViewportEngine,
       client: clientMock as unknown as CadClient,

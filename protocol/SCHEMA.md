@@ -4899,6 +4899,27 @@ STATE (see [§8](#8-error-taxonomy)).
   equal the `policyVersions.resolverVersion` Rust pinned in §7.2 — that axis gates
   checkpoint-cache compatibility. When the two differ, this field wins for
   interpreting the numbers in THIS payload.
+- **FeaturePattern producer-binding repairs** (`op.featurePattern`, §7.3): a
+  `NeedsRepair` item raised while replaying a pattern instance additionally carries
+  `instance` (1-based non-seed instance), `sourceRecordId` (the selected source
+  record whose input failed) and `inputIndex` (its `inputs[]` slot). Two `refId`
+  forms occur: `<sourceRecordId>.input<N>` when the refusal precedes instantiation
+  (missing / incomplete / out-of-range / hash- or ownership-mismatched
+  resolved-input evidence — `reason` `no-candidates`, `ladderFailed`
+  `"descriptor"`, no ladder ran), and
+  `<instance-virtual-opId>.input<N>` once the instance's virtual op exists. On the
+  producer-binding path the worker also emits the `reason` tokens `unknown-origin`,
+  `ambiguous-origin` (the ledger cannot name the input's producer) and
+  `ownership-mismatch` (an existing partition entry whose effective owner is not the
+  expected selected producer, or a retained host face whose live claim no longer
+  matches its evidence); readers without those variants degrade them per the
+  tolerance rule below, and the Rust reader currently drops the three extras (no
+  typed fields on `RepairItem`; the same asymmetry §9 records for
+  `resolvedAxis`/`frozenAxis`). `ladderFailed` stays inside the closed enum on
+  every one of these items. Executable coverage: `fixtures/feature_pattern_repair.ndjson`
+  pins the pre-instantiation form with `no-candidates`; the producer-binding
+  tokens are pinned by worker unit tests (`worker/tests/test_feature_pattern.cpp`)
+  and a Rust parse test, not yet by an NDJSON fixture.
 - `reason`: the five tokens above. `ambiguous` / `no-candidates` / `low-confidence`
   are ladder outcomes a **worker** may emit. **`legacyReferenceFace` is
   worker-emitted but OP-BUILT, not a ladder outcome** (kernel-hardening WP-F,
@@ -5233,6 +5254,17 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-09-13 — §9 FeaturePattern repair-item extras documented; `ladderFailed` kept closed.**
+  [§9](#9-needsrepair-payload) Records the wire surface the worker has emitted since
+  FeaturePattern landed: `instance` / `sourceRecordId` / `inputIndex` on
+  producer-binding repairs, the pre-instantiation `refId` form
+  `<sourceRecordId>.input<N>`, and the tolerated `reason` tokens `unknown-origin`,
+  `ambiguous-origin`, `ownership-mismatch`. Correction on the worker side only: the
+  `ownership-mismatch` item used to emit `ladderFailed: "identity"`, outside the
+  closed `history | descriptor` enum, which the Rust reader rejects as a whole
+  `planStep` — it now emits `"descriptor"` (the op-built precedent). No envelope, no
+  new field, no Rust or TS change; `fixtures/feature_pattern_repair.ndjson` now pins
+  the complete item shape instead of a subset matcher.
 - **2026-09-09 — SketchRegions refusal diagnostics (kernel-hardening WP-S1).**
   [§7.4](#74-sketch-solver-lane) `SketchRegions` gains an ADDITIVE, OPTIONAL,
   omission-legal `diagnostics` array on the success path (the same bounded §7.2

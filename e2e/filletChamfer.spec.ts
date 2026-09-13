@@ -494,7 +494,11 @@ test("a two-distance chamfer BLOCKS the type flip, and allows it once d2 is clea
   await page.getByTestId("chip-edgeop-fillet").click();
   await primaryField(page).click();
   await page.keyboard.press("Enter");
-  await expect(page.getByText(/clear distance2 first/)).toBeVisible();
+  // SCOPED to the status hint: the refusal is now stated in TWO places — here,
+  // and in the inspector's own `Failed: …` line, which an armed re-edit reaches
+  // since the completed-attempt recap stopped shadowing it. Both carry the same
+  // sentence, so an unscoped `getByText` is a strict-mode violation.
+  await expect(page.getByTestId("status-hint")).toHaveText(/clear distance2 first/);
   // The rejected flip wrote nothing: the row is still the same Chamfer.
   expect((await lastFeature(page)).label).toBe("Chamfer");
   expect((await lastFeature(page)).valueText).toBe("1.0×2.5 mm");

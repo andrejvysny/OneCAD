@@ -243,7 +243,13 @@ export class MeshIngest {
     const bodies = documentStore.getState().bodies;
     for (const [id, meta] of Object.entries(bodies)) {
       if (meta.visible && !this.bodyObjects.has(id) && !this.pending.has(id)) {
-        void this.loadBody(id, DEFAULT_LOD, "cosmetic");
+        // Carry the CURRENT publication's generation, exactly as the
+        // `document-changed` path does: a mesh installed without one records no
+        // provenance, and `promote.ts`'s `installedProofIsCurrent` then refuses
+        // every pick on it as stale. The bootstrap sweep (open/new/recover fill
+        // the projection before the viewport exists) is the ordinary way a body
+        // first reaches the scene, so it must be as pickable as a regen's.
+        void this.loadBody(id, DEFAULT_LOD, "cosmetic", 0, this.currentPublication?.generation);
       }
     }
     for (const id of [...this.bodyObjects.keys()]) {

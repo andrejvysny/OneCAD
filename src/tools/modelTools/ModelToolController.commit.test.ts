@@ -111,6 +111,8 @@ function makeClientMock(
       capturePreview?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0] })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0] })),
     getSketch: vi.fn(() => Promise.resolve(makeSession())),
@@ -172,6 +174,18 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     selectionStore.getState().set([
       { kind: "sketchRegion", id: "region-ref", sketchId: "sk", regionId: "r0" },
     ]);
+    // The chip's typed profile context names this sketch, and the confirm gate
+    // (`missingRequiredTargetMessage`) refuses a tool whose sketch the projection
+    // does not carry. `seedMockDocument()` publishes sketch2/4/5 only, so publish
+    // the armed sketch the way production publishes it.
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
   });

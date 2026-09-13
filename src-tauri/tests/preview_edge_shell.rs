@@ -124,8 +124,19 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
-async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, or save → reopen). `RevertToEnd` makes NO SCHEMA
+/// §7.2 `editedFrom` claim, so the §10 v6 post-edit descriptor-tie veto stays
+/// off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
         .await
 }
 
@@ -666,7 +677,7 @@ async fn build_box_a_at_head(
         sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, w, h)),
     );
     add_op(rt, extrude_record(EXTRUDE_A, sa, depth));
-    let rep = regen_all(rt).await;
+    let rep = clean_regen(rt).await;
     let _ = published(&rep, "box A");
     (body_of(EXTRUDE_A), SnapshotId(rep.snapshot_id))
 }
@@ -792,7 +803,7 @@ async fn edge_op_preview_equals_commit(
 
     // The SAME record now commits — and lands where the preview promised.
     add_op(&mut rt, candidate);
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, op_name);
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -848,7 +859,7 @@ async fn freshly_promoted_shell_face_previews_without_repair() {
         sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 20.0, 20.0)),
     );
     add_op(&mut rt, extrude_record(EXTRUDE_A, sa, 25.0));
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let snapshot = SnapshotId(report.snapshot_id);
     let stock = published(&report, "fresh shell stock");
     assert_eq!(stock.repair_summary.needs_repair_count, 0);
@@ -913,7 +924,7 @@ async fn freshly_promoted_shell_face_previews_without_repair() {
     );
 
     add_op(&mut rt, candidate);
-    let committed = regen_all(&mut rt).await;
+    let committed = clean_regen(&mut rt).await;
     assert_eq!(
         published(&committed, "fresh Shell commit")
             .repair_summary
@@ -927,7 +938,7 @@ async fn freshly_promoted_shell_face_previews_without_repair() {
 
     let wm2 = spawn_worker(bin).await;
     let mut reopened = open_over(&wm2, &path);
-    let replay = regen_all(&mut reopened).await;
+    let replay = clean_regen(&mut reopened).await;
     assert_eq!(
         published(&replay, "fresh-worker Shell replay")
             .repair_summary
@@ -1045,7 +1056,7 @@ async fn shell_removes_two_open_faces_in_one_op() {
     );
 
     add_op(&mut rt, candidate);
-    let committed = regen_all(&mut rt).await;
+    let committed = clean_regen(&mut rt).await;
     let snap = published(&committed, "two-face Shell commit");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     let after = body_mesh(&mut rt, body).await;
@@ -1107,7 +1118,7 @@ async fn shell_preview_matches_the_commit() {
         &mut rt,
         extrude_to_face_record(EXTRUDE_COL, scol, face_ref.clone()),
     );
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let rep = published(&report, "ToFace tracking column");
     assert_eq!(
         rep.repair_summary.needs_repair_count, 0,
@@ -1158,7 +1169,7 @@ async fn shell_preview_matches_the_commit() {
     );
 
     add_op(&mut rt, candidate);
-    let commit_report = regen_all(&mut rt).await;
+    let commit_report = clean_regen(&mut rt).await;
     let snap = published(&commit_report, "shell commit");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
     let committed = body_mesh(&mut rt, body_a).await;
@@ -1261,7 +1272,7 @@ async fn shell_open_face_rebind_preserves_typed_evidence() {
     );
     let shell = RecordId(Uuid::from_u128(OP_TAIL));
     add_op(&mut rt, shell_record(OP_TAIL, body_a, vec![face_ref], 1.0));
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     assert_eq!(
         published(&rep, "shell").repair_summary.needs_repair_count,
         0
@@ -1298,7 +1309,9 @@ async fn shell_open_face_rebind_preserves_typed_evidence() {
         serde_json::json!([centroid.x, centroid.y, centroid.z]),
         "the rebind retained typed anchor evidence"
     );
-    let rebound = regen_all(&mut rt).await;
+    // The rebind lands ON the shell — step 4 (0 sketch A, 1 extrude A,
+    // 2 sketch col, 3 extrude-to-face col, 4 shell).
+    let rebound = regen_from(&mut rt, 4).await;
     assert_eq!(
         published(&rebound, "typed shell rebind")
             .repair_summary

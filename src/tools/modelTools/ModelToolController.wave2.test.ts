@@ -116,6 +116,8 @@ describe("ModelToolController Wave 2", () => {
     const previewOps = new Map<string, OperationOp>();
     return {
       onPreviewResult: vi.fn(() => () => {}),
+      onDocumentChanged: vi.fn(() => () => {}),
+      getCurrentMeshPublication: vi.fn(() => null),
       finishSketch: vi.fn(opts.finish),
       getSketchRegions: vi.fn(opts.finish),
       getSketch: vi.fn(() => Promise.resolve(makeSession(opts.entities))),
@@ -167,6 +169,19 @@ describe("ModelToolController Wave 2", () => {
     selectionStore.getState().set([
       { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
     ]);
+    // The chip's typed `profile`/`regions` context names this sketch, and
+    // `activeToolPresentation`'s `missingRequiredTargetMessage` refuses to confirm
+    // a tool whose sketch the projection does not know ("Profile sketch is no
+    // longer available"). `seedMockDocument()` carries sketch2/4/5 only, so the
+    // sketch these arms run off has to be published like production publishes it.
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
     // One visible body by default (seedMockDocument gives body1) → boolean available.
     container = document.createElement("div");
     document.body.appendChild(container);

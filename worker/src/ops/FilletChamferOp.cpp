@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepFilletAPI_LocalOperation.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -187,6 +188,18 @@ EdgeResolution resolve_edges(OpContext& ctx, const json& op, const std::string& 
     return result;
 }
 
+// The op's ACCEPTED contour set: every edge the kernel actually blended. OCCT
+// propagates a seed along its tangent chain internally, so this is a superset of
+// the edges added here, and it is exactly what `Generated` is keyed on — the set
+// `BoundaryCompletionCertificate` needs to name this op's witness faces.
+std::vector<TopoDS_Shape> accepted_contour_edges(BRepFilletAPI_LocalOperation& blend) {
+    std::vector<TopoDS_Shape> edges;
+    for (int contour = 1; contour <= blend.NbContours(); ++contour) {
+        for (int i = 1; i <= blend.NbEdges(contour); ++i) edges.push_back(blend.Edge(contour, i));
+    }
+    return edges;
+}
+
 // `advisories` collects the diagnostics of a SUCCESSFUL build (WP-G: the
 // `FILLET_BLEND_APPROXIMATED` warning). Before this they were dropped on the
 // floor — only the failure branch forwarded them — so a published approximated
@@ -195,13 +208,14 @@ std::optional<OpOutcome> build_fillet(
     OpContext& ctx, const TopoDS_Shape& target_shape,
     std::vector<kernel::fillet::ResolvedEdge> edges, double radius,
     std::unique_ptr<kernel::fillet::FilletBuilder>& builder, TopoDS_Shape& result,
-    std::vector<json>& advisories) {
+    std::vector<json>& advisories, std::vector<TopoDS_Shape>& contour_edges) {
     builder = std::make_unique<kernel::fillet::FilletBuilder>(target_shape, std::move(edges),
                                                               radius);
     kernel::fillet::FilletBuildResult built = builder->build(ctx.cancel);
     if (built.cancelled) return OpOutcome::cancelled();
     if (built.ok) {
         result = std::move(built.shape);
+        contour_edges = accepted_contour_edges(builder->history());
         for (const auto& diagnostic : built.diagnostics) {
             advisories.push_back(diagnostic.to_json());
         }
@@ -286,7 +300,8 @@ std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
                                        kernel::validation::PublicationTier validation_tier,
                                        const onecad::CancelToken* cancel,
                                        std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
-                                       TopoDS_Shape& result) {
+                                       TopoDS_Shape& result,
+                                       std::vector<TopoDS_Shape>& contour_edges) {
     TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
     TopExp::MapShapesAndAncestors(target_shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
     // Both asymmetric forms measure `radius` on the same PERSISTED reference face.
@@ -325,6 +340,7 @@ std::optional<OpOutcome> build_chamfer(const TopoDS_Shape& target_shape,
     if (std::optional<OpOutcome> partial = chamfer_partial_result(*chamfer)) return partial;
     result = chamfer->Shape();
     builder = chamfer;
+    contour_edges = accepted_contour_edges(*chamfer);
     return validate_chamfer(target_shape, result, validation_tier, cancel);
 }
 
@@ -819,6 +835,7 @@ OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
                          const std::string& op_id, const TopoDS_Shape& result,
                          const std::unique_ptr<kernel::fillet::FilletBuilder>& fillet_builder,
                          const std::shared_ptr<BRepBuilderAPI_MakeShape>& builder,
+                         const std::vector<TopoDS_Shape>& contour_edges,
                          std::vector<json>& advisories) {
     OpOutcome out;
     const auto* target = ctx.bodies.get(target_id);
@@ -840,12 +857,19 @@ OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
     }
     out.body_events.push_back({"modified", target_id, {}});
     out.body_ids.push_back(target_id);
+    // OCCT reports a blend's boundary edges and vertices under no `Modified` and
+    // no `Generated` root at all — only the blend FACE is `Generated(seed edge)`.
+    // Left omitted they stay Unknown, and a later feature that references one is
+    // refused for having no producer. The certificate lets the ledger attribute
+    // exactly that topology to this op, and only under the fail-closed vanishing
+    // check inside `modified_body_history`.
+    const BoundaryCompletionCertificate certificate{contour_edges};
     if (fillet_builder) {
         out.topology_history.push_back(modified_body_history(
-            target_id, before, result, fillet_builder->history()));
+            target_id, before, result, fillet_builder->history(), {}, &certificate));
     } else if (builder) {
         out.topology_history.push_back(modified_body_history(
-            target_id, before, result, *builder));
+            target_id, before, result, *builder, {}, &certificate));
     }
     return out;
 }
@@ -906,13 +930,16 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
     std::shared_ptr<BRepBuilderAPI_MakeShape> builder;
     std::unique_ptr<kernel::fillet::FilletBuilder> fillet_builder;
     std::vector<json> advisories;
+    // Filled by whichever branch ran, so `publish_result` can certify blend-born
+    // boundary topology without knowing which kernel builder produced it.
+    std::vector<TopoDS_Shape> contour_edges;
     try {
         std::optional<OpOutcome> failure = mode == Mode::Fillet
                                                ? build_fillet(
                                                      ctx, target->geom,
                                                      std::move(resolved.fillet_edges),
                                                      values.radius, fillet_builder, result,
-                                                     advisories)
+                                                     advisories, contour_edges)
                                                : build_chamfer(
                                                      target->geom, resolved.edges,
                                                      seed_reference_faces, values.radius,
@@ -920,7 +947,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
                                                      values.distance_angle, values.angle_rad,
                                                      result_validation_tier(
                                                          ctx, kernel::validation::PublicationTier::TierB),
-                                                     ctx.cancel, builder, result);
+                                                     ctx.cancel, builder, result, contour_edges);
         if (failure) return std::move(*failure);
     } catch (const Standard_Failure& error) {
         return OpOutcome::fail(
@@ -930,7 +957,8 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
         return OpOutcome::fail("OP_FAILED", std::string(name) + " operation failed");
     }
 
-    return publish_result(ctx, target_id, op_id, result, fillet_builder, builder, advisories);
+    return publish_result(ctx, target_id, op_id, result, fillet_builder, builder, contour_edges,
+                          advisories);
 }
 
 }  // namespace

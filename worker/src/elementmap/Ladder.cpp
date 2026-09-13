@@ -308,16 +308,21 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
             // descriptor-BETTER rival (`desc_rival > desc_assigned` ⇒ negative ⇒
             // below epsilon) — an even clearer case of the anchor deciding.
             //
-            // An anchor-only ref (no frozen descriptor) has descriptor score 0 for
-            // EVERY candidate, so it always ties — but the ANCHOR-EXACT carve-out
-            // below still resolves the common case (a vertex pick whose element did
-            // not move), so such a ref is not blanket-refused post-edit.
-            //
-            // Resolver v6 removes the former anchor-exact carve-out on this lane.
+            // Resolver v6 REMOVED the former anchor-exact carve-out on this lane.
             // After an upstream edit, exactness at a stale world point cannot prove
             // continuity: a congruent twin may have moved onto that point. Descriptor
             // ties therefore always fail closed. Clean replay remains governed by the
-            // v4/v5 anchor-decisive rules below.
+            // v4/v5 anchor-decisive rules below, where the anchor still decides.
+            //
+            // Consequence, stated plainly because it is the common case and v5 said
+            // the opposite: an anchor-only ref (no frozen descriptor) has descriptor
+            // score 0 for EVERY candidate, so its separation from its best rival is
+            // exactly 0 and it IS blanket-refused post-edit. That is deliberate —
+            // deterministic NeedsRepair beats a silent bind (D-3) — and it is what
+            // `chamfer_reference` and `revolve_ops` pin from the Rust side. It also
+            // means a no-edit replay must NOT claim `editedFrom` (Rust mints
+            // `RegenRequest::RevertToEnd` for open/import/new/restart); claiming one
+            // there would refuse every anchor-only ref in the document.
             bool anchor_decided_a_tie = false;
             if (edit.post_upstream_edit && c >= 2 && anchor_scored[i]) {
                 bool has_rival = false;

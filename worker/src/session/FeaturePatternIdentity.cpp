@@ -93,22 +93,25 @@ void feature_pattern_refresh_producer_topology(
     const std::string& body_id, const TopoDS_Shape& after) {
     TopTools_IndexedMapOfShape current;
     TopExp::MapShapes(after, current);
-    for (auto& [producer, shapes] : ownership) {
-        (void)producer;
-        std::erase_if(shapes, [&](const TopoDS_Shape& owned) {
-            for (int i = 1; i <= current.Extent(); ++i)
-                if (owned.IsSame(current(i))) return false;
-            return true;
-        });
-    }
+    // Walk the LIVE body and consume the EFFECTIVE claim per IsSame class, never a
+    // raw ledger row: a shape carrying two disagreeing rows resolves Ambiguous and
+    // must never be exported as this producer's output. Iterating the body is also
+    // what keeps the set live — a shape the last source consumed is not walked.
+    // The index is built ONCE per call; a per-shape `lookup` would rescan every
+    // ledger row and make this quadratic in body size.
+    const TopologyOwnerLedger::EffectiveClaims claims =
+        job.topology_owners.effective_claims(body_id);
     for (auto& [source_id, shapes] : ownership) {
         shapes.clear();
         const std::string virtual_id =
             feature_pattern_virtual_id(pattern_id, source_id, instance);
-        for (const OwnedShape& owned : job.topology_owners.entries())
-            if (owned.body_id == body_id && owned.claim.state == OriginState::Known &&
-                owned.claim.producer_record_id == virtual_id)
-                shapes.push_back(owned.shape);
+        for (int i = 1; i <= current.Extent(); ++i) {
+            const int index = claims.FindIndex(current(i));
+            if (index == 0) continue;
+            const OriginClaim& claim = claims.FindFromIndex(index);
+            if (claim.state == OriginState::Known && claim.producer_record_id == virtual_id)
+                shapes.push_back(current(i));
+        }
     }
 }
 
@@ -208,7 +211,18 @@ std::optional<std::size_t> feature_pattern_repair_input_index(
 }
 
 bool feature_pattern_modifier_inputs_supported(
-    const ScratchJob& job, const json& source, const json& source_ops) {
+    const ScratchJob& job, const json& source, const json& source_ops,
+    const json& layout, std::string& refusal) {
+    refusal = "supports only straight-edge Fillet/Chamfer inputs";
+    // A descriptor centre is a BOUNDING-BOX centre, and `transform_descriptor`
+    // rotates it. A bbox centre is only rotation-covariant for a shape whose bbox
+    // is, and a quarter-circle blend arc's is not: at 45 degrees an r=0.5 arc's
+    // centre moves 0.073 mm, seventy thousand times the 1e-6 match tolerance. The
+    // intended arc is then rejected while a perpendicular twin of equal length and
+    // size can still match uniquely — a silent mis-bind. A Hole-produced circle is
+    // a full circle whose bbox centre IS its centre, so it keeps the rotational
+    // branch under any layout (Astra break F3).
+    const bool linear_layout = layout.value("kind", std::string()) == "Linear";
     std::size_t index = 0;
     for (const json& input : source.value("inputs", json::array())) {
         const json primary = input.value("primary", json::object());
@@ -218,18 +232,29 @@ bool feature_pattern_modifier_inputs_supported(
         const auto curve = em::ElementMapPartition::descriptor_from_json(descriptor).curveType;
         if (curve != GeomAbs_Line) {
             bool supported_circle = false;
+            bool rotated_blend_arc = false;
             const auto evidence = job.resolved_input_evidence.find(
                 source.value("sourceRecordId", std::string()));
             if (curve == GeomAbs_Circle && evidence != job.resolved_input_evidence.end())
                 for (const ResolvedInputEvidence& item : evidence->second.inputs)
                     if (item.input_index == index)
-                        for (const json& producer : source_ops)
-                            if (producer.value("sourceRecordId", std::string()) ==
-                                    item.producer_record_id &&
-                                (producer.value("opType", std::string()) == "Hole" ||
-                                 producer.value("opType", std::string()) == "Fillet"))
-                                supported_circle = true;
-            if (!supported_circle) return false;
+                        for (const json& producer : source_ops) {
+                            if (producer.value("sourceRecordId", std::string()) !=
+                                item.producer_record_id) continue;
+                            const std::string type = producer.value("opType", std::string());
+                            if (type == "Hole") supported_circle = true;
+                            if (type == "Fillet") {
+                                rotated_blend_arc = !linear_layout;
+                                supported_circle = supported_circle || linear_layout;
+                            }
+                        }
+            if (!supported_circle) {
+                if (rotated_blend_arc)
+                    refusal = "patterns a Fillet-produced circular edge only under a Linear "
+                              "layout: a rotated bounding-box descriptor centre cannot match "
+                              "the arc";
+                return false;
+            }
         }
         ++index;
     }
@@ -289,6 +314,36 @@ int match_feature_pattern_produced_ref(
     return matches;
 }
 
+std::vector<json> feature_pattern_unresolved_origin_repairs(
+    const ScratchJob& job, const json& nested, const std::string& source_id, int instance) {
+    std::vector<json> repairs;
+    const auto evidence_op = job.resolved_input_evidence.find(source_id);
+    if (!nested.contains("inputs") || !nested["inputs"].is_array()) return repairs;
+    for (std::size_t i = 0; i < nested["inputs"].size(); ++i) {
+        const json primary = nested["inputs"][i].value("primary", json::object());
+        const std::string id = primary.value("elementId", std::string());
+        const std::string kind = primary.value("kind", std::string());
+        if (id.empty() || (kind != "edge" && kind != "face")) continue;
+        OriginState origin = OriginState::Unknown;
+        if (evidence_op != job.resolved_input_evidence.end())
+            for (const ResolvedInputEvidence& candidate : evidence_op->second.inputs)
+                if (candidate.input_index == i) origin = candidate.origin_state;
+        if (origin == OriginState::Known) continue;
+        repairs.push_back({{"refId", nested.value("opId", std::string()) + ".input" +
+                                         std::to_string(i)},
+                           {"elementId", id}, {"ladderFailed", "descriptor"},
+                           {"reason", origin == OriginState::Ambiguous ? "ambiguous-origin"
+                                                                       : "unknown-origin"},
+                           {"scoringVersion", em::kResolverVersion}, {"instance", instance},
+                           {"sourceRecordId", source_id}, {"inputIndex", i},
+                           {"candidates", json::array()},
+                           {"uiLabel", "FeaturePattern instance " + std::to_string(instance) +
+                                " source " + source_id + " input " + std::to_string(i) +
+                                " requires repair"}});
+    }
+    return repairs;
+}
+
 std::vector<json> feature_pattern_bind_instance_output_refs(
     ScratchJob& job, const json& nested, const json& frozen_source,
     const FeaturePatternProducerTopology& produced,
@@ -329,9 +384,18 @@ std::vector<json> feature_pattern_bind_instance_output_refs(
                         feature_pattern_retained_host_support(
                             job, frozen_source, frozen_inputs[i], selected_ids,
                             designated_host);
+                    // Every clause above reads FROZEN evidence. The live ledger is
+                    // the authority on who owns the face NOW: one whose effective
+                    // claim has since gone Unknown or Ambiguous is a stale binding,
+                    // and admitting it would let the instance consume topology
+                    // nobody can attribute (Astra break F2).
+                    const OriginClaim live =
+                        job.topology_owners.lookup(body_id, existing->shape);
                     producer_owned = retained_slot &&
                         !selected_ids.contains(evidence->producer_record_id) &&
-                        body_id == designated_host && id == evidence->element_id;
+                        body_id == designated_host && id == evidence->element_id &&
+                        live.state == OriginState::Known &&
+                        live.producer_record_id == evidence->producer_record_id;
                 }
             }
             if (existing->body_id == body_id && existing->kind == expected &&
@@ -339,7 +403,7 @@ std::vector<json> feature_pattern_bind_instance_output_refs(
                 continue;
             repairs.push_back({{"refId", nested.value("opId", std::string()) + ".input" +
                                             std::to_string(i)},
-                               {"elementId", id}, {"ladderFailed", "identity"},
+                               {"elementId", id}, {"ladderFailed", "descriptor"},  // closed enum (SCHEMA §9)
                                {"reason", "ownership-mismatch"},
                                {"scoringVersion", em::kResolverVersion}, {"instance", instance},
                                {"sourceRecordId", source_id}, {"inputIndex", i},

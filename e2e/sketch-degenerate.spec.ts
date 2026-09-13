@@ -6,6 +6,7 @@ import {
   selectSketchTool,
   clickAt,
   getSketchEntityCount,
+  setSnapPref,
 } from "./helpers";
 
 /*
@@ -31,11 +32,28 @@ import {
  * the tool machine (SketchController.selectMachine always calls `m.init()`),
  * so each case starts clean regardless of the previous one leaving its own
  * tool armed and waiting for a real second click.
+ *
+ * DISPLACING SNAP SOURCES ARE OFF, for the same reason the camera has to be
+ * still: they break the "same pixel ⇒ same plane point" premise this spec is
+ * built on, and they break it ASYMMETRICALLY. The FIRST click of a pair has no
+ * anchor, so it has no live-dimension frame and resolves on the spatial ladder
+ * (a grid node up to a whole grid reach away); the SECOND click DOES have one,
+ * so cursor rounding — which costs a fraction of a pixel and therefore wins
+ * (`snapArbitration`) — places it near the raw pixel instead. The pair then
+ * lands a snap-radius apart in the plane, which is a real gap the degenerate
+ * floor is right to accept: it is measured from the anchor, and the anchor
+ * moved. With `grid`, `dimensionRound`, `polarTracking` and `sketchGuideLines`
+ * off, a click IS its plane point, and what remains under test is exactly what
+ * the header describes — `toolMachine`'s `minSize` floor. Snap arbitration has
+ * its own specs (`sketch-snap-*`).
  */
 test("a same-point / same-axis click commits nothing for line, circle, and rectangle", async ({ page }) => {
   await openEditorDebug(page);
   await enterSketchViaPlanePicker(page); // default tool: Line
   await waitForCameraSettled(page);
+  for (const source of ["grid", "dimensionRound", "polarTracking", "sketchGuideLines"]) {
+    await setSnapPref(page, source, false);
+  }
 
   await expect(getSketchEntityCount(page)).resolves.toBe(0);
 

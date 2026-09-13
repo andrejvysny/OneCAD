@@ -65,6 +65,8 @@ function makeClientMock() {
   let seq = 0;
   return {
     onPreviewResult: vi.fn(() => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     getOperationParams: vi.fn(() => Promise.resolve({ ...STORED_UNION }) as Promise<Record<string, unknown>>),

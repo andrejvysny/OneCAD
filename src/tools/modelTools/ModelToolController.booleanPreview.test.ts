@@ -66,6 +66,8 @@ function makeClientMock(capturePreview?: (cb: (result: PreviewResult) => void) =
       capturePreview?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     beginPreview: vi.fn((_d: PreviewDraft) =>
       Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` }),
     ),

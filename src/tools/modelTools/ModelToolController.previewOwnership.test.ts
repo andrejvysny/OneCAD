@@ -35,6 +35,7 @@ import type {
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
+import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 
@@ -123,6 +124,8 @@ function makeClientMock(capture: (cb: (r: PreviewResult) => void) => void) {
       capture(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0, R1] })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: [R0, R1] })),
     getSketch: vi.fn(() => Promise.resolve(session)),
@@ -213,6 +216,17 @@ describe("multi-session exact preview ownership (WP0.7)", () => {
     resetStores();
     __setExactPreviewTimeoutForTests(0);
     selectionStore.getState().set([]);
+    // The chip's typed profile context names this sketch, and the confirm gate
+    // (`missingRequiredTargetMessage`) refuses a tool whose sketch the projection
+    // does not carry. `seedMockDocument()` publishes sketch2/4/5 only.
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
   });

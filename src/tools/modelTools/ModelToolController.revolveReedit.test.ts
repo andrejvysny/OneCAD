@@ -141,6 +141,8 @@ function makeClientMock(opts: ClientOpts) {
   let apply = 0;
   return {
     onPreviewResult: vi.fn(() => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn(
       (sketchId: string): Promise<FinishSketchResult> =>
         Promise.resolve({ regions: opts.regions[sketchId] ?? [] }),

@@ -30,15 +30,29 @@ bool feature_pattern_retained_host_support(
     const std::string& designated_host);
 std::optional<std::size_t> feature_pattern_repair_input_index(
     const nlohmann::json& repair, const nlohmann::json& nested);
+// `refusal` receives the phrase naming WHY, which the caller prefixes with the
+// source/index/instance context. `layout` decides whether a Fillet-produced
+// circular edge is patternable at all — see the implementation.
 bool feature_pattern_modifier_inputs_supported(
     const ScratchJob& job, const nlohmann::json& source,
-    const nlohmann::json& source_ops);
+    const nlohmann::json& source_ops, const nlohmann::json& layout,
+    std::string& refusal);
 bool feature_pattern_same_topology_set(
     const TopoDS_Shape& before, const TopoDS_Shape& after);
 void feature_pattern_refresh_producer_topology(
     const ScratchJob& job, FeaturePatternProducerTopology& ownership,
     const std::string& pattern_id, int instance,
     const std::string& body_id, const TopoDS_Shape& after);
+
+// The origin gate that runs BEFORE the straight-edge capability refusal
+// (docs/design/astra/feature-pattern-producer-ownership.md §8). A body
+// sub-element input whose producer the ledger cannot name is missing evidence
+// the user can repair, not an unsupported curve type; `UNSUPPORTED_OP` stays for
+// a genuinely unsupported curve with a Known producer. Returns one repair per
+// Unknown/Ambiguous edge/face input, shaped exactly like the bind repairs below.
+std::vector<nlohmann::json> feature_pattern_unresolved_origin_repairs(
+    const ScratchJob& job, const nlohmann::json& nested,
+    const std::string& source_id, int instance);
 
 // Match a stored source ref only inside one virtual producer's new topology.
 // Returns the number of exact geometric matches and assigns `match` only for one.

@@ -92,8 +92,19 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
     .expect("AddOperation");
 }
 
-async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+/// A CLEAN replay: no record edit preceded it (first build, a record merely
+/// pushed onto the timeline, undo, or save → reopen). `RevertToEnd` makes NO
+/// SCHEMA §7.2 `editedFrom` claim, so the resolver's post-edit descriptor-tie
+/// veto (§10, resolver v6) stays off — which is what a clean replay must get.
+async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+/// The EDIT lane: a real content edit landed at step `from`, and the plan says
+/// so (SCHEMA §7.2 `editedFrom`).
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
         .await
 }
 
@@ -624,7 +635,7 @@ async fn build_box_a(rt: &mut DocumentRuntime, depth: f64) -> BodyId {
         sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 20.0, 20.0)),
     );
     add_op(rt, extrude_record(EXTRUDE_A, sa, depth));
-    let rep = regen_all(rt).await;
+    let rep = clean_regen(rt).await;
     let _ = published(&rep, "box A");
     body_of(EXTRUDE_A)
 }
@@ -655,7 +666,7 @@ async fn linear_pattern_three_boxes() {
             false,
         ),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "linear pattern");
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
@@ -697,7 +708,7 @@ async fn linear_pattern_v1_fused_disjoint_migrates_and_refuses_cold_reopen() {
             true,
         ),
     );
-    let _ = published(&regen_all(&mut rt).await, "V1 fused disjoint pattern");
+    let _ = published(&clean_regen(&mut rt).await, "V1 fused disjoint pattern");
     let aggregate = body_of(OP_PATTERN);
     assert!(rt.head_body_ids().contains(&source), "V1 preserves source");
     assert!(
@@ -726,7 +737,7 @@ async fn linear_pattern_v1_fused_disjoint_migrates_and_refuses_cold_reopen() {
     let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
     let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("cold reopen");
     let _ = published(
-        &regen_all(&mut reopened).await,
+        &clean_regen(&mut reopened).await,
         "cold V1 fused disjoint replay",
     );
     assert!(
@@ -763,7 +774,7 @@ async fn linear_pattern_v1_nonfused_aggregate_migrates_to_v2_children() {
             false,
         ),
     );
-    let _ = published(&regen_all(&mut rt).await, "V1 non-fused pattern");
+    let _ = published(&clean_regen(&mut rt).await, "V1 non-fused pattern");
     let aggregate = body_of(OP_PATTERN);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v1-nonfused.onecad");
@@ -784,7 +795,10 @@ async fn linear_pattern_v1_nonfused_aggregate_migrates_to_v2_children() {
     let meshes: Arc<dyn MeshProvider> = Arc::new(cold.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(cold.clone());
     let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("cold reopen");
-    let _ = published(&regen_all(&mut reopened).await, "cold V1 non-fused replay");
+    let _ = published(
+        &clean_regen(&mut reopened).await,
+        "cold V1 non-fused replay",
+    );
     assert!(
         reopened.head_body_ids().contains(&source),
         "cold reopen keeps source"
@@ -839,7 +853,7 @@ async fn linear_pattern_v3_load_save_reopen_refuses_execution() {
     let mut reopened =
         DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen V3 pattern");
     assert_v3_linear_pattern_record(&reopened, OP_PATTERN);
-    let report = regen_all(&mut reopened).await;
+    let report = clean_regen(&mut reopened).await;
     let snapshot = published(&report, "V3 refusal keeps valid prefix published");
     assert!(
         snapshot.bodies.iter().any(|body| body.body == source),
@@ -888,7 +902,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
             false,
         ),
     );
-    let _ = published(&regen_all(&mut rt).await, "v2 linear pattern");
+    let _ = published(&clean_regen(&mut rt).await, "v2 linear pattern");
     let children: Vec<BodyId> = (0..3)
         .map(|k| BodyId(split_child_uuid(Uuid::from_u128(OP_PATTERN), k)))
         .collect();
@@ -931,7 +945,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
             false,
         ),
     );
-    let _ = published(&regen_all(&mut rt).await, "downstream source mirror");
+    let _ = published(&clean_regen(&mut rt).await, "downstream source mirror");
     assert!(
         rt.head_body_ids().contains(&source),
         "downstream source ref remains live"
@@ -950,7 +964,8 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
         .op,
     })
     .expect("reduce v2 pattern count");
-    let _ = published(&regen_all(&mut rt).await, "reduced v2 linear pattern");
+    // The edit lands ON the pattern — step 2 (0 sketch, 1 extrude, 2 pattern, 3 mirror).
+    let _ = published(&regen_from(&mut rt, 2).await, "reduced v2 linear pattern");
     assert!(rt.head_body_ids().contains(&children[0]));
     assert!(!rt.head_body_ids().contains(&children[1]));
     assert!(!rt.head_body_ids().contains(&children[2]));
@@ -969,7 +984,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
         .op,
     })
     .expect("restore v2 pattern count");
-    let _ = published(&regen_all(&mut rt).await, "restored v2 linear pattern");
+    let _ = published(&regen_from(&mut rt, 2).await, "restored v2 linear pattern");
     for child in &children {
         assert!(
             rt.head_body_ids().contains(child),
@@ -982,7 +997,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
         cascade: false,
     };
     rt.apply(suppress(true)).expect("suppress v2 pattern only");
-    let _ = published(&regen_all(&mut rt).await, "suppressed v2 pattern");
+    let _ = published(&regen_from(&mut rt, 2).await, "suppressed v2 pattern");
     assert!(
         rt.head_body_ids().contains(&source),
         "suppression keeps source"
@@ -998,7 +1013,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
         );
     }
     rt.undo().expect("undo pattern suppression");
-    let _ = published(&regen_all(&mut rt).await, "undo v2 pattern suppression");
+    let _ = published(&clean_regen(&mut rt).await, "undo v2 pattern suppression");
     for child in &children {
         assert!(
             rt.head_body_ids().contains(child),
@@ -1008,7 +1023,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
 
     rt.apply(suppress(true)).expect("suppress before save");
     let _ = published(
-        &regen_all(&mut rt).await,
+        &regen_from(&mut rt, 2).await,
         "suppressed v2 pattern before save",
     );
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1040,7 +1055,7 @@ async fn linear_pattern_v2_preserves_source_and_child_ids() {
     reopened
         .apply(suppress(false))
         .expect("unsuppress after reopen");
-    let _ = published(&regen_all(&mut reopened).await, "reopened v2 pattern");
+    let _ = published(&regen_from(&mut reopened, 2).await, "reopened v2 pattern");
     assert_eq!(
         reopened.body_meta(source).expect("source metadata").color,
         Some([12, 34, 56, 255]),
@@ -1087,7 +1102,7 @@ async fn circular_pattern_three() {
             false,
         ),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "circular pattern");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
 
@@ -1142,7 +1157,7 @@ async fn circular_pattern_partial_sweep_steps_angle_over_count() {
             false,
         ),
     );
-    let report = regen_all(&mut rt).await;
+    let report = clean_regen(&mut rt).await;
     let snap = published(&report, "partial-sweep circular pattern");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
 
@@ -1216,7 +1231,7 @@ async fn mirror_body_fuse() {
             true,
         ),
     );
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "mirror");
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
 
@@ -1290,7 +1305,7 @@ async fn shell_box_open_top() {
     // Shell box A, removing that typed top face.
     add_op(&mut rt, shell_record(OP_SHELL, body_a, vec![face_ref], 2.0));
 
-    let rep = regen_all(&mut rt).await;
+    let rep = clean_regen(&mut rt).await;
     let snap = published(&rep, "shell");
 
     assert_eq!(snap.repair_summary.needs_repair_count, 0);
@@ -1332,7 +1347,7 @@ async fn linear_pattern_deterministic_across_processes() {
                 false,
             ),
         );
-        let rep = regen_all(&mut rt).await;
+        let rep = clean_regen(&mut rt).await;
         let snap = published(&rep, "determinism pattern");
         let sig = snap
             .bodies
@@ -1389,7 +1404,7 @@ async fn pattern_tracks_upstream_extrude_edit() {
             false,
         ),
     );
-    let rep0 = regen_all(&mut rt).await;
+    let rep0 = clean_regen(&mut rt).await;
     let _ = published(&rep0, "pattern before edit");
     let mesh0 = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
     let vol0 = mesh_volume(&validate_mesh_blob(&mesh0).unwrap(), &mesh0);
@@ -1405,7 +1420,8 @@ async fn pattern_tracks_upstream_extrude_edit() {
         op: extrude_op(sa, 50.0),
     })
     .expect("edit extrude depth");
-    let rep1 = regen_all(&mut rt).await;
+    // The edit lands ON the source extrude — step 1 (0 sketch, 1 extrude, 2 pattern).
+    let rep1 = regen_from(&mut rt, 1).await;
     let _ = published(&rep1, "pattern after edit");
     let mesh1 = body_mesh(&mut rt, body_of(OP_PATTERN)).await;
     let vol1 = mesh_volume(&validate_mesh_blob(&mesh1).unwrap(), &mesh1);

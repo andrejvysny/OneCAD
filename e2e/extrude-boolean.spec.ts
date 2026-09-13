@@ -79,9 +79,9 @@ test("extrude boolean: Cut segment visible + auto-targets the sole body; commit 
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
-  // The collapsed chip READS OUT the resolved mode; the segments themselves are
-  // behind `⋯`.
-  await expect(page.getByTestId("chip-mode-readout")).toBeVisible();
+  // The chip READS OUT the resolved mode as its operation badge; the segments
+  // themselves live in the inspector's active-tool section.
+  await expect(page.getByTestId("chip-mode-badge")).toBeVisible();
   await openExtrudeOverflow(page);
 
   // The boolean segment group is offered (an existing body enables Add / Cut).
@@ -93,8 +93,9 @@ test("extrude boolean: Cut segment visible + auto-targets the sole body; commit 
   await expect.poll(async () => (await extrudeDebug(page))?.booleanMode).toBe("Cut");
   expect((await extrudeDebug(page))?.booleanTargetId).toBeTruthy();
 
-  // Commit: one drag + Enter. The panel closes first — it floats over the
-  // viewport, and a press on it is deliberately NOT a depth grab.
+  // Commit: one drag + Enter. The secondary controls are docked in the inspector
+  // beside the viewport, so nothing floats over the depth arrow any more — this
+  // only re-asserts that the section is still mounted for the drag.
   await closeExtrudeOverflow(page);
   await commitExtrudeAtHandle(page);
 

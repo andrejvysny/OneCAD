@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ActiveToolTargets } from "./ActiveToolTargets";
 import { ActiveToolInspector } from "./ActiveToolInspector";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { operationAttemptStore } from "@/stores/operationAttemptStore";
+import { activeToolPresentation } from "@/tools/modelTools/activeToolPresentation";
 import type {
   ActiveToolBodyReference,
   ActiveToolElementReference,
@@ -142,5 +144,80 @@ describe("ActiveToolInspector target projection subscription", () => {
     expect(screen.getByText(/Missing body \(body1\)/)).toBeInTheDocument();
     unmount();
     toolChipStore.getState().clear();
+  });
+});
+
+/*
+ * The attempt lifecycle vs an ARMED tool.
+ *
+ * `operationAttemptStore` has no authority over arming — `begin` only refuses a
+ * second attempt while one is still `applying`, and `authoringEntryBlocked` /
+ * `toolStore.setTool` gate on `applying` alone. `completed` is a DISPLAY state,
+ * so it must never suppress live controls: the inspector already renders the
+ * armed section under `applying` and `failed`, and `completed` was the one
+ * asymmetric case.
+ *
+ * What that cost: every re-edit entered from a history row (`editFeature` →
+ * `editXxxFeature`) arms without going through `activateTool`, which is the only
+ * caller of `clear()` — so after any successful commit the inspector kept showing
+ * that commit's read-only summary and the re-edit rendered NO secondary controls.
+ */
+describe("ActiveToolInspector attempt lifecycle", () => {
+  const armEdgeOp = () =>
+    act(() =>
+      toolChipStore.getState().showFillet(
+        2,
+        [0, 0, 0],
+        vi.fn(),
+        { onConfirm: vi.fn(), onCancel: vi.fn() },
+        { showEdgeOpSegments: true, edgeOp: "Chamfer", onEdgeOp: vi.fn() },
+      ),
+    );
+
+  /** Settle a `completed` attempt carrying the armed tool's own presentation,
+   *  exactly as `ModelToolController` does when a commit lands. */
+  const settleCompleted = () =>
+    act(() => {
+      const token = operationAttemptStore
+        .getState()
+        .begin("mock-document", activeToolPresentation(toolChipStore.getState()));
+      if (token === null) throw new Error("an attempt was already applying");
+      operationAttemptStore.getState().settle(token, "completed");
+    });
+
+  beforeEach(() => {
+    act(() => documentStore.setState(seedMockDocument()));
+    toolChipStore.getState().clear();
+    operationAttemptStore.getState().clear();
+  });
+
+  afterEach(() => {
+    toolChipStore.getState().clear();
+    operationAttemptStore.getState().clear();
+  });
+
+  it("reports the last operation once the commit disarmed the tool", () => {
+    armEdgeOp();
+    settleCompleted();
+    act(() => toolChipStore.getState().clear());
+
+    render(<ActiveToolInspector />);
+    expect(screen.getByText(/^Completed/)).toBeInTheDocument();
+    // No armed tool ⇒ no chip dock and no live controls, only the read-only recap.
+    expect(screen.queryByTestId("tool-chip-dock")).toBeNull();
+    expect(screen.queryByTestId("chip-edgeop-fillet")).toBeNull();
+  });
+
+  it("gives an armed re-edit its own controls even while the last commit reads completed", () => {
+    armEdgeOp();
+    settleCompleted();
+    // The re-edit arms WITHOUT `activateTool`, so the completed attempt survives.
+    armEdgeOp();
+
+    render(<ActiveToolInspector />);
+    expect(screen.getByTestId("tool-chip-dock")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-edgeop-fillet")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-chamfer-d2")).toBeInTheDocument();
+    expect(screen.queryByText(/^Completed/)).toBeNull();
   });
 });

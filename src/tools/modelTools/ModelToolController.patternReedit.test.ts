@@ -59,6 +59,8 @@ function makeEngineMock() {
 function makeClientMock() {
   return {
     onPreviewResult: vi.fn(() => () => {}),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     getOperationParams: vi.fn(() => Promise.resolve({})),
   };

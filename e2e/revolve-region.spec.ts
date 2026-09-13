@@ -37,8 +37,13 @@ test("revolve arms on the SELECTED region — no region picker, then commits", a
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
 
-  // Rectangle — the profile. Its own left edge is a valid revolve axis (every
+  // Rectangle — the profile. Its own RIGHT edge is a valid revolve axis (every
   // profile point lies on one side of it, so `axisSplitsRegion` is false).
+  // The LEFT edge is equally valid geometrically but unclickable: the history
+  // rail is a 220px-wide `z-20` overlay down the left of the canvas (WP 2D
+  // layout), and this rectangle's left edge projects inside it, so the pointer
+  // never reaches the viewport. Same rule the click-away case in
+  // `extrude-commit-gesture.spec.ts` states — stay clear of the floating panels.
   await selectSketchTool(page, "Rectangle");
   await clickAt(page, -260, -150);
   await clickAt(page, -60, 50);
@@ -59,12 +64,12 @@ test("revolve arms on the SELECTED region — no region picker, then commits", a
     { x: 0, y: 0 },
   );
   const centroid = { x: sum.x / (snap.lines.length * 2), y: sum.y / (snap.lines.length * 2) };
-  const minU = Math.min(...snap.lines.flatMap((l) => [l.p0[0], l.p1[0]]));
-  const leftEdge = snap.lines.find(
-    (l) => Math.abs(l.p0[0] - minU) < 1e-3 && Math.abs(l.p1[0] - minU) < 1e-3,
+  const maxU = Math.max(...snap.lines.flatMap((l) => [l.p0[0], l.p1[0]]));
+  const rightEdge = snap.lines.find(
+    (l) => Math.abs(l.p0[0] - maxU) < 1e-3 && Math.abs(l.p1[0] - maxU) < 1e-3,
   );
-  if (!leftEdge) throw new Error("no left edge found in the rectangle snapshot");
-  const axisMid = { x: minU, y: (leftEdge.p0[1] + leftEdge.p1[1]) / 2 };
+  if (!rightEdge) throw new Error("no right edge found in the rectangle snapshot");
+  const axisMid = { x: maxU, y: (rightEdge.p0[1] + rightEdge.p1[1]) / 2 };
 
   const bodiesBefore = await bodyOptions(page).count();
 
@@ -110,7 +115,7 @@ test("revolve arms on the SELECTED region — no region picker, then commits", a
     .poll(async () => (await extrudeDebug(page))?.revolveRegionIds as string[] | undefined)
     .toEqual([picked?.regionId]);
 
-  // Pick the rectangle's left edge → armed at 360°.
+  // Pick the rectangle's right edge → armed at 360°.
   const axisClient = await planePointToClient(page, snap.plane, axisMid);
   await clickAtClient(page, axisClient.x, axisClient.y);
   await expect(page.getByText(/Drag to set angle/)).toBeVisible();

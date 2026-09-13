@@ -108,11 +108,8 @@ async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
 }
 
 async fn clean_regen(rt: &mut DocumentRuntime) -> RegenReport {
-    rt.run_regen(
-        RegenRequest::RevertToEnd { from: 0 },
-        CancelToken::new(),
-    )
-    .await
+    rt.run_regen(RegenRequest::RevertToEnd { from: 0 }, CancelToken::new())
+        .await
 }
 
 fn published<'a>(report: &'a RegenReport, label: &str) -> &'a Arc<ModelSnapshot> {

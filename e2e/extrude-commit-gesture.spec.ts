@@ -231,8 +231,14 @@ test("exact-preview failure keeps the last preview and blocks confirmation", asy
     .poll(async () => ((await extrudeDebug(page))?.previewError as { structural?: boolean } | undefined)?.structural)
     .toBe(true);
 
-  await page.getByTestId("chip-confirm").click();
-  await expect(page.getByText(/Cannot confirm invalid preview: injected stale region binding/)).toBeVisible();
+  // Confirmation is blocked by DISABLING ✓, not by a clickable ✓ that scolds.
+  // The shared active-tool presentation (WP 2C, handoff 2026-09-12 §3 "invalid
+  // typed values ... prevent confirmation") drives `canConfirm` off
+  // `previewLifecycle.status === "invalid"`, so the button is inert and the
+  // reason is the failure hint already asserted above. The controller's
+  // `Cannot confirm invalid preview: …` guard is the programmatic backstop
+  // behind it, pinned in `ModelToolController.edgeShellPreview.test.ts`.
+  await expect(page.getByTestId("chip-confirm")).toBeDisabled();
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
   expect((await extrudeDebug(page))?.phase).toBe("armed");
 });

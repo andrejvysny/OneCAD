@@ -113,6 +113,8 @@ describe("the modeling tools report every regen terminal honestly", () => {
       engine: engineMock as unknown as ViewportEngine,
       client: {
         onPreviewResult: vi.fn(() => () => {}),
+        onDocumentChanged: vi.fn(() => () => {}),
+        getCurrentMeshPublication: vi.fn(() => null),
         applyOperation,
         getOperationParams: vi.fn(() =>
           Promise.resolve({

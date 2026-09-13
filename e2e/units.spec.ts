@@ -159,7 +159,12 @@ test("switching back to mm re-labels the same value — the document does not mo
   await armDatumOffsetChip(page);
 
   const chip = page.getByTestId("model-tool-chip");
-  const input = chip.getByLabel("Offset (mm)");
+  // UNIT-AGNOSTIC on purpose: the M3 semantic labels carry the live display unit
+  // ("Offset (mm)" / "Offset (in)"), and this test switches the unit twice under
+  // one armed chip — a locator pinned to either spelling would stop resolving the
+  // moment the thing it is watching re-labels. Same precedent as
+  // `filletChamfer.spec.ts`'s `/^(Radius|Distance) \(mm\)$/`.
+  const input = chip.getByLabel(/^Offset \((mm|in)\)$/);
   await input.fill("50.8");
   await input.blur();
   await expect.poll(async () => (await extrudeDebug(page))?.datumOffset).toBe(50.8);

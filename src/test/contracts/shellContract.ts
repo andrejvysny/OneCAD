@@ -74,7 +74,9 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "ModelToolChips",
   "MeasureOverlay",
   "RepairMarkerOverlay",
-  "MeasurePanel",
+  // `MeasurePanel` left this list on 2026-09-13: it renders as the Measurement
+  // inspector section (priority 90, `inspectorSections.ts`) while Measure is
+  // active, not as its own shell contribution — recorded decision in TODO.md.
   "FloatingToolbar",
   "SketchChromeBar",
   "ModelTreePanel",

@@ -318,12 +318,21 @@ impl RegenRequest {
     /// **`from == 0` is claimed too** (kernel-hardening WP-A, 2026-09-02). A
     /// base-sketch edit and every variable edit dirty the timeline from step 0, and
     /// those are exactly the edits that move geometry out from under every stored
-    /// anchor — the class the H6a veto exists for. The no-edit lanes that also
-    /// request `ToEnd { from: 0 }` (`open_document`, `import_step`, recovery) are
-    /// safe under the claim: a from-0 replay rebuilds the geometry every anchor was
-    /// authored against, so the true element is ANCHOR-EXACT and the veto's
-    /// carve-out lets the anchor decide (SCHEMA §10). Undo/redo still ride
-    /// [`RevertToEnd`](Self::RevertToEnd), which makes no claim.
+    /// anchor — the class the H6a veto exists for.
+    ///
+    /// **The no-edit lanes do NOT ride this variant.** `open_document`,
+    /// `import_step`, a new document and a worker restart all reach the scheduler
+    /// through `api::enqueue_initial_regen_if_current`, which mints
+    /// [`RevertToEnd { from: 0 }`](Self::RevertToEnd) and therefore claims nothing;
+    /// undo/redo ride the same variant over their own dirty floor. This used to say
+    /// those lanes were safe under a `ToEnd { from: 0 }` claim because a from-0
+    /// replay leaves the true element ANCHOR-EXACT and SCHEMA §10's veto let the
+    /// anchor decide. That carve-out is GONE: resolver v6 refuses a descriptor tie
+    /// downstream of `editedFrom` whatever the anchor says, and an anchor-only ref
+    /// (no `intent.descriptor`) ties against every candidate by construction — so a
+    /// no-edit lane that claimed `editedFrom: 0` would now blanket-refuse the very
+    /// refs it was replaying. The variant is the contract; do not "simplify" a
+    /// no-edit lane back onto `ToEnd`.
     ///
     /// `ToStep` previews never carry it — a preview resolves against the state it is
     /// previewing, and its result is never published.

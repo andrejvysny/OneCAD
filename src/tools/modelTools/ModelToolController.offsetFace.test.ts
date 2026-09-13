@@ -36,6 +36,7 @@ import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { canConfirmActiveTool } from "./activeToolPresentation";
 import { resetStores } from "@/test/resetStores";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 
@@ -135,6 +136,8 @@ function makeClientMock(
       capturePreview?.(cb);
       return () => {};
     }),
+    onDocumentChanged: vi.fn(() => () => {}),
+    getCurrentMeshPublication: vi.fn(() => null),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
     prepareOffsetFace: vi.fn(prepare),
@@ -625,6 +628,52 @@ describe("ModelToolController OffsetFace", () => {
     // version key must not appear and the ordinary hint stands.
     expect(cmd.op.params).not.toHaveProperty("resultPolicyVersion");
     expect(viewportStore.getState().statusHint?.message).toBe("Offset distance updated");
+  });
+
+  it("a re-edit is CONFIRMABLE: the stored faces keep the context, so Enter commits", async () => {
+    // `showOffsetFaceChip` republishes the typed context on every arm, but a
+    // re-edit has NO picks — `setTool("offsetFace")` fires `cancelOffsetFace`,
+    // which clears `offsetFaces` and `offsetTargetBodyId`. Built from the live
+    // picks alone the context is EMPTY, which `missingRequiredTargetMessage` reads
+    // as "Affected body is no longer available": that disables the chip's ✓
+    // (`ModelToolChips.tsx`) and drops Enter out of `armedConfirm`'s table, so an
+    // OffsetFace edited from history could never be applied. Calling
+    // `onConfirm?.()` directly (the spec above) cannot see this — it skips the gate.
+    build();
+    documentStore.setState({
+      features: [
+        {
+          id: "feat-1",
+          kind: "fillet",
+          opType: "OffsetFace",
+          label: "Offset face",
+          valueText: "2.5 mm",
+          primaryValue: 2.5,
+          status: "ok",
+        },
+      ],
+    });
+    await controller.editOffsetFaceFeature("feat-1");
+    await flush();
+
+    // The context names the RECORD's stored face + target body, not a fresh pick.
+    const context = toolChipStore.getState().context;
+    expect(context?.tool).toBe("offsetFace");
+    expect(canConfirmActiveTool(toolChipStore.getState())).toBe(true);
+
+    chipValue(6);
+    // The REAL key path: capture-phase Enter on `window`, with no editable focus.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    await flush();
+
+    const editCalls = clientMock.applyEditCommand.mock.calls as unknown[][];
+    expect(editCalls).toHaveLength(1);
+    const cmd = editCalls[0][0] as { cmd: string; record: string; op: { opType: string; params: Record<string, unknown> } };
+    expect(cmd.cmd).toBe("updateOperationParams");
+    expect(cmd.record).toBe("feat-1");
+    expect(cmd.op.params.distance).toEqual({ value: 6 });
+    expect(cmd.op.params.targetBodyId).toBe("body1");
   });
 
   // ── re-edit re-authoring: V2 → V3 (WP3-C5) ───────────────────────────────

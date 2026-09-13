@@ -172,46 +172,80 @@ export async function waitForRenderedFrame(page: Page): Promise<void> {
 }
 
 /**
- * Open the armed FILLET/CHAMFER chip's own `⋯` overflow, where the
- * [Fillet|Chamfer] toggle and the chamfer second leg now live (UNIFY-UX Phase 1
- * — see `EdgeOpChipControls`). Idempotent, mirroring `openExtrudeOverflow`.
+ * The INSPECTOR DRAWER's scroll body — the stable home of every armed tool's
+ * SECONDARY controls. Scope a secondary locator to this rather than to the page,
+ * so a chip-side control of the same name can never be matched by accident.
  */
-export async function openFilletOverflow(page: Page): Promise<void> {
-  const panel = page.getByTestId("chip-fillet-overflow-panel");
-  if (await panel.isVisible().catch(() => false)) return;
-  await page.getByTestId("chip-fillet-overflow").click();
-  await expect(panel).toBeVisible();
-}
-
-/** Close the fillet `⋯` overflow if open — the panel can float over the handle,
- *  and a press meant for the handle must not land on it instead. */
-export async function closeFilletOverflow(page: Page): Promise<void> {
-  const panel = page.getByTestId("chip-fillet-overflow-panel");
-  if (!(await panel.isVisible().catch(() => false))) return;
-  await page.getByTestId("chip-fillet-overflow").click();
-  await expect(panel).toBeHidden();
+export function inspectorContent(page: Page) {
+  return page.getByTestId("inspector-drawer-content");
 }
 
 /**
- * Open the armed REVOLVE chip's own `⋯` overflow, where the New Body / Add / Cut
- * segments now live (UNIFY-UX Phase 2 — see `RevolveChipControls`). Idempotent,
- * mirroring `openExtrudeOverflow`/`openFilletOverflow`.
+ * Ensure the inspector drawer is open and the ARMED TOOL's section is rendered.
+ *
+ * The recorded layout decision (compact movable chip + stable parameter
+ * inspector) retired the per-chip `⋯` overflows: the chip now carries only the
+ * primary value/unit, the operation badge and ✓/✕, while every secondary
+ * control — the [Fillet|Chamfer] segments, the chamfer second leg / angle /
+ * reference flip, extrude's end conditions, draft, symmetric and boolean
+ * segments, revolve's boolean segments — is rendered by `ActiveToolInspector`
+ * into `inspector-drawer-content`.
+ *
+ * The drawer is open by default (`inspectorLayoutStore`), so this is normally a
+ * pure assertion that the section mounted; it only clicks the toggle when an
+ * earlier step collapsed the drawer. Idempotent either way.
  */
-export async function openRevolveOverflow(page: Page): Promise<void> {
-  const panel = page.getByTestId("chip-revolve-overflow-panel");
-  if (await panel.isVisible().catch(() => false)) return;
-  await page.getByTestId("chip-revolve-overflow").click();
-  await expect(panel).toBeVisible();
+export async function openActiveToolInspector(page: Page): Promise<void> {
+  const content = inspectorContent(page);
+  if (!(await content.isVisible().catch(() => false))) {
+    await page.getByTestId("inspector-drawer-toggle").click();
+  }
+  await expect(content).toBeVisible();
+  await expect(content.getByTestId("active-tool-inspector")).toBeVisible();
+  // The LIVE armed section, not the read-only "last operation" summary. Both
+  // carry `active-tool-inspector`; only the armed one renders the chip dock
+  // (`ActiveToolInspector` returns the terminal summary BEFORE `dockTarget`), so
+  // this is what distinguishes "the controls are here" from "the inspector is
+  // still reporting the previous commit" — and it fails HERE, by name, instead of
+  // at whichever individual control the caller reaches for next.
+  await expect(
+    content.getByTestId("tool-chip-dock"),
+    "the inspector is showing the terminal 'last operation' summary, not the armed tool's controls",
+  ).toBeAttached();
 }
 
-/** Close the revolve `⋯` overflow if open — revolve's whole-viewport angle drag
- *  has no chip-target exclusion of its own, so a floating panel left open could
- *  eat a press meant for the canvas. */
+/**
+ * FILLET/CHAMFER secondary controls — the [Fillet|Chamfer] toggle, the chamfer
+ * second leg / angle and the reference flip. They live in the inspector now, so
+ * this is {@link openActiveToolInspector}; the name is kept because every edge-op
+ * spec reads as "make the type toggle reachable" at its call sites.
+ */
+export async function openFilletOverflow(page: Page): Promise<void> {
+  await openActiveToolInspector(page);
+}
+
+/**
+ * Formerly "close the floating `⋯` popover so it cannot swallow a press meant
+ * for the 3D handle". The inspector is a docked drawer beside the viewport, not
+ * a popover over it, so there is nothing to dismiss — the call sites keep it
+ * because the drag that follows still needs the section MOUNTED (the value the
+ * drag moves is the one the section is showing).
+ */
+export async function closeFilletOverflow(page: Page): Promise<void> {
+  await openActiveToolInspector(page);
+}
+
+/**
+ * REVOLVE secondary controls — the New Body / Add / Cut segments and "Change
+ * axis". Same move as the edge ops: inspector, not a chip overflow.
+ */
+export async function openRevolveOverflow(page: Page): Promise<void> {
+  await openActiveToolInspector(page);
+}
+
+/** See {@link closeFilletOverflow} — nothing floats over the canvas any more. */
 export async function closeRevolveOverflow(page: Page): Promise<void> {
-  const panel = page.getByTestId("chip-revolve-overflow-panel");
-  if (!(await panel.isVisible().catch(() => false))) return;
-  await page.getByTestId("chip-revolve-overflow").click();
-  await expect(panel).toBeHidden();
+  await openActiveToolInspector(page);
 }
 
 /** One placement-gizmo handle (WP-B W2), as `hitTransformGizmo` reports it. */
@@ -362,24 +396,17 @@ export async function expectArmed(
 }
 
 /**
- * Open the armed EXTRUDE chip's `⋯` overflow, where the end conditions, draft,
- * symmetric toggle and boolean segments now live — the collapsed chip carries a
- * dimension and nothing else.
- *
- * Idempotent: the button toggles, so it is only clicked when the panel is closed.
+ * EXTRUDE secondary controls — the end conditions, the draft segment, the
+ * symmetric toggle and the boolean segments. The chip keeps the depth, the badge
+ * and ✓/✕; everything else is in the inspector, so this is
+ * {@link openActiveToolInspector} under the name the extrude specs already use.
  */
 export async function openExtrudeOverflow(page: Page): Promise<void> {
-  const panel = page.getByTestId("chip-overflow-panel");
-  if (await panel.isVisible().catch(() => false)) return;
-  await page.getByTestId("chip-overflow").click();
-  await expect(panel).toBeVisible();
+  await openActiveToolInspector(page);
 }
 
-/** Close the extrude `⋯` overflow if it is open (a floating panel can cover the
- *  arrow, and a press on the panel is deliberately NOT a depth grab). */
+/** See {@link closeFilletOverflow} — the depth arrow has nothing floating over
+ *  it any more, but the section still has to be mounted for the drag that follows. */
 export async function closeExtrudeOverflow(page: Page): Promise<void> {
-  const panel = page.getByTestId("chip-overflow-panel");
-  if (!(await panel.isVisible().catch(() => false))) return;
-  await page.getByTestId("chip-overflow").click();
-  await expect(panel).toBeHidden();
+  await openActiveToolInspector(page);
 }

@@ -103,3 +103,119 @@ CLAUDE.md and none is derivable without running the suite.
   `sketch-multi-object.spec.ts`): "Editing …" becomes visible as soon as the tree
   sets `activeSketchId`, which is ~30 mock-latency ms BEFORE `sketchStore.session`
   lands, and `expect.poll` does not swallow a throw.
+- A model-tool COMMIT test must seed every target body into `documentStore`:
+  `activeToolPresentation`'s `missingRequiredTargetMessage` turns a target the
+  projection does not know into `"… is no longer available"`, which sets
+  `canConfirm: false`, and `armedConfirm()` gates the whole Enter table on
+  `canConfirmActiveTool(...)` — so the commit silently no-ops. `seedMockDocument()`
+  only carries `body1`, so any test arming on `body2`/`body3` (mesh-registry-only
+  bodies) has to `documentStore.setState({ bodies: {…} })` as well.
+- The SKETCH half of that same gate: a `profile`/`regions` context is refused
+  with `"Profile sketch is no longer available"` unless `documentStore.sketches`
+  carries it, and `seedMockDocument()` publishes `sketch2/4/5` only — so every
+  extrude/revolve commit test arming on `"sk"` must `addSketch({id:"sk", …})`
+  in its `beforeEach`, not just seed bodies.
+- `toolChipStore.showXxx(…)` re-seats the chip from `CLEARED`, which NULLS
+  `context`, and `setContext(tool, …)` silently drops unless `state.kind` already
+  equals `tool`. So every `showXxx` call site must be followed by its own
+  `setContext`/`publishXxxContext` — a missed one makes `canConfirm` false
+  forever, which disables the chip's ✓ (`ModelToolChips.tsx`) AND the Enter table
+  (`armedConfirm`). A test that calls `toolChipStore.getState().onConfirm?.()`
+  directly does NOT catch it; assert `canConfirmActiveTool(...)` instead.
+- `__extrudePreview` (the `?vpdebug` surface) is only ever republished by an
+  explicit `this.updateDebug()`. `sendPreview()` does NOT publish it for the
+  extrude/revolve owners: `markPreviewPending` returns early for those two before
+  its own `updateDebug()`, so an arm path that forgets the call leaves the whole
+  e2e/jsdom debug surface reporting the previous phase.
+- A RE-EDIT entry point (`editXxxFeature`) arms with NO live picks on purpose, so
+  any chip context built from the live pick arrays publishes an EMPTY one, which
+  the confirm gate reads as "Affected body is no longer available" — same dead ✓
+  as a missing context. The shell re-edit's `storedFaces` fallback
+  (`ModelToolController.ts`, `armShell`) is the pattern: publish the record's
+  stored typed refs when the live list is empty.
+- The e2e specs are NOT type-checked by anything in CI or by `bunx tsc --noEmit`:
+  `tsconfig.json`'s `include` is `["src"]` and there is no `e2e/tsconfig.json`. A
+  spec-only change can be tsc-green and still not compile. To check one, point an
+  ad-hoc tsconfig at `e2e/**/*.ts` with `lib`/`target` ES2022 (the repo's ES2020
+  makes every `.at(-1)` in the specs a TS2550) and `types: ["node"]`.
+- **The armed model tool is split across two hosts.** `ModelToolChips` (portalled,
+  `model-tool-chip`) carries ONLY the primary value input, the operation badge,
+  `chip-confirm`/`chip-cancel`; every secondary control — `chip-edgeop-*`,
+  `chip-chamfer-*`, `chip-draft-input`, `chip-symmetric`, `chip-end-*`,
+  `chip-bool-*`, `chip-offset-type-*`, `chip-mirror-fuse`, `chip-transform-*` —
+  is rendered by `features/inspector/ActiveToolInspector.tsx` inside
+  `inspector-drawer-content` (open by default). The per-chip `⋯` overflows
+  (`ChipOverflow`, `EdgeOpOverflow`, `ExtrudeOverflow`, the whole
+  `RevolveChipControls.tsx`, and testids `chip-*-overflow*`, `chip-mode-readout`,
+  `chip-draft`) are DEAD — unreferenced by any render path, still exported.
+- `ActiveToolInspector`'s read-only "last operation" summary is gated on
+  `state.kind === "none"` ALONE. A settled `completed` attempt must never suppress
+  a live tool: `operationAttemptStore` gives `completed` no authority (only
+  `applying` blocks `begin`, `authoringEntryBlocked` and `toolStore.setTool`), and
+  a re-edit entered from a history row (`editFeature` → `editXxxFeature`) never
+  reaches `activateTool`, the one caller of `clear()`. Gating the recap on the
+  attempt instead cost every re-edit its whole secondary-control section (fixed
+  2026-09-13). `tool-chip-dock` is the discriminator between the two: the terminal
+  branch returns before it, every armed branch renders it.
+- The chamfer ANGLE / SECOND-DISTANCE fields promise "Enter applies the value THEN
+  confirms", but authoring either makes the chamfer asymmetric, which moves the
+  reference-face pair set, which makes `syncChamferReferenceFaces` close and
+  REOPEN the preview session. `commitFillet` has an explicit gate for that same
+  turn (`ModelToolController.ts` ~:9501) — it awaits `this.chamferSync`, then
+  returns SILENTLY if `armGen` moved or the FSM left `armed`. That silent return
+  fires intermittently: the four e2e tests that type into `chip-chamfer-angle` /
+  `chip-chamfer-d2` and press Enter pass alone and fail in-file, with a different
+  member of the set failing each run, and the FE log shows the arm, two
+  "Computing preview…" cycles, then no `edgeOp: armed → committing` and no hint.
+- `history-row-<id>` is ONLY the clickable header now. The inline value editor is a
+  SIBLING under `history-details-<id>`; both live under the `history-item-<id>`
+  wrapper. A locator scoped to `history-row-…` can never reach the editor.
+- The M3 semantic aria-labels on `DimensionInput` interpolate the LIVE display unit
+  (`Depth (mm)` / `Offset (in)` / `Angle (°)`; the unlabelled default is still
+  `Dimension value`, which is what the history rows use). A spec that switches units
+  under one armed chip must use a regex locator — `/^Offset \((mm|in)\)$/`.
+- The MOCK LANE had no mesh publication at all until `currentMockPublication()`:
+  `seedMockDocument()` writes the projection straight into the store and the
+  e2e boot then calls `newDocument()`, which does NOT replace `documentStore`.
+  Anything gated on `promote.ts`'s `installedProofIsCurrent` (Measure, every
+  proof-carrying pick) is dead without a retained publication AND without
+  provenance on the installed mesh — `meshSync.reconcile()` must pass the
+  publication's generation or `buildBodyObjects` records none.
+- `?vpdemo` is the one mock-lane flag that emits a real `document-changed`, so a
+  spec on `?vpdebug` alone and one on `?vpdemo` exercise different publication
+  states — a useful control when a pick is refused as stale.
+- A committed sketch leg can be MOVED by its own auto-inferred `Horizontal`
+  (`mockEnforce` projects both endpoints onto their mid-y; PlaneGCS does the
+  same), so the draw machine's anchors go stale. `SketchController.reanchorChain`
+  re-seats them after `applySketchSolveResult`; without it the next chain leg
+  starts where the user clicked and `autoConstrain` welds nothing (it only infers
+  `Coincident` between points already equal to 1e-6).
+- Snap resolution is ASYMMETRIC between the first and second click of a gesture:
+  the first has no live-dimension frame (spatial ladder only — a grid node up to
+  a grid reach away), the second has one, and cursor rounding costs a fraction of
+  a pixel so it wins. "The same client pixel twice" is therefore NOT the same
+  plane point. `setSnapPref` (helpers.ts) is the sanctioned way for a spec that
+  needs raw placement to turn off `grid`/`dimensionRound`/`polarTracking`/
+  `sketchGuideLines`.
+- The compact-chip/inspector split moved settings OUT of `model-tool-chip`:
+  transform mode + axis + Copy + Align are in `active-tool-inspector`
+  (`TransformInspector`), and Extrude's boolean segments too — the chip keeps the
+  value, a `chip-*-badge` and ✓/✕. `chip-mode-readout` → `chip-mode-badge`.
+- The left history rail is a 220px `z-20` overlay over the canvas: any e2e click
+  computed from a world point can land under it (and under the right inspector /
+  top toolbar) and never reach the viewport, with NO error — the pick just
+  silently does nothing.
+- `e2e/zzdebug.spec.ts` is a TRACKED empty file. Scratch diagnostics go in it,
+  but restore it with `git checkout --` when done; deleting it is a worktree
+  change.
+- Playwright's `webServer` is killed by whichever run STARTED it, so two
+  concurrent agents on port 4177 tear each other's server down mid-run
+  (`net::ERR_CONNECTION_REFUSED`). Start one long-lived `bun run dev -- --port
+  4177 --strictPort` first and both runs reuse it.
+- `mockClient.prepareOffsetFace` CLASSIFIES the picked face instead of seeding
+  fixed numbers: `mockOffsetFaceDims` (`mockFaceGeometry.ts`) answers `thickness`
+  + an opposite for a planar face, `radius` for the cylinder's curved side, and
+  `{}` for anything it cannot classify (a synthesized body, a multi-face closure).
+  Never both keys at once — `offsetAllowedTypes` tests `radius` FIRST, so the old
+  `{ radius: 10, thickness: 10 }` made every mock-lane face read as curved and
+  removed `Total` from the UI entirely.

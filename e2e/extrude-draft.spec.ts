@@ -102,20 +102,22 @@ test("the [Draft] segment authors an angle that survives the commit and the re-e
   await armExtrudeOnFreshRectangle(page);
   const bodiesBefore = await bodyOptions(page).count();
 
-  // (1) A fresh arm opens COLLAPSED at zero draft — the common extrude is
-  // unchanged. Draft itself now lives behind the chip's `⋯`.
+  // (1) A fresh arm carries ZERO draft — the common extrude is unchanged. Draft
+  // now lives in the inspector's active-tool section, and it is always visible
+  // there: `DraftSegment` deliberately dropped the collapsed `Draft`/`Draft 10°`
+  // disclosure the chip used to carry, because collapsing an invalid field hides
+  // the very text that is blocking confirmation. The value in the field is the
+  // readout now.
   await openExtrudeOverflow(page);
-  await expect(page.getByTestId("chip-draft")).toHaveText("Draft");
-  await expect(draftInput(page)).toHaveCount(0);
+  await expect(draftInput(page)).toHaveValue("0");
   expect((await extrudeDebug(page))?.draftAngleDeg).toBe(0);
 
-  // (2) Expand + author 10°. Tab blurs (commit-on-blur) rather than Enter, which
-  // would confirm the whole extrude before the armed state can be read.
-  await page.getByTestId("chip-draft").click();
+  // (2) Author 10°. Tab blurs (commit-on-blur) rather than Enter, which would
+  // confirm the whole extrude before the armed state can be read.
   await draftInput(page).fill("10");
   await page.keyboard.press("Tab");
   await expect.poll(async () => (await extrudeDebug(page))?.draftAngleDeg).toBe(10);
-  await expect(page.getByTestId("chip-draft")).toHaveText("Draft 10°");
+  await expect(draftInput(page)).toHaveValue("10");
 
   // (3) Commit → one new body, one Extrude row.
   await page.getByTestId("chip-confirm").click();
@@ -134,8 +136,7 @@ test("the [Draft] segment authors an angle that survives the commit and the re-e
   await row.dblclick();
   await expect.poll(async () => (await extrudeDebug(page))?.draftAngleDeg).toBe(10);
   await openExtrudeOverflow(page);
-  await expect(page.getByTestId("chip-draft")).toHaveText("Draft 10°");
-  await expect(draftInput(page)).toHaveValue("10"); // a stored draft opens expanded
+  await expect(draftInput(page)).toHaveValue("10"); // the stored draft seeds the field
 });
 
 test("the draft input clamps to the legacy ±89° range", async ({ page }) => {
@@ -145,7 +146,6 @@ test("the draft input clamps to the legacy ±89° range", async ({ page }) => {
   // prism), so the legacy dialog's own range is the ceiling — and the chip reads
   // the CLAMPED state back, never the typed text.
   await openExtrudeOverflow(page);
-  await page.getByTestId("chip-draft").click();
   await draftInput(page).fill("200");
   await page.keyboard.press("Tab");
   await expect.poll(async () => (await extrudeDebug(page))?.draftAngleDeg).toBe(89);
