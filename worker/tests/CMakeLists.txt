@@ -204,6 +204,22 @@ add_executable(test_tessellation_quality test_tessellation_quality.cpp)
 target_link_libraries(test_tessellation_quality PRIVATE worker_core)
 add_test(NAME tessellation_quality COMMAND test_tessellation_quality)
 
+# VP-HARDENING WP08 (VP11 / finding R03) — exact-span rational Bezier edge
+# sampler: the NUM §2.6 S-curve counterexample, conic/rational spans, knot and
+# C0 splitting, degenerate chords, stationary derivatives, budget outcomes, and
+# the approximate fallback's estimated-not-certified label.
+add_executable(test_curve_sampler test_curve_sampler.cpp)
+target_link_libraries(test_curve_sampler PRIVATE worker_core)
+add_test(NAME curve_sampler COMMAND test_curve_sampler)
+
+# VP-HARDENING WP09 (VP10 / findings R04, R11) — shading normals evaluated from
+# the supporting surface at each triangulation node, analytic and general
+# singular fallbacks with provenance, mirrored placement + winding, and
+# incomplete-tessellation diagnostics. TEST-NORMAL-01..06, TEST-MESH-06.
+add_executable(test_surface_normals test_surface_normals.cpp)
+target_link_libraries(test_surface_normals PRIVATE worker_core)
+add_test(NAME surface_normals COMMAND test_surface_normals)
+
 # --- W-WP6: resolution-ladder calibration + new ops + fast-mode ordering (finding 3)
 #     + STEP export (in-process, real OCCT). ---
 foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshexport wp6_split wp6_checkpoint)

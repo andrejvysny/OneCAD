@@ -20,17 +20,91 @@ perspective and orthographic cameras (`CameraRig`).
 Turntable orbit yaws about **world Z**; pitch is clamped to ±(90° − ε) so the
 Z-up `lookAt` never degenerates.
 
-## Rendering model — on-demand, single rAF
+## Rendering model — dirty reasons, one rAF, submitted ≠ presented
 
-`invalidate()` marks the frame dirty and schedules **one** `requestAnimationFrame`.
-While idle, **no frame is scheduled and nothing renders** (verify under
-`?vpdebug`: `window.__vpFrames` stops incrementing). Camera tweens (Home / Fit /
-ViewCube snap) keep scheduling frames until they finish, then the loop goes
-quiet. There is no continuous render loop.
+`FrameScheduler.ts` owns scheduling. `invalidate(reason)` ORs a **dirty reason**
+(`camera`, `geometry`, `appearance`, `overlay`, `resize`, `quality`, `recovery`)
+into a bitset, bumps a monotonic `requestedRevision`, and ensures **exactly one**
+`requestAnimationFrame` is outstanding. While idle, **no frame is scheduled and
+nothing renders** (verify under `?vpdebug`: `window.__vpFrames` stops
+incrementing). There is no continuous render loop and no second timer — a
+permanent rAF would hide exactly the bug below.
 
-Inputs that must repaint call `invalidate()` (or go through the controls'
-`onChange`, which does). `ResizeObserver` is devicePixelRatio-aware (capped at
-2×) for crisp output on HiDPI displays.
+**The mask is consumed BEFORE the frame work runs.** `tick()` snapshots and
+clears the reasons, then calls the work; anything invalidated *during* the frame
+— a contribution's `frame` hook, an `onAfterRender` listener, an overlay
+layout — belongs to the **next** frame and is answered by it. The old loop
+cleared the flag *after* `renderFrame()`, so such a redraw was silently lost
+(VP-HARDENING finding R06). Never reintroduce that order.
+
+The work reports two **distinct** flags. `changedThisTick` says the tick drew;
+`stillActive` says a transition (a Home / Fit / ViewCube tween) needs another
+frame. Collapsing them into one produces an extra idle frame when a tween ends.
+A frame is rescheduled when the mask is dirty again **or** `stillActive`.
+
+`invalidate()` with no argument means `appearance`, so every legacy caller still
+works; pass the specific reason where it is known. Camera motion goes through
+the controls' `onChange` (`camera`), `resize()` / `syncDpr()` pass `resize`, and
+context recovery passes `recovery`.
+
+**Submitted is not presented.** There are three milestones — *scheduled*,
+*submitted*, *presented*. `renderer.render()` returning proves only that the
+frame was **submitted**; a compositor may still not have shown it. Only native
+capture is evidence of presentation. `onAfterRender(listener)` therefore hands
+the listener a `FrameSubmission` — `{ submission, requestedRevision, publication,
+displayedBodyIds, displayedProvenance }` — built immediately before the draw call.
+
+**And `publication` is the DISPLAYED one, not the adopted one.** It is derived
+from `getEntry(bodyId).provenance` for every visible body, never from the
+registry's `getCurrentMeshPublication()` pointer: that pointer is adopted at the
+top of a document change, *before a single mesh of the new publication has
+landed*, so a frame drawn mid-ingest would otherwise claim the new snapshot while
+showing the previous one's triangles. When the displayed bodies disagree —
+a mixed frame, mid-ingest — `publication` is `null` and `displayedProvenance`
+names each body's own stamp.
+
+A `render()` that throws (or whose promise rejects) notifies **nobody**, counts a
+failure, logs at most once per distinct message per 5 s (oldest key evicted, so a
+recurring message keeps its window), and after three consecutive failures **parks**
+the engine: `submissionHalted` is checked *before* `controls.update()`, because a
+tween commits the camera and re-invalidates on every tick and would otherwise
+keep the mask permanently dirty. A parked engine freezes its transitions and
+draws again only on an `invalidate()` raised **outside** the frame work — one
+attempt per request, re-parking on each failure — or after `retryRenderer()`.
+For the same reason a camera invalidation raised *during* `controls.update()`
+does not dirty the mask at all: that tick already draws the post-update camera,
+so a tween of N advancing ticks costs exactly N frames.
+
+`RendererLifecycle` is `constructing → active → lost → restoring → active`, with
+terminal `disposed` and the bounded `error`. Context loss suspends the scheduler
+(nothing may be submitted into a dead context) and keeps CPU state; restoration
+rebuilds the PMREM environment on a microtask (after three's own handler),
+re-applies the renderer size, resumes, and invalidates once with `recovery`.
+A `webglcontextrestored` that arrives while the engine is **not** `lost` is
+ignored, and a loss during the awaited construction is never overwritten with
+`active` by `init()`'s tail. `captureThumbnail()` returns `null` outside `active`
+rather than forcing a frame into a dead context.
+
+`retryRenderer()` is the way out of `error`: it builds a **fresh canvas** —
+a force-lost context can never be revived on the same element — plus a fresh
+renderer, controls and picker, re-measures the CSS box before sizing, and returns
+`false` without claiming success if that fails. After a *failed init* it re-runs
+the whole `init()` path instead, because that engine has no grid, triad, section,
+picker or observers and a `true` for that shell would be a false success claim
+(`buildScene()` is idempotent, so the light rig is not duplicated).
+
+The engine stays store-agnostic — it imports stores only as TYPES — so
+`ViewportRoot` subscribes to `onLifecycleChanged` and owns the user-facing half:
+a sticky warning while `lost`/`restoring`, a sticky error plus the **Retry
+renderer** action in the viewport while `error`. Its init-failure catch routes
+into that same state, so "WebGL never came up" and "recovery failed" look and
+behave identically.
+
+WebGPU is not selectable in production: `experimentalWebGpu` only produces the
+once-per-session fallback diagnostic and `capabilities.backendNote`, and the
+Settings toggle is rendered disabled with the reason. `RendererPrefs.allowUnsupportedBackends`
+is the only route to `createWebGpu`, and **nothing in the app sets it** — it is
+there for the capability lane WP15/WP16 may build.
 
 ## Render order & depth contract — `renderOrder.ts`
 
@@ -80,7 +154,8 @@ awaited construction resolves after disposal).
 
 | File                 | Role                                                            |
 | -------------------- | --------------------------------------------------------------- |
-| `renderer.ts`        | SOLE renderer construction; WebGL default, flag-gated WebGPU.   |
+| `renderer.ts`        | SOLE renderer construction; WebGL2 only + the one capability record. |
+| `FrameScheduler.ts`  | Dirty-reason bitset, one rAF, consume-before-work (VP02).       |
 | `ViewportEngine.ts`  | Orchestrator: scene graph, render loop, resize, actions.        |
 | `CameraRig.ts`       | Persp+ortho pair; switch preserves apparent size at the pivot.  |
 | `CadOrbitControls.ts`| Turntable orbit / pan / zoom-to-cursor; Home/Fit/snap tweens.   |
@@ -90,7 +165,7 @@ awaited construction resolves after disposal).
 | `lightRig.ts`        | Pure camera-relative key/fill positions (floored key elevation).|
 | `BodyObject.ts`      | Per-body face Mesh + fat edge `LineSegments2`; shared materials.|
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
-| `HighlightLayer.ts`  | Hover/selected highlight: shared-attribute faces, sliced edges. |
+| `HighlightLayer.ts`  | Hover/selected highlight: owned face slices (cached), leased body, owned edges. |
 | `DragHandle.ts`      | Extrude depth handle: screen-scaled arrow + fat pick cylinder.  |
 | `TransformGizmo.ts`  | Placement gizmo: 3 arrows / 3 plane quads / 3 rings (WP-B W2).  |
 
@@ -123,37 +198,70 @@ starts on geometry (`CadOrbitControls` `hitTest` seam).
 **Body edges are fat lines (`LineSegments2`)** — WebGL clamps
 `LineBasicMaterial.linewidth` to one device pixel, which on a HiDPI display is a
 half-CSS-pixel hairline. `Picker.ts` raycasts them NATIVELY (it gathers via
-`traverseVisible`, so a hidden pick proxy would be gathered too). Three
-consequences the Picker owns, none of which apply to plain lines:
+`traverseVisible`, so a hidden pick proxy would be gathered too).
+
+**Every screen-space fat line is authored in CSS (logical) pixels** — width,
+`resolution`, and pick radius alike, never multiplied by the device pixel ratio
+(VP03, finding R01). That is forced by the installed three 0.185.1, not chosen:
+`examples/jsm/lines/LineSegments2.js:419-428` has `onBeforeRender`
+UNCONDITIONALLY overwrite the uniform with `renderer.getViewport()`, and
+`src/renderers/WebGLRenderer.js:781-785` returns the viewport `setSize` stored
+UNSCALED (only `getDrawingBufferSize` applies the ratio). Since
+`LineMaterial.js:239-243` computes `offset *= linewidth; offset /= resolution.y`,
+a device-pixel width over a logical-pixel resolution draws `dpr` times too wide.
+`screenLineStyle.ts` owns that contract and the `LINE_WIDTHS_CSS` table (spec
+§7.3); `ViewportMetrics.ts` is the single snapshot the sizes come from, written
+only by `resize()` and `syncDpr()`. `THREE.Points` markers are a SEPARATE
+adapter — `WebGLMaterials.js:303-308` multiplies `material.size` by the pixel
+ratio itself, so a point size is *also* CSS px but by a different route.
+
+Three consequences the Picker owns, none of which apply to plain lines:
 
 - an intersection carries **`faceIndex` = the segment ordinal directly** (the
   geometry is instanced, one instance per segment) and **no `index`**. There is
   no `>> 1`; adding one binds every edge pick to the wrong edge.
 - the anchor is **`pointOnLine`** (on the segment), not `point` (on the ray).
 - the raycast is **screen-space**: the hit radius is
-  `(material.linewidth + raycaster.params.Line2.threshold) / 2` in the device px
-  `material.resolution` is expressed in. `line2PickThreshold` cancels the drawn
-  width out so the tolerance stays `EDGE_PICK_PX` CSS px at any weight or dpr,
-  and the Picker **flushes `material.resolution` itself before every raycast** —
-  at (0,0), which is where a body sits until its first rendered frame,
-  `LineSegments2.raycast` returns silently with no hits. `params.Line.threshold`
-  (world units) is still driven, because the face-vs-edge preference bias
-  arbitrates on the world-space `distance` both hit kinds report.
+  `(material.linewidth + raycaster.params.Line2.threshold) / 2` in the CSS px
+  `material.resolution` is expressed in. `line2PickThresholdCss` cancels the
+  drawn width out so the tolerance stays `EDGE_PICK_CSS_PX` at any weight, with
+  no dpr term on either side, and the Picker **flushes `material.resolution`
+  itself before every raycast** — at (0,0), which is where a body sits until its
+  first rendered frame, `LineSegments2.raycast` returns silently with no hits.
+  `params.Line.threshold` (world units) is still driven, because the
+  face-vs-edge preference bias arbitrates on the world-space `distance` both hit
+  kinds report.
 
-Highlights are two shapes. FACE and BODY overlays are shallow-cloned geometries
-that SHARE the body's BufferAttributes and only narrow `drawRange` — they own no
-GPU buffers and are never disposed (that would free the shared buffers). EDGE
-overlays cannot do that: `drawRange` is meaningless on an instanced geometry, so
-each one builds a `LineSegmentsGeometry` over a `subarray` VIEW of the entry's
-`edgeSegmentPositions` (CPU-side still zero-copy, but its own GL buffer) and IS
-disposed on rebuild/teardown. `HighlightLayer.clearObjects` discriminates on
-`isLineSegmentsGeometry`.
+Highlights follow the ownership contract of `docs/viewport-hardening/01-SPECIFICATION.md`
+§8 (VP-HARDENING WP03, decision D05); the old shared-attribute wrappers that
+were never disposed are gone (finding R02). Three shapes:
+
+- **BODY** overlays borrow the body's EXACT `entry.geometry` object through a
+  registry lease (`acquireLease(entry, "highlight:body")`) — no wrapper, no
+  copy; the registry will not dispose a leased entry until the lease is
+  released, one flush after the last holder lets go.
+- **FACE** overlays are compact OWNED geometry (`mesh/faceSliceGeometry.ts`):
+  the face's triangles are copied into their own position/index buffers with a
+  local vertex remap (no normals — the overlay is unlit), one combined buffer
+  per (body, role) for multi-face selection, capacity reused across selection
+  changes. They live in `mesh/highlightCache.ts`, a bounded LRU (64 MiB / 256
+  entries) pinned while displayed and dropped when their source entry retires.
+  Disposing one frees only its own buffers.
+- **EDGE** overlays build a `LineSegmentsGeometry` over a `subarray` VIEW of the
+  entry's `edgeSegmentPositions` (CPU zero-copy, but their own
+  `InstancedInterleavedBuffer`, so their own GL buffer) and are cached and
+  disposed the same way.
+
+Body objects and section stencils borrow the body geometry through leases too
+(`"body"`, `"section"`); the registry is the unique disposer of installed
+geometry (`meshRegistry.ts`, ordered frame-end retirement). Never call
+`dispose()` on any geometry that shares the body's `BufferAttribute`s.
 
 `SketchStaticLayer` (model-mode, non-editable presence of every sketch) picks
 DIFFERENTLY: its `hitTest` raycasts an explicit object list it maintains itself,
 not `traverseVisible`. Each sketch's curves are therefore two objects sharing one
-geometry — a fat, VISIBLE `LineSegments2` draw pass (dpr-normalized CSS-px width,
-`SketchObject.cssLineWidth`) and a plain, INVISIBLE `LineSegments` pick proxy
+geometry — a fat, VISIBLE `LineSegments2` draw pass (CSS-px width, see
+`screenLineStyle.ts`) and a plain, INVISIBLE `LineSegments` pick proxy
 that `hitTest` raycasts instead. An invisible object costs no GPU (the renderer
 skips it before buffer upload), and the proxy keeps world-unit `Line.threshold`
 semantics and bare-`Raycaster` (no camera/resolution) test compatibility. The
@@ -242,13 +350,17 @@ frame from the plane→screen scale the engine passes it, holding 6px on / 4px o
 at every zoom. Marker glyphs are one per snap family — the marker is the only
 feedback when snapping hints are off.
 
-**DPR is not a load-time constant.** `dpr.ts` owns `MAX_DPR` and the CSS→device
-conversion. Fat-line `linewidth` is in DEVICE pixels, so a width baked at import
-time renders wrong the moment a window moves to a different-DPR display — and
-`ResizeObserver` never fires for that, because the CSS box did not change.
-`ViewportEngine.syncDpr()` checks the ratio each frame and re-sizes the drawing
-buffer; `SketchObject.update` re-converts every authored CSS width when the
-capped ratio moves.
+**A display change is an EVENT, not a poll.** `dpr.ts` owns `MAX_DPR` and
+nothing else; the ratio it caps is the DRAWING-BUFFER ratio, never a width
+multiplier. A window dragged between a 1x and a 2x display changes the ratio
+with no CSS box change, so `ResizeObserver` never fires and render-on-demand
+means there is no next frame to notice in. `dprWatcher.ts` arms a
+`(resolution: Ndppx)` media query and RE-ARMS it at the new ratio on every
+change (a query pinned to the old value reports only the first transition);
+`ViewportEngine.syncDpr()` then recomputes the metrics snapshot, re-sizes the
+drawing buffer, and schedules exactly one repaint without touching the camera.
+The same `syncDpr()` still runs once per rendered frame as a safety net. Line
+widths need no adjustment at all: they are CSS.
 
 **Curve tessellation is adaptive** (`curveTessellation.ts`): segment counts come
 from a 0.35 CSS px sagitta budget with a 25% rebuild band, floors of 8 (24 for an

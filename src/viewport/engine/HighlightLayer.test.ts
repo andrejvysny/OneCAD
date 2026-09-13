@@ -1,6 +1,9 @@
 /*
  * HighlightLayer: the pure slice math, the overlay material contract, and the
- * ONE place the layer's "never dispose" rule is deliberately broken.
+ * OWNERSHIP contract of VP-HARDENING WP03 (spec §8.2/§8.3, finding R02) — face
+ * and edge overlays own compact buffers and are disposed; a whole-body overlay
+ * borrows the registry's exact geometry object under a lease and disposes
+ * nothing; no overlay ever shares a BufferAttribute with the body.
  *
  * Face ranges are triangle units → index units (×3). Edge ranges stay in
  * SEGMENT units: body edges are instanced fat lines, where one instance IS one
@@ -15,8 +18,11 @@ import {
   buildBodyObjects,
   swap,
   disposeAll,
+  getEntry,
+  openLeases,
   __resetRegistryForTests,
 } from "../mesh/meshRegistry";
+import { readViewportCounters } from "../vph/instrumentation";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 import { encodeMesh1, makeBoxMesh } from "@/ipc/mockMeshes";
 
@@ -148,9 +154,9 @@ describe("overlay materials", () => {
 });
 
 /*
- * The disposal split. Face/body overlays SHARE the body's BufferAttributes and
- * must never be disposed; edge overlays own the InstancedInterleavedBuffer
- * `setPositions` built for them and leak a GL buffer per hover if they are not.
+ * Section clipping reaches materials, not geometry: the five shared overlay
+ * materials sit outside both BodyMaterialLibrary instances, so nothing else can
+ * clip them.
  */
 describe("setClippingPlanes (section view)", () => {
   const planes = () => [new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)];
@@ -204,26 +210,181 @@ describe("setClippingPlanes (section view)", () => {
   });
 });
 
+/*
+ * WP03 ownership (spec §8.2/§8.3). The rejected shortcuts of guide §22 are all
+ * measured AGAINST here: no overlay may share a BufferAttribute with the body,
+ * no undisposed wrapper may accumulate, and a scene-child count is not evidence
+ * of anything — every assertion below reads the registry, the cache, or a
+ * dispose spy.
+ */
 describe("geometry ownership on rebuild", () => {
-  it("disposes an edge overlay's geometry but never a face overlay's", () => {
+  const faceRef = (ord: number) => ({
+    kind: "face" as const,
+    id: `body1#f:${ord}`,
+    bodyId: "body1",
+    topoKey: `f:${ord}`,
+  });
+
+  it("TEST-RES-01: 1,000 alternating face hovers plateau and never touch the source", () => {
     const d = deps();
     const layer = new HighlightLayer(d);
     registerBox();
+    const entry = getEntry("body1")!;
+    const sourcePosition = entry.geometry.getAttribute("position");
+    const sourceIndex = entry.geometry.getIndex();
 
-    layer.setState(null, [
+    // Warm up, THEN start counting: the first two hovers are the allocations
+    // the plateau is measured from (ACCEPTANCE §3.3).
+    layer.setState(faceRef(0), []);
+    layer.setState(faceRef(1), []);
+    const warm = layer.resourceStats();
+    const disposeSpy = vi.spyOn(THREE.BufferGeometry.prototype, "dispose");
+
+    for (let i = 0; i < 1000; i++) layer.setState(faceRef(i % 2), []);
+
+    // No owned geometry was created or destroyed after warm-up: the per-(body,
+    // role) buffer is rewritten in place, so nothing accumulates and nothing
+    // churns.
+    expect(disposeSpy).not.toHaveBeenCalled();
+    expect(layer.resourceStats().entries).toBe(warm.entries);
+    expect(layer.resourceStats().entries).toBeLessThanOrEqual(2);
+    expect(layer.resourceStats().bytes).toBe(warm.bytes);
+    expect(d.root.children).toHaveLength(1);
+
+    // The body is untouched: same geometry, same attribute OBJECTS, still the
+    // zero-copy arrays the parser produced.
+    expect(entry.geometry.getAttribute("position")).toBe(sourcePosition);
+    expect(entry.geometry.getIndex()).toBe(sourceIndex);
+    expect(sourcePosition.array).toBe(entry.view.positions);
+
+    // And the overlay never shares a buffer with it.
+    const overlay = (d.root.children[0] as THREE.Mesh).geometry;
+    expect(overlay).not.toBe(entry.geometry);
+    expect(overlay.getAttribute("position")).not.toBe(sourcePosition);
+    expect(overlay.getAttribute("position").array).not.toBe(sourcePosition.array);
+
+    // The instrumentation counters see the same plateau (ACCEPTANCE §3.3).
+    expect(readViewportCounters().highlightEntries).toBe(warm.entries);
+    expect(readViewportCounters().highlightBytesOwned).toBe(warm.bytes);
+
+    disposeSpy.mockRestore();
+    layer.dispose();
+    // Teardown balances the warm-up allocations rather than leaking them.
+    expect(layer.resourceStats()).toEqual({ entries: 0, bytes: 0, displayed: 0 });
+    expect(readViewportCounters().highlightBytesOwned).toBe(0);
+  });
+
+  it("TEST-RES-02: a whole-body overlay borrows the exact geometry under ONE lease", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    const entry = getEntry("body1")!;
+
+    layer.setState({ kind: "body", id: "body1" }, []);
+
+    expect(d.root.children).toHaveLength(1);
+    expect((d.root.children[0] as THREE.Mesh).geometry).toBe(entry.geometry);
+    expect(openLeases(entry)).toEqual(["highlight:body"]);
+    // Nothing owned: a leased overlay costs the cache nothing.
+    expect(layer.resourceStats().bytes).toBe(0);
+
+    layer.setState(null, []);
+    expect(openLeases(entry)).toEqual([]);
+    layer.dispose();
+  });
+
+  it("a 5-face selection is ONE owned buffer, and a 6th face reuses that buffer", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    const entry = getEntry("body1")!;
+
+    layer.setState(null, [0, 1, 2, 3, 4].map(faceRef));
+
+    // One object, one cache slot — not five overlays and not five buffers.
+    expect(d.root.children).toHaveLength(1);
+    expect(layer.resourceStats().entries).toBe(1);
+    const five = (d.root.children[0] as THREE.Mesh).geometry;
+    // 5 box faces × 2 triangles × 3 indices, and the ordinals stay EXTERNAL.
+    expect(five.drawRange.count).toBe(30);
+    expect(d.root.children[0].userData.faceOrdinals).toEqual([0, 1, 2, 3, 4]);
+    expect(five.getAttribute("position").array).not.toBe(entry.view.positions);
+
+    // A different 5-face set: cache MISS (different ordinals) that reuses the
+    // slot's buffers in place — same geometry object, no second cache entry.
+    layer.setState(null, [0, 1, 2, 3, 5].map(faceRef));
+    expect((d.root.children[0] as THREE.Mesh).geometry).toBe(five);
+    expect(layer.resourceStats().entries).toBe(1);
+
+    // Six faces no longer fit: the buffer grows and the slot moves with it —
+    // still exactly one owned buffer for this (body, role).
+    layer.setState(null, [0, 1, 2, 3, 4, 5].map(faceRef));
+    expect(d.root.children).toHaveLength(1);
+    expect(layer.resourceStats().entries).toBe(1);
+    expect((d.root.children[0] as THREE.Mesh).geometry.drawRange.count).toBe(36);
+    layer.dispose();
+  });
+
+  it("dispose releases every lease and frees every owned overlay", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    const entry = getEntry("body1")!;
+
+    layer.setState({ kind: "body", id: "body1" }, [
+      faceRef(0),
       { kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" },
-      { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0" },
     ]);
-    const edge = d.root.children.find((o) => o instanceof LineSegments2)!;
-    const face = d.root.children.find((o) => !(o instanceof LineSegments2))!;
-    const edgeSpy = vi.spyOn((edge as LineSegments2).geometry, "dispose");
-    const faceSpy = vi.spyOn((face as THREE.Mesh).geometry, "dispose");
+    expect(layer.resourceStats().entries).toBe(2); // face set + edge
+    expect(openLeases(entry)).toEqual(["highlight:body"]);
 
-    layer.setState(null, []); // rebuild drops both
+    layer.dispose();
 
-    expect(edgeSpy).toHaveBeenCalledTimes(1);
-    expect(faceSpy).not.toHaveBeenCalled();
+    expect(openLeases(entry)).toEqual([]);
+    expect(layer.resourceStats()).toEqual({ entries: 0, bytes: 0, displayed: 0 });
     expect(d.root.children).toHaveLength(0);
+    // The source survived its overlays being freed.
+    expect(entry.geometry.getAttribute("position").array).toBe(entry.view.positions);
+  });
+
+  it("an edge overlay owns its segment buffer and is disposed with the cache", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    const entry = getEntry("body1")!;
+
+    layer.setState(null, [{ kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" }]);
+    const edge = d.root.children[0] as LineSegments2;
+    const edgeSpy = vi.spyOn(edge.geometry, "dispose");
+    const sourceSpy = vi.spyOn(entry.geometry, "dispose");
+
+    // Deselecting only unpins — the overlay stays cached for the next hover.
+    layer.setState(null, []);
+    expect(edgeSpy).not.toHaveBeenCalled();
+    expect(layer.resourceStats().entries).toBe(1);
+
+    layer.dispose();
+    expect(edgeSpy).toHaveBeenCalledTimes(1);
+    expect(sourceSpy).not.toHaveBeenCalled();
+  });
+
+  it("a mesh swap retires the overlays cut from the old resource", () => {
+    const d = deps();
+    const layer = new HighlightLayer(d);
+    registerBox();
+    const first = getEntry("body1")!;
+
+    layer.setState(null, [faceRef(0)]);
+    const before = (d.root.children[0] as THREE.Mesh).geometry;
+    expect(layer.resourceStats().entries).toBe(1);
+
+    swap("body1", buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 2));
+
+    // The overlay was rebuilt against the NEW resource, and the old owned
+    // buffer went with the resource it was cut from.
+    expect(layer.resourceStats().entries).toBe(1);
+    expect((d.root.children[0] as THREE.Mesh).geometry).not.toBe(before);
+    expect(openLeases(first)).toEqual([]);
     layer.dispose();
   });
 

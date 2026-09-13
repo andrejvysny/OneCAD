@@ -2,12 +2,24 @@
  * ViewportEngine — imperative Three.js orchestrator (NO react-three-fiber).
  *
  * Owns the scene graph, renderer, camera rig, controls, grid and HTML overlay.
- * Rendering is ON-DEMAND: invalidate() marks the frame dirty and schedules a
- * single rAF; while idle NO frame is scheduled and NO rendering happens. Camera
- * tweens keep scheduling frames until they finish, then the loop goes quiet.
+ * Rendering is ON-DEMAND: invalidate(reason) ORs a dirty reason and `FrameScheduler`
+ * keeps at most one rAF outstanding; while idle NO frame is scheduled and NO
+ * rendering happens. Camera tweens keep scheduling frames until they finish, then
+ * the loop goes quiet. The scheduler consumes the dirty mask BEFORE the frame work
+ * runs, so anything that invalidates during a frame is answered by the NEXT one
+ * instead of being erased (VP-HARDENING R06 — see FrameScheduler.ts).
+ *
+ * SUBMITTED IS NOT PRESENTED. `renderer.render()` returning means the frame was
+ * SUBMITTED from the application's point of view; it is not proof a compositor
+ * presented it (spec §6). `onAfterRender` therefore delivers a `FrameSubmission`
+ * — which publication and which bodies went into that submission — and every
+ * name and log line on this path says "submitted".
  *
  * Lifecycle is StrictMode-safe: init() and dispose() are idempotent and a
  * dispose() that races an in-flight async init() still fully releases GPU state.
+ * The renderer itself moves through `constructing → active → lost → restoring →
+ * active`, with terminal `disposed` and a bounded `error` (see
+ * {@link RendererLifecycle}).
  *
  * Scene graph (see README.md — Z-UP RIGHT-HANDED is a HARD INVARIANT):
  *   scene
@@ -21,8 +33,20 @@
  */
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import { logInfo, logWarn } from "@/debug/log";
-import { createRenderer, type EnvironmentHandle, type RendererHandle } from "./renderer";
+import { logError, logInfo, logWarn } from "@/debug/log";
+import {
+  createRenderer,
+  type EnvironmentHandle,
+  type RendererCapabilities,
+  type RendererHandle,
+} from "./renderer";
+import {
+  DirtyReason,
+  FrameScheduler,
+  type ConsumedFrame,
+  type DirtyReasonMask,
+  type FrameWorkResult,
+} from "./FrameScheduler";
 import { CameraRig, type ProjectionKind } from "./CameraRig";
 import { CadOrbitControls } from "./CadOrbitControls";
 import type { DevicePref, InputDevice } from "./navInput";
@@ -41,7 +65,7 @@ import {
 } from "./SketchStaticLayer";
 import { RegionPickLayer } from "./RegionPickLayer";
 import { flushDisposals, getEntry } from "../mesh/meshRegistry";
-import type { MeshEntry } from "../mesh/meshRegistry";
+import type { MeshEntry, MeshProvenance } from "../mesh/meshRegistry";
 import type { EntityRef } from "@/stores/selectionStore";
 import { SketchObject } from "./SketchObject";
 import { SnapIndicator } from "./SnapIndicator";
@@ -59,7 +83,9 @@ import type {
 } from "@/ipc/types";
 import type { FrontendPointRef, PlaneScreenMetric, SnapDecision } from "@/tools/sketch/snapTypes";
 import { latestSnapTrace } from "@/tools/sketch/snapTrace";
-import { currentDpr, MAX_DPR } from "./dpr";
+import { currentDpr, rawDpr } from "./dpr";
+import { watchDevicePixelRatio } from "./dprWatcher";
+import { nextMetrics, type ViewportMetrics } from "./ViewportMetrics";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle, type DragHandleMode } from "./DragHandle";
@@ -68,6 +94,7 @@ import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
 import { lightRigPose, type LightRigPose } from "./lightRig";
 import { GhostLayer, type GhostInstances } from "./GhostLayer";
+import { beginFrame, countInvalidation, readViewportCounters, type ViewportCounters } from "../vph/instrumentation";
 import { SectionLayer, sectionOffsetRange } from "./SectionLayer";
 import type { SectionPlaneId, SectionState } from "@/stores/viewportStore";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
@@ -101,6 +128,82 @@ export interface SketchStaticReadinessProvider {
  * save a payload Rust would only drop.
  */
 const MAX_THUMBNAIL_CHARS = 340_000;
+
+/**
+ * Renderer/context lifecycle (spec §6).
+ *
+ * `constructing` → `active` at the end of a successful `init()`; `active` →
+ * `lost` when the browser drops the GL context; `lost` → `restoring` on
+ * `webglcontextrestored`, then back to `active` once the GPU-only resources
+ * (PMREM, sizes) are rebuilt. `error` is the BOUNDED failure state — repeated
+ * submission failures or a rebuild that threw — and is left only by
+ * {@link ViewportEngine.retryRenderer} or an explicit `invalidate()`. `disposed`
+ * is terminal.
+ */
+export type RendererLifecycle =
+  | "constructing"
+  | "active"
+  | "lost"
+  | "restoring"
+  | "error"
+  | "disposed";
+
+/** One displayed body and the publication its GEOMETRY came from. */
+export interface DisplayedBodyProvenance {
+  readonly bodyId: string;
+  /** `null` when the body has no registry entry, or its entry carries none. */
+  readonly provenance: MeshProvenance | null;
+}
+
+/**
+ * What one `renderer.render()` call actually carried.
+ *
+ * SUBMITTED, NOT PRESENTED (spec §6): this record is built immediately before
+ * the draw call and delivered when that call returns (or its promise resolves).
+ * It proves what the application handed the backend, never what a compositor
+ * put on screen — native capture is the only evidence of that.
+ *
+ * DISPLAYED, NOT ADOPTED. `publication` is derived from the geometry actually in
+ * the scene, never from the registry's "current publication" pointer: that
+ * pointer is adopted at the TOP of a document change, before a single mesh has
+ * landed, so a frame drawn mid-ingest would otherwise claim the new snapshot
+ * while showing the previous one's triangles.
+ */
+export interface FrameSubmission {
+  /** Monotonic submission number, starting at 1. */
+  readonly submission: number;
+  /** The newest `invalidate()` revision this submission answers (see FrameScheduler). */
+  readonly requestedRevision: number;
+  /**
+   * The provenance every displayed body agrees on, or `null` when they disagree
+   * (a MIXED frame, mid-ingest) or nothing is displayed. Read
+   * {@link FrameSubmission.displayedProvenance} to see which bodies differ.
+   */
+  readonly publication: MeshProvenance | null;
+  /** Ids of the VISIBLE bodies that were in the scene at submission. */
+  readonly displayedBodyIds: readonly string[];
+  /** Per-body provenance for exactly those ids, in the same order. */
+  readonly displayedProvenance: readonly DisplayedBodyProvenance[];
+}
+
+/** Structural equality for a provenance stamp (`null` equals only `null`). */
+function sameProvenance(a: MeshProvenance | null, b: MeshProvenance | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.documentId === b.documentId &&
+    a.runtimeSession === b.runtimeSession &&
+    a.snapshotId === b.snapshotId &&
+    a.generation === b.generation
+  );
+}
+
+/** Minimum gap between two reports of the SAME submission-failure message. */
+const SUBMIT_LOG_THROTTLE_MS = 5_000;
+/** Consecutive failed submissions before the engine stops resubmitting. */
+const SUBMIT_FAILURE_LIMIT = 3;
+/** Cap on the throttle map so a stream of unique messages cannot grow it. */
+const SUBMIT_LOG_KEYS_MAX = 16;
 
 export interface EngineInitOptions {
   experimentalWebGpu?: boolean;
@@ -253,11 +356,20 @@ export class ViewportEngine {
     // A silent context loss looks exactly like "the viewport froze" — it MUST
     // be on the record, and it is rare enough to warrant a warn.
     logWarn("vp", "webgl context LOST", { disposed: this.disposed });
-    if (!this.disposed) e.preventDefault();
+    if (this.disposed) return;
+    e.preventDefault();
+    this.setLifecycle("lost");
+    // Nothing may be submitted into a dead context, and a tween that kept
+    // rescheduling would spin against it. The mask survives; resume replays it.
+    this.scheduler.setSuspended(true);
   };
   private readonly onContextRestored = (): void => {
+    if (this.disposed) return;
+    // Only a LOST context can be restored. A duplicate or spurious event must
+    // not flash `restoring` over a healthy engine or rebuild the PMREM again.
+    if (this.lifecycle !== "lost") return;
     logInfo("vp", "webgl context restored");
-    this.invalidate();
+    this.setLifecycle("restoring");
     // The environment map lives ONLY on the GPU (a PMREM render target has no
     // CPU-side source), so a restored context comes back with a black env unless
     // it is regenerated. It must be DEFERRED: these canvas listeners are
@@ -267,8 +379,21 @@ export class ViewportEngine {
     // context three still considers lost. A microtask puts us after it.
     queueMicrotask(() => {
       if (this.disposed || !this.rendererHandle) return; // dispose() nulls the handle first
-      this.buildEnvironment();
-      this.invalidate();
+      try {
+        this.buildEnvironment();
+      } catch (error) {
+        // ONE report, no retry loop (spec §6). `retryRenderer()` is the way out.
+        logError("vp", "environment rebuild after context restore failed", {
+          error: String(error),
+        });
+        this.setLifecycle("error");
+        return;
+      }
+      // A restored context comes back at the default drawing-buffer size.
+      this.applyRendererSize();
+      this.scheduler.setSuspended(false);
+      this.invalidate(DirtyReason.recovery);
+      this.setLifecycle("active");
     });
   };
 
@@ -380,14 +505,62 @@ export class ViewportEngine {
   // Scratch for `planeScreenMetric` — it runs on every pointer frame, so it
   // allocates nothing after construction (SNAP P2 perf budget).
   private readonly _metricScratch = newPlaneMetricScratch();
-  /** The capped DPR the renderer buffer is currently sized for (see `syncDpr`). */
-  private appliedDpr = currentDpr();
+  /**
+   * The ONE size/scale snapshot (VP03). Written ONLY by `resize()` (CSS-box
+   * change) and `syncDpr()` (display change with no CSS-box change); every
+   * other consumer reads it. See `ViewportMetrics.ts` for the unit contract.
+   */
+  private metrics: ViewportMetrics = nextMetrics(null, {
+    cssWidth: 1,
+    cssHeight: 1,
+    rawDpr: rawDpr(),
+    projectionRevision: 0,
+  });
+  /** Bumped by `setProjection`; carried on every metrics snapshot. */
+  private projectionRevision = 0;
+  /** Disposer for the idle DPR watcher (`dprWatcher.ts`). */
+  private disposeDprWatcher: (() => void) | null = null;
 
-  // Render-on-demand
-  private dirty = true;
-  private rafId = 0;
-  private rafPending = false;
+  // Render-on-demand (VP-HARDENING WP02). The scheduler owns the dirty mask and
+  // the single outstanding rAF; the engine only supplies the frame work.
+  private readonly scheduler = new FrameScheduler({
+    requestFrame: (cb) => requestAnimationFrame(cb),
+    cancelFrame: (id) => cancelAnimationFrame(id),
+  });
   private frames = 0;
+  /** Renderer/context state machine (spec §6). */
+  private lifecycle: RendererLifecycle = "constructing";
+  private readonly lifecycleListeners = new Set<(state: RendererLifecycle) => void>();
+  /** The one capability record for the live renderer (`null` before init). */
+  private capabilities: RendererCapabilities | null = null;
+  /** Consecutive failed submissions; a success resets it. */
+  private submitFailures = 0;
+  /** Set at {@link SUBMIT_FAILURE_LIMIT}: stop resubmitting until asked again. */
+  private submissionHalted = false;
+  /**
+   * True while the scheduler's frame work is running. An `invalidate()` raised
+   * in this window is INTERNAL (a contribution hook, an after-render listener,
+   * a tween's own commit) and is not the user asking for another attempt.
+   */
+  private inFrame = false;
+  /**
+   * True only across `controls.update()`. The tween's `commit()` fires
+   * `onChange` → `invalidate(camera)` on every step INCLUDING the last, which
+   * would dirty the mask for a camera this very tick already draws — one extra
+   * frame per tween. Camera invalidations raised in this window are dropped.
+   */
+  private advancingTransitions = false;
+  /**
+   * An `invalidate()` arrived from OUTSIDE the frame work: the one thing that
+   * may lift {@link submissionHalted}. Consumed by the next frame.
+   */
+  private externalWake = false;
+  /** message → last log time, so an every-frame failure logs once per 5 s. */
+  private readonly submitErrorLoggedAt = new Map<string, number>();
+  /** The init options, kept so `retryRenderer()` can rebuild the same wiring. */
+  private initOpts: EngineInitOptions = {};
+  /** {@link buildScene} has run — it must not run twice (see `retryRenderer`). */
+  private sceneBuilt = false;
   private debug = false;
   // ?vpdebug frame-interval ring (ms between rendered frames) for the 60fps gate.
   private readonly frameTimes = new Float64Array(FRAME_RING);
@@ -408,6 +581,43 @@ export class ViewportEngine {
     return this.frames;
   }
 
+  constructor() {
+    // The first frame is dirty, but nothing may be scheduled until init() has a
+    // renderer to submit to — `init()` resumes the scheduler once it does. This
+    // reproduces the old `dirty = true` + "scheduleFrame bails when not
+    // initialized" pair without losing the pre-init invalidation.
+    this.scheduler.setSuspended(true);
+    this.scheduler.setWork(this.runFrameWork);
+    this.scheduler.invalidate(DirtyReason.appearance);
+  }
+
+  /** The renderer/context state (spec §6). */
+  getLifecycle(): RendererLifecycle {
+    return this.lifecycle;
+  }
+
+  /**
+   * Observe lifecycle transitions. The engine deliberately does NOT reach into
+   * `viewportStore` — it stays store-agnostic (only TYPE imports from stores) —
+   * so the user-facing "graphics context lost" hint is published by
+   * `ViewportRoot`, which subscribes here.
+   */
+  onLifecycleChanged(cb: (state: RendererLifecycle) => void): () => void {
+    this.lifecycleListeners.add(cb);
+    return () => this.lifecycleListeners.delete(cb);
+  }
+
+  private setLifecycle(next: RendererLifecycle): void {
+    if (this.lifecycle === next) return;
+    this.lifecycle = next;
+    for (const cb of [...this.lifecycleListeners]) cb(next);
+  }
+
+  /** What the live context actually reports (spec §5). `null` before init. */
+  getRendererCapabilities(): RendererCapabilities | null {
+    return this.capabilities;
+  }
+
   async init(
     container: HTMLElement,
     overlayEl: HTMLElement,
@@ -416,9 +626,8 @@ export class ViewportEngine {
     if (this.initialized || this.disposed) return;
     this.container = container;
     this.overlayEl = overlayEl;
-    this.canvas = this.createCanvas(container);
-    this.canvas.addEventListener("webglcontextlost", this.onContextLost);
-    this.canvas.addEventListener("webglcontextrestored", this.onContextRestored);
+    this.initOpts = opts;
+    this.canvas = this.attachCanvas(container);
     this.debug = opts.debug ?? false;
 
     this.buildScene();
@@ -433,6 +642,7 @@ export class ViewportEngine {
     }
     this.rendererHandle = handle;
     this.isWebGPU = handle.isWebGPU;
+    this.capabilities = handle.capabilities ?? null;
     // Both need the backend identity, which only exists now; buildScene() ran
     // before the renderer was constructed. No `await` follows the disposed check
     // above, so neither can race a dispose().
@@ -466,34 +676,105 @@ export class ViewportEngine {
       invalidate: () => this.invalidate(),
     });
 
-    this.controls = new CadOrbitControls({
+    this.buildCanvasBoundInputs();
+
+    this.highlights = new HighlightLayer({
+      root: this.interactionRoot,
+      invalidate: () => this.invalidate(),
+    });
+
+    if (this.debug) this.setupDebugOverlay(overlayEl);
+
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(container);
+    // A window dragged between displays changes the ratio with NO CSS resize,
+    // so `ResizeObserver` never fires for it and an idle viewport has no next
+    // frame to recheck in (spec §7.2).
+    this.disposeDprWatcher = watchDevicePixelRatio(() => this.syncDpr());
+
+    this.initialized = true;
+    // There is a renderer now — frames may be scheduled. Anything invalidated
+    // before this point (construction, `resize()`) is still in the mask and is
+    // answered by the one frame this resume schedules.
+    //
+    // UNLESS the context was lost DURING the awaited construction: that state
+    // must not be overwritten with `active`, and its suspension must stand
+    // until `webglcontextrestored` lifts it.
+    if (this.lifecycle !== "lost") {
+      this.scheduler.setSuspended(false);
+      this.setLifecycle("active");
+    }
+    this.resize();
+    this.controls?.homeView(false); // framed iso, no intro animation
+    this.invalidate(DirtyReason.appearance);
+
+    if (this.debug) {
+      (window as unknown as { __vpEngine?: ViewportEngine }).__vpEngine = this;
+    }
+
+    // StrictMode double-invokes the mount effect, so a DEV session legitimately
+    // shows init/dispose/init — that pattern in the log is expected, not a bug.
+    // The capability record rides along here — ONE line per context, never a
+    // per-frame query (spec §5).
+    logInfo("vp", "engine init", {
+      backend: this.isWebGPU ? "webgpu" : "webgl",
+      debug: this.debug,
+      capabilities: this.capabilities,
+    });
+  }
+
+  /** Create the engine-owned canvas and bind the context-loss listeners to it. */
+  private attachCanvas(container: HTMLElement): HTMLCanvasElement {
+    const canvas = this.createCanvas(container);
+    canvas.addEventListener("webglcontextlost", this.onContextLost);
+    canvas.addEventListener("webglcontextrestored", this.onContextRestored);
+    return canvas;
+  }
+
+  /** Unbind and remove the engine-owned canvas. Idempotent. */
+  private detachCanvas(): void {
+    this.canvas?.removeEventListener("webglcontextlost", this.onContextLost);
+    this.canvas?.removeEventListener("webglcontextrestored", this.onContextRestored);
+    this.canvas?.remove();
+    this.canvas = null;
+  }
+
+  /**
+   * The two input owners bound to the CANVAS ELEMENT — orbit controls and the
+   * picker. Extracted from `init()` because {@link retryRenderer} replaces the
+   * canvas (a force-lost context can never be revived on the same element), and
+   * anything still listening on the old one would be deaf.
+   */
+  private buildCanvasBoundInputs(
+    restoreView: ReturnType<CadOrbitControls["getViewState"]> | null = null,
+  ): void {
+    const canvas = this.canvas;
+    if (!canvas) return;
+    const opts = this.initOpts;
+
+    const controls = new CadOrbitControls({
       rig: this.rig,
-      element: this.canvas,
+      element: canvas,
       onChange: this.handleCameraChanged,
       getBounds: this.getSceneBounds,
       getDevicePref: opts.getDevicePref,
       isDragActive: opts.isDragActive,
       onDeviceChange: opts.onDeviceChange,
     });
+    if (restoreView) controls.setView(restoreView, false);
+    this.controls = controls;
 
-    this.highlights = new HighlightLayer({
-      root: this.interactionRoot,
-      invalidate: () => this.invalidate(),
-    });
     this.picker = new Picker({
-      canvas: this.canvas,
+      canvas,
       getCamera: () => this.rig.getCamera(),
       getRoot: () => this.bodiesRoot,
-      getViewportHeight: () => this.viewportSize().height,
+      getViewportHeight: () => this.metrics.cssHeight,
       getFocusDistance: () => this.controls?.getDistance() ?? 260,
-      // Device px — the units a fat edge line's `material.resolution` uses. The
-      // Picker flushes it into the edge materials before every raycast (a
-      // LineSegments2 raycast at resolution (0,0) silently finds nothing).
-      getResolution: () => {
-        const { width, height } = this.viewportSize();
-        const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-        return { w: width * dpr, h: height * dpr };
-      },
+      // CSS px — the units a fat edge line's `material.resolution` uses, and the
+      // ones the addon itself writes at draw time. The Picker flushes it into
+      // the edge materials before every raycast (a LineSegments2 raycast at
+      // resolution (0,0) silently finds nothing).
+      getResolutionCss: () => ({ w: this.metrics.cssWidth, h: this.metrics.cssHeight }),
       invalidate: () => this.invalidate(),
       // Section view: a hit on geometry the cut removed is not on screen, so it
       // must not be pickable either (Picker.raycast drops it and takes the next
@@ -514,27 +795,100 @@ export class ViewportEngine {
         return this.contributions.secondaryHover(x, y);
       },
     });
+  }
 
-    if (this.debug) this.setupDebugOverlay(overlayEl);
+  /**
+   * Rebuild the renderer on a FRESH canvas after a failure (spec §6, TEST-BACKEND-03).
+   *
+   * A context that was lost — or force-lost by `dispose()` — can never be
+   * revived on the same `<canvas>`, so the element itself is replaced and the
+   * canvas-bound input owners are rebuilt against the new one. The camera state
+   * lives on the rig, not on the controls' element, so the view is preserved by
+   * re-applying it.
+   *
+   * Returns false and STAYS in `error` on failure; it never claims success
+   * before a capability record exists.
+   */
+  async retryRenderer(): Promise<boolean> {
+    if (this.disposed || !this.container) return false;
+    const container = this.container;
+    const overlayEl = this.overlayEl;
+    // A retry after a FAILED init has no grid, triad, section, highlights,
+    // picker, resize observer or DPR watcher — `init()` builds those AFTER the
+    // renderer, so it never got there. Claiming `active` for that shell would be
+    // a success claim for a viewport that cannot do anything.
+    const halfBuilt = !this.initialized;
+    this.setLifecycle("constructing");
+    this.scheduler.setSuspended(true);
 
-    this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(container);
+    // The PMREM target must go while its context is still alive (dispose order).
+    this.scene.environment = null;
+    this.environment?.dispose();
+    this.environment = null;
+    this.rendererHandle?.dispose();
+    this.rendererHandle = null;
+    this.capabilities = null;
+    // The camera state lives on the controls, so it has to be carried across
+    // the rebuild by hand — a fresh CadOrbitControls starts at the default view.
+    const view = this.controls?.getViewState() ?? null;
+    this.picker?.dispose();
+    this.picker = null;
+    this.controls?.dispose();
+    this.controls = null;
+    this.detachCanvas();
 
-    this.initialized = true;
-    this.resize();
-    this.controls.homeView(false); // framed iso, no intro animation
-    this.invalidate();
-
-    if (this.debug) {
-      (window as unknown as { __vpEngine?: ViewportEngine }).__vpEngine = this;
+    if (halfBuilt) {
+      if (!overlayEl) {
+        this.setLifecycle("error");
+        return false;
+      }
+      // Re-run the WHOLE init path on a fresh canvas. `buildScene()` is
+      // idempotent, so the lights and roots are not duplicated.
+      try {
+        await this.init(container, overlayEl, this.initOpts);
+      } catch (error) {
+        logError("vp", "renderer retry failed", { error: String(error) });
+        this.setLifecycle("error");
+        return false;
+      }
+      return this.lifecycle === "active";
     }
 
-    // StrictMode double-invokes the mount effect, so a DEV session legitimately
-    // shows init/dispose/init — that pattern in the log is expected, not a bug.
-    logInfo("vp", "engine init", {
-      backend: this.isWebGPU ? "webgpu" : "webgl",
-      debug: this.debug,
-    });
+    const canvas = this.attachCanvas(container);
+    this.canvas = canvas;
+    try {
+      const handle = await createRenderer(canvas, {
+        experimentalWebGpu: this.initOpts.experimentalWebGpu,
+      });
+      if (this.disposed) {
+        handle.dispose();
+        return false;
+      }
+      this.rendererHandle = handle;
+      this.isWebGPU = handle.isWebGPU;
+      this.capabilities = handle.capabilities ?? null;
+      this.applyLightIntensities();
+      this.buildEnvironment();
+    } catch (error) {
+      logError("vp", "renderer retry failed", { error: String(error) });
+      this.setLifecycle("error");
+      return false;
+    }
+
+    this.buildCanvasBoundInputs(view);
+    this.submitFailures = 0;
+    this.submissionHalted = false;
+    this.externalWake = false;
+    // Re-measure BEFORE sizing: `resize()` early-returns while the handle is
+    // null, so a CSS box that moved during the outage is only picked up here.
+    this.updateMetrics();
+    this.applyRendererSize();
+    this.rig.setAspect(this.metrics.cssWidth / this.metrics.cssHeight);
+    this.scheduler.setSuspended(false);
+    this.invalidate(DirtyReason.recovery);
+    this.setLifecycle("active");
+    logInfo("vp", "renderer retried", { capabilities: this.capabilities });
+    return true;
   }
 
   /**
@@ -637,6 +991,10 @@ export class ViewportEngine {
   }
 
   private buildScene(): void {
+    // Idempotent: `retryRenderer()` re-runs `init()` after a failed one, and a
+    // second pass would add a SECOND light rig and leave the first in the scene.
+    if (this.sceneBuilt) return;
+    this.sceneBuilt = true;
     this.interactionRoot.add(this.contributionsRoot);
     // Ambient floor. The ground half is the canvas token, so unlit undersides
     // settle toward the background instead of a hard-coded blue-gray.
@@ -755,26 +1113,51 @@ export class ViewportEngine {
   // ---- Render-on-demand ----
 
   /**
-   * Re-apply the renderer pixel ratio when the DISPLAY changed but the CSS box
-   * did not (SNAP §10.7).
+   * Re-allocate the drawing buffer when the DISPLAY changed but the CSS box did
+   * not (spec §7.2).
    *
-   * `ResizeObserver` never fires for a window dragged between a 1× and a 2×
-   * display: the element's CSS size is identical, only `devicePixelRatio`
-   * moved. Without this the drawing buffer stays at the old ratio and every
-   * fat line renders at half (or double) its intended width.
+   * Driven by `dprWatcher` (event, works while idle) AND rechecked once per
+   * rendered frame as the safety net the spec allows. The camera is untouched:
+   * the CSS rectangle and therefore the aspect are unchanged, so this schedules
+   * exactly one repaint and moves nothing. Line widths and pick radii are CSS
+   * and need no adjustment at all.
    */
   private syncDpr(): void {
-    const dpr = currentDpr();
-    if (dpr === this.appliedDpr) return;
-    this.appliedDpr = dpr;
-    this.resize();
+    if (!this.rendererHandle) return;
+    if (currentDpr() === this.metrics.dpr) return;
+    const before = this.metrics;
+    if (!this.updateMetrics()) return;
+    this.applyRendererSize();
+    // The DPR path normally leaves the CSS box alone, but a display change and
+    // a layout change can land in the same tick ahead of the ResizeObserver;
+    // if the box did move, the aspect must follow in the same snapshot.
+    if (before.cssWidth !== this.metrics.cssWidth || before.cssHeight !== this.metrics.cssHeight) {
+      this.rig.setAspect(this.metrics.cssWidth / this.metrics.cssHeight);
+    }
+    this.invalidate(DirtyReason.resize);
   }
 
-  invalidate(): void {
+  /**
+   * Mark the frame dirty and ensure exactly one frame is scheduled.
+   *
+   * `reason` is a {@link DirtyReason} bit (or an OR of several). It defaults to
+   * `appearance` so every existing zero-argument caller keeps working; pass the
+   * specific reason wherever it is known, because the frame work reads the mask
+   * (a `resize` frame has to re-derive screen metrics, an `appearance` one does
+   * not) and because a lost redraw is far easier to attribute with it.
+   */
+  invalidate(reason: DirtyReasonMask = DirtyReason.appearance): void {
     if (this.disposed) return;
+    countInvalidation();
     if (this.debug) this.recordInvalidateCaller();
-    this.dirty = true;
-    this.scheduleFrame();
+    // Only a request from OUTSIDE a frame may lift a halted engine (B2): a
+    // tween re-invalidates every tick from inside `controls.update()`, so an
+    // "is the mask dirty" test could never park a failing renderer.
+    if (!this.inFrame) this.externalWake = true;
+    // The tween's own camera commit is already reflected by the frame that is
+    // advancing it — dirtying the mask for it costs one extra frame (N1).
+    if (this.advancingTransitions && reason === DirtyReason.camera) return;
+    this.scheduler.invalidate(reason);
   }
 
   /**
@@ -793,41 +1176,154 @@ export class ViewportEngine {
     if (ring.length > 8) ring.splice(0, ring.length - 8);
   }
 
-  private scheduleFrame(): void {
-    if (this.rafPending || this.disposed || !this.initialized) return;
-    this.rafPending = true;
-    this.rafId = requestAnimationFrame(this.tick);
-  }
-
-  private tick = (nowMs: number): void => {
-    this.rafPending = false;
-    if (this.disposed) return;
-    const animating = this.controls ? this.controls.update(nowMs) : false;
-    if (this.dirty || animating) {
-      this.renderFrame();
-      this.dirty = false;
+  /**
+   * The scheduler's frame work (NUM §11.1). The dirty mask has ALREADY been
+   * consumed by the time this runs, so anything invalidated from inside it —
+   * a contribution's frame hook, an after-render listener, an overlay layout —
+   * lands in the next frame instead of being erased (R06).
+   *
+   * `changedThisTick` and `stillActive` are deliberately separate: a tween that
+   * finished on this tick changed something but is no longer active, and
+   * reporting only one flag is what produces the extra idle frame the spec
+   * forbids.
+   */
+  private readonly runFrameWork = (frame: ConsumedFrame): FrameWorkResult => {
+    if (this.disposed) return { changedThisTick: false, stillActive: false };
+    // The halt test runs BEFORE transitions are advanced: `controls.update()`
+    // commits the camera and re-invalidates on every tick, so a tween would
+    // otherwise keep the mask dirty forever and the park would never hold (B2).
+    // A halted engine also freezes its transitions — they resume on a retry.
+    if (this.submissionHalted && !this.externalWake) {
+      return { changedThisTick: false, stillActive: false };
     }
-    if (animating) this.scheduleFrame();
+    this.externalWake = false;
+    this.submissionHalted = false;
+
+    this.inFrame = true;
+    try {
+      this.advancingTransitions = true;
+      const animating = this.controls ? this.controls.update(frame.now) : false;
+      this.advancingTransitions = false;
+
+      const changedThisTick = frame.reasons !== 0 || animating;
+      if (changedThisTick) this.renderFrame(frame.requestedRevision);
+      // A submission that failed inside `renderFrame` re-parks the engine; the
+      // tween must not carry it straight back into the next failing frame.
+      return { changedThisTick, stillActive: animating && !this.submissionHalted };
+    } finally {
+      this.advancingTransitions = false;
+      this.inFrame = false;
+    }
   };
 
-  private readonly afterRenderListeners = new Map<() => void, number>();
-  private renderSubmission = 0;
+  private readonly afterRenderListeners = new Map<(s: FrameSubmission) => void, number>();
+  private submissionCount = 0;
+  /** The last {@link FrameSubmission} handed to the renderer. */
+  private lastSubmission: FrameSubmission | null = null;
 
-  /** Observe the next actual renderer submission, not merely its scheduled rAF. */
-  onAfterRender(listener: () => void): () => void {
-    this.afterRenderListeners.set(listener, this.renderSubmission + 1);
+  /**
+   * Observe the next actual renderer SUBMISSION — `renderer.render()` having
+   * returned — not merely its scheduled rAF, and NOT compositor presentation.
+   * A listener that takes no argument stays type-compatible.
+   */
+  onAfterRender(listener: (submission: FrameSubmission) => void): () => void {
+    this.afterRenderListeners.set(listener, this.submissionCount + 1);
     return () => this.afterRenderListeners.delete(listener);
   }
 
-  private notifyRenderCompleted(submission: number): void {
-    if (this.disposed) return;
+  /** The most recent submission record, or `null` before the first frame. */
+  getLastSubmission(): FrameSubmission | null {
+    return this.lastSubmission;
+  }
+
+  private notifySubmitted(frame: FrameSubmission): void {
     for (const [listener, minimum] of [...this.afterRenderListeners]) {
-      if (submission >= minimum) listener();
+      // Re-checked INSIDE the loop: an after-render listener is allowed to tear
+      // the viewport down, and no later listener may then run against a
+      // disposed engine (spec §6).
+      if (this.disposed) return;
+      if (frame.submission >= minimum) listener(frame);
     }
   }
 
-  private renderFrame(): void {
+  /**
+   * The visible bodies that go into a submission, WITH the publication each
+   * one's geometry actually came from (`MeshEntry.provenance`).
+   *
+   * Reading the registry entry rather than `getCurrentMeshPublication()` is the
+   * whole point: the current-publication pointer is adopted before any mesh of
+   * that publication is installed, so it describes what was ASKED FOR, not what
+   * is on screen.
+   */
+  private collectDisplayed(): {
+    ids: string[];
+    rows: DisplayedBodyProvenance[];
+    common: MeshProvenance | null;
+  } {
+    const ids: string[] = [];
+    const rows: DisplayedBodyProvenance[] = [];
+    if (!this.bodiesRoot.visible) return { ids, rows, common: null };
+    for (const child of this.bodiesRoot.children) {
+      if (!child.visible) continue;
+      const id = child.userData.bodyId;
+      if (typeof id !== "string") continue;
+      ids.push(id);
+      rows.push({ bodyId: id, provenance: getEntry(id)?.provenance ?? null });
+    }
+    let common = rows.length > 0 ? rows[0].provenance : null;
+    for (const row of rows) {
+      if (!sameProvenance(row.provenance, common)) {
+        common = null; // a mixed frame names no single publication
+        break;
+      }
+    }
+    return { ids, rows, common };
+  }
+
+  /** A submission that actually landed: clear the failure run and acknowledge it. */
+  private recordSubmitSuccess(frame: FrameSubmission): void {
+    this.submitFailures = 0;
+    // A frame that submitted cleanly has left the bounded failure state.
+    if (this.lifecycle === "error") this.setLifecycle("active");
+    this.notifySubmitted(frame);
+  }
+
+  /**
+   * One failed submission: count it, report it at most once per distinct message
+   * per 5 s, and after {@link SUBMIT_FAILURE_LIMIT} consecutive failures stop
+   * resubmitting. No listener is notified — an acknowledgment for a frame that
+   * was never submitted is precisely what spec §6 forbids.
+   */
+  private recordSubmitFailure(error: unknown): void {
+    this.submitFailures += 1;
+    const message = error instanceof Error ? error.message : String(error);
+    const now = performance.now();
+    const last = this.submitErrorLoggedAt.get(message);
+    if (last === undefined || now - last >= SUBMIT_LOG_THROTTLE_MS) {
+      // A bounded map, not a timer: nothing here schedules anything. Evict the
+      // OLDEST key (Map preserves insertion order) rather than clearing the
+      // lot, so a message that repeats under a stream of unique ones keeps its
+      // 5 s window instead of being re-logged every 16th failure.
+      while (this.submitErrorLoggedAt.size >= SUBMIT_LOG_KEYS_MAX) {
+        const oldest = this.submitErrorLoggedAt.keys().next().value;
+        if (oldest === undefined) break;
+        this.submitErrorLoggedAt.delete(oldest);
+      }
+      this.submitErrorLoggedAt.set(message, now);
+      logError("vp", "renderer submission failed", {
+        error: message,
+        consecutive: this.submitFailures,
+      });
+    }
+    if (this.submitFailures >= SUBMIT_FAILURE_LIMIT) {
+      this.submissionHalted = true;
+      this.setLifecycle("error");
+    }
+  }
+
+  private renderFrame(requestedRevision = this.scheduler.requestedRevision): void {
     if (!this.rendererHandle || !this.controls) return;
+    const stage = beginFrame(this.submissionCount + 1);
     // A display change with no CSS resize never reaches `ResizeObserver`, so
     // the ratio is checked on the frame that follows it instead.
     this.syncDpr();
@@ -855,12 +1351,12 @@ export class ViewportEngine {
       this.grid.update(this.controls.getTarget(), this.controls.getDistance());
     }
 
-    const { width, height } = this.viewportSize();
-    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    // ONE size snapshot for the whole frame (VP03): CSS px everywhere below.
+    const { cssWidth: width, cssHeight: height } = this.metrics;
     if (this.triad) {
       // Constant on-screen size: the triad reads the camera itself (its own
       // depth from the origin, which orbit distance does not give once panned).
-      this.triad.update(camera, width, height, dpr);
+      this.triad.update(camera, width, height);
     }
     if (this.planePicker?.visible) {
       this.planePicker.update(camera, height);
@@ -879,16 +1375,15 @@ export class ViewportEngine {
         ? Math.max(Math.hypot(m.m00, m.m10), Math.hypot(m.m01, m.m11))
         : 0;
       this.sketch.update(
-        width * dpr,
-        height * dpr,
+        width,
+        height,
         this.controls.getTarget(),
         this.controls.getDistance(),
-        dpr,
         pxPerUnit,
       );
       // The snap guides need the SAME scale: their dash cadence is authored in
       // CSS px and has to survive every zoom (SNAP §10.1).
-      this.snapIndicator?.update(width * dpr, height * dpr, dpr, pxPerUnit);
+      this.snapIndicator?.update(width, height, pxPerUnit);
     }
     // Keep the two grab overlays a constant screen size across zoom/orbit.
     //
@@ -912,8 +1407,28 @@ export class ViewportEngine {
     // Before the draw: the cut's stencil pairs mirror whatever bodies are
     // visible RIGHT NOW (no-op while the section is off).
     this.section?.update();
-    const submission = ++this.renderSubmission;
-    const renderResult = this.rendererHandle.renderer.render(this.scene, camera);
+    // The submission record names WHAT is being handed to the backend, built
+    // immediately before the draw call so it cannot describe a later state.
+    const displayed = this.collectDisplayed();
+    const frame: FrameSubmission = {
+      submission: ++this.submissionCount,
+      requestedRevision,
+      publication: displayed.common,
+      displayedBodyIds: displayed.ids,
+      displayedProvenance: displayed.rows,
+    };
+    this.lastSubmission = frame;
+    stage.submitStart();
+    let renderResult: void | Promise<void>;
+    try {
+      renderResult = this.rendererHandle.renderer.render(this.scene, camera);
+    } catch (error) {
+      // No `stage.end()`, no `frames++`, no listener: this frame was NOT
+      // submitted, so nothing may acknowledge it.
+      this.recordSubmitFailure(error);
+      return;
+    }
+    stage.submitted();
     // The arrow is oriented and scaled just above, so its box is current for this
     // frame — chips that opted in are pushed clear of it inside `update`.
     this.overlayDriver.update(
@@ -927,12 +1442,16 @@ export class ViewportEngine {
     // frame later, so nothing that referenced them this frame reads freed data.
     flushDisposals();
     this.frames++;
+    stage.end();
     if (renderResult) {
-      void renderResult
-        .then(() => this.notifyRenderCompleted(submission))
-        .catch((error: unknown) => logWarn("vp", "async renderer submission failed", { error }));
+      // An async backend (WebGPU) settles later; a rejection is the same
+      // failure as a synchronous throw and acknowledges nothing.
+      void renderResult.then(
+        () => this.recordSubmitSuccess(frame),
+        (error: unknown) => this.recordSubmitFailure(error),
+      );
     } else {
-      this.notifyRenderCompleted(submission);
+      this.recordSubmitSuccess(frame);
     }
     if (this.debug) {
       const now = performance.now();
@@ -974,6 +1493,11 @@ export class ViewportEngine {
   captureThumbnail(maxPx = 512): string | null {
     const handle = this.rendererHandle;
     if (this.disposed || !handle || handle.isWebGPU) return null;
+    // Only an ACTIVE context may be submitted into. Forcing a frame while lost,
+    // restoring, constructing or parked in `error` would either read back a
+    // blank buffer or hand a listener an acknowledgment the engine has just
+    // stopped making (spec §6).
+    if (this.lifecycle !== "active") return null;
     try {
       this.renderFrame();
       const src = handle.renderer.domElement;
@@ -1015,23 +1539,57 @@ export class ViewportEngine {
     };
   }
 
+  /**
+   * Re-read the live CSS box and display ratio into {@link metrics}. Returns
+   * whether anything actually moved — `nextMetrics` hands back the previous
+   * snapshot verbatim when nothing did.
+   */
+  private updateMetrics(): boolean {
+    const { width, height } = this.viewportSize();
+    // A collapsed or mid-layout container reports 0×0; keep the last good
+    // snapshot rather than replacing it with a clamped 1×1 that every reader
+    // would see until the next ResizeObserver fire.
+    if (width === 0 || height === 0) return false;
+    const next = nextMetrics(this.metrics, {
+      cssWidth: width,
+      cssHeight: height,
+      rawDpr: rawDpr(),
+      projectionRevision: this.projectionRevision,
+    });
+    if (next === this.metrics) return false;
+    this.metrics = next;
+    return true;
+  }
+
+  /** Size the drawing buffer from the current snapshot. `setSize`'s arguments
+   *  are LOGICAL px; `setPixelRatio` is what turns them into buffer pixels. */
+  private applyRendererSize(): void {
+    const handle = this.rendererHandle;
+    if (!handle) return;
+    handle.renderer.setPixelRatio(this.metrics.dpr);
+    handle.renderer.setSize(this.metrics.cssWidth, this.metrics.cssHeight, false);
+  }
+
+  /** The current immutable size/scale snapshot (VP03). */
+  getMetrics(): ViewportMetrics {
+    return this.metrics;
+  }
+
   private resize(): void {
     if (!this.rendererHandle || !this.canvas) return;
     const { width, height } = this.viewportSize();
     if (width === 0 || height === 0) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-    this.rendererHandle.renderer.setPixelRatio(dpr);
-    this.rendererHandle.renderer.setSize(width, height, false);
-    this.rig.setAspect(width / height);
-    this.invalidate();
+    this.updateMetrics();
+    this.applyRendererSize();
+    this.rig.setAspect(this.metrics.cssWidth / this.metrics.cssHeight);
+    this.invalidate(DirtyReason.resize);
   }
 
   // ---- Camera changes / listeners ----
 
   private handleCameraChanged = (): void => {
-    this.dirty = true;
+    this.invalidate(DirtyReason.camera);
     for (const cb of this.cameraListeners) cb();
-    this.scheduleFrame();
   };
 
   onCameraChanged(cb: () => void): () => void {
@@ -1064,6 +1622,8 @@ export class ViewportEngine {
 
   setProjection(p: ProjectionKind): void {
     if (this.rig.projection === p) return;
+    this.projectionRevision += 1;
+    this.updateMetrics();
     this.rig.setProjection(p);
     this.controls?.applyToRig();
     this.handleCameraChanged();
@@ -1339,6 +1899,32 @@ export class ViewportEngine {
 
   snapToViewDirection(dir: THREE.Vector3): void {
     this.controls?.snapToViewDirection(dir);
+  }
+
+  /**
+   * Diagnostic read of the renderer's own resource bookkeeping plus the
+   * process-wide viewport counters (VP-HARDENING WP00 instrumentation). Meant
+   * for the `?vpdebug` e2e lane and resource soak tests; `renderer.info` counts
+   * are the renderer's registrations, not measured VRAM, and are labelled so.
+   */
+  debugResourceCounters(): {
+    renderer: { geometries: number; textures: number; programs: number } | null;
+    viewport: Readonly<ViewportCounters>;
+  } {
+    const r = this.rendererHandle?.renderer as
+      | { info?: { memory: { geometries: number; textures: number }; programs?: unknown[] | null } }
+      | undefined;
+    const info = r?.info;
+    return {
+      renderer: info
+        ? {
+            geometries: info.memory.geometries,
+            textures: info.memory.textures,
+            programs: info.programs?.length ?? 0,
+          }
+        : null,
+      viewport: readViewportCounters(),
+    };
   }
 
   /** Ungated orbit by screen deltas — ViewCube drag. */
@@ -2525,13 +3111,18 @@ export class ViewportEngine {
     this.disposed = true;
     this.initialized = false;
 
+    this.setLifecycle("disposed");
     this.cancelAutoFit();
-    if (this.rafPending) cancelAnimationFrame(this.rafId);
-    this.rafPending = false;
+    this.scheduler.dispose();
     this.afterRenderListeners.clear();
+    this.lifecycleListeners.clear();
+    this.lastSubmission = null;
+    this.submitErrorLoggedAt.clear();
 
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.disposeDprWatcher?.();
+    this.disposeDprWatcher = null;
 
     this.picker?.dispose();
     this.picker = null;
@@ -2606,10 +3197,7 @@ export class ViewportEngine {
     this.rendererHandle = null;
 
     // Discard the owned canvas so a remount starts from a fresh context.
-    this.canvas?.removeEventListener("webglcontextlost", this.onContextLost);
-    this.canvas?.removeEventListener("webglcontextrestored", this.onContextRestored);
-    this.canvas?.remove();
-    this.canvas = null;
+    this.detachCanvas();
     this.container = null;
   }
 }

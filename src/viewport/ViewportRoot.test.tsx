@@ -8,7 +8,8 @@
  * underneath the fill becomes selectable — the sketch is only used when
  * there is no body hit at all.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 vi.mock("@/ipc/promote", () => ({
   promoteOne: vi.fn(),
@@ -17,7 +18,15 @@ vi.mock("@/ipc/promote", () => ({
 }));
 
 import * as THREE from "three";
-import { refFromModelHits, promotePick, viewportGeometryChip } from "./ViewportRoot";
+import {
+  applyRendererLifecycleHint,
+  promotePick,
+  refFromModelHits,
+  viewportGeometryChip,
+  ViewportRoot,
+} from "./ViewportRoot";
+import { ViewportEngine } from "./engine/ViewportEngine";
+import { viewportStore } from "@/stores/viewportStore";
 import { promoteOne } from "@/ipc/promote";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import type { PromotedElement } from "@/ipc/types";
@@ -171,5 +180,84 @@ describe("promotePick", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(selectionStore.getState().selected).toEqual([fresh]);
+  });
+});
+
+/*
+ * VP-HARDENING WP02 (spec §6) — the user-facing half of the renderer lifecycle.
+ *
+ * The engine imports stores only as types, so ViewportRoot owns the message and
+ * the way out of a failed renderer. Mounting the real component is the honest
+ * test here: jsdom has no WebGL, so `createRenderer` genuinely rejects and the
+ * component reaches the `error` state through its production path.
+ */
+describe("renderer lifecycle messaging and retry (spec §6)", () => {
+  beforeEach(() => {
+    viewportStore.getState().setStatusHint(null);
+  });
+  afterEach(() => {
+    cleanup();
+    viewportStore.getState().setStatusHint(null);
+    vi.restoreAllMocks();
+  });
+
+  it("keeps a message on screen through lost → restoring → error", () => {
+    applyRendererLifecycleHint("lost");
+    expect(viewportStore.getState().statusHint?.message).toContain("Graphics context lost");
+    expect(viewportStore.getState().statusHint?.severity).toBe("warn");
+
+    applyRendererLifecycleHint("restoring");
+    expect(viewportStore.getState().statusHint?.message).toContain("Graphics context lost");
+
+    applyRendererLifecycleHint("error");
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.message).toBe("Graphics renderer failed — retry from the viewport");
+    expect(hint?.severity).toBe("error");
+    expect(hint?.sticky).toBe(true);
+
+    // …and only a healthy state clears it.
+    applyRendererLifecycleHint("active");
+    expect(viewportStore.getState().statusHint).toBeNull();
+  });
+
+  it("leaves a hint this module does not own alone", () => {
+    viewportStore.getState().setStatusHint("Body failed to load — bad mesh", {
+      severity: "error",
+    });
+    applyRendererLifecycleHint("active");
+    expect(viewportStore.getState().statusHint?.message).toBe("Body failed to load — bad mesh");
+  });
+
+  it("a failed init shows the retry action AND the error hint", async () => {
+    render(<ViewportRoot />);
+    // jsdom cannot create a WebGL context, so init() rejects for real.
+    await screen.findByTestId("renderer-retry");
+    expect(screen.getByTestId("renderer-retry-action")).toBeEnabled();
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Graphics renderer failed — retry from the viewport",
+    );
+  });
+
+  it("clicking the action calls retryRenderer on the live engine", async () => {
+    const retry = vi
+      .spyOn(ViewportEngine.prototype, "retryRenderer")
+      .mockResolvedValue(false);
+    render(<ViewportRoot />);
+    const action = await screen.findByTestId("renderer-retry-action");
+
+    fireEvent.click(action);
+    expect(retry).toHaveBeenCalledTimes(1);
+    // Still failed → the affordance and the message both stand.
+    await screen.findByTestId("renderer-retry");
+    expect(viewportStore.getState().statusHint?.message).toContain("Graphics renderer failed");
+  });
+
+  it("a successful retry clears the action and the hint", async () => {
+    vi.spyOn(ViewportEngine.prototype, "retryRenderer").mockResolvedValue(true);
+    render(<ViewportRoot />);
+    const action = await screen.findByTestId("renderer-retry-action");
+
+    fireEvent.click(action);
+    await waitFor(() => expect(screen.queryByTestId("renderer-retry")).toBeNull());
   });
 });

@@ -199,7 +199,13 @@ add_library(worker_core STATIC
     # --- WP-C1: read-only exact mass properties (SCHEMA §7.5) ---
     src/session/MassProperties.cpp
     src/session/BodyTopology.cpp
+    # --- VP-HARDENING WP08 (VP11 / R03): exact-span rational Bezier edge
+    #     sampler with a convex-hull chord certificate and a derivative-cone
+    #     angular criterion (NUM §2). ---
+    src/tess/CurveSampler.cpp
+    src/tess/EdgeClassification.cpp
     src/tess/Mesh1.cpp
+    src/tess/SurfaceNormals.cpp
     src/tess/MeshHandle.cpp
     src/tess/Tessellate.cpp
     src/sketch/WireSketch.cpp

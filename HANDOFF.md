@@ -1,4 +1,44 @@
-# CURRENT HANDOFF — 2026-09-12 (AUTHORITATIVE; HISTORICAL REPORT BELOW)
+# Handoff — VP-HARDENING 1.0 (viewport program), session 1 paused for a fresh session
+
+Session 31 · 2026-09-13 · worktree `/Users/andrejvysny/workspace/viewport-hardening`, branch `viewport-hardening`, HEAD `65b4c60` · program ledger `docs/viewport-hardening/execution/STATUS.md` (authoritative — read its §8 first)
+
+## Goal
+
+Implement the VP-HARDENING 1.0 package in `docs/viewport-hardening/` (normative: `01-SPECIFICATION.md`, `03-NUMERICS-AND-PROTOCOL.md`, `02-IMPLEMENTATION-GUIDE.md`, `04-ACCEPTANCE-AND-TESTS.md`): a trustworthy professional CAD viewport where drawn, picked and edited geometry agree, delivered as WP00–WP16 in the guide's dependency order, with per-package evidence and no commits without authority. The user directed the Fable orchestrator to delegate implementation (`/fable-orchestrator`) and to use `/codex-astra` for reviews.
+
+## Original plan
+
+Guide §4 dependency graph: WP00 → {WP01, WP02, WP04} → WP03 (after WP01) → WP05 (after WP03) → WP06 (after WP01) → WP07 (after WP04+WP06) → WP08 (after WP04) → WP09 (after WP08) → WP10 (after WP08+WP09) → WP11 (after WP01+WP03) → WP12 (after WP10+WP11) → WP13 (after WP05+WP07+WP10) → WP14 (after WP10+WP11) → WP15 (after WP06+WP12) → WP16. Milestones: M1 = WP00–WP07, M2 = WP08–WP10, M3 = WP11–WP15, M4 = WP16. Astra-first domains (curve sampling, normals, tolerance policy) get an Astra `break` after implementation in addition to the local adversarial reviewer.
+
+## Done so far (and why)
+
+- **WP00 inventory** — baseline gates run serially on a fresh worker build; tree was ALREADY red outside the viewport at HEAD (vitest 443 failures from `ModelToolController` test fakes missing `onDocumentChanged`; ctest `feature_pattern` + `chamfer_reference_face`; 24 Rust auto-bind/NeedsRepair assertions). Recorded as baseline, never repaired (ADR-0015 §5). R01–R18 mapped to source (STATUS §4); eight red ratchet tests (`src/viewport/vph/baselineCounterexamples.test.ts`, `it.fails` flips to `it` when a package fixes the finding — 6 remain); instrumentation counters; acceptance matrix (127 IDs) + `scripts/verify-viewport-acceptance.mjs`; fixture catalog; ADR-0015; G-lane probes with true baseline evidence measured in a detached scratch worktree of `65b4c60` (DPR-2 edge 2.25 CSS px for 1.25 authored; +2 renderer geometries per hover).
+- **WP01 line units** — every fat line CSS px / logical resolution / CSS pick radius; `ViewportMetrics`; re-armed DPR media-query watcher. Why: the installed `LineSegments2.onBeforeRender` writes logical px into `resolution`, so DPR-multiplied widths drew dpr× too wide. Reviewed (no blockers). G: DPR 2 now 1.07 CSS px, cross-DPR Δ 0.03. Probe lessons: measure coverage in LINEAR light; Playwright halves `deltaY` at DPR 2 and a fractional wheel delta flips the app's device classifier to trackpad.
+- **WP02 scheduler/lifecycle** — `FrameScheduler` consumes dirty reasons before work; `FrameSubmission` names the DISPLAYED entries' provenance (the adopted publication was wrong); a parked renderer cannot spin a tween (measured 3 attempts on a throwing renderer); lifecycle with a retry action; capabilities recorded once; WebGPU preference ignored with one warn. Two review rounds.
+- **WP03 leases/highlights** — registry leases with frame-ordered retirement; owned face slices in a 64 MiB/256 LRU; whole-body overlays lease the exact geometry. G: 300 hovers hold geometries at 13. Review: sound with conditions → round 2 owed (STATUS DEV-WP03-1, N-1…N-8; `GhostLayer` still has the R02 shape).
+- **WP04 validation** — branded `ValidatedMesh` (checked arithmetic before allocation, 16 codes + `lod`), peak `MeshAdmission`, display states incl. stale-inspection-only, atomic install, promotion gate in `src/ipc/promote.ts`, preview lanes validate-or-skip. Header bbox enclosure is MEASURED for v1 (a real worker can compute it from a coarser prior triangulation) — strict for v2. Two blockers found by review and fixed. Deviation DEV-WP04-1 (consumer contract not yet in `mesh_format.md`) routed to WP10.
+- **WP08 exact-span curve sampler (C++)** — hull chord certificate + derivative cone, exact conic/B-spline spans incl. periodic unrolling, caps publish nothing, ApproxCurve fallback labelled estimated, measured float32 quantization. Old sampler emitted 2 points / 1.125 mm on the NUM §2.6 S-curve (red log kept). Local review DEFECTIVE (B1–B3) + Astra `break` DEFECTIVE (F1–F10) → round 2 landed. Astra `followup` (call 2/3) derived the real conditions and keeps F2/C1, F5, F6, F7, F9 OPEN → **round 3 owed** (`docs/design/astra/wp08-curve-sampler-followup.md` §4 lists the required tests). Dead ends: a length-based "resolution floor" for cusps (`max(16ρ, budget/1024)`) gives no crease guarantee — the emitted-segment turn predicate must be the acceptance rule; a 1e-9 "significance floor" has no derivation — use `β + asin(E/g) ≤ tol/2`; blanket `maxAbs·4·2^-23` allowance is 4.6× too pessimistic and wrong per axis.
+- **WP09 surface normals (C++)** — normals from `S_u × S_v` with `orientationSign · sign(det A)`, winding `reversed XOR det<0`, analytic singular fallbacks with provenance, completeness metadata, internal edge classification and solid ordinals. Red first (19 FAIL lines). Focused 45/45, full ctest 197/199 (baseline reds). **Unreviewed** — adversarial review and Astra `break` owed.
+
+## How to resume
+
+1. `/handoff resume` → read this section, then `docs/viewport-hardening/execution/STATUS.md` §8, §2, §6, §7; `CURRENT_STATE.md` head; `TODO.md` head; `CLAUDE.md`; `AGENTS.md`.
+2. Environment: this worktree has `node_modules` (bun 1.4.0) and a built worker (`worker/build`, staged sidecar). Rebuild worker with `ONECAD_OCCT_ROOT=$HOME/.onecad-occt/8.0.1 scripts/build-worker.sh Release` if `worker/src` changes. Playwright: ALWAYS `E2E_PORT=4179` (4177 is another session's Vite). One heavy job at a time; record the lease in STATUS §3.
+3. Verify reality: `git status --short | wc -l` (89 expected), `git diff -- . ':!TODO.md' ':!HANDOFF.md' ':!CURRENT_STATE.md' | shasum -a 256 | cut -c1-12` (`9902241f8f31` expected — the three root ledgers are excluded because any handoff edit changes them), `bunx tsc --noEmit`, `bunx vitest run src/viewport src/ipc/promote.test.ts` (59 files / 969 / 6 expected fail), `ctest --test-dir worker/build -R "surface_normals|curve_sampler|tessellation_quality|wp5_mesh1|wp6_meshexport|parity|canonical"` (45/45).
+4. First actions in order: (a) WP09 adversarial review + `/codex-astra break` (grounded on `worker/src/tess/SurfaceNormals.*`, `EdgeClassification.*`, `Tessellate.cpp`, NUM §7–§8); (b) WP08 round 3 from the followup record; (c) WP03 round 2; then (d) WP05, WP06, WP10 briefs (STATUS §7 "Next allowed package" lines).
+5. Commit boundary only after the L3 rung compared against the BASELINE red sets (STATUS §5.1), never against green; commits require the user's authority.
+
+## Open questions
+
+- None product-level. Policy items awaiting the next session's derivation/decision: export tessellation normal policy for `tessellate_raw` (spec §14 says export has its own policy; it still has the mirrored-winding bug and `+Z` fallback); whether `GhostLayer` moves to the lease model inside WP03 round 2 or WP13.
+
+## Pointers
+
+- Tasks → `TODO.md` (top section) · Snapshot → `CURRENT_STATE.md` (top section) · Program ledger → `docs/viewport-hardening/execution/STATUS.md` · Evidence → `docs/qa/viewport-hardening/` · Astra records → `docs/design/astra/wp08-curve-sampler-{break,followup}.md`
+
+---
+
+# CURRENT HANDOFF — 2026-09-12 (HISTORICAL; superseded above)
 
 This is the handoff for a new Claude Code session. The older “session 30 committed/full L3 green” header below is historical and must not be treated as current acceptance. Current source state is dirty and shared; do not clean, reset, stage, commit, push or pull unrelated work.
 

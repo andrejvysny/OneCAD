@@ -4,15 +4,15 @@
  * root group in the engine's `staticSketchRoot` (the Layers → Sketches filter's
  * target — see ViewportEngine's scene graph):
  *   - fills  : one selectable mesh per triangulated profile region,
- *   - curves : a fat `LineSegments2` DRAW pass (dpr-normalized CSS-px width,
- *     see `SketchObject.cssLineWidth`) plus a plain, invisible `LineSegments`
+ *   - curves : a fat `LineSegments2` DRAW pass (CSS-px width, never scaled by
+ *     the device ratio — see `screenLineStyle.ts`) plus a plain, invisible `LineSegments`
  *     PICK PROXY carrying the same geometry — see `hitTest` below for why,
  *   - dots   : constant-size THREE.Points at entity vertices.
  *
  * Everything is authored in plane (u,v) coordinates inside a group carrying the
  * plane basis matrix (see sketchBasis), so local (u,v,0) → world. This layer does
  * NOT reuse SketchObject (that one is edit-mode bound); it reuses the pure
- * `entityPolyline` + `cssLineWidth` + palette + planeBasisMatrix only.
+ * `entityPolyline` + `screenLineStyle` + palette + planeBasisMatrix only.
  *
  * State it renders: per-sketch visibility (tree eye), the ONE sketch being edited
  * (hidden — the live SketchObject owns it), hover + selection tint. Picking
@@ -27,7 +27,8 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import type { SketchEntity, SketchPlane, SketchRegion } from "@/ipc/types";
-import { cssLineWidth, entityPolyline } from "./SketchObject";
+import { entityPolyline } from "./SketchObject";
+import { createScreenLineMaterial, LINE_WIDTHS_CSS } from "./screenLineStyle";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
@@ -36,7 +37,8 @@ import { buildFillGeometry } from "./sketchFillGeometry";
 const FILL_OPACITY = 0.18;
 const FILL_OPACITY_ACTIVE = 0.3;
 const DOT_SIZE = 5;
-const STATIC_CURVE_WIDTH = cssLineWidth(1);
+/** Spec §7.3 static sketch ink, in CSS px, fed to `linewidth` unscaled. */
+const STATIC_CURVE_WIDTH_CSS = LINE_WIDTHS_CSS.staticSketchInk;
 
 /**
  * Emphasis multiplier applied to every static curve/dot while a sketch session
@@ -217,17 +219,21 @@ export class SketchStaticLayer {
     lines.userData.sketchStaticKind = "sketch";
     group.add(lines);
 
-    // DRAW pass: fat LineSegments2, dpr-normalized CSS-px width (SketchObject
-    // precedent) — this is what actually paints on screen.
+    // DRAW pass: fat LineSegments2, CSS-px width — this is what actually paints
+    // on screen. `resolution` is left to the addon's own draw-time write; this
+    // layer hit-tests through the plain `LineSegments` proxy above, so it never
+    // needs a pre-frame resolution flush the way body edges do.
     const drawLineGeo = new LineSegmentsGeometry();
     drawLineGeo.setPositions(segPos);
-    const drawLineMat = new LineMaterial({
-      color: palette.sketchUnder().getHex(),
-      linewidth: STATIC_CURVE_WIDTH,
-      transparent: true,
-      depthWrite: false,
-      toneMapped: false,
-    });
+    const drawLineMat = createScreenLineMaterial(
+      { widthCss: STATIC_CURVE_WIDTH_CSS },
+      {
+        color: palette.sketchUnder().getHex(),
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
+      },
+    );
     const drawLines = new LineSegments2(drawLineGeo, drawLineMat);
     drawLines.renderOrder = RENDER_ORDER.STATIC_CURVES;
     group.add(drawLines);

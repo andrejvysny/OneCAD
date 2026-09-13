@@ -19,11 +19,15 @@
  * plane grid are deliberately NOT in that set — they are the surface the sketch
  * sits on, not the sketch, and an x-rayed tint would wash out every body.
  *
- * Line2 needs the material `resolution` in device pixels for correct width, so
- * the engine calls `update(...)` every frame with the viewport size (already
- * dpr-multiplied by the caller). `linewidth` is therefore also a device-px
- * value — see `cssLineWidth()` below, which the width constants are built
- * from so they read as their CSS-px name on any display.
+ * Line2 widths and the material `resolution` are BOTH in CSS (logical) pixels
+ * and are never multiplied by the device pixel ratio — the installed addon
+ * overwrites `resolution` from the renderer's LOGICAL viewport at draw time, so
+ * a device-px width draws `dpr` times too wide (VP03 / finding R01). The one
+ * unit contract, with its citations into `node_modules/three`, is
+ * `screenLineStyle.ts`; the engine calls `update(...)` with CSS sizes.
+ *
+ * THREE.Points markers are a SEPARATE adapter and keep their own contract —
+ * see the POINT_SIZE_CSS_NOTE comment below.
  *
  * Line2 import note: `three/addons/lines/Line2.js` is WebGLRenderer-only (the
  * WebGPU build lives under `lines/webgpu/`). We are WebGL-default (F-WP4), so the
@@ -42,7 +46,7 @@ import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 import { angleArcPoints } from "@/tools/sketch/angleArcPreview";
 import { buildRingTexture, buildDotTexture } from "./markerTextures";
-import { cssToDevice, currentDpr } from "./dpr";
+import { createScreenLineMaterial, LINE_WIDTHS_CSS, setLineResolutionCss } from "./screenLineStyle";
 import { needsRetessellation, segmentsForEntity } from "./curveTessellation";
 import { pointCoordOf } from "@/tools/sketch/sketchTopology";
 import type { FrontendPointRef } from "@/tools/sketch/snapTypes";
@@ -56,41 +60,37 @@ import { buildNestedFillGeometries } from "./sketchFillGeometry";
 const ARC_SEGMENTS = 64;
 
 /*
- * Fat-line `linewidth` (LineMaterial) is measured in DEVICE px — the same units
- * `update()` feeds `resolution`. The cap and the conversion both live in
- * `dpr.ts` now (SNAP P4): they used to be duplicated here and in the renderer
- * "kept in step by hand", and — worse — the widths below were computed ONCE at
- * module evaluation, so a window dragged to a different-DPR display kept the
- * old stroke width forever. Widths are now authored in CSS px and converted per
- * DPR change by `applyDpr()`.
+ * Stroke weights, in CSS px, from the spec §7.3 baseline hierarchy. They are
+ * module constants again — and correctly so this time: a CSS width is
+ * DPR-INDEPENDENT, so there is nothing to recompute when a window moves to
+ * another display. (The previous code baked a device-px width at module
+ * evaluation, which was wrong twice over: wrong unit, and frozen at load.)
  */
-export { MAX_DPR } from "./dpr";
+const LINE_WIDTH = LINE_WIDTHS_CSS.activeSketchInk;
+const PREVIEW_WIDTH = LINE_WIDTHS_CSS.draft;
+const TRIM_GHOST_WIDTH = LINE_WIDTHS_CSS.trimGhost;
+/** Selection HALO — drawn BEHIND the entity's own semantic-color line (P1 audit
+ *  fix), wide enough to read as an outline rather than a slightly-fatter
+ *  version of the same stroke. Hover has no halo. */
+const SELECTION_HALO_WIDTH = LINE_WIDTHS_CSS.selectionHalo;
+/** The angle-preview arc is a lightweight annotation glyph, not geometry —
+ *  thinner than every real entity line so it never competes with them. */
+const ANGLE_ARC_WIDTH = LINE_WIDTHS_CSS.angleArc;
+/** Dimension lines are annotation, at the §7.3 dimension/snap-guide weight. */
+const DIM_LINE_WIDTH = LINE_WIDTHS_CSS.dimensionOrSnapGuide;
 
-/** @deprecated Use `cssToDevice` from `./dpr`; kept for the non-sketch callers
- *  that build a one-off width and never re-read it. */
-export function cssLineWidth(cssPx: number): number {
-  return cssToDevice(cssPx);
-}
-
-/** Stroke widths in CSS px — the authored values, converted per DPR. */
-const CSS_WIDTHS = {
-  line: 1.25,
-  preview: 1,
-  trimGhost: 2,
-  /** Selection HALO — drawn BEHIND the entity's own semantic-color line (P1
-   *  audit fix), wide enough to read as an outline rather than a
-   *  slightly-fatter version of the same stroke. Hover has no halo. */
-  selectionHalo: 2.5,
-  /** The angle-preview arc is a lightweight annotation glyph, not geometry —
-   *  thinner than every real entity line so it never competes with them. */
-  angleArc: 0.75,
-} as const;
-
-const LINE_WIDTH = cssToDevice(CSS_WIDTHS.line);
-const PREVIEW_WIDTH = cssToDevice(CSS_WIDTHS.preview);
-const TRIM_GHOST_WIDTH = cssToDevice(CSS_WIDTHS.trimGhost);
-const SELECTION_HALO_WIDTH = cssToDevice(CSS_WIDTHS.selectionHalo);
-const ANGLE_ARC_WIDTH = cssToDevice(CSS_WIDTHS.angleArc);
+/*
+ * POINT_SIZE_CSS_NOTE — marker `THREE.Points` are NOT on the line contract.
+ *
+ * With `sizeAttenuation: false`, the installed three 0.185.1 path is:
+ *   `WebGLMaterials.js:303-308` — `uniforms.size.value = material.size * pixelRatio`
+ *   `ShaderLib/points.glsl.js:34` — `gl_PointSize = size;` (the attenuation
+ *   branch is behind `USE_SIZEATTENUATION` and is compiled out here)
+ * and `gl_PointSize` is DEVICE (framebuffer) pixels. The renderer therefore
+ * already applies the ratio, so `material.size` is authored in CSS pixels and a
+ * `size: 10` marker measures 10 CSS px at DPR 1 and at DPR 2 alike. The values
+ * below are correct as they stand and are deliberately left unchanged.
+ */
 /**
  * Endpoint/midpoint/centroid AFFORDANCE opacity while idle — not permanent
  * document content (Sketcher UX cleanup, Track B1b). The three tiers are NOT
@@ -330,9 +330,6 @@ export class SketchObject {
   /** The segment count the committed curves were last BUILT with, so a zoom
    *  only rebuilds when the count moved by a meaningful fraction. */
   private builtSegments = 0;
-  /** The capped DPR the fat-line widths were last converted for. */
-  private appliedDpr = currentDpr();
-
   private readonly _basis = new THREE.Matrix4();
   private readonly _target = new THREE.Vector3();
 
@@ -452,16 +449,21 @@ export class SketchObject {
     this.selectedPoints.renderOrder = RENDER_ORDER.SKETCH_POINTS + 1;
     this.entityGroup.add(this.selectedPoints);
 
+    // Every entity material is one CSS width plus per-family overrides. Dash
+    // sizes passed through `opts` are WORLD units (LineMaterial semantics), not
+    // CSS — see the caveat on `ScreenLineStyle.dashSizeCss`.
     const mk = (color: THREE.Color, opts: Partial<ConstructorParameters<typeof LineMaterial>[0]> = {}) =>
-      new LineMaterial({
-        color: color.getHex(),
-        linewidth: LINE_WIDTH,
-        transparent: true,
-        depthWrite: false,
-        depthTest: false,
-        toneMapped: false,
-        ...opts,
-      });
+      createScreenLineMaterial(
+        { widthCss: LINE_WIDTH },
+        {
+          color: color.getHex(),
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          ...opts,
+        },
+      );
     this.matUnder = mk(palette.sketchUnder());
     this.matFull = mk(palette.sketchFull());
     this.matConflict = mk(palette.sketchConflict());
@@ -493,7 +495,7 @@ export class SketchObject {
     });
     // Neutral overlay tone (reused, not a new token) — a dimension line is
     // annotation, not geometry, same rationale as `matAngleArc`'s violet.
-    this.matDimLine = mk(palette.referenceNeutral(), { linewidth: ANGLE_ARC_WIDTH, transparent: true, opacity: 0.85 });
+    this.matDimLine = mk(palette.referenceNeutral(), { linewidth: DIM_LINE_WIDTH, transparent: true, opacity: 0.85 });
     this.allMaterials = [
       this.matUnder,
       this.matFull,
@@ -1026,28 +1028,22 @@ export class SketchObject {
   }
 
   /**
-   * Per-frame: Line2 resolution, DPR-tracked stroke widths, adaptive curve
-   * tessellation, and the plane-local grid re-center.
+   * Per-frame: Line2 resolution, adaptive curve tessellation, and the
+   * plane-local grid re-center.
    *
-   * `width`/`height` are DEVICE pixels (the `resolution` uniform's units);
-   * `dpr` is the capped ratio they were multiplied by, and `pxPerUnit` is how
-   * many CSS pixels one plane unit currently projects to.
+   * `width`/`height` are CSS (logical) pixels — the units the addon's own
+   * draw-time `resolution` write uses (`screenLineStyle.ts`). Stroke widths are
+   * CSS constants set once at construction and need no per-DPR pass at all.
+   * `pxPerUnit` is how many CSS pixels one plane unit currently projects to.
    */
   update(
     width: number,
     height: number,
     cameraTarget: THREE.Vector3,
     cameraDistance: number,
-    dpr: number = currentDpr(),
     pxPerUnit = 0,
   ): void {
-    for (const m of this.allMaterials) m.resolution.set(width, height);
-    // A window dragged between displays changes the ratio with NO CSS resize,
-    // so this cannot ride on the resize path (SNAP §10.7).
-    if (dpr !== this.appliedDpr) {
-      this.appliedDpr = dpr;
-      this.applyDpr(dpr);
-    }
+    for (const m of this.allMaterials) setLineResolutionCss(m, width, height);
     if (pxPerUnit > 0 && pxPerUnit !== this.pxPerUnit) {
       this.pxPerUnit = pxPerUnit;
       const wanted = this.wantedSegments();
@@ -1077,18 +1073,6 @@ export class SketchObject {
     let max = 0;
     for (const e of this.entities) max = Math.max(max, segmentsForEntity(e, this.pxPerUnit));
     return max;
-  }
-
-  /** Re-convert every authored CSS width into the new device-pixel ratio. */
-  private applyDpr(dpr: number): void {
-    this.matUnder.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
-    this.matFull.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
-    this.matConflict.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
-    this.matConstruction.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
-    this.matHover.linewidth = cssToDevice(CSS_WIDTHS.line, dpr);
-    this.matSelected.linewidth = cssToDevice(CSS_WIDTHS.selectionHalo, dpr);
-    this.matPreview.linewidth = cssToDevice(CSS_WIDTHS.preview, dpr);
-    this.deps.invalidate();
   }
 
   dispose(): void {

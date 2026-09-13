@@ -16,17 +16,20 @@
 import * as THREE from "three";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { palette } from "./palette";
-import { cssLineWidth } from "./SketchObject";
+import { createScreenLineMaterial, LINE_WIDTHS_CSS } from "./screenLineStyle";
 import { MATERIAL_KIND_VERTEX_COLORS, type MaterialKind } from "./renderModes";
 
 /**
- * Body edge weight, in the DEVICE px a fat line's `linewidth` is measured in
- * (see SketchObject.cssLineWidth). Exported because the Picker's `Line2`
- * threshold is derived from it — the raycast's hit radius is
- * `(linewidth + threshold) / 2`, so a pick tolerance expressed in CSS px has to
- * subtract the drawn width. One constant, two consumers, no drift.
+ * Body edge weight in CSS pixels — spec §7.3 "body feature edge". Fed to
+ * `LineMaterial.linewidth` UNSCALED; see `screenLineStyle.ts` for why a device-
+ * pixel width would draw `dpr` times too wide.
+ *
+ * Exported because the Picker's `Line2` threshold is derived from it — the
+ * raycast's hit radius is `(linewidth + threshold) / 2` in the SAME CSS units,
+ * so a pick tolerance expressed in CSS px has to subtract the drawn width. One
+ * constant, two consumers, no drift.
  */
-export const BODY_EDGE_WIDTH = cssLineWidth(1.25);
+export const BODY_EDGE_WIDTH_CSS = LINE_WIDTHS_CSS.bodyFeatureEdge;
 
 export interface BodyMaterialSet {
   face: THREE.MeshStandardMaterial;
@@ -121,14 +124,13 @@ export class BodyMaterialLibrary {
     // reads as a wash of hairlines. NOT `transparent` — body edges belong in the
     // OPAQUE pass exactly as they always have; a transparent edge would be
     // painted after every opaque body and stop depth-sorting against them.
-    const edge = new LineMaterial({
+    const edgeStyle = { widthCss: BODY_EDGE_WIDTH_CSS } as const;
+    const edge = createScreenLineMaterial(edgeStyle, {
       color: palette.bodyEdge().getHex(),
-      linewidth: BODY_EDGE_WIDTH,
       toneMapped: false,
     });
-    const edgeWire = new LineMaterial({
+    const edgeWire = createScreenLineMaterial(edgeStyle, {
       color: palette.bodyEdgeWire().getHex(),
-      linewidth: BODY_EDGE_WIDTH,
       toneMapped: false,
     });
     return { face, edge, edgeWire };

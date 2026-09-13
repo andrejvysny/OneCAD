@@ -68,8 +68,8 @@ import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { datumGhostPlane } from "@/viewport/engine/DatumLayer";
 import { geometricLabel, type PickablePlane } from "@/viewport/engine/PlanePicker";
-import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
+import { validatePreviewMesh } from "@/viewport/mesh/previewMesh";
 import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { operationAttemptStore } from "@/stores/operationAttemptStore";
@@ -8672,8 +8672,12 @@ export class ModelToolController {
     this.syncPreviewReplacedBodies();
     for (let i = 0; i < bodies.length; i++) {
       const previewId = `${es.session.previewBodyId}:${i}`;
-      const view = parseMeshPayload(bodies[i].mesh);
-      const entry = buildBodyObjects(view, previewId, ++this.previewMeshRev);
+      // A preview mesh that fails semantic validation is SKIPPED, not thrown:
+      // this runs under a timer-driven preview listener, and one degenerate
+      // solid must not take the other candidate bodies down with it.
+      const validated = validatePreviewMesh(bodies[i].mesh, previewId);
+      if (!validated) continue;
+      const entry = buildBodyObjects(validated, previewId, ++this.previewMeshRev);
       swapMesh(previewId, entry);
       this.engine.setPreviewBody(entry);
       es.previewBodyIds.push(previewId);

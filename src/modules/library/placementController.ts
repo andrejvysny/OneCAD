@@ -47,8 +47,8 @@
  */
 import { getViewportEngine } from "@/viewport/engineBridge";
 import type { PickHit } from "@/viewport/engine/Picker";
-import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
+import { validatePreviewMesh } from "@/viewport/mesh/previewMesh";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
 import { classifyRegen, failureReason } from "@/ipc/regenOutcome";
@@ -516,10 +516,13 @@ function onPreviewResult(r: PreviewResult): void {
   clearGhostOnly();
   if (!engine || bodies.length === 0) return;
   let rev = 0;
-  for (const b of bodies) {
-    const ghostId = `${previewSession.previewBodyId}:${rev}`;
-    const view = parseMeshPayload(b.mesh);
-    const entry = buildBodyObjects(view, ghostId, ++rev);
+  for (const [index, b] of bodies.entries()) {
+    const ghostId = `${previewSession.previewBodyId}:${index}`;
+    // Skip a ghost whose mesh fails validation rather than throwing out of the
+    // timer-driven preview listener; the remaining ghosts still place.
+    const validated = validatePreviewMesh(b.mesh, ghostId);
+    if (!validated) continue;
+    const entry = buildBodyObjects(validated, ghostId, ++rev);
     swapMesh(ghostId, entry);
     engine.setPreviewBody(entry);
     previewBodyIds.push(ghostId);

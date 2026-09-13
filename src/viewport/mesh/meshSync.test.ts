@@ -7,6 +7,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as THREE from "three";
 import { MeshIngest, meshGeneration } from "./meshSync";
 import * as reg from "./meshRegistry";
+import { parseMeshPayload } from "./parseMeshPayload";
+import { preparedCpuBytesOf } from "./meshAdmission";
+import { validateMeshView } from "./validateMesh";
 import { makeBoxMesh, makeCylinderMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
@@ -17,6 +20,7 @@ import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
 import type { ViewportEngine } from "../engine/ViewportEngine";
+import { HighlightLayer } from "../engine/HighlightLayer";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -1050,5 +1054,536 @@ describe("MeshIngest selection reconcile", () => {
       bodyId: "body1",
     });
     expect(reg.getEntry("body1")).toBe(installed);
+  });
+});
+
+// ── validated installation, stale display, and publication freshness (WP04) ──
+
+/** A structurally perfect box whose vertex 3 carries a NaN component. */
+function semanticallyBrokenBox(): ArrayBuffer {
+  const blob = makeBoxMesh();
+  parseMeshPayload(blob).positions[9] = Number.NaN;
+  return blob;
+}
+
+describe("MeshIngest validated installation and display state", () => {
+  afterEach(() => {
+    viewportStore.getState().setStatusHint(null);
+    __resetLogForTests({ enabled: false });
+  });
+
+  it("TEST-MESH-05 keeps the last valid body installed as stale-inspection-only when a replacement fails validation", async () => {
+    setBodies({ body1: true });
+    const getMesh = vi
+      .fn<() => Promise<ArrayBuffer>>()
+      .mockResolvedValueOnce(makeBoxMesh())
+      .mockResolvedValueOnce(semanticallyBrokenBox())
+      .mockResolvedValueOnce(makeCylinderMesh());
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient(getMesh);
+    __resetLogForTests();
+    ingest = new MeshIngest();
+    const seen: string[] = [];
+    ingest.onDisplayStateChanged((id) => seen.push(id));
+    ingest.attach(engine, client);
+    await tick();
+
+    const lastValid = reg.getEntry("body1");
+    expect(lastValid).toBeDefined();
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(reg.isEntryPromotable(lastValid)).toBe(true);
+    const heldAfterFirst = ingest.admission.snapshot();
+    expect(heldAfterFirst.holdings).toBe(1);
+
+    // A structurally valid but SEMANTICALLY invalid replacement arrives.
+    emit(changed("body1"));
+    await tick();
+
+    expect(reg.getEntry("body1")).toBe(lastValid); // still installed, still drawn
+    expect(engine.bodiesRoot.children).toHaveLength(1);
+    expect(ingest.getDisplayState("body1")).toBe("stale-inspection-only");
+    expect(ingest.getDisplayDiagnostic("body1")?.code).toBe("nonfinite-position");
+    expect(reg.isEntryPromotable(reg.getEntry("body1"))).toBe(false);
+    expect(lastValid!.displayState).toBe("stale-inspection-only");
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.severity).toBe("warn");
+    expect(hint?.message).toContain("body1");
+    expect(hint?.message).toContain("nonfinite-position");
+    const logged = logSnapshot().filter((e) => e.level === "error" && e.tag === "mesh");
+    expect(logged).toHaveLength(1);
+    // The refused payload gave its reservation back; only the installed body pays.
+    expect(ingest.admission.snapshot()).toEqual(heldAfterFirst);
+    expect(seen).toContain("body1");
+
+    // A valid publication restores currency.
+    emit({ revision: 3, changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:3" }], removedBodies: [] });
+    await tick();
+
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(ingest.getDisplayDiagnostic("body1")).toBeUndefined();
+    expect(reg.isEntryPromotable(reg.getEntry("body1"))).toBe(true);
+    expect(reg.getEntry("body1")!.view.faceCount).toBe(3); // the cylinder replaced the box
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+  });
+
+  it("TEST-MESH-05 records failed-initial with no scene object when the FIRST payload is invalid", async () => {
+    setBodies({ body1: true });
+    const { client } = fakeClient(vi.fn(async () => semanticallyBrokenBox()));
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    expect(reg.getEntry("body1")).toBeUndefined();
+    expect(engine.bodiesRoot.children).toHaveLength(0);
+    expect(ingest.getDisplayState("body1")).toBe("failed-initial");
+    expect(ingest.getDisplayDiagnostic("body1")?.code).toBe("nonfinite-position");
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+    expect(ingest.admission.snapshot().holdings).toBe(0);
+  });
+
+  it("TEST-MESH-05 a structurally malformed payload is rejected with its parser kind, not a throw", async () => {
+    setBodies({ body1: true });
+    const torn = makeBoxMesh();
+    new DataView(torn).setUint32(0x00, 0x4d455349, true); // bad magic
+    const { client } = fakeClient(vi.fn(async () => torn));
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), client);
+    await tick();
+
+    expect(ingest.getDisplayState("body1")).toBe("failed-initial");
+    expect(ingest.getDisplayDiagnostic("body1")?.code).toBe("bad-magic");
+  });
+
+  it("TEST-MESH-05 dropping a body clears its display state and gives back its budget", async () => {
+    setBodies({ body1: true });
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(fakeEngine(), client);
+    await tick();
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+
+    emit({ revision: 2, changedBodies: [], removedBodies: ["body1"] });
+    await tick();
+
+    expect(ingest.getDisplayState("body1")).toBeUndefined();
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: 0,
+      estimatedGpuBytes: 0,
+      holdings: 0,
+    });
+  });
+});
+
+
+describe("MeshIngest publication freshness", () => {
+  afterEach(() => {
+    selectionStore.getState().set([]);
+    viewportStore.getState().setStatusHint(null);
+  });
+
+  it("TEST-PUB-01 an older generation completing after a newer one installs nothing and releases its reservation", async () => {
+    // The authored-colour resolve is the long await inside a load, so it is
+    // where a reordered completion lands AFTER a newer publication was accepted.
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      geometrySource: "live",
+      bodies: {
+        body1: { id: "body1", name: "body1", visible: true, faceColors: { el_a: [9, 9, 9, 255] } },
+      },
+    });
+    const meshes = [makeBoxMesh(), makeCylinderMesh()];
+    let nth = 0;
+    const getMesh = vi.fn(async () => meshes[Math.min(nth++, 1)]);
+    const gates: Array<(v: null) => void> = [];
+    const { client, emit } = fakeClient(getMesh);
+    (client as unknown as { elementInfo: () => Promise<null> }).elementInfo = () =>
+      new Promise<null>((r) => gates.push(r));
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    const face = { kind: "face" as const, id: "body1#f:4", bodyId: "body1", topoKey: "f:4" };
+    selectionStore.getState().set([face]);
+
+    // Generation 1's job is parked on its colour resolve holding a BOX-sized
+    // reservation; generation 2 publishes and coalesces behind it.
+    expect(gates).toHaveLength(1);
+    const boxValidation = validateMeshView(parseMeshPayload(makeBoxMesh()), "probe");
+    if (!boxValidation.ok) throw new Error("the mock box must validate");
+    const boxCost = preparedCpuBytesOf(boxValidation.mesh.accounting);
+    expect(ingest.admission.snapshot().preparedCpuBytes).toBe(boxCost);
+    emit({
+      ...changed("body1"),
+      revision: 2,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:2" }],
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 2,
+    });
+    await tick();
+    expect(gates).toHaveLength(1); // latest-wins: one active request per body
+
+    gates[0](null); // the OLDER generation finishes last
+    await tick();
+
+    expect(reg.getEntry("body1")).toBeUndefined(); // nothing installed by the stale job
+    expect(engine.bodiesRoot.children).toHaveLength(0);
+    // The box-sized hold is gone: the only reservation outstanding belongs to
+    // the newer job, which is parked on its own colour resolve.
+    expect(gates).toHaveLength(2);
+    const held = ingest.admission.snapshot();
+    expect(held.holdings).toBe(1);
+    expect(held.preparedCpuBytes).not.toBe(boxCost);
+    expect(selectionStore.getState().selected).toEqual([face]); // a discarded result touches nothing
+
+    gates[1](null);
+    await tick();
+    const installed = reg.getEntry("body1")!;
+    expect(installed.view.faceCount).toBe(3); // the newer mesh, installed exactly once
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: preparedCpuBytesOf(installed.accounting),
+      estimatedGpuBytes: installed.accounting.estimatedGpuBytes,
+      holdings: 1,
+    });
+  });
+
+  it("TEST-PUB-02 a late buffer from closed document A is rejected after B reuses the body id", async () => {
+    documentStore.setState({
+      documentId: "doc-a",
+      runtimeSession: "runtime-a",
+      geometrySource: "live",
+      bodies: { body1: { id: "body1", name: "body1", visible: true } },
+    });
+    const gates: Array<(mesh: ArrayBuffer) => void> = [];
+    const getMesh = vi.fn(() => new Promise<ArrayBuffer>((resolve) => gates.push(resolve)));
+    const retained = {
+      ...changed("body1"),
+      documentId: "doc-a",
+      runtimeSession: "runtime-a",
+      snapshotId: 5,
+    };
+    const { client, emit } = fakeClient(getMesh, retained);
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    expect(gates).toHaveLength(1); // document A's fetch is in flight
+
+    // Document A closes and B opens, reusing the SAME body-local id.
+    documentStore.setState({ documentId: "doc-b", runtimeSession: "runtime-b", bodies: {} });
+    documentStore.setState({
+      bodies: { body1: { id: "body1", name: "body1", visible: true } },
+    });
+    emit({
+      revision: 1,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:1" }],
+      removedBodies: [],
+      documentId: "doc-b",
+      runtimeSession: "runtime-b",
+      snapshotId: 1,
+    });
+    await tick();
+
+    gates[0](makeBoxMesh()); // document A's buffer finally arrives
+    await tick();
+    expect(reg.getEntry("body1")).toBeUndefined(); // A's result never installs
+    expect(ingest.admission.snapshot().holdings).toBe(0);
+
+    expect(gates).toHaveLength(2); // B's own fetch, released behind A's
+    gates[1](makeCylinderMesh());
+    await tick();
+
+    const fromB = reg.getEntry("body1")!;
+    expect(fromB.view.faceCount).toBe(3);
+    expect(fromB.provenance?.documentId).toBe("doc-b");
+    expect(reg.registrySize()).toBe(1); // no shared-cache identity collision
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: preparedCpuBytesOf(fromB.accounting),
+      estimatedGpuBytes: fromB.accounting.estimatedGpuBytes,
+      holdings: 1,
+    });
+    expect(ingest.getDisplayState("body1")).toBe("current");
+  });
+
+  it("TEST-PUB-02 the document fence alone rejects a validated mesh whose document has been replaced", async () => {
+    // No newer request for this body, so the per-body token is unchanged: the
+    // ONLY thing that can reject this payload is the publication fence — and it
+    // must give the admission reservation back when it does.
+    documentStore.setState({
+      documentId: "doc-a",
+      runtimeSession: "runtime-a",
+      geometrySource: "live",
+      bodies: { body1: { id: "body1", name: "body1", visible: true } },
+    });
+    const gates: Array<(mesh: ArrayBuffer) => void> = [];
+    const getMesh = vi.fn(() => new Promise<ArrayBuffer>((resolve) => gates.push(resolve)));
+    const retained = {
+      ...changed("body1"),
+      documentId: "doc-a",
+      runtimeSession: "runtime-a",
+      snapshotId: 5,
+    };
+    const { client } = fakeClient(getMesh, retained);
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    expect(gates).toHaveLength(1);
+
+    documentStore.setState({ documentId: "doc-b" });
+    gates[0](makeBoxMesh());
+    await tick();
+
+    expect(reg.getEntry("body1")).toBeUndefined();
+    expect(engine.bodiesRoot.children).toHaveLength(0);
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: 0,
+      estimatedGpuBytes: 0,
+      holdings: 0,
+    });
+    // A fence rejection is not a payload defect: no stale/failed state is stamped.
+    expect(ingest.getDisplayState("body1")).toBeUndefined();
+  });
+});
+
+describe("MeshIngest pending replacement", () => {
+  afterEach(() => {
+    viewportStore.getState().setStatusHint(null);
+  });
+
+  it("TEST-MESH-05 announces pending-replacement and returns to current when the replacement is fenced out", async () => {
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      geometrySource: "live",
+      bodies: {
+        body1: { id: "body1", name: "body1", visible: true, faceColors: { el_a: [9, 9, 9, 255] } },
+      },
+    });
+    const meshes = [makeBoxMesh(), makeCylinderMesh()];
+    let nth = 0;
+    const getMesh = vi.fn(async () => meshes[Math.min(nth++, 1)]);
+    const gates: Array<(v: null) => void> = [];
+    const retained = {
+      ...changed("body1"),
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 1,
+    };
+    const { client, emit } = fakeClient(getMesh, retained);
+    (client as unknown as { elementInfo: () => Promise<null> }).elementInfo = () =>
+      new Promise<null>((r) => gates.push(r));
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    gates[0](null);
+    await tick();
+
+    const installed = reg.getEntry("body1")!;
+    expect(installed.view.faceCount).toBe(6); // the box is on screen
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    const heldForBox = ingest.admission.snapshot();
+
+    // A replacement is being prepared: the body still shows the box.
+    emit({
+      ...changed("body1"),
+      revision: 2,
+      changedBodies: [{ bodyId: "body1", meshKey: "body1:fine:2" }],
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      snapshotId: 2,
+    });
+    await tick();
+    expect(gates).toHaveLength(2);
+    expect(ingest.getDisplayState("body1")).toBe("pending-replacement");
+    expect(reg.getEntry("body1")).toBe(installed);
+    expect(ingest.admission.snapshot().holdings).toBe(2); // peak: old + prepared
+
+    // The runtime is replaced mid-preparation, so the fence rejects the result.
+    documentStore.setState({ runtimeSession: "runtime-new" });
+    gates[1](null);
+    await tick();
+
+    expect(reg.getEntry("body1")).toBe(installed); // untouched
+    expect(installed.displayState).toBe("current"); // not demoted: nothing was wrong with it
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(reg.isEntryPromotable(installed)).toBe(true);
+    expect(ingest.admission.snapshot()).toEqual(heldForBox);
+  });
+});
+
+describe("MeshIngest post-install failure isolation", () => {
+  afterEach(() => {
+    viewportStore.getState().setStatusHint(null);
+    __resetLogForTests({ enabled: false });
+  });
+
+  it("TEST-MESH-05 a throwing bodyLoaded subscriber does not demote the freshly installed mesh", async () => {
+    // Everything after the atomic publish is best-effort: a selection reconcile,
+    // a highlight rebuild, or — here — a `bodyLoaded` subscriber. The geometry on
+    // screen IS the new validated mesh; calling it stale would both lie and block
+    // every operation authored from it.
+    setBodies({ body1: true });
+    const { client } = fakeClient();
+    const engine = fakeEngine();
+    __resetLogForTests();
+    ingest = new MeshIngest();
+    ingest.onBodyLoaded(() => {
+      throw new Error("subscriber exploded");
+    });
+    ingest.attach(engine, client);
+    await tick();
+
+    const installed = reg.getEntry("body1");
+    expect(installed).toBeDefined();
+    expect(installed!.displayState).toBe("current");
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(reg.isEntryPromotable(installed)).toBe(true);
+    expect(bodyGroup(engine, "body1")).toBeDefined(); // the scene object is published
+
+    // The failure is reported once, and the hint tells the user something broke.
+    const logged = logSnapshot().filter((e) => e.level === "error" && e.tag === "mesh");
+    expect(logged).toHaveLength(1);
+    expect(logged[0].msg).toContain("post-install");
+    expect(viewportStore.getState().statusHint?.message).toContain("subscriber exploded");
+
+    // Exactly one reservation — the installed body's — and no leak.
+    expect(ingest.admission.snapshot()).toEqual({
+      preparedCpuBytes: preparedCpuBytesOf(installed!.accounting),
+      estimatedGpuBytes: installed!.accounting.estimatedGpuBytes,
+      holdings: 1,
+    });
+  });
+
+  it("TEST-MESH-05 a later valid publication still installs after a post-install failure", async () => {
+    setBodies({ body1: true });
+    const getMesh = vi
+      .fn<() => Promise<ArrayBuffer>>()
+      .mockResolvedValueOnce(makeBoxMesh())
+      .mockResolvedValueOnce(makeCylinderMesh());
+    const { client, emit } = fakeClient(getMesh);
+    const engine = fakeEngine();
+    ingest = new MeshIngest();
+    let explode = true;
+    ingest.onBodyLoaded(() => {
+      if (explode) throw new Error("subscriber exploded");
+    });
+    ingest.attach(engine, client);
+    await tick();
+    explode = false;
+
+    emit(changed("body1"));
+    await tick();
+
+    expect(reg.getEntry("body1")!.view.faceCount).toBe(3);
+    expect(ingest.getDisplayState("body1")).toBe("current");
+    expect(ingest.admission.snapshot().holdings).toBe(1);
+  });
+});
+
+/*
+ * WP03 ownership across the document lifecycle (spec §8.2, TEST-RES-05).
+ *
+ * A real HighlightLayer is wired to the fake engine here rather than a spy:
+ * the thing under test is that leases and owned overlays return to the baseline
+ * when a document closes, and a `vi.fn()` for `setHighlightState` would prove
+ * nothing about either.
+ */
+describe("TEST-RES-05 — resource baseline across document cycles", () => {
+  /** Point the fake engine's highlight hooks at a real layer. */
+  function withHighlights(engine: ReturnType<typeof fakeEngine>) {
+    const layer = new HighlightLayer({ root: new THREE.Group(), invalidate: () => {} });
+    const spied = engine as unknown as {
+      refreshHighlights: ReturnType<typeof vi.fn>;
+      setHighlightState: ReturnType<typeof vi.fn>;
+    };
+    spied.refreshHighlights.mockImplementation(() => layer.refresh());
+    spied.setHighlightState.mockImplementation((hover, selected) => layer.setState(hover, selected));
+    return layer;
+  }
+
+  const faceRef = {
+    kind: "face" as const,
+    id: "body1#f:0",
+    bodyId: "body1",
+    topoKey: "f:0",
+  };
+
+  it("fifty open/close cycles end at zero entries, zero leases and zero owned bytes", async () => {
+    for (let cycle = 0; cycle < 50; cycle++) {
+      setBodies({ body1: true, body2: true });
+      const engine = fakeEngine();
+      const layer = withHighlights(engine);
+      const { client } = fakeClient();
+      ingest = new MeshIngest();
+      ingest.attach(engine, client);
+      await tick();
+
+      // A document nobody interacted with would not exercise the borrowers.
+      layer.setState(faceRef, [{ kind: "body", id: "body2" }]);
+      expect(reg.registrySize()).toBe(2);
+      expect(reg.registryDebugSnapshot().openLeases).toBeGreaterThan(0);
+      expect(layer.resourceStats().bytes).toBeGreaterThan(0);
+
+      ingest.detach();
+      ingest = null;
+      layer.dispose();
+
+      expect(reg.registrySize()).toBe(0);
+      expect(reg.registryDebugSnapshot().openLeases).toBe(0);
+      expect(layer.resourceStats()).toEqual({ entries: 0, bytes: 0, displayed: 0 });
+    }
+    expect(reg.leakTripwireCount).toBe(0);
+  });
+
+  it("a replacement releases the outgoing body lease and frees it one flush later", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    const first = reg.getEntry("body1")!;
+    expect(reg.openLeases(first)).toEqual(["body"]);
+
+    emit(changed("body1"));
+    await tick();
+
+    const second = reg.getEntry("body1")!;
+    expect(second).not.toBe(first);
+    // The new lease was taken in PREPARE and the old one released only after
+    // the scene moved (numerics §11.2) — so the outgoing resource is retired,
+    // lease-free, and still intact.
+    expect(reg.openLeases(second)).toEqual(["body"]);
+    expect(reg.openLeases(first)).toEqual([]);
+    expect(first.resourceState).toBe("retired");
+    expect(first.geometry.getAttribute("position").array).toBe(first.view.positions);
+
+    reg.flushDisposals();
+    expect(first.resourceState).toBe("disposed");
+    expect(second.resourceState).toBe("installed");
+    expect(reg.leakTripwireCount).toBe(0);
+  });
+
+  it("dropping a body releases its lease before the resource retires", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    const entry = reg.getEntry("body1")!;
+
+    emit({ revision: 2, changedBodies: [], removedBodies: ["body1"] });
+    await tick();
+
+    expect(reg.openLeases(entry)).toEqual([]);
+    expect(entry.resourceState).toBe("retired");
+    reg.flushDisposals();
+    expect(entry.resourceState).toBe("disposed");
+    expect(reg.leakTripwireCount).toBe(0);
   });
 });

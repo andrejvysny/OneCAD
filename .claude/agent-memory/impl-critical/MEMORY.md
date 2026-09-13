@@ -13,3 +13,6 @@
 - [MESH1 id namespace](repo_mesh_id_namespace.md) — mesh tables mix TopoKeys with minted ElementIds; only TopoKeys promote, and which lanes still trip on it
 - [Viewport selection policy](repo_viewport_selection_policy.md) — D-5 + Astra break: persistent id first, an ordinal is not evidence across a regen, regen-only reconcile
 - [Regen isolation + closure](repo_regen_isolation.md) — why graph.downstream() is not proof of independence, what timeline_of(n) really builds, checkpoint-mint seams
+- [Curve sampling + MESH1 edges](repo_curve_sampler.md) — EDGE_RANGES is 7 not 8, gp_XYZ::IsEqual is strict, OCCT conversion behaviour, worker/build is Makefiles
+- [Mesh validation + admission](repo_mesh_validation.md) — buildBodyObjects' 15-file caller fan-out, what worker MESH1 bytes really guarantee, parser-vs-validator boundary
+- [Surface normals + tessellation](repo_surface_normals.md) — BRepAdaptor world frame, IsNegative is not det, IsClosed(solid) lies, what tessellate_body mutates and drops

@@ -1,10 +1,18 @@
 /*
  * Renderer construction — the SOLE place a WebGL/WebGPU renderer is created.
  *
- * WebGL is the default and the only tested path. A WebGPU path exists behind the
- * `experimentalWebGpu` preference (capability-detected via navigator.gpu), using
- * a dynamic `import("three/webgpu")` so the WebGPU build is code-split out of the
- * default bundle. Any WebGPU failure falls back to WebGL.
+ * WebGL2 is the SUPPORTED PRODUCTION BACKEND and the only one the app selects
+ * (VP-HARDENING VP01, spec §5). The WebGPU path still exists, but it is reachable
+ * only behind an explicit `allowUnsupportedBackends` — tests and diagnostics —
+ * never from a user preference: a half-working editing viewport (no fat lines,
+ * no clipping, no PMREM) is worse than the tested one. A saved
+ * `experimentalWebGpu` preference therefore falls back to WebGL with a
+ * once-per-session diagnostic and a `backendNote`, not an empty viewport.
+ *
+ * Actual context capabilities are recorded ONCE at construction (spec §5:
+ * "Querying these once is acceptable; querying them in every frame is not") and
+ * exposed on the handle. Requested attributes and actual attributes are kept as
+ * two separate facts, because they routinely differ.
  */
 import * as THREE from "three";
 import { logWarn } from "@/debug/log";
@@ -21,8 +29,22 @@ export interface CadRenderer {
 }
 
 export interface RendererPrefs {
-  /** Flag-gated: attempt WebGPU when available. Default false → WebGL. */
+  /**
+   * The user's saved experimental preference. It NO LONGER selects a backend —
+   * it only produces the once-per-session fallback diagnostic. See
+   * {@link RendererPrefs.allowUnsupportedBackends}.
+   */
   experimentalWebGpu?: boolean;
+  /**
+   * @internal Diagnostics and the future WebGPU capability lane (WP15/WP16).
+   *
+   * Permits a backend the capability suite has not passed. NOTHING in the
+   * application sets it — no user preference, no setting, no URL flag — so it
+   * cannot be the route by which a half-working backend reaches a real
+   * document. It exists so the lane that will eventually qualify WebGPU has a
+   * supported way in, instead of re-adding the preference gate that VP01 removed.
+   */
+  allowUnsupportedBackends?: boolean;
 }
 
 /** A prefiltered environment map plus the disposer for the render target behind it. */
@@ -31,9 +53,43 @@ export interface EnvironmentHandle {
   dispose(): void;
 }
 
+/**
+ * What the context actually gave us, read ONCE at construction (spec §5).
+ *
+ * `attributesRequested` vs `attributesActual` is the load-bearing distinction:
+ * asking for `antialias: true` and `stencil: true` does not mean the driver
+ * granted either, and the capped-section algorithm silently degrades without a
+ * stencil buffer. Recording both is what lets a failure be diagnosed instead of
+ * guessed at.
+ */
+export interface RendererCapabilities {
+  readonly backend: "webgl2" | "webgpu";
+  readonly attributesRequested: typeof WEBGL_CONTEXT_ATTRS;
+  /** `null` when the context refused to report (or there is no GL context at all). */
+  readonly attributesActual: WebGLContextAttributes | null;
+  readonly depthBits: number;
+  readonly stencilBits: number;
+  /** MSAA sample count of the default framebuffer (0 when not multisampled). */
+  readonly samples: number;
+  readonly antialias: boolean;
+  readonly maxTextureSize: number;
+  readonly maxRenderbufferSize: number;
+  /**
+   * `EXT_clip_control` is available, so three's `reversedDepthBuffer` COULD be
+   * used. Recorded only — reversed depth is NOT enabled: the spec requires its
+   * test lane to pass first (§5), and that lane does not exist yet.
+   */
+  readonly reversedDepthSupported: boolean;
+  readonly depthConvention: "conventional";
+  /** Set when a requested backend was refused (`"webgpu-preference-ignored"`). */
+  readonly backendNote?: string;
+}
+
 export interface RendererHandle {
   renderer: CadRenderer;
   isWebGPU: boolean;
+  /** The one capability record for this context. Absent on mocked handles. */
+  capabilities?: RendererCapabilities;
   dispose(): void;
   /**
    * Prefilter `source` into an environment map (PMREM).
@@ -82,7 +138,74 @@ export const WEBGL_CONTEXT_ATTRS = {
   stencil: true,
 } as const;
 
-function createWebGl(canvas: HTMLCanvasElement): RendererHandle {
+/** A `getParameter` that never throws and never returns a non-number. */
+function glNumber(gl: WebGL2RenderingContext, pname: number): number {
+  try {
+    const value = gl.getParameter(pname) as unknown;
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Read the capability record. Called EXACTLY ONCE per renderer, at construction
+ * — every value here is fixed for the life of the context, and `getParameter`
+ * is a pipeline stall.
+ *
+ * Defensive throughout because it also runs against the stubbed renderer in the
+ * unit lane, where there is no GL context at all: a missing context yields a
+ * record of zeros rather than a thrown init.
+ */
+function readWebGlCapabilities(
+  renderer: THREE.WebGLRenderer,
+  backendNote?: string,
+): RendererCapabilities {
+  let gl: WebGL2RenderingContext | null = null;
+  try {
+    gl = renderer.getContext() as WebGL2RenderingContext;
+  } catch {
+    gl = null;
+  }
+  const attributesActual = (() => {
+    try {
+      return gl?.getContextAttributes() ?? null;
+    } catch {
+      return null;
+    }
+  })();
+  const extensions = (() => {
+    try {
+      return gl?.getSupportedExtensions() ?? [];
+    } catch {
+      return [];
+    }
+  })();
+  // `renderer.capabilities.reversedDepthBuffer` is three's own answer (0.185.1,
+  // WebGLRenderer.js:3635-3658); the extension list is the fallback when the
+  // renderer is stubbed. Either way this is RECORDED, never acted on.
+  const rendererSaysReversed =
+    (renderer.capabilities as unknown as { reversedDepthBuffer?: boolean } | undefined)
+      ?.reversedDepthBuffer === true;
+
+  return {
+    backend: "webgl2",
+    attributesRequested: WEBGL_CONTEXT_ATTRS,
+    attributesActual,
+    depthBits: gl ? glNumber(gl, gl.DEPTH_BITS) : 0,
+    stencilBits: gl ? glNumber(gl, gl.STENCIL_BITS) : 0,
+    samples: gl ? glNumber(gl, gl.SAMPLES) : 0,
+    antialias: attributesActual?.antialias ?? false,
+    maxTextureSize: gl ? glNumber(gl, gl.MAX_TEXTURE_SIZE) : 0,
+    maxRenderbufferSize: gl ? glNumber(gl, gl.MAX_RENDERBUFFER_SIZE) : 0,
+    reversedDepthSupported: rendererSaysReversed || extensions.includes("EXT_clip_control"),
+    // Reversed depth stays OFF until its acceptance lane exists (spec §5).
+    depthConvention: "conventional",
+    ...(backendNote ? { backendNote } : {}),
+  };
+}
+
+function createWebGl(canvas: HTMLCanvasElement, backendNote?: string): RendererHandle {
   const renderer = new THREE.WebGLRenderer({ canvas, ...WEBGL_CONTEXT_ATTRS });
   // Material-local clipping planes (`material.clippingPlanes`, which is how
   // section view clips ONLY the committed bodies) are skipped ENTIRELY when this
@@ -94,9 +217,17 @@ function createWebGl(canvas: HTMLCanvasElement): RendererHandle {
   // itself. Exposure 1.0 — the light rig, not the exposure, sets the level.
   renderer.toneMapping = THREE.NeutralToneMapping;
   renderer.toneMappingExposure = 1.0;
+  // Stated EXPLICITLY (spec §5) even though 0.185.1 already defaults to it
+  // (WebGLRenderer.js:304): the whole color pipeline — token colors authored in
+  // sRGB, `MeshStandardMaterial` working in linear — is wrong end-to-end if a
+  // future default flips, and a silently linear output looks merely "washed out"
+  // rather than broken.
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  const capabilities = readWebGlCapabilities(renderer, backendNote);
   return {
     renderer,
     isWebGPU: false,
+    capabilities,
     dispose() {
       // forceContextLoss frees the GL context promptly (StrictMode re-inits).
       renderer.forceContextLoss();
@@ -127,21 +258,50 @@ async function createWebGpu(canvas: HTMLCanvasElement): Promise<RendererHandle> 
 }
 
 /**
+ * Once-per-session latch for the ignored-preference diagnostic. Module level on
+ * purpose: a StrictMode remount constructs a second renderer, and the user does
+ * not need to be told twice.
+ */
+let webGpuPreferenceWarned = false;
+
+/**
  * Construct a renderer for `canvas`. Returns a handle whose `dispose()` fully
- * releases GPU resources. WebGPU is attempted only when the flag is set AND the
- * capability check passes; otherwise (or on any error) WebGL is used.
+ * releases GPU resources.
+ *
+ * WebGL2 is ALWAYS the production selection (spec §5). `experimentalWebGpu`
+ * alone can no longer choose WebGPU — it only produces the once-per-session
+ * fallback diagnostic and the `webgpu-preference-ignored` note. WebGPU requires
+ * `allowUnsupportedBackends`, which nothing in the app sets.
  */
 export async function createRenderer(
   canvas: HTMLCanvasElement,
   prefs: RendererPrefs = {},
 ): Promise<RendererHandle> {
-  if (prefs.experimentalWebGpu && (await webGpuAvailable())) {
-    try {
-      return await createWebGpu(canvas);
-    } catch (err) {
-      // Fall through to WebGL — WebGL is the tested path.
-      logWarn("vp", "WebGPU init failed, falling back to WebGL", { error: err });
+  if (prefs.allowUnsupportedBackends === true && prefs.experimentalWebGpu) {
+    if (await webGpuAvailable()) {
+      try {
+        return await createWebGpu(canvas);
+      } catch (err) {
+        // Fall through to WebGL — WebGL is the tested path.
+        logWarn("vp", "WebGPU init failed, falling back to WebGL", { error: err });
+      }
+    }
+    return createWebGl(canvas);
+  }
+
+  let backendNote: string | undefined;
+  if (prefs.experimentalWebGpu) {
+    backendNote = "webgpu-preference-ignored";
+    if (!webGpuPreferenceWarned) {
+      webGpuPreferenceWarned = true;
+      logWarn(
+        "vp",
+        "experimental WebGPU preference ignored: capability suite not passed",
+        { backend: "webgl2" },
+      );
     }
   }
-  return createWebGl(canvas);
+  // The capability record is logged ONCE by the engine, in its `engine init`
+  // line — one place, with the backend identity beside it.
+  return createWebGl(canvas, backendNote);
 }

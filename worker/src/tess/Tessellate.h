@@ -20,14 +20,38 @@
 #include <TopoDS_Shape.hxx>
 
 #include "elementmap/ElementMapPartition.h"
+#include "tess/EdgeClassification.h"
 
 namespace onecad::tess {
+
+// Producer-side completeness evidence for one body (VP-HARDENING WP09, spec §14,
+// NUM §9.2). NOT on the wire yet: WP10 publishes it as MESH1 v2 QUALITY_INFO
+// bit 0 (complete nondegenerate face coverage) and bit 3 (some normal fallback).
+//
+// `ok` on BodyMesh stays true when a face is missing — the body still publishes,
+// because refusing to draw the rest of a solid helps nobody. What must never
+// happen is calling that output COMPLETE, so the flag is explicit and the warning
+// names the face.
+struct TessellationCompleteness {
+    bool allNondegenerateFacesCovered = true;
+    std::vector<std::string> missingFaces;     // TopoKeys ("f:7") with no triangles
+    std::vector<std::string> degenerateFaces;  // TopoKeys legitimately holding a zero range
+    std::uint32_t normalFallbackNodes = 0;     // NUM §7.3 triangulation fallback
+    std::uint32_t singularSplitNodes = 0;      // NUM §7.3 singular split
+    std::uint32_t normalMissingNodes = 0;      // no surface AND no usable incident triangle
+};
 
 struct BodyMesh {
     std::string body_id;
     std::vector<std::uint8_t> blob;       // MESH1 bytes
     std::uint32_t triangle_count = 0;
     bool ok = false;                      // false if the body produced no triangulation
+    TessellationCompleteness completeness;
+    // Per-edge display semantics in `TopExp::MapShapes(shape, TopAbs_EDGE)` order,
+    // empty when `include_edges` is false. WP10 publishes it (MESH1 v2 §16/§20/§21).
+    std::vector<EdgeClass> edge_classes;
+    // Per-face local solid-partition ordinal in face-map order (WP10 §19, WP13 caps).
+    std::vector<std::uint32_t> face_solid_ordinals;
 };
 
 // Raw triangle geometry for one body — the SAME positions/normals/indices

@@ -63,6 +63,38 @@ describe("promoteOne", () => {
     expect(promoteSelection).not.toHaveBeenCalled();
   });
 
+  it("TEST-MESH-05: fails closed before IPC when the installed entry is stale inspection-only", async () => {
+    const publication = { documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 8, generation: 4 };
+    const entry = registry.buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body_1", 1, undefined, undefined, publication);
+    registry.swap("body_1", entry);
+    registry.setCurrentMeshPublication(publication);
+    documentStore.setState({
+      documentId: "doc-1",
+      runtimeSession: "runtime-1",
+      geometrySource: "live",
+      bodies: { body_1: { id: "body_1", name: "Body", visible: true } },
+    });
+    // A failed replacement demotes the installed geometry in place (WP04): the
+    // user still sees it, but it is history, not a current operation target.
+    entry.displayState = "stale-inspection-only";
+    const promoteSelection = vi.fn();
+    const out = await promoteOne(
+      clientWith(promoteSelection),
+      "body_1",
+      { topoKey: "f:0", kind: "face" },
+      8,
+      { entry, kind: "face", topoKey: "f:0" },
+    );
+    expect(out).toBeNull();
+    expect(promoteSelection).not.toHaveBeenCalled();
+    expect(hint()).toBe(STALE_PICK_HINT);
+    // The same proof promotes once the body is current again.
+    entry.displayState = "current";
+    const ok = vi.fn(async () => [{ elementId: "el_1", kind: "face", topoKey: "f:0" } as unknown as PromotedElement]);
+    await promoteOne(clientWith(ok), "body_1", { topoKey: "f:0", kind: "face" }, 8, { entry, kind: "face", topoKey: "f:0" });
+    expect(ok).toHaveBeenCalledTimes(1);
+  });
+
   it("treats an isolation-hidden installed candidate as nonactionable", async () => {
     const provenance = { documentId: "doc-1", runtimeSession: "runtime-1", snapshotId: 7, generation: 3 } as const;
     const entry = registry.buildBodyObjects(

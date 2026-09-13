@@ -13,10 +13,11 @@
  */
 import { useOptionalPlatform } from "@/platform";
 import { getDatumVisuals } from "@/modules/modeling/datumViewport";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/ui/cn";
+import { Button } from "@/ui/Button";
 import { logWarn } from "@/debug/log";
-import { ViewportEngine } from "./engine/ViewportEngine";
+import { ViewportEngine, type RendererLifecycle } from "./engine/ViewportEngine";
 import { chooseGridStep } from "./engine/GridPlane";
 import { resetPaletteCache } from "./engine/palette";
 import { getResolvedTheme, subscribeResolvedTheme } from "@/theme/themeController";
@@ -168,6 +169,71 @@ export function promotePick(client: ReturnType<typeof createClient>, ref: Entity
 const VIEWPORT_HATCH =
   "repeating-linear-gradient(45deg, var(--color-hatch) 0 12px, transparent 12px 24px)";
 
+/** Status-bar message while the GL context is gone (spec §6). Cleared on recovery. */
+const CONTEXT_LOST_HINT = "Graphics context lost — waiting for the browser to restore it";
+/** Status-bar message once recovery has failed and only a retry is left (spec §6). */
+const RENDERER_ERROR_HINT = "Graphics renderer failed — retry from the viewport";
+
+/**
+ * Publish (or clear) the viewport's renderer message for a lifecycle state.
+ *
+ * The engine is deliberately store-agnostic — it imports stores only as TYPES —
+ * so the user-facing half of the lifecycle lives here. Every unhealthy state
+ * keeps SOMETHING on screen: `lost` and `restoring` say the browser is working
+ * on it, `error` says the automatic path is exhausted and points at the retry
+ * action. Only a healthy state clears, and only a message this module owns.
+ */
+export function applyRendererLifecycleHint(state: RendererLifecycle): void {
+  const store = viewportStore.getState();
+  if (state === "lost" || state === "restoring") {
+    store.setStatusHint(CONTEXT_LOST_HINT, { severity: "warn", sticky: true });
+    return;
+  }
+  if (state === "error") {
+    store.setStatusHint(RENDERER_ERROR_HINT, { severity: "error", sticky: true });
+    return;
+  }
+  const current = store.statusHint?.message;
+  if (current === CONTEXT_LOST_HINT || current === RENDERER_ERROR_HINT) {
+    store.setStatusHint(null);
+  }
+}
+
+/**
+ * The one production affordance out of the terminal `error` state.
+ *
+ * Anchored top-centre like the "cached"/"revolve" banners, but INTERACTIVE —
+ * it is the only chip in the viewport a user must be able to click, so
+ * `pointer-events` are enabled here and nowhere else in that band.
+ */
+export function RendererRetryAction({
+  onRetry,
+  busy,
+}: {
+  onRetry: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div
+      data-testid="renderer-retry"
+      className="absolute inset-x-0 top-3 z-[3] flex justify-center"
+    >
+      <span className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-5 shadow-panel">
+        {RENDERER_ERROR_HINT}
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          onClick={onRetry}
+          data-testid="renderer-retry-action"
+        >
+          {busy ? "Retrying…" : "Retry renderer"}
+        </Button>
+      </span>
+    </div>
+  );
+}
+
 function hasFlag(name: string): boolean {
   return new URLSearchParams(window.location.search).has(name);
 }
@@ -185,6 +251,11 @@ export function ViewportRoot({ className }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
+  // The renderer is in the terminal `error` state: the only way forward is the
+  // retry action below (spec §6 — "offer a renderer-retry action").
+  const [rendererFailed, setRendererFailed] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const engineRef = useRef<ViewportEngine | null>(null);
   const [meshEpoch, setMeshEpoch] = useState(0);
   const viewportEngine = useViewportEngine();
   const [sketching, setSketching] = useState(
@@ -197,6 +268,21 @@ export function ViewportRoot({ className }: { className?: string }) {
     useViewportStore((s) => s.statusHint?.severity) === "error";
   const geometryCached = useDocumentStore(selectGeometryCached);
   const chip = viewportGeometryChip(ready, geometryPending, errorHintActive, geometryCached);
+
+  const retryRenderer = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine || retrying) return;
+    setRetrying(true);
+    void engine.retryRenderer().then(
+      (ok) => {
+        setRetrying(false);
+        // `onLifecycleChanged` clears the hint and the flag on success; a
+        // failure leaves both standing, which is the honest outcome.
+        if (ok) setRendererFailed(false);
+      },
+      () => setRetrying(false),
+    );
+  }, [retrying]);
 
   // UNIFY-UX Phase 2: Revolve armed with nothing usable selected yet has no
   // world anchor to hang a chip off of — StatusBar alone was easy to miss (the
@@ -227,8 +313,20 @@ export function ViewportRoot({ className }: { className?: string }) {
     }
 
     const engine = new ViewportEngine();
+    engineRef.current = engine;
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+
+    // ── Renderer lifecycle → status bar + retry affordance (spec §6) ──
+    // Subscribed BEFORE init(), not inside its `.then()`: a context lost during
+    // the awaited construction, and an init that never resolves at all, are
+    // exactly the states the user has to be told about.
+    cleanups.push(
+      engine.onLifecycleChanged((state) => {
+        applyRendererLifecycleHint(state);
+        setRendererFailed(state === "error");
+      }),
+    );
     // The theme the engine is about to build its materials against. `init()`
     // awaits renderer construction, and the theme subscription below can only
     // be installed after that resolves — so a flip landing inside that window
@@ -703,8 +801,14 @@ export function ViewportRoot({ className }: { className?: string }) {
         );
       })
       .catch((err: unknown) => {
-        // jsdom / no-WebGL: stay in placeholder mode. Not fatal.
+        // jsdom / no-WebGL: stay in placeholder mode. Not fatal to the document.
         logWarn("vp", "engine init failed; showing placeholder", { error: err });
+        if (cancelled) return;
+        // …but it IS the same dead end as a failed recovery, so it gets the same
+        // message and the same way out (`retryRenderer()` re-runs the whole init
+        // path on a fresh canvas).
+        applyRendererLifecycleHint("error");
+        setRendererFailed(true);
       });
 
     return () => {
@@ -788,6 +892,9 @@ export function ViewportRoot({ className }: { className?: string }) {
             Last saved geometry
           </span>
         </div>
+      )}
+      {rendererFailed && (
+        <RendererRetryAction onRetry={retryRenderer} busy={retrying} />
       )}
       {ready && <GridScaleChip />}
       {revolveEmpty && (

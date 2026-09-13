@@ -13,6 +13,7 @@ import type { SketchPlane } from "@/ipc/types";
 import type { SnapDecision, SnapKind } from "@/tools/sketch/snapTypes";
 import { GUIDE_DASH_CSS, GUIDE_GAP_CSS, glyphFor, SnapIndicator } from "./SnapIndicator";
 import { RENDER_ORDER } from "./renderOrder";
+import { LINE_WIDTHS_CSS } from "./screenLineStyle";
 
 const PLANE: SketchPlane = {
   kind: "XY",
@@ -110,7 +111,7 @@ describe("guide rendering", () => {
     const guides = [{ orientation: "vertical" as const, value: 5, ref: { x: 5, y: 40 } }];
 
     // Zoomed IN: 20 CSS px per plane unit.
-    ind.update(1000, 800, 1, 20);
+    ind.update(1000, 800, 20);
     ind.show(decision({ guides }), false);
     const near = ind.guideDashSizes()[0];
     // A 6px dash at 20px/unit is 0.3 world units.
@@ -118,7 +119,7 @@ describe("guide rendering", () => {
     expect(near.gap).toBeCloseTo(GUIDE_GAP_CSS / 20, 9);
 
     // Zoomed OUT: 0.5 CSS px per plane unit — 40x coarser in world terms…
-    ind.update(1000, 800, 1, 0.5);
+    ind.update(1000, 800, 0.5);
     ind.show(decision({ guides }), false);
     const far = ind.guideDashSizes()[0];
     expect(far.dash).toBeCloseTo(GUIDE_DASH_CSS / 0.5, 9);
@@ -136,28 +137,29 @@ describe("guide rendering", () => {
     // transient §10.1 cadence violation during any zoom.
     const { ind } = makeIndicator();
     const guides = [{ orientation: "vertical" as const, value: 5, ref: { x: 5, y: 40 } }];
-    ind.update(1000, 800, 1, 20);
+    ind.update(1000, 800, 20);
     ind.show(decision({ guides }), false);
     expect(ind.guideDashSizes()[0].dash).toBeCloseTo(GUIDE_DASH_CSS / 20, 9);
 
     // No show() here — only the per-frame update with a new metric.
-    ind.update(1000, 800, 1, 0.5);
+    ind.update(1000, 800, 0.5);
     const live = ind.guideDashSizes()[0];
     expect(live.dash).toBeCloseTo(GUIDE_DASH_CSS / 0.5, 9);
     expect(live.gap).toBeCloseTo(GUIDE_GAP_CSS / 0.5, 9);
     ind.dispose();
   });
 
-  it("converts the guide width for the CURRENT device pixel ratio", () => {
+  it("feeds the spec §7.3 snap-guide CSS width to linewidth unscaled", () => {
+    // The width is authored in CSS px and fed to `linewidth` unscaled; the
+    // resolution is CSS too (screenLineStyle.ts, VP03). `update()` no longer
+    // takes a DPR at all, so the only thing that can move this number is the
+    // spec table itself — which is what this pins.
     const { ind } = makeIndicator();
     const guides = [{ orientation: "vertical" as const, value: 5, ref: { x: 5, y: 40 } }];
-    ind.update(1000, 800, 1, 10);
+    ind.update(1000, 800, 10);
     ind.show(decision({ guides }), false);
-    const at1x = ind.guideDashSizes()[0].width;
-    ind.update(2000, 1600, 2, 10);
-    const at2x = ind.guideDashSizes()[0].width;
-    // Device px, so 2x DPR is twice the number for the same CSS width.
-    expect(at2x).toBeCloseTo(at1x * 2, 9);
+    expect(ind.guideDashSizes()[0].width).toBe(LINE_WIDTHS_CSS.dimensionOrSnapGuide);
+    expect(LINE_WIDTHS_CSS.dimensionOrSnapGuide).toBe(1);
     ind.dispose();
   });
 

@@ -25,6 +25,10 @@
  * MODE (face/edge child visibility per body — persisted on settingsStore) and
  * the transient ISOLATION mask (viewportStore, session-only). Both are applied
  * here rather than in the engine because the bodyId→handle map lives here.
+ *
+ * VP-HARDENING WP04 acceptance: TEST-MESH-05, TEST-PUB-01, TEST-PUB-02 — the
+ * validated-installation, stale-display, and publication-freshness policy of
+ * specification §9 lives in `loadBody`.
  */
 import type * as THREE from "three";
 import type { CadClient } from "@/ipc/client";
@@ -40,10 +44,32 @@ import type { ViewportEngine } from "../engine/ViewportEngine";
 import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
 import { BodyMaterialLibrary } from "../engine/bodyMaterials";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
-import { parseMeshPayload } from "./parseMeshPayload";
+import { MeshParseError, parseMeshPayload, type MeshParseErrorKind } from "./parseMeshPayload";
 import type { BodyMeshView } from "./parseMeshPayload";
-import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, setCurrentMeshPublication, swap, type MeshProvenance } from "./meshRegistry";
+import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, setCurrentMeshPublication, swap, type MeshDisplayState, type MeshProvenance } from "./meshRegistry";
+import { validateMeshView, type MeshValidationCode } from "./validateMesh";
+import { MeshAdmission, type MeshAdmissionReason, type MeshReservation } from "./meshAdmission";
 import { dropSelectionForBody, reconcileSelectionForBody } from "./rebindPick";
+
+export type { MeshDisplayState } from "./meshRegistry";
+
+/**
+ * Why a body's display could not be updated: a byte-layout violation from the
+ * parser, a semantic violation from validation, or a refusal from resource
+ * admission. One union so the diagnostic reaching the user, the log, and the
+ * tests is the same value in all three places.
+ */
+export type MeshDisplayDiagnosticCode =
+  | MeshParseErrorKind
+  | MeshValidationCode
+  | MeshAdmissionReason
+  /** Fetch, IPC, or geometry-construction failure — not a defect in the payload. */
+  | "load-failed";
+
+export interface MeshDisplayDiagnostic {
+  readonly code: MeshDisplayDiagnosticCode;
+  readonly detail: string;
+}
 
 /** Committed bodies use the worker's display-quality tier; drag previews choose separately. */
 const DEFAULT_LOD: Lod = "fine";
@@ -126,6 +152,17 @@ export class MeshIngest {
   private currentPublication: MeshProvenance | null = null;
   /** Fires after a body's mesh finishes loading into the scene (F-WP7 commit reconcile). */
   private readonly bodyLoadedListeners = new Set<(bodyId: string) => void>();
+  /**
+   * Peak resource admission for prepared mesh resources (spec §9). Public so a
+   * test or a telemetry reader can take a `snapshot()`; it is owned here and
+   * nothing else may reserve against it.
+   */
+  readonly admission = new MeshAdmission();
+  /** The budget hold behind each INSTALLED entry, released when it is replaced or dropped. */
+  private readonly reservations = new Map<string, MeshReservation>();
+  /** What the user is looking at per body, and why. */
+  private readonly displayStates = new Map<string, { state: MeshDisplayState; diagnostic?: MeshDisplayDiagnostic }>();
+  private readonly displayStateListeners = new Set<(bodyId: string) => void>();
 
   private traceRendered(bodyId: string, token: number, startedAt: number): void {
     const engine = this.engine;
@@ -159,6 +196,67 @@ export class MeshIngest {
   onBodyLoaded(cb: (bodyId: string) => void): () => void {
     this.bodyLoadedListeners.add(cb);
     return () => this.bodyLoadedListeners.delete(cb);
+  }
+
+  /** What is on screen for this body, or undefined when it has no display record. */
+  getDisplayState(bodyId: string): MeshDisplayState | undefined {
+    return this.displayStates.get(bodyId)?.state;
+  }
+
+  /** Why the body is in its current display state (absent for `current`/`pending-replacement`). */
+  getDisplayDiagnostic(bodyId: string): MeshDisplayDiagnostic | undefined {
+    return this.displayStates.get(bodyId)?.diagnostic;
+  }
+
+  /** Subscribe to display-state transitions. Returns an unsubscribe. */
+  onDisplayStateChanged(cb: (bodyId: string) => void): () => void {
+    this.displayStateListeners.add(cb);
+    return () => this.displayStateListeners.delete(cb);
+  }
+
+  private setDisplayState(
+    bodyId: string,
+    state: MeshDisplayState,
+    diagnostic?: MeshDisplayDiagnostic,
+  ): void {
+    const prev = this.displayStates.get(bodyId);
+    if (
+      prev?.state === state &&
+      prev.diagnostic?.code === diagnostic?.code &&
+      prev.diagnostic?.detail === diagnostic?.detail
+    ) return;
+    this.displayStates.set(bodyId, diagnostic ? { state, diagnostic } : { state });
+    for (const cb of [...this.displayStateListeners]) cb(bodyId);
+  }
+
+  private clearDisplayState(bodyId: string): void {
+    if (!this.displayStates.delete(bodyId)) return;
+    for (const cb of [...this.displayStateListeners]) cb(bodyId);
+  }
+
+  /**
+   * A payload arrived and cannot be displayed (spec §9). Resource and validation
+   * failures NEVER change document geometry: when the body already has valid
+   * geometry it stays installed and visible as `stale-inspection-only` — orbit,
+   * fit, and tagged historical inspection keep working, while
+   * {@link isEntryPromotable} stops it authoring an operation. A body that never
+   * had geometry becomes `failed-initial`: an explicit non-geometry state, with
+   * no fabricated editable faces.
+   *
+   * Never throws — numerics §10 forbids throwing across a store action.
+   */
+  private rejectPayload(bodyId: string, code: MeshDisplayDiagnosticCode, detail: string): void {
+    const installed = getEntry(bodyId);
+    const state: MeshDisplayState = installed ? "stale-inspection-only" : "failed-initial";
+    if (installed) installed.displayState = state;
+    this.setDisplayState(bodyId, state, { code, detail });
+    logError("mesh", `body mesh REJECTED body=${bodyId}`, { bodyId, code, detail, state });
+    viewportStore.getState().setStatusHint(
+      installed
+        ? `Body ${bodyId}: display not updated — ${code}`
+        : `Body ${bodyId}: geometry unavailable — ${code}`,
+      { severity: installed ? "warn" : "error" },
+    );
   }
 
   attach(engine: ViewportEngine, client: CadClient): void {
@@ -496,6 +594,10 @@ export class MeshIngest {
     this.pending.add(bodyId);
     const bodyColor = documentStore.getState().bodies[bodyId]?.color;
     const faceColorsMeta = documentStore.getState().bodies[bodyId]?.faceColors;
+    /** Budget hold owned by THIS job until it either installs or abandons. */
+    let held: MeshReservation | null = null;
+    let installed = false;
+    let markedPending = false;
 
     try {
       const publication = this.currentPublication;
@@ -532,7 +634,37 @@ export class MeshIngest {
         return;
       }
 
-      const view = parseMeshPayload(buffer);
+      // Real bytes in hand: from here until the swap the body is showing the
+      // PREVIOUS mesh while a replacement is being prepared.
+      if (getEntry(bodyId)) {
+        markedPending = true;
+        this.setDisplayState(bodyId, "pending-replacement");
+      }
+
+      // Parse proves the byte layout; validation proves the semantics. Neither
+      // may reach GPU construction on trust, and neither may throw out of here.
+      let view: BodyMeshView;
+      try {
+        view = parseMeshPayload(buffer);
+      } catch (e) {
+        if (!(e instanceof MeshParseError)) throw e;
+        this.rejectPayload(bodyId, e.kind, e.message);
+        return;
+      }
+      const validation = validateMeshView(view, bodyId);
+      if (!validation.ok) {
+        this.rejectPayload(bodyId, validation.code, validation.detail);
+        return;
+      }
+      // Peak admission: the outgoing body is still installed and still holds its
+      // reservation, so the replacement must fit ALONGSIDE it.
+      const reservation = this.admission.reserve(bodyId, validation.mesh.accounting);
+      if (!reservation.ok) {
+        this.rejectPayload(bodyId, reservation.reason, reservation.detail);
+        return;
+      }
+      held = reservation;
+
       const authoredFaceColors = await this.resolveAuthoredFaceColors(bodyId, view, faceColorsMeta);
       // `resolveAuthoredFaceColors` can await one worker round-trip PER authored
       // colour, which is long enough for a newer publish to overtake this one.
@@ -546,31 +678,61 @@ export class MeshIngest {
           publication.runtimeSession !== documentStore.getState().runtimeSession ||
           publication.generation !== effectiveGeneration)
       ) return;
+      // ── PREPARE ────────────────────────────────────────────────────────────
+      // Everything that can fail happens while the OLD body is still installed
+      // and still on screen (numerics §11.2): build the geometry, then its
+      // scene consumer. A failure here leaves the previous display snapshot
+      // whole rather than publishing half a scene and repairing it later.
       const entry = buildBodyObjects(
-        view,
+        validation.mesh,
         bodyId,
         ++this.meshRev,
         bodyColor,
         authoredFaceColors,
         effectiveGeneration === undefined ? undefined : publication ?? undefined,
       );
+      let handle: BodyObjectHandle;
+      try {
+        handle = buildBodyObject(entry, this.materials);
+        handle.setVisible(this.effectiveVisible(bodyId));
+        handle.applyMode(this.currentModeDef());
+      } catch (e) {
+        // Nothing was published, so this geometry has no owner and no disposal
+        // path — free it here or the leak tripwire catches it at close.
+        entry.dispose();
+        throw e;
+      }
+
+      // ── PUBLISH ────────────────────────────────────────────────────────────
+      // From here to `installed = true` there is no await and nothing that can
+      // throw: registry, scene, and budget move to the new entry together.
       const prev = getEntry(bodyId);
       swap(bodyId, entry);
+      const old = this.bodyObjects.get(bodyId);
+      if (old) {
+        this.engine.bodiesRoot.remove(old.group);
+        // Numerics §11.2: the new lease was acquired in PREPARE, the display
+        // snapshot moved above, and only now is the old one let go — so the
+        // outgoing resource is never lease-free while it is still on screen.
+        old.dispose();
+      }
+      this.engine.bodiesRoot.add(handle.group);
+      this.bodyObjects.set(bodyId, handle);
+      // The outgoing entry is retired, so its budget hold goes with it and this
+      // job's hold becomes the body's installed hold.
+      this.reservations.get(bodyId)?.release();
+      this.reservations.set(bodyId, reservation);
+      held = null;
+      installed = true;
+      this.setDisplayState(bodyId, "current");
+
+      // ── AFTER THE FACT ─────────────────────────────────────────────────────
       // A regen renumbers TopoKeys and consumes elements outright, so a selection
       // made before it may name nothing after it. Decide each ref's fate against
       // the NEW mesh (and, for a promoted one, against the backend) BEFORE the
       // highlight rebuild below reads them — never by searching for a lookalike.
       // A cosmetic reload re-publishes the SAME topology: nothing to survive.
       if (reason === "regen") reconcileSelectionForBody(bodyId, prev, entry, this.client);
-
-      // Rebuild the scene object (remove old, add new).
-      const old = this.bodyObjects.get(bodyId);
-      if (old) this.engine.bodiesRoot.remove(old.group);
-      const handle = buildBodyObject(entry, this.materials);
-      handle.setVisible(this.effectiveVisible(bodyId));
-      handle.applyMode(this.currentModeDef());
-      this.engine.bodiesRoot.add(handle.group);
-      this.bodyObjects.set(bodyId, handle);
       this.updateGeometryPending();
 
       this.engine.refreshHighlights();
@@ -580,15 +742,52 @@ export class MeshIngest {
       for (const cb of [...this.bodyLoadedListeners]) cb(bodyId);
     } catch (e) {
       if (this.detached || this.loadSeq.get(bodyId) !== token) return;
-      // A fetch/parse/build failure must never be silent: without this the body
+      // A fetch/build failure must never be silent: without this the body
       // simply never appears and nothing anywhere says why (the SAVE/OPEN bug
       // class). Keep serving other bodies.
       const reason = e instanceof Error ? e.message : String(e);
-      logError("mesh", `body mesh load FAILED body=${bodyId}`, { bodyId, error: e });
       viewportStore.getState().setStatusHint(`Body failed to load — ${reason}`, {
         severity: "error",
       });
+      if (installed) {
+        // The publish SUCCEEDED and something after it threw — a selection
+        // reconcile, a highlight rebuild, a `bodyLoaded` subscriber. The
+        // geometry on screen is the new, validated, current mesh; calling it
+        // stale would be a lie that also blocks every operation authored from
+        // it. Report the step that failed and leave the display state alone.
+        logError("mesh", `body mesh post-install step FAILED body=${bodyId}`, {
+          bodyId,
+          error: e,
+          code: "load-failed",
+          detail: reason,
+          state: "current",
+        });
+      } else {
+        // Nothing was published: the last valid geometry STAYS installed and
+        // visible, demoted to stale-inspection-only exactly as a rejected
+        // payload would be, rather than being torn out of the scene.
+        const state: MeshDisplayState = getEntry(bodyId) ? "stale-inspection-only" : "failed-initial";
+        logError("mesh", `body mesh load FAILED body=${bodyId}`, { bodyId, error: e, state });
+        const installedEntry = getEntry(bodyId);
+        if (installedEntry) installedEntry.displayState = state;
+        this.setDisplayState(bodyId, state, { code: "load-failed", detail: reason });
+      }
     } finally {
+      // Every path that reserved but did not install gives the budget back
+      // exactly once (`release` is idempotent), and a `pending-replacement`
+      // this job announced is resolved rather than left hanging — unless a
+      // NEWER job for the same body now owns the state.
+      held?.release();
+      if (
+        markedPending &&
+        !installed &&
+        !this.detached &&
+        this.loadSeq.get(bodyId) === token &&
+        this.getDisplayState(bodyId) === "pending-replacement"
+      ) {
+        const entry = getEntry(bodyId);
+        this.setDisplayState(bodyId, entry ? entry.displayState : "failed-initial");
+      }
       if (this.activeToken.get(bodyId) === token) {
         this.activeToken.delete(bodyId);
         this.pending.delete(bodyId);
@@ -615,11 +814,17 @@ export class MeshIngest {
     const handle = this.bodyObjects.get(bodyId);
     if (handle) {
       this.engine?.bodiesRoot.remove(handle.group);
+      handle.dispose(); // release the registry lease before `remove` retires it
       this.bodyObjects.delete(bodyId);
     }
     this.loadSeq.set(bodyId, (this.loadSeq.get(bodyId) ?? 0) + 1);
     this.renderCorrelation.delete(bodyId);
     this.queued.delete(bodyId);
+    // The geometry is going, so its budget hold and its display record go too —
+    // a dropped body must not keep charging the document's resource budget.
+    this.reservations.get(bodyId)?.release();
+    this.reservations.delete(bodyId);
+    this.clearDisplayState(bodyId);
     remove(bodyId);
     // The geometry is gone for good, so a face/edge ref naming it can never draw
     // again — and must never author an op either (D-5, drawable-or-gone).
@@ -635,11 +840,16 @@ export class MeshIngest {
     // instance, and a stale `true` would strand it visible after teardown.
     viewportStore.getState().setGeometryPending(false);
     this.bodyLoadedListeners.clear();
+    this.displayStateListeners.clear();
     for (const u of this.unsubs.splice(0)) u();
     // Clear highlights BEFORE disposing geometry so no clone references freed buffers.
     this.engine?.setHighlightState(null, []);
+    // Detach every borrower BEFORE `disposeAll` below: close releases registry
+    // ownership, and an undetached borrower would be reported by the lease
+    // tripwire instead of simply going quietly (spec §8.2).
     for (const handle of this.bodyObjects.values()) {
       this.engine?.bodiesRoot.remove(handle.group);
+      handle.dispose();
     }
     this.bodyObjects.clear();
     this.loadSeq.clear();
@@ -647,6 +857,12 @@ export class MeshIngest {
     this.activeToken.clear();
     this.queued.clear();
     this.renderCorrelation.clear();
+    // Everything this instance charged to the budget is given back before the
+    // registry is emptied, so a re-attach starts from zero rather than from the
+    // closed document's holdings.
+    for (const reservation of this.reservations.values()) reservation.release();
+    this.reservations.clear();
+    this.displayStates.clear();
     this.currentPublication = null;
     setCurrentMeshPublication(null);
     disposeAll(); // registry empty + leak tripwire

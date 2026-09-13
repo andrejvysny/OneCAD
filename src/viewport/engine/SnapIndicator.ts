@@ -26,16 +26,17 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { SketchPlane } from "@/ipc/types";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import type { SnapDecision, SnapKind } from "@/tools/sketch/snapTypes";
-import { cssToDevice, currentDpr } from "./dpr";
 import { buildDotTexture, buildRingTexture } from "./markerTextures";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
+import { createScreenLineMaterial, LINE_WIDTHS_CSS, setLineResolutionCss } from "./screenLineStyle";
 import { planeBasisMatrix, planePointToWorld } from "./sketchBasis";
 
 const HINT_ID = "__sketch_snap_hint";
 
-/** Guide stroke, in CSS px. */
-const GUIDE_WIDTH_CSS = 1;
+/** Guide stroke, in CSS px — spec §7.3 dimension/snap guide. Fed to
+ *  `linewidth` unscaled; see `screenLineStyle.ts`. */
+const GUIDE_WIDTH_CSS = LINE_WIDTHS_CSS.dimensionOrSnapGuide;
 /** Dash cadence, in CSS px — the pair the ±1px rendering check pins. */
 export const GUIDE_DASH_CSS = 6;
 export const GUIDE_GAP_CSS = 4;
@@ -207,7 +208,7 @@ export class SnapIndicator {
   private currentGlyph: MarkerGlyph | null = null;
   private plane: SketchPlane | null = null;
   private hintRegistered = false;
-  private dpr = currentDpr();
+  /** Fat-line `resolution`, in CSS (logical) px — the addon's own draw-time units. */
   private readonly resolution = new THREE.Vector2(1, 1);
   /** CSS px per plane unit, supplied by the engine each frame. 1 is the inert
    *  fallback (no camera metric yet), which keeps dashes at their world size. */
@@ -303,18 +304,18 @@ export class SnapIndicator {
   }
 
   /**
-   * Per-frame: the fat-line resolution (DEVICE px), the capped DPR the guide
-   * widths are converted for, and the plane→screen scale the dash cadence is
-   * measured in.
+   * Per-frame: the fat-line resolution (CSS px) and the plane→screen scale the
+   * dash cadence is measured in.
+   *
+   * There is no DPR parameter: the guide width is a CSS constant and the
+   * resolution is CSS too, so a display change moves neither
+   * (`screenLineStyle.ts`).
    */
-  update(
-    deviceWidth: number,
-    deviceHeight: number,
-    dpr: number = currentDpr(),
-    pxPerUnit = 0,
-  ): void {
-    this.resolution.set(deviceWidth, deviceHeight);
-    for (const g of this.guideObjects) g.material.resolution.copy(this.resolution);
+  update(cssWidth: number, cssHeight: number, pxPerUnit = 0): void {
+    this.resolution.set(cssWidth, cssHeight);
+    for (const g of this.guideObjects) {
+      setLineResolutionCss(g.material, this.resolution.x, this.resolution.y);
+    }
     if (Number.isFinite(pxPerUnit) && pxPerUnit > 0 && pxPerUnit !== this.pxPerUnit) {
       this.pxPerUnit = pxPerUnit;
       // LIVE guides must track the metric too, not only the next rebuild:
@@ -330,9 +331,6 @@ export class SnapIndicator {
         g.material.gapSize = GUIDE_GAP_CSS * worldPerPx;
       }
     }
-    if (dpr === this.dpr) return;
-    this.dpr = dpr;
-    for (const g of this.guideObjects) g.material.linewidth = cssToDevice(GUIDE_WIDTH_CSS, dpr);
   }
 
   /** Theme change: re-read the palette into the marker + guide materials. */
@@ -490,12 +488,16 @@ export class SnapIndicator {
   }
 
   private makeGuide(): GuideLineObject {
-    const material = new LineMaterial({
-      color: palette.sketchSnap().getHex(),
-      linewidth: cssToDevice(GUIDE_WIDTH_CSS, this.dpr),
+    // Dash/gap are SEEDED with the authored CSS cadence and converted to world
+    // units by `update()`/`setGuides()` as soon as a plane→screen metric exists
+    // — see the caveat on `ScreenLineStyle.dashSizeCss`.
+    const material = createScreenLineMaterial({
+      widthCss: GUIDE_WIDTH_CSS,
       dashed: true,
-      dashSize: GUIDE_DASH_CSS,
-      gapSize: GUIDE_GAP_CSS,
+      dashSizeCss: GUIDE_DASH_CSS,
+      gapSizeCss: GUIDE_GAP_CSS,
+    }, {
+      color: palette.sketchSnap().getHex(),
       depthTest: false,
       transparent: true,
       // Weak-but-visible by design (Sketcher UX cleanup, Track B4; opacity
@@ -505,7 +507,7 @@ export class SnapIndicator {
       opacity: 0.5,
       toneMapped: false,
     });
-    material.resolution.copy(this.resolution);
+    setLineResolutionCss(material, this.resolution.x, this.resolution.y);
     const geometry = new LineGeometry();
     geometry.setPositions([0, 0, 0, 0, 0, 0]);
     const line = new Line2(geometry, material);

@@ -60,15 +60,23 @@ function SwitchRow({
   label,
   checked,
   onChange,
+  disabled = false,
+  helperText,
 }: {
   label: string;
   checked: boolean;
   onChange: (value: boolean) => void;
+  disabled?: boolean;
+  /** Sub-label under the row — why a disabled control is disabled. */
+  helperText?: string;
 }) {
   return (
-    <div className="flex h-9 items-center gap-3 rounded-sm px-3 hover:bg-hover">
-      <span className="flex-1 text-[13px] text-ink-2">{label}</span>
-      <Switch checked={checked} onChange={onChange} ariaLabel={label} />
+    <div className="rounded-sm px-3 hover:bg-hover">
+      <div className="flex h-9 items-center gap-3">
+        <span className="flex-1 text-[13px] text-ink-2">{label}</span>
+        <Switch checked={checked} onChange={onChange} disabled={disabled} ariaLabel={label} />
+      </div>
+      {helperText ? <p className="pb-2 text-[11px] text-ink-3">{helperText}</p> : null}
     </div>
   );
 }
@@ -168,10 +176,16 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
                 </section>
                 <section>
                   <SectionLabel className="pb-1">Experimental</SectionLabel>
+                  {/* VP-HARDENING VP01: the preference is still STORED (a saved
+                      one falls back to WebGL with a diagnostic), but it can no
+                      longer select a backend, so the control is presented as
+                      unavailable rather than hidden. */}
                   <SwitchRow
                     label="Enable WebGPU renderer"
                     checked={experimentalWebGpu}
                     onChange={setExperimentalWebGpu}
+                    disabled
+                    helperText="Unavailable — WebGPU has not passed the viewport capability suite; WebGL is used."
                   />
                 </section>
               </div>

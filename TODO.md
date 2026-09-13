@@ -1,3 +1,63 @@
+# VP-HARDENING 1.0 — VIEWPORT PROGRAM (2026-09-13, session 1 PAUSED for handoff)
+
+Updated: 2026-09-13. Program ledger: `docs/viewport-hardening/execution/STATUS.md` (authoritative for package state and evidence; §8 is the session handoff). Design authority: `docs/viewport-hardening/01–04`. ADR-0015. Worktree `viewport-hardening`, branch `viewport-hardening`, HEAD `65b4c60`. No commits (not authorized); dirty-diff sha256 `9902241f8f31` (excluding the three root ledgers).
+
+## Now
+
+- [ ] WP09 adversarial review (Opus `adversarial-reviewer`) + `/codex-astra break` (grounded: `worker/src/tess/SurfaceNormals.*`, `EdgeClassification.*`, `Tessellate.cpp`, `worker/tests/test_surface_normals.cpp`, NUM §7–§8); apply findings red-first.
+
+## Owed before any commit (order)
+
+- [ ] WP08 round 3 per `docs/design/astra/wp08-curve-sampler-followup.md` §4: turn predicate at every regular join as the acceptance rule (C1), `Satisfied` iff `β + asin(E/g) ≤ tol/2` with retained Bernstein mass and coefficient error bounds (C2), cone against the ENCODED chord (F5), finite control-net validation + derived roundoff enclosure (F6), semantic closure only — remove `period − 1e-9` at `CurveSampler.cpp:557,920` (F7), hard body segment cap incl. endpoints (F9); then Astra call 3/3 = `verify`.
+- [ ] WP03 round 2: DEV-WP03-1 (outline + count degraded mode, re-attempt exact overlay, honest `degraded` getter), N-2 (`handle.dispose()` at `ViewportEngine.ts` ~2826/2863/2867/dispose ~3169, drop the `BodyObject` sweep), N-3 (section lease by object), N-1/N-7 comments, N-4/N-5/N-6 hygiene, N-8 `GhostLayer` to the lease model (or assign to WP13 explicitly).
+- [ ] L3 rung compared against baseline reds (STATUS §5.1): full `ctest`, `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast`, `bun run test`, `bun run e2e` both projects (`E2E_PORT=4179`), fmt/clippy, hex, QA verifiers. Commit only with the user's authority.
+
+## Phase M1 — correctness baseline (WP00–WP07)
+
+- [x] WP00 inventory — baseline gates, R01–R18 map, ratchets, instrumentation, matrix + verifier, fixtures, ADR-0015, G probes with true-baseline evidence.
+- [x] WP01 line units — focused-pass U + G (DPR 2 edge 1.07 CSS px, cross-DPR Δ 0.03). Owed: DPR 1.5 / dark / perspective variants, TEST-LINE-02 G, TEST-LINE-04, edge-locator outlier in the probe.
+- [x] WP02 scheduler/lifecycle — focused-pass U after two review rounds. Owed: TEST-LIFE-03, TEST-BACKEND-02 (G/N).
+- [x] WP03 leases/highlights — focused-pass U + G plateau; round 2 owed (above).
+- [x] WP04 validation/admission — focused-pass U; X-lane cross-track fixtures and the real coarse→fine worker bbox check owed (RISK-WP04-2); DEV-WP04-1 → WP10.
+- [ ] WP05 appearance resolver, assembly colors, `idOf` fix (flips the R18 ratchet) — depends on WP03.
+- [ ] WP06 canonical camera, 35° default, exact plane basis, effective-factor zoom, interaction owner (flips the R07 ratchets) — depends on WP01; owner files `CameraRig.ts`, `CadOrbitControls.ts`, `cameraFit.ts`, `navInput.ts`, engine sketch-entry section, `ViewportRoot.tsx`.
+- [ ] WP07 visibility-aware picking (flips the R10 ratchet) — depends on WP04 + WP06; also RISK-PRE-1.
+
+## Phase M2 — geometric fidelity (WP08–WP10)
+
+- [x] WP08 curve sampler — focused-pass W; round 3 owed (above).
+- [ ] WP09 normals — implemented, green (45/45 focused, 197/199 full), review + Astra break owed (Now).
+- [ ] WP10 MESH1 v2 local origins + quality metadata + edge classes + solid ids — single cross-layer owner, protocol-auditor before landing, documents the consumer contract (DEV-WP04-1), consumes `quantizationErrorMm`, `completeness`, `edge_classes`, `face_solid_ordinals`.
+
+## Phase M3 — integrated viewport (WP11–WP15)
+
+- [ ] WP11 stable sketch resources/batches (R08; SketchObject marker-attribute fix per the WP03 audit — capacity-managed owned buffers).
+- [ ] WP12 shared adaptive quality + controlled refinement (flips the R09 ratchets; wires cooperative cancellation into the sampler; isolates the shared `Poly_Triangulation` hazard recorded in WP09).
+- [ ] WP13 edge policy, effective display set, sections, previews (also `GhostLayer` if not done in WP03 r2; preview admission).
+- [ ] WP14 `three-mesh-bvh` 0.9.15 pin + worker preparation + budgets.
+- [ ] WP15 grid, touch/pen, capture.
+
+## Phase M4 — qualification
+
+- [ ] WP16 native qualification, traceability matrix, final report; user-run gates (autosave checklist, merged-stack Tauri smoke, STEP/3MF external open) recorded as owed, never faked.
+
+## Session-1 progress log (chronological, kept as evidence)
+
+- [x] WP00 baseline gates run serially on a fresh worker build (sha `14741a45…b1a6`, OCCT `0a6a1dce34181289`): tsc clean · Vitest **443 failed / 5544 passed / 78 skipped** (all pre-existing: `ModelToolController.*.test.ts` fakes lack `onDocumentChanged` added in `ee5b449`) · CTest **195/197** (`feature_pattern`, `chamfer_reference_face`) · fmt 1 diff · clippy clean · cargo `--no-fail-fast` **1627 passed / 24 failed / 0 ignored**, 0 worker skips (hole/shell/chamfer/offset/revolve/transform auto-bind assertions). Logs: `docs/qa/viewport-hardening/baseline/`. These reds are owned outside the viewport program and are not repaired by it.
+- [x] WP00 R01–R18 mapped to source at HEAD (STATUS §4): all findings present except R13/R15 (design gaps). R18 `idAt`→`idOf` confirmed; R06 reentrant-invalidate confirmed by reproduction (a scout had misread it).
+- [x] WP00 red reproductions (lane U): `src/viewport/vph/baselineCounterexamples.test.ts` — 8 `it.fails` ratchets (R01, R06, R07×2, R09×2, R10, R18) + 3 installed-contract greens; first red run `baseline/vph-counterexamples-red.log` (9 red incl. one wrong oracle since corrected).
+- [x] WP00 instrumentation boundaries (`src/viewport/vph/instrumentation.ts`, wired into `ViewportEngine.renderFrame`/`invalidate`, `meshRegistry.swap`/`flushDisposals`, `Picker.raycastAll`; `engine.debugResourceCounters()`); acceptance matrix `docs/qa/viewport-hardening/acceptance-matrix.json` (127 IDs) + `scripts/verify-viewport-acceptance.mjs`; fixture catalog `docs/qa/viewport-hardening/fixtures/catalog.json`; `three-mesh-bvh` published 0.9.15 (peer three ≥0.159) verified, pin deferred to WP14.
+- [ ] WP00 G-lane probes (real WebGL, `test.fail`-annotated): `e2e/vph-line-width.spec.ts` (TEST-LINE-01), `e2e/vph-hover-lifecycle.spec.ts` (TEST-RES-01) — in flight.
+- [ ] WP00 W-lane S-curve red (TEST-CURVE-01 on the OCCT edge) — owed as the first step of WP08.
+- [x] WP01 focused-pass (U): CSS line widths / logical resolution / CSS pick radius / `ViewportMetrics` / re-armed DPR watcher; adversarial review no blockers, 8 non-blocking fixes applied; orchestrator `tsc` 0, `vitest src/viewport/engine src/viewport/vph` 41 files / 623 passed / 7 expected fail. G rerun: DPR 2 body edge **1.09 CSS px** (baseline 2.25); DPR-independence case red on probe phase sensitivity (Δ0.26 > 0.20), method fix owed.
+- [x] WP04 focused-pass (U): branded `ValidatedMesh` (16 semantic codes + `lod`, checked arithmetic before allocation), peak `MeshAdmission`, display states + stale-inspection-only, atomic install, promotion gate in `src/ipc/promote.ts`, preview lanes validate-or-skip; review found 2 blockers (post-install demotion, uncaught preview throw), both fixed; orchestrator rerun 11 files / 212 passed / 6 expected fail; 42-mutator 10k sweep clean. Deviation DEV-WP04-1 (consumer contract not yet in `mesh_format.md`; eager id decode) → WP10.
+- [x] WP08 implemented (C++ exact-span rational-Bézier sampler, hull chord certificate, derivative cone, caps → QualityLimited, ApproxCurve fallback KernelEstimated); red first: old sampler 2 points / 1.125 mm; focused ctest **43/43** (orchestrator rerun). Adversarial review + Astra `break` (call 1/3) in flight.
+- [x] WP02 focused-pass (U): review found 3 blockers (submission named the adopted not displayed publication; failure halt could not stop a tween — 86 draws / 5 tweens; `error` cleared the hint with no retry) + 13 non-blocking; all fixed; orchestrator rerun **45 files / 710 passed / 6 expected fail**, tsc 0, hex 0. Measured: 3 draw attempts per tween on a throwing renderer, N renders per N-tick tween.
+- [x] WP08 focused-pass (W): two reviews DEFECTIVE (local B1–B3, Astra F1–F10 — record `docs/design/astra/wp08-curve-sampler-break.md`); round 2 closed 15 items red-first; orchestrator full ctest **196/198** (baseline reds only), Rust edge consumers 45/3 (all three baseline reds). Astra followup (call 2/3) on the resolution floor and test floor in flight.
+- [ ] WP03 (leases, owned face highlights, bounded cache) — implementer running (relaunched after an API session limit killed the first attempt before any edit).
+- [ ] WP09 (surface normals, completeness, internal edge classification) — implementer running.
+- [ ] Line-width probe phase-averaging fix — probe author running.
+
 # CONSOLIDATED CLAUDE CODE HANDOFF — 2026-09-12
 
 - [x] Created `CLAUDE-CODE-HANDOFF-2026-09-12.md`: consolidated implementation, open defects, source map, evidence boundaries, commands, native acceptance and resume order. Documentation-only task; no build/test rerun.

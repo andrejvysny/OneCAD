@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as THREE from "three";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
-import { BodyMaterialLibrary, BODY_EDGE_WIDTH } from "./bodyMaterials";
+import { BodyMaterialLibrary, BODY_EDGE_WIDTH_CSS } from "./bodyMaterials";
 import { palette, resetPaletteCache } from "./palette";
 
 /** Multiply identity for a vertex-colored material (computed, never a hex literal). */
@@ -68,7 +68,9 @@ describe("BodyMaterialSet edge materials", () => {
 
     for (const m of [edge, edgeWire]) {
       expect(m).toBeInstanceOf(LineMaterial);
-      expect(m.linewidth).toBe(BODY_EDGE_WIDTH);
+      // CSS px, unscaled — the width is DPR-independent (screenLineStyle.ts).
+      expect(m.linewidth).toBe(BODY_EDGE_WIDTH_CSS);
+      expect(m.linewidth).toBe(1.25);
       expect(m.toneMapped).toBe(false);
       // NOT transparent: body edges belong in the opaque pass, where they still
       // depth-sort against the bodies they outline.

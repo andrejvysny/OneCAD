@@ -16,7 +16,12 @@ import type { CadClient } from "@/ipc/client";
 import type { PromotePick, PromotedElement } from "@/ipc/types";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore } from "@/stores/documentStore";
-import { getCurrentMeshPublication, getEntry, type MeshEntry } from "@/viewport/mesh/meshRegistry";
+import {
+  getCurrentMeshPublication,
+  getEntry,
+  isEntryPromotable,
+  type MeshEntry,
+} from "@/viewport/mesh/meshRegistry";
 
 export interface InstalledPickProof {
   entry: MeshEntry;
@@ -43,6 +48,10 @@ export function installedProofIsCurrent(bodyId: string, proof: InstalledPickProo
     && publication.documentId === document.documentId
     && publication.runtimeSession === document.runtimeSession
     && installed === proof.entry
+    // A body whose last replacement failed keeps its old geometry on screen as
+    // stale inspection-only state (spec §9): orbit, fit and tagged measurement
+    // are fine, but a face picked off it must never become an operation target.
+    && isEntryPromotable(proof.entry)
     && proof.entry.bodyId === bodyId
     && proof.entry.provenance?.documentId === publication.documentId
     && proof.entry.provenance.runtimeSession === publication.runtimeSession

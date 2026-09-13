@@ -9,12 +9,15 @@
  * jsdom has no GL, so nothing here renders; what is checked is the scene graph
  * and the material state the renderer would consume.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as THREE from "three";
 import { SectionLayer, sectionPlane, sectionOffsetRange } from "./SectionLayer";
 import { RENDER_ORDER } from "./renderOrder";
 import { palette, resetPaletteCache } from "./palette";
 import type { SectionState } from "@/stores/viewportStore";
+import * as reg from "../mesh/meshRegistry";
+import { parseMeshPayload } from "../mesh/parseMeshPayload";
+import { makeBoxMesh } from "@/ipc/mockMeshes";
 
 const state = (over: Partial<SectionState> = {}): SectionState => ({
   enabled: true,
@@ -361,5 +364,93 @@ describe("SectionLayer cap", () => {
 
     expect(scene.children).not.toContain(layer.object3D);
     expect(disposeSpy).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * WP03 ownership (spec §8.2): a stencil pair draws with the registry's EXACT
+ * geometry object, so it must hold a `"section"` lease for as long as it
+ * exists. Without one, a mesh swap could free the buffers the cap is written
+ * from between the swap and the next reconcile.
+ */
+describe("stencil pairs borrow the registry resource", () => {
+  beforeEach(() => {
+    reg.disposeAll();
+    reg.__resetRegistryForTests();
+  });
+
+  /** A body group whose face mesh draws the REGISTERED entry's geometry. */
+  function registeredBody(id: string): { group: THREE.Group; entry: reg.MeshEntry } {
+    const entry = reg.buildBodyObjects(parseMeshPayload(makeBoxMesh()), id, 1);
+    reg.swap(id, entry);
+    const group = new THREE.Group();
+    group.userData.bodyId = id;
+    const face = new THREE.Mesh(entry.geometry, new THREE.MeshStandardMaterial());
+    face.userData = { bodyId: id, kind: "face" };
+    group.add(face);
+    return { group, entry };
+  }
+
+  it("holds a section lease while the pair exists and releases it on teardown", () => {
+    const bodiesRoot = new THREE.Group();
+    const { group, entry } = registeredBody("body1");
+    bodiesRoot.add(group);
+    const layer = new SectionLayer({
+      root: new THREE.Group(),
+      getBodiesRoot: () => bodiesRoot,
+      getBounds: () => null,
+      invalidate: vi.fn(),
+    });
+
+    layer.setState(state());
+    layer.update();
+
+    expect(layer.stencilCount).toBe(1);
+    expect(reg.openLeases(entry)).toEqual(["section"]);
+
+    layer.dispose();
+    expect(reg.openLeases(entry)).toEqual([]);
+  });
+
+  it("releases the lease when the body leaves the scene while the section is on", () => {
+    const bodiesRoot = new THREE.Group();
+    const { group, entry } = registeredBody("body1");
+    bodiesRoot.add(group);
+    const layer = new SectionLayer({
+      root: new THREE.Group(),
+      getBodiesRoot: () => bodiesRoot,
+      getBounds: () => null,
+      invalidate: vi.fn(),
+    });
+    layer.setState(state());
+    layer.update();
+    expect(reg.openLeases(entry)).toEqual(["section"]);
+
+    bodiesRoot.remove(group);
+    layer.update(); // the per-frame reconcile drops the orphaned pair
+
+    expect(layer.stencilCount).toBe(0);
+    expect(reg.openLeases(entry)).toEqual([]);
+    // Released, never freed here: the registry is the only disposer.
+    expect(entry.resourceState).toBe("installed");
+    layer.dispose();
+  });
+
+  it("caps a body with no registry entry (a preview) without a lease", () => {
+    const bodiesRoot = new THREE.Group();
+    bodiesRoot.add(bodyGroup("preview-1"));
+    const layer = new SectionLayer({
+      root: new THREE.Group(),
+      getBodiesRoot: () => bodiesRoot,
+      getBounds: () => null,
+      invalidate: vi.fn(),
+    });
+
+    layer.setState(state());
+    layer.update();
+
+    expect(layer.stencilCount).toBe(1);
+    expect(reg.registryDebugSnapshot().openLeases).toBe(0);
+    layer.dispose();
   });
 });

@@ -12,13 +12,16 @@
  *
  * Materials come from a BodyMaterialLibrary and are SHARED across every body
  * drawing in the same render mode — a BodyObject owns neither geometry
- * (registry-owned) nor materials (library-owned), so tearing it down is just
- * removing the group from its root. `userData.bodyId`/`kind` let the Picker
- * resolve an intersection back to a body + element.
+ * (registry-owned) nor materials (library-owned). It BORROWS the registry's
+ * exact geometry objects under a lease (VP-HARDENING spec §8.2), so tearing it
+ * down is removing the group from its root AND releasing that lease: until it
+ * is released the registry will not free the buffers this group draws with.
+ * `userData.bodyId`/`kind` let the Picker resolve an intersection back to a
+ * body + element.
  */
 import * as THREE from "three";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
-import type { MeshEntry } from "../mesh/meshRegistry";
+import { acquireLease, onEntryRetired, type MeshEntry, type MeshLease } from "../mesh/meshRegistry";
 import type { BodyMaterialLibrary, BodyMaterialSet } from "./bodyMaterials";
 import {
   DEFAULT_RENDER_MODE,
@@ -27,6 +30,45 @@ import {
   type MaterialKind,
   type RenderModeDef,
 } from "./renderModes";
+
+/**
+ * Live handles, for the DETACHED-BORROWER sweep below.
+ *
+ * The committed-body owner (`meshSync`) removes a group and calls
+ * {@link BodyObjectHandle.dispose} in the same step, which is the intended
+ * path. The EXACT-PREVIEW owner (`ViewportEngine.setPreviewBody` /
+ * `clearPreviewBody`) drops its handles by removing the group only — those
+ * files belong to another work package — and a lease nobody releases would keep
+ * a retired preview resource alive for the whole drag.
+ *
+ * Spec §8.2 says a resource may be freed once it is DETACHED from the display
+ * set and lease-free. Both halves are required here: the sweep releases a
+ * handle only when its OWN resource has already left the installed set AND its
+ * group is out of the scene graph. That leaves the atomic-install PREPARE
+ * window alone — a freshly built handle is unparented for a moment, but its
+ * resource is the newly installed one — and it never runs per frame, only when
+ * something retires.
+ */
+interface LiveBodyHandle {
+  readonly entry: MeshEntry;
+  readonly group: THREE.Group;
+  readonly lease: MeshLease;
+}
+
+const liveHandles = new Set<LiveBodyHandle>();
+let sweepInstalled = false;
+
+function installDetachedSweep(): void {
+  if (sweepInstalled) return;
+  sweepInstalled = true;
+  onEntryRetired(() => {
+    for (const handle of [...liveHandles]) {
+      if (handle.entry.resourceState === "installed" || handle.group.parent) continue;
+      handle.lease.release();
+      liveHandles.delete(handle);
+    }
+  });
+}
 
 /** The edge material a mode's {@link RenderModeDef.edgeStyle} names. */
 function edgeMaterial(set: BodyMaterialSet, def: RenderModeDef) {
@@ -56,6 +98,13 @@ export interface BodyObjectHandle {
    * Independent of {@link setVisible}, which owns the GROUP's flag.
    */
   applyMode(def: RenderModeDef): void;
+  /**
+   * Release the registry lease this handle holds. Call it wherever the group
+   * leaves the scene — replacement, drop, detach. Idempotent. It does NOT
+   * remove the group (`meshSync` owns the scene graph) and it does NOT dispose
+   * geometry: the registry is the unique disposer.
+   */
+  dispose(): void;
 }
 
 /**
@@ -101,9 +150,21 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
     group.add(edges);
   }
 
+  // Taken LAST, once every step that could throw has succeeded: a lease held by
+  // a handle that was never returned to the caller could never be released, and
+  // would keep the resource alive to the leak tripwire.
+  const lease = acquireLease(entry, "body");
+  installDetachedSweep();
+  const live: LiveBodyHandle = { entry, group, lease };
+  liveHandles.add(live);
+
   return {
     bodyId: entry.bodyId,
     group,
+    dispose() {
+      liveHandles.delete(live);
+      lease.release();
+    },
     setVisible(visible: boolean) {
       group.visible = visible;
     },

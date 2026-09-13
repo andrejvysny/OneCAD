@@ -1,0 +1,18 @@
+---
+name: viewport-engine-map
+description: File map and naming conventions for src/viewport/engine and src/viewport/mesh, for fat-line/highlight/section/material investigations
+metadata:
+  type: project
+---
+
+Repo map facts for `src/viewport/` not stated in CLAUDE.md (as of HEAD 65b4c60):
+
+- All fat-line (`LineMaterial`/`Line2`/`LineSegments2`) construction sites: `bodyMaterials.ts:124,129` (body edges), `HighlightLayer.ts:121-122` (hover/sel edge highlight), `SketchObject.ts:456` (single `mk()` factory feeds ALL sketch materials — active/hover/construction/reference/projected/preview/trim-ghost/angle-arc/dim-line), `SketchStaticLayer.ts:224` (baked/committed static curves), `SnapIndicator.ts:493` (snap guides), `OriginTriad.ts:116`. No LineMaterial in `TransformGizmo.ts`, `SectionLayer.ts` (Mesh materials only), or `DatumLayer.ts` (uses plain thin `THREE.LineBasicMaterial` at :188,:347, not fat lines).
+- `dpr.ts` owns `MAX_DPR=2` and `cssToDevice(cssPx, dpr)`; `SketchObject.cssLineWidth` is a `@deprecated` thin wrapper re-exported for non-sketch callers (`HighlightLayer.ts`, `bodyMaterials.ts`, `SketchStaticLayer.ts` all import `cssLineWidth` from `SketchObject`, not from `dpr` directly).
+- `Picker.ts` manually flushes `LineMaterial.resolution` to device px before every raycast (`flushEdgeResolution`) because raycast never triggers `LineSegments2.onBeforeRender`; this is a *different* code path from the render-time resolution.
+- `faceRangeIndex.ts`'s `TopoIndex` has two distinct lookups: `idOf(ordinal)` (ordinal→id, no search) vs `idAt(needle)` (triangle-index→id, binary-searches `ordinalOf` first). `bakeFaceColors` in `faceColors.ts:125` loops `for f in 0..faceCount` (f is an ordinal) and calls `topo.idAt(f)` — likely should be `idOf(f)`; only masked in tests because the one test exercising the `authoredFaceColors` map path (`faceColors.test.ts:156`) uses a single face with one triangle, and the multi-face/multi-tri `coloredBox()` fixture never passes `authoredFaceColors`.
+- `renderer.ts` is the sole `WebGLRenderer`/`WebGPURenderer` construction site; `WEBGL_CONTEXT_ATTRS` (`preserveDrawingBuffer: true`, `stencil: true`) exported for jsdom-safe pinning without a real GL context.
+- `RENDER_ORDER` (single ladder) lives in `renderOrder.ts`; extremely well-commented — read its file header before assuming a z-order bug.
+- `HighlightLayer.ts` "never dispose" rule: face/body overlay geometries share the body's BufferAttributes (never disposed); ONLY edge overlays (`LineSegmentsGeometry`, own `InstancedInterleavedBuffer`) are disposed, in `clearObjects()`. Tested by `HighlightLayer.test.ts` `"disposes an edge overlay's geometry but never a face overlay's"`.
+- `bodyMaterials.ts` `BodyMaterialLibrary.setDimmed()` only iterates the shared `this.sets` map, never `this.assemblySets` (per-body assembly-color materials) — an assembly-colored body's dim state is only applied/restored at creation time (`get`/`getAssemblyColor`, line ~92), not by later `setDimmed(false)` calls. No test calls `setDimmed(false)` after creating an assembly set while dimmed.
+- `three` (0.185.1, pinned exact) `WebGLRenderer.getViewport()` returns the size passed to `setSize`/`setViewport` UNSCALED — i.e. **logical/CSS px**, not device px (`getDrawingBufferSize()` is the device-px one, multiplies by `_pixelRatio`). `LineSegments2.onBeforeRender` (`node_modules/three/examples/jsm/lines/LineSegments2.js:419-430`) unconditionally sets `material.resolution` from `renderer.getViewport()` every render, i.e. to CSS px — this runs at actual `renderer.render()` time, after any app-side manual device-px resolution write, for every `Line2`/`LineSegments2` in the scene.

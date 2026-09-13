@@ -6,3 +6,6 @@
 - [Fillet acceptance gate](fillet-acceptance-gate.md) — 1e-9 section/tangency gate refuses walked blends by ~1e6x; analytic blends measure 1e-16; how to probe it
 - [Supervisor + stub lanes](repo_supervisor_and_stub_lanes.md) — SupervisorConfig/WorkerHead fan-out, GeometryEngine default+forward rule, no tokio `rt` in core, stub's three threads
 - [Native menu lane](native-menu-lane.md) — muda's main-thread panic kills a build() test, predefined items steal OS chords, the duplicate-client emit trap, noRegenWhen
+- [Viewport screen units](viewport-screen-units.md) — fat lines are CSS px (three overwrites resolution from the logical viewport), points scale differently, jsdom matchMedia/clientWidth traps
+- [Viewport frame lifecycle](viewport-frame-lifecycle.md) — consume-before-work, suspended-until-init, tween commit costs a frame, fresh canvas on retry, capability read once
+- [Viewport resource ownership](viewport-resource-ownership.md) — registry leases, ordered retirement, and why three 0.185's attribute dispose frees nothing

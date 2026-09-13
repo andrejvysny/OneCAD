@@ -1,0 +1,1648 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "TEST-LINE-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP01",
+      "implementedIn": [
+        "src/viewport/engine/screenLineStyle.test.ts",
+        "e2e/vph-line-width.spec.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp01-focused/vitest.log",
+      "notes": "U green; G green after WP01 in linear-light phase-averaged measurement: DPR1 1.04, DPR2 1.07 CSS px for 1.25 authored, cross-DPR Δ0.03 (runs/wp03-focused/playwright-probes-after-wp03.log, runs/wp01-focused/playwright-linewidth-linear-*.log); locator outlier and DPR 1.5 / dark / perspective / N owed"
+    },
+    {
+      "id": "TEST-LINE-02",
+      "lanes": [
+        "U",
+        "G",
+        "P"
+      ],
+      "state": "implementing",
+      "workPackage": "WP01",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": "U half exists in ViewportEngine.test.ts (one redraw per DPR event, camera unchanged) but without the ID token; G/P owed"
+    },
+    {
+      "id": "TEST-LINE-03",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP01",
+      "implementedIn": [
+        "src/viewport/engine/Picker.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp01-focused/vitest.log",
+      "notes": "U only; G before/after-first-frame at DPR 2 owed"
+    },
+    {
+      "id": "TEST-LINE-04",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LIFE-01",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP02",
+      "implementedIn": [
+        "src/viewport/engine/FrameScheduler.test.ts",
+        "src/viewport/engine/ViewportEngine.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp02-focused/vitest.log",
+      "notes": "U green after adversarial round 2; G/N lanes owed."
+    },
+    {
+      "id": "TEST-LIFE-02",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP02",
+      "implementedIn": [
+        "src/viewport/engine/ViewportEngine.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp02-focused/vitest.log",
+      "notes": "U green after adversarial round 2; G/N lanes owed."
+    },
+    {
+      "id": "TEST-LIFE-03",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LIFE-04",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP01/WP02",
+      "implementedIn": [
+        "src/viewport/engine/dprWatcher.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp02-focused/vitest.log",
+      "notes": "U: DPR watcher (WP01) + settled-idle zero-rAF after a tween (WP02, ViewportEngine.test.ts) green; G/N owed"
+    },
+    {
+      "id": "TEST-LIFE-05",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP02",
+      "implementedIn": [
+        "src/viewport/engine/ViewportEngine.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp02-focused/vitest.log",
+      "notes": "U green after adversarial round 2; G/N lanes owed."
+    },
+    {
+      "id": "TEST-BACKEND-01",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP02",
+      "implementedIn": [
+        "src/viewport/engine/renderer.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp02-focused/vitest.log",
+      "notes": "U green after adversarial round 2; G/N lanes owed."
+    },
+    {
+      "id": "TEST-BACKEND-02",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-BACKEND-03",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP02",
+      "implementedIn": [
+        "src/viewport/engine/ViewportEngine.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp02-focused/vitest.log",
+      "notes": "U green after adversarial round 2; G/N lanes owed."
+    },
+    {
+      "id": "TEST-RES-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP03",
+      "implementedIn": [
+        "src/viewport/engine/HighlightLayer.test.ts",
+        "e2e/vph-hover-lifecycle.spec.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp03-focused/vitest.log",
+      "notes": "U green: 1,000 alternating face hovers create and dispose no owned geometry after warm-up, source attributes untouched. G lane OWED — e2e/vph-hover-lifecycle.spec.ts still carries test.fail and must be rerun (and its annotation removed) in real Chromium WebGL by the orchestrator; N lane owed. G (real Chromium WebGL, mock backend): geometries 11→13 then flat across 300 hovers (runs/wp03-focused/playwright-probes-after-wp03.log); N owed."
+    },
+    {
+      "id": "TEST-RES-02",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP03",
+      "implementedIn": [
+        "src/viewport/mesh/meshRegistry.test.ts",
+        "src/viewport/engine/HighlightLayer.test.ts",
+        "src/viewport/engine/BodyObject.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp03-focused/vitest.log",
+      "notes": "U green: a whole-body highlight borrows the exact geometry object under one lease; a swapped-out resource is retired, never disposed on the frame it was retired in, never while a lease is open, and disposed exactly one flush after the last release; disposeAll reports the owner tags. G lane owed."
+    },
+    {
+      "id": "TEST-RES-03",
+      "lanes": [
+        "U",
+        "G",
+        "B"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP03",
+      "implementedIn": [
+        "src/viewport/mesh/highlightCache.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp03-focused/vitest.log",
+      "notes": "U green: 64 MiB / 256-entry ceiling, LRU order, pinned never evicted, retireSource drops and disposes, all-pinned over budget degrades with exactly one diagnostic per selection change and keeps the semantic selection. G and B lanes owed (the B lane needs a real over-budget selection on a large model)."
+    },
+    {
+      "id": "TEST-RES-04",
+      "lanes": [
+        "U",
+        "G",
+        "B"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-RES-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP03",
+      "implementedIn": [
+        "src/viewport/mesh/meshSync.test.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp03-focused/vitest.log",
+      "notes": "U part green: 50 document open/close cycles with a real HighlightLayer end at zero registry entries, zero open leases, zero owned overlay bytes and leakTripwireCount 0. The 100 preview apply/cancel cycles and the N lane are OWED — exact-preview handles are built in ViewportEngine.ts (WP02-owned) and are covered here only by the detached-borrower sweep in BodyObject.ts."
+    },
+    {
+      "id": "TEST-MESH-01",
+      "lanes": [
+        "U",
+        "X"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/validateMesh.test.ts",
+        "src/viewport/mesh/meshMutations.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Structure stays parseMeshPayload's job; unknown optional section skipped. Explicit cases plus a seeded 10,000-case mutation sweep (seed 90213, 42 mutators, no counterexample). X lane (cross-track fixtures) owed — TS only."
+    },
+    {
+      "id": "TEST-MESH-02",
+      "lanes": [
+        "U",
+        "X"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/validateMesh.test.ts",
+        "src/viewport/mesh/validateMesh.ts",
+        "src/viewport/mesh/meshMutations.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Validation allocates no typed array while refusing a payload (counted Float32Array/Uint32Array construction). Header bbox is MEASURED not fatal for MESH1 v1 (stale BRepBndLib box); strict enclosure returns in v2 per NUM 9.3/WP10. The preview lanes skip an invalid body via validatePreviewMesh instead of throwing. X lane (cross-track fixtures) owed — TS only."
+    },
+    {
+      "id": "TEST-MESH-03",
+      "lanes": [
+        "U",
+        "X"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/validateMesh.test.ts",
+        "src/viewport/mesh/validateMesh.ts",
+        "src/viewport/mesh/meshMutations.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Zero-length ranges and cross-namespace id reuse accepted; a moved TERMINAL id offset is caught by the parser as bad-length. X lane (cross-track fixtures) owed — TS only."
+    },
+    {
+      "id": "TEST-MESH-04",
+      "lanes": [
+        "U",
+        "X"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/validateMesh.test.ts",
+        "src/viewport/mesh/validateMesh.ts",
+        "src/viewport/mesh/meshAdmission.ts",
+        "src/viewport/mesh/meshMutations.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Checked arithmetic before allocation; peak admission refuses 600 MiB over 600 MiB against the 1024 MiB cap and admits 400 MiB. X lane (cross-track fixtures) owed — TS only."
+    },
+    {
+      "id": "TEST-MESH-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/meshSync.test.ts",
+        "src/viewport/mesh/meshSyncAtomicInstall.test.ts",
+        "src/viewport/mesh/meshSync.ts",
+        "src/viewport/mesh/meshRegistry.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Stale body stays installed and drawn, isEntryPromotable false. Install is atomic: a scene-handle failure leaves the previous entry and scene object whole, and a post-install failure does not demote the new mesh. Picker/promote wiring of isEntryPromotable owed to the orchestrator after WP01."
+    },
+    {
+      "id": "TEST-MESH-06",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PUB-01",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/meshSync.test.ts",
+        "src/viewport/mesh/meshSync.ts",
+        "src/viewport/mesh/meshAdmission.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Reordered completion installs nothing and releases its admission reservation; selection untouched."
+    },
+    {
+      "id": "TEST-PUB-02",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP04",
+      "implementedIn": [
+        "src/viewport/mesh/meshSync.test.ts",
+        "src/viewport/mesh/meshSync.ts"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp04-focused/vitest.log",
+      "notes": "Document/session fence rejects document A's late buffer; registry holds only B and admission totals reflect only B."
+    },
+    {
+      "id": "TEST-PUB-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PUB-04",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-02",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-03",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-04",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-06",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PICK-07",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-APP-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-APP-02",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-APP-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-APP-04",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-APP-05",
+      "lanes": [
+        "W",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-COLOR-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-COLOR-02",
+      "lanes": [
+        "U",
+        "X",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-COLOR-03",
+      "lanes": [
+        "U",
+        "G",
+        "B"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-NORMAL-01",
+      "lanes": [
+        "W",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-NORMAL-02",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-NORMAL-03",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-NORMAL-04",
+      "lanes": [
+        "W",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-NORMAL-05",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-NORMAL-06",
+      "lanes": [
+        "W",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CURVE-01",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green (ctest curve_sampler, full ctest 196/198 with only baseline reds); U (TS port) and N lanes owed. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-CURVE-02",
+      "lanes": [
+        "U",
+        "W"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green; U port owed where the plan lists U. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-CURVE-03",
+      "lanes": [
+        "U",
+        "W"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green; U port owed where the plan lists U. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-CURVE-04",
+      "lanes": [
+        "U",
+        "W"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green; U port owed where the plan lists U. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-CURVE-05",
+      "lanes": [
+        "U",
+        "W"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green; U port owed where the plan lists U. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-CURVE-06",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green; N lane owed. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-CURVE-07",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "focused-pass",
+      "workPackage": "WP08",
+      "implementedIn": [
+        "worker/tests/test_curve_sampler.cpp"
+      ],
+      "evidence": "docs/qa/viewport-hardening/runs/wp08-focused/ctest-round2.log",
+      "notes": "W green; N lane owed. Astra break + followup recorded in docs/design/astra/wp08-curve-sampler-break.md."
+    },
+    {
+      "id": "TEST-SK-01",
+      "lanes": [
+        "U",
+        "G",
+        "B"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-02",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-03",
+      "lanes": [
+        "U",
+        "G",
+        "B"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-04",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-05",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-06",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-07",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SK-08",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-02",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-03",
+      "lanes": [
+        "U",
+        "N",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-04",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-06",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-07",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAM-08",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-01",
+      "lanes": [
+        "U",
+        "N",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-02",
+      "lanes": [
+        "U",
+        "N",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-03",
+      "lanes": [
+        "U",
+        "N",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-04",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-05",
+      "lanes": [
+        "U",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-06",
+      "lanes": [
+        "U",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-07",
+      "lanes": [
+        "U",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-INPUT-08",
+      "lanes": [
+        "N",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PROTO-01",
+      "lanes": [
+        "U",
+        "W",
+        "X"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PROTO-02",
+      "lanes": [
+        "X",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PROTO-03",
+      "lanes": [
+        "X",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PROTO-04",
+      "lanes": [
+        "X",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PROTO-05",
+      "lanes": [
+        "U",
+        "X",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PROTO-06",
+      "lanes": [
+        "U",
+        "X"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREC-01",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREC-02",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREC-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREC-04",
+      "lanes": [
+        "W",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREC-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LOD-01",
+      "lanes": [
+        "U",
+        "N",
+        "B"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LOD-02",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LOD-03",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LOD-04",
+      "lanes": [
+        "U",
+        "N",
+        "B"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-LOD-05",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-EDGE-01",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-EDGE-02",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-EDGE-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-EDGE-04",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-01",
+      "lanes": [
+        "W",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-02",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-03",
+      "lanes": [
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-04",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-06",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-SECTION-07",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREVIEW-01",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREVIEW-02",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREVIEW-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PREVIEW-04",
+      "lanes": [
+        "U",
+        "W",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-BVH-01",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-BVH-02",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-BVH-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-BVH-04",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-BVH-05",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PERF-01",
+      "lanes": [
+        "B",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PERF-02",
+      "lanes": [
+        "B",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PERF-03",
+      "lanes": [
+        "B",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PERF-04",
+      "lanes": [
+        "B",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-PERF-05",
+      "lanes": [
+        "B",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-GRID-01",
+      "lanes": [
+        "U",
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-GRID-02",
+      "lanes": [
+        "U",
+        "G"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-GRID-03",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-GRID-04",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAPTURE-01",
+      "lanes": [
+        "G",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAPTURE-02",
+      "lanes": [
+        "U",
+        "N"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    },
+    {
+      "id": "TEST-CAPTURE-03",
+      "lanes": [
+        "G",
+        "N",
+        "P"
+      ],
+      "state": "not-started",
+      "workPackage": "",
+      "implementedIn": [],
+      "evidence": "",
+      "notes": ""
+    }
+  ]
+}

@@ -23,5 +23,6 @@ down. `docs/ARCHITECTURE.md` states the laws; these records say why.
 | [0012](0012-tree-rows-are-provider-scoped.md) | Tree rows are provider-scoped, and row actions are commands |
 | [0013](0013-sdk-is-a-narrower-surface-than-the-platform.md) | `@onecad/sdk` is a narrower surface than `@/platform` |
 | [0014](0014-render-module-openpbr.md) | Render is its own module, targets the Visualization placeholder, adopts OpenPBR |
+| [0015](0015-viewport-hardening-program.md) | The viewport is hardened in place under the VP-HARDENING 1.0 contract, not rewritten |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.

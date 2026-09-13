@@ -13,7 +13,15 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { buildBodyObject } from "./BodyObject";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import { DEFAULT_RENDER_MODE, RENDER_MODES, vertexColorKind } from "./renderModes";
-import { buildBodyObjects, __resetRegistryForTests, disposeAll } from "../mesh/meshRegistry";
+import {
+  buildBodyObjects,
+  flushDisposals,
+  openLeases,
+  remove,
+  swap,
+  __resetRegistryForTests,
+  disposeAll,
+} from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
 
@@ -195,6 +203,82 @@ describe("buildBodyObject", () => {
     expect([face.userData.bodyId, face.userData.kind]).toEqual(["body1", "face"]);
     expect([edges.userData.bodyId, edges.userData.kind]).toEqual(["body1", "edge"]);
     entry.dispose();
+    library.dispose();
+  });
+});
+
+/*
+ * WP03 ownership (spec §8.2): a body object BORROWS the registry's exact
+ * geometry objects, so it holds a lease for as long as its group is in the
+ * scene — and something must give that borrow back even when the owner drops
+ * the handle without disposing it (the exact-preview path in ViewportEngine,
+ * whose file belongs to another package).
+ */
+describe("TEST-RES-02 — body objects borrow the registry resource", () => {
+  it("draws the registry's exact geometry objects and holds ONE body lease", () => {
+    const { handle, face, edges, entry, library } = handleFor();
+
+    expect(face.geometry).toBe(entry.geometry);
+    expect(edges.geometry).toBe(entry.edgeGeometry);
+    expect(openLeases(entry)).toEqual(["body"]);
+
+    handle.dispose();
+    handle.dispose(); // idempotent
+    expect(openLeases(entry)).toEqual([]);
+    library.dispose();
+  });
+
+  it("holds a retired resource alive until the handle is disposed", () => {
+    const root = new THREE.Group();
+    const { handle, entry, library } = handleFor();
+    swap("body1", entry);
+    root.add(handle.group); // on screen, so only an explicit dispose lets it go
+
+    swap("body1", buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 2));
+    flushDisposals();
+    flushDisposals();
+
+    expect(entry.resourceState).toBe("retired"); // the borrow outranks the clock
+    handle.dispose();
+    flushDisposals();
+    expect(entry.resourceState).toBe("disposed");
+    library.dispose();
+  });
+
+  it("releases the lease of a DETACHED handle nobody disposed", () => {
+    const root = new THREE.Group();
+    const { handle, entry, library } = handleFor();
+    swap("preview", entry);
+    root.add(handle.group);
+
+    // The exact-preview owner retires the resource first…
+    remove("preview");
+    expect(openLeases(entry)).toEqual(["body"]); // still on screen: still borrowed
+
+    // …then drops the handle by removing the group only, with no dispose().
+    root.remove(handle.group);
+    swap("other", buildBodyObjects(parseMeshPayload(makeBoxMesh()), "other", 1));
+    remove("other"); // any later retirement runs the sweep
+
+    expect(openLeases(entry)).toEqual([]);
+    flushDisposals();
+    expect(entry.resourceState).toBe("disposed");
+    library.dispose();
+  });
+
+  it("never sweeps a handle whose own resource is still installed (the PREPARE window)", () => {
+    const root = new THREE.Group();
+    const { handle, entry, library } = handleFor();
+    swap("body1", entry); // this handle's resource is the CURRENT one…
+
+    // …and a retirement lands while the handle is still unparented, exactly as
+    // meshSync's atomic install does between PREPARE and PUBLISH.
+    swap("other", buildBodyObjects(parseMeshPayload(makeBoxMesh()), "other", 1));
+    remove("other");
+
+    expect(openLeases(entry)).toEqual(["body"]);
+    root.add(handle.group);
+    handle.dispose();
     library.dispose();
   });
 });

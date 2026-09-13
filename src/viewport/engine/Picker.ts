@@ -8,11 +8,13 @@
  * edge lying on a face surface is selectable, while an occluded edge is not.
  *
  * Body edges are LineSegments2 (P3), whose raycast is SCREEN-SPACE: the hit
- * radius is `(material.linewidth + params.Line2.threshold) / 2` in the DEVICE px
- * `material.resolution` is expressed in. Two consequences this class owns:
+ * radius is `(material.linewidth + params.Line2.threshold) / 2` in the CSS
+ * (logical) px `material.resolution` is expressed in — see `screenLineStyle.ts`
+ * for why that unit is fixed by the installed addon. Two consequences this
+ * class owns:
  *   - the threshold is derived from the drawn edge width so the effective radius
- *     lands on EDGE_PICK_PX CSS px regardless of the line's weight or the dpr
- *     (see {@link line2PickThreshold}), and
+ *     lands on EDGE_PICK_CSS_PX regardless of the line's weight, with no dpr
+ *     term on either side (see {@link line2PickThresholdCss}), and
  *   - `material.resolution` is flushed before every raycast, because a raycast
  *     that happens before the first render would otherwise see (0,0) and return
  *     silently — no hits, no error.
@@ -28,9 +30,10 @@ import * as THREE from "three";
 import type { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import { getEntry } from "../mesh/meshRegistry";
-import { BODY_EDGE_WIDTH } from "./bodyMaterials";
-import { MAX_DPR } from "./SketchObject";
+import { BODY_EDGE_WIDTH_CSS } from "./bodyMaterials";
+import { line2PickThresholdCss, setLineResolutionCss } from "./screenLineStyle";
 import { isInteractiveBoundary } from "@/ui/interactiveBoundary";
+import { beginPick } from "../vph/instrumentation";
 
 export interface PickHit {
   bodyId: string;
@@ -65,7 +68,8 @@ export interface PickModifiers {
   alt: boolean;
 }
 
-const EDGE_PICK_PX = 6;
+/** Edge acquisition radius, in CSS px. Never scaled by the device ratio. */
+const EDGE_PICK_CSS_PX = 6;
 const DRAG_PX = 4; // pointer travel over this ⇒ a drag, not a click
 
 // ── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -75,7 +79,7 @@ export function linePickThreshold(
   camera: THREE.Camera,
   viewportHeight: number,
   focusDistance: number,
-  px = EDGE_PICK_PX,
+  px = EDGE_PICK_CSS_PX,
 ): number {
   const h = Math.max(viewportHeight, 1);
   if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
@@ -86,29 +90,6 @@ export function linePickThreshold(
   const oc = camera as THREE.OrthographicCamera;
   const worldPerPx = (oc.top - oc.bottom) / h;
   return px * worldPerPx;
-}
-
-/**
- * `raycaster.params.Line2.threshold` that makes a LineSegments2 pick radius
- * exactly `px` CSS pixels.
- *
- * LineSegments2 tests `distance < (material.linewidth + threshold) / 2` in
- * device px, so the drawn width has to be SUBTRACTED out — otherwise a fatter
- * edge would silently pick wider than a thin one. Clamped at 0: a line drawn
- * wider than the tolerance already picks at its own half-width, and a negative
- * threshold would be read as `0` by three anyway (`threshold || 0`).
- */
-export function line2PickThreshold(
-  dpr: number,
-  edgeWidthDevice: number,
-  px = EDGE_PICK_PX,
-): number {
-  return Math.max(0, 2 * px * dpr - edgeWidthDevice);
-}
-
-/** The renderer's capped device-pixel ratio — the units fat-line widths use. */
-function cappedDpr(): number {
-  return Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, MAX_DPR);
 }
 
 /**
@@ -235,12 +216,12 @@ export interface PickerDeps {
   getViewportHeight: () => number;
   getFocusDistance: () => number;
   /**
-   * Drawing-buffer size in DEVICE px (canvas CSS size × capped dpr) — the units
-   * a fat line's `material.resolution` is expressed in. Injected rather than
-   * read off the renderer so the resolution self-flush below is testable in
-   * jsdom, where nothing ever renders.
+   * Viewport size in CSS (logical) px — the units a fat line's
+   * `material.resolution` is expressed in, and the same numbers the addon
+   * writes at draw time. Injected rather than read off the renderer so the
+   * resolution self-flush below is testable in jsdom, where nothing renders.
    */
-  getResolution: () => { w: number; h: number };
+  getResolutionCss: () => { w: number; h: number };
   invalidate: () => void;
   /**
    * Live section-view clipping planes, or null when the section is off. Injected
@@ -460,6 +441,20 @@ export class Picker {
   } | null {
     const rect = this.deps.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
+    const endPick = beginPick();
+    try {
+      return this.raycastAllTimed(clientX, clientY, includeEdges, rect);
+    } finally {
+      endPick();
+    }
+  }
+
+  private raycastAllTimed(
+    clientX: number,
+    clientY: number,
+    includeEdges: boolean,
+    rect: DOMRect,
+  ): { faceHits: THREE.Intersection[]; edgeHits: THREE.Intersection[]; threshold: number } {
     const ndc = new THREE.Vector2(
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -(((clientY - rect.top) / rect.height) * 2 - 1),
@@ -472,9 +467,10 @@ export class Picker {
       this.deps.getFocusDistance(),
     );
     this.raycaster.params.Line = { threshold };
-    // Screen-space tolerance for the fat edge lines (see line2PickThreshold).
+    // Screen-space tolerance for the fat edge lines, in the SAME CSS px the
+    // width and the resolution use (see line2PickThresholdCss).
     this.raycaster.params.Line2 = {
-      threshold: line2PickThreshold(cappedDpr(), BODY_EDGE_WIDTH),
+      threshold: line2PickThresholdCss(EDGE_PICK_CSS_PX, BODY_EDGE_WIDTH_CSS),
     };
 
     const faceObjects: THREE.Object3D[] = [];
@@ -502,12 +498,13 @@ export class Picker {
   }
 
   /**
-   * Push the current drawing-buffer size into every gathered edge material.
+   * Push the current CSS viewport size into every gathered edge material.
    *
-   * `LineSegments2.onBeforeRender` keeps `resolution` current for DRAWING, but
-   * its raycast bails out silently when `resolution` is still (0,0) — which is
-   * exactly the state of a body whose first frame has not rendered yet (a
-   * pick on pointerdown can arrive first). Mirrors
+   * `LineSegments2.onBeforeRender` keeps `resolution` current for DRAWING — and
+   * overwrites whatever is here with `renderer.getViewport()`, i.e. the LOGICAL
+   * size, which is exactly what this writes. But its raycast bails out silently
+   * when `resolution` is still (0,0) — the state of a body whose first frame has
+   * not rendered yet (a pick on pointerdown can arrive first). Mirrors
    * `SketchStaticLayer.hitTest`'s matrixWorld self-flush: a hit-test must not
    * depend on a render having happened.
    *
@@ -516,12 +513,12 @@ export class Picker {
    */
   private flushEdgeResolution(edgeObjects: readonly THREE.Object3D[]): void {
     if (edgeObjects.length === 0) return;
-    const { w, h } = this.deps.getResolution();
+    const { w, h } = this.deps.getResolutionCss();
     const seen = new Set<LineMaterial>();
     for (const o of edgeObjects) {
       const mat = (o as THREE.Mesh).material as LineMaterial | undefined;
       if (!mat?.resolution || seen.has(mat)) continue;
-      mat.resolution.set(w, h);
+      setLineResolutionCss(mat, w, h);
       seen.add(mat);
     }
   }

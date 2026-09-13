@@ -35,6 +35,7 @@
 import * as THREE from "three";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
+import { acquireLease, getEntry, type MeshLease } from "../mesh/meshRegistry";
 import type { SectionPlaneId, SectionState } from "@/stores/viewportStore";
 
 /**
@@ -98,6 +99,12 @@ export function sectionOffsetRange(
 interface StencilPair {
   back: THREE.Mesh;
   front: THREE.Mesh;
+  /**
+   * The borrow on the registry resource both meshes draw with (spec §8.2).
+   * Null for a face mesh with no registry entry — preview and ghost bodies are
+   * built outside the registry and own their own geometry.
+   */
+  lease: MeshLease | null;
 }
 
 export interface SectionLayerDeps {
@@ -333,8 +340,16 @@ export class SectionLayer {
     }
   }
 
-  /** Two meshes over `mesh`'s geometry — SHARED, never cloned, never disposed here. */
+  /**
+   * Two meshes over `mesh`'s geometry — the EXACT registry object, shared,
+   * never cloned, never disposed here, and held under a `"section"` lease for
+   * as long as the pair exists (spec §8.2). The body id comes off the face
+   * mesh's `userData`, which `BodyObject` stamps.
+   */
   private createPair(mesh: THREE.Mesh): StencilPair {
+    const bodyId = mesh.userData.bodyId;
+    const entry = typeof bodyId === "string" ? getEntry(bodyId) : undefined;
+    const lease = entry ? acquireLease(entry, "section") : null;
     const make = (material: THREE.Material, order: number): THREE.Mesh => {
       const m = new THREE.Mesh(mesh.geometry, material);
       m.renderOrder = order;
@@ -346,13 +361,15 @@ export class SectionLayer {
     return {
       back: make(this.backMat, RENDER_ORDER.SECTION_STENCIL_BACK),
       front: make(this.frontMat, RENDER_ORDER.SECTION_STENCIL_FRONT),
+      lease,
     };
   }
 
   private disposePair(pair: StencilPair): void {
     // Geometry belongs to the mesh registry and the materials to this layer —
-    // removing the objects is the whole teardown.
+    // removing the objects and giving the borrow back is the whole teardown.
     this.object3D.remove(pair.back, pair.front);
+    pair.lease?.release();
   }
 
   private clearStencils(): void {

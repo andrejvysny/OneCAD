@@ -1,14 +1,18 @@
 /*
- * dpr — the ONE device-pixel-ratio cap and its CSS→device conversion (SNAP P4).
+ * dpr — the ONE renderer pixel-ratio cap, and nothing else.
  *
- * Fat lines (`LineMaterial`) measure `linewidth` in DEVICE pixels, in the same
- * units as the `resolution` uniform. Two things therefore have to agree: the
- * cap the renderer's `setPixelRatio` uses, and the cap a width conversion uses.
- * They used to be two constants in two files kept "in step by hand", and the
- * width was computed ONCE at module evaluation — so a window dragged to a
- * different-DPR display kept the old width forever.
+ * This module used to also own a CSS→device width conversion, on the belief
+ * that a fat line's `linewidth` is measured in DEVICE pixels. It is not: the
+ * installed `LineSegments2.onBeforeRender` overwrites `resolution` from
+ * `renderer.getViewport()`, which is LOGICAL pixels, so a device-pixel width
+ * draws `dpr` times too wide (finding R01). Screen-space line widths, their
+ * `resolution`, and every screen-space pick radius are CSS pixels and are never
+ * multiplied by the ratio — that contract, with its citations into
+ * `node_modules/three`, lives in `screenLineStyle.ts`.
  *
- * Both problems are the same problem: nobody owned the number. This module does.
+ * What is left here is genuinely per-device: the ratio the DRAWING BUFFER is
+ * allocated at. `ViewportMetrics` is the snapshot that carries it; a display
+ * change with no CSS resize reaches the engine through `dprWatcher.ts`.
  */
 
 /**
@@ -17,19 +21,19 @@
  */
 export const MAX_DPR = 2;
 
-/** The current capped device pixel ratio (1 outside a browser). */
+/**
+ * The current CAPPED device pixel ratio (1 outside a browser).
+ *
+ * This is the buffer-allocation ratio — `renderer.setPixelRatio`'s argument and
+ * `ViewportMetrics.dpr`. It is NOT a multiplier for any width, radius, or
+ * resolution.
+ */
 export function currentDpr(): number {
   const raw = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   return Math.min(raw, MAX_DPR);
 }
 
-/**
- * CSS px → device px for a fat-line `linewidth`.
- *
- * Takes the ratio EXPLICITLY so the caller can recompute on a DPR change
- * instead of baking one value in at import time. Omitting it reads the live
- * value, which is right for a one-off call and wrong for a module constant.
- */
-export function cssToDevice(cssPx: number, dpr: number = currentDpr()): number {
-  return cssPx * dpr;
+/** The RAW, uncapped `window.devicePixelRatio` (1 outside a browser). */
+export function rawDpr(): number {
+  return typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
 }

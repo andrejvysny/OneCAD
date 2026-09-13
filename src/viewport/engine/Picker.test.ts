@@ -11,14 +11,14 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import {
   Picker,
   linePickThreshold,
-  line2PickThreshold,
   choosePreferredHit,
   firstUnclippedHit,
   secondaryHitWins,
   resolvePick,
   pickKey,
 } from "./Picker";
-import { BODY_EDGE_WIDTH } from "./bodyMaterials";
+import { BODY_EDGE_WIDTH_CSS } from "./bodyMaterials";
+import { line2PickThresholdCss } from "./screenLineStyle";
 import {
   buildBodyObjects,
   swap,
@@ -71,27 +71,6 @@ describe("linePickThreshold", () => {
     const cam = new THREE.OrthographicCamera(-100, 100, 50, -50, 0.1, 1000); // height 100
     // 6px of 600px viewport over a 100-unit frustum = 1 world unit.
     expect(linePickThreshold(cam, 600, 260, 6)).toBeCloseTo(1, 5);
-  });
-});
-
-/*
- * LineSegments2 tests `dist < (linewidth + threshold) / 2` in DEVICE px, so the
- * threshold has to cancel the drawn width out — otherwise the pick tolerance
- * would silently change whenever the edge weight or the display's dpr did.
- */
-describe("line2PickThreshold", () => {
-  /** What three will actually use as the hit radius, in device px. */
-  const radius = (dpr: number, width: number, px?: number) =>
-    (width + line2PickThreshold(dpr, width, px)) / 2;
-
-  it("yields a hit radius of exactly `px` CSS pixels, whatever the line width", () => {
-    expect(radius(1, 1.5, 6)).toBe(6); // 6 CSS px at dpr 1 = 6 device px
-    expect(radius(1, 4, 6)).toBe(6); // a fatter line does not pick wider
-    expect(radius(2, 3, 6)).toBe(12); // 6 CSS px at dpr 2 = 12 device px
-  });
-
-  it("clamps at zero — a line drawn wider than the tolerance picks at its own width", () => {
-    expect(line2PickThreshold(1, 40, 6)).toBe(0);
   });
 });
 
@@ -278,10 +257,10 @@ describe("Picker → real LineSegments2 raycast", () => {
     return cam;
   }
 
-  function harness(resolution: { w: number; h: number }) {
+  function harness(resolutionCss: { w: number; h: number }) {
     const entry = boxEntry();
     swap("body1", entry);
-    const material = new LineMaterial({ linewidth: BODY_EDGE_WIDTH });
+    const material = new LineMaterial({ linewidth: BODY_EDGE_WIDTH_CSS });
     const line = new LineSegments2(entry.edgeGeometry!, material);
     line.userData = { bodyId: "body1", kind: "edge" };
     line.updateMatrixWorld(true);
@@ -302,18 +281,27 @@ describe("Picker → real LineSegments2 raycast", () => {
       getRoot: () => root,
       getViewportHeight: () => VIEW.h,
       getFocusDistance: () => 400,
-      getResolution: () => resolution,
+      getResolutionCss: () => resolutionCss,
       invalidate: vi.fn(),
       isActive: () => true,
       onHover: vi.fn(),
       onPick: vi.fn(),
     });
     // Pointer at the canvas center ⇒ NDC (0,0) ⇒ the ray through `target`.
-    return { picker, material, probe: () => picker.probe(VIEW.w / 2, VIEW.h / 2) };
+    // `probeOffset(dx)` walks the pointer dx CSS px to the right of the edge:
+    // the camera's right vector is horizontal (world up is +Z), so the edge —
+    // which runs along world Z — projects EXACTLY vertical and dx is the
+    // perpendicular screen distance.
+    return {
+      picker,
+      material,
+      probe: () => picker.probe(VIEW.w / 2, VIEW.h / 2),
+      probeOffset: (dx: number) => picker.probe(VIEW.w / 2 + dx, VIEW.h / 2),
+    };
   }
 
   it("resolves the edge under the pointer to its own TopoKey", () => {
-    const { picker, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+    const { picker, probe } = harness(VIEW);
     const hit = probe();
     expect(hit).not.toBeNull();
     expect(hit!.kind).toBe("edge");
@@ -326,7 +314,7 @@ describe("Picker → real LineSegments2 raycast", () => {
   });
 
   it("enumeration keeps the existing edge-preferred probe first", () => {
-    const { picker, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+    const { picker, probe } = harness(VIEW);
     const preferred = probe();
     const candidates = picker.probeCandidates(VIEW.w / 2, VIEW.h / 2);
     expect(candidates[0]).toMatchObject({
@@ -339,11 +327,14 @@ describe("Picker → real LineSegments2 raycast", () => {
     picker.dispose();
   });
 
-  it("flushes the drawing-buffer resolution into the shared edge material", () => {
-    const { picker, material, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+  it("flushes the LOGICAL (CSS) viewport resolution into the shared edge material", () => {
+    // Not the drawing buffer: `LineSegments2.onBeforeRender` overwrites this
+    // from `renderer.getViewport()`, which `WebGLRenderer.setSize` stores
+    // UNSCALED. A device-px flush would disagree with every rendered frame.
+    const { picker, material, probe } = harness(VIEW);
     expect(material.resolution.x).toBe(0); // nothing has rendered
     probe();
-    expect([material.resolution.x, material.resolution.y]).toEqual([1600, 1200]);
+    expect([material.resolution.x, material.resolution.y]).toEqual([VIEW.w, VIEW.h]);
     picker.dispose();
   });
 
@@ -353,6 +344,71 @@ describe("Picker → real LineSegments2 raycast", () => {
     const { picker, probe } = harness({ w: 0, h: 0 });
     expect(probe()).toBeNull();
     picker.dispose();
+  });
+
+  /*
+   * TEST-LINE-03 — the edge acquisition radius is 6 CSS px, at every DPR, and
+   * before as well as after the first rendered frame.
+   *
+   * The hit radius three actually uses is `(linewidth + threshold) / 2` in the
+   * units `material.resolution` carries. With CSS px on both sides that is
+   * `(1.25 + line2PickThresholdCss(6, 1.25)) / 2` = 6 CSS px exactly, and the
+   * device pixel ratio appears nowhere in the expression. The two DPR cases
+   * below therefore have to produce the SAME boundary — that is the assertion.
+   */
+  describe("TEST-LINE-03 acquisition radius", () => {
+    /** The largest offset that still acquires, bisected to 1/64 CSS px. */
+    function acquisitionBoundary(probeOffset: (dx: number) => unknown): number {
+      let hit = 0;
+      let miss = 24;
+      while (miss - hit > 1 / 64) {
+        const mid = (hit + miss) / 2;
+        if (probeOffset(mid)) hit = mid;
+        else miss = mid;
+      }
+      return (hit + miss) / 2;
+    }
+
+    it("is 6 CSS px whatever window.devicePixelRatio says", () => {
+      // Sanity: the threshold the Picker installs really does make the radius 6.
+      expect((BODY_EDGE_WIDTH_CSS + line2PickThresholdCss(6, BODY_EDGE_WIDTH_CSS)) / 2).toBe(6);
+
+      const boundaries: number[] = [];
+      for (const dpr of [1, 2]) {
+        vi.stubGlobal("devicePixelRatio", dpr);
+        const { picker, material, probeOffset } = harness(VIEW);
+
+        // BEFORE any frame: resolution is still (0,0) and the Picker's own
+        // flush is the only thing that makes the raycast resolve at all.
+        expect(material.resolution.x).toBe(0);
+        const before = acquisitionBoundary(probeOffset);
+
+        // AFTER a frame: `onBeforeRender` has written the logical viewport,
+        // which is the same pair of numbers the flush writes.
+        material.resolution.set(VIEW.w, VIEW.h);
+        const after = acquisitionBoundary(probeOffset);
+
+        expect(after).toBeCloseTo(before, 6);
+        expect(before).toBeCloseTo(6, 1);
+        boundaries.push(before);
+        picker.dispose();
+        disposeAll();
+        __resetRegistryForTests();
+        vi.unstubAllGlobals();
+      }
+      expect(boundaries[1]).toBeCloseTo(boundaries[0], 6);
+    });
+
+    it("moves when a DEVICE-px resolution is flushed — the R01 non-vacuity guard", () => {
+      // Feed the old (drawing-buffer) numbers. The raycast maps the pointer's
+      // NDC offset into RESOLUTION pixels, so a 2x resolution halves the
+      // acquisition radius measured in the CSS pixels the pointer moves in:
+      // 6 / DPR = 3, not 6. Proof the CSS units above are load bearing and not
+      // an accident of the fixture.
+      const { picker, probeOffset } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+      expect(acquisitionBoundary(probeOffset)).toBeCloseTo(6 / DPR, 1);
+      picker.dispose();
+    });
   });
 });
 
@@ -432,7 +488,7 @@ describe("Picker under a section cut — clicking through selects the interior",
       getRoot: () => root,
       getViewportHeight: () => VIEW.h,
       getFocusDistance: () => 400,
-      getResolution: () => ({ w: VIEW.w, h: VIEW.h }),
+      getResolutionCss: () => ({ w: VIEW.w, h: VIEW.h }),
       invalidate: vi.fn(),
       getClippingPlanes: () => planes,
       isActive: () => true,
@@ -507,7 +563,7 @@ describe("Picker overlap enumeration", () => {
       getRoot: () => root,
       getViewportHeight: () => VIEW.h,
       getFocusDistance: () => 400,
-      getResolution: () => VIEW,
+      getResolutionCss: () => VIEW,
       getClippingPlanes: () => options.clipped
         ? [new THREE.Plane(new THREE.Vector3(0, 0, -1), -20)]
         : null,

@@ -8,6 +8,8 @@ import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeome
 import * as reg from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
 import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
+import { readViewportCounters, resetViewportCounters } from "../vph/instrumentation";
 
 /** Stand-in authored STEP colors (sRGB 0–255) for the colored-body cases. */
 const RED: FaceColor = [214, 74, 62, 255];
@@ -207,5 +209,159 @@ describe("disposeAll leak tripwire", () => {
     expect(reg.leakTripwireCount).toBe(before); // no leak detected
     expect(err).not.toHaveBeenCalled();
     err.mockRestore();
+  });
+});
+
+/*
+ * WP03 ownership (spec §8.2). The registry is the UNIQUE disposer, and
+ * retirement is ordered against the frame loop: nothing is freed inside the
+ * frame it was retired in, and nothing is freed while a borrower holds it.
+ */
+describe("TEST-RES-02 — leases and ordered retirement", () => {
+  it("carries a full resource identity on every entry", () => {
+    const entry = box(1);
+    expect(entry.identity.bodyId).toBe("body1");
+    expect(entry.identity.geometryRevision).toBe(1);
+    expect(entry.identity.topologySignature).toMatch(/^[0-9a-f]{16}$/);
+    expect(entry.resourceState).toBe("installed");
+    entry.dispose();
+  });
+
+  it("does not dispose a swapped-out entry on the frame it was swapped", () => {
+    const first = box(1);
+    reg.swap("body1", first);
+    const spy = vi.spyOn(first, "dispose");
+
+    reg.swap("body1", box(2));
+
+    // Retired immediately, freed later: a draw call already recorded for this
+    // frame may still name it.
+    expect(first.resourceState).toBe("retired");
+    expect(spy).not.toHaveBeenCalled();
+
+    reg.flushDisposals(); // the frame ends
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(first.resourceState).toBe("disposed");
+  });
+
+  it("keeps a retired entry alive while a highlight lease is open", () => {
+    const first = box(1);
+    reg.swap("body1", first);
+    const lease = reg.acquireLease(first, "highlight:body");
+    const spy = vi.spyOn(first, "dispose");
+
+    reg.swap("body1", box(2));
+    expect(first.resourceState).toBe("retired");
+    expect(reg.openLeases(first)).toEqual(["highlight:body"]);
+
+    // Any number of frames may pass; the borrow is what holds it.
+    reg.flushDisposals();
+    reg.flushDisposals();
+    expect(spy).not.toHaveBeenCalled();
+    expect(first.geometry.getAttribute("position").array).toBe(first.view.positions);
+
+    lease.release();
+    expect(reg.openLeases(first)).toEqual([]);
+    // Released mid-frame ⇒ freed at the NEXT boundary, not this one.
+    expect(spy).not.toHaveBeenCalled();
+
+    reg.flushDisposals();
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("release is idempotent and counts per owner", () => {
+    const entry = box(1);
+    const a = reg.acquireLease(entry, "body");
+    const b = reg.acquireLease(entry, "section");
+    const c = reg.acquireLease(entry, "section");
+    expect([...reg.openLeases(entry)].sort()).toEqual(["body", "section", "section"]);
+
+    b.release();
+    b.release(); // no double decrement
+    expect([...reg.openLeases(entry)].sort()).toEqual(["body", "section"]);
+
+    a.release();
+    c.release();
+    expect(reg.openLeases(entry)).toEqual([]);
+    entry.dispose();
+  });
+
+  it("reports the OWNER TAGS when disposeAll finds an undetached borrower", () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const entry = box(1);
+    reg.swap("body1", entry);
+    reg.acquireLease(entry, "section"); // never released — the leak
+    const before = reg.leakTripwireCount;
+
+    reg.disposeAll();
+
+    expect(reg.leakTripwireCount).toBe(before + 1);
+    const errors = logSnapshot().filter((e) => e.level === "error");
+    expect(errors.map((e) => e.msg)).toContain("mesh resource disposed with OPEN leases");
+    expect(errors[0].ctx).toMatchObject({ bodyId: "body1", owners: ["section"] });
+    expect(entry.resourceState).toBe("disposed");
+    __resetLogForTests({ enabled: false });
+  });
+
+  it("a clean close leaves no open leases and no tripwire", () => {
+    const entry = box(1);
+    reg.swap("body1", entry);
+    const lease = reg.acquireLease(entry, "body");
+    const before = reg.leakTripwireCount;
+
+    lease.release();
+    reg.disposeAll();
+
+    expect(reg.leakTripwireCount).toBe(before);
+    expect(reg.registryDebugSnapshot()).toMatchObject({
+      openLeases: 0,
+      installed: [],
+      retired: [],
+    });
+  });
+
+  it("a lease on an already-disposed entry is refused, once, with a live bail-out", () => {
+    __resetLogForTests({ enabled: true, console: false });
+    const entry = box(1);
+    entry.dispose();
+
+    const first = reg.acquireLease(entry, "body");
+    const second = reg.acquireLease(entry, "highlight:body");
+
+    expect(first.entry.resourceState).toBe("disposed");
+    expect(second.entry.resourceState).toBe("disposed");
+    expect(reg.openLeases(entry)).toEqual([]);
+    expect(
+      logSnapshot().filter((e) => e.msg === "lease acquired on a DISPOSED mesh resource"),
+    ).toHaveLength(1);
+    __resetLogForTests({ enabled: false });
+  });
+
+  it("reports open leases and cache occupancy to the viewport counters", () => {
+    resetViewportCounters();
+    const entry = box(1);
+    const a = reg.acquireLease(entry, "body");
+    const b = reg.acquireLease(entry, "section");
+    expect(readViewportCounters().leasesOpen).toBe(2);
+
+    a.release();
+    b.release();
+    expect(readViewportCounters().leasesOpen).toBe(0);
+    entry.dispose();
+  });
+
+  it("remove retires rather than freeing, and notifies retirement listeners", () => {
+    const entry = box(1);
+    reg.swap("body1", entry);
+    const seen: string[] = [];
+    const off = reg.onEntryRetired((e) => seen.push(e.bodyId));
+
+    reg.remove("body1");
+
+    expect(seen).toEqual(["body1"]);
+    expect(entry.resourceState).toBe("retired");
+    reg.flushDisposals();
+    expect(entry.resourceState).toBe("disposed");
+    off();
   });
 });

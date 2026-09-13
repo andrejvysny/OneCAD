@@ -43,9 +43,9 @@ describe("OriginTriad", () => {
     const triad = makeTriad();
     const height = 800;
 
-    triad.update(perspAt(50), 1000, height, 1);
+    triad.update(perspAt(50), 1000, height);
     const near = screenLength(triad, perspAt(50), height);
-    triad.update(perspAt(5000), 1000, height, 1);
+    triad.update(perspAt(5000), 1000, height);
     const far = screenLength(triad, perspAt(5000), height);
 
     expect(near).toBeCloseTo(far, 3);
@@ -57,15 +57,15 @@ describe("OriginTriad", () => {
 
   it("scales world length linearly with camera depth — no decade jumps", () => {
     const triad = makeTriad();
-    triad.update(perspAt(100), 1000, 800, 1);
+    triad.update(perspAt(100), 1000, 800);
     const at100 = triad.legLength;
-    triad.update(perspAt(200), 1000, 800, 1);
+    triad.update(perspAt(200), 1000, 800);
     const at200 = triad.legLength;
     // A 1/5/10 step would snap both to the same value; a linear scale doubles.
     expect(at200 / at100).toBeCloseTo(2, 6);
 
     // Smooth in the small: a 1% dolly moves the length ~1%, never 0 or 10x.
-    triad.update(perspAt(101), 1000, 800, 1);
+    triad.update(perspAt(101), 1000, 800);
     expect(triad.legLength / at100).toBeCloseTo(1.01, 6);
 
     triad.dispose();
@@ -81,9 +81,9 @@ describe("OriginTriad", () => {
     panned.lookAt(400, 0, 0);
     panned.updateMatrixWorld(true);
 
-    triad.update(straight, 1000, 800, 1);
+    triad.update(straight, 1000, 800);
     const a = triad.legLength;
-    triad.update(panned, 1000, 800, 1);
+    triad.update(panned, 1000, 800);
     expect(triad.legLength).toBeCloseTo(a, 6);
 
     triad.dispose();
@@ -96,27 +96,31 @@ describe("OriginTriad", () => {
     ortho.lookAt(0, 0, 0);
     ortho.updateMatrixWorld(true);
 
-    triad.update(ortho, 1000, 600, 1);
+    triad.update(ortho, 1000, 600);
     // (top - bottom) / height = 300/600 = 0.5 world units per px.
     expect(triad.legLength).toBeCloseTo(0.5 * 110, 6);
 
     // Ortho has no perspective falloff — dollying must not resize the triad.
     ortho.position.set(0, 0, 5000);
     ortho.updateMatrixWorld(true);
-    triad.update(ortho, 1000, 600, 1);
+    triad.update(ortho, 1000, 600);
     expect(triad.legLength).toBeCloseTo(0.5 * 110, 6);
 
     triad.dispose();
   });
 
-  it("tracks the fat-line resolution in device pixels", () => {
+  it("tracks the fat-line resolution in CSS (logical) pixels", () => {
+    // The addon overwrites `resolution` from `renderer.getViewport()` at draw
+    // time, and that is the UNSCALED size — so writing device px here would
+    // disagree with every rendered frame (screenLineStyle.ts).
     const triad = makeTriad();
-    triad.update(perspAt(250), 800, 600, 2);
+    triad.update(perspAt(250), 800, 600);
     const seg = triad.object3D.children[0] as LineSegments2;
     const mat = seg.material as { resolution: THREE.Vector2; linewidth: number };
-    expect(mat.resolution.x).toBe(1600);
-    expect(mat.resolution.y).toBe(1200);
-    expect(mat.linewidth).toBeGreaterThan(1);
+    expect(mat.resolution.x).toBe(800);
+    expect(mat.resolution.y).toBe(600);
+    // A CSS width, unscaled: the same number on a 1x and a 2x display.
+    expect(mat.linewidth).toBe(2);
     triad.dispose();
   });
 
@@ -143,9 +147,9 @@ describe("OriginTriad", () => {
 
   it("reuses one geometry across updates instead of rebuilding per frame", () => {
     const triad = makeTriad();
-    triad.update(perspAt(250), 1000, 800, 1);
+    triad.update(perspAt(250), 1000, 800);
     const seg1 = triad.object3D.children[0];
-    triad.update(perspAt(900), 1000, 800, 1);
+    triad.update(perspAt(900), 1000, 800);
     expect(triad.object3D.children[0]).toBe(seg1);
     expect(triad.object3D.children.length).toBe(1);
     triad.dispose();
@@ -182,7 +186,7 @@ describe("OriginTriad", () => {
   it("moves each label to just past its own leg's tip on update", () => {
     const overlay = fakeOverlay();
     const triad = makeTriad(overlay);
-    triad.update(perspAt(50), 1000, 800, 1);
+    triad.update(perspAt(50), 1000, 800);
     const reach = triad.legLength * 1.12;
 
     const posFor = (id: string) => {
@@ -209,7 +213,7 @@ describe("OriginTriad", () => {
     // perspAt(50) sits ON the +Z axis looking at the origin — the Z leg
     // projects to (near) zero screen length, its label lands back on the
     // origin, and the X/Y legs stay fully visible cross-hairs.
-    triad.update(perspAt(50), 1000, 800, 1);
+    triad.update(perspAt(50), 1000, 800);
     const displayFor = (letter: string) =>
       Array.from(overlayEl.children).find((el) => el.textContent === letter)?.getAttribute("style") ??
       "";
@@ -230,7 +234,7 @@ describe("OriginTriad", () => {
     iso.position.set(200, 200, 200);
     iso.lookAt(0, 0, 0);
     iso.updateMatrixWorld(true);
-    triad.update(iso, 1000, 800, 1);
+    triad.update(iso, 1000, 800);
     for (const el of Array.from(overlayEl.children)) {
       expect(el.getAttribute("style") ?? "").not.toContain("display: none");
     }

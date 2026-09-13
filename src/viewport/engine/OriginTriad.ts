@@ -25,6 +25,7 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import { worldPerPixel } from "./screenScale";
 import { RENDER_ORDER } from "./renderOrder";
+import { createScreenLineMaterial, setLineResolutionCss } from "./screenLineStyle";
 
 interface TriadColors {
   x: THREE.Color;
@@ -38,7 +39,10 @@ interface OriginTriadDeps {
 }
 
 /** Leg width in CSS px. Same weight as sketch lines. */
-const TRIAD_WIDTH = 2;
+/** Triad leg weight in CSS px, fed to `linewidth` unscaled (`screenLineStyle.ts`).
+ *  NOT in the spec §7.3 table — a permanent orientation gizmo, kept at its
+ *  authored weight. */
+const TRIAD_WIDTH_CSS = 2;
 
 /** Leg length in CSS px, held constant across zoom. */
 const TRIAD_PX = 110;
@@ -113,8 +117,7 @@ export class OriginTriad {
     // Draw after the grid (renderOrder -1) but still behind solid geometry.
     this.object3D.renderOrder = RENDER_ORDER.TRIAD;
 
-    this.material = new LineMaterial({
-      linewidth: TRIAD_WIDTH,
+    this.material = createScreenLineMaterial({ widthCss: TRIAD_WIDTH_CSS }, {
       vertexColors: true,
       // Pull the coplanar +X/+Y legs off the grid plane in depth-buffer space.
       polygonOffset: true,
@@ -162,14 +165,15 @@ export class OriginTriad {
 
   /**
    * Per-frame: rescale so each leg spans TRIAD_PX on screen, and refresh the
-   * fat-line resolution. `width`/`height` are CSS px; `dpr` converts them to
-   * the device pixels LineMaterial expects.
+   * fat-line resolution. `width`/`height` are CSS (logical) px — the same units
+   * the addon writes at draw time, so there is no DPR term
+   * (`screenLineStyle.ts`).
    */
-  update(camera: THREE.Camera, width: number, height: number, dpr: number): void {
+  update(camera: THREE.Camera, width: number, height: number): void {
     const h = Math.max(height, 1);
     // The group never moves, so its local position IS its world position.
     this.object3D.scale.setScalar(worldPerPixel(camera, this.object3D.position, h) * TRIAD_PX);
-    this.material.resolution.set(Math.max(width, 1) * dpr, h * dpr);
+    setLineResolutionCss(this.material, Math.max(width, 1), h);
 
     // Label world positions ride the SAME constant-on-screen-size scale the
     // legs just got — a fixed reach just past each tip, no separate sizing.
