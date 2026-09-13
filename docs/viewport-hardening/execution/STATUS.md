@@ -273,6 +273,8 @@ Next allowed package: WP09 (normals; may begin), WP10 (after WP09)
 
 ## 8. End-of-session handoff — 2026-09-13 (session 1 of the program), implementation PAUSED by user for a fresh session
 
+> **Committed 2026-09-13 (user-directed):** commit `67331740` on `viewport-hardening`, pushed to origin; branch and worktree renamed from `OneCAD-ai-agent`. This is a checkpoint commit, not a gate boundary — the L3 rung is still owed (see below). The paragraphs that follow describe the tree at the moment of the handoff, before the commit.
+
 **Checkpoint.** HEAD `65b4c60eb226a201f2fa3eb565d7283b1c63b5ac` on branch `viewport-hardening` (worktree `/Users/andrejvysny/workspace/viewport-hardening`); 87 porcelain entries, all program-owned; `git diff --stat` 41 files / +4 986 / −746 (tracked) plus new untracked files; dirty-diff sha256 `9902241f8f31` (of `git diff -- . ':!TODO.md' ':!HANDOFF.md' ':!CURRENT_STATE.md'`, i.e. excluding the three root handoff ledgers, which change on every handoff edit; 40 tracked files / +4 967 / −746; 89 porcelain entries incl. untracked). **Nothing committed, nothing pushed** (not authorized). Worker binary `worker/build/onecad-worker` sha256 `d3b5e01312788db4…` (WP09 build), staged to `src-tauri/binaries/`. No heavy process left running; no owned Vite server. Port 4177 is held by another session's Vite for the main checkout — always pass `E2E_PORT=4179`.
 
 **Completed code (all uncommitted, all reviewed unless noted).**

@@ -1,5 +1,7 @@
 # Handoff — VP-HARDENING 1.0 (viewport program), session 1 paused for a fresh session
 
+> **Committed 2026-09-13:** all session-1 work is commit `67331740` on branch `viewport-hardening` (worktree `/Users/andrejvysny/workspace/viewport-hardening`), pushed to `origin/viewport-hardening`. Statements below about an uncommitted/dirty tree, a dirty-diff hash, and "no commits" describe the state BEFORE that commit; the design baseline remains `65b4c60`. The L3 rung was not run for this commit (user-directed checkpoint), so it is a checkpoint, not a gate boundary.
+
 Session 31 · 2026-09-13 · worktree `/Users/andrejvysny/workspace/viewport-hardening`, branch `viewport-hardening`, HEAD `65b4c60` · program ledger `docs/viewport-hardening/execution/STATUS.md` (authoritative — read its §8 first)
 
 ## Goal

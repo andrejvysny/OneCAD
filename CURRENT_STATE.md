@@ -1,5 +1,7 @@
 # Current State — VP-HARDENING 1.0 viewport program (AUTHORITATIVE, 2026-09-13)
 
+> **Committed 2026-09-13:** all session-1 work is commit `67331740` on branch `viewport-hardening` (worktree `/Users/andrejvysny/workspace/viewport-hardening`), pushed to `origin/viewport-hardening`. Statements below about an uncommitted/dirty tree, a dirty-diff hash, and "no commits" describe the state BEFORE that commit; the design baseline remains `65b4c60`. The L3 rung was not run for this commit (user-directed checkpoint), so it is a checkpoint, not a gate boundary.
+
 Last verified: 2026-09-13 21:57 (local) / 19:57 UTC
 
 - **Branch:** `viewport-hardening` (git worktree `/Users/andrejvysny/workspace/viewport-hardening`), HEAD `65b4c60eb226a201f2fa3eb565d7283b1c63b5ac` = the package's design baseline; 0 commits this session; **dirty** — 89 porcelain entries, all program-owned; tracked diff excluding the three root ledgers 40 files / +4 967 / −746; dirty-diff sha256 `9902241f8f31` (computed as `git diff -- . ':!TODO.md' ':!HANDOFF.md' ':!CURRENT_STATE.md' | shasum -a 256`). The main checkout `../OneCAD` (`master`) is another session's and is untouched.
