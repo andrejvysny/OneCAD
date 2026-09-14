@@ -72,3 +72,8 @@ __pycache__/
 # and session checkpoints are not.
 .claude/settings.local.json
 .claude/RESUME.md
+
+# tauri-agent MCP harness artifacts
+.tauri-agent/
+# skill-creator eval workspace (transcripts, screenshots)
+.claude/skills/onecad-agent-test-workspace/

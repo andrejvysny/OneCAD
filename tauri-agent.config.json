@@ -1,0 +1,21 @@
+{
+  "app": {
+    "bundleId": "com.andrejvysny.onecad",
+    "windowLabel": "main",
+    "title": "OneCAD",
+    "processPatterns": ["target/debug/onecad", "onecad-worker-"]
+  },
+  "launch": {
+    "dev": { "command": ["bun", "run", "tauri:agent"], "readyTimeoutMs": 600000 },
+    "bundled": { "appPath": "src-tauri/target/release/bundle/macos/onecad.app" }
+  },
+  "webdriver": { "port": 4445 },
+  "devServer": { "port": 1420 },
+  "artifacts": { "dir": ".tauri-agent/artifacts" },
+  "screenshots": { "policy": "state_changing", "previewMaxPx": 1600 },
+  "settle": { "frameMs": 16, "quietMs": 120, "timeoutMs": 1500 },
+  "calibration": { "probeTestId": "document-title" },
+  "input": { "wheelLinesPerNotch": 3, "dwellMs": 600, "clickIntervalMs": 80 },
+  "logs": { "devJsonl": "logs/dev.jsonl" },
+  "nativeOcclusion": { "rects": [{ "x": 0, "y": 0, "width": 80, "height": 28 }] }
+}

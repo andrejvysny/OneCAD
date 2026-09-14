@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "tauri-agent": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["tools/tauri-agent/src/mcp/server.ts"],
+      "env": { "TAURI_AGENT_LOG": "info" }
+    }
+  }
+}

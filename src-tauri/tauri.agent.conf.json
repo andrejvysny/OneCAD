@@ -1,0 +1,19 @@
+{
+  "build": {
+    "beforeDevCommand": "VITE_TAURI_E2E=1 bun run dev"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        "default",
+        {
+          "identifier": "tauri-e2e",
+          "description": "WebdriverIO bridge for the agent-driven dev session only",
+          "windows": ["main"],
+          "permissions": ["wdio:default", "wdio-webdriver:default"]
+        }
+      ]
+    }
+  }
+}
