@@ -932,6 +932,11 @@ pub async fn confirm_exit(app: AppHandle) {
     // button both route here via `events::CLOSE_REQUESTED`), so this is where both
     // worker slots are retired — once, and before the event loop unwinds.
     app.state::<AppState>().retire_all();
+    // The assistant sidecar is app-scoped, so it is torn down here rather than in
+    // `RunEvent::Exit`: by the time that arm fires the exit is already unwinding,
+    // and a 99 MB child that missed its `shutdown` would be left to `kill_on_drop`
+    // with its SQLite store mid-write.
+    app.state::<AppState>().assistant.stop();
     app.state::<crate::ExitGuard>().clear();
     app.exit(0);
 }

@@ -17,6 +17,7 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2",
+    "agentkit": "file:.agentkit-src/packages/agentkit",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4",

@@ -24,6 +24,7 @@
  */
 import { Slots, type PanelId, type PanelPlacement, type WorkspaceDefinition } from "@/platform";
 import { ModelingPanels } from "@/modules/modeling/panelIds";
+import { AssistantPanels } from "@/modules/assistant/panelIds";
 import { ShellPanels } from "./panelIds";
 import { ShellWorkspaces } from "./workspaceIds";
 
@@ -41,6 +42,12 @@ const COMMON: readonly PanelPlacement[] = [
   { panelId: ShellPanels.TitleBar, slot: Slots.ShellTop },
   { panelId: ModelingPanels.ModelTree, slot: Slots.ShellLeft },
   { panelId: ModelingPanels.Inspector, slot: Slots.ShellRight },
+  // Shares ModelTree's left footprint as a third tab, and is doubly gated:
+  // `settingsStore.assistantEnabled` decides whether it exists for the user at
+  // all, and the workspace decides whether it is offered here. Listed (rather
+  // than left unmentioned, which would also be visible) so the customize sheet
+  // can name it — an unlisted panel is not offerable.
+  { panelId: AssistantPanels.Assistant, slot: Slots.ShellLeft },
   // Flow strips under the title bar, not floating notices — see the banner's
   // own placement note.
   { panelId: ShellPanels.MissingExtensionBanner, slot: Slots.ShellTop },

@@ -38,6 +38,8 @@ import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingUi } from "@/modules/modeling/ui";
 import { LIBRARY_MODULE_ID } from "@/modules/library/manifest";
 import { contributeLibraryUi } from "@/modules/library/register";
+import { ASSISTANT_MODULE_ID } from "@/modules/assistant/manifest";
+import { contributeAssistantUi } from "@/modules/assistant/ui";
 import { SHELL_MODULE_ID, contributeShellChrome } from "@/modules/shell/register";
 import { MeasuredShellRegion } from "./MeasuredShellRegion";
 import { useViewportWorkArea } from "@/stores/viewportWorkAreaStore";
@@ -74,13 +76,16 @@ function useEditorContributions(platform: Platform): void {
     const modeling = platform.createScope(MODELING_MODULE_ID);
     const shell = platform.createScope(SHELL_MODULE_ID);
     const library = platform.createScope(LIBRARY_MODULE_ID);
+    const assistant = platform.createScope(ASSISTANT_MODULE_ID);
     contributeShellChrome(shell);
     contributeModelingUi(modeling);
     contributeLibraryUi(library);
+    contributeAssistantUi(assistant);
     return () => {
       modeling.dispose();
       shell.dispose();
       library.dispose();
+      assistant.dispose();
     };
   }, [platform]);
 }

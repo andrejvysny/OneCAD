@@ -338,6 +338,22 @@ jobs:
           mkdir -p src-tauri/binaries
           cp worker/build-8.0.1-rust/onecad-worker "src-tauri/binaries/onecad-worker-${triple}"
           chmod +x "src-tauri/binaries/onecad-worker-${triple}"
+      - uses: oven-sh/setup-bun@v2
+      - name: Build and stage assistant host
+        working-directory: .
+        # `bundle.externalBin` lists TWO binaries, and `tauri_build::build()`
+        # resolves both inside the build script — so a missing assistant host
+        # fails `cargo fmt`/`clippy`/`test` before a line of Rust compiles,
+        # exactly as a missing worker does. This step must precede every cargo
+        # invocation for the same reason the worker `cp` above does.
+        #
+        # The bootstrap is temporary: AgentKit has no release tag and no
+        # committed dist, so there is nothing to `bun install` from yet. When
+        # v0.5.0 is cut, assistant-host depends on the tag and the bootstrap
+        # line here goes away.
+        run: |
+          scripts/bootstrap-agentkit.sh
+          scripts/build-assistant-host.sh
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
@@ -489,6 +505,12 @@ jobs:
           ONECAD_OCCT_BUILD_ID: ${{ env.OCCT_PRIMARY_BUILD_ID }}
           ONECAD_WORKER_BUILD_DIR: ${{ github.workspace }}/worker/build-tauri-e2e
         run: scripts/build-worker.sh Release
+      - name: Build and stage assistant host
+        # Second `bundle.externalBin` entry — the packaged app carries it, and
+        # `tauri build` refuses to start without it. This job already has bun.
+        run: |
+          scripts/bootstrap-agentkit.sh
+          scripts/build-assistant-host.sh
       - name: Build seed Tauri test artifact
         # NO `--` before the flags. `tauri build` is `[OPTIONS] [ARGS]...`, and
         # everything after `--` is forwarded to `cargo build` — which accepts

@@ -1,0 +1,22 @@
+{
+  "name": "onecad-assistant-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OneCAD's supervised assistant sidecar: an AgentKit composition served over the OCAK1 stdio bridge, with no socket and no document authority.",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "test": "bun test tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "agentkit": "file:../.agentkit-src/packages/agentkit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.5",
+    "typescript": "^5.8.3"
+  }
+}

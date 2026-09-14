@@ -164,6 +164,31 @@ cmake -S worker -B worker/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build worker/build --parallel 3
 ```
 
+### Assistant host sidecar (Bun + AgentKit)
+
+```bash
+scripts/bootstrap-agentkit.sh          # build AgentKit from the pinned commit into .agentkit-src/
+scripts/build-assistant-host.sh        # bun build --compile -> STAGE src-tauri/binaries/onecad-assistant-host-<triple>
+cd assistant-host && bun test          # sidecar unit tests
+```
+
+**Stage this before *any* cargo command too.** `bundle.externalBin` now lists TWO binaries,
+and `tauri_build::build()` resolves both inside the build script — a missing one fails
+`cargo check`/`clippy`/`test` before a line compiles, exactly like the worker's does. The
+assistant-host build is seconds, not the worker's minutes.
+
+`scripts/bootstrap-agentkit.sh` is temporary: AgentKit has no release tag and no committed
+`dist/`, so the documented `github:andrejvysny/AgentKit#v0.5.0` install does not resolve
+yet. When the tag is cut, point `assistant-host/package.json` at it and delete the script.
+
+The compiled host is **~99 MB**, and that is the Bun runtime floor — a compiled
+`console.log("hi")` measures 99.3 MB and everything we add is ~104 KB. Do not try to shrink
+it; see `docs/adr/0015-*`.
+
+Integration tests take `ONECAD_REQUIRE_ASSISTANT_HOST=1` to turn "no host binary" into a
+hard failure instead of a vacuously green skip — the same discipline as
+`ONECAD_REQUIRE_WORKER=1`.
+
 ### Rust (from `src-tauri/`)
 
 ```bash
@@ -202,10 +227,18 @@ node scripts/verify-modeling-coverage.mjs
 node scripts/verify-modeling-contracts.mjs
 scripts/tests/verify-modeling-coverage.test.sh
 scripts/check-worker-stdout-hygiene.sh
-grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'   # hex gate: must be empty
+grep -rna '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'  # hex gate: must be empty
 ```
 
 The hex gate is verified manually at each gate; it is *not* wired into `ci.yml`.
+
+**`-a` is load-bearing.** Three source files use a literal NUL byte as a composite-key
+separator inside a template literal (`src/features/tree/ModelTreePanel.tsx:96`,
+`src/shortcuts/keymap.golden.test.ts:56`, `src/tools/sketch/projectTool.ts:80`). That
+makes `grep` classify them as binary and skip them **silently** — the gate exits 0
+having read 750 of 753 files and looks identical to a clean run. `-a` forces them to be
+read as text. Measured 2026-09-14: the gate is genuinely empty with and without the
+flag, so nothing was hiding, but the gate as previously written could not have told you.
 
 ### Gate ladder
 

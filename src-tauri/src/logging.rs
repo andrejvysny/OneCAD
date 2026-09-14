@@ -46,10 +46,12 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 /// The default `RUST_LOG` when the env var is unset.
 ///
-/// `fe` and `worker` are REQUIRED directives, not decoration: those two lanes are
-/// synthetic targets (forwarded frontend events / forwarded C++ stderr) whose
-/// events are emitted at `debug`, so a bare global `info` would silently drop them.
-pub const DEFAULT_FILTER: &str = "info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug";
+/// `fe`, `worker` and `assistant` are REQUIRED directives, not decoration: those
+/// three lanes are synthetic targets (forwarded frontend events, forwarded C++
+/// worker stderr, forwarded assistant-host stderr) whose events are emitted at
+/// `debug`, so a bare global `info` would silently drop them.
+pub const DEFAULT_FILTER: &str =
+    "info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug,assistant=debug";
 
 /// The shared filter: `RUST_LOG` when set (and parseable), else [`DEFAULT_FILTER`].
 #[must_use]
@@ -219,16 +221,21 @@ mod tests {
         }
     }
 
-    /// The default filter is a CONTRACT with `docs/DEBUGGING.md` + the `fe`/`worker`
-    /// lanes: both are emitted at debug, so dropping either directive silently
-    /// blanks a whole lane.
+    /// The default filter is a CONTRACT with `docs/DEBUGGING.md` + the
+    /// `fe`/`worker`/`assistant` lanes: all three are emitted at debug, so
+    /// dropping any directive silently blanks a whole lane.
     #[test]
     fn default_filter_keeps_the_synthetic_lanes_at_debug() {
         assert_eq!(
             DEFAULT_FILTER,
-            "info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug"
+            "info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug,assistant=debug"
         );
-        for directive in ["fe=debug", "worker=debug", "onecad_lib=debug"] {
+        for directive in [
+            "fe=debug",
+            "worker=debug",
+            "assistant=debug",
+            "onecad_lib=debug",
+        ] {
             assert!(
                 DEFAULT_FILTER.contains(directive),
                 "default filter must carry {directive}"

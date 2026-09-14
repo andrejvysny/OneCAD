@@ -14,6 +14,7 @@ import { createPlatform, type Platform } from "@/platform";
 import { registerShellModule } from "@/modules/shell/module";
 import { registerModelingModule } from "@/modules/modeling/register";
 import { registerRenderModule } from "@/modules/render/module";
+import { registerAssistantModule } from "@/modules/assistant/register";
 
 export function bootstrapOneCAD(): Platform {
   const platform = createPlatform();
@@ -24,6 +25,9 @@ export function bootstrapOneCAD(): Platform {
   registerModelingModule(platform);
   // Stub — registers with zero contributions. See src/modules/render/module.ts.
   registerRenderModule(platform);
+  // Bootstrap-time surface is empty; the sidebar panel registers at editor
+  // mount (`contributeAssistantUi`) and is gated off by default.
+  registerAssistantModule(platform);
 
   platform.initializeSync();
   return platform;

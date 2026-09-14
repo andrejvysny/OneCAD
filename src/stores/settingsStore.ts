@@ -192,6 +192,27 @@ export interface SettingsState {
    * would make the switch-row pin test unrepresentable.
    */
   autoConstrainMode: AutoConstrainMode;
+  /**
+   * Whether the `onecad.assistant` module's sidebar tab is offered at all.
+   * Default FALSE: the assistant talks to a supervised sidecar and a model
+   * provider, so it is opt-in rather than something a user discovers by
+   * finding a third tab one day. While it is off, the tab button is not
+   * rendered and `AssistantPanel` renders nothing.
+   */
+  assistantEnabled: boolean;
+  /**
+   * The local inference endpoint the assistant's provider gateway is configured
+   * with, e.g. `http://127.0.0.1:11434/v1`. Empty means "no provider": the
+   * frontend then clears the Rust-side registry instead of installing one.
+   *
+   * A PROPOSAL, never a decision. Rust validates it in `validate_provider_base`
+   * and refuses anything that is not a canonical literal loopback address
+   * (ADR-0017); nothing here may widen that. Deliberately carries NO credential —
+   * `localStorage` is not where one belongs.
+   */
+  assistantProviderBaseUrl: string;
+  /** The model id that endpoint serves, e.g. `qwen3:8b`. Empty means none. */
+  assistantProviderModel: string;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
@@ -201,6 +222,9 @@ export interface SettingsState {
   setDisplayUnit(unit: LengthUnitId): void;
   setSnapRadius(radius: SnapRadiusId): void;
   setAutoConstrainMode(mode: AutoConstrainMode): void;
+  setAssistantEnabled(value: boolean): void;
+  setAssistantProviderBaseUrl(value: string): void;
+  setAssistantProviderModel(value: string): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -260,6 +284,17 @@ export function mergeBooleanRecord<T extends object>(defaults: Readonly<T>, pers
   return out;
 }
 
+/**
+ * Narrow a persisted assistant-provider field to a string.
+ *
+ * A hand-edited or rolled-back blob can carry anything here; a non-string would
+ * reach the configure command as a value Rust has to refuse, and an `undefined`
+ * would read as "no provider" only by accident. Empty string IS the "none" value.
+ */
+export function coerceProviderString(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
 export const settingsStore = createStore<SettingsState>()(
   persist(
     (set) => ({
@@ -272,6 +307,9 @@ export const settingsStore = createStore<SettingsState>()(
       displayUnit: DEFAULT_LENGTH_UNIT,
       snapRadius: DEFAULT_SNAP_RADIUS,
       autoConstrainMode: DEFAULT_AUTO_CONSTRAIN,
+      assistantEnabled: false,
+      assistantProviderBaseUrl: "",
+      assistantProviderModel: "",
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -299,10 +337,19 @@ export const settingsStore = createStore<SettingsState>()(
       setAutoConstrainMode(mode) {
         set({ autoConstrainMode: mode });
       },
+      setAssistantEnabled(value) {
+        set({ assistantEnabled: value });
+      },
+      setAssistantProviderBaseUrl(value) {
+        set({ assistantProviderBaseUrl: value });
+      },
+      setAssistantProviderModel(value) {
+        set({ assistantProviderModel: value });
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 11,
+      version: 13,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -328,6 +375,17 @@ export const settingsStore = createStore<SettingsState>()(
       // a behavior CHANGE for existing users too (Coincident badges used to
       // always render), not a fresh-install-parity backfill, so the new
       // default applies uniformly regardless of blob age.
+      // v11 → v12 added the assistant gate (`onecad.assistant`). A pre-v12 blob
+      // has no key; backfill FALSE — and unconditionally, not as a
+      // coerce(undefined): the assistant is opt-in for EVERY existing user, so
+      // a blob that somehow carries a true from a rolled-forward build must
+      // still land off until the user turns it on in this build.
+      // v12 → v13 added the assistant's local provider (endpoint + model). A
+      // pre-v13 blob has neither key; both backfill to "" — the empty string is
+      // "no provider configured", which is what every pre-v13 build effectively
+      // had, since nothing populated the Rust-side registry at all. A blob
+      // carrying a string keeps it: the value is only a PROPOSAL, and Rust
+      // refuses anything that is not a canonical loopback base.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -373,6 +431,13 @@ export const settingsStore = createStore<SettingsState>()(
             (s as Partial<SettingsState>).autoConstrainMode,
           );
         }
+        if (s && version < 12) {
+          s.assistantEnabled = false;
+        }
+        if (s && version < 13) {
+          s.assistantProviderBaseUrl = coerceProviderString(s.assistantProviderBaseUrl);
+          s.assistantProviderModel = coerceProviderString(s.assistantProviderModel);
+        }
         return s as unknown as SettingsState;
       },
       // `migrate` only runs when the persisted blob's version differs from the
@@ -400,6 +465,8 @@ export const settingsStore = createStore<SettingsState>()(
         merged.displayUnit = coerceLengthUnit(merged.displayUnit);
         merged.snapRadius = coerceSnapRadius(merged.snapRadius);
         merged.autoConstrainMode = coerceAutoConstrainMode(merged.autoConstrainMode);
+        merged.assistantProviderBaseUrl = coerceProviderString(merged.assistantProviderBaseUrl);
+        merged.assistantProviderModel = coerceProviderString(merged.assistantProviderModel);
         return merged;
       },
     },

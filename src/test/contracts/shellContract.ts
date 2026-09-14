@@ -61,6 +61,17 @@
  * now have `display: contents` measurement wrappers. The wrappers add DOM
  * nodes but no layout boxes, preserve contribution order and component
  * identity, and let floating chrome use the panels' actual rendered bounds.
+ *
+ * AMENDED 2026-09-14 (onecad.assistant module) — a deliberate, user-visible
+ * change, recorded in TODO.md as the README requires. `AssistantPanel` joined
+ * `Slots.ShellLeft` after `VariablesPanel` (priority 120 vs. 110), as a THIRD
+ * occupant of the same `left:0` footprint the model tree and the variables
+ * table already share: it renders `null` unless `sidebarTabStore.activeTab`
+ * names it, exactly as those two do, so it adds no second visible sidebar. It
+ * is additionally gated on `settingsStore.assistantEnabled`, which is OFF by
+ * default — mount order is unconditional (the contribution registers either
+ * way), but a user who has not opted in sees no Assistant tab and no panel.
+ * Nothing already in this list moved relative to anything else.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",
@@ -81,6 +92,7 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "SketchChromeBar",
   "ModelTreePanel",
   "VariablesPanel",
+  "AssistantPanel",
   "InspectorPanel",
   "RepairBanner",
   "TimelineStoppedBanner",

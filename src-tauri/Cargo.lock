@@ -2427,10 +2427,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "libc",
+ "onecad-assistant-protocol",
  "onecad-core",
  "onecad-library",
  "onecad-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -2442,6 +2445,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 0.8.2",
  "tracing",
  "tracing-appender",
@@ -2449,6 +2453,17 @@ dependencies = [
  "trash",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "onecad-assistant-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio-util",
 ]
 
 [[package]]

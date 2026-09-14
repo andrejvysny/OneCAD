@@ -19,6 +19,8 @@ import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingUi } from "@/modules/modeling/ui";
 import { LIBRARY_MODULE_ID } from "@/modules/library/manifest";
 import { contributeLibraryUi } from "@/modules/library/register";
+import { ASSISTANT_MODULE_ID } from "@/modules/assistant/manifest";
+import { contributeAssistantUi } from "@/modules/assistant/ui";
 import { SHELL_MODULE_ID } from "@/modules/shell/panelIds";
 import { contributeShellChrome } from "@/modules/shell/register";
 
@@ -49,6 +51,7 @@ describe("editor mount order", () => {
     contributeShellChrome(platform.createScope(SHELL_MODULE_ID));
     contributeModelingUi(platform.createScope(MODELING_MODULE_ID));
     contributeLibraryUi(platform.createScope(LIBRARY_MODULE_ID));
+    contributeAssistantUi(platform.createScope(ASSISTANT_MODULE_ID));
   });
 
   it("mounts exactly the frozen contribution set, in the frozen order", () => {

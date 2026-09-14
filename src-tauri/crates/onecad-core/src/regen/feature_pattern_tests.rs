@@ -214,9 +214,9 @@ mod tests {
             first_json["params"]["sourceOps"][0]["params"]["diameter"]["value"],
             2.0
         );
-        assert!(!serde_json::to_value(&stored[1]).unwrap()["params"]
+        assert!(serde_json::to_value(&stored[1]).unwrap()["params"]
             .get("sourceOps")
-            .is_some());
+            .is_none());
 
         let mut edited = stored.clone();
         edited[0] = hole(1, body, 7.0);
