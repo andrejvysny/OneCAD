@@ -1,0 +1,48 @@
+{
+  "skill_name": "onecad-agent-test",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Verify in the real OneCAD desktop app that hovering each tool in the left floating toolbar shows a tooltip with its shortcut. Report any tool without one, with evidence a reviewer can check.",
+      "expected_output": "A report backed by the tauri-agent journal: session_start, native pointer_hover actions (backend cgevent) over each toolbar tool, at least one native window screenshot showing a tooltip, actionIds cited, session_stop with no surviving app process. No Playwright, no browser at localhost:1420, no debug_* call used as proof.",
+      "files": [],
+      "expectations": [
+        "The journal contains pointer_hover entries with mode real_user and backend cgevent for at least 15 distinct toolbar tools (model and sketch toolbars together)",
+        "The report identifies the Library tool as the one whose tooltip lacks a shortcut (it renders as 'Library ()'), with a screenshot or snapshot that shows it",
+        "At least one screenshot PNG captured with captureMode window exists in the session artifacts dir and the report references it by actionId or filename",
+        "Every debug_eval_js or debug_invoke_tauri_command actionId cited in the report is labelled as diagnostic and is accompanied by user-visible evidence (screenshot, snapshot, or log line)",
+        "The report notes that the tools toolbar floats at the top of the viewport rather than on the left, correcting the prompt's premise",
+        "session_start precedes the first action and session_stop is the last journal entry; the report states that no onecad/onecad-worker process survived"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Using only what a user could do in the real OneCAD app: create a new project, start a sketch on a base plane, draw a rectangle, finish the sketch, extrude it, and confirm the Extrude feature appears in the history. Provide evidence for each step.",
+      "expected_output": "A real_user run: click New project, click New sketch, pick a plane by clicking the highlighted quad, select Rectangle, two clicks in the viewport, Enter to finish, click inside the region, click Extrude, commit with Enter or chip-confirm, wait for regen, find the Extrude history row. Native screenshots after state changes, journal entries with backend cgevent, no diagnostic call cited as proof.",
+      "files": [],
+      "expectations": [
+        "The journal shows pointer_click entries with backend cgevent for New project, New sketch, the plane pick, the rectangle corners, and Extrude",
+        "The sketch is finished through the UI (keyboard_press Enter or a pointer_click on the Finish sketch button) and the extrude is committed through the UI (Enter or chip-confirm), all with backend cgevent",
+        "A wait_for entry targets a history row or the text Extrude, or an observe_logs call shows a regen outcome line, and the report cites it",
+        "The report includes at least one window screenshot taken after the extrude commit",
+        "The cross-mode key trap is avoided: no keyboard_press of e while sketch-dof is present without a warning being acknowledged in the report",
+        "session_stop is the last journal entry and the report states no app process survived",
+        "The report states that a body was created (Body in the tree or status 'New body created') and that regen reported failedSteps 0, citing the actionId or log line"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "In the real OneCAD app, orbit the 3D viewport with the mouse, zoom with the scroll wheel, and confirm the view changed while the toolbar stayed in place. Show me before and after.",
+      "expected_output": "Before screenshot, a pointer_drag_path with button right and Shift modifier across the viewport, a pointer_scroll over the viewport, after screenshot, a comparison statement about the viewport content changing and the toolbar rect staying the same (from ui_inspect or the snapshot), all via native input.",
+      "files": [],
+      "expectations": [
+        "A pointer_drag_path journal entry has button right and mods including Shift, with backend cgevent, and its points lie inside the viewport-canvas rect",
+        "A pointer_scroll journal entry exists with backend cgevent and the report mentions the wheel probe device or acknowledges its warning",
+        "Two window screenshots exist (before and after), the report references both, and it states concretely what changed in the view (view cube faces, grid scale, camera label) with the evidence source",
+        "The report states the toolbar position/rect was unchanged using ui_inspect or ui_snapshot output rather than assumption",
+        "No left-button drag was used to orbit",
+        "session_stop is the last journal entry and the report states the survivor check result rather than assuming it"
+      ]
+    }
+  ]
+}
